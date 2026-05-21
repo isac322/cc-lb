@@ -186,17 +186,58 @@ fn unrecognized_client() -> Response {
 
 fn ok_stream_bytes() -> Vec<u8> {
     let mut output = Vec::new();
+    let start = json!({
+        "type": "message_start",
+        "message": {
+            "id": "msg_bedrock_fake_000000000000000000000000",
+            "type": "message",
+            "role": "assistant",
+            "model": "fake-bedrock-runtime-model",
+            "content": [],
+            "stop_reason": null,
+            "stop_sequence": null,
+            "usage": { "input_tokens": 100, "output_tokens": 0 }
+        }
+    });
+    output.extend_from_slice(&encode_message("chunk", start.to_string().as_bytes()));
+
+    let block_start = json!({
+        "type": "content_block_start",
+        "index": 0,
+        "content_block": { "type": "text", "text": "" }
+    });
+    output.extend_from_slice(&encode_message("chunk", block_start.to_string().as_bytes()));
+
     for index in 0..50_u64 {
+        let text = if index == 0 {
+            "fake bedrock runtime fixture response HELLO ".to_owned()
+        } else {
+            format!("chunk-{index:02} ")
+        };
         let payload = json!({
             "type": "content_block_delta",
-            "index": index,
+            "index": 0,
             "delta": {
                 "type": "text_delta",
-                "text": format!("chunk-{index:02} ")
+                "text": text
             }
         });
         output.extend_from_slice(&encode_message("chunk", payload.to_string().as_bytes()));
     }
+
+    let block_stop = json!({
+        "type": "content_block_stop",
+        "index": 0
+    });
+    output.extend_from_slice(&encode_message("chunk", block_stop.to_string().as_bytes()));
+
+    let usage = json!({
+        "type": "message_delta",
+        "delta": { "stop_reason": "end_turn", "stop_sequence": null },
+        "usage": { "output_tokens": 50 }
+    });
+    output.extend_from_slice(&encode_message("chunk", usage.to_string().as_bytes()));
+
     let stop = json!({
         "type": "message_stop",
         "amazon-bedrock-invocationMetrics": {

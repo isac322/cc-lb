@@ -1,3 +1,4 @@
+use cc_lb_server::version::compact_version;
 use cc_lb_server::version::format_version;
 
 #[test]
@@ -16,4 +17,25 @@ fn version_includes_sha() {
     let commit_is_hex = commit.len() >= 7 && commit.chars().all(|ch| ch.is_ascii_hexdigit());
     assert!(commit == "unknown" || commit_is_hex, "commit={commit}");
     assert!(lines[2].contains("(rustc "), "output={output}");
+}
+
+#[test]
+fn compact_version_includes_sha() {
+    let output = compact_version();
+    let mut parts = output.split_whitespace();
+    assert_eq!(parts.next(), Some("cc-lb"), "output={output}");
+    assert_eq!(
+        parts.next(),
+        Some(env!("CARGO_PKG_VERSION")),
+        "output={output}"
+    );
+    let sha = output
+        .split_once('(')
+        .and_then(|(_, rest)| rest.strip_suffix(')'))
+        .unwrap_or("");
+    assert!(!sha.is_empty(), "output={output}");
+    assert!(
+        sha == "unknown" || (sha.len() >= 7 && sha.chars().all(|ch| ch.is_ascii_hexdigit())),
+        "sha={sha}"
+    );
 }

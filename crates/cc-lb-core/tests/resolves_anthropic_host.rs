@@ -6,7 +6,7 @@ use cc_lb_core::{make_resolver, DnsCacheError, DnsResolver, DnsResolverConfig};
 #[tokio::test]
 #[ignore]
 async fn resolves_anthropic_host() {
-    let resolver = make_resolver(&DnsResolverConfig::default());
+    let resolver = make_resolver(&DnsResolverConfig::default()).expect("resolver builds");
     let lookup = resolver
         .lookup_ip("api.anthropic.com")
         .await

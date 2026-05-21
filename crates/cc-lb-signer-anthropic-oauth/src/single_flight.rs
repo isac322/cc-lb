@@ -10,7 +10,11 @@ pub fn new_refresh_locks() -> RefreshLocks {
 }
 
 pub fn single_flight_key(principal_id: &str, provider: &str) -> String {
-    format!("{principal_id}\u{1f}{provider}")
+    let mut key = String::with_capacity(principal_id.len() + 1 + provider.len());
+    key.push_str(principal_id);
+    key.push('\u{1f}');
+    key.push_str(provider);
+    key
 }
 
 pub fn lock_for(locks: &RefreshLocks, principal_id: &str, provider: &str) -> Arc<Mutex<()>> {

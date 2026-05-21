@@ -35,6 +35,8 @@ pub enum PreflightError {
     Storage(String),
     #[error("plugin: {0}")]
     Plugin(String),
+    #[error("plugin {name}: missing wasm_path")]
+    PluginMissingArtifact { name: String },
     #[error("failed to bind {addr}: {message}")]
     ListenerBind { addr: SocketAddr, message: String },
     #[error("missing TLS certificate or key file: {0}")]
@@ -152,7 +154,7 @@ fn dry_load_plugin(
     plugin: &PluginRef,
     kind: PluginLoadKind,
 ) -> Result<(), PreflightError> {
-    let manifest = manifest_from_plugin(plugin).map_err(PreflightError::Plugin)?;
+    let manifest = manifest_from_plugin(plugin)?;
     let result = match kind {
         PluginLoadKind::Authn => runtime.instantiate(&manifest).map(|_| ()),
         PluginLoadKind::Router => runtime.instantiate_router(&manifest).map(|_| ()),
@@ -162,11 +164,14 @@ fn dry_load_plugin(
     result.map_err(|error| PreflightError::Plugin(error.to_string()))
 }
 
-fn manifest_from_plugin(plugin: &PluginRef) -> Result<PluginManifest, String> {
-    let artifact = plugin
-        .wasm_path
-        .as_ref()
-        .ok_or_else(|| "missing wasm_path".to_owned())?;
+fn manifest_from_plugin(plugin: &PluginRef) -> Result<PluginManifest, PreflightError> {
+    let artifact =
+        plugin
+            .wasm_path
+            .as_ref()
+            .ok_or_else(|| PreflightError::PluginMissingArtifact {
+                name: plugin.name.clone(),
+            })?;
     let mut metadata = BTreeMap::new();
     metadata.insert(
         "observe_batch_count".to_owned(),

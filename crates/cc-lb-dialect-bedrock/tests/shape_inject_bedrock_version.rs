@@ -8,7 +8,7 @@ fn bedrock_anthropic_version_is_forced_in_body() {
     let ctx = common::request_context(common::messages_body(false), common::anthropic_headers());
 
     let shaped = shape_request(
-        &BedrockRuntimeDialect,
+        &BedrockRuntimeDialect::default(),
         &ctx,
         &Upstream::BedrockRuntime {
             region: "us-east-1".to_owned(),

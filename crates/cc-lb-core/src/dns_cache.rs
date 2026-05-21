@@ -16,6 +16,13 @@ use metrics::Unit;
 use thiserror::Error;
 use tower_service::Service;
 
+pub type DnsResolveFuture<'a> = Pin<Box<DynDnsResolveFuture<'a>>>;
+pub type DynDnsResolveFuture<'a> =
+    dyn Future<Output = Result<Vec<IpAddr>, DnsCacheError>> + Send + 'a;
+type MetricDnsFuture = Pin<Box<DynMetricDnsFuture>>;
+type DynMetricDnsFuture =
+    dyn Future<Output = Result<std::vec::IntoIter<SocketAddr>, DnsCacheError>> + Send;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct DnsResolverConfig {
     pub cache_ttl_floor: Duration,
@@ -35,22 +42,26 @@ impl Default for DnsResolverConfig {
 
 #[derive(Debug, Error, Clone, Eq, PartialEq)]
 pub enum DnsCacheError {
+    #[error("failed to build hickory resolver: {message}")]
+    Build { message: String },
     #[error("dns resolution failed for {host}: {message}")]
     Resolve { host: String, message: String },
 }
 
 pub trait DnsResolver: Send + Sync + 'static {
-    fn resolve(
-        &self,
-        name: String,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<IpAddr>, DnsCacheError>> + Send + '_>>;
+    fn resolve(&self, name: String) -> DnsResolveFuture<'_>;
 }
 
-pub fn make_resolver(config: &DnsResolverConfig) -> Arc<TokioResolver> {
+pub fn make_resolver(config: &DnsResolverConfig) -> Result<Arc<TokioResolver>, DnsCacheError> {
     make_resolver_with_factory(config, |resolver_config, opts, provider| {
         let mut builder = TokioResolver::builder_with_config(resolver_config, provider);
         *builder.options_mut() = opts;
-        Arc::new(builder.build().expect("failed to build hickory resolver"))
+        builder
+            .build()
+            .map(Arc::new)
+            .map_err(|source| DnsCacheError::Build {
+                message: source.to_string(),
+            })
     })
 }
 
@@ -77,10 +88,7 @@ fn resolver_opts(config: &DnsResolverConfig) -> ResolverOpts {
 }
 
 impl DnsResolver for TokioResolver {
-    fn resolve(
-        &self,
-        name: String,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<IpAddr>, DnsCacheError>> + Send + '_>> {
+    fn resolve(&self, name: String) -> DnsResolveFuture<'_> {
         Box::pin(async move {
             let host = name.clone();
             let lookup = self
@@ -99,10 +107,7 @@ impl<T> DnsResolver for Arc<T>
 where
     T: DnsResolver,
 {
-    fn resolve(
-        &self,
-        name: String,
-    ) -> Pin<Box<dyn Future<Output = Result<Vec<IpAddr>, DnsCacheError>> + Send + '_>> {
+    fn resolve(&self, name: String) -> DnsResolveFuture<'_> {
         (**self).resolve(name)
     }
 }
@@ -113,8 +118,8 @@ pub struct CachingDnsConnector {
 }
 
 impl CachingDnsConnector {
-    pub fn new(config: &DnsResolverConfig) -> Self {
-        Self::with_resolver(make_resolver(config), config)
+    pub fn new(config: &DnsResolverConfig) -> Result<Self, DnsCacheError> {
+        make_resolver(config).map(|resolver| Self::with_resolver(resolver, config))
     }
 
     pub fn with_resolver(resolver: Arc<dyn DnsResolver>, config: &DnsResolverConfig) -> Self {
@@ -154,7 +159,7 @@ pub struct MetricDnsResolver {
 impl Service<Name> for MetricDnsResolver {
     type Response = std::vec::IntoIter<SocketAddr>;
     type Error = DnsCacheError;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+    type Future = MetricDnsFuture;
 
     fn poll_ready(&mut self, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         Poll::Ready(Ok(()))

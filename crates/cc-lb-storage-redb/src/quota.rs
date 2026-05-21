@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +23,14 @@ impl BucketKind {
 }
 
 pub fn quota_key(principal_id: &str, window_start: u64, kind: BucketKind) -> Vec<u8> {
-    format!("{}:{}:{}", principal_id, window_start, kind.as_str()).into_bytes()
+    let kind = kind.as_str();
+    let mut key = String::with_capacity(principal_id.len() + 1 + 20 + 1 + kind.len());
+    key.push_str(principal_id);
+    key.push(':');
+    let _ = write!(&mut key, "{window_start}");
+    key.push(':');
+    key.push_str(kind);
+    key.into_bytes()
 }
 
 impl Storage {

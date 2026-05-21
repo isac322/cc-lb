@@ -8,7 +8,7 @@ fn anthropic_beta_header_becomes_ordered_body_array() {
     let ctx = common::request_context(common::messages_body(false), common::anthropic_headers());
 
     let shaped = shape_request(
-        &BedrockRuntimeDialect,
+        &BedrockRuntimeDialect::default(),
         &ctx,
         &Upstream::BedrockRuntime {
             region: "us-east-1".to_owned(),

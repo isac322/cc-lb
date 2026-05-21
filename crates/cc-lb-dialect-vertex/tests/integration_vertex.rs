@@ -11,7 +11,7 @@ use tower::ServiceExt;
 async fn shaped_request_reaches_fake_vertex_as_anthropic_message() {
     let ctx = common::request_context(common::messages_body(false), common::anthropic_headers());
     let shaped = shape_request(
-        &VertexDialect,
+        &VertexDialect::default(),
         &ctx,
         &common::vertex_upstream(),
         &common::principal(),

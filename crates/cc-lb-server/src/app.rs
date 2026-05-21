@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -307,7 +308,6 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             request_ids,
             request_id_middleware,
         ));
-    #[cfg(feature = "chaos")]
     let service_builder = service_builder.layer(crate::chaos::ChaosLayer::from_env());
     let service_builder = service_builder
         .layer(HandleErrorLayer::new(timeout_error))
@@ -422,7 +422,7 @@ async fn request_id_middleware(
         .or_else(|| request.headers().get("x-request-id").cloned())
         .unwrap_or_else(|| {
             let id = state.counter.fetch_add(1, Ordering::Relaxed);
-            match HeaderValue::from_str(&format!("req_server_{id}")) {
+            match HeaderValue::from_str(&server_request_id(id)) {
                 Ok(value) => value,
                 Err(_) => HeaderValue::from_static("req_server"),
             }
@@ -435,6 +435,13 @@ async fn request_id_middleware(
         .headers_mut()
         .insert(HeaderName::from_static("request-id"), request_id);
     response
+}
+
+fn server_request_id(id: u64) -> String {
+    let mut request_id = String::with_capacity("req_server_".len() + 20);
+    request_id.push_str("req_server_");
+    let _ = write!(&mut request_id, "{id}");
+    request_id
 }
 
 fn server_join_result(result: Result<Result<(), io::Error>, JoinError>) -> Result<(), BuildError> {

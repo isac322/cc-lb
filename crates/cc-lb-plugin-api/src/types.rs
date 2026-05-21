@@ -272,7 +272,7 @@ pub struct RouteDecision {
     /// Upstream selected for the request.
     pub upstream: Upstream,
     /// Dialect plugin that shapes the request for the selected upstream.
-    pub dialect: Box<dyn UpstreamDialect>,
+    pub dialect: Arc<dyn UpstreamDialect>,
 }
 
 /// Authentication output used by routing, quota, and signer construction.

@@ -25,9 +25,20 @@ pub(crate) fn compose_url(base_url: &Url, downstream_path: &str, query: Option<&
 
     let composed_path = match (base_path.is_empty(), downstream_path.is_empty()) {
         (true, true) => "/".to_owned(),
-        (true, false) => format!("/{downstream_path}"),
+        (true, false) => {
+            let mut path = String::with_capacity(1 + downstream_path.len());
+            path.push('/');
+            path.push_str(downstream_path);
+            path
+        }
         (false, true) => base_path.to_owned(),
-        (false, false) => format!("{base_path}/{downstream_path}"),
+        (false, false) => {
+            let mut path = String::with_capacity(base_path.len() + 1 + downstream_path.len());
+            path.push_str(base_path);
+            path.push('/');
+            path.push_str(downstream_path);
+            path
+        }
     };
 
     url.set_path(&composed_path);

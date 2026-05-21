@@ -11,7 +11,7 @@ use tower::ServiceExt;
 async fn shaped_runtime_request_converts_fake_eventstream_to_sse() {
     let ctx = common::request_context(common::messages_body(true), common::anthropic_headers());
     let shaped = shape_request(
-        &BedrockRuntimeDialect,
+        &BedrockRuntimeDialect::default(),
         &ctx,
         &Upstream::BedrockRuntime {
             region: "us-east-1".to_owned(),

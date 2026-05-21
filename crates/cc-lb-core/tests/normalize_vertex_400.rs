@@ -8,8 +8,8 @@ use serde_json::Value;
 
 #[test]
 fn vertex_invalid_argument_normalizes_to_anthropic_shape() {
-    let normalizer =
-        ErrorNormalizer::new().with_dialect(UpstreamKind::Vertex, Arc::new(VertexDialect));
+    let normalizer = ErrorNormalizer::new()
+        .with_dialect(UpstreamKind::Vertex, Arc::new(VertexDialect::default()));
     let body = Bytes::from_static(
         br#"{"error":{"code":400,"status":"INVALID_ARGUMENT","message":"bad"}}"#,
     );
@@ -33,4 +33,6 @@ fn vertex_invalid_argument_normalizes_to_anthropic_shape() {
             .and_then(Value::as_str),
         Some("bad")
     );
+
+    insta::assert_snapshot!(serde_json::to_string_pretty(&value).unwrap());
 }

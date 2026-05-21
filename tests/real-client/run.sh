@@ -45,8 +45,6 @@ cleanup() {
   if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
     rm -rf "$TMP_DIR"
   fi
-  pgrep -af '[c]c-lb.*serve' || true
-  pgrep -af '[f]ake-' || true
 }
 trap cleanup EXIT INT TERM
 
@@ -69,19 +67,10 @@ expected=$(tr -d '\r\n' < "$expected_file")
 [ -n "$expected" ] || fail "empty expected substring: $expected_file"
 
 case "$upstream" in
-  anthropic-direct)
-    skip "cc-lb anthropic_direct dialect hard-codes https://api.anthropic.com; local fake cannot be targeted without changing production routing or host files"
-    ;;
-  bedrock-runtime)
-    skip "cc-lb bedrock_runtime dialect hard-codes https://bedrock-runtime.<region>.amazonaws.com; local fake cannot be targeted without changing production routing or host files"
-    ;;
-  bedrock-mantle)
-    skip "cc-lb bedrock_mantle dialect hard-codes https://bedrock-mantle.<region>.api.aws; local fake cannot be targeted without changing production routing or host files"
-    ;;
-  vertex)
-    skip "cc-lb vertex dialect hard-codes https://<region>-aiplatform.googleapis.com; local fake cannot be targeted without changing production routing or host files"
-    ;;
-  custom) ;;
+  anthropic-direct|custom) fake_package=fake-anthropic ;;
+  bedrock-runtime) fake_package=fake-bedrock-runtime ;;
+  bedrock-mantle) fake_package=fake-bedrock-mantle ;;
+  vertex) fake_package=fake-vertex ;;
 esac
 
 . "$SCRIPT_DIR/install.sh"
@@ -185,20 +174,47 @@ cat > "$gcp_credentials" <<'JSON'
 JSON
 render_config "$SCRIPT_DIR/configs/$client-$upstream.toml" "$config_path"
 
-cargo run -q -p fake-anthropic -- --port "$fake_port" > "$TMP_DIR/fake.log" 2>&1 &
+fake_bin="${FAKE_BIN:-$ROOT_DIR/target/debug/$fake_package}"
+if [ -x "$fake_bin" ]; then
+  "$fake_bin" --port "$fake_port" > "$TMP_DIR/fake.log" 2>&1 &
+else
+  cargo run -q -p "$fake_package" -- --port "$fake_port" > "$TMP_DIR/fake.log" 2>&1 &
+fi
 FAKE_PID=$!
-wait_port "$fake_port" fake-anthropic
+if ! wait_port "$fake_port" "$fake_package"; then
+  printf '%s\n' "--- $fake_package log ---" >&2
+  cat "$TMP_DIR/fake.log" >&2 || true
+  fail "$fake_package did not start"
+fi
 
-CC_LB_ADMIN_TOKEN=admin-token \
-CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
-AWS_ACCESS_KEY_ID=AKIATEST \
-AWS_SECRET_ACCESS_KEY=SECRETTEST \
-AWS_REGION=us-east-1 \
-GOOGLE_APPLICATION_CREDENTIALS="$gcp_credentials" \
-RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
-cargo run -q -p cc-lb-server -- serve --config "$config_path" > "$TMP_DIR/proxy.log" 2>&1 &
+cc_lb_bin="${CC_LB_BIN:-$ROOT_DIR/target/debug/cc-lb}"
+if [ -x "$cc_lb_bin" ]; then
+  CC_LB_ADMIN_TOKEN=admin-token \
+  CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
+  AWS_ACCESS_KEY_ID=AKIATEST \
+  AWS_SECRET_ACCESS_KEY=SECRETTEST \
+  AWS_REGION=us-east-1 \
+  GOOGLE_APPLICATION_CREDENTIALS="$gcp_credentials" \
+  CC_LB_GCP_ACCESS_TOKEN=ya29.test \
+  RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
+  "$cc_lb_bin" serve --config "$config_path" > "$TMP_DIR/proxy.log" 2>&1 &
+else
+  CC_LB_ADMIN_TOKEN=admin-token \
+  CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
+  AWS_ACCESS_KEY_ID=AKIATEST \
+  AWS_SECRET_ACCESS_KEY=SECRETTEST \
+  AWS_REGION=us-east-1 \
+  GOOGLE_APPLICATION_CREDENTIALS="$gcp_credentials" \
+  CC_LB_GCP_ACCESS_TOKEN=ya29.test \
+  RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
+  cargo run -q -p cc-lb-server -- serve --config "$config_path" > "$TMP_DIR/proxy.log" 2>&1 &
+fi
 PROXY_PID=$!
-wait_port "$proxy_port" cc-lb
+if ! wait_port "$proxy_port" cc-lb; then
+  printf '%s\n' '--- proxy log ---' >&2
+  cat "$TMP_DIR/proxy.log" >&2 || true
+  fail "cc-lb did not start"
+fi
 
 set +e
 case "$client" in
@@ -245,7 +261,7 @@ printf '%s\n' '--- stdout ---'
 cat "$stdout_file" || true
 printf '%s\n' '--- stderr ---'
 cat "$stderr_file" || true
-printf '%s\n' '--- fake log ---'
+printf '%s\n' "--- $fake_package log ---"
 cat "$TMP_DIR/fake.log" || true
 printf '%s\n' '--- proxy log ---'
 cat "$TMP_DIR/proxy.log" || true

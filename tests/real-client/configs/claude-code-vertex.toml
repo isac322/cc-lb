@@ -19,7 +19,7 @@ kind = "vertex"
 base_url = "__FAKE_URL__"
 region = "__VERTEX_REGION__"
 project = "__PROJECT__"
-auth_strategy = "gcp_oauth"
+auth_strategy = "gcp_o_auth"
 [principals.api-key]
 allowed_models = ["*"]
 

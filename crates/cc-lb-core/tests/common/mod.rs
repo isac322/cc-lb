@@ -98,7 +98,7 @@ impl RouterPlugin for TestRouter {
             upstream: Upstream::CustomAnthropicSpec {
                 base_url: self.base_url.clone(),
             },
-            dialect: Box::new(PassthroughDialect),
+            dialect: Arc::new(PassthroughDialect),
         })
     }
 }

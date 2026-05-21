@@ -1,7 +1,3 @@
-#![cfg(feature = "chaos")]
-
-//! Verifies `CC_LB_CHAOS_DROP_PCT=50` produces an approximately half-dropped request sample.
-
 mod chaos_common;
 
 #[tokio::test]

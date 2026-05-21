@@ -1,3 +1,4 @@
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -102,8 +103,8 @@ impl RouterPlugin for ExtismRouterPlugin {
             )
             .map_err(route_runtime_error)?;
         let response: RouteResponse = parse_versioned(response).map_err(route_runtime_message)?;
-        let dialect: Box<dyn UpstreamDialect> = match response.dialect.unwrap_or_default() {
-            PluginBinding::SelfPlugin => Box::new(ExtismDialectPlugin::new(self.slot.clone())),
+        let dialect: Arc<dyn UpstreamDialect> = match response.dialect.unwrap_or_default() {
+            PluginBinding::SelfPlugin => Arc::new(ExtismDialectPlugin::new(self.slot.clone())),
         };
         Ok(RouteDecision {
             upstream: response.upstream,
@@ -151,8 +152,11 @@ impl UpstreamDialect for ExtismDialectPlugin {
                 reason: format!("plugin returned invalid method: {source}"),
             }
         })?;
-        let headers = headers_from_wire(response.headers)
-            .map_err(|reason| DialectError::UnsupportedRequest { reason })?;
+        let headers = headers_from_wire(response.headers).map_err(|source| {
+            DialectError::UnsupportedRequest {
+                reason: source.to_string(),
+            }
+        })?;
         let body = BASE64.decode(response.body_base64).map_err(|source| {
             DialectError::UnsupportedRequest {
                 reason: format!("plugin returned invalid body_base64: {source}"),
@@ -260,8 +264,10 @@ impl Signer for ExtismSigner {
             })?);
         }
         if let Some(headers) = response.headers {
-            let headers = headers_from_wire(headers)
-                .map_err(|reason| SignerError::SigningFailed { reason })?;
+            let headers =
+                headers_from_wire(headers).map_err(|source| SignerError::SigningFailed {
+                    reason: source.to_string(),
+                })?;
             shaped.headers_mut().clear();
             for (name, value) in headers {
                 if let Some(name) = name {
@@ -481,28 +487,86 @@ pub(crate) fn headers_to_wire(headers: &HeaderMap) -> Vec<HeaderWire> {
         .collect()
 }
 
-fn headers_from_wire(headers: Vec<HeaderWire>) -> Result<HeaderMap, String> {
+fn headers_from_wire(headers: Vec<HeaderWire>) -> Result<HeaderMap, WireError> {
     let mut out = HeaderMap::new();
     for header in headers {
-        let name = HeaderName::from_bytes(header.name.as_bytes())
-            .map_err(|source| format!("invalid header name {}: {source}", header.name))?;
-        let value = BASE64.decode(header.value_base64).map_err(|source| {
-            format!("invalid header value base64 for {}: {source}", header.name)
+        let name = HeaderName::from_bytes(header.name.as_bytes()).map_err(|source| {
+            WireError::InvalidHeaderName {
+                name: header.name.clone(),
+                source,
+            }
         })?;
-        let value = HeaderValue::from_bytes(&value)
-            .map_err(|source| format!("invalid header value for {}: {source}", header.name))?;
+        let value = BASE64.decode(header.value_base64).map_err(|source| {
+            WireError::InvalidHeaderValueBase64 {
+                name: header.name.clone(),
+                source,
+            }
+        })?;
+        let value =
+            HeaderValue::from_bytes(&value).map_err(|source| WireError::InvalidHeaderValue {
+                name: header.name.clone(),
+                source,
+            })?;
         out.append(name, value);
     }
     Ok(out)
 }
 
-pub(crate) fn parse_versioned<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, String> {
+pub(crate) fn parse_versioned<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, WireError> {
     match value.get("_version").and_then(Value::as_u64) {
-        Some(1) => serde_json::from_value(value).map_err(|source| source.to_string()),
-        Some(version) => Err(format!("unsupported plugin envelope version: {version}")),
-        None => Err("missing plugin envelope _version".to_owned()),
+        Some(1) => {
+            serde_json::from_value(value).map_err(|source| WireError::Deserialize { source })
+        }
+        Some(version) => Err(WireError::UnsupportedVersion { version }),
+        None => Err(WireError::MissingVersion),
     }
 }
+
+#[derive(Debug)]
+pub(crate) enum WireError {
+    Deserialize {
+        source: serde_json::Error,
+    },
+    UnsupportedVersion {
+        version: u64,
+    },
+    MissingVersion,
+    InvalidHeaderName {
+        name: String,
+        source: http::header::InvalidHeaderName,
+    },
+    InvalidHeaderValueBase64 {
+        name: String,
+        source: base64::DecodeError,
+    },
+    InvalidHeaderValue {
+        name: String,
+        source: http::header::InvalidHeaderValue,
+    },
+}
+
+impl fmt::Display for WireError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Deserialize { source } => write!(f, "plugin envelope decode failed: {source}"),
+            Self::UnsupportedVersion { version } => {
+                write!(f, "unsupported plugin envelope version: {version}")
+            }
+            Self::MissingVersion => write!(f, "missing plugin envelope _version"),
+            Self::InvalidHeaderName { name, source } => {
+                write!(f, "invalid header name {name}: {source}")
+            }
+            Self::InvalidHeaderValueBase64 { name, source } => {
+                write!(f, "invalid header value base64 for {name}: {source}")
+            }
+            Self::InvalidHeaderValue { name, source } => {
+                write!(f, "invalid header value for {name}: {source}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for WireError {}
 
 fn authn_runtime_error(source: PluginCallError) -> AuthnError {
     AuthnError::Runtime {
@@ -510,8 +574,10 @@ fn authn_runtime_error(source: PluginCallError) -> AuthnError {
     }
 }
 
-fn authn_runtime_message(reason: String) -> AuthnError {
-    AuthnError::Runtime { reason }
+fn authn_runtime_message(source: WireError) -> AuthnError {
+    AuthnError::Runtime {
+        reason: source.to_string(),
+    }
 }
 
 fn route_runtime_error(source: PluginCallError) -> RouteError {
@@ -520,8 +586,10 @@ fn route_runtime_error(source: PluginCallError) -> RouteError {
     }
 }
 
-fn route_runtime_message(reason: String) -> RouteError {
-    RouteError::Runtime { reason }
+fn route_runtime_message(source: WireError) -> RouteError {
+    RouteError::Runtime {
+        reason: source.to_string(),
+    }
 }
 
 fn dialect_runtime_error(source: PluginCallError) -> DialectError {
@@ -530,8 +598,10 @@ fn dialect_runtime_error(source: PluginCallError) -> DialectError {
     }
 }
 
-fn dialect_runtime_message(reason: String) -> DialectError {
-    DialectError::UnsupportedRequest { reason }
+fn dialect_runtime_message(source: WireError) -> DialectError {
+    DialectError::UnsupportedRequest {
+        reason: source.to_string(),
+    }
 }
 
 fn signer_runtime_error(source: PluginCallError) -> SignerError {
@@ -540,6 +610,8 @@ fn signer_runtime_error(source: PluginCallError) -> SignerError {
     }
 }
 
-fn signer_runtime_message(reason: String) -> SignerError {
-    SignerError::SigningFailed { reason }
+fn signer_runtime_message(source: WireError) -> SignerError {
+    SignerError::SigningFailed {
+        reason: source.to_string(),
+    }
 }

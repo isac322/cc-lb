@@ -19,7 +19,7 @@ fn anthropic_and_custom_headers_are_preserved_exactly() {
     );
 
     let shaped = shape_request(
-        &AnthropicDirectDialect,
+        &AnthropicDirectDialect::default(),
         &ctx,
         &Upstream::AnthropicDirect,
         &common::principal(),

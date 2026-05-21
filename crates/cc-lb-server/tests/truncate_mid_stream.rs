@@ -1,7 +1,3 @@
-#![cfg(feature = "chaos")]
-
-//! Verifies `CC_LB_CHAOS_TRUNCATE_AFTER_EVENTS` cleanly ends SSE after the configured data events.
-
 mod chaos_common;
 
 #[tokio::test]

@@ -7,3 +7,8 @@ pub fn format_version() -> String {
         meta.version, meta.git_sha, meta.build_time, meta.rustc, meta.features, meta.target
     )
 }
+
+pub fn compact_version() -> String {
+    let meta = BuildMeta::current();
+    format!("cc-lb {} ({})", meta.version, meta.git_sha)
+}

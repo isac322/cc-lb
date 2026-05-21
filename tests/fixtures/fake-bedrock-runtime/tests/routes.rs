@@ -75,9 +75,9 @@ async fn stream_ok_mode_decodes_and_modes_return_bedrock_errors() {
         .await
         .expect("body bytes");
     let decoded = decode_messages(&body).expect("event-stream decodes");
-    assert_eq!(decoded.len(), 51);
+    assert_eq!(decoded.len(), 55);
     assert_eq!(decoded[0].header_str(":event-type"), Some("chunk"));
-    assert!(String::from_utf8_lossy(&decoded[50].payload).contains("message_stop"));
+    assert!(String::from_utf8_lossy(&decoded[54].payload).contains("message_stop"));
 
     let validation = json_request(app.clone(), "ValidationException").await;
     assert_eq!(validation.0, StatusCode::BAD_REQUEST);

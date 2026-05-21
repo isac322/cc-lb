@@ -14,7 +14,7 @@ fn mantle_preserves_anthropic_shape_body_and_headers() {
     let ctx = common::request_context(body.clone(), headers.clone());
 
     let shaped = shape_request(
-        &BedrockMantleDialect,
+        &BedrockMantleDialect::default(),
         &ctx,
         &Upstream::BedrockMantle {
             region: "us-east-1".to_owned(),
@@ -35,7 +35,7 @@ fn mantle_preserves_anthropic_shape_body_and_headers() {
         shaped.url().as_str(),
         "https://bedrock-mantle.us-east-1.api.aws/anthropic/v1/messages"
     );
-    assert!(BedrockMantleDialect
+    assert!(BedrockMantleDialect::default()
         .normalize_error(StatusCode::BAD_REQUEST, &Bytes::from_static(b"{}"))
         .is_none());
 }

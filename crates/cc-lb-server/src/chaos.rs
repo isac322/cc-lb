@@ -1,5 +1,3 @@
-#![cfg(feature = "chaos")]
-
 use std::future::Future;
 use std::pin::Pin;
 use std::task::{Context, Poll};
@@ -12,6 +10,9 @@ use bytes::Bytes;
 use http_body_util::BodyExt;
 use rand::Rng;
 use tower::{Layer, Service};
+
+type ChaosFuture<T> = Pin<Box<DynChaosFuture<T>>>;
+type DynChaosFuture<T> = dyn Future<Output = T> + Send;
 
 const LATENCY_ENV: &str = "CC_LB_CHAOS_LATENCY_MS";
 const DROP_ENV: &str = "CC_LB_CHAOS_DROP_PCT";
@@ -86,7 +87,7 @@ where
 {
     type Response = Response<Body>;
     type Error = S::Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+    type Future = ChaosFuture<Result<Self::Response, Self::Error>>;
 
     fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
         self.inner.poll_ready(cx)

@@ -5,7 +5,7 @@ use http::StatusCode;
 
 #[test]
 fn validation_exception_normalizes_to_anthropic_invalid_request() {
-    let normalized = BedrockRuntimeDialect
+    let normalized = BedrockRuntimeDialect::default()
         .normalize_error(
             StatusCode::BAD_REQUEST,
             &Bytes::from_static(br#"{"__type":"ValidationException","message":"bad request"}"#),
@@ -20,7 +20,7 @@ fn validation_exception_normalizes_to_anthropic_invalid_request() {
 
 #[test]
 fn server_error_without_bedrock_type_wraps_as_api_error() {
-    let normalized = BedrockRuntimeDialect
+    let normalized = BedrockRuntimeDialect::default()
         .normalize_error(
             StatusCode::BAD_GATEWAY,
             &Bytes::from_static(br#"{"oops":true}"#),

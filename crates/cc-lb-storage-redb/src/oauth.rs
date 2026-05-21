@@ -20,7 +20,11 @@ struct AnthropicApiKeyCredential {
 }
 
 pub fn oauth_key(principal_id: &str, provider: &str) -> Vec<u8> {
-    format!("{principal_id}:{provider}").into_bytes()
+    let mut key = Vec::with_capacity(principal_id.len() + 1 + provider.len());
+    key.extend_from_slice(principal_id.as_bytes());
+    key.push(b':');
+    key.extend_from_slice(provider.as_bytes());
+    key
 }
 
 impl Storage {

@@ -256,6 +256,42 @@ pub fn reload_old_module(output: &str) -> String {
     ))
 }
 
+pub fn lifecycle_counted_old_module(output: &str, hold_after_call: u64) -> String {
+    let helpers = format!(
+        "{}{}{}",
+        bytes_helper("release", b"release"),
+        bytes_helper("started_key", b"started"),
+        bytes_helper("started_value", b"old")
+    );
+    let output_helper = bytes_helper("old_out", output.as_bytes());
+    module(&format!(
+        r#"
+{helpers}
+{output_helper}
+(global $calls (mut i64) (i64.const 0))
+(func (export "authenticate") (result i32)
+  (local $value i64)
+  (local $i i64)
+  (local $out i64)
+  (global.set $calls (i64.add (global.get $calls) (i64.const 1)))
+  (if (i64.ge_u (global.get $calls) (i64.const {hold_after_call}))
+    (then
+      (call $cc_lb_storage_put (call $started_key) (call $started_value))
+      (loop $wait
+        (local.set $i (i64.const 0))
+        (loop $spin
+          (local.set $i (i64.add (local.get $i) (i64.const 1)))
+          (br_if $spin (i64.lt_u (local.get $i) (i64.const 100000))))
+        (local.set $value (call $cc_lb_storage_get (call $release)))
+        (br_if $wait (i64.eqz (call $length (local.get $value)))))))
+  (local.set $out (call $old_out))
+  (call $output_set (local.get $out) (i64.const {len}))
+  (i32.const 0))
+"#,
+        len = output.len()
+    ))
+}
+
 pub fn reload_new_module(output: &str) -> String {
     storage_put_module(output, b"release", b"1")
 }

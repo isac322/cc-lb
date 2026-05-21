@@ -10,7 +10,7 @@ fn direct_normalize_error_returns_none() {
     );
 
     assert_eq!(
-        AnthropicDirectDialect.normalize_error(StatusCode::UNAUTHORIZED, &body),
+        AnthropicDirectDialect::default().normalize_error(StatusCode::UNAUTHORIZED, &body),
         None
     );
 }

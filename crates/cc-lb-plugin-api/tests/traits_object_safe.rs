@@ -48,7 +48,7 @@ impl RouterPlugin for DummyRouter {
     ) -> Result<RouteDecision, RouteError> {
         Ok(RouteDecision {
             upstream: Upstream::AnthropicDirect,
-            dialect: Box::new(DummyDialect),
+            dialect: Arc::new(DummyDialect),
         })
     }
 }

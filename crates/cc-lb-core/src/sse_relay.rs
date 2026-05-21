@@ -18,6 +18,7 @@ use http_body_util::BodyStream;
 use hyper::body::Frame;
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
+use tokio::task::JoinHandle;
 use tokio::time::{sleep, Instant as TokioInstant, Sleep};
 
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
@@ -103,14 +104,14 @@ impl SseRelay {
         let (cancel_tx, cancel_rx) = watch::channel(false);
         let (tx, mut rx) = mpsc::channel::<Bytes>(16);
         let runtime = self.into_runtime();
-        tokio::spawn(async move {
+        let relay_task = tokio::spawn(async move {
             runtime
                 .relay_stream_task(upstream_body, tx, cancel_rx)
                 .await;
         });
 
         let stream = async_stream::stream! {
-            let _guard = DownstreamCancelGuard { cancel_tx };
+            let _guard = DownstreamCancelGuard { cancel_tx, relay_task };
             while let Some(bytes) = rx.recv().await {
                 yield Ok::<Bytes, Infallible>(bytes);
             }
@@ -411,11 +412,15 @@ impl SseBatcher {
 
 struct DownstreamCancelGuard {
     cancel_tx: watch::Sender<bool>,
+    relay_task: JoinHandle<()>,
 }
 
 impl Drop for DownstreamCancelGuard {
     fn drop(&mut self) {
         let _sent = self.cancel_tx.send(true);
+        if !self.relay_task.is_finished() {
+            self.relay_task.abort();
+        }
     }
 }
 

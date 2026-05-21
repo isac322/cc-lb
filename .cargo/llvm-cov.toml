@@ -1,7 +1,1 @@
-# cargo-llvm-cov does not expose per-crate line thresholds in config.
-# CI enforces the actual floor with command-line checks:
-# - cc-lb-core >= 80
-# - cc-lb-dialect-* >= 80
-# - all other workspace crates >= 60
-
 ignore-filename-regex = "^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)"

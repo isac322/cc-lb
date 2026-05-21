@@ -8,7 +8,7 @@ fn model_moves_to_bedrock_runtime_path_and_colon_suffix_is_preserved() {
     let ctx = common::request_context(common::messages_body(false), common::anthropic_headers());
 
     let shaped = shape_request(
-        &BedrockRuntimeDialect,
+        &BedrockRuntimeDialect::default(),
         &ctx,
         &Upstream::BedrockRuntime {
             region: "us-east-1".to_owned(),
@@ -30,7 +30,7 @@ fn streaming_shape_uses_response_stream_endpoint() {
     let ctx = common::request_context(common::messages_body(true), common::anthropic_headers());
 
     let shaped = shape_request(
-        &BedrockRuntimeDialect,
+        &BedrockRuntimeDialect::default(),
         &ctx,
         &Upstream::BedrockRuntime {
             region: "us-west-2".to_owned(),
@@ -60,7 +60,7 @@ fn model_must_be_present_and_string() {
             common::anthropic_headers(),
         );
         let err = shape_request(
-            &BedrockRuntimeDialect,
+            &BedrockRuntimeDialect::default(),
             &ctx,
             &Upstream::BedrockRuntime {
                 region: "us-east-1".to_owned(),

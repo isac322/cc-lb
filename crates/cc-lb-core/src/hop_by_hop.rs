@@ -8,6 +8,9 @@ use http::header::{
 use http::{HeaderMap, HeaderName, Request, Response};
 use tower::{Layer, Service};
 
+type StripFuture<T> = Pin<Box<DynStripFuture<T>>>;
+type DynStripFuture<T> = dyn Future<Output = T> + Send;
+
 const HOP_BY_HOP_HEADERS: [HeaderName; 9] = [
     HeaderName::from_static("connection"),
     HeaderName::from_static("keep-alive"),
@@ -70,7 +73,7 @@ where
 {
     type Response = Response<ResBody>;
     type Error = S::Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
+    type Future = StripFuture<Result<Self::Response, Self::Error>>;
 
     fn poll_ready(
         &mut self,

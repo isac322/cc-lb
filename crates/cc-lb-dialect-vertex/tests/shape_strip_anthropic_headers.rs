@@ -8,7 +8,7 @@ fn anthropic_auth_and_version_headers_are_stripped() {
     let ctx = common::request_context(common::messages_body(false), common::anthropic_headers());
 
     let shaped = shape_request(
-        &VertexDialect,
+        &VertexDialect::default(),
         &ctx,
         &common::vertex_upstream(),
         &common::principal(),

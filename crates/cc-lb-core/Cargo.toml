@@ -34,5 +34,6 @@ tower-service.workspace = true
 tower.workspace = true
 
 [dev-dependencies]
+insta.workspace = true
 tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }
