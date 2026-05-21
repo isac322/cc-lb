@@ -1,0 +1,371 @@
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Arc, Once};
+use std::time::Duration;
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use cc_lb_plugin_api::SignedRequest;
+use dashmap::DashMap;
+use http::{HeaderMap, Request, Response};
+use http_body_util::Full;
+use hyper_rustls::HttpsConnectorBuilder;
+use hyper_util::client::legacy::connect::{Connect, HttpConnector};
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::TokioExecutor;
+use metrics::Unit;
+use thiserror::Error;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+
+use crate::lifecycle::{Body, DispatchError, UpstreamDispatch};
+
+const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+
+static REGISTER_BULKHEAD_METRICS: Once = Once::new();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct BulkheadConfig {
+    pub max_conns_per_upstream: u32,
+    pub semaphore_permits: u32,
+    pub acquire_timeout: Duration,
+}
+
+#[derive(Debug, Error, Clone, Eq, PartialEq)]
+pub enum BulkheadError {
+    #[error("bulkhead queue full; retry after {retry_after:?}")]
+    QueueFull { retry_after: Duration },
+}
+
+#[derive(Debug, Error)]
+pub enum ExecuteError {
+    #[error("bulkhead queue full; retry after {0:?}")]
+    BulkheadFull(Duration),
+    #[error(transparent)]
+    Dispatch(#[from] DispatchError),
+}
+
+pub struct Bulkhead {
+    pub upstream_name: String,
+    pub semaphore: Arc<Semaphore>,
+    pub in_flight: AtomicU32,
+    pub client: Arc<dyn UpstreamDispatch>,
+    pub config: BulkheadConfig,
+}
+
+impl Bulkhead {
+    pub fn new(
+        upstream_name: impl Into<String>,
+        config: BulkheadConfig,
+        dispatcher: Arc<dyn UpstreamDispatch>,
+    ) -> Arc<Self> {
+        register_bulkhead_metrics();
+        let bulkhead = Arc::new(Self {
+            upstream_name: upstream_name.into(),
+            semaphore: Arc::new(Semaphore::new(config.semaphore_permits as usize)),
+            in_flight: AtomicU32::new(0),
+            client: dispatcher,
+            config,
+        });
+        bulkhead.emit_active(0);
+        bulkhead
+    }
+
+    pub async fn execute(&self, signed: SignedRequest) -> Result<Response<Body>, ExecuteError> {
+        let _guard = self.acquire().await.map_err(|source| match source {
+            BulkheadError::QueueFull { retry_after } => ExecuteError::BulkheadFull(retry_after),
+        })?;
+        self.client
+            .dispatch(signed)
+            .await
+            .map_err(ExecuteError::Dispatch)
+    }
+
+    pub async fn acquire(&self) -> Result<BulkheadGuard<'_>, BulkheadError> {
+        let permit = tokio::time::timeout(
+            self.config.acquire_timeout,
+            self.semaphore.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| BulkheadError::QueueFull {
+            retry_after: self.config.acquire_timeout,
+        })?
+        .map_err(|_| BulkheadError::QueueFull {
+            retry_after: self.config.acquire_timeout,
+        })?;
+
+        let active = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+        self.emit_active(active);
+        Ok(BulkheadGuard {
+            bulkhead: self,
+            _permit: permit,
+        })
+    }
+
+    pub fn active(&self) -> u32 {
+        self.in_flight.load(Ordering::SeqCst)
+    }
+
+    fn emit_active(&self, active: u32) {
+        metrics::gauge!(
+            "cc_lb_bulkhead_active",
+            "upstream" => self.upstream_name.clone()
+        )
+        .set(f64::from(active));
+    }
+}
+
+pub struct BulkheadGuard<'a> {
+    bulkhead: &'a Bulkhead,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl Drop for BulkheadGuard<'_> {
+    fn drop(&mut self) {
+        let active = self
+            .bulkhead
+            .in_flight
+            .fetch_sub(1, Ordering::SeqCst)
+            .saturating_sub(1);
+        self.bulkhead.emit_active(active);
+    }
+}
+
+#[derive(Default)]
+pub struct BulkheadRegistry {
+    pub map: DashMap<String, Arc<Bulkhead>>,
+}
+
+impl BulkheadRegistry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn bulkhead(
+        &self,
+        upstream_name: impl Into<String>,
+        config: BulkheadConfig,
+    ) -> Arc<Bulkhead> {
+        self.bulkhead_with_factory(upstream_name, config, || {
+            make_default_dispatcher(config.max_conns_per_upstream as usize)
+        })
+    }
+
+    pub fn bulkhead_with_dispatcher(
+        &self,
+        upstream_name: impl Into<String>,
+        config: BulkheadConfig,
+        dispatcher: Arc<dyn UpstreamDispatch>,
+    ) -> Arc<Bulkhead> {
+        self.bulkhead_with_factory(upstream_name, config, || dispatcher)
+    }
+
+    pub fn bulkhead_with_factory<F>(
+        &self,
+        upstream_name: impl Into<String>,
+        config: BulkheadConfig,
+        dispatcher_factory: F,
+    ) -> Arc<Bulkhead>
+    where
+        F: FnOnce() -> Arc<dyn UpstreamDispatch>,
+    {
+        let upstream_name = upstream_name.into();
+        self.map
+            .entry(upstream_name.clone())
+            .or_insert_with(|| Bulkhead::new(upstream_name, config, dispatcher_factory()))
+            .clone()
+    }
+
+    pub fn get(&self, upstream_name: &str) -> Option<Arc<Bulkhead>> {
+        self.map
+            .get(upstream_name)
+            .map(|bulkhead| Arc::clone(bulkhead.value()))
+    }
+}
+
+pub struct BulkheadDispatch {
+    registry: Arc<BulkheadRegistry>,
+    config: BulkheadConfig,
+    upstream_name: Arc<dyn Fn(&SignedRequest) -> String + Send + Sync>,
+    dispatcher_factory: Arc<dyn Fn(usize) -> Arc<dyn UpstreamDispatch> + Send + Sync>,
+}
+
+impl BulkheadDispatch {
+    pub fn new(
+        registry: Arc<BulkheadRegistry>,
+        config: BulkheadConfig,
+        upstream_name: Arc<dyn Fn(&SignedRequest) -> String + Send + Sync>,
+    ) -> Self {
+        Self::with_dispatcher_factory(
+            registry,
+            config,
+            upstream_name,
+            Arc::new(make_default_dispatcher),
+        )
+    }
+
+    pub fn with_dispatcher_factory(
+        registry: Arc<BulkheadRegistry>,
+        config: BulkheadConfig,
+        upstream_name: Arc<dyn Fn(&SignedRequest) -> String + Send + Sync>,
+        dispatcher_factory: Arc<dyn Fn(usize) -> Arc<dyn UpstreamDispatch> + Send + Sync>,
+    ) -> Self {
+        Self {
+            registry,
+            config,
+            upstream_name,
+            dispatcher_factory,
+        }
+    }
+}
+
+#[async_trait]
+impl UpstreamDispatch for BulkheadDispatch {
+    async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let upstream_name = (self.upstream_name)(&request);
+        let config = self.config;
+        let dispatcher_factory = Arc::clone(&self.dispatcher_factory);
+        let bulkhead = self
+            .registry
+            .bulkhead_with_factory(upstream_name, config, || {
+                dispatcher_factory(config.max_conns_per_upstream as usize)
+            });
+        bulkhead
+            .execute(request)
+            .await
+            .map_err(dispatch_error_from_execute)
+    }
+}
+
+#[async_trait]
+impl UpstreamDispatch for Bulkhead {
+    async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        self.execute(request)
+            .await
+            .map_err(dispatch_error_from_execute)
+    }
+}
+
+#[async_trait]
+impl UpstreamDispatch for Arc<Bulkhead> {
+    async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        self.execute(request)
+            .await
+            .map_err(dispatch_error_from_execute)
+    }
+}
+
+pub fn make_default_dispatcher(max_idle_per_host: usize) -> Arc<dyn UpstreamDispatch> {
+    let connector = HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_http1()
+        .enable_http2()
+        .build();
+    Arc::new(HttpsHyperDispatcher {
+        client: build_client(connector, max_idle_per_host),
+    })
+}
+
+pub fn make_http_dispatcher_with_connector(
+    connector: HttpConnector,
+    max_idle_per_host: usize,
+) -> Arc<dyn UpstreamDispatch> {
+    Arc::new(HttpHyperDispatcher {
+        client: build_client(connector, max_idle_per_host),
+    })
+}
+
+#[derive(Clone)]
+struct HttpsHyperDispatcher {
+    client: Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>,
+}
+
+#[derive(Clone)]
+struct HttpHyperDispatcher {
+    client: Client<HttpConnector, Full<Bytes>>,
+}
+
+#[async_trait]
+impl UpstreamDispatch for HttpsHyperDispatcher {
+    async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        dispatch_with_client(&self.client, request).await
+    }
+}
+
+#[async_trait]
+impl UpstreamDispatch for HttpHyperDispatcher {
+    async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        dispatch_with_client(&self.client, request).await
+    }
+}
+
+fn build_client<C>(connector: C, max_idle_per_host: usize) -> Client<C, Full<Bytes>>
+where
+    C: Connect + Clone + Send + Sync + 'static,
+{
+    let mut builder = Client::builder(TokioExecutor::new());
+    builder.pool_idle_timeout(DEFAULT_POOL_IDLE_TIMEOUT);
+    builder.pool_max_idle_per_host(max_idle_per_host);
+    builder.build(connector)
+}
+
+async fn dispatch_with_client<C>(
+    client: &Client<C, Full<Bytes>>,
+    request: SignedRequest,
+) -> Result<Response<Body>, DispatchError>
+where
+    C: Connect + Clone + Send + Sync + 'static,
+{
+    let (url, method, headers, body) = request.into_parts();
+    let uri = url
+        .as_str()
+        .parse::<http::Uri>()
+        .map_err(|source| DispatchError::InvalidUri {
+            reason: source.to_string(),
+        })?;
+
+    let mut builder = Request::builder().method(method).uri(uri);
+    copy_headers(headers, builder.headers_mut());
+    let request = builder
+        .body(Full::new(body))
+        .map_err(|source| DispatchError::RequestBuild {
+            reason: source.to_string(),
+        })?;
+
+    let response = client
+        .request(request)
+        .await
+        .map_err(|source| DispatchError::Transport {
+            reason: source.to_string(),
+        })?;
+    let (parts, body) = response.into_parts();
+    Ok(Response::from_parts(parts, Body::new(body)))
+}
+
+fn copy_headers(source: HeaderMap, target: Option<&mut HeaderMap>) {
+    let Some(target) = target else {
+        return;
+    };
+
+    for (name, value) in source {
+        if let Some(name) = name {
+            target.append(name, value);
+        }
+    }
+}
+
+fn dispatch_error_from_execute(error: ExecuteError) -> DispatchError {
+    match error {
+        ExecuteError::BulkheadFull(retry_after) => DispatchError::BulkheadFull { retry_after },
+        ExecuteError::Dispatch(source) => source,
+    }
+}
+
+fn register_bulkhead_metrics() {
+    REGISTER_BULKHEAD_METRICS.call_once(|| {
+        metrics::describe_gauge!(
+            "cc_lb_bulkhead_active",
+            Unit::Count,
+            "Active in-flight upstream requests admitted by each bulkhead."
+        );
+    });
+}

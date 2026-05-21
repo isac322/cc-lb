@@ -1,0 +1,78 @@
+# Listener addresses for the proxy, admin stub, and Prometheus metrics listener.
+[listener]
+proxy_addr = "127.0.0.1:8080"
+admin_addr = "127.0.0.1:9090"
+metrics_addr = "127.0.0.1:9091"
+
+# TLS is disabled in the smoke config; T29 wires certificate reload support.
+# [listener.tls]
+# cert_path = "./certs/server.crt"
+# key_path = "./certs/server.key"
+# reload_on_sighup = true
+
+# Lifecycle body caps. The lifecycle enforces these after hop-by-hop stripping.
+[body]
+messages_cap_bytes = 33554432
+files_cap_bytes = 104857600
+
+# Request timeout knobs used by the server and lifecycle composition.
+[timeouts]
+request_header_secs = 10
+request_body_chunk_secs = 30
+idle_secs = 300
+upstream_total_secs = 600
+drain_secs = 60
+
+# Smoke upstream. Start fake-anthropic on port 9080 before running cc-lb.
+[upstreams.fake_anthropic]
+kind = "custom"
+base_url = "http://127.0.0.1:9080"
+auth_strategy = "api_key"
+
+# Optional principal defaults. Built-in authn uses the api-key principal when no plugin is configured.
+[principals.api-key]
+allowed_models = ["*"]
+
+# Wasm plugins are optional; when omitted, built-in x-api-key authn and first-upstream routing are used.
+[plugins]
+observability_hooks = []
+
+# Encrypted redb storage is optional for local smoke tests.
+[storage]
+oauth_aead_key_env = "CC_LB_MASTER_KEY"
+
+# Tracing and metrics. The server binds Prometheus to listener.metrics_addr at startup.
+[observability]
+tracing_level = "info"
+log_redaction = true
+user_prompt_redaction = false
+
+# Default quota policy surfaced to built-in authn and storage-backed quota manager when enabled.
+[quotas]
+default_window_secs = 60
+default_requests_per_window = 1000
+default_input_tokens = 1000000
+default_output_tokens = 1000000
+
+# Admin auth is not enforced by the T25 stub; T26 replaces the admin implementation.
+[admin]
+token_env = "CC_LB_ADMIN_TOKEN"
+
+# Circuit breaker settings applied per upstream host.
+[circuit_breaker]
+failures_to_open = 5
+window_secs = 10
+half_open_after_secs = 30
+
+# Bulkhead settings applied per upstream host.
+[bulkhead]
+max_conns_per_upstream = 50
+semaphore_per_upstream = 100
+
+# DNS cache bounds used by the default dispatcher path.
+[dns]
+cache_ttl_floor_secs = 30
+cache_ttl_ceiling_secs = 300
+
+# Optional egress allow-list placeholder for later policy tasks.
+[egress]

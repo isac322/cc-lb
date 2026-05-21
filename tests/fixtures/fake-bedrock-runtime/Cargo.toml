@@ -1,0 +1,21 @@
+[package]
+name = "fake-bedrock-runtime"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+aws-eventstream-codec = { path = "../../../crates/aws-eventstream-codec" }
+axum.workspace = true
+bytes.workspace = true
+clap = { workspace = true, features = ["derive"] }
+http.workspace = true
+ring.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread"] }
+
+[dev-dependencies]
+http-body-util.workspace = true
+tower = { workspace = true, features = ["util"] }

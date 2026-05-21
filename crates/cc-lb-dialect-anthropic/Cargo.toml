@@ -1,0 +1,13 @@
+[package]
+name = "cc-lb-dialect-anthropic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+bytes.workspace = true
+cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
+http.workspace = true
+url.workspace = true

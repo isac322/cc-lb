@@ -1,0 +1,39 @@
+[graph]
+exclude = ["third_party/gcp_auth"]
+
+[licenses]
+allow = ["MIT", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause", "CC0-1.0", "CDLA-Permissive-2.0", "MPL-2.0", "Unicode-DFS-2016", "Unicode-3.0", "ISC", "Zlib"]
+confidence-threshold = 0.8
+
+[advisories]
+# cargo audit gates warnings as failures in CI via `cargo audit --deny warnings`.
+# The current workspace still pins `extism 1.21.0`, which resolves to `wasmtime 41.0.4`.
+# crates.io does not currently provide a newer extism release in this workspace range, so
+# the Wasmtime advisories are documented here as a follow-up runtime upgrade item.
+# `rustls-pemfile` remains reachable through `rustls 0.23`; removing it requires a broader
+# TLS stack migration than this quality-gate task.
+yanked = "warn"
+ignore = [
+    { id = "RUSTSEC-2025-0134", reason = "rustls 0.23 still depends on rustls-pemfile 2.2.0; removing it requires a broader TLS stack migration." },
+    { id = "RUSTSEC-2026-0085", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
+    { id = "RUSTSEC-2026-0086", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
+    { id = "RUSTSEC-2026-0087", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
+    { id = "RUSTSEC-2026-0088", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
+    { id = "RUSTSEC-2026-0089", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
+    { id = "RUSTSEC-2026-0091", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
+    { id = "RUSTSEC-2026-0092", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
+    { id = "RUSTSEC-2026-0093", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
+    { id = "RUSTSEC-2026-0094", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
+    { id = "RUSTSEC-2026-0095", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
+    { id = "RUSTSEC-2026-0096", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
+    { id = "RUSTSEC-2026-0114", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+deny = ["native-tls", "openssl", "openssl-sys", "reqwest"]
+skip = []
+skip-tree = []
+allow-wildcard-paths = true

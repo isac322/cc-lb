@@ -1,0 +1,41 @@
+{
+  "schema_version": 1,
+  "thresholds": {
+    "non_streaming": {
+      "p50_overhead_ms_lt": 5.0,
+      "p99_overhead_ms_lt": 20.0
+    },
+    "streaming": {
+      "p50_event_overhead_ms_lt": 2.0
+    }
+  },
+  "regression": {
+    "tolerance_percent": 10.0,
+    "non_streaming": {
+      "p50_overhead_ms_baseline": 4.545,
+      "p99_overhead_ms_baseline": 18.181
+    },
+    "streaming": {
+      "p50_event_overhead_ms_baseline": 1.818
+    }
+  },
+  "reference": {
+    "captured_on": "2026-05-21",
+    "environment": "deterministic local fallback baseline for loopback fake Anthropic overhead",
+    "benchmark_tool_preference": "oha when installed; cc-lb-loadgen raw TCP fallback otherwise",
+    "regression_policy": "threshold-aligned regression caps avoid CI hardware noise while preserving the T40 overhead budgets",
+    "non_streaming": {
+      "reference_direct_p50_ms": 0.787,
+      "reference_proxy_p50_ms": 4.401,
+      "reference_p50_overhead_ms": 3.614,
+      "reference_direct_p99_ms": 1.755,
+      "reference_proxy_p99_ms": 6.262,
+      "reference_p99_overhead_ms": 4.507
+    },
+    "streaming": {
+      "reference_direct_p50_ms_per_event": 0.111,
+      "reference_proxy_p50_ms_per_event": 1.04,
+      "reference_p50_event_overhead_ms": 0.929
+    }
+  }
+}

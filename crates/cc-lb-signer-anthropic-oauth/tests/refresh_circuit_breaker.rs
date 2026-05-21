@@ -1,0 +1,41 @@
+mod common;
+
+use cc_lb_plugin_api::{RetryDecision, Signer};
+
+#[tokio::test]
+async fn circuit_breaker_fails_fast_after_three_failures() {
+    let test_storage = common::storage();
+    test_storage
+        .storage
+        .put_oauth(
+            "alice",
+            "anthropic_oauth",
+            &common::creds(
+                "sk-ant-oat01-expired",
+                "refresh-old",
+                common::now_epoch_secs() - 10,
+            ),
+        )
+        .expect("seed oauth credentials");
+    let http = common::FakeOAuthClient::new(vec![
+        common::failure_response(),
+        common::failure_response(),
+        common::failure_response(),
+        common::success_response("sk-ant-oat01-not-used", None, 600),
+    ]);
+    let signer = common::signer(test_storage.storage.clone(), http.clone());
+
+    for _ in 0..3 {
+        match signer.on_unauthorized(&common::unauthorized_error()).await {
+            RetryDecision::Fail => {}
+            RetryDecision::Refresh { .. } => panic!("refresh unexpectedly succeeded"),
+        }
+    }
+    assert_eq!(http.call_count(), 3);
+
+    match signer.on_unauthorized(&common::unauthorized_error()).await {
+        RetryDecision::Fail => {}
+        RetryDecision::Refresh { .. } => panic!("breaker did not fail fast"),
+    }
+    assert_eq!(http.call_count(), 3);
+}

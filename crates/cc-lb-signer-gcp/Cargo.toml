@@ -1,0 +1,30 @@
+[package]
+name = "cc-lb-signer-gcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
+dashmap.workspace = true
+gcp_auth = { path = "../../third_party/gcp_auth", default-features = false, features = ["ring", "webpki-roots"] }
+http.workspace = true
+metrics.workspace = true
+secrecy.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "rt"] }
+tracing.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+bytes.workspace = true
+cc-lb-dialect-vertex = { path = "../cc-lb-dialect-vertex" }
+fake-vertex = { path = "../../tests/fixtures/fake-vertex" }
+http-body-util.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+tower = { workspace = true, features = ["util"] }
+tracing-subscriber.workspace = true
