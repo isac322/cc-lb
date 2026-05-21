@@ -1,7 +1,3 @@
-#![cfg(feature = "chaos")]
-
-//! Verifies `CC_LB_CHAOS_RST_AFTER_BYTES` truncates a non-SSE response body before completion.
-
 mod chaos_common;
 
 #[tokio::test]

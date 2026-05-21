@@ -8,7 +8,6 @@ publish = false
 build = "build.rs"
 
 [features]
-chaos = ["dep:rand"]
 wasmtime = []
 
 [[bin]]
@@ -43,7 +42,7 @@ notify.workspace = true
 oauth2.workspace = true
 nix = { version = "0.31.3", features = ["resource"] }
 redb.workspace = true
-rand = { version = "0.8.6", optional = true, features = ["std", "std_rng"] }
+rand = { version = "0.8.6", features = ["std", "std_rng"] }
 rustls = { workspace = true, default-features = false, features = ["std", "ring", "tls12"] }
 rustls-pemfile = "2"
 serde = { workspace = true, features = ["derive"] }

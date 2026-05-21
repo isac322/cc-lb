@@ -1,0 +1,17 @@
+name: musl-static
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    container: messense/rust-musl-cross:x86_64-musl
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Verify musl static binary
+        run: bash tests/musl-static/verify.sh

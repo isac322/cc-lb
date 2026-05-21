@@ -19,7 +19,7 @@ fn direct_shape_body_identity_for_relay_to_fake_anthropic() {
     );
 
     let shaped = shape_request(
-        &AnthropicDirectDialect,
+        &AnthropicDirectDialect::default(),
         &ctx,
         &Upstream::AnthropicDirect,
         &common::principal(),

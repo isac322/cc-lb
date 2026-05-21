@@ -12,7 +12,7 @@ use serde_json::Value;
 fn bedrock_validation_error_normalizes_to_anthropic_shape() {
     let normalizer = ErrorNormalizer::new().with_dialect(
         UpstreamKind::BedrockRuntime,
-        Arc::new(BedrockRuntimeDialect),
+        Arc::new(BedrockRuntimeDialect::default()),
     );
     let body = Bytes::from_static(br#"{"__type":"ValidationException","message":"bad"}"#);
 
@@ -38,6 +38,8 @@ fn bedrock_validation_error_normalizes_to_anthropic_shape() {
             .and_then(Value::as_str),
         Some("bad")
     );
+
+    insta::assert_snapshot!(serde_json::to_string_pretty(&value).unwrap());
 
     write_evidence("task-24-bedrock-err-to-anthropic.json", &normalized);
 }

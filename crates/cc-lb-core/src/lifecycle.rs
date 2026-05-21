@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -6,12 +7,14 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use axum::body::Body as AxumBody;
 use bytes::Bytes;
+use cc_lb_dialect_bedrock::{convert_eventstream_to_sse_bytes, EventStreamConvertError};
 use cc_lb_plugin_api::{
     shape_request, sign_request, AuthnPlugin, ObservabilityHook, ObserveEvent, Principal,
     PrincipalQuotas, RequestContext, RetryDecision, RouterPlugin, SignedRequest, Upstream,
     UpstreamError,
 };
-use http::{HeaderMap, Request, Response, StatusCode};
+use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
@@ -61,6 +64,14 @@ pub enum DispatchError {
     Transport { reason: String },
     #[error("upstream bulkhead queue full; retry after {retry_after:?}")]
     BulkheadFull { retry_after: Duration },
+}
+
+#[derive(Debug, Error)]
+enum ResponseConversionError {
+    #[error("failed to read Bedrock event-stream body: {source}")]
+    Read { source: axum::Error },
+    #[error("failed to convert Bedrock event-stream body: {source}")]
+    Convert { source: EventStreamConvertError },
 }
 
 #[async_trait]
@@ -328,6 +339,25 @@ impl Lifecycle {
             return Ok(response);
         }
 
+        response = match convert_success_response_if_needed(response, &route.upstream).await {
+            Ok(response) => response,
+            Err(source) => {
+                self.observe_error("response_conversion_error", &source.to_string(), "dialect");
+                let response = anthropic_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "api_error",
+                    "failed to convert upstream response",
+                );
+                self.observe_finished_for_principal(
+                    response.status(),
+                    started,
+                    &authn.principal,
+                    &ctx.body_bytes,
+                );
+                return Ok(response);
+            }
+        };
+
         let status = response.status();
         response = self.relay_response(response);
         self.observe_finished_for_principal(status, started, &authn.principal, &ctx.body_bytes);
@@ -519,6 +549,45 @@ async fn collect_error_response(response: Response<Body>) -> CollectedResponse {
     }
 }
 
+async fn convert_success_response_if_needed(
+    response: Response<Body>,
+    upstream: &Upstream,
+) -> Result<Response<Body>, ResponseConversionError> {
+    if !matches!(upstream, Upstream::BedrockRuntime { .. })
+        || !is_aws_eventstream(response.headers())
+    {
+        return Ok(response);
+    }
+
+    let (mut parts, body) = response.into_parts();
+    let body = body
+        .collect()
+        .await
+        .map_err(|source| ResponseConversionError::Read { source })?
+        .to_bytes();
+    let sse = convert_eventstream_to_sse_bytes(&body)
+        .map_err(|source| ResponseConversionError::Convert { source })?;
+    parts.headers.insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream; charset=utf-8"),
+    );
+    parts.headers.remove(CONTENT_LENGTH);
+    Ok(Response::from_parts(parts, Body::from(sse)))
+}
+
+fn is_aws_eventstream(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value.split(';').next().is_some_and(|media_type| {
+                media_type
+                    .trim()
+                    .eq_ignore_ascii_case("application/vnd.amazon.eventstream")
+            })
+        })
+}
+
 fn rebuild_error_response(
     collected: CollectedResponse,
     upstream: &Upstream,
@@ -563,7 +632,10 @@ fn header_to_string(headers: &HeaderMap, name: &str) -> Option<String> {
 
 fn next_request_id() -> String {
     let id = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("req_core_{id}")
+    let mut request_id = String::with_capacity("req_core_".len() + 20);
+    request_id.push_str("req_core_");
+    let _ = write!(&mut request_id, "{id}");
+    request_id
 }
 
 fn extract_model(body: &Bytes) -> Option<String> {

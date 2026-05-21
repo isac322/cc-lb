@@ -1,4 +1,3 @@
-#![cfg(feature = "chaos")]
 #![allow(dead_code)]
 
 use std::net::SocketAddr;

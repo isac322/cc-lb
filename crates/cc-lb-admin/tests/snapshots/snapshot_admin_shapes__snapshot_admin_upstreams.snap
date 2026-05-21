@@ -1,0 +1,12 @@
+---
+source: crates/cc-lb-admin/tests/snapshot_admin_shapes.rs
+expression: serde_json::to_string_pretty(&json).unwrap()
+---
+{
+  "upstreams": [
+    {
+      "kind": "anthropic_direct",
+      "name": "anthropic"
+    }
+  ]
+}

@@ -25,7 +25,8 @@ pub use clock::{Clock, MockClock, SystemClock};
 #[doc(hidden)]
 pub use dns_cache::make_resolver_with_factory;
 pub use dns_cache::{
-    make_resolver, CachingDnsConnector, DnsCacheError, DnsResolver, DnsResolverConfig,
+    make_resolver, CachingDnsConnector, DnsCacheError, DnsResolveFuture, DnsResolver,
+    DnsResolverConfig,
 };
 pub use error_format::{anthropic_error_body, anthropic_error_response};
 pub use error_normalizer::{ErrorNormalizer, NormalizerError, UpstreamKind};

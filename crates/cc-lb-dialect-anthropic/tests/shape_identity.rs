@@ -19,7 +19,7 @@ fn direct_shape_preserves_method_headers_and_body_bytes() {
     );
 
     let shaped = shape_request(
-        &AnthropicDirectDialect,
+        &AnthropicDirectDialect::default(),
         &ctx,
         &Upstream::AnthropicDirect,
         &common::principal(),
@@ -49,7 +49,7 @@ fn direct_shape_rejects_wrong_upstream_variant() {
     };
 
     let err = shape_request(
-        &AnthropicDirectDialect,
+        &AnthropicDirectDialect::default(),
         &ctx,
         &upstream,
         &common::principal(),

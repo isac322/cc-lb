@@ -3,7 +3,7 @@ use cc_lb_plugin_api::{
     DialectError, Principal, RequestContext, ShapedRequest, ShapedRequestBuilder, Upstream,
     UpstreamDialect,
 };
-use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use http::header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use http::{HeaderMap, HeaderValue, StatusCode};
 use serde_json::{Map, Value};
 use url::Url;
@@ -15,7 +15,15 @@ const EVENTSTREAM_ACCEPT: &str = "application/vnd.amazon.eventstream";
 const JSON_CONTENT_TYPE: &str = "application/json";
 
 #[derive(Clone, Debug, Default)]
-pub struct BedrockRuntimeDialect;
+pub struct BedrockRuntimeDialect {
+    base_url: Option<Url>,
+}
+
+impl BedrockRuntimeDialect {
+    pub fn with_base_url(base_url: Option<Url>) -> Self {
+        Self { base_url }
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct BedrockBodyTransform;
@@ -58,7 +66,7 @@ impl UpstreamDialect for BedrockRuntimeDialect {
             }
         })?;
 
-        let url = runtime_url(region, &model, streaming)?;
+        let url = runtime_url(self.base_url.as_ref(), region, &model, streaming)?;
         let mut headers = shaped_headers(&ctx.downstream_headers);
         headers.insert(CONTENT_TYPE, HeaderValue::from_static(JSON_CONTENT_TYPE));
         headers.insert(
@@ -140,12 +148,28 @@ fn shaped_headers(headers: &HeaderMap) -> HeaderMap {
     shaped.remove("anthropic-beta");
     shaped.remove("x-api-key");
     shaped.remove(AUTHORIZATION);
+    shaped.remove(CONTENT_LENGTH);
     shaped
 }
 
-fn runtime_url(region: &str, model: &str, streaming: bool) -> Result<Url, DialectError> {
-    let base = format!("https://bedrock-runtime.{region}.amazonaws.com");
-    let mut url = Url::parse(&base).map_err(|source| DialectError::InvalidUrl { source })?;
+fn runtime_url(
+    base_url: Option<&Url>,
+    region: &str,
+    model: &str,
+    streaming: bool,
+) -> Result<Url, DialectError> {
+    let mut url = match base_url {
+        Some(base_url) => base_url.clone(),
+        None => {
+            let mut base = String::with_capacity(
+                "https://bedrock-runtime..amazonaws.com".len() + region.len(),
+            );
+            base.push_str("https://bedrock-runtime.");
+            base.push_str(region);
+            base.push_str(".amazonaws.com");
+            Url::parse(&base).map_err(|source| DialectError::InvalidUrl { source })?
+        }
+    };
     {
         let mut segments =
             url.path_segments_mut()

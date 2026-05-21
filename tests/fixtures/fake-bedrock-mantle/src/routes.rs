@@ -181,6 +181,15 @@ fn stream_items(model: &str) -> Vec<(&'static str, String)> {
             .to_string(),
         ),
         (
+            "content_block_start",
+            json!({
+                "type": "content_block_start",
+                "index": 0,
+                "content_block": { "type": "text", "text": "" }
+            })
+            .to_string(),
+        ),
+        (
             "content_block_delta",
             json!({
                 "type": "content_block_delta",
@@ -188,6 +197,10 @@ fn stream_items(model: &str) -> Vec<(&'static str, String)> {
                 "delta": { "type": "text_delta", "text": "fake mantle fixture response HELLO" }
             })
             .to_string(),
+        ),
+        (
+            "content_block_stop",
+            json!({ "type": "content_block_stop", "index": 0 }).to_string(),
         ),
         (
             "message_delta",

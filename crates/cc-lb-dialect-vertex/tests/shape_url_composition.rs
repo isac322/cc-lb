@@ -10,7 +10,7 @@ fn raw_predict_url_uses_project_region_model_and_raw_suffix() {
     let ctx = common::request_context(common::messages_body(false), common::anthropic_headers());
 
     let shaped = shape_request(
-        &VertexDialect,
+        &VertexDialect::default(),
         &ctx,
         &common::vertex_upstream(),
         &common::principal(),
@@ -30,7 +30,7 @@ fn stream_true_body_uses_stream_raw_predict_suffix() {
     let ctx = common::request_context(common::messages_body(true), common::anthropic_headers());
 
     let shaped = shape_request(
-        &VertexDialect,
+        &VertexDialect::default(),
         &ctx,
         &common::vertex_upstream(),
         &common::principal(),
@@ -53,7 +53,7 @@ fn event_stream_accept_header_uses_stream_raw_predict_suffix() {
     let ctx = common::request_context(common::messages_body(false), headers);
 
     let shaped = shape_request(
-        &VertexDialect,
+        &VertexDialect::default(),
         &ctx,
         &common::vertex_upstream(),
         &common::principal(),
@@ -72,7 +72,7 @@ fn model_must_be_present_and_string() {
         let ctx =
             common::request_context(Bytes::from(body.to_owned()), common::anthropic_headers());
         let err = shape_request(
-            &VertexDialect,
+            &VertexDialect::default(),
             &ctx,
             &common::vertex_upstream(),
             &common::principal(),
@@ -88,7 +88,7 @@ fn model_must_be_present_and_string() {
 fn wrong_upstream_variant_is_rejected() {
     let ctx = common::request_context(common::messages_body(false), common::anthropic_headers());
     let err = shape_request(
-        &VertexDialect,
+        &VertexDialect::default(),
         &ctx,
         &Upstream::AnthropicDirect,
         &common::principal(),

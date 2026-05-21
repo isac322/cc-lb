@@ -1,0 +1,83 @@
+---
+source: crates/cc-lb-dialect-bedrock/tests/snapshot_normalized_errors.rs
+expression: "serde_json::to_string_pretty(&snapshots).unwrap()"
+---
+[
+  {
+    "body": {
+      "error": {
+        "message": "bad request",
+        "type": "invalid_request_error"
+      },
+      "type": "error"
+    },
+    "case": "validation_exception_400",
+    "status": 400
+  },
+  {
+    "body": {
+      "error": {
+        "message": "bad credentials",
+        "type": "authentication_error"
+      },
+      "type": "error"
+    },
+    "case": "unrecognized_client_401",
+    "status": 401
+  },
+  {
+    "body": {
+      "error": {
+        "message": "clock skew",
+        "type": "authentication_error"
+      },
+      "type": "error"
+    },
+    "case": "request_time_skewed_403",
+    "status": 403
+  },
+  {
+    "body": {
+      "error": {
+        "message": "slow down",
+        "type": "rate_limit_error"
+      },
+      "type": "error"
+    },
+    "case": "throttling_429",
+    "status": 429
+  },
+  {
+    "body": {
+      "error": {
+        "message": "stream failed",
+        "type": "api_error"
+      },
+      "type": "error"
+    },
+    "case": "model_stream_502",
+    "status": 502
+  },
+  {
+    "body": {
+      "error": {
+        "message": "service unavailable",
+        "type": "api_error"
+      },
+      "type": "error"
+    },
+    "case": "server_without_type_503",
+    "status": 503
+  },
+  {
+    "body": {
+      "error": {
+        "message": "upstream api error",
+        "type": "api_error"
+      },
+      "type": "error"
+    },
+    "case": "timeout_without_type_504",
+    "status": 504
+  }
+]

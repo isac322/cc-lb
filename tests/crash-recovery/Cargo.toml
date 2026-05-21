@@ -1,0 +1,13 @@
+[package]
+name = "cc-lb-crash-recovery-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+cc-lb-storage-redb = { path = "../../crates/cc-lb-storage-redb" }
+redb.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true

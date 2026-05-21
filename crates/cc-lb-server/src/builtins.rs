@@ -3,23 +3,20 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use bytes::Bytes;
 use cc_lb_config::{AuthStrategy as ConfigAuthStrategy, Config, UpstreamKind, UpstreamSpec};
 use cc_lb_dialect_anthropic::{AnthropicDirectDialect, CustomAnthropicSpecDialect};
 use cc_lb_dialect_bedrock::{BedrockMantleDialect, BedrockRuntimeDialect};
 use cc_lb_dialect_vertex::VertexDialect;
 use cc_lb_plugin_api::{
-    AuthStrategy, AuthnError, AuthnOutcome, AuthnPlugin, DialectError, ObservabilityError,
-    ObservabilityHook, ObserveEvent, Principal, PrincipalKind, PrincipalQuotas, RequestContext,
-    RouteDecision, RouteError, RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignerError,
-    SignerFactory, Upstream, UpstreamDialect,
+    AuthStrategy, AuthnError, AuthnOutcome, AuthnPlugin, ObservabilityError, ObservabilityHook,
+    ObserveEvent, Principal, PrincipalKind, PrincipalQuotas, RequestContext, RouteDecision,
+    RouteError, RouterPlugin, SignerError, SignerFactory, Upstream, UpstreamDialect,
 };
 use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
 use cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory;
 use cc_lb_signer_aws::AwsSigV4SignerFactory;
 use cc_lb_signer_gcp::GcpOAuthSignerFactory;
 use cc_lb_storage_redb::Storage;
-use http::StatusCode;
 use oauth2::{ClientId, TokenUrl};
 use serde_json::Map;
 
@@ -127,7 +124,7 @@ impl RouterPlugin for BuiltinRouter {
         );
         Ok(RouteDecision {
             upstream: self.route.upstream.clone(),
-            dialect: Box::new(SharedDialect(self.route.dialect.clone())),
+            dialect: self.route.dialect.clone(),
         })
     }
 }
@@ -145,25 +142,6 @@ pub struct NoopObservabilityHook;
 impl ObservabilityHook for NoopObservabilityHook {
     fn observe(&self, _event: ObserveEvent) -> Result<(), ObservabilityError> {
         Ok(())
-    }
-}
-
-#[derive(Clone)]
-struct SharedDialect(Arc<dyn UpstreamDialect>);
-
-impl UpstreamDialect for SharedDialect {
-    fn shape(
-        &self,
-        ctx: &RequestContext,
-        upstream: &Upstream,
-        principal: &Principal,
-        builder: &mut ShapedRequestBuilder,
-    ) -> Result<ShapedRequest, DialectError> {
-        self.0.shape(ctx, upstream, principal, builder)
-    }
-
-    fn normalize_error(&self, status: StatusCode, body: &Bytes) -> Option<Bytes> {
-        self.0.normalize_error(status, body)
     }
 }
 
@@ -309,10 +287,18 @@ pub fn upstream_from_spec(spec: &UpstreamSpec) -> Result<Upstream, BuiltinError>
 
 pub fn dialect_for_spec(spec: &UpstreamSpec) -> Result<Arc<dyn UpstreamDialect>, BuiltinError> {
     match spec.kind {
-        UpstreamKind::AnthropicDirect => Ok(Arc::new(AnthropicDirectDialect)),
-        UpstreamKind::BedrockRuntime => Ok(Arc::new(BedrockRuntimeDialect)),
-        UpstreamKind::BedrockMantle => Ok(Arc::new(BedrockMantleDialect)),
-        UpstreamKind::Vertex => Ok(Arc::new(VertexDialect)),
+        UpstreamKind::AnthropicDirect => Ok(Arc::new(AnthropicDirectDialect::with_base_url(
+            spec.base_url.clone(),
+        ))),
+        UpstreamKind::BedrockRuntime => Ok(Arc::new(BedrockRuntimeDialect::with_base_url(
+            spec.base_url.clone(),
+        ))),
+        UpstreamKind::BedrockMantle => Ok(Arc::new(BedrockMantleDialect::with_base_url(
+            spec.base_url.clone(),
+        ))),
+        UpstreamKind::Vertex => Ok(Arc::new(VertexDialect::with_base_url(
+            spec.base_url.clone(),
+        ))),
         UpstreamKind::Custom => Ok(Arc::new(CustomAnthropicSpecDialect)),
     }
 }

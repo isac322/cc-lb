@@ -9,6 +9,7 @@ pub mod token;
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Once};
+use std::time::{Duration, SystemTime};
 
 use async_trait::async_trait;
 use cc_lb_plugin_api::{
@@ -141,12 +142,7 @@ impl Signer for GcpOAuthSigner {
         capability: &mut SigningCapability,
     ) -> Result<SignedRequest, SignerError> {
         let token = self.token_for_signing().await?;
-        let header_value =
-            HeaderValue::from_str(&format!("Bearer {}", token.value.expose_secret())).map_err(
-                |source| SignerError::SigningFailed {
-                    reason: source.to_string(),
-                },
-            )?;
+        let header_value = bearer_header_value(token.value.expose_secret())?;
 
         shaped.headers_mut().insert(AUTHORIZATION, header_value);
         tracing::debug!(scopes = ?self.scopes, "gcp oauth bearer applied");
@@ -181,6 +177,13 @@ pub struct GcpOAuthSignerFactory {
 impl GcpOAuthSignerFactory {
     /// Creates a factory backed by Application Default Credentials.
     pub fn new() -> Self {
+        if let Ok(token) = std::env::var("CC_LB_GCP_ACCESS_TOKEN") {
+            if !token.trim().is_empty() {
+                let expires_at = SystemTime::now() + Duration::from_secs(3600);
+                let token = GcpToken::new(token, expires_at, default_scopes());
+                return Self::with_provider(Arc::new(StaticGcpTokenProvider::new(token)));
+            }
+        }
         Self::with_provider(Arc::new(AdcTokenProvider::new()))
     }
 
@@ -258,6 +261,15 @@ fn token_error_to_signer(error: GcpTokenError) -> SignerError {
         GcpTokenError::InvalidCredentials { reason } => SignerError::InvalidCredentials { reason },
         GcpTokenError::Provider { reason } => SignerError::SigningFailed { reason },
     }
+}
+
+fn bearer_header_value(token: &str) -> Result<HeaderValue, SignerError> {
+    let mut value = Vec::with_capacity("Bearer ".len() + token.len());
+    value.extend_from_slice(b"Bearer ");
+    value.extend_from_slice(token.as_bytes());
+    HeaderValue::from_bytes(&value).map_err(|source| SignerError::SigningFailed {
+        reason: source.to_string(),
+    })
 }
 
 fn increment_refresh_metric(outcome: &'static str) {

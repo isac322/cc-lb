@@ -1,7 +1,3 @@
-#![cfg(feature = "chaos")]
-
-//! Verifies `CC_LB_CHAOS_LATENCY_MS` delays proxy responses when the `chaos` feature is enabled.
-
 mod chaos_common;
 
 use std::time::{Duration, Instant};

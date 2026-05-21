@@ -1,0 +1,11 @@
+---
+source: crates/cc-lb-core/tests/normalize_vertex_400.rs
+expression: "serde_json::to_string_pretty(&value).unwrap()"
+---
+{
+  "error": {
+    "message": "bad",
+    "type": "invalid_request_error"
+  },
+  "type": "error"
+}

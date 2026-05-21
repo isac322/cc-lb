@@ -16,6 +16,7 @@ thiserror.workspace = true
 url.workspace = true
 
 [dev-dependencies]
+insta.workspace = true
 axum.workspace = true
 fake-bedrock-runtime = { path = "../../tests/fixtures/fake-bedrock-runtime" }
 http-body-util.workspace = true

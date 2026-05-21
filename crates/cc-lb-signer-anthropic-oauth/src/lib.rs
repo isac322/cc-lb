@@ -290,12 +290,7 @@ impl Signer for AnthropicOAuthSigner {
     ) -> Result<SignedRequest, SignerError> {
         let creds = self.credentials_for_signing().await?;
         let access_token = SecretString::new(creds.access_token.into_boxed_str());
-        let header_value =
-            HeaderValue::from_str(&format!("Bearer {}", access_token.expose_secret())).map_err(
-                |source| SignerError::SigningFailed {
-                    reason: source.to_string(),
-                },
-            )?;
+        let header_value = bearer_header_value(access_token.expose_secret())?;
         shaped.headers_mut().insert(AUTHORIZATION, header_value);
         self.remember_signed_access_token(access_token.expose_secret())
             .await;
@@ -423,6 +418,15 @@ fn refresh_error_to_signer(error: RefreshError) -> SignerError {
             reason: other.to_string(),
         },
     }
+}
+
+fn bearer_header_value(token: &str) -> Result<HeaderValue, SignerError> {
+    let mut value = Vec::with_capacity("Bearer ".len() + token.len());
+    value.extend_from_slice(b"Bearer ");
+    value.extend_from_slice(token.as_bytes());
+    HeaderValue::from_bytes(&value).map_err(|source| SignerError::SigningFailed {
+        reason: source.to_string(),
+    })
 }
 
 fn now_epoch_secs() -> u64 {

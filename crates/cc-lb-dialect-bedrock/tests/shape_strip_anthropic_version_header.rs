@@ -8,7 +8,7 @@ fn provider_version_and_auth_headers_are_stripped_before_sigv4() {
     let ctx = common::request_context(common::messages_body(false), common::anthropic_headers());
 
     let shaped = shape_request(
-        &BedrockRuntimeDialect,
+        &BedrockRuntimeDialect::default(),
         &ctx,
         &Upstream::BedrockRuntime {
             region: "us-east-1".to_owned(),

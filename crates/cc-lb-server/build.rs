@@ -2,6 +2,10 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=GIT_SHA");
+    println!("cargo:rerun-if-env-changed=GITHUB_SHA");
+    println!("cargo:rerun-if-env-changed=CI_COMMIT_SHA");
+
     emit("CC_LB_VERSION", env!("CARGO_PKG_VERSION").to_owned());
     emit("CC_LB_GIT_SHA", git_sha());
     emit("CC_LB_BUILD_TIME", build_time());
@@ -18,6 +22,15 @@ fn emit(name: &str, value: String) {
 }
 
 fn git_sha() -> String {
+    for name in ["GIT_SHA", "GITHUB_SHA", "CI_COMMIT_SHA"] {
+        if let Ok(value) = std::env::var(name) {
+            let value = value.trim();
+            if !value.is_empty() {
+                return value.chars().take(7).collect();
+            }
+        }
+    }
+
     Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])
         .output()

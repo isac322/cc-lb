@@ -9,7 +9,7 @@ use cc_lb_plugin_api::{
     DialectError, Principal, RequestContext, ShapedRequest, ShapedRequestBuilder, Upstream,
     UpstreamDialect,
 };
-use http::header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE};
+use http::header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE};
 use http::{HeaderMap, HeaderValue, StatusCode};
 use serde_json::{Map, Value};
 use url::Url;
@@ -20,7 +20,15 @@ const VERTEX_ANTHROPIC_VERSION: &str = "vertex-2023-10-16";
 const JSON_CONTENT_TYPE: &str = "application/json";
 
 #[derive(Clone, Debug, Default)]
-pub struct VertexDialect;
+pub struct VertexDialect {
+    base_url: Option<Url>,
+}
+
+impl VertexDialect {
+    pub fn with_base_url(base_url: Option<Url>) -> Self {
+        Self { base_url }
+    }
+}
 
 impl UpstreamDialect for VertexDialect {
     fn shape(
@@ -49,7 +57,7 @@ impl UpstreamDialect for VertexDialect {
             }
         })?;
 
-        let url = vertex_url(project, region, &model, streaming)?;
+        let url = vertex_url(self.base_url.as_ref(), project, region, &model, streaming)?;
         let mut headers = shaped_headers(&ctx.downstream_headers);
         headers.insert(CONTENT_TYPE, HeaderValue::from_static(JSON_CONTENT_TYPE));
 
@@ -120,25 +128,37 @@ fn shaped_headers(headers: &HeaderMap) -> HeaderMap {
     shaped.remove("anthropic-beta");
     shaped.remove("x-api-key");
     shaped.remove(AUTHORIZATION);
+    shaped.remove(CONTENT_LENGTH);
     shaped
 }
 
 fn vertex_url(
+    base_url: Option<&Url>,
     project: &str,
     region: &str,
     model: &str,
     streaming: bool,
 ) -> Result<Url, DialectError> {
-    let base = format!("https://{region}-aiplatform.googleapis.com");
-    let mut url = Url::parse(&base).map_err(|source| DialectError::InvalidUrl { source })?;
-    let model_endpoint = format!(
-        "{model}:{}",
-        if streaming {
-            "streamRawPredict"
-        } else {
-            "rawPredict"
+    let mut url = match base_url {
+        Some(base_url) => base_url.clone(),
+        None => {
+            let mut base =
+                String::with_capacity("https://-aiplatform.googleapis.com".len() + region.len());
+            base.push_str("https://");
+            base.push_str(region);
+            base.push_str("-aiplatform.googleapis.com");
+            Url::parse(&base).map_err(|source| DialectError::InvalidUrl { source })?
         }
-    );
+    };
+    let suffix = if streaming {
+        "streamRawPredict"
+    } else {
+        "rawPredict"
+    };
+    let mut model_endpoint = String::with_capacity(model.len() + 1 + suffix.len());
+    model_endpoint.push_str(model);
+    model_endpoint.push(':');
+    model_endpoint.push_str(suffix);
     {
         let mut segments =
             url.path_segments_mut()

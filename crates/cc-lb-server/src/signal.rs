@@ -1,8 +1,10 @@
+use std::future::Future;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::watch;
+use tokio::task::JoinHandle;
 
 pub type SighupHandler = Arc<dyn Fn() + Send + Sync + 'static>;
 
@@ -16,6 +18,7 @@ pub struct SignalHandle {
     drain_timeout: Duration,
     shutdown_started: Arc<AtomicBool>,
     debug_logging: Arc<AtomicBool>,
+    tasks: SignalTasks,
 }
 
 impl SignalHandle {
@@ -32,9 +35,12 @@ impl SignalHandle {
             return;
         }
 
-        let handle = self.clone();
-        tokio::spawn(async move {
-            handle.run_shutdown().await;
+        let shutdown = self.shutdown.clone();
+        let drain_complete = self.drain_complete.clone();
+        let drain = self.drain.clone();
+        let drain_timeout = self.drain_timeout;
+        self.tasks.spawn(async move {
+            run_shutdown(shutdown, drain_complete, drain, drain_timeout).await;
         });
     }
 
@@ -49,22 +55,27 @@ impl SignalHandle {
     pub fn set_draining(&self, draining: bool) {
         self.drain.set_draining(draining);
     }
+}
 
-    async fn run_shutdown(self) {
-        self.drain.trigger();
-        let _ = self.shutdown.send(true);
+async fn run_shutdown(
+    shutdown: watch::Sender<bool>,
+    drain_complete: watch::Sender<bool>,
+    drain: DrainController,
+    drain_timeout: Duration,
+) {
+    drain.trigger();
+    let _ = shutdown.send(true);
 
-        let timed_out = self.drain.await_drained(self.drain_timeout).await;
-        if timed_out {
-            let force_closed = self.drain.mark_force_closed();
-            tracing::warn!(
-                force_closed,
-                "graceful drain deadline elapsed; force closing in-flight requests"
-            );
-        }
-
-        let _ = self.drain_complete.send(true);
+    let timed_out = drain.await_drained(drain_timeout).await;
+    if timed_out {
+        let force_closed = drain.mark_force_closed();
+        tracing::warn!(
+            force_closed,
+            "graceful drain deadline elapsed; force closing in-flight requests"
+        );
     }
+
+    let _ = drain_complete.send(true);
 }
 
 pub fn install(
@@ -81,11 +92,12 @@ pub fn install(
         drain_timeout,
         shutdown_started: Arc::new(AtomicBool::new(false)),
         debug_logging: Arc::new(AtomicBool::new(false)),
+        tasks: SignalTasks::default(),
     };
 
     install_sigterm(handle.clone());
-    install_sighup(sighup_handler);
-    install_sigusr1(handle.debug_logging.clone());
+    install_sighup(sighup_handler, handle.tasks.clone());
+    install_sigusr1(handle.debug_logging.clone(), handle.tasks.clone());
     handle
 }
 
@@ -102,29 +114,47 @@ pub async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
 
 #[cfg(unix)]
 fn install_sigterm(handle: SignalHandle) {
-    tokio::spawn(async move {
+    let shutdown = handle.shutdown.clone();
+    let drain_complete = handle.drain_complete.clone();
+    let drain = handle.drain.clone();
+    let drain_timeout = handle.drain_timeout;
+    let shutdown_started = handle.shutdown_started.clone();
+    let tasks = handle.tasks;
+    tasks.spawn(async move {
         let Ok(mut term) =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         else {
             return;
         };
         let _ = term.recv().await;
-        handle.start_shutdown();
+        if shutdown_started.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        run_shutdown(shutdown, drain_complete, drain, drain_timeout).await;
     });
 }
 
 #[cfg(not(unix))]
 fn install_sigterm(handle: SignalHandle) {
-    tokio::spawn(async move {
+    let shutdown = handle.shutdown.clone();
+    let drain_complete = handle.drain_complete.clone();
+    let drain = handle.drain.clone();
+    let drain_timeout = handle.drain_timeout;
+    let shutdown_started = handle.shutdown_started.clone();
+    let tasks = handle.tasks;
+    tasks.spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
-            handle.start_shutdown();
+            if shutdown_started.swap(true, Ordering::AcqRel) {
+                return;
+            }
+            run_shutdown(shutdown, drain_complete, drain, drain_timeout).await;
         }
     });
 }
 
 #[cfg(unix)]
-fn install_sighup(handler: Option<SighupHandler>) {
-    tokio::spawn(async move {
+fn install_sighup(handler: Option<SighupHandler>, tasks: SignalTasks) {
+    tasks.spawn(async move {
         let Ok(mut sighup) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup())
         else {
             return;
@@ -139,28 +169,68 @@ fn install_sighup(handler: Option<SighupHandler>) {
 }
 
 #[cfg(not(unix))]
-fn install_sighup(_handler: Option<SighupHandler>) {}
+fn install_sighup(_handler: Option<SighupHandler>, _tasks: SignalTasks) {}
 
 #[cfg(unix)]
-fn install_sigusr1(debug_logging: Arc<AtomicBool>) {
-    tokio::spawn(async move {
+fn install_sigusr1(debug_logging: Arc<AtomicBool>, tasks: SignalTasks) {
+    tasks.spawn(async move {
         let Ok(mut sigusr1) =
             tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
         else {
             return;
         };
-        while sigusr1.recv().await.is_some() {
-            debug_logging.store(true, Ordering::Relaxed);
-            tracing::info!("temporary debug logging enabled by SIGUSR1");
-            let debug_logging = debug_logging.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(60)).await;
+        let reset_sleep = tokio::time::sleep(Duration::from_secs(60));
+        tokio::pin!(reset_sleep);
+
+        loop {
+            tokio::select! {
+                signal = sigusr1.recv() => {
+                    if signal.is_none() {
+                        return;
+                    }
+                    debug_logging.store(true, Ordering::Relaxed);
+                    reset_sleep.as_mut().reset(tokio::time::Instant::now() + Duration::from_secs(60));
+                    tracing::info!("temporary debug logging enabled by SIGUSR1");
+                }
+                _ = &mut reset_sleep, if debug_logging.load(Ordering::Relaxed) => {
                 debug_logging.store(false, Ordering::Relaxed);
                 tracing::info!("temporary debug logging disabled");
-            });
+                }
+            }
         }
     });
 }
 
 #[cfg(not(unix))]
-fn install_sigusr1(_debug_logging: Arc<AtomicBool>) {}
+fn install_sigusr1(_debug_logging: Arc<AtomicBool>, _tasks: SignalTasks) {}
+
+#[derive(Clone, Default)]
+struct SignalTasks {
+    handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
+}
+
+impl SignalTasks {
+    fn spawn<F>(&self, future: F)
+    where
+        F: Future<Output = ()> + Send + 'static,
+    {
+        let handle = tokio::spawn(future);
+        match self.handles.lock() {
+            Ok(mut handles) => handles.push(handle),
+            Err(_) => handle.abort(),
+        }
+    }
+}
+
+impl Drop for SignalTasks {
+    fn drop(&mut self) {
+        if Arc::strong_count(&self.handles) != 1 {
+            return;
+        }
+        if let Ok(mut handles) = self.handles.lock() {
+            for handle in handles.drain(..) {
+                handle.abort();
+            }
+        }
+    }
+}

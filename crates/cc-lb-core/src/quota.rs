@@ -242,7 +242,7 @@ impl QuotaManager {
             Ok(Ok(ConsumeAttempt::Rejected)) => reject_decision(
                 principal_id,
                 bucket,
-                format!("{} quota exhausted", bucket_label(bucket)),
+                quota_exhausted_reason(bucket).to_owned(),
                 retry_after_secs,
             ),
             Ok(Err(_source)) => reject_decision(
@@ -386,6 +386,14 @@ fn bucket_label(bucket: BucketKind) -> &'static str {
         BucketKind::Requests => "requests",
         BucketKind::InputTokens => "input_tokens",
         BucketKind::OutputTokens => "output_tokens",
+    }
+}
+
+fn quota_exhausted_reason(bucket: BucketKind) -> &'static str {
+    match bucket {
+        BucketKind::Requests => "requests quota exhausted",
+        BucketKind::InputTokens => "input_tokens quota exhausted",
+        BucketKind::OutputTokens => "output_tokens quota exhausted",
     }
 }
 

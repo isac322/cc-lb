@@ -39,8 +39,11 @@ impl ExtismObservabilityHook {
             .map_err(|source| ObservabilityError::Dropped {
                 reason: source.to_string(),
             })?;
-        parse_versioned::<ObserveResponse>(response)
-            .map_err(|reason| ObservabilityError::Dropped { reason })?;
+        parse_versioned::<ObserveResponse>(response).map_err(|reason| {
+            ObservabilityError::Dropped {
+                reason: reason.to_string(),
+            }
+        })?;
         Ok(())
     }
 }

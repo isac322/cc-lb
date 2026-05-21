@@ -3,7 +3,6 @@
 pub mod app;
 pub mod build_meta;
 pub mod builtins;
-#[cfg(feature = "chaos")]
 pub mod chaos;
 pub mod cli;
 pub mod drain;

@@ -5,7 +5,7 @@ use http::StatusCode;
 
 #[test]
 fn invalid_argument_normalizes_to_anthropic_invalid_request() {
-    let normalized = VertexDialect
+    let normalized = VertexDialect::default()
         .normalize_error(
             StatusCode::BAD_REQUEST,
             &Bytes::from_static(
@@ -53,7 +53,7 @@ fn known_vertex_statuses_map_to_anthropic_error_types() {
             r#"{{"error":{{"code":{},"message":"mapped","status":"{vertex_status}"}}}}"#,
             http_status.as_u16()
         );
-        let normalized = VertexDialect
+        let normalized = VertexDialect::default()
             .normalize_error(http_status, &Bytes::from(body))
             .expect("vertex error normalizes");
         let body: serde_json::Value = serde_json::from_slice(&normalized).expect("json body");
@@ -64,7 +64,7 @@ fn known_vertex_statuses_map_to_anthropic_error_types() {
 
 #[test]
 fn non_vertex_error_body_is_not_normalized() {
-    assert!(VertexDialect
+    assert!(VertexDialect::default()
         .normalize_error(
             StatusCode::BAD_REQUEST,
             &Bytes::from_static(br#"{"type":"error"}"#)

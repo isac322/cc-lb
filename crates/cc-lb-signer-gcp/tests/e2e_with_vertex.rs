@@ -21,8 +21,13 @@ async fn e2e_with_vertex() {
         region: "us-central1".to_owned(),
     };
     let ctx = common::request_context(common::messages_body(false), common::anthropic_headers());
-    let shaped = shape_request(&VertexDialect, &ctx, &upstream, &common::principal())
-        .expect("vertex shape succeeds");
+    let shaped = shape_request(
+        &VertexDialect::default(),
+        &ctx,
+        &upstream,
+        &common::principal(),
+    )
+    .expect("vertex shape succeeds");
     let signer = GcpOAuthSignerFactory::with_provider(provider)
         .build(&upstream)
         .await

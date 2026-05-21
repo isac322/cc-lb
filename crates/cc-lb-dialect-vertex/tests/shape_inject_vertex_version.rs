@@ -8,7 +8,7 @@ fn vertex_anthropic_version_is_forced_in_body() {
     let ctx = common::request_context(common::messages_body(false), common::anthropic_headers());
 
     let shaped = shape_request(
-        &VertexDialect,
+        &VertexDialect::default(),
         &ctx,
         &common::vertex_upstream(),
         &common::principal(),
@@ -24,7 +24,7 @@ fn body_anthropic_beta_is_preserved() {
     let ctx = common::request_context(common::messages_body(false), common::anthropic_headers());
 
     let shaped = shape_request(
-        &VertexDialect,
+        &VertexDialect::default(),
         &ctx,
         &common::vertex_upstream(),
         &common::principal(),
