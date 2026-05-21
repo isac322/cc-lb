@@ -1,0 +1,21 @@
+[package]
+name = "plugin-api-key"
+version = "0.1.0"
+edition = "2021"
+publish = false
+license.workspace = true
+
+[lib]
+name = "plugin_api_key"
+crate-type = ["cdylib"]
+
+[dependencies]
+base64.workspace = true
+extism-pdk = { path = "extism-pdk", version = "=1.21.0" }
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+sha2 = "0.10"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+extism.workspace = true
+serde_json.workspace = true

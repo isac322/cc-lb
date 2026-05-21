@@ -1,0 +1,600 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Config",
+  "type": "object",
+  "properties": {
+    "admin": {
+      "$ref": "#/$defs/AdminConfig",
+      "default": {
+        "token_env": "CC_LB_ADMIN_TOKEN"
+      }
+    },
+    "body": {
+      "$ref": "#/$defs/BodyConfig",
+      "default": {
+        "files_cap_bytes": 104857600,
+        "messages_cap_bytes": 33554432,
+        "per_route_overrides": {}
+      }
+    },
+    "bulkhead": {
+      "$ref": "#/$defs/BulkheadConfig",
+      "default": {
+        "max_conns_per_upstream": 50,
+        "semaphore_per_upstream": 100
+      }
+    },
+    "circuit_breaker": {
+      "$ref": "#/$defs/CircuitBreakerConfig",
+      "default": {
+        "failures_to_open": 5,
+        "half_open_after_secs": 30,
+        "window_secs": 10
+      }
+    },
+    "dns": {
+      "$ref": "#/$defs/DnsConfig",
+      "default": {
+        "cache_ttl_ceiling_secs": 300,
+        "cache_ttl_floor_secs": 30
+      }
+    },
+    "egress": {
+      "$ref": "#/$defs/EgressConfig",
+      "default": {}
+    },
+    "listener": {
+      "$ref": "#/$defs/ListenerConfig",
+      "default": {
+        "admin_addr": "[::1]:9090",
+        "metrics_addr": "[::1]:9091",
+        "proxy_addr": "[::]:8080"
+      }
+    },
+    "observability": {
+      "$ref": "#/$defs/ObservabilityConfig",
+      "default": {
+        "log_redaction": true,
+        "tracing_level": "info",
+        "user_prompt_redaction": false
+      }
+    },
+    "plugins": {
+      "$ref": "#/$defs/PluginsConfig",
+      "default": {
+        "observability_hooks": []
+      }
+    },
+    "principals": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/PrincipalSpec"
+      },
+      "default": {}
+    },
+    "quotas": {
+      "$ref": "#/$defs/QuotasConfig",
+      "default": {
+        "default_input_tokens": 1000000,
+        "default_output_tokens": 1000000,
+        "default_requests_per_window": 1000,
+        "default_window_secs": 60
+      }
+    },
+    "signers": {
+      "$ref": "#/$defs/SignersConfig",
+      "default": {
+        "anthropic_oauth": {
+          "client_id": "",
+          "issuer_base_url": "https://platform.claude.com",
+          "redirect_uri": "http://127.0.0.1/admin/oauth/callback",
+          "scopes": [
+            "messages",
+            "files"
+          ]
+        }
+      }
+    },
+    "storage": {
+      "$ref": "#/$defs/StorageConfig",
+      "default": {
+        "oauth_aead_key_env": "CC_LB_MASTER_KEY"
+      }
+    },
+    "timeouts": {
+      "$ref": "#/$defs/TimeoutsConfig",
+      "default": {
+        "drain_secs": 60,
+        "idle_secs": 300,
+        "request_body_chunk_secs": 30,
+        "request_header_secs": 10,
+        "upstream_total_secs": 600
+      }
+    },
+    "tls": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/TlsConfig"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "upstreams": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/UpstreamSpec"
+      },
+      "default": {}
+    }
+  },
+  "$defs": {
+    "AdminConfig": {
+      "type": "object",
+      "properties": {
+        "token_env": {
+          "type": "string",
+          "default": "CC_LB_ADMIN_TOKEN"
+        }
+      }
+    },
+    "AnthropicOAuthSignerConfig": {
+      "type": "object",
+      "properties": {
+        "client_id": {
+          "type": "string",
+          "default": ""
+        },
+        "issuer_base_url": {
+          "type": "string",
+          "default": "https://platform.claude.com"
+        },
+        "redirect_uri": {
+          "type": "string",
+          "default": "http://127.0.0.1/admin/oauth/callback"
+        },
+        "scopes": {
+          "type": "array",
+          "default": [
+            "messages",
+            "files"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "AuthStrategy": {
+      "type": "string",
+      "enum": [
+        "api_key",
+        "o_auth",
+        "aws_sig_v4",
+        "gcp_o_auth",
+        "internal_forwarded"
+      ]
+    },
+    "BodyConfig": {
+      "type": "object",
+      "properties": {
+        "files_cap_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 104857600,
+          "minimum": 0
+        },
+        "messages_cap_bytes": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 33554432,
+          "minimum": 0
+        },
+        "per_route_overrides": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          },
+          "default": {}
+        }
+      }
+    },
+    "BulkheadConfig": {
+      "type": "object",
+      "properties": {
+        "max_conns_per_upstream": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 50,
+          "minimum": 0
+        },
+        "semaphore_per_upstream": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 100,
+          "minimum": 0
+        }
+      }
+    },
+    "CircuitBreakerConfig": {
+      "type": "object",
+      "properties": {
+        "failures_to_open": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 5,
+          "minimum": 0
+        },
+        "half_open_after_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        },
+        "window_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 10,
+          "minimum": 0
+        }
+      }
+    },
+    "DnsConfig": {
+      "type": "object",
+      "properties": {
+        "cache_ttl_ceiling_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "minimum": 0
+        },
+        "cache_ttl_floor_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        }
+      }
+    },
+    "EgressConfig": {
+      "type": "object",
+      "properties": {
+        "allowed_hosts": {
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
+    "ListenerConfig": {
+      "type": "object",
+      "properties": {
+        "admin_addr": {
+          "type": "string",
+          "default": "[::1]:9090"
+        },
+        "metrics_addr": {
+          "type": "string",
+          "default": "[::1]:9091"
+        },
+        "proxy_addr": {
+          "type": "string",
+          "default": "[::]:8080"
+        },
+        "tls": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/TlsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "unix_socket": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "ObservabilityConfig": {
+      "type": "object",
+      "properties": {
+        "log_redaction": {
+          "type": "boolean",
+          "default": true
+        },
+        "otlp_endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "prometheus_endpoint": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tracing_level": {
+          "type": "string",
+          "default": "info"
+        },
+        "user_prompt_redaction": {
+          "type": "boolean",
+          "default": false
+        }
+      }
+    },
+    "PluginRef": {
+      "type": "object",
+      "properties": {
+        "batched_events_per_flush": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 32,
+          "minimum": 0
+        },
+        "batched_flush_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 100,
+          "minimum": 0
+        },
+        "config": {
+          "default": {}
+        },
+        "name": {
+          "type": "string",
+          "default": ""
+        },
+        "sse_per_event": {
+          "type": "boolean",
+          "default": false
+        },
+        "wasm_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "PluginsConfig": {
+      "type": "object",
+      "properties": {
+        "authn_plugin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PluginRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "observability_hooks": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/PluginRef"
+          }
+        },
+        "router_plugin": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PluginRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "PrincipalSpec": {
+      "type": "object",
+      "properties": {
+        "allowed_models": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "credentials_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "quotas": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/QuotasConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    },
+    "QuotasConfig": {
+      "type": "object",
+      "properties": {
+        "default_input_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 1000000,
+          "minimum": 0
+        },
+        "default_output_tokens": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 1000000,
+          "minimum": 0
+        },
+        "default_requests_per_window": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 1000,
+          "minimum": 0
+        },
+        "default_window_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 60,
+          "minimum": 0
+        }
+      }
+    },
+    "SignersConfig": {
+      "type": "object",
+      "properties": {
+        "anthropic_oauth": {
+          "$ref": "#/$defs/AnthropicOAuthSignerConfig",
+          "default": {
+            "client_id": "",
+            "issuer_base_url": "https://platform.claude.com",
+            "redirect_uri": "http://127.0.0.1/admin/oauth/callback",
+            "scopes": [
+              "messages",
+              "files"
+            ]
+          }
+        }
+      }
+    },
+    "StorageConfig": {
+      "type": "object",
+      "properties": {
+        "oauth_aead_key_env": {
+          "type": "string",
+          "default": "CC_LB_MASTER_KEY"
+        },
+        "redb_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "TimeoutsConfig": {
+      "type": "object",
+      "properties": {
+        "drain_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 60,
+          "minimum": 0
+        },
+        "idle_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "minimum": 0
+        },
+        "request_body_chunk_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        },
+        "request_header_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 10,
+          "minimum": 0
+        },
+        "upstream_total_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 600,
+          "minimum": 0
+        }
+      }
+    },
+    "TlsConfig": {
+      "type": "object",
+      "properties": {
+        "cert_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "key_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "reload_on_sighup": {
+          "type": "boolean",
+          "default": true
+        }
+      }
+    },
+    "UpstreamKind": {
+      "type": "string",
+      "enum": [
+        "anthropic_direct",
+        "bedrock_runtime",
+        "bedrock_mantle",
+        "vertex",
+        "custom"
+      ]
+    },
+    "UpstreamSpec": {
+      "type": "object",
+      "properties": {
+        "auth_strategy": {
+          "$ref": "#/$defs/AuthStrategy"
+        },
+        "base_url": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "uri"
+        },
+        "credentials_ref": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "kind": {
+          "$ref": "#/$defs/UpstreamKind"
+        },
+        "project": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "region": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "kind",
+        "auth_strategy"
+      ]
+    }
+  }
+}

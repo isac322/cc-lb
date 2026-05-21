@@ -1,0 +1,25 @@
+[package]
+name = "cc-lb-signer-anthropic-key"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
+cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
+http.workspace = true
+secrecy.workspace = true
+tokio = { workspace = true, features = ["rt"] }
+
+[dev-dependencies]
+axum.workspace = true
+fake-anthropic = { path = "../../tests/fixtures/fake-anthropic" }
+http-body-util.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tower = { workspace = true, features = ["util"] }

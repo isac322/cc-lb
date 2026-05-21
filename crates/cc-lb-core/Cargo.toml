@@ -1,0 +1,38 @@
+[package]
+name = "cc-lb-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+arc-swap.workspace = true
+async-stream.workspace = true
+async-trait.workspace = true
+axum.workspace = true
+bytes.workspace = true
+cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
+cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
+cc-lb-dialect-bedrock = { path = "../cc-lb-dialect-bedrock" }
+cc-lb-dialect-vertex = { path = "../cc-lb-dialect-vertex" }
+dashmap.workspace = true
+eventsource-stream.workspace = true
+futures-core = "0.3"
+hickory-resolver = { workspace = true, features = ["tokio"] }
+http.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "http1", "http2"] }
+hyper-rustls.workspace = true
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
+metrics.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+url.workspace = true
+tower-service.workspace = true
+tower.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower = { workspace = true, features = ["util"] }

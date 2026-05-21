@@ -1,0 +1,10 @@
+{
+  "model": "claude-3-5-sonnet-20241022",
+  "messages": [
+    {
+      "role": "user",
+      "content": "Say HELLO once."
+    }
+  ],
+  "max_tokens": 16
+}

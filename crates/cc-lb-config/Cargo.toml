@@ -1,0 +1,35 @@
+[package]
+name = "cc-lb-config"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[bin]]
+name = "show"
+path = "src/bin/show.rs"
+
+[[bin]]
+name = "validate"
+path = "src/bin/validate.rs"
+
+[dependencies]
+clap = { workspace = true, features = ["derive"] }
+figment = { workspace = true, features = ["env", "toml"] }
+notify.workspace = true
+schemars.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "signal", "sync", "time"] }
+url = { workspace = true, features = ["serde"] }
+
+[build-dependencies]
+schemars.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+url = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+tempfile.workspace = true

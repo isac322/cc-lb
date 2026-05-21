@@ -1,0 +1,50 @@
+mod reload_common;
+
+use std::net::SocketAddr;
+
+use cc_lb_server::reload::ConfigWatcher;
+
+#[test]
+fn invalid_new_config_keeps_old() {
+    let handle = reload_common::install_prometheus();
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("cc-lb.toml");
+    let proxy_addr: SocketAddr = "127.0.0.1:18080".parse().unwrap();
+    reload_common::write_config(&config_path, 100, proxy_addr);
+
+    let watcher = ConfigWatcher::new(&config_path, reload_common::load_config(&config_path));
+    let before_failed = reload_common::counter_value(&handle, "cc_lb_config_reload_failed_total");
+    std::fs::write(&config_path, "[listener\nthis is not valid toml").unwrap();
+
+    let logs = reload_common::capture_warn_logs(|| {
+        assert!(watcher.reload_now().is_err());
+    });
+
+    let after_failed = reload_common::counter_value(&handle, "cc_lb_config_reload_failed_total");
+    let failure_delta = after_failed - before_failed;
+    assert_eq!(failure_delta, 1.0);
+    assert_eq!(
+        reload_common::labeled_counter_value(
+            &handle,
+            "cc_lb_config_reload_total",
+            "outcome",
+            "failure"
+        ),
+        1.0
+    );
+    assert_eq!(
+        watcher.current_config().quotas.default_requests_per_window,
+        100
+    );
+    assert!(logs.contains("configuration reload failed"));
+
+    let evidence = format!(
+        "bad TOML reload rejected\nwarn_log={logs}\nfailed_counter_before={before_failed}\nfailed_counter_after={after_failed}\nfailed_counter_delta={failure_delta}\ncurrent_default_requests_per_window={}\n",
+        watcher.current_config().quotas.default_requests_per_window
+    );
+    std::fs::write(
+        reload_common::evidence_path("task-31-bad-reload-rejected.log"),
+        evidence,
+    )
+    .unwrap();
+}

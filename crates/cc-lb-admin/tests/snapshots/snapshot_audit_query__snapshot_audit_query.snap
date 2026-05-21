@@ -1,0 +1,21 @@
+---
+source: crates/cc-lb-admin/tests/snapshot_audit_query.rs
+expression: "serde_json::to_string_pretty(&json).unwrap()"
+---
+{
+  "entries": [
+    {
+      "agent_label": null,
+      "duration_ms": 100,
+      "input_tokens": 10,
+      "model": null,
+      "output_tokens": 10,
+      "principal_id": "alice",
+      "request_id": "req_1",
+      "route": "test",
+      "status": 200,
+      "ts": 1000,
+      "upstream": "test"
+    }
+  ]
+}

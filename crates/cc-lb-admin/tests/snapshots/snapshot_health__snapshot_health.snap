@@ -1,0 +1,10 @@
+---
+source: crates/cc-lb-admin/tests/snapshot_health.rs
+expression: "serde_json::to_string_pretty(&json).unwrap()"
+---
+{
+  "git_sha": "unknown",
+  "status": "ok",
+  "uptime_secs": 0,
+  "version": "0.1.0"
+}

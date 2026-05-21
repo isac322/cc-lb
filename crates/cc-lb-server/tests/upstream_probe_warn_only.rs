@@ -1,0 +1,45 @@
+mod preflight_common;
+
+use cc_lb_config::{UpstreamKind, UpstreamSpec};
+use cc_lb_server::preflight::{self, PreflightOptions};
+
+#[tokio::test]
+async fn upstream_probe_warn_only() {
+    let mut config = preflight_common::base_config();
+    let (direct_name, direct) =
+        preflight_common::upstream("direct", UpstreamKind::AnthropicDirect, None);
+    config.upstreams.insert(direct_name, direct);
+    let (custom_name, custom) = preflight_common::upstream(
+        "custom",
+        UpstreamKind::Custom,
+        Some("http://127.0.0.1:9080"),
+    );
+    config.upstreams.insert(custom_name, custom);
+    config.upstreams.insert(
+        "vertex".to_owned(),
+        UpstreamSpec {
+            kind: UpstreamKind::Vertex,
+            base_url: None,
+            region: Some("us-central1".to_owned()),
+            project: Some("demo-project".to_owned()),
+            auth_strategy: cc_lb_config::AuthStrategy::ApiKey,
+            credentials_ref: None,
+        },
+    );
+
+    let report = preflight::run(&config, PreflightOptions { skip_bind: true })
+        .await
+        .unwrap();
+
+    for name in ["direct", "custom", "vertex"] {
+        assert!(
+            report
+                .warnings
+                .iter()
+                .any(|warning| warning
+                    == &format!("upstream {name}: probe skipped (offline preflight)")),
+            "missing warning for {name}: {:?}",
+            report.warnings
+        );
+    }
+}

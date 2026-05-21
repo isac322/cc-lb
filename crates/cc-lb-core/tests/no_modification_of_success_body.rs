@@ -1,0 +1,135 @@
+mod common;
+
+use std::fs;
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+
+use async_trait::async_trait;
+use axum::body::Body;
+use bytes::Bytes;
+use cc_lb_core::{
+    DispatchError, ErrorNormalizer, Lifecycle, LifecycleConfig, UpstreamDispatch, UpstreamKind,
+};
+use cc_lb_plugin_api::{
+    DialectError, Principal, RequestContext, ShapedRequest, ShapedRequestBuilder, SignedRequest,
+    Upstream, UpstreamDialect,
+};
+use http::{Response, StatusCode};
+use http_body_util::BodyExt;
+use url::Url;
+
+use common::{messages_request, RecordingHook, TestAuthn, TestRouter, TestState};
+
+#[tokio::test]
+async fn lifecycle_does_not_invoke_normalizer_for_success_body() {
+    let upstream_body = Bytes::from_static(
+        br#"{"type":"message","id":"msg_success","content":[{"type":"text","text":"ok"}]}"#,
+    );
+    let calls = Arc::new(AtomicUsize::new(0));
+    let mut normalizer = ErrorNormalizer::new();
+    normalizer.register_dialect(
+        UpstreamKind::CustomAnthropicSpec,
+        Arc::new(CountingDialect {
+            calls: Arc::clone(&calls),
+        }),
+    );
+
+    let state = TestState::default();
+    let lifecycle = Lifecycle::new(
+        Arc::new(TestAuthn::new(state)),
+        Arc::new(TestRouter {
+            base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
+        }),
+        Arc::new(FixedSuccessDispatch {
+            body: upstream_body.clone(),
+        }),
+        vec![Arc::new(RecordingHook::default())],
+        LifecycleConfig::default(),
+    )
+    .with_error_normalizer(Arc::new(normalizer));
+
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[]}"#,
+        )))
+        .await
+        .expect("lifecycle handles success request");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let client_body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("success body collects")
+        .to_bytes();
+    assert_eq!(client_body, upstream_body);
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+
+    write_success_diff_evidence(&upstream_body, &client_body);
+}
+
+struct FixedSuccessDispatch {
+    body: Bytes,
+}
+
+#[async_trait]
+impl UpstreamDispatch for FixedSuccessDispatch {
+    async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+        let mut response = Response::new(Body::from(self.body.clone()));
+        *response.status_mut() = StatusCode::OK;
+        Ok(response)
+    }
+}
+
+struct CountingDialect {
+    calls: Arc<AtomicUsize>,
+}
+
+impl UpstreamDialect for CountingDialect {
+    fn shape(
+        &self,
+        _ctx: &RequestContext,
+        _upstream: &Upstream,
+        _principal: &Principal,
+        _builder: &mut ShapedRequestBuilder,
+    ) -> Result<ShapedRequest, DialectError> {
+        Err(DialectError::UnsupportedRequest {
+            reason: "test dialect is error-normalization only".to_owned(),
+        })
+    }
+
+    fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
+        self.calls.fetch_add(1, Ordering::Relaxed);
+        Some(Bytes::from_static(
+            br#"{"type":"error","error":{"type":"api_error","message":"rewritten"}}"#,
+        ))
+    }
+}
+
+fn write_success_diff_evidence(upstream_body: &Bytes, client_body: &Bytes) {
+    let diff = if upstream_body == client_body {
+        "No differences.\n".as_bytes().to_vec()
+    } else {
+        format!(
+            "upstream={:?}\nclient={:?}\n",
+            String::from_utf8_lossy(upstream_body),
+            String::from_utf8_lossy(client_body)
+        )
+        .into_bytes()
+    };
+
+    for dir in evidence_dirs() {
+        fs::create_dir_all(&dir).expect("evidence directory is created");
+        fs::write(dir.join("task-24-success-passthrough.diff"), &diff)
+            .expect("success passthrough evidence is written");
+    }
+}
+
+fn evidence_dirs() -> Vec<PathBuf> {
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("manifest dir"));
+    vec![
+        PathBuf::from(std::env::var("OUT_DIR").unwrap_or_else(|_| ".omo/evidence".to_owned())),
+        manifest_dir.join("../../.omo/evidence"),
+    ]
+}

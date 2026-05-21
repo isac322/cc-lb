@@ -1,0 +1,6 @@
+Connection: keep-alive, X-Remove-Me
+Keep-Alive: timeout=5
+X-Remove-Me: yes
+anthropic-version: 2023-06-01
+authorization: Bearer sk-ant-test
+user-agent: cc-lb-fuzz
