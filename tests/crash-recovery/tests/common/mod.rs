@@ -568,5 +568,5 @@ fn audit_entry(iteration: usize, index: usize, pending: bool) -> AuditEntry {
 }
 
 fn io_error(message: impl Into<String>) -> io::Error {
-    io::Error::new(io::ErrorKind::Other, message.into())
+    io::Error::other(message.into())
 }
