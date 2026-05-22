@@ -1,6 +1,8 @@
 name: Real Client E2E
 
 on:
+  pull_request:
+  push:
   schedule:
     - cron: "17 3 * * *"
   workflow_dispatch:

@@ -2,11 +2,12 @@ name: Soak
 
 on:
   schedule:
-    - cron: "41 4 * * *"
+    - cron: "41 4 * * 1"
   workflow_dispatch:
 
 jobs:
   rss-soak:
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     continue-on-error: true
     steps:
