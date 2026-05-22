@@ -3,3 +3,6 @@
 /.vscode
 **/*.swp
 **/*.swo
+
+# OhMyOpenCode agent artifacts
+.omo/
