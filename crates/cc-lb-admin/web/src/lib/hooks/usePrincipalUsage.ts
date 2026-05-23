@@ -26,7 +26,7 @@ export function usePrincipalUsage(principalId: string | null, range: string, moc
     async function fetchUsage() {
       try {
         setIsLoading(true);
-        const res = await getJson<DashboardUsageResponse>(`/admin/principals/${principalId}/usage?range=${range}&group_by=model`, { signal: controller.signal });
+        const res = await getJson<DashboardUsageResponse>(`/admin/principals/${principalId}/usage?range=${range}`, { signal: controller.signal });
         setData(res);
         setError(null);
       } catch (err) {
