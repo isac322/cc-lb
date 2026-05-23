@@ -8,6 +8,7 @@ on:
 
 env:
   CC_LB_ADMIN_SKIP_SPA: "1"
+  CACHE_ON_FAILURE: "true"
 
 jobs:
   cargo-deny:
