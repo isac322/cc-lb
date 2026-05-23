@@ -228,7 +228,6 @@ fn config(principal_enabled: bool) -> Config {
         "u1".to_owned(),
         PrincipalSpec {
             principal_type: PrincipalType::Machine,
-            quotas: None,
             default_limits: vec![Limit {
                 kind: LimitKind::Requests,
                 window: Duration::from_secs(60),

@@ -133,11 +133,6 @@ tracing_level = "info"
 log_redaction = true
 user_prompt_redaction = false
 
-[quotas]
-default_window_secs = 60
-default_requests_per_window = 1000
-default_input_tokens = 1000000
-default_output_tokens = 1000000
 
 [admin]
 token_env = "CC_LB_ADMIN_TOKEN"

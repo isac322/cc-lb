@@ -9,18 +9,16 @@ use cc_lb_config::Config;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tracing_subscriber::fmt::MakeWriter;
 
-pub fn write_config(path: &Path, requests_per_window: u64, proxy_addr: SocketAddr) {
+pub fn write_config(path: &Path, messages_cap_bytes: u64, proxy_addr: SocketAddr) {
     let config = format!(
         r#"[listener]
 proxy_addr = "{proxy_addr}"
 admin_addr = "127.0.0.1:19090"
 metrics_addr = "127.0.0.1:19091"
 
-[quotas]
-default_window_secs = 60
-default_requests_per_window = {requests_per_window}
-default_input_tokens = 1000000
-default_output_tokens = 1000000
+[body]
+messages_cap_bytes = {messages_cap_bytes}
+files_cap_bytes = 1048576
 "#
     );
     std::fs::write(path, config).unwrap();

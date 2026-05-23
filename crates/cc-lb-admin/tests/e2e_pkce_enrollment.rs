@@ -2,17 +2,13 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use cc_lb_admin::{AdminState, router};
-use cc_lb_aead::AeadService;
+use cc_lb_admin::{router, AdminState};
 use cc_lb_config::Config;
-use cc_lb_core::DashboardBroadcaster;
-use cc_lb_storage_api::{OAuthCredentialStore, OAuthCredentials};
-use cc_lb_storage_redb::{OAUTH_CREDENTIALS_V1, RedbStorage, oauth_key};
+use cc_lb_storage_redb::{oauth_key, Storage, OAUTH_CREDENTIALS_V1};
 use http_body_util::{BodyExt, Empty};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
-use redb::ReadableDatabase;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -26,25 +22,24 @@ fn test_config(issuer_base_url: String) -> Config {
     config
 }
 
-fn test_state(
-    storage: Arc<RedbStorage>,
-    issuer_base_url: String,
-    aead: Arc<AeadService>,
-) -> AdminState {
+fn test_state(storage: Arc<Storage>, issuer_base_url: String) -> AdminState {
     AdminState {
-        storage,
-        aead,
-        quota_manager: None,
+        storage: Some(storage),
+        limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
+            Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
+            Arc::new(arc_swap::ArcSwap::from(
+                cc_lb_core::api_keys::principal_view::PrincipalView::from_config(&Config::default()),
+            )),
+        ),
         lifecycle: None,
-        breaker_registry: None,
-        drain_controller: None,
-        bulkhead_registry: None,
-        plugin_runtime_status: None,
-        dashboard_broadcaster: Arc::new(DashboardBroadcaster::new()),
+        principal_view: Arc::new(arc_swap::ArcSwap::from(
+            cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
+                &cc_lb_admin::CurrentConfig::current_config(
+                    (Arc::new(test_config(issuer_base_url.clone()))).as_ref(),
+                ),
+            ),
+        )),
         config: Arc::new(test_config(issuer_base_url)),
-        config_path: None,
-        config_watcher: None,
-        config_started_at_unix_secs: 0,
         admin_token: Some("test-token".to_string()),
         start_time: std::time::Instant::now(),
     }
@@ -131,13 +126,8 @@ async fn e2e_pkce_enrollment_persists_encrypted_credentials() {
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("test.redb");
     let master_key = [13u8; 32];
-    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
-    let aead = Arc::new(AeadService::from_master_key(master_key));
-    let app = router(test_state(
-        storage.clone(),
-        format!("http://{oauth_addr}"),
-        aead.clone(),
-    ));
+    let storage = Arc::new(Storage::open(&db_path, master_key).unwrap());
+    let app = router(test_state(storage.clone(), format!("http://{oauth_addr}")));
 
     let (status, start) = request_json(
         app.clone(),
@@ -159,16 +149,10 @@ async fn e2e_pkce_enrollment_persists_encrypted_credentials() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(complete["status"], "ok");
 
-    let ciphertext =
-        OAuthCredentialStore::get_oauth_ciphertext(storage.as_ref(), "alice", "anthropic_oauth")
-            .await
-            .unwrap()
-            .unwrap();
-    let plaintext = aead
-        .decrypt(&ciphertext, b"oauth:alice:anthropic_oauth")
+    let creds = storage
+        .get_oauth("alice", "anthropic_oauth")
         .unwrap()
-        .to_vec();
-    let creds: OAuthCredentials = serde_json::from_slice(&plaintext).unwrap();
+        .unwrap();
     assert!(creds.access_token.starts_with("sk-ant-oat01-MOCK-alice-"));
     assert!(creds.refresh_token.starts_with("sk-ant-ort01-MOCK-"));
     drop(storage);

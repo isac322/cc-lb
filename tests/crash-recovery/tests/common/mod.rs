@@ -10,10 +10,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use cc_lb_storage_redb::{
-    AUDIT_LOG_V1, AuditEntry, BucketKind, CURRENT_SCHEMA_VERSION, OAUTH_CREDENTIALS_V1,
-    OAuthCredentials, QUOTAS_BY_PRINCIPAL_V1, RedbStorage,
+    AuditEntry, OAuthCredentials, Storage, AUDIT_LOG_V1, CURRENT_SCHEMA_VERSION,
+    OAUTH_CREDENTIALS_V1,
 };
-use redb::{ReadableDatabase, ReadableTable};
+use redb::ReadableTable;
 
 pub type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -26,6 +26,7 @@ const TOTAL_ITERATIONS_ENV: &str = "CC_LB_CRASH_ITERATIONS";
 const DEFAULT_ITERATIONS: usize = 100;
 const COMMITTED_ROWS: usize = 32;
 const PENDING_ROWS: usize = 10_000;
+const MASTER_KEY: [u8; 32] = [48; 32];
 const ANTHROPIC_OAUTH_PROVIDER: &str = "anthropic_oauth";
 const STARTED_MARKER: &str = "pending_tx_started";
 const CHILD_LINGER: Duration = Duration::from_secs(60);
@@ -33,7 +34,6 @@ const CHILD_LINGER: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum CrashCase {
-    Quota,
     OAuthAead,
     Audit,
 }
@@ -41,7 +41,6 @@ pub enum CrashCase {
 impl CrashCase {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Quota => "quota",
             Self::OAuthAead => "oauth_aead",
             Self::Audit => "audit",
         }
@@ -68,7 +67,6 @@ pub fn run_child_if_requested(case: CrashCase) -> Result<bool, Box<dyn std::erro
     let iteration = required_env(ITERATION_ENV)?.parse::<usize>()?;
 
     match case {
-        CrashCase::Quota => child_quota(&db_path, &control_dir, iteration)?,
         CrashCase::OAuthAead => child_oauth_aead(&db_path, &control_dir, iteration)?,
         CrashCase::Audit => child_audit(&db_path, &control_dir, iteration)?,
     }
@@ -119,7 +117,6 @@ fn run_iteration(case: CrashCase, test_name: &str, iteration: usize) -> TestResu
     }
 
     let report = match case {
-        CrashCase::Quota => verify_quota(&db_path, iteration)?,
         CrashCase::OAuthAead => verify_oauth_aead(&db_path, iteration)?,
         CrashCase::Audit => verify_audit(&db_path, iteration)?,
     };
@@ -161,40 +158,9 @@ fn cleanup_child(child: &mut Child) {
     let _ = child.wait();
 }
 
-fn child_quota(path: &Path, control_dir: &Path, iteration: usize) -> TestResult {
-    {
-        let storage = RedbStorage::open(path)?;
-        storage.set_killswitch_enabled(true)?;
-        let principal_id = quota_committed_principal(iteration);
-        for index in 0..COMMITTED_ROWS {
-            storage.incr_quota(&principal_id, index as u64, BucketKind::Requests, 1)?;
-        }
-    }
-
-    let db = redb::Database::create(path)?;
-    let write_txn = db.begin_write()?;
-    {
-        let mut table = write_txn.open_table(QUOTAS_BY_PRINCIPAL_V1)?;
-        let pending_principal = quota_pending_principal(iteration);
-        let value = 1_u64.to_le_bytes();
-        for index in 0..PENDING_ROWS {
-            let key = cc_lb_storage_redb::quota_key(
-                &pending_principal,
-                index as u64,
-                BucketKind::Requests,
-            );
-            table.insert(key.as_slice(), value.as_slice())?;
-            signal_after_first_pending_row(control_dir, index)?;
-        }
-    }
-    sleep_before_unreachable_commit();
-    write_txn.commit()?;
-    Ok(())
-}
-
 fn child_oauth_aead(path: &Path, control_dir: &Path, iteration: usize) -> TestResult {
     {
-        let storage = RedbStorage::open(path)?;
+        let storage = Storage::open(path, MASTER_KEY)?;
         storage.set_killswitch_enabled(true)?;
         for index in 0..COMMITTED_ROWS {
             let principal_id = oauth_committed_principal(iteration, index);
@@ -224,7 +190,7 @@ fn child_oauth_aead(path: &Path, control_dir: &Path, iteration: usize) -> TestRe
 
 fn child_audit(path: &Path, control_dir: &Path, iteration: usize) -> TestResult {
     {
-        let storage = RedbStorage::open(path)?;
+        let storage = Storage::open(path, MASTER_KEY)?;
         storage.set_killswitch_enabled(true)?;
         for index in 0..COMMITTED_ROWS {
             storage.append_audit(&audit_entry(iteration, index, false))?;
@@ -247,57 +213,13 @@ fn child_audit(path: &Path, control_dir: &Path, iteration: usize) -> TestResult 
     Ok(())
 }
 
-fn verify_quota(
-    path: &Path,
-    iteration: usize,
-) -> Result<VerificationReport, Box<dyn std::error::Error>> {
-    let schema_version;
-    {
-        let storage = RedbStorage::open(path)?;
-        schema_version = verify_schema_and_killswitch(&storage)?;
-        let principal_id = quota_committed_principal(iteration);
-        for index in 0..COMMITTED_ROWS {
-            let value = storage.get_quota(&principal_id, index as u64, BucketKind::Requests)?;
-            if value != 1 {
-                return Err(io_error(format!(
-                    "quota committed row mismatch at iteration {iteration} index {index}: {value}"
-                ))
-                .into());
-            }
-        }
-        let probe = storage.incr_quota(
-            "task-48-parent-probe",
-            iteration as u64,
-            BucketKind::Requests,
-            1,
-        )?;
-        if probe != 1 {
-            return Err(io_error(format!("parent probe write returned {probe}")).into());
-        }
-    }
-
-    let pending_rows = count_quota_prefix(path, quota_pending_principal(iteration).as_bytes())?;
-    if pending_rows != 0 {
-        return Err(io_error(format!(
-            "quota pending transaction left {pending_rows} rows"
-        ))
-        .into());
-    }
-
-    Ok(VerificationReport {
-        schema_version,
-        committed_rows: COMMITTED_ROWS,
-        pending_rows,
-    })
-}
-
 fn verify_oauth_aead(
     path: &Path,
     iteration: usize,
 ) -> Result<VerificationReport, Box<dyn std::error::Error>> {
     let schema_version;
     {
-        let storage = RedbStorage::open(path)?;
+        let storage = Storage::open(path, MASTER_KEY)?;
         schema_version = verify_schema_and_killswitch(&storage)?;
         for index in 0..COMMITTED_ROWS {
             let principal_id = oauth_committed_principal(iteration, index);
@@ -344,7 +266,7 @@ fn verify_audit(
 ) -> Result<VerificationReport, Box<dyn std::error::Error>> {
     let schema_version;
     {
-        let storage = RedbStorage::open(path)?;
+        let storage = Storage::open(path, MASTER_KEY)?;
         schema_version = verify_schema_and_killswitch(&storage)?;
         let entries = storage.query_audit(
             Some(&audit_principal(iteration)),
@@ -379,8 +301,6 @@ fn verify_audit(
             output_tokens: 1,
             duration_ms: 1,
             agent_label: Some("task-48-parent".to_owned()),
-            kind: None,
-            payload: None,
         })?;
     }
 
@@ -399,7 +319,7 @@ fn verify_audit(
     })
 }
 
-fn verify_schema_and_killswitch(storage: &RedbStorage) -> Result<u32, Box<dyn std::error::Error>> {
+fn verify_schema_and_killswitch(storage: &Storage) -> Result<u32, Box<dyn std::error::Error>> {
     let schema_version = storage.schema_version()?;
     if schema_version != CURRENT_SCHEMA_VERSION {
         return Err(io_error(format!(
@@ -411,20 +331,6 @@ fn verify_schema_and_killswitch(storage: &RedbStorage) -> Result<u32, Box<dyn st
         return Err(io_error("killswitch row was not readable after reopen").into());
     }
     Ok(schema_version)
-}
-
-fn count_quota_prefix(path: &Path, prefix: &[u8]) -> Result<usize, Box<dyn std::error::Error>> {
-    let db = redb::Database::create(path)?;
-    let read_txn = db.begin_read()?;
-    let table = read_txn.open_table(QUOTAS_BY_PRINCIPAL_V1)?;
-    let mut count = 0;
-    for row in table.iter()? {
-        let (key, _) = row?;
-        if key.value().starts_with(prefix) {
-            count += 1;
-        }
-    }
-    Ok(count)
 }
 
 fn count_oauth_prefix(path: &Path, prefix: &[u8]) -> Result<usize, Box<dyn std::error::Error>> {
@@ -463,7 +369,7 @@ fn signal_after_first_pending_row(control_dir: &Path, index: usize) -> Result<()
     if index == 0 {
         fs::write(control_dir.join(STARTED_MARKER), b"started")?;
     }
-    if index.is_multiple_of(128) {
+    if index % 128 == 0 {
         thread::sleep(Duration::from_millis(1));
     }
     Ok(())
@@ -500,14 +406,6 @@ fn iteration_count() -> Result<usize, Box<dyn std::error::Error>> {
 
 fn required_env(name: &str) -> Result<String, io::Error> {
     env::var(name).map_err(|_| io_error(format!("missing environment variable {name}")))
-}
-
-fn quota_committed_principal(iteration: usize) -> String {
-    format!("task-48-quota-committed-{iteration}")
-}
-
-fn quota_pending_principal(iteration: usize) -> String {
-    format!("task-48-quota-pending-{iteration}")
 }
 
 fn oauth_committed_principal(iteration: usize, index: usize) -> String {
@@ -565,8 +463,6 @@ fn audit_entry(iteration: usize, index: usize, pending: bool) -> AuditEntry {
         output_tokens: index as u64 + 2,
         duration_ms: 3,
         agent_label: Some("task-48-crash-child".to_owned()),
-        kind: None,
-        payload: None,
     }
 }
 

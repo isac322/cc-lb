@@ -13,7 +13,24 @@ use std::time::{Duration, Instant};
 use tower::ServiceExt;
 
 fn test_state(storage: Arc<Storage>) -> AdminState {
-    AdminState { storage: Some(storage), quota_manager: None, lifecycle: None, principal_view: Arc::new(arc_swap::ArcSwap::from(cc_lb_core::api_keys::principal_view::PrincipalView::from_config(&cc_lb_admin::CurrentConfig::current_config((Arc::new(Config::default())).as_ref())))), config: Arc::new(Config::default()), admin_token: Some("test-token".to_string()), start_time: Instant::now() }
+    AdminState {
+        storage: Some(storage),
+        limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
+            Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
+            Arc::new(arc_swap::ArcSwap::from(
+                cc_lb_core::api_keys::principal_view::PrincipalView::from_config(&Config::default()),
+            )),
+        ),
+        lifecycle: None,
+        principal_view: Arc::new(arc_swap::ArcSwap::from(
+            cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
+                &cc_lb_admin::CurrentConfig::current_config((Arc::new(Config::default())).as_ref()),
+            ),
+        )),
+        config: Arc::new(Config::default()),
+        admin_token: Some("test-token".to_string()),
+        start_time: Instant::now(),
+    }
 }
 
 fn new_storage() -> (tempfile::TempDir, Arc<Storage>) {
@@ -53,12 +70,7 @@ async fn get_json(app: axum::Router, path: &str) -> (StatusCode, Value) {
         .unwrap();
     let response = app.oneshot(req).await.unwrap();
     let status = response.status();
-    let body = response
-        .into_body()
-        .collect()
-        .await
-        .unwrap()
-        .to_bytes();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
     let json = serde_json::from_slice(&body).unwrap();
     (status, json)
 }
