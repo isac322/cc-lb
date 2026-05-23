@@ -811,6 +811,22 @@ impl Storage {
         Ok(())
     }
 
+    pub fn issue_api_key_record_with_index(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+        params: IssueParams,
+    ) -> Result<(), StorageError> {
+        let index_hash = params.index_hash;
+        let composite_row_key = api_key_storage_key(principal_id, key_id);
+        let write_txn = self.db.begin_write()?;
+        self.issue_api_key(&write_txn, principal_id, key_id, params)?;
+        self.put_key_index(&write_txn, &index_hash, &composite_row_key)?;
+        crate::crash_test_sentinel_sleep("CC_LB_CRASH_SENTINEL_KEY_CREATE");
+        write_txn.commit()?;
+        Ok(())
+    }
+
     pub fn update_api_key_record(
         &self,
         principal_id: &str,
@@ -832,6 +848,51 @@ impl Storage {
         let updated = self.revoke_api_key(&write_txn, principal_id, key_id)?;
         write_txn.commit()?;
         Ok(updated)
+    }
+
+    pub fn revoke_api_key_record_zero_secret_fields(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+    ) -> Result<Option<StoredApiKeyRecord>, StorageError> {
+        let storage_key = api_key_storage_key(principal_id, key_id);
+        let write_txn = self.db.begin_write()?;
+        let mut record = {
+            let table = write_txn.open_table(API_KEYS_V1)?;
+            let Some(ciphertext) = table
+                .get(storage_key.as_slice())?
+                .map(|stored| stored.value().to_vec())
+            else {
+                return Ok(None);
+            };
+
+            let plaintext = self.decrypt_value(storage_key.as_slice(), &ciphertext)?;
+            let mut record = decode_record(&plaintext)?;
+            record.status = KeyStatus::Revoked;
+            if record.revoked_at_unix_secs.is_none() {
+                record.revoked_at_unix_secs = Some(now_unix_secs());
+            }
+
+            record
+        };
+
+        let captured_index_hash = record.index_hash;
+        record.index_hash = [0; 32];
+        record.verify_hash = [0; 32];
+        record.secret_salt = [0; 16];
+        record.last_4.clear();
+
+        {
+            let updated_plaintext = encode_record(&record)?;
+            let updated_value = self.encrypt_value(storage_key.as_slice(), &updated_plaintext)?;
+            let mut table = write_txn.open_table(API_KEYS_V1)?;
+            table.insert(storage_key.as_slice(), updated_value.as_slice())?;
+        }
+
+        self.remove_key_index(&write_txn, &captured_index_hash)?;
+        crate::crash_test_sentinel_sleep("CC_LB_CRASH_SENTINEL_KEY_REVOKE");
+        write_txn.commit()?;
+        Ok(Some(record))
     }
 
     pub fn get_anthropic_api_key(&self, storage_key: &str) -> Result<Option<String>, StorageError> {
