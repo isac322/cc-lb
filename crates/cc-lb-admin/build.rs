@@ -27,6 +27,21 @@ fn main() {
         ),
     };
 
+    let install_status = Command::new(&bun)
+        .arg("install")
+        .arg("--frozen-lockfile")
+        .current_dir(&web_dir)
+        .status()
+        .unwrap_or_else(|error| {
+            panic!("failed to invoke bun install for cc-lb-admin SPA: {error}")
+        });
+
+    if !install_status.success() {
+        panic!(
+            "bun install --frozen-lockfile failed for cc-lb-admin SPA with status {install_status}"
+        );
+    }
+
     let status = Command::new(&bun)
         .arg("run")
         .arg("build")
