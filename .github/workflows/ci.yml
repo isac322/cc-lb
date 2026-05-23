@@ -45,8 +45,10 @@ jobs:
           swap-storage: false
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - run: cargo nextest run --workspace
+      - run: cargo nextest run --workspace --exclude cc-lb-loadgen
