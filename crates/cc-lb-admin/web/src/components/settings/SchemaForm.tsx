@@ -1,3 +1,4 @@
+import { humanizeKey } from '../../lib/format';
 import { AllowedModelsEditor } from '../management/AllowedModelsEditor';
 import { FormField } from '../primitives/FormField';
 import { MaskedSecretField } from './MaskedSecretField';
@@ -63,14 +64,27 @@ export function SchemaForm({
     }
   }
 
-  const type = resolvedSchema.type as string | undefined;
-  const title = (resolvedSchema.title as string) || path.split('.').pop() || '';
+  const rawType = resolvedSchema.type;
+  const type: string | undefined = Array.isArray(rawType)
+    ? (rawType.find(
+        (t): t is string => typeof t === 'string' && t !== 'null',
+      ) as string | undefined)
+    : (rawType as string | undefined);
+  const rawKey = path.split('.').pop() || '';
+  const title = (resolvedSchema.title as string) || humanizeKey(rawKey);
   const description = resolvedSchema.description as string | undefined;
+
+  let unit = '';
+  if (rawKey.endsWith('_bytes')) unit = ' (bytes)';
+  else if (rawKey.endsWith('_secs')) unit = ' (seconds)';
+  else if (rawKey.endsWith('_ms')) unit = ' (ms)';
+
+  const displayTitle = title + unit;
 
   if (isSecretPath(path)) {
     return (
       <MaskedSecretField
-        label={title}
+        label={displayTitle}
         value={value as string | null}
         onChange={onChange}
         error={error}
@@ -82,11 +96,11 @@ export function SchemaForm({
   if (type === 'string') {
     if (Array.isArray(resolvedSchema.enum)) {
       return (
-        <FormField label={title} error={error} help={description}>
+        <FormField label={displayTitle} error={error} help={description}>
           <select
             value={(value as string) || ''}
             onChange={(e) => onChange(e.target.value)}
-            className="w-full bg-graphite-900 border border-graphite-700 rounded-md px-3 py-2 text-sm text-graphite-50 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+            className="w-full bg-graphite-900 border border-graphite-700 rounded-md px-3 py-2 text-sm text-graphite-50 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/40"
           >
             <option value="">Select...</option>
             {resolvedSchema.enum.map((opt: unknown) => (
@@ -98,13 +112,33 @@ export function SchemaForm({
         </FormField>
       );
     }
+
+    const isSingleLineHeuristic =
+      /_(path|addr|url|endpoint|socket|env|dir|file|token|key|secret)$/i.test(
+        rawKey,
+      );
+    const isMultiline =
+      resolvedSchema.multiline === true && !isSingleLineHeuristic;
+
+    if (isMultiline) {
+      return (
+        <FormField label={displayTitle} error={error} help={description}>
+          <textarea
+            value={(value as string) || ''}
+            onChange={(e) => onChange(e.target.value)}
+            className="w-full bg-graphite-900 border border-graphite-700 rounded-md px-3 py-2 text-sm text-graphite-50 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/40 font-mono h-32"
+          />
+        </FormField>
+      );
+    }
+
     return (
-      <FormField label={title} error={error} help={description}>
+      <FormField label={displayTitle} error={error} help={description}>
         <input
           type="text"
           value={(value as string) || ''}
           onChange={(e) => onChange(e.target.value)}
-          className="w-full bg-graphite-900 border border-graphite-700 rounded-md px-3 py-2 text-sm text-graphite-50 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+          className="w-full bg-graphite-900 border border-graphite-700 rounded-md px-3 py-2 text-sm text-graphite-50 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/40"
         />
       </FormField>
     );
@@ -112,7 +146,7 @@ export function SchemaForm({
 
   if (type === 'integer' || type === 'number') {
     return (
-      <FormField label={title} error={error} help={description}>
+      <FormField label={displayTitle} error={error} help={description}>
         <input
           type="number"
           value={(value as number) ?? ''}
@@ -121,7 +155,7 @@ export function SchemaForm({
           }
           min={resolvedSchema.minimum as number | undefined}
           max={resolvedSchema.maximum as number | undefined}
-          className="w-full bg-graphite-900 border border-graphite-700 rounded-md px-3 py-2 text-sm text-graphite-50 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
+          className="w-full bg-graphite-900 border border-graphite-700 rounded-md px-3 py-2 text-sm text-graphite-50 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/40 tabular-nums"
         />
       </FormField>
     );
@@ -129,15 +163,17 @@ export function SchemaForm({
 
   if (type === 'boolean') {
     return (
-      <FormField label={title} error={error} help={description}>
+      <FormField error={error} help={description}>
         <label className="flex items-center space-x-3">
           <input
             type="checkbox"
             checked={!!value}
             onChange={(e) => onChange(e.target.checked)}
-            className="h-4 w-4 rounded border-graphite-700 bg-graphite-900 text-blue-500 focus:ring-blue-500 focus:ring-offset-graphite-900"
+            className="h-4 w-4 rounded border-graphite-700 bg-graphite-900 text-cyan-500 focus:ring-cyan-500 focus:ring-offset-graphite-900"
           />
-          <span className="text-sm font-medium text-graphite-200">{title}</span>
+          <span className="text-sm font-medium text-graphite-200">
+            {displayTitle}
+          </span>
         </label>
       </FormField>
     );
@@ -148,7 +184,7 @@ export function SchemaForm({
     (resolvedSchema.items as Record<string, unknown>)?.type === 'string'
   ) {
     return (
-      <FormField label={title} error={error} help={description}>
+      <FormField label={displayTitle} error={error} help={description}>
         <AllowedModelsEditor
           models={(value as string[]) || []}
           onChange={onChange}
@@ -182,7 +218,7 @@ export function SchemaForm({
 
   // Fallback for unknown types or complex objects
   return (
-    <FormField label={title} error={error} help={description}>
+    <FormField label={displayTitle} error={error} help={description}>
       <textarea
         value={value ? JSON.stringify(value, null, 2) : ''}
         onChange={(e) => {
@@ -192,7 +228,7 @@ export function SchemaForm({
             // Ignore parse errors while typing
           }
         }}
-        className="w-full bg-graphite-900 border border-graphite-700 rounded-md px-3 py-2 text-sm text-graphite-50 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500 font-mono h-32"
+        className="w-full bg-graphite-900 border border-graphite-700 rounded-md px-3 py-2 text-sm text-graphite-50 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500/40 font-mono h-32"
       />
     </FormField>
   );

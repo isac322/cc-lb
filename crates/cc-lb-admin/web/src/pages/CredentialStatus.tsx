@@ -13,10 +13,7 @@ export default function CredentialStatus() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-2xl font-semibold text-graphite-50">
-            Credential Status
-          </h1>
-          <p className="text-sm text-graphite-400 mt-1">
+          <p className="text-sm text-graphite-400">
             Status of API keys and OAuth credentials across all principals.
           </p>
         </div>

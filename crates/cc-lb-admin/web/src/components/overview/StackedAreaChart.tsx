@@ -1,3 +1,4 @@
+import { Activity } from 'lucide-react';
 import {
   Area,
   AreaChart,
@@ -11,6 +12,7 @@ import {
 import type { DashboardUsageResponse } from '../../lib/api';
 import { formatNumber } from '../../lib/format';
 import { Card } from '../primitives/Card';
+import { EmptyState } from '../primitives/EmptyState';
 
 interface StackedAreaChartProps {
   usage: DashboardUsageResponse | null;
@@ -18,16 +20,10 @@ interface StackedAreaChartProps {
 }
 
 const COLORS = [
-  '#3b82f6',
-  '#10b981',
-  '#f59e0b',
-  '#ef4444',
-  '#8b5cf6',
-  '#ec4899',
-  '#06b6d4',
-  '#84cc16',
-  '#f97316',
-  '#6366f1',
+  'var(--color-cyan-500)',
+  'var(--color-graphite-500)',
+  'var(--color-graphite-600)',
+  'var(--color-graphite-700)',
 ];
 
 export function StackedAreaChart({ usage, isLoading }: StackedAreaChartProps) {
@@ -45,12 +41,11 @@ export function StackedAreaChart({ usage, isLoading }: StackedAreaChartProps) {
   if (!usage.observed || usage.series.length === 0) {
     return (
       <Card className="p-6 h-80 flex items-center justify-center">
-        <div className="text-center">
-          <div className="text-graphite-400 mb-2">No data available</div>
-          <div className="text-sm text-graphite-500">
-            No traffic in last {usage.range}
-          </div>
-        </div>
+        <EmptyState
+          title="Waiting for first request"
+          message={`No traffic in last ${usage.range}`}
+          icon={Activity}
+        />
       </Card>
     );
   }
@@ -91,19 +86,19 @@ export function StackedAreaChart({ usage, isLoading }: StackedAreaChartProps) {
           >
             <CartesianGrid
               strokeDasharray="3 3"
-              stroke="#374151"
+              stroke="var(--color-graphite-800)"
               vertical={false}
             />
             <XAxis
               dataKey="time"
-              stroke="#9ca3af"
+              stroke="var(--color-graphite-500)"
               fontSize={12}
               tickLine={false}
               axisLine={false}
               minTickGap={30}
             />
             <YAxis
-              stroke="#9ca3af"
+              stroke="var(--color-graphite-500)"
               fontSize={12}
               tickLine={false}
               axisLine={false}
@@ -111,12 +106,15 @@ export function StackedAreaChart({ usage, isLoading }: StackedAreaChartProps) {
             />
             <Tooltip
               contentStyle={{
-                backgroundColor: '#1f2937',
-                borderColor: '#374151',
-                color: '#f9fafb',
+                backgroundColor: 'var(--color-graphite-900)',
+                borderColor: 'var(--color-graphite-800)',
+                color: 'var(--color-graphite-50)',
               }}
-              itemStyle={{ color: '#f9fafb' }}
-              labelStyle={{ color: '#9ca3af', marginBottom: '4px' }}
+              itemStyle={{ color: 'var(--color-graphite-50)' }}
+              labelStyle={{
+                color: 'var(--color-graphite-400)',
+                marginBottom: '4px',
+              }}
             />
             <Legend
               iconType="circle"
