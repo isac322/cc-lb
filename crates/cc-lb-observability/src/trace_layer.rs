@@ -153,3 +153,186 @@ fn header_value<B>(request: &Request<B>, name: &'static str) -> Option<String> {
         .and_then(|value| value.to_str().ok())
         .map(str::to_owned)
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::{Arc, Mutex};
+
+    use cc_lb_plugin_api::{ObservabilityError, ObserveEvent};
+    use http::StatusCode;
+    use tower_http::trace::{OnBodyChunk as _, OnRequest as _, OnResponse as _};
+
+    use super::*;
+
+    #[derive(Clone, Default)]
+    struct RecordingHook {
+        events: Arc<Mutex<Vec<ObserveEvent>>>,
+    }
+
+    impl RecordingHook {
+        fn events(&self) -> Vec<ObserveEvent> {
+            self.events.lock().unwrap().clone()
+        }
+    }
+
+    impl ObservabilityHook for RecordingHook {
+        fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError> {
+            self.events.lock().unwrap().push(event);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn request_observer_prefers_request_id_and_records_user_agent() {
+        let hook = RecordingHook::default();
+        let mut observer = ObserveOnRequest { hook: hook.clone() };
+        let request = Request::builder()
+            .method("POST")
+            .uri("/v1/messages?stream=true")
+            .header("request-id", "primary")
+            .header("x-request-id", "fallback")
+            .header("user-agent", "real-client")
+            .body(())
+            .unwrap();
+
+        observer.on_request(&request, &Span::none());
+
+        assert_eq!(
+            hook.events(),
+            vec![ObserveEvent::RequestStarted {
+                request_id: "primary".to_owned(),
+                downstream_user_agent: Some("real-client".to_owned()),
+            }]
+        );
+    }
+
+    #[test]
+    fn request_observer_falls_back_to_x_request_id() {
+        let hook = RecordingHook::default();
+        let mut observer = ObserveOnRequest { hook: hook.clone() };
+        let request = Request::builder()
+            .header("x-request-id", "fallback")
+            .body(())
+            .unwrap();
+
+        observer.on_request(&request, &Span::none());
+
+        assert_eq!(
+            hook.events(),
+            vec![ObserveEvent::RequestStarted {
+                request_id: "fallback".to_owned(),
+                downstream_user_agent: None,
+            }]
+        );
+    }
+
+    #[test]
+    fn response_observer_records_status_and_latency() {
+        let hook = RecordingHook::default();
+        let observer = ObserveOnResponse { hook: hook.clone() };
+        let response = Response::builder()
+            .status(StatusCode::TOO_MANY_REQUESTS)
+            .body(())
+            .unwrap();
+
+        observer.on_response(&response, Duration::from_millis(123), &Span::none());
+
+        assert_eq!(
+            hook.events(),
+            vec![ObserveEvent::RequestFinished {
+                status: StatusCode::TOO_MANY_REQUESTS,
+                input_tokens: None,
+                output_tokens: None,
+                duration_ms: 123,
+            }]
+        );
+    }
+
+    #[test]
+    fn response_observer_saturates_large_latency() {
+        let hook = RecordingHook::default();
+        let observer = ObserveOnResponse { hook: hook.clone() };
+        let response = Response::builder().status(StatusCode::OK).body(()).unwrap();
+
+        observer.on_response(&response, Duration::MAX, &Span::none());
+
+        assert_eq!(
+            hook.events(),
+            vec![ObserveEvent::RequestFinished {
+                status: StatusCode::OK,
+                input_tokens: None,
+                output_tokens: None,
+                duration_ms: u64::MAX,
+            }]
+        );
+    }
+
+    #[test]
+    fn body_chunk_observer_records_monotonic_batches() {
+        let hook = RecordingHook::default();
+        let mut observer = ObserveOnBodyChunk {
+            hook: hook.clone(),
+            next_batch_index: 0,
+        };
+
+        observer.on_body_chunk(
+            &b"hello".as_slice(),
+            Duration::from_millis(1),
+            &Span::none(),
+        );
+        observer.on_body_chunk(
+            &b"world!".as_slice(),
+            Duration::from_millis(2),
+            &Span::none(),
+        );
+
+        assert_eq!(
+            hook.events(),
+            vec![
+                ObserveEvent::Chunk {
+                    batch_index: 0,
+                    event_count: 1,
+                    total_bytes: 5,
+                },
+                ObserveEvent::Chunk {
+                    batch_index: 1,
+                    event_count: 1,
+                    total_bytes: 6,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn body_chunk_observer_saturates_batch_index() {
+        let hook = RecordingHook::default();
+        let mut observer = ObserveOnBodyChunk {
+            hook: hook.clone(),
+            next_batch_index: u64::MAX,
+        };
+
+        observer.on_body_chunk(&b"x".as_slice(), Duration::ZERO, &Span::none());
+        observer.on_body_chunk(&b"y".as_slice(), Duration::ZERO, &Span::none());
+
+        assert_eq!(
+            hook.events(),
+            vec![
+                ObserveEvent::Chunk {
+                    batch_index: u64::MAX,
+                    event_count: 1,
+                    total_bytes: 1,
+                },
+                ObserveEvent::Chunk {
+                    batch_index: u64::MAX,
+                    event_count: 1,
+                    total_bytes: 1,
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn trace_layer_builds_with_recording_hook() {
+        let _layer = trace_layer(RecordingHook::default());
+    }
+}
