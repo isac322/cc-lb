@@ -1,13 +1,13 @@
 use std::sync::Arc;
 
 use cc_lb_core::{QuotaDecision, QuotaManager, QuotaPolicy};
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn concurrent_request_quota_allows_exact_capacity() -> Result<(), Box<dyn std::error::Error>>
 {
     let dir = tempfile::tempdir()?;
-    let storage = Arc::new(Storage::open(&dir.path().join("quota.redb"), [18; 32])?);
+    let storage = Arc::new(RedbStorage::open(&dir.path().join("quota.redb"))?);
     let manager = Arc::new(QuotaManager::new(
         storage,
         QuotaPolicy {

@@ -14,7 +14,7 @@ use cc_lb_plugin_api::{
     AuthStrategy, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
     SigningCapability, Upstream, UpstreamError,
 };
-use cc_lb_storage_redb::{OAuthCredentials, Storage};
+use cc_lb_storage_redb::{OAuthCredentials, RedbStorage};
 use dashmap::DashMap;
 use http::header::{AUTHORIZATION, HeaderValue};
 use oauth2::{ClientId, TokenUrl};
@@ -42,7 +42,7 @@ pub struct AnthropicOAuthSharedState {
 pub struct AnthropicOAuthSigner {
     pub principal_id: String,
     pub provider: String,
-    pub storage: Arc<Storage>,
+    pub storage: Arc<RedbStorage>,
     pub refresh_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     pub breaker_state: BreakerMap,
     pub http: Arc<dyn OAuthHttpClient>,
@@ -57,7 +57,7 @@ impl AnthropicOAuthSigner {
     pub fn new(
         principal_id: impl Into<String>,
         provider: impl Into<String>,
-        storage: Arc<Storage>,
+        storage: Arc<RedbStorage>,
         token_url: Url,
         client_id: ClientId,
     ) -> Self {
@@ -74,7 +74,7 @@ impl AnthropicOAuthSigner {
     pub fn with_http(
         principal_id: impl Into<String>,
         provider: impl Into<String>,
-        storage: Arc<Storage>,
+        storage: Arc<RedbStorage>,
         token_url: Url,
         client_id: ClientId,
         http: Arc<dyn OAuthHttpClient>,
@@ -99,7 +99,7 @@ impl AnthropicOAuthSigner {
     pub fn with_shared_state(
         principal_id: impl Into<String>,
         provider: impl Into<String>,
-        storage: Arc<Storage>,
+        storage: Arc<RedbStorage>,
         token_url: Url,
         client_id: ClientId,
         shared: AnthropicOAuthSharedState,
@@ -315,7 +315,7 @@ pub struct AnthropicOAuthSignerFactory {
     auth_strategy: AuthStrategy,
     principal_id: String,
     provider: String,
-    storage: Arc<Storage>,
+    storage: Arc<RedbStorage>,
     token_url: Url,
     client_id: ClientId,
     http: Arc<dyn OAuthHttpClient>,
@@ -327,7 +327,7 @@ impl AnthropicOAuthSignerFactory {
     pub fn new(
         principal_id: impl Into<String>,
         provider: impl Into<String>,
-        storage: Arc<Storage>,
+        storage: Arc<RedbStorage>,
         token_url: TokenUrl,
         client_id: ClientId,
     ) -> Self {
@@ -344,7 +344,7 @@ impl AnthropicOAuthSignerFactory {
     pub fn with_http(
         principal_id: impl Into<String>,
         provider: impl Into<String>,
-        storage: Arc<Storage>,
+        storage: Arc<RedbStorage>,
         token_url: TokenUrl,
         client_id: ClientId,
         http: Arc<dyn OAuthHttpClient>,

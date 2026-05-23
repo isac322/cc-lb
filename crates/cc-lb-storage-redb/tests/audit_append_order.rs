@@ -1,10 +1,10 @@
-use cc_lb_storage_redb::{AuditEntry, Storage};
+use cc_lb_storage_redb::{AuditEntry, RedbStorage};
 
 #[test]
 fn audit_query_returns_append_order_for_monotonic_keys() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("storage.redb");
-    let storage = Storage::open(&path, [15; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     for index in 0..1_000 {
         storage.append_audit(&audit_entry(index))?;

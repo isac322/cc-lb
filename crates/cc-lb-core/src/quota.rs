@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Once};
 
 use cc_lb_plugin_api::PrincipalQuotas;
-use cc_lb_storage_redb::{Storage, StorageError};
+use cc_lb_storage_redb::{RedbStorage, StorageError};
 use dashmap::DashMap;
 use metrics::Unit;
 use thiserror::Error;
@@ -66,7 +66,7 @@ pub enum QuotaError {
 }
 
 pub struct QuotaManager {
-    pub storage: Arc<Storage>,
+    pub storage: Arc<RedbStorage>,
     pub defaults: Arc<RwLock<QuotaPolicy>>,
     pub per_principal: Arc<RwLock<HashMap<String, QuotaPolicy>>>,
     pub per_principal_mutexes: Arc<DashMap<String, Arc<Mutex<()>>>>,
@@ -75,11 +75,15 @@ pub struct QuotaManager {
 }
 
 impl QuotaManager {
-    pub fn new(storage: Arc<Storage>, defaults: QuotaPolicy) -> Self {
+    pub fn new(storage: Arc<RedbStorage>, defaults: QuotaPolicy) -> Self {
         Self::with_clock(storage, defaults, Arc::new(SystemClock))
     }
 
-    pub fn with_clock(storage: Arc<Storage>, defaults: QuotaPolicy, clock: Arc<dyn Clock>) -> Self {
+    pub fn with_clock(
+        storage: Arc<RedbStorage>,
+        defaults: QuotaPolicy,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         register_quota_metrics();
         Self {
             storage,

@@ -1,7 +1,7 @@
 use cc_lb_storage_api::{
     AuditEntry, AuditStore, RequestEvent, RequestEventStore, RequestEventUpstream,
 };
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 use serde_json::json;
 
 #[tokio::test]
@@ -9,7 +9,7 @@ async fn audit_store_trait_path_appends_queries_and_prunes()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("adapter-audit.redb");
-    let storage = Storage::open(&path, [51; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     AuditStore::append_audit(&storage, &audit_entry("req-0001", "alice", 1_700_000_000)).await?;
     AuditStore::append_audit(&storage, &audit_entry("req-0002", "alice", 1_700_000_000)).await?;
@@ -35,7 +35,7 @@ async fn request_event_store_trait_path_appends_and_queries()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("adapter-events.redb");
-    let storage = Storage::open(&path, [53; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     RequestEventStore::append_request_event(&storage, &request_event("req-0001", 1_800_000_000))
         .await?;

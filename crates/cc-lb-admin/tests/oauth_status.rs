@@ -8,7 +8,7 @@ use axum::{
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::{Config, PrincipalSpec};
 use cc_lb_core::DashboardBroadcaster;
-use cc_lb_storage_redb::{OAuthCredentials, Storage};
+use cc_lb_storage_redb::{OAuthCredentials, RedbStorage};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -132,7 +132,7 @@ async fn oauth_status_response_excludes_raw_token_material() {
     }
 }
 
-fn test_state(config: Config, storage: Option<Arc<Storage>>) -> AdminState {
+fn test_state(config: Config, storage: Option<Arc<RedbStorage>>) -> AdminState {
     AdminState {
         storage,
         quota_manager: None,
@@ -166,9 +166,9 @@ fn oauth_config(principal_id: &str) -> Config {
 fn storage_with_credential(
     principal_id: &str,
     creds: OAuthCredentials,
-) -> (tempfile::TempDir, Arc<Storage>) {
+) -> (tempfile::TempDir, Arc<RedbStorage>) {
     let dir = tempfile::tempdir().unwrap();
-    let storage = Storage::open(&dir.path().join("oauth.redb"), [12; 32]).unwrap();
+    let storage = RedbStorage::open(&dir.path().join("oauth.redb")).unwrap();
     storage.put_oauth(principal_id, PROVIDER, &creds).unwrap();
     (dir, Arc::new(storage))
 }

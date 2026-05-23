@@ -5,7 +5,7 @@ use axum::{
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_core::DashboardBroadcaster;
-use cc_lb_storage_redb::{OAUTH_CREDENTIALS_V1, Storage, oauth_key};
+use cc_lb_storage_redb::{OAUTH_CREDENTIALS_V1, RedbStorage, oauth_key};
 use http_body_util::{BodyExt, Empty};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
@@ -24,7 +24,7 @@ fn test_config(issuer_base_url: String) -> Config {
     config
 }
 
-fn test_state(storage: Arc<Storage>, issuer_base_url: String) -> AdminState {
+fn test_state(storage: Arc<RedbStorage>, issuer_base_url: String) -> AdminState {
     AdminState {
         storage: Some(storage),
         quota_manager: None,
@@ -124,7 +124,7 @@ async fn e2e_pkce_enrollment_persists_encrypted_credentials() {
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("test.redb");
     let master_key = [13u8; 32];
-    let storage = Arc::new(Storage::open(&db_path, master_key).unwrap());
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
     let app = router(test_state(storage.clone(), format!("http://{oauth_addr}")));
 
     let (status, start) = request_json(

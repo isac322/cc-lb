@@ -14,7 +14,7 @@ use cc_lb_plugin_api::{
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSigner, OAuthHttpClient, OAuthHttpError, OAuthTokenRequest, OAuthTokenResponse,
 };
-use cc_lb_storage_redb::{OAuthCredentials, Storage};
+use cc_lb_storage_redb::{OAuthCredentials, RedbStorage};
 use http::header::USER_AGENT;
 use http::{HeaderMap, HeaderValue, Method, StatusCode};
 use oauth2::ClientId;
@@ -70,17 +70,17 @@ impl OAuthHttpClient for FakeOAuthClient {
 
 pub struct TestStorage {
     pub _dir: TempDir,
-    pub storage: Arc<Storage>,
+    pub storage: Arc<RedbStorage>,
 }
 
 pub fn storage() -> TestStorage {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("storage.redb");
-    let storage = Arc::new(Storage::open(&path, [9; 32]).expect("storage open"));
+    let storage = Arc::new(RedbStorage::open(&path).expect("storage open"));
     TestStorage { _dir: dir, storage }
 }
 
-pub fn signer(storage: Arc<Storage>, http: Arc<dyn OAuthHttpClient>) -> AnthropicOAuthSigner {
+pub fn signer(storage: Arc<RedbStorage>, http: Arc<dyn OAuthHttpClient>) -> AnthropicOAuthSigner {
     AnthropicOAuthSigner::with_http(
         "alice",
         "anthropic_oauth",

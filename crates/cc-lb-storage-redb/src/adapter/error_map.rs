@@ -12,12 +12,6 @@ pub(crate) fn map_redb_err(error: StorageError) -> ApiStorageError {
         StorageError::RedbStorage(source) => redb_transient(source),
         StorageError::Commit(source) => redb_transient(source),
         StorageError::Json(error) => ApiStorageError::Serialization(error),
-        StorageError::AeadAuthenticationFailed => {
-            ApiStorageError::Aead("redb AEAD authentication failed".to_owned())
-        }
-        StorageError::CiphertextTooShort(length) => ApiStorageError::Corrupted {
-            message: format!("redb ciphertext is too short: {length} bytes"),
-        },
         StorageError::UnsupportedSchemaVersion { found, current } => {
             ApiStorageError::SchemaMismatch {
                 found,
@@ -69,6 +63,12 @@ pub(crate) fn map_redb_err(error: StorageError) -> ApiStorageError {
             key_id,
         } => ApiStorageError::Conflict {
             message: format!("unknown redb API key {key_id} for principal {principal_id}"),
+        },
+        StorageError::BackendKindMismatch { stored, configured } => {
+            ApiStorageError::BackendKindMismatch { stored, configured }
+        }
+        StorageError::InvalidBackendKind(kind) => ApiStorageError::Corrupted {
+            message: format!("redb invalid backend kind {kind}"),
         },
     }
 }

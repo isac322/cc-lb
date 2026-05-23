@@ -5,7 +5,7 @@ use std::path::Path;
 
 use cc_lb_config::Config;
 use cc_lb_storage_redb::{
-    AuditEntry, ConfigDraftState, HistoryEntry, HistorySummary, Storage, StorageError,
+    AuditEntry, ConfigDraftState, HistoryEntry, HistorySummary, RedbStorage, StorageError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -193,13 +193,13 @@ fn strip_schema_defaults(value: &mut Value) {
     }
 }
 
-pub fn get_draft(storage: Option<&Storage>) -> Result<ConfigDraftResponse, SettingsError> {
+pub fn get_draft(storage: Option<&RedbStorage>) -> Result<ConfigDraftResponse, SettingsError> {
     let storage = storage.ok_or(SettingsError::StorageUnavailable)?;
     draft_response(storage.get_config_draft()?)
 }
 
 pub fn put_draft(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     request: PutConfigDraftRequest,
     saved_at_unix_secs: u64,
 ) -> Result<PutConfigDraftResponse, SettingsError> {
@@ -219,7 +219,7 @@ pub fn put_draft(
 }
 
 pub(crate) fn apply_draft_principal_change<T, E, F>(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     current: &dyn CurrentConfig,
     saved_at_unix_secs: u64,
     mut transform: F,
@@ -267,7 +267,7 @@ where
 }
 
 pub fn validate_draft(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     request: ValidateConfigDraftRequest,
 ) -> Result<ValidateConfigDraftResponse, SettingsError> {
     let storage = storage.ok_or(SettingsError::StorageUnavailable)?;
@@ -305,7 +305,7 @@ pub fn validate_draft(
 }
 
 pub fn apply_config(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     config_path: Option<&Path>,
     config_watcher: Option<&dyn ConfigReloader>,
     request: ApplyConfigRequest,
@@ -387,7 +387,7 @@ pub fn apply_config(
 }
 
 pub fn list_history(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     limit: usize,
 ) -> Result<ConfigHistoryResponse, SettingsError> {
     let storage = storage.ok_or(SettingsError::StorageUnavailable)?;
@@ -401,7 +401,7 @@ pub fn list_history(
 }
 
 pub fn diff_history(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     from_revision: u64,
     to_revision: u64,
 ) -> Result<ConfigDiffResponse, SettingsError> {

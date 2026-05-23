@@ -1,12 +1,12 @@
 use std::sync::Arc;
 
 use cc_lb_core::{BucketKind, MockClock, QuotaManager, QuotaPolicy};
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 
 #[tokio::test]
 async fn reconcile_frees_unused_reserved_output_tokens() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let storage = Arc::new(Storage::open(&dir.path().join("quota.redb"), [20; 32])?);
+    let storage = Arc::new(RedbStorage::open(&dir.path().join("quota.redb"))?);
     let manager = QuotaManager::with_clock(
         Arc::clone(&storage),
         QuotaPolicy {

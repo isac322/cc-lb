@@ -5,7 +5,7 @@ use axum::{
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_core::DashboardBroadcaster;
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 use http_body_util::{BodyExt, Empty};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
@@ -23,7 +23,7 @@ fn test_config(issuer_base_url: String) -> Config {
     config
 }
 
-fn test_state(storage: Arc<Storage>, issuer_base_url: String) -> AdminState {
+fn test_state(storage: Arc<RedbStorage>, issuer_base_url: String) -> AdminState {
     AdminState {
         storage: Some(storage),
         quota_manager: None,
@@ -104,7 +104,7 @@ async fn test_oauth_pkce_flow() {
     let oauth_addr = spawn_mock_oauth().await;
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("test.redb");
-    let storage = Arc::new(Storage::open(&db_path, [0u8; 32]).unwrap());
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
     let app = router(test_state(storage.clone(), format!("http://{oauth_addr}")));
 
     let (status, start) = request_json(

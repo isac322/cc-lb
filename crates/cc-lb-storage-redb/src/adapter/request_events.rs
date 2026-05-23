@@ -5,18 +5,18 @@ use cc_lb_storage_api::{
 };
 
 use crate::{
-    RequestEvent as RedbRequestEvent, RequestEventUpstream as RedbRequestEventUpstream, Storage,
+    RedbStorage, RequestEvent as RedbRequestEvent, RequestEventUpstream as RedbRequestEventUpstream,
 };
 
 use super::error_map::{map_join_err, map_redb_err};
 
 #[async_trait]
-impl RequestEventStore for Storage {
+impl RequestEventStore for RedbStorage {
     async fn append_request_event(&self, event: &ApiRequestEvent) -> StorageResult<()> {
         let storage = self.clone();
         let event = to_redb_request_event(event);
 
-        tokio::task::spawn_blocking(move || Storage::append_request_event(&storage, &event))
+        tokio::task::spawn_blocking(move || RedbStorage::append_request_event(&storage, &event))
             .await
             .map_err(map_join_err)?
             .map_err(map_redb_err)
@@ -31,7 +31,7 @@ impl RequestEventStore for Storage {
         let storage = self.clone();
 
         tokio::task::spawn_blocking(move || {
-            Storage::query_request_events(&storage, since, until, limit)
+            RedbStorage::query_request_events(&storage, since, until, limit)
         })
         .await
         .map_err(map_join_err)?

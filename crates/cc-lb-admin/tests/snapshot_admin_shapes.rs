@@ -5,7 +5,7 @@ use axum::{
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::{AuthStrategy, Config, PrincipalSpec, QuotasConfig, UpstreamKind, UpstreamSpec};
 use cc_lb_core::{BucketKind, DashboardBroadcaster, QuotaManager, QuotaPolicy};
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use std::sync::Arc;
@@ -55,7 +55,7 @@ fn test_config() -> Config {
 
 fn test_state(
     config: Config,
-    storage: Option<Arc<Storage>>,
+    storage: Option<Arc<RedbStorage>>,
     quota_manager: Option<Arc<QuotaManager>>,
 ) -> AdminState {
     AdminState {
@@ -121,7 +121,7 @@ async fn snapshot_admin_quota() {
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("test.redb");
     let master_key = [0u8; 32];
-    let storage = Arc::new(Storage::open(&db_path, master_key).unwrap());
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
     let quota_policy = QuotaPolicy {
         window_secs: 3_600,
         capacity_requests: 123,

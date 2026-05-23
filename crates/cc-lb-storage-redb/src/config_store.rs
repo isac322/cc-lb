@@ -2,7 +2,7 @@ use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{CONFIG_DRAFT_V1, CONFIG_HISTORY_V1, Storage, StorageError};
+use crate::{CONFIG_DRAFT_V1, CONFIG_HISTORY_V1, RedbStorage, StorageError};
 
 const CONFIG_DRAFT_KEY: &str = "draft";
 const CONFIG_HISTORY_LIMIT: usize = 50;
@@ -39,7 +39,7 @@ struct StoredHistoryEntry {
     summary: HistorySummary,
 }
 
-impl Storage {
+impl RedbStorage {
     pub fn get_config_draft(&self) -> Result<ConfigDraftState, StorageError> {
         let read_txn = self.db.begin_read()?;
         let table = read_txn.open_table(CONFIG_DRAFT_V1)?;

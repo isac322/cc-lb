@@ -5,13 +5,13 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cc_lb_core::{BucketKind, MockClock, QuotaManager, QuotaPolicy, SseBatchConfig, SseRelay};
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 use sse_relay_support::{RecordingHook, TestDialect, body_from_chunks, collect_response_body};
 
 #[tokio::test]
 async fn usage_extracted_on_message_stop() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let storage = Arc::new(Storage::open(&dir.path().join("quota.redb"), [22; 32])?);
+    let storage = Arc::new(RedbStorage::open(&dir.path().join("quota.redb"))?);
     let quota = Arc::new(QuotaManager::with_clock(
         Arc::clone(&storage),
         QuotaPolicy {

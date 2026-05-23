@@ -1,12 +1,12 @@
 use cc_lb_storage_api::{ApiKeyStore, OAuthCredentialStore};
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 
 #[tokio::test]
 async fn oauth_ciphertext_trait_path_roundtrips_arbitrary_bytes_and_isolates_keys()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("adapter-oauth-apikey-oauth.redb");
-    let storage = Storage::open(&path, [81; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     let alice_ciphertext = vec![0, 1, 2, 3, 0xfe, 0xff, b'{', b'}'];
     let bob_ciphertext = vec![9, 8, 7, 0, 6];
@@ -62,7 +62,7 @@ async fn anthropic_api_key_ciphertext_trait_path_roundtrips_by_storage_key()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("adapter-oauth-apikey-anthropic.redb");
-    let storage = Storage::open(&path, [83; 32])?;
+    let storage = RedbStorage::open(&path)?;
     let ciphertext = vec![0xaa, 0, 0xbb, 4, 5, 6];
 
     OAuthCredentialStore::put_anthropic_api_key_ciphertext(
@@ -97,7 +97,7 @@ async fn api_key_store_trait_path_lists_ciphertexts_in_key_id_order()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("adapter-oauth-apikey-list.redb");
-    let storage = Storage::open(&path, [85; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     ApiKeyStore::put_api_key_ciphertext(&storage, "principal-a", "key-c", b"cipher-c").await?;
     ApiKeyStore::put_api_key_ciphertext(&storage, "principal-a", "key-a", &[0, 1, 2]).await?;
@@ -129,7 +129,7 @@ async fn api_key_store_trait_path_revoke_replaces_only_existing_ciphertext()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("adapter-oauth-apikey-revoke.redb");
-    let storage = Storage::open(&path, [87; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     assert!(!ApiKeyStore::revoke_api_key(&storage, "principal-a", "missing", b"revoked").await?);
     assert_eq!(

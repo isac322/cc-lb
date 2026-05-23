@@ -1,6 +1,6 @@
 use cc_lb_config::{Config, PluginRef, UpstreamKind};
 use cc_lb_core::{BreakerRegistry, BreakerState, BulkheadRegistry, DrainController};
-use cc_lb_storage_redb::{RequestEventUpstream, Storage, StorageError, UsageRollupResolution};
+use cc_lb_storage_redb::{RedbStorage, RequestEventUpstream, StorageError, UsageRollupResolution};
 use serde::Serialize;
 
 use crate::PluginRuntimeStatus;
@@ -86,7 +86,7 @@ pub enum StatusBuildError {
 }
 
 pub fn build_upstream_health(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     config: &Config,
     breaker_registry: Option<&BreakerRegistry>,
     bulkhead_registry: Option<&BulkheadRegistry>,
@@ -139,7 +139,7 @@ pub fn build_plugins_status(
 }
 
 pub fn build_oauth_status(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     config: &Config,
     now_unix_secs: u64,
 ) -> Result<OAuthStatusResponse, StatusBuildError> {
@@ -258,7 +258,7 @@ fn build_bulkhead_health(
 }
 
 fn recent_error_count(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     upstream_name: &str,
     kind: RequestEventUpstream,
     now_unix_secs: u64,

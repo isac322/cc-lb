@@ -1,12 +1,12 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{QuotaStore, StorageResult, types::BucketKind as ApiBucketKind};
 
-use crate::{BucketKind as RedbBucketKind, Storage};
+use crate::{BucketKind as RedbBucketKind, RedbStorage};
 
 use super::error_map::{map_join_err, map_redb_err};
 
 #[async_trait]
-impl QuotaStore for Storage {
+impl QuotaStore for RedbStorage {
     async fn incr_quota(
         &self,
         principal_id: &str,
@@ -19,7 +19,7 @@ impl QuotaStore for Storage {
         let kind = to_redb_bucket_kind(kind);
 
         tokio::task::spawn_blocking(move || {
-            Storage::incr_quota(&storage, &principal_id, window_start, kind, amount)
+            RedbStorage::incr_quota(&storage, &principal_id, window_start, kind, amount)
         })
         .await
         .map_err(map_join_err)?
@@ -39,7 +39,7 @@ impl QuotaStore for Storage {
         let kind = to_redb_bucket_kind(kind);
 
         tokio::task::spawn_blocking(move || {
-            Storage::try_incr_quota(
+            RedbStorage::try_incr_quota(
                 &storage,
                 &principal_id,
                 window_start,
@@ -64,7 +64,7 @@ impl QuotaStore for Storage {
         let kind = to_redb_bucket_kind(kind);
 
         tokio::task::spawn_blocking(move || {
-            Storage::get_quota(&storage, &principal_id, window_start, kind)
+            RedbStorage::get_quota(&storage, &principal_id, window_start, kind)
         })
         .await
         .map_err(map_join_err)?
@@ -83,7 +83,7 @@ impl QuotaStore for Storage {
         let kind = to_redb_bucket_kind(kind);
 
         tokio::task::spawn_blocking(move || {
-            Storage::adjust_quota(&storage, &principal_id, window_start, kind, delta)
+            RedbStorage::adjust_quota(&storage, &principal_id, window_start, kind, delta)
         })
         .await
         .map_err(map_join_err)?
@@ -94,7 +94,7 @@ impl QuotaStore for Storage {
         let storage = self.clone();
 
         tokio::task::spawn_blocking(move || {
-            Storage::sweep_old_quotas(&storage, older_than_window_start)
+            RedbStorage::sweep_old_quotas(&storage, older_than_window_start)
         })
         .await
         .map_err(map_join_err)?

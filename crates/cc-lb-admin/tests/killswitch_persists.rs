@@ -5,12 +5,12 @@ use axum::{
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_core::DashboardBroadcaster;
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-fn test_state(storage: Arc<Storage>) -> AdminState {
+fn test_state(storage: Arc<RedbStorage>) -> AdminState {
     AdminState {
         storage: Some(storage),
         quota_manager: None,
@@ -36,7 +36,7 @@ async fn test_killswitch_persists() {
     let master_key = [0u8; 32];
 
     {
-        let storage = Arc::new(Storage::open(&db_path, master_key).unwrap());
+        let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
         let app = router(test_state(storage.clone()));
 
         let req = Request::builder()
@@ -57,7 +57,7 @@ async fn test_killswitch_persists() {
     }
 
     {
-        let storage = Arc::new(Storage::open(&db_path, master_key).unwrap());
+        let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
         assert!(storage.killswitch_enabled().unwrap());
 
         let app = router(test_state(storage.clone()));

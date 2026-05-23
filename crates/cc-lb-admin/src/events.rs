@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use cc_lb_storage_redb::{RequestEvent, RequestEventUpstream, Storage, StorageError};
+use cc_lb_storage_redb::{RedbStorage, RequestEvent, RequestEventUpstream, StorageError};
 use serde::Serialize;
 
 pub const DEFAULT_RECENT_EVENTS_LIMIT: usize = 100;
@@ -134,7 +134,7 @@ pub fn apply_filters_to_event(event: &RequestEvent, filters: &StreamFilters) -> 
 }
 
 pub fn build_recent_events_payload(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     params: &RecentEventsParams,
 ) -> Result<RecentEventsPayload, EventsError> {
     let Some(storage) = storage else {

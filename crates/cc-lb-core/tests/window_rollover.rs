@@ -2,13 +2,13 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_core::{MockClock, QuotaDecision, QuotaManager, QuotaPolicy};
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 
 #[tokio::test]
 async fn next_window_allows_after_current_window_is_exhausted()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let storage = Arc::new(Storage::open(&dir.path().join("quota.redb"), [19; 32])?);
+    let storage = Arc::new(RedbStorage::open(&dir.path().join("quota.redb"))?);
     let clock = Arc::new(MockClock::new(120));
     let manager = QuotaManager::with_clock(
         storage,

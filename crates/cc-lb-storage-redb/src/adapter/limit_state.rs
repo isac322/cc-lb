@@ -10,21 +10,23 @@ use cc_lb_storage_api::{
 use crate::{
     PrincipalLimitIdentityKind as RedbPrincipalLimitIdentityKind,
     PrincipalLimitKind as RedbPrincipalLimitKind, PrincipalLimitState as RedbPrincipalLimitState,
-    Storage,
+    RedbStorage,
 };
 
 use super::error_map::{map_join_err, map_redb_err};
 
 #[async_trait]
-impl LimitStateStore for Storage {
+impl LimitStateStore for RedbStorage {
     async fn put_principal_limit_state(&self, state: &ApiPrincipalLimitState) -> StorageResult<()> {
         let storage = self.clone();
         let state = to_redb_principal_limit_state(state);
 
-        tokio::task::spawn_blocking(move || Storage::put_principal_limit_state(&storage, &state))
-            .await
-            .map_err(map_join_err)?
-            .map_err(map_redb_err)
+        tokio::task::spawn_blocking(move || {
+            RedbStorage::put_principal_limit_state(&storage, &state)
+        })
+        .await
+        .map_err(map_join_err)?
+        .map_err(map_redb_err)
     }
 
     async fn get_principal_limit_state(
@@ -43,7 +45,7 @@ impl LimitStateStore for Storage {
         let kind = to_redb_principal_limit_kind(kind);
 
         tokio::task::spawn_blocking(move || {
-            Storage::get_principal_limit_state(
+            RedbStorage::get_principal_limit_state(
                 &storage,
                 &principal_id,
                 identity_kind,
@@ -66,7 +68,7 @@ impl LimitStateStore for Storage {
         let principal_id = principal_id.to_owned();
 
         tokio::task::spawn_blocking(move || {
-            Storage::list_principal_limit_states(&storage, &principal_id)
+            RedbStorage::list_principal_limit_states(&storage, &principal_id)
         })
         .await
         .map_err(map_join_err)?

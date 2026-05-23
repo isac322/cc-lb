@@ -2,14 +2,14 @@ use cc_lb_storage_api::{
     LimitStateStore, QuotaStore,
     types::{BucketKind, PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState},
 };
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn quota_store_trait_path_concurrent_increments_are_atomic()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("adapter-quota.redb");
-    let storage = Storage::open(&path, [61; 32])?;
+    let storage = RedbStorage::open(&path)?;
     let mut join_set = tokio::task::JoinSet::new();
 
     for _ in 0..100 {
@@ -47,7 +47,7 @@ async fn quota_store_trait_path_try_incr_respects_capacity_boundary()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("adapter-quota-capacity.redb");
-    let storage = Storage::open(&path, [63; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     let first = QuotaStore::try_incr_quota(
         &storage,
@@ -110,7 +110,7 @@ async fn quota_store_trait_path_sweep_removes_only_older_windows()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("adapter-quota-sweep.redb");
-    let storage = Storage::open(&path, [65; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     QuotaStore::incr_quota(&storage, "adapter-alice", 10, BucketKind::Requests, 3).await?;
     QuotaStore::incr_quota(&storage, "adapter-alice", 20, BucketKind::InputTokens, 5).await?;
@@ -145,7 +145,7 @@ async fn limit_state_store_trait_path_upserts_and_lists_latest_snapshots()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("adapter-limit-state.redb");
-    let storage = Storage::open(&path, [67; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     LimitStateStore::put_principal_limit_state(
         &storage,

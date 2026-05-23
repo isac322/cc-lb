@@ -1,4 +1,4 @@
-use cc_lb_storage_redb::{REQUEST_EVENTS_V1, RequestEvent, RequestEventUpstream, Storage};
+use cc_lb_storage_redb::{REQUEST_EVENTS_V1, RedbStorage, RequestEvent, RequestEventUpstream};
 use redb::{ReadableDatabase, ReadableTable};
 use serde_json::Value;
 
@@ -7,11 +7,11 @@ fn request_events_persist_across_reopen() -> Result<(), Box<dyn std::error::Erro
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("events.redb");
 
-    let storage = Storage::open(&path, [23; 32])?;
+    let storage = RedbStorage::open(&path)?;
     storage.append_request_event(&event(0))?;
     drop(storage);
 
-    let storage = Storage::open(&path, [23; 32])?;
+    let storage = RedbStorage::open(&path)?;
     let events = storage.query_request_events(1_800_000_000, u64::MAX, 10)?;
 
     assert_eq!(events.len(), 1);
@@ -30,7 +30,7 @@ fn request_events_query_returns_append_order_for_monotonic_keys()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("events.redb");
-    let storage = Storage::open(&path, [23; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     for index in 0..100 {
         storage.append_request_event(&event(index))?;
@@ -48,7 +48,7 @@ fn request_events_query_returns_append_order_for_monotonic_keys()
 fn request_event_json_rows_exclude_payload_keys() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("events.redb");
-    let storage = Storage::open(&path, [23; 32])?;
+    let storage = RedbStorage::open(&path)?;
     let request_event = event(7);
 
     let serialized = serde_json::to_value(&request_event)?;

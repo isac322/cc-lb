@@ -16,7 +16,7 @@ use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
 use cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory;
 use cc_lb_signer_aws::AwsSigV4SignerFactory;
 use cc_lb_signer_gcp::GcpOAuthSignerFactory;
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 use http::Method;
 use oauth2::{ClientId, TokenUrl};
 use serde_json::Map;
@@ -29,7 +29,7 @@ pub struct BuiltinAuthn {
 }
 
 impl BuiltinAuthn {
-    pub fn new(config: &Config, storage: Option<Arc<Storage>>) -> Self {
+    pub fn new(config: &Config, storage: Option<Arc<RedbStorage>>) -> Self {
         let defaults = default_quotas(config);
         let principal_quotas = config
             .principals
@@ -165,7 +165,7 @@ pub struct CompositeSignerFactory {
 }
 
 impl CompositeSignerFactory {
-    fn new(config: &Config, storage: Option<Arc<Storage>>) -> Self {
+    fn new(config: &Config, storage: Option<Arc<RedbStorage>>) -> Self {
         let upstreams = config
             .upstreams
             .values()
@@ -236,7 +236,7 @@ impl SignerFactory for CompositeSignerFactory {
 
 pub fn anthropic_oauth_factory(
     config: &Config,
-    storage: Option<Arc<Storage>>,
+    storage: Option<Arc<RedbStorage>>,
     principal_id: &str,
     provider: &str,
 ) -> Option<Arc<AnthropicOAuthSignerFactory>> {

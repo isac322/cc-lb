@@ -6,7 +6,7 @@ use cc_lb_plugin_api::{
     Upstream, UpstreamDialect, shape_request, sign_request,
 };
 use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 use http::header::{AUTHORIZATION, USER_AGENT};
 use http::{HeaderMap, HeaderValue, Method};
 
@@ -44,8 +44,7 @@ impl UpstreamDialect for DirectDialect {
 #[tokio::test]
 async fn sign_loads_api_key_from_storage_key() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let storage =
-        Arc::new(Storage::open(&dir.path().join("storage.redb"), [42; 32]).expect("storage"));
+    let storage = Arc::new(RedbStorage::open(&dir.path().join("storage.redb")).expect("storage"));
     storage
         .put_anthropic_api_key("alice:real_anthropic_api_key", "sk-ant-real-aaaa")
         .expect("seed real key");

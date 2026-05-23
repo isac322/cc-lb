@@ -1,16 +1,12 @@
 use base64::Engine;
 use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
-use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use redb::{ReadableDatabase, ReadableTable};
 use ring::digest::{SHA256, digest};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{API_KEYS_V1, OAUTH_CREDENTIALS_V1, Storage, StorageError};
-
-const NONCE_LEN: usize = 12;
+use crate::{API_KEYS_V1, OAUTH_CREDENTIALS_V1, RedbStorage, StorageError};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OAuthCredentials {
@@ -56,7 +52,7 @@ pub fn oauth_key(principal_id: &str, provider: &str) -> Vec<u8> {
     key
 }
 
-impl Storage {
+impl RedbStorage {
     pub fn put_oauth(
         &self,
         principal_id: &str,
@@ -64,8 +60,7 @@ impl Storage {
         creds: &OAuthCredentials,
     ) -> Result<(), StorageError> {
         let key = oauth_key(principal_id, provider);
-        let plaintext = serde_json::to_vec(creds)?;
-        let value = self.encrypt_oauth(principal_id, &plaintext)?;
+        let value = serde_json::to_vec(creds)?;
 
         let write_txn = self.db.begin_write()?;
         {
@@ -91,8 +86,7 @@ impl Storage {
             return Ok(None);
         };
 
-        let plaintext = self.decrypt_oauth(principal_id, &ciphertext)?;
-        let creds = serde_json::from_slice(&plaintext)?;
+        let creds = serde_json::from_slice(&ciphertext)?;
         Ok(Some(creds))
     }
 
@@ -159,8 +153,7 @@ impl Storage {
         let credential = AnthropicApiKeyCredential {
             anthropic_api_key: api_key.to_owned(),
         };
-        let plaintext = serde_json::to_vec(&credential)?;
-        let value = self.encrypt_value(storage_key.as_bytes(), &plaintext)?;
+        let value = serde_json::to_vec(&credential)?;
 
         let write_txn = self.db.begin_write()?;
         {
@@ -181,8 +174,7 @@ impl Storage {
             return Ok(None);
         };
 
-        let plaintext = self.decrypt_value(storage_key.as_bytes(), &ciphertext)?;
-        let credential = serde_json::from_slice::<AnthropicApiKeyCredential>(&plaintext)?;
+        let credential = serde_json::from_slice::<AnthropicApiKeyCredential>(&ciphertext)?;
         Ok(Some(credential.anthropic_api_key))
     }
 
@@ -231,8 +223,7 @@ impl Storage {
             key_hash_b64: STANDARD_NO_PAD.encode(key_hash.as_ref()),
         };
         let storage_key = api_key_storage_key(principal_id, &key_id);
-        let plaintext_record = serde_json::to_vec(&stored)?;
-        let value = self.encrypt_value(storage_key.as_slice(), &plaintext_record)?;
+        let value = serde_json::to_vec(&stored)?;
 
         let write_txn = self.db.begin_write()?;
         {
@@ -257,10 +248,9 @@ impl Storage {
             let (key, value) = row?;
             let key_bytes = key.value();
             if let Some(key_id) = api_key_id_from_storage_key(&prefix, key_bytes) {
-                let plaintext = self.decrypt_value(key_bytes, value.value())?;
                 records.push(api_key_record_from_stored(
                     key_id.to_owned(),
-                    serde_json::from_slice(&plaintext)?,
+                    serde_json::from_slice(value.value())?,
                 ));
             }
         }
@@ -291,12 +281,10 @@ impl Storage {
                 });
             };
 
-            let plaintext = self.decrypt_value(storage_key.as_slice(), &stored_value)?;
-            let mut stored: StoredApiKeyRecord = serde_json::from_slice(&plaintext)?;
+            let mut stored: StoredApiKeyRecord = serde_json::from_slice(&stored_value)?;
             if stored.revoked_at_unix_secs.is_none() {
                 stored.revoked_at_unix_secs = Some(unix_now_secs());
-                let plaintext_record = serde_json::to_vec(&stored)?;
-                let value = self.encrypt_value(storage_key.as_slice(), &plaintext_record)?;
+                let value = serde_json::to_vec(&stored)?;
                 table.insert(storage_key.as_slice(), value.as_slice())?;
             }
             api_key_record_from_stored(key_id.to_owned(), stored)
@@ -372,56 +360,7 @@ impl Storage {
         write_txn.commit()?;
         Ok(replaced)
     }
-
-    fn encrypt_oauth(&self, principal_id: &str, plaintext: &[u8]) -> Result<Vec<u8>, StorageError> {
-        self.encrypt_value(principal_id.as_bytes(), plaintext)
-    }
-
-    fn decrypt_oauth(&self, principal_id: &str, value: &[u8]) -> Result<Vec<u8>, StorageError> {
-        self.decrypt_value(principal_id.as_bytes(), value)
-    }
-
-    fn encrypt_value(&self, aad: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, StorageError> {
-        let cipher = self.cipher();
-        let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
-        let payload = Payload {
-            msg: plaintext,
-            aad,
-        };
-        let ciphertext = cipher
-            .encrypt(&nonce, payload)
-            .map_err(|_| StorageError::AeadAuthenticationFailed)?;
-
-        let mut value = Vec::with_capacity(NONCE_LEN + ciphertext.len());
-        value.extend_from_slice(&nonce);
-        value.extend_from_slice(&ciphertext);
-        Ok(value)
-    }
-
-    fn decrypt_value(&self, aad: &[u8], value: &[u8]) -> Result<Vec<u8>, StorageError> {
-        if value.len() < NONCE_LEN {
-            return Err(StorageError::CiphertextTooShort(value.len()));
-        }
-
-        let (nonce_bytes, ciphertext) = value.split_at(NONCE_LEN);
-        let cipher = self.cipher();
-        let nonce = Nonce::from_slice(nonce_bytes);
-        let payload = Payload {
-            msg: ciphertext,
-            aad,
-        };
-
-        cipher
-            .decrypt(nonce, payload)
-            .map_err(|_| StorageError::AeadAuthenticationFailed)
-    }
-
-    fn cipher(&self) -> ChaCha20Poly1305 {
-        let key = Key::from_slice(&self.master_key);
-        ChaCha20Poly1305::new(key)
-    }
 }
-
 fn api_key_storage_prefix(principal_id: &str) -> Vec<u8> {
     let mut key = Vec::with_capacity(principal_id.len() + 1);
     key.extend_from_slice(principal_id.as_bytes());

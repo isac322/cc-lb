@@ -2,14 +2,14 @@ use cc_lb_storage_api::{
     RequestEvent, RequestEventStore, RequestEventUpstream, UsageRollup, UsageRollupResolution,
     UsageRollupRun, UsageRollupStore,
 };
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 
 #[tokio::test]
 async fn rollup_usage_once_trait_path_checkpoint_is_idempotent()
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("adapter-rollups.redb");
-    let storage = Storage::open(&path, [71; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     for event in fixture_events() {
         RequestEventStore::append_request_event(&storage, &event).await?;
@@ -86,7 +86,7 @@ async fn advance_checkpoint_and_persist_trait_path_keeps_range_results_idempoten
 -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("adapter-rollups-advance.redb");
-    let storage = Storage::open(&path, [73; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     for event in fixture_events() {
         RequestEventStore::append_request_event(&storage, &event).await?;

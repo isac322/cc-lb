@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cc_lb_storage_redb::{PrincipalLimitState, Storage};
+use cc_lb_storage_redb::{PrincipalLimitState, RedbStorage};
 use thiserror::Error;
 use tokio::sync::mpsc::{self, Receiver, Sender, error::TrySendError};
 use tokio::task::JoinHandle;
@@ -50,7 +50,7 @@ impl PrincipalLimitStateSink {
 }
 
 pub fn start_principal_limit_state_writer(
-    storage: Arc<Storage>,
+    storage: Arc<RedbStorage>,
     mut receiver: Receiver<PrincipalLimitState>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {

@@ -17,7 +17,7 @@ use cc_lb_core::{
     BreakerRegistry, BulkheadRegistry, DashboardBroadcaster, DrainController, Lifecycle,
     QuotaManager,
 };
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 
 #[derive(Clone, Debug)]
 pub struct PluginRuntimeSlotStatus {
@@ -33,7 +33,7 @@ pub trait PluginRuntimeStatus: Send + Sync {
 
 #[derive(Clone)]
 pub struct AdminState {
-    pub storage: Option<Arc<Storage>>,
+    pub storage: Option<Arc<RedbStorage>>,
     pub quota_manager: Option<Arc<QuotaManager>>,
     pub lifecycle: Option<Arc<Lifecycle>>,
     pub breaker_registry: Option<Arc<BreakerRegistry>>,

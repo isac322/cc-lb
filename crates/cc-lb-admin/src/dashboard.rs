@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use cc_lb_storage_redb::{Storage, StorageError, UsageRollup, UsageRollupResolution};
+use cc_lb_storage_redb::{RedbStorage, StorageError, UsageRollup, UsageRollupResolution};
 use serde::Serialize;
 
 const MINUTE_SECS: u64 = 60;
@@ -159,7 +159,7 @@ pub fn validate_step_for_range(
 }
 
 pub fn build_dashboard_summary(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     range: DashboardRange,
     now_unix_secs: u64,
 ) -> Result<DashboardSummaryResponse, StorageError> {
@@ -193,7 +193,7 @@ pub fn build_dashboard_summary(
 }
 
 pub fn build_dashboard_usage(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     range: DashboardRange,
     step: UsageRollupResolution,
     group_by: UsageGroupBy,
@@ -231,7 +231,7 @@ pub fn build_dashboard_usage(
 }
 
 pub fn build_dashboard_usage_checked(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     range: DashboardRange,
     step: UsageRollupResolution,
     group_by: UsageGroupBy,

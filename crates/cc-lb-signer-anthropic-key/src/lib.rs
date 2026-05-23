@@ -8,7 +8,7 @@ use cc_lb_plugin_api::{
     AuthStrategy, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
     SigningCapability, Upstream, UpstreamError,
 };
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 use http::header::{AUTHORIZATION, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
 
@@ -17,7 +17,7 @@ enum AnthropicKeyCredentialSource {
     Static(SecretString),
     Storage {
         storage_key: String,
-        storage: Arc<Storage>,
+        storage: Arc<RedbStorage>,
     },
 }
 
@@ -51,7 +51,7 @@ impl AnthropicKeySigner {
         }
     }
 
-    pub fn from_storage(storage_key: impl Into<String>, storage: Arc<Storage>) -> Self {
+    pub fn from_storage(storage_key: impl Into<String>, storage: Arc<RedbStorage>) -> Self {
         Self {
             credential: AnthropicKeyCredentialSource::Storage {
                 storage_key: storage_key.into(),
@@ -120,7 +120,7 @@ impl AnthropicKeySignerFactory {
         }
     }
 
-    pub fn from_storage(storage_key: impl Into<String>, storage: Arc<Storage>) -> Self {
+    pub fn from_storage(storage_key: impl Into<String>, storage: Arc<RedbStorage>) -> Self {
         Self {
             auth_strategy: AuthStrategy::ApiKey,
             credential: AnthropicKeyCredentialSource::Storage {
@@ -158,7 +158,7 @@ impl SignerFactory for AnthropicKeySignerFactory {
 }
 
 async fn load_stored_api_key(
-    storage: Arc<Storage>,
+    storage: Arc<RedbStorage>,
     storage_key: String,
 ) -> Result<SecretString, SignerError> {
     let loaded = tokio::task::spawn_blocking(move || storage.get_anthropic_api_key(&storage_key))

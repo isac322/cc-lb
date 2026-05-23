@@ -1,17 +1,17 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{AuditStore, StorageResult, types::AuditEntry as ApiAuditEntry};
 
-use crate::{AuditEntry as RedbAuditEntry, Storage};
+use crate::{AuditEntry as RedbAuditEntry, RedbStorage};
 
 use super::error_map::{map_join_err, map_redb_err};
 
 #[async_trait]
-impl AuditStore for Storage {
+impl AuditStore for RedbStorage {
     async fn append_audit(&self, entry: &ApiAuditEntry) -> StorageResult<()> {
         let storage = self.clone();
         let entry = to_redb_audit_entry(entry);
 
-        tokio::task::spawn_blocking(move || Storage::append_audit(&storage, &entry))
+        tokio::task::spawn_blocking(move || RedbStorage::append_audit(&storage, &entry))
             .await
             .map_err(map_join_err)?
             .map_err(map_redb_err)
@@ -28,7 +28,7 @@ impl AuditStore for Storage {
         let principal_id = principal_id.map(str::to_owned);
 
         tokio::task::spawn_blocking(move || {
-            Storage::query_audit(&storage, principal_id.as_deref(), since, until, limit)
+            RedbStorage::query_audit(&storage, principal_id.as_deref(), since, until, limit)
         })
         .await
         .map_err(map_join_err)?
@@ -39,7 +39,7 @@ impl AuditStore for Storage {
     async fn prune_audit(&self, older_than: u64) -> StorageResult<u64> {
         let storage = self.clone();
 
-        tokio::task::spawn_blocking(move || Storage::prune_audit(&storage, older_than))
+        tokio::task::spawn_blocking(move || RedbStorage::prune_audit(&storage, older_than))
             .await
             .map_err(map_join_err)?
             .map_err(map_redb_err)

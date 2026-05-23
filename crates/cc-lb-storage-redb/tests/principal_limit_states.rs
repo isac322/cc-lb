@@ -1,5 +1,5 @@
 use cc_lb_storage_redb::{
-    PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, Storage,
+    PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, RedbStorage,
     principal_limit_state_key,
 };
 
@@ -8,7 +8,7 @@ fn principal_limit_states_persist_across_reopen() -> Result<(), Box<dyn std::err
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("limits.redb");
 
-    let storage = Storage::open(&path, [31; 32])?;
+    let storage = RedbStorage::open(&path)?;
     storage.put_principal_limit_state(&state(
         "principal-a",
         PrincipalLimitIdentityKind::Account,
@@ -22,7 +22,7 @@ fn principal_limit_states_persist_across_reopen() -> Result<(), Box<dyn std::err
     ))?;
     drop(storage);
 
-    let storage = Storage::open(&path, [31; 32])?;
+    let storage = RedbStorage::open(&path)?;
     let reopened = storage
         .get_principal_limit_state(
             "principal-a",
@@ -49,7 +49,7 @@ fn principal_limit_states_persist_across_reopen() -> Result<(), Box<dyn std::err
 fn principal_limit_state_upsert_keeps_latest_snapshot() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("limits.redb");
-    let storage = Storage::open(&path, [31; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     storage.put_principal_limit_state(&state(
         "principal-a",
@@ -94,7 +94,7 @@ fn account_grouping_does_not_collapse_unobserved_identity() -> Result<(), Box<dy
 {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("limits.redb");
-    let storage = Storage::open(&path, [31; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     storage.put_principal_limit_state(&state(
         "principal-a",
@@ -167,7 +167,7 @@ fn list_principal_limit_states_filters_by_value_principal_id()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("limits.redb");
-    let storage = Storage::open(&path, [31; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     storage.put_principal_limit_state(&state(
         "principal-a",

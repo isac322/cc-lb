@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use cc_lb_storage_redb::{
     AUDIT_LOG_V1, AuditEntry, BucketKind, CURRENT_SCHEMA_VERSION, OAUTH_CREDENTIALS_V1,
-    OAuthCredentials, QUOTAS_BY_PRINCIPAL_V1, Storage,
+    OAuthCredentials, QUOTAS_BY_PRINCIPAL_V1, RedbStorage,
 };
 use redb::{ReadableDatabase, ReadableTable};
 
@@ -164,7 +164,7 @@ fn cleanup_child(child: &mut Child) {
 
 fn child_quota(path: &Path, control_dir: &Path, iteration: usize) -> TestResult {
     {
-        let storage = Storage::open(path, MASTER_KEY)?;
+        let storage = RedbStorage::open(path)?;
         storage.set_killswitch_enabled(true)?;
         let principal_id = quota_committed_principal(iteration);
         for index in 0..COMMITTED_ROWS {
@@ -195,7 +195,7 @@ fn child_quota(path: &Path, control_dir: &Path, iteration: usize) -> TestResult 
 
 fn child_oauth_aead(path: &Path, control_dir: &Path, iteration: usize) -> TestResult {
     {
-        let storage = Storage::open(path, MASTER_KEY)?;
+        let storage = RedbStorage::open(path)?;
         storage.set_killswitch_enabled(true)?;
         for index in 0..COMMITTED_ROWS {
             let principal_id = oauth_committed_principal(iteration, index);
@@ -225,7 +225,7 @@ fn child_oauth_aead(path: &Path, control_dir: &Path, iteration: usize) -> TestRe
 
 fn child_audit(path: &Path, control_dir: &Path, iteration: usize) -> TestResult {
     {
-        let storage = Storage::open(path, MASTER_KEY)?;
+        let storage = RedbStorage::open(path)?;
         storage.set_killswitch_enabled(true)?;
         for index in 0..COMMITTED_ROWS {
             storage.append_audit(&audit_entry(iteration, index, false))?;
@@ -254,7 +254,7 @@ fn verify_quota(
 ) -> Result<VerificationReport, Box<dyn std::error::Error>> {
     let schema_version;
     {
-        let storage = Storage::open(path, MASTER_KEY)?;
+        let storage = RedbStorage::open(path)?;
         schema_version = verify_schema_and_killswitch(&storage)?;
         let principal_id = quota_committed_principal(iteration);
         for index in 0..COMMITTED_ROWS {
@@ -298,7 +298,7 @@ fn verify_oauth_aead(
 ) -> Result<VerificationReport, Box<dyn std::error::Error>> {
     let schema_version;
     {
-        let storage = Storage::open(path, MASTER_KEY)?;
+        let storage = RedbStorage::open(path)?;
         schema_version = verify_schema_and_killswitch(&storage)?;
         for index in 0..COMMITTED_ROWS {
             let principal_id = oauth_committed_principal(iteration, index);
@@ -345,7 +345,7 @@ fn verify_audit(
 ) -> Result<VerificationReport, Box<dyn std::error::Error>> {
     let schema_version;
     {
-        let storage = Storage::open(path, MASTER_KEY)?;
+        let storage = RedbStorage::open(path)?;
         schema_version = verify_schema_and_killswitch(&storage)?;
         let entries = storage.query_audit(
             Some(&audit_principal(iteration)),

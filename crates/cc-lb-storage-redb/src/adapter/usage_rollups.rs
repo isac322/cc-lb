@@ -8,18 +8,18 @@ use cc_lb_storage_api::{
 };
 
 use crate::{
-    Storage, UsageRollup as RedbUsageRollup, UsageRollupKey as RedbUsageRollupKey,
+    RedbStorage, UsageRollup as RedbUsageRollup, UsageRollupKey as RedbUsageRollupKey,
     UsageRollupResolution as RedbUsageRollupResolution, UsageRollupRun as RedbUsageRollupRun,
 };
 
 use super::error_map::{map_join_err, map_redb_err};
 
 #[async_trait]
-impl UsageRollupStore for Storage {
+impl UsageRollupStore for RedbStorage {
     async fn rollup_usage_once(&self) -> StorageResult<ApiUsageRollupRun> {
         let storage = self.clone();
 
-        tokio::task::spawn_blocking(move || Storage::rollup_usage_once(&storage))
+        tokio::task::spawn_blocking(move || RedbStorage::rollup_usage_once(&storage))
             .await
             .map_err(map_join_err)?
             .map(to_api_usage_rollup_run)
@@ -29,7 +29,7 @@ impl UsageRollupStore for Storage {
     async fn query_usage_rollups(&self) -> StorageResult<Vec<ApiUsageRollup>> {
         let storage = self.clone();
 
-        tokio::task::spawn_blocking(move || Storage::query_usage_rollups(&storage))
+        tokio::task::spawn_blocking(move || RedbStorage::query_usage_rollups(&storage))
             .await
             .map_err(map_join_err)?
             .map(|rollups| rollups.into_iter().map(to_api_usage_rollup).collect())
@@ -46,7 +46,7 @@ impl UsageRollupStore for Storage {
         let resolution = to_redb_usage_rollup_resolution(resolution);
 
         tokio::task::spawn_blocking(move || {
-            Storage::query_usage_rollups_in_range(
+            RedbStorage::query_usage_rollups_in_range(
                 &storage,
                 resolution,
                 window_start_unix_secs,
@@ -62,7 +62,7 @@ impl UsageRollupStore for Storage {
     async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>> {
         let storage = self.clone();
 
-        tokio::task::spawn_blocking(move || Storage::usage_rollup_checkpoint(&storage))
+        tokio::task::spawn_blocking(move || RedbStorage::usage_rollup_checkpoint(&storage))
             .await
             .map_err(map_join_err)?
             .map_err(map_redb_err)
@@ -75,7 +75,7 @@ impl UsageRollupStore for Storage {
         let storage = self.clone();
         let _run = to_redb_usage_rollup_run(run);
 
-        tokio::task::spawn_blocking(move || Storage::rollup_usage_once(&storage))
+        tokio::task::spawn_blocking(move || RedbStorage::rollup_usage_once(&storage))
             .await
             .map_err(map_join_err)?
             .map(|_| ())

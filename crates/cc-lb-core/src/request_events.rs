@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cc_lb_storage_redb::{RequestEvent, Storage};
+use cc_lb_storage_redb::{RedbStorage, RequestEvent};
 use thiserror::Error;
 use tokio::sync::mpsc::{self, Receiver, Sender, error::TrySendError};
 use tokio::task::JoinHandle;
@@ -47,7 +47,7 @@ impl RequestEventSink {
 }
 
 pub fn start_request_event_writer(
-    storage: Arc<Storage>,
+    storage: Arc<RedbStorage>,
     mut receiver: Receiver<RequestEvent>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {

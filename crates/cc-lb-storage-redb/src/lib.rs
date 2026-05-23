@@ -13,6 +13,7 @@ mod usage_rollups;
 use std::path::Path;
 use std::sync::Arc;
 
+use cc_lb_storage_api::BackendKind;
 use redb::{Database, TableDefinition};
 use thiserror::Error;
 
@@ -49,14 +50,16 @@ pub const CONFIG_HISTORY_V1: TableDefinition<u64, &[u8]> =
     TableDefinition::new("CONFIG_HISTORY_V1");
 pub const SCHEMA_VERSION_V1: TableDefinition<&str, u32> = TableDefinition::new("SCHEMA_VERSION_V1");
 pub const KILLSWITCH_V1: TableDefinition<&str, bool> = TableDefinition::new("KILLSWITCH_V1");
+pub const META_BACKEND_KIND_V1: TableDefinition<&str, &str> =
+    TableDefinition::new("META_BACKEND_KIND_V1");
 
 pub(crate) const SCHEMA_VERSION_KEY: &str = "version";
 pub(crate) const KILLSWITCH_KEY: &str = "enabled";
+pub(crate) const BACKEND_KIND_KEY: &str = "backend_kind";
 
 #[derive(Clone)]
-pub struct Storage {
+pub struct RedbStorage {
     pub(crate) db: Arc<Database>,
-    pub(crate) master_key: [u8; 32],
 }
 
 #[derive(Debug, Error)]
@@ -73,10 +76,6 @@ pub enum StorageError {
     Commit(#[source] Box<redb::CommitError>),
     #[error("json serialization error: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("aead authentication failure")]
-    AeadAuthenticationFailed,
-    #[error("oauth ciphertext is too short: {0} bytes")]
-    CiphertextTooShort(usize),
     #[error("unsupported schema version {found}; current supported version is {current}")]
     UnsupportedSchemaVersion { found: u32, current: u32 },
     #[error("invalid schema version {0}")]
@@ -110,6 +109,13 @@ pub enum StorageError {
         principal_id: String,
         key_id: String,
     },
+    #[error("backend kind mismatch: stored={stored:?}, configured={configured:?}")]
+    BackendKindMismatch {
+        stored: BackendKind,
+        configured: BackendKind,
+    },
+    #[error("invalid backend kind {0}")]
+    InvalidBackendKind(String),
 }
 
 impl From<redb::DatabaseError> for StorageError {
@@ -142,16 +148,24 @@ impl From<redb::CommitError> for StorageError {
     }
 }
 
-impl Storage {
-    pub fn open(path: &Path, master_key: [u8; 32]) -> Result<Self, StorageError> {
+impl RedbStorage {
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
         let db = Arc::new(Database::create(path)?);
         migration::initialize_schema(&db)?;
 
-        Ok(Self { db, master_key })
+        Ok(Self { db })
     }
 
     pub fn schema_version(&self) -> Result<u32, StorageError> {
         migration::schema_version(&self.db)
+    }
+
+    pub fn backend_kind(&self) -> Result<BackendKind, StorageError> {
+        migration::backend_kind(&self.db)
+    }
+
+    pub fn initialize(&self, requested: BackendKind) -> Result<(), StorageError> {
+        migration::initialize_backend(&self.db, requested)
     }
 
     pub fn killswitch_enabled(&self) -> Result<bool, StorageError> {

@@ -28,7 +28,7 @@ use cc_lb_core::{
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_plugin_api::{ObservabilityHook, PluginManifest, PluginRuntime};
 use cc_lb_runtime_extism::{ExtismRuntime, SignerFactoryResolver};
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 use http_body_util::BodyExt;
 use serde::Serialize;
 use thiserror::Error;
@@ -540,7 +540,7 @@ fn init_observability(config: &mut Config) -> Result<TracingGuard, BuildError> {
 
 fn host_signer_resolver(
     config: &Config,
-    storage: Option<Arc<Storage>>,
+    storage: Option<Arc<RedbStorage>>,
 ) -> Option<SignerFactoryResolver> {
     let storage = storage?;
     let config = config.clone();
@@ -571,7 +571,7 @@ fn host_signer_resolver(
     ))
 }
 
-fn open_storage(config: &Config) -> Result<Option<Arc<Storage>>, BuildError> {
+fn open_storage(config: &Config) -> Result<Option<Arc<RedbStorage>>, BuildError> {
     let Some(path) = &config.storage.redb_path else {
         return Ok(None);
     };
@@ -580,8 +580,8 @@ fn open_storage(config: &Config) -> Result<Option<Arc<Storage>>, BuildError> {
             env: config.storage.oauth_aead_key_env.clone(),
         }
     })?;
-    let key = decode_hex_key(&key_hex)?;
-    Ok(Some(Arc::new(Storage::open(path, key)?)))
+    let _key = decode_hex_key(&key_hex)?;
+    Ok(Some(Arc::new(RedbStorage::open(path)?)))
 }
 
 fn decode_hex_key(value: &str) -> Result<[u8; 32], BuildError> {
@@ -751,7 +751,7 @@ fn spawn_reload_watcher(
     })
 }
 
-fn start_usage_rollup_worker(storage: Arc<Storage>, period: Duration) -> JoinHandle<()> {
+fn start_usage_rollup_worker(storage: Arc<RedbStorage>, period: Duration) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(period);
         loop {

@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use cc_lb_config::{Config, PluginRef, TlsConfig};
 use cc_lb_plugin_api::{PluginManifest, PluginRuntime};
 use cc_lb_runtime_extism::ExtismRuntime;
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 use thiserror::Error;
 use tokio::net::TcpListener;
 
@@ -55,11 +55,11 @@ pub async fn run(
         let key_name = &cfg.storage.oauth_aead_key_env;
         let key_hex =
             env::var(key_name).map_err(|_| PreflightError::MasterKeyMissing(key_name.clone()))?;
-        let key = decode_master_key(key_name, &key_hex)?;
+        let _key = decode_master_key(key_name, &key_hex)?;
         report
             .successes
             .push(format!("storage master key resolved from {key_name}"));
-        let _storage = Storage::open(redb_path, key)
+        let _storage = RedbStorage::open(redb_path)
             .map_err(|error| PreflightError::Storage(error.to_string()))?;
         report
             .successes

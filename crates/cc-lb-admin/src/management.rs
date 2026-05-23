@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use cc_lb_config::{Config, PrincipalSpec};
-use cc_lb_storage_redb::{ApiKeyRecord, AuditEntry, Storage, StorageError};
+use cc_lb_storage_redb::{ApiKeyRecord, AuditEntry, RedbStorage, StorageError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -135,7 +135,7 @@ pub struct RevokeCredentialResponse {
 }
 
 pub fn create_principal(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     current: &dyn CurrentConfig,
     request: CreatePrincipalRequest,
     now_unix_secs: u64,
@@ -172,7 +172,7 @@ pub fn create_principal(
 }
 
 pub fn update_principal(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     current: &dyn CurrentConfig,
     principal_id: String,
     request: UpdatePrincipalRequest,
@@ -207,7 +207,7 @@ pub fn update_principal(
 }
 
 pub fn set_principal_disabled(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     current: &dyn CurrentConfig,
     principal_id: String,
     disabled: bool,
@@ -250,7 +250,7 @@ pub fn set_principal_disabled(
 }
 
 pub fn update_allowed_models(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     current: &dyn CurrentConfig,
     principal_id: String,
     request: AllowedModelsRequest,
@@ -300,7 +300,7 @@ pub fn update_allowed_models(
 }
 
 pub fn issue_principal_key(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     current: &dyn CurrentConfig,
     principal_id: String,
     request: IssueKeyRequest,
@@ -329,7 +329,7 @@ pub fn issue_principal_key(
 }
 
 pub fn list_principal_keys(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     current: &dyn CurrentConfig,
     principal_id: String,
 ) -> Result<KeyListResponse, ManagementError> {
@@ -343,7 +343,7 @@ pub fn list_principal_keys(
 }
 
 pub fn revoke_principal_key(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     current: &dyn CurrentConfig,
     principal_id: String,
     key_id: String,
@@ -371,7 +371,7 @@ pub fn revoke_principal_key(
 }
 
 pub fn list_credentials(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     config: &Config,
     now_unix_secs: u64,
 ) -> Result<CredentialsResponse, ManagementError> {
@@ -441,7 +441,7 @@ pub fn list_credentials(
 }
 
 pub fn rotate_credential(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     config: &Config,
     principal_id: String,
     provider: String,
@@ -496,7 +496,7 @@ pub fn rotate_credential(
 }
 
 pub fn revoke_credential(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     config: &Config,
     principal_id: String,
     provider: String,
@@ -552,7 +552,7 @@ pub fn revoke_credential(
 }
 
 fn apply_principal_change<T, F>(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     current: &dyn CurrentConfig,
     now_unix_secs: u64,
     transform: F,
@@ -587,7 +587,7 @@ fn ensure_principal_value(
 }
 
 fn principal_exists_in_current_or_draft(
-    storage: &Storage,
+    storage: &RedbStorage,
     current: &dyn CurrentConfig,
     principal_id: &str,
 ) -> Result<bool, ManagementError> {
@@ -608,7 +608,7 @@ fn principal_exists_in_current_or_draft(
 }
 
 fn append_admin_audit(
-    storage: &Storage,
+    storage: &RedbStorage,
     now_unix_secs: u64,
     principal_id: &str,
     kind: &str,

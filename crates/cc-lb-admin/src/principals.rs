@@ -1,6 +1,6 @@
 use cc_lb_config::Config;
 use cc_lb_storage_redb::{
-    PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, Storage, StorageError,
+    PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, RedbStorage, StorageError,
     UsageRollupResolution,
 };
 use serde::Serialize;
@@ -50,7 +50,7 @@ pub(crate) enum T9Error {
 }
 
 pub(crate) fn build_principal_usage(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     config: &Config,
     principal_id: &str,
     range: DashboardRange,
@@ -92,7 +92,7 @@ pub(crate) fn build_principal_usage(
 }
 
 pub(crate) fn build_principal_limits(
-    storage: Option<&Storage>,
+    storage: Option<&RedbStorage>,
     config: &Config,
     principal_id: &str,
     _now_unix_secs: u64,
