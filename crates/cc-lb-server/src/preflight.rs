@@ -232,7 +232,7 @@ async fn bind_addr(addr: SocketAddr) -> Result<(), PreflightError> {
 fn ulimit_warning() -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        use nix::sys::resource::{getrlimit, Resource};
+        use nix::sys::resource::{Resource, getrlimit};
 
         match getrlimit(Resource::RLIMIT_NOFILE) {
             Ok((soft, _hard)) if soft < 65_536 => Some(format!(

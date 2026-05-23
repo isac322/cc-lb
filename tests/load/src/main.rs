@@ -1,14 +1,14 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, bail, Context, Result};
+use anyhow::{Context, Result, anyhow, bail};
 use cc_lb_load_tests::{
-    evaluate_summary, mode_key, round3, Baseline, EndpointSummary, Evidence, ModeSummary, ToolInfo,
-    BASELINE_PATH, EVIDENCE_PATH,
+    BASELINE_PATH, Baseline, EVIDENCE_PATH, EndpointSummary, Evidence, ModeSummary, ToolInfo,
+    evaluate_summary, mode_key, round3,
 };
 use serde_json::json;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};

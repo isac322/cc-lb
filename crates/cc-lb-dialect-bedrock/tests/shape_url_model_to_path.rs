@@ -1,7 +1,7 @@
 mod common;
 
 use cc_lb_dialect_bedrock::BedrockRuntimeDialect;
-use cc_lb_plugin_api::{shape_request, DialectError, Upstream};
+use cc_lb_plugin_api::{DialectError, Upstream, shape_request};
 
 #[test]
 fn model_moves_to_bedrock_runtime_path_and_colon_suffix_is_preserved() {
@@ -39,10 +39,11 @@ fn streaming_shape_uses_response_stream_endpoint() {
     )
     .expect("runtime shape succeeds");
 
-    assert!(shaped
-        .url()
-        .as_str()
-        .ends_with("/model/anthropic.claude-3-5-sonnet-20241022-v2:0/invoke-with-response-stream"));
+    assert!(
+        shaped.url().as_str().ends_with(
+            "/model/anthropic.claude-3-5-sonnet-20241022-v2:0/invoke-with-response-stream"
+        )
+    );
     assert_eq!(
         shaped
             .headers()

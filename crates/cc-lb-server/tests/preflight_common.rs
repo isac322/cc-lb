@@ -15,13 +15,15 @@ pub struct EnvGuard {
 impl EnvGuard {
     pub fn remove(key: &'static str) -> Self {
         let previous = env::var_os(key);
-        env::remove_var(key);
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::remove_var(key) };
         Self { key, previous }
     }
 
     pub fn set(key: &'static str, value: &str) -> Self {
         let previous = env::var_os(key);
-        env::set_var(key, value);
+        // TODO: Audit that the environment access only happens in single-threaded code.
+        unsafe { env::set_var(key, value) };
         Self { key, previous }
     }
 }
@@ -29,9 +31,11 @@ impl EnvGuard {
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         if let Some(previous) = &self.previous {
-            env::set_var(self.key, previous);
+            // TODO: Audit that the environment access only happens in single-threaded code.
+            unsafe { env::set_var(self.key, previous) };
         } else {
-            env::remove_var(self.key);
+            // TODO: Audit that the environment access only happens in single-threaded code.
+            unsafe { env::remove_var(self.key) };
         }
     }
 }

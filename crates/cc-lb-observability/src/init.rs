@@ -99,8 +99,7 @@ const METRIC_DEFINITIONS: [MetricDefinition; 17] = [
     MetricDefinition {
         name: "cc_lb_tokens_total",
         kind: MetricKind::Counter,
-        description:
-            "Total upstream-reported tokens by principal, upstream, model, direction, and status.",
+        description: "Total upstream-reported tokens by principal, upstream, model, direction, and status.",
     },
     MetricDefinition {
         name: "cc_lb_virtual_cost_usd_total",

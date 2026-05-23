@@ -2,8 +2,8 @@ mod common;
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    shape_request, sign_request, DialectError, PluginRuntime, ShapedRequest, ShapedRequestBuilder,
-    Upstream, UpstreamDialect,
+    DialectError, PluginRuntime, ShapedRequest, ShapedRequestBuilder, Upstream, UpstreamDialect,
+    shape_request, sign_request,
 };
 use cc_lb_runtime_extism::ExtismRuntime;
 use http::{HeaderMap, StatusCode};
@@ -118,9 +118,10 @@ async fn unsupported_envelope_version_returns_runtime_error() {
         Ok(_) => panic!("unsupported envelope unexpectedly succeeded"),
         Err(err) => err,
     };
-    assert!(err
-        .to_string()
-        .contains("unsupported plugin envelope version"));
+    assert!(
+        err.to_string()
+            .contains("unsupported plugin envelope version")
+    );
 }
 
 #[tokio::test]

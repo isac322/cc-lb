@@ -6,7 +6,7 @@ use std::fs;
 use bytes::Bytes;
 use cc_lb_plugin_api::{PluginManifest, Principal, PrincipalKind, RequestContext};
 use http::{HeaderMap, Method};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 pub struct WasmFixture {
@@ -365,7 +365,7 @@ fn bytes_helper(name: &str, bytes: &[u8]) -> String {
 }
 
 fn base64(bytes: &[u8]) -> String {
-    use base64::engine::general_purpose::STANDARD;
     use base64::Engine;
+    use base64::engine::general_purpose::STANDARD;
     STANDARD.encode(bytes)
 }

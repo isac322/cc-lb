@@ -1,4 +1,4 @@
-use cc_lb_observability::{metric_definitions, register_metrics, MetricKind};
+use cc_lb_observability::{MetricKind, metric_definitions, register_metrics};
 
 #[test]
 fn describes_all_required_metrics() {

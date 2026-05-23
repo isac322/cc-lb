@@ -8,7 +8,7 @@ pub mod mantle;
 pub mod runtime;
 
 pub use error_map::{bedrock_error_to_anthropic_json, map_bedrock_error_type};
-pub use eventstream_converter::{convert_eventstream_to_sse_bytes, EventStreamConvertError};
+pub use eventstream_converter::{EventStreamConvertError, convert_eventstream_to_sse_bytes};
 pub use mantle::BedrockMantleDialect;
 pub use runtime::{BedrockBodyTransform, BedrockRuntimeDialect};
 

@@ -1,7 +1,7 @@
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use cc_lb_plugin_api::{ObservabilityError, ObservabilityHook, ObserveEvent};
-use tokio::sync::mpsc::{self, error::TrySendError, Receiver, Sender};
+use tokio::sync::mpsc::{self, Receiver, Sender, error::TrySendError};
 
 pub const DEFAULT_HOOK_CHANNEL_CAPACITY: usize = 4096;
 

@@ -3,7 +3,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use tempfile::{tempdir, TempDir};
+use tempfile::{TempDir, tempdir};
 
 pub fn temp_config(contents: &str) -> (TempDir, PathBuf) {
     let dir = tempdir().unwrap();

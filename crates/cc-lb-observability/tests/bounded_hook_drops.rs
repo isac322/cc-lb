@@ -1,5 +1,5 @@
 use cc_lb_observability::{
-    dropped_events_total, BoundedChannelHook, ObservabilityHook, ObserveEvent,
+    BoundedChannelHook, ObservabilityHook, ObserveEvent, dropped_events_total,
 };
 
 #[tokio::test]

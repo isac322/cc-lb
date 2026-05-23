@@ -4,10 +4,14 @@ use std::time::{Duration, Instant};
 
 #[tokio::test]
 async fn latency_injection() {
-    std::env::set_var("CC_LB_CHAOS_LATENCY_MS", "500");
-    std::env::set_var("CC_LB_CHAOS_DROP_PCT", "0");
-    std::env::set_var("CC_LB_CHAOS_RST_AFTER_BYTES", "0");
-    std::env::set_var("CC_LB_CHAOS_TRUNCATE_AFTER_EVENTS", "0");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("CC_LB_CHAOS_LATENCY_MS", "500") };
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("CC_LB_CHAOS_DROP_PCT", "0") };
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("CC_LB_CHAOS_RST_AFTER_BYTES", "0") };
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("CC_LB_CHAOS_TRUNCATE_AFTER_EVENTS", "0") };
 
     let router = chaos_common::start_router(chaos_common::default_fake_config()).await;
     let started = Instant::now();

@@ -3,8 +3,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
     AuthnError, AuthnOutcome, DialectError, Principal, PrincipalQuotas, RequestContext,
@@ -15,7 +15,7 @@ use cc_lb_plugin_api::{
 use http::header::{HeaderName, HeaderValue};
 use http::{HeaderMap, Method, StatusCode};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use url::Url;
 
 use crate::{PluginCallError, PluginSlot, SignerFactoryResolver};

@@ -3,7 +3,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use clap::Parser;
-use fake_bedrock_runtime::{app, AppConfig};
+use fake_bedrock_runtime::{AppConfig, app};
 
 #[derive(Debug, Parser)]
 struct Args {

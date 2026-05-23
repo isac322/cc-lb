@@ -16,12 +16,12 @@ use tokio::sync::Notify;
 use url::Url;
 
 use common::{
-    collect_body, messages_request, signed_request, RecordingHook, TestAuthn, TestRouter, TestState,
+    RecordingHook, TestAuthn, TestRouter, TestState, collect_body, messages_request, signed_request,
 };
 
 #[tokio::test]
-async fn execute_returns_bulkhead_full_when_queue_times_out(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn execute_returns_bulkhead_full_when_queue_times_out()
+-> Result<(), Box<dyn std::error::Error>> {
     let hold = Arc::new(HoldDispatch::default());
     let bulkhead = Bulkhead::new(
         "anthropic-direct",

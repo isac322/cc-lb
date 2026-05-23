@@ -107,8 +107,8 @@ pub mod arcswap_cert {
 
 #[cfg(loom)]
 pub mod single_flight {
-    use loom::sync::atomic::{AtomicU32, AtomicU64, Ordering};
     use loom::sync::Mutex;
+    use loom::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
     pub struct RefreshState {
         lock: Mutex<()>,

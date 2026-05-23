@@ -1,11 +1,11 @@
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, to_bytes};
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    sign_request, Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder,
-    SignerFactory, Upstream, UpstreamDialect,
+    Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder, SignerFactory,
+    Upstream, UpstreamDialect, sign_request,
 };
 use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
-use fake_anthropic::{app, AppConfig};
+use fake_anthropic::{AppConfig, app};
 use http::{HeaderMap, Method, Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;

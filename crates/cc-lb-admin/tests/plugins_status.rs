@@ -5,11 +5,11 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use cc_lb_admin::{router, AdminState};
+use cc_lb_admin::{AdminState, router};
 use cc_lb_config::{Config, PluginRef};
 use cc_lb_core::DashboardBroadcaster;
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 #[tokio::test]

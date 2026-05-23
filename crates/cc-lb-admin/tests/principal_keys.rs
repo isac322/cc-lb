@@ -6,7 +6,7 @@ use config_admin_common::{
     app, assert_private, authed_bytes, authed_json, temp_storage, test_state,
     unauthenticated_status,
 };
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[tokio::test]
 async fn issue_list_and_revoke_key_preserves_one_time_plaintext_contract() {
@@ -27,9 +27,11 @@ async fn issue_list_and_revoke_key_preserves_one_time_plaintext_contract() {
     let plaintext = issue["plaintext_key"].as_str().unwrap().to_owned();
     let key_id = issue["key_id"].as_str().unwrap().to_owned();
     assert_eq!(plaintext.len(), 43);
-    assert!(plaintext
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_'));
+    assert!(
+        plaintext
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || ch == '-' || ch == '_')
+    );
     assert_eq!(key_id.len(), 12);
     assert_eq!(count_occurrences(&issue_body, plaintext.as_bytes()), 1);
 

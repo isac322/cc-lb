@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-use fake_anthropic::{app as fake_anthropic_app, AppConfig};
+use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};

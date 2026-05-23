@@ -7,12 +7,12 @@ use std::sync::{Arc, RwLock};
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use bytes::Bytes;
-use cc_lb_admin::{router, AdminState, ConfigReloader, CurrentConfig};
+use cc_lb_admin::{AdminState, ConfigReloader, CurrentConfig, router};
 use cc_lb_config::{Config, QuotasConfig};
 use cc_lb_core::DashboardBroadcaster;
 use cc_lb_storage_redb::Storage;
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 pub const TOKEN: &str = "test-token";

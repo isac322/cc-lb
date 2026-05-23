@@ -5,8 +5,8 @@ use std::time::{Duration, SystemTime};
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    shape_request, Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder,
-    Upstream, UpstreamDialect,
+    Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder, Upstream,
+    UpstreamDialect, shape_request,
 };
 use cc_lb_signer_gcp::{GcpOAuthSigner, GcpToken, StaticGcpTokenProvider};
 use http::header::CONTENT_TYPE;

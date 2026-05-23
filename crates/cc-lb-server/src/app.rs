@@ -3,10 +3,12 @@ use std::fmt::Write as _;
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use axum::Json;
+use axum::Router;
 use axum::body::Body;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::State;
@@ -14,16 +16,14 @@ use axum::http::header::HeaderValue;
 use axum::http::{HeaderName, Request, Response, StatusCode};
 use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
-use axum::Json;
-use axum::Router;
 use cc_lb_config::{Config, PluginRef, TlsConfig};
 use cc_lb_core::BreakerState;
 use cc_lb_core::{
-    make_default_dispatcher, start_principal_limit_state_writer, start_request_event_writer,
-    start_sweep, BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch,
-    BulkheadRegistry, CircuitBreakerDispatch, DashboardBroadcaster, ErrorNormalizer,
-    HopByHopStripLayer, Lifecycle, LifecycleConfig, PrincipalLimitStateSink, QuotaManager,
-    QuotaPolicy, RequestEventSink, UpstreamDispatch, UpstreamKind,
+    BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
+    CircuitBreakerDispatch, DashboardBroadcaster, ErrorNormalizer, HopByHopStripLayer, Lifecycle,
+    LifecycleConfig, PrincipalLimitStateSink, QuotaManager, QuotaPolicy, RequestEventSink,
+    UpstreamDispatch, UpstreamKind, make_default_dispatcher, start_principal_limit_state_writer,
+    start_request_event_writer, start_sweep,
 };
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_plugin_api::{ObservabilityHook, PluginManifest, PluginRuntime};

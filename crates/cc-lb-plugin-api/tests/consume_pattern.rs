@@ -4,9 +4,9 @@ use std::process::Command;
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    shape_request, sign_request, DialectError, Principal, PrincipalKind, RequestContext,
-    ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError, SigningCapability,
-    Upstream, UpstreamDialect,
+    DialectError, Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder,
+    SignedRequest, Signer, SignerError, SigningCapability, Upstream, UpstreamDialect,
+    shape_request, sign_request,
 };
 use http::{HeaderMap, Method};
 

@@ -5,7 +5,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use cc_lb_admin::{router, AdminState};
+use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_core::DashboardBroadcaster;
 use cc_lb_storage_redb::{RequestEvent, RequestEventUpstream, Storage};
@@ -83,9 +83,11 @@ async fn summary_empty_storage_returns_zero_buckets() {
     let buckets = json["sparkline"]["buckets"].as_array().unwrap();
     assert_eq!(buckets.len(), 15);
     assert_contiguous(buckets, 60);
-    assert!(buckets
-        .iter()
-        .all(|bucket| bucket["request_count"].as_u64().unwrap() == 0));
+    assert!(
+        buckets
+            .iter()
+            .all(|bucket| bucket["request_count"].as_u64().unwrap() == 0)
+    );
 }
 
 #[tokio::test]
@@ -205,6 +207,7 @@ fn seed_summary_events(storage: &Storage, base: u64) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn event(
     ts: u64,
     request_id: &str,

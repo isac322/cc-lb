@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use cc_lb_storage_redb::{RequestEvent, Storage};
 use thiserror::Error;
-use tokio::sync::mpsc::{self, error::TrySendError, Receiver, Sender};
+use tokio::sync::mpsc::{self, Receiver, Sender, error::TrySendError};
 use tokio::task::JoinHandle;
 
 pub const DEFAULT_REQUEST_EVENT_CHANNEL_CAPACITY: usize = 4096;

@@ -1,6 +1,6 @@
 use cc_lb_storage_redb::{
-    RequestEvent, RequestEventUpstream, Storage, UsageRollup, UsageRollupResolution,
-    USAGE_ROLLUPS_V1,
+    RequestEvent, RequestEventUpstream, Storage, USAGE_ROLLUPS_V1, UsageRollup,
+    UsageRollupResolution,
 };
 use redb::ReadableTable;
 use serde_json::Value;
@@ -154,8 +154,8 @@ fn known_and_unknown_model_costs_roll_up() -> Result<(), Box<dyn std::error::Err
 }
 
 #[test]
-fn query_usage_rollups_in_range_filters_resolution_and_bounds(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn query_usage_rollups_in_range_filters_resolution_and_bounds()
+-> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("rollups.redb");
     let storage = Storage::open(&path, [41; 32])?;
@@ -320,6 +320,7 @@ fn fixture_events() -> Vec<RequestEvent> {
     ]
 }
 
+#[allow(clippy::too_many_arguments)]
 fn event(
     ts: u64,
     request_id: &str,

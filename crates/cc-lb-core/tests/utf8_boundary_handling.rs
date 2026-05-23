@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cc_lb_core::SseBatchConfig;
-use sse_relay_support::{body_from_chunks, collect_response_body, relay_for, RecordingHook};
+use sse_relay_support::{RecordingHook, body_from_chunks, collect_response_body, relay_for};
 
 #[tokio::test]
 async fn utf8_boundary_handling() {

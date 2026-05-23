@@ -2,8 +2,8 @@ mod common;
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use axum::body::Body;
@@ -19,7 +19,7 @@ use http::{Response, StatusCode};
 use http_body_util::BodyExt;
 use url::Url;
 
-use common::{messages_request, RecordingHook, TestAuthn, TestRouter, TestState};
+use common::{RecordingHook, TestAuthn, TestRouter, TestState, messages_request};
 
 #[tokio::test]
 async fn lifecycle_does_not_invoke_normalizer_for_success_body() {

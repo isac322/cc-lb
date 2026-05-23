@@ -2,7 +2,7 @@ mod common;
 
 use bytes::Bytes;
 use cc_lb_dialect_bedrock::BedrockMantleDialect;
-use cc_lb_plugin_api::{shape_request, Upstream, UpstreamDialect};
+use cc_lb_plugin_api::{Upstream, UpstreamDialect, shape_request};
 use http::StatusCode;
 
 #[test]
@@ -35,7 +35,9 @@ fn mantle_preserves_anthropic_shape_body_and_headers() {
         shaped.url().as_str(),
         "https://bedrock-mantle.us-east-1.api.aws/anthropic/v1/messages"
     );
-    assert!(BedrockMantleDialect::default()
-        .normalize_error(StatusCode::BAD_REQUEST, &Bytes::from_static(b"{}"))
-        .is_none());
+    assert!(
+        BedrockMantleDialect::default()
+            .normalize_error(StatusCode::BAD_REQUEST, &Bytes::from_static(b"{}"))
+            .is_none()
+    );
 }

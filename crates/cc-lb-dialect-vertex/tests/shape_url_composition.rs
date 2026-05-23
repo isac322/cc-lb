@@ -2,7 +2,7 @@ mod common;
 
 use bytes::Bytes;
 use cc_lb_dialect_vertex::VertexDialect;
-use cc_lb_plugin_api::{shape_request, DialectError, Upstream};
+use cc_lb_plugin_api::{DialectError, Upstream, shape_request};
 use http::HeaderValue;
 
 #[test]
@@ -37,10 +37,12 @@ fn stream_true_body_uses_stream_raw_predict_suffix() {
     )
     .expect("vertex shape succeeds");
 
-    assert!(shaped
-        .url()
-        .as_str()
-        .ends_with("/models/claude-3-5-sonnet@20240620:streamRawPredict"));
+    assert!(
+        shaped
+            .url()
+            .as_str()
+            .ends_with("/models/claude-3-5-sonnet@20240620:streamRawPredict")
+    );
 }
 
 #[test]
@@ -60,10 +62,12 @@ fn event_stream_accept_header_uses_stream_raw_predict_suffix() {
     )
     .expect("vertex shape succeeds");
 
-    assert!(shaped
-        .url()
-        .as_str()
-        .ends_with("/models/claude-3-5-sonnet@20240620:streamRawPredict"));
+    assert!(
+        shaped
+            .url()
+            .as_str()
+            .ends_with("/models/claude-3-5-sonnet@20240620:streamRawPredict")
+    );
 }
 
 #[test]

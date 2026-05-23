@@ -9,8 +9,8 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
-use ring::digest::{digest, SHA256};
-use serde_json::{json, Value};
+use ring::digest::{SHA256, digest};
+use serde_json::{Value, json};
 
 use crate::modes::FakeMode;
 

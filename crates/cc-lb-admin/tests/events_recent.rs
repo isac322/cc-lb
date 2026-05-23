@@ -4,7 +4,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use cc_lb_admin::{router, AdminState};
+use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_core::DashboardBroadcaster;
 use cc_lb_storage_redb::{RequestEvent, RequestEventUpstream, Storage};
@@ -54,11 +54,13 @@ async fn recent_events_filter_by_principal_id() {
         request_ids(json["events"].as_array().unwrap()),
         vec!["req-d", "req-a"]
     );
-    assert!(json["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|event| event["principal_id"] == "principal-a"));
+    assert!(
+        json["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["principal_id"] == "principal-a")
+    );
 }
 
 #[tokio::test]
@@ -90,11 +92,13 @@ async fn recent_events_filter_by_upstream() {
         request_ids(json["events"].as_array().unwrap()),
         vec!["req-e", "req-a"]
     );
-    assert!(json["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|event| event["upstream"] == "anthropic_direct"));
+    assert!(
+        json["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["upstream"] == "anthropic_direct")
+    );
 }
 
 #[tokio::test]
@@ -108,11 +112,13 @@ async fn recent_events_filter_by_model() {
         request_ids(json["events"].as_array().unwrap()),
         vec!["req-e", "req-a"]
     );
-    assert!(json["events"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .all(|event| event["model"] == "claude-a"));
+    assert!(
+        json["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["model"] == "claude-a")
+    );
 }
 
 #[tokio::test]

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use extism::{host_fn, Function, UserData, ValType, PTR};
+use extism::{Function, PTR, UserData, ValType, host_fn};
 use ring::rand::{SecureRandom, SystemRandom};
 
 const RANDOM_BYTES_MAX: u64 = 65_536;

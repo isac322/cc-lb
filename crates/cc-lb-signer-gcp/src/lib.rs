@@ -16,12 +16,12 @@ use cc_lb_plugin_api::{
     AuthStrategy, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
     SigningCapability, Upstream, UpstreamError,
 };
-use http::header::{HeaderValue, AUTHORIZATION};
+use http::header::{AUTHORIZATION, HeaderValue};
 use metrics::Unit;
 use secrecy::ExposeSecret;
 
 pub use adc::AdcTokenProvider;
-pub use single_flight::{new_single_flight_locks, GcpSingleFlightLocks};
+pub use single_flight::{GcpSingleFlightLocks, new_single_flight_locks};
 pub use token::{GcpToken, GcpTokenError, GcpTokenProvider, StaticGcpTokenProvider};
 
 const DEFAULT_CLOUD_PLATFORM_SCOPE: &str = "https://www.googleapis.com/auth/cloud-platform";

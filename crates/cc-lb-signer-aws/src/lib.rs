@@ -12,8 +12,8 @@ use std::time::SystemTime;
 use async_trait::async_trait;
 use aws_credential_types::Credentials as SdkCredentials;
 use aws_sigv4::http_request::{
-    sign, PayloadChecksumKind, SignableBody, SignableRequest, SignatureLocation,
-    SigningInstructions, SigningSettings,
+    PayloadChecksumKind, SignableBody, SignableRequest, SignatureLocation, SigningInstructions,
+    SigningSettings, sign,
 };
 use aws_sigv4::sign::v4;
 use cc_lb_plugin_api::{

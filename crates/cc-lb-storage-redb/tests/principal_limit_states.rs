@@ -1,6 +1,6 @@
 use cc_lb_storage_redb::{
-    principal_limit_state_key, PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState,
-    Storage,
+    PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, Storage,
+    principal_limit_state_key,
 };
 
 #[test]
@@ -163,8 +163,8 @@ fn account_grouping_does_not_collapse_unobserved_identity() -> Result<(), Box<dy
 }
 
 #[test]
-fn list_principal_limit_states_filters_by_value_principal_id(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn list_principal_limit_states_filters_by_value_principal_id()
+-> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("limits.redb");
     let storage = Storage::open(&path, [31; 32])?;
@@ -211,18 +211,25 @@ fn list_principal_limit_states_filters_by_value_principal_id(
     });
 
     assert_eq!(listed.len(), 2);
-    assert!(listed
-        .iter()
-        .all(|state| state.principal_id == "principal-a"));
-    assert!(listed
-        .iter()
-        .any(|state| state.identity_kind == PrincipalLimitIdentityKind::Account));
-    assert!(listed
-        .iter()
-        .any(|state| state.identity_kind == PrincipalLimitIdentityKind::Credential));
+    assert!(
+        listed
+            .iter()
+            .all(|state| state.principal_id == "principal-a")
+    );
+    assert!(
+        listed
+            .iter()
+            .any(|state| state.identity_kind == PrincipalLimitIdentityKind::Account)
+    );
+    assert!(
+        listed
+            .iter()
+            .any(|state| state.identity_kind == PrincipalLimitIdentityKind::Credential)
+    );
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn state(
     principal_id: &str,
     identity_kind: PrincipalLimitIdentityKind,

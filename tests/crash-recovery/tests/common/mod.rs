@@ -10,8 +10,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use cc_lb_storage_redb::{
-    AuditEntry, BucketKind, OAuthCredentials, Storage, AUDIT_LOG_V1, CURRENT_SCHEMA_VERSION,
-    OAUTH_CREDENTIALS_V1, QUOTAS_BY_PRINCIPAL_V1,
+    AUDIT_LOG_V1, AuditEntry, BucketKind, CURRENT_SCHEMA_VERSION, OAUTH_CREDENTIALS_V1,
+    OAuthCredentials, QUOTAS_BY_PRINCIPAL_V1, Storage,
 };
 use redb::ReadableTable;
 

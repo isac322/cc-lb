@@ -1,4 +1,4 @@
-use cc_lb_core::{record_dashboard_sse_lagged, DashboardBroadcaster};
+use cc_lb_core::{DashboardBroadcaster, record_dashboard_sse_lagged};
 use cc_lb_observability::dropped_events_total;
 use cc_lb_storage_redb::{RequestEvent, RequestEventUpstream};
 use tokio::sync::broadcast::error::RecvError;
