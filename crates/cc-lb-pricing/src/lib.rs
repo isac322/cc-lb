@@ -113,7 +113,11 @@ impl PriceCatalog {
         max_output: u64,
         upstream_kind: Option<UpstreamKind>,
     ) -> Option<u64> {
-        let pricing = self.lookup(model, upstream_kind)?;
+        let normalized = normalize_model_id(model, upstream_kind);
+        let Some(pricing) = self.current().models.get(&normalized).cloned() else {
+            record_missing_price_field(&normalized, "model");
+            return None;
+        };
         Some(token_cost_micros(
             max_input,
             pricing.input_per_million_usd,
@@ -182,6 +186,7 @@ pub fn virtual_cost_micros_full(
     let normalized = normalize_model_id(model, upstream_kind);
     let snapshot = global_catalog().current();
     let Some(pricing) = snapshot.models.get(&normalized) else {
+        record_missing_price_field(&normalized, "model");
         return CostEstimate {
             micros_usd: None,
             pricing_status: PricingStatus::Unknown,
@@ -298,7 +303,18 @@ fn component_cost(tokens: u64, price: UsdPerMillion) -> u128 {
     u128::from(tokens) * u128::from(price.as_micros_usd()) / 1_000_000
 }
 
-fn record_missing_cache_field(_model: &str, _field: &'static str) {}
+fn record_missing_cache_field(model: &str, field: &'static str) {
+    record_missing_price_field(model, field);
+}
+
+fn record_missing_price_field(model: &str, field: &'static str) {
+    metrics::counter!(
+        "cclb_price_catalog_missing_field_total",
+        "model" => model.to_owned(),
+        "field" => field
+    )
+    .increment(1);
+}
 
 #[cfg(test)]
 mod tests {
