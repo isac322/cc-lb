@@ -4,6 +4,9 @@ on:
   pull_request:
   push:
 
+env:
+  CC_LB_ADMIN_SKIP_SPA: "1"
+
 jobs:
   verify:
     runs-on: ubuntu-latest
