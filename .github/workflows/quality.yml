@@ -6,6 +6,9 @@ on:
     branches:
       - master
 
+env:
+  CC_LB_ADMIN_SKIP_SPA: "1"
+
 jobs:
   cargo-deny:
     runs-on: ubuntu-latest

@@ -7,6 +7,9 @@ on:
     - cron: "17 3 * * *"
   workflow_dispatch:
 
+env:
+  CC_LB_ADMIN_SKIP_SPA: "1"
+
 jobs:
   matrix:
     runs-on: ubuntu-latest
