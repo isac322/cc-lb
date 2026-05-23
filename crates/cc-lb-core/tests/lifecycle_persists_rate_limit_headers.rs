@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cc_lb_core::PrincipalLimitStateSink;
-use cc_lb_storage_redb::{PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState};
+use cc_lb_storage_api::{PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState};
 use http::{HeaderMap, HeaderValue};
 use tokio::sync::mpsc::Receiver;
 

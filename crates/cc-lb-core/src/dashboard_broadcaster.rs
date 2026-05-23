@@ -1,4 +1,4 @@
-use cc_lb_storage_redb::RequestEvent;
+use cc_lb_storage_api::RequestEvent;
 use tokio::sync::broadcast::{self, Receiver, Sender};
 
 pub const DEFAULT_DASHBOARD_BROADCAST_CAPACITY: usize = 1024;

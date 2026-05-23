@@ -1,17 +1,20 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+mod storage_support;
+
 use cc_lb_core::{BucketKind, QuotaManager, QuotaPolicy, start_sweep};
-use cc_lb_storage_redb::RedbStorage;
+use storage_support::TestStorage;
 
 #[tokio::test]
 async fn sweep_task_removes_windows_older_than_retention() -> Result<(), Box<dyn std::error::Error>>
 {
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(RedbStorage::open(&dir.path().join("quota.redb"))?);
-    storage.incr_quota("old", 1, BucketKind::Requests, 1)?;
+    let storage = TestStorage::new();
+    storage
+        .incr_quota("old", 1, BucketKind::Requests, 1)
+        .await?;
     let manager = Arc::new(QuotaManager::new(
-        Arc::clone(&storage),
+        storage.as_storage(),
         QuotaPolicy {
             window_secs: 60,
             capacity_requests: 10,
@@ -31,6 +34,6 @@ async fn sweep_task_removes_windows_older_than_retention() -> Result<(), Box<dyn
     }
     handle.abort();
 
-    assert_eq!(storage.get_quota("old", 1, BucketKind::Requests)?, 0);
+    assert_eq!(storage.get_quota("old", 1, BucketKind::Requests).await?, 0);
     Ok(())
 }

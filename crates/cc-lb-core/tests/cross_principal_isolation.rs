@@ -1,15 +1,14 @@
-use std::sync::Arc;
+mod storage_support;
 
 use cc_lb_core::{QuotaDecision, QuotaManager, QuotaPolicy};
-use cc_lb_storage_redb::RedbStorage;
+use storage_support::TestStorage;
 
 #[tokio::test]
 async fn exhausted_principal_does_not_affect_another_principal()
 -> Result<(), Box<dyn std::error::Error>> {
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(RedbStorage::open(&dir.path().join("quota.redb"))?);
+    let storage = TestStorage::new();
     let manager = QuotaManager::new(
-        storage,
+        storage.as_storage(),
         QuotaPolicy {
             window_secs: 60,
             capacity_requests: 1,

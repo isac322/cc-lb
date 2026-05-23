@@ -14,7 +14,7 @@ use cc_lb_plugin_api::{
     sign_request,
 };
 use cc_lb_pricing::virtual_cost_micros;
-use cc_lb_storage_redb::{
+use cc_lb_storage_api::{
     PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, RequestEvent,
     RequestEventUpstream,
 };
