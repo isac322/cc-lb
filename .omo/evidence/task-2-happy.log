@@ -1,0 +1,7 @@
+Task 2 happy path evidence
+
+- `cargo build -p cc-lb-storage-redb` ✅
+- `cargo test -p cc-lb-storage-redb price_catalog` ✅
+- Smoke tests passed:
+  - `price_catalog_roundtrip_preserves_json_bytes`
+  - `empty_price_catalog_returns_none`

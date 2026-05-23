@@ -1,0 +1,4 @@
+Task 2 failure log
+
+- No task-specific runtime failure remained after fixes.
+- `lsp_diagnostics` could not run because `rust-analyzer` is not installed in this environment.
