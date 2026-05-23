@@ -7,6 +7,10 @@ rust-version.workspace = true
 publish = false
 build = "build.rs"
 
+[features]
+redb = []
+postgres = []
+
 [dependencies]
 async-stream.workspace = true
 axum.workspace = true

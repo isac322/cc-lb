@@ -6,6 +6,9 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+redb = []
+
 [dependencies]
 base64.workspace = true
 cc-lb-pricing = { path = "../cc-lb-pricing" }

@@ -1,0 +1,17 @@
+[package]
+name = "cc-lb-storage-conformance"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+cc-lb-storage-api = { path = "../cc-lb-storage-api" }
+cc-lb-aead = { path = "../cc-lb-aead" }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+futures = "0.3"
+anyhow = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

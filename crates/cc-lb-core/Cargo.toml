@@ -6,6 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+redb = []
+postgres = []
+
 [dependencies]
 arc-swap.workspace = true
 async-stream.workspace = true
