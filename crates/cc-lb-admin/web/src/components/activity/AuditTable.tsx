@@ -1,4 +1,4 @@
-import { AuditEntry } from '../../lib/api';
+import type { AuditEntry } from '../../lib/api';
 import { AuditRow } from './AuditRow';
 
 interface AuditTableProps {
@@ -18,12 +18,15 @@ export function AuditTable({ events }: AuditTableProps) {
           </tr>
         </thead>
         <tbody className="divide-y divide-graphite-800">
-          {events.map(event => (
+          {events.map((event) => (
             <AuditRow key={`${event.ts}-${event.request_id}`} event={event} />
           ))}
           {events.length === 0 && (
             <tr>
-              <td colSpan={4} className="px-4 py-8 text-center text-graphite-500">
+              <td
+                colSpan={4}
+                className="px-4 py-8 text-center text-graphite-500"
+              >
                 No data available
               </td>
             </tr>

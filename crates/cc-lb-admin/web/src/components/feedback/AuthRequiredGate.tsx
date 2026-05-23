@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { getAdminToken, setAdminToken } from '../../lib/auth';
 import { Button } from '../primitives/Button';
 import { FormField } from '../primitives/FormField';
@@ -31,7 +31,9 @@ export function AuthRequiredGate({ children }: { children: React.ReactNode }) {
             cc
           </div>
         </div>
-        <h2 className="text-xl font-semibold text-graphite-50 text-center mb-2">Authentication Required</h2>
+        <h2 className="text-xl font-semibold text-graphite-50 text-center mb-2">
+          Authentication Required
+        </h2>
         <p className="text-sm text-graphite-400 text-center mb-6">
           Please enter your admin token to access the operator console.
         </p>

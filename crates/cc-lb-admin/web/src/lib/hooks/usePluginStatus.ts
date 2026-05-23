@@ -1,5 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
-import { getJson, PluginsStatusResponse, PluginStatusEntry } from '../api';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  getJson,
+  type PluginStatusEntry,
+  type PluginsStatusResponse,
+} from '../api';
 
 export function usePluginStatus() {
   const [plugins, setPlugins] = useState<PluginStatusEntry[]>([]);
@@ -48,7 +52,7 @@ export function usePluginStatus() {
             sse_per_event: true,
             batched_events_per_flush: 100,
             batched_flush_ms: 1000,
-          }
+          },
         ]);
         setIsLoading(false);
         return;

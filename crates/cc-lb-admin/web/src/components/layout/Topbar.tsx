@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { ConnectionStatus } from './ConnectionStatus';
-import { getAdminToken, setAdminToken, clearAdminToken } from '../../lib/auth';
-import { Modal } from '../primitives/Modal';
+import { clearAdminToken, getAdminToken, setAdminToken } from '../../lib/auth';
 import { Button } from '../primitives/Button';
 import { FormField } from '../primitives/FormField';
+import { Modal } from '../primitives/Modal';
+import { ConnectionStatus } from './ConnectionStatus';
 
 export function Topbar({ title }: { title: string }) {
   const [isModalOpen, setIsModalOpen] = useState(false);
@@ -38,7 +38,11 @@ export function Topbar({ title }: { title: string }) {
         <span className="text-xs text-graphite-500 font-mono">v1.0.0</span>
       </div>
 
-      <Modal isOpen={isModalOpen} onClose={() => setIsModalOpen(false)} title="Admin Token">
+      <Modal
+        isOpen={isModalOpen}
+        onClose={() => setIsModalOpen(false)}
+        title="Admin Token"
+      >
         <div className="space-y-4">
           <FormField
             label="Bearer Token"
@@ -53,8 +57,12 @@ export function Topbar({ title }: { title: string }) {
             />
           </FormField>
           <div className="flex justify-end gap-2">
-            <Button variant="ghost" onClick={() => setIsModalOpen(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleSave}>Save & Reload</Button>
+            <Button variant="ghost" onClick={() => setIsModalOpen(false)}>
+              Cancel
+            </Button>
+            <Button variant="primary" onClick={handleSave}>
+              Save & Reload
+            </Button>
           </div>
         </div>
       </Modal>

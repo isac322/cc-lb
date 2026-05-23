@@ -58,7 +58,7 @@ fn child_writer(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             kind: None,
             payload: None,
         })?;
-        if index % 64 == 0 {
+        if index.is_multiple_of(64) {
             thread::sleep(Duration::from_millis(1));
         }
     }

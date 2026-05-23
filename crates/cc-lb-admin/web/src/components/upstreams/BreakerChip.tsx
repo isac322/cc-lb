@@ -7,7 +7,12 @@ interface BreakerChipProps {
   observed: boolean;
 }
 
-export function BreakerChip({ state, failureCount, halfOpenInFlight, observed }: BreakerChipProps) {
+export function BreakerChip({
+  state,
+  failureCount,
+  halfOpenInFlight,
+  observed,
+}: BreakerChipProps) {
   if (!observed) {
     return <StatusChip variant="neutral">unobserved</StatusChip>;
   }

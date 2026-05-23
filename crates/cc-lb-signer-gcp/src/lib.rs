@@ -177,12 +177,12 @@ pub struct GcpOAuthSignerFactory {
 impl GcpOAuthSignerFactory {
     /// Creates a factory backed by Application Default Credentials.
     pub fn new() -> Self {
-        if let Ok(token) = std::env::var("CC_LB_GCP_ACCESS_TOKEN") {
-            if !token.trim().is_empty() {
-                let expires_at = SystemTime::now() + Duration::from_secs(3600);
-                let token = GcpToken::new(token, expires_at, default_scopes());
-                return Self::with_provider(Arc::new(StaticGcpTokenProvider::new(token)));
-            }
+        if let Ok(token) = std::env::var("CC_LB_GCP_ACCESS_TOKEN")
+            && !token.trim().is_empty()
+        {
+            let expires_at = SystemTime::now() + Duration::from_secs(3600);
+            let token = GcpToken::new(token, expires_at, default_scopes());
+            return Self::with_provider(Arc::new(StaticGcpTokenProvider::new(token)));
         }
         Self::with_provider(Arc::new(AdcTokenProvider::new()))
     }

@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { getJson, ConfigSchemaResponse } from '../api';
+import { useEffect, useState } from 'react';
+import { type ConfigSchemaResponse, getJson } from '../api';
 import { MOCK_SCHEMA } from './mockData';
 
 export function useConfigSchema() {
@@ -8,7 +8,8 @@ export function useConfigSchema() {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const isMock = new URLSearchParams(window.location.search).get('mock') === '1';
+    const isMock =
+      new URLSearchParams(window.location.search).get('mock') === '1';
     if (isMock) {
       setSchema(MOCK_SCHEMA);
       setLoading(false);

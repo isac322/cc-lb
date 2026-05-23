@@ -127,10 +127,10 @@ impl ErrorNormalizer {
             return body.clone();
         }
 
-        if let Some(dialect) = fallback_dialect {
-            if let Some(normalized) = dialect.normalize_error(status, body) {
-                return normalized;
-            }
+        if let Some(dialect) = fallback_dialect
+            && let Some(normalized) = dialect.normalize_error(status, body)
+        {
+            return normalized;
         }
 
         body.clone()
@@ -180,10 +180,10 @@ fn anthropic_sse_error_json(raw_event_data_json: &Bytes) -> Value {
 
 fn bedrock_sse_error_json(raw_event_data_json: &Bytes) -> Value {
     let parsed = serde_json::from_slice::<Value>(raw_event_data_json).ok();
-    if let Some(value) = parsed.as_ref() {
-        if let Some(error) = canonical_anthropic_error_value(value) {
-            return error;
-        }
+    if let Some(value) = parsed.as_ref()
+        && let Some(error) = canonical_anthropic_error_value(value)
+    {
+        return error;
     }
 
     let status = parsed
@@ -201,10 +201,10 @@ fn bedrock_sse_error_json(raw_event_data_json: &Bytes) -> Value {
 
 fn vertex_sse_error_json(raw_event_data_json: &Bytes) -> Value {
     let parsed = serde_json::from_slice::<Value>(raw_event_data_json).ok();
-    if let Some(value) = parsed.as_ref() {
-        if let Some(error) = canonical_anthropic_error_value(value) {
-            return error;
-        }
+    if let Some(value) = parsed.as_ref()
+        && let Some(error) = canonical_anthropic_error_value(value)
+    {
+        return error;
     }
 
     let error = parsed.as_ref().and_then(|value| value.get("error"));

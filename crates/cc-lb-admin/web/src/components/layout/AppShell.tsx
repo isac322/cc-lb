@@ -1,6 +1,6 @@
+import { useLocation } from 'react-router';
 import { Sidebar } from './Sidebar';
 import { Topbar } from './Topbar';
-import { useLocation } from 'react-router';
 
 const ROUTE_TITLES: Record<string, string> = {
   '/': 'Overview',
@@ -23,9 +23,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <Sidebar />
       <div className="flex-1 flex flex-col min-w-0">
         <Topbar title={title} />
-        <main className="flex-1 p-6 overflow-x-hidden">
-          {children}
-        </main>
+        <main className="flex-1 p-6 overflow-x-hidden">{children}</main>
       </div>
     </div>
   );

@@ -1,4 +1,4 @@
-import { ReactNode } from 'react';
+import type { ReactNode } from 'react';
 
 interface SettingsLayoutProps {
   nav: ReactNode;
@@ -13,9 +13,7 @@ export function SettingsLayout({ nav, main, sidebar }: SettingsLayoutProps) {
         {nav}
       </div>
       <div className="flex-1 overflow-y-auto p-6 relative">
-        <div className="max-w-4xl mx-auto pb-32">
-          {main}
-        </div>
+        <div className="max-w-4xl mx-auto pb-32">{main}</div>
       </div>
       {sidebar && (
         <div className="w-80 flex-shrink-0 border-l border-graphite-800 overflow-y-auto bg-graphite-900">

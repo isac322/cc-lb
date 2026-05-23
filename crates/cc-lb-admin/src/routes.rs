@@ -682,10 +682,10 @@ async fn get_quota(
         policy.capacity_input_tokens = p.default_input_tokens;
         policy.capacity_output_tokens = p.default_output_tokens;
     }
-    if let Some(qm) = &state.quota_manager {
-        if let Some(p) = qm.per_principal.read().await.get(&id) {
-            policy = *p;
-        }
+    if let Some(qm) = &state.quota_manager
+        && let Some(p) = qm.per_principal.read().await.get(&id)
+    {
+        policy = *p;
     }
 
     let window_secs = policy.window_secs.max(1);
@@ -1018,12 +1018,11 @@ fn management_error_response(error: management::ManagementError) -> axum::respon
 
 fn effective_config_revision_unix_secs(state: &AdminState) -> u64 {
     let mut effective = state.config_started_at_unix_secs;
-    if let Some(storage) = state.storage.as_deref() {
-        if let Ok(history) = storage.list_config_history(1) {
-            if let Some(entry) = history.first() {
-                effective = effective.max(entry.applied_at_unix_secs);
-            }
-        }
+    if let Some(storage) = state.storage.as_deref()
+        && let Ok(history) = storage.list_config_history(1)
+        && let Some(entry) = history.first()
+    {
+        effective = effective.max(entry.applied_at_unix_secs);
     }
     effective
 }

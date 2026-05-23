@@ -3,7 +3,7 @@ use cc_lb_storage_redb::{
     PRINCIPAL_LIMIT_STATES_V1, QUOTAS_BY_PRINCIPAL_V1, REQUEST_EVENTS_V1, SCHEMA_VERSION_V1,
     Storage, StorageError, USAGE_ROLLUP_CHECKPOINTS_V1, USAGE_ROLLUPS_V1,
 };
-use redb::TableHandle;
+use redb::{ReadableDatabase, TableHandle};
 
 #[test]
 fn opening_empty_database_initializes_schema_v1() -> Result<(), Box<dyn std::error::Error>> {

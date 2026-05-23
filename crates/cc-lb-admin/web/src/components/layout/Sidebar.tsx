@@ -1,14 +1,14 @@
 import { NavLink } from 'react-router';
 import {
-  IconSquare,
-  IconList,
-  IconLines,
-  IconGear,
-  IconServer,
+  IconChart,
   IconFile,
+  IconGear,
+  IconLines,
+  IconList,
   IconLock,
   IconPlug,
-  IconChart
+  IconServer,
+  IconSquare,
 } from './icons';
 
 const NAV_ITEMS = [

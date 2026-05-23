@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import { getJson, ConfigHistoryResponse } from '../api';
+import { useCallback, useEffect, useState } from 'react';
+import { type ConfigHistoryResponse, getJson } from '../api';
 import { MOCK_HISTORY } from './mockData';
 
 export function useConfigHistory(limit: number = 20) {
@@ -8,7 +8,8 @@ export function useConfigHistory(limit: number = 20) {
   const [loading, setLoading] = useState(true);
 
   const fetchHistory = useCallback(async () => {
-    const isMock = new URLSearchParams(window.location.search).get('mock') === '1';
+    const isMock =
+      new URLSearchParams(window.location.search).get('mock') === '1';
     if (isMock) {
       setHistory(MOCK_HISTORY);
       setLoading(false);
@@ -17,7 +18,9 @@ export function useConfigHistory(limit: number = 20) {
 
     setLoading(true);
     try {
-      const data = await getJson<ConfigHistoryResponse>(`/admin/config/history?limit=${limit}`);
+      const data = await getJson<ConfigHistoryResponse>(
+        `/admin/config/history?limit=${limit}`,
+      );
       setHistory(data);
       setError(null);
     } catch (err) {

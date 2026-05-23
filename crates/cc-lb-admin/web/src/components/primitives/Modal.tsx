@@ -23,7 +23,7 @@ export function Modal({
       if (e.key !== 'Tab' || !modalRef.current) return;
 
       const focusableElements = modalRef.current.querySelectorAll<HTMLElement>(
-        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
       );
       const firstElement = focusableElements[0];
       const lastElement = focusableElements[focusableElements.length - 1];
@@ -46,12 +46,13 @@ export function Modal({
       document.addEventListener('keydown', handleEscape);
       document.addEventListener('keydown', handleTab);
       document.body.style.overflow = 'hidden';
-      
+
       setTimeout(() => {
         if (modalRef.current) {
-          const focusableElements = modalRef.current.querySelectorAll<HTMLElement>(
-            'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
-          );
+          const focusableElements =
+            modalRef.current.querySelectorAll<HTMLElement>(
+              'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+            );
           if (focusableElements.length > 0) {
             focusableElements[0].focus();
           } else {
@@ -74,7 +75,7 @@ export function Modal({
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-graphite-950/80 backdrop-blur-sm">
-      <div 
+      <div
         ref={modalRef}
         tabIndex={-1}
         role="dialog"
@@ -83,13 +84,28 @@ export function Modal({
         className="bg-graphite-850 border border-graphite-800 rounded-lg shadow-xl w-full max-w-md overflow-hidden flex flex-col animate-in fade-in zoom-in-95 duration-200"
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-graphite-800">
-          <h2 id="modal-title" className="text-lg font-semibold text-graphite-50">{title}</h2>
+          <h2
+            id="modal-title"
+            className="text-lg font-semibold text-graphite-50"
+          >
+            {title}
+          </h2>
           <button
             onClick={onClose}
             className="text-graphite-400 hover:text-graphite-100 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 rounded"
           >
-            <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            <svg
+              className="w-5 h-5"
+              fill="none"
+              viewBox="0 0 24 24"
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M6 18L18 6M6 6l12 12"
+              />
             </svg>
           </button>
         </div>

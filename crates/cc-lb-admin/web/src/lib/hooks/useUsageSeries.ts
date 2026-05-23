@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import { getJson, DashboardUsageResponse } from '../api';
+import { useCallback, useEffect, useState } from 'react';
+import { type DashboardUsageResponse, getJson } from '../api';
 
 export function useUsageSeries(range: string, groupBy: string) {
   const [data, setData] = useState<DashboardUsageResponse | null>(null);
@@ -11,7 +11,10 @@ export function useUsageSeries(range: string, groupBy: string) {
     setIsLoading(true);
     setError(null);
 
-    getJson<DashboardUsageResponse>(`/admin/usage?range=${range}&group_by=${groupBy}`, { signal: controller.signal })
+    getJson<DashboardUsageResponse>(
+      `/admin/usage?range=${range}&group_by=${groupBy}`,
+      { signal: controller.signal },
+    )
       .then((res) => {
         setData(res);
         setIsLoading(false);
@@ -28,7 +31,9 @@ export function useUsageSeries(range: string, groupBy: string) {
   useEffect(() => {
     const controller = refresh();
     const interval = setInterval(() => {
-      getJson<DashboardUsageResponse>(`/admin/usage?range=${range}&group_by=${groupBy}`)
+      getJson<DashboardUsageResponse>(
+        `/admin/usage?range=${range}&group_by=${groupBy}`,
+      )
         .then((res) => setData(res))
         .catch((err) => {
           if (err.name !== 'AbortError') setError(err);

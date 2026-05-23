@@ -1,17 +1,21 @@
 import { useConfigDiff } from '../../lib/hooks/useConfigDiff';
-import { LoadingState } from '../primitives/LoadingState';
 import { ErrorState } from '../primitives/ErrorState';
+import { LoadingState } from '../primitives/LoadingState';
 
 interface DiffPreviewPanelProps {
   fromRevision: number | null;
   toRevision: number | null;
 }
 
-export function DiffPreviewPanel({ fromRevision, toRevision }: DiffPreviewPanelProps) {
+export function DiffPreviewPanel({
+  fromRevision,
+  toRevision,
+}: DiffPreviewPanelProps) {
   const { diff, error, loading } = useConfigDiff(fromRevision, toRevision);
 
   if (loading) return <LoadingState message="Loading diff..." />;
-  if (error) return <ErrorState title="Failed to load diff" message={error.message} />;
+  if (error)
+    return <ErrorState title="Failed to load diff" message={error.message} />;
   if (!diff) return null;
 
   if (diff.diff.length === 0) {
@@ -38,15 +42,23 @@ export function DiffPreviewPanel({ fromRevision, toRevision }: DiffPreviewPanelP
         <table className="min-w-full divide-y divide-graphite-800">
           <thead className="bg-graphite-900">
             <tr>
-              <th className="px-4 py-2 text-left text-xs font-medium text-graphite-400 uppercase tracking-wider">Path</th>
-              <th className="px-4 py-2 text-left text-xs font-medium text-graphite-400 uppercase tracking-wider">From</th>
-              <th className="px-4 py-2 text-left text-xs font-medium text-graphite-400 uppercase tracking-wider">To</th>
+              <th className="px-4 py-2 text-left text-xs font-medium text-graphite-400 uppercase tracking-wider">
+                Path
+              </th>
+              <th className="px-4 py-2 text-left text-xs font-medium text-graphite-400 uppercase tracking-wider">
+                From
+              </th>
+              <th className="px-4 py-2 text-left text-xs font-medium text-graphite-400 uppercase tracking-wider">
+                To
+              </th>
             </tr>
           </thead>
           <tbody className="bg-graphite-900/50 divide-y divide-graphite-800">
             {diff.diff.map((item, idx) => (
               <tr key={idx}>
-                <td className="px-4 py-2 text-sm text-graphite-300 font-mono">{item.path}</td>
+                <td className="px-4 py-2 text-sm text-graphite-300 font-mono">
+                  {item.path}
+                </td>
                 <td className="px-4 py-2 text-sm text-red-400 font-mono bg-red-400/5">
                   {JSON.stringify(item.from)}
                 </td>

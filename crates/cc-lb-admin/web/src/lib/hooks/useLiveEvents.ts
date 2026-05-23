@@ -1,7 +1,12 @@
-import { useState, useEffect, useRef } from 'react';
-import { streamEventsFetch, RequestEvent } from '../api';
+import { useEffect, useRef, useState } from 'react';
+import { type RequestEvent, streamEventsFetch } from '../api';
 
-export type LiveEventStatus = 'connecting' | 'live' | 'reconnecting' | 'error' | 'closed';
+export type LiveEventStatus =
+  | 'connecting'
+  | 'live'
+  | 'reconnecting'
+  | 'error'
+  | 'closed';
 
 export function useLiveEvents() {
   const [events, setEvents] = useState<RequestEvent[]>([]);
@@ -36,7 +41,7 @@ export function useLiveEvents() {
           setError(err);
           setStatus('reconnecting');
           retryTimeout = setTimeout(connect, 5000);
-        }
+        },
       });
     }
 
@@ -49,8 +54,12 @@ export function useLiveEvents() {
     };
   }, []);
 
-  const pause = () => { isPaused.current = true; };
-  const resume = () => { isPaused.current = false; };
+  const pause = () => {
+    isPaused.current = true;
+  };
+  const resume = () => {
+    isPaused.current = false;
+  };
 
   return { events, status, error, pause, resume };
 }

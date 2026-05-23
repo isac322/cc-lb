@@ -1,8 +1,11 @@
-import { useState, useEffect } from 'react';
-import { getJson, ConfigDiffResponse } from '../api';
+import { useEffect, useState } from 'react';
+import { type ConfigDiffResponse, getJson } from '../api';
 import { MOCK_DIFF } from './mockData';
 
-export function useConfigDiff(fromRevision: number | null, toRevision: number | null) {
+export function useConfigDiff(
+  fromRevision: number | null,
+  toRevision: number | null,
+) {
   const [diff, setDiff] = useState<ConfigDiffResponse | null>(null);
   const [error, setError] = useState<Error | null>(null);
   const [loading, setLoading] = useState(false);
@@ -13,7 +16,8 @@ export function useConfigDiff(fromRevision: number | null, toRevision: number | 
       return;
     }
 
-    const isMock = new URLSearchParams(window.location.search).get('mock') === '1';
+    const isMock =
+      new URLSearchParams(window.location.search).get('mock') === '1';
     if (isMock) {
       setLoading(true);
       setTimeout(() => {
@@ -24,7 +28,9 @@ export function useConfigDiff(fromRevision: number | null, toRevision: number | 
     }
 
     setLoading(true);
-    getJson<ConfigDiffResponse>(`/admin/config/diff?from_revision=${fromRevision}&to_revision=${toRevision}`)
+    getJson<ConfigDiffResponse>(
+      `/admin/config/diff?from_revision=${fromRevision}&to_revision=${toRevision}`,
+    )
       .then((data) => {
         setDiff(data);
         setError(null);

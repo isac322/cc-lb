@@ -1,10 +1,10 @@
-import { useCredentialStatus } from '../lib/hooks/useCredentialStatus';
-import { CredentialRow } from '../components/credentials/CredentialRow';
-import { LoadingState } from '../components/primitives/LoadingState';
-import { ErrorState } from '../components/primitives/ErrorState';
-import { EmptyState } from '../components/primitives/EmptyState';
-import { Button } from '../components/primitives/Button';
 import { RefreshCw } from 'lucide-react';
+import { CredentialRow } from '../components/credentials/CredentialRow';
+import { Button } from '../components/primitives/Button';
+import { EmptyState } from '../components/primitives/EmptyState';
+import { ErrorState } from '../components/primitives/ErrorState';
+import { LoadingState } from '../components/primitives/LoadingState';
+import { useCredentialStatus } from '../lib/hooks/useCredentialStatus';
 
 export default function CredentialStatus() {
   const { rows, isLoading, error, refresh } = useCredentialStatus();
@@ -13,13 +13,17 @@ export default function CredentialStatus() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-2xl font-semibold text-graphite-50">Credential Status</h1>
+          <h1 className="text-2xl font-semibold text-graphite-50">
+            Credential Status
+          </h1>
           <p className="text-sm text-graphite-400 mt-1">
             Status of API keys and OAuth credentials across all principals.
           </p>
         </div>
         <Button variant="secondary" onClick={refresh} disabled={isLoading}>
-          <RefreshCw className={`w-4 h-4 mr-2 ${isLoading ? 'animate-spin' : ''}`} />
+          <RefreshCw
+            className={`w-4 h-4 mr-2 ${isLoading ? 'animate-spin' : ''}`}
+          />
           Refresh
         </Button>
       </div>
@@ -29,9 +33,9 @@ export default function CredentialStatus() {
       ) : error && rows.length === 0 ? (
         <ErrorState message={error.message} onRetry={refresh} />
       ) : rows.length === 0 ? (
-        <EmptyState 
-          title="No credentials found" 
-          message="No credentials have been configured yet." 
+        <EmptyState
+          title="No credentials found"
+          message="No credentials have been configured yet."
         />
       ) : (
         <div className="w-full overflow-x-auto border border-graphite-800 rounded-lg bg-graphite-850">
@@ -46,8 +50,11 @@ export default function CredentialStatus() {
               </tr>
             </thead>
             <tbody className="divide-y divide-graphite-800">
-              {rows.map(row => (
-                <CredentialRow key={`${row.principal_id}-${row.provider}`} row={row} />
+              {rows.map((row) => (
+                <CredentialRow
+                  key={`${row.principal_id}-${row.provider}`}
+                  row={row}
+                />
               ))}
             </tbody>
           </table>

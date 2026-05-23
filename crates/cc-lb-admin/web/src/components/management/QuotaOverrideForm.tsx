@@ -1,6 +1,6 @@
 import { useState } from 'react';
-import { Button } from '../primitives/Button';
 import { useDraftPrincipals } from '../../lib/hooks/useDraftPrincipals';
+import { Button } from '../primitives/Button';
 
 export function QuotaOverrideForm({
   principalId,
@@ -14,7 +14,10 @@ export function QuotaOverrideForm({
   const [inputTokens, setInputTokens] = useState('');
   const [outputTokens, setOutputTokens] = useState('');
   const [isPending, setIsPending] = useState(false);
-  const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [message, setMessage] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
 
   const handleOverride = async () => {
     setIsPending(true);
@@ -22,12 +25,19 @@ export function QuotaOverrideForm({
     try {
       await overrideQuota(principalId, {
         requests_per_window: requests ? parseInt(requests, 10) : undefined,
-        input_tokens_per_window: inputTokens ? parseInt(inputTokens, 10) : undefined,
-        output_tokens_per_window: outputTokens ? parseInt(outputTokens, 10) : undefined,
+        input_tokens_per_window: inputTokens
+          ? parseInt(inputTokens, 10)
+          : undefined,
+        output_tokens_per_window: outputTokens
+          ? parseInt(outputTokens, 10)
+          : undefined,
       });
       setMessage({ type: 'success', text: 'Live override applied' });
     } catch (err) {
-      setMessage({ type: 'error', text: err instanceof Error ? err.message : String(err) });
+      setMessage({
+        type: 'error',
+        text: err instanceof Error ? err.message : String(err),
+      });
     } finally {
       setIsPending(false);
     }
@@ -37,7 +47,9 @@ export function QuotaOverrideForm({
     <div className="space-y-3">
       <div className="grid grid-cols-3 gap-2">
         <div>
-          <label className="block text-xs text-graphite-400 mb-1">Requests</label>
+          <label className="block text-xs text-graphite-400 mb-1">
+            Requests
+          </label>
           <input
             type="number"
             value={requests}
@@ -47,7 +59,9 @@ export function QuotaOverrideForm({
           />
         </div>
         <div>
-          <label className="block text-xs text-graphite-400 mb-1">Input Tokens</label>
+          <label className="block text-xs text-graphite-400 mb-1">
+            Input Tokens
+          </label>
           <input
             type="number"
             value={inputTokens}
@@ -57,7 +71,9 @@ export function QuotaOverrideForm({
           />
         </div>
         <div>
-          <label className="block text-xs text-graphite-400 mb-1">Output Tokens</label>
+          <label className="block text-xs text-graphite-400 mb-1">
+            Output Tokens
+          </label>
           <input
             type="number"
             value={outputTokens}
@@ -70,12 +86,21 @@ export function QuotaOverrideForm({
       <div className="flex items-center justify-between">
         <div className="text-xs">
           {message && (
-            <span className={message.type === 'success' ? 'text-green-400' : 'text-red-400'}>
+            <span
+              className={
+                message.type === 'success' ? 'text-green-400' : 'text-red-400'
+              }
+            >
               {message.text}
             </span>
           )}
         </div>
-        <Button type="button" variant="secondary"  onClick={handleOverride} disabled={isPending}>
+        <Button
+          type="button"
+          variant="secondary"
+          onClick={handleOverride}
+          disabled={isPending}
+        >
           Apply Override
         </Button>
       </div>

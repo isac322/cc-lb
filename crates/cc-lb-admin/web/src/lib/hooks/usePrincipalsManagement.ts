@@ -1,5 +1,5 @@
-import { useState, useEffect, useCallback } from 'react';
-import { getJson, PrincipalSpec } from '../api';
+import { useCallback, useEffect, useState } from 'react';
+import { getJson, type PrincipalSpec } from '../api';
 
 export interface PrincipalWithId extends PrincipalSpec {
   id: string;
@@ -43,20 +43,23 @@ export function usePrincipalsManagement(mock?: boolean) {
     try {
       setIsLoading(true);
       setError(null);
-      
+
       const [current, draftRes] = await Promise.all([
         getJson<Record<string, unknown>>('/admin/config/current'),
         getJson<Record<string, unknown>>('/admin/config/draft'),
       ]);
 
       const config = (draftRes.draft as Record<string, unknown>) || current;
-      const principalsMap = (config.principals as Record<string, unknown>) || {};
-      
-      const list = Object.entries(principalsMap).map(([id, spec]: [string, unknown]) => ({
-        id,
-        ...(spec as PrincipalSpec),
-      }));
-      
+      const principalsMap =
+        (config.principals as Record<string, unknown>) || {};
+
+      const list = Object.entries(principalsMap).map(
+        ([id, spec]: [string, unknown]) => ({
+          id,
+          ...(spec as PrincipalSpec),
+        }),
+      );
+
       setPrincipals(list);
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));

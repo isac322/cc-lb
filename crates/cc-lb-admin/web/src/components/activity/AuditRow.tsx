@@ -1,18 +1,35 @@
-import { AuditEntry } from '../../lib/api';
+import type { AuditEntry } from '../../lib/api';
+import { formatRelativeTime } from '../../lib/time';
 import { StatusChip } from '../primitives/StatusChip';
 import { Tooltip } from '../primitives/Tooltip';
-import { formatRelativeTime } from '../../lib/time';
 import { AuditPayloadView } from './AuditPayloadView';
 
 interface AuditRowProps {
   event: AuditEntry;
 }
 
-function getKindColor(kind: string | undefined): 'ok' | 'warn' | 'danger' | 'neutral' {
+function getKindColor(
+  kind: string | undefined,
+): 'ok' | 'warn' | 'danger' | 'neutral' {
   if (!kind) return 'neutral';
-  if (kind.includes('create') || kind.includes('issue') || kind.includes('complete')) return 'ok';
-  if (kind.includes('revoke') || kind.includes('disable') || kind.includes('killswitch')) return 'danger';
-  if (kind.includes('update') || kind.includes('rotate') || kind.includes('override')) return 'warn';
+  if (
+    kind.includes('create') ||
+    kind.includes('issue') ||
+    kind.includes('complete')
+  )
+    return 'ok';
+  if (
+    kind.includes('revoke') ||
+    kind.includes('disable') ||
+    kind.includes('killswitch')
+  )
+    return 'danger';
+  if (
+    kind.includes('update') ||
+    kind.includes('rotate') ||
+    kind.includes('override')
+  )
+    return 'warn';
   return 'neutral';
 }
 

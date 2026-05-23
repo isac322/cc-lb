@@ -1,30 +1,45 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { SettingsLayout } from '../components/settings/SettingsLayout';
-import { SectionNav } from '../components/settings/SectionNav';
-import { FormSection } from '../components/settings/FormSection';
-import { SchemaForm } from '../components/settings/SchemaForm';
-import { UpstreamsEditor } from '../components/settings/UpstreamsEditor';
-import { PrincipalsEditor } from '../components/settings/PrincipalsEditor';
-import { ValidateApplyBar } from '../components/settings/ValidateApplyBar';
-import { HistoryDrawer } from '../components/settings/HistoryDrawer';
-import { DiffPreviewPanel } from '../components/settings/DiffPreviewPanel';
-import { useConfigSchema } from '../lib/hooks/useConfigSchema';
-import { useConfigDraft } from '../lib/hooks/useConfigDraft';
-import { useConfigValidate } from '../lib/hooks/useConfigValidate';
-import { useConfigApply } from '../lib/hooks/useConfigApply';
-import { LoadingState } from '../components/primitives/LoadingState';
-import { ErrorState } from '../components/primitives/ErrorState';
-import { Modal } from '../components/primitives/Modal';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { Button } from '../components/primitives/Button';
+import { ErrorState } from '../components/primitives/ErrorState';
+import { LoadingState } from '../components/primitives/LoadingState';
+import { Modal } from '../components/primitives/Modal';
+import { DiffPreviewPanel } from '../components/settings/DiffPreviewPanel';
+import { FormSection } from '../components/settings/FormSection';
+import { HistoryDrawer } from '../components/settings/HistoryDrawer';
+import { PrincipalsEditor } from '../components/settings/PrincipalsEditor';
+import { SchemaForm } from '../components/settings/SchemaForm';
+import { SectionNav } from '../components/settings/SectionNav';
+import { SettingsLayout } from '../components/settings/SettingsLayout';
+import { UpstreamsEditor } from '../components/settings/UpstreamsEditor';
+import { ValidateApplyBar } from '../components/settings/ValidateApplyBar';
+import { useConfigApply } from '../lib/hooks/useConfigApply';
+import { useConfigDraft } from '../lib/hooks/useConfigDraft';
+import { useConfigSchema } from '../lib/hooks/useConfigSchema';
+import { useConfigValidate } from '../lib/hooks/useConfigValidate';
 
 export default function Settings() {
-  const { schema, error: schemaError, loading: schemaLoading } = useConfigSchema();
-  const { draftData, error: draftError, loading: draftLoading, saving, saveError, conflict, saveDraft, fetchDraft } = useConfigDraft();
+  const {
+    schema,
+    error: schemaError,
+    loading: schemaLoading,
+  } = useConfigSchema();
+  const {
+    draftData,
+    error: draftError,
+    loading: draftLoading,
+    saving,
+    saveError,
+    conflict,
+    saveDraft,
+    fetchDraft,
+  } = useConfigDraft();
   const { validate, validating } = useConfigValidate();
   const { apply, applying } = useConfigApply();
 
   const [activeSection, setActiveSection] = useState<string>('');
-  const [localDraft, setLocalDraft] = useState<Record<string, unknown> | null>(null);
+  const [localDraft, setLocalDraft] = useState<Record<string, unknown> | null>(
+    null,
+  );
   const [diffModalOpen, setDiffModalOpen] = useState(false);
   const [diffFromRev, setDiffFromRev] = useState<number | null>(null);
   const [applyModalOpen, setApplyModalOpen] = useState(false);
@@ -47,10 +62,15 @@ export default function Settings() {
 
   // Check coverage
   useEffect(() => {
-    if (schema?.coverage_checklist && schema.schema && typeof schema.schema === 'object') {
-      const props = (schema.schema as Record<string, unknown>).properties as Record<string, unknown>;
+    if (
+      schema?.coverage_checklist &&
+      schema.schema &&
+      typeof schema.schema === 'object'
+    ) {
+      const props = (schema.schema as Record<string, unknown>)
+        .properties as Record<string, unknown>;
       if (props) {
-        const missing = schema.coverage_checklist.filter(key => !props[key]);
+        const missing = schema.coverage_checklist.filter((key) => !props[key]);
         if (missing.length > 0) {
           console.error('Missing coverage sections in schema:', missing);
         }
@@ -60,7 +80,8 @@ export default function Settings() {
 
   // Handle mock dialogs
   useEffect(() => {
-    const isMock = new URLSearchParams(window.location.search).get('mock') === '1';
+    const isMock =
+      new URLSearchParams(window.location.search).get('mock') === '1';
     const dialog = new URLSearchParams(window.location.search).get('dialog');
     if (isMock) {
       if (dialog === 'apply') setApplyModalOpen(true);
@@ -79,23 +100,26 @@ export default function Settings() {
     }
   };
 
-  const handleDraftChange = useCallback((key: string, value: unknown) => {
-    setLocalDraft((prev) => {
-      const next = { ...(prev || {}), [key]: value };
-      
-      if (saveTimeoutRef.current) {
-        clearTimeout(saveTimeoutRef.current);
-      }
-      
-      saveTimeoutRef.current = setTimeout(() => {
-        if (draftData) {
-          saveDraft(next, draftData.revision);
+  const handleDraftChange = useCallback(
+    (key: string, value: unknown) => {
+      setLocalDraft((prev) => {
+        const next = { ...(prev || {}), [key]: value };
+
+        if (saveTimeoutRef.current) {
+          clearTimeout(saveTimeoutRef.current);
         }
-      }, 400);
-      
-      return next;
-    });
-  }, [draftData, saveDraft]);
+
+        saveTimeoutRef.current = setTimeout(() => {
+          if (draftData) {
+            saveDraft(next, draftData.revision);
+          }
+        }, 400);
+
+        return next;
+      });
+    },
+    [draftData, saveDraft],
+  );
 
   const handleValidate = async () => {
     if (!draftData) return;
@@ -128,9 +152,16 @@ export default function Settings() {
     setDiffModalOpen(true);
   };
 
-  if (schemaLoading || draftLoading) return <LoadingState message="Loading settings..." />;
-  if (schemaError) return <ErrorState title="Failed to load schema" message={schemaError.message} />;
-  if (draftError) return <ErrorState title="Failed to load draft" message={draftError.message} />;
+  if (schemaLoading || draftLoading)
+    return <LoadingState message="Loading settings..." />;
+  if (schemaError)
+    return (
+      <ErrorState title="Failed to load schema" message={schemaError.message} />
+    );
+  if (draftError)
+    return (
+      <ErrorState title="Failed to load draft" message={draftError.message} />
+    );
   if (!schema || !draftData || !localDraft) return null;
 
   return (
@@ -146,7 +177,8 @@ export default function Settings() {
         main={
           <div className="space-y-8">
             {schema.coverage_checklist.map((key) => {
-              const props = (schema.schema as Record<string, unknown>).properties as Record<string, unknown>;
+              const props = (schema.schema as Record<string, unknown>)
+                .properties as Record<string, unknown>;
               const propSchema = props?.[key] as Record<string, unknown>;
               if (!propSchema) return null;
 
@@ -161,9 +193,15 @@ export default function Settings() {
                     <UpstreamsEditor
                       schema={propSchema as Record<string, unknown>}
                       rootSchema={schema.schema as Record<string, unknown>}
-                      value={(localDraft[key] as Record<string, unknown>[]) || []}
+                      value={
+                        (localDraft[key] as Record<string, unknown>[]) || []
+                      }
                       onChange={(val) => handleDraftChange(key, val)}
-                      error={draftData.last_validation_error?.startsWith(key) ? draftData.last_validation_error : undefined}
+                      error={
+                        draftData.last_validation_error?.startsWith(key)
+                          ? draftData.last_validation_error
+                          : undefined
+                      }
                     />
                   ) : key === 'principals' ? (
                     <PrincipalsEditor
@@ -171,7 +209,11 @@ export default function Settings() {
                       rootSchema={schema.schema as Record<string, unknown>}
                       value={(localDraft[key] as Record<string, unknown>) || {}}
                       onChange={(val) => handleDraftChange(key, val)}
-                      error={draftData.last_validation_error?.startsWith(key) ? draftData.last_validation_error : undefined}
+                      error={
+                        draftData.last_validation_error?.startsWith(key)
+                          ? draftData.last_validation_error
+                          : undefined
+                      }
                     />
                   ) : (
                     <SchemaForm
@@ -180,7 +222,11 @@ export default function Settings() {
                       value={localDraft[key]}
                       onChange={(val) => handleDraftChange(key, val)}
                       path={key}
-                      error={draftData.last_validation_error?.startsWith(key) ? draftData.last_validation_error : undefined}
+                      error={
+                        draftData.last_validation_error?.startsWith(key)
+                          ? draftData.last_validation_error
+                          : undefined
+                      }
                     />
                   )}
                 </FormSection>
@@ -212,11 +258,19 @@ export default function Settings() {
       >
         <div className="space-y-4">
           <p className="text-sm text-graphite-300">
-            Apply revision <span className="font-mono text-graphite-50">{draftData.revision}</span>? 
-            This will atomically write the config file and trigger a reload.
+            Apply revision{' '}
+            <span className="font-mono text-graphite-50">
+              {draftData.revision}
+            </span>
+            ? This will atomically write the config file and trigger a reload.
           </p>
           <div className="flex justify-end space-x-3">
-            <Button variant="secondary" onClick={() => setApplyModalOpen(false)}>Cancel</Button>
+            <Button
+              variant="secondary"
+              onClick={() => setApplyModalOpen(false)}
+            >
+              Cancel
+            </Button>
             <Button variant="primary" onClick={handleApply} disabled={applying}>
               {applying ? 'Applying...' : 'Confirm Apply'}
             </Button>
@@ -235,7 +289,9 @@ export default function Settings() {
             toRevision={draftData.revision} // Compare against current draft revision
           />
           <div className="flex justify-end">
-            <Button variant="secondary" onClick={() => setDiffModalOpen(false)}>Close</Button>
+            <Button variant="secondary" onClick={() => setDiffModalOpen(false)}>
+              Close
+            </Button>
           </div>
         </div>
       </Modal>

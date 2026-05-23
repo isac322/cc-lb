@@ -1,4 +1,4 @@
-import { PrincipalListResponse } from '../../lib/api';
+import type { PrincipalListResponse } from '../../lib/api';
 
 interface PrincipalDirectoryProps {
   data: PrincipalListResponse | null;
@@ -7,7 +7,12 @@ interface PrincipalDirectoryProps {
   onSelect: (id: string) => void;
 }
 
-export function PrincipalDirectory({ data, isLoading, selectedId, onSelect }: PrincipalDirectoryProps) {
+export function PrincipalDirectory({
+  data,
+  isLoading,
+  selectedId,
+  onSelect,
+}: PrincipalDirectoryProps) {
   if (isLoading) {
     return (
       <div className="w-full lg:w-48 flex-shrink-0 space-y-2">

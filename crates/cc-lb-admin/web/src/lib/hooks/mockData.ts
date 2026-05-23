@@ -1,15 +1,15 @@
-import {
-  ConfigSchemaResponse,
+import type {
+  ConfigDiffResponse,
   ConfigDraftResponse,
   ConfigHistoryResponse,
-  ConfigDiffResponse,
-  PrincipalListResponse,
+  ConfigSchemaResponse,
   DashboardUsageResponse,
   PrincipalLimitsResponse,
+  PrincipalListResponse,
 } from '../api';
 
 export const MOCK_DIRECTORY: PrincipalListResponse = {
-  principals: [{ id: 'principal-a' }, { id: 'principal-b' }]
+  principals: [{ id: 'principal-a' }, { id: 'principal-b' }],
 };
 
 export const MOCK_USAGE: DashboardUsageResponse = {
@@ -23,11 +23,29 @@ export const MOCK_USAGE: DashboardUsageResponse = {
     {
       key: 'claude-3-opus-20240229',
       buckets: [
-        { bucket_start_unix_secs: 1764000000, request_count: 10, input_tokens: 1000, output_tokens: 500, error_count: 0, virtual_cost_micros: 15000, latency_ms_sum: 5000, latency_count: 10 },
-        { bucket_start_unix_secs: 1764000060, request_count: 15, input_tokens: 1500, output_tokens: 750, error_count: 1, virtual_cost_micros: 22500, latency_ms_sum: 7500, latency_count: 15 },
-      ]
-    }
-  ]
+        {
+          bucket_start_unix_secs: 1764000000,
+          request_count: 10,
+          input_tokens: 1000,
+          output_tokens: 500,
+          error_count: 0,
+          virtual_cost_micros: 15000,
+          latency_ms_sum: 5000,
+          latency_count: 10,
+        },
+        {
+          bucket_start_unix_secs: 1764000060,
+          request_count: 15,
+          input_tokens: 1500,
+          output_tokens: 750,
+          error_count: 1,
+          virtual_cost_micros: 22500,
+          latency_ms_sum: 7500,
+          latency_count: 15,
+        },
+      ],
+    },
+  ],
 };
 
 export const MOCK_LIMITS: PrincipalLimitsResponse = {
@@ -42,19 +60,59 @@ export const MOCK_LIMITS: PrincipalLimitsResponse = {
         {
           window: '5h',
           snapshots: [
-            { kind: 'requests', limit: 200, remaining: 100, reset: new Date(Date.now() + 3600000).toISOString(), observed_at_unix_secs: 1764000000, stored_at_unix_secs: 1764000000, observed: true },
-            { kind: 'input_tokens', limit: 100000, remaining: 30000, reset: new Date(Date.now() + 3600000).toISOString(), observed_at_unix_secs: 1764000000, stored_at_unix_secs: 1764000000, observed: true },
-            { kind: 'output_tokens', limit: 100000, remaining: 20000, reset: new Date(Date.now() + 3600000).toISOString(), observed_at_unix_secs: 1764000000, stored_at_unix_secs: 1764000000, observed: true },
-          ]
+            {
+              kind: 'requests',
+              limit: 200,
+              remaining: 100,
+              reset: new Date(Date.now() + 3600000).toISOString(),
+              observed_at_unix_secs: 1764000000,
+              stored_at_unix_secs: 1764000000,
+              observed: true,
+            },
+            {
+              kind: 'input_tokens',
+              limit: 100000,
+              remaining: 30000,
+              reset: new Date(Date.now() + 3600000).toISOString(),
+              observed_at_unix_secs: 1764000000,
+              stored_at_unix_secs: 1764000000,
+              observed: true,
+            },
+            {
+              kind: 'output_tokens',
+              limit: 100000,
+              remaining: 20000,
+              reset: new Date(Date.now() + 3600000).toISOString(),
+              observed_at_unix_secs: 1764000000,
+              stored_at_unix_secs: 1764000000,
+              observed: true,
+            },
+          ],
         },
         {
           window: 'weekly',
           snapshots: [
-            { kind: 'requests', limit: 10000, remaining: 5000, reset: new Date(Date.now() + 86400000 * 3).toISOString(), observed_at_unix_secs: 1764000000, stored_at_unix_secs: 1764000000, observed: true },
-            { kind: 'input_tokens', limit: 5000000, remaining: 2000000, reset: new Date(Date.now() + 86400000 * 3).toISOString(), observed_at_unix_secs: 1764000000, stored_at_unix_secs: 1764000000, observed: true },
-          ]
-        }
-      ]
+            {
+              kind: 'requests',
+              limit: 10000,
+              remaining: 5000,
+              reset: new Date(Date.now() + 86400000 * 3).toISOString(),
+              observed_at_unix_secs: 1764000000,
+              stored_at_unix_secs: 1764000000,
+              observed: true,
+            },
+            {
+              kind: 'input_tokens',
+              limit: 5000000,
+              remaining: 2000000,
+              reset: new Date(Date.now() + 86400000 * 3).toISOString(),
+              observed_at_unix_secs: 1764000000,
+              stored_at_unix_secs: 1764000000,
+              observed: true,
+            },
+          ],
+        },
+      ],
     },
     {
       identity_kind: 'unobserved',
@@ -64,13 +122,29 @@ export const MOCK_LIMITS: PrincipalLimitsResponse = {
         {
           window: '5h',
           snapshots: [
-            { kind: 'requests', limit: null, remaining: null, reset: null, observed_at_unix_secs: 0, stored_at_unix_secs: 0, observed: false },
-            { kind: 'tokens', limit: null, remaining: null, reset: null, observed_at_unix_secs: 0, stored_at_unix_secs: 0, observed: false },
-          ]
-        }
-      ]
-    }
-  ]
+            {
+              kind: 'requests',
+              limit: null,
+              remaining: null,
+              reset: null,
+              observed_at_unix_secs: 0,
+              stored_at_unix_secs: 0,
+              observed: false,
+            },
+            {
+              kind: 'tokens',
+              limit: null,
+              remaining: null,
+              reset: null,
+              observed_at_unix_secs: 0,
+              stored_at_unix_secs: 0,
+              observed: false,
+            },
+          ],
+        },
+      ],
+    },
+  ],
 };
 
 export const MOCK_SCHEMA: ConfigSchemaResponse = {
@@ -82,8 +156,18 @@ export const MOCK_SCHEMA: ConfigSchemaResponse = {
         title: 'Listener',
         description: 'Server listener configuration',
         properties: {
-          address: { type: 'string', title: 'Address', description: 'Bind address' },
-          port: { type: 'integer', title: 'Port', description: 'Bind port', minimum: 1, maximum: 65535 },
+          address: {
+            type: 'string',
+            title: 'Address',
+            description: 'Bind address',
+          },
+          port: {
+            type: 'integer',
+            title: 'Port',
+            description: 'Bind port',
+            minimum: 1,
+            maximum: 65535,
+          },
         },
       },
       tls: {
@@ -108,7 +192,10 @@ export const MOCK_SCHEMA: ConfigSchemaResponse = {
         title: 'Timeouts',
         description: 'Global timeouts',
         properties: {
-          connect_timeout_ms: { type: 'integer', title: 'Connect Timeout (ms)' },
+          connect_timeout_ms: {
+            type: 'integer',
+            title: 'Connect Timeout (ms)',
+          },
           read_timeout_ms: { type: 'integer', title: 'Read Timeout (ms)' },
         },
       },
@@ -133,7 +220,11 @@ export const MOCK_SCHEMA: ConfigSchemaResponse = {
         additionalProperties: {
           type: 'object',
           properties: {
-            allowed_models: { type: 'array', items: { type: 'string' }, title: 'Allowed Models' },
+            allowed_models: {
+              type: 'array',
+              items: { type: 'string' },
+              title: 'Allowed Models',
+            },
             disabled: { type: 'boolean', title: 'Disabled' },
           },
         },
@@ -199,7 +290,10 @@ export const MOCK_SCHEMA: ConfigSchemaResponse = {
         title: 'Bulkhead',
         description: 'Concurrency limits',
         properties: {
-          max_concurrent_requests: { type: 'integer', title: 'Max Concurrent Requests' },
+          max_concurrent_requests: {
+            type: 'integer',
+            title: 'Max Concurrent Requests',
+          },
         },
       },
       dns: {
@@ -247,8 +341,18 @@ export const MOCK_DRAFT: ConfigDraftResponse = {
     body: { max_size_bytes: 10485760 },
     timeouts: { connect_timeout_ms: 5000, read_timeout_ms: 30000 },
     upstreams: [
-      { id: 'anthropic', url: 'https://api.anthropic.com', weight: 1, auth_token: '${ANTHROPIC_API_KEY}' },
-      { id: 'openai', url: 'https://api.openai.com', weight: 1, auth_token: '${OPENAI_API_KEY}' },
+      {
+        id: 'anthropic',
+        url: 'https://api.anthropic.com',
+        weight: 1,
+        auth_token: '${ANTHROPIC_API_KEY}',
+      },
+      {
+        id: 'openai',
+        url: 'https://api.openai.com',
+        weight: 1,
+        auth_token: '${OPENAI_API_KEY}',
+      },
     ],
     principals: {
       'user-1': { allowed_models: ['claude-3-opus-20240229'], disabled: false },
@@ -276,17 +380,32 @@ export const MOCK_HISTORY: ConfigHistoryResponse = {
     {
       revision: 41,
       applied_at_unix_secs: Math.floor(Date.now() / 1000) - 3600,
-      config_summary: { upstreams: 2, principals: 2, plugin_count: 0, tls_enabled: true },
+      config_summary: {
+        upstreams: 2,
+        principals: 2,
+        plugin_count: 0,
+        tls_enabled: true,
+      },
     },
     {
       revision: 40,
       applied_at_unix_secs: Math.floor(Date.now() / 1000) - 86400,
-      config_summary: { upstreams: 1, principals: 1, plugin_count: 0, tls_enabled: false },
+      config_summary: {
+        upstreams: 1,
+        principals: 1,
+        plugin_count: 0,
+        tls_enabled: false,
+      },
     },
     {
       revision: 39,
       applied_at_unix_secs: Math.floor(Date.now() / 1000) - 172800,
-      config_summary: { upstreams: 1, principals: 0, plugin_count: 0, tls_enabled: false },
+      config_summary: {
+        upstreams: 1,
+        principals: 0,
+        plugin_count: 0,
+        tls_enabled: false,
+      },
     },
   ],
 };
@@ -296,8 +415,21 @@ export const MOCK_DIFF: ConfigDiffResponse = {
   to: 42,
   diff: [
     { path: 'listener.port', from: 80, to: 8080 },
-    { path: 'upstreams[1]', from: null, to: { id: 'openai', url: 'https://api.openai.com', weight: 1, auth_token: '<redacted>' } },
-    { path: 'principals.user-2', from: null, to: { allowed_models: ['gpt-4-turbo'], disabled: true } },
+    {
+      path: 'upstreams[1]',
+      from: null,
+      to: {
+        id: 'openai',
+        url: 'https://api.openai.com',
+        weight: 1,
+        auth_token: '<redacted>',
+      },
+    },
+    {
+      path: 'principals.user-2',
+      from: null,
+      to: { allowed_models: ['gpt-4-turbo'], disabled: true },
+    },
     { path: 'observability.metrics_enabled', from: false, to: true },
     { path: 'admin.admin_token', from: '<redacted>', to: '<redacted>' },
   ],
