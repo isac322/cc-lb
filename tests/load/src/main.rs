@@ -174,10 +174,10 @@ impl Options {
         if concurrency == 0 {
             bail!("--concurrency must be positive");
         }
-        if let Some(requests) = requests {
-            if requests == 0 {
-                bail!("--requests must be positive");
-            }
+        if let Some(requests) = requests
+            && requests == 0
+        {
+            bail!("--requests must be positive");
         }
         if let Some(duration_secs) = soak_duration_secs {
             if duration_secs == 0 {

@@ -1,5 +1,12 @@
-import { useState, useEffect, useCallback } from 'react';
-import { getJson, postJson, CredentialEntry, CredentialsResponse, RotateCredentialResponse, RevokeCredentialResponse } from '../api';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  type CredentialEntry,
+  type CredentialsResponse,
+  getJson,
+  postJson,
+  type RevokeCredentialResponse,
+  type RotateCredentialResponse,
+} from '../api';
 
 export function useCredentials(mock?: boolean) {
   const [credentials, setCredentials] = useState<CredentialEntry[]>([]);
@@ -61,9 +68,14 @@ export function useCredentials(mock?: boolean) {
     fetchCredentials();
   }, [fetchCredentials]);
 
-  const rotateCredential = async (principalId: string, provider: string): Promise<RotateCredentialResponse> => {
+  const rotateCredential = async (
+    principalId: string,
+    provider: string,
+  ): Promise<RotateCredentialResponse> => {
     if (mock) {
-      const cred = credentials.find(c => c.principal_id === principalId && c.provider === provider);
+      const cred = credentials.find(
+        (c) => c.principal_id === principalId && c.provider === provider,
+      );
       if (cred?.kind === 'oauth') {
         throw new Error('rotate_unsupported');
       }
@@ -79,31 +91,52 @@ export function useCredentials(mock?: boolean) {
       await fetchCredentials();
       return res;
     }
-    const res = await postJson<RotateCredentialResponse, Record<string, never>>(`/admin/credentials/${principalId}/${provider}/rotate`, {});
+    const res = await postJson<RotateCredentialResponse, Record<string, never>>(
+      `/admin/credentials/${principalId}/${provider}/rotate`,
+      {},
+    );
     await fetchCredentials();
     return res;
   };
 
-  const revokeCredential = async (principalId: string, provider: string): Promise<RevokeCredentialResponse> => {
+  const revokeCredential = async (
+    principalId: string,
+    provider: string,
+  ): Promise<RevokeCredentialResponse> => {
     if (mock) {
       const res: RevokeCredentialResponse = {
         principal_id: principalId,
         provider,
-        kind: credentials.find(c => c.principal_id === principalId && c.provider === provider)?.kind || 'api_key',
+        kind:
+          credentials.find(
+            (c) => c.principal_id === principalId && c.provider === provider,
+          )?.kind || 'api_key',
         revoked_keys: [`key_mock_${Date.now()}`],
       };
-      setCredentials(prev => prev.map(c => {
-        if (c.principal_id === principalId && c.provider === provider) {
-          return { ...c, has_credentials: false, status: 'revoked' };
-        }
-        return c;
-      }));
+      setCredentials((prev) =>
+        prev.map((c) => {
+          if (c.principal_id === principalId && c.provider === provider) {
+            return { ...c, has_credentials: false, status: 'revoked' };
+          }
+          return c;
+        }),
+      );
       return res;
     }
-    const res = await postJson<RevokeCredentialResponse, Record<string, never>>(`/admin/credentials/${principalId}/${provider}/revoke`, {});
+    const res = await postJson<RevokeCredentialResponse, Record<string, never>>(
+      `/admin/credentials/${principalId}/${provider}/revoke`,
+      {},
+    );
     await fetchCredentials();
     return res;
   };
 
-  return { credentials, refresh: fetchCredentials, isLoading, error, rotateCredential, revokeCredential };
+  return {
+    credentials,
+    refresh: fetchCredentials,
+    isLoading,
+    error,
+    rotateCredential,
+    revokeCredential,
+  };
 }

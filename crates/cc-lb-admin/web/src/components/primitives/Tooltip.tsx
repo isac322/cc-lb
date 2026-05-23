@@ -1,4 +1,10 @@
-export function Tooltip({ content, children }: { content: string; children: React.ReactNode }) {
+export function Tooltip({
+  content,
+  children,
+}: {
+  content: string;
+  children: React.ReactNode;
+}) {
   return (
     <div className="group relative inline-block">
       {children}

@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { getJson, PrincipalListResponse } from '../api';
+import { useEffect, useState } from 'react';
+import { getJson, type PrincipalListResponse } from '../api';
 import { MOCK_DIRECTORY } from './mockData';
 
 export function usePrincipalDirectory(mock?: boolean) {
@@ -16,11 +16,13 @@ export function usePrincipalDirectory(mock?: boolean) {
     }
 
     const controller = new AbortController();
-    
+
     async function fetchDirectory() {
       try {
         setIsLoading(true);
-        const res = await getJson<PrincipalListResponse>('/admin/principals', { signal: controller.signal });
+        const res = await getJson<PrincipalListResponse>('/admin/principals', {
+          signal: controller.signal,
+        });
         setData(res);
         setError(null);
       } catch (err) {

@@ -1,5 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
-import { getJson, CredentialsResponse, OAuthStatusResponse, OAuthCredentialStatus } from '../api';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  type CredentialsResponse,
+  getJson,
+  type OAuthCredentialStatus,
+  type OAuthStatusResponse,
+} from '../api';
 
 export interface MergedCredentialRow {
   principal_id: string;
@@ -24,7 +29,8 @@ export function useCredentialStatus() {
     setIsLoading(true);
     setError(null);
     try {
-      const isMock = new URLSearchParams(window.location.search).get('mock') === '1';
+      const isMock =
+        new URLSearchParams(window.location.search).get('mock') === '1';
       if (isMock) {
         const now = Math.floor(Date.now() / 1000);
         setRows([
@@ -73,8 +79,8 @@ export function useCredentialStatus() {
             status: 'valid',
             // Fake plaintext field to test redaction if it were rendered (though we don't render arbitrary payload here, just to be safe)
             // @ts-expect-error test redaction
-            plaintext: "mock-plaintext-redacted"
-          }
+            plaintext: 'mock-plaintext-redacted',
+          },
         ]);
         setObserved(true);
         setIsLoading(false);
@@ -83,17 +89,20 @@ export function useCredentialStatus() {
 
       const [credsRes, oauthRes] = await Promise.all([
         getJson<CredentialsResponse>('/admin/credentials'),
-        getJson<OAuthStatusResponse>('/admin/oauth/status').catch(() => ({ credentials: [], observed: false }))
+        getJson<OAuthStatusResponse>('/admin/oauth/status').catch(() => ({
+          credentials: [],
+          observed: false,
+        })),
       ]);
 
       const merged: MergedCredentialRow[] = [];
       const oauthMap = new Map<string, OAuthCredentialStatus>();
-      
-      oauthRes.credentials.forEach(c => {
+
+      oauthRes.credentials.forEach((c) => {
         oauthMap.set(`${c.principal_id}/${c.provider}`, c);
       });
 
-      credsRes.credentials.forEach(c => {
+      credsRes.credentials.forEach((c) => {
         const oauth = oauthMap.get(`${c.principal_id}/${c.provider}`);
         merged.push({
           ...c,
@@ -101,7 +110,9 @@ export function useCredentialStatus() {
           last_updated_unix_secs: oauth?.last_updated_unix_secs,
           // Prefer OAuth status if available as it might have more detail
           status: oauth ? oauth.status : c.status,
-          expires_at_unix_secs: oauth ? oauth.expires_at_unix_secs : c.expires_at_unix_secs,
+          expires_at_unix_secs: oauth
+            ? oauth.expires_at_unix_secs
+            : c.expires_at_unix_secs,
         });
       });
 

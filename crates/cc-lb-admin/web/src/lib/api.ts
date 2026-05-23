@@ -1,12 +1,17 @@
+import { useEffect, useState } from 'react';
 import { getAdminToken } from './auth';
-import { useState, useEffect } from 'react';
 
 export class ApiError extends Error {
   status: number;
   code: string | null;
   body: unknown;
 
-  constructor(status: number, code: string | null, body: unknown, message: string) {
+  constructor(
+    status: number,
+    code: string | null,
+    body: unknown,
+    message: string,
+  ) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
@@ -15,13 +20,16 @@ export class ApiError extends Error {
   }
 }
 
-async function fetchWithAuth(path: string, options: RequestInit = {}): Promise<Response> {
+async function fetchWithAuth(
+  path: string,
+  options: RequestInit = {},
+): Promise<Response> {
   const token = getAdminToken();
   const headers = new Headers(options.headers);
   if (token) {
     headers.set('Authorization', `Bearer ${token}`);
   }
-  
+
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), 30000);
   const signal = options.signal || controller.signal;
@@ -54,12 +62,22 @@ async function fetchWithAuth(path: string, options: RequestInit = {}): Promise<R
   }
 }
 
-export async function getJson<T>(path: string, options?: { signal?: AbortSignal }): Promise<T> {
-  const res = await fetchWithAuth(path, { method: 'GET', signal: options?.signal });
+export async function getJson<T>(
+  path: string,
+  options?: { signal?: AbortSignal },
+): Promise<T> {
+  const res = await fetchWithAuth(path, {
+    method: 'GET',
+    signal: options?.signal,
+  });
   return res.json();
 }
 
-export async function postJson<T, B>(path: string, body: B, options?: { signal?: AbortSignal }): Promise<T> {
+export async function postJson<T, B>(
+  path: string,
+  body: B,
+  options?: { signal?: AbortSignal },
+): Promise<T> {
   const res = await fetchWithAuth(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -69,7 +87,11 @@ export async function postJson<T, B>(path: string, body: B, options?: { signal?:
   return res.json();
 }
 
-export async function putJson<T, B>(path: string, body: B, options?: { signal?: AbortSignal }): Promise<T> {
+export async function putJson<T, B>(
+  path: string,
+  body: B,
+  options?: { signal?: AbortSignal },
+): Promise<T> {
   const res = await fetchWithAuth(path, {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
@@ -79,8 +101,14 @@ export async function putJson<T, B>(path: string, body: B, options?: { signal?: 
   return res.json();
 }
 
-export async function deleteJson<T>(path: string, options?: { signal?: AbortSignal }): Promise<T> {
-  const res = await fetchWithAuth(path, { method: 'DELETE', signal: options?.signal });
+export async function deleteJson<T>(
+  path: string,
+  options?: { signal?: AbortSignal },
+): Promise<T> {
+  const res = await fetchWithAuth(path, {
+    method: 'DELETE',
+    signal: options?.signal,
+  });
   return res.json();
 }
 
@@ -91,11 +119,13 @@ export function streamEventsFetch(
     onError: (err: Error) => void;
     onConnect: () => void;
     signal?: AbortSignal;
-  }
+  },
 ): () => void {
   const controller = new AbortController();
-  const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
-  
+  const signal = options.signal
+    ? AbortSignal.any([controller.signal, options.signal])
+    : controller.signal;
+
   let isClosed = false;
 
   async function connect() {
@@ -114,11 +144,11 @@ export function streamEventsFetch(
         }
         throw new Error(`HTTP ${res.status}`);
       }
-      
+
       options.onConnect();
-      
+
       if (!res.body) throw new Error('No response body');
-      
+
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
       let buffer = '';
@@ -126,30 +156,35 @@ export function streamEventsFetch(
       while (!isClosed) {
         const { done, value } = await reader.read();
         if (done) break;
-        
+
         buffer += decoder.decode(value, { stream: true });
         const lines = buffer.split('\n\n');
         buffer = lines.pop() || '';
-        
+
         for (const block of lines) {
           if (!block.trim()) continue;
           const lines = block.split('\n');
           let eventType = 'message';
           let data = '';
           let id = '';
-          
+
           for (const line of lines) {
             if (line.startsWith('event:')) {
               eventType = line.slice(6).trim();
             } else if (line.startsWith('data:')) {
-              data += line.slice(5).trim() + '\n';
+              data += `${line.slice(5).trim()}\n`;
             } else if (line.startsWith('id:')) {
               id = line.slice(3).trim();
             }
           }
-          
+
           if (data) {
-            options.onEvent(new MessageEvent(eventType, { data: data.trim(), lastEventId: id }));
+            options.onEvent(
+              new MessageEvent(eventType, {
+                data: data.trim(),
+                lastEventId: id,
+              }),
+            );
           }
         }
       }
@@ -167,7 +202,11 @@ export function streamEventsFetch(
   };
 }
 
-export type ConnectionState = 'live' | 'reconnecting' | 'auth_required' | 'disconnected';
+export type ConnectionState =
+  | 'live'
+  | 'reconnecting'
+  | 'auth_required'
+  | 'disconnected';
 
 export interface SummaryTotals {
   request_count: number;
@@ -259,7 +298,7 @@ export function useDashboardConnection() {
             setState('reconnecting');
             retryTimeout = setTimeout(connect, 5000);
           }
-        }
+        },
       });
     }
 

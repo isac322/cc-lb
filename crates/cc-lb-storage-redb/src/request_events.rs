@@ -1,4 +1,4 @@
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
 use crate::{REQUEST_EVENTS_V1, Storage, StorageError};

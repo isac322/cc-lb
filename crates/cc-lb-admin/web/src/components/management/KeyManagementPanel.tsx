@@ -1,11 +1,11 @@
 import { useState } from 'react';
+import { usePrincipalKeys } from '../../lib/hooks/usePrincipalKeys';
+import { formatRelativeTime } from '../../lib/time';
+import { Button } from '../primitives/Button';
 import { Modal } from '../primitives/Modal';
 import { Table } from '../primitives/Table';
-import { Button } from '../primitives/Button';
-import { usePrincipalKeys } from '../../lib/hooks/usePrincipalKeys';
 import { IssueKeyDialog } from './IssueKeyDialog';
 import { RevokeKeyConfirm } from './RevokeKeyConfirm';
-import { formatRelativeTime } from '../../lib/time';
 
 export function KeyManagementPanel({
   principalId,
@@ -24,9 +24,9 @@ export function KeyManagementPanel({
     <Modal isOpen onClose={onClose} title={`Keys for ${principalId}`}>
       <div className="space-y-4">
         {error && <div className="text-red-400 text-sm">{error.message}</div>}
-        
+
         <div className="flex justify-end">
-          <Button variant="primary"  onClick={() => setIsIssuing(true)}>
+          <Button variant="primary" onClick={() => setIsIssuing(true)}>
             Issue New Key
           </Button>
         </div>
@@ -37,17 +37,25 @@ export function KeyManagementPanel({
           columns={[
             {
               header: 'Label',
-              render: (k) => <span className="text-graphite-100">{k.label || '—'}</span>,
+              render: (k) => (
+                <span className="text-graphite-100">{k.label || '—'}</span>
+              ),
             },
             {
               header: 'Issued',
-              render: (k) => <span className="text-graphite-300 text-sm">{formatRelativeTime(k.issued_at_unix_secs)}</span>,
+              render: (k) => (
+                <span className="text-graphite-300 text-sm">
+                  {formatRelativeTime(k.issued_at_unix_secs)}
+                </span>
+              ),
             },
             {
               header: 'Revoked',
               render: (k) => (
                 <span className="text-graphite-300 text-sm">
-                  {k.revoked_at_unix_secs ? formatRelativeTime(k.revoked_at_unix_secs) : '—'}
+                  {k.revoked_at_unix_secs
+                    ? formatRelativeTime(k.revoked_at_unix_secs)
+                    : '—'}
                 </span>
               ),
             },
@@ -57,7 +65,10 @@ export function KeyManagementPanel({
               render: (k) => (
                 <div className="flex justify-end">
                   {!k.revoked_at_unix_secs && (
-                    <Button variant="secondary"  onClick={() => setRevokingKey(k.key_id)}>
+                    <Button
+                      variant="secondary"
+                      onClick={() => setRevokingKey(k.key_id)}
+                    >
                       Revoke
                     </Button>
                   )}

@@ -412,7 +412,7 @@ fn connection_value(tokens: &[String]) -> String {
         if index > 0 {
             value.push(',');
         }
-        if index % 2 == 0 {
+        if index.is_multiple_of(2) {
             value.push(' ');
             value.push_str(&token.to_ascii_uppercase());
             value.push(' ');

@@ -1,11 +1,11 @@
 import { useState } from 'react';
-import { Table } from '../primitives/Table';
-import { StatusChip } from '../primitives/StatusChip';
+import type { PrincipalWithId } from '../../lib/hooks/usePrincipalsManagement';
 import { Button } from '../primitives/Button';
-import { PrincipalWithId } from '../../lib/hooks/usePrincipalsManagement';
-import { PrincipalEditForm } from './PrincipalEditForm';
-import { KeyManagementPanel } from './KeyManagementPanel';
+import { StatusChip } from '../primitives/StatusChip';
+import { Table } from '../primitives/Table';
 import { EnableDisableSwitch } from './EnableDisableSwitch';
+import { KeyManagementPanel } from './KeyManagementPanel';
+import { PrincipalEditForm } from './PrincipalEditForm';
 
 export function PrincipalManagementList({
   principals,
@@ -16,7 +16,8 @@ export function PrincipalManagementList({
   onRefresh: () => void;
   mock?: boolean;
 }) {
-  const [editingPrincipal, setEditingPrincipal] = useState<PrincipalWithId | null>(null);
+  const [editingPrincipal, setEditingPrincipal] =
+    useState<PrincipalWithId | null>(null);
   const [managingKeysFor, setManagingKeysFor] = useState<string | null>(null);
 
   return (
@@ -27,7 +28,9 @@ export function PrincipalManagementList({
         columns={[
           {
             header: 'ID',
-            render: (p) => <span className="font-mono text-graphite-100">{p.id}</span>,
+            render: (p) => (
+              <span className="font-mono text-graphite-100">{p.id}</span>
+            ),
           },
           {
             header: 'Status',
@@ -40,10 +43,12 @@ export function PrincipalManagementList({
           {
             header: 'Quota',
             render: (p) => {
-              if (!p.quotas) return <span className="text-graphite-500">Default</span>;
+              if (!p.quotas)
+                return <span className="text-graphite-500">Default</span>;
               return (
                 <span className="text-graphite-300 text-xs">
-                  {p.quotas.default_requests_per_window} req / {p.quotas.default_window_secs}s
+                  {p.quotas.default_requests_per_window} req /{' '}
+                  {p.quotas.default_window_secs}s
                 </span>
               );
             },
@@ -61,11 +66,21 @@ export function PrincipalManagementList({
             className: 'text-right',
             render: (p) => (
               <div className="flex items-center justify-end gap-2">
-                <EnableDisableSwitch principal={p} onRefresh={onRefresh} mock={mock} />
-                <Button variant="secondary"  onClick={() => setEditingPrincipal(p)}>
+                <EnableDisableSwitch
+                  principal={p}
+                  onRefresh={onRefresh}
+                  mock={mock}
+                />
+                <Button
+                  variant="secondary"
+                  onClick={() => setEditingPrincipal(p)}
+                >
                   Edit
                 </Button>
-                <Button variant="secondary"  onClick={() => setManagingKeysFor(p.id)}>
+                <Button
+                  variant="secondary"
+                  onClick={() => setManagingKeysFor(p.id)}
+                >
                   Keys
                 </Button>
               </div>

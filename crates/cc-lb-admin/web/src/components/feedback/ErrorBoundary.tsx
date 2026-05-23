@@ -1,4 +1,4 @@
-import { Component, ErrorInfo, ReactNode } from 'react';
+import { Component, type ErrorInfo, type ReactNode } from 'react';
 import { ErrorState } from '../primitives/ErrorState';
 
 interface Props {
@@ -31,7 +31,9 @@ export class ErrorBoundary extends Component<Props, State> {
           <div className="max-w-md w-full bg-graphite-850 border border-graphite-800 rounded-lg shadow-xl p-6">
             <ErrorState
               title="Something went wrong"
-              message={this.state.error?.message || 'An unexpected error occurred.'}
+              message={
+                this.state.error?.message || 'An unexpected error occurred.'
+              }
               onRetry={() => {
                 this.setState({ hasError: false, error: null });
                 window.location.reload();

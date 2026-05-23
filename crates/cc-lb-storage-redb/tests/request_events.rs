@@ -1,5 +1,5 @@
 use cc_lb_storage_redb::{REQUEST_EVENTS_V1, RequestEvent, RequestEventUpstream, Storage};
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 use serde_json::Value;
 
 #[test]

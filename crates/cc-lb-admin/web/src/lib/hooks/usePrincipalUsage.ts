@@ -1,8 +1,12 @@
-import { useState, useEffect } from 'react';
-import { getJson, DashboardUsageResponse } from '../api';
+import { useEffect, useState } from 'react';
+import { type DashboardUsageResponse, getJson } from '../api';
 import { MOCK_USAGE } from './mockData';
 
-export function usePrincipalUsage(principalId: string | null, range: string, mock?: boolean) {
+export function usePrincipalUsage(
+  principalId: string | null,
+  range: string,
+  mock?: boolean,
+) {
   const [data, setData] = useState<DashboardUsageResponse | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
@@ -22,11 +26,14 @@ export function usePrincipalUsage(principalId: string | null, range: string, moc
     }
 
     const controller = new AbortController();
-    
+
     async function fetchUsage() {
       try {
         setIsLoading(true);
-        const res = await getJson<DashboardUsageResponse>(`/admin/principals/${principalId}/usage?range=${range}`, { signal: controller.signal });
+        const res = await getJson<DashboardUsageResponse>(
+          `/admin/principals/${principalId}/usage?range=${range}`,
+          { signal: controller.signal },
+        );
         setData(res);
         setError(null);
       } catch (err) {

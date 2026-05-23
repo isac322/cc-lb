@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { Modal } from '../primitives/Modal';
-import { Button } from '../primitives/Button';
 import { usePrincipalKeys } from '../../lib/hooks/usePrincipalKeys';
+import { Button } from '../primitives/Button';
+import { Modal } from '../primitives/Modal';
 
 export function RevokeKeyConfirm({
   principalId,
@@ -37,7 +37,9 @@ export function RevokeKeyConfirm({
     <Modal isOpen onClose={onClose} title="Revoke Key">
       <div className="space-y-4">
         <p className="text-graphite-300 text-sm">
-          Are you sure you want to revoke the key <span className="font-mono text-graphite-100">{keyId}</span>? This action cannot be undone.
+          Are you sure you want to revoke the key{' '}
+          <span className="font-mono text-graphite-100">{keyId}</span>? This
+          action cannot be undone.
         </p>
 
         {error && <div className="text-red-400 text-sm">{error}</div>}
@@ -46,7 +48,13 @@ export function RevokeKeyConfirm({
           <Button type="button" variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button type="button" variant="primary" onClick={handleRevoke} disabled={isPending} className="bg-red-600 hover:bg-red-500 text-white border-red-500">
+          <Button
+            type="button"
+            variant="primary"
+            onClick={handleRevoke}
+            disabled={isPending}
+            className="bg-red-600 hover:bg-red-500 text-white border-red-500"
+          >
             {isPending ? 'Revoking...' : 'Revoke Key'}
           </Button>
         </div>

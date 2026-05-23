@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { Button } from '../primitives/Button';
-import { PrincipalWithId } from '../../lib/hooks/usePrincipalsManagement';
 import { useDraftPrincipals } from '../../lib/hooks/useDraftPrincipals';
+import type { PrincipalWithId } from '../../lib/hooks/usePrincipalsManagement';
+import { Button } from '../primitives/Button';
 
 export function EnableDisableSwitch({
   principal,
@@ -34,7 +34,6 @@ export function EnableDisableSwitch({
   return (
     <Button
       variant="secondary"
-      
       onClick={handleToggle}
       disabled={isPending}
       className={principal.disabled ? 'text-cyan-400' : 'text-red-400'}

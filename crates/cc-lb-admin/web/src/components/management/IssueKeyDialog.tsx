@@ -1,8 +1,8 @@
-import { useState, useEffect } from 'react';
-import { Modal } from '../primitives/Modal';
+import { useEffect, useState } from 'react';
+import { usePrincipalKeys } from '../../lib/hooks/usePrincipalKeys';
 import { Button } from '../primitives/Button';
 import { FormField } from '../primitives/FormField';
-import { usePrincipalKeys } from '../../lib/hooks/usePrincipalKeys';
+import { Modal } from '../primitives/Modal';
 
 export function IssueKeyDialog({
   principalId,
@@ -26,7 +26,9 @@ export function IssueKeyDialog({
 
   useEffect(() => {
     if (autoReveal && mock) {
-      setPlaintextKey(`mock-issued-key-${Math.random().toString(36).substring(2, 15)}`);
+      setPlaintextKey(
+        `mock-issued-key-${Math.random().toString(36).substring(2, 15)}`,
+      );
     }
   }, [autoReveal, mock]);
 
@@ -63,7 +65,8 @@ export function IssueKeyDialog({
       <Modal isOpen onClose={handleDismiss} title="Key Issued">
         <div className="space-y-4">
           <div className="bg-yellow-900/30 border border-yellow-700/50 rounded p-3 text-yellow-200 text-sm">
-            <strong>Warning:</strong> This is the only time the key will be displayed. Copy it now.
+            <strong>Warning:</strong> This is the only time the key will be
+            displayed. Copy it now.
           </div>
           <div className="flex items-center gap-2">
             <input

@@ -46,10 +46,10 @@ impl fmt::Debug for AdcTokenProvider {
 impl GcpTokenProvider for AdcTokenProvider {
     async fn get_token(&self, scopes: &[String]) -> Result<GcpToken, GcpTokenError> {
         let key = single_flight::scope_key(scopes);
-        if let Some(token) = self.cache.get(&key) {
-            if !token.expires_within(REFRESH_BUFFER) {
-                return Ok(token.clone());
-            }
+        if let Some(token) = self.cache.get(&key)
+            && !token.expires_within(REFRESH_BUFFER)
+        {
+            return Ok(token.clone());
         }
 
         self.load_fresh_token(&key).await

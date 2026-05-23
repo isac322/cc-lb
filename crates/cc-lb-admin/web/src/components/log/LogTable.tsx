@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect, useMemo } from 'react';
-import { RequestEvent } from '../../lib/api';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { RequestEvent } from '../../lib/api';
 import { StatusChip } from '../primitives/StatusChip';
 import { LogRowDetail } from './LogRowDetail';
 
@@ -24,7 +24,7 @@ export function LogTable({ events }: LogTableProps) {
       setScrollTop(container.scrollTop);
     };
 
-    const resizeObserver = new ResizeObserver(entries => {
+    const resizeObserver = new ResizeObserver((entries) => {
       for (const entry of entries) {
         setClientHeight(entry.contentRect.height);
       }
@@ -42,8 +42,14 @@ export function LogTable({ events }: LogTableProps) {
   }, []);
 
   const totalHeight = events.length * ROW_HEIGHT;
-  const startIndex = Math.max(0, Math.floor(scrollTop / ROW_HEIGHT) - BUFFER_ROWS);
-  const endIndex = Math.min(events.length, Math.ceil((scrollTop + clientHeight) / ROW_HEIGHT) + BUFFER_ROWS);
+  const startIndex = Math.max(
+    0,
+    Math.floor(scrollTop / ROW_HEIGHT) - BUFFER_ROWS,
+  );
+  const endIndex = Math.min(
+    events.length,
+    Math.ceil((scrollTop + clientHeight) / ROW_HEIGHT) + BUFFER_ROWS,
+  );
 
   const visibleEvents = useMemo(() => {
     return events.slice(startIndex, endIndex).map((event, i) => ({
@@ -64,10 +70,7 @@ export function LogTable({ events }: LogTableProps) {
         <div className="w-20 shrink-0 text-right">Duration</div>
         <div className="w-24 shrink-0 text-right">Tokens (In/Out)</div>
       </div>
-      <div 
-        ref={containerRef} 
-        className="flex-1 overflow-auto relative"
-      >
+      <div ref={containerRef} className="flex-1 overflow-auto relative">
         <div style={{ height: totalHeight, position: 'relative' }}>
           {visibleEvents.map(({ event, index }) => (
             <div
@@ -80,9 +83,13 @@ export function LogTable({ events }: LogTableProps) {
               }}
               className="border-b border-graphite-800/50 hover:bg-graphite-800/50 transition-colors"
             >
-              <div 
+              <div
                 className="flex items-center px-4 h-full cursor-pointer"
-                onClick={() => setExpandedId(expandedId === event.request_id ? null : event.request_id)}
+                onClick={() =>
+                  setExpandedId(
+                    expandedId === event.request_id ? null : event.request_id,
+                  )
+                }
               >
                 <div className="w-24 shrink-0 text-xs text-graphite-300 truncate pr-2">
                   {new Date(event.ts).toLocaleTimeString()}
@@ -100,7 +107,15 @@ export function LogTable({ events }: LogTableProps) {
                   {event.upstream || '-'}
                 </div>
                 <div className="w-20 shrink-0">
-                  <StatusChip variant={event.status >= 500 ? 'danger' : event.status >= 400 ? 'warn' : 'ok'}>
+                  <StatusChip
+                    variant={
+                      event.status >= 500
+                        ? 'danger'
+                        : event.status >= 400
+                          ? 'warn'
+                          : 'ok'
+                    }
+                  >
                     {event.status}
                   </StatusChip>
                 </div>
@@ -108,7 +123,10 @@ export function LogTable({ events }: LogTableProps) {
                   {event.duration_ms}ms
                 </div>
                 <div className="w-24 shrink-0 text-xs text-graphite-300 text-right">
-                  {event.input_tokens !== undefined ? event.input_tokens : '-'}/{event.output_tokens !== undefined ? event.output_tokens : '-'}
+                  {event.input_tokens !== undefined ? event.input_tokens : '-'}/
+                  {event.output_tokens !== undefined
+                    ? event.output_tokens
+                    : '-'}
                 </div>
               </div>
             </div>
@@ -117,7 +135,10 @@ export function LogTable({ events }: LogTableProps) {
       </div>
       {expandedId && (
         <div className="border-t border-graphite-700 bg-graphite-800 p-4 max-h-64 overflow-auto shrink-0">
-          <LogRowDetail event={events.find(e => e.request_id === expandedId)!} onClose={() => setExpandedId(null)} />
+          <LogRowDetail
+            event={events.find((e) => e.request_id === expandedId)!}
+            onClose={() => setExpandedId(null)}
+          />
         </div>
       )}
     </div>

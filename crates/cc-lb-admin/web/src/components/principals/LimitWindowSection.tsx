@@ -1,4 +1,4 @@
-import { PrincipalLimitWindow } from '../../lib/api';
+import type { PrincipalLimitWindow } from '../../lib/api';
 import { LimitDonutChart } from './LimitDonutChart';
 
 interface LimitWindowSectionProps {

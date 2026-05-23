@@ -1,16 +1,21 @@
-import { Tooltip } from '../primitives/Tooltip';
 import { AlertCircle } from 'lucide-react';
+import { Tooltip } from '../primitives/Tooltip';
 
 interface PluginFailureCountProps {
   count: number;
   lastError: string | null;
 }
 
-export function PluginFailureCount({ count, lastError }: PluginFailureCountProps) {
+export function PluginFailureCount({
+  count,
+  lastError,
+}: PluginFailureCountProps) {
   if (count === 0) {
     return (
       <div className="flex flex-col items-end">
-        <span className="text-2xl font-mono font-semibold text-graphite-50">0</span>
+        <span className="text-2xl font-mono font-semibold text-graphite-50">
+          0
+        </span>
         <span className="text-xs text-graphite-400">failures</span>
       </div>
     );
@@ -29,9 +34,7 @@ export function PluginFailureCount({ count, lastError }: PluginFailureCountProps
   if (lastError) {
     return (
       <Tooltip content={lastError}>
-        <div className="cursor-help">
-          {content}
-        </div>
+        <div className="cursor-help">{content}</div>
       </Tooltip>
     );
   }

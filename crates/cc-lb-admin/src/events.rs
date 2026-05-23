@@ -110,25 +110,25 @@ pub fn parse_stream_filters(map: &HashMap<String, String>) -> Result<StreamFilte
 }
 
 pub fn apply_filters_to_event(event: &RequestEvent, filters: &StreamFilters) -> bool {
-    if let Some(principal_id) = filters.principal_id.as_deref() {
-        if event.principal_id.as_deref() != Some(principal_id) {
-            return false;
-        }
+    if let Some(principal_id) = filters.principal_id.as_deref()
+        && event.principal_id.as_deref() != Some(principal_id)
+    {
+        return false;
     }
-    if let Some(model) = filters.model.as_deref() {
-        if event.model.as_deref() != Some(model) {
-            return false;
-        }
+    if let Some(model) = filters.model.as_deref()
+        && event.model.as_deref() != Some(model)
+    {
+        return false;
     }
-    if let Some(upstream) = filters.upstream {
-        if event.upstream != Some(upstream) {
-            return false;
-        }
+    if let Some(upstream) = filters.upstream
+        && event.upstream != Some(upstream)
+    {
+        return false;
     }
-    if let Some(status_class) = filters.status_class {
-        if !status_class.matches(event.status) {
-            return false;
-        }
+    if let Some(status_class) = filters.status_class
+        && !status_class.matches(event.status)
+    {
+        return false;
     }
     true
 }

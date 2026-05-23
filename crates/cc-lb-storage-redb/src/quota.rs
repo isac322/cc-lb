@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
 use crate::{QUOTAS_BY_PRINCIPAL_V1, Storage, StorageError};

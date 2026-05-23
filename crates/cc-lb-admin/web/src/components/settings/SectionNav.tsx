@@ -4,7 +4,11 @@ interface SectionNavProps {
   onSelect: (section: string) => void;
 }
 
-export function SectionNav({ sections, activeSection, onSelect }: SectionNavProps) {
+export function SectionNav({
+  sections,
+  activeSection,
+  onSelect,
+}: SectionNavProps) {
   return (
     <nav className="space-y-1">
       {sections.map((section) => (
