@@ -379,3 +379,161 @@ pub struct PluginManifest {
     #[serde(default)]
     pub metadata: BTreeMap<String, serde_json::Value>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shaped_request_accessors_and_mutators_preserve_parts() {
+        let mut builder = ShapedRequestBuilder {
+            _seal: crate::private::Seal,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("x-test", "one".parse().unwrap());
+        let mut shaped = builder.shaped_request(
+            "https://example.test/v1/messages".parse().unwrap(),
+            Method::POST,
+            headers,
+            Bytes::from_static(b"first"),
+        );
+
+        assert_eq!(shaped.url().as_str(), "https://example.test/v1/messages");
+        assert_eq!(shaped.method(), Method::POST);
+        assert_eq!(shaped.headers()["x-test"], "one");
+        assert_eq!(shaped.body(), &Bytes::from_static(b"first"));
+
+        shaped.set_url("https://example.test/v1/complete".parse().unwrap());
+        shaped.set_method(Method::PUT);
+        shaped
+            .headers_mut()
+            .insert("x-test", "two".parse().unwrap());
+        shaped.set_body(Bytes::from_static(b"second"));
+
+        assert_eq!(shaped.url().path(), "/v1/complete");
+        assert_eq!(shaped.method(), Method::PUT);
+        assert_eq!(shaped.headers()["x-test"], "two");
+        assert_eq!(shaped.body(), &Bytes::from_static(b"second"));
+    }
+
+    #[test]
+    fn signed_request_exposes_and_consumes_signed_parts() {
+        let mut builder = ShapedRequestBuilder {
+            _seal: crate::private::Seal,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("authorization", "Bearer token".parse().unwrap());
+        let shaped = builder.shaped_request(
+            "https://api.example.test/v1/messages".parse().unwrap(),
+            Method::POST,
+            headers,
+            Bytes::from_static(b"{}"),
+        );
+        let mut capability = SigningCapability {
+            _seal: crate::private::Seal,
+        };
+
+        let signed = SignedRequest::from_shaped(shaped, &mut capability);
+        assert_eq!(signed.url().host_str(), Some("api.example.test"));
+        assert_eq!(signed.method(), Method::POST);
+        assert_eq!(signed.headers()["authorization"], "Bearer token");
+        assert_eq!(signed.body(), &Bytes::from_static(b"{}"));
+
+        let (url, method, headers, body) = signed.into_parts();
+        assert_eq!(url.as_str(), "https://api.example.test/v1/messages");
+        assert_eq!(method, Method::POST);
+        assert_eq!(headers["authorization"], "Bearer token");
+        assert_eq!(body, Bytes::from_static(b"{}"));
+    }
+
+    #[test]
+    fn upstream_and_manifest_serde_round_trip() {
+        let upstreams = vec![
+            Upstream::AnthropicDirect,
+            Upstream::BedrockRuntime {
+                region: "us-east-1".to_owned(),
+            },
+            Upstream::BedrockMantle {
+                region: "us-west-2".to_owned(),
+            },
+            Upstream::Vertex {
+                project: "project".to_owned(),
+                region: "us-central1".to_owned(),
+            },
+            Upstream::CustomAnthropicSpec {
+                base_url: "https://gateway.example.test".parse().unwrap(),
+            },
+        ];
+
+        for upstream in upstreams {
+            let json = serde_json::to_string(&upstream).unwrap();
+            let decoded: Upstream = serde_json::from_str(&json).unwrap();
+            assert_eq!(decoded, upstream);
+        }
+
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "name": "authn",
+            "artifact": "plugin.wasm",
+            "config": {"enabled": true}
+        }))
+        .unwrap();
+        assert_eq!(manifest.name, "authn");
+        assert!(manifest.metadata.is_empty());
+    }
+
+    #[test]
+    fn public_enums_cover_all_current_variants() {
+        let principal_kinds = [
+            PrincipalKind::ApiKey,
+            PrincipalKind::OAuthSubject,
+            PrincipalKind::InternalKey,
+            PrincipalKind::WorkloadIdentity,
+            PrincipalKind::SubscriptionBearer,
+        ];
+        assert_eq!(principal_kinds.len(), 5);
+
+        let strategies = [
+            AuthStrategy::ApiKey,
+            AuthStrategy::OAuth,
+            AuthStrategy::AwsSigV4,
+            AuthStrategy::GcpOAuth,
+            AuthStrategy::InternalForwarded,
+        ];
+        assert_eq!(strategies.len(), 5);
+    }
+
+    #[test]
+    fn observe_event_variants_are_equatable() {
+        let events = vec![
+            ObserveEvent::RequestStarted {
+                request_id: "req".to_owned(),
+                downstream_user_agent: Some("ua".to_owned()),
+            },
+            ObserveEvent::AuthnComplete {
+                principal_id: "principal".to_owned(),
+                kind: PrincipalKind::InternalKey,
+            },
+            ObserveEvent::UpstreamChosen {
+                upstream: Upstream::AnthropicDirect,
+            },
+            ObserveEvent::Chunk {
+                batch_index: 1,
+                event_count: 2,
+                total_bytes: 3,
+            },
+            ObserveEvent::RequestFinished {
+                status: StatusCode::OK,
+                input_tokens: Some(4),
+                output_tokens: Some(5),
+                duration_ms: 6,
+            },
+            ObserveEvent::Error {
+                code: "E".to_owned(),
+                message: "redacted".to_owned(),
+                source: "plugin".to_owned(),
+            },
+        ];
+
+        assert_eq!(events, events.clone());
+    }
+}
