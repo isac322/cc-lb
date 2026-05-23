@@ -9,10 +9,15 @@
         "token_env": "CC_LB_ADMIN_TOKEN"
       }
     },
-    "aead": {
-      "$ref": "#/$defs/AeadConfig",
+    "api_keys": {
+      "$ref": "#/$defs/ApiKeysConfig",
       "default": {
-        "key_env": "CC_LB_MASTER_KEY"
+        "price_catalog": {
+          "cache_path": "/var/lib/cc-lb/litellm.json",
+          "refresh_interval": "1h",
+          "url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+        },
+        "usage_retention_days": 90
       }
     },
     "body": {
@@ -43,6 +48,12 @@
       "default": {
         "cache_ttl_ceiling_secs": 300,
         "cache_ttl_floor_secs": 30
+      }
+    },
+    "downstream_auth": {
+      "$ref": "#/$defs/DownstreamAuthConfig",
+      "default": {
+        "mode": "api_key"
       }
     },
     "egress": {
@@ -78,15 +89,6 @@
       },
       "default": {}
     },
-    "quotas": {
-      "$ref": "#/$defs/QuotasConfig",
-      "default": {
-        "default_input_tokens": 1000000,
-        "default_output_tokens": 1000000,
-        "default_requests_per_window": 1000,
-        "default_window_secs": 60
-      }
-    },
     "signers": {
       "$ref": "#/$defs/SignersConfig",
       "default": {
@@ -104,8 +106,7 @@
     "storage": {
       "$ref": "#/$defs/StorageConfig",
       "default": {
-        "kind": "redb",
-        "path": "/var/lib/cc-lb/storage.redb"
+        "oauth_aead_key_env": "CC_LB_MASTER_KEY"
       }
     },
     "timeouts": {
@@ -146,15 +147,6 @@
         }
       }
     },
-    "AeadConfig": {
-      "type": "object",
-      "properties": {
-        "key_env": {
-          "type": "string",
-          "default": "CC_LB_MASTER_KEY"
-        }
-      }
-    },
     "AnthropicOAuthSignerConfig": {
       "type": "object",
       "properties": {
@@ -181,6 +173,26 @@
           }
         }
       }
+    },
+    "ApiKeysConfig": {
+      "type": "object",
+      "properties": {
+        "price_catalog": {
+          "$ref": "#/$defs/PriceCatalogConfig",
+          "default": {
+            "cache_path": "/var/lib/cc-lb/litellm.json",
+            "refresh_interval": "1h",
+            "url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+          }
+        },
+        "usage_retention_days": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 90,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     },
     "AuthStrategy": {
       "type": "string",
@@ -275,6 +287,52 @@
         }
       }
     },
+    "DownstreamAuthConfig": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/DownstreamAuthMode",
+          "default": "api_key"
+        },
+        "none_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NoneModeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "DownstreamAuthMode": {
+      "type": "string",
+      "enum": [
+        "none",
+        "api_key"
+      ]
+    },
+    "Duration": {
+      "type": "object",
+      "properties": {
+        "nanos": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "secs",
+        "nanos"
+      ]
+    },
     "EgressConfig": {
       "type": "object",
       "properties": {
@@ -288,6 +346,37 @@
           }
         }
       }
+    },
+    "Limit": {
+      "type": "object",
+      "properties": {
+        "cap_micros": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "kind": {
+          "$ref": "#/$defs/LimitKind"
+        },
+        "window": {
+          "$ref": "#/$defs/Duration"
+        }
+      },
+      "required": [
+        "kind",
+        "window",
+        "cap_micros"
+      ]
+    },
+    "LimitKind": {
+      "type": "string",
+      "enum": [
+        "requests",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cost_usd",
+        "concurrent"
+      ]
     },
     "ListenerConfig": {
       "type": "object",
@@ -321,6 +410,33 @@
           ]
         }
       }
+    },
+    "NoneModeConfig": {
+      "type": "object",
+      "properties": {
+        "principal_id": {
+          "type": "string",
+          "default": ""
+        },
+        "upstream_credential_ref": {
+          "type": "string",
+          "default": ""
+        },
+        "upstream_kind": {
+          "$ref": "#/$defs/NoneModeUpstreamKind",
+          "default": "anthropic_key"
+        }
+      },
+      "additionalProperties": false
+    },
+    "NoneModeUpstreamKind": {
+      "type": "string",
+      "enum": [
+        "anthropic_key",
+        "anthropic_o_auth",
+        "aws_sig_v4",
+        "gcp_o_auth"
+      ]
     },
     "ObservabilityConfig": {
       "type": "object",
@@ -388,16 +504,6 @@
     "PluginsConfig": {
       "type": "object",
       "properties": {
-        "authn_plugin": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/PluginRef"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "observability_hooks": {
           "type": "array",
           "default": [],
@@ -417,44 +523,23 @@
         }
       }
     },
-    "PostgresPoolConfig": {
+    "PriceCatalogConfig": {
       "type": "object",
       "properties": {
-        "acquire_timeout_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 5,
-          "minimum": 0
-        },
-        "idle_timeout_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 600,
-          "minimum": 0
-        },
-        "max_connections": {
-          "type": "integer",
-          "format": "uint32",
-          "default": 10,
-          "minimum": 0
-        },
-        "min_connections": {
-          "type": "integer",
-          "format": "uint32",
-          "default": 0,
-          "minimum": 0
-        },
-        "sslmode": {
+        "cache_path": {
           "type": "string",
-          "default": "prefer"
+          "default": "/var/lib/cc-lb/litellm.json"
         },
-        "statement_timeout_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 30,
-          "minimum": 0
+        "refresh_interval": {
+          "$ref": "#/$defs/Duration",
+          "default": "1h"
+        },
+        "url": {
+          "type": "string",
+          "default": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
         }
-      }
+      },
+      "additionalProperties": false
     },
     "PrincipalSpec": {
       "type": "object",
@@ -472,52 +557,30 @@
             "null"
           ]
         },
-        "disabled": {
-          "type": [
-            "boolean",
-            "null"
-          ]
+        "default_limits": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Limit"
+          }
         },
-        "quotas": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/QuotasConfig"
-            },
-            {
-              "type": "null"
-            }
-          ]
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "principal_type": {
+          "$ref": "#/$defs/PrincipalType",
+          "default": "machine"
         }
-      }
+      },
+      "additionalProperties": false
     },
-    "QuotasConfig": {
-      "type": "object",
-      "properties": {
-        "default_input_tokens": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 1000000,
-          "minimum": 0
-        },
-        "default_output_tokens": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 1000000,
-          "minimum": 0
-        },
-        "default_requests_per_window": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 1000,
-          "minimum": 0
-        },
-        "default_window_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 60,
-          "minimum": 0
-        }
-      }
+    "PrincipalType": {
+      "type": "string",
+      "enum": [
+        "human",
+        "machine"
+      ]
     },
     "SignersConfig": {
       "type": "object",
@@ -537,51 +600,19 @@
       }
     },
     "StorageConfig": {
-      "oneOf": [
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "type": "string",
-              "const": "redb"
-            },
-            "path": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "path"
-          ]
+      "type": "object",
+      "properties": {
+        "oauth_aead_key_env": {
+          "type": "string",
+          "default": "CC_LB_MASTER_KEY"
         },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "type": "string",
-              "const": "postgres"
-            },
-            "pool": {
-              "$ref": "#/$defs/PostgresPoolConfig",
-              "default": {
-                "acquire_timeout_secs": 5,
-                "idle_timeout_secs": 600,
-                "max_connections": 10,
-                "min_connections": 0,
-                "sslmode": "prefer",
-                "statement_timeout_secs": 30
-              }
-            },
-            "url": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "url"
+        "redb_path": {
+          "type": [
+            "string",
+            "null"
           ]
         }
-      ]
+      }
     },
     "TimeoutsConfig": {
       "type": "object",
