@@ -73,7 +73,7 @@ jobs:
       - name: Run coverage gates
         run: |
           set -euo pipefail
-          cargo llvm-cov --workspace --exclude cc-lb-loadgen --lcov --output-path target/coverage.lcov --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov --workspace --exclude cc-lb-loadgen --exclude cc-lb-plugin-lifecycle-tests --lcov --output-path target/coverage.lcov --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov --package cc-lb-core --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov --package cc-lb-dialect-anthropic --fail-under-lines 80 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov --package cc-lb-dialect-bedrock --fail-under-lines 80 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
