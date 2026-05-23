@@ -17,6 +17,7 @@ use cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory;
 use cc_lb_signer_aws::AwsSigV4SignerFactory;
 use cc_lb_signer_gcp::GcpOAuthSignerFactory;
 use cc_lb_storage_redb::Storage;
+use http::Method;
 use oauth2::{ClientId, TokenUrl};
 use serde_json::Map;
 
@@ -59,16 +60,25 @@ impl BuiltinAuthn {
 #[async_trait]
 impl AuthnPlugin for BuiltinAuthn {
     async fn authenticate(&self, ctx: &RequestContext) -> Result<AuthnOutcome, AuthnError> {
-        let Some(api_key) = ctx
+        let api_key = ctx
             .downstream_headers
             .get("x-api-key")
             .and_then(|value| value.to_str().ok())
             .filter(|value| !value.trim().is_empty())
-        else {
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| {
+                if ctx.method == Method::POST && ctx.path == "/api/event_logging/batch" {
+                    "sk-ant-anonymous-event-logging".to_owned()
+                } else {
+                    String::new()
+                }
+            });
+
+        if api_key.is_empty() {
             return Err(AuthnError::InvalidCredentials {
                 reason: "missing x-api-key header".to_owned(),
             });
-        };
+        }
 
         let principal_id = "api-key".to_owned();
         let quotas = self
@@ -76,7 +86,7 @@ impl AuthnPlugin for BuiltinAuthn {
             .get(&principal_id)
             .cloned()
             .unwrap_or_else(|| self.defaults.clone());
-        let signer_factory = Arc::new(self.signer_factory.with_api_key(api_key.to_owned()));
+        let signer_factory = Arc::new(self.signer_factory.with_api_key(api_key));
 
         Ok(AuthnOutcome {
             principal: Principal {
