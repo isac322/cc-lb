@@ -16,10 +16,12 @@ async-stream.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 bytes.workspace = true
+bincode = "1"
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
+cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 cc-lb-dialect-bedrock = { path = "../cc-lb-dialect-bedrock" }
 cc-lb-dialect-vertex = { path = "../cc-lb-dialect-vertex" }
@@ -33,6 +35,7 @@ hyper = { workspace = true, features = ["client", "http1", "http2"] }
 hyper-rustls.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 metrics.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }

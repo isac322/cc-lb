@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod api_keys;
 mod bulkhead;
 mod circuit_breaker;
 mod clock;
