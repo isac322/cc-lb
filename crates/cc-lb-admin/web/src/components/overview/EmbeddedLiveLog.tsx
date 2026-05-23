@@ -49,7 +49,7 @@ export function EmbeddedLiveLog() {
                   className="px-4 py-8 text-center text-graphite-500"
                 >
                   {status === 'live'
-                    ? 'Waiting for requests...'
+                    ? 'Waiting for first request...'
                     : 'Connecting...'}
                 </td>
               </tr>

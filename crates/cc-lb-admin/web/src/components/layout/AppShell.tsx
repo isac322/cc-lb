@@ -22,8 +22,13 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     <div className="flex min-h-screen bg-graphite-900 text-graphite-100 font-sans">
       <Sidebar />
       <div className="flex-1 flex flex-col min-w-0">
-        <Topbar title={title} />
-        <main className="flex-1 p-6 overflow-x-hidden">{children}</main>
+        <Topbar />
+        <main className="flex-1 p-6 overflow-x-hidden">
+          <h1 className="text-2xl font-semibold tracking-tight mb-6">
+            {title}
+          </h1>
+          {children}
+        </main>
       </div>
     </div>
   );
