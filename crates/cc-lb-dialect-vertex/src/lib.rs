@@ -71,7 +71,16 @@ impl UpstreamDialect for VertexDialect {
 
 /// Returns Vertex SSE bytes without parsing or rewriting them.
 pub fn passthrough_sse_bytes(bytes: Bytes) -> Bytes {
+    record_missing_streaming_usage("vertex");
     bytes
+}
+
+// TODO(v2): extract usage from converse-stream events.
+fn record_missing_streaming_usage(dialect: &str) {
+    tracing::warn!(
+        dialect,
+        "vertex streaming usage extraction not implemented; cost limits may undercount"
+    );
 }
 
 fn parse_body_object(body: &[u8]) -> Result<Map<String, Value>, DialectError> {

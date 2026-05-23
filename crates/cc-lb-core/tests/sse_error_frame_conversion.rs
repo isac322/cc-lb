@@ -1,6 +1,6 @@
 mod sse_relay_support;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -50,6 +50,7 @@ async fn relay_converts_configured_bedrock_error_event() {
         reservation: None,
         error_normalizer: Some(Arc::new(ErrorNormalizer::new())),
         upstream_kind: Some(UpstreamKind::BedrockRuntime),
+        streaming_usage: Arc::new(Mutex::new(Default::default())),
     };
     let upstream = Bytes::from_static(
         b"event: error\ndata: {\"__type\":\"ValidationException\",\"message\":\"bad\"}\n\n",

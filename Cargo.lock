@@ -782,6 +782,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tower",
+ "tracing",
  "url",
 ]
 
@@ -797,6 +798,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "tower",
+ "tracing",
  "url",
 ]
 
