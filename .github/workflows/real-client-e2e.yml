@@ -28,6 +28,11 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: "22"
+      - name: Cache pinned real clients
+        uses: actions/cache@v4
+        with:
+          path: target/test-bins
+          key: real-client-test-bins-${{ runner.os }}-${{ hashFiles('tests/real-client/install.sh') }}
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
