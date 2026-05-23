@@ -5,8 +5,7 @@ import { defineConfig } from 'vite';
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   build: {
-    target: 'es2020',
-    minify: 'esbuild',
+    minify: 'oxc',
     sourcemap: false,
     cssMinify: true,
     reportCompressedSize: false,
