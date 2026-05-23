@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "bun ./node_modules/vite/bin/vite.js",
-    "typecheck": "bun ./node_modules/@typescript/native-preview/bin/tsgo.js -b",
-    "build": "bun ./node_modules/@typescript/native-preview/bin/tsgo.js -b && bun ./node_modules/vite/bin/vite.js build",
+    "typecheck": "bun ./node_modules/@typescript/native-preview/bin/tsgo.js -b --noEmit",
+    "build": "bun ./node_modules/vite/bin/vite.js build",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
