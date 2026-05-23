@@ -1,4 +1,4 @@
-import { AlertCircle } from 'lucide-react';
+import { CircleAlert } from 'lucide-react';
 import { Tooltip } from '../primitives/Tooltip';
 
 interface PluginFailureCountProps {
@@ -24,7 +24,7 @@ export function PluginFailureCount({
   const content = (
     <div className="flex flex-col items-end">
       <div className="flex items-center gap-1 text-red-600">
-        <AlertCircle className="w-4 h-4" />
+        <CircleAlert className="w-4 h-4" />
         <span className="text-2xl font-mono font-semibold">{count}</span>
       </div>
       <span className="text-xs text-red-500">failures</span>
