@@ -72,6 +72,46 @@ impl RedbStorage {
 
         Ok(events)
     }
+
+    pub fn prune_request_events_before(
+        &self,
+        cutoff_ms_x_1m: u64,
+        batch_size: usize,
+    ) -> Result<u64, StorageError> {
+        if batch_size == 0 {
+            return Ok(0);
+        }
+
+        let write_txn = self.db.begin_write()?;
+        let keys_to_remove = {
+            let table = write_txn.open_table(REQUEST_EVENTS_V1)?;
+            let mut keys = Vec::new();
+            for row in table.iter()? {
+                let (key, _) = row?;
+                let decoded_key = decode_request_event_key(key.value())?;
+                if decoded_key >= cutoff_ms_x_1m {
+                    break;
+                }
+                keys.push(key.value().to_vec());
+                if keys.len() >= batch_size {
+                    break;
+                }
+            }
+            keys
+        };
+
+        let mut deleted = 0;
+        {
+            let mut table = write_txn.open_table(REQUEST_EVENTS_V1)?;
+            for key in keys_to_remove {
+                if table.remove(key.as_slice())?.is_some() {
+                    deleted += 1;
+                }
+            }
+        }
+        write_txn.commit()?;
+        Ok(deleted)
+    }
 }
 
 fn next_request_event_key(
