@@ -235,11 +235,6 @@ fn warn_restart_required_changes(current: &Config, new_config: &Config) {
         "tls.key_path",
     );
     warn_plugin_path_change(
-        "plugins.authn_plugin.wasm_path",
-        current.plugins.authn_plugin.as_ref(),
-        new_config.plugins.authn_plugin.as_ref(),
-    );
-    warn_plugin_path_change(
         "plugins.router_plugin.wasm_path",
         current.plugins.router_plugin.as_ref(),
         new_config.plugins.router_plugin.as_ref(),

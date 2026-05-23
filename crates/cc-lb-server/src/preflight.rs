@@ -92,12 +92,6 @@ async fn run_inner(
     }
 
     let runtime = ExtismRuntime::new();
-    if let Some(plugin) = &cfg.plugins.authn_plugin {
-        dry_load_plugin(&runtime, plugin, PluginLoadKind::Authn)?;
-        report
-            .successes
-            .push(format!("plugin {} dry-loaded", plugin.name));
-    }
     if let Some(plugin) = &cfg.plugins.router_plugin {
         dry_load_plugin(&runtime, plugin, PluginLoadKind::Router)?;
         report
@@ -246,7 +240,6 @@ fn validate_redb_path(path: &Path) -> Result<(), PreflightError> {
 }
 
 enum PluginLoadKind {
-    Authn,
     Router,
     Observability,
 }
@@ -258,7 +251,6 @@ fn dry_load_plugin(
 ) -> Result<(), PreflightError> {
     let manifest = manifest_from_plugin(plugin)?;
     let result = match kind {
-        PluginLoadKind::Authn => runtime.instantiate(&manifest).map(|_| ()),
         PluginLoadKind::Router => runtime.instantiate_router(&manifest).map(|_| ()),
         PluginLoadKind::Observability => runtime.instantiate_observability(&manifest).map(|_| ()),
     };
