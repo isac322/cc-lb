@@ -12,7 +12,7 @@ const RSS_GROWTH_LIMIT_KIB: u64 = 1_024;
 
 #[tokio::test]
 async fn plugin_lifecycle_load_init_invoke_reload_drop() {
-    let hold_after_call = (RESOURCE_WARMUP_INVOKES + REPEATED_INVOKES + 2) as u64;
+    let hold_after_call = (RESOURCE_WARMUP_INVOKES * 2 + REPEATED_INVOKES + 2) as u64;
     let fixture = common::fixture(
         "lifecycle",
         &common::lifecycle_counted_old_module(&common::authn_response("before"), hold_after_call),
@@ -31,6 +31,7 @@ async fn plugin_lifecycle_load_init_invoke_reload_drop() {
         .expect("init invoke succeeds");
     assert_eq!(init.principal.id, "before");
     invoke_concurrent(authn.clone(), "before", RESOURCE_WARMUP_INVOKES).await;
+    invoke_repeated(authn.as_ref(), "before", RESOURCE_WARMUP_INVOKES).await;
     tokio::time::sleep(Duration::from_millis(25)).await;
 
     let before_resources = ResourceSnapshot::capture();
@@ -61,6 +62,9 @@ async fn plugin_lifecycle_load_init_invoke_reload_drop() {
         .expect("in-flight task joins")
         .expect("old in-flight call completes");
     assert_eq!(old_outcome.principal.id, "before");
+
+    invoke_repeated(authn.as_ref(), "after", RESOURCE_WARMUP_INVOKES).await;
+    tokio::time::sleep(Duration::from_millis(25)).await;
 
     let after_resources = ResourceSnapshot::capture();
     let after_latencies = invoke_repeated(authn.as_ref(), "after", REPEATED_INVOKES).await;
