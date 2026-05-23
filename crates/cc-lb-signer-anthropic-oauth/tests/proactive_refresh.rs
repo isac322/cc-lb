@@ -6,7 +6,6 @@ use cc_lb_plugin_api::sign_request;
 async fn proactive_refreshes_before_signing() {
     let test_storage = common::storage();
     test_storage
-        .storage
         .put_oauth(
             "alice",
             "anthropic_oauth",
@@ -16,13 +15,18 @@ async fn proactive_refreshes_before_signing() {
                 common::now_epoch_secs() + 30,
             ),
         )
+        .await
         .expect("seed oauth credentials");
     let http = common::FakeOAuthClient::new(vec![common::success_response(
         "sk-ant-oat01-refreshed",
         Some("refresh-new"),
         600,
     )]);
-    let signer = common::signer(test_storage.storage.clone(), http.clone());
+    let signer = common::signer(
+        test_storage.storage.clone(),
+        test_storage.aead.clone(),
+        http.clone(),
+    );
 
     let signed = sign_request(&signer, common::shaped_request())
         .await
@@ -37,8 +41,8 @@ async fn proactive_refreshes_before_signing() {
     );
     assert_eq!(http.call_count(), 1);
     let stored = test_storage
-        .storage
         .get_oauth("alice", "anthropic_oauth")
+        .await
         .expect("load oauth credentials")
         .expect("oauth credentials exist");
     assert_eq!(stored.refresh_token, "refresh-new");

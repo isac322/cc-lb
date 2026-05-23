@@ -4,11 +4,12 @@ use std::fmt;
 use std::sync::Arc;
 
 use async_trait::async_trait;
+use cc_lb_aead::AeadService;
 use cc_lb_plugin_api::{
     AuthStrategy, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
     SigningCapability, Upstream, UpstreamError,
 };
-use cc_lb_storage_redb::RedbStorage;
+use cc_lb_storage_api::{AnthropicApiKeyCredential, Storage};
 use http::header::{AUTHORIZATION, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
 
@@ -17,7 +18,8 @@ enum AnthropicKeyCredentialSource {
     Static(SecretString),
     Storage {
         storage_key: String,
-        storage: Arc<RedbStorage>,
+        storage: Arc<dyn Storage>,
+        aead: Arc<AeadService>,
     },
 }
 
@@ -28,7 +30,8 @@ impl AnthropicKeyCredentialSource {
             Self::Storage {
                 storage_key,
                 storage,
-            } => load_stored_api_key(storage.clone(), storage_key.clone()).await,
+                aead,
+            } => load_stored_api_key(storage.clone(), aead.clone(), storage_key.clone()).await,
         }
     }
 
@@ -51,11 +54,16 @@ impl AnthropicKeySigner {
         }
     }
 
-    pub fn from_storage(storage_key: impl Into<String>, storage: Arc<RedbStorage>) -> Self {
+    pub fn from_storage(
+        storage_key: impl Into<String>,
+        storage: Arc<dyn Storage>,
+        aead: Arc<AeadService>,
+    ) -> Self {
         Self {
             credential: AnthropicKeyCredentialSource::Storage {
                 storage_key: storage_key.into(),
                 storage,
+                aead,
             },
         }
     }
@@ -120,12 +128,17 @@ impl AnthropicKeySignerFactory {
         }
     }
 
-    pub fn from_storage(storage_key: impl Into<String>, storage: Arc<RedbStorage>) -> Self {
+    pub fn from_storage(
+        storage_key: impl Into<String>,
+        storage: Arc<dyn Storage>,
+        aead: Arc<AeadService>,
+    ) -> Self {
         Self {
             auth_strategy: AuthStrategy::ApiKey,
             credential: AnthropicKeyCredentialSource::Storage {
                 storage_key: storage_key.into(),
                 storage,
+                aead,
             },
         }
     }
@@ -158,24 +171,37 @@ impl SignerFactory for AnthropicKeySignerFactory {
 }
 
 async fn load_stored_api_key(
-    storage: Arc<RedbStorage>,
+    storage: Arc<dyn Storage>,
+    aead: Arc<AeadService>,
     storage_key: String,
 ) -> Result<SecretString, SignerError> {
-    let loaded = tokio::task::spawn_blocking(move || storage.get_anthropic_api_key(&storage_key))
+    let loaded = storage
+        .get_anthropic_api_key_ciphertext(&storage_key)
         .await
-        .map_err(|source| SignerError::SigningFailed {
-            reason: source.to_string(),
-        })?
-        .map_err(|source| SignerError::SigningFailed {
-            reason: source.to_string(),
-        })?;
-    let api_key = loaded.ok_or_else(|| SignerError::MissingCredentials {
+        .map_err(signing_failed)?;
+    let ciphertext = loaded.ok_or_else(|| SignerError::MissingCredentials {
         reason: "real Anthropic API key not found in storage".to_owned(),
     })?;
+    let plaintext = aead
+        .decrypt(&ciphertext, &anthropic_api_key_aad(&storage_key))
+        .map_err(signing_failed)?;
+    let credential: AnthropicApiKeyCredential =
+        serde_json::from_slice(&plaintext).map_err(signing_failed)?;
+    let api_key = credential.anthropic_api_key;
     if api_key.trim().is_empty() {
         return Err(SignerError::MissingCredentials {
             reason: "real Anthropic API key is empty".to_owned(),
         });
     }
     Ok(SecretString::new(api_key.into_boxed_str()))
+}
+
+fn anthropic_api_key_aad(storage_key: &str) -> Vec<u8> {
+    format!("anthropic-api-key:{storage_key}").into_bytes()
+}
+
+fn signing_failed(source: impl fmt::Display) -> SignerError {
+    SignerError::SigningFailed {
+        reason: source.to_string(),
+    }
 }
