@@ -8,7 +8,6 @@ on:
 
 env:
   CC_LB_ADMIN_SKIP_SPA: "1"
-  CACHE_ON_FAILURE: "true"
 
 jobs:
   cargo-deny:
@@ -71,6 +70,8 @@ jobs:
         with:
           tool: cargo-llvm-cov
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Run coverage gates
         run: |
           set -euo pipefail
