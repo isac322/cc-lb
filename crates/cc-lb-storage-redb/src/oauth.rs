@@ -715,6 +715,28 @@ impl Storage {
         Ok(records)
     }
 
+    pub fn list_api_keys_all(
+        &self,
+    ) -> Result<Vec<(String, String, StoredApiKeyRecord)>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(API_KEYS_V1)?;
+        let mut records = Vec::new();
+
+        for row in table.iter()? {
+            let (key, stored) = row?;
+            let key_bytes = key.value();
+            let Some((principal_id, key_id)) = decode_api_key_storage_key(key_bytes) else {
+                continue;
+            };
+
+            let ciphertext = stored.value().to_vec();
+            let plaintext = self.decrypt_value(key_bytes, &ciphertext)?;
+            records.push((principal_id, key_id, decode_record(&plaintext)?));
+        }
+
+        Ok(records)
+    }
+
     pub fn update_api_key(
         &self,
         write_txn: &redb::WriteTransaction,
@@ -929,6 +951,17 @@ fn encode_record(record: &StoredApiKeyRecord) -> Result<Vec<u8>, StorageError> {
 fn decode_record(bytes: &[u8]) -> Result<StoredApiKeyRecord, StorageError> {
     let (record, _) = decode_from_slice(bytes, standard().with_variable_int_encoding())?;
     Ok(record)
+}
+
+fn decode_api_key_storage_key(storage_key: &[u8]) -> Option<(String, String)> {
+    let separator_index = storage_key.iter().position(|byte| *byte == 0)?;
+    let (principal_id_bytes, remainder) = storage_key.split_at(separator_index);
+    let key_id_bytes = remainder.get(1..)?;
+
+    let principal_id = std::str::from_utf8(principal_id_bytes).ok()?.to_owned();
+    let key_id = std::str::from_utf8(key_id_bytes).ok()?.to_owned();
+
+    Some((principal_id, key_id))
 }
 
 fn now_unix_secs() -> u64 {

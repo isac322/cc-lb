@@ -47,6 +47,7 @@ pub struct Config {
     pub timeouts: TimeoutsConfig,
     pub upstreams: HashMap<String, UpstreamSpec>,
     pub principals: HashMap<String, PrincipalSpec>,
+    pub quotas: QuotasConfig,
     pub plugins: PluginsConfig,
     pub downstream_auth: DownstreamAuthConfig,
     pub api_keys: ApiKeysConfig,
@@ -312,11 +313,37 @@ pub struct UpstreamSpec {
     pub credentials_ref: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct QuotasConfig {
+    #[serde(default = "default_quota_window_secs")]
+    pub default_window_secs: u64,
+    #[serde(default = "default_quota_requests_per_window")]
+    pub default_requests_per_window: u64,
+    #[serde(default = "default_quota_input_tokens")]
+    pub default_input_tokens: u64,
+    #[serde(default = "default_quota_output_tokens")]
+    pub default_output_tokens: u64,
+}
+
+impl Default for QuotasConfig {
+    fn default() -> Self {
+        Self {
+            default_window_secs: default_quota_window_secs(),
+            default_requests_per_window: default_quota_requests_per_window(),
+            default_input_tokens: default_quota_input_tokens(),
+            default_output_tokens: default_quota_output_tokens(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 pub struct PrincipalSpec {
     #[serde(default = "default_machine")]
     pub principal_type: PrincipalType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quotas: Option<QuotasConfig>,
     #[serde(default)]
     pub default_limits: Vec<Limit>,
     #[serde(default = "default_true")]
@@ -330,6 +357,7 @@ impl Default for PrincipalSpec {
     fn default() -> Self {
         Self {
             principal_type: PrincipalType::Machine,
+            quotas: None,
             default_limits: Vec::new(),
             enabled: true,
             allowed_models: Vec::new(),
@@ -686,6 +714,22 @@ fn default_true() -> bool {
 
 fn default_messages_cap_bytes() -> u64 {
     DEFAULT_MESSAGES_CAP_BYTES
+}
+
+fn default_quota_window_secs() -> u64 {
+    60
+}
+
+fn default_quota_requests_per_window() -> u64 {
+    1_000
+}
+
+fn default_quota_input_tokens() -> u64 {
+    1_000_000
+}
+
+fn default_quota_output_tokens() -> u64 {
+    1_000_000
 }
 
 fn default_files_cap_bytes() -> u64 {

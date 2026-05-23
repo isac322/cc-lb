@@ -125,6 +125,43 @@ pub async fn complete_oauth(
     }
 }
 
+pub async fn oauth_status(
+    State(state): State<AdminState>,
+    axum::extract::Path(oauth_credential_id): axum::extract::Path<String>,
+) -> Response {
+    let config = state.config.current_config();
+    for (principal_id, principal) in &config.principals {
+        let matches_provider = principal
+            .credentials_ref
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|reference| {
+                reference == oauth_credential_id
+                    || reference
+                        .strip_prefix("oauth:")
+                        .map(str::trim)
+                        .is_some_and(|provider| provider == oauth_credential_id)
+            });
+        if !matches_provider {
+            continue;
+        }
+        match state
+            .storage
+            .get_oauth_ciphertext(principal_id, &oauth_credential_id)
+            .await
+        {
+            Ok(Some(_)) => return Json(json!({ "enrolled": true })).into_response(),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(error = %error, "admin oauth status storage operation failed");
+                return storage_error_response(&error);
+            }
+        }
+    }
+
+    Json(json!({ "enrolled": false })).into_response()
+}
+
 fn storage_error_response(error: &StorageError) -> Response {
     match error {
         StorageError::Unavailable { .. } => (
@@ -160,14 +197,7 @@ fn oauth_client_id(config: &cc_lb_config::Config) -> Option<String> {
     if !config.signers.anthropic_oauth.client_id.trim().is_empty() {
         return Some(config.signers.anthropic_oauth.client_id.clone());
     }
-    config
-        .plugins
-        .authn_plugin
-        .as_ref()
-        .and_then(|plugin| plugin.config.get("client_id"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| std::env::var("CC_LB_OAUTH_CLIENT_ID").ok())
+    std::env::var("CC_LB_OAUTH_CLIENT_ID")
+        .ok()
         .filter(|value| !value.trim().is_empty())
 }
