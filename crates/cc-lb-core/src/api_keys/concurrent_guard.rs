@@ -1,4 +1,11 @@
-use std::sync::atomic::{AtomicU32, Ordering};
+#[cfg(loom)]
+use loom::sync::atomic::AtomicU32;
+#[cfg(loom)]
+use loom::sync::Arc;
+#[cfg(not(loom))]
+use std::sync::atomic::AtomicU32;
+use std::sync::atomic::Ordering;
+#[cfg(not(loom))]
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -19,7 +26,9 @@ impl KeyConcurrencyManager {
         key_id: &str,
         cap: u32,
     ) -> Result<KeyConcurrencyGuard, ConcurrencyRejected> {
-        let counter = {
+        let counter = if let Some(counter) = self.counters.get(key_id) {
+            Arc::clone(counter.value())
+        } else {
             let entry = self
                 .counters
                 .entry(key_id.to_owned())
