@@ -15,13 +15,14 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 pub use types::{
-    AdminConfig, AeadConfig, AnthropicOAuthSignerConfig, AuthStrategy, BodyConfig, BulkheadConfig,
-    CircuitBreakerConfig, Config, ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV,
-    DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV,
-    DEFAULT_PLUGIN_BATCHED_EVENTS_PER_FLUSH, DEFAULT_PLUGIN_BATCHED_FLUSH_MS, DEFAULT_REDB_PATH,
-    DnsConfig, EgressConfig, ListenerConfig, ListenerOverrides, ObservabilityConfig, PluginRef,
-    PluginsConfig, PostgresPoolConfig, PrincipalSpec, QuotasConfig, SignersConfig, StorageConfig,
-    TimeoutsConfig, TlsConfig, UpstreamKind, UpstreamSpec,
+    AdminConfig, AeadConfig, ApiKeysConfig, AnthropicOAuthSignerConfig, AuthStrategy, BodyConfig,
+    BulkheadConfig, CircuitBreakerConfig, Config, ConfigOverrides, DnsConfig, DownstreamAuthConfig,
+    DownstreamAuthMode, EgressConfig, Limit, LimitKind, ListenerConfig, ListenerOverrides,
+    NoneModeConfig, NoneModeUpstreamKind, ObservabilityConfig, PluginRef, PluginsConfig,
+    PostgresPoolConfig, PrincipalSpec, PrincipalType, PriceCatalogConfig, SignersConfig, StorageConfig, TimeoutsConfig,
+    TlsConfig, UpstreamKind, UpstreamSpec, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_FILES_CAP_BYTES,
+    DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV, DEFAULT_PLUGIN_BATCHED_EVENTS_PER_FLUSH,
+    DEFAULT_PLUGIN_BATCHED_FLUSH_MS, DEFAULT_REDB_PATH,
 };
 pub use validation::{ValidationError, validate_postgres_url};
 
@@ -59,6 +60,9 @@ impl Config {
         cli_overrides: ConfigOverrides,
     ) -> Result<Self, ConfigError> {
         let legacy_aliases = LegacyConfigAliases::from_toml(toml_path)?;
+        if let Ok(raw_toml) = std::fs::read_to_string(toml_path) {
+            validation::validate_raw_toml(&raw_toml)?;
+        }
         let mut config: Config = Figment::from(Serialized::defaults(Config::default()))
             .merge(Toml::file_exact(toml_path))
             .merge(Serialized::defaults(legacy_aliases))

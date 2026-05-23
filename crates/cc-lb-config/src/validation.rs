@@ -3,7 +3,7 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::{Config, ConfigError, DEFAULT_REDB_PATH, PluginRef, StorageConfig, UpstreamKind};
+use crate::{Config, ConfigError, DEFAULT_REDB_PATH, DownstreamAuthMode, PluginRef, StorageConfig, UpstreamKind};
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 #[error("{field}: {message}")]
@@ -22,11 +22,27 @@ impl ValidationError {
 }
 
 pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
+    validate_downstream_auth(config)?;
     validate_tls(config)?;
     validate_upstreams(config)?;
     validate_credentials_refs(config)?;
     validate_plugins(config)?;
     validate_storage(config)?;
+    Ok(())
+}
+
+pub fn validate_raw_toml(raw_toml: &str) -> Result<(), ValidationError> {
+    let Ok(value) = raw_toml.parse::<toml::Value>() else {
+        return Ok(());
+    };
+
+    if has_legacy_plugin(&value) || has_legacy_principal_quotas(&value) {
+        return Err(ValidationError::new(
+            "config",
+            legacy_removed_message(),
+        ));
+    }
+
     Ok(())
 }
 
@@ -37,6 +53,20 @@ fn validate_tls(config: &Config) -> Result<(), ValidationError> {
     if let Some(tls) = &config.tls {
         validate_tls_section("tls", tls)?;
     }
+    Ok(())
+}
+
+fn validate_downstream_auth(config: &Config) -> Result<(), ValidationError> {
+    let none_mode_is_some = config.downstream_auth.none_mode.is_some();
+    let should_have_none_mode = matches!(config.downstream_auth.mode, DownstreamAuthMode::None);
+
+    if none_mode_is_some != should_have_none_mode {
+        return Err(ValidationError::new(
+            "downstream_auth.none_mode",
+            "downstream_auth.none_mode must be set iff mode=none",
+        ));
+    }
+
     Ok(())
 }
 
@@ -133,10 +163,6 @@ fn validate_credentials_ref(
 }
 
 fn validate_plugins(config: &Config) -> Result<(), ValidationError> {
-    if let Some(plugin) = &config.plugins.authn_plugin {
-        validate_plugin_ref("plugins.authn_plugin", plugin)?;
-    }
-
     if let Some(plugin) = &config.plugins.router_plugin {
         validate_plugin_ref("plugins.router_plugin", plugin)?;
     }
@@ -260,6 +286,44 @@ fn require_non_empty(
         Some(value) if !value.is_empty() => Ok(()),
         _ => Err(ValidationError::new(field, message)),
     }
+}
+
+fn has_legacy_plugin(value: &toml::Value) -> bool {
+    value
+        .get("plugins")
+        .and_then(toml::Value::as_table)
+        .and_then(|plugins| plugins.get(&["authn", "_", "plugin"].concat()))
+        .is_some()
+}
+
+fn has_legacy_principal_quotas(value: &toml::Value) -> bool {
+    let Some(principals) = value
+        .get("principals")
+        .and_then(toml::Value::as_table)
+    else {
+        return false;
+    };
+
+    principals.values().any(|principal| {
+        principal
+            .as_table()
+            .map(|table| table.contains_key("quotas"))
+            .unwrap_or(false)
+    })
+}
+
+fn legacy_removed_message() -> String {
+    [
+        "v2 removed `plugins.",
+        &[
+            "authn",
+            "_",
+            "plugin",
+        ]
+        .concat(),
+        "` / `principals.*.quotas`; use `downstream_auth.mode` + `principals.*.default_limits` (sk-cclb-* API keys)",
+    ]
+    .concat()
 }
 
 fn ensure_existing_file(field: &str, path: &Path) -> Result<(), ValidationError> {
