@@ -1,7 +1,7 @@
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
-use crate::{REQUEST_EVENTS_V1, RedbStorage, StorageError};
+use crate::{RedbStorage, StorageError, REQUEST_EVENTS_V1};
 
 const REQUEST_EVENT_SEQUENCE_SCALE: u64 = 1_000_000;
 

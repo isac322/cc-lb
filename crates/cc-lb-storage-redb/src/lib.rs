@@ -8,7 +8,6 @@ mod limit_state;
 mod migration;
 mod oauth;
 pub mod price_catalog;
-mod quota;
 mod request_events;
 mod usage_rollups;
 
@@ -22,17 +21,17 @@ use thiserror::Error;
 pub use audit::AuditEntry;
 pub use config_store::{ConfigDraftState, HistoryEntry, HistorySummary};
 pub use limit_state::{
-    PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, principal_limit_state_key,
+    principal_limit_state_key, PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState,
 };
 pub use oauth::{
-    api_key_storage_key, ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind,
-    OAuthCredentials, PrincipalKindLite, StoredApiKeyRecord, UpstreamKind, oauth_key,
+    api_key_storage_key, oauth_key, ApiKeyMutation, ApiKeyRecord, IssueParams, IssuedKey,
+    KeyStatus, Limit, LimitKind, OAuthCredentials, PrincipalKindLite, StoredApiKeyRecord,
+    UpstreamKind,
 };
 pub use price_catalog::PriceSnapshot;
-pub use quota::{BucketKind, quota_key};
 pub use request_events::{RequestEvent, RequestEventUpstream};
 pub use usage_rollups::{
-    UsageRollup, UsageRollupKey, UsageRollupResolution, UsageRollupRun, usage_rollup_key,
+    usage_rollup_key, UsageRollup, UsageRollupKey, UsageRollupResolution, UsageRollupRun,
 };
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
@@ -42,8 +41,6 @@ pub const OAUTH_CREDENTIALS_V1: TableDefinition<&[u8], &[u8]> =
 pub const API_KEYS_V1: TableDefinition<&[u8], &[u8]> = TableDefinition::new("API_KEYS_V1");
 pub const KEY_INDEX_BY_HASH_V1: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("KEY_INDEX_BY_HASH_V1");
-pub const QUOTAS_BY_PRINCIPAL_V1: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("QUOTAS_BY_PRINCIPAL_V1");
 pub const PRICE_CATALOG_V1: TableDefinition<&str, &[u8]> = TableDefinition::new("price_catalog_v1");
 pub const AUDIT_LOG_V1: TableDefinition<&[u8], &[u8]> = TableDefinition::new("AUDIT_LOG_V1");
 pub const PRINCIPAL_LIMIT_STATES_V1: TableDefinition<&[u8], &[u8]> =
@@ -69,6 +66,12 @@ pub(crate) const BACKEND_KIND_KEY: &str = "backend_kind";
 #[derive(Clone)]
 pub struct RedbStorage {
     pub(crate) db: Arc<Database>,
+}
+
+#[derive(Clone)]
+pub struct Storage {
+    pub(crate) db: Arc<Database>,
+    pub(crate) master_key: [u8; 32],
 }
 
 #[derive(Debug, Error)]
@@ -97,14 +100,6 @@ pub enum StorageError {
     UnsupportedSchemaVersion { found: u32, current: u32 },
     #[error("invalid schema version {0}")]
     InvalidSchemaVersion(u32),
-    #[error("quota counter overflow for key {0}")]
-    QuotaCounterOverflow(String),
-    #[error("quota counter underflow for key {0}")]
-    QuotaCounterUnderflow(String),
-    #[error("invalid quota counter value for key {0}")]
-    InvalidQuotaCounter(String),
-    #[error("invalid quota key {0}")]
-    InvalidQuotaKey(String),
     #[error("invalid audit key")]
     InvalidAuditKey,
     #[error("audit key overflow")]
@@ -191,6 +186,35 @@ impl RedbStorage {
 
     pub fn initialize(&self, requested: BackendKind) -> Result<(), StorageError> {
         migration::initialize_backend(&self.db, requested)
+    }
+
+    pub fn killswitch_enabled(&self) -> Result<bool, StorageError> {
+        migration::killswitch_enabled(&self.db)
+    }
+
+    pub fn set_killswitch_enabled(&self, enabled: bool) -> Result<(), StorageError> {
+        migration::set_killswitch_enabled(&self.db, enabled)
+    }
+}
+
+impl Storage {
+    pub fn open(path: impl AsRef<Path>, master_key: [u8; 32]) -> Result<Self, StorageError> {
+        let db = Arc::new(Database::create(path)?);
+        migration::initialize_schema(&db)?;
+
+        Ok(Self { db, master_key })
+    }
+
+    pub fn begin_read(&self) -> Result<redb::ReadTransaction, StorageError> {
+        Ok(self.db.begin_read()?)
+    }
+
+    pub fn begin_write(&self) -> Result<redb::WriteTransaction, StorageError> {
+        Ok(self.db.begin_write()?)
+    }
+
+    pub fn schema_version(&self) -> Result<u32, StorageError> {
+        migration::schema_version(&self.db)
     }
 
     pub fn killswitch_enabled(&self) -> Result<bool, StorageError> {

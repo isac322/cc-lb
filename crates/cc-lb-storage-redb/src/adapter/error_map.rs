@@ -2,7 +2,7 @@ use std::error::Error;
 
 use cc_lb_storage_api::StorageError as ApiStorageError;
 
-use crate::{CURRENT_SCHEMA_VERSION, StorageError};
+use crate::{StorageError, CURRENT_SCHEMA_VERSION};
 
 pub(crate) fn map_redb_err(error: StorageError) -> ApiStorageError {
     match error {
