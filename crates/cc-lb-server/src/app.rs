@@ -232,7 +232,7 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
     let error_normalizer = Arc::new(error_normalizer(&config)?);
     let (dispatcher, breaker_registry) = dispatcher(&config);
     let mut lifecycle = Lifecycle::new(
-        authn,
+        authn.clone(),
         signer_factory_for_lifecycle,
         router_plugin,
         dispatcher,
