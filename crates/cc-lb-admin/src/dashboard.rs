@@ -149,7 +149,10 @@ pub fn validate_step_for_range(
     let width = step_width_secs(step);
     let range_secs = range.as_secs();
     let bucket_count = range_secs / width;
-    if bucket_count == 0 || !range_secs.is_multiple_of(width) || bucket_count > MAX_BUCKETS_PER_SERIES {
+    if bucket_count == 0
+        || !range_secs.is_multiple_of(width)
+        || bucket_count > MAX_BUCKETS_PER_SERIES
+    {
         return Err(DashboardQueryError::StepTooFineForRange);
     }
     Ok(())

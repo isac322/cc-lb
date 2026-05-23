@@ -1,4 +1,3 @@
-use redb::ReadableDatabase;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -11,6 +10,7 @@ use http_body_util::{BodyExt, Empty};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::rt::TokioExecutor;
+use redb::ReadableDatabase;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use tower::ServiceExt;
