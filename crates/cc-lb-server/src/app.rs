@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Body;
 use axum::error_handling::HandleErrorLayer;
@@ -19,10 +19,11 @@ use axum::Router;
 use cc_lb_config::{Config, PluginRef, TlsConfig};
 use cc_lb_core::BreakerState;
 use cc_lb_core::{
-    make_default_dispatcher, start_sweep, BreakerConfig, BreakerRegistry, BulkheadConfig,
-    BulkheadDispatch, BulkheadRegistry, CircuitBreakerDispatch, ErrorNormalizer,
-    HopByHopStripLayer, Lifecycle, LifecycleConfig, QuotaManager, QuotaPolicy, UpstreamDispatch,
-    UpstreamKind,
+    make_default_dispatcher, start_principal_limit_state_writer, start_request_event_writer,
+    start_sweep, BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch,
+    BulkheadRegistry, CircuitBreakerDispatch, DashboardBroadcaster, ErrorNormalizer,
+    HopByHopStripLayer, Lifecycle, LifecycleConfig, PrincipalLimitStateSink, QuotaManager,
+    QuotaPolicy, RequestEventSink, UpstreamDispatch, UpstreamKind,
 };
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_plugin_api::{ObservabilityHook, PluginManifest, PluginRuntime};
@@ -52,6 +53,9 @@ pub struct App {
     pub admin_addr: SocketAddr,
     pub reload_task: Option<JoinHandle<()>>,
     pub sweep_task: Option<JoinHandle<()>>,
+    pub request_event_task: Option<JoinHandle<()>>,
+    pub principal_limit_state_task: Option<JoinHandle<()>>,
+    pub usage_rollup_task: Option<JoinHandle<()>>,
     signals: signal::SignalHandle,
     drain_controller: DrainController,
     tls_state: Option<Arc<TlsState>>,
@@ -90,6 +94,9 @@ impl App {
             admin_addr,
             reload_task,
             sweep_task,
+            request_event_task,
+            principal_limit_state_task,
+            usage_rollup_task,
             signals,
             drain_controller: _,
             tls_state,
@@ -135,6 +142,15 @@ impl App {
             task.abort();
         }
         if let Some(task) = sweep_task {
+            task.abort();
+        }
+        if let Some(task) = request_event_task {
+            task.abort();
+        }
+        if let Some(task) = principal_limit_state_task {
+            task.abort();
+        }
+        if let Some(task) = usage_rollup_task {
             task.abort();
         }
 
@@ -190,7 +206,28 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
     }
 
     let error_normalizer = Arc::new(error_normalizer(&config)?);
-    let (dispatcher, breaker_registry) = dispatcher(&config);
+    let (dispatcher, breaker_registry, bulkhead_registry) = dispatcher(&config);
+    let (request_event_sink, request_event_task) = match storage.clone() {
+        Some(storage) => {
+            let (sink, receiver) = RequestEventSink::new();
+            (
+                Some(Arc::new(sink)),
+                Some(start_request_event_writer(storage, receiver)),
+            )
+        }
+        None => (None, None),
+    };
+    let (principal_limit_state_sink, principal_limit_state_task) = match storage.clone() {
+        Some(storage) => {
+            let (sink, receiver) = PrincipalLimitStateSink::new();
+            (
+                Some(Arc::new(sink)),
+                Some(start_principal_limit_state_writer(storage, receiver)),
+            )
+        }
+        None => (None, None),
+    };
+    let dashboard_broadcaster = Arc::new(DashboardBroadcaster::new());
     let lifecycle = Arc::new(
         Lifecycle::new(
             authn,
@@ -202,7 +239,10 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
                 files_body_cap_bytes: cap_to_usize(config.body.files_cap_bytes),
             },
         )
-        .with_error_normalizer(error_normalizer),
+        .with_error_normalizer(error_normalizer)
+        .with_principal_limit_state_sink(principal_limit_state_sink)
+        .with_request_event_sink(request_event_sink)
+        .with_dashboard_broadcaster(Some(dashboard_broadcaster.clone())),
     );
 
     let quota_manager = storage
@@ -211,6 +251,9 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
     let sweep_task = quota_manager
         .as_ref()
         .map(|qm| start_sweep(qm.clone(), Duration::from_secs(60)));
+    let usage_rollup_task = storage
+        .as_ref()
+        .map(|storage| start_usage_rollup_worker(storage.clone(), Duration::from_secs(60)));
     let start_time = std::time::Instant::now();
     let drain_controller = DrainController::new();
     let tls_state = build_tls_state(&config)?;
@@ -219,6 +262,10 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
         _ => None,
     };
     let config_watcher = config_path.map(|path| Arc::new(ConfigWatcher::new(path, config.clone())));
+    let config_path_buf = config_path.map(Path::to_path_buf);
+    let admin_config_watcher: Option<Arc<dyn cc_lb_admin::ConfigReloader>> = config_watcher
+        .clone()
+        .map(|watcher| watcher as Arc<dyn cc_lb_admin::ConfigReloader>);
     let signals = signal::install(
         drain_controller.clone(),
         Duration::from_secs(config.timeouts.drain_secs),
@@ -226,7 +273,7 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
     );
     let state = ProxyState {
         lifecycle: lifecycle.clone(),
-        breaker_registry,
+        breaker_registry: breaker_registry.clone(),
         start_time,
         drain_controller: drain_controller.clone(),
     };
@@ -239,7 +286,15 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
         storage: storage.clone(),
         quota_manager: quota_manager.clone(),
         lifecycle: Some(lifecycle.clone()),
+        breaker_registry: Some(breaker_registry.clone()),
+        drain_controller: Some(drain_controller.clone()),
+        bulkhead_registry: Some(bulkhead_registry),
+        plugin_runtime_status: None,
+        dashboard_broadcaster,
         config: admin_config,
+        config_path: config_path_buf,
+        config_watcher: admin_config_watcher,
+        config_started_at_unix_secs: unix_now_secs(),
         admin_token: config
             .admin
             .token
@@ -258,6 +313,9 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
         admin_addr: config.listener.admin_addr,
         reload_task,
         sweep_task,
+        request_event_task,
+        principal_limit_state_task,
+        usage_rollup_task,
         signals,
         drain_controller,
         tls_state,
@@ -534,7 +592,13 @@ fn hex_nibble(byte: u8) -> Result<u8, BuildError> {
     }
 }
 
-fn dispatcher(config: &Config) -> (Arc<dyn UpstreamDispatch>, Arc<BreakerRegistry>) {
+fn dispatcher(
+    config: &Config,
+) -> (
+    Arc<dyn UpstreamDispatch>,
+    Arc<BreakerRegistry>,
+    Arc<BulkheadRegistry>,
+) {
     let bulkhead_config = BulkheadConfig {
         max_conns_per_upstream: config.bulkhead.max_conns_per_upstream,
         semaphore_permits: config.bulkhead.semaphore_per_upstream,
@@ -554,6 +618,7 @@ fn dispatcher(config: &Config) -> (Arc<dyn UpstreamDispatch>, Arc<BreakerRegistr
             .unwrap_or_else(|| "unknown".to_owned())
     });
     let breaker_registry = Arc::new(BreakerRegistry::new());
+    let bulkhead_registry = Arc::new(BulkheadRegistry::new());
     let breaker_upstream_name = upstream_name.clone();
     let breaker_registry_for_dispatcher = breaker_registry.clone();
     let dispatcher_factory = Arc::new(move |max_idle_per_host| {
@@ -567,12 +632,13 @@ fn dispatcher(config: &Config) -> (Arc<dyn UpstreamDispatch>, Arc<BreakerRegistr
     });
     (
         Arc::new(BulkheadDispatch::with_dispatcher_factory(
-            Arc::new(BulkheadRegistry::new()),
+            bulkhead_registry.clone(),
             bulkhead_config,
             upstream_name.clone(),
             dispatcher_factory,
         )),
         breaker_registry,
+        bulkhead_registry,
     )
 }
 
@@ -671,6 +737,33 @@ fn spawn_reload_watcher(
     })
 }
 
+fn start_usage_rollup_worker(storage: Arc<Storage>, period: Duration) -> JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(period);
+        loop {
+            interval.tick().await;
+            let storage = storage.clone();
+            match tokio::task::spawn_blocking(move || storage.rollup_usage_once()).await {
+                Ok(Ok(run)) => {
+                    if run.processed_events > 0 {
+                        tracing::debug!(
+                            processed_events = run.processed_events,
+                            updated_rollups = run.updated_rollups,
+                            "usage rollup completed"
+                        );
+                    }
+                }
+                Ok(Err(source)) => {
+                    tracing::warn!(error = %source, "usage rollup failed");
+                }
+                Err(source) => {
+                    tracing::warn!(error = %source, "usage rollup task failed");
+                }
+            }
+        }
+    })
+}
+
 async fn quota_reload_loop(
     mut reloads: broadcast::Receiver<Arc<Config>>,
     quota_manager: Arc<QuotaManager>,
@@ -715,6 +808,13 @@ fn cap_to_usize(value: u64) -> usize {
         Ok(value) => value,
         Err(_) => usize::MAX,
     }
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 #[derive(Debug, Error)]

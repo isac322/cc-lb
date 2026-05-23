@@ -53,9 +53,13 @@ impl Config {
             .merge(Serialized::defaults(cli_overrides))
             .extract()?;
 
-        config.resolve_runtime_values();
-        config.validate()?;
+        config.validate_loaded()?;
         Ok(config)
+    }
+
+    pub fn validate_loaded(&mut self) -> Result<(), ValidationError> {
+        self.resolve_runtime_values();
+        self.validate()
     }
 
     pub fn validate(&self) -> Result<(), ValidationError> {

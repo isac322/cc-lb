@@ -85,7 +85,7 @@ pub struct MetricDefinition {
     pub description: &'static str,
 }
 
-const METRIC_DEFINITIONS: [MetricDefinition; 15] = [
+const METRIC_DEFINITIONS: [MetricDefinition; 17] = [
     MetricDefinition {
         name: "cc_lb_requests_total",
         kind: MetricKind::Counter,
@@ -95,6 +95,17 @@ const METRIC_DEFINITIONS: [MetricDefinition; 15] = [
         name: "cc_lb_request_duration_seconds",
         kind: MetricKind::Histogram,
         description: "End-to-end proxied request duration in seconds.",
+    },
+    MetricDefinition {
+        name: "cc_lb_tokens_total",
+        kind: MetricKind::Counter,
+        description:
+            "Total upstream-reported tokens by principal, upstream, model, direction, and status.",
+    },
+    MetricDefinition {
+        name: "cc_lb_virtual_cost_usd_total",
+        kind: MetricKind::Counter,
+        description: "Virtual internal cost estimate in micro-USD by principal, upstream, model, and pricing status.",
     },
     MetricDefinition {
         name: "cc_lb_oauth_refresh_total",
@@ -228,6 +239,16 @@ pub fn register_metrics() {
         "End-to-end proxied request duration in seconds."
     );
     metrics::describe_counter!(
+        "cc_lb_tokens_total",
+        Unit::Count,
+        "Total upstream-reported tokens by principal, upstream, model, direction, and status."
+    );
+    metrics::describe_counter!(
+        "cc_lb_virtual_cost_usd_total",
+        Unit::Count,
+        "Virtual internal cost estimate in micro-USD by principal, upstream, model, and pricing status."
+    );
+    metrics::describe_counter!(
         "cc_lb_oauth_refresh_total",
         Unit::Count,
         "OAuth credential refresh attempts by principal, provider, and outcome."
@@ -349,9 +370,36 @@ fn touch_metrics() {
         "cc_lb_request_duration_seconds",
         "principal" => "unknown",
         "upstream" => "unknown",
-        "model" => "unknown"
+        "model" => "unknown",
+        "status" => "unknown"
     )
     .record(0.0);
+    metrics::counter!(
+        "cc_lb_tokens_total",
+        "principal" => "unknown",
+        "upstream" => "unknown",
+        "model" => "unknown",
+        "direction" => "input",
+        "status" => "unknown"
+    )
+    .increment(0);
+    metrics::counter!(
+        "cc_lb_tokens_total",
+        "principal" => "unknown",
+        "upstream" => "unknown",
+        "model" => "unknown",
+        "direction" => "output",
+        "status" => "unknown"
+    )
+    .increment(0);
+    metrics::counter!(
+        "cc_lb_virtual_cost_usd_total",
+        "principal" => "unknown",
+        "upstream" => "unknown",
+        "model" => "unknown",
+        "pricing_status" => "unknown"
+    )
+    .increment(0);
     metrics::counter!(
         "cc_lb_oauth_refresh_total",
         "principal" => "unknown",

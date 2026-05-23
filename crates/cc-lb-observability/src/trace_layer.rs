@@ -79,14 +79,15 @@ where
             "principal" => "unknown",
             "upstream" => "unknown",
             "model" => "unknown",
-            "status" => status_label
+            "status" => status_label.clone()
         )
         .increment(1);
         metrics::histogram!(
             "cc_lb_request_duration_seconds",
             "principal" => "unknown",
             "upstream" => "unknown",
-            "model" => "unknown"
+            "model" => "unknown",
+            "status" => status_label
         )
         .record(duration_seconds);
 

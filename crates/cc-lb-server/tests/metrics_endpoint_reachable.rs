@@ -17,4 +17,15 @@ async fn metrics_endpoint_reachable() {
 
     assert_eq!(metrics.status, 200);
     assert!(metrics.body.contains("cc_lb_requests_total"));
+    assert!(metrics.body.contains("cc_lb_request_duration_seconds"));
+    assert!(metrics.body.contains("cc_lb_tokens_total"));
+    assert!(metrics.body.contains("cc_lb_virtual_cost_usd_total"));
+    assert!(metrics.body.contains("direction=\"input\""));
+    assert!(metrics.body.contains("direction=\"output\""));
+    assert!(metrics.body.contains("status=\"200\""));
+    assert!(metrics
+        .body
+        .lines()
+        .any(|line| line.contains("cc_lb_request_duration_seconds")
+            && line.contains("status=\"200\"")));
 }

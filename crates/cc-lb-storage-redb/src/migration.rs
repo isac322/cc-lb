@@ -3,8 +3,10 @@ use std::sync::Arc;
 use redb::{Database, ReadableTable};
 
 use crate::{
-    StorageError, AUDIT_LOG_V1, CURRENT_SCHEMA_VERSION, KILLSWITCH_KEY, KILLSWITCH_V1,
-    OAUTH_CREDENTIALS_V1, QUOTAS_BY_PRINCIPAL_V1, SCHEMA_VERSION_KEY, SCHEMA_VERSION_V1,
+    StorageError, API_KEYS_V1, AUDIT_LOG_V1, CONFIG_DRAFT_V1, CONFIG_HISTORY_V1,
+    CURRENT_SCHEMA_VERSION, KILLSWITCH_KEY, KILLSWITCH_V1, OAUTH_CREDENTIALS_V1,
+    PRINCIPAL_LIMIT_STATES_V1, QUOTAS_BY_PRINCIPAL_V1, REQUEST_EVENTS_V1, SCHEMA_VERSION_KEY,
+    SCHEMA_VERSION_V1, USAGE_ROLLUPS_V1, USAGE_ROLLUP_CHECKPOINTS_V1,
 };
 
 pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> {
@@ -39,10 +41,31 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
         write_txn.open_table(OAUTH_CREDENTIALS_V1)?;
     }
     {
+        write_txn.open_table(API_KEYS_V1)?;
+    }
+    {
         write_txn.open_table(QUOTAS_BY_PRINCIPAL_V1)?;
     }
     {
         write_txn.open_table(AUDIT_LOG_V1)?;
+    }
+    {
+        write_txn.open_table(PRINCIPAL_LIMIT_STATES_V1)?;
+    }
+    {
+        write_txn.open_table(REQUEST_EVENTS_V1)?;
+    }
+    {
+        write_txn.open_table(USAGE_ROLLUPS_V1)?;
+    }
+    {
+        write_txn.open_table(USAGE_ROLLUP_CHECKPOINTS_V1)?;
+    }
+    {
+        write_txn.open_table(CONFIG_DRAFT_V1)?;
+    }
+    {
+        write_txn.open_table(CONFIG_HISTORY_V1)?;
     }
 
     write_txn.commit()?;

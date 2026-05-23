@@ -4,7 +4,7 @@ use axum::{
 };
 use cc_lb_admin::{router, AdminState};
 use cc_lb_config::{AuthStrategy, Config, PrincipalSpec, QuotasConfig, UpstreamKind, UpstreamSpec};
-use cc_lb_core::{BucketKind, QuotaManager, QuotaPolicy};
+use cc_lb_core::{BucketKind, DashboardBroadcaster, QuotaManager, QuotaPolicy};
 use cc_lb_storage_redb::Storage;
 use http_body_util::BodyExt;
 use serde_json::Value;
@@ -13,6 +13,10 @@ use tower::ServiceExt;
 
 fn test_config() -> Config {
     let mut config = Config::default();
+    config.signers.anthropic_oauth.scopes = vec![
+        "placeholder-scope".to_string(),
+        "placeholder-scope-2".to_string(),
+    ];
     config.storage.oauth_aead_key_env = "SECRET_STORAGE_KEY".to_string();
     config.admin.token_env = "SECRET_ADMIN_TOKEN".to_string();
     config.quotas = QuotasConfig {
@@ -41,6 +45,7 @@ fn test_config() -> Config {
                 default_input_tokens: 456,
                 default_output_tokens: 789,
             }),
+            disabled: None,
             allowed_models: vec!["claude-3-5-sonnet".to_string()],
             credentials_ref: Some("anthropic-key".to_string()),
         },
@@ -57,7 +62,15 @@ fn test_state(
         storage,
         quota_manager,
         lifecycle: None,
+        breaker_registry: None,
+        drain_controller: None,
+        bulkhead_registry: None,
+        plugin_runtime_status: None,
+        dashboard_broadcaster: Arc::new(DashboardBroadcaster::new()),
         config: Arc::new(config),
+        config_path: None,
+        config_watcher: None,
+        config_started_at_unix_secs: 0,
         admin_token: Some("test-token".to_string()),
         start_time: std::time::Instant::now(),
     }
@@ -81,7 +94,8 @@ async fn json_response(app: axum::Router, method: &str, uri: &str) -> Value {
 #[tokio::test]
 async fn snapshot_admin_config_current() {
     let app = router(test_state(test_config(), None, None));
-    let json = json_response(app, "GET", "/admin/config/current").await;
+    let mut json = json_response(app, "GET", "/admin/config/current").await;
+    json["effective_revision_unix_secs"] = serde_json::json!(0);
 
     insta::assert_snapshot!(serde_json::to_string_pretty(&json).unwrap());
 }

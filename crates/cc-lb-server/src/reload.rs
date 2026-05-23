@@ -162,6 +162,14 @@ impl cc_lb_admin::CurrentConfig for ConfigWatcher {
     }
 }
 
+impl cc_lb_admin::ConfigReloader for ConfigWatcher {
+    fn reload_now(&self) -> Result<(), String> {
+        ConfigWatcher::reload_now(self)
+            .map(|_| ())
+            .map_err(|source| source.to_string())
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ReloadError {
     #[error(transparent)]

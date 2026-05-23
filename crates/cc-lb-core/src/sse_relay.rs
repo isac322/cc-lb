@@ -77,9 +77,9 @@ impl fmt::Display for RelayError {
 impl Error for RelayError {}
 
 #[derive(Default)]
-struct Usage {
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
+pub(crate) struct Usage {
+    pub(crate) input_tokens: Option<u64>,
+    pub(crate) output_tokens: Option<u64>,
 }
 
 struct RelayRuntime {
@@ -463,7 +463,10 @@ fn event_stream_error_to_string(error: EventStreamError<Infallible>) -> String {
 }
 
 fn update_usage_from_event(event: &Event, usage: &mut Usage) {
-    if event.event != "message_stop" {
+    if !matches!(
+        event.event.as_str(),
+        "message_start" | "message_delta" | "message_stop"
+    ) {
         return;
     }
     if let Ok(value) = serde_json::from_str::<Value>(&event.data) {
@@ -471,7 +474,13 @@ fn update_usage_from_event(event: &Event, usage: &mut Usage) {
     }
 }
 
-fn usage_from_json_bytes(bytes: &Bytes) -> Usage {
+pub(crate) async fn update_usage_from_sse_event_bytes(raw: Bytes, usage: &mut Usage) {
+    if let Ok(Some(event)) = parse_one_event(raw).await {
+        update_usage_from_event(&event, usage);
+    }
+}
+
+pub(crate) fn usage_from_json_bytes(bytes: &Bytes) -> Usage {
     let mut usage = Usage::default();
     if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
         update_usage_from_value(&value, &mut usage);
@@ -480,15 +489,18 @@ fn usage_from_json_bytes(bytes: &Bytes) -> Usage {
 }
 
 fn update_usage_from_value(value: &Value, usage: &mut Usage) {
-    if let Some(input_tokens) = value
-        .get("usage")
+    let reported_usage = value.get("usage").or_else(|| {
+        value
+            .get("message")
+            .and_then(|message| message.get("usage"))
+    });
+    if let Some(input_tokens) = reported_usage
         .and_then(|usage| usage.get("input_tokens"))
         .and_then(Value::as_u64)
     {
         usage.input_tokens = Some(input_tokens);
     }
-    if let Some(output_tokens) = value
-        .get("usage")
+    if let Some(output_tokens) = reported_usage
         .and_then(|usage| usage.get("output_tokens"))
         .and_then(Value::as_u64)
     {
@@ -496,7 +508,7 @@ fn update_usage_from_value(value: &Value, usage: &mut Usage) {
     }
 }
 
-fn find_sse_event_end(buffer: &[u8]) -> Option<usize> {
+pub(crate) fn find_sse_event_end(buffer: &[u8]) -> Option<usize> {
     let mut index = 0;
     while index < buffer.len() {
         if buffer[index] == b'\n' && buffer.get(index + 1) == Some(&b'\n') {

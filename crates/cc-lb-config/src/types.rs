@@ -170,6 +170,8 @@ pub struct UpstreamSpec {
 pub struct PrincipalSpec {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quotas: Option<QuotasConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disabled: Option<bool>,
     pub allowed_models: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credentials_ref: Option<String>,
