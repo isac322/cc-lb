@@ -1040,10 +1040,13 @@ dependencies = [
 name = "cc-lb-storage-redb"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "base64",
+ "cc-lb-aead",
  "cc-lb-pricing",
  "cc-lb-storage-api",
+ "cc-lb-storage-conformance",
  "redb",
  "ring",
  "serde",

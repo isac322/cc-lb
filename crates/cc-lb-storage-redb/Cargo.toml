@@ -22,5 +22,8 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 
 [dev-dependencies]
+anyhow.workspace = true
+cc-lb-aead = { path = "../cc-lb-aead" }
+cc-lb-storage-conformance = { path = "../cc-lb-storage-conformance" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
