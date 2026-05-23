@@ -97,7 +97,10 @@ async fn files_content_forwards_exact_path_and_method() {
         .to_bytes();
     assert!(String::from_utf8_lossy(&body).contains("/v1/files/abc123/content"));
     assert_eq!(upstream_state.last_request().method, Method::GET);
-    assert_eq!(upstream_state.last_request().path, "/v1/files/abc123/content");
+    assert_eq!(
+        upstream_state.last_request().path,
+        "/v1/files/abc123/content"
+    );
     write_evidence(
         ".omo/evidence/task-3-files-content.txt",
         "status=200 method=GET path=/v1/files/abc123/content",
@@ -190,23 +193,24 @@ async fn spawn_recording_upstream() -> (
         .expect("bind upstream");
     let addr = listener.local_addr().expect("upstream addr");
     let upstream_state = state.clone();
-    let app = Router::new().fallback(any(move |method: Method, uri: OriginalUri| {
-        let upstream_state = upstream_state.clone();
-        async move {
-            upstream_state.record(method, uri.0.path().to_owned());
-            (
-                StatusCode::OK,
-                [("content-type", "application/json")],
-                format!(
-                    r#"{{"method":"{}","path":"{}"}}"#,
-                    upstream_state.last_request().method,
-                    upstream_state.last_request().path
-                ),
-            )
-                .into_response()
-        }
-    }))
-    .with_state(state.clone());
+    let app = Router::new()
+        .fallback(any(move |method: Method, uri: OriginalUri| {
+            let upstream_state = upstream_state.clone();
+            async move {
+                upstream_state.record(method, uri.0.path().to_owned());
+                (
+                    StatusCode::OK,
+                    [("content-type", "application/json")],
+                    format!(
+                        r#"{{"method":"{}","path":"{}"}}"#,
+                        upstream_state.last_request().method,
+                        upstream_state.last_request().path
+                    ),
+                )
+                    .into_response()
+            }
+        }))
+        .with_state(state.clone());
     let task = tokio::spawn(async move { axum::serve(listener, app).await });
     (addr, state, task)
 }

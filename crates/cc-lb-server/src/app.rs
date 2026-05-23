@@ -52,6 +52,7 @@ pub const PROXY_FILES_ROUTE_ITEM_CONTENT: &str = "/v1/files/{id}/content";
 pub const PROXY_FILES_ROUTE_PATHS: &[&str] = &[
     PROXY_FILES_ROUTE_COLLECTION,
     PROXY_FILES_ROUTE_ITEM,
+    PROXY_FILES_ROUTE_ITEM_CONTENT,
 ];
 
 pub struct App {
@@ -384,11 +385,15 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
         .route("/v1/messages/count_tokens", post(lifecycle_handler))
         .route("/v1/models", get(lifecycle_handler))
         .route("/v1/models/{id}", get(lifecycle_handler))
-        .route(PROXY_FILES_ROUTE_COLLECTION, post(lifecycle_handler).get(lifecycle_handler))
+        .route(
+            PROXY_FILES_ROUTE_COLLECTION,
+            post(lifecycle_handler).get(lifecycle_handler),
+        )
         .route(
             PROXY_FILES_ROUTE_ITEM,
             get(lifecycle_handler).delete(lifecycle_handler),
         )
+        .route(PROXY_FILES_ROUTE_ITEM_CONTENT, get(lifecycle_handler))
         .route("/api/{*path}", any(lifecycle_handler))
         .route("/v1/{*path}", any(lifecycle_handler))
         .with_state(state)
