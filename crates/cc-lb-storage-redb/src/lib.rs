@@ -24,7 +24,10 @@ pub use config_store::{ConfigDraftState, HistoryEntry, HistorySummary};
 pub use limit_state::{
     PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, principal_limit_state_key,
 };
-pub use oauth::{ApiKeyRecord, IssuedKey, OAuthCredentials, oauth_key};
+pub use oauth::{
+    api_key_storage_key, ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind,
+    OAuthCredentials, PrincipalKindLite, StoredApiKeyRecord, UpstreamKind, oauth_key,
+};
 pub use price_catalog::PriceSnapshot;
 pub use quota::{BucketKind, quota_key};
 pub use request_events::{RequestEvent, RequestEventUpstream};
