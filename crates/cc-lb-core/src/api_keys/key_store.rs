@@ -108,6 +108,15 @@ impl KeyStore {
         Ok(self.storage.list_api_keys(principal_id)?)
     }
 
+    pub fn list_all(&self) -> Result<Vec<StoredApiKeyRecord>> {
+        Ok(self
+            .storage
+            .list_api_keys_all()?
+            .into_iter()
+            .map(|(_, _, record)| record)
+            .collect())
+    }
+
     pub fn disable(&self, principal_id: &str, key_id: &str) -> Result<()> {
         self.storage.update_api_key_record(
             principal_id,

@@ -70,6 +70,7 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/admin/plugins", get(plugins_status))
         .route("/admin/killswitch", post(set_killswitch))
         .route("/admin/killswitch", delete(clear_killswitch))
+        .route("/admin/oauth/{id}", get(crate::oauth::oauth_status))
         .route("/admin/oauth/start", post(crate::oauth::start_oauth))
         .route("/admin/oauth/complete", post(crate::oauth::complete_oauth))
         .route("/admin/oauth/status", get(oauth_status))
