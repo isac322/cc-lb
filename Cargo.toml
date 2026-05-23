@@ -15,6 +15,7 @@ members = [
     "tests/property",
     "tests/tls",
     "tests/crash-recovery",
+    "tests/integration",
 ]
 exclude = ["third_party/gcp_auth", "fuzz"]
 resolver = "2"

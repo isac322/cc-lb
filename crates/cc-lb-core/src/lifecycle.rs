@@ -14,7 +14,7 @@ use cc_lb_plugin_api::{
     UpstreamError,
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
-use cc_lb_storage_redb::StoredApiKeyRecord;
+use cc_lb_storage_redb::{RequestEvent, Storage, StoredApiKeyRecord};
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
@@ -110,6 +110,22 @@ impl LimitSubjectProvider for StaticLimitSubjectProvider {
     }
 }
 
+impl LimitSubjectProvider for BuiltinAuthn {
+    fn limit_subject(&self, ctx: &RequestContext, _principal: &Principal) -> Option<LimitSubject> {
+        self.authenticate(&ctx.downstream_headers)
+            .ok()
+            .map(|success| {
+                let mut record = success.record;
+                record.key_hash_b64 = success.key_id.clone();
+                LimitSubject {
+                    principal_id: success.principal_id,
+                    key_id: success.key_id,
+                    record,
+                }
+            })
+    }
+}
+
 #[derive(Clone)]
 pub struct HyperDispatcher {
     client: Client<HttpConnector, Full<Bytes>>,
@@ -173,6 +189,7 @@ pub struct Lifecycle {
     limit_engine: Option<Arc<LimitEngine>>,
     limit_subject_provider: Option<Arc<dyn LimitSubjectProvider>>,
     audit_sink: Option<Arc<AuditWriterSink>>,
+    request_event_storage: Option<Arc<Storage>>,
 }
 
 impl Lifecycle {
@@ -195,6 +212,7 @@ impl Lifecycle {
             limit_engine: None,
             limit_subject_provider: None,
             audit_sink: None,
+            request_event_storage: None,
         }
     }
 
@@ -205,6 +223,11 @@ impl Lifecycle {
 
     pub fn with_audit_sink(mut self, audit_sink: Arc<AuditWriterSink>) -> Self {
         self.audit_sink = Some(audit_sink);
+        self
+    }
+
+    pub fn with_request_event_storage(mut self, storage: Arc<Storage>) -> Self {
+        self.request_event_storage = Some(storage);
         self
     }
 
@@ -290,12 +313,11 @@ impl Lifecycle {
             (None, Err(source)) => {
                 record_key_auth_failure_metric(&source);
                 self.observe_error("authentication_error", &source.to_string(), "authn");
-                let response = anthropic_error_response(
-                    StatusCode::UNAUTHORIZED,
-                    "authentication_error",
-                    &source.to_string(),
-                );
-                self.observe_finished(StatusCode::UNAUTHORIZED, started);
+                let status =
+                    StatusCode::from_u16(source.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
+                let response =
+                    anthropic_error_response(status, "authentication_error", &source.to_string());
+                self.observe_finished(status, started);
                 return Ok(response);
             }
         };
@@ -468,7 +490,13 @@ impl Lifecycle {
         let status = response.status();
         record_api_key_request_metric(&metric_context, status);
         response = self
-            .finish_success_response(response, active_limit.take(), &metric_context)
+            .finish_success_response(
+                response,
+                active_limit.take(),
+                &metric_context,
+                started.elapsed(),
+                status,
+            )
             .await;
         self.observe_finished_for_principal(status, started, &principal, &ctx.body_bytes);
         Ok(response)
@@ -543,6 +571,8 @@ impl Lifecycle {
         response: Response<Body>,
         active_limit: Option<ActiveLimit>,
         metric_context: &ApiKeyMetricContext,
+        duration: Duration,
+        status: StatusCode,
     ) -> Response<Body> {
         let mut active_limit = active_limit;
         if active_limit
@@ -585,6 +615,27 @@ impl Lifecycle {
         } else {
             0
         };
+
+        if let (Some(storage), Some(active_limit)) =
+            (self.request_event_storage.as_ref(), active_limit.as_ref())
+        {
+            let event = RequestEvent {
+                ts_ms: unix_now_ms(),
+                principal_id: active_limit.subject.principal_id.clone(),
+                key_id: active_limit.subject.key_id.clone(),
+                model: active_limit.request.model.clone(),
+                input_tokens: usage.input_tokens,
+                output_tokens: usage.output_tokens,
+                cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                cache_read_input_tokens: usage.cache_read_input_tokens,
+                cost_usd_micros: cost_micros as i64,
+                duration_ms: duration_to_ms(duration),
+                status: status.as_u16(),
+            };
+            if let Err(error) = storage.append_request_event(&event) {
+                tracing::warn!(%error, "failed to append api key request event");
+            }
+        }
 
         if let (Some(limit_engine), Some(active_limit)) =
             (self.limit_engine.as_ref(), active_limit.as_mut())
@@ -960,6 +1011,18 @@ impl ApiKeyMetricContext {
             pricing_upstream_kind: pricing_upstream_kind(upstream),
         }
     }
+}
+
+fn unix_now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
+fn duration_to_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
 fn record_api_key_request_metric(context: &ApiKeyMetricContext, status: StatusCode) {
