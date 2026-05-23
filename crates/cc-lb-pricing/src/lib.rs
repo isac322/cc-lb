@@ -1,190 +1,418 @@
 #![forbid(unsafe_code)]
 
-const MICROS_PER_USD: u64 = 1_000_000;
-const MICROS_PER_MILLION: u128 = 1_000_000;
+use std::collections::HashMap;
+use std::fmt;
+use std::sync::{Arc, OnceLock};
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PricingStatus {
-    Known,
-    Unknown,
+use arc_swap::ArcSwap;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct Pricing {
+    pub model: String,
+    pub input_per_million_usd: UsdPerMillion,
+    pub output_per_million_usd: UsdPerMillion,
 }
 
-impl PricingStatus {
-    pub const fn as_label(self) -> &'static str {
-        match self {
-            Self::Known => "known",
-            Self::Unknown => "unknown",
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct CostEstimate {
     pub micros_usd: Option<u64>,
     pub pricing_status: PricingStatus,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct UsdPerMillion {
-    micros_usd: u64,
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum PricingStatus {
+    Known,
+    Unknown,
 }
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub struct UsdPerMillion(u64);
+
 impl UsdPerMillion {
-    pub const fn from_whole_usd(usd: u64) -> Self {
-        Self {
-            micros_usd: usd * MICROS_PER_USD,
-        }
+    pub const fn from_whole_usd(whole_usd: u64) -> Self {
+        Self(whole_usd * 1_000_000)
     }
 
     pub const fn as_micros_usd(self) -> u64 {
-        self.micros_usd
+        self.0
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamKind {
+    AnthropicKey,
+    AnthropicOAuth,
+    AwsSigV4,
+    GcpOAuth,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub enum CatalogStatus {
+    Ok,
+    Stale,
+    CostDisabled,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CatalogSnapshot {
+    pub fetched_at_ms: u64,
+    pub models: HashMap<String, Pricing>,
+    pub raw_json: Vec<u8>,
+    pub cache_creation_per_million_usd: HashMap<String, UsdPerMillion>,
+    pub cache_read_per_million_usd: HashMap<String, UsdPerMillion>,
+    pub status: CatalogStatus,
+}
+
+impl CatalogSnapshot {
+    pub fn empty_cost_disabled() -> Self {
+        Self {
+            fetched_at_ms: 0,
+            models: HashMap::new(),
+            raw_json: Vec::new(),
+            cache_creation_per_million_usd: HashMap::new(),
+            cache_read_per_million_usd: HashMap::new(),
+            status: CatalogStatus::CostDisabled,
+        }
+    }
+}
+
+pub struct PriceCatalog {
+    snapshot: ArcSwap<CatalogSnapshot>,
+}
+
+impl PriceCatalog {
+    pub fn new_empty() -> Arc<Self> {
+        Arc::new(Self {
+            snapshot: ArcSwap::from_pointee(CatalogSnapshot::empty_cost_disabled()),
+        })
+    }
+
+    pub fn install_snapshot(&self, snap: CatalogSnapshot) {
+        self.snapshot.store(Arc::new(snap));
+    }
+
+    pub fn current(&self) -> Arc<CatalogSnapshot> {
+        self.snapshot.load_full()
+    }
+
+    pub fn lookup(&self, model: &str, upstream_kind: Option<UpstreamKind>) -> Option<Pricing> {
+        let normalized = normalize_model_id(model, upstream_kind);
+        self.current().models.get(&normalized).cloned()
+    }
+
+    pub fn estimate_max(
+        &self,
+        model: &str,
+        max_input: u64,
+        max_output: u64,
+        upstream_kind: Option<UpstreamKind>,
+    ) -> Option<u64> {
+        let pricing = self.lookup(model, upstream_kind)?;
+        Some(token_cost_micros(
+            max_input,
+            pricing.input_per_million_usd,
+            max_output,
+            pricing.output_per_million_usd,
+            0,
+            None,
+            0,
+            None,
+            &pricing.model,
+        ))
+    }
+
+    pub fn status(&self) -> CatalogStatus {
+        self.current().status
     }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct Pricing {
-    pub model: &'static str,
-    pub input_per_million_usd: UsdPerMillion,
-    pub output_per_million_usd: UsdPerMillion,
-}
+pub struct CatalogAlreadyInitialized;
 
-const OPUS_4_1_INPUT: UsdPerMillion = UsdPerMillion::from_whole_usd(15);
-const OPUS_4_1_OUTPUT: UsdPerMillion = UsdPerMillion::from_whole_usd(75);
-const OPUS_4_5_INPUT: UsdPerMillion = UsdPerMillion::from_whole_usd(5);
-const OPUS_4_5_OUTPUT: UsdPerMillion = UsdPerMillion::from_whole_usd(25);
-const SONNET_INPUT: UsdPerMillion = UsdPerMillion::from_whole_usd(3);
-const SONNET_OUTPUT: UsdPerMillion = UsdPerMillion::from_whole_usd(15);
-const HAIKU_4_5_INPUT: UsdPerMillion = UsdPerMillion::from_whole_usd(1);
-const HAIKU_4_5_OUTPUT: UsdPerMillion = UsdPerMillion::from_whole_usd(5);
-
-const PRICING_TABLE: [Pricing; 10] = [
-    Pricing {
-        model: "claude-opus-4-1",
-        input_per_million_usd: OPUS_4_1_INPUT,
-        output_per_million_usd: OPUS_4_1_OUTPUT,
-    },
-    Pricing {
-        model: "claude-opus-4-1-20250805",
-        input_per_million_usd: OPUS_4_1_INPUT,
-        output_per_million_usd: OPUS_4_1_OUTPUT,
-    },
-    Pricing {
-        model: "claude-opus-4-5",
-        input_per_million_usd: OPUS_4_5_INPUT,
-        output_per_million_usd: OPUS_4_5_OUTPUT,
-    },
-    Pricing {
-        model: "claude-sonnet-4-5",
-        input_per_million_usd: SONNET_INPUT,
-        output_per_million_usd: SONNET_OUTPUT,
-    },
-    Pricing {
-        model: "claude-sonnet-4-5-20250929",
-        input_per_million_usd: SONNET_INPUT,
-        output_per_million_usd: SONNET_OUTPUT,
-    },
-    Pricing {
-        model: "claude-haiku-4-5",
-        input_per_million_usd: HAIKU_4_5_INPUT,
-        output_per_million_usd: HAIKU_4_5_OUTPUT,
-    },
-    Pricing {
-        model: "claude-3-5-sonnet-20241022",
-        input_per_million_usd: SONNET_INPUT,
-        output_per_million_usd: SONNET_OUTPUT,
-    },
-    Pricing {
-        model: "claude-3-5-sonnet-20240620",
-        input_per_million_usd: SONNET_INPUT,
-        output_per_million_usd: SONNET_OUTPUT,
-    },
-    Pricing {
-        model: "claude-3-5-sonnet-latest",
-        input_per_million_usd: SONNET_INPUT,
-        output_per_million_usd: SONNET_OUTPUT,
-    },
-    Pricing {
-        model: "claude-3-5-sonnet",
-        input_per_million_usd: SONNET_INPUT,
-        output_per_million_usd: SONNET_OUTPUT,
-    },
-];
-
-pub fn pricing_table() -> &'static [Pricing] {
-    &PRICING_TABLE
-}
-
-pub fn pricing_for_model(model: &str) -> Option<Pricing> {
-    match model {
-        "claude-opus-4-1" => Some(PRICING_TABLE[0]),
-        "claude-opus-4-1-20250805" => Some(PRICING_TABLE[1]),
-        "claude-opus-4-5" => Some(PRICING_TABLE[2]),
-        "claude-sonnet-4-5" => Some(PRICING_TABLE[3]),
-        "claude-sonnet-4-5-20250929" => Some(PRICING_TABLE[4]),
-        "claude-haiku-4-5" => Some(PRICING_TABLE[5]),
-        "claude-3-5-sonnet-20241022" => Some(PRICING_TABLE[6]),
-        "claude-3-5-sonnet-20240620" => Some(PRICING_TABLE[7]),
-        "claude-3-5-sonnet-latest" => Some(PRICING_TABLE[8]),
-        "claude-3-5-sonnet" => Some(PRICING_TABLE[9]),
-        _ => None,
+impl fmt::Display for CatalogAlreadyInitialized {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("price catalog is already initialized")
     }
 }
 
+impl std::error::Error for CatalogAlreadyInitialized {}
+
+static GLOBAL_CATALOG: OnceLock<Arc<PriceCatalog>> = OnceLock::new();
+
+pub fn global_catalog() -> &'static Arc<PriceCatalog> {
+    GLOBAL_CATALOG.get_or_init(PriceCatalog::new_empty)
+}
+
+pub fn init_global_catalog(catalog: Arc<PriceCatalog>) -> Result<(), CatalogAlreadyInitialized> {
+    GLOBAL_CATALOG
+        .set(catalog)
+        .map_err(|_catalog| CatalogAlreadyInitialized)
+}
+
+pub fn pricing_for_model(model: &str) -> Option<Pricing> {
+    global_catalog().lookup(model, None)
+}
+
+pub fn pricing_for_model_with_kind(
+    model: &str,
+    upstream_kind: Option<UpstreamKind>,
+) -> Option<Pricing> {
+    global_catalog().lookup(model, upstream_kind)
+}
+
+#[deprecated(note = "use virtual_cost_micros_full to include cache token costs and upstream kind")]
 pub fn virtual_cost_micros(model: &str, input_tokens: u64, output_tokens: u64) -> CostEstimate {
-    let Some(pricing) = pricing_for_model(model) else {
+    virtual_cost_micros_full(model, input_tokens, output_tokens, 0, 0, None)
+}
+
+pub fn virtual_cost_micros_full(
+    model: &str,
+    input: u64,
+    output: u64,
+    cache_creation_input: u64,
+    cache_read_input: u64,
+    upstream_kind: Option<UpstreamKind>,
+) -> CostEstimate {
+    let normalized = normalize_model_id(model, upstream_kind);
+    let snapshot = global_catalog().current();
+    let Some(pricing) = snapshot.models.get(&normalized) else {
         return CostEstimate {
             micros_usd: None,
             pricing_status: PricingStatus::Unknown,
         };
     };
 
-    let numerator = (input_tokens as u128)
-        .saturating_mul(pricing.input_per_million_usd.as_micros_usd() as u128)
-        .saturating_add(
-            (output_tokens as u128)
-                .saturating_mul(pricing.output_per_million_usd.as_micros_usd() as u128),
-        );
-    let rounded_micros = numerator.saturating_add(MICROS_PER_MILLION / 2) / MICROS_PER_MILLION;
+    let cache_creation_price = snapshot
+        .cache_creation_per_million_usd
+        .get(&normalized)
+        .copied();
+    let cache_read_price = snapshot
+        .cache_read_per_million_usd
+        .get(&normalized)
+        .copied();
 
     CostEstimate {
-        micros_usd: Some(rounded_micros.try_into().unwrap_or(u64::MAX)),
+        micros_usd: Some(token_cost_micros(
+            input,
+            pricing.input_per_million_usd,
+            output,
+            pricing.output_per_million_usd,
+            cache_creation_input,
+            cache_creation_price,
+            cache_read_input,
+            cache_read_price,
+            &normalized,
+        )),
         pricing_status: PricingStatus::Known,
     }
 }
 
+pub fn normalize_model_id(model: &str, upstream_kind: Option<UpstreamKind>) -> String {
+    let Some(upstream_kind) = upstream_kind else {
+        return model.to_owned();
+    };
+    let Some(canonical) = canonical_claude_model(model) else {
+        return model.to_owned();
+    };
+
+    match upstream_kind {
+        UpstreamKind::AwsSigV4 => format!("bedrock/anthropic.{canonical}-v1:0"),
+        UpstreamKind::GcpOAuth => format!("vertex_ai/{canonical}"),
+        UpstreamKind::AnthropicKey | UpstreamKind::AnthropicOAuth => canonical,
+    }
+}
+
+fn canonical_claude_model(model: &str) -> Option<String> {
+    if is_supported_claude_family(model) {
+        return Some(model.to_owned());
+    }
+
+    if let Some(inner) = model
+        .strip_prefix("bedrock/anthropic.")
+        .and_then(|value| value.strip_suffix("-v1:0"))
+    {
+        return is_supported_claude_family(inner).then(|| inner.to_owned());
+    }
+
+    if let Some(inner) = model.strip_prefix("vertex_ai/") {
+        if is_supported_claude_family(inner) {
+            return Some(inner.to_owned());
+        }
+
+        if let Some((family, version)) = inner.split_once('@') {
+            let canonical = format!("{family}-{version}");
+            if is_supported_claude_family(&canonical) {
+                return Some(canonical);
+            }
+        }
+    }
+
+    None
+}
+
+fn is_supported_claude_family(model: &str) -> bool {
+    model.starts_with("claude-3-5-sonnet-")
+        || model.starts_with("claude-3-5-haiku-")
+        || model.starts_with("claude-opus-")
+}
+
+fn token_cost_micros(
+    input_tokens: u64,
+    input_price: UsdPerMillion,
+    output_tokens: u64,
+    output_price: UsdPerMillion,
+    cache_creation_input_tokens: u64,
+    cache_creation_price: Option<UsdPerMillion>,
+    cache_read_input_tokens: u64,
+    cache_read_price: Option<UsdPerMillion>,
+    model: &str,
+) -> u64 {
+    let total = component_cost(input_tokens, input_price)
+        + component_cost(output_tokens, output_price)
+        + cache_creation_price
+            .map(|price| component_cost(cache_creation_input_tokens, price))
+            .unwrap_or_else(|| {
+                if cache_creation_input_tokens > 0 {
+                    record_missing_cache_field(model, "cache_creation_per_million_usd");
+                }
+                0
+            })
+        + cache_read_price
+            .map(|price| component_cost(cache_read_input_tokens, price))
+            .unwrap_or_else(|| {
+                if cache_read_input_tokens > 0 {
+                    record_missing_cache_field(model, "cache_read_per_million_usd");
+                }
+                0
+            });
+    total.try_into().unwrap_or(u64::MAX)
+}
+
+fn component_cost(tokens: u64, price: UsdPerMillion) -> u128 {
+    u128::from(tokens) * u128::from(price.as_micros_usd()) / 1_000_000
+}
+
+fn record_missing_cache_field(_model: &str, _field: &'static str) {}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
 
-    #[test]
-    fn known_model_returns_expected_micros() {
-        let estimate = virtual_cost_micros("claude-sonnet-4-5", 10, 20);
+    static GLOBAL_TEST_LOCK: Mutex<()> = Mutex::new(());
 
-        assert_eq!(estimate.pricing_status, PricingStatus::Known);
-        assert_eq!(estimate.micros_usd, Some(330));
+    fn pricing(model: &str, input_usd: u64, output_usd: u64) -> Pricing {
+        Pricing {
+            model: model.to_owned(),
+            input_per_million_usd: UsdPerMillion::from_whole_usd(input_usd),
+            output_per_million_usd: UsdPerMillion::from_whole_usd(output_usd),
+        }
+    }
+
+    fn snapshot_with(model: &str, pricing: Pricing) -> CatalogSnapshot {
+        let mut models = HashMap::new();
+        models.insert(model.to_owned(), pricing);
+
+        CatalogSnapshot {
+            fetched_at_ms: 1,
+            models,
+            raw_json: b"{}".to_vec(),
+            cache_creation_per_million_usd: HashMap::new(),
+            cache_read_per_million_usd: HashMap::new(),
+            status: CatalogStatus::Ok,
+        }
     }
 
     #[test]
-    fn unknown_model_returns_unknown_without_cost() {
-        let estimate = virtual_cost_micros("not-a-claude-model", 10, 20);
-
-        assert_eq!(estimate.pricing_status, PricingStatus::Unknown);
-        assert_eq!(estimate.micros_usd, None);
+    fn normalize_bedrock() {
+        assert_eq!(
+            normalize_model_id("claude-3-5-sonnet-20241022", Some(UpstreamKind::AwsSigV4)),
+            "bedrock/anthropic.claude-3-5-sonnet-20241022-v1:0"
+        );
     }
 
     #[test]
-    fn zero_tokens_returns_zero_micros_for_known_model() {
-        let estimate = virtual_cost_micros("claude-opus-4-1", 0, 0);
-
-        assert_eq!(estimate.pricing_status, PricingStatus::Known);
-        assert_eq!(estimate.micros_usd, Some(0));
+    fn normalize_none_keeps_model_unchanged() {
+        assert_eq!(
+            normalize_model_id("claude-3-5-sonnet-20241022", None),
+            "claude-3-5-sonnet-20241022"
+        );
     }
 
     #[test]
-    fn large_token_counts_saturate_without_overflowing() {
-        let estimate = virtual_cost_micros("claude-opus-4-1", u64::MAX, u64::MAX);
+    fn install_snapshot_visible_via_lookup() {
+        let catalog = PriceCatalog::new_empty();
+        let inserted = pricing("claude-3-5-sonnet-20241022", 3, 15);
+        catalog.install_snapshot(snapshot_with(
+            "claude-3-5-sonnet-20241022",
+            inserted.clone(),
+        ));
 
-        assert_eq!(estimate.pricing_status, PricingStatus::Known);
-        assert_eq!(estimate.micros_usd, Some(u64::MAX));
+        assert_eq!(
+            catalog.lookup("claude-3-5-sonnet-20241022", None),
+            Some(inserted)
+        );
+    }
+
+    #[test]
+    fn estimate_max_computes_input_and_output_cost() {
+        let catalog = PriceCatalog::new_empty();
+        catalog.install_snapshot(snapshot_with(
+            "claude-3-5-sonnet-20241022",
+            pricing("claude-3-5-sonnet-20241022", 3, 15),
+        ));
+
+        assert_eq!(
+            catalog.estimate_max("claude-3-5-sonnet-20241022", 2_000_000, 1_000_000, None),
+            Some(21_000_000)
+        );
+    }
+
+    #[test]
+    fn pricing_for_model_uses_populated_global_catalog() {
+        let _guard = GLOBAL_TEST_LOCK.lock().expect("global catalog test lock");
+        let model = "claude-3-5-haiku-20241022";
+        let inserted = pricing(model, 1, 5);
+        let snapshot = snapshot_with(model, inserted.clone());
+        let catalog = PriceCatalog::new_empty();
+        catalog.install_snapshot(snapshot.clone());
+        if init_global_catalog(catalog).is_err() {
+            global_catalog().install_snapshot(snapshot);
+        }
+
+        assert_eq!(pricing_for_model(model), Some(inserted));
+    }
+
+    #[allow(deprecated)]
+    #[test]
+    fn virtual_cost_micros_deprecated_wrapper_still_estimates_known_model() {
+        let _guard = GLOBAL_TEST_LOCK.lock().expect("global catalog test lock");
+        let model = "claude-opus-4-1-20250805";
+        let inserted = pricing(model, 15, 75);
+        global_catalog().install_snapshot(snapshot_with(model, inserted));
+
+        assert_eq!(
+            virtual_cost_micros(model, 1_000_000, 2_000_000),
+            CostEstimate {
+                micros_usd: Some(165_000_000),
+                pricing_status: PricingStatus::Known,
+            }
+        );
+    }
+
+    #[test]
+    fn virtual_cost_micros_full_marks_unknown_when_model_absent() {
+        let _guard = GLOBAL_TEST_LOCK.lock().expect("global catalog test lock");
+        global_catalog().install_snapshot(CatalogSnapshot::empty_cost_disabled());
+
+        assert_eq!(
+            virtual_cost_micros_full("missing-model", 1, 1, 1, 1, None),
+            CostEstimate {
+                micros_usd: None,
+                pricing_status: PricingStatus::Unknown,
+            }
+        );
     }
 }
