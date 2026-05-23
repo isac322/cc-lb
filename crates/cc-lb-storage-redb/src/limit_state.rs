@@ -1,7 +1,7 @@
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
-use crate::{PRINCIPAL_LIMIT_STATES_V1, RedbStorage, StorageError};
+use crate::{RedbStorage, StorageError, PRINCIPAL_LIMIT_STATES_V1};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

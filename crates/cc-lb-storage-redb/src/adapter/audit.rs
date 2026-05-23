@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use cc_lb_storage_api::{AuditStore, StorageResult, types::AuditEntry as ApiAuditEntry};
+use cc_lb_storage_api::{types::AuditEntry as ApiAuditEntry, AuditStore, StorageResult};
 
 use crate::{AuditEntry as RedbAuditEntry, RedbStorage};
 

@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use cc_lb_storage_api::{QuotaStore, StorageResult, types::BucketKind as ApiBucketKind};
+use cc_lb_storage_api::{types::BucketKind as ApiBucketKind, QuotaStore, StorageResult};
 
 use crate::{BucketKind as RedbBucketKind, RedbStorage};
 

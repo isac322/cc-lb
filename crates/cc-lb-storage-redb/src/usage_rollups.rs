@@ -5,8 +5,8 @@ use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    REQUEST_EVENTS_V1, RedbStorage, RequestEvent, RequestEventUpstream, StorageError,
-    USAGE_ROLLUP_CHECKPOINTS_V1, USAGE_ROLLUPS_V1,
+    RedbStorage, RequestEvent, RequestEventUpstream, StorageError, REQUEST_EVENTS_V1,
+    USAGE_ROLLUPS_V1, USAGE_ROLLUP_CHECKPOINTS_V1,
 };
 
 const REQUEST_EVENT_CHECKPOINT_KEY: &str = "request_events_v1_high_water";
