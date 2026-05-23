@@ -44,8 +44,8 @@ fn plugin_refs_apply_extism_batch_defaults() {
     std::fs::write(
         &config_path,
         format!(
-            r#"[plugins.authn_plugin]
-name = "authn"
+            r#"[plugins.router_plugin]
+name = "router"
 wasm_path = "{}"
 "#,
             common::toml_path(&wasm)
@@ -54,7 +54,7 @@ wasm_path = "{}"
     .unwrap();
 
     let config = Config::load(&config_path).unwrap();
-    let plugin = config.plugins.authn_plugin.unwrap();
+    let plugin = config.plugins.router_plugin.unwrap();
 
     assert!(!plugin.sse_per_event);
     assert_eq!(
