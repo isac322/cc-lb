@@ -1,0 +1,56 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.19s
+     Running unittests src/lib.rs (target/debug/deps/fake_anthropic-16ef86f3feeb918e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/fake_anthropic-ee0797b9c01c35a8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/auth_required.rs (target/debug/deps/auth_required-3d044a7e270db8e1)
+
+running 2 tests
+test missing_auth_returns_anthropic_error_shape ... ok
+test invalid_auth_is_rejected_and_bearer_sk_ant_is_accepted ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/ok_path.rs (target/debug/deps/ok_path-c62ee94b0ab6d6e5)
+
+running 2 tests
+test non_streaming_and_aux_endpoints_return_anthropic_like_shapes ... ok
+test sse_ok_path_uses_single_content_block_index_and_terminal_events ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/slow_mode.rs (target/debug/deps/slow_mode-79fa08ae1d865dcf)
+
+running 1 test
+test slow_mode_rate_limits_first_sse_frame ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.55s
+
+     Running tests/unknown_event.rs (target/debug/deps/unknown_event-69d9234e25e8bbcf)
+
+running 1 test
+test tamper_unknown_event_mode_emits_foo_event ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/whitelist_headers.rs (target/debug/deps/whitelist_headers-3bb8092726a277bb)
+
+running 1 test
+test record_whitelist_headers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests fake_anthropic
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

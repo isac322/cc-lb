@@ -1,0 +1,101 @@
+   Compiling itoa v1.0.18
+   Compiling pin-project-lite v0.2.17
+   Compiling futures-core v0.3.32
+   Compiling bytes v1.11.1
+   Compiling libc v0.2.186
+   Compiling serde_core v1.0.228
+   Compiling once_cell v1.21.4
+   Compiling tower-service v0.3.3
+   Compiling utf8parse v0.2.2
+   Compiling log v0.4.29
+   Compiling futures-channel v0.3.32
+   Compiling httparse v1.10.1
+   Compiling http v1.4.0
+   Compiling anstyle-parse v1.0.0
+   Compiling percent-encoding v2.3.2
+   Compiling anstyle-query v1.1.5
+   Compiling futures-task v0.3.32
+   Compiling atomic-waker v1.1.2
+   Compiling httpdate v1.0.3
+   Compiling tracing-core v0.1.36
+   Compiling mio v1.2.0
+   Compiling socket2 v0.6.3
+   Compiling tower-layer v0.3.3
+   Compiling anstyle v1.0.14
+   Compiling http-body v1.0.1
+   Compiling smallvec v1.15.1
+   Compiling colorchoice v1.0.5
+   Compiling tokio v1.52.3
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling slab v0.4.12
+   Compiling sync_wrapper v1.0.2
+   Compiling http-body-util v0.1.3
+   Compiling form_urlencoded v1.2.2
+   Compiling anstream v1.0.0
+   Compiling zmij v1.0.21
+   Compiling mime v0.3.17
+   Compiling futures-util v0.3.32
+   Compiling strsim v0.11.1
+   Compiling ryu v1.0.23
+   Compiling clap_lex v1.1.0
+   Compiling memchr v2.8.0
+   Compiling matchit v0.8.4
+   Compiling async-stream v0.3.6
+   Compiling clap_builder v4.6.0
+   Compiling tracing v0.1.44
+   Compiling clap v4.6.1
+   Compiling axum-core v0.5.6
+   Compiling serde v1.0.228
+   Compiling serde_json v1.0.149
+   Compiling serde_path_to_error v0.1.20
+   Compiling serde_urlencoded v0.7.1
+   Compiling hyper v1.9.0
+   Compiling tower v0.5.3
+   Compiling hyper-util v0.1.20
+   Compiling axum v0.8.9
+   Compiling fake-anthropic v0.1.0 (/home/bhyoo/.local/share/opencode/worktree/fce5f5faef249d03ae57ed446d5e54511082a4f6/nimble-squid/tests/fixtures/fake-anthropic)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.50s
+     Running unittests src/lib.rs (target/debug/deps/fake_anthropic-16ef86f3feeb918e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/main.rs (target/debug/deps/fake_anthropic-ee0797b9c01c35a8)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/auth_required.rs (target/debug/deps/auth_required-3d044a7e270db8e1)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/ok_path.rs (target/debug/deps/ok_path-c62ee94b0ab6d6e5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 0.00s
+
+     Running tests/slow_mode.rs (target/debug/deps/slow_mode-79fa08ae1d865dcf)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/unknown_event.rs (target/debug/deps/unknown_event-69d9234e25e8bbcf)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 1 filtered out; finished in 0.00s
+
+     Running tests/whitelist_headers.rs (target/debug/deps/whitelist_headers-3bb8092726a277bb)
+
+running 1 test
+fake-anthropic request_count key_label=x-api-key:sk-ant-* count=1
+test record_whitelist_headers ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+

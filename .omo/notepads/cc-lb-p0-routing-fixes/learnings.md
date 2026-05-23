@@ -1,0 +1,4 @@
+- 2026-05-23T09:00:17.085203+00:00: updated fake-anthropic last-request header recording.
+  - Changed files: tests/fixtures/fake-anthropic/src/routes.rs, tests/fixtures/fake-anthropic/tests/whitelist_headers.rs
+  - Tests: cargo test -p fake-anthropic record_whitelist_headers -- --exact --nocapture; cargo test -p fake-anthropic; cargo clippy -p fake-anthropic --all-targets -- -D warnings; cargo fmt --all
+  - Gotchas: /__last_request now preserves x_api_key and adds a headers object with exactly x-organization-uuid and x-trusted-device-token; header lookup is case-insensitive while JSON keys stay lower-case; rust-analyzer is not installed so lsp_diagnostics could not run.
