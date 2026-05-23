@@ -10,3 +10,8 @@
 - Changed files: `crates/cc-lb-server/src/app.rs`, `crates/cc-lb-server/tests/files_content_explicit_route.rs`, `.omo/notepads/cc-lb-p0-routing-fixes/learnings.md`
 - Commands run: `cargo fmt --all`, `CC_LB_ADMIN_SKIP_SPA=1 cargo test -p cc-lb-server --test files_content_explicit_route`, `CC_LB_ADMIN_SKIP_SPA=1 cargo test -p cc-lb-server --test multi_route_dispatch`, `CC_LB_ADMIN_SKIP_SPA=1 cargo clippy -p cc-lb-server --all-targets -- -D warnings`
 - Gotchas: route-registration coverage needed a test-only route path list because the existing `/v1/{*path}` wildcard would otherwise make `/v1/files/abc123/content` pass before the explicit route was registered; `rust-analyzer` is not installed, so `lsp_diagnostics` reported it unavailable.
+
+2026-05-23T00:00:00+00:00
+- Changed files: `crates/cc-lb-core/src/hop_by_hop.rs`, `crates/cc-lb-server/tests/header_preservation_contract.rs`, `.omo/evidence/task-4-headers-forward.txt`, `.omo/evidence/task-4-hop-by-hop.txt`, `.omo/evidence/task-4-contract-comment.txt`
+- Commands run: `cargo fmt --all`, `CC_LB_ADMIN_SKIP_SPA=1 cargo test -p cc-lb-server --test header_preservation_contract`, `cargo test -p cc-lb-core --test lifecycle_response_header_passthrough`, `cargo doc --no-deps -p cc-lb-core`, `CC_LB_ADMIN_SKIP_SPA=1 cargo clippy -p cc-lb-core -p cc-lb-server --all-targets -- -D warnings`
+- Gotchas: fake-anthropic only records x_api_key plus the selected lower-case headers, so Connection had to be verified with a separate recording upstream while keeping the fixture whitelist unchanged; rust-analyzer is still unavailable.
