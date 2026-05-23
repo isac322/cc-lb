@@ -41,7 +41,7 @@ use tokio::task::{JoinError, JoinHandle};
 use tower::ServiceBuilder;
 
 use crate::build_meta::BuildMeta;
-use crate::builtins::{self, BuiltinAuthn, BuiltinRouter, NoopObservabilityHook};
+use crate::builtins::{self, BuiltinAuthnPluginAdapter, BuiltinRouter, NoopObservabilityHook};
 use crate::drain::DrainController;
 use crate::preflight::{self, PreflightOptions};
 use crate::reload::ConfigWatcher;
@@ -253,10 +253,11 @@ fn build_app_with_storage(
         host_signer_resolver(&config, storage.clone(), aead.clone())
             .expect("host signer resolver is always available when storage is configured"),
     );
-    let authn = match &config.plugins.authn_plugin {
-        Some(plugin) => runtime.instantiate(&manifest_from_plugin(plugin)?)?,
-        None => Arc::new(BuiltinAuthn::new(&config, storage.clone(), aead.clone())),
-    };
+    let authn = Arc::new(BuiltinAuthnPluginAdapter::new(
+        &config,
+        storage.clone(),
+        aead.clone(),
+    ));
     let router_plugin = match &config.plugins.router_plugin {
         Some(plugin) => runtime.instantiate_router(&manifest_from_plugin(plugin)?)?,
         None => Arc::new(BuiltinRouter::new(&config)?),
