@@ -96,6 +96,50 @@ impl Storage {
         Ok(Some(creds))
     }
 
+    pub(crate) fn put_oauth_ciphertext(
+        &self,
+        principal_id: &str,
+        provider: &str,
+        ciphertext: &[u8],
+    ) -> Result<(), StorageError> {
+        let key = oauth_key(principal_id, provider);
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(OAUTH_CREDENTIALS_V1)?;
+            table.insert(key.as_slice(), ciphertext)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn get_oauth_ciphertext(
+        &self,
+        principal_id: &str,
+        provider: &str,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let key = oauth_key(principal_id, provider);
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(OAUTH_CREDENTIALS_V1)?;
+        Ok(table
+            .get(key.as_slice())?
+            .map(|stored| stored.value().to_vec()))
+    }
+
+    pub(crate) fn delete_oauth_ciphertext(
+        &self,
+        principal_id: &str,
+        provider: &str,
+    ) -> Result<bool, StorageError> {
+        let key = oauth_key(principal_id, provider);
+        let write_txn = self.db.begin_write()?;
+        let removed = {
+            let mut table = write_txn.open_table(OAUTH_CREDENTIALS_V1)?;
+            table.remove(key.as_slice())?.is_some()
+        };
+        write_txn.commit()?;
+        Ok(removed)
+    }
+
     pub fn delete_oauth(&self, principal_id: &str, provider: &str) -> Result<(), StorageError> {
         let key = oauth_key(principal_id, provider);
         let write_txn = self.db.begin_write()?;
@@ -140,6 +184,31 @@ impl Storage {
         let plaintext = self.decrypt_value(storage_key.as_bytes(), &ciphertext)?;
         let credential = serde_json::from_slice::<AnthropicApiKeyCredential>(&plaintext)?;
         Ok(Some(credential.anthropic_api_key))
+    }
+
+    pub(crate) fn put_anthropic_api_key_ciphertext(
+        &self,
+        storage_key: &str,
+        ciphertext: &[u8],
+    ) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(OAUTH_CREDENTIALS_V1)?;
+            table.insert(storage_key.as_bytes(), ciphertext)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn get_anthropic_api_key_ciphertext(
+        &self,
+        storage_key: &str,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(OAUTH_CREDENTIALS_V1)?;
+        Ok(table
+            .get(storage_key.as_bytes())?
+            .map(|stored| stored.value().to_vec()))
     }
 
     pub fn issue_api_key(
@@ -234,6 +303,74 @@ impl Storage {
         };
         write_txn.commit()?;
         Ok(record)
+    }
+
+    pub(crate) fn put_api_key_ciphertext(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+        ciphertext: &[u8],
+    ) -> Result<(), StorageError> {
+        let storage_key = api_key_storage_key(principal_id, key_id);
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(API_KEYS_V1)?;
+            table.insert(storage_key.as_slice(), ciphertext)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn get_api_key_ciphertext(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let storage_key = api_key_storage_key(principal_id, key_id);
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(API_KEYS_V1)?;
+        Ok(table
+            .get(storage_key.as_slice())?
+            .map(|stored| stored.value().to_vec()))
+    }
+
+    pub(crate) fn list_api_key_ciphertexts(
+        &self,
+        principal_id: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(API_KEYS_V1)?;
+        let prefix = api_key_storage_prefix(principal_id);
+        let mut records = Vec::new();
+        for row in table.iter()? {
+            let (key, value) = row?;
+            let key_bytes = key.value();
+            if let Some(key_id) = api_key_id_from_storage_key(&prefix, key_bytes) {
+                records.push((key_id.to_owned(), value.value().to_vec()));
+            }
+        }
+        records.sort_by(|left, right| left.0.cmp(&right.0));
+        Ok(records)
+    }
+
+    pub(crate) fn revoke_api_key_ciphertext(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+        revoked_ciphertext: &[u8],
+    ) -> Result<bool, StorageError> {
+        let storage_key = api_key_storage_key(principal_id, key_id);
+        let write_txn = self.db.begin_write()?;
+        let replaced = {
+            let mut table = write_txn.open_table(API_KEYS_V1)?;
+            let exists = table.get(storage_key.as_slice())?.is_some();
+            if exists {
+                table.insert(storage_key.as_slice(), revoked_ciphertext)?;
+            }
+            exists
+        };
+        write_txn.commit()?;
+        Ok(replaced)
     }
 
     fn encrypt_oauth(&self, principal_id: &str, plaintext: &[u8]) -> Result<Vec<u8>, StorageError> {
