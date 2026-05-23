@@ -23,12 +23,14 @@ cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
+cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 cc-lb-dialect-bedrock = { path = "../cc-lb-dialect-bedrock" }
 cc-lb-dialect-vertex = { path = "../cc-lb-dialect-vertex" }
 dashmap.workspace = true
 eventsource-stream.workspace = true
 futures-core = "0.3"
+globset.workspace = true
 hickory-resolver = { workspace = true, features = ["tokio"] }
 http.workspace = true
 http-body-util.workspace = true
