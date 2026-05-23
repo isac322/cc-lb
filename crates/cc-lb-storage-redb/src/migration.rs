@@ -5,10 +5,10 @@ use redb::{Database, ReadableDatabase, ReadableTable};
 
 use crate::{
     API_KEYS_V1, AUDIT_LOG_V1, BACKEND_KIND_KEY, CONFIG_DRAFT_V1, CONFIG_HISTORY_V1,
-    CURRENT_SCHEMA_VERSION, KILLSWITCH_KEY, KILLSWITCH_V1, META_BACKEND_KIND_V1,
-    OAUTH_CREDENTIALS_V1, PRINCIPAL_LIMIT_STATES_V1, QUOTAS_BY_PRINCIPAL_V1, REQUEST_EVENTS_V1,
-    SCHEMA_VERSION_KEY, SCHEMA_VERSION_V1, StorageError, USAGE_ROLLUP_CHECKPOINTS_V1,
-    USAGE_ROLLUPS_V1,
+    CURRENT_SCHEMA_VERSION, KEY_INDEX_BY_HASH_V1, KILLSWITCH_KEY, KILLSWITCH_V1,
+    META_BACKEND_KIND_V1, OAUTH_CREDENTIALS_V1, PRICE_CATALOG_V1, PRINCIPAL_LIMIT_STATES_V1,
+    QUOTAS_BY_PRINCIPAL_V1, REQUEST_EVENTS_V1, SCHEMA_VERSION_KEY, SCHEMA_VERSION_V1,
+    StorageError, USAGE_ROLLUP_CHECKPOINTS_V1, USAGE_ROLLUPS_V1,
 };
 
 pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> {
@@ -59,7 +59,13 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
         write_txn.open_table(API_KEYS_V1)?;
     }
     {
+        write_txn.open_table(KEY_INDEX_BY_HASH_V1)?;
+    }
+    {
         write_txn.open_table(QUOTAS_BY_PRINCIPAL_V1)?;
+    }
+    {
+        write_txn.open_table(PRICE_CATALOG_V1)?;
     }
     {
         write_txn.open_table(AUDIT_LOG_V1)?;
