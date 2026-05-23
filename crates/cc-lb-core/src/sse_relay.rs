@@ -3,7 +3,7 @@ use std::error::Error;
 use std::fmt;
 use std::future::poll_fn;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant as StdInstant};
 
@@ -27,6 +27,7 @@ use crate::sse_error_frame::{make_error_frame, make_error_frame_from_json};
 
 const CLIENT_DISCONNECTED_STATUS: u16 = 499;
 
+#[derive(Clone)]
 pub struct SseRelay {
     pub obs: Arc<dyn ObservabilityHook>,
     pub dialect: Arc<dyn UpstreamDialect>,
@@ -36,6 +37,16 @@ pub struct SseRelay {
     pub reservation: Option<Reservation>,
     pub error_normalizer: Option<Arc<ErrorNormalizer>>,
     pub upstream_kind: Option<UpstreamKind>,
+    pub streaming_usage: Arc<Mutex<StreamingUsage>>,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct StreamingUsage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub complete: bool,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -76,12 +87,6 @@ impl fmt::Display for RelayError {
 
 impl Error for RelayError {}
 
-#[derive(Default)]
-pub(crate) struct Usage {
-    pub(crate) input_tokens: Option<u64>,
-    pub(crate) output_tokens: Option<u64>,
-}
-
 struct RelayRuntime {
     obs: Arc<dyn ObservabilityHook>,
     dialect: Arc<dyn UpstreamDialect>,
@@ -91,10 +96,18 @@ struct RelayRuntime {
     reservation: Option<Reservation>,
     error_normalizer: Option<Arc<ErrorNormalizer>>,
     upstream_kind: Option<UpstreamKind>,
+    streaming_usage: Arc<Mutex<StreamingUsage>>,
     started: StdInstant,
 }
 
 impl SseRelay {
+    pub fn current_usage(&self) -> StreamingUsage {
+        *self
+            .streaming_usage
+            .lock()
+            .expect("streaming usage lock poisoned")
+    }
+
     pub fn into_response(self, upstream_body: hyper::body::Incoming) -> Response<Body> {
         self.into_response_from_body(Body::new(upstream_body))
     }
@@ -157,6 +170,7 @@ impl SseRelay {
 
         let bytes = body.freeze();
         let usage = usage_from_json_bytes(&bytes);
+        runtime.store_usage(usage);
         runtime.finish_usage(&usage).await;
         Ok(Response::new(Body::from(bytes)))
     }
@@ -171,8 +185,51 @@ impl SseRelay {
             reservation: self.reservation,
             error_normalizer: self.error_normalizer,
             upstream_kind: self.upstream_kind,
+            streaming_usage: self.streaming_usage,
             started: StdInstant::now(),
         }
+    }
+}
+
+impl StreamingUsage {
+    pub fn observe_message_start(&mut self, usage_json: &Value) {
+        if let Some(input_tokens) = usage_json.get("input_tokens").and_then(Value::as_u64) {
+            self.input_tokens = input_tokens;
+        }
+        if let Some(cache_creation_input_tokens) = usage_json
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64)
+        {
+            self.cache_creation_input_tokens = cache_creation_input_tokens;
+        }
+        if let Some(cache_read_input_tokens) = usage_json
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_u64)
+        {
+            self.cache_read_input_tokens = cache_read_input_tokens;
+        }
+    }
+
+    pub fn observe_message_delta(&mut self, usage_json: &Value) {
+        if let Some(output_tokens) = usage_json.get("output_tokens").and_then(Value::as_u64) {
+            self.output_tokens = output_tokens;
+        }
+        if let Some(cache_creation_input_tokens) = usage_json
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64)
+        {
+            self.cache_creation_input_tokens = cache_creation_input_tokens;
+        }
+        if let Some(cache_read_input_tokens) = usage_json
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_u64)
+        {
+            self.cache_read_input_tokens = cache_read_input_tokens;
+        }
+    }
+
+    pub fn mark_complete(&mut self) {
+        self.complete = true;
     }
 }
 
@@ -195,7 +252,7 @@ impl RelayRuntime {
         let mut stream = BodyStream::new(upstream_body);
         let mut buffer = BytesMut::new();
         let mut batcher = SseBatcher::new(self.batch);
-        let mut usage = Usage::default();
+        let mut usage = self.current_usage();
         let mut deadline = Box::pin(sleep(self.batch.max_age));
         reset_deadline(&mut deadline, self.batch.max_age);
 
@@ -232,13 +289,13 @@ impl RelayRuntime {
                             batcher.flush(&self.obs);
                             let _sent = tx.send(self.error_frame_for_unknown_status(&source.to_string())).await;
                             self.observe_error("upstream_read_failed", &source.to_string());
-                            self.observe_finished(StatusCode::BAD_GATEWAY, usage.input_tokens, usage.output_tokens);
+                            self.observe_finished(StatusCode::BAD_GATEWAY, Some(usage.input_tokens), Some(usage.output_tokens));
                             break;
                         }
                         None => {
                             batcher.flush(&self.obs);
                             self.finish_usage(&usage).await;
-                            self.observe_finished(StatusCode::OK, usage.input_tokens, usage.output_tokens);
+                            self.observe_finished(StatusCode::OK, Some(usage.input_tokens), Some(usage.output_tokens));
                             break;
                         }
                     }
@@ -253,7 +310,7 @@ impl RelayRuntime {
         tx: &mpsc::Sender<Bytes>,
         batcher: &mut SseBatcher,
         deadline: &mut Pin<Box<Sleep>>,
-        usage: &mut Usage,
+        usage: &mut StreamingUsage,
     ) -> Result<(), ()> {
         while let Some(end) = find_sse_event_end(buffer) {
             let raw = buffer.split_to(end).freeze();
@@ -264,6 +321,7 @@ impl RelayRuntime {
                         outgoing = self.error_frame_from_event(&event, outgoing);
                     } else {
                         update_usage_from_event(&event, usage);
+                        self.store_usage(*usage);
                     }
                 }
                 Ok(None) => {}
@@ -315,17 +373,31 @@ impl RelayRuntime {
             .unwrap_or_else(|| make_error_frame("api_error", message))
     }
 
-    async fn finish_usage(&self, usage: &Usage) {
-        if let (Some(quota), Some(reservation), Some(output_tokens)) = (
-            self.quota.as_ref(),
-            self.reservation.clone(),
-            usage.output_tokens,
-        ) {
-            quota.reconcile_output(reservation, output_tokens).await;
+    async fn finish_usage(&self, usage: &StreamingUsage) {
+        if let (Some(quota), Some(reservation)) = (self.quota.as_ref(), self.reservation.clone()) {
+            quota
+                .reconcile_output(reservation, usage.output_tokens)
+                .await;
         }
-        if let (Some(quota), Some(input_tokens)) = (self.quota.as_ref(), usage.input_tokens) {
-            let _decision = quota.count_input(&self.principal_id, input_tokens).await;
+        if let Some(quota) = self.quota.as_ref() {
+            let _decision = quota
+                .count_input(&self.principal_id, usage.input_tokens)
+                .await;
         }
+    }
+
+    fn current_usage(&self) -> StreamingUsage {
+        *self
+            .streaming_usage
+            .lock()
+            .expect("streaming usage lock poisoned")
+    }
+
+    fn store_usage(&self, usage: StreamingUsage) {
+        *self
+            .streaming_usage
+            .lock()
+            .expect("streaming usage lock poisoned") = usage;
     }
 
     fn observe_error(&self, code: &str, message: &str) {
@@ -462,33 +534,46 @@ fn event_stream_error_to_string(error: EventStreamError<Infallible>) -> String {
     }
 }
 
-fn update_usage_from_event(event: &Event, usage: &mut Usage) {
-    if !matches!(
-        event.event.as_str(),
-        "message_start" | "message_delta" | "message_stop"
-    ) {
+fn update_usage_from_event(event: &Event, usage: &mut StreamingUsage) {
+    let Ok(value) = serde_json::from_str::<Value>(&event.data) else {
         return;
-    }
-    if let Ok(value) = serde_json::from_str::<Value>(&event.data) {
-        update_usage_from_value(&value, usage);
+    };
+    let event_type = value
+        .get("type")
+        .and_then(Value::as_str)
+        .unwrap_or(event.event.as_str());
+    match event_type {
+        "message_start" => {
+            if let Some(usage_json) = value
+                .get("message")
+                .and_then(|message| message.get("usage"))
+            {
+                usage.observe_message_start(usage_json);
+            }
+        }
+        "message_delta" => {
+            if let Some(usage_json) = value.get("usage") {
+                usage.observe_message_delta(usage_json);
+            }
+        }
+        "message_stop" => {
+            update_usage_from_value(&value, usage);
+            usage.mark_complete();
+        }
+        _ => {}
     }
 }
 
-pub(crate) async fn update_usage_from_sse_event_bytes(raw: Bytes, usage: &mut Usage) {
-    if let Ok(Some(event)) = parse_one_event(raw).await {
-        update_usage_from_event(&event, usage);
-    }
-}
-
-pub(crate) fn usage_from_json_bytes(bytes: &Bytes) -> Usage {
-    let mut usage = Usage::default();
+fn usage_from_json_bytes(bytes: &Bytes) -> StreamingUsage {
+    let mut usage = StreamingUsage::default();
     if let Ok(value) = serde_json::from_slice::<Value>(bytes) {
         update_usage_from_value(&value, &mut usage);
+        usage.mark_complete();
     }
     usage
 }
 
-fn update_usage_from_value(value: &Value, usage: &mut Usage) {
+fn update_usage_from_value(value: &Value, usage: &mut StreamingUsage) {
     let reported_usage = value.get("usage").or_else(|| {
         value
             .get("message")
@@ -498,13 +583,25 @@ fn update_usage_from_value(value: &Value, usage: &mut Usage) {
         .and_then(|usage| usage.get("input_tokens"))
         .and_then(Value::as_u64)
     {
-        usage.input_tokens = Some(input_tokens);
+        usage.input_tokens = input_tokens;
     }
     if let Some(output_tokens) = reported_usage
         .and_then(|usage| usage.get("output_tokens"))
         .and_then(Value::as_u64)
     {
-        usage.output_tokens = Some(output_tokens);
+        usage.output_tokens = output_tokens;
+    }
+    if let Some(cache_creation_input_tokens) = reported_usage
+        .and_then(|usage| usage.get("cache_creation_input_tokens"))
+        .and_then(Value::as_u64)
+    {
+        usage.cache_creation_input_tokens = cache_creation_input_tokens;
+    }
+    if let Some(cache_read_input_tokens) = reported_usage
+        .and_then(|usage| usage.get("cache_read_input_tokens"))
+        .and_then(Value::as_u64)
+    {
+        usage.cache_read_input_tokens = cache_read_input_tokens;
     }
 }
 

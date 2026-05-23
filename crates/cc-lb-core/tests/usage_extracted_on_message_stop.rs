@@ -1,7 +1,7 @@
 mod sse_relay_support;
 mod storage_support;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bytes::Bytes;
@@ -36,6 +36,7 @@ async fn usage_extracted_on_message_stop() -> Result<(), Box<dyn std::error::Err
         reservation: Some(reservation.clone()),
         error_normalizer: None,
         upstream_kind: None,
+        streaming_usage: Arc::new(Mutex::new(Default::default())),
     };
 
     let response =
