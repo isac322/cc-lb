@@ -93,6 +93,8 @@ fn is_doc_build() -> bool {
 
 fn write_skip_placeholder(dist_dir: &PathBuf) {
     fs::create_dir_all(dist_dir).expect("failed to create cc-lb-admin SPA dist directory");
+    let assets_dir = dist_dir.join("assets");
+    fs::create_dir_all(&assets_dir).expect("failed to create cc-lb-admin SPA assets directory");
     fs::write(
         dist_dir.join("index.html"),
         r#"<!DOCTYPE html>
@@ -100,13 +102,22 @@ fn write_skip_placeholder(dist_dir: &PathBuf) {
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="stylesheet" href="/assets/index-skip.css" />
     <title>cc-lb Admin</title>
   </head>
   <body>
     <div id="root">SPA build skipped (CC_LB_ADMIN_SKIP_SPA=1)</div>
+    <script type="module" src="/assets/index-skip.js"></script>
   </body>
 </html>
 "#,
     )
     .expect("failed to write cc-lb-admin SPA skip placeholder");
+    fs::write(
+        assets_dir.join("index-skip.css"),
+        "#root{font-family:sans-serif;}\n",
+    )
+    .expect("failed to write cc-lb-admin SPA skip stylesheet");
+    fs::write(assets_dir.join("index-skip.js"), "export {};\n")
+        .expect("failed to write cc-lb-admin SPA skip script");
 }
