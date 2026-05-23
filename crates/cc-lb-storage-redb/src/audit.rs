@@ -99,6 +99,46 @@ impl RedbStorage {
         write_txn.commit()?;
         Ok(deleted)
     }
+
+    pub fn prune_audit_before(
+        &self,
+        cutoff_ts_x_1m: u64,
+        batch_size: usize,
+    ) -> Result<u64, StorageError> {
+        if batch_size == 0 {
+            return Ok(0);
+        }
+
+        let write_txn = self.db.begin_write()?;
+        let keys_to_remove = {
+            let table = write_txn.open_table(AUDIT_LOG_V1)?;
+            let mut keys = Vec::new();
+            for row in table.iter()? {
+                let (key, _) = row?;
+                let decoded_key = decode_audit_key(key.value())?;
+                if decoded_key >= cutoff_ts_x_1m {
+                    break;
+                }
+                keys.push(key.value().to_vec());
+                if keys.len() >= batch_size {
+                    break;
+                }
+            }
+            keys
+        };
+
+        let mut deleted = 0;
+        {
+            let mut table = write_txn.open_table(AUDIT_LOG_V1)?;
+            for key in keys_to_remove {
+                if table.remove(key.as_slice())?.is_some() {
+                    deleted += 1;
+                }
+            }
+        }
+        write_txn.commit()?;
+        Ok(deleted)
+    }
 }
 
 fn next_audit_key(table: &redb::Table<'_, &[u8], &[u8]>, ts: u64) -> Result<u64, StorageError> {

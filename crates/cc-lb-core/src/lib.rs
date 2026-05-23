@@ -18,6 +18,7 @@ mod rate_limit_headers;
 mod request_events;
 mod sse_error_frame;
 mod sse_relay;
+pub mod usage_pruner;
 
 pub use bulkhead::{
     Bulkhead, BulkheadConfig, BulkheadDispatch, BulkheadError, BulkheadRegistry, ExecuteError,
