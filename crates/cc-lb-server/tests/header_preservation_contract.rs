@@ -3,15 +3,15 @@ mod common;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
+use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::OriginalUri;
 use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::any;
-use axum::Router;
 use cc_lb_config::{AuthStrategy, Config, UpstreamKind, UpstreamSpec};
 use cc_lb_server::app::build_app_with_path;
-use fake_anthropic::{app as fake_anthropic_app, AppConfig};
+use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;

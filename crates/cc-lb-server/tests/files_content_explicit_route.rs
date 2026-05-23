@@ -1,16 +1,16 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
+use axum::Router;
 use axum::body::Body;
 use axum::extract::OriginalUri;
 use axum::http::{Method, Request, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::any;
-use axum::Router;
 use cc_lb_config::{AuthStrategy, Config, UpstreamKind, UpstreamSpec};
 use cc_lb_server::app::{
-    build_app_with_path, PROXY_FILES_ROUTE_COLLECTION, PROXY_FILES_ROUTE_ITEM,
-    PROXY_FILES_ROUTE_ITEM_CONTENT, PROXY_FILES_ROUTE_PATHS,
+    PROXY_FILES_ROUTE_COLLECTION, PROXY_FILES_ROUTE_ITEM, PROXY_FILES_ROUTE_ITEM_CONTENT,
+    PROXY_FILES_ROUTE_PATHS, build_app_with_path,
 };
 use http_body_util::BodyExt;
 use tokio::net::TcpListener;

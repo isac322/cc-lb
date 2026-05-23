@@ -1,5 +1,5 @@
-use redb::ReadableDatabase;
 use cc_lb_storage_redb::{OAUTH_CREDENTIALS_V1, OAuthCredentials, Storage, oauth_key};
+use redb::ReadableDatabase;
 
 #[test]
 fn oauth_roundtrip_keeps_tokens_encrypted_at_rest() -> Result<(), Box<dyn std::error::Error>> {

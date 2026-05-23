@@ -1,12 +1,12 @@
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
+use axum::Router;
 use axum::body::{Body, Bytes};
 use axum::extract::OriginalUri;
 use axum::http::{Method, Request, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::any;
-use axum::Router;
 use cc_lb_config::{AuthStrategy, Config, UpstreamKind, UpstreamSpec};
 use cc_lb_server::app::build_app_with_path;
 use http_body_util::BodyExt;
@@ -105,7 +105,10 @@ async fn api_wildcard_forwarding() {
         .to_bytes();
     assert!(String::from_utf8_lossy(&anon_body).contains("/api/event_logging/batch"));
     assert_eq!(upstream_state.last_request().method, Method::POST);
-    assert_eq!(upstream_state.last_request().path, "/api/event_logging/batch");
+    assert_eq!(
+        upstream_state.last_request().path,
+        "/api/event_logging/batch"
+    );
     write_evidence(
         ".omo/evidence/task-2-event-logging-anon.txt",
         "status=200 method=POST path=/api/event_logging/batch",
@@ -187,23 +190,24 @@ async fn spawn_recording_upstream() -> (
         .expect("bind upstream");
     let addr = listener.local_addr().expect("upstream addr");
     let upstream_state = state.clone();
-    let app = Router::new().fallback(any(move |method: Method, uri: OriginalUri| {
-        let upstream_state = upstream_state.clone();
-        async move {
-            upstream_state.record(method, uri.0.path().to_owned());
-            (
-                StatusCode::OK,
-                [("content-type", "application/json")],
-                format!(
-                    r#"{{"method":"{}","path":"{}"}}"#,
-                    upstream_state.last_request().method,
-                    upstream_state.last_request().path
-                ),
-            )
-                .into_response()
-        }
-    }))
-    .with_state(state.clone());
+    let app = Router::new()
+        .fallback(any(move |method: Method, uri: OriginalUri| {
+            let upstream_state = upstream_state.clone();
+            async move {
+                upstream_state.record(method, uri.0.path().to_owned());
+                (
+                    StatusCode::OK,
+                    [("content-type", "application/json")],
+                    format!(
+                        r#"{{"method":"{}","path":"{}"}}"#,
+                        upstream_state.last_request().method,
+                        upstream_state.last_request().path
+                    ),
+                )
+                    .into_response()
+            }
+        }))
+        .with_state(state.clone());
     let task = tokio::spawn(async move { axum::serve(listener, app).await });
     (addr, state, task)
 }
