@@ -381,6 +381,7 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             "/v1/files/{id}",
             get(lifecycle_handler).delete(lifecycle_handler),
         )
+        .route("/api/{*path}", any(lifecycle_handler))
         .route("/v1/{*path}", any(lifecycle_handler))
         .with_state(state)
         .layer(service_builder)
