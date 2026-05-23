@@ -4,13 +4,13 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "bun ./node_modules/vite/bin/vite.js",
-    "typecheck": "bun ./node_modules/@typescript/native-preview/bin/tsgo.js -b --noEmit",
-    "build": "bun ./node_modules/vite/bin/vite.js build",
+    "dev": "bunx --bun vite",
+    "typecheck": "bunx --bun tsgo -b --noEmit",
+    "build": "bunx --bun vite build",
     "lint": "biome check .",
     "lint:fix": "biome check --write .",
     "format": "biome format --write .",
-    "preview": "bun ./node_modules/vite/bin/vite.js preview",
+    "preview": "bunx --bun vite preview",
     "test": "bun test"
   },
   "dependencies": {
