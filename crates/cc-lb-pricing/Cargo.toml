@@ -9,6 +9,7 @@ publish = false
 [dependencies]
 arc-swap.workspace = true
 cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
+metrics.workspace = true
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

@@ -24,7 +24,7 @@ use hyper_util::rt::TokioExecutor;
 use serde_json::{json, Value};
 use thiserror::Error;
 
-use crate::api_keys::builtin_authn::BuiltinAuthn;
+use crate::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, BuiltinAuthn};
 use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as LimitReservation};
 use crate::api_keys::types::LimitKind;
 use crate::audit_writer::{AuditEntry, AuditWriterSink};
@@ -288,6 +288,7 @@ impl Lifecycle {
             (Some(success), _) => success,
             (None, Ok(success)) => success,
             (None, Err(source)) => {
+                record_key_auth_failure_metric(&source);
                 self.observe_error("authentication_error", &source.to_string(), "authn");
                 let response = anthropic_error_response(
                     StatusCode::UNAUTHORIZED,
@@ -327,6 +328,7 @@ impl Lifecycle {
                 return Ok(response);
             }
         };
+        let metric_context = ApiKeyMetricContext::new(&success, &route.upstream, &ctx.body_bytes);
 
         self.observe(ObserveEvent::UpstreamChosen {
             upstream: route.upstream.clone(),
@@ -412,6 +414,7 @@ impl Lifecycle {
                     self.error_normalizer.as_ref(),
                 );
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
+                record_api_key_request_metric(&metric_context, response.status());
                 self.observe_finished_for_principal(
                     response.status(),
                     started,
@@ -431,6 +434,7 @@ impl Lifecycle {
                 self.error_normalizer.as_ref(),
             );
             self.attach_limit_headers(&mut response, active_limit.as_ref());
+            record_api_key_request_metric(&metric_context, response.status());
             self.observe_finished_for_principal(
                 response.status(),
                 started,
@@ -450,6 +454,7 @@ impl Lifecycle {
                     "failed to convert upstream response",
                 );
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
+                record_api_key_request_metric(&metric_context, response.status());
                 self.observe_finished_for_principal(
                     response.status(),
                     started,
@@ -461,8 +466,9 @@ impl Lifecycle {
         };
 
         let status = response.status();
+        record_api_key_request_metric(&metric_context, status);
         response = self
-            .finish_success_response(response, active_limit.take())
+            .finish_success_response(response, active_limit.take(), &metric_context)
             .await;
         self.observe_finished_for_principal(status, started, &principal, &ctx.body_bytes);
         Ok(response)
@@ -510,6 +516,7 @@ impl Lifecycle {
                 reservation: Some(reservation),
             })),
             Err(reason) => {
+                record_limit_reject_metrics(&reason, &subject.key_id);
                 if let Some(limit_violation) = limit_violation_name(&reason) {
                     self.enqueue_limit_audit(ctx, &subject, &limit_request, route, limit_violation);
                 }
@@ -535,14 +542,16 @@ impl Lifecycle {
         &self,
         response: Response<Body>,
         active_limit: Option<ActiveLimit>,
+        metric_context: &ApiKeyMetricContext,
     ) -> Response<Body> {
-        let Some(mut active_limit) = active_limit else {
-            return self.relay_response(response);
-        };
-
-        if active_limit.request.stream || is_sse_response(response.headers()) {
+        let mut active_limit = active_limit;
+        if active_limit
+            .as_ref()
+            .is_some_and(|active_limit| active_limit.request.stream)
+            || is_sse_response(response.headers())
+        {
             let mut response = self.relay_response(response);
-            self.attach_limit_headers(&mut response, Some(&active_limit));
+            self.attach_limit_headers(&mut response, active_limit.as_ref());
             return response;
         }
 
@@ -552,19 +561,38 @@ impl Lifecycle {
             Err(_source) => Bytes::new(),
         };
         let usage = usage_from_json_body(&body);
-        if let (Some(limit_engine), Some(reservation)) =
-            (self.limit_engine.as_ref(), active_limit.reservation.take())
-        {
+        let cost_micros = if usage.present {
+            let cost_model = active_limit
+                .as_ref()
+                .map(|active_limit| active_limit.request.model.as_str())
+                .unwrap_or(metric_context.model.as_str());
+            let pricing_upstream_kind = active_limit
+                .as_ref()
+                .and_then(|active_limit| active_limit.upstream_kind)
+                .or(metric_context.pricing_upstream_kind);
             let cost_micros = virtual_cost_micros_full(
-                &active_limit.request.model,
+                cost_model,
                 usage.input_tokens,
                 usage.output_tokens,
                 usage.cache_creation_input_tokens,
                 usage.cache_read_input_tokens,
-                active_limit.upstream_kind,
+                pricing_upstream_kind,
             )
             .micros_usd
-            .unwrap_or(0) as i64;
+            .unwrap_or(0);
+            record_api_key_usage_metrics(metric_context, &usage, cost_micros);
+            cost_micros
+        } else {
+            0
+        };
+
+        if let (Some(limit_engine), Some(active_limit)) =
+            (self.limit_engine.as_ref(), active_limit.as_mut())
+        {
+            let Some(reservation) = active_limit.reservation.take() else {
+                return Response::from_parts(parts, Body::from(body));
+            };
+            let cost_micros = cost_micros as i64;
             limit_engine.reconcile(
                 reservation,
                 usage.input_tokens,
@@ -907,10 +935,137 @@ struct ActiveLimit {
 
 #[derive(Default)]
 struct UsageCounts {
+    present: bool,
     input_tokens: u64,
     output_tokens: u64,
     cache_creation_input_tokens: u64,
     cache_read_input_tokens: u64,
+}
+
+struct ApiKeyMetricContext {
+    key_id: String,
+    principal_id: String,
+    model: String,
+    upstream_kind: &'static str,
+    pricing_upstream_kind: Option<cc_lb_pricing::UpstreamKind>,
+}
+
+impl ApiKeyMetricContext {
+    fn new(success: &AuthnSuccess, upstream: &Upstream, body: &Bytes) -> Self {
+        Self {
+            key_id: success.key_id.clone(),
+            principal_id: success.principal_id.clone(),
+            model: extract_model(body).unwrap_or_else(|| "unknown".to_owned()),
+            upstream_kind: audit_upstream_name(upstream),
+            pricing_upstream_kind: pricing_upstream_kind(upstream),
+        }
+    }
+}
+
+fn record_api_key_request_metric(context: &ApiKeyMetricContext, status: StatusCode) {
+    metrics::counter!(
+        "cclb_api_key_requests_total",
+        "key_id" => context.key_id.clone(),
+        "principal_id" => context.principal_id.clone(),
+        "model" => context.model.clone(),
+        "upstream_kind" => context.upstream_kind,
+        "status" => status.as_u16().to_string()
+    )
+    .increment(1);
+}
+
+fn record_api_key_usage_metrics(
+    context: &ApiKeyMetricContext,
+    usage: &UsageCounts,
+    cost_micros: u64,
+) {
+    increment_token_metric(&context.key_id, "input", usage.input_tokens);
+    increment_token_metric(&context.key_id, "output", usage.output_tokens);
+    increment_token_metric(
+        &context.key_id,
+        "cache_creation",
+        usage.cache_creation_input_tokens,
+    );
+    increment_token_metric(&context.key_id, "cache_read", usage.cache_read_input_tokens);
+
+    if cost_micros > 0 {
+        metrics::counter!(
+            "cclb_api_key_cost_usd_micro_total",
+            "key_id" => context.key_id.clone()
+        )
+        .increment(cost_micros);
+    }
+}
+
+fn increment_token_metric(key_id: &str, kind: &'static str, value: u64) {
+    if value == 0 {
+        return;
+    }
+
+    metrics::counter!(
+        "cclb_api_key_tokens_total",
+        "key_id" => key_id.to_owned(),
+        "kind" => kind
+    )
+    .increment(value);
+}
+
+fn record_key_auth_failure_metric(source: &BuiltinAuthError) {
+    metrics::counter!(
+        "cclb_key_auth_failures_total",
+        "reason" => key_auth_failure_reason(source)
+    )
+    .increment(1);
+}
+
+fn key_auth_failure_reason(source: &BuiltinAuthError) -> &'static str {
+    match source {
+        BuiltinAuthError::Expired => "Expired",
+        BuiltinAuthError::KeyDisabled => "Disabled",
+        BuiltinAuthError::KeyRevoked => "Revoked",
+        BuiltinAuthError::PrincipalDisabled => "PrincipalDisabled",
+        BuiltinAuthError::MissingHeader
+        | BuiltinAuthError::InvalidFormat
+        | BuiltinAuthError::NotFound
+        | BuiltinAuthError::SignatureMismatch
+        | BuiltinAuthError::PrincipalMissing => "InvalidKey",
+    }
+}
+
+fn record_limit_reject_metrics(reason: &RejectReason, key_id: &str) {
+    if let Some(kind) = limit_reject_metric_kind(reason) {
+        metrics::counter!(
+            "cclb_limit_hits_total",
+            "kind" => kind,
+            "key_id" => key_id.to_owned()
+        )
+        .increment(1);
+    }
+
+    if matches!(reason, RejectReason::ConcurrentRateLimit) {
+        metrics::counter!(
+            "cclb_concurrent_rejects_total",
+            "key_id" => key_id.to_owned()
+        )
+        .increment(1);
+    }
+}
+
+fn limit_reject_metric_kind(reason: &RejectReason) -> Option<&'static str> {
+    match reason {
+        RejectReason::RequestsRateLimit => Some("Requests"),
+        RejectReason::TokenRateLimit { kind } => Some(audit_limit_kind_name(*kind)),
+        RejectReason::CostRateLimit => Some("CostUsd"),
+        RejectReason::ConcurrentRateLimit => Some("Concurrent"),
+        RejectReason::PrincipalMissing
+        | RejectReason::PrincipalDisabled
+        | RejectReason::KeyDisabled
+        | RejectReason::KeyRevoked
+        | RejectReason::Expired
+        | RejectReason::ModelNotAllowed
+        | RejectReason::CostUnavailable
+        | RejectReason::OutputCapExceeded { .. } => None,
+    }
 }
 
 fn usage_from_json_body(body: &Bytes) -> UsageCounts {
@@ -921,6 +1076,7 @@ fn usage_from_json_body(body: &Bytes) -> UsageCounts {
         return UsageCounts::default();
     };
     UsageCounts {
+        present: true,
         input_tokens: usage
             .get("input_tokens")
             .and_then(Value::as_u64)

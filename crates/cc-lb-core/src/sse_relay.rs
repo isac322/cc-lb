@@ -363,7 +363,17 @@ impl RelayRuntime {
             .unwrap_or_else(|| make_error_frame("api_error", message))
     }
 
-    async fn finish_usage(&self, _usage: &StreamingUsage) {}
+    async fn finish_usage(&self, usage: &StreamingUsage) {
+        if usage.complete {
+            return;
+        }
+
+        metrics::counter!(
+            "cclb_streaming_usage_missing_total",
+            "dialect" => streaming_usage_dialect_label(self.upstream_kind)
+        )
+        .increment(1);
+    }
 
     fn current_usage(&self) -> StreamingUsage {
         *self
@@ -404,6 +414,16 @@ impl RelayRuntime {
                 .try_into()
                 .unwrap_or(u64::MAX),
         });
+    }
+}
+
+fn streaming_usage_dialect_label(upstream_kind: Option<UpstreamKind>) -> &'static str {
+    match upstream_kind {
+        Some(UpstreamKind::BedrockRuntime | UpstreamKind::BedrockMantle) => "bedrock",
+        Some(UpstreamKind::Vertex) => "vertex",
+        Some(UpstreamKind::AnthropicDirect | UpstreamKind::CustomAnthropicSpec) | None => {
+            "anthropic"
+        }
     }
 }
 

@@ -243,6 +243,10 @@ impl LiteLlmLoader {
 
     fn record_failure(&self, error: &LoaderError) {
         self.failure_count.fetch_add(1, Ordering::Relaxed);
+        metrics::counter!("cclb_price_catalog_refresh_failures_total").increment(1);
+        if matches!(error, LoaderError::Validation(_)) {
+            metrics::counter!("cclb_price_catalog_validation_failures_total").increment(1);
+        }
         if let Ok(mut guard) = self.last_failure_kind.lock() {
             *guard = Some(error.kind().to_owned());
         }
@@ -283,9 +287,11 @@ fn parse_litellm_json(bytes: &[u8]) -> Result<CatalogSnapshot, LoaderError> {
             continue;
         };
         let Some(input_cost) = object.get("input_cost_per_token").and_then(Value::as_f64) else {
+            record_missing_catalog_field(&model, "input_cost_per_token");
             continue;
         };
         let Some(output_cost) = object.get("output_cost_per_token").and_then(Value::as_f64) else {
+            record_missing_catalog_field(&model, "output_cost_per_token");
             continue;
         };
 
@@ -368,6 +374,15 @@ fn usd_per_token_to_per_million(
     }
 
     Ok(UsdPerMillion(micros_per_million.round() as u64))
+}
+
+fn record_missing_catalog_field(model: &str, field: &'static str) {
+    metrics::counter!(
+        "cclb_price_catalog_missing_field_total",
+        "model" => model.to_owned(),
+        "field" => field
+    )
+    .increment(1);
 }
 
 async fn put_storage_snapshot(

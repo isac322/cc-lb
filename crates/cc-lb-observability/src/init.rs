@@ -11,6 +11,10 @@ use tracing_subscriber::filter::ParseError;
 use tracing_subscriber::layer::{Layer, SubscriberExt};
 use tracing_subscriber::{EnvFilter, Registry};
 
+use crate::cclb_metrics::{
+    register_prometheus14_metrics, touch_prometheus14_metric_handles,
+    PROMETHEUS14_METRIC_DEFINITIONS,
+};
 use crate::panic_hook::install_panic_hook;
 use crate::redaction::{RedactingMakeWriter, RedactionLayer, RedactionPolicy};
 
@@ -85,7 +89,7 @@ pub struct MetricDefinition {
     pub description: &'static str,
 }
 
-const METRIC_DEFINITIONS: [MetricDefinition; 17] = [
+const METRIC_DEFINITIONS: [MetricDefinition; 29] = [
     MetricDefinition {
         name: "cc_lb_requests_total",
         kind: MetricKind::Counter,
@@ -95,16 +99,6 @@ const METRIC_DEFINITIONS: [MetricDefinition; 17] = [
         name: "cc_lb_request_duration_seconds",
         kind: MetricKind::Histogram,
         description: "End-to-end proxied request duration in seconds.",
-    },
-    MetricDefinition {
-        name: "cc_lb_tokens_total",
-        kind: MetricKind::Counter,
-        description: "Total upstream-reported tokens by principal, upstream, model, direction, and status.",
-    },
-    MetricDefinition {
-        name: "cc_lb_virtual_cost_usd_total",
-        kind: MetricKind::Counter,
-        description: "Virtual internal cost estimate in micro-USD by principal, upstream, model, and pricing status.",
     },
     MetricDefinition {
         name: "cc_lb_oauth_refresh_total",
@@ -171,6 +165,20 @@ const METRIC_DEFINITIONS: [MetricDefinition; 17] = [
         kind: MetricKind::Histogram,
         description: "Extism plugin hook call duration in seconds.",
     },
+    PROMETHEUS14_METRIC_DEFINITIONS[0],
+    PROMETHEUS14_METRIC_DEFINITIONS[1],
+    PROMETHEUS14_METRIC_DEFINITIONS[2],
+    PROMETHEUS14_METRIC_DEFINITIONS[3],
+    PROMETHEUS14_METRIC_DEFINITIONS[4],
+    PROMETHEUS14_METRIC_DEFINITIONS[5],
+    PROMETHEUS14_METRIC_DEFINITIONS[6],
+    PROMETHEUS14_METRIC_DEFINITIONS[7],
+    PROMETHEUS14_METRIC_DEFINITIONS[8],
+    PROMETHEUS14_METRIC_DEFINITIONS[9],
+    PROMETHEUS14_METRIC_DEFINITIONS[10],
+    PROMETHEUS14_METRIC_DEFINITIONS[11],
+    PROMETHEUS14_METRIC_DEFINITIONS[12],
+    PROMETHEUS14_METRIC_DEFINITIONS[13],
 ];
 
 pub fn init(cfg: &ObservabilityConfig) -> Result<TracingGuard, InitError> {
@@ -238,16 +246,6 @@ pub fn register_metrics() {
         "End-to-end proxied request duration in seconds."
     );
     metrics::describe_counter!(
-        "cc_lb_tokens_total",
-        Unit::Count,
-        "Total upstream-reported tokens by principal, upstream, model, direction, and status."
-    );
-    metrics::describe_counter!(
-        "cc_lb_virtual_cost_usd_total",
-        Unit::Count,
-        "Virtual internal cost estimate in micro-USD by principal, upstream, model, and pricing status."
-    );
-    metrics::describe_counter!(
         "cc_lb_oauth_refresh_total",
         Unit::Count,
         "OAuth credential refresh attempts by principal, provider, and outcome."
@@ -312,6 +310,7 @@ pub fn register_metrics() {
         Unit::Seconds,
         "Extism plugin hook call duration in seconds."
     );
+    register_prometheus14_metrics();
 
     touch_metrics();
 }
@@ -369,36 +368,9 @@ fn touch_metrics() {
         "cc_lb_request_duration_seconds",
         "principal" => "unknown",
         "upstream" => "unknown",
-        "model" => "unknown",
-        "status" => "unknown"
+        "model" => "unknown"
     )
     .record(0.0);
-    metrics::counter!(
-        "cc_lb_tokens_total",
-        "principal" => "unknown",
-        "upstream" => "unknown",
-        "model" => "unknown",
-        "direction" => "input",
-        "status" => "unknown"
-    )
-    .increment(0);
-    metrics::counter!(
-        "cc_lb_tokens_total",
-        "principal" => "unknown",
-        "upstream" => "unknown",
-        "model" => "unknown",
-        "direction" => "output",
-        "status" => "unknown"
-    )
-    .increment(0);
-    metrics::counter!(
-        "cc_lb_virtual_cost_usd_total",
-        "principal" => "unknown",
-        "upstream" => "unknown",
-        "model" => "unknown",
-        "pricing_status" => "unknown"
-    )
-    .increment(0);
     metrics::counter!(
         "cc_lb_oauth_refresh_total",
         "principal" => "unknown",
@@ -434,4 +406,5 @@ fn touch_metrics() {
         "hook" => "unknown"
     )
     .record(0.0);
+    touch_prometheus14_metric_handles();
 }

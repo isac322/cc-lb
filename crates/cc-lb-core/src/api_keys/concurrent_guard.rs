@@ -37,6 +37,8 @@ impl KeyConcurrencyManager {
                 .compare_exchange(current, current + 1, Ordering::AcqRel, Ordering::Acquire)
                 .is_ok()
             {
+                metrics::gauge!("cclb_api_key_concurrent", "key_id" => key_id.to_owned())
+                    .set(f64::from(current + 1));
                 return Ok(KeyConcurrencyGuard {
                     key_id: key_id.to_owned(),
                     counter,
@@ -66,7 +68,12 @@ impl KeyConcurrencyGuard {
 
 impl Drop for KeyConcurrencyGuard {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::AcqRel);
+        let previous = self.counter.fetch_sub(1, Ordering::AcqRel);
+        metrics::gauge!(
+            "cclb_api_key_concurrent",
+            "key_id" => self.key_id.clone()
+        )
+        .set(f64::from(previous.saturating_sub(1)));
     }
 }
 
