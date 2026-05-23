@@ -1,5 +1,6 @@
 import { Copy } from 'lucide-react';
 import type { PluginStatusEntry } from '../../lib/api';
+import { pluralize } from '../../lib/format';
 import { Card } from '../primitives/Card';
 import { StatusChip } from '../primitives/StatusChip';
 import { PluginFailureCount } from './PluginFailureCount';
@@ -71,7 +72,7 @@ export function PluginCard({ plugin }: PluginCardProps) {
               )}
               {plugin.batched_events_per_flush !== null && (
                 <span className="text-xs bg-gray-100 text-gray-600 px-2 py-1 rounded">
-                  batch: {plugin.batched_events_per_flush} ev /{' '}
+                  batch: {pluralize(plugin.batched_events_per_flush, 'event')} /{' '}
                   {plugin.batched_flush_ms} ms
                 </span>
               )}

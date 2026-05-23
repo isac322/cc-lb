@@ -72,9 +72,6 @@ export default function RealtimeLog() {
   return (
     <div className="space-y-6 h-[calc(100vh-8rem)] flex flex-col">
       <div className="shrink-0">
-        <h2 className="text-lg font-semibold text-graphite-50 mb-4">
-          Realtime Log
-        </h2>
         <LogFilterBar filters={filters} onChange={handleFilterChange} />
 
         <div className="flex items-center justify-between mb-4">

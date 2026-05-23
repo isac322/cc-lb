@@ -235,20 +235,21 @@ export default function Settings() {
           </div>
         }
         sidebar={<HistoryDrawer onSelectRevision={handleHistorySelect} />}
-      />
-
-      <ValidateApplyBar
-        revision={draftData.revision}
-        lastValidatedRevision={draftData.last_validated_revision}
-        lastValidationError={draftData.last_validation_error}
-        saving={saving}
-        saveError={saveError}
-        conflict={conflict}
-        validating={validating}
-        applying={applying}
-        onValidate={handleValidate}
-        onApply={() => setApplyModalOpen(true)}
-        onRefresh={fetchDraft}
+        footer={
+          <ValidateApplyBar
+            revision={draftData.revision}
+            lastValidatedRevision={draftData.last_validated_revision}
+            lastValidationError={draftData.last_validation_error}
+            saving={saving}
+            saveError={saveError}
+            conflict={conflict}
+            validating={validating}
+            applying={applying}
+            onValidate={handleValidate}
+            onApply={() => setApplyModalOpen(true)}
+            onRefresh={fetchDraft}
+          />
+        }
       />
 
       <Modal

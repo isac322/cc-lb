@@ -5,7 +5,7 @@ import { FormField } from '../primitives/FormField';
 import { Modal } from '../primitives/Modal';
 import { ConnectionStatus } from './ConnectionStatus';
 
-export function Topbar({ title }: { title: string }) {
+export function Topbar() {
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [tokenInput, setTokenInput] = useState('');
 
@@ -25,16 +25,17 @@ export function Topbar({ title }: { title: string }) {
   };
 
   return (
-    <header className="h-16 border-b border-graphite-800 bg-graphite-900 flex items-center justify-between px-6 sticky top-0 z-10">
-      <h1 className="text-lg font-semibold text-graphite-50">{title}</h1>
-      <div className="flex items-center gap-4">
+    <header className="h-16 border-b border-graphite-800 bg-graphite-900 flex items-center justify-end px-6 sticky top-0 z-10">
+      <div className="flex items-center gap-3">
         <ConnectionStatus />
+        <div className="h-4 w-px bg-graphite-800 hidden sm:block" />
         <button
           onClick={handleOpenModal}
-          className="text-sm text-graphite-300 hover:text-graphite-50 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 rounded px-2 py-1"
+          className="text-sm text-graphite-300 hover:text-graphite-50 transition-colors focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-cyan-500 rounded px-2 py-1"
         >
           Admin Token
         </button>
+        <div className="h-4 w-px bg-graphite-800 hidden sm:block" />
         <span className="text-xs text-graphite-500 font-mono">v1.0.0</span>
       </div>
 

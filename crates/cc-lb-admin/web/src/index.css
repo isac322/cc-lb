@@ -9,9 +9,9 @@
   --color-graphite-500: #52525b;
   --color-graphite-600: #3f3f46;
   --color-graphite-700: #27272a;
-  --color-graphite-800: #18181b;
-  --color-graphite-850: #121214;
-  --color-graphite-900: #09090b;
+  --color-graphite-800: oklch(0.27 0.012 240);
+  --color-graphite-850: oklch(0.23 0.012 240);
+  --color-graphite-900: oklch(0.18 0.012 240);
   --color-graphite-950: #000000;
 
   --color-cyan-400: #22d3ee;
@@ -32,23 +32,23 @@
 
   --color-fuchsia-400: #e879f9;
 
-  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
-  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, monospace;
+  --font-sans: "Geist Variable", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono Variable", ui-monospace, "JetBrains Mono", monospace;
 
-  --spacing-card-gutter: 1rem;
+  --spacing-card-gutter: 1.25rem;
 
   --radius-sm: 0.25rem;
   --radius-md: 0.5rem;
   --radius-lg: 0.75rem;
 
-  --shadow-sm: 0 1px 0 0 rgb(0 0 0 / 0.3);
+  --shadow-sm: 0 1px 0 0 rgba(255,255,255,0.04) inset, 0 8px 24px -12px rgba(0,0,0,0.5);
   --shadow-md: 0 4px 12px rgb(0 0 0 / 0.4);
 
   --color-status-ok: var(--color-green-400);
   --color-status-warn: var(--color-amber-400);
   --color-status-danger: var(--color-red-400);
   --color-status-info: var(--color-cyan-400);
-  --color-status-live: var(--color-cyan-400);
+  --color-status-live: oklch(0.78 0.18 150);
 }
 
 @layer base {
