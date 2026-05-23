@@ -3,9 +3,11 @@
 mod adapter;
 mod audit;
 mod config_store;
+mod key_index;
 mod limit_state;
 mod migration;
 mod oauth;
+pub mod price_catalog;
 mod quota;
 mod request_events;
 mod usage_rollups;
@@ -23,6 +25,7 @@ pub use limit_state::{
     PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, principal_limit_state_key,
 };
 pub use oauth::{ApiKeyRecord, IssuedKey, OAuthCredentials, oauth_key};
+pub use price_catalog::PriceSnapshot;
 pub use quota::{BucketKind, quota_key};
 pub use request_events::{RequestEvent, RequestEventUpstream};
 pub use usage_rollups::{
@@ -34,8 +37,11 @@ pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 pub const OAUTH_CREDENTIALS_V1: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("OAUTH_CREDENTIALS_V1");
 pub const API_KEYS_V1: TableDefinition<&[u8], &[u8]> = TableDefinition::new("API_KEYS_V1");
+pub const KEY_INDEX_BY_HASH_V1: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("KEY_INDEX_BY_HASH_V1");
 pub const QUOTAS_BY_PRINCIPAL_V1: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("QUOTAS_BY_PRINCIPAL_V1");
+pub const PRICE_CATALOG_V1: TableDefinition<&str, &[u8]> = TableDefinition::new("price_catalog_v1");
 pub const AUDIT_LOG_V1: TableDefinition<&[u8], &[u8]> = TableDefinition::new("AUDIT_LOG_V1");
 pub const PRINCIPAL_LIMIT_STATES_V1: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("PRINCIPAL_LIMIT_STATES_V1");
@@ -76,6 +82,14 @@ pub enum StorageError {
     Commit(#[source] Box<redb::CommitError>),
     #[error("json serialization error: {0}")]
     Json(#[from] serde_json::Error),
+    #[error("bincode encode error: {0}")]
+    BincodeEncode(#[from] bincode::error::EncodeError),
+    #[error("bincode decode error: {0}")]
+    BincodeDecode(#[from] bincode::error::DecodeError),
+    #[error("aead authentication failure")]
+    AeadAuthenticationFailed,
+    #[error("oauth ciphertext is too short: {0} bytes")]
+    CiphertextTooShort(usize),
     #[error("unsupported schema version {found}; current supported version is {current}")]
     UnsupportedSchemaVersion { found: u32, current: u32 },
     #[error("invalid schema version {0}")]
@@ -154,6 +168,14 @@ impl RedbStorage {
         migration::initialize_schema(&db)?;
 
         Ok(Self { db })
+    }
+
+    pub fn begin_read(&self) -> Result<redb::ReadTransaction, StorageError> {
+        Ok(self.db.begin_read()?)
+    }
+
+    pub fn begin_write(&self) -> Result<redb::WriteTransaction, StorageError> {
+        Ok(self.db.begin_write()?)
     }
 
     pub fn schema_version(&self) -> Result<u32, StorageError> {
