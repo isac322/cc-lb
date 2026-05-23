@@ -56,3 +56,9 @@ tower.workspace = true
 insta.workspace = true
 tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }
+
+[target.'cfg(loom)'.dependencies]
+loom = "0.7"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }
