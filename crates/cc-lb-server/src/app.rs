@@ -24,7 +24,7 @@ use cc_lb_core::{
         concurrent_guard::KeyConcurrencyManager, key_store::KeyStore, limit_engine::LimitEngine,
         principal_view::PrincipalView,
     },
-    make_default_dispatcher,
+    make_default_dispatcher, spawn_audit_writer,
     usage_pruner::UsagePruner,
     BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
     CircuitBreakerDispatch, ErrorNormalizer, HopByHopStripLayer, Lifecycle, LifecycleConfig,
@@ -60,6 +60,7 @@ pub struct App {
     pub proxy_addr: SocketAddr,
     pub admin_addr: SocketAddr,
     pub reload_task: Option<JoinHandle<()>>,
+    audit_writer_task: Option<JoinHandle<()>>,
     signals: signal::SignalHandle,
     drain_controller: DrainController,
     tls_state: Option<Arc<TlsState>>,
@@ -97,6 +98,7 @@ impl App {
             proxy_addr,
             admin_addr,
             reload_task,
+            audit_writer_task,
             signals,
             drain_controller: _,
             tls_state,
@@ -143,6 +145,9 @@ impl App {
         }
         let _ = admin_stop_tx.send(true);
         let _ = admin.await;
+        if let Some(task) = audit_writer_task {
+            let _ = task.await;
+        }
         proxy_result?;
         Ok(())
     }
@@ -190,6 +195,13 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
         let pruner = UsagePruner::new(storage, config.api_keys.usage_retention_days);
         let _usage_pruner_task = tokio::spawn(pruner.start_daemon());
     }
+    let (audit_sink, audit_writer_task) = match storage.clone() {
+        Some(storage) => {
+            let (sink, task) = spawn_audit_writer(storage, 1024);
+            (Some(Arc::new(sink)), Some(task))
+        }
+        None => (None, None),
+    };
     let limit_engine = LimitEngine::new(concurrent_mgr, principal_view.clone());
     if let Some(storage) = storage.clone() {
         limit_engine.startup_replay(storage);
@@ -219,20 +231,22 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
 
     let error_normalizer = Arc::new(error_normalizer(&config)?);
     let (dispatcher, breaker_registry) = dispatcher(&config);
-    let lifecycle = Arc::new(
-        Lifecycle::new(
-            authn,
-            signer_factory_for_lifecycle,
-            router_plugin,
-            dispatcher,
-            observability_hooks,
-            LifecycleConfig {
-                messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
-                files_body_cap_bytes: cap_to_usize(config.body.files_cap_bytes),
-            },
-        )
-        .with_error_normalizer(error_normalizer),
-    );
+    let mut lifecycle = Lifecycle::new(
+        authn,
+        signer_factory_for_lifecycle,
+        router_plugin,
+        dispatcher,
+        observability_hooks,
+        LifecycleConfig {
+            messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
+            files_body_cap_bytes: cap_to_usize(config.body.files_cap_bytes),
+        },
+    )
+    .with_error_normalizer(error_normalizer);
+    if let Some(audit_sink) = audit_sink.clone() {
+        lifecycle = lifecycle.with_audit_sink(audit_sink);
+    }
+    let lifecycle = Arc::new(lifecycle);
 
     let start_time = std::time::Instant::now();
     let drain_controller = DrainController::new();
@@ -269,6 +283,7 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
         storage: storage.clone(),
         limit_engine: limit_engine.clone(),
         lifecycle: Some(lifecycle.clone()),
+        audit_sink: audit_sink.clone(),
         principal_view: principal_view.clone(),
         config: admin_config,
         admin_token: config
@@ -286,6 +301,7 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
         proxy_addr: config.listener.proxy_addr,
         admin_addr: config.listener.admin_addr,
         reload_task,
+        audit_writer_task,
         signals,
         drain_controller,
         tls_state,

@@ -104,10 +104,11 @@ fn insert_audit_entries(storage: &Storage, ts: u64) -> Result<(), Box<dyn std::e
             upstream: "anthropic_direct".to_owned(),
             model: Some("claude-sonnet-4-5".to_owned()),
             status: 200,
-            input_tokens: 10,
-            output_tokens: 20,
+            input_tokens: Some(10),
+            output_tokens: Some(20),
             duration_ms: 25,
             agent_label: None,
+            ..Default::default()
         })?;
     }
     Ok(())

@@ -17,6 +17,7 @@ fn test_state() -> AdminState {
             )),
         ),
         lifecycle: None,
+        audit_sink: None,
         principal_view: Arc::new(arc_swap::ArcSwap::from(
             cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
                 &cc_lb_admin::CurrentConfig::current_config((Arc::new(Config::default())).as_ref()),

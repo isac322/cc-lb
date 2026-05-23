@@ -19,6 +19,7 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
             )),
         ),
         lifecycle: None,
+        audit_sink: None,
         principal_view: Arc::new(arc_swap::ArcSwap::from(
             cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
                 &cc_lb_admin::CurrentConfig::current_config((Arc::new(Config::default())).as_ref()),
@@ -45,10 +46,11 @@ async fn test_snapshot_audit_query() {
         upstream: "test".to_string(),
         model: None,
         status: 200,
-        input_tokens: 10,
-        output_tokens: 10,
+        input_tokens: Some(10),
+        output_tokens: Some(10),
         duration_ms: 100,
         agent_label: None,
+        ..Default::default()
     };
     storage.append_audit(&entry).unwrap();
 

@@ -73,6 +73,7 @@ fn test_state(config: Config, storage: Option<Arc<Storage>>) -> AdminState {
         storage,
         limit_engine,
         lifecycle: None,
+        audit_sink: None,
         principal_view,
         config: Arc::new(config),
         admin_token: Some("test-token".to_string()),

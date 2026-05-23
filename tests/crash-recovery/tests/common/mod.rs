@@ -297,10 +297,11 @@ fn verify_audit(
             upstream: "anthropic_direct".to_owned(),
             model: Some("claude-sonnet-4-5".to_owned()),
             status: 200,
-            input_tokens: 1,
-            output_tokens: 1,
+            input_tokens: Some(1),
+            output_tokens: Some(1),
             duration_ms: 1,
             agent_label: Some("task-48-parent".to_owned()),
+            ..Default::default()
         })?;
     }
 
@@ -351,13 +352,9 @@ fn count_audit_request_prefix(
     path: &Path,
     prefix: &str,
 ) -> Result<usize, Box<dyn std::error::Error>> {
-    let db = redb::Database::create(path)?;
-    let read_txn = db.begin_read()?;
-    let table = read_txn.open_table(AUDIT_LOG_V1)?;
+    let storage = Storage::open(path, MASTER_KEY)?;
     let mut count = 0;
-    for row in table.iter()? {
-        let (_, value) = row?;
-        let entry = serde_json::from_slice::<AuditEntry>(value.value())?;
+    for entry in storage.query_audit(None, 0, u64::MAX, usize::MAX)? {
         if entry.request_id.starts_with(prefix) {
             count += 1;
         }
@@ -459,10 +456,11 @@ fn audit_entry(iteration: usize, index: usize, pending: bool) -> AuditEntry {
         upstream: "anthropic_direct".to_owned(),
         model: Some("claude-sonnet-4-5".to_owned()),
         status: 200,
-        input_tokens: index as u64 + 1,
-        output_tokens: index as u64 + 2,
+        input_tokens: Some(index as u64 + 1),
+        output_tokens: Some(index as u64 + 2),
         duration_ms: 3,
         agent_label: Some("task-48-crash-child".to_owned()),
+        ..Default::default()
     }
 }
 

@@ -36,10 +36,11 @@ fn killed_writer_leaves_database_reopenable() -> Result<(), Box<dyn std::error::
         upstream: "anthropic_direct".to_owned(),
         model: Some("claude-sonnet-4-5".to_owned()),
         status: 200,
-        input_tokens: 1,
-        output_tokens: 1,
+        input_tokens: Some(1),
+        output_tokens: Some(1),
         duration_ms: 1,
         agent_label: Some("crash-parent".to_owned()),
+        ..Default::default()
     })?;
     let audit_rows = storage.query_audit(None, 0, u64::MAX, usize::MAX)?;
     println!(
@@ -62,10 +63,11 @@ fn child_writer(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             upstream: "anthropic_direct".to_owned(),
             model: Some("claude-sonnet-4-5".to_owned()),
             status: 200,
-            input_tokens: 1,
-            output_tokens: 2,
+            input_tokens: Some(1),
+            output_tokens: Some(2),
             duration_ms: 3,
             agent_label: Some("crash-child".to_owned()),
+            ..Default::default()
         })?;
         if index % 64 == 0 {
             thread::sleep(Duration::from_millis(1));

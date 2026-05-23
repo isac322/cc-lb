@@ -11,7 +11,7 @@ use axum::Router;
 use cc_lb_config::Config;
 use cc_lb_core::{
     api_keys::{limit_engine::LimitEngine, principal_view::PrincipalView},
-    Lifecycle,
+    AuditWriterSink, Lifecycle,
 };
 use cc_lb_storage_redb::Storage;
 
@@ -20,6 +20,7 @@ pub struct AdminState {
     pub storage: Option<Arc<Storage>>,
     pub limit_engine: Arc<LimitEngine>,
     pub lifecycle: Option<Arc<Lifecycle>>,
+    pub audit_sink: Option<Arc<AuditWriterSink>>,
     pub principal_view: Arc<ArcSwap<PrincipalView>>,
     pub config: Arc<dyn CurrentConfig>,
     pub admin_token: Option<String>,
