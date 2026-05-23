@@ -23,9 +23,11 @@ async fn metrics_endpoint_reachable() {
     assert!(metrics.body.contains("direction=\"input\""));
     assert!(metrics.body.contains("direction=\"output\""));
     assert!(metrics.body.contains("status=\"200\""));
-    assert!(metrics
-        .body
-        .lines()
-        .any(|line| line.contains("cc_lb_request_duration_seconds")
-            && line.contains("status=\"200\"")));
+    assert!(
+        metrics
+            .body
+            .lines()
+            .any(|line| line.contains("cc_lb_request_duration_seconds")
+                && line.contains("status=\"200\""))
+    );
 }

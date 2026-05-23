@@ -1,9 +1,9 @@
 mod common;
 
-use axum::body::{to_bytes, Body};
-use cc_lb_dialect_bedrock::{convert_eventstream_to_sse_bytes, BedrockRuntimeDialect};
-use cc_lb_plugin_api::{shape_request, Upstream};
-use fake_bedrock_runtime::{app, AppConfig};
+use axum::body::{Body, to_bytes};
+use cc_lb_dialect_bedrock::{BedrockRuntimeDialect, convert_eventstream_to_sse_bytes};
+use cc_lb_plugin_api::{Upstream, shape_request};
+use fake_bedrock_runtime::{AppConfig, app};
 use http::{Request, StatusCode};
 use tower::ServiceExt;
 

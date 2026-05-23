@@ -1,14 +1,14 @@
 mod common;
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use bytes::Bytes;
 use http_body_util::BodyExt;
 
 use common::{
-    lifecycle_with, messages_request, DispatchMode, MockDispatch, RecordingHook, TestAuthn,
-    TestState,
+    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState, lifecycle_with,
+    messages_request,
 };
 
 #[tokio::test]
@@ -45,25 +45,27 @@ async fn happy_sse_relays_incrementally_and_observes_chunks() {
         "expected at least 50 data lines, got {data_lines}"
     );
     assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
-    assert!(hook
-        .events
-        .lock()
-        .expect("events lock")
-        .iter()
-        .any(|event| matches!(event, cc_lb_plugin_api::ObserveEvent::Chunk { .. })));
-    assert!(hook
-        .events
-        .lock()
-        .expect("events lock")
-        .iter()
-        .any(|event| matches!(
-            event,
-            cc_lb_plugin_api::ObserveEvent::RequestFinished {
-                input_tokens: Some(7),
-                output_tokens: Some(42),
-                ..
-            }
-        )));
+    assert!(
+        hook.events
+            .lock()
+            .expect("events lock")
+            .iter()
+            .any(|event| matches!(event, cc_lb_plugin_api::ObserveEvent::Chunk { .. }))
+    );
+    assert!(
+        hook.events
+            .lock()
+            .expect("events lock")
+            .iter()
+            .any(|event| matches!(
+                event,
+                cc_lb_plugin_api::ObserveEvent::RequestFinished {
+                    input_tokens: Some(7),
+                    output_tokens: Some(42),
+                    ..
+                }
+            ))
+    );
 }
 
 #[tokio::test]
@@ -95,17 +97,18 @@ async fn happy_non_streaming_observes_usage_tokens() {
         .to_bytes();
 
     assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 1);
-    assert!(hook
-        .events
-        .lock()
-        .expect("events lock")
-        .iter()
-        .any(|event| matches!(
-            event,
-            cc_lb_plugin_api::ObserveEvent::RequestFinished {
-                input_tokens: Some(1),
-                output_tokens: Some(1),
-                ..
-            }
-        )));
+    assert!(
+        hook.events
+            .lock()
+            .expect("events lock")
+            .iter()
+            .any(|event| matches!(
+                event,
+                cc_lb_plugin_api::ObserveEvent::RequestFinished {
+                    input_tokens: Some(1),
+                    output_tokens: Some(1),
+                    ..
+                }
+            ))
+    );
 }

@@ -1,7 +1,7 @@
 mod common;
 
 use cc_lb_dialect_bedrock::BedrockRuntimeDialect;
-use cc_lb_plugin_api::{shape_request, Upstream};
+use cc_lb_plugin_api::{Upstream, shape_request};
 
 #[test]
 fn anthropic_beta_header_becomes_ordered_body_array() {

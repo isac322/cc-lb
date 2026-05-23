@@ -2,7 +2,7 @@ use cc_lb_core::anthropic_error_response;
 use http::header::{CONTENT_TYPE, RETRY_AFTER};
 use http::{HeaderMap, HeaderValue, StatusCode};
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[tokio::test]
 async fn snapshot_core_error_responses() {

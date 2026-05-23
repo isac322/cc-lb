@@ -3,9 +3,9 @@ use std::fmt::Write as _;
 use std::hash::{BuildHasherDefault, DefaultHasher};
 use std::sync::OnceLock;
 
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
-use extism_pdk::{config, plugin_fn, Error, FnResult, Json, WithReturnCode};
+use base64::engine::general_purpose::STANDARD as BASE64;
+use extism_pdk::{Error, FnResult, Json, WithReturnCode, config, plugin_fn};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};

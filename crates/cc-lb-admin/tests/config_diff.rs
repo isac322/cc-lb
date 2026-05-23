@@ -5,8 +5,8 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use cc_lb_storage_redb::HistorySummary;
 use config_admin_common::{
-    app, apply_state, authed_json, config_value, expected_revision_body, minimal_config, put_body,
-    temp_storage, write_config, TestReloader,
+    TestReloader, app, apply_state, authed_json, config_value, expected_revision_body,
+    minimal_config, put_body, temp_storage, write_config,
 };
 
 #[tokio::test]

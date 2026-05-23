@@ -44,8 +44,10 @@ async fn sign_canonical_request() {
     );
     assert!(authorization.starts_with("AWS4-HMAC-SHA256 "));
     assert!(authorization.contains("Credential=AKIATEST/20200101/us-east-1/bedrock/aws4_request"));
-    assert!(authorization
-        .contains("SignedHeaders=accept;content-type;host;x-amz-content-sha256;x-amz-date"));
+    assert!(
+        authorization
+            .contains("SignedHeaders=accept;content-type;host;x-amz-content-sha256;x-amz-date")
+    );
     assert_eq!(signature.len(), 64);
     assert!(signature.chars().all(|ch| ch.is_ascii_hexdigit()));
     assert_ne!(

@@ -8,7 +8,7 @@ use cc_lb_dialect_vertex::vertex_error_to_anthropic_json;
 use cc_lb_plugin_api::{Upstream, UpstreamDialect};
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::sse_error_frame::make_error_frame_from_json;

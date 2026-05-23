@@ -2,7 +2,7 @@ use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{Storage, StorageError, AUDIT_LOG_V1};
+use crate::{AUDIT_LOG_V1, Storage, StorageError};
 
 const AUDIT_SEQUENCE_SCALE: u64 = 1_000_000;
 

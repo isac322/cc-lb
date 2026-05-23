@@ -1,4 +1,4 @@
-use aws_eventstream_codec::{decode_messages, DecodeError, DecodedMessage};
+use aws_eventstream_codec::{DecodeError, DecodedMessage, decode_messages};
 use bytes::Bytes;
 use http::StatusCode;
 use serde_json::Value;

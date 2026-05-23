@@ -1,6 +1,6 @@
 use aws_eventstream_codec::decode_messages;
-use axum::body::{to_bytes, Body};
-use fake_bedrock_runtime::{app, AppConfig};
+use axum::body::{Body, to_bytes};
+use fake_bedrock_runtime::{AppConfig, app};
 use http::{Request, StatusCode};
 use tower::ServiceExt;
 

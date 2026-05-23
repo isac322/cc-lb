@@ -9,7 +9,7 @@ use cc_lb_plugin_api::{
     SigningCapability, Upstream, UpstreamError,
 };
 use cc_lb_storage_redb::Storage;
-use http::header::{HeaderValue, AUTHORIZATION};
+use http::header::{AUTHORIZATION, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
 
 #[derive(Clone)]

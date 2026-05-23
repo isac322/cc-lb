@@ -3,10 +3,10 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use extism::{Manifest, Plugin, PluginBuilder, Wasm};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub fn build_wasm() -> PathBuf {
     let workspace = workspace_root();

@@ -2,7 +2,7 @@ mod tls_common;
 
 use std::sync::Arc;
 
-use cc_lb_server::tls::{load_certs, TlsState};
+use cc_lb_server::tls::{TlsState, load_certs};
 
 #[test]
 fn load_bad_cert_keeps_current_snapshot() {

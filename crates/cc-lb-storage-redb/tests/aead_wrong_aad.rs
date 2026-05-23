@@ -1,5 +1,5 @@
 use cc_lb_storage_redb::{
-    oauth_key, OAuthCredentials, Storage, StorageError, OAUTH_CREDENTIALS_V1,
+    OAUTH_CREDENTIALS_V1, OAuthCredentials, Storage, StorageError, oauth_key,
 };
 use redb::ReadableTable;
 

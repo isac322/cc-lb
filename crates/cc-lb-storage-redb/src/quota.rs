@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
 
-use crate::{Storage, StorageError, QUOTAS_BY_PRINCIPAL_V1};
+use crate::{QUOTAS_BY_PRINCIPAL_V1, Storage, StorageError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BucketKind {

@@ -1,6 +1,6 @@
 mod common;
 
-use cc_lb_observability::{RedactionPolicy, REDACTED};
+use cc_lb_observability::{REDACTED, RedactionPolicy};
 
 #[test]
 fn redacts_gcp_private_key_pem_from_tracing_output() {

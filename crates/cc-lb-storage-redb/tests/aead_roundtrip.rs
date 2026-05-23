@@ -1,4 +1,4 @@
-use cc_lb_storage_redb::{oauth_key, OAuthCredentials, Storage, OAUTH_CREDENTIALS_V1};
+use cc_lb_storage_redb::{OAUTH_CREDENTIALS_V1, OAuthCredentials, Storage, oauth_key};
 
 #[test]
 fn oauth_roundtrip_keeps_tokens_encrypted_at_rest() -> Result<(), Box<dyn std::error::Error>> {

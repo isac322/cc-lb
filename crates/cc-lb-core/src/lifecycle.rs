@@ -1,17 +1,17 @@
 use std::convert::Infallible;
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use axum::body::Body as AxumBody;
 use bytes::{Bytes, BytesMut};
-use cc_lb_dialect_bedrock::{convert_eventstream_to_sse_bytes, EventStreamConvertError};
+use cc_lb_dialect_bedrock::{EventStreamConvertError, convert_eventstream_to_sse_bytes};
 use cc_lb_plugin_api::{
-    shape_request, sign_request, AuthnPlugin, ObservabilityHook, ObserveEvent, Principal,
-    PrincipalQuotas, RequestContext, RetryDecision, RouterPlugin, SignedRequest, Upstream,
-    UpstreamError,
+    AuthnPlugin, ObservabilityHook, ObserveEvent, Principal, PrincipalQuotas, RequestContext,
+    RetryDecision, RouterPlugin, SignedRequest, Upstream, UpstreamError, shape_request,
+    sign_request,
 };
 use cc_lb_pricing::virtual_cost_micros;
 use cc_lb_storage_redb::{
@@ -21,8 +21,8 @@ use cc_lb_storage_redb::{
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use http::{HeaderMap, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use serde_json::Value;
 use thiserror::Error;
@@ -33,8 +33,8 @@ use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::limit_state_writer::PrincipalLimitStateSink;
 use crate::rate_limit_headers::{
-    derive_limit_identity, parse_anthropic_rate_limit_headers, AnthropicRateLimitKind,
-    LimitIdentity,
+    AnthropicRateLimitKind, LimitIdentity, derive_limit_identity,
+    parse_anthropic_rate_limit_headers,
 };
 use crate::request_events::RequestEventSink;
 use crate::sse_relay::{self, Usage};

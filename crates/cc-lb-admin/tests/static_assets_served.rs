@@ -1,10 +1,10 @@
 use axum::{
-    body::Body,
-    http::{header, Request, StatusCode},
-    response::Response,
     Router,
+    body::Body,
+    http::{Request, StatusCode, header},
+    response::Response,
 };
-use cc_lb_admin::{router, AdminState};
+use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_core::DashboardBroadcaster;
 use http_body_util::BodyExt;
@@ -45,7 +45,7 @@ async fn body_text(response: Response) -> String {
     String::from_utf8(bytes.to_vec()).unwrap()
 }
 
-fn header_value<'a>(response: &'a Response, name: header::HeaderName) -> &'a str {
+fn header_value(response: &Response, name: header::HeaderName) -> &str {
     response
         .headers()
         .get(name)
@@ -63,7 +63,7 @@ fn assert_header_starts(response: &Response, name: header::HeaderName, expected:
 
 fn discover_index_asset(index_html: &str, suffix: &str) -> String {
     index_html
-        .split(|ch| ch == '"' || ch == '\'')
+        .split(['"', '\''])
         .find(|part| part.starts_with("/assets/index-") && part.ends_with(suffix))
         .unwrap_or_else(|| panic!("missing index asset ending in {suffix}"))
         .to_string()

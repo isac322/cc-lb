@@ -1,6 +1,6 @@
 mod common;
 
-use cc_lb_observability::{RedactionPolicy, REDACTED};
+use cc_lb_observability::{REDACTED, RedactionPolicy};
 
 #[test]
 fn user_prompt_redaction_defaults_off_and_can_be_enabled() {

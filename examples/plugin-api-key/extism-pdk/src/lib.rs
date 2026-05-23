@@ -46,11 +46,7 @@ impl WithReturnCode {
     }
 
     fn code(&self) -> i32 {
-        if self.code == 0 {
-            1
-        } else {
-            self.code
-        }
+        if self.code == 0 { 1 } else { self.code }
     }
 }
 
@@ -83,8 +79,8 @@ pub mod config {
 #[doc(hidden)]
 pub mod __private {
     use super::{FnResult, Json, WithReturnCode};
-    use serde::de::DeserializeOwned;
     use serde::Serialize;
+    use serde::de::DeserializeOwned;
 
     pub fn run<I, O>(function: fn(Json<I>) -> FnResult<Json<O>>) -> i32
     where
@@ -119,7 +115,7 @@ mod raw {
     use super::Error;
 
     #[link(wasm_import_module = "extism:host/env")]
-    extern "C" {
+    unsafe extern "C" {
         fn alloc(length: u64) -> u64;
         fn config_get(offset: u64) -> u64;
         fn error_set(offset: u64);

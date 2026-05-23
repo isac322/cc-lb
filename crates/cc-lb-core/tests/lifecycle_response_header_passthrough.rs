@@ -6,8 +6,8 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderValue, StatusCode};
 
 use common::{
-    collect_body, lifecycle_with, messages_request, DispatchMode, MockDispatch, RecordingHook,
-    TestAuthn, TestState,
+    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState, collect_body, lifecycle_with,
+    messages_request,
 };
 
 #[tokio::test]

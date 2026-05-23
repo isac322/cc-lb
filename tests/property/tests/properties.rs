@@ -8,7 +8,7 @@ use std::time::Duration;
 use aws_eventstream_codec::{decode_message, decode_messages, encode_message};
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_core::{strip_hop_by_hop, SseBatchConfig, SseRelay};
+use cc_lb_core::{SseBatchConfig, SseRelay, strip_hop_by_hop};
 use cc_lb_plugin_api::{
     DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext,
     ShapedRequest, ShapedRequestBuilder, Upstream, UpstreamDialect,

@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use axum::body::Body;
@@ -9,7 +9,7 @@ use axum::http::{Request, Response, StatusCode};
 use axum::middleware::Next;
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use tokio::sync::{watch, Notify};
+use tokio::sync::{Notify, watch};
 
 #[derive(Clone)]
 pub struct DrainController {

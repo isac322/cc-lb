@@ -9,8 +9,8 @@ use http::{HeaderMap, HeaderValue};
 use tokio::sync::mpsc::Receiver;
 
 use common::{
-    collect_body, lifecycle_with, messages_request, DispatchMode, MockDispatch, RecordingHook,
-    TestAuthn, TestState,
+    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState, collect_body, lifecycle_with,
+    messages_request,
 };
 
 #[tokio::test]

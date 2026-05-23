@@ -2,7 +2,7 @@ use std::convert::Infallible;
 
 use http::header::HeaderValue;
 use http::{Request, Response};
-use tower::{service_fn, Layer, ServiceExt};
+use tower::{Layer, ServiceExt, service_fn};
 
 use cc_lb_core::HopByHopStripLayer;
 

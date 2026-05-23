@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use cc_lb_core::SseBatchConfig;
 use sse_relay_support::{
-    body_with_error_after, collect_response_body, numbered_events, relay_for, RecordingHook,
+    RecordingHook, body_with_error_after, collect_response_body, numbered_events, relay_for,
 };
 
 #[tokio::test]

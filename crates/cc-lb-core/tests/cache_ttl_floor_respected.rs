@@ -1,7 +1,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use cc_lb_core::{make_resolver_with_factory, DnsResolverConfig};
+use cc_lb_core::{DnsResolverConfig, make_resolver_with_factory};
 use hickory_resolver::config::ResolverOpts;
 
 #[test]

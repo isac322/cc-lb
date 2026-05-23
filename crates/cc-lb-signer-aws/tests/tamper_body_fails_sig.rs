@@ -1,9 +1,9 @@
 mod common;
 
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, to_bytes};
 use bytes::Bytes;
 use cc_lb_plugin_api::sign_request;
-use fake_bedrock_runtime::{app, AppConfig};
+use fake_bedrock_runtime::{AppConfig, app};
 use http::header::{CONTENT_TYPE, HOST};
 use http::{HeaderMap, HeaderValue, Request, StatusCode};
 use serde_json::Value;

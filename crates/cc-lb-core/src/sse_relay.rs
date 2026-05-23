@@ -19,7 +19,7 @@ use hyper::body::Frame;
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, Instant as TokioInstant, Sleep};
+use tokio::time::{Instant as TokioInstant, Sleep, sleep};
 
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
 use crate::quota::{QuotaManager, Reservation};

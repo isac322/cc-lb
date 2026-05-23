@@ -13,4 +13,4 @@ pub mod tls;
 pub mod validate;
 pub mod version;
 
-pub use app::{build_app, build_app_with_path, run_serve, App, BuildError};
+pub use app::{App, BuildError, build_app, build_app_with_path, run_serve};

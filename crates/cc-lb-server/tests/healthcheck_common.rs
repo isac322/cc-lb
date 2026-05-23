@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use axum::{routing::any, Router};
+use axum::{Router, routing::any};
 use cc_lb_config::{AuthStrategy, Config, UpstreamKind, UpstreamSpec};
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;

@@ -8,8 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    shape_request, Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder,
-    Upstream, UpstreamDialect,
+    Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder, Upstream,
+    UpstreamDialect, shape_request,
 };
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSigner, OAuthHttpClient, OAuthHttpError, OAuthTokenRequest, OAuthTokenResponse,

@@ -1,7 +1,7 @@
 mod common;
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -14,11 +14,11 @@ use cc_lb_plugin_api::SignedRequest;
 use http::{Response, StatusCode};
 use url::Url;
 
-use common::{collect_body, messages_request, RecordingHook, TestAuthn, TestRouter, TestState};
+use common::{RecordingHook, TestAuthn, TestRouter, TestState, collect_body, messages_request};
 
 #[tokio::test]
-async fn bedrock_failure_does_not_open_anthropic_direct_breaker(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn bedrock_failure_does_not_open_anthropic_direct_breaker()
+-> Result<(), Box<dyn std::error::Error>> {
     let registry = Arc::new(BreakerRegistry::new());
     let inner = Arc::new(HostDispatch::default());
     let dispatch = Arc::new(CircuitBreakerDispatch::new(

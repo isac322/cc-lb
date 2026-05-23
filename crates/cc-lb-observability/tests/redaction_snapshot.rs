@@ -1,6 +1,6 @@
 mod common;
 
-use cc_lb_observability::{RedactionPolicy, REDACTED};
+use cc_lb_observability::{REDACTED, RedactionPolicy};
 use regex::Regex;
 
 #[test]

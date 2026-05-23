@@ -1,15 +1,15 @@
 mod common;
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use bytes::Bytes;
 use http_body_util::BodyExt;
 
 use common::{
-    lifecycle_with, messages_request, DispatchMode, MockDispatch, RecordingHook, TestAuthn,
-    TestState,
+    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState, lifecycle_with,
+    messages_request,
 };
 
 #[tokio::test]

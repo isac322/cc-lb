@@ -67,18 +67,23 @@ async fn revoke_api_key_credential_revokes_all_active_keys() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["kind"], "api_key");
-    assert!(body["revoked_keys"]
-        .as_array()
-        .unwrap()
-        .contains(&json!(first.key_id)));
-    assert!(body["revoked_keys"]
-        .as_array()
-        .unwrap()
-        .contains(&json!(second.key_id)));
+    assert!(
+        body["revoked_keys"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(first.key_id))
+    );
+    assert!(
+        body["revoked_keys"]
+            .as_array()
+            .unwrap()
+            .contains(&json!(second.key_id))
+    );
     let keys = storage.list_api_keys("bob").unwrap();
-    assert!(keys
-        .iter()
-        .all(|record| record.revoked_at_unix_secs.is_some()));
+    assert!(
+        keys.iter()
+            .all(|record| record.revoked_at_unix_secs.is_some())
+    );
 }
 
 #[tokio::test]

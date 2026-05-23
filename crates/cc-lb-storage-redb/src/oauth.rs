@@ -1,14 +1,14 @@
-use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
 use base64::Engine;
+use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use redb::ReadableTable;
-use ring::digest::{digest, SHA256};
+use ring::digest::{SHA256, digest};
 use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::{Storage, StorageError, API_KEYS_V1, OAUTH_CREDENTIALS_V1};
+use crate::{API_KEYS_V1, OAUTH_CREDENTIALS_V1, Storage, StorageError};
 
 const NONCE_LEN: usize = 12;
 

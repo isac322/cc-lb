@@ -2,11 +2,11 @@ mod common;
 
 use std::sync::Arc;
 
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, to_bytes};
 use cc_lb_dialect_vertex::VertexDialect;
-use cc_lb_plugin_api::{shape_request, sign_request, SignerFactory, Upstream};
+use cc_lb_plugin_api::{SignerFactory, Upstream, shape_request, sign_request};
 use cc_lb_signer_gcp::{GcpOAuthSignerFactory, StaticGcpTokenProvider};
-use fake_vertex::{app, AppConfig};
+use fake_vertex::{AppConfig, app};
 use http::{Request, StatusCode};
 use tower::ServiceExt;
 

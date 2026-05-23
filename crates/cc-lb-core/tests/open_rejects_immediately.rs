@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use cc_lb_core::{BreakerConfig, BreakerError, CircuitBreaker, MockClock};
@@ -25,9 +25,9 @@ fn open_breaker_returns_error_without_calling_upstream() -> Result<(), Box<dyn s
     };
 
     match breaker.permit() {
-        Ok(permit) => {
+        Ok(_permit) => {
             upstream();
-            permit.record_success();
+            _permit.record_success();
         }
         Err(BreakerError::Open { retry_after }) => {
             println!("open_rejected retry_after_secs={}", retry_after.as_secs());

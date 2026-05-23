@@ -3,8 +3,8 @@ use std::fs;
 use std::sync::Arc;
 
 use cc_lb_plugin_api::{ObservabilityHook, ObserveEvent, PluginManifest, PluginRuntime};
-use criterion::{criterion_group, criterion_main, Criterion};
-use serde_json::{json, Value};
+use criterion::{Criterion, criterion_group, criterion_main};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 
 fn bench_extism_observe(c: &mut Criterion) {
