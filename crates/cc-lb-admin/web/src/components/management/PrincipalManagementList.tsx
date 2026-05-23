@@ -1,4 +1,5 @@
 import { useState } from 'react';
+import { pluralize } from '../../lib/format';
 import type { PrincipalWithId } from '../../lib/hooks/usePrincipalsManagement';
 import { Button } from '../primitives/Button';
 import { StatusChip } from '../primitives/StatusChip';
@@ -57,7 +58,7 @@ export function PrincipalManagementList({
             header: 'Allowed Models',
             render: (p) => (
               <span className="text-graphite-300">
-                {p.allowed_models?.length || 0} models
+                {pluralize(p.allowed_models?.length || 0, 'model')}
               </span>
             ),
           },

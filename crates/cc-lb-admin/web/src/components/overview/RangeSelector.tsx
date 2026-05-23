@@ -24,10 +24,10 @@ export function RangeSelector() {
         <button
           key={value}
           onClick={() => handleRangeChange(value)}
-          className={`px-3 py-1 text-sm font-medium rounded-sm transition-colors ${
+          className={`px-3 py-1 text-sm font-medium transition-colors ${
             currentRange === value
-              ? 'bg-graphite-800 text-graphite-50 shadow-sm'
-              : 'text-graphite-400 hover:text-graphite-200 hover:bg-graphite-800/50'
+              ? 'bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 rounded-md'
+              : 'text-graphite-400 hover:text-graphite-100 hover:bg-graphite-800 rounded-md border border-transparent'
           }`}
         >
           {label}
