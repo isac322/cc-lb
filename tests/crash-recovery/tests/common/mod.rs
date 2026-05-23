@@ -380,6 +380,8 @@ fn verify_audit(
             output_tokens: 1,
             duration_ms: 1,
             agent_label: Some("task-48-parent".to_owned()),
+            kind: None,
+            payload: None,
         })?;
     }
 
@@ -564,6 +566,8 @@ fn audit_entry(iteration: usize, index: usize, pending: bool) -> AuditEntry {
         output_tokens: index as u64 + 2,
         duration_ms: 3,
         agent_label: Some("task-48-crash-child".to_owned()),
+        kind: None,
+        payload: None,
     }
 }
 

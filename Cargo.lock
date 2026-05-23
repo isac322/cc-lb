@@ -608,6 +608,7 @@ dependencies = [
 name = "cc-lb-admin"
 version = "0.1.0"
 dependencies = [
+ "async-stream",
  "axum 0.8.9",
  "base64",
  "bytes",
@@ -628,12 +629,14 @@ dependencies = [
  "oauth2",
  "redb",
  "rust-embed",
+ "schemars",
  "secrecy",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "toml 0.8.23",
  "tower 0.5.3",
  "tracing",
  "url",
@@ -666,7 +669,9 @@ dependencies = [
  "bytes",
  "cc-lb-dialect-bedrock",
  "cc-lb-dialect-vertex",
+ "cc-lb-observability",
  "cc-lb-plugin-api",
+ "cc-lb-pricing",
  "cc-lb-storage-redb",
  "dashmap",
  "eventsource-stream",
@@ -685,6 +690,7 @@ dependencies = [
  "tokio",
  "tower 0.5.3",
  "tower-service",
+ "tracing",
  "url",
 ]
 
@@ -808,6 +814,10 @@ dependencies = [
  "serde_json",
  "tokio",
 ]
+
+[[package]]
+name = "cc-lb-pricing"
+version = "0.1.0"
 
 [[package]]
 name = "cc-lb-property-tests"
@@ -991,8 +1001,11 @@ dependencies = [
 name = "cc-lb-storage-redb"
 version = "0.1.0"
 dependencies = [
+ "base64",
+ "cc-lb-pricing",
  "chacha20poly1305",
  "redb",
+ "ring",
  "serde",
  "serde_json",
  "tempfile",

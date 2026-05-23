@@ -4,6 +4,7 @@ use axum::{
 };
 use cc_lb_admin::{router, AdminState};
 use cc_lb_config::Config;
+use cc_lb_core::DashboardBroadcaster;
 use cc_lb_storage_redb::{AuditEntry, Storage};
 use http_body_util::BodyExt;
 use std::sync::Arc;
@@ -14,7 +15,15 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         storage: Some(storage),
         quota_manager: None,
         lifecycle: None,
+        breaker_registry: None,
+        drain_controller: None,
+        bulkhead_registry: None,
+        plugin_runtime_status: None,
+        dashboard_broadcaster: Arc::new(DashboardBroadcaster::new()),
         config: Arc::new(Config::default()),
+        config_path: None,
+        config_watcher: None,
+        config_started_at_unix_secs: 0,
         admin_token: Some("test-token".to_string()),
         start_time: std::time::Instant::now(),
     }
@@ -40,6 +49,8 @@ async fn test_audit_pagination() {
             output_tokens: 10,
             duration_ms: 100,
             agent_label: None,
+            kind: None,
+            payload: None,
         };
         storage.append_audit(&entry).unwrap();
     }

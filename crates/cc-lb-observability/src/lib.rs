@@ -9,7 +9,10 @@ mod redaction;
 mod trace_layer;
 
 pub use cc_lb_plugin_api::{ObservabilityError, ObservabilityHook, ObserveEvent};
-pub use hook::{dropped_events_total, BoundedChannelHook, DEFAULT_HOOK_CHANNEL_CAPACITY};
+pub use hook::{
+    dropped_events_total, increment_dropped_events, increment_dropped_events_by,
+    BoundedChannelHook, DEFAULT_HOOK_CHANNEL_CAPACITY,
+};
 pub use init::{
     init, metric_definitions, panic_total, register_metrics, InitError, MetricDefinition,
     MetricKind, ObservabilityConfig, TracingGuard,

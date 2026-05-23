@@ -1,6 +1,6 @@
 ---
 source: crates/cc-lb-admin/tests/snapshot_admin_shapes.rs
-expression: serde_json::to_string_pretty(&json).unwrap()
+expression: "serde_json::to_string_pretty(&json).unwrap()"
 ---
 {
   "admin": {
@@ -24,6 +24,7 @@ expression: serde_json::to_string_pretty(&json).unwrap()
     "cache_ttl_ceiling_secs": 300,
     "cache_ttl_floor_secs": 30
   },
+  "effective_revision_unix_secs": 0,
   "egress": {},
   "listener": {
     "admin_addr": "[::1]:9090",
@@ -64,8 +65,8 @@ expression: serde_json::to_string_pretty(&json).unwrap()
       "issuer_base_url": "https://platform.claude.com",
       "redirect_uri": "http://127.0.0.1/admin/oauth/callback",
       "scopes": [
-        "messages",
-        "files"
+        "placeholder-scope",
+        "placeholder-scope-2"
       ]
     }
   },

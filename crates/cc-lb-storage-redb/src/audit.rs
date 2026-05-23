@@ -1,5 +1,6 @@
 use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::{Storage, StorageError, AUDIT_LOG_V1};
 
@@ -18,6 +19,10 @@ pub struct AuditEntry {
     pub output_tokens: u64,
     pub duration_ms: u64,
     pub agent_label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub payload: Option<Value>,
 }
 
 impl Storage {

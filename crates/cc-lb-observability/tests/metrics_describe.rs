@@ -15,6 +15,8 @@ fn describes_all_required_metrics() {
         vec![
             "cc_lb_requests_total",
             "cc_lb_request_duration_seconds",
+            "cc_lb_tokens_total",
+            "cc_lb_virtual_cost_usd_total",
             "cc_lb_oauth_refresh_total",
             "cc_lb_quota_active_principals_total",
             "cc_lb_quota_rejected_total",
@@ -31,10 +33,12 @@ fn describes_all_required_metrics() {
         ]
     );
 
-    assert_eq!(definitions.len(), 15);
+    assert_eq!(definitions.len(), 17);
     assert_eq!(definitions[0].kind, MetricKind::Counter);
     assert_eq!(definitions[1].kind, MetricKind::Histogram);
-    assert_eq!(definitions[3].kind, MetricKind::Gauge);
+    assert_eq!(definitions[2].kind, MetricKind::Counter);
+    assert_eq!(definitions[3].kind, MetricKind::Counter);
+    assert_eq!(definitions[5].kind, MetricKind::Gauge);
 
     for name in names {
         println!("OK {name}");

@@ -1,0 +1,1240 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>cc-lb 사용 가이드 · Anthropic-compatible reverse proxy</title>
+  <meta name="description" content="cc-lb를 실제 Anthropic API 키로 로컬에서 실행하고 검증하는 use-case 중심 가이드." />
+  <style>
+    [data-theme="dark"] {
+      --bg: #0d1117;
+      --bg-elev: #161b22;
+      --bg-code: #0a0e14;
+      --border: #30363d;
+      --fg: #e6edf3;
+      --fg-muted: #8b949e;
+      --accent: #f78166;
+      --accent-hov: #ff9b80;
+      --link: #58a6ff;
+      --green: #56d364;
+      --red: #f85149;
+      --yellow: #d29922;
+      --kbd-bg: #21262d;
+    }
+    [data-theme="light"] {
+      --bg: #ffffff;
+      --bg-elev: #f6f8fa;
+      --bg-code: #f3f5f8;
+      --border: #d0d7de;
+      --fg: #1f2328;
+      --fg-muted: #59636e;
+      --accent: #cc4f1f;
+      --accent-hov: #b03e10;
+      --link: #0969da;
+      --green: #1a7f37;
+      --red: #cf222e;
+      --yellow: #9a6700;
+      --kbd-bg: #f6f8fa;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Pretendard", "Noto Sans KR", Roboto, Helvetica, Arial, sans-serif;
+      background: var(--bg); color: var(--fg);
+      line-height: 1.65; font-size: 15px;
+      transition: background 0.2s, color 0.2s;
+    }
+    code, pre { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Monaco, Consolas, "Liberation Mono", monospace; font-size: 13px; }
+    a { color: var(--link); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .topbar {
+      position: sticky; top: 0; z-index: 10;
+      background: var(--bg); border-bottom: 1px solid var(--border);
+      padding: 10px 24px; display: flex; align-items: center; gap: 16px;
+    }
+    .topbar .brand { display: flex; align-items: baseline; gap: 8px; }
+    .topbar h1 { font-size: 18px; margin: 0; font-weight: 700; letter-spacing: -0.01em; }
+    .topbar .tag { font-size: 12px; color: var(--fg-muted); }
+    .topbar .grow { flex: 1; }
+    .topbar input[type="search"] {
+      background: var(--bg-elev); border: 1px solid var(--border);
+      color: var(--fg); padding: 6px 10px; border-radius: 6px; width: 260px; font-size: 13px;
+    }
+    .topbar input[type="search"]:focus { outline: none; border-color: var(--accent); }
+    .btn-icon {
+      background: var(--bg-elev); border: 1px solid var(--border);
+      color: var(--fg); padding: 6px 10px; border-radius: 6px; cursor: pointer; font-size: 13px;
+    }
+    .btn-icon:hover { border-color: var(--accent); }
+
+    .layout { display: grid; grid-template-columns: 260px 1fr; max-width: 1280px; margin: 0 auto; }
+    @media (max-width: 900px) {
+      .layout { grid-template-columns: 1fr; }
+      .sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--border); }
+      main { padding: 24px 20px 60px; }
+      .topbar input[type="search"] { width: 140px; }
+    }
+
+    .sidebar {
+      position: sticky; top: 53px; align-self: start;
+      height: calc(100vh - 53px); overflow-y: auto;
+      border-right: 1px solid var(--border); padding: 20px 0;
+    }
+    .sidebar ol { list-style: none; padding: 0; margin: 0; }
+    .sidebar li { margin: 0; }
+    .sidebar a {
+      display: block; padding: 6px 24px; color: var(--fg-muted); font-size: 13px;
+      border-left: 2px solid transparent;
+    }
+    .sidebar a:hover { color: var(--fg); background: var(--bg-elev); border-left-color: var(--accent); text-decoration: none; }
+    .sidebar a.active { color: var(--fg); border-left-color: var(--accent); font-weight: 600; }
+    .sidebar .grp {
+      padding: 16px 24px 4px; font-size: 10px; text-transform: uppercase;
+      letter-spacing: 0.08em; color: var(--fg-muted); font-weight: 700;
+    }
+
+    main { padding: 32px 40px 80px; max-width: 920px; }
+    h2 { margin: 48px 0 12px; font-size: 24px; font-weight: 700; padding-bottom: 8px; border-bottom: 1px solid var(--border); scroll-margin-top: 70px; }
+    h3 { margin: 28px 0 8px; font-size: 17px; font-weight: 600; scroll-margin-top: 70px; }
+    h4 { margin: 18px 0 6px; font-size: 14px; font-weight: 600; color: var(--fg-muted); text-transform: uppercase; letter-spacing: 0.05em; }
+    p { margin: 8px 0; }
+    ul, ol { padding-left: 22px; }
+    li { margin: 4px 0; }
+
+    .hero {
+      background: linear-gradient(135deg, var(--bg-elev) 0%, var(--bg) 100%);
+      border: 1px solid var(--border); border-radius: 10px;
+      padding: 28px; margin-bottom: 32px;
+    }
+    .hero h2 { border: none; margin: 0 0 8px; padding: 0; font-size: 28px; }
+    .hero p { color: var(--fg-muted); font-size: 15px; }
+    .hero .qa { display: flex; gap: 8px; margin-top: 18px; flex-wrap: wrap; }
+    .hero .qa a {
+      background: var(--accent); color: white; padding: 9px 16px; border-radius: 6px;
+      font-weight: 600; font-size: 13px;
+    }
+    .hero .qa a.secondary { background: transparent; color: var(--fg); border: 1px solid var(--border); }
+    .hero .qa a:hover { background: var(--accent-hov); text-decoration: none; }
+    .hero .qa a.secondary:hover { border-color: var(--accent); background: var(--bg-elev); }
+
+    .callout {
+      border-left: 4px solid var(--accent); background: var(--bg-elev);
+      padding: 12px 16px; margin: 16px 0; border-radius: 0 6px 6px 0;
+    }
+    .callout .label {
+      font-weight: 700; color: var(--accent); font-size: 11px;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      display: block; margin-bottom: 4px;
+    }
+    .callout.warn { border-left-color: var(--yellow); }
+    .callout.warn .label { color: var(--yellow); }
+    .callout.danger { border-left-color: var(--red); }
+    .callout.danger .label { color: var(--red); }
+    .callout.tip { border-left-color: var(--green); }
+    .callout.tip .label { color: var(--green); }
+
+    .codewrap { position: relative; margin: 12px 0; }
+    pre {
+      background: var(--bg-code); border: 1px solid var(--border); border-radius: 6px;
+      padding: 14px 16px; overflow-x: auto; margin: 0; line-height: 1.55;
+    }
+    .codewrap .copy {
+      position: absolute; top: 8px; right: 8px;
+      background: var(--bg-elev); color: var(--fg-muted);
+      border: 1px solid var(--border); padding: 4px 9px; font-size: 11px;
+      border-radius: 4px; cursor: pointer;
+      opacity: 0; transition: opacity 0.15s;
+    }
+    .codewrap:hover .copy { opacity: 1; }
+    .codewrap .copy:hover { color: var(--fg); border-color: var(--accent); }
+    .codewrap .copy.copied { color: var(--green); border-color: var(--green); }
+    .codewrap .lang {
+      position: absolute; top: 8px; left: 12px;
+      font-size: 10px; color: var(--fg-muted); text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
+    pre.has-lang { padding-top: 26px; }
+
+    code:not(pre code) {
+      background: var(--bg-elev); color: var(--fg);
+      padding: 1px 6px; border-radius: 4px; font-size: 0.88em;
+      border: 1px solid var(--border);
+    }
+
+    table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14px; }
+    th, td { border: 1px solid var(--border); padding: 8px 12px; text-align: left; vertical-align: top; }
+    th { background: var(--bg-elev); font-weight: 600; }
+
+    .steps { counter-reset: step; padding: 0; list-style: none; margin: 16px 0; }
+    .steps > li {
+      counter-increment: step; padding: 16px 0 16px 52px; position: relative;
+      border-bottom: 1px solid var(--border);
+    }
+    .steps > li:last-child { border-bottom: none; }
+    .steps > li::before {
+      content: counter(step); position: absolute; left: 0; top: 16px;
+      width: 32px; height: 32px; line-height: 32px; text-align: center; border-radius: 50%;
+      background: var(--accent); color: white; font-weight: 700; font-size: 14px;
+    }
+    .steps > li > h3 { margin: 0 0 6px; font-size: 16px; }
+
+    .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 16px; margin: 16px 0; }
+    .card {
+      background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px;
+      padding: 18px; text-decoration: none; color: inherit; display: block;
+      transition: border-color 0.15s, transform 0.15s;
+    }
+    .card:hover { border-color: var(--accent); transform: translateY(-2px); text-decoration: none; }
+    .card .when {
+      display: inline-block; font-size: 10px; padding: 2px 8px; background: var(--bg);
+      border: 1px solid var(--border); border-radius: 999px; margin-bottom: 8px;
+      color: var(--accent); font-weight: 700; text-transform: uppercase; letter-spacing: 0.04em;
+    }
+    .card h3 { margin: 4px 0 6px; font-size: 16px; }
+    .card p { margin: 0; color: var(--fg-muted); font-size: 13px; }
+
+    .builder {
+      background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px;
+      padding: 20px; margin: 16px 0;
+    }
+    .builder h3 { margin: 0 0 12px; font-size: 16px; }
+    .builder .row {
+      display: flex; gap: 12px; flex-wrap: wrap; margin-bottom: 12px; align-items: center;
+    }
+    .builder label { font-size: 13px; color: var(--fg-muted); margin-right: 4px; }
+    .builder select, .builder input[type="text"] {
+      background: var(--bg); color: var(--fg); border: 1px solid var(--border);
+      padding: 6px 10px; border-radius: 4px; font-size: 13px; min-width: 200px;
+    }
+    .builder select:focus, .builder input:focus { outline: none; border-color: var(--accent); }
+    .builder .check { display: flex; align-items: center; gap: 6px; font-size: 13px; color: var(--fg); }
+    .builder .out { margin-top: 14px; }
+
+    .pill { display: inline-block; padding: 2px 8px; border-radius: 999px; font-size: 11px; font-weight: 700; }
+    .pill.ok { background: rgba(86, 211, 100, 0.15); color: var(--green); }
+    .pill.warn { background: rgba(210, 153, 34, 0.15); color: var(--yellow); }
+    .pill.no { background: rgba(248, 81, 73, 0.15); color: var(--red); }
+    .pill.beta { background: rgba(247, 129, 102, 0.15); color: var(--accent); }
+
+    kbd {
+      display: inline-block; padding: 1px 6px; border: 1px solid var(--border);
+      border-radius: 4px; background: var(--kbd-bg); font-size: 11px; font-family: inherit;
+    }
+
+    .filter-hidden { display: none !important; }
+    mark { background: var(--accent); color: var(--bg); padding: 0 2px; border-radius: 2px; }
+
+    footer {
+      padding: 24px 40px; border-top: 1px solid var(--border);
+      color: var(--fg-muted); font-size: 13px; margin-top: 48px;
+    }
+
+    .toc-meta { color: var(--fg-muted); font-size: 12px; margin-top: 4px; }
+
+    details {
+      border: 1px solid var(--border); border-radius: 6px;
+      padding: 10px 14px; margin: 10px 0; background: var(--bg-elev);
+    }
+    details > summary { cursor: pointer; font-weight: 600; }
+    details[open] > summary { margin-bottom: 8px; }
+  </style>
+</head>
+<body data-theme="dark">
+
+<div class="topbar">
+  <div class="brand">
+    <h1>cc-lb</h1>
+    <span class="tag">Anthropic-compatible reverse proxy</span>
+  </div>
+  <span class="grow"></span>
+  <input type="search" id="search" placeholder="가이드 안에서 검색 (예: bedrock)" />
+  <button class="btn-icon" id="theme-toggle" title="테마 전환">☀️</button>
+</div>
+
+<div class="layout">
+  <aside class="sidebar">
+    <ol>
+      <li class="grp">시작</li>
+      <li><a href="#hero">cc-lb 한눈에</a></li>
+      <li><a href="#quick-start">Quick Start · 2분 컷</a></li>
+      <li><a href="#decision">어느 길로 가야 할까</a></li>
+
+      <li class="grp">Use Case</li>
+      <li><a href="#uc-proxy">① 단순 프록시 + 로깅</a></li>
+      <li><a href="#uc-multi-key">② 여러 Anthropic 키 분산</a></li>
+      <li><a href="#uc-mix-provider">③ Anthropic + Bedrock + Vertex 혼합</a></li>
+      <li><a href="#uc-key-map">④ 내부 키 → 실제 키 매핑</a></li>
+      <li><a href="#uc-oauth">⑤ Claude Pro OAuth 토큰</a></li>
+
+      <li class="grp">실전 도구</li>
+      <li><a href="#config-builder">Config 빌더 (인터랙티브)</a></li>
+      <li><a href="#observe">관찰 / Admin / Metrics</a></li>
+      <li><a href="#ops">TLS · drain · 핫리로드</a></li>
+
+      <li class="grp">참고</li>
+      <li><a href="#trouble">트러블슈팅</a></li>
+      <li><a href="#cheatsheet">치트시트 · 신호 / 환경변수</a></li>
+      <li><a href="#caveats">알려진 한계</a></li>
+    </ol>
+  </aside>
+
+  <main>
+
+    <section id="hero" class="hero">
+      <h2>cc-lb 한눈에</h2>
+      <p>Claude Code · OpenCode · pi 같은 코딩 에이전트의 <code>ANTHROPIC_BASE_URL</code>만 cc-lb로 돌려주면, 그 안에서 <b>인증 브로커링 · 사용량 쿼터 · 감사 로그 · 메트릭</b>을 강제할 수 있는 Rust 정적 musl 바이너리입니다. 클라이언트 코드는 단 한 줄도 안 바꿔도 됩니다.</p>
+      <div class="qa">
+        <a href="#quick-start">2분 컷 Quick Start</a>
+        <a href="#decision" class="secondary">내 상황에 맞는 길 찾기</a>
+        <a href="#config-builder" class="secondary">Config 빌더 열기</a>
+      </div>
+    </section>
+
+    <section>
+      <p>이 가이드는 <b>레퍼런스가 아니라 use case 모음</b>입니다. "지금 내 상황이면 어떤 옵션을 켜야 하나" 한 가지만 골라서 따라하면 됩니다. 전체 옵션 레퍼런스가 필요하면 <a href="#cheatsheet">치트시트</a>와 <code>examples/cc-lb.toml</code>을 참고하세요.</p>
+    </section>
+
+    <h2 id="quick-start">Quick Start · 2분 컷</h2>
+    <p>실제 Anthropic API 키 하나만 있으면 됩니다. <span class="pill ok">검증된 흐름</span></p>
+
+    <ol class="steps">
+      <li>
+        <h3>빌드</h3>
+        <p>repo 루트에서:</p>
+        <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>cargo build --workspace
+# 결과: target/debug/cc-lb</code></pre><button class="copy">복사</button></div>
+        <p class="toc-meta">2분 이상 걸리면 정상입니다 (Wasmtime/Cranelift 의존성 포함). 한 번 빌드해두면 캐시됩니다.</p>
+      </li>
+
+      <li>
+        <h3>최소 config 파일 만들기</h3>
+        <p>아무 곳이나 <code>quickstart.toml</code> 생성:</p>
+        <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[listener]
+proxy_addr   = "127.0.0.1:8080"
+admin_addr   = "127.0.0.1:9090"
+metrics_addr = "127.0.0.1:9091"
+
+[body]
+messages_cap_bytes = 33554432
+files_cap_bytes    = 104857600
+
+[timeouts]
+request_header_secs     = 10
+request_body_chunk_secs = 30
+idle_secs               = 300
+upstream_total_secs     = 600
+drain_secs              = 60
+
+[upstreams.anthropic]
+kind          = "anthropic_direct"
+auth_strategy = "api_key"
+
+[principals.api-key]
+allowed_models = ["*"]
+
+[plugins]
+observability_hooks = []
+
+[storage]
+oauth_aead_key_env = "CC_LB_MASTER_KEY"
+
+[observability]
+tracing_level         = "info"
+log_redaction         = true
+user_prompt_redaction = false
+
+[quotas]
+default_window_secs         = 60
+default_requests_per_window = 1000
+default_input_tokens        = 1000000
+default_output_tokens       = 1000000
+
+[admin]
+token_env = "CC_LB_ADMIN_TOKEN"
+
+[circuit_breaker]
+failures_to_open     = 5
+window_secs          = 10
+half_open_after_secs = 30
+
+[bulkhead]
+max_conns_per_upstream  = 50
+semaphore_per_upstream  = 100
+
+[dns]
+cache_ttl_floor_secs   = 30
+cache_ttl_ceiling_secs = 300
+
+[egress]</code></pre><button class="copy">복사</button></div>
+        <div class="callout tip">
+          <span class="label">팁</span>
+          <a href="#config-builder">인터랙티브 Config 빌더</a>에서 옵션 골라 자동 생성할 수도 있습니다.
+        </div>
+      </li>
+
+      <li>
+        <h3>환경변수 (마스터키 + admin 토큰)</h3>
+        <p><code>[storage]</code>의 <code>oauth_aead_key_env</code>가 가리키는 변수와 <code>[admin]</code>의 <code>token_env</code>를 설정합니다. Quick start에서는 <code>redb_path</code>가 비어 있어 OAuth/quota 저장은 메모리 전용이지만, 마스터키 형식 검증은 통과해야 합니다.</p>
+        <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>export CC_LB_MASTER_KEY=$(openssl rand -hex 32)   # 64자 hex 필수
+export CC_LB_ADMIN_TOKEN=$(openssl rand -hex 24)</code></pre><button class="copy">복사</button></div>
+      </li>
+
+      <li>
+        <h3>띄우기 전에 한 번 검증</h3>
+        <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>./target/debug/cc-lb config validate --config quickstart.toml
+# &quot;validation: ok&quot; + 각 upstream &quot;probe: skipped (offline)&quot; → exit 0</code></pre><button class="copy">복사</button></div>
+        <p class="toc-meta">네트워크 호출 없이 TOML 파싱, 마스터키 형식, plugin dry-load, TLS 파일 존재만 확인합니다.</p>
+      </li>
+
+      <li>
+        <h3>서버 실행</h3>
+        <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>./target/debug/cc-lb serve --config quickstart.toml</code></pre><button class="copy">복사</button></div>
+        <p>3개 리스너가 동시에 뜹니다: <code>:8080</code> 프록시, <code>:9090</code> 관리 API + UI, <code>:9091</code> Prometheus.</p>
+      </li>
+
+      <li>
+        <h3>실제 Anthropic 키로 호출 (가장 중요한 단계)</h3>
+        <p>본인 Anthropic 키 (<code>sk-ant-api03-...</code>)를 <code>x-api-key</code>로 그대로 보내면 cc-lb가 그대로 forwarding합니다.</p>
+        <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 헬스 체크 먼저
+curl -s http://127.0.0.1:8080/healthz
+# 응답: ok
+
+# 실제 호출 (non-streaming)
+curl -s -X POST http://127.0.0.1:8080/v1/messages \
+  -H &quot;x-api-key: $YOUR_ANTHROPIC_KEY&quot; \
+  -H &quot;anthropic-version: 2023-06-01&quot; \
+  -H &quot;content-type: application/json&quot; \
+  -d &#39;{
+    &quot;model&quot;: &quot;claude-sonnet-4-5-20250929&quot;,
+    &quot;max_tokens&quot;: 32,
+    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;ping&quot;}]
+  }&#39;
+
+# 실제 호출 (SSE 스트리밍)
+curl -N -X POST http://127.0.0.1:8080/v1/messages \
+  -H &quot;x-api-key: $YOUR_ANTHROPIC_KEY&quot; \
+  -H &quot;anthropic-version: 2023-06-01&quot; \
+  -H &quot;content-type: application/json&quot; \
+  -d &#39;{
+    &quot;model&quot;: &quot;claude-sonnet-4-5-20250929&quot;,
+    &quot;max_tokens&quot;: 64,
+    &quot;stream&quot;: true,
+    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;stream please&quot;}]
+  }&#39;</code></pre><button class="copy">복사</button></div>
+      </li>
+
+      <li>
+        <h3>트래픽이 실제로 도는지 확인 (이게 "로드 밸런싱 검증")</h3>
+        <p>위 호출 직후:</p>
+        <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># Prometheus 카운터로 본 트래픽
+curl -s http://127.0.0.1:9091/metrics | grep -E &#39;^cc_lb_requests_total&#39;
+# upstream=&quot;anthropic&quot;, status=&quot;200&quot; 등이 값 1 이상으로 늘어야 함
+
+# Admin UI에서 시각적 확인 (브라우저)
+xdg-open http://127.0.0.1:9090/ 2&gt;/dev/null
+
+# Admin REST (감사 로그)
+curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
+  http://127.0.0.1:9090/admin/audit | head -c 400</code></pre><button class="copy">복사</button></div>
+        <div class="callout tip">
+          <span class="label">잘 됐나?</span>
+          <code>cc_lb_requests_total</code>이 늘었고 응답 본문이 정상 Anthropic JSON이면 프록시 path가 끝까지 통과한 것입니다. 이 상태에서 클라이언트(Claude Code, OpenCode 등)의 <code>ANTHROPIC_BASE_URL</code>을 <code>http://127.0.0.1:8080</code>로 바꾸면 됩니다.
+        </div>
+      </li>
+
+      <li>
+        <h3>클라이언트 붙이기</h3>
+        <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 예: Claude Code
+ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
+  ANTHROPIC_API_KEY=$YOUR_ANTHROPIC_KEY \
+  claude
+
+# 예: OpenCode
+ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
+  ANTHROPIC_API_KEY=$YOUR_ANTHROPIC_KEY \
+  opencode
+
+# 예: pi
+ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
+  ANTHROPIC_API_KEY=$YOUR_ANTHROPIC_KEY \
+  pi</code></pre><button class="copy">복사</button></div>
+        <p>이 시점부터 모든 호출이 cc-lb를 통과하며 메트릭/감사 로그에 잡힙니다.</p>
+      </li>
+
+      <li>
+        <h3>종료</h3>
+        <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># in-flight 요청 wait + force-close까지 graceful drain
+kill -TERM $(pgrep -f &#39;[c]c-lb serve&#39;)</code></pre><button class="copy">복사</button></div>
+        <p><code>SIGTERM</code>은 <code>drain_secs</code>만큼 in-flight 요청을 기다린 뒤 종료합니다. <code>SIGINT</code>(<kbd>Ctrl-C</kbd>)는 즉시 종료입니다.</p>
+      </li>
+    </ol>
+
+    <h2 id="decision">어느 길로 가야 할까</h2>
+    <p>아래 카드에서 본인 상황과 가장 가까운 항목을 누르세요. 각 use case는 같은 5단계 패턴입니다: <b>언제 / 현실 / 최소 config / 실행 / 확인</b>.</p>
+
+    <div class="cards">
+      <a href="#uc-proxy" class="card">
+        <span class="when">가장 흔함</span>
+        <h3>① 단순 프록시 + 로깅</h3>
+        <p>키 하나, 클라이언트는 그대로, 중앙에서 로그·메트릭·감사만 보고 싶을 때. Quick Start와 거의 동일.</p>
+      </a>
+      <a href="#uc-multi-key" class="card">
+        <span class="when">rate limit 회피</span>
+        <h3>② 여러 Anthropic 키 분산</h3>
+        <p>한 키가 한계라서 여러 키로 트래픽 나누고 싶을 때. <b>현실: 빌트인 router는 첫 upstream만 씀.</b> 실제 분산 방법 4가지.</p>
+      </a>
+      <a href="#uc-mix-provider" class="card">
+        <span class="when">멀티 클라우드</span>
+        <h3>③ Anthropic + Bedrock + Vertex 혼합</h3>
+        <p>모델별로 다른 provider 쓰고 싶을 때. SigV4 / GCP ADC 자동 처리.</p>
+      </a>
+      <a href="#uc-key-map" class="card">
+        <span class="when">키 보호</span>
+        <h3>④ 내부 키 → 실제 키 매핑</h3>
+        <p>팀에 발급한 내부 키 <code>ck-internal-*</code>를 실제 Anthropic 키로 매핑. 실제 키 절대 노출 X.</p>
+      </a>
+      <a href="#uc-oauth" class="card">
+        <span class="when">구독자</span>
+        <h3>⑤ Claude Pro OAuth 토큰</h3>
+        <p>Claude Pro 구독 토큰 (<code>sk-ant-oat01-*</code>)을 cc-lb 뒤에서 자동 refresh.</p>
+      </a>
+    </div>
+
+    <h2 id="uc-proxy">Use Case ① · 단순 프록시 + 로깅</h2>
+
+    <h4>언제</h4>
+    <ul>
+      <li>Anthropic 키 한 개를 팀 전체가 공유하고 있는데, 누가 얼마나 쓰는지 보고 싶다.</li>
+      <li>요청/응답을 감사 로그로 남기고 Prometheus로 SLO 보고 싶다.</li>
+      <li>클라이언트 코드/설정은 최소 변경.</li>
+    </ul>
+
+    <h4>현실</h4>
+    <ul>
+      <li>이게 cc-lb가 가장 잘하는 기본 path입니다. Plugin 불필요. Storage 불필요. <span class="pill ok">즉시 동작</span></li>
+      <li>키는 <code>x-api-key</code> 헤더 그대로 forwarding됩니다. cc-lb는 키 값 자체는 redact해서 로그에 남기고 메트릭에는 노출하지 않습니다.</li>
+    </ul>
+
+    <h4>최소 config 발췌</h4>
+    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[upstreams.anthropic]
+kind          = &quot;anthropic_direct&quot;
+auth_strategy = &quot;api_key&quot;
+
+[principals.api-key]
+allowed_models = [&quot;*&quot;]
+
+[observability]
+tracing_level = &quot;info&quot;
+log_redaction = true</code></pre><button class="copy">복사</button></div>
+
+    <h4>실행 + 확인</h4>
+    <p><a href="#quick-start">Quick Start</a> 그대로 따라가면 됩니다. <code>cc_lb_requests_total</code>이 호출마다 올라가는지만 확인하세요.</p>
+
+    <h2 id="uc-multi-key">Use Case ② · 여러 Anthropic 키 분산</h2>
+
+    <h4>언제</h4>
+    <ul>
+      <li>키 하나의 organization-level rate limit이 한계라서 여러 키로 트래픽을 분산하고 싶다.</li>
+      <li>키 별로 다른 결제/조직으로 쓰고 싶다.</li>
+    </ul>
+
+    <h4>현실 (꼭 읽기)</h4>
+    <div class="callout warn">
+      <span class="label">중요</span>
+      <b>cc-lb의 빌트인 라우터는 첫 upstream만 사용합니다.</b> <code>[upstreams.a]</code>, <code>[upstreams.b]</code> 두 개를 등록해도 빌트인 path는 항상 <code>a</code>로 갑니다. <b>round-robin / weighted / least-conn은 router plugin (Extism Wasm)으로 직접 구현해야 합니다.</b> 이건 의도된 설계입니다 — 분산 정책은 비즈니스 요구에 따라 달라서 코어에 박지 않았습니다.
+    </div>
+
+    <h4>대안 4가지</h4>
+    <ol>
+      <li>
+        <b>Principal 별로 다른 upstream 매핑</b> (router plugin 필요, 가장 단순)
+        <p>각 클라이언트가 다른 <code>x-api-key</code>를 들고 와서, 그 키를 보고 어느 upstream으로 보낼지 결정. 예: <code>plugin-internal-key-mapping</code>이 이 패턴.</p>
+      </li>
+      <li>
+        <b>커스텀 router plugin (round-robin)</b>
+        <p><code>examples/plugin-api-key/</code> 구조를 베이스로 router trait 구현. 약 100줄 Rust → <code>wasm32-wasip1</code> 빌드 → <code>[plugins].router_plugin</code>에 등록.</p>
+      </li>
+      <li>
+        <b>클라이언트 측 키 순환</b>
+        <p>cc-lb 앞에 nginx <code>upstream { server cc-lb-a; server cc-lb-b; }</code> 같이 두고 각 cc-lb 인스턴스마다 다른 키. cc-lb는 손 안 댐.</p>
+      </li>
+      <li>
+        <b>외부 HAProxy/Envoy</b>
+        <p>cc-lb 인스턴스 여러 개 띄우고 그 앞에 L7 LB. 관찰/감사는 cc-lb가, 분산은 외부 LB가 담당하는 분리 구조.</p>
+      </li>
+    </ol>
+
+    <h4>1번 (principal 별 매핑) 최소 config 발췌</h4>
+    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[upstreams.anthropic_pool_a]
+kind          = &quot;anthropic_direct&quot;
+auth_strategy = &quot;api_key&quot;
+
+[upstreams.anthropic_pool_b]
+kind          = &quot;anthropic_direct&quot;
+auth_strategy = &quot;api_key&quot;
+
+[plugins]
+authn_plugin  = { wasm_path = &quot;./plugins/plugin_api_key.wasm&quot; }
+router_plugin = { wasm_path = &quot;./plugins/my_router.wasm&quot; }
+# my_router.wasm: principal.id 보고 upstream 이름 반환</code></pre><button class="copy">복사</button></div>
+
+    <h4>2번 (custom router plugin) 스켈레톤</h4>
+    <p><code>examples/plugin-api-key/src/lib.rs</code>를 복사한 뒤 trait만 router 쪽으로 교체:</p>
+    <div class="codewrap"><span class="lang">rust</span><pre class="has-lang"><code>use extism_pdk::*;
+use serde::{Deserialize, Serialize};
+
+#[derive(Deserialize)]
+struct RouteInput { _version: u32, principal_id: String, /* ... */ }
+
+#[derive(Serialize)]
+struct RouteOutput { _version: u32, upstream: String }
+
+#[plugin_fn]
+pub fn route(Json(input): Json&lt;RouteInput&gt;) -&gt; FnResult&lt;Json&lt;RouteOutput&gt;&gt; {
+    // 간단한 round-robin: principal hash 기반
+    let pools = [&quot;anthropic_pool_a&quot;, &quot;anthropic_pool_b&quot;];
+    let idx = (input.principal_id.bytes().sum::&lt;u8&gt;() as usize) % pools.len();
+    Ok(Json(RouteOutput { _version: 1, upstream: pools[idx].into() }))
+}</code></pre><button class="copy">복사</button></div>
+
+    <h4>빌드 + 등록</h4>
+    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>rustup target add wasm32-wasip1
+cargo build --target wasm32-wasip1 --release -p my-router
+cp target/wasm32-wasip1/release/my_router.wasm ./plugins/
+# 그 후 cc-lb 재시작 (config 파일의 plugins.router_plugin 경로 가리키게)</code></pre><button class="copy">복사</button></div>
+
+    <h4>확인</h4>
+    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 다른 키로 두 번 호출
+curl -s http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: keyA&quot; ...
+curl -s http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: keyB&quot; ...
+
+# 메트릭에서 upstream 별로 분산됐는지 확인
+curl -s http://127.0.0.1:9091/metrics | grep cc_lb_requests_total
+# upstream=&quot;anthropic_pool_a&quot; 와 upstream=&quot;anthropic_pool_b&quot; 둘 다 카운트 증가</code></pre><button class="copy">복사</button></div>
+
+    <h2 id="uc-mix-provider">Use Case ③ · Anthropic + Bedrock + Vertex 혼합</h2>
+
+    <h4>언제</h4>
+    <ul>
+      <li>일부 모델은 AWS Bedrock에 enroll, 일부는 GCP Vertex, 일부는 Anthropic Direct.</li>
+      <li>클라이언트는 Anthropic API 하나만 알면 되고, cc-lb가 뒷단을 알아서 처리.</li>
+    </ul>
+
+    <h4>현실</h4>
+    <ul>
+      <li>4가지 signer가 자동 처리됩니다: <code>api_key</code>, <code>anthropic_oauth</code>, <code>aws_sigv4</code>, <code>gcp_oauth</code>. <span class="pill ok">검증됨</span></li>
+      <li>Bedrock 응답의 AWS event-stream은 cc-lb가 Anthropic SSE 형식으로 자동 변환합니다.</li>
+      <li>Bedrock/Vertex의 에러 JSON도 Anthropic 에러 형식으로 자동 normalize됩니다 (성공 응답은 그대로 passthrough).</li>
+      <li>여전히 빌트인 router 한계 적용 — 모델별 라우팅은 router plugin 필요. 하지만 <code>principals.<name>.allowed_models</code>로 거절은 가능.</li>
+    </ul>
+
+    <h4>최소 config 발췌</h4>
+    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[upstreams.anthropic]
+kind          = &quot;anthropic_direct&quot;
+auth_strategy = &quot;api_key&quot;
+
+[upstreams.bedrock]
+kind            = &quot;bedrock_runtime&quot;
+region          = &quot;us-east-1&quot;
+auth_strategy   = &quot;aws_sigv4&quot;
+credentials_ref = &quot;default&quot;     # ~/.aws/credentials 프로파일
+
+[upstreams.vertex]
+kind          = &quot;vertex&quot;
+project       = &quot;my-gcp-project&quot;
+region        = &quot;us-east5&quot;
+auth_strategy = &quot;gcp_oauth&quot;     # ADC 자동 사용
+
+[plugins]
+router_plugin = { wasm_path = &quot;./plugins/model_router.wasm&quot; }
+# model_router: request.body.model 보고 upstream 결정</code></pre><button class="copy">복사</button></div>
+
+    <h4>실행 + 확인</h4>
+    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># AWS / GCP credential은 표준 위치에 있어야 함
+export AWS_PROFILE=default
+export GOOGLE_APPLICATION_CREDENTIALS=~/.config/gcloud/application_default_credentials.json
+
+./target/debug/cc-lb config validate --config mix.toml
+./target/debug/cc-lb serve --config mix.toml
+
+# 본인이 enroll된 Bedrock 모델 ID로 호출
+curl -s http://127.0.0.1:8080/v1/messages \
+  -H &quot;x-api-key: dummy&quot; \
+  -H &quot;anthropic-version: 2023-06-01&quot; \
+  -d &#39;{
+    &quot;model&quot;: &quot;anthropic.claude-sonnet-4-5-20250929-v1:0&quot;,
+    &quot;max_tokens&quot;: 16,
+    &quot;messages&quot;: [{&quot;role&quot;:&quot;user&quot;,&quot;content&quot;:&quot;hi from bedrock&quot;}]
+  }&#39;</code></pre><button class="copy">복사</button></div>
+
+    <div class="callout warn">
+      <span class="label">주의</span>
+      Bedrock/Vertex 모델 ID는 provider 형식을 그대로 본문 <code>model</code>에 넣어야 합니다 — cc-lb는 변환하지 않습니다 (이건 의도, 모델명 자동 변환은 scope 밖).
+    </div>
+
+    <h2 id="uc-key-map">Use Case ④ · 내부 키 → 실제 키 매핑</h2>
+
+    <h4>언제</h4>
+    <ul>
+      <li>팀원/CI에 실제 <code>sk-ant-api03-*</code> 키를 절대 노출하고 싶지 않다.</li>
+      <li>내부 키 <code>ck-internal-alice</code>를 발급해서 cc-lb가 실제 키로 바꿔준다.</li>
+      <li>내부 키 회수/회전이 클라이언트 재배포 없이 가능.</li>
+    </ul>
+
+    <h4>현실</h4>
+    <ul>
+      <li><code>examples/plugin-internal-key-mapping/</code>가 정확히 이 use case 예제입니다. <span class="pill ok">동작 검증됨 (T35)</span></li>
+      <li>plugin이 들고 있는 매핑은 in-memory. 영속화하려면 plugin storage API (<code>cc_lb_storage_get/put</code>) 사용.</li>
+    </ul>
+
+    <h4>최소 config 발췌</h4>
+    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[upstreams.anthropic]
+kind          = &quot;anthropic_direct&quot;
+auth_strategy = &quot;api_key&quot;
+# 실제 키는 plugin이 주입하므로 여기엔 안 적음
+
+[plugins]
+authn_plugin = { wasm_path = &quot;./plugins/plugin_internal_key_mapping.wasm&quot; }
+
+[storage]
+redb_path          = &quot;/var/lib/cc-lb/cc-lb.redb&quot;   # 매핑 영속화 위해 필요
+oauth_aead_key_env = &quot;CC_LB_MASTER_KEY&quot;</code></pre><button class="copy">복사</button></div>
+
+    <h4>빌드 + 실행</h4>
+    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>rustup target add wasm32-wasip1
+cargo build --target wasm32-wasip1 --release -p plugin-internal-key-mapping
+mkdir -p plugins
+cp target/wasm32-wasip1/release/plugin_internal_key_mapping.wasm plugins/
+
+export CC_LB_MASTER_KEY=$(openssl rand -hex 32)
+export CC_LB_ADMIN_TOKEN=$(openssl rand -hex 24)
+
+./target/debug/cc-lb serve --config keymap.toml</code></pre><button class="copy">복사</button></div>
+
+    <h4>확인</h4>
+    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 내부 키로 호출하면 cc-lb 내부에서 실제 키로 교체되어 Anthropic으로 감
+curl -s http://127.0.0.1:8080/v1/messages \
+  -H &quot;x-api-key: ck-internal-alice&quot; \
+  -H &quot;anthropic-version: 2023-06-01&quot; \
+  -d &#39;{&quot;model&quot;:&quot;claude-sonnet-4-5-20250929&quot;,&quot;max_tokens&quot;:16,&quot;messages&quot;:[{&quot;role&quot;:&quot;user&quot;,&quot;content&quot;:&quot;hi&quot;}]}&#39;
+
+# 알 수 없는 내부 키는 401
+curl -s -i http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: ck-internal-unknown&quot; ...
+# → HTTP/1.1 401 authentication_error</code></pre><button class="copy">복사</button></div>
+
+    <h2 id="uc-oauth">Use Case ⑤ · Claude Pro OAuth 토큰</h2>
+
+    <h4>언제</h4>
+    <ul>
+      <li>본인이 Anthropic Pro 구독자이고 <code>sk-ant-oat01-*</code> 토큰을 cc-lb 뒤에 두고 싶다.</li>
+      <li>토큰 자동 refresh + 안전한 저장이 필요하다.</li>
+    </ul>
+
+    <h4>현실</h4>
+    <ul>
+      <li><code>examples/plugin-oauth-anthropic-pro/</code> + <code>anthropic_oauth</code> signer 조합. <span class="pill ok">자동 refresh + single-flight 검증됨 (T15)</span></li>
+      <li>토큰은 redb에 ChaCha20-Poly1305로 AEAD 암호화되어 저장됩니다. 마스터키 (<code>CC_LB_MASTER_KEY</code>) 없으면 복호화 불가.</li>
+      <li>최초 토큰 등록은 admin REST의 PKCE 흐름으로 합니다 (<code>POST /admin/oauth/start</code> → 본인 브라우저에서 인증 → callback → <code>POST /admin/oauth/complete</code>).</li>
+    </ul>
+
+    <h4>최소 config 발췌</h4>
+    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[upstreams.anthropic]
+kind          = &quot;anthropic_direct&quot;
+auth_strategy = &quot;anthropic_oauth&quot;     # ← api_key 아님
+
+[plugins]
+authn_plugin = { wasm_path = &quot;./plugins/plugin_oauth_anthropic_pro.wasm&quot; }
+
+[storage]
+redb_path          = &quot;/var/lib/cc-lb/cc-lb.redb&quot;   # 토큰 저장 위해 필수
+oauth_aead_key_env = &quot;CC_LB_MASTER_KEY&quot;
+
+[admin]
+token_env = &quot;CC_LB_ADMIN_TOKEN&quot;</code></pre><button class="copy">복사</button></div>
+
+    <h4>최초 토큰 등록 (PKCE)</h4>
+    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 1) 인증 URL 받기
+curl -s -X POST http://127.0.0.1:9090/admin/oauth/start \
+  -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
+  -H &quot;content-type: application/json&quot; \
+  -d &#39;{&quot;principal_id&quot;: &quot;me&quot;}&#39;
+# 응답에 들어있는 url을 브라우저에서 열고 Anthropic 로그인
+
+# 2) 브라우저가 콜백한 code를 cc-lb에 전달 (PKCE verifier는 1단계에서 받은 값)
+curl -s -X POST http://127.0.0.1:9090/admin/oauth/complete \
+  -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
+  -H &quot;content-type: application/json&quot; \
+  -d &#39;{&quot;principal_id&quot;:&quot;me&quot;,&quot;code&quot;:&quot;...&quot;,&quot;code_verifier&quot;:&quot;...&quot;}&#39;</code></pre><button class="copy">복사</button></div>
+
+    <h4>확인</h4>
+    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 이제 별도 x-api-key 없이도 (또는 임의 값으로) 호출 가능
+curl -s http://127.0.0.1:8080/v1/messages \
+  -H &quot;x-api-key: dummy&quot; \
+  -H &quot;anthropic-version: 2023-06-01&quot; \
+  -H &quot;anthropic-beta: oauth-2025-04-20&quot; \
+  -d &#39;{&quot;model&quot;:&quot;claude-sonnet-4-5-20250929&quot;,&quot;max_tokens&quot;:16,&quot;messages&quot;:[{&quot;role&quot;:&quot;user&quot;,&quot;content&quot;:&quot;hi&quot;}]}&#39;
+# 내부적으로 Authorization: Bearer sk-ant-oat01-... 으로 자동 변환되어 전송</code></pre><button class="copy">복사</button></div>
+
+    <h2 id="config-builder">Config 빌더 (인터랙티브)</h2>
+    <p>아래에서 옵션을 고르면 cc-lb.toml과 실행 커맨드가 실시간 갱신됩니다. 그대로 복사해서 쓰세요.</p>
+
+    <div class="builder">
+      <h3>Config 빌더</h3>
+
+      <div class="row">
+        <label>Upstream 종류</label>
+        <select id="b-upstream">
+          <option value="anthropic">Anthropic Direct (가장 흔함)</option>
+          <option value="bedrock">AWS Bedrock Runtime</option>
+          <option value="vertex">GCP Vertex AI</option>
+          <option value="custom">Custom (테스트/내부 게이트웨이)</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label>인증 방식</label>
+        <select id="b-auth">
+          <option value="api_key">api_key (x-api-key forwarding)</option>
+          <option value="anthropic_oauth">anthropic_oauth (Claude Pro 토큰)</option>
+          <option value="aws_sigv4">aws_sigv4 (Bedrock 전용)</option>
+          <option value="gcp_oauth">gcp_oauth (Vertex 전용)</option>
+        </select>
+      </div>
+
+      <div class="row">
+        <label>Bedrock region</label>
+        <input type="text" id="b-aws-region" value="us-east-1" />
+        <label>Vertex project / region</label>
+        <input type="text" id="b-gcp-project" value="my-project" />
+        <input type="text" id="b-gcp-region" value="us-east5" />
+      </div>
+
+      <div class="row">
+        <label>Custom base_url</label>
+        <input type="text" id="b-custom-url" value="http://127.0.0.1:9080" />
+      </div>
+
+      <div class="row">
+        <label class="check"><input type="checkbox" id="b-tls" /> TLS 켜기</label>
+        <label class="check"><input type="checkbox" id="b-storage" /> redb 저장소 켜기 (OAuth/Quota 영속화)</label>
+        <label class="check"><input type="checkbox" id="b-plugin" /> 플러그인 슬롯 비워두기 → 채워두기</label>
+      </div>
+
+      <div class="out">
+        <h4>생성된 cc-lb.toml</h4>
+        <div class="codewrap"><span class="lang">toml</span><pre class="has-lang" id="b-out-toml"></pre><button class="copy">복사</button></div>
+        <h4>실행 커맨드</h4>
+        <div class="codewrap"><span class="lang">bash</span><pre class="has-lang" id="b-out-cmd"></pre><button class="copy">복사</button></div>
+      </div>
+    </div>
+
+    <h2 id="observe">관찰 / Admin / Metrics</h2>
+
+    <h4>3개 리스너 분리</h4>
+    <table>
+      <tr><th>리스너</th><th>주소 (기본)</th><th>인증</th><th>용도</th></tr>
+      <tr><td>Proxy</td><td><code>0.0.0.0:8080</code></td><td>x-api-key 등</td><td>실제 트래픽</td></tr>
+      <tr><td>Admin</td><td><code>127.0.0.1:9090</code></td><td>Bearer (옵션)</td><td>관리 API + UI</td></tr>
+      <tr><td>Metrics</td><td><code>127.0.0.1:9091</code></td><td>없음 (내부 망 전제)</td><td>Prometheus scrape</td></tr>
+    </table>
+    <div class="callout warn">
+      <span class="label">운영 권장</span>
+      Admin/Metrics는 항상 <code>127.0.0.1</code> 또는 사설망 IP에 바인드하세요. Prometheus scrape도 같은 LAN/시그널 평면에서만 접근 가능하게.
+    </div>
+
+    <h4>핵심 메트릭</h4>
+    <table>
+      <tr><th>메트릭</th><th>의미</th></tr>
+      <tr><td><code>cc_lb_requests_total{principal,upstream,model,status}</code></td><td>모든 요청 카운터</td></tr>
+      <tr><td><code>cc_lb_breaker_state{upstream}</code></td><td>0=Closed / 1=HalfOpen / 2=Open</td></tr>
+      <tr><td><code>cc_lb_bulkhead_active{upstream}</code></td><td>현재 동시 처리 수</td></tr>
+      <tr><td><code>cc_lb_drain_in_progress</code></td><td>SIGTERM 후 drain 진행 중</td></tr>
+      <tr><td><code>cc_lb_tls_reload_total{outcome}</code> · <code>cc_lb_config_reload_total{outcome}</code></td><td>핫리로드 성공/실패</td></tr>
+      <tr><td><code>cc_lb_extism_failure_total{plugin,kind}</code></td><td>플러그인 패닉/OOM/fuel 등</td></tr>
+      <tr><td><code>cc_lb_aws_clock_skew_total</code></td><td>Bedrock SigV4 시계 skew 회수</td></tr>
+    </table>
+
+    <h4>Admin REST 빠른 참조</h4>
+    <table>
+      <tr><th>엔드포인트</th><th>설명</th></tr>
+      <tr><td><code>GET /admin/health</code></td><td>비인증 헬스</td></tr>
+      <tr><td><code>GET /admin/principals</code></td><td>principal 목록</td></tr>
+      <tr><td><code>GET /admin/principals/{id}/quota</code></td><td>현재 정책 + 카운터</td></tr>
+      <tr><td><code>POST /admin/principals/{id}/quota/override</code></td><td>런타임 정책 변경 (in-memory)</td></tr>
+      <tr><td><code>GET /admin/audit?from=&amp;to=&amp;limit=</code></td><td>감사 로그</td></tr>
+      <tr><td><code>GET /admin/upstreams</code></td><td>upstream 상태 (breaker/drain)</td></tr>
+      <tr><td><code>POST /admin/upstreams/{name}/drain</code></td><td>특정 upstream drain</td></tr>
+      <tr><td><code>POST /admin/killswitch</code> / <code>DELETE</code></td><td>전역 차단 토글</td></tr>
+      <tr><td><code>GET /admin/config/current</code></td><td>live config 스냅샷</td></tr>
+      <tr><td><code>POST /admin/config/reload</code></td><td>self SIGHUP</td></tr>
+      <tr><td><code>GET /</code></td><td>embedded admin UI (HTML)</td></tr>
+    </table>
+
+    <h2 id="ops">TLS · drain · 핫리로드</h2>
+
+    <h4>TLS 켜기</h4>
+    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[listener.tls]
+cert_path        = &quot;/etc/cc-lb/server.crt&quot;
+key_path         = &quot;/etc/cc-lb/server.key&quot;
+reload_on_sighup = true</code></pre><button class="copy">복사</button></div>
+    <p><code>kill -HUP</code> 보내면 cert만 atomic 교체. 인증서 갱신 시 cc-lb 재시작 불필요. 실패하면 이전 cert 유지.</p>
+
+    <h4>Config 핫리로드</h4>
+    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>vim /etc/cc-lb/prod.toml
+kill -HUP $(pgrep -x cc-lb)
+# 파일 watch + SIGHUP 둘 다 동작 (500ms debounce)
+# 즉시 반영: quota defaults
+# 재시작 필요: breaker / bulkhead / redaction (WARN 로그로 안내)</code></pre><button class="copy">복사</button></div>
+
+    <h4>Graceful drain</h4>
+    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>kill -TERM $(pgrep -x cc-lb)
+# 1. proxy listener는 새 요청 503 + Retry-After: 60 반환
+# 2. in-flight 요청은 timeouts.drain_secs 까지 대기
+# 3. 그 이후엔 force-close
+# 4. admin/metrics 리스너는 drain 중에도 살아있음 (메트릭 계속 scrape 가능)</code></pre><button class="copy">복사</button></div>
+
+    <h4>systemd unit 예시</h4>
+    <div class="codewrap"><span class="lang">ini</span><pre class="has-lang"><code>[Unit]
+Description=cc-lb Anthropic-compatible reverse proxy
+After=network-online.target
+
+[Service]
+EnvironmentFile=/etc/cc-lb/env       # CC_LB_MASTER_KEY, CC_LB_ADMIN_TOKEN
+ExecStart=/usr/local/bin/cc-lb serve --config /etc/cc-lb/prod.toml
+ExecReload=/bin/kill -HUP $MAINPID
+KillSignal=SIGTERM
+TimeoutStopSec=90s
+Restart=on-failure
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target</code></pre><button class="copy">복사</button></div>
+
+    <h2 id="trouble">트러블슈팅</h2>
+
+    <details>
+      <summary><code>/readyz</code>가 503 반환</summary>
+      <p>모든 upstream의 circuit breaker가 Open 상태이거나 drain 시작됨. 메트릭에서 <code>cc_lb_breaker_state{upstream}</code> 값 확인 (0=Closed, 1=HalfOpen, 2=Open). 한 upstream만 Open이어도 그 upstream으로 갈 요청은 503.</p>
+    </details>
+
+    <details>
+      <summary>실제 Anthropic 호출했는데 401</summary>
+      <p>키 자체가 잘못됐거나, OAuth 모드에 api_key를 보낸 경우. <code>tracing_level = "debug"</code>로 띄워서 어느 signer가 적용됐는지 로그로 확인. 키 값은 <code>[REDACTED]</code>으로 가려져 있으니 비교 불가 — 본인 측에서 키 다시 확인.</p>
+    </details>
+
+    <details>
+      <summary>여러 upstream 등록했는데 한 곳으로만 트래픽 감</summary>
+      <p>정상 동작입니다. 빌트인 router는 첫 upstream만 사용합니다. <a href="#uc-multi-key">Use Case ②</a>의 4가지 분산 방법 중 하나 선택하세요.</p>
+    </details>
+
+    <details>
+      <summary>Bedrock dialect로 fake fixture 테스트 안 됨</summary>
+      <p><code>bedrock_runtime</code>, <code>vertex</code>, <code>bedrock_mantle</code>, <code>anthropic_direct</code>는 base_url을 hardcode합니다. 로컬 fixture로 테스트하려면 <code>kind = "custom"</code>으로 base_url을 자유 지정해서 fake-anthropic을 띄우는 방식만 가능합니다. 운영에서는 실제 provider로 직행하므로 문제 없음.</p>
+    </details>
+
+    <details>
+      <summary><code>cargo build</code>가 forbidden dep 충돌로 실패</summary>
+      <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>cargo tree | grep -E &#39;reqwest|native-tls|openssl&#39;
+# deny.toml의 banned 리스트가 막아주지만 새 의존성 추가 시 주의</code></pre><button class="copy">복사</button></div>
+    </details>
+
+    <details>
+      <summary>musl 빌드가 openssl-probe / rustls-native-certs 끌어옴</summary>
+      <p><code>rustls</code> 또는 <code>gcp_auth</code>의 feature가 잘못 켜진 것. workspace의 <code>default-features = false</code>가 깨졌는지, <code>third_party/gcp_auth</code>의 patched feature가 유지되는지 확인.</p>
+    </details>
+
+    <h2 id="cheatsheet">치트시트 · 신호 / 환경변수 / 포트</h2>
+
+    <h4>신호</h4>
+    <table>
+      <tr><th>신호</th><th>동작</th></tr>
+      <tr><td><code>SIGTERM</code></td><td>Graceful drain (drain_secs 후 force-close)</td></tr>
+      <tr><td><code>SIGHUP</code></td><td>TLS reload → config reload (atomic ArcSwap, 실패시 이전 상태)</td></tr>
+      <tr><td><code>SIGINT</code> (Ctrl-C)</td><td>즉시 종료 (drain 안 함)</td></tr>
+    </table>
+
+    <h4>환경변수</h4>
+    <table>
+      <tr><th>변수</th><th>의미</th></tr>
+      <tr><td><code>CC_LB_MASTER_KEY</code></td><td>32바이트(64hex) AEAD 마스터키. OAuth/quota 저장에 필수.</td></tr>
+      <tr><td><code>CC_LB_ADMIN_TOKEN</code></td><td>Admin REST Bearer 토큰</td></tr>
+      <tr><td><code>CC_LB_&lt;SEC&gt;__&lt;FIELD&gt;</code></td><td>모든 TOML 필드 환경변수 오버라이드 (nested는 <code>__</code> 이중 언더스코어)</td></tr>
+      <tr><td><code>AWS_PROFILE</code> / 표준 AWS 환경변수</td><td>Bedrock SigV4 credential chain</td></tr>
+      <tr><td><code>GOOGLE_APPLICATION_CREDENTIALS</code></td><td>Vertex ADC</td></tr>
+    </table>
+
+    <h4>기본 포트</h4>
+    <table>
+      <tr><th>포트</th><th>리스너</th></tr>
+      <tr><td>8080</td><td>Proxy (HTTP/HTTPS)</td></tr>
+      <tr><td>9090</td><td>Admin REST + UI</td></tr>
+      <tr><td>9091</td><td>Prometheus metrics</td></tr>
+    </table>
+
+    <h4>유용한 한 줄</h4>
+    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 현재 떠있는 cc-lb 버전 + git SHA
+./target/debug/cc-lb --version
+
+# config 한 줄 변경 후 안전한 검증
+./target/debug/cc-lb config validate --config prod.toml
+
+# 트래픽 카운터만 빠르게
+curl -s http://127.0.0.1:9091/metrics | grep ^cc_lb_requests_total
+
+# 모든 upstream의 breaker 상태
+curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
+  http://127.0.0.1:9090/admin/upstreams | jq</code></pre><button class="copy">복사</button></div>
+
+    <h2 id="caveats">알려진 한계</h2>
+    <ul>
+      <li><b>빌트인 라우팅은 first-upstream 고정</b> — round-robin/weighted/least-conn은 router plugin 필요. <a href="#uc-multi-key">Use Case ②</a> 참고.</li>
+      <li><b>Anthropic Direct / Bedrock / Vertex dialect의 base_url 무시</b> — production hardcoded URL을 사용합니다. 로컬 e2e fixture는 <code>kind = "custom"</code>으로만 가능.</li>
+      <li><b>모델명 자동 변환 없음</b> — Bedrock/Vertex 모델 ID는 본문 <code>model</code>에 provider 형식 그대로 보내야 합니다.</li>
+      <li><b>cross-LLM 변환 없음</b> — Anthropic Messages API 형식만 지원. OpenAI/Gemini 형식 변환은 scope 밖.</li>
+      <li><b>스트리밍 ↔ 비스트리밍 변환 없음</b> — 요청 그대로 forwarding.</li>
+      <li><b>응답 캐싱 없음</b> — 매 요청마다 upstream 호출.</li>
+      <li><b>분산 모드 없음</b> — 단일 인스턴스 전제. 여러 인스턴스 띄우려면 외부 LB + 외부 redb 공유 필요 (현재 redb는 single-writer).</li>
+      <li><b>HTTP/3 / gRPC / WebSocket 없음</b> — Anthropic API가 HTTP/1.1+HTTP/2 SSE 기반이라 그 외 프로토콜은 미지원.</li>
+    </ul>
+
+  </main>
+</div>
+
+<footer>
+  cc-lb · Anthropic-compatible reverse proxy · 이 문서는 로컬 단일 파일입니다. 의문점은 <code>.omo/drafts/cc-lb-run-guide.md</code> 또는 <code>examples/cc-lb.toml</code>을 참고하세요.
+</footer>
+
+<script>
+(function () {
+  // ---------- 테마 토글 ----------
+  var root = document.documentElement;
+  var body = document.body;
+  var stored = localStorage.getItem('cc-lb-theme');
+  if (stored === 'light' || stored === 'dark') {
+    body.setAttribute('data-theme', stored);
+  }
+  var toggle = document.getElementById('theme-toggle');
+  function refreshIcon() {
+    toggle.textContent = body.getAttribute('data-theme') === 'dark' ? '☀️' : '🌙';
+  }
+  refreshIcon();
+  toggle.addEventListener('click', function () {
+    var next = body.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
+    body.setAttribute('data-theme', next);
+    localStorage.setItem('cc-lb-theme', next);
+    refreshIcon();
+  });
+
+  // ---------- 코드 복사 버튼 ----------
+  document.querySelectorAll('.codewrap').forEach(function (wrap) {
+    var btn = wrap.querySelector('.copy');
+    if (!btn) return;
+    btn.addEventListener('click', function () {
+      var pre = wrap.querySelector('pre');
+      if (!pre) return;
+      var text = pre.innerText;
+      navigator.clipboard.writeText(text).then(function () {
+        var orig = btn.textContent;
+        btn.textContent = '복사됨';
+        btn.classList.add('copied');
+        setTimeout(function () { btn.textContent = orig; btn.classList.remove('copied'); }, 1200);
+      }, function () {
+        btn.textContent = '복사 실패';
+        setTimeout(function () { btn.textContent = '복사'; }, 1200);
+      });
+    });
+  });
+
+  // ---------- 검색 필터 ----------
+  var search = document.getElementById('search');
+  var sections = Array.from(document.querySelectorAll('main section, main h2, main h3, main p, main li, main pre, main details'));
+  var contentMap = sections.map(function (el) {
+    return { el: el, text: (el.textContent || '').toLowerCase() };
+  });
+  search.addEventListener('input', function (e) {
+    var q = e.target.value.trim().toLowerCase();
+    if (!q) {
+      contentMap.forEach(function (it) { it.el.classList.remove('filter-hidden'); });
+      return;
+    }
+    // 검색 범위: <main> 안의 가장 큰 블록 단위(h2 ~ 다음 h2)로 보여주기
+    var headings = Array.from(document.querySelectorAll('main h2'));
+    var groups = [];
+    headings.forEach(function (h, i) {
+      var next = headings[i + 1] || null;
+      var group = [h];
+      var node = h.nextElementSibling;
+      while (node && node !== next) { group.push(node); node = node.nextElementSibling; }
+      groups.push(group);
+    });
+    groups.forEach(function (group) {
+      var text = group.map(function (n) { return n.textContent || ''; }).join(' ').toLowerCase();
+      var match = text.indexOf(q) !== -1;
+      group.forEach(function (n) {
+        if (match) n.classList.remove('filter-hidden');
+        else n.classList.add('filter-hidden');
+      });
+    });
+  });
+
+  // ---------- Sidebar 활성화 ----------
+  var navLinks = Array.from(document.querySelectorAll('.sidebar a'));
+  var sectionMap = navLinks.map(function (a) {
+    var id = a.getAttribute('href').replace('#', '');
+    return { link: a, el: document.getElementById(id) };
+  }).filter(function (x) { return x.el; });
+  function onScroll() {
+    var y = window.scrollY + 80;
+    var current = sectionMap[0];
+    for (var i = 0; i < sectionMap.length; i++) {
+      if (sectionMap[i].el.offsetTop <= y) current = sectionMap[i];
+    }
+    navLinks.forEach(function (a) { a.classList.remove('active'); });
+    if (current) current.link.classList.add('active');
+  }
+  window.addEventListener('scroll', onScroll, { passive: true });
+  onScroll();
+
+  // ---------- Config builder ----------
+  var bUpstream = document.getElementById('b-upstream');
+  var bAuth = document.getElementById('b-auth');
+  var bAwsRegion = document.getElementById('b-aws-region');
+  var bGcpProject = document.getElementById('b-gcp-project');
+  var bGcpRegion = document.getElementById('b-gcp-region');
+  var bCustomUrl = document.getElementById('b-custom-url');
+  var bTls = document.getElementById('b-tls');
+  var bStorage = document.getElementById('b-storage');
+  var bPlugin = document.getElementById('b-plugin');
+  var outToml = document.getElementById('b-out-toml');
+  var outCmd = document.getElementById('b-out-cmd');
+
+  function renderBuilder() {
+    var up = bUpstream.value;
+    var auth = bAuth.value;
+    var toml = '';
+    toml += '[listener]\n';
+    toml += 'proxy_addr   = "127.0.0.1:8080"\n';
+    toml += 'admin_addr   = "127.0.0.1:9090"\n';
+    toml += 'metrics_addr = "127.0.0.1:9091"\n\n';
+
+    if (bTls.checked) {
+      toml += '[listener.tls]\n';
+      toml += 'cert_path        = "/etc/cc-lb/server.crt"\n';
+      toml += 'key_path         = "/etc/cc-lb/server.key"\n';
+      toml += 'reload_on_sighup = true\n\n';
+    }
+
+    toml += '[body]\n';
+    toml += 'messages_cap_bytes = 33554432\n';
+    toml += 'files_cap_bytes    = 104857600\n\n';
+    toml += '[timeouts]\n';
+    toml += 'request_header_secs     = 10\n';
+    toml += 'request_body_chunk_secs = 30\n';
+    toml += 'idle_secs               = 300\n';
+    toml += 'upstream_total_secs     = 600\n';
+    toml += 'drain_secs              = 60\n\n';
+
+    // upstream 블록
+    if (up === 'anthropic') {
+      toml += '[upstreams.anthropic]\n';
+      toml += 'kind          = "anthropic_direct"\n';
+      toml += 'auth_strategy = "' + auth + '"\n\n';
+    } else if (up === 'bedrock') {
+      toml += '[upstreams.bedrock]\n';
+      toml += 'kind            = "bedrock_runtime"\n';
+      toml += 'region          = "' + bAwsRegion.value + '"\n';
+      toml += 'auth_strategy   = "' + (auth === 'aws_sigv4' ? 'aws_sigv4' : 'aws_sigv4') + '"\n';
+      toml += 'credentials_ref = "default"\n\n';
+    } else if (up === 'vertex') {
+      toml += '[upstreams.vertex]\n';
+      toml += 'kind          = "vertex"\n';
+      toml += 'project       = "' + bGcpProject.value + '"\n';
+      toml += 'region        = "' + bGcpRegion.value + '"\n';
+      toml += 'auth_strategy = "gcp_oauth"\n\n';
+    } else if (up === 'custom') {
+      toml += '[upstreams.custom_gw]\n';
+      toml += 'kind          = "custom"\n';
+      toml += 'base_url      = "' + bCustomUrl.value + '"\n';
+      toml += 'auth_strategy = "' + auth + '"\n\n';
+    }
+
+    toml += '[principals.api-key]\n';
+    toml += 'allowed_models = ["*"]\n\n';
+
+    toml += '[plugins]\n';
+    if (bPlugin.checked) {
+      toml += 'authn_plugin  = { wasm_path = "./plugins/plugin_api_key.wasm" }\n';
+      toml += '# router_plugin = { wasm_path = "./plugins/my_router.wasm" }\n';
+    }
+    toml += 'observability_hooks = []\n\n';
+
+    toml += '[storage]\n';
+    if (bStorage.checked) {
+      toml += 'redb_path          = "/var/lib/cc-lb/cc-lb.redb"\n';
+    }
+    toml += 'oauth_aead_key_env = "CC_LB_MASTER_KEY"\n\n';
+
+    toml += '[observability]\n';
+    toml += 'tracing_level         = "info"\n';
+    toml += 'log_redaction         = true\n';
+    toml += 'user_prompt_redaction = false\n\n';
+
+    toml += '[quotas]\n';
+    toml += 'default_window_secs         = 60\n';
+    toml += 'default_requests_per_window = 1000\n';
+    toml += 'default_input_tokens        = 1000000\n';
+    toml += 'default_output_tokens       = 1000000\n\n';
+
+    toml += '[admin]\n';
+    toml += 'token_env = "CC_LB_ADMIN_TOKEN"\n\n';
+
+    toml += '[circuit_breaker]\n';
+    toml += 'failures_to_open     = 5\n';
+    toml += 'window_secs          = 10\n';
+    toml += 'half_open_after_secs = 30\n\n';
+
+    toml += '[bulkhead]\n';
+    toml += 'max_conns_per_upstream  = 50\n';
+    toml += 'semaphore_per_upstream  = 100\n\n';
+
+    toml += '[dns]\n';
+    toml += 'cache_ttl_floor_secs   = 30\n';
+    toml += 'cache_ttl_ceiling_secs = 300\n\n';
+
+    toml += '[egress]\n';
+
+    outToml.textContent = toml;
+
+    // 커맨드 부분
+    var cmd = '';
+    cmd += '# 1) 환경변수\n';
+    cmd += 'export CC_LB_MASTER_KEY=$(openssl rand -hex 32)\n';
+    cmd += 'export CC_LB_ADMIN_TOKEN=$(openssl rand -hex 24)\n';
+    if (up === 'bedrock') cmd += 'export AWS_PROFILE=default\n';
+    if (up === 'vertex') cmd += 'export GOOGLE_APPLICATION_CREDENTIALS=~/.config/gcloud/application_default_credentials.json\n';
+    cmd += '\n# 2) 위 toml을 cc-lb.toml로 저장 후 validate\n';
+    cmd += './target/debug/cc-lb config validate --config cc-lb.toml\n';
+    cmd += '\n# 3) 실행\n';
+    cmd += './target/debug/cc-lb serve --config cc-lb.toml\n';
+    cmd += '\n# 4) 호출 (model은 사용 중인 provider에 맞춰 조정)\n';
+    var sampleModel = up === 'bedrock'
+      ? 'anthropic.claude-sonnet-4-5-20250929-v1:0'
+      : 'claude-sonnet-4-5-20250929';
+    cmd += 'curl -s -X POST http://127.0.0.1:8080/v1/messages \\\n';
+    cmd += '  -H "x-api-key: $YOUR_KEY" \\\n';
+    cmd += '  -H "anthropic-version: 2023-06-01" \\\n';
+    cmd += '  -H "content-type: application/json" \\\n';
+    cmd += '  -d \'{"model":"' + sampleModel + '","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}\'\n';
+    outCmd.textContent = cmd;
+  }
+  ['change', 'input'].forEach(function (evt) {
+    [bUpstream, bAuth, bAwsRegion, bGcpProject, bGcpRegion, bCustomUrl, bTls, bStorage, bPlugin].forEach(function (el) {
+      el.addEventListener(evt, renderBuilder);
+    });
+  });
+  renderBuilder();
+})();
+</script>
+</body>
+</html>
