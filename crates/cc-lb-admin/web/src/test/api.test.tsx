@@ -13,6 +13,14 @@ global.localStorage = {
 import { ApiError, getJson, postJson } from '../lib/api';
 import { clearAdminToken, setAdminToken } from '../lib/auth';
 
+function mockFetch(
+  impl: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
+): typeof fetch {
+  return Object.assign(mock(impl), {
+    preconnect: () => {},
+  }) as unknown as typeof fetch;
+}
+
 describe('API Client', () => {
   const originalFetch = global.fetch;
 
@@ -27,35 +35,31 @@ describe('API Client', () => {
   it('getJson adds auth header and parses json', async () => {
     setAdminToken('test-token');
 
-    global.fetch = mock(
-      async (_input: RequestInfo | URL, init?: RequestInit) => {
-        expect(init?.headers).toBeDefined();
-        const headers = new Headers(init?.headers);
-        expect(headers.get('Authorization')).toBe('Bearer test-token');
+    global.fetch = mockFetch(async (_input, init) => {
+      expect(init?.headers).toBeDefined();
+      const headers = new Headers(init?.headers);
+      expect(headers.get('Authorization')).toBe('Bearer test-token');
 
-        return new Response(JSON.stringify({ success: true }), {
-          status: 200,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      },
-    );
+      return new Response(JSON.stringify({ success: true }), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
 
     const result = await getJson<{ success: boolean }>('/test');
     expect(result.success).toBe(true);
   });
 
   it('postJson sends body and parses json', async () => {
-    global.fetch = mock(
-      async (_input: RequestInfo | URL, init?: RequestInit) => {
-        expect(init?.method).toBe('POST');
-        expect(init?.body).toBe(JSON.stringify({ foo: 'bar' }));
+    global.fetch = mockFetch(async (_input, init) => {
+      expect(init?.method).toBe('POST');
+      expect(init?.body).toBe(JSON.stringify({ foo: 'bar' }));
 
-        return new Response(JSON.stringify({ created: true }), {
-          status: 201,
-          headers: { 'Content-Type': 'application/json' },
-        });
-      },
-    );
+      return new Response(JSON.stringify({ created: true }), {
+        status: 201,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
 
     const result = await postJson<{ created: boolean }, { foo: string }>(
       '/test',
@@ -65,7 +69,7 @@ describe('API Client', () => {
   });
 
   it('throws ApiError on non-2xx response', async () => {
-    global.fetch = mock(async () => {
+    global.fetch = mockFetch(async () => {
       return new Response(
         JSON.stringify({ code: 'bad_request', message: 'Invalid input' }),
         {
@@ -77,7 +81,7 @@ describe('API Client', () => {
 
     try {
       await getJson('/test');
-      expect(true).toBe(false); // Should not reach here
+      expect(true).toBe(false);
     } catch (err) {
       expect(err).toBeInstanceOf(ApiError);
       const apiErr = err as ApiError;
@@ -88,13 +92,13 @@ describe('API Client', () => {
   });
 
   it('throws ApiError with unauthorized code on 401', async () => {
-    global.fetch = mock(async () => {
+    global.fetch = mockFetch(async () => {
       return new Response(null, { status: 401 });
     });
 
     try {
       await getJson('/test');
-      expect(true).toBe(false); // Should not reach here
+      expect(true).toBe(false);
     } catch (err) {
       expect(err).toBeInstanceOf(ApiError);
       const apiErr = err as ApiError;
