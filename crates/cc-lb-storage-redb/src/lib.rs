@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+mod adapter;
 mod audit;
 mod config_store;
 mod limit_state;
