@@ -1,5 +1,5 @@
 [package]
-name = "cc-lb-crash-recovery-tests"
+name = "tests-crash-recovery"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,7 +7,8 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
-cc-lb-storage-redb = { path = "../../crates/cc-lb-storage-redb" }
+cc-lb-core = { path = "../../crates/cc-lb-core" }
+cc-lb-storage-redb = { path = "../../crates/cc-lb-storage-redb", features = ["crash-test-hooks"] }
 redb.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true

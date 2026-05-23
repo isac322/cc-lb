@@ -140,3 +140,22 @@ impl Storage {
         migration::set_killswitch_enabled(&self.db, enabled)
     }
 }
+
+#[cfg(any(test, feature = "crash-test-hooks"))]
+pub(crate) fn crash_test_sentinel_sleep(env_name: &str) {
+    if std::env::var_os(env_name).is_none() {
+        return;
+    }
+
+    if let Some(control_dir) = std::env::var_os("CC_LB_CRASH_CONTROL_DIR") {
+        let _ = std::fs::write(
+            std::path::PathBuf::from(control_dir).join("pending_tx_started"),
+            b"started",
+        );
+    }
+    std::thread::sleep(std::time::Duration::from_secs(60));
+}
+
+#[cfg(not(any(test, feature = "crash-test-hooks")))]
+#[inline]
+pub(crate) fn crash_test_sentinel_sleep(_: &str) {}

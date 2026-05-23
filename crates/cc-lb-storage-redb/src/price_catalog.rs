@@ -28,6 +28,7 @@ impl Storage {
             let mut table = write_txn.open_table(PRICE_CATALOG_V1)?;
             table.insert(PRICE_CATALOG_ROW_KEY, encoded.as_slice())?;
         }
+        crate::crash_test_sentinel_sleep("CC_LB_CRASH_SENTINEL_PRICE_CATALOG");
         write_txn.commit()?;
         Ok(())
     }
