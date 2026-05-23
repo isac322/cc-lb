@@ -29,6 +29,9 @@ jobs:
 
   nextest:
     runs-on: ubuntu-latest
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - name: Free up disk space on runner
         uses: jlumbroso/free-disk-space@v1.3.1
