@@ -18,6 +18,7 @@ axum.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
+serde_yaml = "0.9"
 tokio.workspace = true
 rust-embed.workspace = true
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }

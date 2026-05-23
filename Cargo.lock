@@ -672,6 +672,7 @@ dependencies = [
  "secrecy",
  "serde",
  "serde_json",
+ "serde_yaml",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -741,6 +742,7 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "insta",
+ "loom",
  "metrics",
  "parking_lot",
  "rand 0.8.6",
@@ -756,16 +758,6 @@ dependencies = [
  "tracing",
  "ulid",
  "url",
-]
-
-[[package]]
-name = "cc-lb-crash-recovery-tests"
-version = "0.1.0"
-dependencies = [
- "cc-lb-storage-redb",
- "redb",
- "serde_json",
- "tempfile",
 ]
 
 [[package]]
@@ -823,13 +815,6 @@ dependencies = [
  "serde_json",
  "tokio",
  "url",
-]
-
-[[package]]
-name = "cc-lb-loom-tests"
-version = "0.1.0"
-dependencies = [
- "loom",
 ]
 
 [[package]]
@@ -5385,6 +5370,49 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
 dependencies = [
  "winapi-util",
+]
+
+[[package]]
+name = "tests-crash-recovery"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-core",
+ "cc-lb-storage-redb",
+ "redb",
+ "serde_json",
+ "tempfile",
+]
+
+[[package]]
+name = "tests-integration"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-config",
+ "cc-lb-pricing",
+ "cc-lb-server",
+ "cc-lb-storage-redb",
+ "reqwest",
+ "serde_json",
+ "serde_yaml",
+ "tempfile",
+ "tokio",
+ "url",
+ "wiremock",
+]
+
+[[package]]
+name = "tests-loom"
+version = "0.1.0"
+dependencies = [
+ "arc-swap",
+ "bincode 1.3.3",
+ "cc-lb-storage-redb",
+ "dashmap",
+ "globset",
+ "loom",
+ "metrics",
+ "parking_lot",
+ "serde",
 ]
 
 [[package]]

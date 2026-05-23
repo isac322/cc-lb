@@ -4,7 +4,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
@@ -52,7 +52,7 @@ use crate::preflight::{self, PreflightOptions};
 use crate::reload::ConfigWatcher;
 use crate::signal;
 use crate::tls::{ReloadableListener, TlsState};
-use cc_lb_admin::{AdminState, CurrentConfig};
+use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig};
 
 pub struct App {
     pub router: Router,
@@ -246,6 +246,10 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
     if let Some(audit_sink) = audit_sink.clone() {
         lifecycle = lifecycle.with_audit_sink(audit_sink);
     }
+    lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), authn.clone());
+    if let Some(storage) = storage.clone() {
+        lifecycle = lifecycle.with_request_event_storage(storage);
+    }
     let lifecycle = Arc::new(lifecycle);
 
     let start_time = std::time::Instant::now();
@@ -277,7 +281,10 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
     };
     let admin_config: Arc<dyn CurrentConfig> = match &config_watcher {
         Some(watcher) => watcher.clone(),
-        None => Arc::new(config.clone()),
+        None => Arc::new(InMemoryCurrentConfig::new(
+            config.clone(),
+            principal_view.clone(),
+        )),
     };
     let admin_state = AdminState {
         storage: storage.clone(),
@@ -306,6 +313,57 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
         drain_controller,
         tls_state,
     })
+}
+
+struct InMemoryCurrentConfig {
+    current: ArcSwap<Config>,
+    draft: Mutex<Option<Config>>,
+    principal_view: Arc<ArcSwap<PrincipalView>>,
+}
+
+impl InMemoryCurrentConfig {
+    fn new(config: Config, principal_view: Arc<ArcSwap<PrincipalView>>) -> Self {
+        Self {
+            current: ArcSwap::from_pointee(config),
+            draft: Mutex::new(None),
+            principal_view,
+        }
+    }
+}
+
+impl CurrentConfig for InMemoryCurrentConfig {
+    fn current_config(&self) -> Arc<Config> {
+        self.current.load_full()
+    }
+
+    fn put_draft_config(&self, config: Config) -> Result<(), ConfigDraftError> {
+        config
+            .validate()
+            .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
+        let mut draft = self
+            .draft
+            .lock()
+            .map_err(|_| ConfigDraftError::Invalid("config draft lock poisoned".to_owned()))?;
+        *draft = Some(config);
+        Ok(())
+    }
+
+    fn apply_draft_config(&self) -> Result<Arc<Config>, ConfigDraftError> {
+        let config = self
+            .draft
+            .lock()
+            .map_err(|_| ConfigDraftError::Invalid("config draft lock poisoned".to_owned()))?
+            .take()
+            .ok_or(ConfigDraftError::MissingDraft)?;
+        config
+            .validate()
+            .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
+        self.principal_view
+            .store(PrincipalView::from_config(&config));
+        let config = Arc::new(config);
+        self.current.store(config.clone());
+        Ok(config)
+    }
 }
 
 #[derive(Clone)]

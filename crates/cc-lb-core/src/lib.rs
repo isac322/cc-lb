@@ -35,7 +35,7 @@ pub use error_normalizer::{ErrorNormalizer, NormalizerError, UpstreamKind};
 pub use hop_by_hop::{strip_hop_by_hop, HopByHopStripLayer, HopByHopStripService};
 pub use lifecycle::{
     ApiKeyAwareSignerFactory, Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig,
-    ProxyError, UpstreamDispatch,
+    LimitSubject, LimitSubjectProvider, ProxyError, UpstreamDispatch,
 };
 pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};
 pub use sse_relay::{RelayError, SseBatchConfig, SseRelay, StreamingUsage};

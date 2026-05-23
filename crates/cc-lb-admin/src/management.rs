@@ -224,6 +224,43 @@ pub fn issue_principal_key(
     })
 }
 
+pub fn get_principal_key(
+    state: &AdminState,
+    principal_id: String,
+    key_id: String,
+) -> Result<ApiKeyRecord> {
+    let storage = state
+        .storage
+        .as_ref()
+        .ok_or(ManagementError::StorageUnavailable)?;
+    let key_store = KeyStore::new(storage.clone());
+    if !principal_exists_in_current_or_draft(state, &principal_id) {
+        return Err(ManagementError::UnknownPrincipal);
+    }
+
+    let record = find_key_by_id(&key_store, &principal_id, &key_id)?
+        .ok_or(ManagementError::UnknownApiKey)?;
+
+    Ok(ApiKeyRecord {
+        key_id,
+        label: if record.label.is_empty() {
+            None
+        } else {
+            Some(record.label)
+        },
+        issued_at_unix_secs: record.issued_at_unix_secs,
+        revoked_at_unix_secs: record.revoked_at_unix_secs,
+        status: record.status,
+        last_4: record.last_4,
+        expires_at_unix_secs: record.expires_at_unix_secs,
+        upstream_kind: record.upstream_kind,
+        upstream_credential_ref: record.upstream_credential_ref,
+        limit_overrides: record.limit_overrides,
+        description: record.description,
+        principal_kind: record.principal_kind,
+    })
+}
+
 pub fn list_principal_keys(state: &AdminState, principal_id: String) -> Result<KeyListResponse> {
     let storage = state
         .storage

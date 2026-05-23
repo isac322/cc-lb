@@ -3,9 +3,11 @@ use axum::{
     http::{header, StatusCode},
     middleware,
     response::IntoResponse,
-    routing::{delete, get, patch, post},
+    routing::{delete, get, post, put},
     Json, Router,
 };
+use bytes::Bytes;
+use cc_lb_config::Config;
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -31,7 +33,7 @@ pub fn build_router(state: AdminState) -> Router {
         )
         .route(
             "/admin/principals/{id}/keys/{key_id}",
-            patch(update_principal_key),
+            get(get_principal_key).patch(update_principal_key),
         )
         .route(
             "/admin/principals/{id}/keys/{key_id}/revoke",
@@ -58,6 +60,8 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/admin/oauth/start", post(crate::oauth::start_oauth))
         .route("/admin/oauth/complete", post(crate::oauth::complete_oauth))
         .route("/admin/config/current", get(get_config))
+        .route("/admin/config/draft", put(put_config_draft))
+        .route("/admin/config/apply", post(apply_config_draft))
         .route("/admin/config/reload", post(reload_config))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -194,6 +198,60 @@ async fn get_config(State(state): State<AdminState>) -> Result<Json<Value>, Stat
     Ok(Json(config_json))
 }
 
+async fn put_config_draft(
+    State(state): State<AdminState>,
+    body: Bytes,
+) -> axum::response::Response {
+    let config = match parse_config_draft(&body) {
+        Ok(config) => config,
+        Err(message) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": { "message": message } })),
+            )
+                .into_response();
+        }
+    };
+
+    match state.config.put_draft_config(config) {
+        Ok(()) => Json(json!({ "status": "draft_saved" })).into_response(),
+        Err(error) => config_draft_error_response(error),
+    }
+}
+
+async fn apply_config_draft(State(state): State<AdminState>) -> axum::response::Response {
+    match state.config.apply_draft_config() {
+        Ok(config) => Json(json!({
+            "status": "applied",
+            "principal_count": config.principals.len(),
+        }))
+        .into_response(),
+        Err(error) => config_draft_error_response(error),
+    }
+}
+
+fn parse_config_draft(body: &[u8]) -> Result<Config, String> {
+    match serde_yaml::from_slice::<Config>(body) {
+        Ok(config) => Ok(config),
+        Err(yaml_error) => serde_json::from_slice::<Config>(body).map_err(|json_error| {
+            format!("failed to parse draft as YAML ({yaml_error}) or JSON ({json_error})")
+        }),
+    }
+}
+
+fn config_draft_error_response(error: crate::ConfigDraftError) -> axum::response::Response {
+    let status = match error {
+        crate::ConfigDraftError::Unavailable => StatusCode::NOT_IMPLEMENTED,
+        crate::ConfigDraftError::MissingDraft => StatusCode::NOT_FOUND,
+        crate::ConfigDraftError::Invalid(_) => StatusCode::BAD_REQUEST,
+    };
+    (
+        status,
+        Json(json!({ "error": { "message": error.to_string() } })),
+    )
+        .into_response()
+}
+
 async fn reload_config(State(_state): State<AdminState>) -> Result<Json<Value>, StatusCode> {
     #[cfg(unix)]
     {
@@ -223,6 +281,16 @@ async fn list_principal_keys(
     Path(id): Path<String>,
 ) -> axum::response::Response {
     match management::list_principal_keys(&state, id) {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => management_error_response(error),
+    }
+}
+
+async fn get_principal_key(
+    State(state): State<AdminState>,
+    Path((id, key_id)): Path<(String, String)>,
+) -> axum::response::Response {
+    match management::get_principal_key(&state, id, key_id) {
         Ok(response) => Json(response).into_response(),
         Err(error) => management_error_response(error),
     }
