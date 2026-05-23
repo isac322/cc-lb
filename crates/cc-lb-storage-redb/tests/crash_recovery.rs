@@ -3,7 +3,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cc_lb_storage_redb::{AuditEntry, BucketKind, RedbStorage};
+use cc_lb_storage_redb::{AuditEntry, Storage};
 
 #[test]
 fn killed_writer_leaves_database_reopenable() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,22 +27,33 @@ fn killed_writer_leaves_database_reopenable() -> Result<(), Box<dyn std::error::
     let status = child.wait()?;
     println!("child status after SIGKILL attempt: {status}");
 
-    let storage = RedbStorage::open(&path)?;
-    let parent_count = storage.incr_quota("parent", 1, BucketKind::Requests, 1)?;
+    let storage = Storage::open(&path, [23; 32])?;
+    storage.append_audit(&AuditEntry {
+        ts: 1_800_000_000,
+        request_id: "crash-parent-probe".to_owned(),
+        principal_id: "parent".to_owned(),
+        route: "messages".to_owned(),
+        upstream: "anthropic_direct".to_owned(),
+        model: Some("claude-sonnet-4-5".to_owned()),
+        status: 200,
+        input_tokens: 1,
+        output_tokens: 1,
+        duration_ms: 1,
+        agent_label: Some("crash-parent".to_owned()),
+    })?;
     let audit_rows = storage.query_audit(None, 0, u64::MAX, usize::MAX)?;
     println!(
-        "reopened after killed writer; parent counter={parent_count}; readable audit rows={}",
+        "reopened after killed writer; readable audit rows={}",
         audit_rows.len()
     );
 
-    assert_eq!(parent_count, 1);
+    assert!(!audit_rows.is_empty());
     Ok(())
 }
 
 fn child_writer(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let storage = RedbStorage::open(path)?;
+    let storage = Storage::open(path, [23; 32])?;
     for index in 0..10_000 {
-        storage.incr_quota("child", index % 8, BucketKind::Requests, 1)?;
         storage.append_audit(&AuditEntry {
             ts: 1_700_000_000 + index,
             request_id: format!("crash-{index}"),
@@ -55,10 +66,8 @@ fn child_writer(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             output_tokens: 2,
             duration_ms: 3,
             agent_label: Some("crash-child".to_owned()),
-            kind: None,
-            payload: None,
         })?;
-        if index.is_multiple_of(64) {
+        if index % 64 == 0 {
             thread::sleep(Duration::from_millis(1));
         }
     }

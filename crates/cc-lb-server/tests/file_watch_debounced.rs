@@ -30,8 +30,5 @@ async fn file_watch_debounced() {
     let _ = task.await;
 
     assert_eq!(watcher.reload_attempts(), 1);
-    assert_eq!(
-        watcher.current_config().quotas.default_requests_per_window,
-        105
-    );
+    assert_eq!(watcher.current_config().body.messages_cap_bytes, 105);
 }

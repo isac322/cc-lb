@@ -1,38 +1,25 @@
 #![forbid(unsafe_code)]
 
-mod adapter;
 mod audit;
-mod config_store;
 mod key_index;
-mod limit_state;
 mod migration;
 mod oauth;
 pub mod price_catalog;
 mod request_events;
-mod usage_rollups;
 
 use std::path::Path;
 use std::sync::Arc;
 
-use cc_lb_storage_api::BackendKind;
 use redb::{Database, TableDefinition};
 use thiserror::Error;
 
 pub use audit::AuditEntry;
-pub use config_store::{ConfigDraftState, HistoryEntry, HistorySummary};
-pub use limit_state::{
-    principal_limit_state_key, PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState,
-};
 pub use oauth::{
-    api_key_storage_key, oauth_key, ApiKeyMutation, ApiKeyRecord, IssueParams, IssuedKey,
-    KeyStatus, Limit, LimitKind, OAuthCredentials, PrincipalKindLite, StoredApiKeyRecord,
-    UpstreamKind,
+    api_key_storage_key, oauth_key, ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind,
+    OAuthCredentials, PrincipalKindLite, StoredApiKeyRecord, UpstreamKind,
 };
 pub use price_catalog::PriceSnapshot;
-pub use request_events::{RequestEvent, RequestEventUpstream};
-pub use usage_rollups::{
-    usage_rollup_key, UsageRollup, UsageRollupKey, UsageRollupResolution, UsageRollupRun,
-};
+pub use request_events::RequestEvent;
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 
@@ -43,30 +30,13 @@ pub const KEY_INDEX_BY_HASH_V1: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("KEY_INDEX_BY_HASH_V1");
 pub const PRICE_CATALOG_V1: TableDefinition<&str, &[u8]> = TableDefinition::new("price_catalog_v1");
 pub const AUDIT_LOG_V1: TableDefinition<&[u8], &[u8]> = TableDefinition::new("AUDIT_LOG_V1");
-pub const PRINCIPAL_LIMIT_STATES_V1: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("PRINCIPAL_LIMIT_STATES_V1");
 pub const REQUEST_EVENTS_V1: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("REQUEST_EVENTS_V1");
-pub const USAGE_ROLLUPS_V1: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("USAGE_ROLLUPS_V1");
-pub const USAGE_ROLLUP_CHECKPOINTS_V1: TableDefinition<&str, u64> =
-    TableDefinition::new("USAGE_ROLLUP_CHECKPOINTS_V1");
-pub const CONFIG_DRAFT_V1: TableDefinition<&str, &[u8]> = TableDefinition::new("CONFIG_DRAFT_V1");
-pub const CONFIG_HISTORY_V1: TableDefinition<u64, &[u8]> =
-    TableDefinition::new("CONFIG_HISTORY_V1");
 pub const SCHEMA_VERSION_V1: TableDefinition<&str, u32> = TableDefinition::new("SCHEMA_VERSION_V1");
 pub const KILLSWITCH_V1: TableDefinition<&str, bool> = TableDefinition::new("KILLSWITCH_V1");
-pub const META_BACKEND_KIND_V1: TableDefinition<&str, &str> =
-    TableDefinition::new("META_BACKEND_KIND_V1");
 
 pub(crate) const SCHEMA_VERSION_KEY: &str = "version";
 pub(crate) const KILLSWITCH_KEY: &str = "enabled";
-pub(crate) const BACKEND_KIND_KEY: &str = "backend_kind";
-
-#[derive(Clone)]
-pub struct RedbStorage {
-    pub(crate) db: Arc<Database>,
-}
 
 #[derive(Clone)]
 pub struct Storage {
@@ -104,30 +74,12 @@ pub enum StorageError {
     InvalidAuditKey,
     #[error("audit key overflow")]
     AuditKeyOverflow,
-    #[error("stale draft revision; current revision is {current}")]
-    StaleDraftRevision { current: u64 },
-    #[error("config draft revision overflow")]
-    ConfigRevisionOverflow,
-    #[error("invalid request event key")]
-    InvalidRequestEventKey,
     #[error("request event key overflow")]
     RequestEventKeyOverflow,
+    #[error("invalid request event key")]
+    InvalidRequestEventKey,
     #[error("utf-8 decoding error: {0}")]
     Utf8(#[from] std::str::Utf8Error),
-    #[error("random API key generation failed")]
-    Random,
-    #[error("unknown API key {key_id} for principal {principal_id}")]
-    UnknownApiKey {
-        principal_id: String,
-        key_id: String,
-    },
-    #[error("backend kind mismatch: stored={stored:?}, configured={configured:?}")]
-    BackendKindMismatch {
-        stored: BackendKind,
-        configured: BackendKind,
-    },
-    #[error("invalid backend kind {0}")]
-    InvalidBackendKind(String),
 }
 
 impl From<redb::DatabaseError> for StorageError {
@@ -160,45 +112,8 @@ impl From<redb::CommitError> for StorageError {
     }
 }
 
-impl RedbStorage {
-    pub fn open(path: impl AsRef<Path>) -> Result<Self, StorageError> {
-        let db = Arc::new(Database::create(path)?);
-        migration::initialize_schema(&db)?;
-
-        Ok(Self { db })
-    }
-
-    pub fn begin_read(&self) -> Result<redb::ReadTransaction, StorageError> {
-        Ok(self.db.begin_read()?)
-    }
-
-    pub fn begin_write(&self) -> Result<redb::WriteTransaction, StorageError> {
-        Ok(self.db.begin_write()?)
-    }
-
-    pub fn schema_version(&self) -> Result<u32, StorageError> {
-        migration::schema_version(&self.db)
-    }
-
-    pub fn backend_kind(&self) -> Result<BackendKind, StorageError> {
-        migration::backend_kind(&self.db)
-    }
-
-    pub fn initialize(&self, requested: BackendKind) -> Result<(), StorageError> {
-        migration::initialize_backend(&self.db, requested)
-    }
-
-    pub fn killswitch_enabled(&self) -> Result<bool, StorageError> {
-        migration::killswitch_enabled(&self.db)
-    }
-
-    pub fn set_killswitch_enabled(&self, enabled: bool) -> Result<(), StorageError> {
-        migration::set_killswitch_enabled(&self.db, enabled)
-    }
-}
-
 impl Storage {
-    pub fn open(path: impl AsRef<Path>, master_key: [u8; 32]) -> Result<Self, StorageError> {
+    pub fn open(path: &Path, master_key: [u8; 32]) -> Result<Self, StorageError> {
         let db = Arc::new(Database::create(path)?);
         migration::initialize_schema(&db)?;
 

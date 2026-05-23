@@ -1,6 +1,9 @@
 use std::{sync::Arc, time::Duration};
 
-use axum::{body::Body, http::{Request, StatusCode}};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use cc_lb_admin::{router, AdminState};
 use cc_lb_config::{Config, Limit, LimitKind, PrincipalSpec, PrincipalType};
 use cc_lb_core::api_keys::principal_view::PrincipalView;
@@ -12,7 +15,12 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
     let config = test_config();
     AdminState {
         storage: Some(storage),
-        quota_manager: None,
+        limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
+            Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
+            Arc::new(arc_swap::ArcSwap::from(
+                cc_lb_core::api_keys::principal_view::PrincipalView::from_config(&Config::default()),
+            )),
+        ),
         lifecycle: None,
         principal_view: Arc::new(arc_swap::ArcSwap::from(PrincipalView::from_config(&config))),
         config: Arc::new(config),
@@ -27,7 +35,6 @@ fn test_config() -> Config {
         "u1".to_owned(),
         PrincipalSpec {
             principal_type: PrincipalType::Machine,
-            quotas: None,
             default_limits: vec![Limit {
                 kind: LimitKind::Requests,
                 window: Duration::from_secs(60),
@@ -48,7 +55,12 @@ fn new_store() -> (tempfile::TempDir, Arc<Storage>) {
     (dir, Arc::new(storage))
 }
 
-async fn send_json(app: axum::Router, method: &str, path: &str, body: Value) -> axum::http::Response<Body> {
+async fn send_json(
+    app: axum::Router,
+    method: &str,
+    path: &str,
+    body: Value,
+) -> axum::http::Response<Body> {
     let req = Request::builder()
         .method(method)
         .uri(path)
@@ -109,7 +121,11 @@ async fn list_keys(app: axum::Router) -> Value {
     response_json(response).await
 }
 
-async fn post_transition(app: axum::Router, key_id: &str, transition: &str) -> axum::http::Response<Body> {
+async fn post_transition(
+    app: axum::Router,
+    key_id: &str,
+    transition: &str,
+) -> axum::http::Response<Body> {
     let request = Request::builder()
         .method("POST")
         .uri(format!("/admin/principals/u1/keys/{key_id}/{transition}"))

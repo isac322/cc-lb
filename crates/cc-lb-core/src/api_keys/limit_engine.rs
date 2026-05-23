@@ -6,6 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use arc_swap::ArcSwap;
 use cc_lb_storage_redb::{KeyStatus as StoredKeyStatus, StoredApiKeyRecord};
 use parking_lot::RwLock;
+use serde::Serialize;
 
 use crate::api_keys::concurrent_guard::{KeyConcurrencyGuard, KeyConcurrencyManager};
 use crate::api_keys::principal_view::{PrincipalStatus, PrincipalView};
@@ -18,6 +19,45 @@ impl Hash for LimitKind {
 }
 
 type RollingKey = (String, LimitKind, u64);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum IdentityFilter {
+    Principal,
+    ApiKey,
+    All,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PrincipalLimitsSnapshot {
+    pub principal_id: String,
+    pub observed: bool,
+    pub identities: Vec<PrincipalLimitIdentitySnapshot>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PrincipalLimitIdentitySnapshot {
+    pub identity_kind: &'static str,
+    pub identity_value: Option<String>,
+    pub account_observed: bool,
+    pub windows: Vec<PrincipalLimitWindowSnapshot>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PrincipalLimitWindowSnapshot {
+    pub window: String,
+    pub snapshots: Vec<PrincipalLimitSnapshot>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct PrincipalLimitSnapshot {
+    pub kind: &'static str,
+    pub limit: Option<u64>,
+    pub remaining: Option<u64>,
+    pub reset: Option<String>,
+    pub observed_at_unix_secs: u64,
+    pub stored_at_unix_secs: u64,
+    pub observed: bool,
+}
 
 pub struct LimitEngine {
     inner: Arc<LimitEngineInner>,
@@ -334,6 +374,122 @@ impl LimitEngine {
         headers
     }
 
+    pub fn snapshot_for_principal(
+        &self,
+        principal_id: &str,
+        identity_filter: IdentityFilter,
+    ) -> PrincipalLimitsSnapshot {
+        let now_sec = now_sec();
+        let defaults = self
+            .inner
+            .principal_view
+            .load()
+            .default_limits(principal_id)
+            .to_vec();
+        let effective_limits = self.inner.effective_limits.read().clone();
+        let mut identities = Vec::new();
+
+        if matches!(
+            identity_filter,
+            IdentityFilter::Principal | IdentityFilter::All
+        ) {
+            identities.push(PrincipalLimitIdentitySnapshot {
+                identity_kind: "principal",
+                identity_value: None,
+                account_observed: true,
+                windows: self.snapshot_windows_for_principal(
+                    &defaults,
+                    principal_id,
+                    &effective_limits,
+                    now_sec,
+                ),
+            });
+        }
+
+        if matches!(
+            identity_filter,
+            IdentityFilter::ApiKey | IdentityFilter::All
+        ) {
+            let mut key_limits = effective_limits
+                .iter()
+                .filter(|((_, stored_principal_id), _)| stored_principal_id == principal_id)
+                .map(|((key_id, _), limits)| (key_id.clone(), limits.clone()))
+                .collect::<Vec<_>>();
+            key_limits.sort_by(|left, right| left.0.cmp(&right.0));
+            for (key_id, limits) in key_limits {
+                identities.push(PrincipalLimitIdentitySnapshot {
+                    identity_kind: "api_key",
+                    identity_value: Some(key_id.clone()),
+                    account_observed: false,
+                    windows: self.snapshot_windows_for_key(&key_id, &limits, now_sec),
+                });
+            }
+        }
+
+        let observed = identities.iter().any(|identity| {
+            identity
+                .windows
+                .iter()
+                .any(|window| window.snapshots.iter().any(|snapshot| snapshot.observed))
+        });
+
+        PrincipalLimitsSnapshot {
+            principal_id: principal_id.to_owned(),
+            observed,
+            identities,
+        }
+    }
+
+    fn snapshot_windows_for_principal(
+        &self,
+        defaults: &[Limit],
+        principal_id: &str,
+        effective_limits: &HashMap<(String, String), Vec<Limit>>,
+        now_sec: u64,
+    ) -> Vec<PrincipalLimitWindowSnapshot> {
+        let mut windows = Vec::new();
+        for limit in defaults {
+            let window_sec = limit.window.as_secs();
+            let mut total = 0_i64;
+            let mut oldest: Option<u64> = None;
+            for ((key_id, stored_principal_id), limits) in effective_limits {
+                if stored_principal_id != principal_id
+                    || !limits.iter().any(|candidate| {
+                        candidate.kind == limit.kind && candidate.window == limit.window
+                    })
+                {
+                    continue;
+                }
+                let (key_total, key_oldest) =
+                    self.current_total_and_oldest(key_id, limit.kind, window_sec, now_sec);
+                total = total.saturating_add(key_total);
+                oldest = match (oldest, key_oldest) {
+                    (Some(left), Some(right)) => Some(left.min(right)),
+                    (None, Some(right)) => Some(right),
+                    (current, None) => current,
+                };
+            }
+            push_limit_snapshot(&mut windows, limit, total, oldest, now_sec);
+        }
+        sort_windows(windows)
+    }
+
+    fn snapshot_windows_for_key(
+        &self,
+        key_id: &str,
+        limits: &[Limit],
+        now_sec: u64,
+    ) -> Vec<PrincipalLimitWindowSnapshot> {
+        let mut windows = Vec::new();
+        for limit in limits {
+            let window_sec = limit.window.as_secs();
+            let (total, oldest) =
+                self.current_total_and_oldest(key_id, limit.kind, window_sec, now_sec);
+            push_limit_snapshot(&mut windows, limit, total, oldest, now_sec);
+        }
+        sort_windows(windows)
+    }
+
     pub fn startup_replay(&self, _storage: Arc<cc_lb_storage_redb::Storage>) {
         // TODO(T22): rebuild rolling counters from PRINCIPAL_LIMIT_STATES_V1 + REQUEST_EVENTS_V1
     }
@@ -414,6 +570,100 @@ impl Drop for Reservation {
                 );
             }
         }
+    }
+}
+
+fn push_limit_snapshot(
+    windows: &mut Vec<PrincipalLimitWindowSnapshot>,
+    limit: &Limit,
+    total: i64,
+    oldest: Option<u64>,
+    now_sec: u64,
+) {
+    let window_sec = limit.window.as_secs();
+    let remaining = limit.cap_micros.saturating_sub(total).max(0) as u64;
+    let reset_sec = oldest.unwrap_or(now_sec).saturating_add(window_sec);
+    let window = format_window(window_sec);
+    let snapshot = PrincipalLimitSnapshot {
+        kind: limit_kind_name(limit.kind),
+        limit: Some(limit.cap_micros.max(0) as u64),
+        remaining: Some(remaining),
+        reset: Some(unix_to_iso8601(reset_sec)),
+        observed_at_unix_secs: now_sec,
+        stored_at_unix_secs: now_sec,
+        observed: total != 0,
+    };
+
+    match windows
+        .iter_mut()
+        .find(|candidate| candidate.window == window)
+    {
+        Some(existing) => existing.snapshots.push(snapshot),
+        None => windows.push(PrincipalLimitWindowSnapshot {
+            window,
+            snapshots: vec![snapshot],
+        }),
+    }
+}
+
+fn sort_windows(
+    mut windows: Vec<PrincipalLimitWindowSnapshot>,
+) -> Vec<PrincipalLimitWindowSnapshot> {
+    windows.sort_by(|left, right| {
+        window_sort_key(&left.window)
+            .cmp(&window_sort_key(&right.window))
+            .then_with(|| left.window.cmp(&right.window))
+    });
+    for window in &mut windows {
+        window.snapshots.sort_by(|left, right| {
+            limit_kind_sort_key(left.kind)
+                .cmp(&limit_kind_sort_key(right.kind))
+                .then_with(|| left.kind.cmp(right.kind))
+        });
+    }
+    windows
+}
+
+fn format_window(window_sec: u64) -> String {
+    if window_sec % 86_400 == 0 {
+        format!("{}d", window_sec / 86_400)
+    } else if window_sec % 3_600 == 0 {
+        format!("{}h", window_sec / 3_600)
+    } else if window_sec % 60 == 0 {
+        format!("{}m", window_sec / 60)
+    } else {
+        format!("{window_sec}s")
+    }
+}
+
+fn window_sort_key(window: &str) -> u8 {
+    match window {
+        "5h" => 0,
+        "7d" | "weekly" => 1,
+        _ => 2,
+    }
+}
+
+fn limit_kind_sort_key(kind: &str) -> u8 {
+    match kind {
+        "requests" => 0,
+        "input_tokens" => 1,
+        "output_tokens" => 2,
+        "total_tokens" => 3,
+        "cost_usd" => 4,
+        "concurrent" => 5,
+        _ => 6,
+    }
+}
+
+fn limit_kind_name(kind: LimitKind) -> &'static str {
+    match kind {
+        LimitKind::Requests => "requests",
+        LimitKind::InputTokens => "input_tokens",
+        LimitKind::OutputTokens => "output_tokens",
+        LimitKind::TotalTokens => "total_tokens",
+        LimitKind::CostUsd => "cost_usd",
+        LimitKind::Concurrent => "concurrent",
     }
 }
 

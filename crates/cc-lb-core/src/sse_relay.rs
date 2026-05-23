@@ -22,7 +22,6 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, Sleep, sleep};
 
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
-use crate::quota::{QuotaManager, Reservation};
 use crate::sse_error_frame::{make_error_frame, make_error_frame_from_json};
 
 const CLIENT_DISCONNECTED_STATUS: u16 = 499;
@@ -32,9 +31,6 @@ pub struct SseRelay {
     pub obs: Arc<dyn ObservabilityHook>,
     pub dialect: Arc<dyn UpstreamDialect>,
     pub batch: SseBatchConfig,
-    pub quota: Option<Arc<QuotaManager>>,
-    pub principal_id: String,
-    pub reservation: Option<Reservation>,
     pub error_normalizer: Option<Arc<ErrorNormalizer>>,
     pub upstream_kind: Option<UpstreamKind>,
     pub streaming_usage: Arc<Mutex<StreamingUsage>>,
@@ -91,9 +87,6 @@ struct RelayRuntime {
     obs: Arc<dyn ObservabilityHook>,
     dialect: Arc<dyn UpstreamDialect>,
     batch: SseBatchConfig,
-    quota: Option<Arc<QuotaManager>>,
-    principal_id: String,
-    reservation: Option<Reservation>,
     error_normalizer: Option<Arc<ErrorNormalizer>>,
     upstream_kind: Option<UpstreamKind>,
     streaming_usage: Arc<Mutex<StreamingUsage>>,
@@ -180,9 +173,6 @@ impl SseRelay {
             obs: self.obs,
             dialect: self.dialect,
             batch: self.batch.normalized(),
-            quota: self.quota,
-            principal_id: self.principal_id,
-            reservation: self.reservation,
             error_normalizer: self.error_normalizer,
             upstream_kind: self.upstream_kind,
             streaming_usage: self.streaming_usage,
@@ -373,18 +363,7 @@ impl RelayRuntime {
             .unwrap_or_else(|| make_error_frame("api_error", message))
     }
 
-    async fn finish_usage(&self, usage: &StreamingUsage) {
-        if let (Some(quota), Some(reservation)) = (self.quota.as_ref(), self.reservation.clone()) {
-            quota
-                .reconcile_output(reservation, usage.output_tokens)
-                .await;
-        }
-        if let Some(quota) = self.quota.as_ref() {
-            let _decision = quota
-                .count_input(&self.principal_id, usage.input_tokens)
-                .await;
-        }
-    }
+    async fn finish_usage(&self, _usage: &StreamingUsage) {}
 
     fn current_usage(&self) -> StreamingUsage {
         *self

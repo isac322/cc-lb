@@ -89,15 +89,6 @@
       },
       "default": {}
     },
-    "quotas": {
-      "$ref": "#/$defs/QuotasConfig",
-      "default": {
-        "default_input_tokens": 1000000,
-        "default_output_tokens": 1000000,
-        "default_requests_per_window": 1000,
-        "default_window_secs": 60
-      }
-    },
     "signers": {
       "$ref": "#/$defs/SignersConfig",
       "default": {
@@ -580,16 +571,6 @@
         "principal_type": {
           "$ref": "#/$defs/PrincipalType",
           "default": "machine"
-        },
-        "quotas": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/QuotasConfig"
-            },
-            {
-              "type": "null"
-            }
-          ]
         }
       },
       "additionalProperties": false
@@ -600,35 +581,6 @@
         "human",
         "machine"
       ]
-    },
-    "QuotasConfig": {
-      "type": "object",
-      "properties": {
-        "default_input_tokens": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 1000000,
-          "minimum": 0
-        },
-        "default_output_tokens": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 1000000,
-          "minimum": 0
-        },
-        "default_requests_per_window": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 1000,
-          "minimum": 0
-        },
-        "default_window_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 60,
-          "minimum": 0
-        }
-      }
     },
     "SignersConfig": {
       "type": "object",

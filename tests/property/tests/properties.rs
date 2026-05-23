@@ -331,9 +331,6 @@ fn relay() -> SseRelay {
             max_events: 8,
             max_age: Duration::from_secs(60),
         },
-        quota: None,
-        principal_id: "property-principal".to_owned(),
-        reservation: None,
         error_normalizer: None,
         upstream_kind: None,
     }

@@ -1,281 +1,169 @@
-use cc_lb_config::Config;
-use cc_lb_storage_api::{
-    PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, Storage, StorageError,
-    UsageRollupResolution,
+use std::{collections::BTreeMap, time::Duration};
+
+use axum::{
+    extract::{Path, Query, State},
+    http::StatusCode,
+    Json,
 };
-use serde::Serialize;
+use humantime::parse_duration;
+use serde::{Deserialize, Serialize};
 
-use crate::dashboard::{self, DashboardRange, DashboardUsageResponse, UsageGroupBy};
+use crate::{management::ManagementError, AdminState};
+use cc_lb_core::api_keys::limit_engine::{IdentityFilter, PrincipalLimitsSnapshot};
 
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct PrincipalLimitsResponse {
-    pub principal_id: String,
-    pub observed: bool,
-    pub identities: Vec<PrincipalLimitIdentityResponse>,
+#[derive(Debug, Clone, Deserialize)]
+pub struct KeyUsageQuery {
+    pub range: Option<String>,
+    pub step: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct PrincipalLimitIdentityResponse {
-    pub identity_kind: &'static str,
-    pub identity_value: Option<String>,
-    pub account_observed: bool,
-    pub windows: Vec<PrincipalLimitWindowResponse>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct PrincipalLimitWindowResponse {
-    pub window: String,
-    pub snapshots: Vec<PrincipalLimitSnapshotResponse>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct PrincipalLimitSnapshotResponse {
-    pub kind: &'static str,
-    pub limit: Option<u64>,
-    pub remaining: Option<u64>,
-    pub reset: Option<String>,
-    pub observed_at_unix_secs: u64,
-    pub stored_at_unix_secs: u64,
+pub struct DashboardUsageResponse {
+    pub range: String,
+    pub step: String,
+    pub group_by: String,
+    pub window_start_unix_secs: u64,
+    pub window_end_unix_secs: u64,
+    pub series: Vec<UsageSeries>,
     pub observed: bool,
 }
 
-#[derive(Debug)]
-pub(crate) enum T9Error {
-    UnknownPrincipal,
-    InvalidPrincipalId,
-    InvalidRange,
-    InvalidStep,
-    StepTooFineForRange,
-    Storage(StorageError),
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UsageSeries {
+    pub bucket_start_unix_secs: u64,
+    pub request_count: u64,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cost_usd_micros: i64,
 }
 
-pub(crate) async fn build_principal_usage(
-    storage: &dyn Storage,
-    config: &Config,
-    principal_id: &str,
-    range: DashboardRange,
-    step: UsageRollupResolution,
-    now_unix_secs: u64,
-) -> Result<DashboardUsageResponse, T9Error> {
-    ensure_principal(config, principal_id)?;
-    dashboard::validate_step_for_range(range, step).map_err(map_dashboard_query_error)?;
+pub async fn principal_key_usage(
+    State(state): State<AdminState>,
+    Path((principal_id, key_id)): Path<(String, String)>,
+    Query(query): Query<KeyUsageQuery>,
+) -> Result<Json<DashboardUsageResponse>, ManagementError> {
+    let storage = state
+        .storage
+        .as_ref()
+        .ok_or(ManagementError::StorageUnavailable)?;
 
-    let (window_start_unix_secs, window_end_unix_secs) =
-        dashboard::build_window_for_step(range, step, now_unix_secs);
-    let rollups = storage
-        .query_usage_rollups_in_range(step, window_start_unix_secs, window_end_unix_secs)
-        .await?
-        .into_iter()
-        .filter(|rollup| rollup.principal == principal_id)
-        .collect::<Vec<_>>();
-    let observed = !rollups.is_empty();
-    let (series, truncated_series_count) = dashboard::build_usage_series(
-        UsageGroupBy::Model,
-        &rollups,
-        window_start_unix_secs,
-        window_end_unix_secs,
-        step,
-    );
-
-    Ok(DashboardUsageResponse {
-        range: range.as_str(),
-        step: step.as_str(),
-        group_by: UsageGroupBy::Model.as_str(),
-        window_start_unix_secs,
-        window_end_unix_secs,
-        series,
-        truncated_series_count,
-        observed,
-    })
-}
-
-pub(crate) async fn build_principal_limits(
-    storage: &dyn Storage,
-    config: &Config,
-    principal_id: &str,
-    _now_unix_secs: u64,
-) -> Result<PrincipalLimitsResponse, T9Error> {
-    ensure_principal(config, principal_id)?;
-
-    let states = storage.list_principal_limit_states(principal_id).await?;
-    let observed = !states.is_empty();
-
-    Ok(PrincipalLimitsResponse {
-        principal_id: principal_id.to_owned(),
-        observed,
-        identities: build_limit_identities(states),
-    })
-}
-
-fn ensure_principal(config: &Config, principal_id: &str) -> Result<(), T9Error> {
-    if !is_valid_principal_id(principal_id) {
-        return Err(T9Error::InvalidPrincipalId);
-    }
-    if !config.principals.contains_key(principal_id) {
-        return Err(T9Error::UnknownPrincipal);
-    }
-    Ok(())
-}
-
-fn is_valid_principal_id(principal_id: &str) -> bool {
-    !principal_id.is_empty()
-        && principal_id.len() <= 256
-        && principal_id
-            .chars()
-            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.' | ':' | '@'))
-}
-
-fn build_limit_identities(states: Vec<PrincipalLimitState>) -> Vec<PrincipalLimitIdentityResponse> {
-    let mut identities = Vec::<IdentityAccumulator>::new();
-    for state in states {
-        match identities.iter_mut().find(|identity| {
-            identity.identity_kind == state.identity_kind
-                && identity.identity_value == state.identity_value
-        }) {
-            Some(identity) => identity.states.push(state),
-            None => identities.push(IdentityAccumulator {
-                identity_kind: state.identity_kind,
-                identity_value: state.identity_value.clone(),
-                states: vec![state],
-            }),
-        }
+    if state.principal_view.load().get(&principal_id).is_none() {
+        return Err(ManagementError::UnknownPrincipal);
     }
 
-    identities.sort_by(|left, right| {
-        identity_rank(left.identity_kind)
-            .cmp(&identity_rank(right.identity_kind))
-            .then_with(|| {
-                identity_sort_value(&left.identity_value)
-                    .cmp(identity_sort_value(&right.identity_value))
-            })
-    });
-
-    identities
-        .into_iter()
-        .map(|identity| PrincipalLimitIdentityResponse {
-            identity_kind: identity.identity_kind.as_str(),
-            identity_value: identity.identity_value,
-            account_observed: identity.identity_kind == PrincipalLimitIdentityKind::Account,
-            windows: build_limit_windows(identity.states),
-        })
-        .collect()
-}
-
-fn build_limit_windows(states: Vec<PrincipalLimitState>) -> Vec<PrincipalLimitWindowResponse> {
-    let mut windows = Vec::<WindowAccumulator>::new();
-    for state in states {
-        match windows
-            .iter_mut()
-            .find(|window| window.window == state.window)
-        {
-            Some(window) => window.states.push(state),
-            None => windows.push(WindowAccumulator {
-                window: state.window.clone(),
-                states: vec![state],
-            }),
-        }
+    if storage.get_api_key(&principal_id, &key_id)?.is_none() {
+        return Err(ManagementError::UnknownApiKey);
     }
 
-    windows.sort_by(|left, right| {
-        window_rank(&left.window)
-            .cmp(&window_rank(&right.window))
-            .then_with(|| left.window.cmp(&right.window))
-    });
+    let range_raw = query.range.unwrap_or_else(|| "1h".to_owned());
+    let step_raw = query.step.unwrap_or_else(|| "1h".to_owned());
+    let range = parse_duration(&range_raw).map_err(|error| ManagementError::InvalidRequest {
+        message: format!("invalid range: {error}"),
+    })?;
+    let max_range = Duration::from_secs(7 * 24 * 60 * 60);
+    if range > max_range {
+        return Err(ManagementError::InvalidRequest {
+            message:
+                "range exceeds maximum 7 days for per-key usage; use principal-level /usage instead"
+                    .to_owned(),
+        });
+    }
+    let step = parse_duration(&step_raw).map_err(|error| ManagementError::InvalidRequest {
+        message: format!("invalid step: {error}"),
+    })?;
 
-    windows
-        .into_iter()
-        .map(|mut window| {
-            window.states.sort_by(|left, right| {
-                kind_rank(left.kind)
-                    .cmp(&kind_rank(right.kind))
-                    .then_with(|| left.kind.as_str().cmp(right.kind.as_str()))
-                    .then_with(|| left.observed_at_unix_secs.cmp(&right.observed_at_unix_secs))
-                    .then_with(|| left.stored_at_unix_secs.cmp(&right.stored_at_unix_secs))
+    let now_ms = now_unix_ms()?;
+    let range_ms = duration_to_ms(range).max(1);
+    let step_ms = duration_to_ms(step).max(1);
+    let range_start_ms = now_ms.saturating_sub(range_ms);
+    let range_end_ms = now_ms;
+    let bucket_count = range_ms
+        .saturating_add(step_ms.saturating_sub(1))
+        .div_ceil(step_ms)
+        .max(1);
+
+    let events = storage.query_request_events_by_principal_in_range(
+        &principal_id,
+        range_start_ms,
+        range_end_ms,
+    )?;
+
+    let mut aggregates: BTreeMap<u64, UsageSeries> = BTreeMap::new();
+    for event in events.into_iter().filter(|event| event.key_id == key_id) {
+        let bucket_offset = event.ts_ms.saturating_sub(range_start_ms) / step_ms;
+        let bucket_offset = bucket_offset.min(bucket_count - 1);
+        let bucket_start_ms = range_start_ms.saturating_add(bucket_offset.saturating_mul(step_ms));
+        let entry = aggregates
+            .entry(bucket_start_ms)
+            .or_insert_with(|| UsageSeries {
+                bucket_start_unix_secs: bucket_start_ms / 1000,
+                ..UsageSeries::default()
             });
-            PrincipalLimitWindowResponse {
-                window: window.window,
-                snapshots: window
-                    .states
-                    .into_iter()
-                    .map(|state| PrincipalLimitSnapshotResponse {
-                        kind: state.kind.as_str(),
-                        limit: state.limit,
-                        remaining: state.remaining,
-                        reset: state.reset,
-                        observed_at_unix_secs: state.observed_at_unix_secs,
-                        stored_at_unix_secs: state.stored_at_unix_secs,
-                        observed: state.limit.is_some() || state.remaining.is_some(),
-                    })
-                    .collect(),
-            }
-        })
-        .collect()
-}
-
-fn map_dashboard_query_error(error: dashboard::DashboardQueryError) -> T9Error {
-    match error {
-        dashboard::DashboardQueryError::InvalidRange => T9Error::InvalidRange,
-        dashboard::DashboardQueryError::InvalidStep => T9Error::InvalidStep,
-        dashboard::DashboardQueryError::InvalidGroupBy => T9Error::InvalidStep,
-        dashboard::DashboardQueryError::StepTooFineForRange => T9Error::StepTooFineForRange,
+        entry.request_count += 1;
+        entry.input_tokens +=
+            event.input_tokens + event.cache_creation_input_tokens + event.cache_read_input_tokens;
+        entry.output_tokens += event.output_tokens;
+        entry.cost_usd_micros += event.cost_usd_micros;
     }
-}
 
-fn identity_rank(identity_kind: PrincipalLimitIdentityKind) -> u8 {
-    match identity_kind {
-        PrincipalLimitIdentityKind::Account => 0,
-        PrincipalLimitIdentityKind::Credential => 1,
-        PrincipalLimitIdentityKind::Unobserved => 2,
+    let mut series = Vec::new();
+    for bucket_index in 0..bucket_count {
+        let bucket_start_ms = range_start_ms.saturating_add(bucket_index.saturating_mul(step_ms));
+        series.push(aggregates.remove(&bucket_start_ms).unwrap_or(UsageSeries {
+            bucket_start_unix_secs: bucket_start_ms / 1000,
+            ..UsageSeries::default()
+        }));
     }
+
+    Ok(Json(DashboardUsageResponse {
+        range: range_raw,
+        step: step_raw,
+        group_by: "key".to_owned(),
+        window_start_unix_secs: range_start_ms / 1000,
+        window_end_unix_secs: range_end_ms / 1000,
+        series,
+        observed: true,
+    }))
 }
 
-fn identity_sort_value(value: &Option<String>) -> &str {
-    value.as_deref().unwrap_or("")
+#[derive(Debug, Clone, Deserialize)]
+pub struct PrincipalLimitsQuery {
+    pub identity: Option<String>,
 }
 
-fn window_rank(window: &str) -> u8 {
-    match window {
-        "5h" => 0,
-        "weekly" => 1,
-        _ => 2,
+pub async fn principal_limits(
+    State(state): State<AdminState>,
+    Path(principal_id): Path<String>,
+    Query(query): Query<PrincipalLimitsQuery>,
+) -> Result<Json<PrincipalLimitsSnapshot>, StatusCode> {
+    if state.principal_view.load().get(&principal_id).is_none() {
+        return Err(StatusCode::NOT_FOUND);
     }
+
+    let identity_filter = match query.identity.as_deref().unwrap_or("all") {
+        "principal" => IdentityFilter::Principal,
+        "api_key" => IdentityFilter::ApiKey,
+        "all" => IdentityFilter::All,
+        _ => return Err(StatusCode::BAD_REQUEST),
+    };
+
+    Ok(Json(
+        state
+            .limit_engine
+            .snapshot_for_principal(&principal_id, identity_filter),
+    ))
 }
 
-fn kind_rank(kind: PrincipalLimitKind) -> u8 {
-    match kind {
-        PrincipalLimitKind::Requests => 0,
-        PrincipalLimitKind::InputTokens => 1,
-        PrincipalLimitKind::OutputTokens => 2,
-        PrincipalLimitKind::Tokens => 3,
-    }
+fn duration_to_ms(duration: Duration) -> u64 {
+    duration.as_millis().min(u128::from(u64::MAX)) as u64
 }
 
-impl T9Error {
-    pub(crate) fn as_str(&self) -> &'static str {
-        match self {
-            Self::UnknownPrincipal => "unknown_principal",
-            Self::InvalidPrincipalId => "invalid_principal_id",
-            Self::InvalidRange => "invalid_range",
-            Self::InvalidStep => "invalid_step",
-            Self::StepTooFineForRange => "step_too_fine_for_range",
-            Self::Storage(_) => "storage_error",
-        }
-    }
-}
-
-impl From<StorageError> for T9Error {
-    fn from(error: StorageError) -> Self {
-        Self::Storage(error)
-    }
-}
-
-struct IdentityAccumulator {
-    identity_kind: PrincipalLimitIdentityKind,
-    identity_value: Option<String>,
-    states: Vec<PrincipalLimitState>,
-}
-
-struct WindowAccumulator {
-    window: String,
-    states: Vec<PrincipalLimitState>,
+fn now_unix_ms() -> Result<u64, ManagementError> {
+    Ok(std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| ManagementError::InvalidRequest {
+            message: "system clock is before unix epoch".to_owned(),
+        })?
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64)
 }

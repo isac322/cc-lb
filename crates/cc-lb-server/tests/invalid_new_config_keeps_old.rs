@@ -32,15 +32,12 @@ fn invalid_new_config_keeps_old() {
         ),
         1.0
     );
-    assert_eq!(
-        watcher.current_config().quotas.default_requests_per_window,
-        100
-    );
+    assert_eq!(watcher.current_config().body.messages_cap_bytes, 100);
     assert!(logs.contains("configuration reload failed"));
 
     let evidence = format!(
-        "bad TOML reload rejected\nwarn_log={logs}\nfailed_counter_before={before_failed}\nfailed_counter_after={after_failed}\nfailed_counter_delta={failure_delta}\ncurrent_default_requests_per_window={}\n",
-        watcher.current_config().quotas.default_requests_per_window
+        "bad TOML reload rejected\nwarn_log={logs}\nfailed_counter_before={before_failed}\nfailed_counter_after={after_failed}\nfailed_counter_delta={failure_delta}\ncurrent_messages_cap_bytes={}\n",
+        watcher.current_config().body.messages_cap_bytes
     );
     std::fs::write(
         reload_common::evidence_path("task-31-bad-reload-rejected.log"),
