@@ -9,7 +9,6 @@ on:
 
 env:
   CC_LB_ADMIN_SKIP_SPA: "1"
-  CACHE_ON_FAILURE: "true"
 
 jobs:
   matrix:
@@ -31,6 +30,8 @@ jobs:
           node-version: "22"
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Install pinned real clients
         run: tests/real-client/install.sh
       - name: Run real-client matrix

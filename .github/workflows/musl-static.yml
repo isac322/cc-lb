@@ -6,7 +6,6 @@ on:
 
 env:
   CC_LB_ADMIN_SKIP_SPA: "1"
-  CACHE_ON_FAILURE: "true"
 
 jobs:
   verify:
@@ -19,6 +18,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
+          cache-on-failure: true
           key: musl-x86_64-musl
       - name: Verify musl static binary
         run: bash tests/musl-static/verify.sh
