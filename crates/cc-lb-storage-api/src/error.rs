@@ -1,9 +1,48 @@
+use std::error::Error;
+
 use thiserror::Error;
+
+use crate::BackendKind;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
-    #[error("storage API placeholder error")]
-    Placeholder,
+    #[error("transient (retryable={retryable}): {source}")]
+    Transient {
+        retryable: bool,
+        #[source]
+        source: Box<dyn Error + Send + Sync + 'static>,
+    },
+    #[error("conflict: {message}")]
+    Conflict { message: String },
+    #[error("schema mismatch: found={found}, expected={expected}")]
+    SchemaMismatch { found: u32, expected: u32 },
+    #[error("unavailable: {message}")]
+    Unavailable { message: String },
+    #[error("corrupted: {message}")]
+    Corrupted { message: String },
+    #[error("fatal: {message}")]
+    Fatal { message: String },
+    #[error("backend kind mismatch: stored={stored:?}, configured={configured:?}")]
+    BackendKindMismatch {
+        stored: BackendKind,
+        configured: BackendKind,
+    },
+    #[error("serialization: {0}")]
+    Serialization(#[from] serde_json::Error),
+    #[error("aead: {0}")]
+    Aead(String),
+}
+
+impl StorageError {
+    pub fn is_retryable(&self) -> bool {
+        matches!(
+            self,
+            Self::Transient {
+                retryable: true,
+                ..
+            } | Self::Unavailable { .. }
+        )
+    }
 }
 
 pub type StorageResult<T> = Result<T, StorageError>;

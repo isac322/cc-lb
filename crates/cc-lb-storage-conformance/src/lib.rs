@@ -1,4 +1,4 @@
 pub mod harness;
 pub mod scenarios;
 
-pub use harness::{ConformanceBackend, ConformanceFixture};
+pub use harness::{scenario_applies_to_backend, ConformanceBackend, ConformanceFixture};
