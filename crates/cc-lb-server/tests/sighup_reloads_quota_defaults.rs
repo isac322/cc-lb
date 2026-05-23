@@ -34,6 +34,7 @@ async fn sighup_reloads_body_defaults() {
             )),
         ),
         lifecycle: None,
+        audit_sink: None,
         principal_view: Arc::new(arc_swap::ArcSwap::from(
             cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
                 &cc_lb_admin::CurrentConfig::current_config((watcher.clone()).as_ref()),

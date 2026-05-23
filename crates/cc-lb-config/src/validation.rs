@@ -37,10 +37,7 @@ pub fn validate_raw_toml(raw_toml: &str) -> Result<(), ValidationError> {
     };
 
     if has_legacy_plugin(&value) || has_legacy_principal_quotas(&value) {
-        return Err(ValidationError::new(
-            "config",
-            legacy_removed_message(),
-        ));
+        return Err(ValidationError::new("config", legacy_removed_message()));
     }
 
     Ok(())
@@ -297,10 +294,7 @@ fn has_legacy_plugin(value: &toml::Value) -> bool {
 }
 
 fn has_legacy_principal_quotas(value: &toml::Value) -> bool {
-    let Some(principals) = value
-        .get("principals")
-        .and_then(toml::Value::as_table)
-    else {
+    let Some(principals) = value.get("principals").and_then(toml::Value::as_table) else {
         return false;
     };
 

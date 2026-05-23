@@ -22,6 +22,7 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
             )),
         ),
         lifecycle: None,
+        audit_sink: None,
         principal_view: Arc::new(arc_swap::ArcSwap::from(PrincipalView::from_config(&config))),
         config: Arc::new(config),
         admin_token: Some("test-token".to_owned()),

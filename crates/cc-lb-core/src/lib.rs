@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod api_keys;
+pub mod audit_writer;
 mod bulkhead;
 mod circuit_breaker;
 mod clock;
@@ -13,6 +14,7 @@ mod sse_error_frame;
 mod sse_relay;
 pub mod usage_pruner;
 
+pub use audit_writer::{spawn_audit_writer, AuditDropped, AuditEntry, AuditWriterSink};
 pub use bulkhead::{
     make_default_dispatcher, make_http_dispatcher_with_connector, Bulkhead, BulkheadConfig,
     BulkheadDispatch, BulkheadError, BulkheadRegistry, ExecuteError,

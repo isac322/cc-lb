@@ -7,20 +7,12 @@ use bytes::Bytes;
 use http::StatusCode;
 
 use crate::errors::{
-    AuthnError, DialectError, ObservabilityError, RouteError, RuntimeError, SignerError,
-    UpstreamError,
+    DialectError, ObservabilityError, RouteError, RuntimeError, SignerError, UpstreamError,
 };
 use crate::types::{
-    AuthnOutcome, ObserveEvent, PluginManifest, Principal, RequestContext, RetryDecision,
-    RouteDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, Upstream,
+    ObserveEvent, PluginManifest, Principal, RequestContext, RetryDecision, RouteDecision,
+    ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, Upstream,
 };
-
-/// Authentication plugin boundary.
-#[async_trait]
-pub trait AuthnPlugin: Send + Sync {
-    /// Authenticates a parsed downstream request.
-    async fn authenticate(&self, ctx: &RequestContext) -> Result<AuthnOutcome, AuthnError>;
-}
 
 /// Router plugin boundary.
 pub trait RouterPlugin: Send + Sync {
@@ -76,9 +68,6 @@ pub trait ObservabilityHook: Send + Sync {
 
 /// Runtime abstraction for concrete plugin systems such as Extism.
 pub trait PluginRuntime: Send + Sync {
-    /// Instantiates an authentication plugin.
-    fn instantiate(&self, manifest: &PluginManifest) -> Result<Arc<dyn AuthnPlugin>, RuntimeError>;
-
     /// Instantiates a router plugin.
     fn instantiate_router(
         &self,

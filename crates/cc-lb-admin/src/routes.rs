@@ -1,20 +1,20 @@
 use axum::{
-    Json, Router,
     extract::{Path, Query, State},
-    http::{StatusCode, header},
+    http::{header, StatusCode},
     middleware,
     response::IntoResponse,
     routing::{delete, get, patch, post},
+    Json, Router,
 };
 use rust_embed::RustEmbed;
 use serde::Deserialize;
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 use crate::{
-    AdminState,
     auth::require_admin_auth,
     management,
     principals::{principal_key_usage, principal_limits},
+    AdminState,
 };
 
 #[derive(RustEmbed)]

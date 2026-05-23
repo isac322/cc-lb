@@ -9,7 +9,8 @@ use cc_lb_storage_redb::{
 use serde::{Deserialize, Serialize};
 
 #[test]
-fn redb_stored_api_key_schema_roundtrip_preserves_new_fields() -> Result<(), Box<dyn std::error::Error>> {
+fn redb_stored_api_key_schema_roundtrip_preserves_new_fields(
+) -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("api_keys.redb");
     let storage = Storage::open(&path, [11; 32])?;
@@ -39,14 +40,20 @@ fn redb_stored_api_key_schema_roundtrip_preserves_new_fields() -> Result<(), Box
     assert_eq!(record.label, params.label);
     assert_eq!(record.description, params.description);
     assert_eq!(record.upstream_kind, params.upstream_kind);
-    assert_eq!(record.upstream_credential_ref, params.upstream_credential_ref);
+    assert_eq!(
+        record.upstream_credential_ref,
+        params.upstream_credential_ref
+    );
     assert_eq!(record.limit_overrides, params.limit_overrides);
     assert_eq!(record.status, KeyStatus::Active);
     assert_eq!(record.expires_at_unix_secs, params.expires_at_unix_secs);
     assert_eq!(record.last_4, params.last_4);
     assert_eq!(record.principal_kind, params.principal_kind);
     assert_eq!(record.index_hash, params.index_hash);
-    assert_eq!(record.key_hash_b64, URL_SAFE_NO_PAD.encode(params.verify_hash));
+    assert_eq!(
+        record.key_hash_b64,
+        URL_SAFE_NO_PAD.encode(params.verify_hash)
+    );
 
     let fetched = storage
         .get_api_key("alice", "key-1")?
@@ -78,8 +85,14 @@ fn redb_stored_api_key_schema_roundtrip_preserves_new_fields() -> Result<(), Box
     )?;
     assert_eq!(consumed, legacy_bytes.len());
     assert_eq!(legacy_decoded.label, legacy.label);
-    assert_eq!(legacy_decoded.issued_at_unix_secs, legacy.issued_at_unix_secs);
-    assert_eq!(legacy_decoded.revoked_at_unix_secs, legacy.revoked_at_unix_secs);
+    assert_eq!(
+        legacy_decoded.issued_at_unix_secs,
+        legacy.issued_at_unix_secs
+    );
+    assert_eq!(
+        legacy_decoded.revoked_at_unix_secs,
+        legacy.revoked_at_unix_secs
+    );
     assert_eq!(legacy_decoded.key_hash_b64, legacy.key_hash_b64);
     assert_eq!(legacy_decoded.status, KeyStatus::Active);
     assert_eq!(legacy_decoded.limit_overrides, Vec::<Limit>::new());
@@ -180,5 +193,7 @@ enum LegacyStoredApiKeyRecordWire {
 }
 
 fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
-    haystack.windows(needle.len()).any(|window| window == needle)
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
 }
