@@ -6,7 +6,6 @@ on:
 
 env:
   CC_LB_ADMIN_SKIP_SPA: "1"
-  CACHE_ON_FAILURE: "true"
 
 jobs:
   fmt:
@@ -26,6 +25,8 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   nextest:
@@ -49,6 +50,8 @@ jobs:
       - name: Install WASI target for pinned toolchain
         run: rustup target add wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
