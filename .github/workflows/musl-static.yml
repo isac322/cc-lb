@@ -17,5 +17,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: musl-x86_64-musl
       - name: Verify musl static binary
         run: bash tests/musl-static/verify.sh
