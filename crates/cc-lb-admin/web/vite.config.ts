@@ -4,11 +4,4 @@ import { defineConfig } from 'vite';
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
-  build: {
-    minify: 'oxc',
-    sourcemap: false,
-    cssMinify: true,
-    reportCompressedSize: false,
-    chunkSizeWarningLimit: 800,
-  },
 });
