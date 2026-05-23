@@ -19,10 +19,7 @@ export default function AdminActivity() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-2xl font-semibold text-graphite-50">
-            Admin Activity
-          </h1>
-          <p className="text-sm text-graphite-400 mt-1">
+          <p className="text-sm text-graphite-400">
             Audit log of administrative actions and configuration changes.
           </p>
         </div>

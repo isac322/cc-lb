@@ -1,4 +1,6 @@
+import { Activity } from 'lucide-react';
 import type { AuditEntry } from '../../lib/api';
+import { EmptyState } from '../primitives/EmptyState';
 import { AuditRow } from './AuditRow';
 
 interface AuditTableProps {
@@ -23,11 +25,12 @@ export function AuditTable({ events }: AuditTableProps) {
           ))}
           {events.length === 0 && (
             <tr>
-              <td
-                colSpan={4}
-                className="px-4 py-8 text-center text-graphite-500"
-              >
-                No data available
+              <td colSpan={4} className="p-0">
+                <EmptyState
+                  title="No audit events"
+                  message="Waiting for first event"
+                  icon={Activity}
+                />
               </td>
             </tr>
           )}

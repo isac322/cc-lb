@@ -30,10 +30,7 @@ export default function PluginStatus() {
     <div className="space-y-6">
       <div className="flex justify-between items-center">
         <div>
-          <h1 className="text-2xl font-semibold text-graphite-50">
-            Plugin Status
-          </h1>
-          <p className="text-sm text-graphite-400 mt-1">
+          <p className="text-sm text-graphite-400">
             Runtime status and health of loaded Extism WASM plugins.
           </p>
         </div>

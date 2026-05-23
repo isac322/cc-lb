@@ -68,9 +68,7 @@ export default function PrincipalManagement() {
       {tab === 'principals' && (
         <Card className="p-6">
           <div className="flex items-center justify-between mb-6">
-            <h2 className="text-lg font-semibold text-graphite-50">
-              Principals
-            </h2>
+            <h2 className="text-base font-semibold text-graphite-50">Roster</h2>
             <Button variant="primary" onClick={() => setIsCreating(true)}>
               + New principal
             </Button>
@@ -93,8 +91,8 @@ export default function PrincipalManagement() {
       {tab === 'credentials' && (
         <Card className="p-6">
           <div className="mb-6">
-            <h2 className="text-lg font-semibold text-graphite-50">
-              Credentials
+            <h2 className="text-base font-semibold text-graphite-50">
+              Active credentials
             </h2>
           </div>
           <CredentialsList mock={mock} />
