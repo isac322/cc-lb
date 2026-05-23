@@ -12,6 +12,14 @@ clients='claude-code opencode pi'
 upstreams='anthropic-direct bedrock-runtime bedrock-mantle vertex custom'
 failures=0
 
+export CC_LB_ADMIN_SKIP_SPA="${CC_LB_ADMIN_SKIP_SPA:-1}"
+cargo build \
+  -p cc-lb-server \
+  -p fake-anthropic \
+  -p fake-bedrock-runtime \
+  -p fake-bedrock-mantle \
+  -p fake-vertex
+
 for client in $clients; do
   for upstream in $upstreams; do
     log="$EVIDENCE_DIR/task-36-real-$client-$upstream.log"
