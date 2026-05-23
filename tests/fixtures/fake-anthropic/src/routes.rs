@@ -38,6 +38,7 @@ pub struct AppState {
     config: AppConfig,
     request_counts: Mutex<BTreeMap<&'static str, u64>>,
     last_x_api_key: Mutex<Option<String>>,
+    last_selected_headers: Mutex<BTreeMap<&'static str, Option<String>>>,
 }
 
 impl AppState {
@@ -46,6 +47,10 @@ impl AppState {
             config,
             request_counts: Mutex::new(BTreeMap::new()),
             last_x_api_key: Mutex::new(None),
+            last_selected_headers: Mutex::new(BTreeMap::from([
+                ("x-organization-uuid", None),
+                ("x-trusted-device-token", None),
+            ])),
         }
     }
 
@@ -65,6 +70,18 @@ impl AppState {
                 .get("x-api-key")
                 .and_then(|value| value.to_str().ok())
                 .map(ToOwned::to_owned);
+        }
+
+        if let Ok(mut last_selected_headers) = self.last_selected_headers.lock() {
+            for name in ["x-organization-uuid", "x-trusted-device-token"] {
+                last_selected_headers.insert(
+                    name,
+                    headers
+                        .get(name)
+                        .and_then(|value| value.to_str().ok())
+                        .map(ToOwned::to_owned),
+                );
+            }
         }
     }
 }
@@ -92,7 +109,16 @@ async fn last_request(State(state): State<Arc<AppState>>) -> Response {
         .lock()
         .ok()
         .and_then(|value| value.clone());
-    json_response(StatusCode::OK, json!({ "x_api_key": x_api_key }))
+    let headers = state
+        .last_selected_headers
+        .lock()
+        .ok()
+        .map(|value| value.clone())
+        .unwrap_or_default();
+    json_response(
+        StatusCode::OK,
+        json!({ "x_api_key": x_api_key, "headers": headers }),
+    )
 }
 
 async fn messages(State(state): State<Arc<AppState>>, headers: HeaderMap, body: Bytes) -> Response {
