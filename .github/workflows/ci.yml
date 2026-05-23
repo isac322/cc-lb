@@ -45,8 +45,8 @@ jobs:
           swap-storage: false
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-wasip1
+      - name: Install WASI target for pinned toolchain
+        run: rustup target add wasm32-wasip1
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:

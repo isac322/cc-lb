@@ -64,7 +64,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
-          targets: wasm32-wasip1
+      - name: Install WASI target for pinned toolchain
+        run: rustup target add wasm32-wasip1
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
