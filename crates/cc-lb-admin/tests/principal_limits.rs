@@ -4,14 +4,14 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use cc_lb_admin::{router, AdminState};
+use cc_lb_admin::{AdminState, router};
 use cc_lb_config::{Config, PrincipalSpec};
 use cc_lb_core::DashboardBroadcaster;
 use cc_lb_storage_redb::{
     PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, Storage,
 };
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 #[tokio::test]
@@ -101,9 +101,11 @@ async fn account_observed_is_false_without_account_identity() {
     assert_eq!(status, StatusCode::OK);
     let identities = json["identities"].as_array().unwrap();
     assert_eq!(identity_kinds(identities), vec!["credential", "unobserved"]);
-    assert!(identities
-        .iter()
-        .all(|identity| identity["account_observed"] == false));
+    assert!(
+        identities
+            .iter()
+            .all(|identity| identity["account_observed"] == false)
+    );
 }
 
 #[tokio::test]
@@ -311,6 +313,7 @@ fn seed_ordered_limit_states(storage: &Storage, principal_id: &str) {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn limit_state(
     principal_id: &str,
     identity_kind: PrincipalLimitIdentityKind,

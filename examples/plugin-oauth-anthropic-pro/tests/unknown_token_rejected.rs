@@ -12,16 +12,20 @@ fn unknown_token_rejected() {
         vec![("Authorization", "Bearer sk-ant-oat01-UNKNOWN-bob")],
     )
     .expect_err("unknown OAuth bearer must be rejected");
-    assert!(unknown
-        .to_string()
-        .contains("unknown Anthropic OAuth bearer"));
+    assert!(
+        unknown
+            .to_string()
+            .contains("unknown Anthropic OAuth bearer")
+    );
 
     let wrong_prefix = common::authenticate(
         &mut plugin,
         vec![("Authorization", "Bearer sk-ant-WRONGPREFIX-xxx")],
     )
     .expect_err("wrong token prefix must be rejected");
-    assert!(wrong_prefix
-        .to_string()
-        .contains("invalid Anthropic OAuth token prefix"));
+    assert!(
+        wrong_prefix
+            .to_string()
+            .contains("invalid Anthropic OAuth token prefix")
+    );
 }

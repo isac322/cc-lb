@@ -1,4 +1,4 @@
-use cc_lb_storage_redb::{RequestEvent, RequestEventUpstream, Storage, REQUEST_EVENTS_V1};
+use cc_lb_storage_redb::{REQUEST_EVENTS_V1, RequestEvent, RequestEventUpstream, Storage};
 use redb::ReadableTable;
 use serde_json::Value;
 
@@ -26,8 +26,8 @@ fn request_events_persist_across_reopen() -> Result<(), Box<dyn std::error::Erro
 }
 
 #[test]
-fn request_events_query_returns_append_order_for_monotonic_keys(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn request_events_query_returns_append_order_for_monotonic_keys()
+-> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("events.redb");
     let storage = Storage::open(&path, [23; 32])?;

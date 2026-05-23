@@ -1,4 +1,4 @@
-use cc_lb_storage_redb::{oauth_key, Storage, OAUTH_CREDENTIALS_V1};
+use cc_lb_storage_redb::{OAUTH_CREDENTIALS_V1, Storage, oauth_key};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = std::env::args().collect::<Vec<_>>();

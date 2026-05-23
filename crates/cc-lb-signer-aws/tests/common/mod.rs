@@ -5,12 +5,12 @@ use std::time::SystemTime;
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    shape_request, Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder,
-    Upstream, UpstreamDialect,
+    Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder, Upstream,
+    UpstreamDialect, shape_request,
 };
 use cc_lb_signer_aws::{AwsSigV4Signer, Clock, StaticCredentialsProvider};
 use http::{HeaderMap, Method, StatusCode};
-use ring::digest::{digest, SHA256};
+use ring::digest::{SHA256, digest};
 use url::Url;
 
 pub const ACCESS_KEY: &str = "AKIATEST";

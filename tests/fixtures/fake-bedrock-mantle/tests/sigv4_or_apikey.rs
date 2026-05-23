@@ -1,5 +1,5 @@
-use axum::body::{to_bytes, Body};
-use fake_bedrock_mantle::{app, AppConfig};
+use axum::body::{Body, to_bytes};
+use fake_bedrock_mantle::{AppConfig, app};
 use http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;

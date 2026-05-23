@@ -3,10 +3,10 @@ mod common;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use cc_lb_plugin_api::{sign_request, RetryDecision, Signer, UpstreamError};
+use cc_lb_plugin_api::{RetryDecision, Signer, UpstreamError, sign_request};
 use cc_lb_signer_gcp::StaticGcpTokenProvider;
-use http::header::AUTHORIZATION;
 use http::StatusCode;
+use http::header::AUTHORIZATION;
 
 #[tokio::test]
 async fn on_unauthorized_refreshes_once() {

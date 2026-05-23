@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cc_lb_core::{start_sweep, BucketKind, QuotaManager, QuotaPolicy};
+use cc_lb_core::{BucketKind, QuotaManager, QuotaPolicy, start_sweep};
 use cc_lb_storage_redb::Storage;
 
 #[tokio::test]

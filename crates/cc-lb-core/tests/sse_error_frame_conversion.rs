@@ -6,7 +6,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use cc_lb_core::{ErrorNormalizer, SseBatchConfig, SseRelay, UpstreamKind};
 use serde_json::Value;
-use sse_relay_support::{body_from_chunks, collect_response_body, RecordingHook, TestDialect};
+use sse_relay_support::{RecordingHook, TestDialect, body_from_chunks, collect_response_body};
 
 #[test]
 fn bedrock_exception_json_becomes_anthropic_sse_error_frame() {

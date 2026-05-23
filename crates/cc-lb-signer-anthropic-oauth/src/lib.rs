@@ -16,7 +16,7 @@ use cc_lb_plugin_api::{
 };
 use cc_lb_storage_redb::{OAuthCredentials, Storage};
 use dashmap::DashMap;
-use http::header::{HeaderValue, AUTHORIZATION};
+use http::header::{AUTHORIZATION, HeaderValue};
 use oauth2::{ClientId, TokenUrl};
 use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::Mutex;
@@ -25,11 +25,11 @@ use url::Url;
 pub use http_client::{
     HyperOAuthHttpClient, OAuthHttpClient, OAuthHttpError, OAuthTokenRequest, OAuthTokenResponse,
 };
-pub use pkce::{complete_pkce_flow, start_pkce_flow, PkceHandshake, PkceHandshakeState};
+pub use pkce::{PkceHandshake, PkceHandshakeState, complete_pkce_flow, start_pkce_flow};
 pub use refresh::{
-    BreakerMap, CircuitBreakerState, RefreshError, BREAKER_FAILURE_THRESHOLD, REFRESH_BUFFER_SECS,
+    BREAKER_FAILURE_THRESHOLD, BreakerMap, CircuitBreakerState, REFRESH_BUFFER_SECS, RefreshError,
 };
-pub use single_flight::{new_refresh_locks, RefreshLocks};
+pub use single_flight::{RefreshLocks, new_refresh_locks};
 
 #[derive(Clone, Debug)]
 pub struct AnthropicOAuthSharedState {

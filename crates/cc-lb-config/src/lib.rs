@@ -7,20 +7,20 @@ mod validation;
 use std::env;
 use std::path::Path;
 
-use figment::providers::{Env, Format, Serialized, Toml};
 use figment::Figment;
+use figment::providers::{Env, Format, Serialized, Toml};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 pub use types::{
     AdminConfig, AnthropicOAuthSignerConfig, AuthStrategy, BodyConfig, BulkheadConfig,
-    CircuitBreakerConfig, Config, ConfigOverrides, DnsConfig, EgressConfig, ListenerConfig,
-    ListenerOverrides, ObservabilityConfig, PluginRef, PluginsConfig, PrincipalSpec, QuotasConfig,
-    SignersConfig, StorageConfig, TimeoutsConfig, TlsConfig, UpstreamKind, UpstreamSpec,
-    DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES,
-    DEFAULT_OAUTH_AEAD_KEY_ENV, DEFAULT_PLUGIN_BATCHED_EVENTS_PER_FLUSH,
-    DEFAULT_PLUGIN_BATCHED_FLUSH_MS,
+    CircuitBreakerConfig, Config, ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV,
+    DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV,
+    DEFAULT_PLUGIN_BATCHED_EVENTS_PER_FLUSH, DEFAULT_PLUGIN_BATCHED_FLUSH_MS, DnsConfig,
+    EgressConfig, ListenerConfig, ListenerOverrides, ObservabilityConfig, PluginRef, PluginsConfig,
+    PrincipalSpec, QuotasConfig, SignersConfig, StorageConfig, TimeoutsConfig, TlsConfig,
+    UpstreamKind, UpstreamSpec,
 };
 pub use validation::ValidationError;
 

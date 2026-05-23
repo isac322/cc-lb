@@ -38,6 +38,8 @@ async fn sign_streaming_endpoint_uses_full_body_hash() {
 
     assert_eq!(payload_hash, common::hex_sha256(&body));
     assert_ne!(payload_hash, "STREAMING-AWS4-HMAC-SHA256-EVENTS");
-    assert!(authorization
-        .contains("SignedHeaders=accept;content-type;host;x-amz-content-sha256;x-amz-date"));
+    assert!(
+        authorization
+            .contains("SignedHeaders=accept;content-type;host;x-amz-content-sha256;x-amz-date")
+    );
 }

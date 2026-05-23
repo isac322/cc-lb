@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use http::StatusCode;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub fn map_vertex_error_status(error_status: &str) -> &'static str {
     match error_status {

@@ -19,10 +19,12 @@ async fn pkce_start_and_complete_flow() {
         Url::parse("http://127.0.0.1:1455/callback").expect("redirect url"),
     );
 
-    assert!(handshake
-        .authorize_url
-        .query_pairs()
-        .any(|(name, value)| { name == "code_challenge_method" && value == "S256" }));
+    assert!(
+        handshake
+            .authorize_url
+            .query_pairs()
+            .any(|(name, value)| { name == "code_challenge_method" && value == "S256" })
+    );
 
     let creds = complete_pkce_flow(handshake, "auth-code".to_owned(), http.clone())
         .await

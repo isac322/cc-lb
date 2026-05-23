@@ -1,7 +1,7 @@
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    sign_request, Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder,
-    SignerFactory, Upstream, UpstreamDialect,
+    Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder, SignerFactory,
+    Upstream, UpstreamDialect, sign_request,
 };
 use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
 use http::header::{AUTHORIZATION, USER_AGENT};

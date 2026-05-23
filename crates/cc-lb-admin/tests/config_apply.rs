@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use axum::http::StatusCode;
 use config_admin_common::{
-    app, apply_state, authed_json, config_value, expected_revision_body, minimal_config, put_body,
-    temp_storage, test_state, test_state_without_storage, write_config, TestReloader,
+    TestReloader, app, apply_state, authed_json, config_value, expected_revision_body,
+    minimal_config, put_body, temp_storage, test_state, test_state_without_storage, write_config,
 };
 
 #[tokio::test]
@@ -119,9 +119,11 @@ async fn apply_validated_matching_revision_writes_file_reloads_and_audits_metada
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["applied_revision"], 1);
     assert!(json["applied_at_unix_secs"].as_u64().unwrap() > 0);
-    assert!(std::fs::read_to_string(&config_path)
-        .unwrap()
-        .contains("default_requests_per_window = 333"));
+    assert!(
+        std::fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("default_requests_per_window = 333")
+    );
     assert_eq!(reloader.reloads(), 1);
     assert_eq!(reloader.current().quotas.default_requests_per_window, 333);
 

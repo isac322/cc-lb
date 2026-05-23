@@ -3,25 +3,25 @@ use std::convert::Infallible;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
+    Json, Router,
     extract::{Path, Query, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     middleware,
     response::{
-        sse::{Event, KeepAlive, Sse},
         IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
     },
     routing::{delete, get, post, put},
-    Json, Router,
 };
 use rust_embed::RustEmbed;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
 
 use crate::{
-    auth::require_admin_auth, dashboard, events, management, principals, status, AdminState,
+    AdminState, auth::require_admin_auth, dashboard, events, management, principals, status,
 };
-use cc_lb_core::{record_dashboard_sse_lagged, BucketKind};
+use cc_lb_core::{BucketKind, record_dashboard_sse_lagged};
 
 #[derive(RustEmbed)]
 #[folder = "web/dist/"]

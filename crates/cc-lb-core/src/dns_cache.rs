@@ -6,12 +6,12 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
+use hickory_resolver::TokioResolver;
 use hickory_resolver::config::{LookupIpStrategy, ResolverConfig, ResolverOpts};
 use hickory_resolver::net::runtime::TokioRuntimeProvider;
-use hickory_resolver::TokioResolver;
 use hyper::Uri;
-use hyper_util::client::legacy::connect::dns::Name;
 use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::client::legacy::connect::dns::Name;
 use metrics::Unit;
 use thiserror::Error;
 use tower_service::Service;

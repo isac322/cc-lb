@@ -3,4 +3,4 @@
 mod modes;
 mod routes;
 
-pub use routes::{app, AppConfig};
+pub use routes::{AppConfig, app};

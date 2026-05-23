@@ -6,7 +6,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use cc_lb_core::SseBatchConfig;
 use sse_relay_support::{
-    body_from_chunks, collect_response_body, fixture_1000_events, relay_for, RecordingHook,
+    RecordingHook, body_from_chunks, collect_response_body, fixture_1000_events, relay_for,
 };
 
 #[tokio::test]

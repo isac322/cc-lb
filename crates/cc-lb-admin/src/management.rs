@@ -3,10 +3,10 @@ use std::collections::HashMap;
 use cc_lb_config::{Config, PrincipalSpec};
 use cc_lb_storage_redb::{ApiKeyRecord, AuditEntry, Storage, StorageError};
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use thiserror::Error;
 
-use crate::{settings, CurrentConfig};
+use crate::{CurrentConfig, settings};
 
 const EXPIRING_SOON_SECS: u64 = 300;
 const DEFAULT_API_KEY_PROVIDER: &str = "api_key";

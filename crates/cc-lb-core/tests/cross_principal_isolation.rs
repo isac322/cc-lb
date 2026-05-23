@@ -4,8 +4,8 @@ use cc_lb_core::{QuotaDecision, QuotaManager, QuotaPolicy};
 use cc_lb_storage_redb::Storage;
 
 #[tokio::test]
-async fn exhausted_principal_does_not_affect_another_principal(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn exhausted_principal_does_not_affect_another_principal()
+-> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let storage = Arc::new(Storage::open(&dir.path().join("quota.redb"), [21; 32])?);
     let manager = QuotaManager::new(

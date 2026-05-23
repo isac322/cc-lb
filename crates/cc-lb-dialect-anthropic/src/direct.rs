@@ -6,7 +6,7 @@ use cc_lb_plugin_api::{
 use http::StatusCode;
 use url::Url;
 
-use crate::{compose_url, ANTHROPIC_API_BASE_URL};
+use crate::{ANTHROPIC_API_BASE_URL, compose_url};
 
 /// Passthrough dialect for the official Anthropic API.
 #[derive(Clone, Debug, Default)]

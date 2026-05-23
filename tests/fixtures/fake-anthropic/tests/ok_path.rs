@@ -1,5 +1,5 @@
-use axum::body::{to_bytes, Body};
-use fake_anthropic::{app, AppConfig};
+use axum::body::{Body, to_bytes};
+use fake_anthropic::{AppConfig, app};
 use http::{Request, StatusCode};
 use serde_json::Value;
 use tower::ServiceExt;
@@ -116,10 +116,12 @@ fn parse_indices(text: &str) -> Vec<u64> {
 }
 
 fn assert_required_headers(headers: &http::HeaderMap) {
-    assert!(headers
-        .get("request-id")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.starts_with("req_")));
+    assert!(
+        headers
+            .get("request-id")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("req_"))
+    );
     assert_eq!(
         headers
             .get("anthropic-organization-id")

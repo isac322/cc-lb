@@ -2,7 +2,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use cc_lb_admin::{router, AdminState};
+use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_core::DashboardBroadcaster;
 use std::sync::Arc;

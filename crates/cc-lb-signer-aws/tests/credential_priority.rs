@@ -36,9 +36,12 @@ async fn credential_priority() {
         Arc::new(ProfileCredentialsProvider::with_path("default", &path)),
     ]);
 
-    env::set_var("AWS_ACCESS_KEY_ID", "AKIAENV");
-    env::set_var("AWS_SECRET_ACCESS_KEY", "env-secret");
-    env::set_var("AWS_SESSION_TOKEN", "env-token");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { env::set_var("AWS_ACCESS_KEY_ID", "AKIAENV") };
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { env::set_var("AWS_SECRET_ACCESS_KEY", "env-secret") };
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { env::set_var("AWS_SESSION_TOKEN", "env-token") };
     let env_credentials = chain.resolve().await.expect("env credentials");
     assert_eq!(env_credentials.access_key_id, "AKIAENV");
 
@@ -63,9 +66,12 @@ fn write_profile(path: &Path) {
 }
 
 fn clear_aws_env() {
-    env::remove_var("AWS_ACCESS_KEY_ID");
-    env::remove_var("AWS_SECRET_ACCESS_KEY");
-    env::remove_var("AWS_SESSION_TOKEN");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { env::remove_var("AWS_ACCESS_KEY_ID") };
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { env::remove_var("AWS_SECRET_ACCESS_KEY") };
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { env::remove_var("AWS_SESSION_TOKEN") };
 }
 
 struct EnvGuard {
@@ -87,8 +93,10 @@ impl Drop for EnvGuard {
     fn drop(&mut self) {
         for (name, value) in &self.saved {
             match value {
-                Some(value) => env::set_var(name, value),
-                None => env::remove_var(name),
+                // TODO: Audit that the environment access only happens in single-threaded code.
+                Some(value) => unsafe { env::set_var(name, value) },
+                // TODO: Audit that the environment access only happens in single-threaded code.
+                None => unsafe { env::remove_var(name) },
             }
         }
     }

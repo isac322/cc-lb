@@ -1,7 +1,7 @@
 mod common;
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -12,7 +12,7 @@ use http::{HeaderValue, Request, StatusCode};
 use serde_json::Value;
 use url::Url;
 
-use common::{collect_body, DispatchMode, MockDispatch, RecordingHook, TestRouter, TestState};
+use common::{DispatchMode, MockDispatch, RecordingHook, TestRouter, TestState, collect_body};
 
 const SECRET_HEADER_TOKEN: &str = "sk-ant-oat01-task46-secret";
 const SECRET_HEADER_VALUE: &str = "Bearer sk-ant-oat01-task46-secret";
@@ -53,10 +53,12 @@ async fn authn_runtime_error_maps_to_anthropic_error_without_secret_leak() {
     assert_eq!(body_json["type"], "error");
     assert_eq!(body_json["error"]["type"], "authentication_error");
     assert_eq!(body_json["error"]["message"], "authentication failed");
-    assert!(headers
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.starts_with("application/json")));
+    assert!(
+        headers
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("application/json"))
+    );
     assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 0);
     assert_eq!(std::process::id(), process_id_before);
     assert_no_task46_secret(&body_text);

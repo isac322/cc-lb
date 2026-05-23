@@ -30,9 +30,9 @@ pub use traits::{
     UpstreamDialect,
 };
 pub use types::{
-    shape_request, sign_request, AuthStrategy, AuthnOutcome, ObserveEvent, PluginManifest,
-    Principal, PrincipalKind, PrincipalQuotas, RequestContext, RetryDecision, RouteDecision,
-    ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, Upstream,
+    AuthStrategy, AuthnOutcome, ObserveEvent, PluginManifest, Principal, PrincipalKind,
+    PrincipalQuotas, RequestContext, RetryDecision, RouteDecision, ShapedRequest,
+    ShapedRequestBuilder, SignedRequest, SigningCapability, Upstream, shape_request, sign_request,
 };
 
 mod private {

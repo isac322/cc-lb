@@ -1,7 +1,7 @@
 mod common;
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use async_trait::async_trait;
@@ -13,8 +13,8 @@ use tokio::sync::Notify;
 use common::signed_request;
 
 #[tokio::test]
-async fn cancelling_execute_drops_guard_and_releases_permit(
-) -> Result<(), Box<dyn std::error::Error>> {
+async fn cancelling_execute_drops_guard_and_releases_permit()
+-> Result<(), Box<dyn std::error::Error>> {
     let hold = Arc::new(HoldDispatch::default());
     let bulkhead = Bulkhead::new(
         "anthropic-direct",

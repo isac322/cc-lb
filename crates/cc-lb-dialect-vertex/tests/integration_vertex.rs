@@ -1,9 +1,9 @@
 mod common;
 
-use axum::body::{to_bytes, Body};
+use axum::body::{Body, to_bytes};
 use cc_lb_dialect_vertex::VertexDialect;
 use cc_lb_plugin_api::shape_request;
-use fake_vertex::{app, AppConfig};
+use fake_vertex::{AppConfig, app};
 use http::{Request, StatusCode};
 use tower::ServiceExt;
 

@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::http_client::OAuthHttpClient;
-use crate::refresh::{exchange_pkce_code, RefreshError};
+use crate::refresh::{RefreshError, exchange_pkce_code};
 
 #[derive(Clone)]
 pub struct PkceHandshake {

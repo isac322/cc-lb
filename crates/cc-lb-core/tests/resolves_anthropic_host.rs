@@ -1,7 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
-use cc_lb_core::{make_resolver, DnsCacheError, DnsResolver, DnsResolverConfig};
+use cc_lb_core::{DnsCacheError, DnsResolver, DnsResolverConfig, make_resolver};
 
 #[tokio::test]
 #[ignore]

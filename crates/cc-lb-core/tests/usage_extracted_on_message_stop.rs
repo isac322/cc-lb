@@ -6,7 +6,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use cc_lb_core::{BucketKind, MockClock, QuotaManager, QuotaPolicy, SseBatchConfig, SseRelay};
 use cc_lb_storage_redb::Storage;
-use sse_relay_support::{body_from_chunks, collect_response_body, RecordingHook, TestDialect};
+use sse_relay_support::{RecordingHook, TestDialect, body_from_chunks, collect_response_body};
 
 #[tokio::test]
 async fn usage_extracted_on_message_stop() -> Result<(), Box<dyn std::error::Error>> {

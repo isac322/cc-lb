@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    shape_request, sign_request, Principal, PrincipalKind, RequestContext, ShapedRequest,
-    ShapedRequestBuilder, SignerFactory, Upstream, UpstreamDialect,
+    Principal, PrincipalKind, RequestContext, ShapedRequest, ShapedRequestBuilder, SignerFactory,
+    Upstream, UpstreamDialect, shape_request, sign_request,
 };
 use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
 use cc_lb_storage_redb::Storage;

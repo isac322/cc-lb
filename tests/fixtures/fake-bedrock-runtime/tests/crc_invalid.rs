@@ -1,4 +1,4 @@
-use aws_eventstream_codec::{decode_messages, DecodeError};
+use aws_eventstream_codec::{DecodeError, decode_messages};
 
 #[test]
 fn payload_mutation_returns_crc_mismatch() {

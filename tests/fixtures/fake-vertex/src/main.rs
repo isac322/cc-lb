@@ -3,7 +3,7 @@
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
 use clap::Parser;
-use fake_vertex::{app, AppConfig};
+use fake_vertex::{AppConfig, app};
 
 #[derive(Debug, Parser)]
 struct Args {

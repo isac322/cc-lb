@@ -1,7 +1,7 @@
 use std::time::Instant;
 
 use axum::body::Body;
-use fake_anthropic::{app, AppConfig};
+use fake_anthropic::{AppConfig, app};
 use http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use tower::ServiceExt;

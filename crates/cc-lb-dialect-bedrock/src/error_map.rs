@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use http::StatusCode;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 pub fn map_bedrock_error_type(error_type: &str) -> &'static str {
     match short_error_type(error_type) {

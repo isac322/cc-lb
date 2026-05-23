@@ -1,7 +1,7 @@
 mod common;
 
 use cc_lb_dialect_bedrock::BedrockRuntimeDialect;
-use cc_lb_plugin_api::{shape_request, Upstream};
+use cc_lb_plugin_api::{Upstream, shape_request};
 
 #[test]
 fn bedrock_anthropic_version_is_forced_in_body() {

@@ -2,10 +2,10 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use cc_lb_admin::{router, AdminState};
+use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_core::DashboardBroadcaster;
-use cc_lb_storage_redb::{oauth_key, Storage, OAUTH_CREDENTIALS_V1};
+use cc_lb_storage_redb::{OAUTH_CREDENTIALS_V1, Storage, oauth_key};
 use http_body_util::{BodyExt, Empty};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;

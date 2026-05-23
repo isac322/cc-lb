@@ -2,10 +2,14 @@ mod chaos_common;
 
 #[tokio::test]
 async fn drop_pct_50() {
-    std::env::set_var("CC_LB_CHAOS_LATENCY_MS", "0");
-    std::env::set_var("CC_LB_CHAOS_DROP_PCT", "50");
-    std::env::set_var("CC_LB_CHAOS_RST_AFTER_BYTES", "0");
-    std::env::set_var("CC_LB_CHAOS_TRUNCATE_AFTER_EVENTS", "0");
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("CC_LB_CHAOS_LATENCY_MS", "0") };
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("CC_LB_CHAOS_DROP_PCT", "50") };
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("CC_LB_CHAOS_RST_AFTER_BYTES", "0") };
+    // TODO: Audit that the environment access only happens in single-threaded code.
+    unsafe { std::env::set_var("CC_LB_CHAOS_TRUNCATE_AFTER_EVENTS", "0") };
 
     let router = chaos_common::start_router(chaos_common::default_fake_config()).await;
     let mut dropped = 0_u64;

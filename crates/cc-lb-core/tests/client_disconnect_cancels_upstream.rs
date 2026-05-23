@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use cc_lb_core::SseBatchConfig;
 use http_body_util::BodyExt;
-use sse_relay_support::{body_from_chunks, numbered_events, relay_for, DropSignal, RecordingHook};
+use sse_relay_support::{DropSignal, RecordingHook, body_from_chunks, numbered_events, relay_for};
 
 #[tokio::test]
 async fn client_disconnect_cancels_upstream() {

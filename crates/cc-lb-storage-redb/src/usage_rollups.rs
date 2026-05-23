@@ -5,8 +5,8 @@ use redb::ReadableTable;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    RequestEvent, RequestEventUpstream, Storage, StorageError, REQUEST_EVENTS_V1, USAGE_ROLLUPS_V1,
-    USAGE_ROLLUP_CHECKPOINTS_V1,
+    REQUEST_EVENTS_V1, RequestEvent, RequestEventUpstream, Storage, StorageError,
+    USAGE_ROLLUP_CHECKPOINTS_V1, USAGE_ROLLUPS_V1,
 };
 
 const REQUEST_EVENT_CHECKPOINT_KEY: &str = "request_events_v1_high_water";
@@ -91,10 +91,9 @@ impl Storage {
         let write_txn = self.db.begin_write()?;
         let previous_checkpoint = {
             let checkpoints = write_txn.open_table(USAGE_ROLLUP_CHECKPOINTS_V1)?;
-            let checkpoint = checkpoints
+            checkpoints
                 .get(REQUEST_EVENT_CHECKPOINT_KEY)?
-                .map(|stored| stored.value());
-            checkpoint
+                .map(|stored| stored.value())
         };
         let mut checkpoint = previous_checkpoint;
         let mut processed_events = 0;

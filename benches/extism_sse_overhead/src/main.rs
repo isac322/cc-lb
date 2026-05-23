@@ -15,7 +15,7 @@ use cc_lb_plugin_api::{
 };
 use http::{Response, StatusCode};
 use http_body_util::BodyExt;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tempfile::TempDir;
 use url::Url;
 
@@ -642,7 +642,7 @@ fn ns_to_ms(ns: u128) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{percentile, Stats};
+    use super::{Stats, percentile};
 
     #[test]
     fn percentile_uses_nearest_rank() {

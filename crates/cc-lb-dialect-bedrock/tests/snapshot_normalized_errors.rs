@@ -2,7 +2,7 @@ use bytes::Bytes;
 use cc_lb_dialect_bedrock::BedrockRuntimeDialect;
 use cc_lb_plugin_api::UpstreamDialect;
 use http::StatusCode;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 #[test]
 fn snapshot_normalized_errors() {
