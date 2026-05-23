@@ -32,3 +32,38 @@ export function microsToUsd(micros: number): string {
     maximumFractionDigits: 6,
   }).format(micros / 1_000_000);
 }
+
+export function pluralize(
+  count: number,
+  singular: string,
+  plural?: string,
+): string {
+  if (count === 1) return `${count} ${singular}`;
+  return `${count} ${plural || `${singular}s`}`;
+}
+
+const ACRONYMS = [
+  'OAUTH',
+  'AEAD',
+  'IP',
+  'DNS',
+  'URL',
+  'TLS',
+  'SSO',
+  'ID',
+  'API',
+  'HTTP',
+  'TCP',
+  'RST',
+];
+
+export function humanizeKey(snake: string): string {
+  return snake
+    .split('_')
+    .map((word) => {
+      const upper = word.toUpperCase();
+      if (ACRONYMS.includes(upper)) return upper;
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    })
+    .join(' ');
+}

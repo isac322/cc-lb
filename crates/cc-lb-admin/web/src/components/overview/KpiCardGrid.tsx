@@ -40,7 +40,7 @@ export function KpiCardGrid({ summary, isLoading }: KpiCardGridProps) {
             <div className="text-2xl font-semibold text-graphite-50 mt-1">
               —
             </div>
-            <div className="text-xs text-graphite-500 mt-1">
+            <div className="text-xs text-graphite-300 mt-1">
               No traffic in last {range}
             </div>
           </Card>

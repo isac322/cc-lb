@@ -33,8 +33,8 @@ export function ValidateApplyBar({
   const canApply = isValidated && !saving && !conflict && !saveError;
 
   return (
-    <div className="fixed bottom-0 left-64 right-0 bg-graphite-900 border-t border-graphite-800 p-4 z-10">
-      <div className="max-w-4xl mx-auto flex items-center justify-between">
+    <div className="bg-graphite-900 border-t border-graphite-800 py-2 px-6 shadow-[0_-1px_0_0_rgba(255,255,255,0.04),0_-12px_32px_-12px_rgba(0,0,0,0.7)]">
+      <div className="max-w-screen-2xl mx-auto flex items-center justify-between">
         <div className="flex items-center space-x-4">
           <div className="text-sm text-graphite-300">
             Draft Revision:{' '}
