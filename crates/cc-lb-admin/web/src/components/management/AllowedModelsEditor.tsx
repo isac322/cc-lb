@@ -47,7 +47,9 @@ export function AllowedModelsEditor({
             </button>
           </span>
         ))}
-        {models.length === 0 && <span className="text-graphite-500 text-sm">No models allowed</span>}
+        {models.length === 0 && (
+          <span className="text-graphite-500 text-sm">No models allowed</span>
+        )}
       </div>
       <div className="flex gap-2">
         <input
@@ -58,7 +60,12 @@ export function AllowedModelsEditor({
           placeholder="e.g. claude-3-5-sonnet"
           className="flex-1 bg-graphite-900 border border-graphite-800 rounded px-3 py-1.5 text-sm text-graphite-50 focus:outline-none focus:border-cyan-500"
         />
-        <Button type="button" variant="secondary"  onClick={handleAdd} disabled={!input.trim()}>
+        <Button
+          type="button"
+          variant="secondary"
+          onClick={handleAdd}
+          disabled={!input.trim()}
+        >
           Add
         </Button>
       </div>

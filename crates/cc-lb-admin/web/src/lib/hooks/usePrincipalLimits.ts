@@ -1,5 +1,5 @@
-import { useState, useEffect } from 'react';
-import { getJson, PrincipalLimitsResponse } from '../api';
+import { useEffect, useState } from 'react';
+import { getJson, type PrincipalLimitsResponse } from '../api';
 import { MOCK_LIMITS } from './mockData';
 
 export function usePrincipalLimits(principalId: string | null, mock?: boolean) {
@@ -22,11 +22,14 @@ export function usePrincipalLimits(principalId: string | null, mock?: boolean) {
     }
 
     const controller = new AbortController();
-    
+
     async function fetchLimits() {
       try {
         setIsLoading(true);
-        const res = await getJson<PrincipalLimitsResponse>(`/admin/principals/${principalId}/limits`, { signal: controller.signal });
+        const res = await getJson<PrincipalLimitsResponse>(
+          `/admin/principals/${principalId}/limits`,
+          { signal: controller.signal },
+        );
         setData(res);
         setError(null);
       } catch (err) {

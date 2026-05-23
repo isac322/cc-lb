@@ -1,8 +1,14 @@
-import { useState, useEffect, useCallback } from 'react';
-import { getJson, UpstreamHealthResponse, UpstreamListResponse } from '../api';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  getJson,
+  type UpstreamHealthResponse,
+  type UpstreamListResponse,
+} from '../api';
 
 export function useUpstreamHealth() {
-  const [healthByName, setHealthByName] = useState<Record<string, UpstreamHealthResponse>>({});
+  const [healthByName, setHealthByName] = useState<
+    Record<string, UpstreamHealthResponse>
+  >({});
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 
@@ -16,7 +22,12 @@ export function useUpstreamHealth() {
           anthropic_direct: {
             name: 'anthropic_direct',
             kind: 'anthropic_direct',
-            breaker: { state: 'closed', failure_count: 0, half_open_in_flight: 0, observed: true },
+            breaker: {
+              state: 'closed',
+              failure_count: 0,
+              half_open_in_flight: 0,
+              observed: true,
+            },
             bulkhead: { max_conns: 100, available_permits: 95, observed: true },
             drain: { draining: true, in_flight: 5 },
             killswitch: false,
@@ -26,7 +37,12 @@ export function useUpstreamHealth() {
           bedrock_runtime: {
             name: 'bedrock_runtime',
             kind: 'bedrock_runtime',
-            breaker: { state: 'half_open', failure_count: 3, half_open_in_flight: 1, observed: true },
+            breaker: {
+              state: 'half_open',
+              failure_count: 3,
+              half_open_in_flight: 1,
+              observed: true,
+            },
             bulkhead: { max_conns: 50, available_permits: 49, observed: true },
             drain: { draining: false, in_flight: 0 },
             killswitch: false,
@@ -36,7 +52,12 @@ export function useUpstreamHealth() {
           vertex: {
             name: 'vertex',
             kind: 'vertex',
-            breaker: { state: 'open', failure_count: 12, half_open_in_flight: 0, observed: true },
+            breaker: {
+              state: 'open',
+              failure_count: 12,
+              half_open_in_flight: 0,
+              observed: true,
+            },
             bulkhead: { max_conns: 20, available_permits: 20, observed: true },
             drain: { draining: false, in_flight: 0 },
             killswitch: false,
@@ -53,17 +74,21 @@ export function useUpstreamHealth() {
       }
 
       const listRes = await getJson<UpstreamListResponse>('/admin/upstreams');
-      const names = listRes.upstreams.map(u => u.name);
-      
+      const names = listRes.upstreams.map((u) => u.name);
+
       const healthResults = await Promise.all(
-        names.map(name => getJson<UpstreamHealthResponse>(`/admin/upstreams/${name}/health`).catch(e => {
-          console.error(`Failed to fetch health for ${name}`, e);
-          return null;
-        }))
+        names.map((name) =>
+          getJson<UpstreamHealthResponse>(
+            `/admin/upstreams/${name}/health`,
+          ).catch((e) => {
+            console.error(`Failed to fetch health for ${name}`, e);
+            return null;
+          }),
+        ),
       );
 
       const newHealth: Record<string, UpstreamHealthResponse> = {};
-      healthResults.forEach(res => {
+      healthResults.forEach((res) => {
         if (res) {
           newHealth[res.name] = res;
         }

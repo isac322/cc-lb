@@ -297,10 +297,10 @@ impl Visit for RedactingVisitor {
 }
 
 fn redact_known_secret_patterns(value: &str) -> String {
-    if let Ok(regex_set) = SECRET_REGEX_SET.as_ref() {
-        if !regex_set.is_match(value) {
-            return value.to_owned();
-        }
+    if let Ok(regex_set) = SECRET_REGEX_SET.as_ref()
+        && !regex_set.is_match(value)
+    {
+        return value.to_owned();
     }
 
     let mut redacted = Cow::Borrowed(value);

@@ -1,15 +1,14 @@
-import { useState, useEffect } from 'react';
+import { useEffect, useState } from 'react';
 import { useSearchParams } from 'react-router';
-import { Card } from '../components/primitives/Card';
-import { Button } from '../components/primitives/Button';
-import { PrincipalManagementList } from '../components/management/PrincipalManagementList';
-import { CredentialsList } from '../components/management/CredentialsList';
-import { PrincipalEditForm } from '../components/management/PrincipalEditForm';
-import { usePrincipalsManagement } from '../lib/hooks/usePrincipalsManagement';
-import { useDraftPrincipals } from '../lib/hooks/useDraftPrincipals';
-
-import { IssueKeyDialog } from '../components/management/IssueKeyDialog';
 import { CredentialRotateDialog } from '../components/management/CredentialRotateDialog';
+import { CredentialsList } from '../components/management/CredentialsList';
+import { IssueKeyDialog } from '../components/management/IssueKeyDialog';
+import { PrincipalEditForm } from '../components/management/PrincipalEditForm';
+import { PrincipalManagementList } from '../components/management/PrincipalManagementList';
+import { Button } from '../components/primitives/Button';
+import { Card } from '../components/primitives/Card';
+import { useDraftPrincipals } from '../lib/hooks/useDraftPrincipals';
+import { usePrincipalsManagement } from '../lib/hooks/usePrincipalsManagement';
 
 export default function PrincipalManagement() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -17,7 +16,9 @@ export default function PrincipalManagement() {
   const urlTab = searchParams.get('tab') as 'principals' | 'credentials' | null;
   const autoOpenDialog = searchParams.get('dialog');
 
-  const [tab, setTab] = useState<'principals' | 'credentials'>(urlTab || 'principals');
+  const [tab, setTab] = useState<'principals' | 'credentials'>(
+    urlTab || 'principals',
+  );
   const [isCreating, setIsCreating] = useState(false);
 
   useEffect(() => {
@@ -33,7 +34,8 @@ export default function PrincipalManagement() {
     setSearchParams(newParams);
   };
 
-  const { principals, refresh, isLoading, error } = usePrincipalsManagement(mock);
+  const { principals, refresh, isLoading, error } =
+    usePrincipalsManagement(mock);
   const { lastDraftRevision } = useDraftPrincipals(mock);
 
   return (
@@ -66,18 +68,24 @@ export default function PrincipalManagement() {
       {tab === 'principals' && (
         <Card className="p-6">
           <div className="flex items-center justify-between mb-6">
-            <h2 className="text-lg font-semibold text-graphite-50">Principals</h2>
-            <Button variant="primary"  onClick={() => setIsCreating(true)}>
+            <h2 className="text-lg font-semibold text-graphite-50">
+              Principals
+            </h2>
+            <Button variant="primary" onClick={() => setIsCreating(true)}>
               + New principal
             </Button>
           </div>
-          
+
           {isLoading ? (
             <div className="text-graphite-400">Loading principals...</div>
           ) : error ? (
             <div className="text-red-400">Error: {error.message}</div>
           ) : (
-            <PrincipalManagementList principals={principals} onRefresh={refresh} mock={mock} />
+            <PrincipalManagementList
+              principals={principals}
+              onRefresh={refresh}
+              mock={mock}
+            />
           )}
         </Card>
       )}
@@ -85,7 +93,9 @@ export default function PrincipalManagement() {
       {tab === 'credentials' && (
         <Card className="p-6">
           <div className="mb-6">
-            <h2 className="text-lg font-semibold text-graphite-50">Credentials</h2>
+            <h2 className="text-lg font-semibold text-graphite-50">
+              Credentials
+            </h2>
           </div>
           <CredentialsList mock={mock} />
         </Card>
@@ -134,7 +144,10 @@ export default function PrincipalManagement() {
         <div className="fixed bottom-0 left-0 right-0 bg-graphite-900 border-t border-graphite-800 p-4 flex items-center justify-center z-40">
           <div className="text-sm text-graphite-300">
             Draft revision {lastDraftRevision} saved.{' '}
-            <a href="/settings" className="text-cyan-400 hover:underline font-medium">
+            <a
+              href="/settings"
+              className="text-cyan-400 hover:underline font-medium"
+            >
               Review & apply →
             </a>
           </div>

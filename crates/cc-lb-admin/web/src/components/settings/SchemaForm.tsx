@@ -1,6 +1,6 @@
-import { MaskedSecretField } from './MaskedSecretField';
-import { FormField } from '../primitives/FormField';
 import { AllowedModelsEditor } from '../management/AllowedModelsEditor';
+import { FormField } from '../primitives/FormField';
+import { MaskedSecretField } from './MaskedSecretField';
 
 interface SchemaFormProps {
   schema: Record<string, unknown>;
@@ -11,7 +11,10 @@ interface SchemaFormProps {
   error?: string;
 }
 
-function resolveRef(ref: string, rootSchema: Record<string, unknown>): Record<string, unknown> {
+function resolveRef(
+  ref: string,
+  rootSchema: Record<string, unknown>,
+): Record<string, unknown> {
   if (!ref.startsWith('#/')) return {};
   const parts = ref.split('/').slice(1);
   let current: unknown = rootSchema;
@@ -24,20 +27,32 @@ function resolveRef(ref: string, rootSchema: Record<string, unknown>): Record<st
 
 function isSecretPath(path: string): boolean {
   const lower = path.toLowerCase();
-  return lower.includes('token') ||
-         lower.includes('secret') ||
-         lower.includes('api_key') ||
-         lower.includes('aead_master_key');
+  return (
+    lower.includes('token') ||
+    lower.includes('secret') ||
+    lower.includes('api_key') ||
+    lower.includes('aead_master_key')
+  );
 }
 
-export function SchemaForm({ schema, rootSchema, value, onChange, path, error }: SchemaFormProps) {
+export function SchemaForm({
+  schema,
+  rootSchema,
+  value,
+  onChange,
+  path,
+  error,
+}: SchemaFormProps) {
   if (!schema) return null;
 
   let resolvedSchema = schema;
   if (typeof schema.$ref === 'string') {
     resolvedSchema = resolveRef(schema.$ref, rootSchema);
   } else if (Array.isArray(schema.anyOf) || Array.isArray(schema.oneOf)) {
-    const variants = (schema.anyOf || schema.oneOf) as Record<string, unknown>[];
+    const variants = (schema.anyOf || schema.oneOf) as Record<
+      string,
+      unknown
+    >[];
     const nonNullVariant = variants.find((v) => v.type !== 'null');
     if (nonNullVariant) {
       if (typeof nonNullVariant.$ref === 'string') {
@@ -75,7 +90,9 @@ export function SchemaForm({ schema, rootSchema, value, onChange, path, error }:
           >
             <option value="">Select...</option>
             {resolvedSchema.enum.map((opt: unknown) => (
-              <option key={String(opt)} value={String(opt)}>{String(opt)}</option>
+              <option key={String(opt)} value={String(opt)}>
+                {String(opt)}
+              </option>
             ))}
           </select>
         </FormField>
@@ -99,7 +116,9 @@ export function SchemaForm({ schema, rootSchema, value, onChange, path, error }:
         <input
           type="number"
           value={(value as number) ?? ''}
-          onChange={(e) => onChange(e.target.value === '' ? null : Number(e.target.value))}
+          onChange={(e) =>
+            onChange(e.target.value === '' ? null : Number(e.target.value))
+          }
           min={resolvedSchema.minimum as number | undefined}
           max={resolvedSchema.maximum as number | undefined}
           className="w-full bg-graphite-900 border border-graphite-700 rounded-md px-3 py-2 text-sm text-graphite-50 focus:outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500"
@@ -124,7 +143,10 @@ export function SchemaForm({ schema, rootSchema, value, onChange, path, error }:
     );
   }
 
-  if (type === 'array' && (resolvedSchema.items as Record<string, unknown>)?.type === 'string') {
+  if (
+    type === 'array' &&
+    (resolvedSchema.items as Record<string, unknown>)?.type === 'string'
+  ) {
     return (
       <FormField label={title} error={error} help={description}>
         <AllowedModelsEditor
@@ -136,7 +158,10 @@ export function SchemaForm({ schema, rootSchema, value, onChange, path, error }:
   }
 
   if (type === 'object' && resolvedSchema.properties) {
-    const props = resolvedSchema.properties as Record<string, Record<string, unknown>>;
+    const props = resolvedSchema.properties as Record<
+      string,
+      Record<string, unknown>
+    >;
     const valObj = (value as Record<string, unknown>) || {};
     return (
       <div className="space-y-4">

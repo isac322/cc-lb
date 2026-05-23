@@ -1,7 +1,10 @@
-import { useState, useEffect } from 'react';
-import { getJson, RequestEvent, RecentEventsPayload } from '../api';
+import { useEffect, useState } from 'react';
+import { getJson, type RecentEventsPayload, type RequestEvent } from '../api';
 
-export function useRecentEvents(filters: Record<string, string>, mock: boolean) {
+export function useRecentEvents(
+  filters: Record<string, string>,
+  mock: boolean,
+) {
   const [events, setEvents] = useState<RequestEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
@@ -23,13 +26,13 @@ export function useRecentEvents(filters: Record<string, string>, mock: boolean) 
     }
 
     getJson<RecentEventsPayload>(`/admin/events/recent?${params.toString()}`)
-      .then(data => {
+      .then((data) => {
         if (isMounted) {
           setEvents(data.events);
           setLoading(false);
         }
       })
-      .catch(err => {
+      .catch((err) => {
         if (isMounted) {
           setError(err instanceof Error ? err : new Error(String(err)));
           setLoading(false);

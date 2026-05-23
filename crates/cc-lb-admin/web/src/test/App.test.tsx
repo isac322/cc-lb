@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'bun:test';
+import { describe, expect, it } from 'bun:test';
 import { renderToString } from 'react-dom/server';
 import { MemoryRouter } from 'react-router';
 import App from '../App';
@@ -8,9 +8,9 @@ describe('App', () => {
     const html = renderToString(
       <MemoryRouter>
         <App />
-      </MemoryRouter>
+      </MemoryRouter>,
     );
-    
+
     // Since localStorage is empty in test, it should render the AuthRequiredGate
     expect(html).toContain('Authentication Required');
     expect(html).toContain('Please enter your admin token');

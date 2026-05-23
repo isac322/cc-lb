@@ -1,13 +1,16 @@
-import { Card } from '../primitives/Card';
-import { DashboardUsageResponse } from '../../lib/api';
+import type { DashboardUsageResponse } from '../../lib/api';
 import { formatNumber, formatPercent, microsToUsd } from '../../lib/format';
+import { Card } from '../primitives/Card';
 
 interface PrincipalUsageStripProps {
   usage: DashboardUsageResponse | null;
   isLoading: boolean;
 }
 
-export function PrincipalUsageStrip({ usage, isLoading }: PrincipalUsageStripProps) {
+export function PrincipalUsageStrip({
+  usage,
+  isLoading,
+}: PrincipalUsageStripProps) {
   if (isLoading || !usage) {
     return (
       <div className="flex space-x-4 overflow-x-auto pb-4 snap-x">
@@ -37,8 +40,8 @@ export function PrincipalUsageStrip({ usage, isLoading }: PrincipalUsageStripPro
         let tokens = 0;
         let errors = 0;
         let cost = 0;
-        
-        s.buckets.forEach(b => {
+
+        s.buckets.forEach((b) => {
           reqs += b.request_count;
           tokens += b.input_tokens + b.output_tokens;
           errors += b.error_count;
@@ -48,28 +51,42 @@ export function PrincipalUsageStrip({ usage, isLoading }: PrincipalUsageStripPro
         const errorRate = reqs > 0 ? errors / reqs : 0;
 
         return (
-          <Card key={s.key} className="p-4 min-w-[280px] flex-shrink-0 snap-start border-l-4 border-l-blue-500">
-            <div className="font-mono text-sm text-graphite-50 mb-3 truncate" title={s.key}>
+          <Card
+            key={s.key}
+            className="p-4 min-w-[280px] flex-shrink-0 snap-start border-l-4 border-l-blue-500"
+          >
+            <div
+              className="font-mono text-sm text-graphite-50 mb-3 truncate"
+              title={s.key}
+            >
               {s.key}
             </div>
             <div className="grid grid-cols-2 gap-y-2 gap-x-4 text-sm">
               <div>
                 <div className="text-graphite-400 text-xs">Requests</div>
-                <div className="font-medium text-graphite-200">{formatNumber(reqs)}</div>
+                <div className="font-medium text-graphite-200">
+                  {formatNumber(reqs)}
+                </div>
               </div>
               <div>
                 <div className="text-graphite-400 text-xs">Tokens</div>
-                <div className="font-medium text-graphite-200">{formatNumber(tokens)}</div>
+                <div className="font-medium text-graphite-200">
+                  {formatNumber(tokens)}
+                </div>
               </div>
               <div>
                 <div className="text-graphite-400 text-xs">Error Rate</div>
-                <div className={`font-medium ${errorRate > 0.05 ? 'text-red-400' : 'text-graphite-200'}`}>
+                <div
+                  className={`font-medium ${errorRate > 0.05 ? 'text-red-400' : 'text-graphite-200'}`}
+                >
                   {formatPercent(errorRate)}
                 </div>
               </div>
               <div>
                 <div className="text-graphite-400 text-xs">Cost</div>
-                <div className="font-medium text-graphite-200">{microsToUsd(cost)}</div>
+                <div className="font-medium text-graphite-200">
+                  {microsToUsd(cost)}
+                </div>
               </div>
             </div>
           </Card>

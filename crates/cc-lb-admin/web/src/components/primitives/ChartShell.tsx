@@ -1,6 +1,6 @@
 import { Card } from './Card';
-import { LoadingState } from './LoadingState';
 import { EmptyState } from './EmptyState';
+import { LoadingState } from './LoadingState';
 
 export function ChartShell({
   title,

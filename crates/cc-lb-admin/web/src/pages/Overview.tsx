@@ -1,12 +1,15 @@
 import { useSearchParams } from 'react-router';
+import { EmbeddedLiveLog } from '../components/overview/EmbeddedLiveLog';
 import { KpiCardGrid } from '../components/overview/KpiCardGrid';
+import { PrincipalUsageStrip } from '../components/overview/PrincipalUsageStrip';
 import { RangeSelector } from '../components/overview/RangeSelector';
 import { StackedAreaChart } from '../components/overview/StackedAreaChart';
-import { PrincipalUsageStrip } from '../components/overview/PrincipalUsageStrip';
-import { EmbeddedLiveLog } from '../components/overview/EmbeddedLiveLog';
+import type {
+  DashboardSummaryResponse,
+  DashboardUsageResponse,
+} from '../lib/api';
 import { useDashboardSummary } from '../lib/hooks/useDashboardSummary';
 import { useUsageSeries } from '../lib/hooks/useUsageSeries';
-import { DashboardSummaryResponse, DashboardUsageResponse } from '../lib/api';
 
 // Mock data for ?mock=1 mode
 const MOCK_SUMMARY: DashboardSummaryResponse = {
@@ -47,14 +50,14 @@ const MOCK_USAGE_MODEL: DashboardUsageResponse = {
   series: [
     {
       key: 'claude-3-opus-20240229',
-      buckets: MOCK_SUMMARY.sparkline.buckets.map(b => ({
+      buckets: MOCK_SUMMARY.sparkline.buckets.map((b) => ({
         ...b,
         request_count: Math.floor(b.request_count * 0.3),
       })),
     },
     {
       key: 'claude-3-sonnet-20240229',
-      buckets: MOCK_SUMMARY.sparkline.buckets.map(b => ({
+      buckets: MOCK_SUMMARY.sparkline.buckets.map((b) => ({
         ...b,
         request_count: Math.floor(b.request_count * 0.7),
       })),
@@ -72,7 +75,7 @@ const MOCK_USAGE_PRINCIPAL: DashboardUsageResponse = {
   series: [
     {
       key: 'principal-prod-app-1',
-      buckets: MOCK_SUMMARY.sparkline.buckets.map(b => ({
+      buckets: MOCK_SUMMARY.sparkline.buckets.map((b) => ({
         ...b,
         request_count: Math.floor(b.request_count * 0.8),
         input_tokens: Math.floor(b.input_tokens * 0.8),
@@ -83,7 +86,7 @@ const MOCK_USAGE_PRINCIPAL: DashboardUsageResponse = {
     },
     {
       key: 'principal-dev-test-2',
-      buckets: MOCK_SUMMARY.sparkline.buckets.map(b => ({
+      buckets: MOCK_SUMMARY.sparkline.buckets.map((b) => ({
         ...b,
         request_count: Math.floor(b.request_count * 0.2),
         input_tokens: Math.floor(b.input_tokens * 0.2),
@@ -113,7 +116,9 @@ export default function Overview() {
   const usageModelLoading = isMock ? false : usageModelHook.isLoading;
   const usageModelError = isMock ? null : usageModelHook.error;
 
-  const usagePrincipal = isMock ? MOCK_USAGE_PRINCIPAL : usagePrincipalHook.data;
+  const usagePrincipal = isMock
+    ? MOCK_USAGE_PRINCIPAL
+    : usagePrincipalHook.data;
   const usagePrincipalLoading = isMock ? false : usagePrincipalHook.isLoading;
   const usagePrincipalError = isMock ? null : usagePrincipalHook.error;
 
@@ -127,7 +132,10 @@ export default function Overview() {
       {summaryError && (
         <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-md text-red-400 text-sm flex items-center justify-between">
           <span>Failed to load summary: {summaryError.message}</span>
-          <button onClick={summaryHook.refresh} className="px-3 py-1 bg-red-500/20 hover:bg-red-500/30 rounded transition-colors">
+          <button
+            onClick={summaryHook.refresh}
+            className="px-3 py-1 bg-red-500/20 hover:bg-red-500/30 rounded transition-colors"
+          >
             Retry
           </button>
         </div>
@@ -138,7 +146,10 @@ export default function Overview() {
       {usageModelError && (
         <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-md text-red-400 text-sm flex items-center justify-between">
           <span>Failed to load chart data: {usageModelError.message}</span>
-          <button onClick={usageModelHook.refresh} className="px-3 py-1 bg-red-500/20 hover:bg-red-500/30 rounded transition-colors">
+          <button
+            onClick={usageModelHook.refresh}
+            className="px-3 py-1 bg-red-500/20 hover:bg-red-500/30 rounded transition-colors"
+          >
             Retry
           </button>
         </div>
@@ -148,14 +159,22 @@ export default function Overview() {
 
       {usagePrincipalError && (
         <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-md text-red-400 text-sm flex items-center justify-between">
-          <span>Failed to load principal usage: {usagePrincipalError.message}</span>
-          <button onClick={usagePrincipalHook.refresh} className="px-3 py-1 bg-red-500/20 hover:bg-red-500/30 rounded transition-colors">
+          <span>
+            Failed to load principal usage: {usagePrincipalError.message}
+          </span>
+          <button
+            onClick={usagePrincipalHook.refresh}
+            className="px-3 py-1 bg-red-500/20 hover:bg-red-500/30 rounded transition-colors"
+          >
             Retry
           </button>
         </div>
       )}
 
-      <PrincipalUsageStrip usage={usagePrincipal} isLoading={usagePrincipalLoading} />
+      <PrincipalUsageStrip
+        usage={usagePrincipal}
+        isLoading={usagePrincipalLoading}
+      />
 
       <EmbeddedLiveLog />
     </div>

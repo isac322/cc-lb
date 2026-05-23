@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use cc_lb_pricing::virtual_cost_micros;
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
 use crate::{

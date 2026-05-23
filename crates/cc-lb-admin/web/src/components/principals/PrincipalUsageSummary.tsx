@@ -1,14 +1,17 @@
-import { DashboardUsageResponse } from '../../lib/api';
+import type { DashboardUsageResponse } from '../../lib/api';
 import { formatNumber, formatPercent, microsToUsd } from '../../lib/format';
-import { MetricCard } from '../primitives/MetricCard';
 import { Sparkline } from '../overview/Sparkline';
+import { MetricCard } from '../primitives/MetricCard';
 
 interface PrincipalUsageSummaryProps {
   usage: DashboardUsageResponse | null;
   isLoading: boolean;
 }
 
-export function PrincipalUsageSummary({ usage, isLoading }: PrincipalUsageSummaryProps) {
+export function PrincipalUsageSummary({
+  usage,
+  isLoading,
+}: PrincipalUsageSummaryProps) {
   if (isLoading || !usage) {
     return (
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
@@ -34,10 +37,10 @@ export function PrincipalUsageSummary({ usage, isLoading }: PrincipalUsageSummar
   let tokens = 0;
   let errors = 0;
   let cost = 0;
-  
+
   // Aggregate across all models for this principal
-  usage.series.forEach(s => {
-    s.buckets.forEach(b => {
+  usage.series.forEach((s) => {
+    s.buckets.forEach((b) => {
       reqs += b.request_count;
       tokens += b.input_tokens + b.output_tokens;
       errors += b.error_count;
@@ -48,11 +51,19 @@ export function PrincipalUsageSummary({ usage, isLoading }: PrincipalUsageSummar
   const errorRate = reqs > 0 ? errors / reqs : 0;
 
   // For sparklines, we need to aggregate buckets across series by time
-  const aggregatedBuckets = new Map<number, { reqs: number, tokens: number, errors: number, cost: number }>();
-  
-  usage.series.forEach(s => {
-    s.buckets.forEach(b => {
-      const existing = aggregatedBuckets.get(b.bucket_start_unix_secs) || { reqs: 0, tokens: 0, errors: 0, cost: 0 };
+  const aggregatedBuckets = new Map<
+    number,
+    { reqs: number; tokens: number; errors: number; cost: number }
+  >();
+
+  usage.series.forEach((s) => {
+    s.buckets.forEach((b) => {
+      const existing = aggregatedBuckets.get(b.bucket_start_unix_secs) || {
+        reqs: 0,
+        tokens: 0,
+        errors: 0,
+        cost: 0,
+      };
       existing.reqs += b.request_count;
       existing.tokens += b.input_tokens + b.output_tokens;
       existing.errors += b.error_count;
@@ -66,7 +77,7 @@ export function PrincipalUsageSummary({ usage, isLoading }: PrincipalUsageSummar
     .map(([ts, data]) => ({
       ts,
       ...data,
-      errorRate: data.reqs > 0 ? data.errors / data.reqs : 0
+      errorRate: data.reqs > 0 ? data.errors / data.reqs : 0,
     }));
 
   return (
@@ -80,11 +91,19 @@ export function PrincipalUsageSummary({ usage, isLoading }: PrincipalUsageSummar
         <Sparkline data={sparklineData} dataKey="tokens" color="#8b5cf6" />
       </div>
       <div className="relative overflow-hidden rounded-lg">
-        <MetricCard 
-          title="Error Rate" 
-          value={<span className={errorRate > 0.05 ? 'text-red-400' : ''}>{formatPercent(errorRate)}</span>} 
+        <MetricCard
+          title="Error Rate"
+          value={
+            <span className={errorRate > 0.05 ? 'text-red-400' : ''}>
+              {formatPercent(errorRate)}
+            </span>
+          }
         />
-        <Sparkline data={sparklineData} dataKey="errorRate" color={errorRate > 0.05 ? '#f87171' : '#3b82f6'} />
+        <Sparkline
+          data={sparklineData}
+          dataKey="errorRate"
+          color={errorRate > 0.05 ? '#f87171' : '#3b82f6'}
+        />
       </div>
       <div className="relative overflow-hidden rounded-lg">
         <MetricCard title="Cost" value={microsToUsd(cost)} />

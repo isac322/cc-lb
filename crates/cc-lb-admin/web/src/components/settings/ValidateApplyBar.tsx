@@ -37,9 +37,12 @@ export function ValidateApplyBar({
       <div className="max-w-4xl mx-auto flex items-center justify-between">
         <div className="flex items-center space-x-4">
           <div className="text-sm text-graphite-300">
-            Draft Revision: <span className="font-mono font-medium text-graphite-50">{revision}</span>
+            Draft Revision:{' '}
+            <span className="font-mono font-medium text-graphite-50">
+              {revision}
+            </span>
           </div>
-          
+
           {saving ? (
             <StatusChip variant="warn">Saving...</StatusChip>
           ) : saveError ? (
@@ -51,7 +54,9 @@ export function ValidateApplyBar({
           )}
 
           {isValidated && !conflict && (
-            <StatusChip variant="ok">Validated Rev {lastValidatedRevision}</StatusChip>
+            <StatusChip variant="ok">
+              Validated Rev {lastValidatedRevision}
+            </StatusChip>
           )}
         </div>
 
@@ -65,7 +70,15 @@ export function ValidateApplyBar({
             variant="secondary"
             onClick={onValidate}
             disabled={!canValidate || validating}
-            title={saving ? 'Cannot validate while saving' : saveError ? 'Cannot validate or apply while autosave is failing — fix the save error first.' : conflict ? 'Resolve conflict first' : ''}
+            title={
+              saving
+                ? 'Cannot validate while saving'
+                : saveError
+                  ? 'Cannot validate or apply while autosave is failing — fix the save error first.'
+                  : conflict
+                    ? 'Resolve conflict first'
+                    : ''
+            }
           >
             {validating ? 'Validating...' : 'Validate'}
           </Button>
@@ -73,13 +86,23 @@ export function ValidateApplyBar({
             variant="primary"
             onClick={onApply}
             disabled={!canApply || applying}
-            title={!isValidated ? 'Must validate current revision first' : saving ? 'Cannot apply while saving' : saveError ? 'Cannot validate or apply while autosave is failing — fix the save error first.' : conflict ? 'Resolve conflict first' : ''}
+            title={
+              !isValidated
+                ? 'Must validate current revision first'
+                : saving
+                  ? 'Cannot apply while saving'
+                  : saveError
+                    ? 'Cannot validate or apply while autosave is failing — fix the save error first.'
+                    : conflict
+                      ? 'Resolve conflict first'
+                      : ''
+            }
           >
             {applying ? 'Applying...' : 'Apply'}
           </Button>
         </div>
       </div>
-      
+
       {lastValidationError && !isValidated && (
         <div className="max-w-4xl mx-auto mt-3 p-3 bg-red-900/20 border border-red-800 rounded-md text-sm text-red-200">
           <strong>Validation Error:</strong> {lastValidationError}
@@ -87,7 +110,8 @@ export function ValidateApplyBar({
       )}
       {conflict && (
         <div className="max-w-4xl mx-auto mt-3 p-3 bg-yellow-900/20 border border-yellow-800 rounded-md text-sm text-yellow-200">
-          <strong>Draft updated elsewhere.</strong> Please refresh to drop local edits and continue.
+          <strong>Draft updated elsewhere.</strong> Please refresh to drop local
+          edits and continue.
         </div>
       )}
     </div>

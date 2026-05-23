@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use redb::{Database, ReadableTable};
+use redb::{Database, ReadableDatabase, ReadableTable};
 
 use crate::{
     API_KEYS_V1, AUDIT_LOG_V1, CONFIG_DRAFT_V1, CONFIG_HISTORY_V1, CURRENT_SCHEMA_VERSION,

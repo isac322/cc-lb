@@ -5,7 +5,11 @@ interface ActionNeededAlertProps {
 }
 
 export function ActionNeededAlert({ status }: ActionNeededAlertProps) {
-  if (status !== 'expired' && status !== 'expiring_soon' && status !== 'missing') {
+  if (
+    status !== 'expired' &&
+    status !== 'expiring_soon' &&
+    status !== 'missing'
+  ) {
     return null;
   }
 

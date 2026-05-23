@@ -1,5 +1,11 @@
-import { useState, useEffect, useCallback } from 'react';
-import { getJson, postJson, ApiKeyRecord, IssueKeyResponse, RevokeKeyResponse } from '../api';
+import { useCallback, useEffect, useState } from 'react';
+import {
+  type ApiKeyRecord,
+  getJson,
+  type IssueKeyResponse,
+  postJson,
+  type RevokeKeyResponse,
+} from '../api';
 
 export function usePrincipalKeys(principalId: string, mock?: boolean) {
   const [keys, setKeys] = useState<ApiKeyRecord[]>([]);
@@ -40,7 +46,9 @@ export function usePrincipalKeys(principalId: string, mock?: boolean) {
     try {
       setIsLoading(true);
       setError(null);
-      const res = await getJson<{ keys: ApiKeyRecord[] }>(`/admin/principals/${principalId}/keys`);
+      const res = await getJson<{ keys: ApiKeyRecord[] }>(
+        `/admin/principals/${principalId}/keys`,
+      );
       setKeys(res.keys);
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
@@ -72,7 +80,10 @@ export function usePrincipalKeys(principalId: string, mock?: boolean) {
       ]);
       return newKey;
     }
-    const res = await postJson<IssueKeyResponse, { label?: string }>(`/admin/principals/${principalId}/keys`, { label });
+    const res = await postJson<IssueKeyResponse, { label?: string }>(
+      `/admin/principals/${principalId}/keys`,
+      { label },
+    );
     await fetchKeys();
     return res;
   };
@@ -84,11 +95,18 @@ export function usePrincipalKeys(principalId: string, mock?: boolean) {
         revoked_at_unix_secs: Math.floor(Date.now() / 1000),
       };
       setKeys((prev) =>
-        prev.map((k) => (k.key_id === keyId ? { ...k, revoked_at_unix_secs: res.revoked_at_unix_secs } : k))
+        prev.map((k) =>
+          k.key_id === keyId
+            ? { ...k, revoked_at_unix_secs: res.revoked_at_unix_secs }
+            : k,
+        ),
       );
       return res;
     }
-    const res = await postJson<RevokeKeyResponse, Record<string, never>>(`/admin/principals/${principalId}/keys/${keyId}/revoke`, {});
+    const res = await postJson<RevokeKeyResponse, Record<string, never>>(
+      `/admin/principals/${principalId}/keys/${keyId}/revoke`,
+      {},
+    );
     await fetchKeys();
     return res;
   };

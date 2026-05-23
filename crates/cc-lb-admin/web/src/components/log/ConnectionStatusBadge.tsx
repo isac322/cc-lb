@@ -1,6 +1,10 @@
 import { StatusChip } from '../primitives/StatusChip';
 
-export function ConnectionStatusBadge({ status }: { status: 'live' | 'reconnecting' | 'error' }) {
+export function ConnectionStatusBadge({
+  status,
+}: {
+  status: 'live' | 'reconnecting' | 'error';
+}) {
   if (status === 'live') {
     return <StatusChip variant="live">Live</StatusChip>;
   }

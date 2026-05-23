@@ -1,3 +1,4 @@
+use redb::ReadableDatabase;
 use cc_lb_storage_redb::{OAUTH_CREDENTIALS_V1, Storage, oauth_key};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

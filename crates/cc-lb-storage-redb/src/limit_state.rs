@@ -1,4 +1,4 @@
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
 use crate::{PRINCIPAL_LIMIT_STATES_V1, Storage, StorageError};

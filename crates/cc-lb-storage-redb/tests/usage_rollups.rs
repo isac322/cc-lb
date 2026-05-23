@@ -2,7 +2,7 @@ use cc_lb_storage_redb::{
     RequestEvent, RequestEventUpstream, Storage, USAGE_ROLLUPS_V1, UsageRollup,
     UsageRollupResolution,
 };
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 use serde_json::Value;
 
 #[test]

@@ -1,7 +1,7 @@
 import { useState } from 'react';
-import { Modal } from '../primitives/Modal';
-import { Button } from '../primitives/Button';
 import { useCredentials } from '../../lib/hooks/useCredentials';
+import { Button } from '../primitives/Button';
+import { Modal } from '../primitives/Modal';
 
 export function CredentialRotateDialog({
   principalId,
@@ -32,7 +32,9 @@ export function CredentialRotateDialog({
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       if (msg.includes('rotate_unsupported')) {
-        setError('Rotation requires running the OAuth flow. Please visit the Credentials page to re-authenticate.');
+        setError(
+          'Rotation requires running the OAuth flow. Please visit the Credentials page to re-authenticate.',
+        );
       } else {
         setError(msg);
       }
@@ -59,7 +61,8 @@ export function CredentialRotateDialog({
       <Modal isOpen onClose={handleDismiss} title="Credential Rotated">
         <div className="space-y-4">
           <div className="bg-yellow-900/30 border border-yellow-700/50 rounded p-3 text-yellow-200 text-sm">
-            <strong>Warning:</strong> This is the only time the new key will be displayed. Copy it now.
+            <strong>Warning:</strong> This is the only time the new key will be
+            displayed. Copy it now.
           </div>
           <div className="flex items-center gap-2">
             <input
@@ -86,8 +89,9 @@ export function CredentialRotateDialog({
     <Modal isOpen onClose={onClose} title="Rotate Credential">
       <div className="space-y-4">
         <p className="text-graphite-300 text-sm">
-          Are you sure you want to rotate the credential for <span className="font-mono text-graphite-100">{principalId}</span> ({provider})?
-          The old credential will be revoked immediately.
+          Are you sure you want to rotate the credential for{' '}
+          <span className="font-mono text-graphite-100">{principalId}</span> (
+          {provider})? The old credential will be revoked immediately.
         </p>
 
         {error && (
@@ -95,7 +99,12 @@ export function CredentialRotateDialog({
             {error}
             {error.includes('OAuth') && (
               <div className="mt-2">
-                <a href="/credentials" className="text-cyan-400 hover:underline">Go to Credentials →</a>
+                <a
+                  href="/credentials"
+                  className="text-cyan-400 hover:underline"
+                >
+                  Go to Credentials →
+                </a>
               </div>
             )}
           </div>
@@ -105,7 +114,12 @@ export function CredentialRotateDialog({
           <Button type="button" variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button type="button" variant="primary" onClick={handleRotate} disabled={isPending}>
+          <Button
+            type="button"
+            variant="primary"
+            onClick={handleRotate}
+            disabled={isPending}
+          >
             {isPending ? 'Rotating...' : 'Rotate Credential'}
           </Button>
         </div>

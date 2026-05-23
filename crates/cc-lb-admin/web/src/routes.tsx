@@ -1,5 +1,5 @@
 import { lazy } from 'react';
-import { Routes, Route } from 'react-router';
+import { Route, Routes } from 'react-router';
 import { ErrorState } from './components/primitives/ErrorState';
 
 const Overview = lazy(() => import('./pages/Overview'));
@@ -18,7 +18,7 @@ function NotFound() {
       <ErrorState
         title="404 Not Found"
         message="The page you are looking for does not exist."
-        onRetry={() => window.location.href = '/'}
+        onRetry={() => (window.location.href = '/')}
       />
     </div>
   );

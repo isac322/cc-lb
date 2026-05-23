@@ -1,9 +1,9 @@
 import { useState } from 'react';
-import { Modal } from '../primitives/Modal';
+import { useDraftPrincipals } from '../../lib/hooks/useDraftPrincipals';
+import type { PrincipalWithId } from '../../lib/hooks/usePrincipalsManagement';
 import { Button } from '../primitives/Button';
 import { FormField } from '../primitives/FormField';
-import { PrincipalWithId } from '../../lib/hooks/usePrincipalsManagement';
-import { useDraftPrincipals } from '../../lib/hooks/useDraftPrincipals';
+import { Modal } from '../primitives/Modal';
 import { AllowedModelsEditor } from './AllowedModelsEditor';
 import { QuotaOverrideForm } from './QuotaOverrideForm';
 
@@ -20,9 +20,11 @@ export function PrincipalEditForm({
 }) {
   const isEdit = !!principal;
   const { createPrincipal, updatePrincipal } = useDraftPrincipals(mock);
-  
+
   const [id, setId] = useState(principal?.id || '');
-  const [allowedModels, setAllowedModels] = useState<string[]>(principal?.allowed_models || []);
+  const [allowedModels, setAllowedModels] = useState<string[]>(
+    principal?.allowed_models || [],
+  );
   const [isPending, setIsPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -34,8 +36,12 @@ export function PrincipalEditForm({
       const spec = {
         allowed_models: allowedModels,
         ...(principal?.quotas ? { quotas: principal.quotas } : {}),
-        ...(principal?.disabled !== undefined ? { disabled: principal.disabled } : {}),
-        ...(principal?.credentials_ref ? { credentials_ref: principal.credentials_ref } : {}),
+        ...(principal?.disabled !== undefined
+          ? { disabled: principal.disabled }
+          : {}),
+        ...(principal?.credentials_ref
+          ? { credentials_ref: principal.credentials_ref }
+          : {}),
       };
 
       if (isEdit) {
@@ -52,7 +58,11 @@ export function PrincipalEditForm({
   };
 
   return (
-    <Modal isOpen onClose={onClose} title={isEdit ? 'Edit Principal' : 'New Principal'}>
+    <Modal
+      isOpen
+      onClose={onClose}
+      title={isEdit ? 'Edit Principal' : 'New Principal'}
+    >
       <form onSubmit={handleSubmit} className="space-y-4">
         <FormField label="ID" error={undefined}>
           <input
@@ -66,13 +76,20 @@ export function PrincipalEditForm({
         </FormField>
 
         <div className="space-y-2">
-          <label className="block text-sm font-medium text-graphite-300">Allowed Models</label>
-          <AllowedModelsEditor models={allowedModels} onChange={setAllowedModels} />
+          <label className="block text-sm font-medium text-graphite-300">
+            Allowed Models
+          </label>
+          <AllowedModelsEditor
+            models={allowedModels}
+            onChange={setAllowedModels}
+          />
         </div>
 
         {isEdit && (
           <div className="pt-4 border-t border-graphite-800">
-            <h3 className="text-sm font-medium text-graphite-300 mb-2">Live Quota Override</h3>
+            <h3 className="text-sm font-medium text-graphite-300 mb-2">
+              Live Quota Override
+            </h3>
             <QuotaOverrideForm principalId={id} mock={mock} />
           </div>
         )}

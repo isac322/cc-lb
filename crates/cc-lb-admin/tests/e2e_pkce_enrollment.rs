@@ -1,3 +1,4 @@
+use redb::ReadableDatabase;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
