@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/aws-eventstream-codec",
+    "crates/cc-lb-pricing",
     "crates/cc-lb-*",
     "benches/extism_sse_overhead",
     "examples/plugin-api-key",

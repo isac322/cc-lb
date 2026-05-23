@@ -7,6 +7,7 @@ use std::time::{Duration, Instant};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use cc_lb_admin::AdminState;
+use cc_lb_core::DashboardBroadcaster;
 use cc_lb_server::reload::ConfigWatcher;
 use http_body_util::BodyExt;
 use serde_json::json;
@@ -27,7 +28,15 @@ async fn sighup_reloads_quota_defaults() {
         storage: None,
         quota_manager: None,
         lifecycle: None,
+        breaker_registry: None,
+        drain_controller: None,
+        bulkhead_registry: None,
+        plugin_runtime_status: None,
+        dashboard_broadcaster: Arc::new(DashboardBroadcaster::new()),
         config: watcher.clone(),
+        config_path: None,
+        config_watcher: None,
+        config_started_at_unix_secs: 0,
         admin_token: Some("test-token".to_string()),
         start_time: std::time::Instant::now(),
     });

@@ -5,11 +5,14 @@ edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
 publish = false
+build = "build.rs"
 
 [dependencies]
+async-stream.workspace = true
 axum.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+schemars.workspace = true
 tokio.workspace = true
 rust-embed.workspace = true
 cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
@@ -24,6 +27,7 @@ cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
 oauth2.workspace = true
 secrecy.workspace = true
 thiserror.workspace = true
+toml = "0.8"
 url.workspace = true
 mime_guess = "2.0.5"
 nix = { version = "0.31.3", features = ["signal"] }

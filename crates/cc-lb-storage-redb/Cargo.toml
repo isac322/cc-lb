@@ -7,8 +7,11 @@ rust-version.workspace = true
 publish = false
 
 [dependencies]
+base64.workspace = true
+cc-lb-pricing = { path = "../cc-lb-pricing" }
 chacha20poly1305.workspace = true
 redb.workspace = true
+ring.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true

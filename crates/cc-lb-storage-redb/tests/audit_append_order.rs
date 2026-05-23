@@ -43,5 +43,7 @@ fn audit_entry(index: usize) -> AuditEntry {
         output_tokens: (index * 2) as u64,
         duration_ms: 25,
         agent_label: Some("test-agent".to_owned()),
+        kind: None,
+        payload: None,
     }
 }

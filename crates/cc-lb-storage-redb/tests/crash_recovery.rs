@@ -55,6 +55,8 @@ fn child_writer(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             output_tokens: 2,
             duration_ms: 3,
             agent_label: Some("crash-child".to_owned()),
+            kind: None,
+            payload: None,
         })?;
         if index % 64 == 0 {
             thread::sleep(Duration::from_millis(1));

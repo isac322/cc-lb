@@ -4,6 +4,7 @@ use axum::{
 };
 use cc_lb_admin::{router, AdminState};
 use cc_lb_config::Config;
+use cc_lb_core::DashboardBroadcaster;
 use cc_lb_storage_redb::Storage;
 use http_body_util::{BodyExt, Empty};
 use hyper_rustls::HttpsConnectorBuilder;
@@ -27,7 +28,15 @@ fn test_state(storage: Arc<Storage>, issuer_base_url: String) -> AdminState {
         storage: Some(storage),
         quota_manager: None,
         lifecycle: None,
+        breaker_registry: None,
+        drain_controller: None,
+        bulkhead_registry: None,
+        plugin_runtime_status: None,
+        dashboard_broadcaster: Arc::new(DashboardBroadcaster::new()),
         config: Arc::new(test_config(issuer_base_url)),
+        config_path: None,
+        config_watcher: None,
+        config_started_at_unix_secs: 0,
         admin_token: Some("test-token".to_string()),
         start_time: std::time::Instant::now(),
     }

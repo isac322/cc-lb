@@ -1,0 +1,87 @@
+@import "tailwindcss";
+
+@theme {
+  --color-graphite-50: #f4f4f5;
+  --color-graphite-100: #e4e4e7;
+  --color-graphite-200: #d4d4d8;
+  --color-graphite-300: #a1a1aa;
+  --color-graphite-400: #71717a;
+  --color-graphite-500: #52525b;
+  --color-graphite-600: #3f3f46;
+  --color-graphite-700: #27272a;
+  --color-graphite-800: #18181b;
+  --color-graphite-850: #121214;
+  --color-graphite-900: #09090b;
+  --color-graphite-950: #000000;
+
+  --color-cyan-400: #22d3ee;
+  --color-cyan-500: #06b6d4;
+  --color-cyan-600: #0891b2;
+
+  --color-amber-400: #fbbf24;
+  --color-amber-500: #f59e0b;
+  --color-amber-600: #d97706;
+
+  --color-red-400: #f87171;
+  --color-red-500: #ef4444;
+  --color-red-600: #dc2626;
+
+  --color-green-400: #4ade80;
+  --color-green-500: #22c55e;
+  --color-green-600: #16a34a;
+
+  --color-fuchsia-400: #e879f9;
+
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, monospace;
+
+  --spacing-card-gutter: 1rem;
+
+  --radius-sm: 0.25rem;
+  --radius-md: 0.5rem;
+  --radius-lg: 0.75rem;
+
+  --shadow-sm: 0 1px 0 0 rgb(0 0 0 / 0.3);
+  --shadow-md: 0 4px 12px rgb(0 0 0 / 0.4);
+
+  --color-status-ok: var(--color-green-400);
+  --color-status-warn: var(--color-amber-400);
+  --color-status-danger: var(--color-red-400);
+  --color-status-info: var(--color-cyan-400);
+  --color-status-live: var(--color-cyan-400);
+}
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  body {
+    background-color: var(--color-graphite-900);
+    color: var(--color-graphite-100);
+    font-family: var(--font-sans);
+  }
+
+  *:focus-visible {
+    outline: 2px solid var(--color-cyan-500);
+    outline-offset: 2px;
+  }
+}
+
+@keyframes pulse-live {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+@keyframes row-highlight {
+  0% { background-color: var(--color-cyan-500); opacity: 0.2; }
+  100% { background-color: transparent; opacity: 1; }
+}
+
+.animate-pulse-live {
+  animation: pulse-live 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+
+.animate-row-highlight {
+  animation: row-highlight 2s ease-out forwards;
+}

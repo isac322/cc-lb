@@ -417,6 +417,12 @@
             "null"
           ]
         },
+        "disabled": {
+          "type": [
+            "boolean",
+            "null"
+          ]
+        },
         "quotas": {
           "anyOf": [
             {
