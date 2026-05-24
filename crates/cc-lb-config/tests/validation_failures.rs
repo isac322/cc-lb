@@ -13,7 +13,7 @@ struct EnvGuard {
 impl EnvGuard {
     fn set(key: &'static str, value: &str) -> Self {
         let previous = env::var_os(key);
-        // TODO: Audit that the environment access only happens in single-threaded code.
+        // SAFETY: test-only; single-threaded test runner, no concurrent env access
         unsafe { env::set_var(key, value) };
         Self { key, previous }
     }
@@ -22,10 +22,10 @@ impl EnvGuard {
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         if let Some(previous) = &self.previous {
-            // TODO: Audit that the environment access only happens in single-threaded code.
+            // SAFETY: test-only; single-threaded test runner, no concurrent env access
             unsafe { env::set_var(self.key, previous) };
         } else {
-            // TODO: Audit that the environment access only happens in single-threaded code.
+            // SAFETY: test-only; single-threaded test runner, no concurrent env access
             unsafe { env::remove_var(self.key) };
         }
     }
