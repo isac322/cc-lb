@@ -76,7 +76,7 @@ fn redb_stored_api_key_schema_roundtrip_preserves_new_fields(
         key_hash_b64: "legacy-hash".to_owned(),
     };
     let legacy_bytes = encode_to_vec(
-        &LegacyStoredApiKeyRecordWire::V0(legacy.clone()),
+        LegacyStoredApiKeyRecordWire::V0(legacy.clone()),
         standard().with_variable_int_encoding(),
     )?;
     let (legacy_decoded, consumed) = decode_from_slice::<StoredApiKeyRecord, _>(
