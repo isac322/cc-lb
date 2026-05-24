@@ -120,7 +120,8 @@ async fn principal_usage_response_excludes_payload_terms() {
 
 fn test_state(config: Config, storage: Option<Arc<RedbStorage>>) -> AdminState {
     AdminState {
-        storage,
+        storage: storage.unwrap_or_else(test_storage),
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         quota_manager: None,
         lifecycle: None,
         breaker_registry: None,
@@ -165,7 +166,7 @@ async fn authorized_json(app: axum::Router, uri: &str) -> (StatusCode, Value, Ve
     (status, json, body.to_vec())
 }
 
-fn seed_usage_events(storage: &Storage, base: u64) {
+fn seed_usage_events(storage: &RedbStorage, base: u64) {
     for event in [
         event(base + 5, "req-a-1", "principal-a", "model-a"),
         event(base + 65, "req-a-2", "principal-a", "model-b"),
@@ -228,4 +229,12 @@ fn forbidden_terms() -> Vec<String> {
         ["tool", "_use"].concat(),
         ["con", "tent"].concat(),
     ]
+}
+
+fn test_storage() -> Arc<RedbStorage> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.redb");
+    let storage = Arc::new(RedbStorage::open(&path).unwrap());
+    std::mem::forget(dir);
+    storage
 }

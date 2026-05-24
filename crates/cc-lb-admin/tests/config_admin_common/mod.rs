@@ -23,6 +23,14 @@ pub fn temp_storage() -> (tempfile::TempDir, Arc<RedbStorage>) {
     (dir, storage)
 }
 
+pub fn test_storage() -> Arc<RedbStorage> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.redb");
+    let storage = Arc::new(RedbStorage::open(&path).unwrap());
+    std::mem::forget(dir);
+    storage
+}
+
 pub fn minimal_config() -> Config {
     config_with_requests(1_000)
 }
@@ -45,7 +53,8 @@ pub fn config_value(default_requests_per_window: u64) -> Value {
 
 pub fn test_state(config: Config, storage: Option<Arc<RedbStorage>>) -> AdminState {
     AdminState {
-        storage,
+        storage: storage.unwrap_or_else(test_storage),
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         quota_manager: None,
         lifecycle: None,
         breaker_registry: None,
@@ -74,7 +83,8 @@ pub fn apply_state(
     let config: Arc<dyn CurrentConfig> = reloader.clone();
     let config_watcher: Arc<dyn ConfigReloader> = reloader;
     AdminState {
-        storage: Some(storage),
+        storage,
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         quota_manager: None,
         lifecycle: None,
         breaker_registry: None,

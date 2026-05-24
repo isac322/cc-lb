@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use cc_lb_aead::AeadService;
 use cc_lb_config::{AuthStrategy as ConfigAuthStrategy, Config, UpstreamKind, UpstreamSpec};
 use cc_lb_dialect_anthropic::{AnthropicDirectDialect, CustomAnthropicSpecDialect};
 use cc_lb_dialect_bedrock::{BedrockMantleDialect, BedrockRuntimeDialect};
@@ -16,7 +17,7 @@ use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
 use cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory;
 use cc_lb_signer_aws::AwsSigV4SignerFactory;
 use cc_lb_signer_gcp::GcpOAuthSignerFactory;
-use cc_lb_storage_redb::RedbStorage;
+use cc_lb_storage_api::Storage;
 use http::Method;
 use oauth2::{ClientId, TokenUrl};
 use serde_json::Map;
@@ -29,7 +30,7 @@ pub struct BuiltinAuthn {
 }
 
 impl BuiltinAuthn {
-    pub fn new(config: &Config, storage: Option<Arc<RedbStorage>>) -> Self {
+    pub fn new(config: &Config, storage: Arc<dyn Storage>, aead: Arc<AeadService>) -> Self {
         let defaults = default_quotas(config);
         let principal_quotas = config
             .principals
@@ -52,7 +53,7 @@ impl BuiltinAuthn {
         Self {
             defaults,
             principal_quotas,
-            signer_factory: Arc::new(CompositeSignerFactory::new(config, storage)),
+            signer_factory: Arc::new(CompositeSignerFactory::new(config, storage, aead)),
         }
     }
 }
@@ -165,7 +166,7 @@ pub struct CompositeSignerFactory {
 }
 
 impl CompositeSignerFactory {
-    fn new(config: &Config, storage: Option<Arc<RedbStorage>>) -> Self {
+    fn new(config: &Config, storage: Arc<dyn Storage>, aead: Arc<AeadService>) -> Self {
         let upstreams = config
             .upstreams
             .values()
@@ -179,7 +180,7 @@ impl CompositeSignerFactory {
             api_key: None,
             aws: Arc::new(AwsSigV4SignerFactory::new()),
             gcp: Arc::new(GcpOAuthSignerFactory::new()),
-            oauth: anthropic_oauth_factory(config, storage, "api-key", "anthropic_oauth"),
+            oauth: anthropic_oauth_factory(config, storage, aead, "api-key", "anthropic_oauth"),
         }
     }
 
@@ -236,11 +237,11 @@ impl SignerFactory for CompositeSignerFactory {
 
 pub fn anthropic_oauth_factory(
     config: &Config,
-    storage: Option<Arc<RedbStorage>>,
+    storage: Arc<dyn Storage>,
+    aead: Arc<AeadService>,
     principal_id: &str,
     provider: &str,
 ) -> Option<Arc<AnthropicOAuthSignerFactory>> {
-    let storage = storage?;
     let token_url = std::env::var("CC_LB_OAUTH_TOKEN_URL")
         .ok()
         .unwrap_or_else(|| {
@@ -255,6 +256,7 @@ pub fn anthropic_oauth_factory(
         principal_id.to_owned(),
         provider.to_owned(),
         storage,
+        aead,
         token_url,
         ClientId::new(client_id),
     )))

@@ -1,7 +1,9 @@
 pub mod auth;
+mod credential_crypto;
 pub mod dashboard;
 pub mod events;
 pub mod management;
+mod oauth_pkce;
 pub mod oauth;
 mod principals;
 pub mod routes;
@@ -12,12 +14,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::Router;
+use cc_lb_aead::AeadService;
 use cc_lb_config::Config;
 use cc_lb_core::{
     BreakerRegistry, BulkheadRegistry, DashboardBroadcaster, DrainController, Lifecycle,
     QuotaManager,
 };
-use cc_lb_storage_redb::RedbStorage;
+use cc_lb_storage_api::Storage;
 
 #[derive(Clone, Debug)]
 pub struct PluginRuntimeSlotStatus {
@@ -33,7 +36,8 @@ pub trait PluginRuntimeStatus: Send + Sync {
 
 #[derive(Clone)]
 pub struct AdminState {
-    pub storage: Option<Arc<RedbStorage>>,
+    pub storage: Arc<dyn Storage>,
+    pub aead: Arc<AeadService>,
     pub quota_manager: Option<Arc<QuotaManager>>,
     pub lifecycle: Option<Arc<Lifecycle>>,
     pub breaker_registry: Option<Arc<BreakerRegistry>>,

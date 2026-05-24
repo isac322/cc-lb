@@ -44,8 +44,10 @@ pub async fn spawn_test_server() -> TestServer {
     let metrics_addr = free_addr();
     let config_dir = tempfile::tempdir().expect("temp config dir");
     let config_path = config_dir.path().join("cc-lb.toml");
+    let storage_path = config_dir.path().join("storage.redb");
     write_config(
         &config_path,
+        &storage_path,
         proxy_addr,
         admin_addr,
         metrics_addr,
@@ -56,6 +58,10 @@ pub async fn spawn_test_server() -> TestServer {
         .arg("serve")
         .arg("--config")
         .arg(&config_path)
+        .env(
+            "CC_LB_MASTER_KEY",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        )
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
@@ -82,11 +88,13 @@ pub fn free_addr() -> SocketAddr {
 
 fn write_config(
     path: &Path,
+    storage_path: &Path,
     proxy_addr: SocketAddr,
     admin_addr: SocketAddr,
     metrics_addr: SocketAddr,
     upstream_addr: SocketAddr,
 ) {
+    let storage_path_str = storage_path.display();
     let config = format!(
         r#"
 [listener]
@@ -117,6 +125,7 @@ allowed_models = ["*"]
 observability_hooks = []
 
 [storage]
+redb_path = "{storage_path_str}"
 oauth_aead_key_env = "CC_LB_MASTER_KEY"
 
 [observability]

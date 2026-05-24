@@ -16,6 +16,7 @@ use axum::http::header::HeaderValue;
 use axum::http::{HeaderName, Request, Response, StatusCode};
 use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
+use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, PluginRef, TlsConfig};
 use cc_lb_core::BreakerState;
 use cc_lb_core::{
@@ -28,6 +29,7 @@ use cc_lb_core::{
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_plugin_api::{ObservabilityHook, PluginManifest, PluginRuntime};
 use cc_lb_runtime_extism::{ExtismRuntime, SignerFactoryResolver};
+use cc_lb_storage_api::Storage;
 use cc_lb_storage_redb::RedbStorage;
 use http_body_util::BodyExt;
 use serde::Serialize;
@@ -194,15 +196,37 @@ pub fn build_app(config: Config) -> Result<App, BuildError> {
     build_app_with_path(config, None)
 }
 
+/// Test-only variant: auto-creates a temp redb storage with all-zero key.
+/// The tempdir is intentionally leaked so the redb file stays accessible.
+pub fn build_app_for_testing(mut config: Config) -> Result<App, BuildError> {
+    let dir = tempfile::TempDir::new()?;
+    let path = dir.path().join("storage.redb");
+    let storage: Arc<dyn Storage> = Arc::new(RedbStorage::open(&path)?);
+    let aead = Arc::new(AeadService::from_master_key([0u8; 32]));
+    config.storage.redb_path = Some(path);
+    config.storage.oauth_aead_key_env = "__CC_LB_TEST_KEY__".to_owned();
+    std::mem::forget(dir);
+    build_app_with_storage(config, None, storage, aead)
+}
+
 pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result<App, BuildError> {
-    let storage = open_storage(&config)?;
-    let runtime = match host_signer_resolver(&config, storage.clone()) {
-        Some(resolver) => ExtismRuntime::with_signer_factory_resolver(resolver),
-        None => ExtismRuntime::new(),
-    };
+    let (storage, aead) = open_storage(&config)?;
+    build_app_with_storage(config, config_path, storage, aead)
+}
+
+fn build_app_with_storage(
+    config: Config,
+    config_path: Option<&Path>,
+    storage: Arc<dyn Storage>,
+    aead: Arc<AeadService>,
+) -> Result<App, BuildError> {
+    let runtime = ExtismRuntime::with_signer_factory_resolver(
+        host_signer_resolver(&config, storage.clone(), aead.clone())
+            .expect("host signer resolver is always available when storage is configured"),
+    );
     let authn = match &config.plugins.authn_plugin {
         Some(plugin) => runtime.instantiate(&manifest_from_plugin(plugin)?)?,
-        None => Arc::new(BuiltinAuthn::new(&config, storage.clone())),
+        None => Arc::new(BuiltinAuthn::new(&config, storage.clone(), aead.clone())),
     };
     let router_plugin = match &config.plugins.router_plugin {
         Some(plugin) => runtime.instantiate_router(&manifest_from_plugin(plugin)?)?,
@@ -216,25 +240,22 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
 
     let error_normalizer = Arc::new(error_normalizer(&config)?);
     let (dispatcher, breaker_registry, bulkhead_registry) = dispatcher(&config);
-    let (request_event_sink, request_event_task) = match storage.clone() {
-        Some(storage) => {
-            let (sink, receiver) = RequestEventSink::new();
-            (
-                Some(Arc::new(sink)),
-                Some(start_request_event_writer(storage, receiver)),
-            )
-        }
-        None => (None, None),
+    let (request_event_sink, request_event_task) = {
+        let (sink, receiver) = RequestEventSink::new();
+        (
+            Some(Arc::new(sink)),
+            Some(start_request_event_writer(storage.clone(), receiver)),
+        )
     };
-    let (principal_limit_state_sink, principal_limit_state_task) = match storage.clone() {
-        Some(storage) => {
-            let (sink, receiver) = PrincipalLimitStateSink::new();
-            (
-                Some(Arc::new(sink)),
-                Some(start_principal_limit_state_writer(storage, receiver)),
-            )
-        }
-        None => (None, None),
+    let (principal_limit_state_sink, principal_limit_state_task) = {
+        let (sink, receiver) = PrincipalLimitStateSink::new();
+        (
+            Some(Arc::new(sink)),
+            Some(start_principal_limit_state_writer(
+                storage.clone(),
+                receiver,
+            )),
+        )
     };
     let dashboard_broadcaster = Arc::new(DashboardBroadcaster::new());
     let lifecycle = Arc::new(
@@ -254,15 +275,12 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
         .with_dashboard_broadcaster(Some(dashboard_broadcaster.clone())),
     );
 
-    let quota_manager = storage
-        .as_ref()
-        .map(|s| Arc::new(QuotaManager::new(s.clone(), quota_policy(&config))));
-    let sweep_task = quota_manager
-        .as_ref()
-        .map(|qm| start_sweep(qm.clone(), Duration::from_secs(60)));
-    let usage_rollup_task = storage
-        .as_ref()
-        .map(|storage| start_usage_rollup_worker(storage.clone(), Duration::from_secs(60)));
+    let quota_manager = Arc::new(QuotaManager::new(storage.clone(), quota_policy(&config)));
+    let sweep_task = Some(start_sweep(quota_manager.clone(), Duration::from_secs(60)));
+    let usage_rollup_task = Some(start_usage_rollup_worker(
+        storage.clone(),
+        Duration::from_secs(60),
+    ));
     let start_time = std::time::Instant::now();
     let drain_controller = DrainController::new();
     let tls_state = build_tls_state(&config)?;
@@ -293,7 +311,8 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
 
     let admin_state = AdminState {
         storage: storage.clone(),
-        quota_manager: quota_manager.clone(),
+        aead: aead.clone(),
+        quota_manager: Some(quota_manager.clone()),
         lifecycle: Some(lifecycle.clone()),
         breaker_registry: Some(breaker_registry.clone()),
         drain_controller: Some(drain_controller.clone()),
@@ -540,9 +559,9 @@ fn init_observability(config: &mut Config) -> Result<TracingGuard, BuildError> {
 
 fn host_signer_resolver(
     config: &Config,
-    storage: Option<Arc<RedbStorage>>,
+    storage: Arc<dyn Storage>,
+    aead: Arc<AeadService>,
 ) -> Option<SignerFactoryResolver> {
-    let storage = storage?;
     let config = config.clone();
     Some(Arc::new(
         move |factory_ref, principal, _signer_state| match factory_ref {
@@ -556,12 +575,14 @@ fn host_signer_resolver(
                         cc_lb_signer_anthropic_key::AnthropicKeySignerFactory::from_storage(
                             storage_key.to_owned(),
                             storage.clone(),
+                            aead.clone(),
                         ),
                     ) as Arc<dyn cc_lb_plugin_api::SignerFactory>
                 }),
             "anthropic-oauth" => builtins::anthropic_oauth_factory(
                 &config,
-                Some(storage.clone()),
+                storage.clone(),
+                aead.clone(),
                 &principal.id,
                 "anthropic_oauth",
             )
@@ -571,17 +592,21 @@ fn host_signer_resolver(
     ))
 }
 
-fn open_storage(config: &Config) -> Result<Option<Arc<RedbStorage>>, BuildError> {
-    let Some(path) = &config.storage.redb_path else {
-        return Ok(None);
-    };
+fn open_storage(config: &Config) -> Result<(Arc<dyn Storage>, Arc<AeadService>), BuildError> {
+    let path = config
+        .storage
+        .redb_path
+        .as_ref()
+        .ok_or(BuildError::StorageRequired)?;
     let key_hex = std::env::var(&config.storage.oauth_aead_key_env).map_err(|_| {
         BuildError::StorageKeyMissing {
             env: config.storage.oauth_aead_key_env.clone(),
         }
     })?;
-    let _key = decode_hex_key(&key_hex)?;
-    Ok(Some(Arc::new(RedbStorage::open(path)?)))
+    let key = decode_hex_key(&key_hex)?;
+    let storage: Arc<dyn Storage> = Arc::new(RedbStorage::open(path)?);
+    let aead = Arc::new(AeadService::from_master_key(key));
+    Ok((storage, aead))
 }
 
 fn decode_hex_key(value: &str) -> Result<[u8; 32], BuildError> {
@@ -735,30 +760,25 @@ fn active_tls_config(config: &Config) -> Option<(&'static str, &TlsConfig)> {
 
 fn spawn_reload_watcher(
     config_watcher: Arc<ConfigWatcher>,
-    quota_manager: Option<Arc<QuotaManager>>,
+    quota_manager: Arc<QuotaManager>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let file_watcher = config_watcher.clone();
-        if let Some(quota_manager) = quota_manager {
-            let quota_updates = config_watcher.subscribe();
-            tokio::select! {
-                _ = file_watcher.watch_file_changes() => {}
-                _ = quota_reload_loop(quota_updates, quota_manager) => {}
-            }
-        } else {
-            file_watcher.watch_file_changes().await;
+        let quota_updates = config_watcher.subscribe();
+        tokio::select! {
+            _ = file_watcher.watch_file_changes() => {}
+            _ = quota_reload_loop(quota_updates, quota_manager) => {}
         }
     })
 }
 
-fn start_usage_rollup_worker(storage: Arc<RedbStorage>, period: Duration) -> JoinHandle<()> {
+fn start_usage_rollup_worker(storage: Arc<dyn Storage>, period: Duration) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(period);
         loop {
             interval.tick().await;
-            let storage = storage.clone();
-            match tokio::task::spawn_blocking(move || storage.rollup_usage_once()).await {
-                Ok(Ok(run)) => {
+            match storage.rollup_usage_once().await {
+                Ok(run) => {
                     if run.processed_events > 0 {
                         tracing::debug!(
                             processed_events = run.processed_events,
@@ -767,11 +787,8 @@ fn start_usage_rollup_worker(storage: Arc<RedbStorage>, period: Duration) -> Joi
                         );
                     }
                 }
-                Ok(Err(source)) => {
-                    tracing::warn!(error = %source, "usage rollup failed");
-                }
                 Err(source) => {
-                    tracing::warn!(error = %source, "usage rollup task failed");
+                    tracing::warn!(error = %source, "usage rollup failed");
                 }
             }
         }
@@ -851,6 +868,8 @@ pub enum BuildError {
     StorageKeyMissing { env: String },
     #[error("storage key must be 64 hexadecimal characters")]
     InvalidStorageKey,
+    #[error("storage.redb_path is required")]
+    StorageRequired,
     #[error("invalid plugin {name}: {reason}")]
     InvalidPlugin { name: String, reason: String },
     #[error("{field}: {message}")]

@@ -2,12 +2,15 @@ mod config_admin_common;
 
 use axum::http::StatusCode;
 use cc_lb_config::{Config, PrincipalSpec};
-use cc_lb_storage_redb::OAuthCredentials;
+use cc_lb_aead::AeadService;
+use cc_lb_storage_api::{ApiKeyRecord, OAuthCredentials, StoredApiKeyRecord};
+use cc_lb_storage_redb::RedbStorage;
 use config_admin_common::{
     app, assert_private, authed_bytes, authed_json, temp_storage, test_state,
     test_state_without_storage, unauthenticated_status,
 };
 use serde_json::json;
+use std::sync::Arc;
 
 const OAUTH_PROVIDER: &str = "anthropic_oauth";
 const API_KEY_PROVIDER: &str = "api_key";
@@ -27,12 +30,8 @@ async fn list_credentials_without_storage_is_unobserved() {
 #[tokio::test]
 async fn list_credentials_reports_oauth_and_api_key_kinds() {
     let (_dir, storage) = temp_storage();
-    storage
-        .put_oauth("alice", OAUTH_PROVIDER, &oauth_credentials(3_600))
-        .unwrap();
-    storage
-        .issue_api_key("bob", Some("bob-key".to_owned()))
-        .unwrap();
+    put_oauth(&storage, "alice", OAUTH_PROVIDER, &oauth_credentials(3_600)).await;
+    put_api_key(&storage, "bob", "bob-key", Some("bob-key"), None).await;
     let app = app(test_state(credentials_config(), Some(storage)));
 
     let (status, _, body, _) = authed_json(app, "GET", "/admin/credentials", None).await;
@@ -54,12 +53,8 @@ async fn list_credentials_reports_oauth_and_api_key_kinds() {
 #[tokio::test]
 async fn revoke_api_key_credential_revokes_all_active_keys() {
     let (_dir, storage) = temp_storage();
-    let first = storage
-        .issue_api_key("bob", Some("first".to_owned()))
-        .unwrap();
-    let second = storage
-        .issue_api_key("bob", Some("second".to_owned()))
-        .unwrap();
+    let first = put_api_key(&storage, "bob", "first-key", Some("first"), None).await;
+    let second = put_api_key(&storage, "bob", "second-key", Some("second"), None).await;
     let app = app(test_state(credentials_config(), Some(storage.clone())));
 
     let (status, _, body, _) =
@@ -79,7 +74,7 @@ async fn revoke_api_key_credential_revokes_all_active_keys() {
             .unwrap()
             .contains(&json!(second.key_id))
     );
-    let keys = storage.list_api_keys("bob").unwrap();
+    let keys = list_api_keys(&storage, "bob").await;
     assert!(
         keys.iter()
             .all(|record| record.revoked_at_unix_secs.is_some())
@@ -89,9 +84,7 @@ async fn revoke_api_key_credential_revokes_all_active_keys() {
 #[tokio::test]
 async fn rotate_api_key_credential_returns_new_plaintext_once_and_revokes_old_key() {
     let (_dir, storage) = temp_storage();
-    let old = storage
-        .issue_api_key("bob", Some("old".to_owned()))
-        .unwrap();
+    let old = put_api_key(&storage, "bob", "old-key", Some("old"), None).await;
     let app = app(test_state(credentials_config(), Some(storage.clone())));
 
     let (status, _, body, body_bytes) =
@@ -106,7 +99,7 @@ async fn rotate_api_key_credential_returns_new_plaintext_once_and_revokes_old_ke
     assert_eq!(plaintext.len(), 43);
     assert_eq!(count_occurrences(&body_bytes, plaintext.as_bytes()), 1);
 
-    let keys = storage.list_api_keys("bob").unwrap();
+    let keys = list_api_keys(&storage, "bob").await;
     let old_record = keys
         .iter()
         .find(|record| record.key_id == old.key_id)
@@ -149,18 +142,18 @@ async fn credentials_list_requires_admin_auth() {
 #[tokio::test]
 async fn credential_responses_never_return_oauth_secret_material() {
     let (_dir, storage) = temp_storage();
-    storage
-        .put_oauth(
-            "alice",
-            OAUTH_PROVIDER,
-            &OAuthCredentials {
-                access_token: LEAK_MARKER.to_owned(),
-                refresh_token: LEAK_MARKER.to_owned(),
-                expires_at: unix_now_secs() + 3_600,
-                scopes: vec![LEAK_MARKER.to_owned()],
-            },
-        )
-        .unwrap();
+    put_oauth(
+        &storage,
+        "alice",
+        OAUTH_PROVIDER,
+        &OAuthCredentials {
+            access_token: LEAK_MARKER.to_owned(),
+            refresh_token: LEAK_MARKER.to_owned(),
+            expires_at: unix_now_secs() + 3_600,
+            scopes: vec![LEAK_MARKER.to_owned()],
+        },
+    )
+    .await;
     let app = app(test_state(credentials_config(), Some(storage)));
 
     let (_, _, list_body) = authed_bytes(app.clone(), "GET", "/admin/credentials", None).await;
@@ -224,6 +217,85 @@ fn oauth_credentials(expires_in_secs: u64) -> OAuthCredentials {
         expires_at: unix_now_secs() + expires_in_secs,
         scopes: Vec::new(),
     }
+}
+
+async fn put_oauth(
+    storage: &Arc<RedbStorage>,
+    principal_id: &str,
+    provider: &str,
+    credentials: &OAuthCredentials,
+) {
+    let aead = AeadService::from_master_key([0; 32]);
+    let plaintext = serde_json::to_vec(credentials).unwrap();
+    let ciphertext = aead
+        .encrypt(&plaintext, format!("oauth:{principal_id}:{provider}").as_bytes())
+        .unwrap();
+    cc_lb_storage_api::OAuthCredentialStore::put_oauth_ciphertext(
+        storage.as_ref(),
+        principal_id,
+        provider,
+        &ciphertext,
+    )
+    .await
+    .unwrap();
+}
+
+async fn put_api_key(
+    storage: &Arc<RedbStorage>,
+    principal_id: &str,
+    key_id: &str,
+    label: Option<&str>,
+    revoked_at_unix_secs: Option<u64>,
+) -> ApiKeyRecord {
+    let aead = AeadService::from_master_key([0; 32]);
+    let stored = StoredApiKeyRecord {
+        label: label.map(str::to_owned),
+        issued_at_unix_secs: unix_now_secs(),
+        revoked_at_unix_secs,
+        key_hash_b64: format!("hash-{key_id}"),
+    };
+    let plaintext = serde_json::to_vec(&stored).unwrap();
+    let ciphertext = aead
+        .encrypt(&plaintext, format!("api-key:{principal_id}:{key_id}").as_bytes())
+        .unwrap();
+    cc_lb_storage_api::ApiKeyStore::put_api_key_ciphertext(
+        storage.as_ref(),
+        principal_id,
+        key_id,
+        &ciphertext,
+    )
+    .await
+    .unwrap();
+    ApiKeyRecord {
+        key_id: key_id.to_owned(),
+        label: stored.label,
+        issued_at_unix_secs: stored.issued_at_unix_secs,
+        revoked_at_unix_secs,
+    }
+}
+
+async fn list_api_keys(storage: &Arc<RedbStorage>, principal_id: &str) -> Vec<ApiKeyRecord> {
+    let aead = AeadService::from_master_key([0; 32]);
+    let mut records = Vec::new();
+    for (key_id, ciphertext) in cc_lb_storage_api::ApiKeyStore::list_api_key_ciphertexts(
+        storage.as_ref(),
+        principal_id,
+    )
+    .await
+    .unwrap()
+    {
+        let plaintext = aead
+            .decrypt(&ciphertext, format!("api-key:{principal_id}:{key_id}").as_bytes())
+            .unwrap();
+        let stored: StoredApiKeyRecord = serde_json::from_slice(&plaintext).unwrap();
+        records.push(ApiKeyRecord {
+            key_id,
+            label: stored.label,
+            issued_at_unix_secs: stored.issued_at_unix_secs,
+            revoked_at_unix_secs: stored.revoked_at_unix_secs,
+        });
+    }
+    records
 }
 
 fn unix_now_secs() -> u64 {

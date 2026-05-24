@@ -1,6 +1,6 @@
 use cc_lb_config::Config;
-use cc_lb_storage_redb::{
-    PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, RedbStorage, StorageError,
+use cc_lb_storage_api::{
+    PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, Storage, StorageError,
     UsageRollupResolution,
 };
 use serde::Serialize;
@@ -49,8 +49,8 @@ pub(crate) enum T9Error {
     Storage(StorageError),
 }
 
-pub(crate) fn build_principal_usage(
-    storage: Option<&RedbStorage>,
+pub(crate) async fn build_principal_usage(
+    storage: &dyn Storage,
     config: &Config,
     principal_id: &str,
     range: DashboardRange,
@@ -62,15 +62,13 @@ pub(crate) fn build_principal_usage(
 
     let (window_start_unix_secs, window_end_unix_secs) =
         dashboard::build_window_for_step(range, step, now_unix_secs);
-    let rollups = match storage {
-        Some(storage) => storage
-            .query_usage_rollups_in_range(step, window_start_unix_secs, window_end_unix_secs)?
-            .into_iter()
-            .filter(|rollup| rollup.principal == principal_id)
-            .collect::<Vec<_>>(),
-        None => Vec::new(),
-    };
-    let observed = storage.is_some() && !rollups.is_empty();
+    let rollups = storage
+        .query_usage_rollups_in_range(step, window_start_unix_secs, window_end_unix_secs)
+        .await?
+        .into_iter()
+        .filter(|rollup| rollup.principal == principal_id)
+        .collect::<Vec<_>>();
+    let observed = !rollups.is_empty();
     let (series, truncated_series_count) = dashboard::build_usage_series(
         UsageGroupBy::Model,
         &rollups,
@@ -91,18 +89,15 @@ pub(crate) fn build_principal_usage(
     })
 }
 
-pub(crate) fn build_principal_limits(
-    storage: Option<&RedbStorage>,
+pub(crate) async fn build_principal_limits(
+    storage: &dyn Storage,
     config: &Config,
     principal_id: &str,
     _now_unix_secs: u64,
 ) -> Result<PrincipalLimitsResponse, T9Error> {
     ensure_principal(config, principal_id)?;
 
-    let states = match storage {
-        Some(storage) => storage.list_principal_limit_states(principal_id)?,
-        None => Vec::new(),
-    };
+    let states = storage.list_principal_limit_states(principal_id).await?;
     let observed = !states.is_empty();
 
     Ok(PrincipalLimitsResponse {

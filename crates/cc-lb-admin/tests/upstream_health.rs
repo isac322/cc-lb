@@ -138,7 +138,8 @@ fn test_state(
     drain_controller: Option<DrainController>,
 ) -> AdminState {
     AdminState {
-        storage,
+        storage: storage.unwrap_or_else(test_storage),
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         quota_manager: None,
         lifecycle: None,
         breaker_registry,
@@ -211,4 +212,12 @@ fn forbidden_terms() -> Vec<String> {
         ["ae", "ad"].concat(),
         ["refresh", "_token"].concat(),
     ]
+}
+
+fn test_storage() -> Arc<RedbStorage> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.redb");
+    let storage = Arc::new(RedbStorage::open(&path).unwrap());
+    std::mem::forget(dir);
+    storage
 }

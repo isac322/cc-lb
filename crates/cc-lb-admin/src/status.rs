@@ -1,8 +1,10 @@
+use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, PluginRef, UpstreamKind};
 use cc_lb_core::{BreakerRegistry, BreakerState, BulkheadRegistry, DrainController};
-use cc_lb_storage_redb::{RedbStorage, RequestEventUpstream, StorageError, UsageRollupResolution};
+use cc_lb_storage_api::{OAuthCredentials, RequestEventUpstream, Storage, StorageError, UsageRollupResolution};
 use serde::Serialize;
 
+use crate::credential_crypto::{decrypt_json, oauth_aad};
 use crate::PluginRuntimeStatus;
 
 const RECENT_ERROR_WINDOW_SECS: u64 = 15 * 60;
@@ -85,8 +87,8 @@ pub enum StatusBuildError {
     Storage(StorageError),
 }
 
-pub fn build_upstream_health(
-    storage: Option<&RedbStorage>,
+pub async fn build_upstream_health(
+    storage: &dyn Storage,
     config: &Config,
     breaker_registry: Option<&BreakerRegistry>,
     bulkhead_registry: Option<&BulkheadRegistry>,
@@ -112,12 +114,9 @@ pub fn build_upstream_health(
                 .map(saturating_u32)
                 .unwrap_or(0),
         },
-        killswitch: match storage {
-            Some(storage) => storage.killswitch_enabled()?,
-            None => false,
-        },
+        killswitch: storage.killswitch_enabled().await?,
         last_probe_unix_secs: None,
-        error_count_recent: recent_error_count(storage, upstream_name, kind, now_unix_secs)?,
+        error_count_recent: recent_error_count(storage, upstream_name, kind, now_unix_secs).await?,
     })
 }
 
@@ -138,18 +137,12 @@ pub fn build_plugins_status(
     PluginsStatusResponse { plugins }
 }
 
-pub fn build_oauth_status(
-    storage: Option<&RedbStorage>,
+pub async fn build_oauth_status(
+    storage: &dyn Storage,
+    aead: &AeadService,
     config: &Config,
     now_unix_secs: u64,
 ) -> Result<OAuthStatusResponse, StatusBuildError> {
-    let Some(storage) = storage else {
-        return Ok(OAuthStatusResponse {
-            credentials: Vec::new(),
-            observed: false,
-        });
-    };
-
     let mut refs = config
         .principals
         .iter()
@@ -172,7 +165,14 @@ pub fn build_oauth_status(
 
     let mut credentials = Vec::with_capacity(refs.len());
     for (principal_id, provider) in refs {
-        let stored = storage.get_oauth(&principal_id, &provider)?;
+        let stored = match storage.get_oauth_ciphertext(&principal_id, &provider).await? {
+            Some(ciphertext) => Some(decrypt_json::<OAuthCredentials>(
+                aead,
+                &ciphertext,
+                &oauth_aad(&principal_id, &provider),
+            )?),
+            None => None,
+        };
         credentials.push(match stored {
             Some(creds) => OAuthCredentialStatus {
                 principal_id,
@@ -257,19 +257,17 @@ fn build_bulkhead_health(
     }
 }
 
-fn recent_error_count(
-    storage: Option<&RedbStorage>,
+async fn recent_error_count(
+    storage: &dyn Storage,
     upstream_name: &str,
     kind: RequestEventUpstream,
     now_unix_secs: u64,
 ) -> Result<u64, StorageError> {
-    let Some(storage) = storage else {
-        return Ok(0);
-    };
     let window_start = now_unix_secs.saturating_sub(RECENT_ERROR_WINDOW_SECS);
     let kind_label = request_event_upstream_label(kind);
     Ok(storage
-        .query_usage_rollups_in_range(UsageRollupResolution::Minute, window_start, now_unix_secs)?
+        .query_usage_rollups_in_range(UsageRollupResolution::Minute, window_start, now_unix_secs)
+        .await?
         .into_iter()
         .filter(|rollup| rollup.upstream == upstream_name || rollup.upstream == kind_label)
         .map(|rollup| rollup.error_count)

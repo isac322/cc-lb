@@ -4,8 +4,8 @@ use axum::{
 };
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::{AuthStrategy, Config, PrincipalSpec, QuotasConfig, UpstreamKind, UpstreamSpec};
-use cc_lb_core::{BucketKind, DashboardBroadcaster, QuotaManager, QuotaPolicy};
-use cc_lb_storage_redb::RedbStorage;
+use cc_lb_core::{DashboardBroadcaster, QuotaManager, QuotaPolicy};
+use cc_lb_storage_redb::{BucketKind, RedbStorage};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use std::sync::Arc;
@@ -59,7 +59,8 @@ fn test_state(
     quota_manager: Option<Arc<QuotaManager>>,
 ) -> AdminState {
     AdminState {
-        storage,
+        storage: storage.unwrap_or_else(test_storage),
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         quota_manager,
         lifecycle: None,
         breaker_registry: None,
@@ -120,7 +121,6 @@ async fn snapshot_admin_upstreams() {
 async fn snapshot_admin_quota() {
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("test.redb");
-    let master_key = [0u8; 32];
     let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
     let quota_policy = QuotaPolicy {
         window_secs: 3_600,
@@ -157,4 +157,12 @@ async fn snapshot_admin_quota() {
     json["window_start"] = serde_json::json!(0);
 
     insta::assert_snapshot!(serde_json::to_string_pretty(&json).unwrap());
+}
+
+fn test_storage() -> Arc<RedbStorage> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.redb");
+    let storage = Arc::new(RedbStorage::open(&path).unwrap());
+    std::mem::forget(dir);
+    storage
 }

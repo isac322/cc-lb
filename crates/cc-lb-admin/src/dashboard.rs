@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use cc_lb_storage_redb::{RedbStorage, StorageError, UsageRollup, UsageRollupResolution};
+use cc_lb_storage_api::{Storage, StorageError, UsageRollup, UsageRollupResolution};
 use serde::Serialize;
 
 const MINUTE_SECS: u64 = 60;
@@ -158,26 +158,21 @@ pub fn validate_step_for_range(
     Ok(())
 }
 
-pub fn build_dashboard_summary(
-    storage: Option<&RedbStorage>,
+pub async fn build_dashboard_summary(
+    storage: &dyn Storage,
     range: DashboardRange,
     now_unix_secs: u64,
 ) -> Result<DashboardSummaryResponse, StorageError> {
     let step = auto_step(range);
     let (window_start_unix_secs, window_end_unix_secs) = build_window(range, now_unix_secs);
     let mut buckets = zero_filled_buckets(window_start_unix_secs, window_end_unix_secs, step);
-    let mut observed = false;
 
-    if let Some(storage) = storage {
-        let rollups = storage.query_usage_rollups_in_range(
-            step,
-            window_start_unix_secs,
-            window_end_unix_secs,
-        )?;
-        observed = !rollups.is_empty();
-        for rollup in &rollups {
-            add_rollup_to_buckets(&mut buckets, rollup, window_start_unix_secs, step);
-        }
+    let rollups = storage
+        .query_usage_rollups_in_range(step, window_start_unix_secs, window_end_unix_secs)
+        .await?;
+    let observed = !rollups.is_empty();
+    for rollup in &rollups {
+        add_rollup_to_buckets(&mut buckets, rollup, window_start_unix_secs, step);
     }
 
     let totals = summary_totals(&buckets);
@@ -192,8 +187,8 @@ pub fn build_dashboard_summary(
     })
 }
 
-pub fn build_dashboard_usage(
-    storage: Option<&RedbStorage>,
+pub async fn build_dashboard_usage(
+    storage: &dyn Storage,
     range: DashboardRange,
     step: UsageRollupResolution,
     group_by: UsageGroupBy,
@@ -201,15 +196,10 @@ pub fn build_dashboard_usage(
 ) -> Result<DashboardUsageResponse, StorageError> {
     let (window_start_unix_secs, window_end_unix_secs) =
         build_window_for_step(range, step, now_unix_secs);
-    let rollups = match storage {
-        Some(storage) => storage.query_usage_rollups_in_range(
-            step,
-            window_start_unix_secs,
-            window_end_unix_secs,
-        )?,
-        None => Vec::new(),
-    };
-    let observed = storage.is_some() && !rollups.is_empty();
+    let rollups = storage
+        .query_usage_rollups_in_range(step, window_start_unix_secs, window_end_unix_secs)
+        .await?;
+    let observed = !rollups.is_empty();
     let (series, truncated_series_count) = build_usage_series(
         group_by,
         &rollups,
@@ -230,15 +220,17 @@ pub fn build_dashboard_usage(
     })
 }
 
-pub fn build_dashboard_usage_checked(
-    storage: Option<&RedbStorage>,
+pub async fn build_dashboard_usage_checked(
+    storage: &dyn Storage,
     range: DashboardRange,
     step: UsageRollupResolution,
     group_by: UsageGroupBy,
     now_unix_secs: u64,
 ) -> Result<DashboardUsageResponse, DashboardBuildError> {
     validate_step_for_range(range, step)?;
-    build_dashboard_usage(storage, range, step, group_by, now_unix_secs).map_err(Into::into)
+    build_dashboard_usage(storage, range, step, group_by, now_unix_secs)
+        .await
+        .map_err(Into::into)
 }
 
 #[derive(Debug)]

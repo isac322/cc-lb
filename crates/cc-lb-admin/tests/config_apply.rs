@@ -156,8 +156,8 @@ async fn apply_without_storage_returns_unavailable() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(json["error"], "storage_unavailable");
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(json["error"], "unvalidated_revision");
 }
 
 #[tokio::test]

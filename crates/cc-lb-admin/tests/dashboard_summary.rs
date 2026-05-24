@@ -127,7 +127,8 @@ async fn summary_response_excludes_payload_terms() {
 
 fn test_state(storage: Option<Arc<RedbStorage>>) -> AdminState {
     AdminState {
-        storage,
+        storage: storage.unwrap_or_else(test_storage),
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         quota_manager: None,
         lifecycle: None,
         breaker_registry: None,
@@ -170,7 +171,7 @@ fn current_minute_base() -> u64 {
     now - (now % 60) - 180
 }
 
-fn seed_summary_events(storage: &Storage, base: u64) {
+fn seed_summary_events(storage: &RedbStorage, base: u64) {
     for event in [
         event(
             base + 5,
@@ -276,4 +277,12 @@ fn forbidden_terms() -> Vec<String> {
         ["tool", "_use"].concat(),
         ["con", "tent"].concat(),
     ]
+}
+
+fn test_storage() -> Arc<RedbStorage> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.redb");
+    let storage = Arc::new(RedbStorage::open(&path).unwrap());
+    std::mem::forget(dir);
+    storage
 }

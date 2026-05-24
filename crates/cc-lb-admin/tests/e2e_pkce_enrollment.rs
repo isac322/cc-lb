@@ -5,6 +5,8 @@ use axum::{
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_core::DashboardBroadcaster;
+use cc_lb_aead::AeadService;
+use cc_lb_storage_api::{OAuthCredentialStore, OAuthCredentials};
 use cc_lb_storage_redb::{OAUTH_CREDENTIALS_V1, RedbStorage, oauth_key};
 use http_body_util::{BodyExt, Empty};
 use hyper_rustls::HttpsConnectorBuilder;
@@ -24,9 +26,14 @@ fn test_config(issuer_base_url: String) -> Config {
     config
 }
 
-fn test_state(storage: Arc<RedbStorage>, issuer_base_url: String) -> AdminState {
+fn test_state(
+    storage: Arc<RedbStorage>,
+    issuer_base_url: String,
+    aead: Arc<AeadService>,
+) -> AdminState {
     AdminState {
-        storage: Some(storage),
+        storage,
+        aead,
         quota_manager: None,
         lifecycle: None,
         breaker_registry: None,
@@ -125,7 +132,12 @@ async fn e2e_pkce_enrollment_persists_encrypted_credentials() {
     let db_path = temp_dir.path().join("test.redb");
     let master_key = [13u8; 32];
     let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
-    let app = router(test_state(storage.clone(), format!("http://{oauth_addr}")));
+    let aead = Arc::new(AeadService::from_master_key(master_key));
+    let app = router(test_state(
+        storage.clone(),
+        format!("http://{oauth_addr}"),
+        aead.clone(),
+    ));
 
     let (status, start) = request_json(
         app.clone(),
@@ -147,10 +159,19 @@ async fn e2e_pkce_enrollment_persists_encrypted_credentials() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(complete["status"], "ok");
 
-    let creds = storage
-        .get_oauth("alice", "anthropic_oauth")
+    let ciphertext = OAuthCredentialStore::get_oauth_ciphertext(
+        storage.as_ref(),
+        "alice",
+        "anthropic_oauth",
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let plaintext = aead
+        .decrypt(&ciphertext, b"oauth:alice:anthropic_oauth")
         .unwrap()
-        .unwrap();
+        .to_vec();
+    let creds: OAuthCredentials = serde_json::from_slice(&plaintext).unwrap();
     assert!(creds.access_token.starts_with("sk-ant-oat01-MOCK-alice-"));
     assert!(creds.refresh_token.starts_with("sk-ant-ort01-MOCK-"));
     drop(storage);

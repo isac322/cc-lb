@@ -4,9 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use cc_lb_config::Config;
-use cc_lb_storage_redb::{
-    AuditEntry, ConfigDraftState, HistoryEntry, HistorySummary, RedbStorage, StorageError,
-};
+use cc_lb_storage_api::{AuditEntry, ConfigDraftState, HistoryEntry, HistorySummary, Storage, StorageError};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -63,7 +61,13 @@ pub enum SettingsError {
 impl From<StorageError> for SettingsError {
     fn from(error: StorageError) -> Self {
         match error {
-            StorageError::StaleDraftRevision { current } => Self::StaleDraftRevision { current },
+            StorageError::Conflict { message } if message.contains("stale") => {
+                let current = message
+                    .rsplit_once(' ')
+                    .and_then(|(_, value)| value.parse::<u64>().ok())
+                    .unwrap_or(0);
+                Self::StaleDraftRevision { current }
+            }
             other => Self::Storage(other),
         }
     }
@@ -193,17 +197,15 @@ fn strip_schema_defaults(value: &mut Value) {
     }
 }
 
-pub fn get_draft(storage: Option<&RedbStorage>) -> Result<ConfigDraftResponse, SettingsError> {
-    let storage = storage.ok_or(SettingsError::StorageUnavailable)?;
-    draft_response(storage.get_config_draft()?)
+pub async fn get_draft(storage: &dyn Storage) -> Result<ConfigDraftResponse, SettingsError> {
+    draft_response(storage.get_config_draft().await?)
 }
 
-pub fn put_draft(
-    storage: Option<&RedbStorage>,
+pub async fn put_draft(
+    storage: &dyn Storage,
     request: PutConfigDraftRequest,
     saved_at_unix_secs: u64,
 ) -> Result<PutConfigDraftResponse, SettingsError> {
-    let storage = storage.ok_or(SettingsError::StorageUnavailable)?;
     let state = ConfigDraftState {
         draft: Some(request.draft),
         revision: 0,
@@ -211,15 +213,15 @@ pub fn put_draft(
         last_validation_error: None,
         saved_at_unix_secs: Some(saved_at_unix_secs),
     };
-    let revision = storage.put_config_draft(state, request.expected_revision)?;
+    let revision = storage.put_config_draft(state, request.expected_revision).await?;
     Ok(PutConfigDraftResponse {
         revision,
         saved_at_unix_secs,
     })
 }
 
-pub(crate) fn apply_draft_principal_change<T, E, F>(
-    storage: Option<&RedbStorage>,
+pub(crate) async fn apply_draft_principal_change<T, E, F>(
+    storage: &dyn Storage,
     current: &dyn CurrentConfig,
     saved_at_unix_secs: u64,
     mut transform: F,
@@ -227,8 +229,7 @@ pub(crate) fn apply_draft_principal_change<T, E, F>(
 where
     F: FnMut(&mut Value) -> Result<T, E>,
 {
-    let storage = storage.ok_or(SettingsError::StorageUnavailable)?;
-    let state = storage.get_config_draft()?;
+    let state = storage.get_config_draft().await?;
     let expected_revision = state.revision;
     let mut draft = match state.draft {
         Some(draft) => draft,
@@ -262,16 +263,15 @@ where
             saved_at_unix_secs: Some(saved_at_unix_secs),
         },
         expected_revision,
-    )?;
+    ).await?;
     Ok(Ok((revision, outcome)))
 }
 
-pub fn validate_draft(
-    storage: Option<&RedbStorage>,
+pub async fn validate_draft(
+    storage: &dyn Storage,
     request: ValidateConfigDraftRequest,
 ) -> Result<ValidateConfigDraftResponse, SettingsError> {
-    let storage = storage.ok_or(SettingsError::StorageUnavailable)?;
-    let state = storage.get_config_draft()?;
+    let state = storage.get_config_draft().await?;
     if state.revision != request.expected_revision {
         return Err(SettingsError::StaleDraftRevision {
             current: state.revision,
@@ -286,7 +286,7 @@ pub fn validate_draft(
 
     match validation {
         Ok(_) => {
-            storage.set_last_validated_revision(state.revision, None)?;
+            storage.set_last_validated_revision(state.revision, None).await?;
             Ok(ValidateConfigDraftResponse {
                 valid: true,
                 revision: state.revision,
@@ -294,7 +294,7 @@ pub fn validate_draft(
             })
         }
         Err(error) => {
-            storage.set_last_validated_revision(state.revision, Some(error.clone()))?;
+            storage.set_last_validated_revision(state.revision, Some(error.clone())).await?;
             Ok(ValidateConfigDraftResponse {
                 valid: false,
                 revision: state.revision,
@@ -304,15 +304,14 @@ pub fn validate_draft(
     }
 }
 
-pub fn apply_config(
-    storage: Option<&RedbStorage>,
+pub async fn apply_config(
+    storage: &dyn Storage,
     config_path: Option<&Path>,
     config_watcher: Option<&dyn ConfigReloader>,
     request: ApplyConfigRequest,
     applied_at_unix_secs: u64,
 ) -> Result<ApplyConfigResponse, SettingsError> {
-    let storage = storage.ok_or(SettingsError::StorageUnavailable)?;
-    let state = storage.get_config_draft()?;
+    let state = storage.get_config_draft().await?;
     if state.revision != request.expected_revision {
         return Err(SettingsError::StaleDraftRevision {
             current: state.revision,
@@ -359,7 +358,7 @@ pub fn apply_config(
         config_toml,
         applied_at_unix_secs,
         history_summary(&config),
-    )?;
+    ).await?;
     storage.append_audit(&AuditEntry {
         ts: applied_at_unix_secs,
         request_id: format!("config_apply_{}", request.expected_revision),
@@ -378,7 +377,7 @@ pub fn apply_config(
             "actor": "admin",
             "applied_at_unix_secs": applied_at_unix_secs,
         })),
-    })?;
+    }).await?;
 
     Ok(ApplyConfigResponse {
         applied_revision: request.expected_revision,
@@ -386,28 +385,27 @@ pub fn apply_config(
     })
 }
 
-pub fn list_history(
-    storage: Option<&RedbStorage>,
+pub async fn list_history(
+    storage: &dyn Storage,
     limit: usize,
 ) -> Result<ConfigHistoryResponse, SettingsError> {
-    let storage = storage.ok_or(SettingsError::StorageUnavailable)?;
     let limit = limit.min(100);
     let history = storage
-        .list_config_history(limit)?
+        .list_config_history(limit)
+        .await?
         .into_iter()
         .map(history_item)
         .collect();
     Ok(ConfigHistoryResponse { history })
 }
 
-pub fn diff_history(
-    storage: Option<&RedbStorage>,
+pub async fn diff_history(
+    storage: &dyn Storage,
     from_revision: u64,
     to_revision: u64,
 ) -> Result<ConfigDiffResponse, SettingsError> {
-    let storage = storage.ok_or(SettingsError::StorageUnavailable)?;
     if from_revision == to_revision {
-        if storage.get_config_history(from_revision)?.is_none() {
+        if storage.get_config_history(from_revision).await?.is_none() {
             return Err(SettingsError::UnknownRevision {
                 missing: from_revision,
             });
@@ -422,12 +420,14 @@ pub fn diff_history(
 
     let from =
         storage
-            .get_config_history(from_revision)?
+            .get_config_history(from_revision)
+            .await?
             .ok_or(SettingsError::UnknownRevision {
                 missing: from_revision,
             })?;
     let to = storage
-        .get_config_history(to_revision)?
+        .get_config_history(to_revision)
+        .await?
         .ok_or(SettingsError::UnknownRevision {
             missing: to_revision,
         })?;

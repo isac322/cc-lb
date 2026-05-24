@@ -10,7 +10,7 @@ use axum::routing::any;
 use cc_lb_config::{AuthStrategy, Config, UpstreamKind, UpstreamSpec};
 use cc_lb_server::app::{
     PROXY_FILES_ROUTE_COLLECTION, PROXY_FILES_ROUTE_ITEM, PROXY_FILES_ROUTE_ITEM_CONTENT,
-    PROXY_FILES_ROUTE_PATHS, build_app_with_path,
+    PROXY_FILES_ROUTE_PATHS, build_app_for_testing,
 };
 use http_body_util::BodyExt;
 use tokio::net::TcpListener;
@@ -73,7 +73,7 @@ async fn files_content_route_is_registered_explicitly() {
 async fn files_content_forwards_exact_path_and_method() {
     let (upstream_addr, upstream_state, _upstream) = spawn_recording_upstream().await;
     let config = config_for_upstream(upstream_addr);
-    let app = build_app_with_path(config, None).expect("build app");
+    let app = build_app_for_testing(config).expect("build app");
 
     let response = app
         .router
@@ -111,7 +111,7 @@ async fn files_content_forwards_exact_path_and_method() {
 async fn files_routes_remain_intact() {
     let (upstream_addr, upstream_state, _upstream) = spawn_recording_upstream().await;
     let config = config_for_upstream(upstream_addr);
-    let app = build_app_with_path(config, None).expect("build app");
+    let app = build_app_for_testing(config).expect("build app");
 
     let files = app
         .router

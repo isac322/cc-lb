@@ -12,7 +12,8 @@ use tower::ServiceExt;
 
 fn test_state(storage: Arc<RedbStorage>) -> AdminState {
     AdminState {
-        storage: Some(storage),
+        storage,
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         quota_manager: None,
         lifecycle: None,
         breaker_registry: None,
@@ -33,8 +34,6 @@ fn test_state(storage: Arc<RedbStorage>) -> AdminState {
 async fn test_killswitch_persists() {
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("test.redb");
-    let master_key = [0u8; 32];
-
     {
         let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
         let app = router(test_state(storage.clone()));

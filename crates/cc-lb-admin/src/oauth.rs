@@ -1,15 +1,16 @@
 use axum::{extract::State, http::StatusCode, response::Json};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use cc_lb_signer_anthropic_oauth::{
-    HyperOAuthHttpClient, PkceHandshakeState, complete_pkce_flow, start_pkce_flow,
-};
 use oauth2::{AuthUrl, ClientId, TokenUrl};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use url::Url;
 
+use crate::credential_crypto::{encrypt_json, oauth_aad};
+use crate::oauth_pkce::{
+    HyperOAuthHttpClient, PkceHandshakeState, complete_pkce_flow, start_pkce_flow,
+};
 use crate::AdminState;
 
 #[derive(Deserialize)]
@@ -74,9 +75,6 @@ pub async fn complete_oauth(
     State(state): State<AdminState>,
     Json(payload): Json<OauthCompleteRequest>,
 ) -> Result<Json<Value>, StatusCode> {
-    let Some(storage) = &state.storage else {
-        return Err(StatusCode::NOT_IMPLEMENTED);
-    };
     let state_token = decode_state(&payload.state_token)?;
     if state_token.provider != "anthropic_oauth" {
         return Err(StatusCode::BAD_REQUEST);
@@ -93,8 +91,13 @@ pub async fn complete_oauth(
     .await
     .map_err(|_| StatusCode::BAD_GATEWAY)?;
 
-    storage
-        .put_oauth(&state_token.principal_id, &state_token.provider, &creds)
+    let aad = oauth_aad(&state_token.principal_id, &state_token.provider);
+    let ciphertext = encrypt_json(state.aead.as_ref(), &creds, &aad)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    state
+        .storage
+        .put_oauth_ciphertext(&state_token.principal_id, &state_token.provider, &ciphertext)
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(json!({ "status": "ok" })))
