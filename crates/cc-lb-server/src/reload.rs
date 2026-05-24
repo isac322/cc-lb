@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use cc_lb_config::{Config, ConfigError, PluginRef};
+use cc_lb_config::{Config, ConfigError, PluginRef, StorageConfig};
 use notify::{Event, RecursiveMode, Watcher};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
@@ -248,12 +248,41 @@ fn warn_restart_required_changes(current: &Config, new_config: &Config) {
         &current.plugins.observability_hooks,
         &new_config.plugins.observability_hooks,
     );
-    warn_if_changed(&current.storage, &new_config.storage, "storage");
-    warn_if_changed(
-        &current.aead.key_env,
-        &new_config.aead.key_env,
-        "aead.key_env",
-    );
+    warn_storage_restart_required(&current.storage, &new_config.storage);
+    warn_aead_restart_required(&current.aead.key_env, &new_config.aead.key_env);
+}
+
+fn warn_storage_restart_required(current: &StorageConfig, new_config: &StorageConfig) {
+    match (current, new_config) {
+        (StorageConfig::Redb { path: current }, StorageConfig::Redb { path: new_config }) => {
+            if current != new_config {
+                tracing::warn!("storage backend changed; restart required to apply");
+            }
+        }
+        (
+            StorageConfig::Postgres {
+                url: current_url,
+                pool: current_pool,
+            },
+            StorageConfig::Postgres {
+                url: new_url,
+                pool: new_pool,
+            },
+        ) => {
+            if current_url != new_url {
+                tracing::warn!("storage backend changed; restart required to apply");
+            } else if current_pool != new_pool {
+                tracing::warn!(field = "storage.pool", "restart required to apply");
+            }
+        }
+        _ => tracing::warn!("storage backend changed; restart required to apply"),
+    }
+}
+
+fn warn_aead_restart_required(current: &str, new_config: &str) {
+    if current != new_config {
+        tracing::warn!("aead key env changed; restart required to apply");
+    }
 }
 
 fn warn_plugin_path_change(

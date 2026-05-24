@@ -39,6 +39,10 @@ pub async fn open_storage(
     }
 }
 
+pub async fn probe_postgres_connection(url: &str) -> Result<(), StorageFactoryError> {
+    probe_postgres_connection_impl(url).await
+}
+
 async fn open_redb(path: &Path) -> Result<Arc<dyn Storage>, StorageFactoryError> {
     let storage = cc_lb_storage_redb::RedbStorage::open(path).map_err(|error| {
         StorageFactoryError::ConnectionFailed {
@@ -58,6 +62,13 @@ async fn open_postgres(
     _url: &str,
     _pool: &cc_lb_config::PostgresPoolConfig,
 ) -> Result<Arc<dyn Storage>, StorageFactoryError> {
+    Err(StorageFactoryError::FeatureDisabled {
+        backend: "postgres".to_owned(),
+    })
+}
+
+#[cfg(not(feature = "postgres"))]
+async fn probe_postgres_connection_impl(_url: &str) -> Result<(), StorageFactoryError> {
     Err(StorageFactoryError::FeatureDisabled {
         backend: "postgres".to_owned(),
     })
@@ -100,6 +111,30 @@ async fn open_postgres(
         .await
         .map_err(|error| map_init_error(error, BackendKind::Postgres))?;
     Ok(storage)
+}
+
+#[cfg(feature = "postgres")]
+async fn probe_postgres_connection_impl(url: &str) -> Result<(), StorageFactoryError> {
+    use std::time::Duration;
+
+    use sqlx::Connection;
+    use tokio::time::timeout;
+
+    let probe = async {
+        let mut connection = sqlx::PgConnection::connect(url).await?;
+        sqlx::query("SELECT 1").execute(&mut connection).await?;
+        Ok::<(), sqlx::Error>(())
+    };
+
+    match timeout(Duration::from_secs(5), probe).await {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(error)) => Err(StorageFactoryError::ConnectionFailed {
+            message: host_only(url) + ": " + &error.to_string(),
+        }),
+        Err(_) => Err(StorageFactoryError::ConnectionFailed {
+            message: host_only(url) + ": connection timed out",
+        }),
+    }
 }
 
 fn map_init_error(error: StorageError, _kind: BackendKind) -> StorageFactoryError {

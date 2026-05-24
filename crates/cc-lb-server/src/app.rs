@@ -182,7 +182,14 @@ pub async fn run_serve(config_path: &Path) -> Result<(), ServeError> {
         config.observability.user_prompt_redaction,
     ));
     let _guard = init_observability(&mut config)?;
-    let app = build_app_with_path_async(config, Some(config_path)).await?;
+    let app = match build_app_with_path_async(config, Some(config_path)).await {
+        Ok(app) => app,
+        Err(error) if error.is_storage_initialization() => {
+            tracing::error!(error = %error, "storage initialization failed; exiting");
+            return Err(ServeError::Build(error));
+        }
+        Err(error) => return Err(ServeError::Build(error)),
+    };
     app.start().await?;
     Ok(())
 }
@@ -921,4 +928,16 @@ pub enum BuildError {
     InvalidPlugin { name: String, reason: String },
     #[error("{field}: {message}")]
     InvalidTlsConfig { field: String, message: String },
+}
+
+impl BuildError {
+    fn is_storage_initialization(&self) -> bool {
+        matches!(
+            self,
+            Self::StorageFactory(_)
+                | Self::StorageKeyMissing { .. }
+                | Self::InvalidStorageKey
+                | Self::StorageTask(_)
+        )
+    }
 }

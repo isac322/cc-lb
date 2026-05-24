@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 use std::env;
+use std::fs;
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, PluginRef, StorageConfig, TlsConfig};
+use cc_lb_config::{Config, DEFAULT_REDB_PATH, PluginRef, StorageConfig, TlsConfig};
 use cc_lb_plugin_api::{PluginManifest, PluginRuntime};
 use cc_lb_runtime_extism::ExtismRuntime;
 use thiserror::Error;
@@ -51,20 +52,44 @@ pub async fn run(
     cfg: &Config,
     options: PreflightOptions,
 ) -> Result<PreflightReport, PreflightError> {
+    run_inner(cfg, options, true).await
+}
+
+pub async fn run_offline(
+    cfg: &Config,
+    options: PreflightOptions,
+) -> Result<PreflightReport, PreflightError> {
+    run_inner(cfg, options, false).await
+}
+
+async fn run_inner(
+    cfg: &Config,
+    options: PreflightOptions,
+    probe_storage: bool,
+) -> Result<PreflightReport, PreflightError> {
     let mut report = PreflightReport::default();
 
-    let key_name = &cfg.aead.key_env;
-    let key_hex =
-        env::var(key_name).map_err(|_| PreflightError::MasterKeyMissing(key_name.clone()))?;
-    let key = decode_master_key(key_name, &key_hex)?;
-    report
-        .successes
-        .push(format!("storage master key resolved from {key_name}"));
-    let aead = Arc::new(AeadService::from_master_key(key));
-    let _storage = storage_factory::open_storage(&cfg.storage, aead)
-        .await
-        .map_err(|error| PreflightError::Storage(error.to_string()))?;
-    report.successes.push(storage_open_success(&cfg.storage));
+    if probe_storage {
+        let key_name = &cfg.aead.key_env;
+        let key_hex =
+            env::var(key_name).map_err(|_| PreflightError::MasterKeyMissing(key_name.clone()))?;
+        let key = decode_master_key(key_name, &key_hex)?;
+        report
+            .successes
+            .push(format!("storage master key resolved from {key_name}"));
+        match &cfg.storage {
+            StorageConfig::Redb { path } => validate_redb_path(path)?,
+            StorageConfig::Postgres { url, .. } => {
+                probe_postgres_connection(url).await?;
+            }
+        }
+
+        let aead = Arc::new(AeadService::from_master_key(key));
+        let _storage = storage_factory::open_storage(&cfg.storage, aead)
+            .await
+            .map_err(|error| PreflightError::Storage(error.to_string()))?;
+        report.successes.push(storage_open_success(&cfg.storage));
+    }
 
     let runtime = ExtismRuntime::new();
     if let Some(plugin) = &cfg.plugins.authn_plugin {
@@ -155,6 +180,69 @@ fn postgres_host(url: &str) -> String {
         .ok()
         .and_then(|url| url.host_str().map(str::to_owned))
         .unwrap_or_else(|| "<unknown host>".to_owned())
+}
+
+async fn probe_postgres_connection(url: &str) -> Result<(), PreflightError> {
+    match storage_factory::probe_postgres_connection(url).await {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            tracing::error!(
+                host = %postgres_host(url),
+                error = %error,
+                "postgres connection probe failed"
+            );
+            Err(PreflightError::Storage(error.to_string()))
+        }
+    }
+}
+
+fn validate_redb_path(path: &Path) -> Result<(), PreflightError> {
+    if path == Path::new(DEFAULT_REDB_PATH) && !path.exists() {
+        return Ok(());
+    }
+
+    if path.exists() {
+        let metadata = fs::metadata(path).map_err(|error| {
+            PreflightError::Storage(format!("cannot inspect path {}: {error}", path.display()))
+        })?;
+        if !metadata.is_file() {
+            return Err(PreflightError::Storage(format!(
+                "not a file: {}",
+                path.display()
+            )));
+        }
+        if metadata.permissions().readonly() {
+            return Err(PreflightError::Storage(format!(
+                "file is not writable: {}",
+                path.display()
+            )));
+        }
+    }
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent_metadata = fs::metadata(parent).map_err(|_| {
+        PreflightError::Storage(format!(
+            "parent directory does not exist: {}",
+            parent.display()
+        ))
+    })?;
+    if !parent_metadata.is_dir() {
+        return Err(PreflightError::Storage(format!(
+            "parent path is not a directory: {}",
+            parent.display()
+        )));
+    }
+    if parent_metadata.permissions().readonly() {
+        return Err(PreflightError::Storage(format!(
+            "parent directory is not writable: {}",
+            parent.display()
+        )));
+    }
+
+    Ok(())
 }
 
 enum PluginLoadKind {
