@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 
-use cc_lb_config::{AuthStrategy, Config, PluginRef, UpstreamKind, UpstreamSpec};
+use cc_lb_config::{AuthStrategy, Config, PluginRef, StorageConfig, UpstreamKind, UpstreamSpec};
 use url::Url;
 
 pub struct EnvGuard {
@@ -45,6 +45,13 @@ pub fn base_config() -> Config {
         upstreams: HashMap::new(),
         ..Config::default()
     }
+}
+
+pub fn use_temp_redb(config: &mut Config, name: &str, key_env: &str) {
+    config.storage = StorageConfig::Redb {
+        path: std::env::temp_dir().join(format!("cc-lb-{name}-{}.redb", std::process::id())),
+    };
+    config.aead.key_env = key_env.to_owned();
 }
 
 pub fn authn_plugin(name: &str, wasm_path: impl Into<std::path::PathBuf>) -> PluginRef {

@@ -31,7 +31,16 @@ async fn ulimit_low_warns() {
     )
     .unwrap();
 
-    let config = preflight_common::base_config();
+    let _env_guard = preflight_common::EnvGuard::set(
+        "CC_LB_TEST_MASTER_KEY_PREFLIGHT_ULIMIT",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    );
+    let mut config = preflight_common::base_config();
+    preflight_common::use_temp_redb(
+        &mut config,
+        "preflight-ulimit",
+        "CC_LB_TEST_MASTER_KEY_PREFLIGHT_ULIMIT",
+    );
     let report = preflight::run(&config, PreflightOptions { skip_bind: true })
         .await
         .unwrap();
