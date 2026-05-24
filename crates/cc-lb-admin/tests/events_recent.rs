@@ -219,7 +219,7 @@ async fn authorized_json(app: axum::Router, uri: &str) -> (StatusCode, Value, Ve
 
 fn seeded_storage() -> (tempfile::TempDir, Arc<RedbStorage>) {
     let dir = tempfile::tempdir().unwrap();
-    let storage = RedbStorage::open(&dir.path().join("events.redb")).unwrap();
+    let storage = RedbStorage::open(dir.path().join("events.redb")).unwrap();
     for event in [
         event(
             1_800_000_000,

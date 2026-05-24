@@ -1,3 +1,4 @@
+#[cfg(feature = "postgres")]
 use std::process::Command;
 
 #[cfg(feature = "postgres")]

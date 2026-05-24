@@ -25,7 +25,7 @@ async fn sweep_task_removes_windows_older_than_retention() -> Result<(), Box<dyn
 
     let handle = start_sweep(manager, Duration::from_millis(10));
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
-    while storage.get_quota("old", 1, BucketKind::Requests)? != 0 {
+    while storage.get_quota("old", 1, BucketKind::Requests).await? != 0 {
         assert!(
             tokio::time::Instant::now() < deadline,
             "sweep task did not remove old quota window before deadline"

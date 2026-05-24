@@ -19,7 +19,7 @@ pub const TOKEN: &str = "test-token";
 
 pub fn temp_storage() -> (tempfile::TempDir, Arc<RedbStorage>) {
     let dir = tempfile::tempdir().unwrap();
-    let storage = Arc::new(RedbStorage::open(&dir.path().join("test.redb")).unwrap());
+    let storage = Arc::new(RedbStorage::open(dir.path().join("test.redb")).unwrap());
     (dir, storage)
 }
 

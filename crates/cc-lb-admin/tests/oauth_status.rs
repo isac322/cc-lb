@@ -178,7 +178,7 @@ async fn storage_with_credential(
     creds: OAuthCredentials,
 ) -> (tempfile::TempDir, Arc<RedbStorage>) {
     let dir = tempfile::tempdir().unwrap();
-    let storage = RedbStorage::open(&dir.path().join("oauth.redb")).unwrap();
+    let storage = RedbStorage::open(dir.path().join("oauth.redb")).unwrap();
     let storage = Arc::new(storage);
     let aead = AeadService::from_master_key([0; 32]);
     let plaintext = serde_json::to_vec(&creds).unwrap();

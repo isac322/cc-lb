@@ -107,7 +107,10 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
     let config = Config::load(&config_path).expect("load config");
     // SAFETY: test-only; single-threaded test runner, no concurrent env access.
     unsafe {
-        std::env::set_var("CC_LB_MASTER_KEY", "0000000000000000000000000000000000000000000000000000000000000000");
+        std::env::set_var(
+            "CC_LB_MASTER_KEY",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
     }
     let app = build_app_with_path(config, Some(&config_path)).expect("build app");
     let signals = app.signal_handle();
@@ -502,6 +505,7 @@ fn free_addr() -> SocketAddr {
     listener.local_addr().expect("free addr")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_config(
     path: &Path,
     proxy_addr: SocketAddr,

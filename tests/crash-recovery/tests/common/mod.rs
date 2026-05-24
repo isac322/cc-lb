@@ -26,7 +26,6 @@ const TOTAL_ITERATIONS_ENV: &str = "CC_LB_CRASH_ITERATIONS";
 const DEFAULT_ITERATIONS: usize = 100;
 const COMMITTED_ROWS: usize = 32;
 const PENDING_ROWS: usize = 10_000;
-const MASTER_KEY: [u8; 32] = [48; 32];
 const ANTHROPIC_OAUTH_PROVIDER: &str = "anthropic_oauth";
 const STARTED_MARKER: &str = "pending_tx_started";
 const CHILD_LINGER: Duration = Duration::from_secs(60);

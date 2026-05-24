@@ -162,7 +162,12 @@ fn audit_entry(index: usize) -> AuditEntry {
     AuditEntry {
         ts: AUDIT_BASE_TS + (index / 10) as u64,
         request_id: format!("req-{index:04}"),
-        principal_id: if index.is_multiple_of(2) { "alice" } else { "bob" }.to_owned(),
+        principal_id: if index.is_multiple_of(2) {
+            "alice"
+        } else {
+            "bob"
+        }
+        .to_owned(),
         route: "messages".to_owned(),
         upstream: "anthropic_direct".to_owned(),
         model: Some("claude-sonnet-4-5".to_owned()),

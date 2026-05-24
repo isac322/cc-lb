@@ -70,7 +70,7 @@ async fn registered_open_breaker_is_reported() {
 #[tokio::test]
 async fn killswitch_state_reflects_storage_value() {
     let dir = tempfile::tempdir().unwrap();
-    let storage = Arc::new(RedbStorage::open(&dir.path().join("status.redb")).unwrap());
+    let storage = Arc::new(RedbStorage::open(dir.path().join("status.redb")).unwrap());
     storage.set_killswitch_enabled(true).unwrap();
 
     let app = router(test_state(test_config(), Some(storage.clone()), None, None));
