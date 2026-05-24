@@ -2,10 +2,12 @@ use cc_lb_storage_api::{StorageError, StorageResult};
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::PgPool;
 
+pub mod api_keys;
 pub mod audit;
 pub mod config_store;
 pub mod limit_state;
 pub mod meta;
+pub mod oauth_credentials;
 pub mod quota;
 pub mod request_events;
 pub mod usage_rollups;
