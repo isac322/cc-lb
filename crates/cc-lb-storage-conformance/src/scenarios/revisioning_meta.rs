@@ -24,7 +24,7 @@ pub trait RevisioningMetaBackend: ConformanceBackend {
     async fn stored_backend_kind(&self, fixture: &Self::Fixture) -> Result<Option<BackendKind>>;
 }
 
-pub async fn run_all<B: ConformanceBackend>(backend: Arc<B>) -> Result<()>
+pub async fn run_all<B>(backend: Arc<B>) -> Result<()>
 where
     B: RevisioningMetaBackend,
 {
@@ -385,7 +385,7 @@ fn history_summary(seed: u64) -> HistorySummary {
         upstreams: seed as usize,
         principals: (seed + 1) as usize,
         plugin_count: (seed + 2) as usize,
-        tls_enabled: seed % 2 == 0,
+        tls_enabled: seed.is_multiple_of(2),
     }
 }
 
