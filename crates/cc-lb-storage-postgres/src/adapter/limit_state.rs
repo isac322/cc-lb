@@ -12,7 +12,7 @@ impl LimitStateStore for PostgresStorage {
     async fn put_principal_limit_state(&self, state: &PrincipalLimitState) -> StorageResult<()> {
         let snapshot = serde_json::to_value(state)?;
         sqlx::query(
-            "INSERT INTO principal_limit_states_v1              (principal_id, identity_kind, identity_value, window, kind, snapshot, updated_at)              VALUES ($1,$2,$3,$4,$5,$6,NOW())              ON CONFLICT (principal_id, identity_kind, identity_value, window, kind)              DO UPDATE SET snapshot = EXCLUDED.snapshot, updated_at = NOW()",
+            "INSERT INTO principal_limit_states_v1              (principal_id, identity_kind, identity_value, \"window\", kind, snapshot, updated_at)              VALUES ($1,$2,$3,$4,$5,$6,NOW())              ON CONFLICT (principal_id, identity_kind, identity_value, \"window\", kind)              DO UPDATE SET snapshot = EXCLUDED.snapshot, updated_at = NOW()",
         )
         .bind(&state.principal_id)
         .bind(state.identity_kind.as_str())
@@ -39,7 +39,7 @@ impl LimitStateStore for PostgresStorage {
         kind: PrincipalLimitKind,
     ) -> StorageResult<Option<PrincipalLimitState>> {
         let snapshot = sqlx::query_scalar::<_, Value>(
-            "SELECT snapshot FROM principal_limit_states_v1              WHERE principal_id = $1 AND identity_kind = $2 AND identity_value = $3              AND window = $4 AND kind = $5",
+            "SELECT snapshot FROM principal_limit_states_v1              WHERE principal_id = $1 AND identity_kind = $2 AND identity_value = $3              AND \"window\" = $4 AND kind = $5",
         )
         .bind(principal_id)
         .bind(identity_kind.as_str())
