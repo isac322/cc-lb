@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
-use cc_lb_config::{Config, ConfigError, PluginRef, ValidationError};
+use cc_lb_config::{Config, ConfigError, PluginRef};
 use notify::{Event, RecursiveMode, Watcher};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
@@ -77,12 +77,6 @@ impl ConfigWatcher {
                 return Err(ReloadError::Config(source));
             }
         };
-
-        if let Err(source) = new_config.validate() {
-            self.record_attempt();
-            self.record_failure(&source);
-            return Err(ReloadError::Validation(source));
-        }
 
         let current_config = self.current_config();
         if skip_unchanged && *current_config == new_config {
@@ -174,8 +168,6 @@ impl cc_lb_admin::ConfigReloader for ConfigWatcher {
 pub enum ReloadError {
     #[error(transparent)]
     Config(#[from] ConfigError),
-    #[error(transparent)]
-    Validation(#[from] ValidationError),
 }
 
 #[derive(Debug, Error)]
@@ -256,15 +248,11 @@ fn warn_restart_required_changes(current: &Config, new_config: &Config) {
         &current.plugins.observability_hooks,
         &new_config.plugins.observability_hooks,
     );
+    warn_if_changed(&current.storage, &new_config.storage, "storage");
     warn_if_changed(
-        &current.storage.redb_path,
-        &new_config.storage.redb_path,
-        "storage.redb_path",
-    );
-    warn_if_changed(
-        &current.storage.oauth_aead_key_env,
-        &new_config.storage.oauth_aead_key_env,
-        "storage.oauth_aead_key_env",
+        &current.aead.key_env,
+        &new_config.aead.key_env,
+        "aead.key_env",
     );
 }
 

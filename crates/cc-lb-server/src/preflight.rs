@@ -2,14 +2,16 @@ use std::collections::BTreeMap;
 use std::env;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::Arc;
 
-use cc_lb_config::{Config, PluginRef, TlsConfig};
+use cc_lb_aead::AeadService;
+use cc_lb_config::{Config, PluginRef, StorageConfig, TlsConfig};
 use cc_lb_plugin_api::{PluginManifest, PluginRuntime};
 use cc_lb_runtime_extism::ExtismRuntime;
-use cc_lb_storage_redb::RedbStorage;
 use thiserror::Error;
 use tokio::net::TcpListener;
 
+use crate::storage_factory;
 use crate::tls;
 
 #[derive(Debug, Default, Clone)]
@@ -51,20 +53,18 @@ pub async fn run(
 ) -> Result<PreflightReport, PreflightError> {
     let mut report = PreflightReport::default();
 
-    if let Some(redb_path) = &cfg.storage.redb_path {
-        let key_name = &cfg.storage.oauth_aead_key_env;
-        let key_hex =
-            env::var(key_name).map_err(|_| PreflightError::MasterKeyMissing(key_name.clone()))?;
-        let _key = decode_master_key(key_name, &key_hex)?;
-        report
-            .successes
-            .push(format!("storage master key resolved from {key_name}"));
-        let _storage = RedbStorage::open(redb_path)
-            .map_err(|error| PreflightError::Storage(error.to_string()))?;
-        report
-            .successes
-            .push(format!("storage opened: {}", redb_path.display()));
-    }
+    let key_name = &cfg.aead.key_env;
+    let key_hex =
+        env::var(key_name).map_err(|_| PreflightError::MasterKeyMissing(key_name.clone()))?;
+    let key = decode_master_key(key_name, &key_hex)?;
+    report
+        .successes
+        .push(format!("storage master key resolved from {key_name}"));
+    let aead = Arc::new(AeadService::from_master_key(key));
+    let _storage = storage_factory::open_storage(&cfg.storage, aead)
+        .await
+        .map_err(|error| PreflightError::Storage(error.to_string()))?;
+    report.successes.push(storage_open_success(&cfg.storage));
 
     let runtime = ExtismRuntime::new();
     if let Some(plugin) = &cfg.plugins.authn_plugin {
@@ -141,6 +141,20 @@ fn hex_nibble(byte: u8) -> Option<u8> {
         b'A'..=b'F' => Some(byte - b'A' + 10),
         _ => None,
     }
+}
+
+fn storage_open_success(config: &StorageConfig) -> String {
+    match config {
+        StorageConfig::Redb { path } => format!("storage opened: {}", path.display()),
+        StorageConfig::Postgres { url, .. } => format!("storage opened: {}", postgres_host(url)),
+    }
+}
+
+fn postgres_host(url: &str) -> String {
+    url::Url::parse(url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_owned))
+        .unwrap_or_else(|| "<unknown host>".to_owned())
 }
 
 enum PluginLoadKind {

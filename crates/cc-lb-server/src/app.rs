@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
@@ -17,7 +18,7 @@ use axum::http::{HeaderName, Request, Response, StatusCode};
 use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, PluginRef, TlsConfig};
+use cc_lb_config::{Config, PluginRef, StorageConfig, TlsConfig};
 use cc_lb_core::BreakerState;
 use cc_lb_core::{
     BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
@@ -30,11 +31,11 @@ use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_plugin_api::{ObservabilityHook, PluginManifest, PluginRuntime};
 use cc_lb_runtime_extism::{ExtismRuntime, SignerFactoryResolver};
 use cc_lb_storage_api::Storage;
-use cc_lb_storage_redb::RedbStorage;
 use http_body_util::BodyExt;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::net::TcpListener;
+use tokio::runtime::RuntimeFlavor;
 use tokio::sync::{broadcast, watch};
 use tokio::task::{JoinError, JoinHandle};
 use tower::ServiceBuilder;
@@ -45,6 +46,7 @@ use crate::drain::DrainController;
 use crate::preflight::{self, PreflightOptions};
 use crate::reload::ConfigWatcher;
 use crate::signal;
+use crate::storage_factory;
 use crate::tls::{ReloadableListener, TlsState};
 use cc_lb_admin::{AdminState, CurrentConfig};
 
@@ -180,7 +182,7 @@ pub async fn run_serve(config_path: &Path) -> Result<(), ServeError> {
         config.observability.user_prompt_redaction,
     ));
     let _guard = init_observability(&mut config)?;
-    let app = build_app_with_path(config, Some(config_path))?;
+    let app = build_app_with_path_async(config, Some(config_path)).await?;
     app.start().await?;
     Ok(())
 }
@@ -201,16 +203,32 @@ pub fn build_app(config: Config) -> Result<App, BuildError> {
 pub fn build_app_for_testing(mut config: Config) -> Result<App, BuildError> {
     let dir = tempfile::TempDir::new()?;
     let path = dir.path().join("storage.redb");
-    let storage: Arc<dyn Storage> = Arc::new(RedbStorage::open(&path)?);
     let aead = Arc::new(AeadService::from_master_key([0u8; 32]));
-    config.storage.redb_path = Some(path);
-    config.storage.oauth_aead_key_env = "__CC_LB_TEST_KEY__".to_owned();
+    config.storage = StorageConfig::Redb { path };
+    config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
+    let storage_config = config.storage.clone();
+    let storage = block_on_storage_open({
+        let aead = aead.clone();
+        async move {
+            storage_factory::open_storage(&storage_config, aead)
+                .await
+                .map_err(BuildError::from)
+        }
+    })?;
     std::mem::forget(dir);
     build_app_with_storage(config, None, storage, aead)
 }
 
 pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result<App, BuildError> {
     let (storage, aead) = open_storage(&config)?;
+    build_app_with_storage(config, config_path, storage, aead)
+}
+
+async fn build_app_with_path_async(
+    config: Config,
+    config_path: Option<&Path>,
+) -> Result<App, BuildError> {
+    let (storage, aead) = open_storage_async(&config).await?;
     build_app_with_storage(config, config_path, storage, aead)
 }
 
@@ -593,20 +611,49 @@ fn host_signer_resolver(
 }
 
 fn open_storage(config: &Config) -> Result<(Arc<dyn Storage>, Arc<AeadService>), BuildError> {
-    let path = config
-        .storage
-        .redb_path
-        .as_ref()
-        .ok_or(BuildError::StorageRequired)?;
-    let key_hex = std::env::var(&config.storage.oauth_aead_key_env).map_err(|_| {
-        BuildError::StorageKeyMissing {
-            env: config.storage.oauth_aead_key_env.clone(),
-        }
-    })?;
+    let config = config.clone();
+    block_on_storage_open(async move { open_storage_async(&config).await })
+}
+
+async fn open_storage_async(
+    config: &Config,
+) -> Result<(Arc<dyn Storage>, Arc<AeadService>), BuildError> {
+    let key_hex =
+        std::env::var(&config.aead.key_env).map_err(|_| BuildError::StorageKeyMissing {
+            env: config.aead.key_env.clone(),
+        })?;
     let key = decode_hex_key(&key_hex)?;
-    let storage: Arc<dyn Storage> = Arc::new(RedbStorage::open(path)?);
     let aead = Arc::new(AeadService::from_master_key(key));
+    let storage = storage_factory::open_storage(&config.storage, aead.clone()).await?;
     Ok((storage, aead))
+}
+
+fn block_on_storage_open<F, T>(future: F) -> Result<T, BuildError>
+where
+    F: Future<Output = Result<T, BuildError>> + Send + 'static,
+    T: Send + 'static,
+{
+    match tokio::runtime::Handle::try_current() {
+        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
+            tokio::task::block_in_place(|| handle.block_on(future))
+        }
+        Ok(_) => std::thread::spawn(move || {
+            tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()
+                .map_err(BuildError::from)?
+                .block_on(future)
+        })
+        .join()
+        .map_err(|_| {
+            BuildError::StorageTask("storage initialization thread panicked".to_owned())
+        })?,
+        Err(_) => tokio::runtime::Builder::new_multi_thread()
+            .enable_all()
+            .build()
+            .map_err(BuildError::from)?
+            .block_on(future),
+    }
 }
 
 fn decode_hex_key(value: &str) -> Result<[u8; 32], BuildError> {
@@ -859,7 +906,7 @@ pub enum BuildError {
     #[error(transparent)]
     Observability(#[from] cc_lb_observability::InitError),
     #[error(transparent)]
-    Storage(#[from] cc_lb_storage_redb::StorageError),
+    StorageFactory(#[from] crate::storage_factory::StorageFactoryError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -868,8 +915,8 @@ pub enum BuildError {
     StorageKeyMissing { env: String },
     #[error("storage key must be 64 hexadecimal characters")]
     InvalidStorageKey,
-    #[error("storage.redb_path is required")]
-    StorageRequired,
+    #[error("storage initialization failed: {0}")]
+    StorageTask(String),
     #[error("invalid plugin {name}: {reason}")]
     InvalidPlugin { name: String, reason: String },
     #[error("{field}: {message}")]

@@ -14,7 +14,6 @@ redb = [
     "cc-lb-core/redb",
     "cc-lb-signer-anthropic-key/redb",
     "cc-lb-signer-anthropic-oauth/redb",
-    "dep:cc-lb-storage-redb",
 ]
 postgres = [
     "cc-lb-admin/postgres",
@@ -51,7 +50,7 @@ cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
 cc-lb-signer-aws = { path = "../cc-lb-signer-aws" }
 cc-lb-signer-gcp = { path = "../cc-lb-signer-gcp" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
-cc-lb-storage-redb = { path = "../cc-lb-storage-redb", optional = true }
+cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres", optional = true }
 clap = { workspace = true, features = ["derive"] }
 http.workspace = true
