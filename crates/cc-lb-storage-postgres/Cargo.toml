@@ -17,7 +17,7 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-sqlx = { workspace = true, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "uuid"] }
+sqlx = { workspace = true, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "uuid"] } # macros: required for sqlx::migrate!(). Pulls sqlx-mysql (dev-time only) -> rsa (RUSTSEC-2023-0071) which is ignored in cargo-audit CI (MySQL auth path, never executed at runtime).
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
 tracing = { workspace = true }

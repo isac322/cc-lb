@@ -1,5 +1,8 @@
 name: postgres
 
+env:
+  CC_LB_ADMIN_SKIP_SPA: "1"
+
 on:
   pull_request:
     paths:
