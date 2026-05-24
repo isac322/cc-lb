@@ -140,8 +140,9 @@ pub async fn build_recent_events_payload(
     let pull_limit =
         (params.limit * RECENT_EVENTS_PULL_INFLATION_FACTOR).min(MAX_RECENT_EVENTS_PULL_LIMIT);
     let filters = params.stream_filters();
-    let mut events =
-        storage.query_request_events(params.since_unix_secs, params.until_unix_secs, pull_limit).await?;
+    let mut events = storage
+        .query_request_events(params.since_unix_secs, params.until_unix_secs, pull_limit)
+        .await?;
     events.sort_by(|left, right| {
         right
             .ts

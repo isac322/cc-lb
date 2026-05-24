@@ -625,21 +625,23 @@ async fn append_admin_audit(
     kind: &str,
     payload: Value,
 ) -> Result<(), ManagementError> {
-    storage.append_audit(&AuditEntry {
-        ts: now_unix_secs,
-        request_id: format!("admin_{kind}_{principal_id}_{now_unix_secs}"),
-        principal_id: principal_id.to_owned(),
-        route: kind.to_owned(),
-        upstream: "admin".to_owned(),
-        model: None,
-        status: 200,
-        input_tokens: 0,
-        output_tokens: 0,
-        duration_ms: 0,
-        agent_label: None,
-        kind: Some(kind.to_owned()),
-        payload: Some(payload),
-    }).await?;
+    storage
+        .append_audit(&AuditEntry {
+            ts: now_unix_secs,
+            request_id: format!("admin_{kind}_{principal_id}_{now_unix_secs}"),
+            principal_id: principal_id.to_owned(),
+            route: kind.to_owned(),
+            upstream: "admin".to_owned(),
+            model: None,
+            status: 200,
+            input_tokens: 0,
+            output_tokens: 0,
+            duration_ms: 0,
+            agent_label: None,
+            kind: Some(kind.to_owned()),
+            payload: Some(payload),
+        })
+        .await?;
     Ok(())
 }
 
@@ -652,7 +654,11 @@ async fn get_oauth(
     let Some(ciphertext) = storage.get_oauth_ciphertext(principal_id, provider).await? else {
         return Ok(None);
     };
-    Ok(Some(decrypt_json(aead, &ciphertext, &oauth_aad(principal_id, provider))?))
+    Ok(Some(decrypt_json(
+        aead,
+        &ciphertext,
+        &oauth_aad(principal_id, provider),
+    )?))
 }
 
 async fn issue_api_key(
@@ -665,7 +671,9 @@ async fn issue_api_key(
     let mut raw_key = [0_u8; 32];
     SystemRandom::new()
         .fill(&mut raw_key)
-        .map_err(|_| StorageError::Fatal { message: "api key random generation failed".to_owned() })?;
+        .map_err(|_| StorageError::Fatal {
+            message: "api key random generation failed".to_owned(),
+        })?;
     let plaintext = URL_SAFE_NO_PAD.encode(raw_key);
     let key_hash = digest(&SHA256, plaintext.as_bytes());
     let key_id = hex_prefix(key_hash.as_ref(), 12);
@@ -677,7 +685,9 @@ async fn issue_api_key(
     };
     let aad = api_key_aad(principal_id, &key_id);
     let ciphertext = encrypt_json(aead, &stored, &aad)?;
-    storage.put_api_key_ciphertext(principal_id, &key_id, &ciphertext).await?;
+    storage
+        .put_api_key_ciphertext(principal_id, &key_id, &ciphertext)
+        .await?;
     Ok(IssuedKey {
         key_id,
         plaintext,
@@ -692,7 +702,8 @@ async fn list_api_keys(
 ) -> Result<Vec<ApiKeyRecord>, ManagementError> {
     let mut records = Vec::new();
     for (key_id, ciphertext) in storage.list_api_key_ciphertexts(principal_id).await? {
-        let stored: StoredApiKeyRecord = decrypt_json(aead, &ciphertext, &api_key_aad(principal_id, &key_id))?;
+        let stored: StoredApiKeyRecord =
+            decrypt_json(aead, &ciphertext, &api_key_aad(principal_id, &key_id))?;
         records.push(ApiKeyRecord {
             key_id,
             label: stored.label,
@@ -723,7 +734,10 @@ async fn revoke_api_key(
     if stored.revoked_at_unix_secs.is_none() {
         stored.revoked_at_unix_secs = Some(revoked_at_unix_secs);
         let revoked_ciphertext = encrypt_json(aead, &stored, &aad)?;
-        if !storage.revoke_api_key(principal_id, key_id, &revoked_ciphertext).await? {
+        if !storage
+            .revoke_api_key(principal_id, key_id, &revoked_ciphertext)
+            .await?
+        {
             return Err(ManagementError::UnknownApiKey);
         }
     }

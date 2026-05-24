@@ -4,7 +4,9 @@ use std::fs;
 use std::path::Path;
 
 use cc_lb_config::Config;
-use cc_lb_storage_api::{AuditEntry, ConfigDraftState, HistoryEntry, HistorySummary, Storage, StorageError};
+use cc_lb_storage_api::{
+    AuditEntry, ConfigDraftState, HistoryEntry, HistorySummary, Storage, StorageError,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -213,7 +215,9 @@ pub async fn put_draft(
         last_validation_error: None,
         saved_at_unix_secs: Some(saved_at_unix_secs),
     };
-    let revision = storage.put_config_draft(state, request.expected_revision).await?;
+    let revision = storage
+        .put_config_draft(state, request.expected_revision)
+        .await?;
     Ok(PutConfigDraftResponse {
         revision,
         saved_at_unix_secs,
@@ -254,16 +258,18 @@ where
         Ok(outcome) => outcome,
         Err(error) => return Ok(Err(error)),
     };
-    let revision = storage.put_config_draft(
-        ConfigDraftState {
-            draft: Some(draft),
-            revision: 0,
-            last_validated_revision: None,
-            last_validation_error: None,
-            saved_at_unix_secs: Some(saved_at_unix_secs),
-        },
-        expected_revision,
-    ).await?;
+    let revision = storage
+        .put_config_draft(
+            ConfigDraftState {
+                draft: Some(draft),
+                revision: 0,
+                last_validated_revision: None,
+                last_validation_error: None,
+                saved_at_unix_secs: Some(saved_at_unix_secs),
+            },
+            expected_revision,
+        )
+        .await?;
     Ok(Ok((revision, outcome)))
 }
 
@@ -286,7 +292,9 @@ pub async fn validate_draft(
 
     match validation {
         Ok(_) => {
-            storage.set_last_validated_revision(state.revision, None).await?;
+            storage
+                .set_last_validated_revision(state.revision, None)
+                .await?;
             Ok(ValidateConfigDraftResponse {
                 valid: true,
                 revision: state.revision,
@@ -294,7 +302,9 @@ pub async fn validate_draft(
             })
         }
         Err(error) => {
-            storage.set_last_validated_revision(state.revision, Some(error.clone())).await?;
+            storage
+                .set_last_validated_revision(state.revision, Some(error.clone()))
+                .await?;
             Ok(ValidateConfigDraftResponse {
                 valid: false,
                 revision: state.revision,
@@ -353,31 +363,35 @@ pub async fn apply_config(
         .reload_now()
         .map_err(|detail| SettingsError::ReloadFailed { detail })?;
 
-    storage.append_config_history(
-        request.expected_revision,
-        config_toml,
-        applied_at_unix_secs,
-        history_summary(&config),
-    ).await?;
-    storage.append_audit(&AuditEntry {
-        ts: applied_at_unix_secs,
-        request_id: format!("config_apply_{}", request.expected_revision),
-        principal_id: "admin".to_owned(),
-        route: "config_apply".to_owned(),
-        upstream: "admin".to_owned(),
-        model: None,
-        status: 200,
-        input_tokens: 0,
-        output_tokens: 0,
-        duration_ms: 0,
-        agent_label: None,
-        kind: Some("config_apply".to_owned()),
-        payload: Some(json!({
-            "revision": request.expected_revision,
-            "actor": "admin",
-            "applied_at_unix_secs": applied_at_unix_secs,
-        })),
-    }).await?;
+    storage
+        .append_config_history(
+            request.expected_revision,
+            config_toml,
+            applied_at_unix_secs,
+            history_summary(&config),
+        )
+        .await?;
+    storage
+        .append_audit(&AuditEntry {
+            ts: applied_at_unix_secs,
+            request_id: format!("config_apply_{}", request.expected_revision),
+            principal_id: "admin".to_owned(),
+            route: "config_apply".to_owned(),
+            upstream: "admin".to_owned(),
+            model: None,
+            status: 200,
+            input_tokens: 0,
+            output_tokens: 0,
+            duration_ms: 0,
+            agent_label: None,
+            kind: Some("config_apply".to_owned()),
+            payload: Some(json!({
+                "revision": request.expected_revision,
+                "actor": "admin",
+                "applied_at_unix_secs": applied_at_unix_secs,
+            })),
+        })
+        .await?;
 
     Ok(ApplyConfigResponse {
         applied_revision: request.expected_revision,
@@ -425,12 +439,13 @@ pub async fn diff_history(
             .ok_or(SettingsError::UnknownRevision {
                 missing: from_revision,
             })?;
-    let to = storage
-        .get_config_history(to_revision)
-        .await?
-        .ok_or(SettingsError::UnknownRevision {
-            missing: to_revision,
-        })?;
+    let to =
+        storage
+            .get_config_history(to_revision)
+            .await?
+            .ok_or(SettingsError::UnknownRevision {
+                missing: to_revision,
+            })?;
     let from_json = history_config_json(&from)?;
     let to_json = history_config_json(&to)?;
     let mut diff = Vec::new();

@@ -237,13 +237,13 @@ impl OAuthHttpClient for HyperOAuthHttpClient {
                 reason: source.to_string(),
             })?;
 
-        let response = self
-            .client
-            .request(http_request)
-            .await
-            .map_err(|source| OAuthHttpError::Request {
-                reason: source.to_string(),
-            })?;
+        let response =
+            self.client
+                .request(http_request)
+                .await
+                .map_err(|source| OAuthHttpError::Request {
+                    reason: source.to_string(),
+                })?;
         let status = response.status();
         let body = response
             .into_body()
@@ -267,7 +267,12 @@ async fn exchange_pkce_code(
     redirect_uri: &Url,
     now_epoch_secs: u64,
 ) -> Result<OAuthCredentials, OAuthTokenError> {
-    let body = form_body(client_id, code_verifier.expose_secret(), auth_code, redirect_uri);
+    let body = form_body(
+        client_id,
+        code_verifier.expose_secret(),
+        auth_code,
+        redirect_uri,
+    );
     let response = http
         .post_token(OAuthTokenRequest {
             endpoint: token_url.clone(),
@@ -287,7 +292,10 @@ async fn exchange_pkce_code(
     parse_token_response(response.body, now_epoch_secs)
 }
 
-fn parse_token_response(body: Bytes, now_epoch_secs: u64) -> Result<OAuthCredentials, OAuthTokenError> {
+fn parse_token_response(
+    body: Bytes,
+    now_epoch_secs: u64,
+) -> Result<OAuthCredentials, OAuthTokenError> {
     #[derive(Debug, Deserialize)]
     struct TokenEndpointJson {
         access_token: String,

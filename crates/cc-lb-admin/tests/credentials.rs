@@ -1,8 +1,8 @@
 mod config_admin_common;
 
 use axum::http::StatusCode;
-use cc_lb_config::{Config, PrincipalSpec};
 use cc_lb_aead::AeadService;
+use cc_lb_config::{Config, PrincipalSpec};
 use cc_lb_storage_api::{ApiKeyRecord, OAuthCredentials, StoredApiKeyRecord};
 use cc_lb_storage_redb::RedbStorage;
 use config_admin_common::{
@@ -228,7 +228,10 @@ async fn put_oauth(
     let aead = AeadService::from_master_key([0; 32]);
     let plaintext = serde_json::to_vec(credentials).unwrap();
     let ciphertext = aead
-        .encrypt(&plaintext, format!("oauth:{principal_id}:{provider}").as_bytes())
+        .encrypt(
+            &plaintext,
+            format!("oauth:{principal_id}:{provider}").as_bytes(),
+        )
         .unwrap();
     cc_lb_storage_api::OAuthCredentialStore::put_oauth_ciphertext(
         storage.as_ref(),
@@ -256,7 +259,10 @@ async fn put_api_key(
     };
     let plaintext = serde_json::to_vec(&stored).unwrap();
     let ciphertext = aead
-        .encrypt(&plaintext, format!("api-key:{principal_id}:{key_id}").as_bytes())
+        .encrypt(
+            &plaintext,
+            format!("api-key:{principal_id}:{key_id}").as_bytes(),
+        )
         .unwrap();
     cc_lb_storage_api::ApiKeyStore::put_api_key_ciphertext(
         storage.as_ref(),
@@ -277,15 +283,16 @@ async fn put_api_key(
 async fn list_api_keys(storage: &Arc<RedbStorage>, principal_id: &str) -> Vec<ApiKeyRecord> {
     let aead = AeadService::from_master_key([0; 32]);
     let mut records = Vec::new();
-    for (key_id, ciphertext) in cc_lb_storage_api::ApiKeyStore::list_api_key_ciphertexts(
-        storage.as_ref(),
-        principal_id,
-    )
-    .await
-    .unwrap()
+    for (key_id, ciphertext) in
+        cc_lb_storage_api::ApiKeyStore::list_api_key_ciphertexts(storage.as_ref(), principal_id)
+            .await
+            .unwrap()
     {
         let plaintext = aead
-            .decrypt(&ciphertext, format!("api-key:{principal_id}:{key_id}").as_bytes())
+            .decrypt(
+                &ciphertext,
+                format!("api-key:{principal_id}:{key_id}").as_bytes(),
+            )
             .unwrap();
         let stored: StoredApiKeyRecord = serde_json::from_slice(&plaintext).unwrap();
         records.push(ApiKeyRecord {

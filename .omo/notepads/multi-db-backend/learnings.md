@@ -76,6 +76,11 @@
 - FeatureDisabled when postgres feature off but Postgres config selected
 - cargo build --features redb,postgres: PASS
 
+## [T29] Backend-aware reload + preflight
+- preflight: Postgres SELECT 1 probe with 5s timeout
+- reload: kind-change → warn, no hot swap
+- cargo build --features postgres,redb: PASS
+
 ## [T31] Examples moved to cc-lb-server
 - inspect_oauth.rs + seed_real_anthropic_key.rs: clap --backend flag, no AEAD internals
 - old cc-lb-storage-redb examples deleted

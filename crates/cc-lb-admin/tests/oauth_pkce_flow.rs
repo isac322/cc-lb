@@ -137,14 +137,11 @@ async fn test_oauth_pkce_flow() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    let ciphertext = OAuthCredentialStore::get_oauth_ciphertext(
-        storage.as_ref(),
-        "alice",
-        "anthropic_oauth",
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let ciphertext =
+        OAuthCredentialStore::get_oauth_ciphertext(storage.as_ref(), "alice", "anthropic_oauth")
+            .await
+            .unwrap()
+            .unwrap();
     let plaintext = aead
         .decrypt(&ciphertext, b"oauth:alice:anthropic_oauth")
         .unwrap()

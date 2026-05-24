@@ -1,11 +1,13 @@
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, PluginRef, UpstreamKind};
 use cc_lb_core::{BreakerRegistry, BreakerState, BulkheadRegistry, DrainController};
-use cc_lb_storage_api::{OAuthCredentials, RequestEventUpstream, Storage, StorageError, UsageRollupResolution};
+use cc_lb_storage_api::{
+    OAuthCredentials, RequestEventUpstream, Storage, StorageError, UsageRollupResolution,
+};
 use serde::Serialize;
 
-use crate::credential_crypto::{decrypt_json, oauth_aad};
 use crate::PluginRuntimeStatus;
+use crate::credential_crypto::{decrypt_json, oauth_aad};
 
 const RECENT_ERROR_WINDOW_SECS: u64 = 15 * 60;
 const EXPIRING_SOON_SECS: u64 = 300;
@@ -165,7 +167,10 @@ pub async fn build_oauth_status(
 
     let mut credentials = Vec::with_capacity(refs.len());
     for (principal_id, provider) in refs {
-        let stored = match storage.get_oauth_ciphertext(&principal_id, &provider).await? {
+        let stored = match storage
+            .get_oauth_ciphertext(&principal_id, &provider)
+            .await?
+        {
             Some(ciphertext) => Some(decrypt_json::<OAuthCredentials>(
                 aead,
                 &ciphertext,

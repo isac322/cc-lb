@@ -3,9 +3,9 @@ use axum::{
     http::{Request, StatusCode},
 };
 use cc_lb_admin::{AdminState, router};
+use cc_lb_aead::AeadService;
 use cc_lb_config::Config;
 use cc_lb_core::DashboardBroadcaster;
-use cc_lb_aead::AeadService;
 use cc_lb_storage_api::{OAuthCredentialStore, OAuthCredentials};
 use cc_lb_storage_redb::{OAUTH_CREDENTIALS_V1, RedbStorage, oauth_key};
 use http_body_util::{BodyExt, Empty};
@@ -159,14 +159,11 @@ async fn e2e_pkce_enrollment_persists_encrypted_credentials() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(complete["status"], "ok");
 
-    let ciphertext = OAuthCredentialStore::get_oauth_ciphertext(
-        storage.as_ref(),
-        "alice",
-        "anthropic_oauth",
-    )
-    .await
-    .unwrap()
-    .unwrap();
+    let ciphertext =
+        OAuthCredentialStore::get_oauth_ciphertext(storage.as_ref(), "alice", "anthropic_oauth")
+            .await
+            .unwrap()
+            .unwrap();
     let plaintext = aead
         .decrypt(&ciphertext, b"oauth:alice:anthropic_oauth")
         .unwrap()
