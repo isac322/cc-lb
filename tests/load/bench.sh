@@ -136,10 +136,19 @@ auth_strategy = "api_key"
 [principals.api-key]
 allowed_models = ["*"]
 
+[downstream_auth]
+mode = "none"
+
+[downstream_auth.none_mode]
+principal_id = "api-key"
+upstream_kind = "anthropic_key"
+upstream_credential_ref = "fake_anthropic"
+
 [plugins]
 observability_hooks = []
 
 [storage]
+redb_path = "$TMP_DIR/cc-lb.redb"
 oauth_aead_key_env = "CC_LB_MASTER_KEY"
 
 [observability]

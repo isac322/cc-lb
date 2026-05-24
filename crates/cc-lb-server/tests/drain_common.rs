@@ -1,13 +1,17 @@
 #![allow(dead_code)]
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use cc_lb_config::{AuthStrategy, Config, UpstreamKind, UpstreamSpec};
-use cc_lb_server::app::{BuildError, build_app_for_testing};
+use cc_lb_config::{
+    AuthStrategy, Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, UpstreamKind,
+    UpstreamSpec,
+};
+use cc_lb_server::app::{build_app_with_path, BuildError};
 use cc_lb_server::drain::DrainController;
 use cc_lb_server::signal::SignalHandle;
-use fake_anthropic::{AppConfig, app as fake_anthropic_app};
+use fake_anthropic::{app as fake_anthropic_app, AppConfig};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -38,12 +42,13 @@ pub async fn start_app(drain_secs: u64, fake_config: AppConfig) -> RunningApp {
     let admin_addr = free_addr();
     let metrics_addr = free_addr();
     let config_dir = tempfile::tempdir().expect("config dir");
+    let config_path = config_dir.path().join("cc-lb.toml");
     let mut config = config_for_upstream(upstream_addr, drain_secs);
     config.listener.proxy_addr = proxy_addr;
     config.listener.admin_addr = admin_addr;
     config.listener.metrics_addr = metrics_addr;
 
-    let app = build_app_for_testing(config).expect("build app");
+    let app = build_app_with_path(config, Some(&config_path)).expect("build app");
     let controller = app.drain_controller();
     let signals = app.signal_handle();
     let server = tokio::spawn(async move { app.start().await });
@@ -69,7 +74,7 @@ pub async fn start_router(drain_secs: u64, fake_config: AppConfig) -> RunningRou
     let mut config = config_for_upstream(upstream_addr, drain_secs);
     config.listener.proxy_addr = proxy_addr;
 
-    let app = build_app_for_testing(config).expect("build app");
+    let app = build_app_with_path(config, None).expect("build app");
     let controller = app.drain_controller();
     let router = app.router;
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
@@ -179,8 +184,31 @@ pub fn very_slow_fake_config() -> AppConfig {
     }
 }
 
+fn configure_builtin_auth(config: &mut Config) {
+    std::env::set_var(
+        "CC_LB_MASTER_KEY",
+        "0000000000000000000000000000000000000000000000000000000000000000",
+    );
+    config.downstream_auth.mode = DownstreamAuthMode::None;
+    config.downstream_auth.none_mode = Some(NoneModeConfig {
+        principal_id: "api-key".to_owned(),
+        upstream_kind: NoneModeUpstreamKind::AnthropicKey,
+        upstream_credential_ref: "fake_anthropic".to_owned(),
+    });
+    config.storage.redb_path = Some(unique_redb_path("cc-lb-drain"));
+}
+
+fn unique_redb_path(prefix: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{}-{nanos}.redb", std::process::id()))
+}
+
 fn config_for_upstream(upstream_addr: SocketAddr, drain_secs: u64) -> Config {
     let mut config = Config::default();
+    configure_builtin_auth(&mut config);
     config.timeouts.drain_secs = drain_secs;
     config.timeouts.upstream_total_secs = 30;
     config.upstreams.insert(

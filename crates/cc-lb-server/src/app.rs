@@ -372,7 +372,9 @@ struct ProxyState {
     breaker_registry: Arc<BreakerRegistry>,
     start_time: std::time::Instant,
     drain_controller: DrainController,
+    #[allow(dead_code)]
     key_store: Option<Arc<KeyStore>>,
+    #[allow(dead_code)]
     builtin_authn: Option<Arc<BuiltinAuthn>>,
 }
 

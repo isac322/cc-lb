@@ -64,6 +64,12 @@ impl KeyConcurrencyManager {
     }
 }
 
+impl Default for KeyConcurrencyManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 pub struct KeyConcurrencyGuard {
     key_id: String,
     counter: Arc<AtomicU32>,

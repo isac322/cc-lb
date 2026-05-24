@@ -267,6 +267,7 @@ fn is_supported_claude_family(model: &str) -> bool {
         || model.starts_with("claude-opus-")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn token_cost_micros(
     input_tokens: u64,
     input_price: UsdPerMillion,
