@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -223,9 +223,8 @@ impl LiteLlmLoader {
     }
 
     async fn install_from_cache(&self) -> Result<Option<u64>, LoaderError> {
-        match read_disk_cache(self.cache_path.clone()).await? {
-            Some(bytes) => return install_cached_bytes(&self.catalog, bytes, None).map(Some),
-            None => {}
+        if let Some(bytes) = read_disk_cache(self.cache_path.clone()).await? {
+            return install_cached_bytes(&self.catalog, bytes, None).map(Some);
         }
 
         let Some(snapshot) = get_storage_snapshot(self.storage.clone()).await? else {
@@ -446,7 +445,7 @@ fn install_cached_bytes(
     Ok(fetched_at_ms)
 }
 
-fn tmp_cache_path(cache_path: &PathBuf) -> PathBuf {
+fn tmp_cache_path(cache_path: &Path) -> PathBuf {
     let mut tmp = OsString::from(cache_path.as_os_str());
     tmp.push(".tmp");
     PathBuf::from(tmp)

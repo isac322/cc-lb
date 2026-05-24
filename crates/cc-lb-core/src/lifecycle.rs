@@ -502,6 +502,7 @@ impl Lifecycle {
         Ok(response)
     }
 
+    #[allow(clippy::result_large_err)]
     fn reserve_limit(
         &self,
         ctx: &RequestContext,

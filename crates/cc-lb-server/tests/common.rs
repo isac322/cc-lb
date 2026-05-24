@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
-use fake_anthropic::{AppConfig, app as fake_anthropic_app};
+use fake_anthropic::{app as fake_anthropic_app, AppConfig};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -44,10 +44,8 @@ pub async fn spawn_test_server() -> TestServer {
     let metrics_addr = free_addr();
     let config_dir = tempfile::tempdir().expect("temp config dir");
     let config_path = config_dir.path().join("cc-lb.toml");
-    let storage_path = config_dir.path().join("storage.redb");
     write_config(
         &config_path,
-        &storage_path,
         proxy_addr,
         admin_addr,
         metrics_addr,
@@ -62,6 +60,7 @@ pub async fn spawn_test_server() -> TestServer {
             "CC_LB_MASTER_KEY",
             "0000000000000000000000000000000000000000000000000000000000000000",
         )
+        .env("CC_LB_ADMIN_TOKEN", "admin-token")
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .spawn()
@@ -88,13 +87,13 @@ pub fn free_addr() -> SocketAddr {
 
 fn write_config(
     path: &Path,
-    storage_path: &Path,
     proxy_addr: SocketAddr,
     admin_addr: SocketAddr,
     metrics_addr: SocketAddr,
     upstream_addr: SocketAddr,
 ) {
-    let storage_path_str = storage_path.display();
+    let storage_path = path.with_file_name("cc-lb.redb");
+    let storage_path = storage_path.display();
     let config = format!(
         r#"
 [listener]
@@ -121,11 +120,19 @@ auth_strategy = "api_key"
 [principals.api-key]
 allowed_models = ["*"]
 
+[downstream_auth]
+mode = "none"
+
+[downstream_auth.none_mode]
+principal_id = "api-key"
+upstream_kind = "anthropic_key"
+upstream_credential_ref = "fake_anthropic"
+
 [plugins]
 observability_hooks = []
 
 [storage]
-redb_path = "{storage_path_str}"
+redb_path = "{storage_path}"
 oauth_aead_key_env = "CC_LB_MASTER_KEY"
 
 [observability]
