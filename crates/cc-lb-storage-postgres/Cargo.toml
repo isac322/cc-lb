@@ -19,6 +19,6 @@ serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sqlx = { workspace = true, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "uuid"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
 tracing = { workspace = true }
 uuid = { workspace = true }
