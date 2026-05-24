@@ -6,7 +6,9 @@ pub mod audit;
 pub mod config_store;
 pub mod limit_state;
 pub mod meta;
+pub mod quota;
 pub mod request_events;
+pub mod usage_rollups;
 
 #[derive(Debug, Clone)]
 pub struct PostgresStorage {
