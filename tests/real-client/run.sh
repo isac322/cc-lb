@@ -156,10 +156,24 @@ detect_skip_reason() {
 }
 
 TMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/cc-lb-real-client.XXXXXX")
-proxy_port=$(free_port)
-admin_port=$(free_port)
-metrics_port=$(free_port)
-fake_port=$(free_port)
+# Allocate 4 distinct ports atomically: hold all sockets open during reservation
+# so the kernel cannot hand the same ephemeral port to two sockets, then close
+# them just before binding. Avoids race collisions seen on busy CI runners.
+read -r proxy_port admin_port metrics_port fake_port <<EOF
+$(python3 - <<'PY'
+import socket
+socks = []
+for _ in range(4):
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(('127.0.0.1', 0))
+    socks.append(s)
+ports = [s.getsockname()[1] for s in socks]
+for s in socks:
+    s.close()
+print(' '.join(str(p) for p in ports))
+PY
+)
+EOF
 config_path="$TMP_DIR/cc-lb.toml"
 gcp_credentials="$TMP_DIR/gcp-adc.json"
 stdout_file="$TMP_DIR/client.stdout"
