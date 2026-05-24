@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use cc_lb_storage_api::{BucketKind, QuotaStore, StorageResult};
+use cc_lb_storage_api::{BucketKind, QuotaStore, StorageError, StorageResult};
 use sqlx::Row;
 
 use crate::{
@@ -111,8 +111,58 @@ impl QuotaStore for PostgresStorage {
         kind: BucketKind,
         delta: i64,
     ) -> StorageResult<u64> {
-        let value = upsert_quota_delta(&self.pool, principal_id, window_start, kind, delta).await?;
-        i64_to_u64(value, "quota value")
+        let window_start_i64 = u64_to_i64(window_start, "quota window_start")?;
+        let kind_str = kind.as_str();
+
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+
+        // Lock the row (or non-row) so the read-compute-write is atomic against
+        // concurrent adjust_quota / incr_quota calls touching the same key.
+        let current = sqlx::query_scalar::<_, i64>(
+            "SELECT value FROM quotas_by_principal_v1 \
+              WHERE principal_id = $1 AND window_start = $2 AND kind = $3 FOR UPDATE",
+        )
+        .bind(principal_id)
+        .bind(window_start_i64)
+        .bind(kind_str)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?
+        .unwrap_or(0);
+
+        let next = current.checked_add(delta).ok_or_else(|| StorageError::Fatal {
+            message: format!(
+                "quota adjustment overflow: principal={principal_id} window_start={window_start} \
+                 kind={kind_str} current={current} delta={delta}"
+            ),
+        })?;
+
+        if next < 0 {
+            // Match redb adjust_quota: underflow is rejected without mutating the row.
+            // tx is dropped (auto-rollback) on return.
+            return Err(StorageError::Conflict {
+                message: format!(
+                    "quota adjustment would underflow: principal={principal_id} \
+                     window_start={window_start} kind={kind_str} current={current} delta={delta}"
+                ),
+            });
+        }
+
+        sqlx::query(
+            "INSERT INTO quotas_by_principal_v1 (principal_id, window_start, kind, value) \
+              VALUES ($1, $2, $3, $4) \
+              ON CONFLICT (principal_id, window_start, kind) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(principal_id)
+        .bind(window_start_i64)
+        .bind(kind_str)
+        .bind(next)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        tx.commit().await.map_err(map_sqlx_error)?;
+        i64_to_u64(next, "quota value")
     }
 
     async fn sweep_old_quotas(&self, older_than_window_start: u64) -> StorageResult<u64> {

@@ -79,11 +79,19 @@ async fn open_postgres(
     url: &str,
     pool_config: &cc_lb_config::PostgresPoolConfig,
 ) -> Result<Arc<dyn Storage>, StorageFactoryError> {
+    use std::str::FromStr;
     use std::time::Duration;
 
-    use sqlx::postgres::PgPoolOptions;
+    use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     let statement_timeout_ms = pool_config.statement_timeout_secs * 1000;
+    let ssl_mode = parse_ssl_mode(&pool_config.sslmode)?;
+
+    let connect_options =
+        PgConnectOptions::from_str(url).map_err(|error| StorageFactoryError::ConnectionFailed {
+            message: host_only(url) + ": " + &error.to_string(),
+        })?;
+    let connect_options = connect_options.ssl_mode(ssl_mode);
 
     let pool = PgPoolOptions::new()
         .max_connections(pool_config.max_connections)
@@ -98,7 +106,7 @@ async fn open_postgres(
                 Ok(())
             })
         })
-        .connect(url)
+        .connect_with(connect_options)
         .await
         .map_err(|error| StorageFactoryError::ConnectionFailed {
             message: host_only(url) + ": " + &error.to_string(),
@@ -111,6 +119,25 @@ async fn open_postgres(
         .await
         .map_err(|error| map_init_error(error, BackendKind::Postgres))?;
     Ok(storage)
+}
+
+#[cfg(feature = "postgres")]
+fn parse_ssl_mode(value: &str) -> Result<sqlx::postgres::PgSslMode, StorageFactoryError> {
+    use sqlx::postgres::PgSslMode;
+    match value.to_ascii_lowercase().as_str() {
+        "disable" => Ok(PgSslMode::Disable),
+        "allow" => Ok(PgSslMode::Allow),
+        "prefer" => Ok(PgSslMode::Prefer),
+        "require" => Ok(PgSslMode::Require),
+        "verify-ca" | "verify_ca" => Ok(PgSslMode::VerifyCa),
+        "verify-full" | "verify_full" => Ok(PgSslMode::VerifyFull),
+        other => Err(StorageFactoryError::InitFailed {
+            message: format!(
+                "unknown postgres sslmode '{other}'; expected one of: disable, allow, prefer, \
+                 require, verify-ca, verify-full"
+            ),
+        }),
+    }
 }
 
 #[cfg(feature = "postgres")]

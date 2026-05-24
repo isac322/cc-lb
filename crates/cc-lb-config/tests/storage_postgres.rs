@@ -58,6 +58,53 @@ fn test_postgres_pool_defaults() {
 }
 
 #[test]
+fn test_tagged_kind_with_legacy_redb_path_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"[storage]
+kind = "postgres"
+url = "postgres://localhost/db"
+redb_path = "/tmp/leftover.redb"
+"#,
+    )
+    .unwrap();
+
+    let error =
+        Config::load(&config_path).expect_err("conflicting [storage] keys must be rejected");
+
+    let message = format!("{error}");
+    assert!(
+        message.contains("conflicting [storage] keys")
+            && message.contains("redb_path")
+            && message.contains("`kind`"),
+        "unexpected error message: {message}"
+    );
+}
+
+#[test]
+fn test_tagged_kind_postgres_without_legacy_keys_parses() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("config.toml");
+    std::fs::write(
+        &config_path,
+        r#"[storage]
+kind = "postgres"
+url = "postgres://localhost/db"
+"#,
+    )
+    .unwrap();
+
+    let config = Config::load(&config_path).unwrap();
+
+    assert!(matches!(
+        config.storage,
+        StorageConfig::Postgres { ref url, .. } if url == "postgres://localhost/db"
+    ));
+}
+
+#[test]
 fn test_statement_timeout_exceeds_request_timeout() {
     let mut config = Config::default();
     let request_timeout = config.timeouts.upstream_total_secs;

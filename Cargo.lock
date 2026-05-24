@@ -1034,6 +1034,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "cc-lb-pricing",
  "cc-lb-storage-api",
  "chrono",
  "serde",

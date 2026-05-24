@@ -37,6 +37,10 @@ pub enum ConfigError {
         "storage.pool.statement_timeout_secs ({statement}) must be less than timeouts.upstream_total_secs ({request})"
     )]
     StatementTimeoutExceedsRequestTimeout { statement: u64, request: u64 },
+    #[error(
+        "conflicting [storage] keys: tagged `kind` cannot be combined with legacy `redb_path`; remove `redb_path` (or remove `kind` to keep the legacy format)"
+    )]
+    ConflictingStorageKeys,
 }
 
 impl From<figment::Error> for ConfigError {
@@ -98,31 +102,53 @@ impl Config {
 struct LegacyConfigAliases {
     #[serde(skip_serializing_if = "Option::is_none")]
     aead: Option<LegacyAeadAlias>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    storage: Option<LegacyStorageAlias>,
 }
 
 impl LegacyConfigAliases {
     fn from_toml(toml_path: &Path) -> Result<Self, ConfigError> {
         let parsed: LegacyConfigFile = Figment::from(Toml::file_exact(toml_path)).extract()?;
-        let legacy_key_env = parsed
-            .storage
-            .and_then(|storage| storage.oauth_aead_key_env);
+        let storage = parsed.storage.unwrap_or_default();
+
+        if storage.kind.is_some() && storage.redb_path.is_some() {
+            return Err(ConfigError::ConflictingStorageKeys);
+        }
+
+        let storage_alias = if storage.kind.is_none() {
+            storage
+                .redb_path
+                .clone()
+                .map(|path| LegacyStorageAlias { kind: "redb", path })
+        } else {
+            None
+        };
+
+        let legacy_key_env = storage.oauth_aead_key_env;
         let has_aead_key_env = parsed.aead.and_then(|aead| aead.key_env).is_some();
 
-        Ok(
-            if let (Some(key_env), false) = (legacy_key_env, has_aead_key_env) {
-                Self {
-                    aead: Some(LegacyAeadAlias { key_env }),
-                }
-            } else {
-                Self::default()
-            },
-        )
+        let aead_alias = if let (Some(key_env), false) = (legacy_key_env, has_aead_key_env) {
+            Some(LegacyAeadAlias { key_env })
+        } else {
+            None
+        };
+
+        Ok(Self {
+            aead: aead_alias,
+            storage: storage_alias,
+        })
     }
 }
 
 #[derive(Debug, Serialize)]
 struct LegacyAeadAlias {
     key_env: String,
+}
+
+#[derive(Debug, Serialize)]
+struct LegacyStorageAlias {
+    kind: &'static str,
+    path: std::path::PathBuf,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -133,6 +159,8 @@ struct LegacyConfigFile {
 
 #[derive(Debug, Default, Deserialize)]
 struct LegacyStorageAliases {
+    kind: Option<String>,
+    redb_path: Option<std::path::PathBuf>,
     oauth_aead_key_env: Option<String>,
 }
 

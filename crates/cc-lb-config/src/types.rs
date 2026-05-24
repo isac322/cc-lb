@@ -245,8 +245,16 @@ impl<'de> Deserialize<'de> for StorageConfig {
         D: Deserializer<'de>,
     {
         let value = Value::deserialize(deserializer)?;
+        let has_kind = value.get("kind").is_some();
+        let has_legacy_redb_path = value.get("redb_path").is_some();
+        let has_legacy_aead_env = value.get("oauth_aead_key_env").is_some();
 
-        if value.get("redb_path").is_some() || value.get("oauth_aead_key_env").is_some() {
+        if has_kind {
+            let tagged = TaggedStorageConfig::deserialize(value).map_err(D::Error::custom)?;
+            return Ok(tagged.into());
+        }
+
+        if has_legacy_redb_path || has_legacy_aead_env {
             tracing::warn!(
                 "[storage] redb_path/oauth_aead_key_env is deprecated; use kind = \"redb\" + path and [aead].key_env"
             );
@@ -256,11 +264,6 @@ impl<'de> Deserialize<'de> for StorageConfig {
                     .redb_path
                     .unwrap_or_else(|| PathBuf::from(DEFAULT_REDB_PATH)),
             });
-        }
-
-        if value.get("kind").is_some() {
-            let tagged = TaggedStorageConfig::deserialize(value).map_err(D::Error::custom)?;
-            return Ok(tagged.into());
         }
 
         Ok(Self::default())

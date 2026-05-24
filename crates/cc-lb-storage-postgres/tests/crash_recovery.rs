@@ -331,15 +331,28 @@ fn expected_rollups_visible(rollups: &[UsageRollup]) -> bool {
         return false;
     }
 
+    let expected_input: u64 = (0..EVENTS_PER_ITERATION).map(|index| 10 + index).sum();
+    let expected_output: u64 = (0..EVENTS_PER_ITERATION).map(|index| 20 + index).sum();
+    let expected_latency_sum: u64 = (0..EVENTS_PER_ITERATION).map(|index| 30 + index).sum();
+    let expected_latency_min = 30;
+    let expected_latency_max = 30 + EVENTS_PER_ITERATION - 1;
+
     [UsageRollupResolution::Minute, UsageRollupResolution::Hour]
         .into_iter()
         .all(|resolution| {
             rollups.iter().any(|rollup| {
                 rollup.resolution == resolution
                     && rollup.principal == "crash-recovery-principal"
-                    && rollup.upstream.is_empty()
-                    && rollup.model.is_empty()
+                    && rollup.upstream == "anthropic_direct"
+                    && rollup.model == "claude-sonnet-4-5"
                     && rollup.request_count == EVENTS_PER_ITERATION
+                    && rollup.input_tokens == expected_input
+                    && rollup.output_tokens == expected_output
+                    && rollup.error_count == 0
+                    && rollup.latency_count == EVENTS_PER_ITERATION
+                    && rollup.latency_ms_sum == expected_latency_sum
+                    && rollup.latency_ms_min == Some(expected_latency_min)
+                    && rollup.latency_ms_max == Some(expected_latency_max)
             })
         })
 }

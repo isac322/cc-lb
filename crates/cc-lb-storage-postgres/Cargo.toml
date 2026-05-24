@@ -12,6 +12,7 @@ postgres = []
 
 [dependencies]
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
+cc-lb-pricing = { path = "../cc-lb-pricing" }
 async-trait = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }

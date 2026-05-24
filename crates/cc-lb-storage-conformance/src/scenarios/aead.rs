@@ -300,29 +300,23 @@ where
     )
 }
 
-/// Builds stable AAD for OAuth credentials from the storage lookup identity.
+/// Builds AAD for OAuth credentials, byte-identical to the production format
+/// used by [`cc-lb-admin::credential_crypto::oauth_aad`].
 fn oauth_aad(principal_id: &str, provider: &str) -> Vec<u8> {
-    [
-        b"oauth".as_slice(),
-        principal_id.as_bytes(),
-        provider.as_bytes(),
-    ]
-    .join(&0)
+    format!("oauth:{principal_id}:{provider}").into_bytes()
 }
 
-/// Builds stable AAD for stored API-key records from the principal and key id.
+/// Builds AAD for stored API-key records, byte-identical to the production format
+/// used by [`cc-lb-admin::credential_crypto::api_key_aad`].
 fn api_key_aad(principal_id: &str, key_id: &str) -> Vec<u8> {
-    [
-        b"api-key".as_slice(),
-        principal_id.as_bytes(),
-        key_id.as_bytes(),
-    ]
-    .join(&0)
+    format!("api-key:{principal_id}:{key_id}").into_bytes()
 }
 
-/// Builds stable AAD for the Anthropic direct-key slot from its storage key.
+/// Builds AAD for the Anthropic direct-key slot, byte-identical to the production
+/// format used by [`cc-lb-admin::credential_crypto::anthropic_api_key_aad`] and
+/// [`cc-lb-signer-anthropic-key::anthropic_api_key_aad`].
 fn anthropic_api_key_aad(storage_key: &str) -> Vec<u8> {
-    [b"anthropic-api-key".as_slice(), storage_key.as_bytes()].join(&0)
+    format!("anthropic-api-key:{storage_key}").into_bytes()
 }
 
 fn assert_decryption_failed(result: cc_lb_aead::AeadResult<Vec<u8>>, context: &str) -> Result<()> {
