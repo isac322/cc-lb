@@ -447,6 +447,11 @@ fn refresh_error_to_signer(error: RefreshError) -> SignerError {
         RefreshError::MissingCredentials => SignerError::MissingCredentials {
             reason: "oauth credentials not found".to_owned(),
         },
+        RefreshError::Storage {
+            source: StorageError::Unavailable { .. },
+        } => SignerError::StorageUnavailable {
+            reason: "storage unavailable".to_owned(),
+        },
         other => SignerError::SigningFailed {
             reason: other.to_string(),
         },
