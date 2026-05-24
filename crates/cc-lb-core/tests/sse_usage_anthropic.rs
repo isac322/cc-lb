@@ -149,6 +149,7 @@ async fn message_delta_can_supply_cache_creation_tokens() {
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn assert_usage(
     actual_input_tokens: u64,
     actual_output_tokens: u64,
