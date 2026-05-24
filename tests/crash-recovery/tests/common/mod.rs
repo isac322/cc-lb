@@ -400,7 +400,7 @@ fn verify_audit(
     })
 }
 
-fn verify_schema_and_killswitch(storage: &Storage) -> Result<u32, Box<dyn std::error::Error>> {
+fn verify_schema_and_killswitch(storage: &RedbStorage) -> Result<u32, Box<dyn std::error::Error>> {
     let schema_version = storage.schema_version()?;
     if schema_version != CURRENT_SCHEMA_VERSION {
         return Err(io_error(format!(

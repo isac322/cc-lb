@@ -17,7 +17,7 @@ fn test_config() -> Config {
         "placeholder-scope".to_string(),
         "placeholder-scope-2".to_string(),
     ];
-    config.storage.oauth_aead_key_env = "SECRET_STORAGE_KEY".to_string();
+    config.aead.key_env = "SECRET_STORAGE_KEY".to_string();
     config.admin.token_env = "SECRET_ADMIN_TOKEN".to_string();
     config.quotas = QuotasConfig {
         default_window_secs: 60,

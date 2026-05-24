@@ -33,6 +33,10 @@ impl AeadService {
         Ok(service)
     }
 
+    pub fn try_from_key(key: &[u8]) -> AeadResult<Self> {
+        Self::try_from_master_key(key)
+    }
+
     pub fn encrypt(&self, plaintext: &[u8], aad: &[u8]) -> AeadResult<Vec<u8>> {
         let nonce = ChaCha20Poly1305::generate_nonce(&mut OsRng);
         let payload = Payload {
