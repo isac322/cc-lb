@@ -2,6 +2,7 @@
 
 pub mod adapter;
 pub mod config;
+pub mod error_map;
 
 pub use adapter::PostgresStorage;
 pub use config::PostgresConfig;
