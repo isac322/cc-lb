@@ -894,6 +894,7 @@ dependencies = [
  "notify",
  "oauth2",
  "rand 0.8.6",
+ "redb",
  "rustls",
  "rustls-pemfile",
  "serde",

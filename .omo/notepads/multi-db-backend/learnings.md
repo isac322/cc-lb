@@ -80,3 +80,8 @@
 - inspect_oauth.rs + seed_real_anthropic_key.rs: clap --backend flag, no AEAD internals
 - old cc-lb-storage-redb examples deleted
 - cargo build --examples --features postgres,redb: PASS
+
+## [T30] Fatal tests
+- missing_aead_key_fatal: tests both feature configs
+- bad_postgres_url_fatal: unreachable IP, password masked
+- backend_kind_mismatch_fatal: redb file stamped as postgres → mismatch fatal
