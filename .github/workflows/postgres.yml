@@ -80,3 +80,6 @@ jobs:
 
       - name: Run cc-lb-server Postgres tests
         run: cargo test -p cc-lb-server --features postgres,redb
+
+      - name: E2E smoke - cc-lb binary against postgres backend
+        run: ./tests/real-client/postgres-smoke.sh
