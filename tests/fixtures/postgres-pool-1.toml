@@ -17,7 +17,7 @@ drain_secs = 5
 [upstreams.fake]
 kind = "custom"
 base_url = "UPSTREAM_BASE_URL_PLACEHOLDER"
-auth_strategy = "oauth"
+auth_strategy = "o_auth"
 
 [principals.api-key]
 allowed_models = ["*"]
@@ -32,6 +32,7 @@ url = "will_be_replaced_at_runtime"
 [storage.pool]
 max_connections = 1
 acquire_timeout_secs = 1
+statement_timeout_secs = 25
 
 [aead]
 key_env = "CC_LB_MASTER_KEY"
