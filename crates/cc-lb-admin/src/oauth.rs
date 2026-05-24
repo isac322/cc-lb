@@ -1,17 +1,23 @@
-use axum::{extract::State, http::StatusCode, response::Json};
+use axum::{
+    Json,
+    extract::State,
+    http::{StatusCode, header},
+    response::{IntoResponse, Response},
+};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use cc_lb_storage_api::StorageError;
 use oauth2::{AuthUrl, ClientId, TokenUrl};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::sync::Arc;
 use url::Url;
 
+use crate::AdminState;
 use crate::credential_crypto::{encrypt_json, oauth_aad};
 use crate::oauth_pkce::{
     HyperOAuthHttpClient, PkceHandshakeState, complete_pkce_flow, start_pkce_flow,
 };
-use crate::AdminState;
 
 #[derive(Deserialize)]
 pub struct OauthStartRequest {
@@ -74,33 +80,61 @@ pub struct OauthCompleteRequest {
 pub async fn complete_oauth(
     State(state): State<AdminState>,
     Json(payload): Json<OauthCompleteRequest>,
-) -> Result<Json<Value>, StatusCode> {
-    let state_token = decode_state(&payload.state_token)?;
+) -> Response {
+    let state_token = match decode_state(&payload.state_token) {
+        Ok(state_token) => state_token,
+        Err(status) => return status.into_response(),
+    };
     if state_token.provider != "anthropic_oauth" {
-        return Err(StatusCode::BAD_REQUEST);
+        return StatusCode::BAD_REQUEST.into_response();
     }
-    let handshake = state_token
-        .handshake
-        .into_handshake()
-        .map_err(|_| StatusCode::BAD_REQUEST)?;
-    let creds = complete_pkce_flow(
+    let handshake = match state_token.handshake.into_handshake() {
+        Ok(handshake) => handshake,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
+    };
+    let creds = match complete_pkce_flow(
         handshake,
         payload.code,
         Arc::new(HyperOAuthHttpClient::new()),
     )
     .await
-    .map_err(|_| StatusCode::BAD_GATEWAY)?;
+    {
+        Ok(creds) => creds,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
 
     let aad = oauth_aad(&state_token.principal_id, &state_token.provider);
-    let ciphertext = encrypt_json(state.aead.as_ref(), &creds, &aad)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    state
+    let ciphertext = match encrypt_json(state.aead.as_ref(), &creds, &aad) {
+        Ok(ciphertext) => ciphertext,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    match state
         .storage
-        .put_oauth_ciphertext(&state_token.principal_id, &state_token.provider, &ciphertext)
+        .put_oauth_ciphertext(
+            &state_token.principal_id,
+            &state_token.provider,
+            &ciphertext,
+        )
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    {
+        Ok(()) => Json(json!({ "status": "ok" })).into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "admin oauth storage operation failed");
+            storage_error_response(&error)
+        }
+    }
+}
 
-    Ok(Json(json!({ "status": "ok" })))
+fn storage_error_response(error: &StorageError) -> Response {
+    match error {
+        StorageError::Unavailable { .. } => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            [(header::RETRY_AFTER, "1")],
+            Json(json!({ "error": "storage_error" })),
+        )
+            .into_response(),
+        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

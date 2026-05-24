@@ -85,3 +85,9 @@
 - missing_aead_key_fatal: tests both feature configs
 - bad_postgres_url_fatal: unreachable IP, password masked
 - backend_kind_mismatch_fatal: redb file stamped as postgres → mismatch fatal
+
+## [T32] Error wiring
+- exit codes 2-5 mapped per StorageFactoryError variant
+- StorageError::Unavailable → HTTP 503 + Retry-After: 1
+- comment block in lib.rs
+- cargo build --features postgres,redb: PASS

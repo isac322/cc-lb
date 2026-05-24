@@ -184,6 +184,10 @@ pub async fn run_serve(config_path: &Path) -> Result<(), ServeError> {
     let _guard = init_observability(&mut config)?;
     let app = match build_app_with_path_async(config, Some(config_path)).await {
         Ok(app) => app,
+        Err(BuildError::StorageFactory(error)) => {
+            tracing::error!(event = "boot_fatal", kind = %error, "storage initialization failed");
+            return Err(ServeError::Build(BuildError::StorageFactory(error)));
+        }
         Err(error) if error.is_storage_initialization() => {
             tracing::error!(error = %error, "storage initialization failed; exiting");
             return Err(ServeError::Build(error));
