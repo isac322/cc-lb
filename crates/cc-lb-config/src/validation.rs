@@ -3,7 +3,7 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::{Config, PluginRef, UpstreamKind};
+use crate::{Config, ConfigError, DEFAULT_REDB_PATH, PluginRef, StorageConfig, UpstreamKind};
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 #[error("{field}: {message}")]
@@ -21,7 +21,7 @@ impl ValidationError {
     }
 }
 
-pub fn validate_config(config: &Config) -> Result<(), ValidationError> {
+pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     validate_tls(config)?;
     validate_upstreams(config)?;
     validate_credentials_refs(config)?;
@@ -161,12 +161,49 @@ fn validate_plugin_ref(prefix: &str, plugin: &PluginRef) -> Result<(), Validatio
     ensure_existing_file(&format!("{prefix}.wasm_path"), wasm_path)
 }
 
-fn validate_storage(config: &Config) -> Result<(), ValidationError> {
-    let Some(redb_path) = &config.storage.redb_path else {
-        return Ok(());
-    };
+fn validate_storage(config: &Config) -> Result<(), ConfigError> {
+    match &config.storage {
+        StorageConfig::Redb { path } => {
+            if path == Path::new(DEFAULT_REDB_PATH) && !path.exists() {
+                return Ok(());
+            }
+            validate_redb_path(path)?;
+        }
+        StorageConfig::Postgres { url, pool } => {
+            validate_postgres_url(url)?;
+            if pool.statement_timeout_secs >= config.timeouts.upstream_total_secs {
+                return Err(ConfigError::StatementTimeoutExceedsRequestTimeout {
+                    statement: pool.statement_timeout_secs,
+                    request: config.timeouts.upstream_total_secs,
+                });
+            }
+        }
+    }
 
-    validate_redb_path(redb_path)
+    Ok(())
+}
+
+pub fn validate_postgres_url(url: &str) -> Result<(), ConfigError> {
+    let parsed = url::Url::parse(url).map_err(|_| ConfigError::InvalidPostgresUrl {
+        message: "invalid URL syntax".to_owned(),
+    })?;
+
+    if !matches!(parsed.scheme(), "postgres" | "postgresql") {
+        return Err(ConfigError::InvalidPostgresUrl {
+            message: format!(
+                "expected postgres:// or postgresql:// scheme, got '{}'",
+                parsed.scheme()
+            ),
+        });
+    }
+
+    if parsed.host_str().map(str::is_empty).unwrap_or(true) {
+        return Err(ConfigError::InvalidPostgresUrl {
+            message: "missing host".to_owned(),
+        });
+    }
+
+    Ok(())
 }
 
 fn validate_redb_path(path: &Path) -> Result<(), ValidationError> {

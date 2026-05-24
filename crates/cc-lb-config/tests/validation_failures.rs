@@ -3,7 +3,7 @@ mod common;
 use std::env;
 use std::ffi::OsString;
 
-use cc_lb_config::Config;
+use cc_lb_config::{Config, StorageConfig};
 
 struct EnvGuard {
     key: &'static str,
@@ -97,8 +97,11 @@ oauth_aead_key_env = "CC_LB_TEST_MASTER_KEY_INVALID"
 
     let config = Config::load(&config_path).unwrap();
 
+    assert_eq!(config.aead.key_env, "CC_LB_TEST_MASTER_KEY_INVALID");
     assert_eq!(
-        config.storage.oauth_aead_key_env,
-        "CC_LB_TEST_MASTER_KEY_INVALID"
+        config.storage,
+        StorageConfig::Redb {
+            path: dir.path().join("credentials.redb")
+        }
     );
 }
