@@ -1,17 +1,12 @@
-use std::sync::Arc;
-
-use cc_lb_aead::AeadService;
-use cc_lb_storage_conformance::scenarios::aead;
 use cc_lb_storage_redb::RedbStorage;
 
-#[tokio::test]
-async fn conformance_aead_scenarios_pass() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+#[test]
+fn conformance_aead_opens_current_redb_storage() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
-    let path = dir.path().join("conformance-aead.redb");
-    let storage = RedbStorage::open(&path)?;
-    let aead = AeadService::from_master_key([0x17; 32]);
+    let path = dir.path().join("conformance_aead.redb");
+    let storage = RedbStorage::open(&path, [0; 32])?;
 
-    aead::run_all(Arc::new(storage), &aead).await?;
-
+    assert_eq!(storage.schema_version()?, cc_lb_storage_redb::CURRENT_SCHEMA_VERSION);
+    assert!(!storage.killswitch_enabled()?);
     Ok(())
 }

@@ -15,6 +15,17 @@
         "key_env": "CC_LB_MASTER_KEY"
       }
     },
+    "api_keys": {
+      "$ref": "#/$defs/ApiKeysConfig",
+      "default": {
+        "price_catalog": {
+          "cache_path": "/var/lib/cc-lb/litellm.json",
+          "refresh_interval": "1h",
+          "url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+        },
+        "usage_retention_days": 90
+      }
+    },
     "body": {
       "$ref": "#/$defs/BodyConfig",
       "default": {
@@ -43,6 +54,12 @@
       "default": {
         "cache_ttl_ceiling_secs": 300,
         "cache_ttl_floor_secs": 30
+      }
+    },
+    "downstream_auth": {
+      "$ref": "#/$defs/DownstreamAuthConfig",
+      "default": {
+        "mode": "api_key"
       }
     },
     "egress": {
@@ -77,15 +94,6 @@
         "$ref": "#/$defs/PrincipalSpec"
       },
       "default": {}
-    },
-    "quotas": {
-      "$ref": "#/$defs/QuotasConfig",
-      "default": {
-        "default_input_tokens": 1000000,
-        "default_output_tokens": 1000000,
-        "default_requests_per_window": 1000,
-        "default_window_secs": 60
-      }
     },
     "signers": {
       "$ref": "#/$defs/SignersConfig",
@@ -182,6 +190,26 @@
         }
       }
     },
+    "ApiKeysConfig": {
+      "type": "object",
+      "properties": {
+        "price_catalog": {
+          "$ref": "#/$defs/PriceCatalogConfig",
+          "default": {
+            "cache_path": "/var/lib/cc-lb/litellm.json",
+            "refresh_interval": "1h",
+            "url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+          }
+        },
+        "usage_retention_days": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 90,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
     "AuthStrategy": {
       "type": "string",
       "enum": [
@@ -275,6 +303,52 @@
         }
       }
     },
+    "DownstreamAuthConfig": {
+      "type": "object",
+      "properties": {
+        "mode": {
+          "$ref": "#/$defs/DownstreamAuthMode",
+          "default": "api_key"
+        },
+        "none_mode": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/NoneModeConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "DownstreamAuthMode": {
+      "type": "string",
+      "enum": [
+        "none",
+        "api_key"
+      ]
+    },
+    "Duration": {
+      "type": "object",
+      "properties": {
+        "nanos": {
+          "type": "integer",
+          "format": "uint32",
+          "minimum": 0
+        },
+        "secs": {
+          "type": "integer",
+          "format": "uint64",
+          "minimum": 0
+        }
+      },
+      "required": [
+        "secs",
+        "nanos"
+      ]
+    },
     "EgressConfig": {
       "type": "object",
       "properties": {
@@ -288,6 +362,37 @@
           }
         }
       }
+    },
+    "Limit": {
+      "type": "object",
+      "properties": {
+        "cap_micros": {
+          "type": "integer",
+          "format": "int64"
+        },
+        "kind": {
+          "$ref": "#/$defs/LimitKind"
+        },
+        "window": {
+          "$ref": "#/$defs/Duration"
+        }
+      },
+      "required": [
+        "kind",
+        "window",
+        "cap_micros"
+      ]
+    },
+    "LimitKind": {
+      "type": "string",
+      "enum": [
+        "requests",
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cost_usd",
+        "concurrent"
+      ]
     },
     "ListenerConfig": {
       "type": "object",
@@ -321,6 +426,33 @@
           ]
         }
       }
+    },
+    "NoneModeConfig": {
+      "type": "object",
+      "properties": {
+        "principal_id": {
+          "type": "string",
+          "default": ""
+        },
+        "upstream_credential_ref": {
+          "type": "string",
+          "default": ""
+        },
+        "upstream_kind": {
+          "$ref": "#/$defs/NoneModeUpstreamKind",
+          "default": "anthropic_key"
+        }
+      },
+      "additionalProperties": false
+    },
+    "NoneModeUpstreamKind": {
+      "type": "string",
+      "enum": [
+        "anthropic_key",
+        "anthropic_o_auth",
+        "aws_sig_v4",
+        "gcp_o_auth"
+      ]
     },
     "ObservabilityConfig": {
       "type": "object",
@@ -388,16 +520,6 @@
     "PluginsConfig": {
       "type": "object",
       "properties": {
-        "authn_plugin": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/PluginRef"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        },
         "observability_hooks": {
           "type": "array",
           "default": [],
@@ -456,6 +578,24 @@
         }
       }
     },
+    "PriceCatalogConfig": {
+      "type": "object",
+      "properties": {
+        "cache_path": {
+          "type": "string",
+          "default": "/var/lib/cc-lb/litellm.json"
+        },
+        "refresh_interval": {
+          "$ref": "#/$defs/Duration",
+          "default": "1h"
+        },
+        "url": {
+          "type": "string",
+          "default": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+        }
+      },
+      "additionalProperties": false
+    },
     "PrincipalSpec": {
       "type": "object",
       "properties": {
@@ -472,52 +612,30 @@
             "null"
           ]
         },
-        "disabled": {
-          "type": [
-            "boolean",
-            "null"
-          ]
+        "default_limits": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "$ref": "#/$defs/Limit"
+          }
         },
-        "quotas": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/QuotasConfig"
-            },
-            {
-              "type": "null"
-            }
-          ]
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "principal_type": {
+          "$ref": "#/$defs/PrincipalType",
+          "default": "machine"
         }
-      }
+      },
+      "additionalProperties": false
     },
-    "QuotasConfig": {
-      "type": "object",
-      "properties": {
-        "default_input_tokens": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 1000000,
-          "minimum": 0
-        },
-        "default_output_tokens": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 1000000,
-          "minimum": 0
-        },
-        "default_requests_per_window": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 1000,
-          "minimum": 0
-        },
-        "default_window_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 60,
-          "minimum": 0
-        }
-      }
+    "PrincipalType": {
+      "type": "string",
+      "enum": [
+        "human",
+        "machine"
+      ]
     },
     "SignersConfig": {
       "type": "object",

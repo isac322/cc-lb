@@ -1,11 +1,15 @@
 #![allow(dead_code)]
 
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use cc_lb_config::{AuthStrategy, Config, UpstreamKind, UpstreamSpec};
-use cc_lb_server::app::build_app_for_testing;
-use fake_anthropic::{AppConfig, app as fake_anthropic_app};
+use cc_lb_config::{
+    AuthStrategy, Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, StorageConfig,
+    UpstreamKind, UpstreamSpec,
+};
+use cc_lb_server::app::build_app_with_path;
+use fake_anthropic::{app as fake_anthropic_app, AppConfig};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -28,7 +32,7 @@ pub async fn start_router(fake_config: AppConfig) -> RunningRouter {
     let mut config = config_for_upstream(upstream_addr);
     config.listener.proxy_addr = proxy_addr;
 
-    let app = build_app_for_testing(config).expect("build app");
+    let app = build_app_with_path(config, None).expect("build app");
     let router = app.router;
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
 
@@ -146,8 +150,35 @@ async fn spawn_fake(config: AppConfig) -> (SocketAddr, JoinHandle<Result<(), std
     (addr, task)
 }
 
+fn configure_builtin_auth(config: &mut Config) {
+    unsafe {
+        std::env::set_var(
+            "CC_LB_MASTER_KEY",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+    }
+    config.downstream_auth.mode = DownstreamAuthMode::None;
+    config.downstream_auth.none_mode = Some(NoneModeConfig {
+        principal_id: "api-key".to_owned(),
+        upstream_kind: NoneModeUpstreamKind::AnthropicKey,
+        upstream_credential_ref: "fake_anthropic".to_owned(),
+    });
+    config.storage = StorageConfig::Redb {
+        path: unique_redb_path("cc-lb-chaos"),
+    };
+}
+
+fn unique_redb_path(prefix: &str) -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{}-{nanos}.redb", std::process::id()))
+}
+
 fn config_for_upstream(upstream_addr: SocketAddr) -> Config {
     let mut config = Config::default();
+    configure_builtin_auth(&mut config);
     config.timeouts.upstream_total_secs = 30;
     config.upstreams.insert(
         "fake".to_owned(),

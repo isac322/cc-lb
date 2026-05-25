@@ -4,11 +4,6 @@ members = [
     "crates/cc-lb-pricing",
     "crates/cc-lb-*",
     "benches/extism_sse_overhead",
-    "examples/plugin-api-key",
-    "examples/plugin-oauth-anthropic-pro",
-    "examples/plugin-internal-key-mapping",
-    "examples/plugin-api-key/extism-pdk",
-    "examples/plugin-api-key/extism-pdk-macros",
     "tests/fixtures/fake-anthropic",
     "tests/fixtures/mock-anthropic-oauth-server",
     "tests/fixtures/fake-bedrock-runtime",
@@ -20,6 +15,7 @@ members = [
     "tests/property",
     "tests/tls",
     "tests/crash-recovery",
+    "tests/integration",
 ]
 exclude = ["third_party/gcp_auth", "fuzz"]
 resolver = "2"
@@ -50,6 +46,8 @@ dashmap = "6"
 eventsource-stream = "0.2"
 extism = { version = "1", default-features = false, features = ["wasmtime-default-features"] }
 figment = "0.10"
+gcp_auth = "0.13"
+globset = "0.4"
 hickory-resolver = "0.26"
 hyper = "1"
 http = "1"

@@ -7,63 +7,58 @@ use std::time::{Duration, Instant};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use cc_lb_admin::AdminState;
-use cc_lb_core::DashboardBroadcaster;
 use cc_lb_server::reload::ConfigWatcher;
 use http_body_util::BodyExt;
 use serde_json::json;
 use tower::ServiceExt;
 
 #[tokio::test]
-async fn sighup_reloads_quota_defaults() {
+async fn sighup_reloads_body_defaults() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("cc-lb.toml");
     let proxy_addr: SocketAddr = "127.0.0.1:18080".parse().unwrap();
     reload_common::write_config(&config_path, 100, proxy_addr);
-
-    let storage_dir = tempfile::tempdir().unwrap();
-    let storage = Arc::new(
-        cc_lb_storage_redb::RedbStorage::open(storage_dir.path().join("test.redb")).unwrap(),
-    );
-    let aead = Arc::new(cc_lb_aead::AeadService::from_master_key([0u8; 32]));
 
     let watcher = Arc::new(ConfigWatcher::new(
         &config_path,
         reload_common::load_config(&config_path),
     ));
     let app = cc_lb_admin::router(AdminState {
-        storage,
-        aead,
-        quota_manager: None,
+        storage: None,
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
+        limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
+            Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
+            Arc::new(arc_swap::ArcSwap::from(
+                cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
+                    &cc_lb_config::Config::default(),
+                ),
+            )),
+        ),
         lifecycle: None,
-        breaker_registry: None,
-        drain_controller: None,
-        bulkhead_registry: None,
-        plugin_runtime_status: None,
-        dashboard_broadcaster: Arc::new(DashboardBroadcaster::new()),
+        audit_sink: None,
+        principal_view: Arc::new(arc_swap::ArcSwap::from(
+            cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
+                &cc_lb_admin::CurrentConfig::current_config((watcher.clone()).as_ref()),
+            ),
+        )),
         config: watcher.clone(),
-        config_path: None,
-        config_watcher: None,
-        config_started_at_unix_secs: 0,
         admin_token: Some("test-token".to_string()),
         start_time: std::time::Instant::now(),
     });
     let before_admin = admin_config(app.clone()).await;
-    assert_eq!(
-        before_admin["quotas"]["default_requests_per_window"],
-        json!(100)
-    );
+    assert_eq!(before_admin["body"]["messages_cap_bytes"], json!(100));
 
     reload_common::write_config(&config_path, 200, proxy_addr);
     watcher.reload_now().unwrap();
 
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
-        if watcher.current_config().quotas.default_requests_per_window == 200 {
+        if watcher.current_config().body.messages_cap_bytes == 200 {
             break;
         }
         assert!(
             Instant::now() < deadline,
-            "quota default did not reload to 200"
+            "body default did not reload to 200"
         );
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
@@ -73,12 +68,12 @@ async fn sighup_reloads_quota_defaults() {
     let evidence = json!({
         "before": {
             "admin_config_current": before_admin,
-            "quotas.default_requests_per_window": 100,
+            "body.messages_cap_bytes": 100,
         },
         "trigger": "ConfigWatcher::reload_now()",
         "after": {
             "admin_config_current": after_admin,
-            "quotas.default_requests_per_window": after.quotas.default_requests_per_window,
+            "body.messages_cap_bytes": after.body.messages_cap_bytes,
         }
     });
     std::fs::write(
@@ -87,7 +82,7 @@ async fn sighup_reloads_quota_defaults() {
     )
     .unwrap();
 
-    assert_eq!(after.quotas.default_requests_per_window, 200);
+    assert_eq!(after.body.messages_cap_bytes, 200);
 }
 
 async fn admin_config(app: axum::Router) -> serde_json::Value {

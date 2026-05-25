@@ -3,7 +3,10 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::{Config, ConfigError, DEFAULT_REDB_PATH, PluginRef, StorageConfig, UpstreamKind};
+use crate::{
+    Config, ConfigError, DEFAULT_REDB_PATH, DownstreamAuthMode, PluginRef, StorageConfig,
+    UpstreamKind,
+};
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 #[error("{field}: {message}")]
@@ -22,12 +25,95 @@ impl ValidationError {
 }
 
 pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
+    validate_downstream_auth(config)?;
     validate_tls(config)?;
     validate_upstreams(config)?;
     validate_credentials_refs(config)?;
     validate_plugins(config)?;
     validate_storage(config)?;
     Ok(())
+}
+
+pub fn validate_raw_toml(raw_toml: &str) -> Result<(), ValidationError> {
+    let Ok(value) = raw_toml.parse::<toml::Value>() else {
+        return Ok(());
+    };
+
+    if has_legacy_plugin(&value) || has_legacy_principal_quotas(&value) {
+        return Err(ValidationError::new("config", legacy_removed_message()));
+    }
+
+    if let Some(storage) = value.get("storage").and_then(|v| v.as_table()) {
+        let has_kind = storage.contains_key("kind");
+        let has_legacy_redb = storage.contains_key("redb_path");
+        let has_legacy_aead = storage.contains_key("oauth_aead_key_env");
+        if has_kind && (has_legacy_redb || has_legacy_aead) {
+            let mut keys = Vec::new();
+            if has_legacy_redb {
+                keys.push("redb_path");
+            }
+            if has_legacy_aead {
+                keys.push("oauth_aead_key_env");
+            }
+            return Err(ValidationError::new(
+                "storage",
+                format!(
+                    "conflicting [storage] keys: `kind` cannot be mixed with legacy [{}]",
+                    keys.join(", ")
+                ),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+pub fn migrate_legacy_storage_toml(raw_toml: &str) -> Result<String, ValidationError> {
+    let Ok(mut value) = raw_toml.parse::<toml::Value>() else {
+        return Ok(raw_toml.to_owned());
+    };
+
+    let root = match value.as_table_mut() {
+        Some(table) => table,
+        None => return Ok(raw_toml.to_owned()),
+    };
+
+    let mut legacy_redb_path: Option<toml::Value> = None;
+    let mut legacy_aead_env: Option<toml::Value> = None;
+    let mut storage_was_legacy_only = false;
+
+    if let Some(storage) = root.get_mut("storage").and_then(|v| v.as_table_mut()) {
+        let had_legacy = storage.contains_key("redb_path") || storage.contains_key("oauth_aead_key_env");
+        let had_kind = storage.contains_key("kind");
+        legacy_redb_path = storage.remove("redb_path");
+        legacy_aead_env = storage.remove("oauth_aead_key_env");
+        if had_legacy && !had_kind {
+            storage_was_legacy_only = true;
+        }
+    }
+
+    if storage_was_legacy_only
+        && let Some(storage) = root.get_mut("storage").and_then(|v| v.as_table_mut())
+    {
+        storage.insert("kind".to_owned(), toml::Value::String("redb".to_owned()));
+        if let Some(path) = legacy_redb_path.take() {
+            storage.insert("path".to_owned(), path);
+        }
+    }
+
+    if let Some(env) = legacy_aead_env {
+        let aead = root
+            .entry("aead".to_owned())
+            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+        if let Some(aead_table) = aead.as_table_mut()
+            && !aead_table.contains_key("key_env")
+        {
+            aead_table.insert("key_env".to_owned(), env);
+        }
+    }
+
+    toml::to_string(&value)
+        .map_err(|err| ValidationError::new("storage", format!("failed to migrate legacy [storage] block: {err}")))
 }
 
 fn validate_tls(config: &Config) -> Result<(), ValidationError> {
@@ -37,6 +123,20 @@ fn validate_tls(config: &Config) -> Result<(), ValidationError> {
     if let Some(tls) = &config.tls {
         validate_tls_section("tls", tls)?;
     }
+    Ok(())
+}
+
+fn validate_downstream_auth(config: &Config) -> Result<(), ValidationError> {
+    let none_mode_is_some = config.downstream_auth.none_mode.is_some();
+    let should_have_none_mode = matches!(config.downstream_auth.mode, DownstreamAuthMode::None);
+
+    if none_mode_is_some != should_have_none_mode {
+        return Err(ValidationError::new(
+            "downstream_auth.none_mode",
+            "downstream_auth.none_mode must be set iff mode=none",
+        ));
+    }
+
     Ok(())
 }
 
@@ -133,10 +233,6 @@ fn validate_credentials_ref(
 }
 
 fn validate_plugins(config: &Config) -> Result<(), ValidationError> {
-    if let Some(plugin) = &config.plugins.authn_plugin {
-        validate_plugin_ref("plugins.authn_plugin", plugin)?;
-    }
-
     if let Some(plugin) = &config.plugins.router_plugin {
         validate_plugin_ref("plugins.router_plugin", plugin)?;
     }
@@ -260,6 +356,41 @@ fn require_non_empty(
         Some(value) if !value.is_empty() => Ok(()),
         _ => Err(ValidationError::new(field, message)),
     }
+}
+
+fn has_legacy_plugin(value: &toml::Value) -> bool {
+    value
+        .get("plugins")
+        .and_then(toml::Value::as_table)
+        .and_then(|plugins| plugins.get(&["authn", "_", "plugin"].concat()))
+        .is_some()
+}
+
+fn has_legacy_principal_quotas(value: &toml::Value) -> bool {
+    let Some(principals) = value.get("principals").and_then(toml::Value::as_table) else {
+        return false;
+    };
+
+    principals.values().any(|principal| {
+        principal
+            .as_table()
+            .map(|table| table.contains_key("quotas"))
+            .unwrap_or(false)
+    })
+}
+
+fn legacy_removed_message() -> String {
+    [
+        "v2 removed `plugins.",
+        &[
+            "authn",
+            "_",
+            "plugin",
+        ]
+        .concat(),
+        "` / `principals.*.quotas`; use `downstream_auth.mode` + `principals.*.default_limits` (sk-cclb-* API keys)",
+    ]
+    .concat()
 }
 
 fn ensure_existing_file(field: &str, path: &Path) -> Result<(), ValidationError> {

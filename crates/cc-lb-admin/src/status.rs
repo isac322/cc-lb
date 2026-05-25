@@ -127,9 +127,6 @@ pub fn build_plugins_status(
     runtime_status: Option<&dyn PluginRuntimeStatus>,
 ) -> PluginsStatusResponse {
     let mut plugins = Vec::new();
-    if let Some(plugin) = &config.plugins.authn_plugin {
-        plugins.push(plugin_entry("authn", plugin, runtime_status));
-    }
     if let Some(plugin) = &config.plugins.router_plugin {
         plugins.push(plugin_entry("router", plugin, runtime_status));
     }

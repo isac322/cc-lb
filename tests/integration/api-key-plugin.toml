@@ -25,15 +25,10 @@ allowed_models = ["*"]
 [plugins]
 observability_hooks = []
 
-[plugins.authn_plugin]
-name = "plugin-api-key"
-wasm_path = "target/wasm32-wasip1/release/plugin_api_key.wasm"
-
-[plugins.authn_plugin.config]
-keys = '{"alice":"sk-ant-alice"}'
-
 [storage]
-oauth_aead_key_env = "CC_LB_MASTER_KEY"
+
+[aead]
+key_env = "CC_LB_MASTER_KEY"
 
 [observability]
 tracing_level = "info"

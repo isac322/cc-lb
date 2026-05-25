@@ -6,7 +6,7 @@ use axum::{
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use cc_lb_storage_api::StorageError;
+use cc_lb_storage_redb::{OAuthCredentials as RedbOAuthCredentials, StorageError};
 use oauth2::{AuthUrl, ClientId, TokenUrl};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -14,7 +14,6 @@ use std::sync::Arc;
 use url::Url;
 
 use crate::AdminState;
-use crate::credential_crypto::{encrypt_json, oauth_aad};
 use crate::oauth_pkce::{
     HyperOAuthHttpClient, PkceHandshakeState, complete_pkce_flow, start_pkce_flow,
 };
@@ -103,20 +102,16 @@ pub async fn complete_oauth(
         Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
     };
 
-    let aad = oauth_aad(&state_token.principal_id, &state_token.provider);
-    let ciphertext = match encrypt_json(state.aead.as_ref(), &creds, &aad) {
-        Ok(ciphertext) => ciphertext,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Some(storage) = state.storage.as_ref() else {
+        return StatusCode::NOT_IMPLEMENTED.into_response();
     };
-    match state
-        .storage
-        .put_oauth_ciphertext(
-            &state_token.principal_id,
-            &state_token.provider,
-            &ciphertext,
-        )
-        .await
-    {
+    let creds = RedbOAuthCredentials {
+        access_token: creds.access_token,
+        refresh_token: creds.refresh_token,
+        expires_at: creds.expires_at,
+        scopes: creds.scopes,
+    };
+    match storage.put_oauth(&state_token.principal_id, &state_token.provider, &creds) {
         Ok(()) => Json(json!({ "status": "ok" })).into_response(),
         Err(error) => {
             tracing::error!(error = %error, "admin oauth storage operation failed");
@@ -125,9 +120,68 @@ pub async fn complete_oauth(
     }
 }
 
+pub async fn oauth_status(
+    State(state): State<AdminState>,
+    axum::extract::Path(oauth_credential_id): axum::extract::Path<String>,
+) -> Response {
+    let config = state.config.current_config();
+    for (principal_id, principal) in &config.principals {
+        let matches_provider = principal
+            .credentials_ref
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|reference| {
+                reference == oauth_credential_id
+                    || reference
+                        .strip_prefix("oauth:")
+                        .map(str::trim)
+                        .is_some_and(|provider| provider == oauth_credential_id)
+            });
+        if !matches_provider {
+            continue;
+        }
+        let Some(storage) = state.storage.as_ref() else {
+            return StatusCode::NOT_IMPLEMENTED.into_response();
+        };
+        match storage.get_oauth(principal_id, &oauth_credential_id) {
+            Ok(Some(_)) => return Json(json!({ "enrolled": true })).into_response(),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(error = %error, "admin oauth status storage operation failed");
+                return storage_error_response(&error);
+            }
+        }
+    }
+
+    if let Some(storage) = state.storage.as_ref() {
+        let records = match storage.list_api_keys_all() {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::error!(error = %error, "admin oauth status managed-key scan failed");
+                return storage_error_response(&error);
+            }
+        };
+        for (principal_id, _key_id, record) in records {
+            if record.upstream_credential_ref != oauth_credential_id {
+                continue;
+            }
+            match storage.get_oauth(&principal_id, &oauth_credential_id) {
+                Ok(Some(_)) => return Json(json!({ "enrolled": true })).into_response(),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!(error = %error, "admin oauth status managed-key oauth lookup failed");
+                    return storage_error_response(&error);
+                }
+            }
+        }
+    }
+
+    Json(json!({ "enrolled": false })).into_response()
+}
+
 fn storage_error_response(error: &StorageError) -> Response {
     match error {
-        StorageError::Unavailable { .. } => (
+        StorageError::RedbStorage(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::RETRY_AFTER, "1")],
             Json(json!({ "error": "storage_error" })),
@@ -160,14 +214,7 @@ fn oauth_client_id(config: &cc_lb_config::Config) -> Option<String> {
     if !config.signers.anthropic_oauth.client_id.trim().is_empty() {
         return Some(config.signers.anthropic_oauth.client_id.clone());
     }
-    config
-        .plugins
-        .authn_plugin
-        .as_ref()
-        .and_then(|plugin| plugin.config.get("client_id"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(ToOwned::to_owned)
-        .or_else(|| std::env::var("CC_LB_OAUTH_CLIENT_ID").ok())
+    std::env::var("CC_LB_OAUTH_CLIENT_ID")
+        .ok()
         .filter(|value| !value.trim().is_empty())
 }

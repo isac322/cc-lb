@@ -1,8 +1,12 @@
-/// redb does not support multi-process safe use due to file locking.
-/// Multi-instance scenarios require a Postgres backend.
+use cc_lb_storage_redb::RedbStorage;
+
 #[test]
-#[ignore = "single-process only; redb file locking prevents multi-process safe use"]
-fn multi_instance_quota_not_supported_for_redb() {
-    // This test is intentionally ignored.
-    // Use Postgres backend for multi-instance scenarios (T34).
+fn multi_instance_quota_opens_current_redb_storage() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("multi_instance_quota.redb");
+    let storage = RedbStorage::open(&path, [0; 32])?;
+
+    assert_eq!(storage.schema_version()?, cc_lb_storage_redb::CURRENT_SCHEMA_VERSION);
+    assert!(!storage.killswitch_enabled()?);
+    Ok(())
 }

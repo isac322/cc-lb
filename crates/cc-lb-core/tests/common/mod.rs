@@ -9,13 +9,20 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_core::{DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch};
-use cc_lb_plugin_api::{
-    AuthnError, AuthnOutcome, DialectError, ObservabilityError, ObservabilityHook, ObserveEvent,
-    Principal, PrincipalKind, PrincipalQuotas, RequestContext, RetryDecision, RouteDecision,
-    RouteError, RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer,
-    SignerError, SignerFactory, SigningCapability, Upstream, UpstreamDialect, sign_request,
+use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
+use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_core::api_keys::key_store::KeyStore;
+use cc_lb_core::api_keys::principal_view::PrincipalView;
+use cc_lb_core::{
+    ApiKeyAwareSignerFactory, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch,
 };
+use cc_lb_plugin_api::{
+    sign_request, DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal,
+    PrincipalKind, RequestContext, RetryDecision, RouteDecision, RouteError, RouterPlugin,
+    ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError, SignerFactory,
+    SigningCapability, Upstream, UpstreamDialect,
+};
+use cc_lb_storage_redb::Storage;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
 use http_body_util::BodyExt;
@@ -44,41 +51,43 @@ impl Default for TestState {
 
 #[derive(Clone)]
 pub struct TestAuthn {
-    pub quotas: PrincipalQuotas,
+    pub authn: Arc<BuiltinAuthn>,
     pub state: TestState,
     pub refresh_allowed: bool,
 }
 
 impl TestAuthn {
     pub fn new(state: TestState) -> Self {
+        let dir = tempfile::tempdir().expect("test auth storage dir is created");
+        let storage = Arc::new(
+            Storage::open(&dir.path().join("test-auth.redb"), [7; 32])
+                .expect("test auth storage opens"),
+        );
+        let _dir = Box::leak(Box::new(dir));
         Self {
-            quotas: PrincipalQuotas {
-                requests_per_window: 100,
-                input_tokens_per_window: 100_000,
-                output_tokens_per_window: 100_000,
-                window: Duration::from_secs(60),
-                allowed_models: vec!["claude-*".to_owned()],
-            },
+            authn: Arc::new(BuiltinAuthn::new(
+                DownstreamAuthMode::None,
+                Some(NoneModeConfig {
+                    principal_id: "principal-test".to_owned(),
+                    upstream_kind: NoneModeUpstreamKind::AnthropicKey,
+                    upstream_credential_ref: "test-upstream".to_owned(),
+                }),
+                Arc::new(KeyStore::new(storage)),
+                Arc::new(arc_swap::ArcSwap::from(PrincipalView::from_config(
+                    &cc_lb_config::Config::default(),
+                ))),
+            )),
             state,
             refresh_allowed: true,
         }
     }
 }
 
-#[async_trait]
-impl cc_lb_plugin_api::AuthnPlugin for TestAuthn {
-    async fn authenticate(&self, _ctx: &RequestContext) -> Result<AuthnOutcome, AuthnError> {
-        Ok(AuthnOutcome {
-            principal: Principal {
-                id: "principal-test".to_owned(),
-                kind: PrincipalKind::ApiKey,
-                claims: serde_json::Map::new(),
-            },
-            signer_factory: Arc::new(TestSignerFactory {
-                state: self.state.clone(),
-                refresh_allowed: self.refresh_allowed,
-            }),
-            quotas: self.quotas.clone(),
+impl ApiKeyAwareSignerFactory for TestAuthn {
+    fn with_api_key(&self, _api_key: String) -> Arc<dyn SignerFactory> {
+        Arc::new(TestSignerFactory {
+            state: self.state.clone(),
+            refresh_allowed: self.refresh_allowed,
         })
     }
 }
@@ -247,14 +256,31 @@ pub fn lifecycle_with(
     dispatcher: MockDispatch,
     hook: Arc<RecordingHook>,
 ) -> Lifecycle {
-    Lifecycle::new(
-        Arc::new(authn),
+    lifecycle_with_parts(
+        authn,
         Arc::new(TestRouter {
             base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
         }),
         Arc::new(dispatcher),
         vec![hook],
         LifecycleConfig::default(),
+    )
+}
+
+pub fn lifecycle_with_parts(
+    authn: TestAuthn,
+    router: Arc<dyn RouterPlugin>,
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    hooks: Vec<Arc<dyn ObservabilityHook>>,
+    config: LifecycleConfig,
+) -> Lifecycle {
+    Lifecycle::new(
+        authn.authn.clone(),
+        Arc::new(authn),
+        router,
+        dispatcher,
+        hooks,
+        config,
     )
 }
 

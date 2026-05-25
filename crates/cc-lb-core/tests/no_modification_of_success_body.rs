@@ -2,15 +2,13 @@ mod common;
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_core::{
-    DispatchError, ErrorNormalizer, Lifecycle, LifecycleConfig, UpstreamDispatch, UpstreamKind,
-};
+use cc_lb_core::{DispatchError, ErrorNormalizer, LifecycleConfig, UpstreamDispatch, UpstreamKind};
 use cc_lb_plugin_api::{
     DialectError, Principal, RequestContext, ShapedRequest, ShapedRequestBuilder, SignedRequest,
     Upstream, UpstreamDialect,
@@ -19,7 +17,9 @@ use http::{Response, StatusCode};
 use http_body_util::BodyExt;
 use url::Url;
 
-use common::{RecordingHook, TestAuthn, TestRouter, TestState, messages_request};
+use common::{
+    lifecycle_with_parts, messages_request, RecordingHook, TestAuthn, TestRouter, TestState,
+};
 
 #[tokio::test]
 async fn lifecycle_does_not_invoke_normalizer_for_success_body() {
@@ -36,8 +36,8 @@ async fn lifecycle_does_not_invoke_normalizer_for_success_body() {
     );
 
     let state = TestState::default();
-    let lifecycle = Lifecycle::new(
-        Arc::new(TestAuthn::new(state)),
+    let lifecycle = lifecycle_with_parts(
+        TestAuthn::new(state),
         Arc::new(TestRouter {
             base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
         }),
