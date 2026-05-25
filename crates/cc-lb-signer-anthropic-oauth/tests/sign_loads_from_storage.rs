@@ -6,7 +6,6 @@ use cc_lb_plugin_api::sign_request;
 async fn sign_loads_from_storage() {
     let test_storage = common::storage();
     test_storage
-        .storage
         .put_oauth(
             "alice",
             "anthropic_oauth",
@@ -16,9 +15,14 @@ async fn sign_loads_from_storage() {
                 common::now_epoch_secs() + 600,
             ),
         )
+        .await
         .expect("seed oauth credentials");
     let http = common::FakeOAuthClient::new(Vec::new());
-    let signer = common::signer(test_storage.storage.clone(), http.clone());
+    let signer = common::signer(
+        test_storage.storage.clone(),
+        test_storage.aead.clone(),
+        http.clone(),
+    );
 
     let signed = sign_request(&signer, common::shaped_request())
         .await

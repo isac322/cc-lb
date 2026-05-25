@@ -10,17 +10,25 @@ use bytes::Bytes;
 use cc_lb_admin::{AdminState, ConfigReloader, CurrentConfig, router};
 use cc_lb_config::{Config, QuotasConfig};
 use cc_lb_core::DashboardBroadcaster;
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 pub const TOKEN: &str = "test-token";
 
-pub fn temp_storage() -> (tempfile::TempDir, Arc<Storage>) {
+pub fn temp_storage() -> (tempfile::TempDir, Arc<RedbStorage>) {
     let dir = tempfile::tempdir().unwrap();
-    let storage = Arc::new(Storage::open(&dir.path().join("test.redb"), [0; 32]).unwrap());
+    let storage = Arc::new(RedbStorage::open(dir.path().join("test.redb")).unwrap());
     (dir, storage)
+}
+
+pub fn test_storage() -> Arc<RedbStorage> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.redb");
+    let storage = Arc::new(RedbStorage::open(&path).unwrap());
+    std::mem::forget(dir);
+    storage
 }
 
 pub fn minimal_config() -> Config {
@@ -43,9 +51,10 @@ pub fn config_value(default_requests_per_window: u64) -> Value {
     serde_json::to_value(config_with_requests(default_requests_per_window)).unwrap()
 }
 
-pub fn test_state(config: Config, storage: Option<Arc<Storage>>) -> AdminState {
+pub fn test_state(config: Config, storage: Option<Arc<RedbStorage>>) -> AdminState {
     AdminState {
-        storage,
+        storage: storage.unwrap_or_else(test_storage),
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         quota_manager: None,
         lifecycle: None,
         breaker_registry: None,
@@ -67,14 +76,15 @@ pub fn test_state_without_storage() -> AdminState {
 }
 
 pub fn apply_state(
-    storage: Arc<Storage>,
+    storage: Arc<RedbStorage>,
     config_path: PathBuf,
     reloader: Arc<TestReloader>,
 ) -> AdminState {
     let config: Arc<dyn CurrentConfig> = reloader.clone();
     let config_watcher: Arc<dyn ConfigReloader> = reloader;
     AdminState {
-        storage: Some(storage),
+        storage,
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         quota_manager: None,
         lifecycle: None,
         breaker_registry: None,

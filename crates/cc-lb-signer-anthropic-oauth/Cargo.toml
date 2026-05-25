@@ -6,11 +6,16 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+redb = []
+postgres = []
+
 [dependencies]
 async-trait.workspace = true
 bytes.workspace = true
+cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
-cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
+cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 dashmap.workspace = true
 http.workspace = true
 http-body-util.workspace = true
@@ -28,4 +33,4 @@ url.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

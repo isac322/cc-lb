@@ -6,7 +6,6 @@ use cc_lb_plugin_api::{RetryDecision, Signer};
 async fn circuit_breaker_fails_fast_after_three_failures() {
     let test_storage = common::storage();
     test_storage
-        .storage
         .put_oauth(
             "alice",
             "anthropic_oauth",
@@ -16,6 +15,7 @@ async fn circuit_breaker_fails_fast_after_three_failures() {
                 common::now_epoch_secs() - 10,
             ),
         )
+        .await
         .expect("seed oauth credentials");
     let http = common::FakeOAuthClient::new(vec![
         common::failure_response(),
@@ -23,7 +23,11 @@ async fn circuit_breaker_fails_fast_after_three_failures() {
         common::failure_response(),
         common::success_response("sk-ant-oat01-not-used", None, 600),
     ]);
-    let signer = common::signer(test_storage.storage.clone(), http.clone());
+    let signer = common::signer(
+        test_storage.storage.clone(),
+        test_storage.aead.clone(),
+        http.clone(),
+    );
 
     for _ in 0..3 {
         match signer.on_unauthorized(&common::unauthorized_error()).await {

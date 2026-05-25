@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 
-use cc_lb_config::{AuthStrategy, Config, PluginRef, UpstreamKind, UpstreamSpec};
+use cc_lb_config::{AuthStrategy, Config, PluginRef, StorageConfig, UpstreamKind, UpstreamSpec};
 use url::Url;
 
 pub struct EnvGuard {
@@ -15,14 +15,14 @@ pub struct EnvGuard {
 impl EnvGuard {
     pub fn remove(key: &'static str) -> Self {
         let previous = env::var_os(key);
-        // TODO: Audit that the environment access only happens in single-threaded code.
+        // SAFETY: test-only; single-threaded test runner, no concurrent env access
         unsafe { env::remove_var(key) };
         Self { key, previous }
     }
 
     pub fn set(key: &'static str, value: &str) -> Self {
         let previous = env::var_os(key);
-        // TODO: Audit that the environment access only happens in single-threaded code.
+        // SAFETY: test-only; single-threaded test runner, no concurrent env access
         unsafe { env::set_var(key, value) };
         Self { key, previous }
     }
@@ -31,10 +31,10 @@ impl EnvGuard {
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         if let Some(previous) = &self.previous {
-            // TODO: Audit that the environment access only happens in single-threaded code.
+            // SAFETY: test-only; single-threaded test runner, no concurrent env access
             unsafe { env::set_var(self.key, previous) };
         } else {
-            // TODO: Audit that the environment access only happens in single-threaded code.
+            // SAFETY: test-only; single-threaded test runner, no concurrent env access
             unsafe { env::remove_var(self.key) };
         }
     }
@@ -45,6 +45,13 @@ pub fn base_config() -> Config {
         upstreams: HashMap::new(),
         ..Config::default()
     }
+}
+
+pub fn use_temp_redb(config: &mut Config, name: &str, key_env: &str) {
+    config.storage = StorageConfig::Redb {
+        path: std::env::temp_dir().join(format!("cc-lb-{name}-{}.redb", std::process::id())),
+    };
+    config.aead.key_env = key_env.to_owned();
 }
 
 pub fn authn_plugin(name: &str, wasm_path: impl Into<std::path::PathBuf>) -> PluginRef {

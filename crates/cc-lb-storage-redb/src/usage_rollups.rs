@@ -5,7 +5,7 @@ use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    REQUEST_EVENTS_V1, RequestEvent, RequestEventUpstream, Storage, StorageError,
+    REQUEST_EVENTS_V1, RedbStorage, RequestEvent, RequestEventUpstream, StorageError,
     USAGE_ROLLUP_CHECKPOINTS_V1, USAGE_ROLLUPS_V1,
 };
 
@@ -86,7 +86,7 @@ struct UsageRollupDelta {
     virtual_cost_micros: u64,
 }
 
-impl Storage {
+impl RedbStorage {
     pub fn rollup_usage_once(&self) -> Result<UsageRollupRun, StorageError> {
         let write_txn = self.db.begin_write()?;
         let previous_checkpoint = {

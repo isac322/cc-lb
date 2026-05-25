@@ -1,0 +1,25 @@
+[package]
+name = "cc-lb-storage-postgres"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+build = "build.rs"
+
+[features]
+postgres = []
+
+[dependencies]
+cc-lb-storage-api = { path = "../cc-lb-storage-api" }
+cc-lb-pricing = { path = "../cc-lb-pricing" }
+async-trait = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sqlx = { workspace = true, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "uuid"] } # macros: required for sqlx::migrate!(). Pulls sqlx-mysql (dev-time only) -> rsa (RUSTSEC-2023-0071) which is ignored in cargo-audit CI (MySQL auth path, never executed at runtime).
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
+tracing = { workspace = true }
+uuid = { workspace = true }

@@ -1,10 +1,10 @@
-use cc_lb_storage_redb::{BucketKind, Storage};
+use cc_lb_storage_redb::{BucketKind, RedbStorage};
 
 #[test]
 fn sweep_old_quotas_removes_only_older_windows() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("storage.redb");
-    let storage = Storage::open(&path, [19; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     storage.incr_quota("alice", 10, BucketKind::Requests, 3)?;
     storage.incr_quota("alice", 20, BucketKind::InputTokens, 5)?;

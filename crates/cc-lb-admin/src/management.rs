@@ -1,11 +1,20 @@
 use std::collections::HashMap;
 
+use base64::Engine;
+use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
+use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, PrincipalSpec};
-use cc_lb_storage_redb::{ApiKeyRecord, AuditEntry, Storage, StorageError};
+use cc_lb_storage_api::{
+    ApiKeyRecord, AuditEntry, IssuedKey, OAuthCredentials, Storage, StorageError,
+    StoredApiKeyRecord,
+};
+use ring::digest::{SHA256, digest};
+use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use thiserror::Error;
 
+use crate::credential_crypto::{api_key_aad, decrypt_json, encrypt_json, oauth_aad};
 use crate::{CurrentConfig, settings};
 
 const EXPIRING_SOON_SECS: u64 = 300;
@@ -19,7 +28,7 @@ pub enum ManagementError {
     #[error(transparent)]
     Settings(#[from] settings::SettingsError),
     #[error("storage error: {0}")]
-    Storage(StorageError),
+    Storage(#[from] StorageError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error("principal exists")]
@@ -32,15 +41,6 @@ pub enum ManagementError {
     InvalidDraftPrincipal,
     #[error("rotate unsupported for {kind}")]
     RotateUnsupported { kind: &'static str },
-}
-
-impl From<StorageError> for ManagementError {
-    fn from(error: StorageError) -> Self {
-        match error {
-            StorageError::UnknownApiKey { .. } => Self::UnknownApiKey,
-            other => Self::Storage(other),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,20 +134,19 @@ pub struct RevokeCredentialResponse {
     pub revoked_keys: Vec<String>,
 }
 
-pub fn create_principal(
-    storage: Option<&Storage>,
+pub async fn create_principal(
+    storage: &dyn Storage,
     current: &dyn CurrentConfig,
     request: CreatePrincipalRequest,
     now_unix_secs: u64,
 ) -> Result<PrincipalMutationResponse, ManagementError> {
-    let storage = storage.ok_or(ManagementError::StorageUnavailable)?;
     let principal_id = request.id;
     let spec = request.spec;
     let current_config = current.current_config();
     let current_exists = current_config.principals.contains_key(&principal_id);
     let principal_for_audit = principal_id.clone();
     let (revision, response) =
-        apply_principal_change(Some(storage), current, now_unix_secs, move |principals| {
+        apply_principal_change(storage, current, now_unix_secs, move |principals| {
             let principals = principals_object(principals)?;
             if current_exists || principals.contains_key(&principal_id) {
                 return Err(ManagementError::PrincipalExists);
@@ -157,32 +156,33 @@ pub fn create_principal(
                 revision: 0,
                 principal_id: principal_id.clone(),
             })
-        })?;
+        })
+        .await?;
     append_admin_audit(
         storage,
         now_unix_secs,
         &principal_for_audit,
         "principal_create",
         json!({ "principal_id": principal_for_audit }),
-    )?;
+    )
+    .await?;
     Ok(PrincipalMutationResponse {
         revision,
         ..response
     })
 }
 
-pub fn update_principal(
-    storage: Option<&Storage>,
+pub async fn update_principal(
+    storage: &dyn Storage,
     current: &dyn CurrentConfig,
     principal_id: String,
     request: UpdatePrincipalRequest,
     now_unix_secs: u64,
 ) -> Result<PrincipalMutationResponse, ManagementError> {
-    let storage = storage.ok_or(ManagementError::StorageUnavailable)?;
     let spec = request.spec;
     let principal_for_audit = principal_id.clone();
     let (revision, response) =
-        apply_principal_change(Some(storage), current, now_unix_secs, move |principals| {
+        apply_principal_change(storage, current, now_unix_secs, move |principals| {
             let principals = principals_object(principals)?;
             if !principals.contains_key(&principal_id) {
                 return Err(ManagementError::UnknownPrincipal);
@@ -192,28 +192,29 @@ pub fn update_principal(
                 revision: 0,
                 principal_id: principal_id.clone(),
             })
-        })?;
+        })
+        .await?;
     append_admin_audit(
         storage,
         now_unix_secs,
         &principal_for_audit,
         "principal_update",
         json!({ "principal_id": principal_for_audit }),
-    )?;
+    )
+    .await?;
     Ok(PrincipalMutationResponse {
         revision,
         ..response
     })
 }
 
-pub fn set_principal_disabled(
-    storage: Option<&Storage>,
+pub async fn set_principal_disabled(
+    storage: &dyn Storage,
     current: &dyn CurrentConfig,
     principal_id: String,
     disabled: bool,
     now_unix_secs: u64,
 ) -> Result<PrincipalMutationResponse, ManagementError> {
-    let storage = storage.ok_or(ManagementError::StorageUnavailable)?;
     let current_config = current.current_config();
     let current_spec = current_config.principals.get(&principal_id).cloned();
     let audit_kind = if disabled {
@@ -223,7 +224,7 @@ pub fn set_principal_disabled(
     };
     let principal_for_audit = principal_id.clone();
     let (revision, response) =
-        apply_principal_change(Some(storage), current, now_unix_secs, move |principals| {
+        apply_principal_change(storage, current, now_unix_secs, move |principals| {
             let principals = principals_object(principals)?;
             ensure_principal_value(principals, &principal_id, current_spec.as_ref())?;
             let principal = principals
@@ -235,35 +236,36 @@ pub fn set_principal_disabled(
                 revision: 0,
                 principal_id: principal_id.clone(),
             })
-        })?;
+        })
+        .await?;
     append_admin_audit(
         storage,
         now_unix_secs,
         &principal_for_audit,
         audit_kind,
         json!({ "principal_id": principal_for_audit, "disabled": disabled }),
-    )?;
+    )
+    .await?;
     Ok(PrincipalMutationResponse {
         revision,
         ..response
     })
 }
 
-pub fn update_allowed_models(
-    storage: Option<&Storage>,
+pub async fn update_allowed_models(
+    storage: &dyn Storage,
     current: &dyn CurrentConfig,
     principal_id: String,
     request: AllowedModelsRequest,
     now_unix_secs: u64,
 ) -> Result<PrincipalAllowedModelsResponse, ManagementError> {
-    let storage = storage.ok_or(ManagementError::StorageUnavailable)?;
     let current_config = current.current_config();
     let current_spec = current_config.principals.get(&principal_id).cloned();
     let allowed_models = request.allowed_models;
     let principal_for_audit = principal_id.clone();
     let models_for_audit = allowed_models.len();
     let (revision, response) =
-        apply_principal_change(Some(storage), current, now_unix_secs, move |principals| {
+        apply_principal_change(storage, current, now_unix_secs, move |principals| {
             let principals = principals_object(principals)?;
             ensure_principal_value(principals, &principal_id, current_spec.as_ref())?;
             let principal = principals
@@ -285,33 +287,35 @@ pub fn update_allowed_models(
                 principal_id: principal_id.clone(),
                 allowed_models: allowed_models.clone(),
             })
-        })?;
+        })
+        .await?;
     append_admin_audit(
         storage,
         now_unix_secs,
         &principal_for_audit,
         "principal_allowed_models_update",
         json!({ "principal_id": principal_for_audit, "allowed_models_count": models_for_audit }),
-    )?;
+    )
+    .await?;
     Ok(PrincipalAllowedModelsResponse {
         revision,
         ..response
     })
 }
 
-pub fn issue_principal_key(
-    storage: Option<&Storage>,
+pub async fn issue_principal_key(
+    storage: &dyn Storage,
+    aead: &AeadService,
     current: &dyn CurrentConfig,
     principal_id: String,
     request: IssueKeyRequest,
     now_unix_secs: u64,
 ) -> Result<IssueKeyResponse, ManagementError> {
-    let storage = storage.ok_or(ManagementError::StorageUnavailable)?;
-    if !principal_exists_in_current_or_draft(storage, current, &principal_id)? {
+    if !principal_exists_in_current_or_draft(storage, current, &principal_id).await? {
         return Err(ManagementError::UnknownPrincipal);
     }
     let label = request.label;
-    let issued = storage.issue_api_key(&principal_id, label.clone())?;
+    let issued = issue_api_key(storage, aead, &principal_id, label.clone(), now_unix_secs).await?;
     let key_id = issued.key_id.clone();
     append_admin_audit(
         storage,
@@ -319,7 +323,8 @@ pub fn issue_principal_key(
         &principal_id,
         "api_key_issue",
         json!({ "principal_id": principal_id.clone(), "key_id": key_id, "label": label }),
-    )?;
+    )
+    .await?;
     Ok(IssueKeyResponse {
         principal_id,
         key_id: issued.key_id,
@@ -328,32 +333,32 @@ pub fn issue_principal_key(
     })
 }
 
-pub fn list_principal_keys(
-    storage: Option<&Storage>,
+pub async fn list_principal_keys(
+    storage: &dyn Storage,
+    aead: &AeadService,
     current: &dyn CurrentConfig,
     principal_id: String,
 ) -> Result<KeyListResponse, ManagementError> {
-    let storage = storage.ok_or(ManagementError::StorageUnavailable)?;
-    if !principal_exists_in_current_or_draft(storage, current, &principal_id)? {
+    if !principal_exists_in_current_or_draft(storage, current, &principal_id).await? {
         return Err(ManagementError::UnknownPrincipal);
     }
     Ok(KeyListResponse {
-        keys: storage.list_api_keys(&principal_id)?,
+        keys: list_api_keys(storage, aead, &principal_id).await?,
     })
 }
 
-pub fn revoke_principal_key(
-    storage: Option<&Storage>,
+pub async fn revoke_principal_key(
+    storage: &dyn Storage,
+    aead: &AeadService,
     current: &dyn CurrentConfig,
     principal_id: String,
     key_id: String,
     now_unix_secs: u64,
 ) -> Result<RevokeKeyResponse, ManagementError> {
-    let storage = storage.ok_or(ManagementError::StorageUnavailable)?;
-    if !principal_exists_in_current_or_draft(storage, current, &principal_id)? {
+    if !principal_exists_in_current_or_draft(storage, current, &principal_id).await? {
         return Err(ManagementError::UnknownPrincipal);
     }
-    let record = storage.revoke_api_key(&principal_id, &key_id)?;
+    let record = revoke_api_key(storage, aead, &principal_id, &key_id, now_unix_secs).await?;
     let revoked_at_unix_secs = record
         .revoked_at_unix_secs
         .ok_or(ManagementError::UnknownApiKey)?;
@@ -363,25 +368,20 @@ pub fn revoke_principal_key(
         &principal_id,
         "api_key_revoke",
         json!({ "principal_id": principal_id.clone(), "key_id": key_id }),
-    )?;
+    )
+    .await?;
     Ok(RevokeKeyResponse {
         key_id: record.key_id,
         revoked_at_unix_secs,
     })
 }
 
-pub fn list_credentials(
-    storage: Option<&Storage>,
+pub async fn list_credentials(
+    storage: &dyn Storage,
+    aead: &AeadService,
     config: &Config,
     now_unix_secs: u64,
 ) -> Result<CredentialsResponse, ManagementError> {
-    let Some(storage) = storage else {
-        return Ok(CredentialsResponse {
-            credentials: Vec::new(),
-            observed: false,
-        });
-    };
-
     let associations = associated_principals(config);
     let mut principal_ids = config.principals.keys().cloned().collect::<Vec<_>>();
     principal_ids.sort();
@@ -396,7 +396,7 @@ pub fn list_credentials(
             .as_deref()
             .and_then(oauth_provider_from_credentials_ref)
         {
-            let stored = storage.get_oauth(&principal_id, &provider)?;
+            let stored = get_oauth(storage, aead, &principal_id, &provider).await?;
             credentials.push(oauth_credential_entry(
                 &principal_id,
                 &provider,
@@ -411,7 +411,7 @@ pub fn list_credentials(
             ));
         }
 
-        let keys = storage.list_api_keys(&principal_id)?;
+        let keys = list_api_keys(storage, aead, &principal_id).await?;
         if !keys.is_empty() || api_key_credentials_ref(principal).is_some() {
             let provider = api_key_provider(principal);
             credentials.push(api_key_credential_entry(
@@ -434,20 +434,21 @@ pub fn list_credentials(
             .then_with(|| left.provider.cmp(&right.provider))
             .then_with(|| left.kind.cmp(&right.kind))
     });
+    let observed = !credentials.is_empty();
     Ok(CredentialsResponse {
         credentials,
-        observed: true,
+        observed,
     })
 }
 
-pub fn rotate_credential(
-    storage: Option<&Storage>,
+pub async fn rotate_credential(
+    storage: &dyn Storage,
+    aead: &AeadService,
     config: &Config,
     principal_id: String,
     provider: String,
     now_unix_secs: u64,
 ) -> Result<RotateCredentialResponse, ManagementError> {
-    let storage = storage.ok_or(ManagementError::StorageUnavailable)?;
     let principal = config
         .principals
         .get(&principal_id)
@@ -456,8 +457,8 @@ pub fn rotate_credential(
         return Err(ManagementError::RotateUnsupported { kind: "oauth" });
     }
 
-    let old_key_id = storage
-        .list_api_keys(&principal_id)?
+    let old_key_id = list_api_keys(storage, aead, &principal_id)
+        .await?
         .into_iter()
         .filter(|record| record.revoked_at_unix_secs.is_none())
         .max_by(|left, right| {
@@ -466,9 +467,16 @@ pub fn rotate_credential(
                 .then_with(|| left.key_id.cmp(&right.key_id))
         })
         .map(|record| record.key_id);
-    let issued = storage.issue_api_key(&principal_id, Some(format!("rotate:{provider}")))?;
+    let issued = issue_api_key(
+        storage,
+        aead,
+        &principal_id,
+        Some(format!("rotate:{provider}")),
+        now_unix_secs,
+    )
+    .await?;
     if let Some(key_id) = old_key_id.as_deref() {
-        storage.revoke_api_key(&principal_id, key_id)?;
+        revoke_api_key(storage, aead, &principal_id, key_id, now_unix_secs).await?;
     }
     let new_key_id = issued.key_id.clone();
     append_admin_audit(
@@ -483,7 +491,8 @@ pub fn rotate_credential(
             "new_key_id": new_key_id,
             "revoked_key_id": old_key_id.clone(),
         }),
-    )?;
+    )
+    .await?;
     Ok(RotateCredentialResponse {
         principal_id,
         provider,
@@ -495,28 +504,29 @@ pub fn rotate_credential(
     })
 }
 
-pub fn revoke_credential(
-    storage: Option<&Storage>,
+pub async fn revoke_credential(
+    storage: &dyn Storage,
+    aead: &AeadService,
     config: &Config,
     principal_id: String,
     provider: String,
     now_unix_secs: u64,
 ) -> Result<RevokeCredentialResponse, ManagementError> {
-    let storage = storage.ok_or(ManagementError::StorageUnavailable)?;
     let principal = config
         .principals
         .get(&principal_id)
         .ok_or(ManagementError::UnknownPrincipal)?;
     match credential_kind(principal, &provider) {
         CredentialKind::Oauth => {
-            storage.delete_oauth(&principal_id, &provider)?;
+            storage.delete_oauth(&principal_id, &provider).await?;
             append_admin_audit(
                 storage,
                 now_unix_secs,
                 &principal_id,
                 "credential_revoke",
                 json!({ "principal_id": principal_id.clone(), "provider": provider.clone(), "kind": "oauth" }),
-            )?;
+            )
+            .await?;
             Ok(RevokeCredentialResponse {
                 principal_id,
                 provider,
@@ -525,14 +535,14 @@ pub fn revoke_credential(
             })
         }
         CredentialKind::ApiKey => {
-            let active_keys = storage
-                .list_api_keys(&principal_id)?
+            let active_keys = list_api_keys(storage, aead, &principal_id)
+                .await?
                 .into_iter()
                 .filter(|record| record.revoked_at_unix_secs.is_none())
                 .map(|record| record.key_id)
                 .collect::<Vec<_>>();
             for key_id in &active_keys {
-                storage.revoke_api_key(&principal_id, key_id)?;
+                revoke_api_key(storage, aead, &principal_id, key_id, now_unix_secs).await?;
             }
             append_admin_audit(
                 storage,
@@ -540,7 +550,8 @@ pub fn revoke_credential(
                 &principal_id,
                 "credential_revoke",
                 json!({ "principal_id": principal_id.clone(), "provider": provider.clone(), "kind": "api_key", "revoked_keys": active_keys.clone() }),
-            )?;
+            )
+            .await?;
             Ok(RevokeCredentialResponse {
                 principal_id,
                 provider,
@@ -551,8 +562,8 @@ pub fn revoke_credential(
     }
 }
 
-fn apply_principal_change<T, F>(
-    storage: Option<&Storage>,
+async fn apply_principal_change<T, F>(
+    storage: &dyn Storage,
     current: &dyn CurrentConfig,
     now_unix_secs: u64,
     transform: F,
@@ -560,7 +571,7 @@ fn apply_principal_change<T, F>(
 where
     F: FnMut(&mut Value) -> Result<T, ManagementError>,
 {
-    settings::apply_draft_principal_change(storage, current, now_unix_secs, transform)?
+    settings::apply_draft_principal_change(storage, current, now_unix_secs, transform).await?
 }
 
 fn principals_object(
@@ -586,8 +597,8 @@ fn ensure_principal_value(
     Ok(())
 }
 
-fn principal_exists_in_current_or_draft(
-    storage: &Storage,
+async fn principal_exists_in_current_or_draft(
+    storage: &dyn Storage,
     current: &dyn CurrentConfig,
     principal_id: &str,
 ) -> Result<bool, ManagementError> {
@@ -598,7 +609,7 @@ fn principal_exists_in_current_or_draft(
     {
         return Ok(true);
     }
-    let state = storage.get_config_draft()?;
+    let state = storage.get_config_draft().await?;
     Ok(state
         .draft
         .as_ref()
@@ -607,35 +618,157 @@ fn principal_exists_in_current_or_draft(
         .is_some_and(|principals| principals.contains_key(principal_id)))
 }
 
-fn append_admin_audit(
-    storage: &Storage,
+async fn append_admin_audit(
+    storage: &dyn Storage,
     now_unix_secs: u64,
     principal_id: &str,
     kind: &str,
     payload: Value,
 ) -> Result<(), ManagementError> {
-    storage.append_audit(&AuditEntry {
-        ts: now_unix_secs,
-        request_id: format!("admin_{kind}_{principal_id}_{now_unix_secs}"),
-        principal_id: principal_id.to_owned(),
-        route: kind.to_owned(),
-        upstream: "admin".to_owned(),
-        model: None,
-        status: 200,
-        input_tokens: 0,
-        output_tokens: 0,
-        duration_ms: 0,
-        agent_label: None,
-        kind: Some(kind.to_owned()),
-        payload: Some(payload),
-    })?;
+    storage
+        .append_audit(&AuditEntry {
+            ts: now_unix_secs,
+            request_id: format!("admin_{kind}_{principal_id}_{now_unix_secs}"),
+            principal_id: principal_id.to_owned(),
+            route: kind.to_owned(),
+            upstream: "admin".to_owned(),
+            model: None,
+            status: 200,
+            input_tokens: 0,
+            output_tokens: 0,
+            duration_ms: 0,
+            agent_label: None,
+            kind: Some(kind.to_owned()),
+            payload: Some(payload),
+        })
+        .await?;
     Ok(())
+}
+
+async fn get_oauth(
+    storage: &dyn Storage,
+    aead: &AeadService,
+    principal_id: &str,
+    provider: &str,
+) -> Result<Option<OAuthCredentials>, ManagementError> {
+    let Some(ciphertext) = storage.get_oauth_ciphertext(principal_id, provider).await? else {
+        return Ok(None);
+    };
+    Ok(Some(decrypt_json(
+        aead,
+        &ciphertext,
+        &oauth_aad(principal_id, provider),
+    )?))
+}
+
+async fn issue_api_key(
+    storage: &dyn Storage,
+    aead: &AeadService,
+    principal_id: &str,
+    label: Option<String>,
+    issued_at_unix_secs: u64,
+) -> Result<IssuedKey, ManagementError> {
+    let mut raw_key = [0_u8; 32];
+    SystemRandom::new()
+        .fill(&mut raw_key)
+        .map_err(|_| StorageError::Fatal {
+            message: "api key random generation failed".to_owned(),
+        })?;
+    let plaintext = URL_SAFE_NO_PAD.encode(raw_key);
+    let key_hash = digest(&SHA256, plaintext.as_bytes());
+    let key_id = hex_prefix(key_hash.as_ref(), 12);
+    let stored = StoredApiKeyRecord {
+        label,
+        issued_at_unix_secs,
+        revoked_at_unix_secs: None,
+        key_hash_b64: STANDARD_NO_PAD.encode(key_hash.as_ref()),
+    };
+    let aad = api_key_aad(principal_id, &key_id);
+    let ciphertext = encrypt_json(aead, &stored, &aad)?;
+    storage
+        .put_api_key_ciphertext(principal_id, &key_id, &ciphertext)
+        .await?;
+    Ok(IssuedKey {
+        key_id,
+        plaintext,
+        issued_at_unix_secs,
+    })
+}
+
+async fn list_api_keys(
+    storage: &dyn Storage,
+    aead: &AeadService,
+    principal_id: &str,
+) -> Result<Vec<ApiKeyRecord>, ManagementError> {
+    let mut records = Vec::new();
+    for (key_id, ciphertext) in storage.list_api_key_ciphertexts(principal_id).await? {
+        let stored: StoredApiKeyRecord =
+            decrypt_json(aead, &ciphertext, &api_key_aad(principal_id, &key_id))?;
+        records.push(ApiKeyRecord {
+            key_id,
+            label: stored.label,
+            issued_at_unix_secs: stored.issued_at_unix_secs,
+            revoked_at_unix_secs: stored.revoked_at_unix_secs,
+        });
+    }
+    records.sort_by(|left, right| {
+        left.issued_at_unix_secs
+            .cmp(&right.issued_at_unix_secs)
+            .then_with(|| left.key_id.cmp(&right.key_id))
+    });
+    Ok(records)
+}
+
+async fn revoke_api_key(
+    storage: &dyn Storage,
+    aead: &AeadService,
+    principal_id: &str,
+    key_id: &str,
+    revoked_at_unix_secs: u64,
+) -> Result<ApiKeyRecord, ManagementError> {
+    let Some(ciphertext) = storage.get_api_key_ciphertext(principal_id, key_id).await? else {
+        return Err(ManagementError::UnknownApiKey);
+    };
+    let aad = api_key_aad(principal_id, key_id);
+    let mut stored: StoredApiKeyRecord = decrypt_json(aead, &ciphertext, &aad)?;
+    if stored.revoked_at_unix_secs.is_none() {
+        stored.revoked_at_unix_secs = Some(revoked_at_unix_secs);
+        let revoked_ciphertext = encrypt_json(aead, &stored, &aad)?;
+        if !storage
+            .revoke_api_key(principal_id, key_id, &revoked_ciphertext)
+            .await?
+        {
+            return Err(ManagementError::UnknownApiKey);
+        }
+    }
+    Ok(ApiKeyRecord {
+        key_id: key_id.to_owned(),
+        label: stored.label,
+        issued_at_unix_secs: stored.issued_at_unix_secs,
+        revoked_at_unix_secs: stored.revoked_at_unix_secs,
+    })
+}
+
+fn hex_prefix(bytes: &[u8], hex_chars: usize) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut out = String::with_capacity(hex_chars);
+    for byte in bytes.iter().take(hex_chars.div_ceil(2)) {
+        out.push(HEX[(byte >> 4) as usize] as char);
+        if out.len() == hex_chars {
+            break;
+        }
+        out.push(HEX[(byte & 0x0f) as usize] as char);
+        if out.len() == hex_chars {
+            break;
+        }
+    }
+    out
 }
 
 fn oauth_credential_entry(
     principal_id: &str,
     provider: &str,
-    stored: Option<&cc_lb_storage_redb::OAuthCredentials>,
+    stored: Option<&OAuthCredentials>,
     associated_principals: Vec<String>,
     now_unix_secs: u64,
 ) -> CredentialEntry {

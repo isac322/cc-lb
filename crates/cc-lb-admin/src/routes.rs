@@ -22,6 +22,7 @@ use crate::{
     AdminState, auth::require_admin_auth, dashboard, events, management, principals, status,
 };
 use cc_lb_core::{BucketKind, record_dashboard_sse_lagged};
+use cc_lb_storage_api::{StorageError, UsageRollupResolution};
 
 #[derive(RustEmbed)]
 #[folder = "web/dist/"]
@@ -204,11 +205,11 @@ async fn dashboard_summary(
         Ok(range) => range,
         Err(error) => return dashboard_error(StatusCode::BAD_REQUEST, error.as_str()),
     };
-    match dashboard::build_dashboard_summary(state.storage.as_deref(), range, unix_now_secs()) {
+    match dashboard::build_dashboard_summary(state.storage.as_ref(), range, unix_now_secs()).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => {
             tracing::error!(%error, "dashboard summary query failed");
-            dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "storage_error")
+            storage_error_response(&error, "storage_error")
         }
     }
 }
@@ -237,19 +238,21 @@ async fn dashboard_usage(
     };
 
     match dashboard::build_dashboard_usage_checked(
-        state.storage.as_deref(),
+        state.storage.as_ref(),
         range,
         step,
         group_by,
         unix_now_secs(),
-    ) {
+    )
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(dashboard::DashboardBuildError::Query(error)) => {
             dashboard_error(StatusCode::BAD_REQUEST, error.as_str())
         }
         Err(dashboard::DashboardBuildError::Storage(error)) => {
             tracing::error!(%error, "dashboard usage query failed");
-            dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "storage_error")
+            storage_error_response(&error, "storage_error")
         }
     }
 }
@@ -273,13 +276,15 @@ async fn principal_usage(
     let config = state.config.current_config();
 
     match principals::build_principal_usage(
-        state.storage.as_deref(),
+        state.storage.as_ref(),
         &config,
         &id,
         range,
         step,
         unix_now_secs(),
-    ) {
+    )
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error) => principal_error(error),
     }
@@ -290,12 +295,9 @@ async fn principal_limits(
     Path(id): Path<String>,
 ) -> impl IntoResponse {
     let config = state.config.current_config();
-    match principals::build_principal_limits(
-        state.storage.as_deref(),
-        &config,
-        &id,
-        unix_now_secs(),
-    ) {
+    match principals::build_principal_limits(state.storage.as_ref(), &config, &id, unix_now_secs())
+        .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error) => principal_error(error),
     }
@@ -313,7 +315,7 @@ fn principal_range(
 fn principal_step(
     query: &HashMap<String, String>,
     range: dashboard::DashboardRange,
-) -> Result<cc_lb_storage_redb::UsageRollupResolution, principals::T9Error> {
+) -> Result<UsageRollupResolution, principals::T9Error> {
     match query.get("step") {
         Some(step) => dashboard::parse_step(step).map_err(|_| principals::T9Error::InvalidStep),
         None => Ok(dashboard::auto_step(range)),
@@ -332,7 +334,7 @@ fn principal_error(error: principals::T9Error) -> axum::response::Response {
         }
         principals::T9Error::Storage(ref source) => {
             tracing::error!(error = %source, "principal admin query failed");
-            dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, error_code)
+            storage_error_response(source, error_code)
         }
     }
 }
@@ -355,8 +357,24 @@ fn unix_now_secs() -> u64 {
         .as_secs()
 }
 
-fn dashboard_error(status: StatusCode, error: &str) -> axum::response::Response {
+fn dashboard_error(status: StatusCode, error: &str) -> Response {
     (status, Json(json!({ "error": error }))).into_response()
+}
+
+fn storage_error_response(source: &StorageError, error: &str) -> Response {
+    match source {
+        StorageError::Unavailable { .. } => storage_unavailable_response(error),
+        _ => dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, error),
+    }
+}
+
+fn storage_unavailable_response(error: &str) -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "1")],
+        Json(json!({ "error": error })),
+    )
+        .into_response()
 }
 
 async fn upstream_health(
@@ -365,21 +383,23 @@ async fn upstream_health(
 ) -> axum::response::Response {
     let config = state.config.current_config();
     match status::build_upstream_health(
-        state.storage.as_deref(),
+        state.storage.as_ref(),
         &config,
         state.breaker_registry.as_deref(),
         state.bulkhead_registry.as_deref(),
         state.drain_controller.as_ref(),
         &name,
         unix_now_secs(),
-    ) {
+    )
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error @ status::StatusBuildError::UnknownUpstream) => {
             dashboard_error(StatusCode::NOT_FOUND, error.as_str())
         }
         Err(status::StatusBuildError::Storage(source)) => {
             tracing::error!(error = %source, "admin upstream health query failed");
-            dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "storage_error")
+            storage_error_response(&source, "storage_error")
         }
     }
 }
@@ -394,11 +414,18 @@ async fn plugins_status(State(state): State<AdminState>) -> Json<status::Plugins
 
 async fn oauth_status(State(state): State<AdminState>) -> axum::response::Response {
     let config = state.config.current_config();
-    match status::build_oauth_status(state.storage.as_deref(), &config, unix_now_secs()) {
+    match status::build_oauth_status(
+        state.storage.as_ref(),
+        state.aead.as_ref(),
+        &config,
+        unix_now_secs(),
+    )
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(status::StatusBuildError::Storage(source)) => {
             tracing::error!(error = %source, "admin oauth status query failed");
-            dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "storage_error")
+            storage_error_response(&source, "storage_error")
         }
         Err(status::StatusBuildError::UnknownUpstream) => {
             dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "storage_error")
@@ -415,7 +442,7 @@ async fn recent_events(
         Err(error) => return events_error(error),
     };
 
-    match events::build_recent_events_payload(state.storage.as_deref(), &params) {
+    match events::build_recent_events_payload(state.storage.as_ref(), &params).await {
         Ok(payload) => Json(payload).into_response(),
         Err(error) => events_error(error),
     }
@@ -426,7 +453,7 @@ fn events_error(error: events::EventsError) -> axum::response::Response {
     match error {
         events::EventsError::Storage(ref source) => {
             tracing::error!(error = %source, "admin events query failed");
-            dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, error_code)
+            storage_error_response(source, error_code)
         }
         _ => dashboard_error(StatusCode::BAD_REQUEST, error_code),
     }
@@ -485,11 +512,13 @@ async fn create_principal(
     Json(request): Json<management::CreatePrincipalRequest>,
 ) -> axum::response::Response {
     match management::create_principal(
-        state.storage.as_deref(),
+        state.storage.as_ref(),
         state.config.as_ref(),
         request,
         unix_now_secs(),
-    ) {
+    )
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error) => management_error_response(error),
     }
@@ -501,12 +530,14 @@ async fn update_principal(
     Json(request): Json<management::UpdatePrincipalRequest>,
 ) -> axum::response::Response {
     match management::update_principal(
-        state.storage.as_deref(),
+        state.storage.as_ref(),
         state.config.as_ref(),
         id,
         request,
         unix_now_secs(),
-    ) {
+    )
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error) => management_error_response(error),
     }
@@ -517,12 +548,14 @@ async fn disable_principal(
     Path(id): Path<String>,
 ) -> axum::response::Response {
     match management::set_principal_disabled(
-        state.storage.as_deref(),
+        state.storage.as_ref(),
         state.config.as_ref(),
         id,
         true,
         unix_now_secs(),
-    ) {
+    )
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error) => management_error_response(error),
     }
@@ -533,12 +566,14 @@ async fn enable_principal(
     Path(id): Path<String>,
 ) -> axum::response::Response {
     match management::set_principal_disabled(
-        state.storage.as_deref(),
+        state.storage.as_ref(),
         state.config.as_ref(),
         id,
         false,
         unix_now_secs(),
-    ) {
+    )
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error) => management_error_response(error),
     }
@@ -550,12 +585,14 @@ async fn update_principal_allowed_models(
     Json(request): Json<management::AllowedModelsRequest>,
 ) -> axum::response::Response {
     match management::update_allowed_models(
-        state.storage.as_deref(),
+        state.storage.as_ref(),
         state.config.as_ref(),
         id,
         request,
         unix_now_secs(),
-    ) {
+    )
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error) => management_error_response(error),
     }
@@ -567,12 +604,15 @@ async fn issue_principal_key(
     Json(request): Json<management::IssueKeyRequest>,
 ) -> axum::response::Response {
     match management::issue_principal_key(
-        state.storage.as_deref(),
+        state.storage.as_ref(),
+        state.aead.as_ref(),
         state.config.as_ref(),
         id,
         request,
         unix_now_secs(),
-    ) {
+    )
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error) => management_error_response(error),
     }
@@ -582,7 +622,14 @@ async fn list_principal_keys(
     State(state): State<AdminState>,
     Path(id): Path<String>,
 ) -> axum::response::Response {
-    match management::list_principal_keys(state.storage.as_deref(), state.config.as_ref(), id) {
+    match management::list_principal_keys(
+        state.storage.as_ref(),
+        state.aead.as_ref(),
+        state.config.as_ref(),
+        id,
+    )
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error) => management_error_response(error),
     }
@@ -593,12 +640,15 @@ async fn revoke_principal_key(
     Path((id, key_id)): Path<(String, String)>,
 ) -> axum::response::Response {
     match management::revoke_principal_key(
-        state.storage.as_deref(),
+        state.storage.as_ref(),
+        state.aead.as_ref(),
         state.config.as_ref(),
         id,
         key_id,
         unix_now_secs(),
-    ) {
+    )
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error) => management_error_response(error),
     }
@@ -606,7 +656,14 @@ async fn revoke_principal_key(
 
 async fn list_credentials(State(state): State<AdminState>) -> axum::response::Response {
     let config = state.config.current_config();
-    match management::list_credentials(state.storage.as_deref(), &config, unix_now_secs()) {
+    match management::list_credentials(
+        state.storage.as_ref(),
+        state.aead.as_ref(),
+        &config,
+        unix_now_secs(),
+    )
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error) => management_error_response(error),
     }
@@ -618,12 +675,15 @@ async fn rotate_credential(
 ) -> axum::response::Response {
     let config = state.config.current_config();
     match management::rotate_credential(
-        state.storage.as_deref(),
+        state.storage.as_ref(),
+        state.aead.as_ref(),
         &config,
         principal_id,
         provider,
         unix_now_secs(),
-    ) {
+    )
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error) => management_error_response(error),
     }
@@ -635,12 +695,15 @@ async fn revoke_credential(
 ) -> axum::response::Response {
     let config = state.config.current_config();
     match management::revoke_credential(
-        state.storage.as_deref(),
+        state.storage.as_ref(),
+        state.aead.as_ref(),
         &config,
         principal_id,
         provider,
         unix_now_secs(),
-    ) {
+    )
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error) => management_error_response(error),
     }
@@ -658,15 +721,10 @@ async fn list_principals(State(state): State<AdminState>) -> Result<Json<Value>,
     Ok(Json(json!({ "principals": principals })))
 }
 
-async fn get_quota(
-    State(state): State<AdminState>,
-    Path(id): Path<String>,
-) -> Result<Json<Value>, StatusCode> {
-    let Some(storage) = &state.storage else {
-        return Err(StatusCode::NOT_IMPLEMENTED);
-    };
+async fn get_quota(State(state): State<AdminState>, Path(id): Path<String>) -> Response {
+    let storage = state.storage.as_ref();
     let Some(_quota_manager) = &state.quota_manager else {
-        return Err(StatusCode::NOT_IMPLEMENTED);
+        return StatusCode::NOT_IMPLEMENTED.into_response();
     };
 
     let config = state.config.current_config();
@@ -689,23 +747,44 @@ async fn get_quota(
     }
 
     let window_secs = policy.window_secs.max(1);
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .as_secs();
+    let now = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(duration) => duration.as_secs(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
     let window_start = (now / window_secs) * window_secs;
 
-    let requests = storage
+    let requests = match storage
         .get_quota(&id, window_start, BucketKind::Requests)
-        .unwrap_or(0);
-    let input_tokens = storage
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, "admin quota query failed");
+            return storage_error_response(&error, "storage_error");
+        }
+    };
+    let input_tokens = match storage
         .get_quota(&id, window_start, BucketKind::InputTokens)
-        .unwrap_or(0);
-    let output_tokens = storage
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, "admin quota query failed");
+            return storage_error_response(&error, "storage_error");
+        }
+    };
+    let output_tokens = match storage
         .get_quota(&id, window_start, BucketKind::OutputTokens)
-        .unwrap_or(0);
+        .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            tracing::error!(error = %error, "admin quota query failed");
+            return storage_error_response(&error, "storage_error");
+        }
+    };
 
-    Ok(Json(json!({
+    Json(json!({
         "window_start": window_start,
         "window_secs": window_secs,
         "requests": requests,
@@ -714,7 +793,8 @@ async fn get_quota(
         "requests_per_window": policy.capacity_requests,
         "input_tokens_per_window": policy.capacity_input_tokens,
         "output_tokens_per_window": policy.capacity_output_tokens,
-    })))
+    }))
+    .into_response()
 }
 
 #[derive(Deserialize)]
@@ -773,23 +853,23 @@ struct AuditQuery {
     limit: Option<usize>,
 }
 
-async fn query_audit(
-    State(state): State<AdminState>,
-    Query(query): Query<AuditQuery>,
-) -> Result<Json<Value>, StatusCode> {
-    let Some(storage) = &state.storage else {
-        return Err(StatusCode::NOT_IMPLEMENTED);
-    };
+async fn query_audit(State(state): State<AdminState>, Query(query): Query<AuditQuery>) -> Response {
+    let storage = state.storage.as_ref();
 
     let since = query.since.unwrap_or(0);
     let until = query.until.unwrap_or(u64::MAX);
     let limit = query.limit.unwrap_or(100).min(1000);
 
-    let entries = storage
+    match storage
         .query_audit(query.principal_id.as_deref(), since, until, limit)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-
-    Ok(Json(json!({ "entries": entries })))
+        .await
+    {
+        Ok(entries) => Json(json!({ "entries": entries })).into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "admin audit query failed");
+            storage_error_response(&error, "storage_error")
+        }
+    }
 }
 
 async fn list_upstreams(State(state): State<AdminState>) -> Result<Json<Value>, StatusCode> {
@@ -811,24 +891,26 @@ async fn drain_upstream(
     Ok(Json(json!({ "status": "ok", "drained": name })))
 }
 
-async fn set_killswitch(State(state): State<AdminState>) -> Result<Json<Value>, StatusCode> {
-    let Some(storage) = &state.storage else {
-        return Err(StatusCode::NOT_IMPLEMENTED);
-    };
-    storage
-        .set_killswitch_enabled(true)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(json!({ "status": "ok", "killswitch": true })))
+async fn set_killswitch(State(state): State<AdminState>) -> Response {
+    let storage = state.storage.as_ref();
+    match storage.set_killswitch_enabled(true).await {
+        Ok(()) => Json(json!({ "status": "ok", "killswitch": true })).into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "admin killswitch write failed");
+            storage_error_response(&error, "storage_error")
+        }
+    }
 }
 
-async fn clear_killswitch(State(state): State<AdminState>) -> Result<Json<Value>, StatusCode> {
-    let Some(storage) = &state.storage else {
-        return Err(StatusCode::NOT_IMPLEMENTED);
-    };
-    storage
-        .set_killswitch_enabled(false)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    Ok(Json(json!({ "status": "ok", "killswitch": false })))
+async fn clear_killswitch(State(state): State<AdminState>) -> Response {
+    let storage = state.storage.as_ref();
+    match storage.set_killswitch_enabled(false).await {
+        Ok(()) => Json(json!({ "status": "ok", "killswitch": false })).into_response(),
+        Err(error) => {
+            tracing::error!(error = %error, "admin killswitch write failed");
+            storage_error_response(&error, "storage_error")
+        }
+    }
 }
 
 async fn get_config(State(state): State<AdminState>) -> Result<Json<Value>, StatusCode> {
@@ -848,7 +930,7 @@ async fn get_config_schema() -> axum::response::Response {
 }
 
 async fn get_config_draft(State(state): State<AdminState>) -> axum::response::Response {
-    match crate::settings::get_draft(state.storage.as_deref()) {
+    match crate::settings::get_draft(state.storage.as_ref()).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => settings_error_response(error, false),
     }
@@ -858,7 +940,7 @@ async fn put_config_draft(
     State(state): State<AdminState>,
     Json(request): Json<crate::settings::PutConfigDraftRequest>,
 ) -> axum::response::Response {
-    match crate::settings::put_draft(state.storage.as_deref(), request, unix_now_secs()) {
+    match crate::settings::put_draft(state.storage.as_ref(), request, unix_now_secs()).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => settings_error_response(error, true),
     }
@@ -868,7 +950,7 @@ async fn validate_config_draft(
     State(state): State<AdminState>,
     Json(request): Json<crate::settings::ValidateConfigDraftRequest>,
 ) -> axum::response::Response {
-    match crate::settings::validate_draft(state.storage.as_deref(), request) {
+    match crate::settings::validate_draft(state.storage.as_ref(), request).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => settings_error_response(error, false),
     }
@@ -879,12 +961,14 @@ async fn apply_config_draft(
     Json(request): Json<crate::settings::ApplyConfigRequest>,
 ) -> axum::response::Response {
     match crate::settings::apply_config(
-        state.storage.as_deref(),
+        state.storage.as_ref(),
         state.config_path.as_deref(),
         state.config_watcher.as_deref(),
         request,
         unix_now_secs(),
-    ) {
+    )
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error) => settings_error_response(error, false),
     }
@@ -899,7 +983,7 @@ async fn get_config_history(
     State(state): State<AdminState>,
     Query(query): Query<ConfigHistoryQuery>,
 ) -> axum::response::Response {
-    match crate::settings::list_history(state.storage.as_deref(), query.limit.unwrap_or(20)) {
+    match crate::settings::list_history(state.storage.as_ref(), query.limit.unwrap_or(20)).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => settings_error_response(error, false),
     }
@@ -916,10 +1000,12 @@ async fn get_config_diff(
     Query(query): Query<ConfigDiffQuery>,
 ) -> axum::response::Response {
     match crate::settings::diff_history(
-        state.storage.as_deref(),
+        state.storage.as_ref(),
         query.from_revision,
         query.to_revision,
-    ) {
+    )
+    .await
+    {
         Ok(response) => Json(response).into_response(),
         Err(error) => settings_error_response(error, false),
     }
@@ -931,11 +1017,11 @@ fn settings_error_response(
 ) -> axum::response::Response {
     match error {
         crate::settings::SettingsError::StorageUnavailable => {
-            dashboard_error(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable")
+            storage_unavailable_response("storage_unavailable")
         }
         crate::settings::SettingsError::Storage(source) => {
             tracing::error!(error = %source, "admin config storage operation failed");
-            dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "storage_error")
+            storage_error_response(&source, "storage_error")
         }
         crate::settings::SettingsError::StaleDraftRevision { current } => {
             if include_current_revision {
@@ -985,12 +1071,12 @@ fn settings_error_response(
 fn management_error_response(error: management::ManagementError) -> axum::response::Response {
     match error {
         management::ManagementError::StorageUnavailable => {
-            dashboard_error(StatusCode::SERVICE_UNAVAILABLE, "storage_unavailable")
+            storage_unavailable_response("storage_unavailable")
         }
         management::ManagementError::Settings(error) => settings_error_response(error, false),
         management::ManagementError::Storage(source) => {
             tracing::error!(error = %source, "admin management storage operation failed");
-            dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "storage_error")
+            storage_error_response(&source, "storage_error")
         }
         management::ManagementError::Json(source) => {
             tracing::error!(error = %source, "admin management json operation failed");
@@ -1017,14 +1103,7 @@ fn management_error_response(error: management::ManagementError) -> axum::respon
 }
 
 fn effective_config_revision_unix_secs(state: &AdminState) -> u64 {
-    let mut effective = state.config_started_at_unix_secs;
-    if let Some(storage) = state.storage.as_deref()
-        && let Ok(history) = storage.list_config_history(1)
-        && let Some(entry) = history.first()
-    {
-        effective = effective.max(entry.applied_at_unix_secs);
-    }
-    effective
+    state.config_started_at_unix_secs
 }
 
 async fn reload_config(State(_state): State<AdminState>) -> Result<Json<Value>, StatusCode> {

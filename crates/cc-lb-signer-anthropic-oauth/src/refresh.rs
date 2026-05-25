@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use bytes::Bytes;
-use cc_lb_storage_redb::OAuthCredentials;
+use cc_lb_storage_api::{OAuthCredentials, StorageError};
 use dashmap::DashMap;
 use http::StatusCode;
 use secrecy::{ExposeSecret, SecretString};
@@ -52,10 +52,11 @@ pub enum RefreshError {
     Http { reason: String },
     #[error("oauth token response json failed: {reason}")]
     Json { reason: String },
-    #[error("oauth storage operation failed: {reason}")]
-    Storage { reason: String },
-    #[error("oauth storage task failed: {reason}")]
-    StorageTask { reason: String },
+    #[error("oauth storage operation failed: {source}")]
+    Storage {
+        #[from]
+        source: StorageError,
+    },
 }
 
 #[derive(Debug, Deserialize)]

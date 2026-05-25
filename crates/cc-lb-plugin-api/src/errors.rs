@@ -95,6 +95,12 @@ pub enum SignerError {
         /// Redacted signing failure reason.
         reason: String,
     },
+    /// Credential storage is temporarily unavailable.
+    #[error("credential storage unavailable: {reason}")]
+    StorageUnavailable {
+        /// Redacted storage failure reason.
+        reason: String,
+    },
     /// The factory was asked to build a signer for the wrong strategy.
     #[error("wrong signer strategy: {strategy:?}")]
     WrongStrategy {

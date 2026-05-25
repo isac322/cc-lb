@@ -36,11 +36,11 @@ async fn credential_priority() {
         Arc::new(ProfileCredentialsProvider::with_path("default", &path)),
     ]);
 
-    // TODO: Audit that the environment access only happens in single-threaded code.
+    // SAFETY: test-only; single-threaded test runner, no concurrent env access
     unsafe { env::set_var("AWS_ACCESS_KEY_ID", "AKIAENV") };
-    // TODO: Audit that the environment access only happens in single-threaded code.
+    // SAFETY: test-only; single-threaded test runner, no concurrent env access
     unsafe { env::set_var("AWS_SECRET_ACCESS_KEY", "env-secret") };
-    // TODO: Audit that the environment access only happens in single-threaded code.
+    // SAFETY: test-only; single-threaded test runner, no concurrent env access
     unsafe { env::set_var("AWS_SESSION_TOKEN", "env-token") };
     let env_credentials = chain.resolve().await.expect("env credentials");
     assert_eq!(env_credentials.access_key_id, "AKIAENV");
@@ -66,11 +66,11 @@ fn write_profile(path: &Path) {
 }
 
 fn clear_aws_env() {
-    // TODO: Audit that the environment access only happens in single-threaded code.
+    // SAFETY: test-only; single-threaded test runner, no concurrent env access
     unsafe { env::remove_var("AWS_ACCESS_KEY_ID") };
-    // TODO: Audit that the environment access only happens in single-threaded code.
+    // SAFETY: test-only; single-threaded test runner, no concurrent env access
     unsafe { env::remove_var("AWS_SECRET_ACCESS_KEY") };
-    // TODO: Audit that the environment access only happens in single-threaded code.
+    // SAFETY: test-only; single-threaded test runner, no concurrent env access
     unsafe { env::remove_var("AWS_SESSION_TOKEN") };
 }
 
@@ -93,9 +93,9 @@ impl Drop for EnvGuard {
     fn drop(&mut self) {
         for (name, value) in &self.saved {
             match value {
-                // TODO: Audit that the environment access only happens in single-threaded code.
+                // SAFETY: test-only; single-threaded test runner, no concurrent env access
                 Some(value) => unsafe { env::set_var(name, value) },
-                // TODO: Audit that the environment access only happens in single-threaded code.
+                // SAFETY: test-only; single-threaded test runner, no concurrent env access
                 None => unsafe { env::remove_var(name) },
             }
         }

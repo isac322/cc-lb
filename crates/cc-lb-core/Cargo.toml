@@ -6,13 +6,18 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+redb = []
+postgres = []
+
 [dependencies]
 arc-swap.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 bytes.workspace = true
-cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
+cc-lb-aead = { path = "../cc-lb-aead" }
+cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }

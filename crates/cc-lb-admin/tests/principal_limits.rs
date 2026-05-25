@@ -8,7 +8,7 @@ use cc_lb_admin::{AdminState, router};
 use cc_lb_config::{Config, PrincipalSpec};
 use cc_lb_core::DashboardBroadcaster;
 use cc_lb_storage_redb::{
-    PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, Storage,
+    PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, RedbStorage,
 };
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -18,7 +18,7 @@ use tower::ServiceExt;
 async fn existing_principal_limits_group_and_order_identities_windows_and_kinds() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("principal-limits.redb");
-    let storage = Storage::open(&path, [43; 32]).unwrap();
+    let storage = RedbStorage::open(&path).unwrap();
     seed_ordered_limit_states(&storage, "principal-a");
 
     let app = router(test_state(
@@ -66,7 +66,7 @@ async fn existing_principal_limits_group_and_order_identities_windows_and_kinds(
 async fn account_observed_is_false_without_account_identity() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("principal-limits.redb");
-    let storage = Storage::open(&path, [43; 32]).unwrap();
+    let storage = RedbStorage::open(&path).unwrap();
     storage
         .put_principal_limit_state(&limit_state(
             "principal-a",
@@ -112,7 +112,7 @@ async fn account_observed_is_false_without_account_identity() {
 async fn five_hour_and_weekly_limits_json_shape_is_stable() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("principal-limits.redb");
-    let storage = Storage::open(&path, [43; 32]).unwrap();
+    let storage = RedbStorage::open(&path).unwrap();
     storage
         .put_principal_limit_state(&limit_state(
             "principal-a",
@@ -236,7 +236,7 @@ async fn principal_limits_response_excludes_payload_terms() {
     assert_forbidden_bytes_absent(&body);
 }
 
-fn seed_ordered_limit_states(storage: &Storage, principal_id: &str) {
+fn seed_ordered_limit_states(storage: &RedbStorage, principal_id: &str) {
     for state in [
         limit_state(
             principal_id,
@@ -339,9 +339,10 @@ fn limit_state(
     }
 }
 
-fn test_state(config: Config, storage: Option<Arc<Storage>>) -> AdminState {
+fn test_state(config: Config, storage: Option<Arc<RedbStorage>>) -> AdminState {
     AdminState {
-        storage,
+        storage: storage.unwrap_or_else(test_storage),
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         quota_manager: None,
         lifecycle: None,
         breaker_registry: None,
@@ -426,4 +427,12 @@ fn forbidden_terms() -> Vec<String> {
         ["tool", "_use"].concat(),
         ["con", "tent"].concat(),
     ]
+}
+
+fn test_storage() -> Arc<RedbStorage> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.redb");
+    let storage = Arc::new(RedbStorage::open(&path).unwrap());
+    std::mem::forget(dir);
+    storage
 }

@@ -7,7 +7,12 @@ rust-version.workspace = true
 publish = false
 build = "build.rs"
 
+[features]
+redb = []
+postgres = []
+
 [dependencies]
+async-trait.workspace = true
 async-stream.workspace = true
 axum.workspace = true
 serde.workspace = true
@@ -15,18 +20,23 @@ serde_json.workspace = true
 schemars.workspace = true
 tokio.workspace = true
 rust-embed.workspace = true
-cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
+cc-lb-storage-api = { path = "../cc-lb-storage-api" }
+cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-core = { path = "../cc-lb-core" }
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 tracing.workspace = true
 http.workspace = true
+http-body-util.workspace = true
 bytes.workspace = true
 base64.workspace = true
-cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-rustls.workspace = true
+hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "tokio"] }
 oauth2.workspace = true
 secrecy.workspace = true
 thiserror.workspace = true
+ring.workspace = true
 toml = "0.8"
 url.workspace = true
 mime_guess = "2.0.5"
@@ -37,8 +47,6 @@ tower.workspace = true
 http-body-util.workspace = true
 insta.workspace = true
 tempfile.workspace = true
-mock-anthropic-oauth-server = { path = "../../tests/fixtures/mock-anthropic-oauth-server" }
-hyper = { workspace = true, features = ["client", "http1"] }
-hyper-rustls.workspace = true
-hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "tokio"] }
+cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
 redb.workspace = true
+mock-anthropic-oauth-server = { path = "../../tests/fixtures/mock-anthropic-oauth-server" }

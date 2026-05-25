@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cc_lb_storage_redb::{PrincipalLimitState, Storage};
+use cc_lb_storage_api::{PrincipalLimitState, Storage};
 use thiserror::Error;
 use tokio::sync::mpsc::{self, Receiver, Sender, error::TrySendError};
 use tokio::task::JoinHandle;
@@ -50,23 +50,16 @@ impl PrincipalLimitStateSink {
 }
 
 pub fn start_principal_limit_state_writer(
-    storage: Arc<Storage>,
+    storage: Arc<dyn Storage>,
     mut receiver: Receiver<PrincipalLimitState>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(state) = receiver.recv().await {
-            let storage = storage.clone();
-            match tokio::task::spawn_blocking(move || storage.put_principal_limit_state(&state))
-                .await
-            {
-                Ok(Ok(())) => {}
-                Ok(Err(source)) => {
-                    cc_lb_observability::increment_dropped_events("limit_state_worker_drop");
-                    tracing::warn!(error = %source, "principal limit state persistence failed");
-                }
+            match storage.put_principal_limit_state(&state).await {
+                Ok(()) => {}
                 Err(source) => {
                     cc_lb_observability::increment_dropped_events("limit_state_worker_drop");
-                    tracing::warn!(error = %source, "principal limit state writer task failed");
+                    tracing::warn!(error = %source, "principal limit state persistence failed");
                 }
             }
         }

@@ -8,7 +8,7 @@ use axum::{
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::{AuthStrategy, Config, UpstreamKind, UpstreamSpec};
 use cc_lb_core::{BreakerConfig, BreakerRegistry, DashboardBroadcaster, DrainController};
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -70,7 +70,7 @@ async fn registered_open_breaker_is_reported() {
 #[tokio::test]
 async fn killswitch_state_reflects_storage_value() {
     let dir = tempfile::tempdir().unwrap();
-    let storage = Arc::new(Storage::open(&dir.path().join("status.redb"), [11; 32]).unwrap());
+    let storage = Arc::new(RedbStorage::open(dir.path().join("status.redb")).unwrap());
     storage.set_killswitch_enabled(true).unwrap();
 
     let app = router(test_state(test_config(), Some(storage.clone()), None, None));
@@ -133,12 +133,13 @@ async fn upstream_health_response_excludes_payload_and_secret_terms() {
 
 fn test_state(
     config: Config,
-    storage: Option<Arc<Storage>>,
+    storage: Option<Arc<RedbStorage>>,
     breaker_registry: Option<Arc<BreakerRegistry>>,
     drain_controller: Option<DrainController>,
 ) -> AdminState {
     AdminState {
-        storage,
+        storage: storage.unwrap_or_else(test_storage),
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         quota_manager: None,
         lifecycle: None,
         breaker_registry,
@@ -211,4 +212,12 @@ fn forbidden_terms() -> Vec<String> {
         ["ae", "ad"].concat(),
         ["refresh", "_token"].concat(),
     ]
+}
+
+fn test_storage() -> Arc<RedbStorage> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.redb");
+    let storage = Arc::new(RedbStorage::open(&path).unwrap());
+    std::mem::forget(dir);
+    storage
 }
