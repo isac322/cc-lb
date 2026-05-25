@@ -53,12 +53,21 @@ impl Config {
         toml_path: &Path,
         cli_overrides: ConfigOverrides,
     ) -> Result<Self, ConfigError> {
-        if let Ok(raw_toml) = std::fs::read_to_string(toml_path) {
-            validation::validate_raw_toml(&raw_toml)?;
-        }
+        let raw_toml = std::fs::read_to_string(toml_path).ok();
+        let migrated_toml = match raw_toml.as_deref() {
+            Some(raw) => {
+                validation::validate_raw_toml(raw)?;
+                Some(validation::migrate_legacy_storage_toml(raw)?)
+            }
+            None => None,
+        };
 
-        let mut config: Config = Figment::from(Serialized::defaults(Config::default()))
-            .merge(Toml::file_exact(toml_path))
+        let mut figment = Figment::from(Serialized::defaults(Config::default()));
+        figment = match migrated_toml.as_deref() {
+            Some(migrated) => figment.merge(Toml::string(migrated)),
+            None => figment.merge(Toml::file_exact(toml_path)),
+        };
+        let mut config: Config = figment
             .merge(Env::prefixed("CC_LB_").split("__"))
             .merge(Serialized::defaults(cli_overrides))
             .extract()?;
