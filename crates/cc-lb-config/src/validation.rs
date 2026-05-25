@@ -160,25 +160,6 @@ fn validate_upstreams(config: &Config) -> Result<(), ValidationError> {
     for (name, upstream) in &config.upstreams {
         match upstream.kind {
             UpstreamKind::AnthropicDirect => {}
-            UpstreamKind::BedrockRuntime | UpstreamKind::BedrockMantle => {
-                require_non_empty(
-                    &format!("upstreams.{name}.region"),
-                    upstream.region.as_deref(),
-                    "region is required for this upstream kind",
-                )?;
-            }
-            UpstreamKind::Vertex => {
-                require_non_empty(
-                    &format!("upstreams.{name}.region"),
-                    upstream.region.as_deref(),
-                    "region is required for vertex upstreams",
-                )?;
-                require_non_empty(
-                    &format!("upstreams.{name}.project"),
-                    upstream.project.as_deref(),
-                    "project is required for vertex upstreams",
-                )?;
-            }
             UpstreamKind::Custom => {
                 if upstream.base_url.is_none() {
                     return Err(ValidationError::new(

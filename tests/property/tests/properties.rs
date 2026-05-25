@@ -5,7 +5,6 @@ use std::convert::Infallible;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aws_eventstream_codec::{decode_message, decode_messages, encode_message};
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_core::{strip_hop_by_hop, SseBatchConfig, SseRelay, StreamingUsage};
@@ -72,38 +71,6 @@ fn sse_random_byte_sequences_do_not_panic() -> Result<(), String> {
             let _output = runtime
                 .block_on(relay_bytes(input, split_seed))
                 .map_err(TestCaseError::fail)?;
-            Ok(())
-        },
-    )
-}
-
-#[test]
-fn aws_eventstream_roundtrip_preserves_payload_and_event_type() -> Result<(), String> {
-    run_property(
-        "aws_eventstream_roundtrip_preserves_payload_and_event_type",
-        (
-            event_type_strategy(),
-            prop::collection::vec(any::<u8>(), 0..=512),
-        ),
-        |(event_type, payload)| {
-            let frame = encode_message(&event_type, &payload);
-            let (decoded, consumed) = decode_message(&frame).map_err(|source| {
-                TestCaseError::fail(format!("event-stream decode failed: {source}"))
-            })?;
-            prop_assert_eq!(consumed, frame.len());
-            prop_assert_eq!(decoded.header_str(":event-type"), Some(event_type.as_str()));
-            prop_assert_eq!(decoded.header_str(":message-type"), Some("event"));
-            prop_assert_eq!(decoded.payload.as_slice(), payload.as_slice());
-
-            let decoded_messages = decode_messages(&frame).map_err(|source| {
-                TestCaseError::fail(format!("event-stream batch decode failed: {source}"))
-            })?;
-            prop_assert_eq!(decoded_messages.len(), 1);
-            prop_assert_eq!(
-                decoded_messages[0].header_str(":event-type"),
-                Some(event_type.as_str())
-            );
-            prop_assert_eq!(decoded_messages[0].payload.as_slice(), payload.as_slice());
             Ok(())
         },
     )

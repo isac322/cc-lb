@@ -309,9 +309,6 @@ fn plugin_entry(
 fn request_event_upstream_kind(kind: &UpstreamKind) -> RequestEventUpstream {
     match kind {
         UpstreamKind::AnthropicDirect => RequestEventUpstream::AnthropicDirect,
-        UpstreamKind::BedrockRuntime => RequestEventUpstream::BedrockRuntime,
-        UpstreamKind::BedrockMantle => RequestEventUpstream::BedrockMantle,
-        UpstreamKind::Vertex => RequestEventUpstream::Vertex,
         UpstreamKind::Custom => RequestEventUpstream::CustomAnthropicSpec,
     }
 }
@@ -319,9 +316,6 @@ fn request_event_upstream_kind(kind: &UpstreamKind) -> RequestEventUpstream {
 fn request_event_upstream_label(kind: RequestEventUpstream) -> &'static str {
     match kind {
         RequestEventUpstream::AnthropicDirect => "anthropic_direct",
-        RequestEventUpstream::BedrockRuntime => "bedrock_runtime",
-        RequestEventUpstream::BedrockMantle => "bedrock_mantle",
-        RequestEventUpstream::Vertex => "vertex",
         RequestEventUpstream::CustomAnthropicSpec => "custom_anthropic_spec",
     }
 }

@@ -40,16 +40,12 @@ cc-lb-admin = { version = "0.1.0", path = "../cc-lb-admin" }
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-core = { path = "../cc-lb-core" }
 cc-lb-dialect-anthropic = { path = "../cc-lb-dialect-anthropic" }
-cc-lb-dialect-bedrock = { path = "../cc-lb-dialect-bedrock" }
-cc-lb-dialect-vertex = { path = "../cc-lb-dialect-vertex" }
 cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-runtime-extism = { path = "../cc-lb-runtime-extism" }
 cc-lb-signer-anthropic-key = { path = "../cc-lb-signer-anthropic-key" }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
-cc-lb-signer-aws = { path = "../cc-lb-signer-aws" }
-cc-lb-signer-gcp = { path = "../cc-lb-signer-gcp" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres", optional = true }

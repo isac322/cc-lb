@@ -48,8 +48,6 @@ impl UsdPerMillion {
 pub enum UpstreamKind {
     AnthropicKey,
     AnthropicOAuth,
-    AwsSigV4,
-    GcpOAuth,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -218,53 +216,8 @@ pub fn virtual_cost_micros_full(
     }
 }
 
-pub fn normalize_model_id(model: &str, upstream_kind: Option<UpstreamKind>) -> String {
-    let Some(upstream_kind) = upstream_kind else {
-        return model.to_owned();
-    };
-    let Some(canonical) = canonical_claude_model(model) else {
-        return model.to_owned();
-    };
-
-    match upstream_kind {
-        UpstreamKind::AwsSigV4 => format!("bedrock/anthropic.{canonical}-v1:0"),
-        UpstreamKind::GcpOAuth => format!("vertex_ai/{canonical}"),
-        UpstreamKind::AnthropicKey | UpstreamKind::AnthropicOAuth => canonical,
-    }
-}
-
-fn canonical_claude_model(model: &str) -> Option<String> {
-    if is_supported_claude_family(model) {
-        return Some(model.to_owned());
-    }
-
-    if let Some(inner) = model
-        .strip_prefix("bedrock/anthropic.")
-        .and_then(|value| value.strip_suffix("-v1:0"))
-    {
-        return is_supported_claude_family(inner).then(|| inner.to_owned());
-    }
-
-    if let Some(inner) = model.strip_prefix("vertex_ai/") {
-        if is_supported_claude_family(inner) {
-            return Some(inner.to_owned());
-        }
-
-        if let Some((family, version)) = inner.split_once('@') {
-            let canonical = format!("{family}-{version}");
-            if is_supported_claude_family(&canonical) {
-                return Some(canonical);
-            }
-        }
-    }
-
-    None
-}
-
-fn is_supported_claude_family(model: &str) -> bool {
-    model.starts_with("claude-3-5-sonnet-")
-        || model.starts_with("claude-3-5-haiku-")
-        || model.starts_with("claude-opus-")
+pub fn normalize_model_id(model: &str, _upstream_kind: Option<UpstreamKind>) -> String {
+    model.to_owned()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -347,17 +300,27 @@ mod tests {
     }
 
     #[test]
-    fn normalize_bedrock() {
+    fn normalize_none_keeps_model_unchanged() {
         assert_eq!(
-            normalize_model_id("claude-3-5-sonnet-20241022", Some(UpstreamKind::AwsSigV4)),
-            "bedrock/anthropic.claude-3-5-sonnet-20241022-v1:0"
+            normalize_model_id("claude-3-5-sonnet-20241022", None),
+            "claude-3-5-sonnet-20241022"
         );
     }
 
     #[test]
-    fn normalize_none_keeps_model_unchanged() {
+    fn normalize_anthropic_kind_keeps_model_unchanged() {
         assert_eq!(
-            normalize_model_id("claude-3-5-sonnet-20241022", None),
+            normalize_model_id(
+                "claude-3-5-sonnet-20241022",
+                Some(UpstreamKind::AnthropicKey)
+            ),
+            "claude-3-5-sonnet-20241022"
+        );
+        assert_eq!(
+            normalize_model_id(
+                "claude-3-5-sonnet-20241022",
+                Some(UpstreamKind::AnthropicOAuth)
+            ),
             "claude-3-5-sonnet-20241022"
         );
     }

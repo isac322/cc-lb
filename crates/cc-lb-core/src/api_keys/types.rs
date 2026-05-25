@@ -33,8 +33,6 @@ impl Limit {
 pub enum UpstreamKind {
     AnthropicKey,
     AnthropicOAuth,
-    AwsSigV4,
-    GcpOAuth,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]

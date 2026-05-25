@@ -69,10 +69,6 @@ impl RollupDelta {
                 RequestEventUpstream::AnthropicDirect | RequestEventUpstream::CustomAnthropicSpec => {
                     UpstreamKind::AnthropicKey
                 }
-                RequestEventUpstream::BedrockRuntime | RequestEventUpstream::BedrockMantle => {
-                    UpstreamKind::AwsSigV4
-                }
-                RequestEventUpstream::Vertex => UpstreamKind::GcpOAuth,
             });
             let estimate = virtual_cost_micros_full(
                 model,
@@ -431,9 +427,6 @@ fn normalize_dimension(value: Option<&str>) -> String {
 fn upstream_dimension(upstream: RequestEventUpstream) -> String {
     match upstream {
         RequestEventUpstream::AnthropicDirect => "anthropic_direct",
-        RequestEventUpstream::BedrockRuntime => "bedrock_runtime",
-        RequestEventUpstream::BedrockMantle => "bedrock_mantle",
-        RequestEventUpstream::Vertex => "vertex",
         RequestEventUpstream::CustomAnthropicSpec => "custom_anthropic_spec",
     }
     .to_owned()

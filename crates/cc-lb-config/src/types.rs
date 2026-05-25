@@ -160,9 +160,6 @@ impl Default for TimeoutsConfig {
 #[serde(rename_all = "snake_case")]
 pub enum UpstreamKind {
     AnthropicDirect,
-    BedrockRuntime,
-    BedrockMantle,
-    Vertex,
     Custom,
 }
 
@@ -207,8 +204,6 @@ pub enum DownstreamAuthMode {
 pub enum NoneModeUpstreamKind {
     AnthropicKey,
     AnthropicOAuth,
-    AwsSigV4,
-    GcpOAuth,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -293,8 +288,6 @@ impl Default for ApiKeysConfig {
 pub enum AuthStrategy {
     ApiKey,
     OAuth,
-    AwsSigV4,
-    GcpOAuth,
     InternalForwarded,
 }
 
