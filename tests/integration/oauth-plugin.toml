@@ -26,8 +26,11 @@ allowed_models = ["*"]
 observability_hooks = []
 
 [storage]
-redb_path = "/tmp/cc-lb-oauth-plugin.redb"
-oauth_aead_key_env = "CC_LB_MASTER_KEY"
+kind = "redb"
+path = "/tmp/cc-lb-oauth-plugin.redb"
+
+[aead]
+key_env = "CC_LB_MASTER_KEY"
 
 [signers.anthropic_oauth]
 issuer_base_url = "http://127.0.0.1:0"
