@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 
 use async_trait::async_trait;
-use cc_lb_pricing::virtual_cost_micros;
+use cc_lb_pricing::{virtual_cost_micros_full, UpstreamKind};
 use cc_lb_storage_api::{
     RequestEvent, RequestEventUpstream, StorageError, StorageResult, UsageRollup,
     UsageRollupResolution, UsageRollupRun, UsageRollupStore,
@@ -65,10 +65,22 @@ impl RollupDelta {
         self.latency_ms_min = min_option(self.latency_ms_min, Some(event.duration_ms));
         self.latency_ms_max = max_option(self.latency_ms_max, Some(event.duration_ms));
         if let Some(model) = event.model.as_deref() {
-            let estimate = virtual_cost_micros(
+            let upstream_kind = event.upstream.map(|u| match u {
+                RequestEventUpstream::AnthropicDirect | RequestEventUpstream::CustomAnthropicSpec => {
+                    UpstreamKind::AnthropicKey
+                }
+                RequestEventUpstream::BedrockRuntime | RequestEventUpstream::BedrockMantle => {
+                    UpstreamKind::AwsSigV4
+                }
+                RequestEventUpstream::Vertex => UpstreamKind::GcpOAuth,
+            });
+            let estimate = virtual_cost_micros_full(
                 model,
                 event.input_tokens.unwrap_or(0),
                 event.output_tokens.unwrap_or(0),
+                0,
+                0,
+                upstream_kind,
             );
             self.virtual_cost_micros = self
                 .virtual_cost_micros

@@ -1,1 +1,38 @@
-// Removed stale integration test after server/config API rebase.
+use std::process::Command;
+
+#[test]
+fn missing_aead_key_fatal() {
+    let dir = tempfile::tempdir().unwrap();
+    let storage_path = dir.path().join("missing-aead-key.redb");
+    let config_path = dir.path().join("cc-lb.toml");
+    std::fs::write(
+        &config_path,
+        format!(
+            r#"
+[storage]
+kind = "redb"
+path = "{}"
+
+[aead]
+key_env = "CC_LB_AEAD_KEY"
+"#,
+            storage_path.display()
+        ),
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_cc-lb"))
+        .args(["serve", "--config"])
+        .arg(&config_path)
+        .env_remove("CC_LB_MASTER_KEY")
+        .env_remove("CC_LB_AEAD_KEY")
+        .output()
+        .unwrap();
+
+    assert_eq!(output.status.code(), Some(2), "status={:?}", output.status);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("AEAD") || stderr.contains("master key"),
+        "stderr={stderr}"
+    );
+}
