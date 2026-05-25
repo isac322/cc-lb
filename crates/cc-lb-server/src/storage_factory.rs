@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::StorageConfig;
-use cc_lb_storage_api::{BackendKind, Storage, StorageError};
+use cc_lb_storage_api::{BackendKind, Storage};
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageFactoryError {
