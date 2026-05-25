@@ -82,14 +82,13 @@ pub async fn principal_key_usage(
         .div_ceil(step_ms)
         .max(1);
 
-    let events = storage.query_request_events_by_principal_in_range(
-        &principal_id,
-        range_start_ms,
-        range_end_ms,
-    )?;
+    let events = storage.query_request_events(range_start_ms, range_end_ms, usize::MAX)?;
 
     let mut aggregates: BTreeMap<u64, UsageSeries> = BTreeMap::new();
-    for event in events.into_iter().filter(|event| event.key_id == key_id) {
+    for event in events
+        .into_iter()
+        .filter(|event| event.principal_id == principal_id && event.key_id == key_id)
+    {
         let bucket_offset = event.ts_ms.saturating_sub(range_start_ms) / step_ms;
         let bucket_offset = bucket_offset.min(bucket_count - 1);
         let bucket_start_ms = range_start_ms.saturating_add(bucket_offset.saturating_mul(step_ms));

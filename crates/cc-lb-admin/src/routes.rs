@@ -20,7 +20,7 @@ use crate::{
 };
 
 #[derive(RustEmbed)]
-#[folder = "assets/"]
+#[folder = "web/dist/"]
 struct Assets;
 
 pub fn build_router(state: AdminState) -> Router {

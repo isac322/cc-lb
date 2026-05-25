@@ -2,13 +2,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aws_eventstream_codec::{decode_message, decode_messages, encode_message};
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_core::{SseBatchConfig, SseRelay, strip_hop_by_hop};
+use cc_lb_core::{strip_hop_by_hop, SseBatchConfig, SseRelay, StreamingUsage};
 use cc_lb_plugin_api::{
     DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext,
     ShapedRequest, ShapedRequestBuilder, Upstream, UpstreamDialect,
@@ -333,6 +333,7 @@ fn relay() -> SseRelay {
         },
         error_normalizer: None,
         upstream_kind: None,
+        streaming_usage: Arc::new(Mutex::new(StreamingUsage::default())),
     }
 }
 

@@ -2,7 +2,7 @@ use cc_lb_storage_redb::{
     Storage, StorageError, AUDIT_LOG_V1, CURRENT_SCHEMA_VERSION, KILLSWITCH_V1,
     OAUTH_CREDENTIALS_V1, REQUEST_EVENTS_V1, SCHEMA_VERSION_V1,
 };
-use redb::TableHandle;
+use redb::{ReadableDatabase, TableHandle};
 
 #[test]
 fn opening_empty_database_initializes_schema_v1() -> Result<(), Box<dyn std::error::Error>> {

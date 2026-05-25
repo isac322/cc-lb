@@ -44,6 +44,7 @@ cc-lb-dialect-bedrock = { path = "../cc-lb-dialect-bedrock" }
 cc-lb-dialect-vertex = { path = "../cc-lb-dialect-vertex" }
 cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
+cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-runtime-extism = { path = "../cc-lb-runtime-extism" }
 cc-lb-signer-anthropic-key = { path = "../cc-lb-signer-anthropic-key" }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }

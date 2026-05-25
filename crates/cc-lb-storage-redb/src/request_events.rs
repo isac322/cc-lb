@@ -1,25 +1,24 @@
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
-use crate::{RedbStorage, StorageError, REQUEST_EVENTS_V1};
+use crate::{Storage, StorageError, REQUEST_EVENTS_V1};
 
 const REQUEST_EVENT_SEQUENCE_SCALE: u64 = 1_000_000;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RequestEvent {
-    pub ts: u64,
-    pub request_id: String,
-    pub principal_id: Option<String>,
-    pub principal_kind: Option<String>,
-    pub upstream: Option<RequestEventUpstream>,
-    pub model: Option<String>,
-    pub status: u16,
-    pub input_tokens: Option<u64>,
-    pub output_tokens: Option<u64>,
+    pub ts_ms: u64,
+    pub principal_id: String,
+    pub key_id: String,
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
+    pub cost_usd_micros: i64,
     pub duration_ms: u64,
-    pub error_code: Option<String>,
+    pub status: u16,
 }
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestEventUpstream {
@@ -30,13 +29,13 @@ pub enum RequestEventUpstream {
     CustomAnthropicSpec,
 }
 
-impl RedbStorage {
+impl Storage {
     pub fn append_request_event(&self, event: &RequestEvent) -> Result<(), StorageError> {
         let payload = serde_json::to_vec(event)?;
         let write_txn = self.db.begin_write()?;
         {
             let mut table = write_txn.open_table(REQUEST_EVENTS_V1)?;
-            let key = next_request_event_key(&table, event.ts)?;
+            let key = next_request_event_key(&table, event.ts_ms)?;
             let encoded_key = key.to_be_bytes();
             table.insert(encoded_key.as_slice(), payload.as_slice())?;
         }
@@ -61,7 +60,7 @@ impl RedbStorage {
         for row in table.iter()? {
             let (_, value) = row?;
             let event: RequestEvent = serde_json::from_slice(value.value())?;
-            if event.ts < since || event.ts > until {
+            if event.ts_ms < since || event.ts_ms > until {
                 continue;
             }
             events.push(event);

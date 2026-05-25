@@ -1,13 +1,12 @@
 use std::fmt;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    AuthnError, AuthnOutcome, DialectError, Principal, PrincipalQuotas, RequestContext,
+    DialectError, Principal, RequestContext,
     RetryDecision, RouteDecision, RouteError, RouterPlugin, ShapedRequest, ShapedRequestBuilder,
     SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, Upstream,
     UpstreamDialect, UpstreamError,
@@ -18,61 +17,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use url::Url;
 
-use crate::{PluginCallError, PluginSlot, SignerFactoryResolver};
-
-#[derive(Clone)]
-pub(crate) struct ExtismAuthnPlugin {
-    slot: Arc<PluginSlot>,
-    signer_factory_resolver: Option<SignerFactoryResolver>,
-}
-
-impl ExtismAuthnPlugin {
-    pub(crate) fn new(
-        slot: Arc<PluginSlot>,
-        signer_factory_resolver: Option<SignerFactoryResolver>,
-    ) -> Self {
-        Self {
-            slot,
-            signer_factory_resolver,
-        }
-    }
-}
-
-#[async_trait]
-impl cc_lb_plugin_api::AuthnPlugin for ExtismAuthnPlugin {
-    async fn authenticate(&self, ctx: &RequestContext) -> Result<AuthnOutcome, AuthnError> {
-        let response = self
-            .slot
-            .call_value_async(
-                "authenticate",
-                json!({
-                    "_version": 1,
-                    "request": RequestContextWire::from(ctx),
-                }),
-            )
-            .await
-            .map_err(authn_runtime_error)?;
-        let response: AuthnResponse = parse_versioned(response).map_err(authn_runtime_message)?;
-        let signer_state = response.signer_state.unwrap_or(Value::Null);
-        let signer_factory = response
-            .signer_factory_ref
-            .as_deref()
-            .and_then(|factory_ref| {
-                self.signer_factory_resolver
-                    .as_ref()
-                    .and_then(|resolver| resolver(factory_ref, &response.principal, &signer_state))
-            })
-            .unwrap_or_else(|| {
-                Arc::new(ExtismSignerFactory::new(self.slot.clone(), signer_state))
-                    as Arc<dyn SignerFactory>
-            });
-        Ok(AuthnOutcome {
-            principal: response.principal,
-            signer_factory,
-            quotas: response.quotas.into(),
-        })
-    }
-}
+use crate::{PluginCallError, PluginSlot};
 
 #[derive(Clone)]
 pub(crate) struct ExtismRouterPlugin {
@@ -367,38 +312,6 @@ pub(crate) struct HeaderWire {
 }
 
 #[derive(Clone, Debug, Deserialize)]
-struct AuthnResponse {
-    principal: Principal,
-    quotas: PrincipalQuotasWire,
-    #[serde(default)]
-    signer_factory_ref: Option<String>,
-    #[serde(default)]
-    signer_state: Option<Value>,
-}
-
-#[derive(Clone, Debug, Deserialize)]
-struct PrincipalQuotasWire {
-    requests_per_window: u64,
-    input_tokens_per_window: u64,
-    output_tokens_per_window: u64,
-    window_ms: u64,
-    #[serde(default)]
-    allowed_models: Vec<String>,
-}
-
-impl From<PrincipalQuotasWire> for PrincipalQuotas {
-    fn from(value: PrincipalQuotasWire) -> Self {
-        Self {
-            requests_per_window: value.requests_per_window,
-            input_tokens_per_window: value.input_tokens_per_window,
-            output_tokens_per_window: value.output_tokens_per_window,
-            window: Duration::from_millis(value.window_ms),
-            allowed_models: value.allowed_models,
-        }
-    }
-}
-
-#[derive(Clone, Debug, Deserialize)]
 struct RouteResponse {
     upstream: Upstream,
     #[serde(default)]
@@ -567,18 +480,6 @@ impl fmt::Display for WireError {
 }
 
 impl std::error::Error for WireError {}
-
-fn authn_runtime_error(source: PluginCallError) -> AuthnError {
-    AuthnError::Runtime {
-        reason: source.to_string(),
-    }
-}
-
-fn authn_runtime_message(source: WireError) -> AuthnError {
-    AuthnError::Runtime {
-        reason: source.to_string(),
-    }
-}
 
 fn route_runtime_error(source: PluginCallError) -> RouteError {
     RouteError::Runtime {

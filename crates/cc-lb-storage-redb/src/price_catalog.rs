@@ -1,4 +1,5 @@
 use bincode::{config, serde as bincode_serde};
+use redb::ReadableDatabase;
 use serde::{Deserialize, Serialize};
 
 use crate::{Storage, StorageError, PRICE_CATALOG_V1};

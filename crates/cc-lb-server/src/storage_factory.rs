@@ -43,18 +43,10 @@ pub async fn probe_postgres_connection(url: &str) -> Result<(), StorageFactoryEr
     probe_postgres_connection_impl(url).await
 }
 
-async fn open_redb(path: &Path) -> Result<Arc<dyn Storage>, StorageFactoryError> {
-    let storage = cc_lb_storage_redb::RedbStorage::open(path).map_err(|error| {
-        StorageFactoryError::ConnectionFailed {
-            message: error.to_string(),
-        }
-    })?;
-    let storage: Arc<dyn Storage> = Arc::new(storage);
-    storage
-        .initialize(BackendKind::Redb)
-        .await
-        .map_err(|error| map_init_error(error, BackendKind::Redb))?;
-    Ok(storage)
+async fn open_redb(_path: &Path) -> Result<Arc<dyn Storage>, StorageFactoryError> {
+    Err(StorageFactoryError::FeatureDisabled {
+        backend: "redb-storage-api".to_owned(),
+    })
 }
 
 #[cfg(not(feature = "postgres"))]

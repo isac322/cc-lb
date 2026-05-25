@@ -1,4 +1,6 @@
 pub mod auth;
+mod oauth_pkce;
+mod credential_crypto;
 pub mod management;
 pub mod oauth;
 pub mod principals;
@@ -8,6 +10,7 @@ use arc_swap::ArcSwap;
 use std::sync::Arc;
 
 use axum::Router;
+use cc_lb_aead::AeadService;
 use cc_lb_config::Config;
 use cc_lb_core::{
     api_keys::{limit_engine::LimitEngine, principal_view::PrincipalView},
@@ -18,6 +21,7 @@ use cc_lb_storage_redb::Storage;
 #[derive(Clone)]
 pub struct AdminState {
     pub storage: Option<Arc<Storage>>,
+    pub aead: Arc<AeadService>,
     pub limit_engine: Arc<LimitEngine>,
     pub lifecycle: Option<Arc<Lifecycle>>,
     pub audit_sink: Option<Arc<AuditWriterSink>>,

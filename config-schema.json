@@ -9,6 +9,12 @@
         "token_env": "CC_LB_ADMIN_TOKEN"
       }
     },
+    "aead": {
+      "$ref": "#/$defs/AeadConfig",
+      "default": {
+        "key_env": "CC_LB_MASTER_KEY"
+      }
+    },
     "api_keys": {
       "$ref": "#/$defs/ApiKeysConfig",
       "default": {
@@ -106,7 +112,8 @@
     "storage": {
       "$ref": "#/$defs/StorageConfig",
       "default": {
-        "oauth_aead_key_env": "CC_LB_MASTER_KEY"
+        "kind": "redb",
+        "path": "/var/lib/cc-lb/storage.redb"
       }
     },
     "timeouts": {
@@ -144,6 +151,15 @@
         "token_env": {
           "type": "string",
           "default": "CC_LB_ADMIN_TOKEN"
+        }
+      }
+    },
+    "AeadConfig": {
+      "type": "object",
+      "properties": {
+        "key_env": {
+          "type": "string",
+          "default": "CC_LB_MASTER_KEY"
         }
       }
     },
@@ -523,6 +539,45 @@
         }
       }
     },
+    "PostgresPoolConfig": {
+      "type": "object",
+      "properties": {
+        "acquire_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 5,
+          "minimum": 0
+        },
+        "idle_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 600,
+          "minimum": 0
+        },
+        "max_connections": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 10,
+          "minimum": 0
+        },
+        "min_connections": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 0,
+          "minimum": 0
+        },
+        "sslmode": {
+          "type": "string",
+          "default": "prefer"
+        },
+        "statement_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        }
+      }
+    },
     "PriceCatalogConfig": {
       "type": "object",
       "properties": {
@@ -600,19 +655,51 @@
       }
     },
     "StorageConfig": {
-      "type": "object",
-      "properties": {
-        "oauth_aead_key_env": {
-          "type": "string",
-          "default": "CC_LB_MASTER_KEY"
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "redb"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
+          ]
         },
-        "redb_path": {
-          "type": [
-            "string",
-            "null"
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "postgres"
+            },
+            "pool": {
+              "$ref": "#/$defs/PostgresPoolConfig",
+              "default": {
+                "acquire_timeout_secs": 5,
+                "idle_timeout_secs": 600,
+                "max_connections": 10,
+                "min_connections": 0,
+                "sslmode": "prefer",
+                "statement_timeout_secs": 30
+              }
+            },
+            "url": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "url"
           ]
         }
-      }
+      ]
     },
     "TimeoutsConfig": {
       "type": "object",

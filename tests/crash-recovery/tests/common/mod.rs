@@ -17,7 +17,7 @@ use cc_lb_storage_redb::{
     PrincipalKindLite, Storage, UpstreamKind, API_KEYS_V1, AUDIT_LOG_V1, CURRENT_SCHEMA_VERSION,
     KEY_INDEX_BY_HASH_V1, OAUTH_CREDENTIALS_V1,
 };
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 
 pub type TestResult = Result<(), Box<dyn std::error::Error>>;
 
@@ -283,13 +283,13 @@ fn child_key_revoke(path: &Path, control_dir: &Path, iteration: usize) -> TestRe
 }
 
 fn child_price_catalog(path: &Path) -> TestResult {
-    env::remove_var(PRICE_CATALOG_SENTINEL_ENV);
+    unsafe { env::remove_var(PRICE_CATALOG_SENTINEL_ENV) };
     let storage = Storage::open(path, MASTER_KEY)?;
     storage.set_killswitch_enabled(true)?;
     storage.put_price_snapshot(OLD_PRICE_JSON, OLD_PRICE_FETCHED_AT_MS)?;
     fs::write(price_cache_path(path), OLD_PRICE_JSON)?;
 
-    env::set_var(PRICE_CATALOG_SENTINEL_ENV, "1");
+    unsafe { env::set_var(PRICE_CATALOG_SENTINEL_ENV, "1") };
     storage.put_price_snapshot(NEW_PRICE_JSON, NEW_PRICE_FETCHED_AT_MS)?;
     Ok(())
 }

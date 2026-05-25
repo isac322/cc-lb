@@ -6,6 +6,7 @@ mod bulkhead;
 mod circuit_breaker;
 mod clock;
 mod dns_cache;
+mod drain;
 mod error_format;
 mod error_normalizer;
 mod hop_by_hop;
@@ -26,6 +27,7 @@ pub use circuit_breaker::{
 pub use clock::{Clock, MockClock, SystemClock};
 #[doc(hidden)]
 pub use dns_cache::make_resolver_with_factory;
+pub use drain::{proxy_drain_middleware, DrainController};
 pub use dns_cache::{
     make_resolver, CachingDnsConnector, DnsCacheError, DnsResolveFuture, DnsResolver,
     DnsResolverConfig,
