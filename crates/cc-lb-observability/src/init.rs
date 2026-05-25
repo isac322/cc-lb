@@ -89,7 +89,7 @@ pub struct MetricDefinition {
     pub description: &'static str,
 }
 
-const METRIC_DEFINITIONS: [MetricDefinition; 29] = [
+const METRIC_DEFINITIONS: [MetricDefinition; 31] = [
     MetricDefinition {
         name: "cc_lb_requests_total",
         kind: MetricKind::Counter,
@@ -164,6 +164,16 @@ const METRIC_DEFINITIONS: [MetricDefinition; 29] = [
         name: "cc_lb_extism_call_duration_seconds",
         kind: MetricKind::Histogram,
         description: "Extism plugin hook call duration in seconds.",
+    },
+    MetricDefinition {
+        name: "cc_lb_tokens_total",
+        kind: MetricKind::Counter,
+        description: "Tokens observed from upstream responses by principal, upstream, model, and direction (input/output).",
+    },
+    MetricDefinition {
+        name: "cc_lb_virtual_cost_usd_total",
+        kind: MetricKind::Counter,
+        description: "Virtual cost in micro-USD attributed to proxied responses by principal, upstream, and model.",
     },
     PROMETHEUS14_METRIC_DEFINITIONS[0],
     PROMETHEUS14_METRIC_DEFINITIONS[1],
@@ -310,6 +320,16 @@ pub fn register_metrics() {
         Unit::Seconds,
         "Extism plugin hook call duration in seconds."
     );
+    metrics::describe_counter!(
+        "cc_lb_tokens_total",
+        Unit::Count,
+        "Tokens observed from upstream responses by principal, upstream, model, and direction (input/output)."
+    );
+    metrics::describe_counter!(
+        "cc_lb_virtual_cost_usd_total",
+        Unit::Count,
+        "Virtual cost in micro-USD attributed to proxied responses by principal, upstream, and model."
+    );
     register_prometheus14_metrics();
 
     touch_metrics();
@@ -406,5 +426,28 @@ fn touch_metrics() {
         "hook" => "unknown"
     )
     .record(0.0);
+    metrics::counter!(
+        "cc_lb_tokens_total",
+        "principal" => "unknown",
+        "upstream" => "unknown",
+        "model" => "unknown",
+        "direction" => "input"
+    )
+    .increment(0);
+    metrics::counter!(
+        "cc_lb_tokens_total",
+        "principal" => "unknown",
+        "upstream" => "unknown",
+        "model" => "unknown",
+        "direction" => "output"
+    )
+    .increment(0);
+    metrics::counter!(
+        "cc_lb_virtual_cost_usd_total",
+        "principal" => "unknown",
+        "upstream" => "unknown",
+        "model" => "unknown"
+    )
+    .increment(0);
     touch_prometheus14_metric_handles();
 }

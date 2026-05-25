@@ -92,15 +92,6 @@ async fn open_redb(
     path: &Path,
     master_key: [u8; 32],
 ) -> Result<StorageBackend, StorageFactoryError> {
-    if !path.exists() {
-        std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(path)
-            .map_err(|error| StorageFactoryError::InitFailed {
-                message: error.to_string(),
-            })?;
-    }
     let storage =
         cc_lb_storage_redb::Storage::open(path, master_key).map_err(map_redb_open_error)?;
     storage

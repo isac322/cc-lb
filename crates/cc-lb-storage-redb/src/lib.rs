@@ -12,7 +12,7 @@ mod usage_rollups;
 use std::path::Path;
 use std::sync::Arc;
 
-use redb::{Database, ReadableDatabase, TableDefinition};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use thiserror::Error;
 
 pub use audit::AuditEntry;
@@ -50,6 +50,7 @@ pub const CONFIG_HISTORY_V1: TableDefinition<u64, &[u8]> =
 
 pub(crate) const SCHEMA_VERSION_KEY: &str = "version";
 pub(crate) const KILLSWITCH_KEY: &str = "enabled";
+pub(crate) const BACKEND_KIND_KEY: &str = "backend_kind";
 
 #[derive(Clone)]
 pub struct Storage {
@@ -177,17 +178,46 @@ impl Storage {
         &self,
         requested: cc_lb_storage_api::BackendKind,
     ) -> Result<(), StorageError> {
-        match requested {
-            cc_lb_storage_api::BackendKind::Redb => Ok(()),
-            other => Err(StorageError::BackendKindMismatch {
-                stored: cc_lb_storage_api::BackendKind::Redb,
-                configured: other,
-            }),
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(META_BACKEND_KIND_V1)?;
+            let stored = table
+                .get(BACKEND_KIND_KEY)?
+                .map(|value| value.value().to_owned());
+            match stored {
+                Some(value) => {
+                    let stored_kind = parse_backend_kind(&value)?;
+                    if stored_kind != requested {
+                        return Err(StorageError::BackendKindMismatch {
+                            stored: stored_kind,
+                            configured: requested,
+                        });
+                    }
+                }
+                None => {
+                    table.insert(BACKEND_KIND_KEY, requested.as_str())?;
+                }
+            }
         }
+        write_txn.commit()?;
+        Ok(())
     }
 
     pub fn backend_kind(&self) -> Result<cc_lb_storage_api::BackendKind, StorageError> {
-        Ok(cc_lb_storage_api::BackendKind::Redb)
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(META_BACKEND_KIND_V1)?;
+        match table.get(BACKEND_KIND_KEY)? {
+            Some(value) => parse_backend_kind(value.value()),
+            None => Ok(cc_lb_storage_api::BackendKind::Redb),
+        }
+    }
+}
+
+fn parse_backend_kind(value: &str) -> Result<cc_lb_storage_api::BackendKind, StorageError> {
+    match value {
+        "redb" => Ok(cc_lb_storage_api::BackendKind::Redb),
+        "postgres" => Ok(cc_lb_storage_api::BackendKind::Postgres),
+        other => Err(StorageError::InvalidBackendKind(other.to_owned())),
     }
 }
 

@@ -305,7 +305,7 @@ impl Lifecycle {
         });
 
         let success = match (
-            self.authn.authenticate_none_mode(),
+            self.authn.authenticate_none_mode(&ctx.downstream_headers),
             self.authn.authenticate(&ctx.downstream_headers),
         ) {
             (Some(success), _) => success,
@@ -1059,6 +1059,30 @@ fn record_api_key_usage_metrics(
         )
         .increment(cost_micros);
     }
+
+    metrics::counter!(
+        "cc_lb_tokens_total",
+        "principal" => context.principal_id.clone(),
+        "upstream" => context.upstream_kind,
+        "model" => context.model.clone(),
+        "direction" => "input"
+    )
+    .increment(usage.input_tokens);
+    metrics::counter!(
+        "cc_lb_tokens_total",
+        "principal" => context.principal_id.clone(),
+        "upstream" => context.upstream_kind,
+        "model" => context.model.clone(),
+        "direction" => "output"
+    )
+    .increment(usage.output_tokens);
+    metrics::counter!(
+        "cc_lb_virtual_cost_usd_total",
+        "principal" => context.principal_id.clone(),
+        "upstream" => context.upstream_kind,
+        "model" => context.model.clone()
+    )
+    .increment(cost_micros);
 }
 
 fn increment_token_metric(key_id: &str, kind: &'static str, value: u64) {

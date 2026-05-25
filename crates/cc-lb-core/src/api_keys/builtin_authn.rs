@@ -137,7 +137,7 @@ impl BuiltinAuthn {
         })
     }
 
-    pub fn authenticate_none_mode(&self) -> Option<AuthnSuccess> {
+    pub fn authenticate_none_mode(&self, headers: &http::HeaderMap) -> Option<AuthnSuccess> {
         if self.mode != DownstreamAuthMode::None {
             return None;
         }
@@ -153,6 +153,12 @@ impl BuiltinAuthn {
             ..Default::default()
         };
 
+        let api_key = headers
+            .get("x-api-key")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .map(|value| value.to_owned());
+
         Some(AuthnSuccess {
             principal_id: none_mode.principal_id.clone(),
             key_id: "none-mode".to_owned(),
@@ -160,7 +166,7 @@ impl BuiltinAuthn {
             upstream_credential_ref: record.upstream_credential_ref.clone(),
             record,
             last_4: String::new(),
-            api_key: None,
+            api_key,
         })
     }
 }

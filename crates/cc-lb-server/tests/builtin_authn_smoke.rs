@@ -208,7 +208,7 @@ fn mode_none_returns_authn_success_from_none_mode() -> Result<(), Box<dyn std::e
     );
 
     let success = authn
-        .authenticate_none_mode()
+        .authenticate_none_mode(&http::HeaderMap::new())
         .expect("none mode should authenticate");
 
     assert_eq!(success.principal_id, "anon");

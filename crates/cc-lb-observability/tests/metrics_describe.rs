@@ -28,6 +28,8 @@ fn describes_all_required_metrics() {
             "cc_lb_tls_reload_total",
             "cc_lb_sse_events_total",
             "cc_lb_extism_call_duration_seconds",
+            "cc_lb_tokens_total",
+            "cc_lb_virtual_cost_usd_total",
             "cclb_api_key_requests_total",
             "cclb_api_key_tokens_total",
             "cclb_api_key_cost_usd_micro_total",
@@ -45,7 +47,7 @@ fn describes_all_required_metrics() {
         ]
     );
 
-    assert_eq!(definitions.len(), 29);
+    assert_eq!(definitions.len(), 31);
     assert_eq!(definitions[0].kind, MetricKind::Counter);
     assert_eq!(definitions[1].kind, MetricKind::Histogram);
     assert_eq!(definitions[3].kind, MetricKind::Gauge);
