@@ -3,7 +3,10 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::{Config, ConfigError, DEFAULT_REDB_PATH, DownstreamAuthMode, PluginRef, StorageConfig, UpstreamKind};
+use crate::{
+    Config, ConfigError, DEFAULT_REDB_PATH, DownstreamAuthMode, PluginRef, StorageConfig,
+    UpstreamKind,
+};
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 #[error("{field}: {message}")]

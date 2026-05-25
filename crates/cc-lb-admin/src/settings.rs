@@ -496,9 +496,7 @@ fn history_summary(config: &Config) -> HistorySummary {
 }
 
 fn plugin_count(config: &Config) -> usize {
-    usize::from(config.plugins.authn_plugin.is_some())
-        + usize::from(config.plugins.router_plugin.is_some())
-        + config.plugins.observability_hooks.len()
+    usize::from(config.plugins.router_plugin.is_some()) + config.plugins.observability_hooks.len()
 }
 
 fn history_item(entry: HistoryEntry) -> ConfigHistoryItem {

@@ -1,44 +1,22 @@
+use async_trait::async_trait;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    AuthnError, AuthnOutcome, AuthnPlugin, DialectError, ObservabilityError, ObservabilityHook,
-    ObserveEvent, PluginManifest, PluginRuntime, Principal, PrincipalKind, PrincipalQuotas,
+    DialectError, ObservabilityError, ObservabilityHook,
+    ObserveEvent, PluginManifest, PluginRuntime, Principal,
     RequestContext, RetryDecision, RouteDecision, RouteError, RouterPlugin, ShapedRequest,
     ShapedRequestBuilder, SignedRequest, Signer, SignerError, SignerFactory, SigningCapability,
     Upstream, UpstreamDialect,
 };
 use http::{HeaderMap, Method, StatusCode};
 
-struct DummyAuthn;
 struct DummyRouter;
 struct DummyDialect;
 struct DummySigner;
 struct DummyFactory;
 struct DummyObserve;
 struct DummyRuntime;
-
-#[async_trait]
-impl AuthnPlugin for DummyAuthn {
-    async fn authenticate(&self, _ctx: &RequestContext) -> Result<AuthnOutcome, AuthnError> {
-        Ok(AuthnOutcome {
-            principal: Principal {
-                id: "alice".to_owned(),
-                kind: PrincipalKind::ApiKey,
-                claims: serde_json::Map::new(),
-            },
-            signer_factory: Arc::new(DummyFactory),
-            quotas: PrincipalQuotas {
-                requests_per_window: 1,
-                input_tokens_per_window: 1,
-                output_tokens_per_window: 1,
-                window: std::time::Duration::from_secs(1),
-                allowed_models: Vec::new(),
-            },
-        })
-    }
-}
 
 impl RouterPlugin for DummyRouter {
     fn route(
@@ -103,13 +81,6 @@ impl ObservabilityHook for DummyObserve {
 }
 
 impl PluginRuntime for DummyRuntime {
-    fn instantiate(
-        &self,
-        _manifest: &PluginManifest,
-    ) -> Result<Arc<dyn AuthnPlugin>, cc_lb_plugin_api::RuntimeError> {
-        Ok(Arc::new(DummyAuthn))
-    }
-
     fn instantiate_router(
         &self,
         _manifest: &PluginManifest,
@@ -141,7 +112,6 @@ impl PluginRuntime for DummyRuntime {
 
 #[test]
 fn all_traits_are_object_safe() {
-    let _: Box<dyn AuthnPlugin> = Box::new(DummyAuthn);
     let _: Box<dyn RouterPlugin> = Box::new(DummyRouter);
     let _: Box<dyn UpstreamDialect> = Box::new(DummyDialect);
     let _: Box<dyn Signer> = Box::new(DummySigner);

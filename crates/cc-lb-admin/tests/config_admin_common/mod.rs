@@ -55,7 +55,7 @@ pub fn test_state(config: Config, storage: Option<Arc<RedbStorage>>) -> AdminSta
     AdminState {
         storage: storage.unwrap_or_else(test_storage),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        quota_manager: None,
+
         lifecycle: None,
         breaker_registry: None,
         drain_controller: None,
@@ -85,7 +85,7 @@ pub fn apply_state(
     AdminState {
         storage,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        quota_manager: None,
+
         lifecycle: None,
         breaker_registry: None,
         drain_controller: None,

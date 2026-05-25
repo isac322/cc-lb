@@ -6,6 +6,7 @@ use cc_lb_storage_redb::{
     api_key_storage_key, ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind,
     PrincipalKindLite, Storage, StoredApiKeyRecord, UpstreamKind, API_KEYS_V1,
 };
+use redb::ReadableDatabase;
 use serde::{Deserialize, Serialize};
 
 #[test]

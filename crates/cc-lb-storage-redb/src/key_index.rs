@@ -1,3 +1,5 @@
+use redb::ReadableDatabase;
+
 use crate::{Storage, StorageError, KEY_INDEX_BY_HASH_V1};
 
 impl Storage {

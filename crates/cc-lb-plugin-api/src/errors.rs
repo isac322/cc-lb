@@ -4,7 +4,7 @@ use thiserror::Error;
 
 use crate::types::AuthStrategy;
 
-/// Authentication failures returned by [`crate::AuthnPlugin`].
+/// Authentication failures returned by authentication code.
 #[derive(Debug, Error)]
 pub enum AuthnError {
     /// Credentials were missing or malformed.

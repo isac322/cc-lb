@@ -505,11 +505,13 @@ fn write_config(
     cert_path: &Path,
     key_path: &Path,
 ) {
-    std::env::set_var(
-        "CC_LB_MASTER_KEY",
-        "0000000000000000000000000000000000000000000000000000000000000000",
-    );
-    std::env::set_var("CC_LB_ADMIN_TOKEN", "admin-token");
+    unsafe {
+        std::env::set_var(
+            "CC_LB_MASTER_KEY",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        std::env::set_var("CC_LB_ADMIN_TOKEN", "admin-token");
+    }
     let storage_path = path.with_file_name("cc-lb.redb");
     let storage_path = storage_path.display();
     let config = format!(

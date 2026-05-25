@@ -1,6 +1,6 @@
 use bincode::config::standard;
 use bincode::serde::{decode_from_slice, encode_to_vec};
-use redb::ReadableTable;
+use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
 use crate::{Storage, StorageError, AUDIT_LOG_V1};

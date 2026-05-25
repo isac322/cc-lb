@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use redb::{Database, ReadableTable};
+use redb::{Database, ReadableDatabase, ReadableTable};
 
 use crate::{
     StorageError, API_KEYS_V1, AUDIT_LOG_V1, CURRENT_SCHEMA_VERSION, KEY_INDEX_BY_HASH_V1,

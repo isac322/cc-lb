@@ -6,7 +6,7 @@ use axum::{
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use cc_lb_storage_api::StorageError;
+use cc_lb_storage_redb::{OAuthCredentials as RedbOAuthCredentials, StorageError};
 use oauth2::{AuthUrl, ClientId, TokenUrl};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -14,7 +14,6 @@ use std::sync::Arc;
 use url::Url;
 
 use crate::AdminState;
-use crate::credential_crypto::{encrypt_json, oauth_aad};
 use crate::oauth_pkce::{
     HyperOAuthHttpClient, PkceHandshakeState, complete_pkce_flow, start_pkce_flow,
 };
@@ -103,20 +102,16 @@ pub async fn complete_oauth(
         Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
     };
 
-    let aad = oauth_aad(&state_token.principal_id, &state_token.provider);
-    let ciphertext = match encrypt_json(state.aead.as_ref(), &creds, &aad) {
-        Ok(ciphertext) => ciphertext,
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    let Some(storage) = state.storage.as_ref() else {
+        return StatusCode::NOT_IMPLEMENTED.into_response();
     };
-    match state
-        .storage
-        .put_oauth_ciphertext(
-            &state_token.principal_id,
-            &state_token.provider,
-            &ciphertext,
-        )
-        .await
-    {
+    let creds = RedbOAuthCredentials {
+        access_token: creds.access_token,
+        refresh_token: creds.refresh_token,
+        expires_at: creds.expires_at,
+        scopes: creds.scopes,
+    };
+    match storage.put_oauth(&state_token.principal_id, &state_token.provider, &creds) {
         Ok(()) => Json(json!({ "status": "ok" })).into_response(),
         Err(error) => {
             tracing::error!(error = %error, "admin oauth storage operation failed");
@@ -145,11 +140,10 @@ pub async fn oauth_status(
         if !matches_provider {
             continue;
         }
-        match state
-            .storage
-            .get_oauth_ciphertext(principal_id, &oauth_credential_id)
-            .await
-        {
+        let Some(storage) = state.storage.as_ref() else {
+            return StatusCode::NOT_IMPLEMENTED.into_response();
+        };
+        match storage.get_oauth(principal_id, &oauth_credential_id) {
             Ok(Some(_)) => return Json(json!({ "enrolled": true })).into_response(),
             Ok(None) => {}
             Err(error) => {
@@ -164,7 +158,7 @@ pub async fn oauth_status(
 
 fn storage_error_response(error: &StorageError) -> Response {
     match error {
-        StorageError::Unavailable { .. } => (
+        StorageError::RedbStorage(_) => (
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::RETRY_AFTER, "1")],
             Json(json!({ "error": "storage_error" })),

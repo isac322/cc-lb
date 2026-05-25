@@ -17,12 +17,13 @@ use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
 use axum::Json;
 use axum::Router;
+use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DownstreamAuthMode, PluginRef, TlsConfig};
 use cc_lb_core::BreakerState;
 use cc_lb_core::{
     api_keys::{
-        concurrent_guard::KeyConcurrencyManager, key_store::KeyStore, limit_engine::LimitEngine,
-        principal_view::PrincipalView,
+        builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
+        limit_engine::LimitEngine, principal_view::PrincipalView,
     },
     make_default_dispatcher, spawn_audit_writer,
     usage_pruner::UsagePruner,
@@ -44,9 +45,7 @@ use tokio::task::{JoinError, JoinHandle};
 use tower::ServiceBuilder;
 
 use crate::build_meta::BuildMeta;
-use crate::builtins::{
-    self, BuiltinAuthn, BuiltinRouter, CompositeSignerFactory, NoopObservabilityHook,
-};
+use crate::builtins::{self, BuiltinRouter, CompositeSignerFactory, NoopObservabilityHook};
 use crate::drain::DrainController;
 use crate::preflight::{self, PreflightOptions};
 use crate::reload::ConfigWatcher;
@@ -179,7 +178,7 @@ pub fn build_app(config: Config) -> Result<App, BuildError> {
 
 pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result<App, BuildError> {
     config.validate().map_err(cc_lb_config::ConfigError::from)?;
-    let storage = open_storage(&config)?;
+    let (storage, aead) = open_storage(&config)?;
     if matches!(config.downstream_auth.mode, DownstreamAuthMode::ApiKey) && storage.is_none() {
         return Err(BuildError::StorageRequired);
     }
@@ -218,7 +217,7 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
     let runtime = ExtismRuntime::new();
     let authn = builtin_authn.clone().ok_or(BuildError::StorageRequired)?;
     let signer_factory_for_lifecycle =
-        Arc::new(CompositeSignerFactory::new(&config, storage.clone()));
+        Arc::new(CompositeSignerFactory::new(&config, storage.clone(), aead.clone()));
     let router_plugin = match &config.plugins.router_plugin {
         Some(plugin) => runtime.instantiate_router(&manifest_from_plugin(plugin)?)?,
         None => Arc::new(BuiltinRouter::new(&config)?),
@@ -288,6 +287,7 @@ pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result
     };
     let admin_state = AdminState {
         storage: storage.clone(),
+        aead: aead.clone(),
         limit_engine: limit_engine.clone(),
         lifecycle: Some(lifecycle.clone()),
         audit_sink: audit_sink.clone(),
@@ -601,17 +601,17 @@ fn init_observability(config: &mut Config) -> Result<TracingGuard, BuildError> {
     .map_err(BuildError::from)
 }
 
-fn open_storage(config: &Config) -> Result<Option<Arc<Storage>>, BuildError> {
-    let Some(path) = &config.storage.redb_path else {
-        return Ok(None);
-    };
-    let key_hex = std::env::var(&config.storage.oauth_aead_key_env).map_err(|_| {
-        BuildError::StorageKeyMissing {
-            env: config.storage.oauth_aead_key_env.clone(),
-        }
+fn open_storage(config: &Config) -> Result<(Option<Arc<Storage>>, Arc<AeadService>), BuildError> {
+    let key_hex = std::env::var(&config.aead.key_env).map_err(|_| BuildError::StorageKeyMissing {
+        env: config.aead.key_env.clone(),
     })?;
     let key = decode_hex_key(&key_hex)?;
-    Ok(Some(Arc::new(Storage::open(path, key)?)))
+    let aead = Arc::new(AeadService::from_master_key(key));
+    let storage = match &config.storage {
+        cc_lb_config::StorageConfig::Redb { path } => Some(Arc::new(Storage::open(path, key)?)),
+        cc_lb_config::StorageConfig::Postgres { .. } => None,
+    };
+    Ok((storage, aead))
 }
 
 fn decode_hex_key(value: &str) -> Result<[u8; 32], BuildError> {

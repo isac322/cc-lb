@@ -18,12 +18,13 @@ pub use types::{
     BulkheadConfig, CircuitBreakerConfig, Config, ConfigOverrides, DnsConfig, DownstreamAuthConfig,
     DownstreamAuthMode, EgressConfig, Limit, LimitKind, ListenerConfig, ListenerOverrides,
     NoneModeConfig, NoneModeUpstreamKind, ObservabilityConfig, PluginRef, PluginsConfig,
-    PriceCatalogConfig, PrincipalSpec, PrincipalType, SignersConfig, StorageConfig, TimeoutsConfig,
-    TlsConfig, UpstreamKind, UpstreamSpec, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_FILES_CAP_BYTES,
-    DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV,
+    PostgresPoolConfig, PriceCatalogConfig, PrincipalSpec, PrincipalType, SignersConfig,
+    StorageConfig, TimeoutsConfig, TlsConfig, UpstreamKind, UpstreamSpec, DEFAULT_ADMIN_TOKEN_ENV,
+    DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV,
+    DEFAULT_REDB_PATH,
     DEFAULT_PLUGIN_BATCHED_EVENTS_PER_FLUSH, DEFAULT_PLUGIN_BATCHED_FLUSH_MS,
 };
-pub use validation::ValidationError;
+pub use validation::{validate_postgres_url, ValidationError};
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -31,6 +32,10 @@ pub enum ConfigError {
     Figment(#[source] Box<figment::Error>),
     #[error(transparent)]
     Validation(#[from] ValidationError),
+    #[error("invalid postgres URL: {message}")]
+    InvalidPostgresUrl { message: String },
+    #[error("postgres statement timeout {statement}s must be less than request timeout {request}s")]
+    StatementTimeoutExceedsRequestTimeout { statement: u64, request: u64 },
 }
 
 impl From<figment::Error> for ConfigError {
@@ -63,7 +68,7 @@ impl Config {
         Ok(config)
     }
 
-    pub fn validate(&self) -> Result<(), ValidationError> {
+    pub fn validate(&self) -> Result<(), ConfigError> {
         validation::validate_config(self)
     }
 
