@@ -18,7 +18,7 @@ async fn prune_old_request_events() -> Result<(), Box<dyn std::error::Error>> {
 
     assert!(result.request_events_removed >= 5);
     let remaining =
-        storage.query_request_events_by_principal_in_range("principal-1", 0, u64::MAX)?;
+        storage.query_request_events(0, u64::MAX, 100)?;
     assert_eq!(remaining.len(), 0);
     Ok(())
 }
@@ -34,7 +34,7 @@ async fn retention_zero_is_no_op() -> Result<(), Box<dyn std::error::Error>> {
 
     assert_eq!(result, PruneResult::default());
     let remaining =
-        storage.query_request_events_by_principal_in_range("principal-1", 0, u64::MAX)?;
+        storage.query_request_events(0, u64::MAX, 100)?;
     assert_eq!(remaining.len(), 5);
     Ok(())
 }
@@ -49,7 +49,7 @@ async fn recent_rows_preserved() -> Result<(), Box<dyn std::error::Error>> {
 
     assert_eq!(result.request_events_removed, 0);
     let remaining =
-        storage.query_request_events_by_principal_in_range("principal-1", 0, u64::MAX)?;
+        storage.query_request_events(0, u64::MAX, 100)?;
     assert_eq!(remaining.len(), 5);
     Ok(())
 }
