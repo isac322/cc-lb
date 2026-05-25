@@ -1,0 +1,76 @@
+# Local dev config for cc-lb against dockerized postgres + fake-anthropic upstream.
+# Brought up by the RustRover run configurations in this directory.
+# Docker container: `cc-lb-postgres` (postgres:17-alpine on 127.0.0.1:5432)
+
+[listener]
+proxy_addr = "127.0.0.1:8080"
+admin_addr = "127.0.0.1:9090"
+metrics_addr = "127.0.0.1:9091"
+
+[body]
+messages_cap_bytes = 33554432
+files_cap_bytes = 104857600
+
+[timeouts]
+request_header_secs = 10
+request_body_chunk_secs = 30
+idle_secs = 300
+upstream_total_secs = 600
+drain_secs = 60
+
+# Smoke upstream — paired with the `fake-anthropic (smoke upstream)` run configuration.
+[upstreams.fake_anthropic]
+kind = "custom"
+base_url = "http://127.0.0.1:9080"
+auth_strategy = "api_key"
+
+[principals.api-key]
+allowed_models = ["*"]
+
+[plugins]
+observability_hooks = []
+
+# Tagged storage format — needs `--features postgres` on the cc-lb-server build.
+# Schema (0001..0012) is auto-applied on startup via sqlx::migrate!.
+[storage]
+kind = "postgres"
+url = "postgres://cclb:cclb@127.0.0.1:5432/cclb"
+
+[storage.pool]
+max_connections = 10
+acquire_timeout_secs = 10
+statement_timeout_secs = 25
+sslmode = "disable"
+
+# AEAD master key — separate section in the tagged storage format.
+[aead]
+key_env = "CC_LB_MASTER_KEY"
+
+[observability]
+tracing_level = "info"
+log_redaction = true
+user_prompt_redaction = false
+
+[quotas]
+default_window_secs = 60
+default_requests_per_window = 1000
+default_input_tokens = 1000000
+default_output_tokens = 1000000
+
+[admin]
+token_env = "CC_LB_ADMIN_TOKEN"
+
+[circuit_breaker]
+failures_to_open = 5
+window_secs = 10
+half_open_after_secs = 30
+
+[bulkhead]
+max_conns_per_upstream = 50
+semaphore_per_upstream = 100
+
+[dns]
+cache_ttl_floor_secs = 30
+cache_ttl_ceiling_secs = 300
+
+[egress]
