@@ -10,7 +10,7 @@ use axum::http::{HeaderMap, Method, Request, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::any;
 use cc_lb_config::{AuthStrategy, Config, UpstreamKind, UpstreamSpec};
-use cc_lb_server::app::build_app_with_path;
+use cc_lb_server::app::build_app_for_testing;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use serde_json::Value;
 use tokio::net::TcpListener;
@@ -46,7 +46,7 @@ impl UpstreamState {
 #[tokio::test]
 async fn forwards_selected_headers_to_fake_anthropic() {
     let (upstream_addr, _upstream) = spawn_fake_anthropic().await;
-    let app = build_app_with_path(config_for_upstream(upstream_addr), None).expect("build app");
+    let app = build_app_for_testing(config_for_upstream(upstream_addr)).expect("build app");
 
     let response = app
         .router
@@ -88,7 +88,7 @@ async fn forwards_selected_headers_to_fake_anthropic() {
 #[tokio::test]
 async fn strips_connection_before_upstream_forwarding() {
     let (upstream_addr, upstream_state, _upstream) = spawn_recording_upstream().await;
-    let app = build_app_with_path(config_for_upstream(upstream_addr), None).expect("build app");
+    let app = build_app_for_testing(config_for_upstream(upstream_addr)).expect("build app");
 
     let response = app
         .router

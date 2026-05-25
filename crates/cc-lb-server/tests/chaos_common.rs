@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use cc_lb_config::{AuthStrategy, Config, UpstreamKind, UpstreamSpec};
-use cc_lb_server::app::build_app_with_path;
+use cc_lb_server::app::build_app_for_testing;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -28,7 +28,7 @@ pub async fn start_router(fake_config: AppConfig) -> RunningRouter {
     let mut config = config_for_upstream(upstream_addr);
     config.listener.proxy_addr = proxy_addr;
 
-    let app = build_app_with_path(config, None).expect("build app");
+    let app = build_app_for_testing(config).expect("build app");
     let router = app.router;
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
 

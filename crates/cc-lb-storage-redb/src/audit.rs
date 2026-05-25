@@ -2,7 +2,7 @@ use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{AUDIT_LOG_V1, Storage, StorageError};
+use crate::{AUDIT_LOG_V1, RedbStorage, StorageError};
 
 const AUDIT_SEQUENCE_SCALE: u64 = 1_000_000;
 
@@ -25,7 +25,7 @@ pub struct AuditEntry {
     pub payload: Option<Value>,
 }
 
-impl Storage {
+impl RedbStorage {
     pub fn append_audit(&self, entry: &AuditEntry) -> Result<(), StorageError> {
         let payload = serde_json::to_vec(entry)?;
         let write_txn = self.db.begin_write()?;

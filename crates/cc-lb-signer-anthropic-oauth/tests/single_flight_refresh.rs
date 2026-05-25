@@ -1,12 +1,15 @@
 mod common;
 
+use std::sync::Arc;
+use std::time::Duration;
+
 use cc_lb_plugin_api::{RetryDecision, Signer};
+use tokio::sync::Barrier;
 
 #[tokio::test]
 async fn concurrent_unauthorized_refreshes_single_flight() {
     let test_storage = common::storage();
     test_storage
-        .storage
         .put_oauth(
             "alice",
             "anthropic_oauth",
@@ -16,20 +19,32 @@ async fn concurrent_unauthorized_refreshes_single_flight() {
                 common::now_epoch_secs() - 10,
             ),
         )
+        .await
         .expect("seed oauth credentials");
-    let http = common::FakeOAuthClient::new(vec![common::success_response(
-        "sk-ant-oat01-refreshed",
-        None,
-        600,
-    )]);
-    let signer = common::signer(test_storage.storage.clone(), http.clone());
+    let http = common::FakeOAuthClient::with_response_delay(
+        vec![common::success_response(
+            "sk-ant-oat01-refreshed",
+            None,
+            600,
+        )],
+        Duration::from_millis(25),
+    );
+    let signer = common::signer(
+        test_storage.storage.clone(),
+        test_storage.aead.clone(),
+        http.clone(),
+    );
+    let task_count = 50;
+    let barrier = Arc::new(Barrier::new(task_count));
     let mut tasks = Vec::new();
-    for _ in 0..50 {
+    for _ in 0..task_count {
         let signer = signer.clone();
+        let barrier = barrier.clone();
         let err = common::unauthorized_error();
-        tasks.push(tokio::spawn(
-            async move { signer.on_unauthorized(&err).await },
-        ));
+        tasks.push(tokio::spawn(async move {
+            barrier.wait().await;
+            signer.on_unauthorized(&err).await
+        }));
     }
 
     for task in tasks {

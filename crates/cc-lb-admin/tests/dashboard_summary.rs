@@ -8,7 +8,7 @@ use axum::{
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_core::DashboardBroadcaster;
-use cc_lb_storage_redb::{RequestEvent, RequestEventUpstream, Storage};
+use cc_lb_storage_redb::{RedbStorage, RequestEvent, RequestEventUpstream};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -17,7 +17,7 @@ use tower::ServiceExt;
 async fn authorized_summary_returns_totals_and_zero_filled_sparkline() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("dashboard.redb");
-    let storage = Storage::open(&path, [41; 32]).unwrap();
+    let storage = RedbStorage::open(&path).unwrap();
     let base = current_minute_base();
     seed_summary_events(&storage, base);
     storage.rollup_usage_once().unwrap();
@@ -125,9 +125,10 @@ async fn summary_response_excludes_payload_terms() {
     assert_forbidden_bytes_absent(&body);
 }
 
-fn test_state(storage: Option<Arc<Storage>>) -> AdminState {
+fn test_state(storage: Option<Arc<RedbStorage>>) -> AdminState {
     AdminState {
-        storage,
+        storage: storage.unwrap_or_else(test_storage),
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         quota_manager: None,
         lifecycle: None,
         breaker_registry: None,
@@ -170,7 +171,7 @@ fn current_minute_base() -> u64 {
     now - (now % 60) - 180
 }
 
-fn seed_summary_events(storage: &Storage, base: u64) {
+fn seed_summary_events(storage: &RedbStorage, base: u64) {
     for event in [
         event(
             base + 5,
@@ -276,4 +277,12 @@ fn forbidden_terms() -> Vec<String> {
         ["tool", "_use"].concat(),
         ["con", "tent"].concat(),
     ]
+}
+
+fn test_storage() -> Arc<RedbStorage> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.redb");
+    let storage = Arc::new(RedbStorage::open(&path).unwrap());
+    std::mem::forget(dir);
+    storage
 }

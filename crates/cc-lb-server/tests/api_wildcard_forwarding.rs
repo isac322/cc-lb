@@ -8,7 +8,7 @@ use axum::http::{Method, Request, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::any;
 use cc_lb_config::{AuthStrategy, Config, UpstreamKind, UpstreamSpec};
-use cc_lb_server::app::build_app_with_path;
+use cc_lb_server::app::build_app_for_testing;
 use http_body_util::BodyExt;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -54,7 +54,7 @@ impl UpstreamState {
 async fn api_wildcard_forwarding() {
     let (upstream_addr, upstream_state, _upstream) = spawn_recording_upstream().await;
     let config = config_for_upstream(upstream_addr);
-    let app = build_app_with_path(config, None).expect("build app");
+    let app = build_app_for_testing(config).expect("build app");
 
     let usage = app
         .router

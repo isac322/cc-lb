@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering;
 use bytes::Bytes;
 use cc_lb_core::{DashboardBroadcaster, RequestEventSink};
 use cc_lb_observability::dropped_events_total;
-use cc_lb_storage_redb::{RequestEvent, RequestEventUpstream};
+use cc_lb_storage_api::{RequestEvent, RequestEventUpstream};
 use common::{
     DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState, collect_body, lifecycle_with,
     messages_request,

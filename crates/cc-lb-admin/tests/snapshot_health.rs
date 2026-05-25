@@ -5,13 +5,15 @@ use axum::{
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_core::DashboardBroadcaster;
+use cc_lb_storage_redb::RedbStorage;
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
 
 fn test_state() -> AdminState {
     AdminState {
-        storage: None,
+        storage: test_storage(),
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         quota_manager: None,
         lifecycle: None,
         breaker_registry: None,
@@ -49,4 +51,12 @@ async fn test_snapshot_health() {
     json["git_sha"] = serde_json::json!("unknown");
 
     insta::assert_snapshot!(serde_json::to_string_pretty(&json).unwrap());
+}
+
+fn test_storage() -> Arc<RedbStorage> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.redb");
+    let storage = Arc::new(RedbStorage::open(&path).unwrap());
+    std::mem::forget(dir);
+    storage
 }

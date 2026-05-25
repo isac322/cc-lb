@@ -2,8 +2,10 @@
 
 use std::process::ExitCode;
 
+use cc_lb_server::app::ServeError;
 use cc_lb_server::cli::{Cli, Command, ConfigCommand};
-use cc_lb_server::{run_serve, validate};
+use cc_lb_server::storage_factory::StorageFactoryError;
+use cc_lb_server::{BuildError, run_serve, validate};
 use clap::FromArgMatches;
 
 enum RunError {
@@ -26,9 +28,13 @@ fn main() -> ExitCode {
             eprintln!("validation: failed: {error}");
             ExitCode::from(2)
         }
-        Err(RunError::Serve(cc_lb_server::app::ServeError::Preflight(error))) => {
+        Err(RunError::Serve(ServeError::Preflight(error))) => {
             eprintln!("preflight: failed: {error}");
             ExitCode::from(2)
+        }
+        Err(RunError::Serve(ServeError::Build(BuildError::StorageFactory(error)))) => {
+            eprintln!("storage initialization failed: {error}");
+            ExitCode::from(storage_error_exit_code(&error) as u8)
         }
         Err(RunError::Serve(error)) => {
             eprintln!("{error}");
@@ -46,6 +52,15 @@ fn main() -> ExitCode {
             eprintln!("{error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn storage_error_exit_code(error: &StorageFactoryError) -> i32 {
+    match error {
+        StorageFactoryError::FeatureDisabled { .. } => 2,
+        StorageFactoryError::BackendKindMismatch { .. } => 3,
+        StorageFactoryError::ConnectionFailed { .. } => 4,
+        StorageFactoryError::InitFailed { .. } => 5,
     }
 }
 

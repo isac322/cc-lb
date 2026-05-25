@@ -93,6 +93,7 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
     let admin_addr = free_addr();
     let metrics_addr = free_addr();
     let config_path = dir.path().join("cc-lb.toml");
+    let db_path = dir.path().join("storage.redb");
     write_config(
         &config_path,
         proxy_addr,
@@ -101,8 +102,16 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
         upstream_addr,
         &cert_path,
         &key_path,
+        &db_path,
     );
     let config = Config::load(&config_path).expect("load config");
+    // SAFETY: test-only; single-threaded test runner, no concurrent env access.
+    unsafe {
+        std::env::set_var(
+            "CC_LB_MASTER_KEY",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+    }
     let app = build_app_with_path(config, Some(&config_path)).expect("build app");
     let signals = app.signal_handle();
     let server = tokio::spawn(async move { app.start().await });
@@ -496,6 +505,7 @@ fn free_addr() -> SocketAddr {
     listener.local_addr().expect("free addr")
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_config(
     path: &Path,
     proxy_addr: SocketAddr,
@@ -504,6 +514,7 @@ fn write_config(
     upstream_addr: SocketAddr,
     cert_path: &Path,
     key_path: &Path,
+    db_path: &Path,
 ) {
     let config = format!(
         r#"[listener]
@@ -528,13 +539,18 @@ allowed_models = ["*"]
 observability_hooks = []
 
 [storage]
-oauth_aead_key_env = "CC_LB_MASTER_KEY"
+kind = "redb"
+path = "{}"
+
+[aead]
+key_env = "CC_LB_MASTER_KEY"
 
 [admin]
 token_env = "CC_LB_ADMIN_TOKEN"
 "#,
         cert_path.display(),
-        key_path.display()
+        key_path.display(),
+        db_path.display()
     );
     fs::write(path, config).expect("write config");
 }

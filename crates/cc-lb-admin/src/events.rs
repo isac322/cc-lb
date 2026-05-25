@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use cc_lb_storage_redb::{RequestEvent, RequestEventUpstream, Storage, StorageError};
+use cc_lb_storage_api::{RequestEvent, RequestEventUpstream, Storage, StorageError};
 use serde::Serialize;
 
 pub const DEFAULT_RECENT_EVENTS_LIMIT: usize = 100;
@@ -133,24 +133,16 @@ pub fn apply_filters_to_event(event: &RequestEvent, filters: &StreamFilters) -> 
     true
 }
 
-pub fn build_recent_events_payload(
-    storage: Option<&Storage>,
+pub async fn build_recent_events_payload(
+    storage: &dyn Storage,
     params: &RecentEventsParams,
 ) -> Result<RecentEventsPayload, EventsError> {
-    let Some(storage) = storage else {
-        return Ok(RecentEventsPayload {
-            events: Vec::new(),
-            observed: false,
-            count: 0,
-            limit: params.limit,
-        });
-    };
-
     let pull_limit =
         (params.limit * RECENT_EVENTS_PULL_INFLATION_FACTOR).min(MAX_RECENT_EVENTS_PULL_LIMIT);
     let filters = params.stream_filters();
-    let mut events =
-        storage.query_request_events(params.since_unix_secs, params.until_unix_secs, pull_limit)?;
+    let mut events = storage
+        .query_request_events(params.since_unix_secs, params.until_unix_secs, pull_limit)
+        .await?;
     events.sort_by(|left, right| {
         right
             .ts
@@ -161,9 +153,10 @@ pub fn build_recent_events_payload(
     events.truncate(params.limit);
     let count = events.len();
 
+    let observed = !events.is_empty();
     Ok(RecentEventsPayload {
         events,
-        observed: true,
+        observed,
         count,
         limit: params.limit,
     })

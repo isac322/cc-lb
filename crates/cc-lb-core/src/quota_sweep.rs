@@ -10,8 +10,7 @@ pub fn start_sweep(manager: Arc<QuotaManager>, period: Duration) -> tokio::task:
             interval.tick().await;
             let storage = Arc::clone(&manager.storage);
             let older_than = older_than_window_start(manager.default_policy().await);
-            let _result =
-                tokio::task::spawn_blocking(move || storage.sweep_old_quotas(older_than)).await;
+            let _result = storage.sweep_old_quotas(older_than).await;
         }
     })
 }

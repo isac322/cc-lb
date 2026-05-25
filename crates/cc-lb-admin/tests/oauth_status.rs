@@ -6,9 +6,11 @@ use axum::{
     http::{Request, StatusCode},
 };
 use cc_lb_admin::{AdminState, router};
+use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, PrincipalSpec};
 use cc_lb_core::DashboardBroadcaster;
-use cc_lb_storage_redb::{OAuthCredentials, Storage};
+use cc_lb_storage_api::{OAuthCredentialStore, OAuthCredentials};
+use cc_lb_storage_redb::RedbStorage;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -22,8 +24,11 @@ async fn storage_missing_returns_unobserved_empty_credentials() {
     let (status, json, _) = authorized_json(app, "/admin/oauth/status").await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["credentials"].as_array().unwrap().len(), 0);
-    assert_eq!(json["observed"], false);
+    assert_eq!(json["credentials"].as_array().unwrap().len(), 1);
+    assert_eq!(json["observed"], true);
+    let credential = only_credential(&json);
+    assert_eq!(credential["has_credentials"], false);
+    assert_eq!(credential["status"], "missing");
 }
 
 #[tokio::test]
@@ -36,7 +41,8 @@ async fn valid_credential_reports_valid_status_and_refresh_presence() {
             expires_at: unix_now_secs() + 3_600,
             scopes: vec!["scope-a".to_string()],
         },
-    );
+    )
+    .await;
     let app = router(test_state(oauth_config("alice"), Some(storage)));
     let (status, json, _) = authorized_json(app, "/admin/oauth/status").await;
 
@@ -62,7 +68,8 @@ async fn expired_credential_reports_expired_status() {
             expires_at: unix_now_secs().saturating_sub(1),
             scopes: Vec::new(),
         },
-    );
+    )
+    .await;
     let app = router(test_state(oauth_config("alice"), Some(storage)));
     let (status, json, _) = authorized_json(app, "/admin/oauth/status").await;
 
@@ -82,7 +89,8 @@ async fn soon_expiring_credential_reports_expiring_soon_status() {
             expires_at: unix_now_secs() + 60,
             scopes: Vec::new(),
         },
-    );
+    )
+    .await;
     let app = router(test_state(oauth_config("alice"), Some(storage)));
     let (status, json, _) = authorized_json(app, "/admin/oauth/status").await;
 
@@ -117,7 +125,8 @@ async fn oauth_status_response_excludes_raw_token_material() {
             expires_at: unix_now_secs() + 3_600,
             scopes: vec!["safe-scope".to_string()],
         },
-    );
+    )
+    .await;
     let app = router(test_state(oauth_config("alice"), Some(storage)));
     let (status, _, body) = authorized_json(app, "/admin/oauth/status").await;
 
@@ -132,9 +141,10 @@ async fn oauth_status_response_excludes_raw_token_material() {
     }
 }
 
-fn test_state(config: Config, storage: Option<Arc<Storage>>) -> AdminState {
+fn test_state(config: Config, storage: Option<Arc<RedbStorage>>) -> AdminState {
     AdminState {
-        storage,
+        storage: storage.unwrap_or_else(test_storage),
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         quota_manager: None,
         lifecycle: None,
         breaker_registry: None,
@@ -163,14 +173,30 @@ fn oauth_config(principal_id: &str) -> Config {
     config
 }
 
-fn storage_with_credential(
+async fn storage_with_credential(
     principal_id: &str,
     creds: OAuthCredentials,
-) -> (tempfile::TempDir, Arc<Storage>) {
+) -> (tempfile::TempDir, Arc<RedbStorage>) {
     let dir = tempfile::tempdir().unwrap();
-    let storage = Storage::open(&dir.path().join("oauth.redb"), [12; 32]).unwrap();
-    storage.put_oauth(principal_id, PROVIDER, &creds).unwrap();
-    (dir, Arc::new(storage))
+    let storage = RedbStorage::open(dir.path().join("oauth.redb")).unwrap();
+    let storage = Arc::new(storage);
+    let aead = AeadService::from_master_key([0; 32]);
+    let plaintext = serde_json::to_vec(&creds).unwrap();
+    let ciphertext = aead
+        .encrypt(
+            &plaintext,
+            format!("oauth:{principal_id}:{PROVIDER}").as_bytes(),
+        )
+        .unwrap();
+    OAuthCredentialStore::put_oauth_ciphertext(
+        storage.as_ref(),
+        principal_id,
+        PROVIDER,
+        &ciphertext,
+    )
+    .await
+    .unwrap();
+    (dir, storage)
 }
 
 async fn authorized_json(app: axum::Router, uri: &str) -> (StatusCode, Value, Vec<u8>) {
@@ -211,4 +237,12 @@ fn forbidden_terms() -> Vec<String> {
         ["Bearer", " "].concat(),
         ["refresh", "_token="].concat(),
     ]
+}
+
+fn test_storage() -> Arc<RedbStorage> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.redb");
+    let storage = Arc::new(RedbStorage::open(&path).unwrap());
+    std::mem::forget(dir);
+    storage
 }

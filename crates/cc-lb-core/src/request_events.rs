@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use cc_lb_storage_redb::{RequestEvent, Storage};
+use cc_lb_storage_api::{RequestEvent, Storage};
 use thiserror::Error;
 use tokio::sync::mpsc::{self, Receiver, Sender, error::TrySendError};
 use tokio::task::JoinHandle;
@@ -47,21 +47,16 @@ impl RequestEventSink {
 }
 
 pub fn start_request_event_writer(
-    storage: Arc<Storage>,
+    storage: Arc<dyn Storage>,
     mut receiver: Receiver<RequestEvent>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(event) = receiver.recv().await {
-            let storage = storage.clone();
-            match tokio::task::spawn_blocking(move || storage.append_request_event(&event)).await {
-                Ok(Ok(())) => {}
-                Ok(Err(source)) => {
-                    cc_lb_observability::increment_dropped_events("worker_drop");
-                    tracing::warn!(error = %source, "request event persistence failed");
-                }
+            match storage.append_request_event(&event).await {
+                Ok(()) => {}
                 Err(source) => {
                     cc_lb_observability::increment_dropped_events("worker_drop");
-                    tracing::warn!(error = %source, "request event writer task failed");
+                    tracing::warn!(error = %source, "request event persistence failed");
                 }
             }
         }

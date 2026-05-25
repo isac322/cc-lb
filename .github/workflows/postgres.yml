@@ -1,0 +1,85 @@
+name: postgres
+
+env:
+  CC_LB_ADMIN_SKIP_SPA: "1"
+
+on:
+  pull_request:
+    paths:
+      - 'crates/cc-lb-storage-*/**'
+      - 'crates/cc-lb-config/**'
+      - '.github/workflows/**'
+  push:
+    branches:
+      - master
+    paths:
+      - 'crates/cc-lb-storage-*/**'
+      - 'crates/cc-lb-config/**'
+      - '.github/workflows/**'
+  schedule:
+    - cron: '0 2 * * *'
+
+jobs:
+  postgres-conformance:
+    name: Postgres conformance
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: testpw
+          POSTGRES_DB: cc_lb_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
+
+    steps:
+      - name: Free up disk space on runner
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+          swap-storage: false
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/
+          key: ${{ runner.os }}-cargo-postgres-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install sqlx-cli (repo-local)
+        run: cargo install sqlx-cli --no-default-features --features postgres --root ./target/tools
+
+      - name: Run Postgres migrations
+        run: ./target/tools/bin/sqlx migrate run --source crates/cc-lb-storage-postgres/migrations
+        env:
+          DATABASE_URL: ${{ env.CI_POSTGRES_URL }}
+
+      - name: Run Postgres conformance tests
+        run: cargo test -p cc-lb-storage-postgres --features postgres -- --test-threads=4
+
+      - name: Run cc-lb-server Postgres tests
+        run: cargo test -p cc-lb-server --features postgres,redb
+
+      - name: E2E smoke - cc-lb binary against postgres backend
+        run: ./tests/real-client/postgres-smoke.sh

@@ -10,11 +10,12 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use cc_lb_aead::AeadService;
 use cc_lb_plugin_api::{
     AuthStrategy, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
     SigningCapability, Upstream, UpstreamError,
 };
-use cc_lb_storage_redb::{OAuthCredentials, Storage};
+use cc_lb_storage_api::{OAuthCredentials, Storage, StorageError};
 use dashmap::DashMap;
 use http::header::{AUTHORIZATION, HeaderValue};
 use oauth2::{ClientId, TokenUrl};
@@ -42,7 +43,8 @@ pub struct AnthropicOAuthSharedState {
 pub struct AnthropicOAuthSigner {
     pub principal_id: String,
     pub provider: String,
-    pub storage: Arc<Storage>,
+    pub storage: Arc<dyn Storage>,
+    pub aead: Arc<AeadService>,
     pub refresh_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     pub breaker_state: BreakerMap,
     pub http: Arc<dyn OAuthHttpClient>,
@@ -57,7 +59,8 @@ impl AnthropicOAuthSigner {
     pub fn new(
         principal_id: impl Into<String>,
         provider: impl Into<String>,
-        storage: Arc<Storage>,
+        storage: Arc<dyn Storage>,
+        aead: Arc<AeadService>,
         token_url: Url,
         client_id: ClientId,
     ) -> Self {
@@ -65,6 +68,7 @@ impl AnthropicOAuthSigner {
             principal_id,
             provider,
             storage,
+            aead,
             token_url,
             client_id,
             Arc::new(HyperOAuthHttpClient::new()),
@@ -74,7 +78,8 @@ impl AnthropicOAuthSigner {
     pub fn with_http(
         principal_id: impl Into<String>,
         provider: impl Into<String>,
-        storage: Arc<Storage>,
+        storage: Arc<dyn Storage>,
+        aead: Arc<AeadService>,
         token_url: Url,
         client_id: ClientId,
         http: Arc<dyn OAuthHttpClient>,
@@ -87,6 +92,7 @@ impl AnthropicOAuthSigner {
             principal_id,
             provider,
             storage,
+            aead,
             refresh_locks: new_refresh_locks(),
             breaker_state: refresh::new_breaker_map(),
             http,
@@ -99,7 +105,8 @@ impl AnthropicOAuthSigner {
     pub fn with_shared_state(
         principal_id: impl Into<String>,
         provider: impl Into<String>,
-        storage: Arc<Storage>,
+        storage: Arc<dyn Storage>,
+        aead: Arc<AeadService>,
         token_url: Url,
         client_id: ClientId,
         shared: AnthropicOAuthSharedState,
@@ -112,6 +119,7 @@ impl AnthropicOAuthSigner {
             principal_id,
             provider,
             storage,
+            aead,
             refresh_locks: shared.refresh_locks,
             breaker_state: shared.breaker_state,
             http: shared.http,
@@ -229,31 +237,34 @@ impl AnthropicOAuthSigner {
     }
 
     async fn load_credentials(&self) -> Result<Option<OAuthCredentials>, RefreshError> {
-        let storage = self.storage.clone();
-        let principal_id = self.principal_id.clone();
-        let provider = self.provider.clone();
-        tokio::task::spawn_blocking(move || storage.get_oauth(&principal_id, &provider))
-            .await
-            .map_err(|source| RefreshError::StorageTask {
-                reason: source.to_string(),
-            })?
-            .map_err(|source| RefreshError::Storage {
-                reason: source.to_string(),
-            })
+        let ciphertext = self
+            .storage
+            .get_oauth_ciphertext(&self.principal_id, &self.provider)
+            .await?;
+        let Some(ciphertext) = ciphertext else {
+            return Ok(None);
+        };
+
+        let aad = oauth_credentials_aad(&self.principal_id, &self.provider);
+        let plaintext = self
+            .aead
+            .decrypt(&ciphertext, &aad)
+            .map_err(storage_aead_error)?;
+        let creds = serde_json::from_slice(&plaintext).map_err(storage_json_error)?;
+        Ok(Some(creds))
     }
 
     async fn store_credentials(&self, creds: OAuthCredentials) -> Result<(), RefreshError> {
-        let storage = self.storage.clone();
-        let principal_id = self.principal_id.clone();
-        let provider = self.provider.clone();
-        tokio::task::spawn_blocking(move || storage.put_oauth(&principal_id, &provider, &creds))
-            .await
-            .map_err(|source| RefreshError::StorageTask {
-                reason: source.to_string(),
-            })?
-            .map_err(|source| RefreshError::Storage {
-                reason: source.to_string(),
-            })
+        let plaintext = serde_json::to_vec(&creds).map_err(storage_json_error)?;
+        let aad = oauth_credentials_aad(&self.principal_id, &self.provider);
+        let ciphertext = self
+            .aead
+            .encrypt(&plaintext, &aad)
+            .map_err(storage_aead_error)?;
+        self.storage
+            .put_oauth_ciphertext(&self.principal_id, &self.provider, &ciphertext)
+            .await?;
+        Ok(())
     }
 
     async fn remember_signed_access_token(&self, access_token: &str) {
@@ -315,7 +326,8 @@ pub struct AnthropicOAuthSignerFactory {
     auth_strategy: AuthStrategy,
     principal_id: String,
     provider: String,
-    storage: Arc<Storage>,
+    storage: Arc<dyn Storage>,
+    aead: Arc<AeadService>,
     token_url: Url,
     client_id: ClientId,
     http: Arc<dyn OAuthHttpClient>,
@@ -327,7 +339,8 @@ impl AnthropicOAuthSignerFactory {
     pub fn new(
         principal_id: impl Into<String>,
         provider: impl Into<String>,
-        storage: Arc<Storage>,
+        storage: Arc<dyn Storage>,
+        aead: Arc<AeadService>,
         token_url: TokenUrl,
         client_id: ClientId,
     ) -> Self {
@@ -335,6 +348,7 @@ impl AnthropicOAuthSignerFactory {
             principal_id,
             provider,
             storage,
+            aead,
             token_url,
             client_id,
             Arc::new(HyperOAuthHttpClient::new()),
@@ -344,7 +358,8 @@ impl AnthropicOAuthSignerFactory {
     pub fn with_http(
         principal_id: impl Into<String>,
         provider: impl Into<String>,
-        storage: Arc<Storage>,
+        storage: Arc<dyn Storage>,
+        aead: Arc<AeadService>,
         token_url: TokenUrl,
         client_id: ClientId,
         http: Arc<dyn OAuthHttpClient>,
@@ -354,6 +369,7 @@ impl AnthropicOAuthSignerFactory {
             principal_id: principal_id.into(),
             provider: provider.into(),
             storage,
+            aead,
             token_url: token_url.url().clone(),
             client_id,
             http,
@@ -398,6 +414,7 @@ impl SignerFactory for AnthropicOAuthSignerFactory {
             self.principal_id.clone(),
             self.provider.clone(),
             self.storage.clone(),
+            self.aead.clone(),
             self.token_url.clone(),
             self.client_id.clone(),
             AnthropicOAuthSharedState {
@@ -409,10 +426,31 @@ impl SignerFactory for AnthropicOAuthSignerFactory {
     }
 }
 
+fn oauth_credentials_aad(principal_id: &str, provider: &str) -> Vec<u8> {
+    format!("oauth:{principal_id}:{provider}").into_bytes()
+}
+
+fn storage_aead_error(source: cc_lb_aead::AeadError) -> RefreshError {
+    RefreshError::Storage {
+        source: StorageError::Aead(source.to_string()),
+    }
+}
+
+fn storage_json_error(source: serde_json::Error) -> RefreshError {
+    RefreshError::Storage {
+        source: StorageError::Serialization(source),
+    }
+}
+
 fn refresh_error_to_signer(error: RefreshError) -> SignerError {
     match error {
         RefreshError::MissingCredentials => SignerError::MissingCredentials {
             reason: "oauth credentials not found".to_owned(),
+        },
+        RefreshError::Storage {
+            source: StorageError::Unavailable { .. },
+        } => SignerError::StorageUnavailable {
+            reason: "storage unavailable".to_owned(),
         },
         other => SignerError::SigningFailed {
             reason: other.to_string(),

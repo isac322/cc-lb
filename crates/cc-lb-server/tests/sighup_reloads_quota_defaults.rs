@@ -20,12 +20,19 @@ async fn sighup_reloads_quota_defaults() {
     let proxy_addr: SocketAddr = "127.0.0.1:18080".parse().unwrap();
     reload_common::write_config(&config_path, 100, proxy_addr);
 
+    let storage_dir = tempfile::tempdir().unwrap();
+    let storage = Arc::new(
+        cc_lb_storage_redb::RedbStorage::open(storage_dir.path().join("test.redb")).unwrap(),
+    );
+    let aead = Arc::new(cc_lb_aead::AeadService::from_master_key([0u8; 32]));
+
     let watcher = Arc::new(ConfigWatcher::new(
         &config_path,
         reload_common::load_config(&config_path),
     ));
     let app = cc_lb_admin::router(AdminState {
-        storage: None,
+        storage,
+        aead,
         quota_manager: None,
         lifecycle: None,
         breaker_registry: None,

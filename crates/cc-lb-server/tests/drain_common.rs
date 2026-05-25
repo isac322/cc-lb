@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use cc_lb_config::{AuthStrategy, Config, UpstreamKind, UpstreamSpec};
-use cc_lb_server::app::{BuildError, build_app_with_path};
+use cc_lb_server::app::{BuildError, build_app_for_testing};
 use cc_lb_server::drain::DrainController;
 use cc_lb_server::signal::SignalHandle;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
@@ -38,13 +38,12 @@ pub async fn start_app(drain_secs: u64, fake_config: AppConfig) -> RunningApp {
     let admin_addr = free_addr();
     let metrics_addr = free_addr();
     let config_dir = tempfile::tempdir().expect("config dir");
-    let config_path = config_dir.path().join("cc-lb.toml");
     let mut config = config_for_upstream(upstream_addr, drain_secs);
     config.listener.proxy_addr = proxy_addr;
     config.listener.admin_addr = admin_addr;
     config.listener.metrics_addr = metrics_addr;
 
-    let app = build_app_with_path(config, Some(&config_path)).expect("build app");
+    let app = build_app_for_testing(config).expect("build app");
     let controller = app.drain_controller();
     let signals = app.signal_handle();
     let server = tokio::spawn(async move { app.start().await });
@@ -70,7 +69,7 @@ pub async fn start_router(drain_secs: u64, fake_config: AppConfig) -> RunningRou
     let mut config = config_for_upstream(upstream_addr, drain_secs);
     config.listener.proxy_addr = proxy_addr;
 
-    let app = build_app_with_path(config, None).expect("build app");
+    let app = build_app_for_testing(config).expect("build app");
     let controller = app.drain_controller();
     let router = app.router;
     let server = tokio::spawn(async move { axum::serve(listener, router).await });

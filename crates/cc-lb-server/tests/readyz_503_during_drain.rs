@@ -4,7 +4,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use cc_lb_server::app::build_app_with_path;
+use cc_lb_server::app::build_app_for_testing;
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -13,7 +13,7 @@ use tower::ServiceExt;
 async fn readyz_503_during_drain() {
     let (upstream_addr, _upstream) = healthcheck_common::spawn_upstream(StatusCode::OK).await;
     let config = healthcheck_common::config_for_upstream(upstream_addr, 5);
-    let app = build_app_with_path(config, None).expect("build app");
+    let app = build_app_for_testing(config).expect("build app");
 
     let warmup = Request::builder()
         .method("GET")

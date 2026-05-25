@@ -2,7 +2,7 @@ use std::fmt;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use cc_lb_storage_redb::OAuthCredentials;
+use cc_lb_storage_api::OAuthCredentials;
 use oauth2::{AuthUrl, ClientId, PkceCodeChallenge, TokenUrl};
 use secrecy::{ExposeSecret, SecretString};
 use serde::{Deserialize, Serialize};

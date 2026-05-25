@@ -10,11 +10,11 @@ use bytes::{Bytes, BytesMut};
 use cc_lb_dialect_bedrock::{EventStreamConvertError, convert_eventstream_to_sse_bytes};
 use cc_lb_plugin_api::{
     AuthnPlugin, ObservabilityHook, ObserveEvent, Principal, PrincipalQuotas, RequestContext,
-    RetryDecision, RouterPlugin, SignedRequest, Upstream, UpstreamError, shape_request,
-    sign_request,
+    RetryDecision, RouterPlugin, SignedRequest, SignerError, Upstream, UpstreamError,
+    shape_request, sign_request,
 };
 use cc_lb_pricing::virtual_cost_micros;
-use cc_lb_storage_redb::{
+use cc_lb_storage_api::{
     PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, RequestEvent,
     RequestEventUpstream,
 };
@@ -300,13 +300,11 @@ impl Lifecycle {
             Ok(signer) => signer,
             Err(source) => {
                 self.observe_error("signing_error", &source.to_string(), "signer_factory");
-                let response = anthropic_error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "api_error",
-                    "failed to prepare upstream credentials",
-                );
+                let response =
+                    signing_error_response(&source, "failed to prepare upstream credentials");
+                let status = response.status();
                 self.observe_finished_for_principal(
-                    StatusCode::BAD_GATEWAY,
+                    status,
                     started,
                     Some(&ctx.request_id),
                     &authn.principal,
@@ -485,9 +483,8 @@ impl Lifecycle {
             .await
             .map_err(|source| {
                 self.observe_error("signing_error", &source.to_string(), "signer");
-                Box::new(anthropic_error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "api_error",
+                Box::new(signing_error_response(
+                    &source,
                     "failed to sign upstream request",
                 ))
             })?;
@@ -865,6 +862,18 @@ fn enqueue_request_event(
     }
     if let Some(broadcaster) = dashboard_broadcaster {
         broadcaster.publish(event);
+    }
+}
+
+fn signing_error_response(source: &SignerError, fallback_message: &'static str) -> Response<Body> {
+    match source {
+        SignerError::StorageUnavailable { .. } => anthropic_error_response_with_retry_after(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "overloaded_error",
+            "credential storage temporarily unavailable",
+            1,
+        ),
+        _ => anthropic_error_response(StatusCode::BAD_GATEWAY, "api_error", fallback_message),
     }
 }
 

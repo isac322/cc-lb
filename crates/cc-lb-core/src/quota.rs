@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Once};
 
 use cc_lb_plugin_api::PrincipalQuotas;
-use cc_lb_storage_redb::{Storage, StorageError};
+use cc_lb_storage_api::{Storage, StorageError};
 use dashmap::DashMap;
 use metrics::Unit;
 use thiserror::Error;
@@ -10,7 +10,7 @@ use tokio::sync::{Mutex, RwLock};
 
 use crate::clock::{Clock, SystemClock};
 
-pub use cc_lb_storage_redb::BucketKind;
+pub use cc_lb_storage_api::BucketKind;
 
 static REGISTER_QUOTA_METRICS: Once = Once::new();
 
@@ -59,14 +59,12 @@ pub struct Reservation {
 pub enum QuotaError {
     #[error("quota storage operation failed: {0}")]
     Storage(#[from] StorageError),
-    #[error("quota storage task failed: {0}")]
-    Join(#[from] tokio::task::JoinError),
     #[error("quota adjustment {delta} exceeds i64 range")]
     AdjustmentOutOfRange { delta: u64 },
 }
 
 pub struct QuotaManager {
-    pub storage: Arc<Storage>,
+    pub storage: Arc<dyn Storage>,
     pub defaults: Arc<RwLock<QuotaPolicy>>,
     pub per_principal: Arc<RwLock<HashMap<String, QuotaPolicy>>>,
     pub per_principal_mutexes: Arc<DashMap<String, Arc<Mutex<()>>>>,
@@ -75,11 +73,15 @@ pub struct QuotaManager {
 }
 
 impl QuotaManager {
-    pub fn new(storage: Arc<Storage>, defaults: QuotaPolicy) -> Self {
+    pub fn new(storage: Arc<dyn Storage>, defaults: QuotaPolicy) -> Self {
         Self::with_clock(storage, defaults, Arc::new(SystemClock))
     }
 
-    pub fn with_clock(storage: Arc<Storage>, defaults: QuotaPolicy, clock: Arc<dyn Clock>) -> Self {
+    pub fn with_clock(
+        storage: Arc<dyn Storage>,
+        defaults: QuotaPolicy,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
         register_quota_metrics();
         Self {
             storage,
@@ -220,35 +222,22 @@ impl QuotaManager {
         let capacity = capacity_for(policy, bucket);
         let now = self.clock.now_unix_secs();
         let retry_after_secs = retry_after_secs(now, window_start, policy.window_secs);
-        let principal = principal_id.to_owned();
         let storage = Arc::clone(&self.storage);
         let mutex = self.mutex_for(principal_id);
         let _guard = mutex.lock().await;
 
-        let result =
-            tokio::task::spawn_blocking(move || -> Result<ConsumeAttempt, StorageError> {
-                match storage.try_incr_quota(&principal, window_start, bucket, amount, capacity)? {
-                    Some(new_value) => Ok(ConsumeAttempt::Allowed { new_value }),
-                    None => Ok(ConsumeAttempt::Rejected),
-                }
-            })
-            .await;
-
-        match result {
-            Ok(Ok(ConsumeAttempt::Allowed { new_value })) => QuotaDecision::Allow {
+        match storage
+            .try_incr_quota(principal_id, window_start, bucket, amount, capacity)
+            .await
+        {
+            Ok(Some(new_value)) => QuotaDecision::Allow {
                 remaining_in_window: capacity.saturating_sub(new_value),
                 retry_after_secs: None,
             },
-            Ok(Ok(ConsumeAttempt::Rejected)) => reject_decision(
+            Ok(None) => reject_decision(
                 principal_id,
                 bucket,
                 quota_exhausted_reason(bucket).to_owned(),
-                retry_after_secs,
-            ),
-            Ok(Err(_source)) => reject_decision(
-                principal_id,
-                bucket,
-                "quota storage unavailable".to_owned(),
                 retry_after_secs,
             ),
             Err(_source) => reject_decision(
@@ -310,21 +299,14 @@ impl QuotaManager {
         bucket: BucketKind,
         delta: i64,
     ) -> Result<u64, QuotaError> {
-        let principal = principal_id.to_owned();
         let storage = Arc::clone(&self.storage);
         let mutex = self.mutex_for(principal_id);
         let _guard = mutex.lock().await;
-        tokio::task::spawn_blocking(move || {
-            storage.adjust_quota(&principal, window_start, bucket, delta)
-        })
-        .await?
-        .map_err(QuotaError::from)
+        storage
+            .adjust_quota(principal_id, window_start, bucket, delta)
+            .await
+            .map_err(QuotaError::from)
     }
-}
-
-enum ConsumeAttempt {
-    Allowed { new_value: u64 },
-    Rejected,
 }
 
 pub fn current_window_start(window_secs: u64) -> u64 {

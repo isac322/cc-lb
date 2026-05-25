@@ -3,7 +3,7 @@ mod config_admin_common;
 use std::sync::Arc;
 
 use axum::http::StatusCode;
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::RedbStorage;
 use config_admin_common::{app, authed_json, minimal_config, put_body, test_state};
 use serde_json::json;
 
@@ -19,7 +19,7 @@ async fn draft_persists_after_storage_reopen() {
     });
 
     {
-        let storage = Arc::new(Storage::open(&db_path, [0; 32]).unwrap());
+        let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
         let app = app(test_state(minimal_config(), Some(storage)));
         let (status, _, json, _) = authed_json(
             app,
@@ -32,7 +32,7 @@ async fn draft_persists_after_storage_reopen() {
         assert_eq!(json["revision"], 1);
     }
 
-    let storage = Arc::new(Storage::open(&db_path, [0; 32]).unwrap());
+    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
     let app = app(test_state(minimal_config(), Some(storage)));
     let (status, _, json, _) = authed_json(app, "GET", "/admin/config/draft", None).await;
 

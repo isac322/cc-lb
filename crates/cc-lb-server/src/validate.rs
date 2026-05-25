@@ -29,7 +29,10 @@ fn validate_preflight(config: &Config) -> Result<PreflightReport, ValidateError>
         .build()?;
 
     runtime
-        .block_on(preflight::run(config, PreflightOptions { skip_bind: true }))
+        .block_on(preflight::run_offline(
+            config,
+            PreflightOptions { skip_bind: true },
+        ))
         .map_err(ValidateError::Preflight)
 }
 

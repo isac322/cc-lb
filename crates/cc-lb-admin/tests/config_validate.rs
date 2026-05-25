@@ -111,6 +111,7 @@ async fn validate_without_storage_returns_unavailable() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(json["error"], "storage_unavailable");
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["valid"], false);
+    assert_eq!(json["error"], "draft_missing");
 }

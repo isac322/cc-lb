@@ -3,7 +3,7 @@ use std::fmt::Write as _;
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
-use crate::{QUOTAS_BY_PRINCIPAL_V1, Storage, StorageError};
+use crate::{QUOTAS_BY_PRINCIPAL_V1, RedbStorage, StorageError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum BucketKind {
@@ -33,7 +33,7 @@ pub fn quota_key(principal_id: &str, window_start: u64, kind: BucketKind) -> Vec
     key.into_bytes()
 }
 
-impl Storage {
+impl RedbStorage {
     pub fn incr_quota(
         &self,
         principal_id: &str,

@@ -1,10 +1,14 @@
 ---
 source: crates/cc-lb-admin/tests/snapshot_admin_shapes.rs
+assertion_line: 101
 expression: "serde_json::to_string_pretty(&json).unwrap()"
 ---
 {
   "admin": {
     "token_env": "[REDACTED]"
+  },
+  "aead": {
+    "key_env": "SECRET_STORAGE_KEY"
   },
   "body": {
     "files_cap_bytes": 104857600,
@@ -71,7 +75,8 @@ expression: "serde_json::to_string_pretty(&json).unwrap()"
     }
   },
   "storage": {
-    "oauth_aead_key_env": "[REDACTED]"
+    "kind": "redb",
+    "path": "/var/lib/cc-lb/storage.redb"
   },
   "timeouts": {
     "drain_secs": 60,
