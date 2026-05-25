@@ -1,0 +1,53 @@
+# Dependabot configuration for cc-lb.
+# Docs: https://docs.github.com/en/code-security/dependabot/dependabot-options-reference
+#
+# Scope:
+#   - GitHub Actions used in .github/workflows/*
+#   - Root Cargo workspace (covers crates/*, benches/*, tests/* members listed
+#     in the root Cargo.toml [workspace] block)
+#   - Fuzz workspace (excluded from the root workspace, so registered separately)
+#   - Bun-based admin web app (uses bun.lock; officially supported by Dependabot
+#     as of 2025-02-13 via package-ecosystem: "bun")
+#
+# Not registered:
+#   - third_party/gcp_auth: vendored snapshot of the crates.io `gcp_auth` 0.12.6
+#     release (Cargo-normalized Cargo.toml). Dependabot PRs against vendored
+#     copies would only churn or conflict, so it is intentionally excluded.
+
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    open-pull-requests-limit: 10
+
+  - package-ecosystem: "cargo"
+    directory: "/fuzz"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    open-pull-requests-limit: 5
+
+  - package-ecosystem: "bun"
+    directory: "/crates/cc-lb-admin/web"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "09:00"
+      timezone: "Asia/Seoul"
+    open-pull-requests-limit: 10
