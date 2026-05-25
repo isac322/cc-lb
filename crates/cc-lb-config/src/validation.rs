@@ -92,12 +92,12 @@ pub fn migrate_legacy_storage_toml(raw_toml: &str) -> Result<String, ValidationE
         }
     }
 
-    if storage_was_legacy_only {
-        if let Some(storage) = root.get_mut("storage").and_then(|v| v.as_table_mut()) {
-            storage.insert("kind".to_owned(), toml::Value::String("redb".to_owned()));
-            if let Some(path) = legacy_redb_path.take() {
-                storage.insert("path".to_owned(), path);
-            }
+    if storage_was_legacy_only
+        && let Some(storage) = root.get_mut("storage").and_then(|v| v.as_table_mut())
+    {
+        storage.insert("kind".to_owned(), toml::Value::String("redb".to_owned()));
+        if let Some(path) = legacy_redb_path.take() {
+            storage.insert("path".to_owned(), path);
         }
     }
 

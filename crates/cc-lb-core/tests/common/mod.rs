@@ -355,6 +355,9 @@ fn streaming_response(state: TestState) -> Response<Body> {
             yield Ok::<Bytes, Infallible>(Bytes::from(frame));
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        yield Ok::<Bytes, Infallible>(Bytes::from_static(
+            b"event: message_stop\ndata: {\"type\":\"message_stop\",\"usage\":{\"input_tokens\":7,\"output_tokens\":42}}\n\n",
+        ));
     };
     let mut response = Response::new(Body::from_stream(stream));
     *response.status_mut() = StatusCode::OK;

@@ -24,6 +24,7 @@ use hyper_util::rt::TokioExecutor;
 use serde_json::{json, Value};
 use thiserror::Error;
 
+use crate::sse_relay;
 use crate::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, BuiltinAuthn};
 use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as LimitReservation};
 use crate::api_keys::types::LimitKind;
@@ -581,7 +582,9 @@ impl Lifecycle {
             .is_some_and(|active_limit| active_limit.request.stream)
             || is_sse_response(response.headers())
         {
-            let mut response = self.relay_response(response);
+            let response_status = response.status();
+            let mut response =
+                self.relay_response(response, response_status, Instant::now() - duration);
             self.attach_limit_headers(&mut response, active_limit.as_ref());
             return response;
         }
@@ -592,6 +595,14 @@ impl Lifecycle {
             Err(_source) => Bytes::new(),
         };
         let usage = usage_from_json_body(&body);
+        if usage.present {
+            self.observe(ObserveEvent::RequestFinished {
+                status,
+                input_tokens: Some(usage.input_tokens),
+                output_tokens: Some(usage.output_tokens),
+                duration_ms: duration_to_ms(duration),
+            });
+        }
         let cost_micros = if usage.present {
             let cost_model = active_limit
                 .as_ref()
@@ -756,16 +767,28 @@ impl Lifecycle {
         })
     }
 
-    fn relay_response(&self, response: Response<Body>) -> Response<Body> {
+    fn relay_response(
+        &self,
+        response: Response<Body>,
+        status: StatusCode,
+        started: Instant,
+    ) -> Response<Body> {
         let (mut parts, mut body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
         let hooks = self.observability_hooks.clone();
         let stream = async_stream::stream! {
             let mut batch_index = 0_u64;
+            let mut buffer: Vec<u8> = Vec::new();
+            let mut usage = UsageCounts::default();
             while let Some(frame) = body.frame().await {
                 match frame {
                     Ok(frame) => {
                         if let Ok(data) = frame.into_data() {
+                            buffer.extend_from_slice(&data);
+                            while let Some(end) = sse_relay::find_sse_event_end(&buffer) {
+                                let raw = buffer.drain(..end).collect::<Vec<u8>>();
+                                accumulate_sse_usage(&raw, &mut usage);
+                            }
                             observe_many(&hooks, ObserveEvent::Chunk {
                                 batch_index,
                                 event_count: 1,
@@ -778,6 +801,17 @@ impl Lifecycle {
                     Err(_source) => break,
                 }
             }
+            let (input_tokens, output_tokens) = if usage.present {
+                (Some(usage.input_tokens), Some(usage.output_tokens))
+            } else {
+                (None, None)
+            };
+            observe_many(&hooks, ObserveEvent::RequestFinished {
+                status,
+                input_tokens,
+                output_tokens,
+                duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+            });
         };
         Response::from_parts(parts, Body::from_stream(stream))
     }
@@ -819,7 +853,15 @@ impl Lifecycle {
             "status" => status.as_u16().to_string(),
         )
         .increment(1);
-        self.observe_finished(status, started);
+        let usage = sse_relay::usage_from_json_bytes(body);
+        let input_tokens = (usage.input_tokens > 0).then_some(usage.input_tokens);
+        let output_tokens = (usage.output_tokens > 0).then_some(usage.output_tokens);
+        self.observe(ObserveEvent::RequestFinished {
+            status,
+            input_tokens,
+            output_tokens,
+            duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+        });
     }
 }
 
@@ -1153,6 +1195,46 @@ fn limit_reject_metric_kind(reason: &RejectReason) -> Option<&'static str> {
         | RejectReason::ModelNotAllowed
         | RejectReason::CostUnavailable
         | RejectReason::OutputCapExceeded { .. } => None,
+    }
+}
+
+fn accumulate_sse_usage(raw: &[u8], usage: &mut UsageCounts) {
+    let text = match std::str::from_utf8(raw) {
+        Ok(text) => text,
+        Err(_) => return,
+    };
+    for line in text.lines() {
+        let Some(payload) = line.strip_prefix("data:").map(str::trim_start) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(payload) else {
+            continue;
+        };
+        let reported = value
+            .get("usage")
+            .or_else(|| value.get("message").and_then(|m| m.get("usage")));
+        let Some(reported) = reported else {
+            continue;
+        };
+        usage.present = true;
+        if let Some(input_tokens) = reported.get("input_tokens").and_then(Value::as_u64) {
+            usage.input_tokens = input_tokens;
+        }
+        if let Some(output_tokens) = reported.get("output_tokens").and_then(Value::as_u64) {
+            usage.output_tokens = output_tokens;
+        }
+        if let Some(cache_creation) = reported
+            .get("cache_creation_input_tokens")
+            .and_then(Value::as_u64)
+        {
+            usage.cache_creation_input_tokens = cache_creation;
+        }
+        if let Some(cache_read) = reported
+            .get("cache_read_input_tokens")
+            .and_then(Value::as_u64)
+        {
+            usage.cache_read_input_tokens = cache_read;
+        }
     }
 }
 
