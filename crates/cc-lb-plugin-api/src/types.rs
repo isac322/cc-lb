@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use url::Url;
 
 use crate::errors::{DialectError, SignerError};
-use crate::traits::{Signer, SignerFactory, UpstreamDialect};
+use crate::traits::{Signer, UpstreamDialect};
 
 /// Authenticated caller identity used for quota, audit, and routing decisions.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -273,17 +273,6 @@ pub struct RouteDecision {
     pub upstream: Upstream,
     /// Dialect plugin that shapes the request for the selected upstream.
     pub dialect: Arc<dyn UpstreamDialect>,
-}
-
-/// Authentication output used by routing, quota, and signer construction.
-#[derive(Clone)]
-pub struct AuthnOutcome {
-    /// Authenticated principal.
-    pub principal: Principal,
-    /// Factory that builds signers for routed upstreams.
-    pub signer_factory: Arc<dyn SignerFactory>,
-    /// Quotas and model gates attached to the principal.
-    pub quotas: PrincipalQuotas,
 }
 
 /// Per-principal quota window and model allow-list.

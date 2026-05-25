@@ -63,17 +63,17 @@ credentials_ref = "missing"
 }
 
 #[test]
-fn missing_plugin_wasm_path_fails_with_field_path() {
+fn missing_router_plugin_wasm_path_fails_with_field_path() {
     let (_dir, path) = common::temp_config(
-        r#"[plugins.authn_plugin]
-name = "authn"
+        r#"[plugins.router_plugin]
+name = "router"
 "#,
     );
 
     let error = Config::load(&path).unwrap_err().to_string();
 
     assert!(
-        error.contains("plugins.authn_plugin.wasm_path: missing plugin wasm path"),
+        error.contains("plugins.router_plugin.wasm_path: missing plugin wasm path"),
         "{error}"
     );
 }

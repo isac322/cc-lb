@@ -2,7 +2,7 @@ use std::error::Error;
 
 use cc_lb_storage_api::StorageError as ApiStorageError;
 
-use crate::{CURRENT_SCHEMA_VERSION, StorageError};
+use crate::{StorageError, CURRENT_SCHEMA_VERSION};
 
 pub(crate) fn map_redb_err(error: StorageError) -> ApiStorageError {
     match error {
@@ -21,18 +21,6 @@ pub(crate) fn map_redb_err(error: StorageError) -> ApiStorageError {
         StorageError::InvalidSchemaVersion(found) => ApiStorageError::SchemaMismatch {
             found,
             expected: CURRENT_SCHEMA_VERSION,
-        },
-        StorageError::QuotaCounterOverflow(key) => ApiStorageError::Fatal {
-            message: format!("redb quota counter overflow for key {key}"),
-        },
-        StorageError::QuotaCounterUnderflow(key) => ApiStorageError::Corrupted {
-            message: format!("redb quota counter underflow for key {key}"),
-        },
-        StorageError::InvalidQuotaCounter(key) => ApiStorageError::Corrupted {
-            message: format!("redb invalid quota counter value for key {key}"),
-        },
-        StorageError::InvalidQuotaKey(key) => ApiStorageError::Corrupted {
-            message: format!("redb invalid quota key {key}"),
         },
         StorageError::InvalidAuditKey => ApiStorageError::Corrupted {
             message: "redb invalid audit key".to_owned(),

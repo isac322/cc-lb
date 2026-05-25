@@ -1,4 +1,4 @@
-use cc_lb_storage_redb::{REQUEST_EVENTS_V1, RedbStorage, RequestEvent, RequestEventUpstream};
+use cc_lb_storage_redb::{REQUEST_EVENTS_V1, RedbStorage, RequestEvent};
 use redb::{ReadableDatabase, ReadableTable};
 use serde_json::Value;
 
@@ -7,20 +7,16 @@ fn request_events_persist_across_reopen() -> Result<(), Box<dyn std::error::Erro
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("events.redb");
 
-    let storage = RedbStorage::open(&path)?;
+    let storage = RedbStorage::open(&path, [0; 32])?;
     storage.append_request_event(&event(0))?;
     drop(storage);
 
-    let storage = RedbStorage::open(&path)?;
+    let storage = RedbStorage::open(&path, [0; 32])?;
     let events = storage.query_request_events(1_800_000_000, u64::MAX, 10)?;
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].request_id, "req-0000");
-    assert_eq!(events[0].principal_id.as_deref(), Some("principal-a"));
-    assert_eq!(
-        events[0].upstream,
-        Some(RequestEventUpstream::AnthropicDirect)
-    );
+    assert_eq!(events[0].key_id, "req-0000");
+    assert_eq!(events[0].principal_id, "principal-a");
     assert_eq!(events[0].status, 200);
     Ok(())
 }
@@ -30,7 +26,7 @@ fn request_events_query_returns_append_order_for_monotonic_keys()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("events.redb");
-    let storage = RedbStorage::open(&path)?;
+    let storage = RedbStorage::open(&path, [0; 32])?;
 
     for index in 0..100 {
         storage.append_request_event(&event(index))?;
@@ -38,9 +34,9 @@ fn request_events_query_returns_append_order_for_monotonic_keys()
 
     let events = storage.query_request_events(1_800_000_002, u64::MAX, 5)?;
     assert_eq!(events.len(), 5);
-    assert_eq!(events[0].request_id, "req-0020");
-    assert_eq!(events[4].request_id, "req-0024");
-    assert!(events.iter().all(|event| event.ts >= 1_800_000_002));
+    assert_eq!(events[0].key_id, "req-0020");
+    assert_eq!(events[4].key_id, "req-0024");
+    assert!(events.iter().all(|event| event.ts_ms >= 1_800_000_002));
     Ok(())
 }
 
@@ -48,7 +44,7 @@ fn request_events_query_returns_append_order_for_monotonic_keys()
 fn request_event_json_rows_exclude_payload_keys() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("events.redb");
-    let storage = RedbStorage::open(&path)?;
+    let storage = RedbStorage::open(&path, [0; 32])?;
     let request_event = event(7);
 
     let serialized = serde_json::to_value(&request_event)?;
@@ -76,17 +72,17 @@ fn request_event_json_rows_exclude_payload_keys() -> Result<(), Box<dyn std::err
 
 fn event(index: usize) -> RequestEvent {
     RequestEvent {
-        ts: 1_800_000_000 + (index / 10) as u64,
-        request_id: format!("req-{index:04}"),
-        principal_id: Some("principal-a".to_owned()),
-        principal_kind: Some("api_key".to_owned()),
-        upstream: Some(RequestEventUpstream::AnthropicDirect),
-        model: Some("claude-sonnet-4-5".to_owned()),
-        status: 200,
-        input_tokens: Some(index as u64),
-        output_tokens: Some((index * 2) as u64),
+        ts_ms: 1_800_000_000 + (index / 10) as u64,
+        principal_id: "principal-a".to_owned(),
+        key_id: format!("req-{index:04}"),
+        model: "claude-sonnet-4-5".to_owned(),
+        input_tokens: index as u64,
+        output_tokens: (index * 2) as u64,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        cost_usd_micros: 0,
         duration_ms: 25,
-        error_code: None,
+        status: 200,
     }
 }
 

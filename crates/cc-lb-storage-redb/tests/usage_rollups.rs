@@ -1,6 +1,5 @@
 use cc_lb_storage_redb::{
-    RedbStorage, RequestEvent, RequestEventUpstream, USAGE_ROLLUPS_V1, UsageRollup,
-    UsageRollupResolution,
+    RedbStorage, RequestEvent, USAGE_ROLLUPS_V1, UsageRollup, UsageRollupResolution,
 };
 use redb::{ReadableDatabase, ReadableTable};
 use serde_json::Value;
@@ -9,7 +8,7 @@ use serde_json::Value;
 fn fixture_events_roll_up_once_and_rerun_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("rollups.redb");
-    let storage = RedbStorage::open(&path)?;
+    let storage = RedbStorage::open(&path, [0; 32])?;
 
     for event in fixture_events() {
         storage.append_request_event(&event)?;
@@ -28,7 +27,7 @@ fn fixture_events_roll_up_once_and_rerun_is_idempotent() -> Result<(), Box<dyn s
             UsageRollupResolution::Minute,
             1_800_000_000,
             "principal-a",
-            "anthropic_direct",
+            "unknown",
             "claude-sonnet-4-5",
         ),
         ExpectedRollup {
@@ -49,7 +48,7 @@ fn fixture_events_roll_up_once_and_rerun_is_idempotent() -> Result<(), Box<dyn s
             UsageRollupResolution::Minute,
             1_800_000_060,
             "principal-a",
-            "anthropic_direct",
+            "unknown",
             "claude-sonnet-4-5",
         ),
         ExpectedRollup {
@@ -70,7 +69,7 @@ fn fixture_events_roll_up_once_and_rerun_is_idempotent() -> Result<(), Box<dyn s
             UsageRollupResolution::Hour,
             1_800_000_000,
             "principal-a",
-            "anthropic_direct",
+            "unknown",
             "claude-sonnet-4-5",
         ),
         ExpectedRollup {
@@ -93,7 +92,7 @@ fn fixture_events_roll_up_once_and_rerun_is_idempotent() -> Result<(), Box<dyn s
     assert_eq!(storage.query_usage_rollups()?, rollups);
     drop(storage);
 
-    let reopened = RedbStorage::open(&path)?;
+    let reopened = RedbStorage::open(&path, [0; 32])?;
     assert_eq!(reopened.usage_rollup_checkpoint()?, first.checkpoint);
     assert_eq!(reopened.query_usage_rollups()?, rollups);
     Ok(())
@@ -103,14 +102,13 @@ fn fixture_events_roll_up_once_and_rerun_is_idempotent() -> Result<(), Box<dyn s
 fn known_and_unknown_model_costs_roll_up() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("rollups.redb");
-    let storage = RedbStorage::open(&path)?;
+    let storage = RedbStorage::open(&path, [0; 32])?;
 
     storage.append_request_event(&event(
         1_800_000_005,
         "req-known",
         "principal-a",
-        RequestEventUpstream::AnthropicDirect,
-        "claude-sonnet-4-5",
+                "claude-sonnet-4-5",
         200,
         Some(10),
         Some(20),
@@ -120,8 +118,7 @@ fn known_and_unknown_model_costs_roll_up() -> Result<(), Box<dyn std::error::Err
         1_800_000_010,
         "req-unknown",
         "principal-a",
-        RequestEventUpstream::AnthropicDirect,
-        "unknown-model",
+                "unknown-model",
         200,
         Some(10),
         Some(20),
@@ -135,7 +132,7 @@ fn known_and_unknown_model_costs_roll_up() -> Result<(), Box<dyn std::error::Err
         UsageRollupResolution::Minute,
         1_800_000_000,
         "principal-a",
-        "anthropic_direct",
+        "unknown",
         "claude-sonnet-4-5",
     );
     let unknown = find_rollup(
@@ -143,7 +140,7 @@ fn known_and_unknown_model_costs_roll_up() -> Result<(), Box<dyn std::error::Err
         UsageRollupResolution::Minute,
         1_800_000_000,
         "principal-a",
-        "anthropic_direct",
+        "unknown",
         "unknown-model",
     );
 
@@ -158,7 +155,7 @@ fn query_usage_rollups_in_range_filters_resolution_and_bounds()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("rollups.redb");
-    let storage = RedbStorage::open(&path)?;
+    let storage = RedbStorage::open(&path, [0; 32])?;
 
     for event in fixture_events() {
         storage.append_request_event(&event)?;
@@ -196,7 +193,7 @@ fn query_usage_rollups_in_range_filters_resolution_and_bounds()
 fn usage_rollup_json_rows_exclude_payload_keys() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("rollups.redb");
-    let storage = RedbStorage::open(&path)?;
+    let storage = RedbStorage::open(&path, [0; 32])?;
 
     for event in fixture_events() {
         let serialized = serde_json::to_value(&event)?;
@@ -277,8 +274,7 @@ fn fixture_events() -> Vec<RequestEvent> {
             1_800_000_005,
             "req-a-1",
             "principal-a",
-            RequestEventUpstream::AnthropicDirect,
-            "claude-sonnet-4-5",
+                        "claude-sonnet-4-5",
             200,
             Some(10),
             Some(20),
@@ -288,8 +284,7 @@ fn fixture_events() -> Vec<RequestEvent> {
             1_800_000_030,
             "req-a-2",
             "principal-a",
-            RequestEventUpstream::AnthropicDirect,
-            "claude-sonnet-4-5",
+                        "claude-sonnet-4-5",
             429,
             Some(5),
             None,
@@ -299,8 +294,7 @@ fn fixture_events() -> Vec<RequestEvent> {
             1_800_000_065,
             "req-a-3",
             "principal-a",
-            RequestEventUpstream::AnthropicDirect,
-            "claude-sonnet-4-5",
+                        "claude-sonnet-4-5",
             200,
             Some(7),
             Some(8),
@@ -310,8 +304,7 @@ fn fixture_events() -> Vec<RequestEvent> {
             1_800_000_045,
             "req-b-1",
             "principal-b",
-            RequestEventUpstream::Vertex,
-            "claude-opus-4-1",
+                        "claude-opus-4-1",
             500,
             None,
             Some(1),
@@ -323,9 +316,8 @@ fn fixture_events() -> Vec<RequestEvent> {
 #[allow(clippy::too_many_arguments)]
 fn event(
     ts: u64,
-    request_id: &str,
+    _request_id: &str,
     principal: &str,
-    upstream: RequestEventUpstream,
     model: &str,
     status: u16,
     input_tokens: Option<u64>,
@@ -333,17 +325,20 @@ fn event(
     duration_ms: u64,
 ) -> RequestEvent {
     RequestEvent {
-        ts,
-        request_id: request_id.to_owned(),
-        principal_id: Some(principal.to_owned()),
-        principal_kind: Some("api_key".to_owned()),
-        upstream: Some(upstream),
-        model: Some(model.to_owned()),
-        status,
-        input_tokens,
-        output_tokens,
+        ts_ms: ts * 1000,
+        principal_id: principal.to_owned(),
+        key_id: "test-key".to_owned(),
+        model: model.to_owned(),
+        input_tokens: input_tokens.unwrap_or(0),
+        output_tokens: output_tokens.unwrap_or(0),
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        cost_usd_micros: match model {
+            "claude-sonnet-4-5" => ((input_tokens.unwrap_or(0) * 3) + (output_tokens.unwrap_or(0) * 15)) as i64,
+            _ => 0,
+        },
         duration_ms,
-        error_code: None,
+        status,
     }
 }
 

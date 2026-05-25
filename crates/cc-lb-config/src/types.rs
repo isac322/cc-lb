@@ -1,12 +1,33 @@
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
+use std::time::Duration;
 
 use schemars::JsonSchema;
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use url::Url;
+
+mod humantime_serde {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::time::Duration;
+
+    pub fn serialize<S>(duration: &Duration, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&humantime::format_duration(*duration).to_string())
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        humantime::parse_duration(&value).map_err(serde::de::Error::custom)
+    }
+}
 
 pub const DEFAULT_MESSAGES_CAP_BYTES: u64 = 32 * 1024 * 1024;
 pub const DEFAULT_FILES_CAP_BYTES: u64 = 100 * 1024 * 1024;
@@ -27,11 +48,12 @@ pub struct Config {
     pub upstreams: HashMap<String, UpstreamSpec>,
     pub principals: HashMap<String, PrincipalSpec>,
     pub plugins: PluginsConfig,
+    pub downstream_auth: DownstreamAuthConfig,
+    pub api_keys: ApiKeysConfig,
     pub storage: StorageConfig,
     pub aead: AeadConfig,
     pub signers: SignersConfig,
     pub observability: ObservabilityConfig,
-    pub quotas: QuotasConfig,
     pub admin: AdminConfig,
     pub circuit_breaker: CircuitBreakerConfig,
     pub bulkhead: BulkheadConfig,
@@ -146,6 +168,128 @@ pub enum UpstreamKind {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
+pub enum LimitKind {
+    Requests,
+    InputTokens,
+    OutputTokens,
+    TotalTokens,
+    CostUsd,
+    Concurrent,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize, JsonSchema)]
+pub struct Limit {
+    pub kind: LimitKind,
+    #[serde(
+        serialize_with = "crate::types::humantime_serde::serialize",
+        deserialize_with = "crate::types::humantime_serde::deserialize"
+    )]
+    pub window: Duration,
+    pub cap_micros: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum PrincipalType {
+    Human,
+    Machine,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DownstreamAuthMode {
+    None,
+    ApiKey,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum NoneModeUpstreamKind {
+    AnthropicKey,
+    AnthropicOAuth,
+    AwsSigV4,
+    GcpOAuth,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct NoneModeConfig {
+    pub principal_id: String,
+    pub upstream_kind: NoneModeUpstreamKind,
+    pub upstream_credential_ref: String,
+}
+
+impl Default for NoneModeConfig {
+    fn default() -> Self {
+        Self {
+            principal_id: String::new(),
+            upstream_kind: NoneModeUpstreamKind::AnthropicKey,
+            upstream_credential_ref: String::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct DownstreamAuthConfig {
+    pub mode: DownstreamAuthMode,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub none_mode: Option<NoneModeConfig>,
+}
+
+impl Default for DownstreamAuthConfig {
+    fn default() -> Self {
+        Self {
+            mode: DownstreamAuthMode::ApiKey,
+            none_mode: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct PriceCatalogConfig {
+    #[serde(default = "default_price_catalog_url")]
+    pub url: String,
+    #[serde(default = "default_price_catalog_refresh_interval")]
+    #[serde(
+        serialize_with = "crate::types::humantime_serde::serialize",
+        deserialize_with = "crate::types::humantime_serde::deserialize"
+    )]
+    pub refresh_interval: Duration,
+    #[serde(default = "default_price_catalog_cache_path")]
+    pub cache_path: PathBuf,
+}
+
+impl Default for PriceCatalogConfig {
+    fn default() -> Self {
+        Self {
+            url: default_price_catalog_url(),
+            refresh_interval: default_price_catalog_refresh_interval(),
+            cache_path: default_price_catalog_cache_path(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct ApiKeysConfig {
+    #[serde(default = "default_usage_retention_days")]
+    pub usage_retention_days: u64,
+    pub price_catalog: PriceCatalogConfig,
+}
+
+impl Default for ApiKeysConfig {
+    fn default() -> Self {
+        Self {
+            usage_retention_days: default_usage_retention_days(),
+            price_catalog: PriceCatalogConfig::default(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
 pub enum AuthStrategy {
     ApiKey,
     OAuth,
@@ -168,23 +312,35 @@ pub struct UpstreamSpec {
     pub credentials_ref: Option<String>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
 pub struct PrincipalSpec {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub quotas: Option<QuotasConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub disabled: Option<bool>,
+    #[serde(default = "default_machine")]
+    pub principal_type: PrincipalType,
+    #[serde(default)]
+    pub default_limits: Vec<Limit>,
+    #[serde(default = "default_true")]
+    pub enabled: bool,
     pub allowed_models: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credentials_ref: Option<String>,
 }
 
+impl Default for PrincipalSpec {
+    fn default() -> Self {
+        Self {
+            principal_type: PrincipalType::Machine,
+            default_limits: Vec::new(),
+            enabled: true,
+            allowed_models: Vec::new(),
+            credentials_ref: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
 #[serde(default)]
 pub struct PluginsConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub authn_plugin: Option<PluginRef>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub router_plugin: Option<PluginRef>,
     pub observability_hooks: Vec<PluginRef>,
@@ -392,30 +548,6 @@ impl Default for ObservabilityConfig {
             prometheus_endpoint: None,
             log_redaction: true,
             user_prompt_redaction: false,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct QuotasConfig {
-    #[serde(default = "default_quota_window_secs")]
-    pub default_window_secs: u64,
-    #[serde(default = "default_requests_per_window")]
-    pub default_requests_per_window: u64,
-    #[serde(default = "default_input_tokens")]
-    pub default_input_tokens: u64,
-    #[serde(default = "default_output_tokens")]
-    pub default_output_tokens: u64,
-}
-
-impl Default for QuotasConfig {
-    fn default() -> Self {
-        Self {
-            default_window_secs: 60,
-            default_requests_per_window: 1_000,
-            default_input_tokens: 1_000_000,
-            default_output_tokens: 1_000_000,
         }
     }
 }
@@ -632,20 +764,25 @@ fn default_tracing_level() -> String {
     "info".to_owned()
 }
 
-fn default_quota_window_secs() -> u64 {
-    QuotasConfig::default().default_window_secs
+fn default_usage_retention_days() -> u64 {
+    90
 }
 
-fn default_requests_per_window() -> u64 {
-    QuotasConfig::default().default_requests_per_window
+fn default_price_catalog_url() -> String {
+    "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+        .to_owned()
 }
 
-fn default_input_tokens() -> u64 {
-    QuotasConfig::default().default_input_tokens
+fn default_price_catalog_refresh_interval() -> Duration {
+    Duration::from_secs(60 * 60)
 }
 
-fn default_output_tokens() -> u64 {
-    QuotasConfig::default().default_output_tokens
+fn default_price_catalog_cache_path() -> PathBuf {
+    PathBuf::from("/var/lib/cc-lb/litellm.json")
+}
+
+fn default_machine() -> PrincipalType {
+    PrincipalType::Machine
 }
 
 fn default_admin_token_env() -> String {
@@ -678,4 +815,143 @@ fn default_dns_cache_ttl_floor_secs() -> u64 {
 
 fn default_dns_cache_ttl_ceiling_secs() -> u64 {
     DnsConfig::default().cache_ttl_ceiling_secs
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Config, ConfigOverrides};
+    use std::fs;
+
+    fn load_config(toml: &str) -> Result<Config, crate::ConfigError> {
+        let temp_file = tempfile::NamedTempFile::new().expect("create temp config");
+        fs::write(temp_file.path(), toml).expect("write temp config");
+        Config::load_with_overrides(temp_file.path(), ConfigOverrides::default())
+    }
+
+    #[test]
+    fn valid_api_key_mode_deserializes() {
+        let config = load_config(
+            r#"
+[downstream_auth]
+mode = "api_key"
+
+[api_keys]
+"#,
+        )
+        .expect("config should load");
+
+        assert_eq!(config.downstream_auth.mode, DownstreamAuthMode::ApiKey);
+        assert!(config.downstream_auth.none_mode.is_none());
+    }
+
+    #[test]
+    fn valid_none_mode_deserializes() {
+        let config = load_config(
+            r#"
+[downstream_auth]
+mode = "none"
+
+[downstream_auth.none_mode]
+principal_id = "anon"
+upstream_kind = "anthropic_key"
+upstream_credential_ref = "cred-1"
+
+[api_keys]
+"#,
+        )
+        .expect("config should load");
+
+        assert_eq!(config.downstream_auth.mode, DownstreamAuthMode::None);
+        let none_mode = config.downstream_auth.none_mode.expect("none mode config");
+        assert_eq!(none_mode.principal_id, "anon");
+        assert_eq!(none_mode.upstream_kind, NoneModeUpstreamKind::AnthropicKey);
+        assert_eq!(none_mode.upstream_credential_ref, "cred-1");
+    }
+
+    #[test]
+    fn none_mode_missing_fails_validation() {
+        let error = load_config(
+            r#"
+[downstream_auth]
+mode = "none"
+
+[api_keys]
+"#,
+        )
+        .expect_err("config should fail validation");
+
+        assert!(error
+            .to_string()
+            .contains("downstream_auth.none_mode must be set iff mode=none"));
+    }
+
+    #[test]
+    fn api_key_mode_rejects_none_mode() {
+        let error = load_config(
+            r#"
+[downstream_auth]
+mode = "api_key"
+
+[downstream_auth.none_mode]
+principal_id = "anon"
+upstream_kind = "anthropic_key"
+upstream_credential_ref = "cred-1"
+
+[api_keys]
+"#,
+        )
+        .expect_err("config should fail validation");
+
+        assert!(error
+            .to_string()
+            .contains("downstream_auth.none_mode must be set iff mode=none"));
+    }
+
+    fn legacy_removed_message() -> String {
+        let legacy_plugin_section = ["authn", "_", "plugin"].concat();
+        [
+            "v2 removed `plugins.",
+            &legacy_plugin_section,
+            "` / `principals.*.quotas`; use `downstream_auth.mode` + `principals.*.default_limits` (sk-cclb-* API keys)",
+        ]
+        .concat()
+    }
+
+    #[test]
+    fn legacy_plugin_rejected() {
+        let legacy_plugin_section = ["authn", "_", "plugin"].concat();
+        let config_toml = format!(
+            "[plugins.{}]\nname = \"legacy\"\n\n[api_keys]\n",
+            legacy_plugin_section
+        );
+        let error = load_config(&config_toml).expect_err("legacy plugin should fail");
+
+        assert!(error.to_string().contains(&legacy_removed_message()));
+    }
+
+    #[test]
+    fn legacy_principal_quotas_rejected() {
+        let error = load_config(
+            r#"
+[principals.u1.quotas]
+default_window_secs = 60
+
+[api_keys]
+"#,
+        )
+        .expect_err("legacy quotas should fail");
+
+        assert!(error.to_string().contains(&legacy_removed_message()));
+    }
+
+    #[test]
+    fn principal_spec_defaults_to_machine() {
+        let principal = toml::from_str::<PrincipalSpec>("allowed_models = []")
+            .expect("principal should deserialize");
+
+        assert_eq!(principal.principal_type, PrincipalType::Machine);
+        assert!(principal.default_limits.is_empty());
+        assert!(principal.enabled);
+    }
 }

@@ -20,6 +20,7 @@ pub enum EventStreamConvertError {
 }
 
 pub fn convert_eventstream_to_sse_bytes(input: &[u8]) -> Result<Bytes, EventStreamConvertError> {
+    record_missing_streaming_usage("bedrock");
     let messages = decode_messages(input)?;
     let mut output = Vec::new();
 
@@ -90,4 +91,12 @@ fn append_sse(output: &mut Vec<u8>, event_name: &str, payload: &[u8]) {
     output.extend_from_slice(b"\ndata: ");
     output.extend_from_slice(payload);
     output.extend_from_slice(b"\n\n");
+}
+
+// TODO(v2): extract usage from converse-stream events.
+fn record_missing_streaming_usage(dialect: &str) {
+    tracing::warn!(
+        dialect,
+        "bedrock streaming usage extraction not implemented; cost limits may undercount"
+    );
 }

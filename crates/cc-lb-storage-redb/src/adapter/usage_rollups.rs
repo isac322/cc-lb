@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    StorageResult, UsageRollupStore,
     types::{
         UsageRollup as ApiUsageRollup, UsageRollupKey as ApiUsageRollupKey,
         UsageRollupResolution as ApiUsageRollupResolution, UsageRollupRun as ApiUsageRollupRun,
     },
+    StorageResult, UsageRollupStore,
 };
 
 use crate::{

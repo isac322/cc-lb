@@ -1,15 +1,13 @@
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
-use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
-use axum::Json;
-use axum::Router;
+use arc_swap::ArcSwap;
 use axum::body::Body;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::State;
@@ -17,38 +15,43 @@ use axum::http::header::HeaderValue;
 use axum::http::{HeaderName, Request, Response, StatusCode};
 use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
+use axum::Json;
+use axum::Router;
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, PluginRef, StorageConfig, TlsConfig};
+use cc_lb_config::{Config, DownstreamAuthMode, PluginRef, TlsConfig};
 use cc_lb_core::BreakerState;
 use cc_lb_core::{
+    api_keys::{
+        builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
+        limit_engine::LimitEngine, principal_view::PrincipalView,
+    },
+    make_default_dispatcher, spawn_audit_writer,
+    usage_pruner::UsagePruner,
     BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
-    CircuitBreakerDispatch, DashboardBroadcaster, ErrorNormalizer, HopByHopStripLayer, Lifecycle,
-    LifecycleConfig, PrincipalLimitStateSink, QuotaManager, QuotaPolicy, RequestEventSink,
-    UpstreamDispatch, UpstreamKind, make_default_dispatcher, start_principal_limit_state_writer,
-    start_request_event_writer, start_sweep,
+    CircuitBreakerDispatch, ErrorNormalizer, HopByHopStripLayer, Lifecycle, LifecycleConfig,
+    UpstreamDispatch, UpstreamKind,
 };
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_plugin_api::{ObservabilityHook, PluginManifest, PluginRuntime};
-use cc_lb_runtime_extism::{ExtismRuntime, SignerFactoryResolver};
-use cc_lb_storage_api::Storage;
+use cc_lb_pricing::LiteLlmLoader;
+use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_storage_redb::Storage;
 use http_body_util::BodyExt;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::net::TcpListener;
-use tokio::runtime::RuntimeFlavor;
-use tokio::sync::{broadcast, watch};
+use tokio::sync::watch;
 use tokio::task::{JoinError, JoinHandle};
 use tower::ServiceBuilder;
 
 use crate::build_meta::BuildMeta;
-use crate::builtins::{self, BuiltinAuthn, BuiltinRouter, NoopObservabilityHook};
+use crate::builtins::{self, BuiltinRouter, CompositeSignerFactory, NoopObservabilityHook};
 use crate::drain::DrainController;
 use crate::preflight::{self, PreflightOptions};
 use crate::reload::ConfigWatcher;
 use crate::signal;
-use crate::storage_factory;
 use crate::tls::{ReloadableListener, TlsState};
-use cc_lb_admin::{AdminState, CurrentConfig};
+use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig};
 
 pub const PROXY_FILES_ROUTE_COLLECTION: &str = "/v1/files";
 pub const PROXY_FILES_ROUTE_ITEM: &str = "/v1/files/{id}";
@@ -65,10 +68,7 @@ pub struct App {
     pub proxy_addr: SocketAddr,
     pub admin_addr: SocketAddr,
     pub reload_task: Option<JoinHandle<()>>,
-    pub sweep_task: Option<JoinHandle<()>>,
-    pub request_event_task: Option<JoinHandle<()>>,
-    pub principal_limit_state_task: Option<JoinHandle<()>>,
-    pub usage_rollup_task: Option<JoinHandle<()>>,
+    audit_writer_task: Option<JoinHandle<()>>,
     signals: signal::SignalHandle,
     drain_controller: DrainController,
     tls_state: Option<Arc<TlsState>>,
@@ -106,10 +106,7 @@ impl App {
             proxy_addr,
             admin_addr,
             reload_task,
-            sweep_task,
-            request_event_task,
-            principal_limit_state_task,
-            usage_rollup_task,
+            audit_writer_task,
             signals,
             drain_controller: _,
             tls_state,
@@ -154,21 +151,11 @@ impl App {
         if let Some(task) = reload_task {
             task.abort();
         }
-        if let Some(task) = sweep_task {
-            task.abort();
-        }
-        if let Some(task) = request_event_task {
-            task.abort();
-        }
-        if let Some(task) = principal_limit_state_task {
-            task.abort();
-        }
-        if let Some(task) = usage_rollup_task {
-            task.abort();
-        }
-
         let _ = admin_stop_tx.send(true);
         let _ = admin.await;
+        if let Some(task) = audit_writer_task {
+            let _ = task.await;
+        }
         proxy_result?;
         Ok(())
     }
@@ -182,18 +169,7 @@ pub async fn run_serve(config_path: &Path) -> Result<(), ServeError> {
         config.observability.user_prompt_redaction,
     ));
     let _guard = init_observability(&mut config)?;
-    let app = match build_app_with_path_async(config, Some(config_path)).await {
-        Ok(app) => app,
-        Err(BuildError::StorageFactory(error)) => {
-            tracing::error!(event = "boot_fatal", kind = %error, "storage initialization failed");
-            return Err(ServeError::Build(BuildError::StorageFactory(error)));
-        }
-        Err(error) if error.is_storage_initialization() => {
-            tracing::error!(error = %error, "storage initialization failed; exiting");
-            return Err(ServeError::Build(error));
-        }
-        Err(error) => return Err(ServeError::Build(error)),
-    };
+    let app = build_app_with_path(config, Some(config_path))?;
     app.start().await?;
     Ok(())
 }
@@ -209,54 +185,75 @@ pub fn build_app(config: Config) -> Result<App, BuildError> {
     build_app_with_path(config, None)
 }
 
-/// Test-only variant: auto-creates a temp redb storage with all-zero key.
-/// The tempdir is intentionally leaked so the redb file stays accessible.
 pub fn build_app_for_testing(mut config: Config) -> Result<App, BuildError> {
     let dir = tempfile::TempDir::new()?;
     let path = dir.path().join("storage.redb");
-    let aead = Arc::new(AeadService::from_master_key([0u8; 32]));
-    config.storage = StorageConfig::Redb { path };
+    let key = [0u8; 32];
+    let aead = Arc::new(AeadService::from_master_key(key));
+    let storage = Some(Arc::new(cc_lb_storage_redb::Storage::open(&path, key)?));
+    config.storage = cc_lb_config::StorageConfig::Redb { path };
     config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
-    let storage_config = config.storage.clone();
-    let storage = block_on_storage_open({
-        let aead = aead.clone();
-        async move {
-            storage_factory::open_storage(&storage_config, aead)
-                .await
-                .map_err(BuildError::from)
-        }
-    })?;
+    config.downstream_auth.mode = DownstreamAuthMode::None;
+    config.downstream_auth.none_mode = Some(cc_lb_config::NoneModeConfig {
+        principal_id: "test-principal".to_owned(),
+        upstream_kind: cc_lb_config::NoneModeUpstreamKind::AnthropicKey,
+        upstream_credential_ref: "test-cred".to_owned(),
+    });
     std::mem::forget(dir);
     build_app_with_storage(config, None, storage, aead)
 }
 
 pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result<App, BuildError> {
+    config.validate()?;
     let (storage, aead) = open_storage(&config)?;
     build_app_with_storage(config, config_path, storage, aead)
 }
 
-async fn build_app_with_path_async(
+pub fn build_app_with_storage(
     config: Config,
     config_path: Option<&Path>,
-) -> Result<App, BuildError> {
-    let (storage, aead) = open_storage_async(&config).await?;
-    build_app_with_storage(config, config_path, storage, aead)
-}
-
-fn build_app_with_storage(
-    config: Config,
-    config_path: Option<&Path>,
-    storage: Arc<dyn Storage>,
+    storage: Option<Arc<cc_lb_storage_redb::Storage>>,
     aead: Arc<AeadService>,
 ) -> Result<App, BuildError> {
-    let runtime = ExtismRuntime::with_signer_factory_resolver(
-        host_signer_resolver(&config, storage.clone(), aead.clone())
-            .expect("host signer resolver is always available when storage is configured"),
-    );
-    let authn = match &config.plugins.authn_plugin {
-        Some(plugin) => runtime.instantiate(&manifest_from_plugin(plugin)?)?,
-        None => Arc::new(BuiltinAuthn::new(&config, storage.clone(), aead.clone())),
+    if matches!(config.downstream_auth.mode, DownstreamAuthMode::ApiKey) && storage.is_none() {
+        return Err(BuildError::StorageRequired);
+    }
+
+    let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config)));
+    let key_store = storage
+        .as_ref()
+        .map(|storage| Arc::new(KeyStore::new(storage.clone())));
+    let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
+    let price_catalog = cc_lb_pricing::global_catalog().clone();
+    spawn_price_catalog_loader(&config, storage.clone(), price_catalog.clone());
+    if let Some(storage) = storage.clone() {
+        let pruner = UsagePruner::new(storage, config.api_keys.usage_retention_days);
+        let _usage_pruner_task = tokio::spawn(pruner.start_daemon());
+    }
+    let (audit_sink, audit_writer_task) = match storage.clone() {
+        Some(storage) => {
+            let (sink, task) = spawn_audit_writer(storage, 1024);
+            (Some(Arc::new(sink)), Some(task))
+        }
+        None => (None, None),
     };
+    let limit_engine = LimitEngine::new(concurrent_mgr, principal_view.clone());
+    if let Some(storage) = storage.clone() {
+        limit_engine.startup_replay(storage);
+    }
+    let builtin_authn = key_store.as_ref().map(|key_store| {
+        Arc::new(BuiltinAuthn::new(
+            config.downstream_auth.mode.clone(),
+            config.downstream_auth.none_mode.clone(),
+            key_store.clone(),
+            principal_view.clone(),
+        ))
+    });
+
+    let runtime = ExtismRuntime::new();
+    let authn = builtin_authn.clone().ok_or(BuildError::StorageRequired)?;
+    let signer_factory_for_lifecycle =
+        Arc::new(CompositeSignerFactory::new(&config, storage.clone(), aead.clone()));
     let router_plugin = match &config.plugins.router_plugin {
         Some(plugin) => runtime.instantiate_router(&manifest_from_plugin(plugin)?)?,
         None => Arc::new(BuiltinRouter::new(&config)?),
@@ -268,48 +265,28 @@ fn build_app_with_storage(
     }
 
     let error_normalizer = Arc::new(error_normalizer(&config)?);
-    let (dispatcher, breaker_registry, bulkhead_registry) = dispatcher(&config);
-    let (request_event_sink, request_event_task) = {
-        let (sink, receiver) = RequestEventSink::new();
-        (
-            Some(Arc::new(sink)),
-            Some(start_request_event_writer(storage.clone(), receiver)),
-        )
-    };
-    let (principal_limit_state_sink, principal_limit_state_task) = {
-        let (sink, receiver) = PrincipalLimitStateSink::new();
-        (
-            Some(Arc::new(sink)),
-            Some(start_principal_limit_state_writer(
-                storage.clone(),
-                receiver,
-            )),
-        )
-    };
-    let dashboard_broadcaster = Arc::new(DashboardBroadcaster::new());
-    let lifecycle = Arc::new(
-        Lifecycle::new(
-            authn,
-            router_plugin,
-            dispatcher,
-            observability_hooks,
-            LifecycleConfig {
-                messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
-                files_body_cap_bytes: cap_to_usize(config.body.files_cap_bytes),
-            },
-        )
-        .with_error_normalizer(error_normalizer)
-        .with_principal_limit_state_sink(principal_limit_state_sink)
-        .with_request_event_sink(request_event_sink)
-        .with_dashboard_broadcaster(Some(dashboard_broadcaster.clone())),
-    );
+    let (dispatcher, breaker_registry) = dispatcher(&config);
+    let mut lifecycle = Lifecycle::new(
+        authn.clone(),
+        signer_factory_for_lifecycle,
+        router_plugin,
+        dispatcher,
+        observability_hooks,
+        LifecycleConfig {
+            messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
+            files_body_cap_bytes: cap_to_usize(config.body.files_cap_bytes),
+        },
+    )
+    .with_error_normalizer(error_normalizer);
+    if let Some(audit_sink) = audit_sink.clone() {
+        lifecycle = lifecycle.with_audit_sink(audit_sink);
+    }
+    lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), authn.clone());
+    if let Some(storage) = storage.clone() {
+        lifecycle = lifecycle.with_request_event_storage(storage);
+    }
+    let lifecycle = Arc::new(lifecycle);
 
-    let quota_manager = Arc::new(QuotaManager::new(storage.clone(), quota_policy(&config)));
-    let sweep_task = Some(start_sweep(quota_manager.clone(), Duration::from_secs(60)));
-    let usage_rollup_task = Some(start_usage_rollup_worker(
-        storage.clone(),
-        Duration::from_secs(60),
-    ));
     let start_time = std::time::Instant::now();
     let drain_controller = DrainController::new();
     let tls_state = build_tls_state(&config)?;
@@ -317,11 +294,13 @@ fn build_app_with_storage(
         Some((_, tls)) if tls.reload_on_sighup => tls_state.clone(),
         _ => None,
     };
-    let config_watcher = config_path.map(|path| Arc::new(ConfigWatcher::new(path, config.clone())));
-    let config_path_buf = config_path.map(Path::to_path_buf);
-    let admin_config_watcher: Option<Arc<dyn cc_lb_admin::ConfigReloader>> = config_watcher
-        .clone()
-        .map(|watcher| watcher as Arc<dyn cc_lb_admin::ConfigReloader>);
+    let config_watcher = config_path.map(|path| {
+        Arc::new(ConfigWatcher::new_with_principal_view(
+            path,
+            config.clone(),
+            Some(principal_view.clone()),
+        ))
+    });
     let signals = signal::install(
         drain_controller.clone(),
         Duration::from_secs(config.timeouts.drain_secs),
@@ -329,29 +308,27 @@ fn build_app_with_storage(
     );
     let state = ProxyState {
         lifecycle: lifecycle.clone(),
-        breaker_registry: breaker_registry.clone(),
+        breaker_registry,
         start_time,
         drain_controller: drain_controller.clone(),
+        key_store,
+        builtin_authn,
     };
     let admin_config: Arc<dyn CurrentConfig> = match &config_watcher {
         Some(watcher) => watcher.clone(),
-        None => Arc::new(config.clone()),
+        None => Arc::new(InMemoryCurrentConfig::new(
+            config.clone(),
+            principal_view.clone(),
+        )),
     };
-
     let admin_state = AdminState {
         storage: storage.clone(),
         aead: aead.clone(),
-        quota_manager: Some(quota_manager.clone()),
+        limit_engine: limit_engine.clone(),
         lifecycle: Some(lifecycle.clone()),
-        breaker_registry: Some(breaker_registry.clone()),
-        drain_controller: Some(drain_controller.clone()),
-        bulkhead_registry: Some(bulkhead_registry),
-        plugin_runtime_status: None,
-        dashboard_broadcaster,
+        audit_sink: audit_sink.clone(),
+        principal_view: principal_view.clone(),
         config: admin_config,
-        config_path: config_path_buf,
-        config_watcher: admin_config_watcher,
-        config_started_at_unix_secs: unix_now_secs(),
         admin_token: config
             .admin
             .token
@@ -359,9 +336,7 @@ fn build_app_with_storage(
             .or_else(|| std::env::var(&config.admin.token_env).ok()),
         start_time,
     };
-    let reload_task = config_watcher
-        .clone()
-        .map(|watcher| spawn_reload_watcher(watcher, quota_manager));
+    let reload_task = config_watcher.clone().map(spawn_reload_watcher);
 
     Ok(App {
         router: app_router(state, config.timeouts.upstream_total_secs),
@@ -369,14 +344,62 @@ fn build_app_with_storage(
         proxy_addr: config.listener.proxy_addr,
         admin_addr: config.listener.admin_addr,
         reload_task,
-        sweep_task,
-        request_event_task,
-        principal_limit_state_task,
-        usage_rollup_task,
+        audit_writer_task,
         signals,
         drain_controller,
         tls_state,
     })
+}
+
+struct InMemoryCurrentConfig {
+    current: ArcSwap<Config>,
+    draft: Mutex<Option<Config>>,
+    principal_view: Arc<ArcSwap<PrincipalView>>,
+}
+
+impl InMemoryCurrentConfig {
+    fn new(config: Config, principal_view: Arc<ArcSwap<PrincipalView>>) -> Self {
+        Self {
+            current: ArcSwap::from_pointee(config),
+            draft: Mutex::new(None),
+            principal_view,
+        }
+    }
+}
+
+impl CurrentConfig for InMemoryCurrentConfig {
+    fn current_config(&self) -> Arc<Config> {
+        self.current.load_full()
+    }
+
+    fn put_draft_config(&self, config: Config) -> Result<(), ConfigDraftError> {
+        config
+            .validate()
+            .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
+        let mut draft = self
+            .draft
+            .lock()
+            .map_err(|_| ConfigDraftError::Invalid("config draft lock poisoned".to_owned()))?;
+        *draft = Some(config);
+        Ok(())
+    }
+
+    fn apply_draft_config(&self) -> Result<Arc<Config>, ConfigDraftError> {
+        let config = self
+            .draft
+            .lock()
+            .map_err(|_| ConfigDraftError::Invalid("config draft lock poisoned".to_owned()))?
+            .take()
+            .ok_or(ConfigDraftError::MissingDraft)?;
+        config
+            .validate()
+            .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
+        self.principal_view
+            .store(PrincipalView::from_config(&config));
+        let config = Arc::new(config);
+        self.current.store(config.clone());
+        Ok(config)
+    }
 }
 
 #[derive(Clone)]
@@ -385,6 +408,39 @@ struct ProxyState {
     breaker_registry: Arc<BreakerRegistry>,
     start_time: std::time::Instant,
     drain_controller: DrainController,
+    #[allow(dead_code)]
+    key_store: Option<Arc<KeyStore>>,
+    #[allow(dead_code)]
+    builtin_authn: Option<Arc<BuiltinAuthn>>,
+}
+
+fn spawn_price_catalog_loader(
+    config: &Config,
+    storage: Option<Arc<Storage>>,
+    price_catalog: Arc<cc_lb_pricing::PriceCatalog>,
+) {
+    let Some(storage) = storage else {
+        return;
+    };
+    if tokio::runtime::Handle::try_current().is_err() {
+        tracing::warn!("tokio runtime unavailable; litellm price catalog loader not started");
+        return;
+    }
+
+    let price_catalog_config = &config.api_keys.price_catalog;
+    let loader = LiteLlmLoader::new(
+        price_catalog.clone(),
+        storage,
+        price_catalog_config.url.clone(),
+        price_catalog_config.refresh_interval,
+        price_catalog_config.cache_path.clone(),
+    );
+    let _loader_task = loader.start_daemon();
+    tokio::spawn(async move {
+        if !LiteLlmLoader::wait_for_first_snapshot(&price_catalog, Duration::from_secs(10)).await {
+            tracing::warn!("litellm price catalog first snapshot unavailable; startup continuing");
+        }
+    });
 }
 
 #[derive(Clone, Serialize)]
@@ -433,15 +489,12 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
         .route("/v1/messages/count_tokens", post(lifecycle_handler))
         .route("/v1/models", get(lifecycle_handler))
         .route("/v1/models/{id}", get(lifecycle_handler))
+        .route("/v1/files", post(lifecycle_handler).get(lifecycle_handler))
         .route(
-            PROXY_FILES_ROUTE_COLLECTION,
-            post(lifecycle_handler).get(lifecycle_handler),
-        )
-        .route(
-            PROXY_FILES_ROUTE_ITEM,
+            "/v1/files/{id}",
             get(lifecycle_handler).delete(lifecycle_handler),
         )
-        .route(PROXY_FILES_ROUTE_ITEM_CONTENT, get(lifecycle_handler))
+        .route("/v1/files/{id}/content", get(lifecycle_handler))
         .route("/api/{*path}", any(lifecycle_handler))
         .route("/v1/{*path}", any(lifecycle_handler))
         .with_state(state)
@@ -586,85 +639,17 @@ fn init_observability(config: &mut Config) -> Result<TracingGuard, BuildError> {
     .map_err(BuildError::from)
 }
 
-fn host_signer_resolver(
-    config: &Config,
-    storage: Arc<dyn Storage>,
-    aead: Arc<AeadService>,
-) -> Option<SignerFactoryResolver> {
-    let config = config.clone();
-    Some(Arc::new(
-        move |factory_ref, principal, _signer_state| match factory_ref {
-            "anthropic-key" => principal
-                .claims
-                .get("real_credential_storage_key")
-                .and_then(serde_json::Value::as_str)
-                .filter(|storage_key| !storage_key.trim().is_empty())
-                .map(|storage_key| {
-                    Arc::new(
-                        cc_lb_signer_anthropic_key::AnthropicKeySignerFactory::from_storage(
-                            storage_key.to_owned(),
-                            storage.clone(),
-                            aead.clone(),
-                        ),
-                    ) as Arc<dyn cc_lb_plugin_api::SignerFactory>
-                }),
-            "anthropic-oauth" => builtins::anthropic_oauth_factory(
-                &config,
-                storage.clone(),
-                aead.clone(),
-                &principal.id,
-                "anthropic_oauth",
-            )
-            .map(|factory| factory as Arc<dyn cc_lb_plugin_api::SignerFactory>),
-            _ => None,
-        },
-    ))
-}
-
-fn open_storage(config: &Config) -> Result<(Arc<dyn Storage>, Arc<AeadService>), BuildError> {
-    let config = config.clone();
-    block_on_storage_open(async move { open_storage_async(&config).await })
-}
-
-async fn open_storage_async(
-    config: &Config,
-) -> Result<(Arc<dyn Storage>, Arc<AeadService>), BuildError> {
-    let key_hex =
-        std::env::var(&config.aead.key_env).map_err(|_| BuildError::StorageKeyMissing {
-            env: config.aead.key_env.clone(),
-        })?;
+fn open_storage(config: &Config) -> Result<(Option<Arc<Storage>>, Arc<AeadService>), BuildError> {
+    let key_hex = std::env::var(&config.aead.key_env).map_err(|_| BuildError::StorageKeyMissing {
+        env: config.aead.key_env.clone(),
+    })?;
     let key = decode_hex_key(&key_hex)?;
     let aead = Arc::new(AeadService::from_master_key(key));
-    let storage = storage_factory::open_storage(&config.storage, aead.clone()).await?;
+    let storage = match &config.storage {
+        cc_lb_config::StorageConfig::Redb { path } => Some(Arc::new(Storage::open(path, key)?)),
+        cc_lb_config::StorageConfig::Postgres { .. } => None,
+    };
     Ok((storage, aead))
-}
-
-fn block_on_storage_open<F, T>(future: F) -> Result<T, BuildError>
-where
-    F: Future<Output = Result<T, BuildError>> + Send + 'static,
-    T: Send + 'static,
-{
-    match tokio::runtime::Handle::try_current() {
-        Ok(handle) if handle.runtime_flavor() == RuntimeFlavor::MultiThread => {
-            tokio::task::block_in_place(|| handle.block_on(future))
-        }
-        Ok(_) => std::thread::spawn(move || {
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .map_err(BuildError::from)?
-                .block_on(future)
-        })
-        .join()
-        .map_err(|_| {
-            BuildError::StorageTask("storage initialization thread panicked".to_owned())
-        })?,
-        Err(_) => tokio::runtime::Builder::new_multi_thread()
-            .enable_all()
-            .build()
-            .map_err(BuildError::from)?
-            .block_on(future),
-    }
 }
 
 fn decode_hex_key(value: &str) -> Result<[u8; 32], BuildError> {
@@ -689,13 +674,7 @@ fn hex_nibble(byte: u8) -> Result<u8, BuildError> {
     }
 }
 
-fn dispatcher(
-    config: &Config,
-) -> (
-    Arc<dyn UpstreamDispatch>,
-    Arc<BreakerRegistry>,
-    Arc<BulkheadRegistry>,
-) {
+fn dispatcher(config: &Config) -> (Arc<dyn UpstreamDispatch>, Arc<BreakerRegistry>) {
     let bulkhead_config = BulkheadConfig {
         max_conns_per_upstream: config.bulkhead.max_conns_per_upstream,
         semaphore_permits: config.bulkhead.semaphore_per_upstream,
@@ -715,7 +694,6 @@ fn dispatcher(
             .unwrap_or_else(|| "unknown".to_owned())
     });
     let breaker_registry = Arc::new(BreakerRegistry::new());
-    let bulkhead_registry = Arc::new(BulkheadRegistry::new());
     let breaker_upstream_name = upstream_name.clone();
     let breaker_registry_for_dispatcher = breaker_registry.clone();
     let dispatcher_factory = Arc::new(move |max_idle_per_host| {
@@ -729,13 +707,12 @@ fn dispatcher(
     });
     (
         Arc::new(BulkheadDispatch::with_dispatcher_factory(
-            bulkhead_registry.clone(),
+            Arc::new(BulkheadRegistry::new()),
             bulkhead_config,
             upstream_name.clone(),
             dispatcher_factory,
         )),
         breaker_registry,
-        bulkhead_registry,
     )
 }
 
@@ -747,15 +724,6 @@ fn error_normalizer(config: &Config) -> Result<ErrorNormalizer, BuildError> {
         normalizer.register_dialect(kind, builtins::dialect_for_spec(spec)?);
     }
     Ok(normalizer)
-}
-
-fn quota_policy(config: &Config) -> QuotaPolicy {
-    QuotaPolicy {
-        window_secs: config.quotas.default_window_secs.max(1),
-        capacity_requests: config.quotas.default_requests_per_window,
-        capacity_input_tokens: config.quotas.default_input_tokens,
-        capacity_output_tokens: config.quotas.default_output_tokens,
-    }
 }
 
 fn manifest_from_plugin(plugin: &PluginRef) -> Result<PluginManifest, BuildError> {
@@ -816,59 +784,10 @@ fn active_tls_config(config: &Config) -> Option<(&'static str, &TlsConfig)> {
     }
 }
 
-fn spawn_reload_watcher(
-    config_watcher: Arc<ConfigWatcher>,
-    quota_manager: Arc<QuotaManager>,
-) -> JoinHandle<()> {
+fn spawn_reload_watcher(config_watcher: Arc<ConfigWatcher>) -> JoinHandle<()> {
     tokio::spawn(async move {
-        let file_watcher = config_watcher.clone();
-        let quota_updates = config_watcher.subscribe();
-        tokio::select! {
-            _ = file_watcher.watch_file_changes() => {}
-            _ = quota_reload_loop(quota_updates, quota_manager) => {}
-        }
+        config_watcher.watch_file_changes().await;
     })
-}
-
-fn start_usage_rollup_worker(storage: Arc<dyn Storage>, period: Duration) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(period);
-        loop {
-            interval.tick().await;
-            match storage.rollup_usage_once().await {
-                Ok(run) => {
-                    if run.processed_events > 0 {
-                        tracing::debug!(
-                            processed_events = run.processed_events,
-                            updated_rollups = run.updated_rollups,
-                            "usage rollup completed"
-                        );
-                    }
-                }
-                Err(source) => {
-                    tracing::warn!(error = %source, "usage rollup failed");
-                }
-            }
-        }
-    })
-}
-
-async fn quota_reload_loop(
-    mut reloads: broadcast::Receiver<Arc<Config>>,
-    quota_manager: Arc<QuotaManager>,
-) {
-    loop {
-        match reloads.recv().await {
-            Ok(config) => {
-                quota_manager.set_defaults(quota_policy(&config)).await;
-                tracing::info!("quota defaults reloaded from configuration");
-            }
-            Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                tracing::warn!(skipped, "quota reload subscriber lagged");
-            }
-            Err(broadcast::error::RecvError::Closed) => return,
-        }
-    }
 }
 
 fn sighup_handler(
@@ -899,13 +818,6 @@ fn cap_to_usize(value: u64) -> usize {
     }
 }
 
-fn unix_now_secs() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
-}
-
 #[derive(Debug, Error)]
 pub enum BuildError {
     #[error(transparent)]
@@ -917,7 +829,7 @@ pub enum BuildError {
     #[error(transparent)]
     Observability(#[from] cc_lb_observability::InitError),
     #[error(transparent)]
-    StorageFactory(#[from] crate::storage_factory::StorageFactoryError),
+    Storage(#[from] cc_lb_storage_redb::StorageError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
@@ -926,22 +838,10 @@ pub enum BuildError {
     StorageKeyMissing { env: String },
     #[error("storage key must be 64 hexadecimal characters")]
     InvalidStorageKey,
-    #[error("storage initialization failed: {0}")]
-    StorageTask(String),
+    #[error("storage.redb_path is required for builtin downstream auth")]
+    StorageRequired,
     #[error("invalid plugin {name}: {reason}")]
     InvalidPlugin { name: String, reason: String },
     #[error("{field}: {message}")]
     InvalidTlsConfig { field: String, message: String },
-}
-
-impl BuildError {
-    fn is_storage_initialization(&self) -> bool {
-        matches!(
-            self,
-            Self::StorageFactory(_)
-                | Self::StorageKeyMissing { .. }
-                | Self::InvalidStorageKey
-                | Self::StorageTask(_)
-        )
-    }
 }

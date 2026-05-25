@@ -1,34 +1,32 @@
-use std::collections::HashMap;
-
-use base64::Engine;
-use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
-use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, PrincipalSpec};
-use cc_lb_storage_api::{
-    ApiKeyRecord, AuditEntry, IssuedKey, OAuthCredentials, Storage, StorageError,
-    StoredApiKeyRecord,
+use axum::{
+    Json,
+    http::StatusCode,
+    response::{IntoResponse, Response},
 };
-use ring::digest::{SHA256, digest};
-use ring::rand::{SecureRandom, SystemRandom};
+use cc_lb_config::PrincipalSpec;
+use cc_lb_core::AuditEntry;
+use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore, KeyStoreError};
+use cc_lb_core::api_keys::secret;
+use cc_lb_core::api_keys::types::{
+    Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalType as CorePrincipalType,
+};
+use cc_lb_storage_redb::{
+    ApiKeyMutation, KeyStatus, Limit, LimitKind, PrincipalKindLite, StoredApiKeyRecord,
+    UpstreamKind,
+};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
-use thiserror::Error;
+use serde_json::Value;
 
-use crate::credential_crypto::{api_key_aad, decrypt_json, encrypt_json, oauth_aad};
-use crate::{CurrentConfig, settings};
+use crate::AdminState;
 
-const EXPIRING_SOON_SECS: u64 = 300;
-const DEFAULT_API_KEY_PROVIDER: &str = "api_key";
-const ANTHROPIC_OAUTH_PROVIDER: &str = "anthropic_oauth";
+pub type Result<T> = std::result::Result<T, ManagementError>;
 
-#[derive(Debug, Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum ManagementError {
     #[error("storage unavailable")]
     StorageUnavailable,
     #[error(transparent)]
-    Settings(#[from] settings::SettingsError),
-    #[error("storage error: {0}")]
-    Storage(#[from] StorageError),
+    Settings(#[from] crate::settings::SettingsError),
     #[error(transparent)]
     Json(#[from] serde_json::Error),
     #[error("principal exists")]
@@ -39,8 +37,78 @@ pub enum ManagementError {
     UnknownApiKey,
     #[error("invalid draft principal")]
     InvalidDraftPrincipal,
-    #[error("rotate unsupported for {kind}")]
-    RotateUnsupported { kind: &'static str },
+    #[error("invalid request: {message}")]
+    InvalidRequest { message: String },
+    #[error("conflict: {0}")]
+    Conflict(String),
+    #[error(transparent)]
+    Storage(#[from] cc_lb_storage_redb::StorageError),
+    #[error("limit_overrides invalid: {message}")]
+    LimitOverridesInvalid { message: String },
+    #[error(transparent)]
+    KeyStore(#[from] KeyStoreError),
+}
+
+impl IntoResponse for ManagementError {
+    fn into_response(self) -> Response {
+        match self {
+            ManagementError::StorageUnavailable => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            ManagementError::Settings(error) => settings_management_error_response(error),
+            ManagementError::Json(error) => {
+                tracing::error!(error = %error, "admin principal management json operation failed");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+            ManagementError::PrincipalExists => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": "principal_exists" })),
+            )
+                .into_response(),
+            ManagementError::UnknownPrincipal => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "unknown_principal" })),
+            )
+                .into_response(),
+            ManagementError::UnknownApiKey => StatusCode::NOT_FOUND.into_response(),
+            ManagementError::InvalidDraftPrincipal => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({ "error": "invalid_draft_principal" })),
+            )
+                .into_response(),
+            ManagementError::InvalidRequest { message } => (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "type": "error",
+                    "error": {
+                        "type": "invalid_request_error",
+                        "message": message,
+                    }
+                })),
+            )
+                .into_response(),
+            ManagementError::Conflict(message) => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": message })),
+            )
+                .into_response(),
+            ManagementError::Storage(error) => {
+                tracing::error!(error = %error, "admin api key management storage operation failed");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+            ManagementError::LimitOverridesInvalid { message } => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({
+                    "code": "limit_overrides_invalid",
+                    "field": "limit_overrides",
+                    "message": message,
+                })),
+            )
+                .into_response(),
+            ManagementError::KeyStore(error) => {
+                tracing::error!(error = %error, "admin api key management operation failed");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -60,12 +128,6 @@ pub struct AllowedModelsRequest {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct IssueKeyRequest {
-    #[serde(default)]
-    pub label: Option<String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PrincipalMutationResponse {
     pub revision: u64,
     pub principal_id: String,
@@ -79,11 +141,47 @@ pub struct PrincipalAllowedModelsResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IssueKeyRequest {
+    pub label: Option<String>,
+    pub upstream_kind: UpstreamKind,
+    pub upstream_credential_ref: String,
+    pub description: Option<String>,
+    pub expires_at_unix_secs: Option<u64>,
+    pub limit_overrides: Option<Vec<Limit>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ApiKeyRecord {
+    pub key_id: String,
+    pub label: Option<String>,
+    pub issued_at_unix_secs: u64,
+    pub revoked_at_unix_secs: Option<u64>,
+    pub status: KeyStatus,
+    pub last_4: String,
+    pub expires_at_unix_secs: Option<u64>,
+    pub upstream_kind: UpstreamKind,
+    pub upstream_credential_ref: String,
+    pub limit_overrides: Vec<Limit>,
+    pub description: Option<String>,
+    pub principal_kind: PrincipalKindLite,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IssueKeyResponse {
     pub principal_id: String,
     pub key_id: String,
     pub plaintext_key: String,
     pub issued_at_unix_secs: u64,
+    pub last_4: String,
+    pub status: KeyStatus,
+    pub label: Option<String>,
+    pub revoked_at_unix_secs: Option<u64>,
+    pub expires_at_unix_secs: Option<u64>,
+    pub upstream_kind: UpstreamKind,
+    pub upstream_credential_ref: String,
+    pub limit_overrides: Vec<Limit>,
+    pub description: Option<String>,
+    pub principal_kind: PrincipalKindLite,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -98,55 +196,49 @@ pub struct RevokeKeyResponse {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CredentialsResponse {
-    pub credentials: Vec<CredentialEntry>,
-    pub observed: bool,
+pub struct UpdateKeyRequest {
+    pub label: Option<String>,
+    pub description: Option<String>,
+    #[serde(default, deserialize_with = "double_option")]
+    pub expires_at_unix_secs: Option<Option<u64>>,
+    pub limit_overrides: Option<Vec<Limit>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CredentialEntry {
-    pub principal_id: String,
-    pub provider: String,
-    pub kind: String,
-    pub identity: String,
-    pub associated_principals: Vec<String>,
-    pub has_credentials: bool,
-    pub expires_at_unix_secs: Option<u64>,
-    pub status: String,
+pub struct UpdateKeyResponse {
+    pub key_id: String,
+    pub updated_at_unix_secs: u64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RotateCredentialResponse {
-    pub principal_id: String,
-    pub provider: String,
-    pub kind: String,
-    pub new_key_id: String,
-    pub revoked_key_id: Option<String>,
-    pub plaintext_key: String,
-    pub issued_at_unix_secs: u64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RevokeCredentialResponse {
-    pub principal_id: String,
-    pub provider: String,
-    pub kind: String,
-    pub revoked_keys: Vec<String>,
+#[derive(Debug, Clone, Serialize)]
+pub struct KeyStatusResponse {
+    pub key_id: String,
+    pub status: KeyStatus,
+    pub updated_at_unix_secs: u64,
 }
 
 pub async fn create_principal(
-    storage: &dyn Storage,
-    current: &dyn CurrentConfig,
+    state: &AdminState,
     request: CreatePrincipalRequest,
     now_unix_secs: u64,
-) -> Result<PrincipalMutationResponse, ManagementError> {
+) -> Result<PrincipalMutationResponse> {
+    let storage = state
+        .storage
+        .as_deref()
+        .ok_or(ManagementError::StorageUnavailable)?;
     let principal_id = request.id;
     let spec = request.spec;
-    let current_config = current.current_config();
-    let current_exists = current_config.principals.contains_key(&principal_id);
+    let current_exists = state
+        .config
+        .current_config()
+        .principals
+        .contains_key(&principal_id);
     let principal_for_audit = principal_id.clone();
-    let (revision, response) =
-        apply_principal_change(storage, current, now_unix_secs, move |principals| {
+    let (revision, response) = apply_principal_change(
+        storage,
+        state.config.as_ref(),
+        now_unix_secs,
+        move |principals| {
             let principals = principals_object(principals)?;
             if current_exists || principals.contains_key(&principal_id) {
                 return Err(ManagementError::PrincipalExists);
@@ -156,16 +248,10 @@ pub async fn create_principal(
                 revision: 0,
                 principal_id: principal_id.clone(),
             })
-        })
-        .await?;
-    append_admin_audit(
-        storage,
-        now_unix_secs,
-        &principal_for_audit,
-        "principal_create",
-        json!({ "principal_id": principal_for_audit }),
+        },
     )
     .await?;
+    enqueue_principal_admin_audit(state, &principal_for_audit, "principal_create");
     Ok(PrincipalMutationResponse {
         revision,
         ..response
@@ -173,16 +259,22 @@ pub async fn create_principal(
 }
 
 pub async fn update_principal(
-    storage: &dyn Storage,
-    current: &dyn CurrentConfig,
+    state: &AdminState,
     principal_id: String,
     request: UpdatePrincipalRequest,
     now_unix_secs: u64,
-) -> Result<PrincipalMutationResponse, ManagementError> {
+) -> Result<PrincipalMutationResponse> {
+    let storage = state
+        .storage
+        .as_deref()
+        .ok_or(ManagementError::StorageUnavailable)?;
     let spec = request.spec;
     let principal_for_audit = principal_id.clone();
-    let (revision, response) =
-        apply_principal_change(storage, current, now_unix_secs, move |principals| {
+    let (revision, response) = apply_principal_change(
+        storage,
+        state.config.as_ref(),
+        now_unix_secs,
+        move |principals| {
             let principals = principals_object(principals)?;
             if !principals.contains_key(&principal_id) {
                 return Err(ManagementError::UnknownPrincipal);
@@ -192,16 +284,10 @@ pub async fn update_principal(
                 revision: 0,
                 principal_id: principal_id.clone(),
             })
-        })
-        .await?;
-    append_admin_audit(
-        storage,
-        now_unix_secs,
-        &principal_for_audit,
-        "principal_update",
-        json!({ "principal_id": principal_for_audit }),
+        },
     )
     .await?;
+    enqueue_principal_admin_audit(state, &principal_for_audit, "principal_update");
     Ok(PrincipalMutationResponse {
         revision,
         ..response
@@ -209,22 +295,28 @@ pub async fn update_principal(
 }
 
 pub async fn set_principal_disabled(
-    storage: &dyn Storage,
-    current: &dyn CurrentConfig,
+    state: &AdminState,
     principal_id: String,
     disabled: bool,
     now_unix_secs: u64,
-) -> Result<PrincipalMutationResponse, ManagementError> {
-    let current_config = current.current_config();
+) -> Result<PrincipalMutationResponse> {
+    let storage = state
+        .storage
+        .as_deref()
+        .ok_or(ManagementError::StorageUnavailable)?;
+    let current_config = state.config.current_config();
     let current_spec = current_config.principals.get(&principal_id).cloned();
+    let principal_for_audit = principal_id.clone();
     let audit_kind = if disabled {
         "principal_disable"
     } else {
         "principal_enable"
     };
-    let principal_for_audit = principal_id.clone();
-    let (revision, response) =
-        apply_principal_change(storage, current, now_unix_secs, move |principals| {
+    let (revision, response) = apply_principal_change(
+        storage,
+        state.config.as_ref(),
+        now_unix_secs,
+        move |principals| {
             let principals = principals_object(principals)?;
             ensure_principal_value(principals, &principal_id, current_spec.as_ref())?;
             let principal = principals
@@ -236,16 +328,10 @@ pub async fn set_principal_disabled(
                 revision: 0,
                 principal_id: principal_id.clone(),
             })
-        })
-        .await?;
-    append_admin_audit(
-        storage,
-        now_unix_secs,
-        &principal_for_audit,
-        audit_kind,
-        json!({ "principal_id": principal_for_audit, "disabled": disabled }),
+        },
     )
     .await?;
+    enqueue_principal_admin_audit(state, &principal_for_audit, audit_kind);
     Ok(PrincipalMutationResponse {
         revision,
         ..response
@@ -253,19 +339,24 @@ pub async fn set_principal_disabled(
 }
 
 pub async fn update_allowed_models(
-    storage: &dyn Storage,
-    current: &dyn CurrentConfig,
+    state: &AdminState,
     principal_id: String,
     request: AllowedModelsRequest,
     now_unix_secs: u64,
-) -> Result<PrincipalAllowedModelsResponse, ManagementError> {
-    let current_config = current.current_config();
+) -> Result<PrincipalAllowedModelsResponse> {
+    let storage = state
+        .storage
+        .as_deref()
+        .ok_or(ManagementError::StorageUnavailable)?;
+    let current_config = state.config.current_config();
     let current_spec = current_config.principals.get(&principal_id).cloned();
     let allowed_models = request.allowed_models;
     let principal_for_audit = principal_id.clone();
-    let models_for_audit = allowed_models.len();
-    let (revision, response) =
-        apply_principal_change(storage, current, now_unix_secs, move |principals| {
+    let (revision, response) = apply_principal_change(
+        storage,
+        state.config.as_ref(),
+        now_unix_secs,
+        move |principals| {
             let principals = principals_object(principals)?;
             ensure_principal_value(principals, &principal_id, current_spec.as_ref())?;
             let principal = principals
@@ -274,309 +365,323 @@ pub async fn update_allowed_models(
                 .ok_or(ManagementError::InvalidDraftPrincipal)?;
             principal.insert(
                 "allowed_models".to_owned(),
-                Value::Array(
-                    allowed_models
-                        .iter()
-                        .cloned()
-                        .map(Value::String)
-                        .collect::<Vec<_>>(),
-                ),
+                Value::Array(allowed_models.iter().cloned().map(Value::String).collect()),
             );
             Ok(PrincipalAllowedModelsResponse {
                 revision: 0,
                 principal_id: principal_id.clone(),
                 allowed_models: allowed_models.clone(),
             })
-        })
-        .await?;
-    append_admin_audit(
-        storage,
-        now_unix_secs,
-        &principal_for_audit,
-        "principal_allowed_models_update",
-        json!({ "principal_id": principal_for_audit, "allowed_models_count": models_for_audit }),
+        },
     )
     .await?;
+    enqueue_principal_admin_audit(
+        state,
+        &principal_for_audit,
+        "principal_allowed_models_update",
+    );
     Ok(PrincipalAllowedModelsResponse {
         revision,
         ..response
     })
 }
 
-pub async fn issue_principal_key(
-    storage: &dyn Storage,
-    aead: &AeadService,
-    current: &dyn CurrentConfig,
+pub fn issue_principal_key(
+    state: &AdminState,
     principal_id: String,
     request: IssueKeyRequest,
-    now_unix_secs: u64,
-) -> Result<IssueKeyResponse, ManagementError> {
-    if !principal_exists_in_current_or_draft(storage, current, &principal_id).await? {
+) -> Result<IssueKeyResponse> {
+    let storage = state
+        .storage
+        .as_ref()
+        .ok_or(ManagementError::StorageUnavailable)?;
+    let key_store = KeyStore::new(storage.clone());
+    if !principal_exists_in_current_or_draft(state, &principal_id) {
         return Err(ManagementError::UnknownPrincipal);
     }
-    let label = request.label;
-    let issued = issue_api_key(storage, aead, &principal_id, label.clone(), now_unix_secs).await?;
-    let key_id = issued.key_id.clone();
-    append_admin_audit(
-        storage,
-        now_unix_secs,
+
+    let principal_view = state.principal_view.load();
+    let principal = principal_view
+        .get(&principal_id)
+        .ok_or(ManagementError::UnknownPrincipal)?;
+    let default_limits = principal_view.default_limits(&principal_id);
+    let limit_overrides = request.limit_overrides.unwrap_or_default();
+    validate_limit_overrides(&limit_overrides, default_limits)?;
+
+    let label = request.label.unwrap_or_default();
+    let principal_kind = principal_kind_lite(principal.principal_type());
+    let (record, plaintext) = key_store.create(
         &principal_id,
-        "api_key_issue",
-        json!({ "principal_id": principal_id.clone(), "key_id": key_id, "label": label }),
-    )
-    .await?;
+        CreateParams {
+            upstream_kind: request.upstream_kind,
+            upstream_credential_ref: request.upstream_credential_ref,
+            label,
+            description: request.description,
+            expires_at_unix_secs: request.expires_at_unix_secs,
+            limit_overrides: limit_overrides.clone(),
+            principal_kind,
+        },
+    )?;
+    let (key_id, _) =
+        secret::parse(plaintext.expose()).map_err(|_| KeyStoreError::IndexInconsistency {
+            reason: "generated api key secret could not be parsed".to_owned(),
+        })?;
+
+    enqueue_admin_audit(state, &principal_id, &key_id, "api_key_issue");
+
     Ok(IssueKeyResponse {
         principal_id,
-        key_id: issued.key_id,
-        plaintext_key: issued.plaintext,
-        issued_at_unix_secs: issued.issued_at_unix_secs,
+        key_id,
+        plaintext_key: plaintext.expose().to_owned(),
+        issued_at_unix_secs: record.issued_at_unix_secs,
+        last_4: record.last_4,
+        status: record.status,
+        label: if record.label.is_empty() {
+            None
+        } else {
+            Some(record.label)
+        },
+        revoked_at_unix_secs: record.revoked_at_unix_secs,
+        expires_at_unix_secs: record.expires_at_unix_secs,
+        upstream_kind: record.upstream_kind,
+        upstream_credential_ref: record.upstream_credential_ref,
+        limit_overrides: record.limit_overrides,
+        description: record.description,
+        principal_kind: record.principal_kind,
     })
 }
 
-pub async fn list_principal_keys(
-    storage: &dyn Storage,
-    aead: &AeadService,
-    current: &dyn CurrentConfig,
-    principal_id: String,
-) -> Result<KeyListResponse, ManagementError> {
-    if !principal_exists_in_current_or_draft(storage, current, &principal_id).await? {
-        return Err(ManagementError::UnknownPrincipal);
-    }
-    Ok(KeyListResponse {
-        keys: list_api_keys(storage, aead, &principal_id).await?,
-    })
-}
-
-pub async fn revoke_principal_key(
-    storage: &dyn Storage,
-    aead: &AeadService,
-    current: &dyn CurrentConfig,
+pub fn get_principal_key(
+    state: &AdminState,
     principal_id: String,
     key_id: String,
-    now_unix_secs: u64,
-) -> Result<RevokeKeyResponse, ManagementError> {
-    if !principal_exists_in_current_or_draft(storage, current, &principal_id).await? {
+) -> Result<ApiKeyRecord> {
+    let storage = state
+        .storage
+        .as_ref()
+        .ok_or(ManagementError::StorageUnavailable)?;
+    let key_store = KeyStore::new(storage.clone());
+    if !principal_exists_in_current_or_draft(state, &principal_id) {
         return Err(ManagementError::UnknownPrincipal);
     }
-    let record = revoke_api_key(storage, aead, &principal_id, &key_id, now_unix_secs).await?;
-    let revoked_at_unix_secs = record
-        .revoked_at_unix_secs
+
+    let record = find_key_by_id(&key_store, &principal_id, &key_id)?
         .ok_or(ManagementError::UnknownApiKey)?;
-    append_admin_audit(
-        storage,
-        now_unix_secs,
-        &principal_id,
-        "api_key_revoke",
-        json!({ "principal_id": principal_id.clone(), "key_id": key_id }),
-    )
-    .await?;
+
+    Ok(ApiKeyRecord {
+        key_id,
+        label: if record.label.is_empty() {
+            None
+        } else {
+            Some(record.label)
+        },
+        issued_at_unix_secs: record.issued_at_unix_secs,
+        revoked_at_unix_secs: record.revoked_at_unix_secs,
+        status: record.status,
+        last_4: record.last_4,
+        expires_at_unix_secs: record.expires_at_unix_secs,
+        upstream_kind: record.upstream_kind,
+        upstream_credential_ref: record.upstream_credential_ref,
+        limit_overrides: record.limit_overrides,
+        description: record.description,
+        principal_kind: record.principal_kind,
+    })
+}
+
+pub fn list_principal_keys(state: &AdminState, principal_id: String) -> Result<KeyListResponse> {
+    let storage = state
+        .storage
+        .as_ref()
+        .ok_or(ManagementError::StorageUnavailable)?;
+    let key_store = KeyStore::new(storage.clone());
+    if !principal_exists_in_current_or_draft(state, &principal_id) {
+        return Err(ManagementError::UnknownPrincipal);
+    }
+
+    let mut keys = Vec::new();
+    for record in key_store.list_by_principal(&principal_id)? {
+        let key_id = key_id_for_record(&key_store, &record)?;
+        keys.push(ApiKeyRecord {
+            key_id,
+            label: if record.label.is_empty() {
+                None
+            } else {
+                Some(record.label)
+            },
+            issued_at_unix_secs: record.issued_at_unix_secs,
+            revoked_at_unix_secs: record.revoked_at_unix_secs,
+            status: record.status,
+            last_4: record.last_4,
+            expires_at_unix_secs: record.expires_at_unix_secs,
+            upstream_kind: record.upstream_kind,
+            upstream_credential_ref: record.upstream_credential_ref,
+            limit_overrides: record.limit_overrides,
+            description: record.description,
+            principal_kind: record.principal_kind,
+        });
+    }
+
+    Ok(KeyListResponse { keys })
+}
+
+pub fn revoke_principal_key(
+    state: &AdminState,
+    principal_id: String,
+    key_id: String,
+) -> Result<RevokeKeyResponse> {
+    let storage = state
+        .storage
+        .as_ref()
+        .ok_or(ManagementError::StorageUnavailable)?;
+    let key_store = KeyStore::new(storage.clone());
+    if !principal_exists_in_current_or_draft(state, &principal_id) {
+        return Err(ManagementError::UnknownPrincipal);
+    }
+
+    if find_key_by_id(&key_store, &principal_id, &key_id)?.is_none() {
+        return Err(ManagementError::UnknownApiKey);
+    }
+
+    key_store.revoke(&principal_id, &key_id)?;
+    enqueue_admin_audit(state, &principal_id, &key_id, "api_key_revoke");
+
     Ok(RevokeKeyResponse {
-        key_id: record.key_id,
-        revoked_at_unix_secs,
+        key_id,
+        revoked_at_unix_secs: unix_now_secs(),
     })
 }
 
-pub async fn list_credentials(
-    storage: &dyn Storage,
-    aead: &AeadService,
-    config: &Config,
-    now_unix_secs: u64,
-) -> Result<CredentialsResponse, ManagementError> {
-    let associations = associated_principals(config);
-    let mut principal_ids = config.principals.keys().cloned().collect::<Vec<_>>();
-    principal_ids.sort();
-    let mut credentials = Vec::new();
-    for principal_id in principal_ids {
-        let principal = config
-            .principals
-            .get(&principal_id)
-            .ok_or(ManagementError::UnknownPrincipal)?;
-        if let Some(provider) = principal
-            .credentials_ref
-            .as_deref()
-            .and_then(oauth_provider_from_credentials_ref)
-        {
-            let stored = get_oauth(storage, aead, &principal_id, &provider).await?;
-            credentials.push(oauth_credential_entry(
-                &principal_id,
-                &provider,
-                stored.as_ref(),
-                association_for(
-                    &associations,
-                    &provider,
-                    principal.credentials_ref.as_deref(),
-                    &principal_id,
-                ),
-                now_unix_secs,
-            ));
-        }
-
-        let keys = list_api_keys(storage, aead, &principal_id).await?;
-        if !keys.is_empty() || api_key_credentials_ref(principal).is_some() {
-            let provider = api_key_provider(principal);
-            credentials.push(api_key_credential_entry(
-                &principal_id,
-                &provider,
-                &keys,
-                association_for(
-                    &associations,
-                    &provider,
-                    principal.credentials_ref.as_deref(),
-                    &principal_id,
-                ),
-            ));
-        }
-    }
-
-    credentials.sort_by(|left, right| {
-        left.principal_id
-            .cmp(&right.principal_id)
-            .then_with(|| left.provider.cmp(&right.provider))
-            .then_with(|| left.kind.cmp(&right.kind))
-    });
-    let observed = !credentials.is_empty();
-    Ok(CredentialsResponse {
-        credentials,
-        observed,
-    })
-}
-
-pub async fn rotate_credential(
-    storage: &dyn Storage,
-    aead: &AeadService,
-    config: &Config,
+pub fn update_principal_key(
+    state: &AdminState,
     principal_id: String,
-    provider: String,
-    now_unix_secs: u64,
-) -> Result<RotateCredentialResponse, ManagementError> {
-    let principal = config
-        .principals
-        .get(&principal_id)
-        .ok_or(ManagementError::UnknownPrincipal)?;
-    if credential_kind(principal, &provider) == CredentialKind::Oauth {
-        return Err(ManagementError::RotateUnsupported { kind: "oauth" });
+    key_id: String,
+    request: UpdateKeyRequest,
+) -> Result<UpdateKeyResponse> {
+    let storage = state
+        .storage
+        .as_ref()
+        .ok_or(ManagementError::StorageUnavailable)?;
+    let key_store = KeyStore::new(storage.clone());
+    if !principal_exists_in_current_or_draft(state, &principal_id) {
+        return Err(ManagementError::UnknownPrincipal);
     }
 
-    let old_key_id = list_api_keys(storage, aead, &principal_id)
-        .await?
-        .into_iter()
-        .filter(|record| record.revoked_at_unix_secs.is_none())
-        .max_by(|left, right| {
-            left.issued_at_unix_secs
-                .cmp(&right.issued_at_unix_secs)
-                .then_with(|| left.key_id.cmp(&right.key_id))
-        })
-        .map(|record| record.key_id);
-    let issued = issue_api_key(
-        storage,
-        aead,
-        &principal_id,
-        Some(format!("rotate:{provider}")),
-        now_unix_secs,
-    )
-    .await?;
-    if let Some(key_id) = old_key_id.as_deref() {
-        revoke_api_key(storage, aead, &principal_id, key_id, now_unix_secs).await?;
+    let Some(existing_record) = storage
+        .get_api_key(&principal_id, &key_id)
+        .map_err(KeyStoreError::from)?
+    else {
+        return Err(ManagementError::UnknownApiKey);
+    };
+    if existing_record.status == KeyStatus::Revoked {
+        return Err(ManagementError::Conflict(
+            "key revoked; cannot patch".to_owned(),
+        ));
     }
-    let new_key_id = issued.key_id.clone();
-    append_admin_audit(
-        storage,
-        now_unix_secs,
+
+    if find_key_by_id(&key_store, &principal_id, &key_id)?.is_none() {
+        return Err(ManagementError::UnknownApiKey);
+    }
+
+    if let Some(limit_overrides) = request.limit_overrides.as_ref() {
+        let principal_view = state.principal_view.load();
+        let default_limits = principal_view.default_limits(&principal_id);
+        validate_limit_overrides(limit_overrides, default_limits)?;
+    }
+
+    key_store.patch(
         &principal_id,
-        "credential_rotate",
-        json!({
-            "principal_id": principal_id.clone(),
-            "provider": provider.clone(),
-            "kind": "api_key",
-            "new_key_id": new_key_id,
-            "revoked_key_id": old_key_id.clone(),
-        }),
-    )
-    .await?;
-    Ok(RotateCredentialResponse {
-        principal_id,
-        provider,
-        kind: "api_key".to_owned(),
-        new_key_id: issued.key_id,
-        revoked_key_id: old_key_id,
-        plaintext_key: issued.plaintext,
-        issued_at_unix_secs: issued.issued_at_unix_secs,
+        &key_id,
+        ApiKeyMutation {
+            label: request.label,
+            description: request.description.map(Some),
+            expires_at_unix_secs: request.expires_at_unix_secs,
+            limit_overrides: request.limit_overrides,
+            ..Default::default()
+        },
+    )?;
+    enqueue_admin_audit(state, &principal_id, &key_id, "api_key_patch");
+
+    Ok(UpdateKeyResponse {
+        key_id,
+        updated_at_unix_secs: unix_now_secs(),
     })
 }
 
-pub async fn revoke_credential(
-    storage: &dyn Storage,
-    aead: &AeadService,
-    config: &Config,
+pub fn disable_principal_key(
+    state: &AdminState,
     principal_id: String,
-    provider: String,
-    now_unix_secs: u64,
-) -> Result<RevokeCredentialResponse, ManagementError> {
-    let principal = config
-        .principals
-        .get(&principal_id)
-        .ok_or(ManagementError::UnknownPrincipal)?;
-    match credential_kind(principal, &provider) {
-        CredentialKind::Oauth => {
-            storage.delete_oauth(&principal_id, &provider).await?;
-            append_admin_audit(
-                storage,
-                now_unix_secs,
-                &principal_id,
-                "credential_revoke",
-                json!({ "principal_id": principal_id.clone(), "provider": provider.clone(), "kind": "oauth" }),
-            )
-            .await?;
-            Ok(RevokeCredentialResponse {
-                principal_id,
-                provider,
-                kind: "oauth".to_owned(),
-                revoked_keys: Vec::new(),
+    key_id: String,
+) -> Result<KeyStatusResponse> {
+    let storage = state
+        .storage
+        .as_ref()
+        .ok_or(ManagementError::StorageUnavailable)?;
+    let key_store = KeyStore::new(storage.clone());
+    if !principal_exists_in_current_or_draft(state, &principal_id) {
+        return Err(ManagementError::UnknownPrincipal);
+    }
+
+    if find_key_by_id(&key_store, &principal_id, &key_id)?.is_none() {
+        return Err(ManagementError::UnknownApiKey);
+    }
+
+    key_store.disable(&principal_id, &key_id)?;
+    enqueue_admin_audit(state, &principal_id, &key_id, "api_key_disable");
+
+    Ok(KeyStatusResponse {
+        key_id,
+        status: KeyStatus::Disabled,
+        updated_at_unix_secs: unix_now_secs(),
+    })
+}
+
+pub fn enable_principal_key(
+    state: &AdminState,
+    principal_id: String,
+    key_id: String,
+) -> Result<KeyStatusResponse> {
+    let storage = state
+        .storage
+        .as_ref()
+        .ok_or(ManagementError::StorageUnavailable)?;
+    let key_store = KeyStore::new(storage.clone());
+    if !principal_exists_in_current_or_draft(state, &principal_id) {
+        return Err(ManagementError::UnknownPrincipal);
+    }
+
+    if storage.get_api_key(&principal_id, &key_id)?.is_none() {
+        return Err(ManagementError::UnknownApiKey);
+    }
+
+    match key_store.enable(&principal_id, &key_id) {
+        Ok(()) => {
+            enqueue_admin_audit(state, &principal_id, &key_id, "api_key_enable");
+            Ok(KeyStatusResponse {
+                key_id,
+                status: KeyStatus::Active,
+                updated_at_unix_secs: unix_now_secs(),
             })
         }
-        CredentialKind::ApiKey => {
-            let active_keys = list_api_keys(storage, aead, &principal_id)
-                .await?
-                .into_iter()
-                .filter(|record| record.revoked_at_unix_secs.is_none())
-                .map(|record| record.key_id)
-                .collect::<Vec<_>>();
-            for key_id in &active_keys {
-                revoke_api_key(storage, aead, &principal_id, key_id, now_unix_secs).await?;
-            }
-            append_admin_audit(
-                storage,
-                now_unix_secs,
-                &principal_id,
-                "credential_revoke",
-                json!({ "principal_id": principal_id.clone(), "provider": provider.clone(), "kind": "api_key", "revoked_keys": active_keys.clone() }),
-            )
-            .await?;
-            Ok(RevokeCredentialResponse {
-                principal_id,
-                provider,
-                kind: "api_key".to_owned(),
-                revoked_keys: active_keys,
-            })
-        }
+        Err(KeyStoreError::KeyAlreadyRevoked { .. }) => Err(ManagementError::Conflict(
+            "key revoked; cannot enable".to_owned(),
+        )),
+        Err(error) => Err(error.into()),
     }
 }
 
 async fn apply_principal_change<T, F>(
-    storage: &dyn Storage,
-    current: &dyn CurrentConfig,
+    storage: &cc_lb_storage_redb::Storage,
+    current: &dyn crate::CurrentConfig,
     now_unix_secs: u64,
     transform: F,
-) -> Result<(u64, T), ManagementError>
+) -> Result<(u64, T)>
 where
-    F: FnMut(&mut Value) -> Result<T, ManagementError>,
+    F: FnMut(&mut Value) -> Result<T>,
 {
-    settings::apply_draft_principal_change(storage, current, now_unix_secs, transform).await?
+    crate::settings::apply_draft_principal_change(storage, current, now_unix_secs, transform).await?
 }
 
-fn principals_object(
-    principals: &mut Value,
-) -> Result<&mut serde_json::Map<String, Value>, ManagementError> {
+fn principals_object(principals: &mut Value) -> Result<&mut serde_json::Map<String, Value>> {
     principals
         .as_object_mut()
         .ok_or(ManagementError::InvalidDraftPrincipal)
@@ -586,7 +691,7 @@ fn ensure_principal_value(
     principals: &mut serde_json::Map<String, Value>,
     principal_id: &str,
     current_spec: Option<&PrincipalSpec>,
-) -> Result<(), ManagementError> {
+) -> Result<()> {
     if principals.contains_key(principal_id) {
         return Ok(());
     }
@@ -597,317 +702,189 @@ fn ensure_principal_value(
     Ok(())
 }
 
-async fn principal_exists_in_current_or_draft(
-    storage: &dyn Storage,
-    current: &dyn CurrentConfig,
-    principal_id: &str,
-) -> Result<bool, ManagementError> {
-    if current
-        .current_config()
-        .principals
-        .contains_key(principal_id)
-    {
-        return Ok(true);
+fn principal_exists_in_current_or_draft(state: &AdminState, principal_id: &str) -> bool {
+    if state.principal_view.load().get(principal_id).is_some() {
+        return true;
     }
-    let state = storage.get_config_draft().await?;
-    Ok(state
-        .draft
+    state
+        .storage
         .as_ref()
-        .and_then(|draft| draft.get("principals"))
-        .and_then(Value::as_object)
-        .is_some_and(|principals| principals.contains_key(principal_id)))
+        .and_then(|storage| storage.get_config_draft().ok())
+        .and_then(|draft| draft.draft)
+        .and_then(|draft| draft.get("principals").cloned())
+        .and_then(|principals| principals.as_object().cloned())
+        .is_some_and(|principals| principals.contains_key(principal_id))
 }
 
-async fn append_admin_audit(
-    storage: &dyn Storage,
-    now_unix_secs: u64,
+fn double_option<'de, T, D>(deserializer: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    T: serde::Deserialize<'de>,
+    D: serde::Deserializer<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
+fn key_id_for_record(key_store: &KeyStore, record: &StoredApiKeyRecord) -> Result<String> {
+    if record.index_hash == [0; 32] {
+        return Ok(String::new());
+    }
+
+    Ok(key_store
+        .lookup_by_index_hash(&record.index_hash)?
+        .map(|(_, key_id, _)| key_id)
+        .unwrap_or_default())
+}
+
+fn find_key_by_id(
+    key_store: &KeyStore,
     principal_id: &str,
-    kind: &str,
-    payload: Value,
-) -> Result<(), ManagementError> {
-    storage
-        .append_audit(&AuditEntry {
-            ts: now_unix_secs,
-            request_id: format!("admin_{kind}_{principal_id}_{now_unix_secs}"),
-            principal_id: principal_id.to_owned(),
-            route: kind.to_owned(),
-            upstream: "admin".to_owned(),
-            model: None,
-            status: 200,
-            input_tokens: 0,
-            output_tokens: 0,
-            duration_ms: 0,
-            agent_label: None,
-            kind: Some(kind.to_owned()),
-            payload: Some(payload),
-        })
-        .await?;
+    key_id: &str,
+) -> Result<Option<StoredApiKeyRecord>> {
+    for record in key_store.list_by_principal(principal_id)? {
+        let Some((_, current_key_id, current_record)) =
+            key_store.lookup_by_index_hash(&record.index_hash)?
+        else {
+            continue;
+        };
+        if current_key_id == key_id {
+            return Ok(Some(current_record));
+        }
+    }
+
+    Ok(None)
+}
+
+fn validate_limit_overrides(overrides: &[Limit], defaults: &[PrincipalLimit]) -> Result<()> {
+    for override_limit in overrides {
+        let Some(default_limit) = defaults.iter().find(|default_limit| {
+            limit_kind_matches(override_limit.kind, default_limit.kind)
+                && override_limit.window_secs == default_limit.window.as_secs()
+        }) else {
+            return Err(ManagementError::LimitOverridesInvalid {
+                message: "limit_overrides must match a principal default limit by kind and window"
+                    .to_owned(),
+            });
+        };
+
+        if override_limit.cap_micros > default_limit.cap_micros {
+            return Err(ManagementError::LimitOverridesInvalid {
+                message: "limit_overrides must be a subset of principal default limits".to_owned(),
+            });
+        }
+    }
+
     Ok(())
 }
 
-async fn get_oauth(
-    storage: &dyn Storage,
-    aead: &AeadService,
-    principal_id: &str,
-    provider: &str,
-) -> Result<Option<OAuthCredentials>, ManagementError> {
-    let Some(ciphertext) = storage.get_oauth_ciphertext(principal_id, provider).await? else {
-        return Ok(None);
-    };
-    Ok(Some(decrypt_json(
-        aead,
-        &ciphertext,
-        &oauth_aad(principal_id, provider),
-    )?))
+fn limit_kind_matches(left: LimitKind, right: PrincipalLimitKind) -> bool {
+    matches!(
+        (left, right),
+        (LimitKind::Requests, PrincipalLimitKind::Requests)
+            | (LimitKind::InputTokens, PrincipalLimitKind::InputTokens)
+            | (LimitKind::OutputTokens, PrincipalLimitKind::OutputTokens)
+            | (LimitKind::TotalTokens, PrincipalLimitKind::TotalTokens)
+            | (LimitKind::CostUsd, PrincipalLimitKind::CostUsd)
+            | (LimitKind::Concurrent, PrincipalLimitKind::Concurrent)
+    )
 }
 
-async fn issue_api_key(
-    storage: &dyn Storage,
-    aead: &AeadService,
-    principal_id: &str,
-    label: Option<String>,
-    issued_at_unix_secs: u64,
-) -> Result<IssuedKey, ManagementError> {
-    let mut raw_key = [0_u8; 32];
-    SystemRandom::new()
-        .fill(&mut raw_key)
-        .map_err(|_| StorageError::Fatal {
-            message: "api key random generation failed".to_owned(),
-        })?;
-    let plaintext = URL_SAFE_NO_PAD.encode(raw_key);
-    let key_hash = digest(&SHA256, plaintext.as_bytes());
-    let key_id = hex_prefix(key_hash.as_ref(), 12);
-    let stored = StoredApiKeyRecord {
-        label,
-        issued_at_unix_secs,
-        revoked_at_unix_secs: None,
-        key_hash_b64: STANDARD_NO_PAD.encode(key_hash.as_ref()),
-    };
-    let aad = api_key_aad(principal_id, &key_id);
-    let ciphertext = encrypt_json(aead, &stored, &aad)?;
-    storage
-        .put_api_key_ciphertext(principal_id, &key_id, &ciphertext)
-        .await?;
-    Ok(IssuedKey {
-        key_id,
-        plaintext,
-        issued_at_unix_secs,
-    })
-}
-
-async fn list_api_keys(
-    storage: &dyn Storage,
-    aead: &AeadService,
-    principal_id: &str,
-) -> Result<Vec<ApiKeyRecord>, ManagementError> {
-    let mut records = Vec::new();
-    for (key_id, ciphertext) in storage.list_api_key_ciphertexts(principal_id).await? {
-        let stored: StoredApiKeyRecord =
-            decrypt_json(aead, &ciphertext, &api_key_aad(principal_id, &key_id))?;
-        records.push(ApiKeyRecord {
-            key_id,
-            label: stored.label,
-            issued_at_unix_secs: stored.issued_at_unix_secs,
-            revoked_at_unix_secs: stored.revoked_at_unix_secs,
-        });
+fn principal_kind_lite(kind: CorePrincipalType) -> PrincipalKindLite {
+    match kind {
+        CorePrincipalType::Human => PrincipalKindLite::Human,
+        CorePrincipalType::Machine => PrincipalKindLite::Machine,
     }
-    records.sort_by(|left, right| {
-        left.issued_at_unix_secs
-            .cmp(&right.issued_at_unix_secs)
-            .then_with(|| left.key_id.cmp(&right.key_id))
+}
+
+fn settings_management_error_response(error: crate::settings::SettingsError) -> Response {
+    match error {
+        crate::settings::SettingsError::StorageUnavailable => {
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
+        crate::settings::SettingsError::Storage(source) => {
+            tracing::error!(error = %source, "admin principal management storage operation failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        crate::settings::SettingsError::StaleDraftRevision { current } => (
+            StatusCode::CONFLICT,
+            Json(
+                serde_json::json!({ "error": "stale_draft_revision", "current_revision": current }),
+            ),
+        )
+            .into_response(),
+        crate::settings::SettingsError::ValidationFailed { detail } => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "validation_failed", "detail": detail })),
+        )
+            .into_response(),
+        crate::settings::SettingsError::UnknownRevision { missing } => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "unknown_revision", "missing": missing })),
+        )
+            .into_response(),
+        crate::settings::SettingsError::Schema(source) => {
+            tracing::error!(error = %source, "admin principal management schema operation failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        other => {
+            tracing::error!(error = %other, "unexpected admin principal settings error");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+fn enqueue_principal_admin_audit(state: &AdminState, principal_id: &str, action: &str) {
+    let Some(audit_sink) = &state.audit_sink else {
+        return;
+    };
+    let ts = unix_now_secs();
+    let _ = audit_sink.try_enqueue(AuditEntry {
+        ts,
+        request_id: format!("admin-{action}-{principal_id}-{ts}"),
+        principal_id: principal_id.to_owned(),
+        route: "admin_principal".to_owned(),
+        upstream: String::new(),
+        model: None,
+        status: 200,
+        input_tokens: None,
+        output_tokens: None,
+        duration_ms: 0,
+        agent_label: None,
+        api_key_id: None,
+        cost_usd_micros: None,
+        limit_violation: None,
+        admin_action: Some(action.to_owned()),
+        actor: Some("admin".to_owned()),
     });
-    Ok(records)
 }
 
-async fn revoke_api_key(
-    storage: &dyn Storage,
-    aead: &AeadService,
-    principal_id: &str,
-    key_id: &str,
-    revoked_at_unix_secs: u64,
-) -> Result<ApiKeyRecord, ManagementError> {
-    let Some(ciphertext) = storage.get_api_key_ciphertext(principal_id, key_id).await? else {
-        return Err(ManagementError::UnknownApiKey);
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn enqueue_admin_audit(state: &AdminState, principal_id: &str, key_id: &str, action: &str) {
+    let Some(audit_sink) = &state.audit_sink else {
+        return;
     };
-    let aad = api_key_aad(principal_id, key_id);
-    let mut stored: StoredApiKeyRecord = decrypt_json(aead, &ciphertext, &aad)?;
-    if stored.revoked_at_unix_secs.is_none() {
-        stored.revoked_at_unix_secs = Some(revoked_at_unix_secs);
-        let revoked_ciphertext = encrypt_json(aead, &stored, &aad)?;
-        if !storage
-            .revoke_api_key(principal_id, key_id, &revoked_ciphertext)
-            .await?
-        {
-            return Err(ManagementError::UnknownApiKey);
-        }
-    }
-    Ok(ApiKeyRecord {
-        key_id: key_id.to_owned(),
-        label: stored.label,
-        issued_at_unix_secs: stored.issued_at_unix_secs,
-        revoked_at_unix_secs: stored.revoked_at_unix_secs,
-    })
-}
-
-fn hex_prefix(bytes: &[u8], hex_chars: usize) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(hex_chars);
-    for byte in bytes.iter().take(hex_chars.div_ceil(2)) {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        if out.len() == hex_chars {
-            break;
-        }
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-        if out.len() == hex_chars {
-            break;
-        }
-    }
-    out
-}
-
-fn oauth_credential_entry(
-    principal_id: &str,
-    provider: &str,
-    stored: Option<&OAuthCredentials>,
-    associated_principals: Vec<String>,
-    now_unix_secs: u64,
-) -> CredentialEntry {
-    let expires_at = stored.map(|creds| creds.expires_at);
-    CredentialEntry {
+    let ts = unix_now_secs();
+    let _ = audit_sink.try_enqueue(AuditEntry {
+        ts,
+        request_id: format!("admin-{action}-{principal_id}-{key_id}-{ts}"),
         principal_id: principal_id.to_owned(),
-        provider: provider.to_owned(),
-        kind: "oauth".to_owned(),
-        identity: format!("{principal_id}/{provider}"),
-        associated_principals,
-        has_credentials: stored.is_some(),
-        expires_at_unix_secs: expires_at,
-        status: oauth_status_label(stored.is_some(), expires_at, now_unix_secs).to_owned(),
-    }
-}
-
-fn api_key_credential_entry(
-    principal_id: &str,
-    provider: &str,
-    keys: &[ApiKeyRecord],
-    associated_principals: Vec<String>,
-) -> CredentialEntry {
-    let active_count = keys
-        .iter()
-        .filter(|record| record.revoked_at_unix_secs.is_none())
-        .count();
-    let status = if active_count > 0 {
-        "valid"
-    } else if keys
-        .iter()
-        .any(|record| record.revoked_at_unix_secs.is_some())
-    {
-        "revoked"
-    } else {
-        "missing"
-    };
-    CredentialEntry {
-        principal_id: principal_id.to_owned(),
-        provider: provider.to_owned(),
-        kind: "api_key".to_owned(),
-        identity: format!("{principal_id}/{provider}"),
-        associated_principals,
-        has_credentials: active_count > 0,
-        expires_at_unix_secs: None,
-        status: status.to_owned(),
-    }
-}
-
-fn associated_principals(config: &Config) -> HashMap<(String, String), Vec<String>> {
-    let mut associations: HashMap<(String, String), Vec<String>> = HashMap::new();
-    for (principal_id, principal) in &config.principals {
-        let Some(reference) = principal.credentials_ref.as_deref() else {
-            continue;
-        };
-        let provider = oauth_provider_from_credentials_ref(reference)
-            .unwrap_or_else(|| reference.trim().to_owned());
-        associations
-            .entry((provider, reference.trim().to_owned()))
-            .or_default()
-            .push(principal_id.clone());
-    }
-    for principals in associations.values_mut() {
-        principals.sort();
-    }
-    associations
-}
-
-fn association_for(
-    associations: &HashMap<(String, String), Vec<String>>,
-    provider: &str,
-    reference: Option<&str>,
-    principal_id: &str,
-) -> Vec<String> {
-    reference
-        .map(str::trim)
-        .and_then(|reference| associations.get(&(provider.to_owned(), reference.to_owned())))
-        .cloned()
-        .unwrap_or_else(|| vec![principal_id.to_owned()])
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CredentialKind {
-    ApiKey,
-    Oauth,
-}
-
-fn credential_kind(principal: &PrincipalSpec, provider: &str) -> CredentialKind {
-    if principal
-        .credentials_ref
-        .as_deref()
-        .and_then(oauth_provider_from_credentials_ref)
-        .is_some_and(|oauth_provider| oauth_provider == provider)
-        || provider == ANTHROPIC_OAUTH_PROVIDER
-    {
-        CredentialKind::Oauth
-    } else {
-        CredentialKind::ApiKey
-    }
-}
-
-fn api_key_provider(principal: &PrincipalSpec) -> String {
-    api_key_credentials_ref(principal).unwrap_or_else(|| DEFAULT_API_KEY_PROVIDER.to_owned())
-}
-
-fn api_key_credentials_ref(principal: &PrincipalSpec) -> Option<String> {
-    principal
-        .credentials_ref
-        .as_deref()
-        .map(str::trim)
-        .filter(|reference| !reference.is_empty())
-        .filter(|reference| oauth_provider_from_credentials_ref(reference).is_none())
-        .map(ToOwned::to_owned)
-}
-
-fn oauth_provider_from_credentials_ref(reference: &str) -> Option<String> {
-    let reference = reference.trim();
-    if reference == ANTHROPIC_OAUTH_PROVIDER {
-        return Some(reference.to_owned());
-    }
-    reference
-        .strip_prefix("oauth:")
-        .map(str::trim)
-        .filter(|provider| !provider.is_empty())
-        .map(ToOwned::to_owned)
-}
-
-fn oauth_status_label(
-    has_credentials: bool,
-    expires_at_unix_secs: Option<u64>,
-    now_unix_secs: u64,
-) -> &'static str {
-    let Some(expires_at) = expires_at_unix_secs.filter(|_| has_credentials) else {
-        return "missing";
-    };
-    if expires_at <= now_unix_secs {
-        "expired"
-    } else if expires_at <= now_unix_secs.saturating_add(EXPIRING_SOON_SECS) {
-        "expiring_soon"
-    } else {
-        "valid"
-    }
+        route: "admin_api_key".to_owned(),
+        upstream: String::new(),
+        model: None,
+        status: 200,
+        input_tokens: None,
+        output_tokens: None,
+        duration_ms: 0,
+        agent_label: None,
+        api_key_id: Some(key_id.to_owned()),
+        cost_usd_micros: None,
+        limit_violation: None,
+        admin_action: Some(action.to_owned()),
+        actor: Some("admin".to_owned()),
+    });
 }

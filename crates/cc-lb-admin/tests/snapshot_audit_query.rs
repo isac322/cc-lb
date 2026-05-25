@@ -2,29 +2,31 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use cc_lb_admin::{AdminState, router};
+use cc_lb_admin::{router, AdminState};
 use cc_lb_config::Config;
-use cc_lb_core::DashboardBroadcaster;
-use cc_lb_storage_redb::{AuditEntry, RedbStorage};
+use cc_lb_storage_redb::{AuditEntry, Storage};
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-fn test_state(storage: Arc<RedbStorage>) -> AdminState {
+fn test_state(storage: Arc<Storage>) -> AdminState {
     AdminState {
-        storage,
+        storage: Some(storage),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        quota_manager: None,
+        limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
+            Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
+            Arc::new(arc_swap::ArcSwap::from(
+                cc_lb_core::api_keys::principal_view::PrincipalView::from_config(&Config::default()),
+            )),
+        ),
         lifecycle: None,
-        breaker_registry: None,
-        drain_controller: None,
-        bulkhead_registry: None,
-        plugin_runtime_status: None,
-        dashboard_broadcaster: Arc::new(DashboardBroadcaster::new()),
+        audit_sink: None,
+        principal_view: Arc::new(arc_swap::ArcSwap::from(
+            cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
+                &cc_lb_admin::CurrentConfig::current_config((Arc::new(Config::default())).as_ref()),
+            ),
+        )),
         config: Arc::new(Config::default()),
-        config_path: None,
-        config_watcher: None,
-        config_started_at_unix_secs: 0,
         admin_token: Some("test-token".to_string()),
         start_time: std::time::Instant::now(),
     }
@@ -34,7 +36,8 @@ fn test_state(storage: Arc<RedbStorage>) -> AdminState {
 async fn test_snapshot_audit_query() {
     let temp_dir = tempfile::tempdir().unwrap();
     let db_path = temp_dir.path().join("test.redb");
-    let storage = Arc::new(RedbStorage::open(&db_path).unwrap());
+    let master_key = [0u8; 32];
+    let storage = Arc::new(Storage::open(&db_path, master_key).unwrap());
 
     let entry = AuditEntry {
         ts: 1000,
@@ -44,12 +47,11 @@ async fn test_snapshot_audit_query() {
         upstream: "test".to_string(),
         model: None,
         status: 200,
-        input_tokens: 10,
-        output_tokens: 10,
+        input_tokens: Some(10),
+        output_tokens: Some(10),
         duration_ms: 100,
         agent_label: None,
-        kind: None,
-        payload: None,
+        ..Default::default()
     };
     storage.append_audit(&entry).unwrap();
 
