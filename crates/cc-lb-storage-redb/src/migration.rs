@@ -3,9 +3,9 @@ use std::sync::Arc;
 use redb::{Database, ReadableDatabase, ReadableTable};
 
 use crate::{
-    StorageError, API_KEYS_V1, AUDIT_LOG_V1, CURRENT_SCHEMA_VERSION, KEY_INDEX_BY_HASH_V1,
-    KILLSWITCH_KEY, KILLSWITCH_V1, OAUTH_CREDENTIALS_V1, PRICE_CATALOG_V1, REQUEST_EVENTS_V1,
-    SCHEMA_VERSION_KEY, SCHEMA_VERSION_V1,
+    API_KEYS_V1, AUDIT_LOG_V1, CONFIG_DRAFT_V1, CONFIG_HISTORY_V1, CURRENT_SCHEMA_VERSION,
+    KEY_INDEX_BY_HASH_V1, KILLSWITCH_KEY, KILLSWITCH_V1, OAUTH_CREDENTIALS_V1, PRICE_CATALOG_V1,
+    REQUEST_EVENTS_V1, SCHEMA_VERSION_KEY, SCHEMA_VERSION_V1, StorageError,
 };
 
 pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> {
@@ -53,6 +53,12 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
     }
     {
         write_txn.open_table(REQUEST_EVENTS_V1)?;
+    }
+    {
+        write_txn.open_table(CONFIG_DRAFT_V1)?;
+    }
+    {
+        write_txn.open_table(CONFIG_HISTORY_V1)?;
     }
 
     write_txn.commit()?;

@@ -44,7 +44,13 @@ pub fn config_with_requests(_default_requests_per_window: u64) -> Config {
 }
 
 pub fn config_value(default_requests_per_window: u64) -> Value {
-    serde_json::to_value(config_with_requests(default_requests_per_window)).unwrap()
+    let mut value =
+        serde_json::to_value(config_with_requests(default_requests_per_window)).unwrap();
+    value.as_object_mut().unwrap().insert(
+        "quotas".to_owned(),
+        json!({ "default_requests_per_window": default_requests_per_window }),
+    );
+    value
 }
 
 pub fn test_state(config: Config, storage: Option<Arc<RedbStorage>>) -> AdminState {
@@ -125,7 +131,10 @@ pub async fn authed_bytes(
         }
         None => Body::empty(),
     };
-    let response = app.oneshot(builder.body(request_body).unwrap()).await.unwrap();
+    let response = app
+        .oneshot(builder.body(request_body).unwrap())
+        .await
+        .unwrap();
     let status = response.status();
     let headers = response.headers().clone();
     let body = response.into_body().collect().await.unwrap().to_bytes();
@@ -134,7 +143,13 @@ pub async fn authed_bytes(
 
 pub async fn unauthenticated_status(app: axum::Router, method: &str, uri: &str) -> StatusCode {
     let response = app
-        .oneshot(Request::builder().method(method).uri(uri).body(Body::empty()).unwrap())
+        .oneshot(
+            Request::builder()
+                .method(method)
+                .uri(uri)
+                .body(Body::empty())
+                .unwrap(),
+        )
         .await
         .unwrap();
     response.status()

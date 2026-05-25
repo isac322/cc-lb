@@ -4,10 +4,9 @@ use axum::{
     http::{StatusCode, header},
     middleware,
     response::IntoResponse,
-    routing::{delete, get, post, put},
+    routing::{delete, get, post},
 };
-use bytes::Bytes;
-use cc_lb_config::Config;
+use cc_lb_storage_redb::{Storage, StorageError};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -60,8 +59,15 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/admin/oauth/start", post(crate::oauth::start_oauth))
         .route("/admin/oauth/complete", post(crate::oauth::complete_oauth))
         .route("/admin/config/current", get(get_config))
-        .route("/admin/config/draft", put(put_config_draft))
+        .route("/admin/config/schema", get(get_config_schema))
+        .route(
+            "/admin/config/draft",
+            get(get_config_draft).put(put_config_draft),
+        )
+        .route("/admin/config/draft/validate", post(validate_config_draft))
         .route("/admin/config/apply", post(apply_config_draft))
+        .route("/admin/config/history", get(get_config_history))
+        .route("/admin/config/diff", get(get_config_diff))
         .route("/admin/config/reload", post(reload_config))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -200,22 +206,15 @@ async fn get_config(State(state): State<AdminState>) -> Result<Json<Value>, Stat
 
 async fn put_config_draft(
     State(state): State<AdminState>,
-    body: Bytes,
+    Json(request): Json<crate::settings::PutConfigDraftRequest>,
 ) -> axum::response::Response {
-    let config = match parse_config_draft(&body) {
-        Ok(config) => config,
-        Err(message) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": { "message": message } })),
-            )
-                .into_response();
-        }
+    let storage = match config_storage(&state) {
+        Ok(storage) => storage,
+        Err(error) => return settings_error_response(error, true),
     };
-
-    match state.config.put_draft_config(config) {
-        Ok(()) => Json(json!({ "status": "draft_saved" })).into_response(),
-        Err(error) => config_draft_error_response(error),
+    match crate::settings::put_draft(storage, request, unix_now_secs()).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => settings_error_response(error, true),
     }
 }
 
@@ -230,15 +229,6 @@ async fn apply_config_draft(State(state): State<AdminState>) -> axum::response::
     }
 }
 
-fn parse_config_draft(body: &[u8]) -> Result<Config, String> {
-    match serde_yaml::from_slice::<Config>(body) {
-        Ok(config) => Ok(config),
-        Err(yaml_error) => serde_json::from_slice::<Config>(body).map_err(|json_error| {
-            format!("failed to parse draft as YAML ({yaml_error}) or JSON ({json_error})")
-        }),
-    }
-}
-
 fn config_draft_error_response(error: crate::ConfigDraftError) -> axum::response::Response {
     let status = match error {
         crate::ConfigDraftError::Unavailable => StatusCode::NOT_IMPLEMENTED,
@@ -250,6 +240,174 @@ fn config_draft_error_response(error: crate::ConfigDraftError) -> axum::response
         Json(json!({ "error": { "message": error.to_string() } })),
     )
         .into_response()
+}
+
+async fn get_config_schema() -> axum::response::Response {
+    match crate::settings::schema_response() {
+        Ok(response) => ([(header::CACHE_CONTROL, "max-age=60")], Json(response)).into_response(),
+        Err(error) => settings_error_response(error, false),
+    }
+}
+
+async fn get_config_draft(State(state): State<AdminState>) -> axum::response::Response {
+    let storage = match config_storage(&state) {
+        Ok(storage) => storage,
+        Err(error) => return settings_error_response(error, false),
+    };
+    match crate::settings::get_draft(storage).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => settings_error_response(error, false),
+    }
+}
+
+async fn validate_config_draft(
+    State(state): State<AdminState>,
+    Json(request): Json<crate::settings::ValidateConfigDraftRequest>,
+) -> axum::response::Response {
+    let storage = match config_storage(&state) {
+        Ok(storage) => storage,
+        Err(crate::settings::SettingsError::StorageUnavailable) => {
+            return Json(crate::settings::ValidateConfigDraftResponse {
+                valid: false,
+                revision: request.expected_revision,
+                error: Some("draft_missing".to_owned()),
+            })
+            .into_response();
+        }
+        Err(error) => return settings_error_response(error, false),
+    };
+    match crate::settings::validate_draft(storage, request).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => settings_error_response(error, false),
+    }
+}
+
+#[derive(Deserialize)]
+struct ConfigHistoryQuery {
+    limit: Option<usize>,
+}
+
+async fn get_config_history(
+    State(state): State<AdminState>,
+    Query(query): Query<ConfigHistoryQuery>,
+) -> axum::response::Response {
+    let storage = match config_storage(&state) {
+        Ok(storage) => storage,
+        Err(error) => return settings_error_response(error, false),
+    };
+    match crate::settings::list_history(storage, query.limit.unwrap_or(20)).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => settings_error_response(error, false),
+    }
+}
+
+#[derive(Deserialize)]
+struct ConfigDiffQuery {
+    from_revision: u64,
+    to_revision: u64,
+}
+
+async fn get_config_diff(
+    State(state): State<AdminState>,
+    Query(query): Query<ConfigDiffQuery>,
+) -> axum::response::Response {
+    let storage = match config_storage(&state) {
+        Ok(storage) => storage,
+        Err(error) => return settings_error_response(error, false),
+    };
+    match crate::settings::diff_history(storage, query.from_revision, query.to_revision).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => settings_error_response(error, false),
+    }
+}
+
+fn config_storage(state: &AdminState) -> Result<&Storage, crate::settings::SettingsError> {
+    state
+        .storage
+        .as_deref()
+        .ok_or(crate::settings::SettingsError::StorageUnavailable)
+}
+
+fn settings_error_response(
+    error: crate::settings::SettingsError,
+    include_current_revision: bool,
+) -> axum::response::Response {
+    match error {
+        crate::settings::SettingsError::StorageUnavailable => {
+            storage_unavailable_response("storage_unavailable")
+        }
+        crate::settings::SettingsError::Storage(source) => {
+            tracing::error!(error = %source, "admin config storage operation failed");
+            storage_error_response(&source, "storage_error")
+        }
+        crate::settings::SettingsError::StaleDraftRevision { current } => {
+            if include_current_revision {
+                (
+                    StatusCode::CONFLICT,
+                    Json(json!({ "error": "stale_draft_revision", "current_revision": current })),
+                )
+                    .into_response()
+            } else {
+                dashboard_error(StatusCode::CONFLICT, "stale_draft_revision")
+            }
+        }
+        crate::settings::SettingsError::UnvalidatedRevision => {
+            dashboard_error(StatusCode::CONFLICT, "unvalidated_revision")
+        }
+        crate::settings::SettingsError::ValidationFailed { detail } => (
+            StatusCode::CONFLICT,
+            Json(json!({ "error": "validation_failed", "detail": detail })),
+        )
+            .into_response(),
+        crate::settings::SettingsError::ConfigPathMissing => {
+            dashboard_error(StatusCode::SERVICE_UNAVAILABLE, "config_path_missing")
+        }
+        crate::settings::SettingsError::ConfigWatcherMissing => {
+            dashboard_error(StatusCode::SERVICE_UNAVAILABLE, "config_watcher_missing")
+        }
+        crate::settings::SettingsError::ApplyWriteFailed { detail } => {
+            tracing::error!(error = %detail, "admin config apply write failed");
+            dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "apply_write_failed")
+        }
+        crate::settings::SettingsError::ReloadFailed { detail } => {
+            tracing::error!(error = %detail, "admin config apply reload failed");
+            dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "reload_failed")
+        }
+        crate::settings::SettingsError::UnknownRevision { missing } => (
+            StatusCode::NOT_FOUND,
+            Json(json!({ "error": "unknown_revision", "missing": missing })),
+        )
+            .into_response(),
+        crate::settings::SettingsError::Schema(source) => {
+            tracing::error!(error = %source, "admin config schema serialization failed");
+            dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, "schema_error")
+        }
+    }
+}
+
+fn storage_error_response(source: &StorageError, error: &str) -> axum::response::Response {
+    tracing::error!(%source, "admin storage operation failed");
+    dashboard_error(StatusCode::INTERNAL_SERVER_ERROR, error)
+}
+
+fn storage_unavailable_response(error: &str) -> axum::response::Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "1")],
+        Json(json!({ "error": error })),
+    )
+        .into_response()
+}
+
+fn dashboard_error(status: StatusCode, error: &str) -> axum::response::Response {
+    (status, Json(json!({ "error": error }))).into_response()
+}
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 async fn reload_config(State(_state): State<AdminState>) -> Result<Json<Value>, StatusCode> {

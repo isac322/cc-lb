@@ -1,10 +1,11 @@
 pub mod auth;
-mod oauth_pkce;
 mod credential_crypto;
 pub mod management;
 pub mod oauth;
+mod oauth_pkce;
 pub mod principals;
 pub mod routes;
+pub mod settings;
 
 use arc_swap::ArcSwap;
 use std::sync::Arc;
@@ -13,8 +14,8 @@ use axum::Router;
 use cc_lb_aead::AeadService;
 use cc_lb_config::Config;
 use cc_lb_core::{
-    api_keys::{limit_engine::LimitEngine, principal_view::PrincipalView},
     AuditWriterSink, Lifecycle,
+    api_keys::{limit_engine::LimitEngine, principal_view::PrincipalView},
 };
 use cc_lb_storage_redb::Storage;
 
@@ -51,6 +52,10 @@ pub trait CurrentConfig: Send + Sync {
     fn apply_draft_config(&self) -> Result<Arc<Config>, ConfigDraftError> {
         Err(ConfigDraftError::Unavailable)
     }
+}
+
+pub trait ConfigReloader: Send + Sync {
+    fn reload_now(&self) -> Result<(), String>;
 }
 
 impl CurrentConfig for Config {
