@@ -6,7 +6,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cc_lb_config::{
     AuthStrategy, Config, DownstreamAuthMode, Limit, LimitKind, NoneModeConfig,
-    NoneModeUpstreamKind, PrincipalSpec, PrincipalType, UpstreamKind, UpstreamSpec,
+    NoneModeUpstreamKind, PrincipalSpec, PrincipalType, StorageConfig, UpstreamKind, UpstreamSpec,
 };
 use cc_lb_pricing::{global_catalog, UpstreamKind as PricingUpstreamKind};
 use cc_lb_server::{build_app, signal::SignalHandle, BuildError};
@@ -27,8 +27,10 @@ const MODEL: &str = "claude-3-5-sonnet-20241022";
 async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
     std::fs::create_dir_all(evidence_dir())?;
     let dir = tempfile::tempdir()?;
-    std::env::set_var(MASTER_KEY_ENV, MASTER_KEY_HEX);
-    std::env::set_var("CC_LB_ADMIN_TOKEN", ADMIN_TOKEN);
+    unsafe {
+        std::env::set_var(MASTER_KEY_ENV, MASTER_KEY_HEX);
+        std::env::set_var("CC_LB_ADMIN_TOKEN", ADMIN_TOKEN);
+    }
 
     let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
     let litellm = MockServer::start().await;
@@ -533,8 +535,8 @@ fn base_config(
     config.upstreams = upstreams(upstream_url);
     config.downstream_auth.mode = mode;
     config.downstream_auth.none_mode = none_mode;
-    config.storage.redb_path = Some(redb_path);
-    config.storage.oauth_aead_key_env = MASTER_KEY_ENV.to_owned();
+    config.storage = StorageConfig::Redb { path: redb_path };
+    config.aead.key_env = MASTER_KEY_ENV.to_owned();
     config.api_keys.price_catalog.url = format!("{litellm_url}/prices");
     config.api_keys.price_catalog.refresh_interval = Duration::from_secs(60 * 60);
     config.api_keys.price_catalog.cache_path = tempfile::tempdir()

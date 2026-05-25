@@ -21,7 +21,7 @@ use tower::ServiceExt;
 
 fn test_config() -> Config {
     let mut config = Config::default();
-    config.storage.oauth_aead_key_env = "SECRET_STORAGE_KEY".to_string();
+    config.aead.key_env = "SECRET_STORAGE_KEY".to_string();
     config.admin.token_env = "SECRET_ADMIN_TOKEN".to_string();
     config.upstreams.insert(
         "anthropic".to_string(),
@@ -71,6 +71,7 @@ fn test_state(config: Config, storage: Option<Arc<Storage>>) -> AdminState {
     );
     AdminState {
         storage,
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine,
         lifecycle: None,
         audit_sink: None,

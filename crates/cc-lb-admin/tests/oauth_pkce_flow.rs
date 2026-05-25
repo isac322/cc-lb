@@ -25,6 +25,7 @@ fn test_config(issuer_base_url: String) -> Config {
 fn test_state(storage: Arc<Storage>, issuer_base_url: String) -> AdminState {
     AdminState {
         storage: Some(storage),
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
             Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
             Arc::new(arc_swap::ArcSwap::from(

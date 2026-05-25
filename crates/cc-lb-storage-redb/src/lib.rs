@@ -39,6 +39,7 @@ pub const USAGE_ROLLUPS_V1: TableDefinition<&[u8], &[u8]> =
 pub const USAGE_ROLLUP_CHECKPOINTS_V1: TableDefinition<&str, u64> =
     TableDefinition::new("USAGE_ROLLUP_CHECKPOINTS_V1");
 pub const SCHEMA_VERSION_V1: TableDefinition<&str, u32> = TableDefinition::new("SCHEMA_VERSION_V1");
+pub const META_BACKEND_KIND_V1: TableDefinition<&str, &str> = TableDefinition::new("META_BACKEND_KIND_V1");
 pub const KILLSWITCH_V1: TableDefinition<&str, bool> = TableDefinition::new("KILLSWITCH_V1");
 
 pub(crate) const SCHEMA_VERSION_KEY: &str = "version";

@@ -4,6 +4,7 @@ pub mod api_keys;
 pub mod audit_writer;
 mod bulkhead;
 mod circuit_breaker;
+mod dashboard_broadcaster;
 mod clock;
 mod dns_cache;
 mod drain;
@@ -25,6 +26,7 @@ pub use circuit_breaker::{
     CircuitBreakerConfig, CircuitBreakerDispatch, Permit,
 };
 pub use clock::{Clock, MockClock, SystemClock};
+pub use dashboard_broadcaster::{record_dashboard_sse_lagged, DashboardBroadcaster};
 #[doc(hidden)]
 pub use dns_cache::make_resolver_with_factory;
 pub use drain::{proxy_drain_middleware, DrainController};

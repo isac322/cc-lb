@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 
-use cc_lb_config::{AuthStrategy, Config, UpstreamKind, UpstreamSpec};
+use cc_lb_config::{AuthStrategy, Config, StorageConfig, UpstreamKind, UpstreamSpec};
 use url::Url;
 
 pub struct EnvGuard {
@@ -15,13 +15,13 @@ pub struct EnvGuard {
 impl EnvGuard {
     pub fn remove(key: &'static str) -> Self {
         let previous = env::var_os(key);
-        env::remove_var(key);
+        unsafe { env::remove_var(key) };
         Self { key, previous }
     }
 
     pub fn set(key: &'static str, value: &str) -> Self {
         let previous = env::var_os(key);
-        env::set_var(key, value);
+        unsafe { env::set_var(key, value) };
         Self { key, previous }
     }
 }
@@ -29,9 +29,9 @@ impl EnvGuard {
 impl Drop for EnvGuard {
     fn drop(&mut self) {
         if let Some(previous) = &self.previous {
-            env::set_var(self.key, previous);
+            unsafe { env::set_var(self.key, previous) };
         } else {
-            env::remove_var(self.key);
+            unsafe { env::remove_var(self.key) };
         }
     }
 }
@@ -55,4 +55,20 @@ pub fn upstream(name: &str, kind: UpstreamKind, base_url: Option<&str>) -> (Stri
             credentials_ref: None,
         },
     )
+}
+
+
+pub fn use_temp_redb(config: &mut Config, prefix: &str, key_env: &'static str) {
+    config.storage = StorageConfig::Redb {
+        path: unique_redb_path(prefix),
+    };
+    config.aead.key_env = key_env.to_owned();
+}
+
+fn unique_redb_path(prefix: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock after epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("{prefix}-{}-{nanos}.redb", std::process::id()))
 }

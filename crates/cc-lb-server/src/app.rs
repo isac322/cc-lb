@@ -53,6 +53,15 @@ use crate::signal;
 use crate::tls::{ReloadableListener, TlsState};
 use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig};
 
+pub const PROXY_FILES_ROUTE_COLLECTION: &str = "/v1/files";
+pub const PROXY_FILES_ROUTE_ITEM: &str = "/v1/files/{id}";
+pub const PROXY_FILES_ROUTE_ITEM_CONTENT: &str = "/v1/files/{id}/content";
+pub const PROXY_FILES_ROUTE_PATHS: &[&str] = &[
+    PROXY_FILES_ROUTE_COLLECTION,
+    PROXY_FILES_ROUTE_ITEM,
+    PROXY_FILES_ROUTE_ITEM_CONTENT,
+];
+
 pub struct App {
     pub router: Router,
     pub admin_router: Router,
@@ -174,6 +183,10 @@ fn print_preflight_report(report: &preflight::PreflightReport) {
 
 pub fn build_app(config: Config) -> Result<App, BuildError> {
     build_app_with_path(config, None)
+}
+
+pub fn build_app_for_testing(config: Config) -> Result<App, BuildError> {
+    build_app(config)
 }
 
 pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result<App, BuildError> {

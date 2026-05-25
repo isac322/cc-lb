@@ -625,11 +625,11 @@ fn sort_windows(
 }
 
 fn format_window(window_sec: u64) -> String {
-    if window_sec % 86_400 == 0 {
+    if window_sec.is_multiple_of(86_400) {
         format!("{}d", window_sec / 86_400)
-    } else if window_sec % 3_600 == 0 {
+    } else if window_sec.is_multiple_of(3_600) {
         format!("{}h", window_sec / 3_600)
-    } else if window_sec % 60 == 0 {
+    } else if window_sec.is_multiple_of(60) {
         format!("{}m", window_sec / 60)
     } else {
         format!("{window_sec}s")
