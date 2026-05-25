@@ -69,12 +69,13 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
     draft_config
         .principals
         .insert("u1".to_owned(), managed_principal());
-    let draft_yaml = serde_yaml::to_string(&draft_config)?;
     let draft_response = client
         .put(format!("{}/admin/config/draft", server.admin_url))
         .bearer_auth(ADMIN_TOKEN)
-        .header("content-type", "application/x-yaml")
-        .body(draft_yaml)
+        .json(&serde_json::json!({
+            "draft": serde_json::to_value(&draft_config)?,
+            "expected_revision": 0,
+        }))
         .send()
         .await?;
     assert_eq!(

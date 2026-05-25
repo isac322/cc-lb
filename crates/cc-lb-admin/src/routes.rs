@@ -223,8 +223,14 @@ async fn put_config_draft(
         Ok(storage) => storage,
         Err(error) => return settings_error_response(error, true),
     };
+    let draft_value = request.draft.clone();
     match crate::settings::put_draft(storage, request, unix_now_secs()).await {
-        Ok(response) => Json(response).into_response(),
+        Ok(response) => {
+            if let Ok(config) = serde_json::from_value::<cc_lb_config::Config>(draft_value) {
+                let _ = state.config.put_draft_config(config);
+            }
+            Json(response).into_response()
+        }
         Err(error) => settings_error_response(error, true),
     }
 }
