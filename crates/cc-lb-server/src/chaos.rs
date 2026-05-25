@@ -8,7 +8,6 @@ use axum::http::header;
 use axum::http::{Request, Response, StatusCode};
 use bytes::Bytes;
 use http_body_util::BodyExt;
-use rand::Rng;
 use tower::{Layer, Service};
 
 type ChaosFuture<T> = Pin<Box<DynChaosFuture<T>>>;
@@ -45,7 +44,7 @@ impl ChaosConfig {
     }
 
     fn should_drop(&self) -> bool {
-        self.drop_pct > 0 && rand::thread_rng().gen_range(0_u8..100) < self.drop_pct
+        self.drop_pct > 0 && rand::random_range(0_u8..100) < self.drop_pct
     }
 }
 

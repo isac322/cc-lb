@@ -2,8 +2,6 @@ use std::fmt;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
-use rand::rngs::OsRng;
-use rand::RngCore;
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -50,10 +48,10 @@ pub struct ParseError;
 
 pub fn generate_new() -> NewKeyOutput {
     let mut secret_bytes = [0_u8; SECRET_BYTES_LEN];
-    OsRng.fill_bytes(&mut secret_bytes);
+    rand::fill(&mut secret_bytes[..]);
 
     let mut salt = [0_u8; SALT_BYTES_LEN];
-    OsRng.fill_bytes(&mut salt);
+    rand::fill(&mut salt[..]);
 
     let key_id = Ulid::new().to_string();
     let secret_b64 = URL_SAFE_NO_PAD.encode(secret_bytes);
