@@ -7,6 +7,7 @@ use std::{error::Error, str::FromStr, sync::Arc, thread};
 use cc_lb_storage_api::{AuditEntry, AuditStore, BucketKind, QuotaStore};
 use cc_lb_storage_postgres::PostgresStorage;
 use chrono::Utc;
+use sqlx::AssertSqlSafe;
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 use uuid::Uuid;
 
@@ -203,7 +204,7 @@ async fn create_schema(url: &str, schema: &str) -> TestResult<()> {
         .connect_with(PgConnectOptions::from_str(url)?)
         .await?;
 
-    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+    sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {schema}")))
         .execute(&pool)
         .await?;
     pool.close().await;
@@ -217,9 +218,11 @@ async fn drop_schema(url: &str, schema: &str) -> TestResult<()> {
         .connect_with(PgConnectOptions::from_str(url)?)
         .await?;
 
-    sqlx::query(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"))
-        .execute(&pool)
-        .await?;
+    sqlx::query(AssertSqlSafe(format!(
+        "DROP SCHEMA IF EXISTS {schema} CASCADE"
+    )))
+    .execute(&pool)
+    .await?;
     pool.close().await;
 
     Ok(())
@@ -240,7 +243,7 @@ async fn connect_schema_pool(
 
 async fn apply_migrations(pool: &sqlx::PgPool) -> TestResult<()> {
     for migration in MIGRATIONS {
-        sqlx::raw_sql(migration).execute(pool).await?;
+        sqlx::raw_sql(*migration).execute(pool).await?;
     }
 
     Ok(())
