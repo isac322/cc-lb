@@ -12,9 +12,14 @@ confidence-threshold = 0.8
 # the Wasmtime advisories are documented here as a follow-up runtime upgrade item.
 # `rustls-pemfile` remains reachable through `rustls 0.23`; removing it requires a broader
 # TLS stack migration than this quality-gate task.
+# `bincode 2.x` was marked unmaintained on 2025-12-16 (no safe upgrade available; the
+# upstream team ceased development permanently). cc-lb-storage-redb encodes/decodes via
+# `bincode::serde` 2.x APIs; migrating to postcard/rkyv is a separate task tracked outside
+# the dependency-refresh window.
 yanked = "warn"
 ignore = [
     { id = "RUSTSEC-2025-0134", reason = "rustls 0.23 still depends on rustls-pemfile 2.2.0; removing it requires a broader TLS stack migration." },
+    { id = "RUSTSEC-2025-0141", reason = "cc-lb-storage-redb uses bincode 2.x `serde` integration; the upstream team ceased development permanently with no safe upgrade available." },
     { id = "RUSTSEC-2026-0085", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
     { id = "RUSTSEC-2026-0086", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
     { id = "RUSTSEC-2026-0087", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },

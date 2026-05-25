@@ -5,7 +5,7 @@ use cc_lb_storage_api::{
     UsageRollupResolution, UsageRollupStore,
 };
 use cc_lb_storage_postgres::PostgresStorage;
-use sqlx::{PgPool, postgres::PgPoolOptions};
+use sqlx::{AssertSqlSafe, PgPool, postgres::PgPoolOptions};
 use tokio::{runtime::Runtime, time};
 use uuid::Uuid;
 
@@ -132,9 +132,12 @@ impl CrashFixture {
         checkpoint_sleep_secs: f64,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let admin_pool = PgPoolOptions::new().max_connections(2).connect(url).await?;
-        sqlx::query(&format!("CREATE SCHEMA {}", quote_ident(schema)))
-            .execute(&admin_pool)
-            .await?;
+        sqlx::query(AssertSqlSafe(format!(
+            "CREATE SCHEMA {}",
+            quote_ident(schema)
+        )))
+        .execute(&admin_pool)
+        .await?;
 
         let app_name = format!("cc_lb_crash_{scenario}_{}", Uuid::new_v4().simple());
         let pool = schema_pool(url, schema, &app_name, 1).await?;
@@ -207,10 +210,10 @@ impl CrashFixture {
 
     async fn drop_schema(&self) -> Result<(), Box<dyn std::error::Error>> {
         self.pool.close().await;
-        sqlx::query(&format!(
+        sqlx::query(AssertSqlSafe(format!(
             "DROP SCHEMA IF EXISTS {} CASCADE",
             quote_ident(&self.schema)
-        ))
+        )))
         .execute(&self.admin_pool)
         .await?;
         self.admin_pool.close().await;
@@ -289,9 +292,9 @@ async fn install_checkpoint_sleep_trigger(
     pool: &PgPool,
     sleep_secs: f64,
 ) -> Result<(), sqlx::Error> {
-    sqlx::query(&format!(
+    sqlx::query(AssertSqlSafe(format!(
         "CREATE OR REPLACE FUNCTION cc_lb_sleep_before_checkpoint()          RETURNS trigger          LANGUAGE plpgsql          AS $$          BEGIN              PERFORM pg_sleep({sleep_secs});              RETURN NEW;          END;          $$"
-    ))
+    )))
     .execute(pool)
     .await?;
 
