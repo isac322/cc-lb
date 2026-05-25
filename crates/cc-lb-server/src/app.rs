@@ -185,13 +185,36 @@ pub fn build_app(config: Config) -> Result<App, BuildError> {
     build_app_with_path(config, None)
 }
 
-pub fn build_app_for_testing(config: Config) -> Result<App, BuildError> {
-    build_app(config)
+pub fn build_app_for_testing(mut config: Config) -> Result<App, BuildError> {
+    let dir = tempfile::TempDir::new()?;
+    let path = dir.path().join("storage.redb");
+    let key = [0u8; 32];
+    let aead = Arc::new(AeadService::from_master_key(key));
+    let storage = Some(Arc::new(cc_lb_storage_redb::Storage::open(&path, key)?));
+    config.storage = cc_lb_config::StorageConfig::Redb { path };
+    config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
+    config.downstream_auth.mode = DownstreamAuthMode::None;
+    config.downstream_auth.none_mode = Some(cc_lb_config::NoneModeConfig {
+        principal_id: "test-principal".to_owned(),
+        upstream_kind: cc_lb_config::NoneModeUpstreamKind::AnthropicKey,
+        upstream_credential_ref: "test-cred".to_owned(),
+    });
+    std::mem::forget(dir);
+    build_app_with_storage(config, None, storage, aead)
 }
 
 pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result<App, BuildError> {
     config.validate()?;
     let (storage, aead) = open_storage(&config)?;
+    build_app_with_storage(config, config_path, storage, aead)
+}
+
+pub fn build_app_with_storage(
+    config: Config,
+    config_path: Option<&Path>,
+    storage: Option<Arc<cc_lb_storage_redb::Storage>>,
+    aead: Arc<AeadService>,
+) -> Result<App, BuildError> {
     if matches!(config.downstream_auth.mode, DownstreamAuthMode::ApiKey) && storage.is_none() {
         return Err(BuildError::StorageRequired);
     }

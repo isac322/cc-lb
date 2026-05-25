@@ -2,7 +2,7 @@ use bincode::{config, serde as bincode_serde};
 use redb::ReadableDatabase;
 use serde::{Deserialize, Serialize};
 
-use crate::{Storage, StorageError, PRICE_CATALOG_V1};
+use crate::{PRICE_CATALOG_V1, Storage, StorageError};
 
 const PRICE_CATALOG_ROW_KEY: &str = "litellm_snapshot";
 
