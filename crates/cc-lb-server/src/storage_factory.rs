@@ -156,16 +156,6 @@ async fn probe_postgres_connection_impl(url: &str) -> Result<(), StorageFactoryE
     }
 }
 
-fn map_init_error(error: StorageError, _kind: BackendKind) -> StorageFactoryError {
-    match error {
-        StorageError::BackendKindMismatch { stored, configured } => {
-            StorageFactoryError::BackendKindMismatch { stored, configured }
-        }
-        other => StorageFactoryError::InitFailed {
-            message: other.to_string(),
-        },
-    }
-}
 
 /// Extract only the host from a connection URL to avoid leaking credentials in logs.
 #[cfg(feature = "postgres")]
