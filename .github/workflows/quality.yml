@@ -95,7 +95,7 @@ jobs:
           cargo llvm-cov --package aws-eventstream-codec --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
       - name: Upload coverage report
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: task-43-coverage-lcov
           path: target/coverage.lcov
