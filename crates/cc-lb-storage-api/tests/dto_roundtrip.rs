@@ -112,7 +112,7 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         request_id: "req_002".to_owned(),
         principal_id: Some("principal_a".to_owned()),
         principal_kind: Some("account".to_owned()),
-        upstream: Some(RequestEventUpstream::BedrockMantle),
+        upstream: Some(RequestEventUpstream::AnthropicDirect),
         model: Some("claude-3-haiku".to_owned()),
         status: 429,
         input_tokens: Some(35),
@@ -173,7 +173,7 @@ backend = 'redb'"
         resolution: UsageRollupResolution::Hour,
         bucket_start: 1_716_000_000,
         principal: "principal_a".to_owned(),
-        upstream: "bedrock_mantle".to_owned(),
+        upstream: "anthropic_direct".to_owned(),
         model: "claude-3-haiku".to_owned(),
     });
     assert_json_roundtrip(UsageRollup {

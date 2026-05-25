@@ -215,8 +215,6 @@
       "enum": [
         "api_key",
         "o_auth",
-        "aws_sig_v4",
-        "gcp_o_auth",
         "internal_forwarded"
       ]
     },
@@ -449,9 +447,7 @@
       "type": "string",
       "enum": [
         "anthropic_key",
-        "anthropic_o_auth",
-        "aws_sig_v4",
-        "gcp_o_auth"
+        "anthropic_o_auth"
       ]
     },
     "ObservabilityConfig": {
@@ -761,9 +757,6 @@
       "type": "string",
       "enum": [
         "anthropic_direct",
-        "bedrock_runtime",
-        "bedrock_mantle",
-        "vertex",
         "custom"
       ]
     },

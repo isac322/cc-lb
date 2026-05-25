@@ -75,9 +75,6 @@ fn to_api_request_event(event: RedbRequestEvent) -> ApiRequestEvent {
 fn to_redb_request_event_upstream(upstream: ApiRequestEventUpstream) -> RedbRequestEventUpstream {
     match upstream {
         ApiRequestEventUpstream::AnthropicDirect => RedbRequestEventUpstream::AnthropicDirect,
-        ApiRequestEventUpstream::BedrockRuntime => RedbRequestEventUpstream::BedrockRuntime,
-        ApiRequestEventUpstream::BedrockMantle => RedbRequestEventUpstream::BedrockMantle,
-        ApiRequestEventUpstream::Vertex => RedbRequestEventUpstream::Vertex,
         ApiRequestEventUpstream::CustomAnthropicSpec => {
             RedbRequestEventUpstream::CustomAnthropicSpec
         }
@@ -87,9 +84,6 @@ fn to_redb_request_event_upstream(upstream: ApiRequestEventUpstream) -> RedbRequ
 fn to_api_request_event_upstream(upstream: RedbRequestEventUpstream) -> ApiRequestEventUpstream {
     match upstream {
         RedbRequestEventUpstream::AnthropicDirect => ApiRequestEventUpstream::AnthropicDirect,
-        RedbRequestEventUpstream::BedrockRuntime => ApiRequestEventUpstream::BedrockRuntime,
-        RedbRequestEventUpstream::BedrockMantle => ApiRequestEventUpstream::BedrockMantle,
-        RedbRequestEventUpstream::Vertex => ApiRequestEventUpstream::Vertex,
         RedbRequestEventUpstream::CustomAnthropicSpec => {
             ApiRequestEventUpstream::CustomAnthropicSpec
         }

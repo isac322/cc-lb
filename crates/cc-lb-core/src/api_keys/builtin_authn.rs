@@ -175,7 +175,5 @@ pub fn map_none_mode_upstream_kind(kind: NoneModeUpstreamKind) -> cc_lb_storage_
     match kind {
         NoneModeUpstreamKind::AnthropicKey => cc_lb_storage_redb::UpstreamKind::AnthropicKey,
         NoneModeUpstreamKind::AnthropicOAuth => cc_lb_storage_redb::UpstreamKind::AnthropicOAuth,
-        NoneModeUpstreamKind::AwsSigV4 => cc_lb_storage_redb::UpstreamKind::AwsSigV4,
-        NoneModeUpstreamKind::GcpOAuth => cc_lb_storage_redb::UpstreamKind::GcpOAuth,
     }
 }

@@ -8,7 +8,6 @@ publish = false
 cargo-fuzz = true
 
 [dependencies]
-aws-eventstream-codec = { path = "../crates/aws-eventstream-codec" }
 axum = "0.8"
 bytes = "1"
 cc-lb-core = { path = "../crates/cc-lb-core" }
@@ -21,13 +20,6 @@ tokio = { version = "1", features = ["rt", "time"] }
 [[bin]]
 name = "sse_wrapper"
 path = "fuzz_targets/sse_wrapper.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
-name = "eventstream_decoder"
-path = "fuzz_targets/eventstream_decoder.rs"
 test = false
 doc = false
 bench = false

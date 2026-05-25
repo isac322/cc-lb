@@ -1,6 +1,6 @@
 mod preflight_common;
 
-use cc_lb_config::{UpstreamKind, UpstreamSpec};
+use cc_lb_config::UpstreamKind;
 use cc_lb_server::preflight::{self, PreflightOptions};
 
 #[tokio::test]
@@ -24,23 +24,12 @@ async fn upstream_probe_warn_only() {
         Some("http://127.0.0.1:9080"),
     );
     config.upstreams.insert(custom_name, custom);
-    config.upstreams.insert(
-        "vertex".to_owned(),
-        UpstreamSpec {
-            kind: UpstreamKind::Vertex,
-            base_url: None,
-            region: Some("us-central1".to_owned()),
-            project: Some("demo-project".to_owned()),
-            auth_strategy: cc_lb_config::AuthStrategy::ApiKey,
-            credentials_ref: None,
-        },
-    );
 
     let report = preflight::run(&config, PreflightOptions { skip_bind: true })
         .await
         .unwrap();
 
-    for name in ["direct", "custom", "vertex"] {
+    for name in ["direct", "custom"] {
         assert!(
             report
                 .warnings

@@ -8,7 +8,6 @@ publish = false
 
 [dependencies]
 async-stream.workspace = true
-aws-eventstream-codec = { path = "../../crates/aws-eventstream-codec" }
 axum.workspace = true
 bytes.workspace = true
 cc-lb-core = { path = "../../crates/cc-lb-core" }

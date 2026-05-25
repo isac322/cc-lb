@@ -629,7 +629,7 @@ fn usage_events() -> Vec<RequestEvent> {
             1_800_000_045,
             "usage-req-b-1",
             "usage-principal-b",
-            RequestEventUpstream::Vertex,
+            RequestEventUpstream::CustomAnthropicSpec,
             "claude-opus-4-1",
             500,
             None,

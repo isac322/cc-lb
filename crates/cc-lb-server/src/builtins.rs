@@ -5,8 +5,6 @@ use cc_lb_aead::AeadService;
 use cc_lb_core::ApiKeyAwareSignerFactory;
 use cc_lb_config::{AuthStrategy as ConfigAuthStrategy, Config, UpstreamKind, UpstreamSpec};
 use cc_lb_dialect_anthropic::{AnthropicDirectDialect, CustomAnthropicSpecDialect};
-use cc_lb_dialect_bedrock::{BedrockMantleDialect, BedrockRuntimeDialect};
-use cc_lb_dialect_vertex::VertexDialect;
 use cc_lb_plugin_api::{
     AuthStrategy, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext,
     RouteDecision,
@@ -14,8 +12,6 @@ use cc_lb_plugin_api::{
 };
 use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
 use cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory;
-use cc_lb_signer_aws::AwsSigV4SignerFactory;
-use cc_lb_signer_gcp::GcpOAuthSignerFactory;
 use cc_lb_storage_redb::Storage;
 
 
@@ -79,8 +75,6 @@ impl ObservabilityHook for NoopObservabilityHook {
 pub struct CompositeSignerFactory {
     upstreams: Vec<(Upstream, AuthStrategy)>,
     api_key: Option<String>,
-    aws: Arc<AwsSigV4SignerFactory>,
-    gcp: Arc<GcpOAuthSignerFactory>,
     oauth: Option<Arc<AnthropicOAuthSignerFactory>>,
 }
 
@@ -97,8 +91,6 @@ impl CompositeSignerFactory {
         Self {
             upstreams,
             api_key: None,
-            aws: Arc::new(AwsSigV4SignerFactory::new()),
-            gcp: Arc::new(GcpOAuthSignerFactory::new()),
             oauth: anthropic_oauth_factory(config, storage, aead, "api-key", "anthropic_oauth"),
         }
     }
@@ -107,8 +99,6 @@ impl CompositeSignerFactory {
         Self {
             upstreams: self.upstreams.clone(),
             api_key: Some(api_key),
-            aws: self.aws.clone(),
-            gcp: self.gcp.clone(),
             oauth: self.oauth.clone(),
         }
     }
@@ -154,8 +144,6 @@ impl SignerFactory for CompositeSignerFactory {
                     })?;
                 factory.build(upstream).await
             }
-            AuthStrategy::AwsSigV4 => self.aws.build(upstream).await,
-            AuthStrategy::GcpOAuth => self.gcp.build(upstream).await,
         }
     }
 }
@@ -186,16 +174,6 @@ pub fn oauth_endpoint(base: &str, path: &str) -> String {
 pub fn upstream_from_spec(spec: &UpstreamSpec) -> Result<Upstream, BuiltinError> {
     match spec.kind {
         UpstreamKind::AnthropicDirect => Ok(Upstream::AnthropicDirect),
-        UpstreamKind::BedrockRuntime => Ok(Upstream::BedrockRuntime {
-            region: required_field(spec.region.as_deref(), "region")?,
-        }),
-        UpstreamKind::BedrockMantle => Ok(Upstream::BedrockMantle {
-            region: required_field(spec.region.as_deref(), "region")?,
-        }),
-        UpstreamKind::Vertex => Ok(Upstream::Vertex {
-            project: required_field(spec.project.as_deref(), "project")?,
-            region: required_field(spec.region.as_deref(), "region")?,
-        }),
         UpstreamKind::Custom => Ok(Upstream::CustomAnthropicSpec {
             base_url: spec
                 .base_url
@@ -210,15 +188,6 @@ pub fn dialect_for_spec(spec: &UpstreamSpec) -> Result<Arc<dyn UpstreamDialect>,
         UpstreamKind::AnthropicDirect => Ok(Arc::new(AnthropicDirectDialect::with_base_url(
             spec.base_url.clone(),
         ))),
-        UpstreamKind::BedrockRuntime => Ok(Arc::new(BedrockRuntimeDialect::with_base_url(
-            spec.base_url.clone(),
-        ))),
-        UpstreamKind::BedrockMantle => Ok(Arc::new(BedrockMantleDialect::with_base_url(
-            spec.base_url.clone(),
-        ))),
-        UpstreamKind::Vertex => Ok(Arc::new(VertexDialect::with_base_url(
-            spec.base_url.clone(),
-        ))),
         UpstreamKind::Custom => Ok(Arc::new(CustomAnthropicSpecDialect)),
     }
 }
@@ -227,17 +196,8 @@ pub fn auth_strategy_from_config(strategy: &ConfigAuthStrategy) -> AuthStrategy 
     match strategy {
         ConfigAuthStrategy::ApiKey => AuthStrategy::ApiKey,
         ConfigAuthStrategy::OAuth => AuthStrategy::OAuth,
-        ConfigAuthStrategy::AwsSigV4 => AuthStrategy::AwsSigV4,
-        ConfigAuthStrategy::GcpOAuth => AuthStrategy::GcpOAuth,
         ConfigAuthStrategy::InternalForwarded => AuthStrategy::InternalForwarded,
     }
-}
-
-fn required_field(value: Option<&str>, field: &'static str) -> Result<String, BuiltinError> {
-    value
-        .filter(|value| !value.trim().is_empty())
-        .map(ToOwned::to_owned)
-        .ok_or(BuiltinError::MissingField(field))
 }
 
 #[derive(Debug, thiserror::Error)]

@@ -19,8 +19,6 @@ pub enum UpstreamKind {
     #[default]
     AnthropicKey,
     AnthropicOAuth,
-    AwsSigV4,
-    GcpOAuth,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
