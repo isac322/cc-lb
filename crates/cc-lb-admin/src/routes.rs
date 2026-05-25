@@ -4,7 +4,7 @@ use axum::{
     http::{StatusCode, header},
     middleware,
     response::IntoResponse,
-    routing::{delete, get, post},
+    routing::{delete, get, post, put},
 };
 use cc_lb_storage_redb::{Storage, StorageError};
 use rust_embed::RustEmbed;
@@ -15,7 +15,7 @@ use crate::{
     AdminState,
     auth::require_admin_auth,
     management,
-    principals::{principal_key_usage, principal_limits},
+    principals::{principal_key_usage, principal_limits, principal_usage},
 };
 
 #[derive(RustEmbed)]
@@ -24,7 +24,18 @@ struct Assets;
 
 pub fn build_router(state: AdminState) -> Router {
     let protected_routes = Router::new()
-        .route("/admin/principals", get(list_principals))
+        .route(
+            "/admin/principals",
+            get(list_principals).post(create_principal),
+        )
+        .route("/admin/principals/{id}", put(update_principal))
+        .route("/admin/principals/{id}/disable", post(disable_principal))
+        .route("/admin/principals/{id}/enable", post(enable_principal))
+        .route(
+            "/admin/principals/{id}/allowed_models",
+            put(update_principal_allowed_models),
+        )
+        .route("/admin/principals/{id}/usage", get(principal_usage))
         .route("/admin/principals/{id}/limits", get(principal_limits))
         .route(
             "/admin/principals/{id}/keys",
@@ -421,6 +432,58 @@ async fn reload_config(State(_state): State<AdminState>) -> Result<Json<Value>, 
         }
     }
     Ok(Json(json!({ "status": "ok", "reloading": true })))
+}
+
+async fn create_principal(
+    State(state): State<AdminState>,
+    Json(request): Json<management::CreatePrincipalRequest>,
+) -> axum::response::Response {
+    match management::create_principal(&state, request, unix_now_secs()).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => management_error_response(error),
+    }
+}
+
+async fn update_principal(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+    Json(request): Json<management::UpdatePrincipalRequest>,
+) -> axum::response::Response {
+    match management::update_principal(&state, id, request, unix_now_secs()).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => management_error_response(error),
+    }
+}
+
+async fn disable_principal(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    match management::set_principal_disabled(&state, id, true, unix_now_secs()).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => management_error_response(error),
+    }
+}
+
+async fn enable_principal(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    match management::set_principal_disabled(&state, id, false, unix_now_secs()).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => management_error_response(error),
+    }
+}
+
+async fn update_principal_allowed_models(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+    Json(request): Json<management::AllowedModelsRequest>,
+) -> axum::response::Response {
+    match management::update_allowed_models(&state, id, request, unix_now_secs()).await {
+        Ok(response) => Json(response).into_response(),
+        Err(error) => management_error_response(error),
+    }
 }
 
 async fn issue_principal_key(

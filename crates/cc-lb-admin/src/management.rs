@@ -1,19 +1,21 @@
 use axum::{
+    Json,
     http::StatusCode,
     response::{IntoResponse, Response},
-    Json,
 };
+use cc_lb_config::PrincipalSpec;
+use cc_lb_core::AuditEntry;
 use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore, KeyStoreError};
 use cc_lb_core::api_keys::secret;
 use cc_lb_core::api_keys::types::{
     Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalType as CorePrincipalType,
 };
-use cc_lb_core::AuditEntry;
 use cc_lb_storage_redb::{
     ApiKeyMutation, KeyStatus, Limit, LimitKind, PrincipalKindLite, StoredApiKeyRecord,
     UpstreamKind,
 };
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::AdminState;
 
@@ -23,10 +25,18 @@ pub type Result<T> = std::result::Result<T, ManagementError>;
 pub enum ManagementError {
     #[error("storage unavailable")]
     StorageUnavailable,
+    #[error(transparent)]
+    Settings(#[from] crate::settings::SettingsError),
+    #[error(transparent)]
+    Json(#[from] serde_json::Error),
+    #[error("principal exists")]
+    PrincipalExists,
     #[error("unknown principal")]
     UnknownPrincipal,
     #[error("unknown api key")]
     UnknownApiKey,
+    #[error("invalid draft principal")]
+    InvalidDraftPrincipal,
     #[error("invalid request: {message}")]
     InvalidRequest { message: String },
     #[error("conflict: {0}")]
@@ -43,8 +53,27 @@ impl IntoResponse for ManagementError {
     fn into_response(self) -> Response {
         match self {
             ManagementError::StorageUnavailable => StatusCode::SERVICE_UNAVAILABLE.into_response(),
-            ManagementError::UnknownPrincipal => StatusCode::NOT_FOUND.into_response(),
+            ManagementError::Settings(error) => settings_management_error_response(error),
+            ManagementError::Json(error) => {
+                tracing::error!(error = %error, "admin principal management json operation failed");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
+            ManagementError::PrincipalExists => (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({ "error": "principal_exists" })),
+            )
+                .into_response(),
+            ManagementError::UnknownPrincipal => (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({ "error": "unknown_principal" })),
+            )
+                .into_response(),
             ManagementError::UnknownApiKey => StatusCode::NOT_FOUND.into_response(),
+            ManagementError::InvalidDraftPrincipal => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                Json(serde_json::json!({ "error": "invalid_draft_principal" })),
+            )
+                .into_response(),
             ManagementError::InvalidRequest { message } => (
                 StatusCode::BAD_REQUEST,
                 Json(serde_json::json!({
@@ -80,6 +109,35 @@ impl IntoResponse for ManagementError {
             }
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CreatePrincipalRequest {
+    pub id: String,
+    pub spec: PrincipalSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct UpdatePrincipalRequest {
+    pub spec: PrincipalSpec,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AllowedModelsRequest {
+    pub allowed_models: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrincipalMutationResponse {
+    pub revision: u64,
+    pub principal_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PrincipalAllowedModelsResponse {
+    pub revision: u64,
+    pub principal_id: String,
+    pub allowed_models: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -157,6 +215,175 @@ pub struct KeyStatusResponse {
     pub key_id: String,
     pub status: KeyStatus,
     pub updated_at_unix_secs: u64,
+}
+
+pub async fn create_principal(
+    state: &AdminState,
+    request: CreatePrincipalRequest,
+    now_unix_secs: u64,
+) -> Result<PrincipalMutationResponse> {
+    let storage = state
+        .storage
+        .as_deref()
+        .ok_or(ManagementError::StorageUnavailable)?;
+    let principal_id = request.id;
+    let spec = request.spec;
+    let current_exists = state
+        .config
+        .current_config()
+        .principals
+        .contains_key(&principal_id);
+    let principal_for_audit = principal_id.clone();
+    let (revision, response) = apply_principal_change(
+        storage,
+        state.config.as_ref(),
+        now_unix_secs,
+        move |principals| {
+            let principals = principals_object(principals)?;
+            if current_exists || principals.contains_key(&principal_id) {
+                return Err(ManagementError::PrincipalExists);
+            }
+            principals.insert(principal_id.clone(), serde_json::to_value(&spec)?);
+            Ok(PrincipalMutationResponse {
+                revision: 0,
+                principal_id: principal_id.clone(),
+            })
+        },
+    )
+    .await?;
+    enqueue_principal_admin_audit(state, &principal_for_audit, "principal_create");
+    Ok(PrincipalMutationResponse {
+        revision,
+        ..response
+    })
+}
+
+pub async fn update_principal(
+    state: &AdminState,
+    principal_id: String,
+    request: UpdatePrincipalRequest,
+    now_unix_secs: u64,
+) -> Result<PrincipalMutationResponse> {
+    let storage = state
+        .storage
+        .as_deref()
+        .ok_or(ManagementError::StorageUnavailable)?;
+    let spec = request.spec;
+    let principal_for_audit = principal_id.clone();
+    let (revision, response) = apply_principal_change(
+        storage,
+        state.config.as_ref(),
+        now_unix_secs,
+        move |principals| {
+            let principals = principals_object(principals)?;
+            if !principals.contains_key(&principal_id) {
+                return Err(ManagementError::UnknownPrincipal);
+            }
+            principals.insert(principal_id.clone(), serde_json::to_value(&spec)?);
+            Ok(PrincipalMutationResponse {
+                revision: 0,
+                principal_id: principal_id.clone(),
+            })
+        },
+    )
+    .await?;
+    enqueue_principal_admin_audit(state, &principal_for_audit, "principal_update");
+    Ok(PrincipalMutationResponse {
+        revision,
+        ..response
+    })
+}
+
+pub async fn set_principal_disabled(
+    state: &AdminState,
+    principal_id: String,
+    disabled: bool,
+    now_unix_secs: u64,
+) -> Result<PrincipalMutationResponse> {
+    let storage = state
+        .storage
+        .as_deref()
+        .ok_or(ManagementError::StorageUnavailable)?;
+    let current_config = state.config.current_config();
+    let current_spec = current_config.principals.get(&principal_id).cloned();
+    let principal_for_audit = principal_id.clone();
+    let audit_kind = if disabled {
+        "principal_disable"
+    } else {
+        "principal_enable"
+    };
+    let (revision, response) = apply_principal_change(
+        storage,
+        state.config.as_ref(),
+        now_unix_secs,
+        move |principals| {
+            let principals = principals_object(principals)?;
+            ensure_principal_value(principals, &principal_id, current_spec.as_ref())?;
+            let principal = principals
+                .get_mut(&principal_id)
+                .and_then(Value::as_object_mut)
+                .ok_or(ManagementError::InvalidDraftPrincipal)?;
+            principal.insert("disabled".to_owned(), Value::Bool(disabled));
+            Ok(PrincipalMutationResponse {
+                revision: 0,
+                principal_id: principal_id.clone(),
+            })
+        },
+    )
+    .await?;
+    enqueue_principal_admin_audit(state, &principal_for_audit, audit_kind);
+    Ok(PrincipalMutationResponse {
+        revision,
+        ..response
+    })
+}
+
+pub async fn update_allowed_models(
+    state: &AdminState,
+    principal_id: String,
+    request: AllowedModelsRequest,
+    now_unix_secs: u64,
+) -> Result<PrincipalAllowedModelsResponse> {
+    let storage = state
+        .storage
+        .as_deref()
+        .ok_or(ManagementError::StorageUnavailable)?;
+    let current_config = state.config.current_config();
+    let current_spec = current_config.principals.get(&principal_id).cloned();
+    let allowed_models = request.allowed_models;
+    let principal_for_audit = principal_id.clone();
+    let (revision, response) = apply_principal_change(
+        storage,
+        state.config.as_ref(),
+        now_unix_secs,
+        move |principals| {
+            let principals = principals_object(principals)?;
+            ensure_principal_value(principals, &principal_id, current_spec.as_ref())?;
+            let principal = principals
+                .get_mut(&principal_id)
+                .and_then(Value::as_object_mut)
+                .ok_or(ManagementError::InvalidDraftPrincipal)?;
+            principal.insert(
+                "allowed_models".to_owned(),
+                Value::Array(allowed_models.iter().cloned().map(Value::String).collect()),
+            );
+            Ok(PrincipalAllowedModelsResponse {
+                revision: 0,
+                principal_id: principal_id.clone(),
+                allowed_models: allowed_models.clone(),
+            })
+        },
+    )
+    .await?;
+    enqueue_principal_admin_audit(
+        state,
+        &principal_for_audit,
+        "principal_allowed_models_update",
+    );
+    Ok(PrincipalAllowedModelsResponse {
+        revision,
+        ..response
+    })
 }
 
 pub fn issue_principal_key(
@@ -442,8 +669,53 @@ pub fn enable_principal_key(
     }
 }
 
+async fn apply_principal_change<T, F>(
+    storage: &cc_lb_storage_redb::Storage,
+    current: &dyn crate::CurrentConfig,
+    now_unix_secs: u64,
+    transform: F,
+) -> Result<(u64, T)>
+where
+    F: FnMut(&mut Value) -> Result<T>,
+{
+    crate::settings::apply_draft_principal_change(storage, current, now_unix_secs, transform)
+        .await?
+        .map_err(|error| error)
+}
+
+fn principals_object(principals: &mut Value) -> Result<&mut serde_json::Map<String, Value>> {
+    principals
+        .as_object_mut()
+        .ok_or(ManagementError::InvalidDraftPrincipal)
+}
+
+fn ensure_principal_value(
+    principals: &mut serde_json::Map<String, Value>,
+    principal_id: &str,
+    current_spec: Option<&PrincipalSpec>,
+) -> Result<()> {
+    if principals.contains_key(principal_id) {
+        return Ok(());
+    }
+    let Some(current_spec) = current_spec else {
+        return Err(ManagementError::UnknownPrincipal);
+    };
+    principals.insert(principal_id.to_owned(), serde_json::to_value(current_spec)?);
+    Ok(())
+}
+
 fn principal_exists_in_current_or_draft(state: &AdminState, principal_id: &str) -> bool {
-    state.principal_view.load().get(principal_id).is_some()
+    if state.principal_view.load().get(principal_id).is_some() {
+        return true;
+    }
+    state
+        .storage
+        .as_ref()
+        .and_then(|storage| storage.get_config_draft().ok())
+        .and_then(|draft| draft.draft)
+        .and_then(|draft| draft.get("principals").cloned())
+        .and_then(|principals| principals.as_object().cloned())
+        .is_some_and(|principals| principals.contains_key(principal_id))
 }
 
 fn double_option<'de, T, D>(deserializer: D) -> std::result::Result<Option<Option<T>>, D::Error>
@@ -523,6 +795,68 @@ fn principal_kind_lite(kind: CorePrincipalType) -> PrincipalKindLite {
         CorePrincipalType::Human => PrincipalKindLite::Human,
         CorePrincipalType::Machine => PrincipalKindLite::Machine,
     }
+}
+
+fn settings_management_error_response(error: crate::settings::SettingsError) -> Response {
+    match error {
+        crate::settings::SettingsError::StorageUnavailable => {
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
+        }
+        crate::settings::SettingsError::Storage(source) => {
+            tracing::error!(error = %source, "admin principal management storage operation failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        crate::settings::SettingsError::StaleDraftRevision { current } => (
+            StatusCode::CONFLICT,
+            Json(
+                serde_json::json!({ "error": "stale_draft_revision", "current_revision": current }),
+            ),
+        )
+            .into_response(),
+        crate::settings::SettingsError::ValidationFailed { detail } => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "validation_failed", "detail": detail })),
+        )
+            .into_response(),
+        crate::settings::SettingsError::UnknownRevision { missing } => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "unknown_revision", "missing": missing })),
+        )
+            .into_response(),
+        crate::settings::SettingsError::Schema(source) => {
+            tracing::error!(error = %source, "admin principal management schema operation failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        other => {
+            tracing::error!(error = %other, "unexpected admin principal settings error");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+fn enqueue_principal_admin_audit(state: &AdminState, principal_id: &str, action: &str) {
+    let Some(audit_sink) = &state.audit_sink else {
+        return;
+    };
+    let ts = unix_now_secs();
+    let _ = audit_sink.try_enqueue(AuditEntry {
+        ts,
+        request_id: format!("admin-{action}-{principal_id}-{ts}"),
+        principal_id: principal_id.to_owned(),
+        route: "admin_principal".to_owned(),
+        upstream: String::new(),
+        model: None,
+        status: 200,
+        input_tokens: None,
+        output_tokens: None,
+        duration_ms: 0,
+        agent_label: None,
+        api_key_id: None,
+        cost_usd_micros: None,
+        limit_violation: None,
+        admin_action: Some(action.to_owned()),
+        actor: Some("admin".to_owned()),
+    });
 }
 
 fn unix_now_secs() -> u64 {
