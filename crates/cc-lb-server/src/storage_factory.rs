@@ -162,6 +162,7 @@ async fn open_postgres(
     use std::str::FromStr;
     use std::time::Duration;
 
+    use sqlx::AssertSqlSafe;
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
 
     let statement_timeout_ms = pool_config.statement_timeout_secs * 1000;
@@ -180,9 +181,13 @@ async fn open_postgres(
         .idle_timeout(Duration::from_secs(pool_config.idle_timeout_secs))
         .after_connect(move |conn, _meta| {
             Box::pin(async move {
+                // sqlx 0.9 requires SqlSafeStr; statement_timeout_ms is a u64, so the
+                // interpolated string is SQL-injection safe by construction.
                 let statement_timeout =
                     format!("SET statement_timeout = '{statement_timeout_ms}ms'");
-                sqlx::query(&statement_timeout).execute(conn).await?;
+                sqlx::query(AssertSqlSafe(statement_timeout))
+                    .execute(conn)
+                    .await?;
                 Ok(())
             })
         })
