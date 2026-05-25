@@ -46,7 +46,6 @@ dashmap = "6"
 eventsource-stream = "0.2"
 extism = { version = "1", default-features = false, features = ["wasmtime-default-features"] }
 figment = "0.10"
-gcp_auth = "0.13"
 globset = "0.4"
 hickory-resolver = "0.26"
 hyper = "1"
@@ -72,7 +71,7 @@ secrecy = "0.10"
 schemars = { version = "1", features = ["url2"] }
 serde = "1"
 serde_json = "1"
-sqlx = { version = "0.8", default-features = false, features = ["chrono", "json", "migrate", "postgres", "runtime-tokio-rustls", "uuid"] }
+sqlx = { version = "0.9", default-features = false, features = ["chrono", "json", "migrate", "postgres", "runtime-tokio", "tls-rustls-ring", "uuid"] }
 tempfile = "3"
 thiserror = "2"
 tokio = "1"

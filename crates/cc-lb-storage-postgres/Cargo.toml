@@ -18,7 +18,7 @@ bytes = { workspace = true }
 chrono = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
-sqlx = { workspace = true, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls", "uuid"] } # macros: required for sqlx::migrate!(). Pulls sqlx-mysql (dev-time only) -> rsa (RUSTSEC-2023-0071) which is ignored in cargo-audit CI (MySQL auth path, never executed at runtime).
+sqlx = { workspace = true, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio", "tls-rustls-ring", "uuid"] } # macros: required for sqlx::migrate!(). sqlx 0.9 split combined runtime+TLS features into separate runtime-tokio + tls-rustls-ring. macros no longer unconditionally pulls sqlx-mysql in 0.9 (uses optional ? dep refs).
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time"] }
 tracing = { workspace = true }
