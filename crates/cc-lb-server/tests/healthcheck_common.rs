@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 use axum::{routing::any, Router};
 use cc_lb_config::{
-    AuthStrategy, Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, UpstreamKind,
-    UpstreamSpec,
+    AuthStrategy, Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, StorageConfig,
+    UpstreamKind, UpstreamSpec,
 };
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -23,17 +23,21 @@ pub async fn spawn_upstream(
 }
 
 pub fn configure_builtin_auth(config: &mut Config) {
-    std::env::set_var(
-        "CC_LB_MASTER_KEY",
-        "0000000000000000000000000000000000000000000000000000000000000000",
-    );
+    unsafe {
+        std::env::set_var(
+            "CC_LB_MASTER_KEY",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+    }
     config.downstream_auth.mode = DownstreamAuthMode::None;
     config.downstream_auth.none_mode = Some(NoneModeConfig {
         principal_id: "api-key".to_owned(),
         upstream_kind: NoneModeUpstreamKind::AnthropicKey,
         upstream_credential_ref: "fake_anthropic".to_owned(),
     });
-    config.storage.redb_path = Some(unique_redb_path("cc-lb-health"));
+    config.storage = StorageConfig::Redb {
+        path: unique_redb_path("cc-lb-health"),
+    };
 }
 
 fn unique_redb_path(prefix: &str) -> PathBuf {

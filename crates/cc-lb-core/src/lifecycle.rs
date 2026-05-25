@@ -1276,12 +1276,11 @@ fn limit_rejection_response(
         CONTENT_TYPE,
         HeaderValue::from_static("application/json; charset=utf-8"),
     );
-    if status == StatusCode::TOO_MANY_REQUESTS {
-        if let Some(retry_after_seconds) = retry_after_seconds {
-            if let Ok(value) = HeaderValue::from_str(&retry_after_seconds.to_string()) {
-                response.headers_mut().insert(RETRY_AFTER, value);
-            }
-        }
+    if status == StatusCode::TOO_MANY_REQUESTS
+        && let Some(value) = retry_after_seconds
+            .and_then(|sec| HeaderValue::from_str(&sec.to_string()).ok())
+    {
+        response.headers_mut().insert(RETRY_AFTER, value);
     }
     response
 }

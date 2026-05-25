@@ -10,7 +10,7 @@ use cc_lb_config::{
 use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_core::api_keys::principal_view::PrincipalView;
 use cc_lb_core::api_keys::secret;
-use cc_lb_server::builtins::{AuthnError, BuiltinAuthn};
+use cc_lb_core::api_keys::builtin_authn::{BuiltinAuthError as AuthnError, BuiltinAuthn};
 use cc_lb_storage_redb::{
     IssueParams, KeyStatus, Limit as StorageLimit, LimitKind as StorageLimitKind,
     PrincipalKindLite, Storage, UpstreamKind,

@@ -25,6 +25,7 @@ async fn sighup_reloads_body_defaults() {
     ));
     let app = cc_lb_admin::router(AdminState {
         storage: None,
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
             Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
             Arc::new(arc_swap::ArcSwap::from(

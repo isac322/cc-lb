@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use cc_lb_config::{
-    AuthStrategy, Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, UpstreamKind,
-    UpstreamSpec,
+    AuthStrategy, Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, StorageConfig,
+    UpstreamKind, UpstreamSpec,
 };
 use cc_lb_server::app::build_app_with_path;
 use fake_anthropic::{app as fake_anthropic_app, AppConfig};
@@ -151,17 +151,21 @@ async fn spawn_fake(config: AppConfig) -> (SocketAddr, JoinHandle<Result<(), std
 }
 
 fn configure_builtin_auth(config: &mut Config) {
-    std::env::set_var(
-        "CC_LB_MASTER_KEY",
-        "0000000000000000000000000000000000000000000000000000000000000000",
-    );
+    unsafe {
+        std::env::set_var(
+            "CC_LB_MASTER_KEY",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+    }
     config.downstream_auth.mode = DownstreamAuthMode::None;
     config.downstream_auth.none_mode = Some(NoneModeConfig {
         principal_id: "api-key".to_owned(),
         upstream_kind: NoneModeUpstreamKind::AnthropicKey,
         upstream_credential_ref: "fake_anthropic".to_owned(),
     });
-    config.storage.redb_path = Some(unique_redb_path("cc-lb-chaos"));
+    config.storage = StorageConfig::Redb {
+        path: unique_redb_path("cc-lb-chaos"),
+    };
 }
 
 fn unique_redb_path(prefix: &str) -> PathBuf {
