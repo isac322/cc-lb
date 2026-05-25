@@ -190,7 +190,7 @@ pub fn build_app_for_testing(config: Config) -> Result<App, BuildError> {
 }
 
 pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result<App, BuildError> {
-    config.validate().map_err(cc_lb_config::ConfigError::from)?;
+    config.validate()?;
     let (storage, aead) = open_storage(&config)?;
     if matches!(config.downstream_auth.mode, DownstreamAuthMode::ApiKey) && storage.is_none() {
         return Err(BuildError::StorageRequired);

@@ -1,22 +1,22 @@
 use axum::{
+    Json, Router,
     extract::{Path, Query, State},
-    http::{header, StatusCode},
+    http::{StatusCode, header},
     middleware,
     response::IntoResponse,
     routing::{delete, get, post, put},
-    Json, Router,
 };
 use bytes::Bytes;
 use cc_lb_config::Config;
 use rust_embed::RustEmbed;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::{
+    AdminState,
     auth::require_admin_auth,
     management,
     principals::{principal_key_usage, principal_limits},
-    AdminState,
 };
 
 #[derive(RustEmbed)]
@@ -185,15 +185,15 @@ async fn get_config(State(state): State<AdminState>) -> Result<Json<Value>, Stat
     let config = state.config.current_config();
     let mut config_json =
         serde_json::to_value(&*config).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    if let Some(storage) = config_json.get_mut("storage") {
-        if let Some(obj) = storage.as_object_mut() {
-            obj.insert("oauth_aead_key_env".to_string(), json!("[REDACTED]"));
-        }
+    if let Some(storage) = config_json.get_mut("storage")
+        && let Some(obj) = storage.as_object_mut()
+    {
+        obj.insert("oauth_aead_key_env".to_string(), json!("[REDACTED]"));
     }
-    if let Some(admin) = config_json.get_mut("admin") {
-        if let Some(obj) = admin.as_object_mut() {
-            obj.insert("token_env".to_string(), json!("[REDACTED]"));
-        }
+    if let Some(admin) = config_json.get_mut("admin")
+        && let Some(obj) = admin.as_object_mut()
+    {
+        obj.insert("token_env".to_string(), json!("[REDACTED]"));
     }
     Ok(Json(config_json))
 }
