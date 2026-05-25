@@ -597,7 +597,7 @@ fn signal_after_first_pending_row(control_dir: &Path, index: usize) -> Result<()
     if index == 0 {
         fs::write(control_dir.join(STARTED_MARKER), b"started")?;
     }
-    if index % 128 == 0 {
+    if index.is_multiple_of(128) {
         thread::sleep(Duration::from_millis(1));
     }
     Ok(())
