@@ -4,8 +4,8 @@ use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Storage, RequestEvent, RequestEventUpstream, StorageError, REQUEST_EVENTS_V1,
-    USAGE_ROLLUPS_V1, USAGE_ROLLUP_CHECKPOINTS_V1,
+    REQUEST_EVENTS_V1, RequestEvent, Storage, StorageError, USAGE_ROLLUP_CHECKPOINTS_V1,
+    USAGE_ROLLUPS_V1,
 };
 
 const REQUEST_EVENT_CHECKPOINT_KEY: &str = "request_events_v1_high_water";
@@ -245,7 +245,8 @@ impl UsageRollupKey {
 impl UsageRollupDelta {
     fn add_event(&mut self, event: &RequestEvent) {
         self.request_count += 1;
-        self.input_tokens += event.input_tokens + event.cache_creation_input_tokens + event.cache_read_input_tokens;
+        self.input_tokens +=
+            event.input_tokens + event.cache_creation_input_tokens + event.cache_read_input_tokens;
         self.output_tokens += event.output_tokens;
         if event.status >= 400 {
             self.error_count += 1;
@@ -289,17 +290,6 @@ fn normalize_dimension(value: Option<&str>) -> String {
     } else {
         normalized
     }
-}
-
-fn upstream_dimension(upstream: RequestEventUpstream) -> String {
-    match upstream {
-        RequestEventUpstream::AnthropicDirect => "anthropic_direct",
-        RequestEventUpstream::BedrockRuntime => "bedrock_runtime",
-        RequestEventUpstream::BedrockMantle => "bedrock_mantle",
-        RequestEventUpstream::Vertex => "vertex",
-        RequestEventUpstream::CustomAnthropicSpec => "custom_anthropic_spec",
-    }
-    .to_owned()
 }
 
 fn push_segment(key: &mut Vec<u8>, value: &str) {

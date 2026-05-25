@@ -14,8 +14,8 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use cc_lb_plugin_api::{
-    ObservabilityHook, PluginManifest, PluginRuntime, Principal, RouterPlugin, RuntimeError,
-    SignerFactory, UpstreamDialect,
+    ObservabilityHook, PluginManifest, PluginRuntime, RouterPlugin, RuntimeError, SignerFactory,
+    UpstreamDialect,
 };
 use extism::{Manifest, Plugin, PluginBuilder, Wasm};
 use serde_json::Value;
@@ -102,15 +102,11 @@ impl ResourceLimits {
     }
 }
 
-pub type SignerFactoryResolver =
-    Arc<dyn Fn(&str, &Principal, &Value) -> Option<Arc<dyn SignerFactory>> + Send + Sync>;
-
 pub struct ExtismRuntime {
     config: ExtismRuntimeConfig,
     manifests: RwLock<HashMap<String, PluginEntry>>,
     instances: RwLock<HashMap<String, Arc<PluginSlot>>>,
     host_state: Arc<HostState>,
-    signer_factory_resolver: Option<SignerFactoryResolver>,
 }
 
 impl ExtismRuntime {
@@ -124,14 +120,6 @@ impl ExtismRuntime {
             manifests: RwLock::new(HashMap::new()),
             instances: RwLock::new(HashMap::new()),
             host_state: Arc::new(HostState::new()),
-            signer_factory_resolver: None,
-        }
-    }
-
-    pub fn with_signer_factory_resolver(resolver: SignerFactoryResolver) -> Self {
-        Self {
-            signer_factory_resolver: Some(resolver),
-            ..Self::new()
         }
     }
 
