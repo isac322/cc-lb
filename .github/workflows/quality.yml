@@ -79,8 +79,6 @@ jobs:
           cargo llvm-cov --workspace --exclude cc-lb-loadgen --exclude cc-lb-plugin-lifecycle-tests --exclude plugin-api-key --exclude plugin-oauth-anthropic-pro --exclude plugin-internal-key-mapping --exclude extism-pdk --exclude extism-pdk-macros --lcov --output-path target/coverage.lcov --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov --package cc-lb-core --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov --package cc-lb-dialect-anthropic --fail-under-lines 80 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov --package cc-lb-dialect-bedrock --fail-under-lines 80 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov --package cc-lb-dialect-vertex --fail-under-lines 80 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov --package cc-lb-admin --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov --package cc-lb-config --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov --package cc-lb-observability --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
@@ -88,11 +86,8 @@ jobs:
           cargo llvm-cov --package cc-lb-runtime-extism --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov --package cc-lb-signer-anthropic-key --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov --package cc-lb-signer-anthropic-oauth --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov --package cc-lb-signer-aws --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov --package cc-lb-signer-gcp --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov --package cc-lb-server --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov --package cc-lb-storage-redb --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov --package aws-eventstream-codec --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@v7

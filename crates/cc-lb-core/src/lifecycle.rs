@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use axum::body::Body as AxumBody;
 use bytes::Bytes;
-use cc_lb_dialect_bedrock::{convert_eventstream_to_sse_bytes, EventStreamConvertError};
 use cc_lb_plugin_api::{
     shape_request, sign_request, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
     RequestContext, RetryDecision, RouterPlugin, SignedRequest, SignerFactory, Upstream,
@@ -15,7 +14,7 @@ use cc_lb_plugin_api::{
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_redb::{RequestEvent, Storage, StoredApiKeyRecord};
-use http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
+use http::header::{CONTENT_TYPE, RETRY_AFTER};
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::connect::HttpConnector;
@@ -71,14 +70,6 @@ pub enum DispatchError {
     Transport { reason: String },
     #[error("upstream bulkhead queue full; retry after {retry_after:?}")]
     BulkheadFull { retry_after: Duration },
-}
-
-#[derive(Debug, Error)]
-enum ResponseConversionError {
-    #[error("failed to read Bedrock event-stream body: {source}")]
-    Read { source: axum::Error },
-    #[error("failed to convert Bedrock event-stream body: {source}")]
-    Convert { source: EventStreamConvertError },
 }
 
 #[async_trait]
@@ -466,27 +457,6 @@ impl Lifecycle {
             );
             return Ok(response);
         }
-
-        response = match convert_success_response_if_needed(response, &route.upstream).await {
-            Ok(response) => response,
-            Err(source) => {
-                self.observe_error("response_conversion_error", &source.to_string(), "dialect");
-                let mut response = anthropic_error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "api_error",
-                    "failed to convert upstream response",
-                );
-                self.attach_limit_headers(&mut response, active_limit.as_ref());
-                record_api_key_request_metric(&metric_context, response.status());
-                self.observe_finished_for_principal(
-                    response.status(),
-                    started,
-                    &principal,
-                    &ctx.body_bytes,
-                );
-                return Ok(response);
-            }
-        };
 
         let status = response.status();
         record_api_key_request_metric(&metric_context, status);
@@ -886,45 +856,6 @@ async fn collect_error_response(response: Response<Body>) -> CollectedResponse {
         },
         body,
     }
-}
-
-async fn convert_success_response_if_needed(
-    response: Response<Body>,
-    upstream: &Upstream,
-) -> Result<Response<Body>, ResponseConversionError> {
-    if !matches!(upstream, Upstream::BedrockRuntime { .. })
-        || !is_aws_eventstream(response.headers())
-    {
-        return Ok(response);
-    }
-
-    let (mut parts, body) = response.into_parts();
-    let body = body
-        .collect()
-        .await
-        .map_err(|source| ResponseConversionError::Read { source })?
-        .to_bytes();
-    let sse = convert_eventstream_to_sse_bytes(&body)
-        .map_err(|source| ResponseConversionError::Convert { source })?;
-    parts.headers.insert(
-        CONTENT_TYPE,
-        HeaderValue::from_static("text/event-stream; charset=utf-8"),
-    );
-    parts.headers.remove(CONTENT_LENGTH);
-    Ok(Response::from_parts(parts, Body::from(sse)))
-}
-
-fn is_aws_eventstream(headers: &HeaderMap) -> bool {
-    headers
-        .get(CONTENT_TYPE)
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| {
-            value.split(';').next().is_some_and(|media_type| {
-                media_type
-                    .trim()
-                    .eq_ignore_ascii_case("application/vnd.amazon.eventstream")
-            })
-        })
 }
 
 fn rebuild_error_response(
@@ -1443,9 +1374,6 @@ fn limit_kind_name(kind: LimitKind) -> &'static str {
 fn audit_upstream_name(upstream: &Upstream) -> &'static str {
     match upstream {
         Upstream::AnthropicDirect => "anthropic_direct",
-        Upstream::BedrockRuntime { .. } => "bedrock_runtime",
-        Upstream::BedrockMantle { .. } => "bedrock_mantle",
-        Upstream::Vertex { .. } => "vertex",
         Upstream::CustomAnthropicSpec { .. } => "custom_anthropic_spec",
     }
 }
@@ -1455,10 +1383,6 @@ fn pricing_upstream_kind(upstream: &Upstream) -> Option<cc_lb_pricing::UpstreamK
         Upstream::AnthropicDirect | Upstream::CustomAnthropicSpec { .. } => {
             Some(cc_lb_pricing::UpstreamKind::AnthropicKey)
         }
-        Upstream::BedrockRuntime { .. } | Upstream::BedrockMantle { .. } => {
-            Some(cc_lb_pricing::UpstreamKind::AwsSigV4)
-        }
-        Upstream::Vertex { .. } => Some(cc_lb_pricing::UpstreamKind::GcpOAuth),
     }
 }
 

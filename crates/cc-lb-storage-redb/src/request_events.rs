@@ -23,9 +23,6 @@ pub struct RequestEvent {
 #[serde(rename_all = "snake_case")]
 pub enum RequestEventUpstream {
     AnthropicDirect,
-    BedrockRuntime,
-    BedrockMantle,
-    Vertex,
     CustomAnthropicSpec,
 }
 

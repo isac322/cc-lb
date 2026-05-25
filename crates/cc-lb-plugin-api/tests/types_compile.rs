@@ -10,22 +10,12 @@ use http::{HeaderMap, Method, StatusCode};
 fn upstream_variants_and_principal_serde_compile() {
     let variants = [
         Upstream::AnthropicDirect,
-        Upstream::BedrockRuntime {
-            region: "us-east-1".to_owned(),
-        },
-        Upstream::BedrockMantle {
-            region: "us-west-2".to_owned(),
-        },
-        Upstream::Vertex {
-            project: "project-a".to_owned(),
-            region: "us-central1".to_owned(),
-        },
         Upstream::CustomAnthropicSpec {
             base_url: "https://gateway.example.test".parse().unwrap(),
         },
     ];
 
-    assert_eq!(variants.len(), 5);
+    assert_eq!(variants.len(), 2);
 
     let principal = Principal {
         id: "alice".to_owned(),
@@ -39,7 +29,7 @@ fn upstream_variants_and_principal_serde_compile() {
 
 #[test]
 fn remaining_public_types_compile() {
-    let _strategy = AuthStrategy::AwsSigV4;
+    let _strategy = AuthStrategy::ApiKey;
     let ctx = RequestContext {
         request_id: "req-1".to_owned(),
         downstream_headers: HeaderMap::new(),

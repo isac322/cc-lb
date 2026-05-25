@@ -1,14 +1,10 @@
 [workspace]
 members = [
-    "crates/aws-eventstream-codec",
     "crates/cc-lb-pricing",
     "crates/cc-lb-*",
     "benches/extism_sse_overhead",
     "tests/fixtures/fake-anthropic",
     "tests/fixtures/mock-anthropic-oauth-server",
-    "tests/fixtures/fake-bedrock-runtime",
-    "tests/fixtures/fake-bedrock-mantle",
-    "tests/fixtures/fake-vertex",
     "tests/load",
     "tests/loom",
     "tests/plugin-lifecycle",
@@ -17,7 +13,7 @@ members = [
     "tests/crash-recovery",
     "tests/integration",
 ]
-exclude = ["third_party/gcp_auth", "fuzz"]
+exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]
@@ -30,7 +26,6 @@ rust-version = "1.95.0"
 anyhow = "1"
 arc-swap = "1"
 async-stream = "0.3"
-aws-sigv4 = "1"
 base64 = "0.22"
 axum = "0.8"
 bytes = "1"

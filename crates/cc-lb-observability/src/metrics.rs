@@ -193,7 +193,7 @@ pub fn touch_prometheus14_metrics() {
     metrics::counter!("cclb_audit_writer_dropped_total").increment(1);
     metrics::counter!("cclb_key_auth_failures_total", "reason" => "InvalidKey").increment(1);
     metrics::counter!("cclb_concurrent_rejects_total", "key_id" => "smoke-key").increment(1);
-    metrics::counter!("cclb_streaming_usage_missing_total", "dialect" => "bedrock").increment(1);
+    metrics::counter!("cclb_streaming_usage_missing_total", "dialect" => "anthropic").increment(1);
 }
 
 pub(crate) fn touch_prometheus14_metric_handles() {

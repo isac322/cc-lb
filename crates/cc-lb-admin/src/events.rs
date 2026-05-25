@@ -207,9 +207,6 @@ impl From<StorageError> for EventsError {
 fn parse_upstream(value: &str) -> Result<RequestEventUpstream, EventsError> {
     match value {
         "anthropic_direct" => Ok(RequestEventUpstream::AnthropicDirect),
-        "bedrock_runtime" => Ok(RequestEventUpstream::BedrockRuntime),
-        "bedrock_mantle" => Ok(RequestEventUpstream::BedrockMantle),
-        "vertex" => Ok(RequestEventUpstream::Vertex),
         "custom_anthropic_spec" => Ok(RequestEventUpstream::CustomAnthropicSpec),
         _ => Err(EventsError::InvalidUpstream),
     }

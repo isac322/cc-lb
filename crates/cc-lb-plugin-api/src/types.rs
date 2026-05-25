@@ -45,23 +45,6 @@ pub enum PrincipalKind {
 pub enum Upstream {
     /// Direct Anthropic API endpoint.
     AnthropicDirect,
-    /// AWS Bedrock runtime endpoint for Anthropic models.
-    BedrockRuntime {
-        /// AWS region containing the Bedrock runtime endpoint.
-        region: String,
-    },
-    /// AWS Bedrock mantle Anthropic-compatible endpoint.
-    BedrockMantle {
-        /// AWS region containing the mantle endpoint.
-        region: String,
-    },
-    /// Google Vertex AI Anthropic publisher endpoint.
-    Vertex {
-        /// GCP project identifier.
-        project: String,
-        /// Vertex AI region.
-        region: String,
-    },
     /// Custom gateway that already speaks the Anthropic Messages wire shape.
     CustomAnthropicSpec {
         /// Base URL for the custom Anthropic-compatible gateway.
@@ -77,10 +60,6 @@ pub enum AuthStrategy {
     ApiKey,
     /// Anthropic-style OAuth bearer signing.
     OAuth,
-    /// AWS Signature Version 4 signing.
-    AwsSigV4,
-    /// GCP OAuth bearer signing.
-    GcpOAuth,
     /// Forward an internal credential supplied by upstream configuration.
     InternalForwarded,
 }
@@ -439,16 +418,6 @@ mod tests {
     fn upstream_and_manifest_serde_round_trip() {
         let upstreams = vec![
             Upstream::AnthropicDirect,
-            Upstream::BedrockRuntime {
-                region: "us-east-1".to_owned(),
-            },
-            Upstream::BedrockMantle {
-                region: "us-west-2".to_owned(),
-            },
-            Upstream::Vertex {
-                project: "project".to_owned(),
-                region: "us-central1".to_owned(),
-            },
             Upstream::CustomAnthropicSpec {
                 base_url: "https://gateway.example.test".parse().unwrap(),
             },
@@ -484,11 +453,9 @@ mod tests {
         let strategies = [
             AuthStrategy::ApiKey,
             AuthStrategy::OAuth,
-            AuthStrategy::AwsSigV4,
-            AuthStrategy::GcpOAuth,
             AuthStrategy::InternalForwarded,
         ];
-        assert_eq!(strategies.len(), 5);
+        assert_eq!(strategies.len(), 3);
     }
 
     #[test]
