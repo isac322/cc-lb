@@ -4,29 +4,6 @@ use thiserror::Error;
 
 use crate::types::AuthStrategy;
 
-/// Authentication failures returned by authentication code.
-#[derive(Debug, Error)]
-pub enum AuthnError {
-    /// Credentials were missing or malformed.
-    #[error("invalid credentials: {reason}")]
-    InvalidCredentials {
-        /// Redacted failure reason.
-        reason: String,
-    },
-    /// The plugin explicitly denied the request.
-    #[error("principal denied: {reason}")]
-    Denied {
-        /// Redacted denial reason.
-        reason: String,
-    },
-    /// Authentication plugin runtime failed.
-    #[error("authentication runtime error: {reason}")]
-    Runtime {
-        /// Redacted runtime failure reason.
-        reason: String,
-    },
-}
-
 /// Routing failures returned by [`crate::RouterPlugin`].
 #[derive(Debug, Error)]
 pub enum RouteError {
