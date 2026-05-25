@@ -1,17 +1,15 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE_NO_PAD};
 use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bincode::config::standard;
 use bincode::serde::{decode_from_slice, encode_to_vec};
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use redb::{ReadableDatabase, ReadableTable};
-use ring::digest::{digest, SHA256};
-use ring::rand::{SecureRandom, SystemRandom};
 use serde::{Deserialize, Serialize};
 
-use crate::{Storage, StorageError, API_KEYS_V1, OAUTH_CREDENTIALS_V1};
+use crate::{API_KEYS_V1, OAUTH_CREDENTIALS_V1, Storage, StorageError};
 
 const NONCE_LEN: usize = 12;
 
@@ -213,29 +211,6 @@ pub struct OAuthCredentials {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct AnthropicApiKeyCredential {
     anthropic_api_key: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct IssuedKey {
-    pub key_id: String,
-    pub plaintext: String,
-    pub issued_at_unix_secs: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct ApiKeyRecord {
-    pub key_id: String,
-    pub label: Option<String>,
-    pub issued_at_unix_secs: u64,
-    pub revoked_at_unix_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct LegacyStoredApiKeyRecord {
-    label: Option<String>,
-    issued_at_unix_secs: u64,
-    revoked_at_unix_secs: Option<u64>,
-    key_hash_b64: String,
 }
 
 pub fn oauth_key(principal_id: &str, provider: &str) -> Vec<u8> {
@@ -651,45 +626,6 @@ impl Storage {
         let key = Key::from_slice(&self.master_key);
         ChaCha20Poly1305::new(key)
     }
-}
-
-fn api_key_storage_prefix(principal_id: &str) -> Vec<u8> {
-    let mut key = Vec::with_capacity(principal_id.len() + 1);
-    key.extend_from_slice(principal_id.as_bytes());
-    key.push(0);
-    key
-}
-
-fn api_key_id_from_storage_key<'a>(prefix: &[u8], storage_key: &'a [u8]) -> Option<&'a str> {
-    storage_key
-        .strip_prefix(prefix)
-        .and_then(|suffix| std::str::from_utf8(suffix).ok())
-        .filter(|key_id| !key_id.is_empty())
-}
-
-fn api_key_record_from_stored(key_id: String, stored: LegacyStoredApiKeyRecord) -> ApiKeyRecord {
-    ApiKeyRecord {
-        key_id,
-        label: stored.label,
-        issued_at_unix_secs: stored.issued_at_unix_secs,
-        revoked_at_unix_secs: stored.revoked_at_unix_secs,
-    }
-}
-
-fn hex_prefix(bytes: &[u8], hex_chars: usize) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut out = String::with_capacity(hex_chars);
-    for byte in bytes.iter().take(hex_chars.div_ceil(2)) {
-        out.push(HEX[(byte >> 4) as usize] as char);
-        if out.len() == hex_chars {
-            break;
-        }
-        out.push(HEX[(byte & 0x0f) as usize] as char);
-        if out.len() == hex_chars {
-            break;
-        }
-    }
-    out
 }
 
 fn encode_record(record: &StoredApiKeyRecord) -> Result<Vec<u8>, StorageError> {
