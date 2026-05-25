@@ -3,7 +3,8 @@ use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::de::Error as DeError;
+use serde::{Deserialize, Deserializer, Serialize};
 use serde_json::{Map, Value};
 use url::Url;
 
@@ -13,6 +14,7 @@ pub const DEFAULT_PLUGIN_BATCHED_EVENTS_PER_FLUSH: u32 = 32;
 pub const DEFAULT_PLUGIN_BATCHED_FLUSH_MS: u64 = 100;
 pub const DEFAULT_OAUTH_AEAD_KEY_ENV: &str = "CC_LB_MASTER_KEY";
 pub const DEFAULT_ADMIN_TOKEN_ENV: &str = "CC_LB_ADMIN_TOKEN";
+pub const DEFAULT_REDB_PATH: &str = "/var/lib/cc-lb/storage.redb";
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -26,6 +28,7 @@ pub struct Config {
     pub principals: HashMap<String, PrincipalSpec>,
     pub plugins: PluginsConfig,
     pub storage: StorageConfig,
+    pub aead: AeadConfig,
     pub signers: SignersConfig,
     pub observability: ObservabilityConfig,
     pub quotas: QuotasConfig,
@@ -215,20 +218,125 @@ impl Default for PluginRef {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct StorageConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub redb_path: Option<PathBuf>,
-    #[serde(default = "default_oauth_aead_key_env")]
-    pub oauth_aead_key_env: String,
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum StorageConfig {
+    Redb {
+        path: PathBuf,
+    },
+    Postgres {
+        url: String,
+        #[serde(default)]
+        pool: PostgresPoolConfig,
+    },
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
+        Self::Redb {
+            path: PathBuf::from(DEFAULT_REDB_PATH),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for StorageConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = Value::deserialize(deserializer)?;
+        let has_kind = value.get("kind").is_some();
+        let has_legacy_redb_path = value.get("redb_path").is_some();
+        let has_legacy_aead_env = value.get("oauth_aead_key_env").is_some();
+
+        if has_kind {
+            let tagged = TaggedStorageConfig::deserialize(value).map_err(D::Error::custom)?;
+            return Ok(tagged.into());
+        }
+
+        if has_legacy_redb_path || has_legacy_aead_env {
+            tracing::warn!(
+                "[storage] redb_path/oauth_aead_key_env is deprecated; use kind = \"redb\" + path and [aead].key_env"
+            );
+            let legacy = LegacyStorageConfig::deserialize(value).map_err(D::Error::custom)?;
+            return Ok(Self::Redb {
+                path: legacy
+                    .redb_path
+                    .unwrap_or_else(|| PathBuf::from(DEFAULT_REDB_PATH)),
+            });
+        }
+
+        Ok(Self::default())
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum TaggedStorageConfig {
+    Redb {
+        path: PathBuf,
+    },
+    Postgres {
+        url: String,
+        #[serde(default)]
+        pool: PostgresPoolConfig,
+    },
+}
+
+impl From<TaggedStorageConfig> for StorageConfig {
+    fn from(value: TaggedStorageConfig) -> Self {
+        match value {
+            TaggedStorageConfig::Redb { path } => Self::Redb { path },
+            TaggedStorageConfig::Postgres { url, pool } => Self::Postgres { url, pool },
+        }
+    }
+}
+
+#[derive(Default, Deserialize)]
+struct LegacyStorageConfig {
+    redb_path: Option<PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct AeadConfig {
+    #[serde(default = "default_oauth_aead_key_env", alias = "oauth_aead_key_env")]
+    pub key_env: String,
+}
+
+impl Default for AeadConfig {
+    fn default() -> Self {
         Self {
-            redb_path: None,
-            oauth_aead_key_env: DEFAULT_OAUTH_AEAD_KEY_ENV.to_owned(),
+            key_env: DEFAULT_OAUTH_AEAD_KEY_ENV.to_owned(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PostgresPoolConfig {
+    #[serde(default = "default_max_connections")]
+    pub max_connections: u32,
+    #[serde(default)]
+    pub min_connections: u32,
+    #[serde(default = "default_acquire_timeout_secs")]
+    pub acquire_timeout_secs: u64,
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+    #[serde(default = "default_statement_timeout_secs")]
+    pub statement_timeout_secs: u64,
+    #[serde(default = "default_sslmode")]
+    pub sslmode: String,
+}
+
+impl Default for PostgresPoolConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: default_max_connections(),
+            min_connections: 0,
+            acquire_timeout_secs: default_acquire_timeout_secs(),
+            idle_timeout_secs: default_idle_timeout_secs(),
+            statement_timeout_secs: default_statement_timeout_secs(),
+            sslmode: default_sslmode(),
         }
     }
 }
@@ -486,6 +594,26 @@ fn default_plugin_batched_flush_ms() -> u64 {
 
 fn default_oauth_aead_key_env() -> String {
     DEFAULT_OAUTH_AEAD_KEY_ENV.to_owned()
+}
+
+fn default_max_connections() -> u32 {
+    10
+}
+
+fn default_acquire_timeout_secs() -> u64 {
+    5
+}
+
+fn default_idle_timeout_secs() -> u64 {
+    600
+}
+
+fn default_statement_timeout_secs() -> u64 {
+    30
+}
+
+fn default_sslmode() -> String {
+    "prefer".to_owned()
 }
 
 fn default_anthropic_oauth_issuer_base_url() -> String {

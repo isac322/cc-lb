@@ -1,5 +1,5 @@
 use cc_lb_storage_redb::{
-    RequestEvent, RequestEventUpstream, Storage, USAGE_ROLLUPS_V1, UsageRollup,
+    RedbStorage, RequestEvent, RequestEventUpstream, USAGE_ROLLUPS_V1, UsageRollup,
     UsageRollupResolution,
 };
 use redb::{ReadableDatabase, ReadableTable};
@@ -9,7 +9,7 @@ use serde_json::Value;
 fn fixture_events_roll_up_once_and_rerun_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("rollups.redb");
-    let storage = Storage::open(&path, [41; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     for event in fixture_events() {
         storage.append_request_event(&event)?;
@@ -93,7 +93,7 @@ fn fixture_events_roll_up_once_and_rerun_is_idempotent() -> Result<(), Box<dyn s
     assert_eq!(storage.query_usage_rollups()?, rollups);
     drop(storage);
 
-    let reopened = Storage::open(&path, [41; 32])?;
+    let reopened = RedbStorage::open(&path)?;
     assert_eq!(reopened.usage_rollup_checkpoint()?, first.checkpoint);
     assert_eq!(reopened.query_usage_rollups()?, rollups);
     Ok(())
@@ -103,7 +103,7 @@ fn fixture_events_roll_up_once_and_rerun_is_idempotent() -> Result<(), Box<dyn s
 fn known_and_unknown_model_costs_roll_up() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("rollups.redb");
-    let storage = Storage::open(&path, [41; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     storage.append_request_event(&event(
         1_800_000_005,
@@ -158,7 +158,7 @@ fn query_usage_rollups_in_range_filters_resolution_and_bounds()
 -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("rollups.redb");
-    let storage = Storage::open(&path, [41; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     for event in fixture_events() {
         storage.append_request_event(&event)?;
@@ -196,7 +196,7 @@ fn query_usage_rollups_in_range_filters_resolution_and_bounds()
 fn usage_rollup_json_rows_exclude_payload_keys() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("rollups.redb");
-    let storage = Storage::open(&path, [41; 32])?;
+    let storage = RedbStorage::open(&path)?;
 
     for event in fixture_events() {
         let serialized = serde_json::to_value(&event)?;

@@ -6,7 +6,6 @@ use cc_lb_plugin_api::{RetryDecision, Signer};
 async fn refresh_failure_returns_fail() {
     let test_storage = common::storage();
     test_storage
-        .storage
         .put_oauth(
             "alice",
             "anthropic_oauth",
@@ -16,9 +15,14 @@ async fn refresh_failure_returns_fail() {
                 common::now_epoch_secs() - 10,
             ),
         )
+        .await
         .expect("seed oauth credentials");
     let http = common::FakeOAuthClient::new(vec![common::failure_response()]);
-    let signer = common::signer(test_storage.storage.clone(), http.clone());
+    let signer = common::signer(
+        test_storage.storage.clone(),
+        test_storage.aead.clone(),
+        http.clone(),
+    );
 
     match signer.on_unauthorized(&common::unauthorized_error()).await {
         RetryDecision::Fail => {}

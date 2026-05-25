@@ -7,7 +7,7 @@ use axum::{
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_core::DashboardBroadcaster;
-use cc_lb_storage_redb::{RequestEvent, RequestEventUpstream, Storage};
+use cc_lb_storage_redb::{RedbStorage, RequestEvent, RequestEventUpstream};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -179,9 +179,10 @@ async fn recent_events_response_excludes_payload_terms() {
     assert_forbidden_bytes_absent(&body);
 }
 
-fn test_state(storage: Option<Arc<Storage>>) -> AdminState {
+fn test_state(storage: Option<Arc<RedbStorage>>) -> AdminState {
     AdminState {
-        storage,
+        storage: storage.unwrap_or_else(test_storage),
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         quota_manager: None,
         lifecycle: None,
         breaker_registry: None,
@@ -216,9 +217,9 @@ async fn authorized_json(app: axum::Router, uri: &str) -> (StatusCode, Value, Ve
     (status, json, body.to_vec())
 }
 
-fn seeded_storage() -> (tempfile::TempDir, Arc<Storage>) {
+fn seeded_storage() -> (tempfile::TempDir, Arc<RedbStorage>) {
     let dir = tempfile::tempdir().unwrap();
-    let storage = Storage::open(&dir.path().join("events.redb"), [43; 32]).unwrap();
+    let storage = RedbStorage::open(dir.path().join("events.redb")).unwrap();
     for event in [
         event(
             1_800_000_000,
@@ -319,4 +320,12 @@ fn forbidden_terms() -> Vec<String> {
         ["tool", "_use"].concat(),
         ["con", "tent"].concat(),
     ]
+}
+
+fn test_storage() -> Arc<RedbStorage> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.redb");
+    let storage = Arc::new(RedbStorage::open(&path).unwrap());
+    std::mem::forget(dir);
+    storage
 }

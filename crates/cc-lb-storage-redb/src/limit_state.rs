@@ -1,7 +1,7 @@
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
-use crate::{PRINCIPAL_LIMIT_STATES_V1, Storage, StorageError};
+use crate::{PRINCIPAL_LIMIT_STATES_V1, RedbStorage, StorageError};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -78,7 +78,7 @@ pub fn principal_limit_state_key(
     key
 }
 
-impl Storage {
+impl RedbStorage {
     pub fn put_principal_limit_state(
         &self,
         state: &PrincipalLimitState,

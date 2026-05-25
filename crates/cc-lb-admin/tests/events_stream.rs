@@ -12,14 +12,16 @@ use cc_lb_admin::{
 };
 use cc_lb_config::Config;
 use cc_lb_core::DashboardBroadcaster;
-use cc_lb_storage_redb::{RequestEvent, RequestEventUpstream};
+use cc_lb_storage_api::{RequestEvent, RequestEventUpstream};
+use cc_lb_storage_redb::RedbStorage;
 use http_body_util::BodyExt;
 use std::collections::HashMap;
 use tower::ServiceExt;
 
 fn test_state(broadcaster: Arc<DashboardBroadcaster>) -> AdminState {
     AdminState {
-        storage: None,
+        storage: test_storage(),
+        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         quota_manager: None,
         lifecycle: None,
         breaker_registry: None,
@@ -175,4 +177,12 @@ fn forbidden_json_keys() -> Vec<String> {
         ["tool", "_use"].concat(),
         ["con", "tent"].concat(),
     ]
+}
+
+fn test_storage() -> Arc<RedbStorage> {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("test.redb");
+    let storage = Arc::new(RedbStorage::open(&path).unwrap());
+    std::mem::forget(dir);
+    storage
 }

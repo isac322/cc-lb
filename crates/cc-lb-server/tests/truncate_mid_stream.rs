@@ -2,13 +2,13 @@ mod chaos_common;
 
 #[tokio::test]
 async fn truncate_mid_stream() {
-    // TODO: Audit that the environment access only happens in single-threaded code.
+    // SAFETY: test-only; single-threaded test runner, no concurrent env access
     unsafe { std::env::set_var("CC_LB_CHAOS_LATENCY_MS", "0") };
-    // TODO: Audit that the environment access only happens in single-threaded code.
+    // SAFETY: test-only; single-threaded test runner, no concurrent env access
     unsafe { std::env::set_var("CC_LB_CHAOS_DROP_PCT", "0") };
-    // TODO: Audit that the environment access only happens in single-threaded code.
+    // SAFETY: test-only; single-threaded test runner, no concurrent env access
     unsafe { std::env::set_var("CC_LB_CHAOS_RST_AFTER_BYTES", "0") };
-    // TODO: Audit that the environment access only happens in single-threaded code.
+    // SAFETY: test-only; single-threaded test runner, no concurrent env access
     unsafe { std::env::set_var("CC_LB_CHAOS_TRUNCATE_AFTER_EVENTS", "2") };
 
     let router = chaos_common::start_router(chaos_common::default_fake_config()).await;

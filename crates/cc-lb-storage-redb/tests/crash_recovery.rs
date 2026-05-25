@@ -3,7 +3,7 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use cc_lb_storage_redb::{AuditEntry, BucketKind, Storage};
+use cc_lb_storage_redb::{AuditEntry, BucketKind, RedbStorage};
 
 #[test]
 fn killed_writer_leaves_database_reopenable() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,7 +27,7 @@ fn killed_writer_leaves_database_reopenable() -> Result<(), Box<dyn std::error::
     let status = child.wait()?;
     println!("child status after SIGKILL attempt: {status}");
 
-    let storage = Storage::open(&path, [23; 32])?;
+    let storage = RedbStorage::open(&path)?;
     let parent_count = storage.incr_quota("parent", 1, BucketKind::Requests, 1)?;
     let audit_rows = storage.query_audit(None, 0, u64::MAX, usize::MAX)?;
     println!(
@@ -40,7 +40,7 @@ fn killed_writer_leaves_database_reopenable() -> Result<(), Box<dyn std::error::
 }
 
 fn child_writer(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let storage = Storage::open(path, [23; 32])?;
+    let storage = RedbStorage::open(path)?;
     for index in 0..10_000 {
         storage.incr_quota("child", index % 8, BucketKind::Requests, 1)?;
         storage.append_audit(&AuditEntry {

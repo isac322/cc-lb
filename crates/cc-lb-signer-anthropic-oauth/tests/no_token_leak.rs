@@ -4,7 +4,6 @@ mod common;
 async fn debug_does_not_include_raw_token() {
     let test_storage = common::storage();
     test_storage
-        .storage
         .put_oauth(
             "alice",
             "anthropic_oauth",
@@ -14,9 +13,14 @@ async fn debug_does_not_include_raw_token() {
                 common::now_epoch_secs() + 600,
             ),
         )
+        .await
         .expect("seed oauth credentials");
     let http = common::FakeOAuthClient::new(Vec::new());
-    let signer = common::signer(test_storage.storage.clone(), http);
+    let signer = common::signer(
+        test_storage.storage.clone(),
+        test_storage.aead.clone(),
+        http,
+    );
 
     let debug = format!("{signer:?}");
 

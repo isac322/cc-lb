@@ -5,7 +5,16 @@ use cc_lb_server::preflight::{self, PreflightOptions};
 
 #[tokio::test]
 async fn upstream_probe_warn_only() {
+    let _guard = preflight_common::EnvGuard::set(
+        "CC_LB_TEST_MASTER_KEY_PREFLIGHT_UPSTREAM",
+        "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+    );
     let mut config = preflight_common::base_config();
+    preflight_common::use_temp_redb(
+        &mut config,
+        "preflight-upstream",
+        "CC_LB_TEST_MASTER_KEY_PREFLIGHT_UPSTREAM",
+    );
     let (direct_name, direct) =
         preflight_common::upstream("direct", UpstreamKind::AnthropicDirect, None);
     config.upstreams.insert(direct_name, direct);

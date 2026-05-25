@@ -1,14 +1,15 @@
 use std::sync::Arc;
 
+mod storage_support;
+
 use cc_lb_core::{BucketKind, MockClock, QuotaManager, QuotaPolicy};
-use cc_lb_storage_redb::Storage;
+use storage_support::TestStorage;
 
 #[tokio::test]
 async fn reconcile_frees_unused_reserved_output_tokens() -> Result<(), Box<dyn std::error::Error>> {
-    let dir = tempfile::tempdir()?;
-    let storage = Arc::new(Storage::open(&dir.path().join("quota.redb"), [20; 32])?);
+    let storage = TestStorage::new();
     let manager = QuotaManager::with_clock(
-        Arc::clone(&storage),
+        storage.as_storage(),
         QuotaPolicy {
             window_secs: 60,
             capacity_requests: 1_000,
@@ -23,20 +24,24 @@ async fn reconcile_frees_unused_reserved_output_tokens() -> Result<(), Box<dyn s
         .await
         .unwrap();
     assert_eq!(
-        storage.get_quota(
-            "principal-reserve",
-            reservation.window_start,
-            BucketKind::OutputTokens,
-        )?,
+        storage
+            .get_quota(
+                "principal-reserve",
+                reservation.window_start,
+                BucketKind::OutputTokens,
+            )
+            .await?,
         100
     );
 
     manager.reconcile_output(reservation.clone(), 50).await;
-    let final_count = storage.get_quota(
-        "principal-reserve",
-        reservation.window_start,
-        BucketKind::OutputTokens,
-    )?;
+    let final_count = storage
+        .get_quota(
+            "principal-reserve",
+            reservation.window_start,
+            BucketKind::OutputTokens,
+        )
+        .await?;
     println!("reserved=100, actual=50, final_counter={final_count}");
     assert_eq!(final_count, 50);
     Ok(())

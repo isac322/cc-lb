@@ -8,6 +8,21 @@ publish = false
 build = "build.rs"
 
 [features]
+default = ["redb"]
+redb = [
+    "cc-lb-admin/redb",
+    "cc-lb-core/redb",
+    "cc-lb-signer-anthropic-key/redb",
+    "cc-lb-signer-anthropic-oauth/redb",
+]
+postgres = [
+    "cc-lb-admin/postgres",
+    "cc-lb-core/postgres",
+    "cc-lb-signer-anthropic-key/postgres",
+    "cc-lb-signer-anthropic-oauth/postgres",
+    "dep:cc-lb-storage-postgres",
+    "dep:sqlx",
+]
 wasmtime = []
 
 [[bin]]
@@ -20,6 +35,7 @@ async-trait.workspace = true
 arc-swap.workspace = true
 axum.workspace = true
 bytes.workspace = true
+cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-admin = { version = "0.1.0", path = "../cc-lb-admin" }
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-core = { path = "../cc-lb-core" }
@@ -33,7 +49,9 @@ cc-lb-signer-anthropic-key = { path = "../cc-lb-signer-anthropic-key" }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
 cc-lb-signer-aws = { path = "../cc-lb-signer-aws" }
 cc-lb-signer-gcp = { path = "../cc-lb-signer-gcp" }
+cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
+cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres", optional = true }
 clap = { workspace = true, features = ["derive"] }
 http.workspace = true
 http-body-util.workspace = true
@@ -41,12 +59,13 @@ metrics.workspace = true
 notify.workspace = true
 oauth2.workspace = true
 nix = { version = "0.31.3", features = ["resource"] }
-redb.workspace = true
 rand = { version = "0.8.6", features = ["std", "std_rng"] }
 rustls = { workspace = true, default-features = false, features = ["std", "ring", "tls12"] }
 rustls-pemfile = "2"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+sqlx = { workspace = true, optional = true }
+tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
@@ -57,5 +76,5 @@ url.workspace = true
 [dev-dependencies]
 metrics-exporter-prometheus.workspace = true
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic" }
-tempfile.workspace = true
+redb.workspace = true
 tracing-subscriber.workspace = true

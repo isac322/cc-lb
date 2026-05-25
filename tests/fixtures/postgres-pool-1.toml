@@ -1,0 +1,70 @@
+[listener]
+proxy_addr = "PROXY_ADDR_PLACEHOLDER"
+admin_addr = "ADMIN_ADDR_PLACEHOLDER"
+metrics_addr = "METRICS_ADDR_PLACEHOLDER"
+
+[body]
+messages_cap_bytes = 256
+files_cap_bytes = 1048576
+
+[timeouts]
+request_header_secs = 10
+request_body_chunk_secs = 30
+idle_secs = 300
+upstream_total_secs = 30
+drain_secs = 5
+
+[upstreams.fake]
+kind = "custom"
+base_url = "UPSTREAM_BASE_URL_PLACEHOLDER"
+auth_strategy = "o_auth"
+
+[principals.api-key]
+allowed_models = ["*"]
+
+[plugins]
+observability_hooks = []
+
+[storage]
+kind = "postgres"
+url = "will_be_replaced_at_runtime"
+
+[storage.pool]
+max_connections = 1
+acquire_timeout_secs = 1
+statement_timeout_secs = 25
+
+[aead]
+key_env = "CC_LB_MASTER_KEY"
+
+[signers.anthropic_oauth]
+client_id = "pool-exhaustion-test-client"
+
+[observability]
+tracing_level = "info"
+log_redaction = true
+user_prompt_redaction = false
+
+[quotas]
+default_window_secs = 60
+default_requests_per_window = 1000
+default_input_tokens = 1000000
+default_output_tokens = 1000000
+
+[admin]
+token_env = "CC_LB_ADMIN_TOKEN"
+
+[circuit_breaker]
+failures_to_open = 5
+window_secs = 10
+half_open_after_secs = 30
+
+[bulkhead]
+max_conns_per_upstream = 50
+semaphore_per_upstream = 100
+
+[dns]
+cache_ttl_floor_secs = 30
+cache_ttl_ceiling_secs = 300
+
+[egress]

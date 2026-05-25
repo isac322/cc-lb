@@ -1,7 +1,7 @@
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
-use crate::{REQUEST_EVENTS_V1, Storage, StorageError};
+use crate::{REQUEST_EVENTS_V1, RedbStorage, StorageError};
 
 const REQUEST_EVENT_SEQUENCE_SCALE: u64 = 1_000_000;
 
@@ -30,7 +30,7 @@ pub enum RequestEventUpstream {
     CustomAnthropicSpec,
 }
 
-impl Storage {
+impl RedbStorage {
     pub fn append_request_event(&self, event: &RequestEvent) -> Result<(), StorageError> {
         let payload = serde_json::to_vec(event)?;
         let write_txn = self.db.begin_write()?;
