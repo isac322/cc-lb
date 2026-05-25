@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 mod audit;
+mod config_store;
 mod key_index;
 mod migration;
 mod oauth;
@@ -15,9 +16,10 @@ use redb::{Database, ReadableDatabase, TableDefinition};
 use thiserror::Error;
 
 pub use audit::AuditEntry;
+pub use config_store::{ConfigDraftState, HistoryEntry, HistorySummary};
 pub use oauth::{
-    api_key_storage_key, oauth_key, ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind,
-    OAuthCredentials, PrincipalKindLite, StoredApiKeyRecord, UpstreamKind,
+    ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind, OAuthCredentials, PrincipalKindLite,
+    StoredApiKeyRecord, UpstreamKind, api_key_storage_key, oauth_key,
 };
 pub use price_catalog::PriceSnapshot;
 pub use request_events::{RequestEvent, RequestEventUpstream};
@@ -39,8 +41,12 @@ pub const USAGE_ROLLUPS_V1: TableDefinition<&[u8], &[u8]> =
 pub const USAGE_ROLLUP_CHECKPOINTS_V1: TableDefinition<&str, u64> =
     TableDefinition::new("USAGE_ROLLUP_CHECKPOINTS_V1");
 pub const SCHEMA_VERSION_V1: TableDefinition<&str, u32> = TableDefinition::new("SCHEMA_VERSION_V1");
-pub const META_BACKEND_KIND_V1: TableDefinition<&str, &str> = TableDefinition::new("META_BACKEND_KIND_V1");
+pub const META_BACKEND_KIND_V1: TableDefinition<&str, &str> =
+    TableDefinition::new("META_BACKEND_KIND_V1");
 pub const KILLSWITCH_V1: TableDefinition<&str, bool> = TableDefinition::new("KILLSWITCH_V1");
+pub const CONFIG_DRAFT_V1: TableDefinition<&str, &[u8]> = TableDefinition::new("CONFIG_DRAFT_V1");
+pub const CONFIG_HISTORY_V1: TableDefinition<u64, &[u8]> =
+    TableDefinition::new("CONFIG_HISTORY_V1");
 
 pub(crate) const SCHEMA_VERSION_KEY: &str = "version";
 pub(crate) const KILLSWITCH_KEY: &str = "enabled";
@@ -92,13 +98,19 @@ pub enum StorageError {
     #[error("random generation failed")]
     Random,
     #[error("unknown api key {principal_id}/{key_id}")]
-    UnknownApiKey { principal_id: String, key_id: String },
+    UnknownApiKey {
+        principal_id: String,
+        key_id: String,
+    },
     #[error("stale config draft revision; current revision is {current}")]
     StaleDraftRevision { current: u64 },
     #[error("config revision overflow")]
     ConfigRevisionOverflow,
     #[error("backend kind mismatch: stored={stored:?}, configured={configured:?}")]
-    BackendKindMismatch { stored: cc_lb_storage_api::BackendKind, configured: cc_lb_storage_api::BackendKind },
+    BackendKindMismatch {
+        stored: cc_lb_storage_api::BackendKind,
+        configured: cc_lb_storage_api::BackendKind,
+    },
     #[error("invalid backend kind {0}")]
     InvalidBackendKind(String),
 }
@@ -161,7 +173,10 @@ impl Storage {
         migration::set_killswitch_enabled(&self.db, enabled)
     }
 
-    pub fn initialize(&self, requested: cc_lb_storage_api::BackendKind) -> Result<(), StorageError> {
+    pub fn initialize(
+        &self,
+        requested: cc_lb_storage_api::BackendKind,
+    ) -> Result<(), StorageError> {
         match requested {
             cc_lb_storage_api::BackendKind::Redb => Ok(()),
             other => Err(StorageError::BackendKindMismatch {
