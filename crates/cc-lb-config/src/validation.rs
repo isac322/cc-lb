@@ -35,15 +35,15 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
 }
 
 pub fn validate_raw_toml(raw_toml: &str) -> Result<(), ValidationError> {
-    let Ok(value) = raw_toml.parse::<toml::Value>() else {
+    let Ok(table) = raw_toml.parse::<toml::Table>() else {
         return Ok(());
     };
 
-    if has_legacy_plugin(&value) || has_legacy_principal_quotas(&value) {
+    if has_legacy_plugin(&table) || has_legacy_principal_quotas(&table) {
         return Err(ValidationError::new("config", legacy_removed_message()));
     }
 
-    if let Some(storage) = value.get("storage").and_then(|v| v.as_table()) {
+    if let Some(storage) = table.get("storage").and_then(|v| v.as_table()) {
         let has_kind = storage.contains_key("kind");
         let has_legacy_redb = storage.contains_key("redb_path");
         let has_legacy_aead = storage.contains_key("oauth_aead_key_env");
@@ -69,13 +69,8 @@ pub fn validate_raw_toml(raw_toml: &str) -> Result<(), ValidationError> {
 }
 
 pub fn migrate_legacy_storage_toml(raw_toml: &str) -> Result<String, ValidationError> {
-    let Ok(mut value) = raw_toml.parse::<toml::Value>() else {
+    let Ok(mut root) = raw_toml.parse::<toml::Table>() else {
         return Ok(raw_toml.to_owned());
-    };
-
-    let root = match value.as_table_mut() {
-        Some(table) => table,
-        None => return Ok(raw_toml.to_owned()),
     };
 
     let mut legacy_redb_path: Option<toml::Value> = None;
@@ -104,7 +99,7 @@ pub fn migrate_legacy_storage_toml(raw_toml: &str) -> Result<String, ValidationE
     if let Some(env) = legacy_aead_env {
         let aead = root
             .entry("aead".to_owned())
-            .or_insert_with(|| toml::Value::Table(toml::map::Map::new()));
+            .or_insert_with(|| toml::Value::Table(toml::Table::new()));
         if let Some(aead_table) = aead.as_table_mut()
             && !aead_table.contains_key("key_env")
         {
@@ -112,7 +107,7 @@ pub fn migrate_legacy_storage_toml(raw_toml: &str) -> Result<String, ValidationE
         }
     }
 
-    toml::to_string(&value)
+    toml::to_string(&root)
         .map_err(|err| ValidationError::new("storage", format!("failed to migrate legacy [storage] block: {err}")))
 }
 
@@ -358,23 +353,23 @@ fn require_non_empty(
     }
 }
 
-fn has_legacy_plugin(value: &toml::Value) -> bool {
-    value
+fn has_legacy_plugin(table: &toml::Table) -> bool {
+    table
         .get("plugins")
         .and_then(toml::Value::as_table)
         .and_then(|plugins| plugins.get(&["authn", "_", "plugin"].concat()))
         .is_some()
 }
 
-fn has_legacy_principal_quotas(value: &toml::Value) -> bool {
-    let Some(principals) = value.get("principals").and_then(toml::Value::as_table) else {
+fn has_legacy_principal_quotas(table: &toml::Table) -> bool {
+    let Some(principals) = table.get("principals").and_then(toml::Value::as_table) else {
         return false;
     };
 
     principals.values().any(|principal| {
         principal
             .as_table()
-            .map(|table| table.contains_key("quotas"))
+            .map(|t| t.contains_key("quotas"))
             .unwrap_or(false)
     })
 }

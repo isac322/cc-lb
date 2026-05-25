@@ -39,10 +39,10 @@ hyper-rustls.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 metrics.workspace = true
 parking_lot = "0.12"
-rand = "0.8.6"
+rand = "0.10"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-sha2 = "0.10.9"
+sha2 = "0.11"
 subtle = "2.6.1"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
