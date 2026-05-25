@@ -153,6 +153,29 @@ pub async fn oauth_status(
         }
     }
 
+    if let Some(storage) = state.storage.as_ref() {
+        let records = match storage.list_api_keys_all() {
+            Ok(records) => records,
+            Err(error) => {
+                tracing::error!(error = %error, "admin oauth status managed-key scan failed");
+                return storage_error_response(&error);
+            }
+        };
+        for (principal_id, _key_id, record) in records {
+            if record.upstream_credential_ref != oauth_credential_id {
+                continue;
+            }
+            match storage.get_oauth(&principal_id, &oauth_credential_id) {
+                Ok(Some(_)) => return Json(json!({ "enrolled": true })).into_response(),
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::error!(error = %error, "admin oauth status managed-key oauth lookup failed");
+                    return storage_error_response(&error);
+                }
+            }
+        }
+    }
+
     Json(json!({ "enrolled": false })).into_response()
 }
 
