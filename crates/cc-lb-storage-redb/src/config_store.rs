@@ -2,7 +2,7 @@ use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{RedbStorage, StorageError, CONFIG_DRAFT_V1, CONFIG_HISTORY_V1};
+use crate::{CONFIG_DRAFT_V1, CONFIG_HISTORY_V1, RedbStorage, StorageError};
 
 const CONFIG_DRAFT_KEY: &str = "draft";
 const CONFIG_HISTORY_LIMIT: usize = 50;

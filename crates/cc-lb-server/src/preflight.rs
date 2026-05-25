@@ -85,7 +85,7 @@ async fn run_inner(
         }
 
         let aead = Arc::new(AeadService::from_master_key(key));
-        let _storage = storage_factory::open_storage(&cfg.storage, aead)
+        let _storage = storage_factory::open_storage(&cfg.storage, aead, key)
             .await
             .map_err(|error| PreflightError::Storage(error.to_string()))?;
         report.successes.push(storage_open_success(&cfg.storage));
@@ -326,7 +326,7 @@ async fn bind_addr(addr: SocketAddr) -> Result<(), PreflightError> {
 fn ulimit_warning() -> Option<String> {
     #[cfg(target_os = "linux")]
     {
-        use nix::sys::resource::{getrlimit, Resource};
+        use nix::sys::resource::{Resource, getrlimit};
 
         match getrlimit(Resource::RLIMIT_NOFILE) {
             Ok((soft, _hard)) if soft < 65_536 => Some(format!(

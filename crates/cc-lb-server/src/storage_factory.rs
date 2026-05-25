@@ -6,7 +6,53 @@ use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::StorageConfig;
-use cc_lb_storage_api::{BackendKind, Storage};
+#[cfg(feature = "postgres")]
+use cc_lb_storage_api::Storage;
+use cc_lb_storage_api::{BackendKind, StorageError, StorageResult};
+
+pub enum StorageBackend {
+    Redb(Arc<cc_lb_storage_redb::Storage>),
+    #[cfg(feature = "postgres")]
+    Postgres(Arc<dyn Storage>),
+}
+
+impl StorageBackend {
+    pub async fn put_anthropic_api_key_ciphertext(
+        &self,
+        _storage_key: &str,
+        _ciphertext: &[u8],
+    ) -> StorageResult<()> {
+        match self {
+            Self::Redb(_) => Err(raw_ciphertext_unavailable(
+                "put anthropic API key ciphertext",
+            )),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(storage) => {
+                storage
+                    .put_anthropic_api_key_ciphertext(_storage_key, _ciphertext)
+                    .await
+            }
+        }
+    }
+
+    pub async fn get_oauth_ciphertext(
+        &self,
+        _principal_id: &str,
+        _provider: &str,
+    ) -> StorageResult<Option<Vec<u8>>> {
+        match self {
+            Self::Redb(_) => Err(raw_ciphertext_unavailable("get OAuth ciphertext")),
+            #[cfg(feature = "postgres")]
+            Self::Postgres(storage) => storage.get_oauth_ciphertext(_principal_id, _provider).await,
+        }
+    }
+}
+
+fn raw_ciphertext_unavailable(operation: &str) -> StorageError {
+    StorageError::Unavailable {
+        message: format!("{operation} is unavailable for redb through storage_factory"),
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum StorageFactoryError {
@@ -23,15 +69,13 @@ pub enum StorageFactoryError {
     InitFailed { message: String },
 }
 
-/// Build an `Arc<dyn Storage>` from config.
-/// The caller is responsible for constructing `AeadService` from `AeadConfig.key_env`
-/// and passing it here.
 pub async fn open_storage(
     config: &StorageConfig,
     _aead: Arc<AeadService>,
-) -> Result<Arc<dyn Storage>, StorageFactoryError> {
+    master_key: [u8; 32],
+) -> Result<StorageBackend, StorageFactoryError> {
     match config {
-        StorageConfig::Redb { path } => open_redb(path).await,
+        StorageConfig::Redb { path } => open_redb(path, master_key).await,
         StorageConfig::Postgres {
             url,
             pool: pool_config,
@@ -43,17 +87,70 @@ pub async fn probe_postgres_connection(url: &str) -> Result<(), StorageFactoryEr
     probe_postgres_connection_impl(url).await
 }
 
-async fn open_redb(_path: &Path) -> Result<Arc<dyn Storage>, StorageFactoryError> {
+#[cfg(feature = "redb")]
+async fn open_redb(
+    path: &Path,
+    master_key: [u8; 32],
+) -> Result<StorageBackend, StorageFactoryError> {
+    if !path.exists() {
+        std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(path)
+            .map_err(|error| StorageFactoryError::InitFailed {
+                message: error.to_string(),
+            })?;
+    }
+    let storage =
+        cc_lb_storage_redb::Storage::open(path, master_key).map_err(map_redb_open_error)?;
+    storage
+        .initialize(BackendKind::Redb)
+        .map_err(map_redb_open_error)?;
+    Ok(StorageBackend::Redb(Arc::new(storage)))
+}
+
+#[cfg(not(feature = "redb"))]
+async fn open_redb(
+    _path: &Path,
+    _master_key: [u8; 32],
+) -> Result<StorageBackend, StorageFactoryError> {
     Err(StorageFactoryError::FeatureDisabled {
-        backend: "redb-storage-api".to_owned(),
+        backend: "redb".to_owned(),
     })
+}
+
+#[cfg(feature = "redb")]
+fn map_redb_open_error(error: cc_lb_storage_redb::StorageError) -> StorageFactoryError {
+    match error {
+        cc_lb_storage_redb::StorageError::BackendKindMismatch { stored, configured } => {
+            StorageFactoryError::BackendKindMismatch { stored, configured }
+        }
+        other => StorageFactoryError::InitFailed {
+            message: other.to_string(),
+        },
+    }
+}
+
+#[cfg(feature = "postgres")]
+fn map_init_error(
+    error: cc_lb_storage_api::StorageError,
+    configured: BackendKind,
+) -> StorageFactoryError {
+    match error {
+        cc_lb_storage_api::StorageError::BackendKindMismatch { stored, .. } => {
+            StorageFactoryError::BackendKindMismatch { stored, configured }
+        }
+        other => StorageFactoryError::InitFailed {
+            message: other.to_string(),
+        },
+    }
 }
 
 #[cfg(not(feature = "postgres"))]
 async fn open_postgres(
     _url: &str,
     _pool: &cc_lb_config::PostgresPoolConfig,
-) -> Result<Arc<dyn Storage>, StorageFactoryError> {
+) -> Result<StorageBackend, StorageFactoryError> {
     Err(StorageFactoryError::FeatureDisabled {
         backend: "postgres".to_owned(),
     })
@@ -70,7 +167,7 @@ async fn probe_postgres_connection_impl(_url: &str) -> Result<(), StorageFactory
 async fn open_postgres(
     url: &str,
     pool_config: &cc_lb_config::PostgresPoolConfig,
-) -> Result<Arc<dyn Storage>, StorageFactoryError> {
+) -> Result<StorageBackend, StorageFactoryError> {
     use std::str::FromStr;
     use std::time::Duration;
 
@@ -110,7 +207,7 @@ async fn open_postgres(
         .initialize(BackendKind::Postgres)
         .await
         .map_err(|error| map_init_error(error, BackendKind::Postgres))?;
-    Ok(storage)
+    Ok(StorageBackend::Postgres(storage))
 }
 
 #[cfg(feature = "postgres")]
@@ -155,8 +252,6 @@ async fn probe_postgres_connection_impl(url: &str) -> Result<(), StorageFactoryE
         }),
     }
 }
-
-
 /// Extract only the host from a connection URL to avoid leaking credentials in logs.
 #[cfg(feature = "postgres")]
 fn host_only(url: &str) -> String {

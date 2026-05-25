@@ -1,6 +1,6 @@
 use redb::ReadableDatabase;
 
-use crate::{Storage, StorageError, KEY_INDEX_BY_HASH_V1};
+use crate::{KEY_INDEX_BY_HASH_V1, Storage, StorageError};
 
 impl Storage {
     pub fn put_key_index(

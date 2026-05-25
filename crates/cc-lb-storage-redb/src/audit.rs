@@ -3,7 +3,7 @@ use bincode::serde::{decode_from_slice, encode_to_vec};
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
-use crate::{Storage, StorageError, AUDIT_LOG_V1};
+use crate::{AUDIT_LOG_V1, Storage, StorageError};
 
 const AUDIT_SEQUENCE_SCALE: u64 = 1_000_000;
 
