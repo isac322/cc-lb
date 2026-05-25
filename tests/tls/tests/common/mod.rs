@@ -545,8 +545,11 @@ upstream_credential_ref = "fake_anthropic"
 observability_hooks = []
 
 [storage]
-redb_path = "{storage_path}"
-oauth_aead_key_env = "CC_LB_MASTER_KEY"
+kind = "redb"
+path = "{storage_path}"
+
+[aead]
+key_env = "CC_LB_MASTER_KEY"
 
 [admin]
 token_env = "CC_LB_ADMIN_TOKEN"

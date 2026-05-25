@@ -26,7 +26,9 @@ allowed_models = ["*"]
 observability_hooks = []
 
 [storage]
-oauth_aead_key_env = "CC_LB_MASTER_KEY"
+
+[aead]
+key_env = "CC_LB_MASTER_KEY"
 
 [observability]
 tracing_level = "info"
