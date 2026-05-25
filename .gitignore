@@ -10,3 +10,6 @@
 
 # OhMyOpenCode agent artifacts
 .omo/
+
+# Local dev secrets merged into cargo via `--config` from the RustRover run configs.
+.cargo/local-env.toml
