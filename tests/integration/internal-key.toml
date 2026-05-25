@@ -25,16 +25,12 @@ allowed_models = ["*"]
 [plugins]
 observability_hooks = []
 
-[plugins.authn_plugin]
-name = "plugin-internal-key-mapping"
-wasm_path = "target/wasm32-wasip1/release/plugin_internal_key_mapping.wasm"
-
-[plugins.authn_plugin.config]
-tokens = { "ck-internal-alice-X" = { principal_id = "alice", real_credential_kind = "anthropic_api_key", real_credential_storage_key = "alice:real_anthropic_api_key" } }
-
 [storage]
-redb_path = "/tmp/cc-lb-internal-key.redb"
-oauth_aead_key_env = "CC_LB_MASTER_KEY"
+kind = "redb"
+path = "/tmp/cc-lb-internal-key.redb"
+
+[aead]
+key_env = "CC_LB_MASTER_KEY"
 
 [observability]
 tracing_level = "info"

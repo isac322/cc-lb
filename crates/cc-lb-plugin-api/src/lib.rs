@@ -22,17 +22,15 @@ mod traits;
 mod types;
 
 pub use errors::{
-    AuthnError, DialectError, ObservabilityError, RouteError, RuntimeError, SignerError,
-    UpstreamError,
+    DialectError, ObservabilityError, RouteError, RuntimeError, SignerError, UpstreamError,
 };
 pub use traits::{
-    AuthnPlugin, ObservabilityHook, PluginRuntime, RouterPlugin, Signer, SignerFactory,
-    UpstreamDialect,
+    ObservabilityHook, PluginRuntime, RouterPlugin, Signer, SignerFactory, UpstreamDialect,
 };
 pub use types::{
-    AuthStrategy, AuthnOutcome, ObserveEvent, PluginManifest, Principal, PrincipalKind,
-    PrincipalQuotas, RequestContext, RetryDecision, RouteDecision, ShapedRequest,
-    ShapedRequestBuilder, SignedRequest, SigningCapability, Upstream, shape_request, sign_request,
+    shape_request, sign_request, AuthStrategy, ObserveEvent, PluginManifest, Principal,
+    PrincipalKind, PrincipalQuotas, RequestContext, RetryDecision, RouteDecision, ShapedRequest,
+    ShapedRequestBuilder, SignedRequest, SigningCapability, Upstream,
 };
 
 mod private {

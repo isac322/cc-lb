@@ -1,10 +1,10 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    ConfigStore, StorageResult,
     types::{
         ConfigDraftState as ApiConfigDraftState, HistoryEntry as ApiHistoryEntry,
         HistorySummary as ApiHistorySummary,
     },
+    ConfigStore, StorageResult,
 };
 
 use crate::{

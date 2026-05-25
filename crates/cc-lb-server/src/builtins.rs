@@ -1,105 +1,24 @@
-use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
 
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
+use cc_lb_core::ApiKeyAwareSignerFactory;
 use cc_lb_config::{AuthStrategy as ConfigAuthStrategy, Config, UpstreamKind, UpstreamSpec};
 use cc_lb_dialect_anthropic::{AnthropicDirectDialect, CustomAnthropicSpecDialect};
 use cc_lb_dialect_bedrock::{BedrockMantleDialect, BedrockRuntimeDialect};
 use cc_lb_dialect_vertex::VertexDialect;
 use cc_lb_plugin_api::{
-    AuthStrategy, AuthnError, AuthnOutcome, AuthnPlugin, ObservabilityError, ObservabilityHook,
-    ObserveEvent, Principal, PrincipalKind, PrincipalQuotas, RequestContext, RouteDecision,
+    AuthStrategy, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext,
+    RouteDecision,
     RouteError, RouterPlugin, SignerError, SignerFactory, Upstream, UpstreamDialect,
 };
 use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
 use cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory;
 use cc_lb_signer_aws::AwsSigV4SignerFactory;
 use cc_lb_signer_gcp::GcpOAuthSignerFactory;
-use cc_lb_storage_api::Storage;
-use http::Method;
-use oauth2::{ClientId, TokenUrl};
-use serde_json::Map;
+use cc_lb_storage_redb::Storage;
 
-#[derive(Clone)]
-pub struct BuiltinAuthn {
-    defaults: PrincipalQuotas,
-    principal_quotas: HashMap<String, PrincipalQuotas>,
-    signer_factory: Arc<CompositeSignerFactory>,
-}
 
-impl BuiltinAuthn {
-    pub fn new(config: &Config, storage: Arc<dyn Storage>, aead: Arc<AeadService>) -> Self {
-        let defaults = default_quotas(config);
-        let principal_quotas = config
-            .principals
-            .iter()
-            .map(|(name, principal)| {
-                let quotas = principal.quotas.as_ref().map_or_else(
-                    || defaults.clone(),
-                    |quotas| PrincipalQuotas {
-                        requests_per_window: quotas.default_requests_per_window,
-                        input_tokens_per_window: quotas.default_input_tokens,
-                        output_tokens_per_window: quotas.default_output_tokens,
-                        window: Duration::from_secs(quotas.default_window_secs.max(1)),
-                        allowed_models: principal.allowed_models.clone(),
-                    },
-                );
-                (name.clone(), quotas)
-            })
-            .collect();
-
-        Self {
-            defaults,
-            principal_quotas,
-            signer_factory: Arc::new(CompositeSignerFactory::new(config, storage, aead)),
-        }
-    }
-}
-
-#[async_trait]
-impl AuthnPlugin for BuiltinAuthn {
-    async fn authenticate(&self, ctx: &RequestContext) -> Result<AuthnOutcome, AuthnError> {
-        let api_key = ctx
-            .downstream_headers
-            .get("x-api-key")
-            .and_then(|value| value.to_str().ok())
-            .filter(|value| !value.trim().is_empty())
-            .map(ToOwned::to_owned)
-            .unwrap_or_else(|| {
-                if ctx.method == Method::POST && ctx.path == "/api/event_logging/batch" {
-                    "sk-ant-anonymous-event-logging".to_owned()
-                } else {
-                    String::new()
-                }
-            });
-
-        if api_key.is_empty() {
-            return Err(AuthnError::InvalidCredentials {
-                reason: "missing x-api-key header".to_owned(),
-            });
-        }
-
-        let principal_id = "api-key".to_owned();
-        let quotas = self
-            .principal_quotas
-            .get(&principal_id)
-            .cloned()
-            .unwrap_or_else(|| self.defaults.clone());
-        let signer_factory = Arc::new(self.signer_factory.with_api_key(api_key));
-
-        Ok(AuthnOutcome {
-            principal: Principal {
-                id: principal_id,
-                kind: PrincipalKind::ApiKey,
-                claims: Map::new(),
-            },
-            signer_factory,
-            quotas,
-        })
-    }
-}
 
 #[derive(Clone)]
 pub struct BuiltinRouter {
@@ -166,7 +85,7 @@ pub struct CompositeSignerFactory {
 }
 
 impl CompositeSignerFactory {
-    fn new(config: &Config, storage: Arc<dyn Storage>, aead: Arc<AeadService>) -> Self {
+    pub fn new(config: &Config, storage: Option<Arc<Storage>>, aead: Arc<AeadService>) -> Self {
         let upstreams = config
             .upstreams
             .values()
@@ -184,7 +103,7 @@ impl CompositeSignerFactory {
         }
     }
 
-    fn with_api_key(&self, api_key: String) -> Self {
+    fn clone_with_api_key(&self, api_key: String) -> Self {
         Self {
             upstreams: self.upstreams.clone(),
             api_key: Some(api_key),
@@ -199,6 +118,12 @@ impl CompositeSignerFactory {
             .iter()
             .find_map(|(candidate, strategy)| (candidate == upstream).then(|| strategy.clone()))
             .unwrap_or(AuthStrategy::ApiKey)
+    }
+}
+
+impl ApiKeyAwareSignerFactory for CompositeSignerFactory {
+    fn with_api_key(&self, api_key: String) -> Arc<dyn SignerFactory> {
+        Arc::new(self.clone_with_api_key(api_key))
     }
 }
 
@@ -236,30 +161,13 @@ impl SignerFactory for CompositeSignerFactory {
 }
 
 pub fn anthropic_oauth_factory(
-    config: &Config,
-    storage: Arc<dyn Storage>,
-    aead: Arc<AeadService>,
-    principal_id: &str,
-    provider: &str,
+    _config: &Config,
+    _storage: Option<Arc<Storage>>,
+    _aead: Arc<AeadService>,
+    _principal_id: &str,
+    _provider: &str,
 ) -> Option<Arc<AnthropicOAuthSignerFactory>> {
-    let token_url = std::env::var("CC_LB_OAUTH_TOKEN_URL")
-        .ok()
-        .unwrap_or_else(|| {
-            oauth_endpoint(
-                &config.signers.anthropic_oauth.issuer_base_url,
-                "/v1/oauth/token",
-            )
-        });
-    let client_id = oauth_client_id(config)?;
-    let token_url = TokenUrl::new(token_url).ok()?;
-    Some(Arc::new(AnthropicOAuthSignerFactory::new(
-        principal_id.to_owned(),
-        provider.to_owned(),
-        storage,
-        aead,
-        token_url,
-        ClientId::new(client_id),
-    )))
+    None
 }
 
 pub fn oauth_client_id(config: &Config) -> Option<String> {
@@ -322,16 +230,6 @@ pub fn auth_strategy_from_config(strategy: &ConfigAuthStrategy) -> AuthStrategy 
         ConfigAuthStrategy::AwsSigV4 => AuthStrategy::AwsSigV4,
         ConfigAuthStrategy::GcpOAuth => AuthStrategy::GcpOAuth,
         ConfigAuthStrategy::InternalForwarded => AuthStrategy::InternalForwarded,
-    }
-}
-
-pub fn default_quotas(config: &Config) -> PrincipalQuotas {
-    PrincipalQuotas {
-        requests_per_window: config.quotas.default_requests_per_window,
-        input_tokens_per_window: config.quotas.default_input_tokens,
-        output_tokens_per_window: config.quotas.default_output_tokens,
-        window: Duration::from_secs(config.quotas.default_window_secs.max(1)),
-        allowed_models: Vec::new(),
     }
 }
 

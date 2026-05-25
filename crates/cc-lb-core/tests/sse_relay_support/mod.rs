@@ -103,11 +103,9 @@ pub fn relay_for(hook: Arc<RecordingHook>, batch: SseBatchConfig) -> SseRelay {
         obs: hook,
         dialect: Arc::new(TestDialect),
         batch,
-        quota: None,
-        principal_id: "principal-sse".to_owned(),
-        reservation: None,
         error_normalizer: None,
         upstream_kind: None,
+        streaming_usage: Arc::new(Mutex::new(Default::default())),
     }
 }
 

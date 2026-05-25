@@ -1,12 +1,11 @@
 use std::collections::BTreeMap;
 
-use cc_lb_pricing::virtual_cost_micros;
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    REQUEST_EVENTS_V1, RedbStorage, RequestEvent, RequestEventUpstream, StorageError,
-    USAGE_ROLLUP_CHECKPOINTS_V1, USAGE_ROLLUPS_V1,
+    REQUEST_EVENTS_V1, RequestEvent, Storage, StorageError, USAGE_ROLLUP_CHECKPOINTS_V1,
+    USAGE_ROLLUPS_V1,
 };
 
 const REQUEST_EVENT_CHECKPOINT_KEY: &str = "request_events_v1_high_water";
@@ -86,7 +85,7 @@ struct UsageRollupDelta {
     virtual_cost_micros: u64,
 }
 
-impl RedbStorage {
+impl Storage {
     pub fn rollup_usage_once(&self) -> Result<UsageRollupRun, StorageError> {
         let write_txn = self.db.begin_write()?;
         let previous_checkpoint = {
@@ -235,13 +234,10 @@ impl UsageRollupKey {
     fn from_event(resolution: UsageRollupResolution, event: &RequestEvent) -> Self {
         Self {
             resolution,
-            bucket_start: resolution.bucket_start(event.ts),
-            principal: normalize_dimension(event.principal_id.as_deref()),
-            upstream: event
-                .upstream
-                .map(upstream_dimension)
-                .unwrap_or_else(|| UNKNOWN_DIMENSION.to_owned()),
-            model: normalize_dimension(event.model.as_deref()),
+            bucket_start: resolution.bucket_start(event.ts_ms / 1000),
+            principal: normalize_dimension(Some(event.principal_id.as_str())),
+            upstream: UNKNOWN_DIMENSION.to_owned(),
+            model: normalize_dimension(Some(event.model.as_str())),
         }
     }
 }
@@ -249,8 +245,9 @@ impl UsageRollupKey {
 impl UsageRollupDelta {
     fn add_event(&mut self, event: &RequestEvent) {
         self.request_count += 1;
-        self.input_tokens += event.input_tokens.unwrap_or(0);
-        self.output_tokens += event.output_tokens.unwrap_or(0);
+        self.input_tokens +=
+            event.input_tokens + event.cache_creation_input_tokens + event.cache_read_input_tokens;
+        self.output_tokens += event.output_tokens;
         if event.status >= 400 {
             self.error_count += 1;
         }
@@ -258,14 +255,7 @@ impl UsageRollupDelta {
         self.latency_ms_sum += event.duration_ms;
         self.latency_ms_min = min_option(self.latency_ms_min, Some(event.duration_ms));
         self.latency_ms_max = max_option(self.latency_ms_max, Some(event.duration_ms));
-        if let Some(model) = event.model.as_deref() {
-            let estimate = virtual_cost_micros(
-                model,
-                event.input_tokens.unwrap_or(0),
-                event.output_tokens.unwrap_or(0),
-            );
-            self.virtual_cost_micros += estimate.micros_usd.unwrap_or(0);
-        }
+        self.virtual_cost_micros += event.cost_usd_micros.max(0) as u64;
     }
 }
 
@@ -300,17 +290,6 @@ fn normalize_dimension(value: Option<&str>) -> String {
     } else {
         normalized
     }
-}
-
-fn upstream_dimension(upstream: RequestEventUpstream) -> String {
-    match upstream {
-        RequestEventUpstream::AnthropicDirect => "anthropic_direct",
-        RequestEventUpstream::BedrockRuntime => "bedrock_runtime",
-        RequestEventUpstream::BedrockMantle => "bedrock_mantle",
-        RequestEventUpstream::Vertex => "vertex",
-        RequestEventUpstream::CustomAnthropicSpec => "custom_anthropic_spec",
-    }
-    .to_owned()
 }
 
 fn push_segment(key: &mut Vec<u8>, value: &str) {

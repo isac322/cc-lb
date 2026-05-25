@@ -17,6 +17,8 @@ path = "src/bin/validate.rs"
 [dependencies]
 clap = { workspace = true, features = ["derive"] }
 figment = { workspace = true, features = ["env", "toml"] }
+humantime = "2"
+humantime_serde_dep = { package = "humantime-serde", version = "1" }
 notify.workspace = true
 schemars.workspace = true
 serde = { workspace = true, features = ["derive"] }
@@ -24,9 +26,11 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "signal", "sync", "time"] }
 tracing.workspace = true
+toml = "0.8"
 url = { workspace = true, features = ["serde"] }
 
 [build-dependencies]
+humantime = "2"
 schemars.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true

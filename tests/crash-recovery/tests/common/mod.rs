@@ -6,12 +6,16 @@ use std::io;
 use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
+use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
+use cc_lb_core::api_keys::secret;
 use cc_lb_storage_redb::{
-    AUDIT_LOG_V1, AuditEntry, BucketKind, CURRENT_SCHEMA_VERSION, OAUTH_CREDENTIALS_V1,
-    OAuthCredentials, QUOTAS_BY_PRINCIPAL_V1, RedbStorage,
+    api_key_storage_key, AuditEntry, KeyStatus, Limit, LimitKind, OAuthCredentials,
+    PrincipalKindLite, Storage, UpstreamKind, API_KEYS_V1, AUDIT_LOG_V1, CURRENT_SCHEMA_VERSION,
+    KEY_INDEX_BY_HASH_V1, OAUTH_CREDENTIALS_V1,
 };
 use redb::{ReadableDatabase, ReadableTable};
 
@@ -26,24 +30,41 @@ const TOTAL_ITERATIONS_ENV: &str = "CC_LB_CRASH_ITERATIONS";
 const DEFAULT_ITERATIONS: usize = 100;
 const COMMITTED_ROWS: usize = 32;
 const PENDING_ROWS: usize = 10_000;
+const MASTER_KEY: [u8; 32] = [48; 32];
 const ANTHROPIC_OAUTH_PROVIDER: &str = "anthropic_oauth";
 const STARTED_MARKER: &str = "pending_tx_started";
 const CHILD_LINGER: Duration = Duration::from_secs(60);
+const KEY_CREATE_SENTINEL_ENV: &str = "CC_LB_CRASH_SENTINEL_KEY_CREATE";
+const KEY_REVOKE_SENTINEL_ENV: &str = "CC_LB_CRASH_SENTINEL_KEY_REVOKE";
+const PRICE_CATALOG_SENTINEL_ENV: &str = "CC_LB_CRASH_SENTINEL_PRICE_CATALOG";
+const REVOKE_KEY_ID_FILE: &str = "revoke_key_id";
+const REVOKE_INDEX_HASH_FILE: &str = "revoke_index_hash";
+const PRICE_CACHE_FILE: &str = "litellm-cache.json";
+const OLD_PRICE_FETCHED_AT_MS: u64 = 1_765_000_100;
+const NEW_PRICE_FETCHED_AT_MS: u64 = 1_765_000_200;
+const OLD_PRICE_JSON: &[u8] =
+    br#"{"claude-old":{"input_cost_per_token":0.000001,"output_cost_per_token":0.000002}}"#;
+const NEW_PRICE_JSON: &[u8] =
+    br#"{"claude-new":{"input_cost_per_token":0.000003,"output_cost_per_token":0.000004}}"#;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)]
 pub enum CrashCase {
-    Quota,
     OAuthAead,
     Audit,
+    KeyIssuance,
+    KeyRevoke,
+    PriceCatalog,
 }
 
 impl CrashCase {
     fn as_str(self) -> &'static str {
         match self {
-            Self::Quota => "quota",
             Self::OAuthAead => "oauth_aead",
             Self::Audit => "audit",
+            Self::KeyIssuance => "key_issuance",
+            Self::KeyRevoke => "key_revoke",
+            Self::PriceCatalog => "price_catalog",
         }
     }
 }
@@ -68,9 +89,11 @@ pub fn run_child_if_requested(case: CrashCase) -> Result<bool, Box<dyn std::erro
     let iteration = required_env(ITERATION_ENV)?.parse::<usize>()?;
 
     match case {
-        CrashCase::Quota => child_quota(&db_path, &control_dir, iteration)?,
         CrashCase::OAuthAead => child_oauth_aead(&db_path, &control_dir, iteration)?,
         CrashCase::Audit => child_audit(&db_path, &control_dir, iteration)?,
+        CrashCase::KeyIssuance => child_key_issuance(&db_path, iteration)?,
+        CrashCase::KeyRevoke => child_key_revoke(&db_path, &control_dir, iteration)?,
+        CrashCase::PriceCatalog => child_price_catalog(&db_path)?,
     }
     Ok(true)
 }
@@ -119,9 +142,11 @@ fn run_iteration(case: CrashCase, test_name: &str, iteration: usize) -> TestResu
     }
 
     let report = match case {
-        CrashCase::Quota => verify_quota(&db_path, iteration)?,
         CrashCase::OAuthAead => verify_oauth_aead(&db_path, iteration)?,
         CrashCase::Audit => verify_audit(&db_path, iteration)?,
+        CrashCase::KeyIssuance => verify_key_issuance(&db_path, iteration)?,
+        CrashCase::KeyRevoke => verify_key_revoke(&db_path, &control_dir, iteration)?,
+        CrashCase::PriceCatalog => verify_price_catalog(&db_path)?,
     };
 
     println!(
@@ -153,6 +178,18 @@ fn spawn_child(
         .arg("--exact")
         .arg(test_name)
         .arg("--nocapture");
+    match case {
+        CrashCase::KeyIssuance => {
+            command.env(KEY_CREATE_SENTINEL_ENV, "1");
+        }
+        CrashCase::KeyRevoke => {
+            command.env(KEY_REVOKE_SENTINEL_ENV, "1");
+        }
+        CrashCase::PriceCatalog => {
+            command.env(PRICE_CATALOG_SENTINEL_ENV, "1");
+        }
+        CrashCase::OAuthAead | CrashCase::Audit => {}
+    }
     Ok(command.spawn()?)
 }
 
@@ -161,40 +198,9 @@ fn cleanup_child(child: &mut Child) {
     let _ = child.wait();
 }
 
-fn child_quota(path: &Path, control_dir: &Path, iteration: usize) -> TestResult {
-    {
-        let storage = RedbStorage::open(path)?;
-        storage.set_killswitch_enabled(true)?;
-        let principal_id = quota_committed_principal(iteration);
-        for index in 0..COMMITTED_ROWS {
-            storage.incr_quota(&principal_id, index as u64, BucketKind::Requests, 1)?;
-        }
-    }
-
-    let db = redb::Database::create(path)?;
-    let write_txn = db.begin_write()?;
-    {
-        let mut table = write_txn.open_table(QUOTAS_BY_PRINCIPAL_V1)?;
-        let pending_principal = quota_pending_principal(iteration);
-        let value = 1_u64.to_le_bytes();
-        for index in 0..PENDING_ROWS {
-            let key = cc_lb_storage_redb::quota_key(
-                &pending_principal,
-                index as u64,
-                BucketKind::Requests,
-            );
-            table.insert(key.as_slice(), value.as_slice())?;
-            signal_after_first_pending_row(control_dir, index)?;
-        }
-    }
-    sleep_before_unreachable_commit();
-    write_txn.commit()?;
-    Ok(())
-}
-
 fn child_oauth_aead(path: &Path, control_dir: &Path, iteration: usize) -> TestResult {
     {
-        let storage = RedbStorage::open(path)?;
+        let storage = Storage::open(path, MASTER_KEY)?;
         storage.set_killswitch_enabled(true)?;
         for index in 0..COMMITTED_ROWS {
             let principal_id = oauth_committed_principal(iteration, index);
@@ -224,7 +230,7 @@ fn child_oauth_aead(path: &Path, control_dir: &Path, iteration: usize) -> TestRe
 
 fn child_audit(path: &Path, control_dir: &Path, iteration: usize) -> TestResult {
     {
-        let storage = RedbStorage::open(path)?;
+        let storage = Storage::open(path, MASTER_KEY)?;
         storage.set_killswitch_enabled(true)?;
         for index in 0..COMMITTED_ROWS {
             storage.append_audit(&audit_entry(iteration, index, false))?;
@@ -247,48 +253,45 @@ fn child_audit(path: &Path, control_dir: &Path, iteration: usize) -> TestResult 
     Ok(())
 }
 
-fn verify_quota(
-    path: &Path,
-    iteration: usize,
-) -> Result<VerificationReport, Box<dyn std::error::Error>> {
-    let schema_version;
-    {
-        let storage = RedbStorage::open(path)?;
-        schema_version = verify_schema_and_killswitch(&storage)?;
-        let principal_id = quota_committed_principal(iteration);
-        for index in 0..COMMITTED_ROWS {
-            let value = storage.get_quota(&principal_id, index as u64, BucketKind::Requests)?;
-            if value != 1 {
-                return Err(io_error(format!(
-                    "quota committed row mismatch at iteration {iteration} index {index}: {value}"
-                ))
-                .into());
-            }
-        }
-        let probe = storage.incr_quota(
-            "task-48-parent-probe",
-            iteration as u64,
-            BucketKind::Requests,
-            1,
-        )?;
-        if probe != 1 {
-            return Err(io_error(format!("parent probe write returned {probe}")).into());
-        }
-    }
+fn child_key_issuance(path: &Path, iteration: usize) -> TestResult {
+    let storage = Arc::new(Storage::open(path, MASTER_KEY)?);
+    storage.set_killswitch_enabled(true)?;
+    let key_store = KeyStore::new(storage);
+    let _ = key_store.create(
+        &key_issuance_principal(iteration),
+        create_params(iteration, "issued during crash"),
+    )?;
+    Ok(())
+}
 
-    let pending_rows = count_quota_prefix(path, quota_pending_principal(iteration).as_bytes())?;
-    if pending_rows != 0 {
-        return Err(io_error(format!(
-            "quota pending transaction left {pending_rows} rows"
-        ))
-        .into());
-    }
+fn child_key_revoke(path: &Path, control_dir: &Path, iteration: usize) -> TestResult {
+    let storage = Arc::new(Storage::open(path, MASTER_KEY)?);
+    storage.set_killswitch_enabled(true)?;
+    let key_store = KeyStore::new(storage);
+    let (_record, plaintext) = key_store.create(
+        &key_revoke_principal(iteration),
+        create_params(iteration, "revoked during crash"),
+    )?;
+    let (key_id, secret_b64_bytes) = secret::parse(plaintext.expose())?;
+    let index_hash = secret::compute_index_hash(&secret_b64_bytes);
 
-    Ok(VerificationReport {
-        schema_version,
-        committed_rows: COMMITTED_ROWS,
-        pending_rows,
-    })
+    fs::write(control_dir.join(REVOKE_KEY_ID_FILE), key_id.as_bytes())?;
+    fs::write(control_dir.join(REVOKE_INDEX_HASH_FILE), index_hash)?;
+
+    key_store.revoke(&key_revoke_principal(iteration), &key_id)?;
+    Ok(())
+}
+
+fn child_price_catalog(path: &Path) -> TestResult {
+    unsafe { env::remove_var(PRICE_CATALOG_SENTINEL_ENV) };
+    let storage = Storage::open(path, MASTER_KEY)?;
+    storage.set_killswitch_enabled(true)?;
+    storage.put_price_snapshot(OLD_PRICE_JSON, OLD_PRICE_FETCHED_AT_MS)?;
+    fs::write(price_cache_path(path), OLD_PRICE_JSON)?;
+
+    unsafe { env::set_var(PRICE_CATALOG_SENTINEL_ENV, "1") };
+    storage.put_price_snapshot(NEW_PRICE_JSON, NEW_PRICE_FETCHED_AT_MS)?;
+    Ok(())
 }
 
 fn verify_oauth_aead(
@@ -297,7 +300,7 @@ fn verify_oauth_aead(
 ) -> Result<VerificationReport, Box<dyn std::error::Error>> {
     let schema_version;
     {
-        let storage = RedbStorage::open(path)?;
+        let storage = Storage::open(path, MASTER_KEY)?;
         schema_version = verify_schema_and_killswitch(&storage)?;
         for index in 0..COMMITTED_ROWS {
             let principal_id = oauth_committed_principal(iteration, index);
@@ -344,7 +347,7 @@ fn verify_audit(
 ) -> Result<VerificationReport, Box<dyn std::error::Error>> {
     let schema_version;
     {
-        let storage = RedbStorage::open(path)?;
+        let storage = Storage::open(path, MASTER_KEY)?;
         schema_version = verify_schema_and_killswitch(&storage)?;
         let entries = storage.query_audit(
             Some(&audit_principal(iteration)),
@@ -375,12 +378,11 @@ fn verify_audit(
             upstream: "anthropic_direct".to_owned(),
             model: Some("claude-sonnet-4-5".to_owned()),
             status: 200,
-            input_tokens: 1,
-            output_tokens: 1,
+            input_tokens: Some(1),
+            output_tokens: Some(1),
             duration_ms: 1,
             agent_label: Some("task-48-parent".to_owned()),
-            kind: None,
-            payload: None,
+            ..Default::default()
         })?;
     }
 
@@ -399,7 +401,135 @@ fn verify_audit(
     })
 }
 
-fn verify_schema_and_killswitch(storage: &RedbStorage) -> Result<u32, Box<dyn std::error::Error>> {
+fn verify_key_issuance(
+    path: &Path,
+    iteration: usize,
+) -> Result<VerificationReport, Box<dyn std::error::Error>> {
+    let storage = Storage::open(path, MASTER_KEY)?;
+    let schema_version = verify_schema_and_killswitch(&storage)?;
+    let api_key_rows = count_api_key_rows(&storage)?;
+    let index_rows = count_key_index_rows(&storage)?;
+
+    match (api_key_rows, index_rows) {
+        (0, 0) => {}
+        (1, 1) => {
+            let keys = storage.list_api_keys(&key_issuance_principal(iteration))?;
+            if keys.len() != 1 {
+                return Err(io_error(format!(
+                    "issued api key row count mismatch at iteration {iteration}: {}",
+                    keys.len()
+                ))
+                .into());
+            }
+        }
+        (api_rows, key_index_rows) => {
+            return Err(io_error(format!(
+                "partial key issuance commit at iteration {iteration}: api_keys={api_rows} key_index={key_index_rows}"
+            ))
+            .into());
+        }
+    }
+
+    Ok(VerificationReport {
+        schema_version,
+        committed_rows: api_key_rows,
+        pending_rows: index_rows,
+    })
+}
+
+fn verify_key_revoke(
+    path: &Path,
+    control_dir: &Path,
+    iteration: usize,
+) -> Result<VerificationReport, Box<dyn std::error::Error>> {
+    let key_id = fs::read_to_string(control_dir.join(REVOKE_KEY_ID_FILE))?;
+    let index_hash_bytes = fs::read(control_dir.join(REVOKE_INDEX_HASH_FILE))?;
+    let index_hash: [u8; 32] = index_hash_bytes
+        .try_into()
+        .map_err(|_| io_error("stored revoke index hash was not 32 bytes"))?;
+    let principal_id = key_revoke_principal(iteration);
+
+    let storage = Storage::open(path, MASTER_KEY)?;
+    let schema_version = verify_schema_and_killswitch(&storage)?;
+    let record = storage
+        .get_api_key(&principal_id, &key_id)?
+        .ok_or_else(|| {
+            io_error(format!(
+                "missing revoked api key row {principal_id}/{key_id}"
+            ))
+        })?;
+    let indexed_composite = storage.get_composite_by_index(&index_hash)?;
+    let expected_composite = api_key_storage_key(&principal_id, &key_id);
+
+    match record.status {
+        KeyStatus::Active => {
+            if indexed_composite.as_deref() != Some(expected_composite.as_slice()) {
+                return Err(io_error(format!(
+                    "active api key lost index at iteration {iteration}"
+                ))
+                .into());
+            }
+        }
+        KeyStatus::Revoked => {
+            if indexed_composite.is_some() {
+                return Err(io_error(format!(
+                    "revoked api key retained index at iteration {iteration}"
+                ))
+                .into());
+            }
+            if record.index_hash != [0; 32] {
+                return Err(io_error(format!(
+                    "revoked api key retained index hash at iteration {iteration}"
+                ))
+                .into());
+            }
+        }
+        status => {
+            return Err(io_error(format!(
+                "unexpected api key status after crash at iteration {iteration}: {status:?}"
+            ))
+            .into());
+        }
+    }
+
+    Ok(VerificationReport {
+        schema_version,
+        committed_rows: 1,
+        pending_rows: usize::from(indexed_composite.is_some()),
+    })
+}
+
+fn verify_price_catalog(path: &Path) -> Result<VerificationReport, Box<dyn std::error::Error>> {
+    let storage = Storage::open(path, MASTER_KEY)?;
+    let schema_version = verify_schema_and_killswitch(&storage)?;
+    let snapshot = storage
+        .get_price_snapshot()?
+        .ok_or_else(|| io_error("missing price catalog snapshot after crash"))?;
+    if !is_expected_price_snapshot(snapshot.json_bytes.as_slice(), snapshot.fetched_at_ms) {
+        return Err(io_error(format!(
+            "unexpected price catalog snapshot after crash: fetched_at_ms={}",
+            snapshot.fetched_at_ms
+        ))
+        .into());
+    }
+
+    let cache_path = price_cache_path(path);
+    if cache_path.exists() {
+        let cache_bytes = fs::read(cache_path)?;
+        serde_json::from_slice::<serde_json::Value>(&cache_bytes)?;
+        if cache_bytes != OLD_PRICE_JSON && cache_bytes != NEW_PRICE_JSON {
+            return Err(io_error("disk price cache was neither old nor new snapshot").into());
+        }
+    }
+
+    Ok(VerificationReport {
+        schema_version,
+        committed_rows: 1,
+        pending_rows: 0,
+    })
+}
+
+fn verify_schema_and_killswitch(storage: &Storage) -> Result<u32, Box<dyn std::error::Error>> {
     let schema_version = storage.schema_version()?;
     if schema_version != CURRENT_SCHEMA_VERSION {
         return Err(io_error(format!(
@@ -411,20 +541,6 @@ fn verify_schema_and_killswitch(storage: &RedbStorage) -> Result<u32, Box<dyn st
         return Err(io_error("killswitch row was not readable after reopen").into());
     }
     Ok(schema_version)
-}
-
-fn count_quota_prefix(path: &Path, prefix: &[u8]) -> Result<usize, Box<dyn std::error::Error>> {
-    let db = redb::Database::create(path)?;
-    let read_txn = db.begin_read()?;
-    let table = read_txn.open_table(QUOTAS_BY_PRINCIPAL_V1)?;
-    let mut count = 0;
-    for row in table.iter()? {
-        let (key, _) = row?;
-        if key.value().starts_with(prefix) {
-            count += 1;
-        }
-    }
-    Ok(count)
 }
 
 fn count_oauth_prefix(path: &Path, prefix: &[u8]) -> Result<usize, Box<dyn std::error::Error>> {
@@ -445,16 +561,34 @@ fn count_audit_request_prefix(
     path: &Path,
     prefix: &str,
 ) -> Result<usize, Box<dyn std::error::Error>> {
-    let db = redb::Database::create(path)?;
-    let read_txn = db.begin_read()?;
-    let table = read_txn.open_table(AUDIT_LOG_V1)?;
+    let storage = Storage::open(path, MASTER_KEY)?;
     let mut count = 0;
-    for row in table.iter()? {
-        let (_, value) = row?;
-        let entry = serde_json::from_slice::<AuditEntry>(value.value())?;
+    for entry in storage.query_audit(None, 0, u64::MAX, usize::MAX)? {
         if entry.request_id.starts_with(prefix) {
             count += 1;
         }
+    }
+    Ok(count)
+}
+
+fn count_api_key_rows(storage: &Storage) -> Result<usize, Box<dyn std::error::Error>> {
+    let read_txn = storage.begin_read()?;
+    let table = read_txn.open_table(API_KEYS_V1)?;
+    let mut count = 0;
+    for row in table.iter()? {
+        let _ = row?;
+        count += 1;
+    }
+    Ok(count)
+}
+
+fn count_key_index_rows(storage: &Storage) -> Result<usize, Box<dyn std::error::Error>> {
+    let read_txn = storage.begin_read()?;
+    let table = read_txn.open_table(KEY_INDEX_BY_HASH_V1)?;
+    let mut count = 0;
+    for row in table.iter()? {
+        let _ = row?;
+        count += 1;
     }
     Ok(count)
 }
@@ -500,14 +634,6 @@ fn iteration_count() -> Result<usize, Box<dyn std::error::Error>> {
 
 fn required_env(name: &str) -> Result<String, io::Error> {
     env::var(name).map_err(|_| io_error(format!("missing environment variable {name}")))
-}
-
-fn quota_committed_principal(iteration: usize) -> String {
-    format!("task-48-quota-committed-{iteration}")
-}
-
-fn quota_pending_principal(iteration: usize) -> String {
-    format!("task-48-quota-pending-{iteration}")
 }
 
 fn oauth_committed_principal(iteration: usize, index: usize) -> String {
@@ -561,13 +687,48 @@ fn audit_entry(iteration: usize, index: usize, pending: bool) -> AuditEntry {
         upstream: "anthropic_direct".to_owned(),
         model: Some("claude-sonnet-4-5".to_owned()),
         status: 200,
-        input_tokens: index as u64 + 1,
-        output_tokens: index as u64 + 2,
+        input_tokens: Some(index as u64 + 1),
+        output_tokens: Some(index as u64 + 2),
         duration_ms: 3,
         agent_label: Some("task-48-crash-child".to_owned()),
-        kind: None,
-        payload: None,
+        ..Default::default()
     }
+}
+
+fn create_params(iteration: usize, label: &str) -> CreateParams {
+    CreateParams {
+        upstream_kind: UpstreamKind::AnthropicKey,
+        upstream_credential_ref: format!("task-30-upstream-{iteration}"),
+        label: label.to_owned(),
+        description: Some(format!("task-30 crash recovery iteration {iteration}")),
+        expires_at_unix_secs: None,
+        limit_overrides: vec![Limit {
+            kind: LimitKind::Requests,
+            window_secs: 60,
+            cap_micros: 1_000,
+        }],
+        principal_kind: PrincipalKindLite::Machine,
+    }
+}
+
+fn key_issuance_principal(iteration: usize) -> String {
+    format!("task-30-key-issuance-principal-{iteration}")
+}
+
+fn key_revoke_principal(iteration: usize) -> String {
+    format!("task-30-key-revoke-principal-{iteration}")
+}
+
+fn price_cache_path(db_path: &Path) -> PathBuf {
+    db_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(PRICE_CACHE_FILE)
+}
+
+fn is_expected_price_snapshot(json_bytes: &[u8], fetched_at_ms: u64) -> bool {
+    (json_bytes == OLD_PRICE_JSON && fetched_at_ms == OLD_PRICE_FETCHED_AT_MS)
+        || (json_bytes == NEW_PRICE_JSON && fetched_at_ms == NEW_PRICE_FETCHED_AT_MS)
 }
 
 fn io_error(message: impl Into<String>) -> io::Error {

@@ -1,6 +1,6 @@
 ---
 source: crates/cc-lb-admin/tests/snapshot_admin_shapes.rs
-assertion_line: 101
+assertion_line: 105
 expression: "serde_json::to_string_pretty(&json).unwrap()"
 ---
 {
@@ -9,6 +9,14 @@ expression: "serde_json::to_string_pretty(&json).unwrap()"
   },
   "aead": {
     "key_env": "SECRET_STORAGE_KEY"
+  },
+  "api_keys": {
+    "price_catalog": {
+      "cache_path": "/var/lib/cc-lb/litellm.json",
+      "refresh_interval": "1h",
+      "url": "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+    },
+    "usage_retention_days": 90
   },
   "body": {
     "files_cap_bytes": 104857600,
@@ -28,7 +36,9 @@ expression: "serde_json::to_string_pretty(&json).unwrap()"
     "cache_ttl_ceiling_secs": 300,
     "cache_ttl_floor_secs": 30
   },
-  "effective_revision_unix_secs": 0,
+  "downstream_auth": {
+    "mode": "api_key"
+  },
   "egress": {},
   "listener": {
     "admin_addr": "[::1]:9090",
@@ -49,19 +59,26 @@ expression: "serde_json::to_string_pretty(&json).unwrap()"
         "claude-3-5-sonnet"
       ],
       "credentials_ref": "anthropic-key",
-      "quotas": {
-        "default_input_tokens": 456,
-        "default_output_tokens": 789,
-        "default_requests_per_window": 123,
-        "default_window_secs": 3600
-      }
+      "default_limits": [
+        {
+          "cap_micros": 123,
+          "kind": "requests",
+          "window": "1h"
+        },
+        {
+          "cap_micros": 456,
+          "kind": "input_tokens",
+          "window": "1h"
+        },
+        {
+          "cap_micros": 789,
+          "kind": "output_tokens",
+          "window": "1h"
+        }
+      ],
+      "enabled": true,
+      "principal_type": "machine"
     }
-  },
-  "quotas": {
-    "default_input_tokens": 1000000,
-    "default_output_tokens": 1000000,
-    "default_requests_per_window": 1000,
-    "default_window_secs": 60
   },
   "signers": {
     "anthropic_oauth": {
@@ -69,13 +86,14 @@ expression: "serde_json::to_string_pretty(&json).unwrap()"
       "issuer_base_url": "https://platform.claude.com",
       "redirect_uri": "http://127.0.0.1/admin/oauth/callback",
       "scopes": [
-        "placeholder-scope",
-        "placeholder-scope-2"
+        "messages",
+        "files"
       ]
     }
   },
   "storage": {
     "kind": "redb",
+    "oauth_aead_key_env": "[REDACTED]",
     "path": "/var/lib/cc-lb/storage.redb"
   },
   "timeouts": {

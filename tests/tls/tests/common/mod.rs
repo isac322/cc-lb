@@ -8,9 +8,9 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cc_lb_config::Config;
-use cc_lb_server::{BuildError, build_app_with_path};
-use fake_anthropic::{AppConfig, app as fake_anthropic_app};
-use ring::digest::{SHA256, digest};
+use cc_lb_server::{build_app_with_path, BuildError};
+use fake_anthropic::{app as fake_anthropic_app, AppConfig};
+use ring::digest::{digest, SHA256};
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 use rustls::{
@@ -22,8 +22,8 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::Command;
 use tokio::task::JoinHandle;
-use tokio_rustls::TlsConnector;
 use tokio_rustls::client::TlsStream;
+use tokio_rustls::TlsConnector;
 
 pub const STREAM_BODY: &str = r#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"stream through reload"}],"max_tokens":16,"stream":true}"#;
 
@@ -93,7 +93,6 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
     let admin_addr = free_addr();
     let metrics_addr = free_addr();
     let config_path = dir.path().join("cc-lb.toml");
-    let db_path = dir.path().join("storage.redb");
     write_config(
         &config_path,
         proxy_addr,
@@ -102,16 +101,8 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
         upstream_addr,
         &cert_path,
         &key_path,
-        &db_path,
     );
     let config = Config::load(&config_path).expect("load config");
-    // SAFETY: test-only; single-threaded test runner, no concurrent env access.
-    unsafe {
-        std::env::set_var(
-            "CC_LB_MASTER_KEY",
-            "0000000000000000000000000000000000000000000000000000000000000000",
-        );
-    }
     let app = build_app_with_path(config, Some(&config_path)).expect("build app");
     let signals = app.signal_handle();
     let server = tokio::spawn(async move { app.start().await });
@@ -505,7 +496,6 @@ fn free_addr() -> SocketAddr {
     listener.local_addr().expect("free addr")
 }
 
-#[allow(clippy::too_many_arguments)]
 fn write_config(
     path: &Path,
     proxy_addr: SocketAddr,
@@ -514,8 +504,16 @@ fn write_config(
     upstream_addr: SocketAddr,
     cert_path: &Path,
     key_path: &Path,
-    db_path: &Path,
 ) {
+    unsafe {
+        std::env::set_var(
+            "CC_LB_MASTER_KEY",
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
+        std::env::set_var("CC_LB_ADMIN_TOKEN", "admin-token");
+    }
+    let storage_path = path.with_file_name("cc-lb.redb");
+    let storage_path = storage_path.display();
     let config = format!(
         r#"[listener]
 proxy_addr = "{proxy_addr}"
@@ -535,12 +533,20 @@ auth_strategy = "api_key"
 [principals.api-key]
 allowed_models = ["*"]
 
+[downstream_auth]
+mode = "none"
+
+[downstream_auth.none_mode]
+principal_id = "api-key"
+upstream_kind = "anthropic_key"
+upstream_credential_ref = "fake_anthropic"
+
 [plugins]
 observability_hooks = []
 
 [storage]
 kind = "redb"
-path = "{}"
+path = "{storage_path}"
 
 [aead]
 key_env = "CC_LB_MASTER_KEY"
@@ -549,8 +555,7 @@ key_env = "CC_LB_MASTER_KEY"
 token_env = "CC_LB_ADMIN_TOKEN"
 "#,
         cert_path.display(),
-        key_path.display(),
-        db_path.display()
+        key_path.display()
     );
     fs::write(path, config).expect("write config");
 }

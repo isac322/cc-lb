@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    RequestEventStore, StorageResult,
     types::{RequestEvent as ApiRequestEvent, RequestEventUpstream as ApiRequestEventUpstream},
+    RequestEventStore, StorageResult,
 };
 
 use crate::{

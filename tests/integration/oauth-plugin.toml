@@ -25,17 +25,12 @@ allowed_models = ["*"]
 [plugins]
 observability_hooks = []
 
-[plugins.authn_plugin]
-name = "plugin-oauth-anthropic-pro"
-wasm_path = "target/wasm32-wasip1/release/plugin_oauth_anthropic_pro.wasm"
-
-[plugins.authn_plugin.config]
-client_id = "client-test"
-principals = { alice = { refresh_token_storage_key = "alice:anthropic_oauth", token_prefix = "sk-ant-oat01-MOCK-" } }
-
 [storage]
-redb_path = "/tmp/cc-lb-oauth-plugin.redb"
-oauth_aead_key_env = "CC_LB_MASTER_KEY"
+kind = "redb"
+path = "/tmp/cc-lb-oauth-plugin.redb"
+
+[aead]
+key_env = "CC_LB_MASTER_KEY"
 
 [signers.anthropic_oauth]
 issuer_base_url = "http://127.0.0.1:0"

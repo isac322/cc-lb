@@ -5,6 +5,7 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use cc_lb_config::{Config, ConfigError, PluginRef, StorageConfig};
+use cc_lb_core::api_keys::principal_view::PrincipalView;
 use notify::{Event, RecursiveMode, Watcher};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
@@ -18,16 +19,26 @@ pub struct ConfigWatcher {
     current: ArcSwap<Config>,
     reload_tx: broadcast::Sender<Arc<Config>>,
     reloads_attempted: AtomicUsize,
+    principal_view: Option<Arc<ArcSwap<PrincipalView>>>,
 }
 
 impl ConfigWatcher {
     pub fn new(path: impl AsRef<Path>, initial_config: Config) -> Self {
+        Self::new_with_principal_view(path, initial_config, None)
+    }
+
+    pub fn new_with_principal_view(
+        path: impl AsRef<Path>,
+        initial_config: Config,
+        principal_view: Option<Arc<ArcSwap<PrincipalView>>>,
+    ) -> Self {
         let (reload_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self {
             path: path.as_ref().to_path_buf(),
             current: ArcSwap::from_pointee(initial_config),
             reload_tx,
             reloads_attempted: AtomicUsize::new(0),
+            principal_view,
         }
     }
 
@@ -87,6 +98,9 @@ impl ConfigWatcher {
         warn_restart_required_changes(&current_config, &new_config);
 
         let new_config = Arc::new(new_config);
+        if let Some(principal_view) = &self.principal_view {
+            principal_view.store(PrincipalView::from_config(&new_config));
+        }
         self.current.store(Arc::clone(&new_config));
         metrics::counter!("cc_lb_config_reload_total", "outcome" => "success").increment(1);
         let _receivers = self.reload_tx.send(Arc::clone(&new_config));
@@ -153,14 +167,6 @@ impl ConfigWatcher {
 impl cc_lb_admin::CurrentConfig for ConfigWatcher {
     fn current_config(&self) -> Arc<Config> {
         ConfigWatcher::current_config(self)
-    }
-}
-
-impl cc_lb_admin::ConfigReloader for ConfigWatcher {
-    fn reload_now(&self) -> Result<(), String> {
-        ConfigWatcher::reload_now(self)
-            .map(|_| ())
-            .map_err(|source| source.to_string())
     }
 }
 
@@ -233,11 +239,6 @@ fn warn_restart_required_changes(current: &Config, new_config: &Config) {
             .as_ref()
             .and_then(|tls| tls.key_path.as_ref()),
         "tls.key_path",
-    );
-    warn_plugin_path_change(
-        "plugins.authn_plugin.wasm_path",
-        current.plugins.authn_plugin.as_ref(),
-        new_config.plugins.authn_plugin.as_ref(),
     );
     warn_plugin_path_change(
         "plugins.router_plugin.wasm_path",

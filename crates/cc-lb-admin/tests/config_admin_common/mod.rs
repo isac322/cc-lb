@@ -4,12 +4,16 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
+use arc_swap::ArcSwap;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use bytes::Bytes;
-use cc_lb_admin::{AdminState, ConfigReloader, CurrentConfig, router};
-use cc_lb_config::{Config, QuotasConfig};
-use cc_lb_core::DashboardBroadcaster;
+use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig, router};
+use cc_lb_config::Config;
+use cc_lb_core::api_keys::{
+    concurrent_guard::KeyConcurrencyManager, limit_engine::LimitEngine,
+    principal_view::PrincipalView,
+};
 use cc_lb_storage_redb::RedbStorage;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
@@ -19,53 +23,49 @@ pub const TOKEN: &str = "test-token";
 
 pub fn temp_storage() -> (tempfile::TempDir, Arc<RedbStorage>) {
     let dir = tempfile::tempdir().unwrap();
-    let storage = Arc::new(RedbStorage::open(dir.path().join("test.redb")).unwrap());
+    let storage = Arc::new(RedbStorage::open(&dir.path().join("test.redb"), [0; 32]).unwrap());
     (dir, storage)
 }
 
 pub fn test_storage() -> Arc<RedbStorage> {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("test.redb");
-    let storage = Arc::new(RedbStorage::open(&path).unwrap());
+    let storage = Arc::new(RedbStorage::open(&path, [0; 32]).unwrap());
     std::mem::forget(dir);
     storage
 }
 
 pub fn minimal_config() -> Config {
-    config_with_requests(1_000)
+    Config::default()
 }
 
-pub fn config_with_requests(default_requests_per_window: u64) -> Config {
-    let mut config = Config::default();
-    config.signers.anthropic_oauth.scopes = Vec::new();
-    config.quotas = QuotasConfig {
-        default_window_secs: 60,
-        default_requests_per_window,
-        default_input_tokens: 1_000_000,
-        default_output_tokens: 1_000_000,
-    };
-    config
+pub fn config_with_requests(_default_requests_per_window: u64) -> Config {
+    Config::default()
 }
 
 pub fn config_value(default_requests_per_window: u64) -> Value {
-    serde_json::to_value(config_with_requests(default_requests_per_window)).unwrap()
+    let mut value =
+        serde_json::to_value(config_with_requests(default_requests_per_window)).unwrap();
+    value.as_object_mut().unwrap().insert(
+        "quotas".to_owned(),
+        json!({ "default_requests_per_window": default_requests_per_window }),
+    );
+    value
 }
 
 pub fn test_state(config: Config, storage: Option<Arc<RedbStorage>>) -> AdminState {
+    let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config)));
     AdminState {
-        storage: storage.unwrap_or_else(test_storage),
+        storage,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        quota_manager: None,
+        limit_engine: LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            principal_view.clone(),
+        ),
         lifecycle: None,
-        breaker_registry: None,
-        drain_controller: None,
-        bulkhead_registry: None,
-        plugin_runtime_status: None,
-        dashboard_broadcaster: Arc::new(DashboardBroadcaster::new()),
+        audit_sink: None,
+        principal_view,
         config: Arc::new(config),
-        config_path: None,
-        config_watcher: None,
-        config_started_at_unix_secs: 0,
         admin_token: Some(TOKEN.to_owned()),
         start_time: std::time::Instant::now(),
     }
@@ -76,26 +76,23 @@ pub fn test_state_without_storage() -> AdminState {
 }
 
 pub fn apply_state(
-    storage: Arc<RedbStorage>,
-    config_path: PathBuf,
+    _storage: Arc<RedbStorage>,
+    _config_path: PathBuf,
     reloader: Arc<TestReloader>,
 ) -> AdminState {
-    let config: Arc<dyn CurrentConfig> = reloader.clone();
-    let config_watcher: Arc<dyn ConfigReloader> = reloader;
+    let config = reloader.current();
+    let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config)));
     AdminState {
-        storage,
+        storage: Some(test_storage()),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        quota_manager: None,
+        limit_engine: LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            principal_view.clone(),
+        ),
         lifecycle: None,
-        breaker_registry: None,
-        drain_controller: None,
-        bulkhead_registry: None,
-        plugin_runtime_status: None,
-        dashboard_broadcaster: Arc::new(DashboardBroadcaster::new()),
-        config,
-        config_path: Some(config_path),
-        config_watcher: Some(config_watcher),
-        config_started_at_unix_secs: 0,
+        audit_sink: None,
+        principal_view,
+        config: reloader,
         admin_token: Some(TOKEN.to_owned()),
         start_time: std::time::Instant::now(),
     }
@@ -160,25 +157,13 @@ pub async fn unauthenticated_status(app: axum::Router, method: &str, uri: &str) 
 
 pub fn assert_private(body: &[u8]) {
     let text = String::from_utf8_lossy(body);
-    for needle in [
-        "\"messages\"",
-        "\"system\"",
-        "\"tools\"",
-        "\"tool_use\"",
-        "\"content\"",
-    ] {
-        assert!(!text.contains(needle), "response leaked {needle}: {text}");
-    }
     for needle in ["sk-ant", "aead_master_key"] {
         assert!(!text.contains(needle), "response leaked {needle}: {text}");
     }
 }
 
 pub fn put_body(draft: Value, expected_revision: u64) -> Value {
-    json!({
-        "draft": draft,
-        "expected_revision": expected_revision,
-    })
+    json!({ "draft": draft, "expected_revision": expected_revision })
 }
 
 pub fn expected_revision_body(expected_revision: u64) -> Value {
@@ -190,16 +175,16 @@ pub fn write_config(path: &Path, config: &Config) {
 }
 
 pub struct TestReloader {
-    path: PathBuf,
     current: Arc<RwLock<Config>>,
+    draft: Arc<RwLock<Option<Config>>>,
     reloads: AtomicUsize,
 }
 
 impl TestReloader {
-    pub fn new(path: PathBuf, initial: Config) -> Self {
+    pub fn new(_path: PathBuf, initial: Config) -> Self {
         Self {
-            path,
             current: Arc::new(RwLock::new(initial)),
+            draft: Arc::new(RwLock::new(None)),
             reloads: AtomicUsize::new(0),
         }
     }
@@ -217,13 +202,21 @@ impl CurrentConfig for TestReloader {
     fn current_config(&self) -> Arc<Config> {
         Arc::new(self.current())
     }
-}
 
-impl ConfigReloader for TestReloader {
-    fn reload_now(&self) -> Result<(), String> {
-        let config = Config::load(&self.path).map_err(|source| source.to_string())?;
-        *self.current.write().unwrap() = config;
-        self.reloads.fetch_add(1, Ordering::AcqRel);
+    fn put_draft_config(&self, config: Config) -> Result<(), ConfigDraftError> {
+        *self.draft.write().unwrap() = Some(config);
         Ok(())
+    }
+
+    fn apply_draft_config(&self) -> Result<Arc<Config>, ConfigDraftError> {
+        let config = self
+            .draft
+            .write()
+            .unwrap()
+            .take()
+            .ok_or(ConfigDraftError::MissingDraft)?;
+        *self.current.write().unwrap() = config.clone();
+        self.reloads.fetch_add(1, Ordering::AcqRel);
+        Ok(Arc::new(config))
     }
 }

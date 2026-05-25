@@ -14,17 +14,15 @@ use std::time::{Duration, Instant};
 
 use arc_swap::ArcSwap;
 use cc_lb_plugin_api::{
-    AuthnPlugin, ObservabilityHook, PluginManifest, PluginRuntime, Principal, RouterPlugin,
-    RuntimeError, SignerFactory, UpstreamDialect,
+    ObservabilityHook, PluginManifest, PluginRuntime, RouterPlugin, RuntimeError, SignerFactory,
+    UpstreamDialect,
 };
 use extism::{Manifest, Plugin, PluginBuilder, Wasm};
 use serde_json::Value;
 use tokio::sync::oneshot;
 
 use crate::host_functions::{HostFunctionContext, HostState};
-use crate::plugin_wrap::{
-    ExtismAuthnPlugin, ExtismDialectPlugin, ExtismRouterPlugin, ExtismSignerFactory,
-};
+use crate::plugin_wrap::{ExtismDialectPlugin, ExtismRouterPlugin, ExtismSignerFactory};
 use crate::sse_batch::ExtismObservabilityHook;
 
 const DEFAULT_MEMORY_MAX_PAGES: u32 = 32;
@@ -104,15 +102,11 @@ impl ResourceLimits {
     }
 }
 
-pub type SignerFactoryResolver =
-    Arc<dyn Fn(&str, &Principal, &Value) -> Option<Arc<dyn SignerFactory>> + Send + Sync>;
-
 pub struct ExtismRuntime {
     config: ExtismRuntimeConfig,
     manifests: RwLock<HashMap<String, PluginEntry>>,
     instances: RwLock<HashMap<String, Arc<PluginSlot>>>,
     host_state: Arc<HostState>,
-    signer_factory_resolver: Option<SignerFactoryResolver>,
 }
 
 impl ExtismRuntime {
@@ -126,14 +120,6 @@ impl ExtismRuntime {
             manifests: RwLock::new(HashMap::new()),
             instances: RwLock::new(HashMap::new()),
             host_state: Arc::new(HostState::new()),
-            signer_factory_resolver: None,
-        }
-    }
-
-    pub fn with_signer_factory_resolver(resolver: SignerFactoryResolver) -> Self {
-        Self {
-            signer_factory_resolver: Some(resolver),
-            ..Self::new()
         }
     }
 
@@ -239,14 +225,6 @@ impl Default for ExtismRuntime {
 }
 
 impl PluginRuntime for ExtismRuntime {
-    fn instantiate(&self, manifest: &PluginManifest) -> Result<Arc<dyn AuthnPlugin>, RuntimeError> {
-        let slot = self.instantiate_slot(manifest, "authenticate")?;
-        Ok(Arc::new(ExtismAuthnPlugin::new(
-            slot,
-            self.signer_factory_resolver.clone(),
-        )))
-    }
-
     fn instantiate_router(
         &self,
         manifest: &PluginManifest,

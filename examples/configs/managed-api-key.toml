@@ -1,0 +1,31 @@
+[listener]
+proxy_addr = "0.0.0.0:8080"
+admin_addr = "127.0.0.1:9090"
+metrics_addr = "127.0.0.1:9091"
+
+[storage]
+redb_path = "/var/lib/cc-lb/store.redb"
+oauth_aead_key_env = "CC_LB_MASTER_KEY"
+
+[admin]
+token_env = "CC_LB_ADMIN_TOKEN"
+
+[downstream_auth]
+mode = "api_key"
+
+[api_keys]
+usage_retention_days = 90
+
+[api_keys.price_catalog]
+url = "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json"
+refresh_interval = "1h"
+cache_path = "/var/lib/cc-lb/litellm.json"
+
+[principals.demo-machine]
+principal_type = "machine"
+allowed_models = ["claude-3-5-sonnet-*", "claude-3-5-haiku-*"]
+default_limits = [
+  { kind = "requests", window = "1h", cap_micros = 1000 },
+  { kind = "cost_usd", window = "24h", cap_micros = 100000000 },
+]
+enabled = true

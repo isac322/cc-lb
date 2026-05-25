@@ -4,11 +4,11 @@ use std::fs;
 use std::path::Path;
 
 use cc_lb_config::Config;
-use cc_lb_storage_api::{
+use cc_lb_storage_redb::{
     AuditEntry, ConfigDraftState, HistoryEntry, HistorySummary, Storage, StorageError,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use thiserror::Error;
 
 use crate::{ConfigReloader, CurrentConfig};
@@ -23,10 +23,12 @@ pub const COVERAGE_CHECKLIST: &[&str] = &[
     "upstreams",
     "principals",
     "plugins",
+    "downstream_auth",
+    "api_keys",
     "storage",
+    "aead",
     "signers",
     "observability",
-    "quotas",
     "admin",
     "circuit_breaker",
     "bulkhead",
@@ -63,13 +65,7 @@ pub enum SettingsError {
 impl From<StorageError> for SettingsError {
     fn from(error: StorageError) -> Self {
         match error {
-            StorageError::Conflict { message } if message.contains("stale") => {
-                let current = message
-                    .rsplit_once(' ')
-                    .and_then(|(_, value)| value.parse::<u64>().ok())
-                    .unwrap_or(0);
-                Self::StaleDraftRevision { current }
-            }
+            StorageError::StaleDraftRevision { current } => Self::StaleDraftRevision { current },
             other => Self::Storage(other),
         }
     }
@@ -199,12 +195,12 @@ fn strip_schema_defaults(value: &mut Value) {
     }
 }
 
-pub async fn get_draft(storage: &dyn Storage) -> Result<ConfigDraftResponse, SettingsError> {
-    draft_response(storage.get_config_draft().await?)
+pub async fn get_draft(storage: &Storage) -> Result<ConfigDraftResponse, SettingsError> {
+    draft_response(storage.get_config_draft()?)
 }
 
 pub async fn put_draft(
-    storage: &dyn Storage,
+    storage: &Storage,
     request: PutConfigDraftRequest,
     saved_at_unix_secs: u64,
 ) -> Result<PutConfigDraftResponse, SettingsError> {
@@ -215,17 +211,16 @@ pub async fn put_draft(
         last_validation_error: None,
         saved_at_unix_secs: Some(saved_at_unix_secs),
     };
-    let revision = storage
-        .put_config_draft(state, request.expected_revision)
-        .await?;
+    let revision = storage.put_config_draft(state, request.expected_revision)?;
     Ok(PutConfigDraftResponse {
         revision,
         saved_at_unix_secs,
     })
 }
 
+#[allow(dead_code)]
 pub(crate) async fn apply_draft_principal_change<T, E, F>(
-    storage: &dyn Storage,
+    storage: &Storage,
     current: &dyn CurrentConfig,
     saved_at_unix_secs: u64,
     mut transform: F,
@@ -233,7 +228,7 @@ pub(crate) async fn apply_draft_principal_change<T, E, F>(
 where
     F: FnMut(&mut Value) -> Result<T, E>,
 {
-    let state = storage.get_config_draft().await?;
+    let state = storage.get_config_draft()?;
     let expected_revision = state.revision;
     let mut draft = match state.draft {
         Some(draft) => draft,
@@ -258,26 +253,24 @@ where
         Ok(outcome) => outcome,
         Err(error) => return Ok(Err(error)),
     };
-    let revision = storage
-        .put_config_draft(
-            ConfigDraftState {
-                draft: Some(draft),
-                revision: 0,
-                last_validated_revision: None,
-                last_validation_error: None,
-                saved_at_unix_secs: Some(saved_at_unix_secs),
-            },
-            expected_revision,
-        )
-        .await?;
+    let revision = storage.put_config_draft(
+        ConfigDraftState {
+            draft: Some(draft),
+            revision: 0,
+            last_validated_revision: None,
+            last_validation_error: None,
+            saved_at_unix_secs: Some(saved_at_unix_secs),
+        },
+        expected_revision,
+    )?;
     Ok(Ok((revision, outcome)))
 }
 
 pub async fn validate_draft(
-    storage: &dyn Storage,
+    storage: &Storage,
     request: ValidateConfigDraftRequest,
 ) -> Result<ValidateConfigDraftResponse, SettingsError> {
-    let state = storage.get_config_draft().await?;
+    let state = storage.get_config_draft()?;
     if state.revision != request.expected_revision {
         return Err(SettingsError::StaleDraftRevision {
             current: state.revision,
@@ -292,9 +285,7 @@ pub async fn validate_draft(
 
     match validation {
         Ok(_) => {
-            storage
-                .set_last_validated_revision(state.revision, None)
-                .await?;
+            storage.set_last_validated_revision(state.revision, None)?;
             Ok(ValidateConfigDraftResponse {
                 valid: true,
                 revision: state.revision,
@@ -302,9 +293,7 @@ pub async fn validate_draft(
             })
         }
         Err(error) => {
-            storage
-                .set_last_validated_revision(state.revision, Some(error.clone()))
-                .await?;
+            storage.set_last_validated_revision(state.revision, Some(error.clone()))?;
             Ok(ValidateConfigDraftResponse {
                 valid: false,
                 revision: state.revision,
@@ -315,13 +304,13 @@ pub async fn validate_draft(
 }
 
 pub async fn apply_config(
-    storage: &dyn Storage,
+    storage: &Storage,
     config_path: Option<&Path>,
     config_watcher: Option<&dyn ConfigReloader>,
     request: ApplyConfigRequest,
     applied_at_unix_secs: u64,
 ) -> Result<ApplyConfigResponse, SettingsError> {
-    let state = storage.get_config_draft().await?;
+    let state = storage.get_config_draft()?;
     if state.revision != request.expected_revision {
         return Err(SettingsError::StaleDraftRevision {
             current: state.revision,
@@ -341,12 +330,12 @@ pub async fn apply_config(
         toml::to_string_pretty(&config).map_err(|source| SettingsError::ApplyWriteFailed {
             detail: source.to_string(),
         })?;
-    let mut roundtrip: Config =
+    let roundtrip: Config =
         toml::from_str(&config_toml).map_err(|source| SettingsError::ValidationFailed {
             detail: source.to_string(),
         })?;
     roundtrip
-        .validate_loaded()
+        .validate()
         .map_err(|source| SettingsError::ValidationFailed {
             detail: source.to_string(),
         })?;
@@ -363,35 +352,30 @@ pub async fn apply_config(
         .reload_now()
         .map_err(|detail| SettingsError::ReloadFailed { detail })?;
 
-    storage
-        .append_config_history(
-            request.expected_revision,
-            config_toml,
-            applied_at_unix_secs,
-            history_summary(&config),
-        )
-        .await?;
-    storage
-        .append_audit(&AuditEntry {
-            ts: applied_at_unix_secs,
-            request_id: format!("config_apply_{}", request.expected_revision),
-            principal_id: "admin".to_owned(),
-            route: "config_apply".to_owned(),
-            upstream: "admin".to_owned(),
-            model: None,
-            status: 200,
-            input_tokens: 0,
-            output_tokens: 0,
-            duration_ms: 0,
-            agent_label: None,
-            kind: Some("config_apply".to_owned()),
-            payload: Some(json!({
-                "revision": request.expected_revision,
-                "actor": "admin",
-                "applied_at_unix_secs": applied_at_unix_secs,
-            })),
-        })
-        .await?;
+    storage.append_config_history(
+        request.expected_revision,
+        config_toml,
+        applied_at_unix_secs,
+        history_summary(&config),
+    )?;
+    storage.append_audit(&AuditEntry {
+        ts: applied_at_unix_secs,
+        request_id: format!("config_apply_{}", request.expected_revision),
+        principal_id: "admin".to_owned(),
+        route: "config_apply".to_owned(),
+        upstream: "admin".to_owned(),
+        model: None,
+        status: 200,
+        input_tokens: Some(0),
+        output_tokens: Some(0),
+        duration_ms: 0,
+        agent_label: None,
+        api_key_id: None,
+        cost_usd_micros: None,
+        limit_violation: None,
+        admin_action: Some("config_apply".to_owned()),
+        actor: Some("admin".to_owned()),
+    })?;
 
     Ok(ApplyConfigResponse {
         applied_revision: request.expected_revision,
@@ -400,13 +384,12 @@ pub async fn apply_config(
 }
 
 pub async fn list_history(
-    storage: &dyn Storage,
+    storage: &Storage,
     limit: usize,
 ) -> Result<ConfigHistoryResponse, SettingsError> {
     let limit = limit.min(100);
     let history = storage
-        .list_config_history(limit)
-        .await?
+        .list_config_history(limit)?
         .into_iter()
         .map(history_item)
         .collect();
@@ -414,12 +397,12 @@ pub async fn list_history(
 }
 
 pub async fn diff_history(
-    storage: &dyn Storage,
+    storage: &Storage,
     from_revision: u64,
     to_revision: u64,
 ) -> Result<ConfigDiffResponse, SettingsError> {
     if from_revision == to_revision {
-        if storage.get_config_history(from_revision).await?.is_none() {
+        if storage.get_config_history(from_revision)?.is_none() {
             return Err(SettingsError::UnknownRevision {
                 missing: from_revision,
             });
@@ -434,18 +417,15 @@ pub async fn diff_history(
 
     let from =
         storage
-            .get_config_history(from_revision)
-            .await?
+            .get_config_history(from_revision)?
             .ok_or(SettingsError::UnknownRevision {
                 missing: from_revision,
             })?;
-    let to =
-        storage
-            .get_config_history(to_revision)
-            .await?
-            .ok_or(SettingsError::UnknownRevision {
-                missing: to_revision,
-            })?;
+    let to = storage
+        .get_config_history(to_revision)?
+        .ok_or(SettingsError::UnknownRevision {
+            missing: to_revision,
+        })?;
     let from_json = history_config_json(&from)?;
     let to_json = history_config_json(&to)?;
     let mut diff = Vec::new();
@@ -479,10 +459,8 @@ fn draft_response(state: ConfigDraftState) -> Result<ConfigDraftResponse, Settin
 }
 
 fn deserialize_and_validate_config(value: Value) -> Result<Config, String> {
-    let mut config: Config = serde_json::from_value(value).map_err(|source| source.to_string())?;
-    config
-        .validate_loaded()
-        .map_err(|source| source.to_string())?;
+    let config: Config = serde_json::from_value(value).map_err(|source| source.to_string())?;
+    config.validate().map_err(|source| source.to_string())?;
     Ok(config)
 }
 
@@ -496,9 +474,7 @@ fn history_summary(config: &Config) -> HistorySummary {
 }
 
 fn plugin_count(config: &Config) -> usize {
-    usize::from(config.plugins.authn_plugin.is_some())
-        + usize::from(config.plugins.router_plugin.is_some())
-        + config.plugins.observability_hooks.len()
+    usize::from(config.plugins.router_plugin.is_some()) + config.plugins.observability_hooks.len()
 }
 
 fn history_item(entry: HistoryEntry) -> ConfigHistoryItem {
@@ -510,12 +486,12 @@ fn history_item(entry: HistoryEntry) -> ConfigHistoryItem {
 }
 
 fn history_config_json(entry: &HistoryEntry) -> Result<Value, SettingsError> {
-    let mut config: Config =
+    let config: Config =
         toml::from_str(&entry.config_toml).map_err(|source| SettingsError::ValidationFailed {
             detail: source.to_string(),
         })?;
     config
-        .validate_loaded()
+        .validate()
         .map_err(|source| SettingsError::ValidationFailed {
             detail: source.to_string(),
         })?;

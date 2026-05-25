@@ -335,8 +335,10 @@ async fn mode_response(mode: FakeMode) -> Option<Response> {
 fn auth_failure(state: &AppState, headers: &HeaderMap) -> Option<Response> {
     state.record_last_request(headers);
 
-    if header_starts_with(headers, "x-api-key", "sk-ant-") {
-        state.record_auth("x-api-key:sk-ant-*");
+    if header_matches(headers, "x-api-key", "")
+        || header_starts_with(headers, "x-api-key", "sk-ant-")
+    {
+        state.record_auth("x-api-key:accepted");
         return None;
     }
 
@@ -357,6 +359,14 @@ fn header_starts_with(headers: &HeaderMap, name: &str, prefix: &str) -> bool {
         .get(name)
         .and_then(|value| value.to_str().ok())
         .map(|value| value.starts_with(prefix))
+        .unwrap_or(false)
+}
+
+fn header_matches(headers: &HeaderMap, name: &str, expected: &str) -> bool {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value == expected)
         .unwrap_or(false)
 }
 
