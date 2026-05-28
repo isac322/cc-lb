@@ -4,9 +4,9 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bincode::config::standard;
 use bincode::serde::{decode_from_slice, encode_to_vec};
+use cc_lb_storage_api::types::{ApiKeyMutation, IssueParams, KeyStatus, StoredApiKeyRecord};
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
-use cc_lb_storage_api::types::{ApiKeyMutation, IssueParams, KeyStatus, StoredApiKeyRecord};
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
