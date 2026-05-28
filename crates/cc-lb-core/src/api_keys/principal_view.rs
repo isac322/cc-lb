@@ -1,7 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use cc_lb_config::{Config, Limit as ConfigLimit, LimitKind as ConfigLimitKind};
+use cc_lb_config::{Config, ConfigError, Limit as ConfigLimit, LimitKind as ConfigLimitKind};
+use cc_lb_plugin_api::{ObservabilityHook, RouterPlugin};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::api_keys::types::{Limit, LimitKind, PrincipalType};
@@ -13,12 +14,23 @@ pub enum PrincipalStatus {
     Missing,
 }
 
+#[derive(Clone)]
+pub enum RouterPluginCache {
+    Inherit,
+    Explicit(Arc<dyn RouterPlugin>),
+}
+
+#[derive(Clone)]
+pub enum ObservabilityHooksCache {
+    Inherit,
+    Explicit(Vec<Arc<dyn ObservabilityHook>>),
+}
+
 #[derive(Debug)]
 pub struct PrincipalView {
     specs: HashMap<String, PrincipalSpecCached>,
 }
 
-#[derive(Debug)]
 pub struct PrincipalSpecCached {
     id: String,
     principal_type: PrincipalType,
@@ -26,29 +38,39 @@ pub struct PrincipalSpecCached {
     allowed_models_exact: HashSet<String>,
     default_limits: Vec<Limit>,
     enabled: bool,
+    router_plugin: RouterPluginCache,
+    observability_hooks: ObservabilityHooksCache,
 }
 
 impl PrincipalView {
-    pub fn from_config(config: &Config) -> Arc<PrincipalView> {
-        let specs = config
+    pub fn from_config(
+        config: &Config,
+        mut principal_chains: HashMap<String, (RouterPluginCache, ObservabilityHooksCache)>,
+    ) -> Result<Arc<PrincipalView>, ConfigError> {
+        let mut specs = config
             .principals
             .iter()
-            .map(|(principal_id, principal)| {
+            .map(|(principal_id, principal)| -> Result<_, ConfigError> {
                 let mut exact = HashSet::new();
                 let mut builder = GlobSetBuilder::new();
 
                 for model in &principal.allowed_models {
                     if is_glob_pattern(model) {
-                        builder
-                            .add(Glob::new(model).expect("invalid principal allowed_models glob"));
+                        builder.add(Glob::new(model).map_err(|source| {
+                            invalid_allowed_models_glob(principal_id, model, source)
+                        })?);
                     } else {
                         exact.insert(model.clone());
                     }
                 }
 
-                let allowed_models = builder
-                    .build()
-                    .expect("invalid principal allowed_models glob set");
+                let allowed_models = builder.build().map_err(|source| {
+                    invalid_allowed_models_glob(principal_id, "<compiled glob set>", source)
+                })?;
+
+                let (router_plugin, observability_hooks) = principal_chains
+                    .remove(principal_id)
+                    .unwrap_or((RouterPluginCache::Inherit, ObservabilityHooksCache::Inherit));
 
                 let cached = PrincipalSpecCached {
                     id: principal_id.clone(),
@@ -62,13 +84,41 @@ impl PrincipalView {
                         .map(Into::into)
                         .collect(),
                     enabled: principal.enabled,
+                    router_plugin,
+                    observability_hooks,
                 };
 
-                (principal_id.clone(), cached)
+                Ok((principal_id.clone(), cached))
             })
-            .collect();
+            .collect::<Result<HashMap<_, _>, ConfigError>>()?;
 
-        Arc::new(PrincipalView { specs })
+        if matches!(
+            config.downstream_auth.mode,
+            cc_lb_config::DownstreamAuthMode::None
+        ) && let Some(none_mode) = &config.downstream_auth.none_mode
+            && !specs.contains_key(&none_mode.principal_id)
+        {
+            let (router_plugin, observability_hooks) = principal_chains
+                .remove(&none_mode.principal_id)
+                .unwrap_or((RouterPluginCache::Inherit, ObservabilityHooksCache::Inherit));
+            specs.insert(
+                none_mode.principal_id.clone(),
+                PrincipalSpecCached {
+                    id: none_mode.principal_id.clone(),
+                    principal_type: PrincipalType::Machine,
+                    allowed_models: GlobSetBuilder::new()
+                        .build()
+                        .expect("empty allowed-model glob set builds"),
+                    allowed_models_exact: HashSet::new(),
+                    default_limits: Vec::new(),
+                    enabled: true,
+                    router_plugin,
+                    observability_hooks,
+                },
+            );
+        }
+
+        Ok(Arc::new(PrincipalView { specs }))
     }
 
     pub fn get(&self, principal_id: &str) -> Option<&PrincipalSpecCached> {
@@ -106,6 +156,18 @@ impl PrincipalView {
     }
 }
 
+impl std::fmt::Debug for PrincipalSpecCached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrincipalSpecCached")
+            .field("id", &self.id)
+            .field("principal_type", &self.principal_type)
+            .field("allowed_models_exact", &self.allowed_models_exact)
+            .field("default_limits", &self.default_limits)
+            .field("enabled", &self.enabled)
+            .finish_non_exhaustive()
+    }
+}
+
 impl PrincipalSpecCached {
     pub fn id(&self) -> &str {
         &self.id
@@ -113,6 +175,26 @@ impl PrincipalSpecCached {
 
     pub fn principal_type(&self) -> PrincipalType {
         self.principal_type
+    }
+
+    pub fn resolved_router<'a>(
+        &'a self,
+        global: &'a Arc<dyn RouterPlugin>,
+    ) -> &'a Arc<dyn RouterPlugin> {
+        match &self.router_plugin {
+            RouterPluginCache::Inherit => global,
+            RouterPluginCache::Explicit(handle) => handle,
+        }
+    }
+
+    pub fn resolved_hooks<'a>(
+        &'a self,
+        global: &'a [Arc<dyn ObservabilityHook>],
+    ) -> &'a [Arc<dyn ObservabilityHook>] {
+        match &self.observability_hooks {
+            ObservabilityHooksCache::Inherit => global,
+            ObservabilityHooksCache::Explicit(hooks) => hooks.as_slice(),
+        }
     }
 }
 
@@ -150,4 +232,109 @@ impl From<cc_lb_config::PrincipalType> for PrincipalType {
 
 fn is_glob_pattern(model: &str) -> bool {
     model.chars().any(|ch| matches!(ch, '*' | '?' | '[' | ']'))
+}
+
+fn invalid_allowed_models_glob(
+    principal_id: &str,
+    pattern: &str,
+    source: globset::Error,
+) -> ConfigError {
+    ConfigError::InvalidPrincipalAllowedModelsGlob {
+        principal_id: principal_id.to_owned(),
+        pattern: pattern.to_owned(),
+        message: source.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cc_lb_plugin_api::{
+        ObservabilityError, ObserveEvent, Principal, RequestContext, RouteDecision, RouteError,
+    };
+
+    struct StubRouter(&'static str);
+    impl RouterPlugin for StubRouter {
+        fn route(&self, _: &RequestContext, _: &Principal) -> Result<RouteDecision, RouteError> {
+            unimplemented!("StubRouter({}) is for identity comparison only", self.0)
+        }
+    }
+
+    struct StubHook(&'static str);
+    impl ObservabilityHook for StubHook {
+        fn observe(&self, _: ObserveEvent) -> Result<(), ObservabilityError> {
+            unimplemented!("StubHook({}) is for identity comparison only", self.0)
+        }
+    }
+
+    fn cached(router: RouterPluginCache, hooks: ObservabilityHooksCache) -> PrincipalSpecCached {
+        PrincipalSpecCached {
+            id: "test".to_owned(),
+            principal_type: PrincipalType::Machine,
+            allowed_models: GlobSetBuilder::new().build().unwrap(),
+            allowed_models_exact: HashSet::new(),
+            default_limits: Vec::new(),
+            enabled: true,
+            router_plugin: router,
+            observability_hooks: hooks,
+        }
+    }
+
+    #[test]
+    fn principal_spec_cached_inherit_resolves_to_global() {
+        let global: Arc<dyn RouterPlugin> = Arc::new(StubRouter("global"));
+        let spec = cached(RouterPluginCache::Inherit, ObservabilityHooksCache::Inherit);
+
+        let resolved = spec.resolved_router(&global);
+
+        assert!(
+            Arc::ptr_eq(resolved, &global),
+            "Inherit must yield the borrowed global handle by identity"
+        );
+    }
+
+    #[test]
+    fn principal_spec_cached_explicit_router_overrides_global() {
+        let global: Arc<dyn RouterPlugin> = Arc::new(StubRouter("global"));
+        let explicit: Arc<dyn RouterPlugin> = Arc::new(StubRouter("explicit"));
+        let spec = cached(
+            RouterPluginCache::Explicit(explicit.clone()),
+            ObservabilityHooksCache::Inherit,
+        );
+
+        let resolved = spec.resolved_router(&global);
+
+        assert!(Arc::ptr_eq(resolved, &explicit));
+        assert!(!Arc::ptr_eq(resolved, &global));
+    }
+
+    #[test]
+    fn principal_spec_cached_inherit_hooks_returns_global_slice() {
+        let global: Vec<Arc<dyn ObservabilityHook>> =
+            vec![Arc::new(StubHook("g1")), Arc::new(StubHook("g2"))];
+        let spec = cached(RouterPluginCache::Inherit, ObservabilityHooksCache::Inherit);
+
+        let resolved = spec.resolved_hooks(&global);
+
+        assert_eq!(resolved.len(), 2);
+        assert!(Arc::ptr_eq(&resolved[0], &global[0]));
+        assert!(Arc::ptr_eq(&resolved[1], &global[1]));
+    }
+
+    #[test]
+    fn principal_spec_cached_explicit_empty_hooks_returns_empty() {
+        let global: Vec<Arc<dyn ObservabilityHook>> =
+            vec![Arc::new(StubHook("g1")), Arc::new(StubHook("g2"))];
+        let spec = cached(
+            RouterPluginCache::Inherit,
+            ObservabilityHooksCache::Explicit(Vec::new()),
+        );
+
+        let resolved = spec.resolved_hooks(&global);
+
+        assert!(
+            resolved.is_empty(),
+            "Explicit(vec![]) must return an empty slice, NOT the global chain"
+        );
+    }
 }

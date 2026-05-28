@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::io;
 use std::net::SocketAddr;
@@ -18,23 +18,26 @@ use axum::http::{HeaderName, Request, Response, StatusCode};
 use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, DownstreamAuthMode, PluginRef, TlsConfig};
+use cc_lb_config::{Config, ConfigError, DownstreamAuthMode, PluginRef, TlsConfig};
 use cc_lb_core::BreakerState;
 use cc_lb_core::{
     BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
     CircuitBreakerDispatch, ErrorNormalizer, HopByHopStripLayer, Lifecycle, LifecycleConfig,
     UpstreamDispatch, UpstreamKind,
     api_keys::{
-        builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
-        limit_engine::LimitEngine, principal_view::PrincipalView,
+        builtin_authn::BuiltinAuthn,
+        concurrent_guard::KeyConcurrencyManager,
+        key_store::KeyStore,
+        limit_engine::LimitEngine,
+        principal_view::{ObservabilityHooksCache, PrincipalView, RouterPluginCache},
     },
     make_default_dispatcher, spawn_audit_writer,
     usage_pruner::UsagePruner,
 };
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
-use cc_lb_plugin_api::{ObservabilityHook, PluginManifest, PluginRuntime};
+use cc_lb_plugin_api::{ObservabilityHook, PluginManifest, RouterPlugin, RuntimeError};
 use cc_lb_pricing::LiteLlmLoader;
-use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
 use cc_lb_storage_api::ManagedKeyStore;
 use cc_lb_storage_redb::Storage;
 use http_body_util::BodyExt;
@@ -46,7 +49,9 @@ use tokio::task::{JoinError, JoinHandle};
 use tower::ServiceBuilder;
 
 use crate::build_meta::BuildMeta;
-use crate::builtins::{self, BuiltinRouter, CompositeSignerFactory, NoopObservabilityHook};
+use crate::builtins::{
+    self, BuiltinError, BuiltinRouter, CompositeSignerFactory, NoopObservabilityHook,
+};
 use crate::drain::DrainController;
 use crate::preflight::{self, PreflightOptions};
 use crate::reload::ConfigWatcher;
@@ -62,6 +67,44 @@ pub const PROXY_FILES_ROUTE_PATHS: &[&str] = &[
     PROXY_FILES_ROUTE_ITEM,
     PROXY_FILES_ROUTE_ITEM_CONTENT,
 ];
+
+#[allow(clippy::type_complexity)]
+pub(crate) fn build_global_chain(
+    config: &Config,
+    runtime: &ExtismRuntime,
+    staged: &mut Vec<StagedSlot>,
+) -> Result<(Arc<dyn RouterPlugin>, Vec<Arc<dyn ObservabilityHook>>), GlobalChainError> {
+    let global_router: Arc<dyn RouterPlugin> = match &config.plugins.router_plugin {
+        Some(plugin) => {
+            let manifest = manifest_from_plugin(plugin)?;
+            let (handle, slot) = runtime.instantiate_router_global(&plugin.name, &manifest)?;
+            staged.push(slot);
+            handle
+        }
+        None => Arc::new(BuiltinRouter::new(config)?),
+    };
+
+    let mut global_observability_hooks =
+        Vec::with_capacity(config.plugins.observability_hooks.len());
+    for plugin in &config.plugins.observability_hooks {
+        let manifest = manifest_from_plugin(plugin)?;
+        let (handle, slot) = runtime.instantiate_observability_global(&plugin.name, &manifest)?;
+        staged.push(slot);
+        global_observability_hooks.push(handle);
+    }
+
+    Ok((global_router, global_observability_hooks))
+}
+
+#[derive(Debug, Error)]
+pub enum GlobalChainError {
+    #[error(transparent)]
+    Builtin(#[from] BuiltinError),
+    #[error(transparent)]
+    Runtime(#[from] RuntimeError),
+    #[error(transparent)]
+    Config(#[from] ConfigError),
+}
 
 pub struct App {
     pub router: Router,
@@ -286,9 +329,7 @@ pub fn build_app_with_storage(
     storage: Option<Arc<cc_lb_storage_redb::Storage>>,
     aead: Arc<AeadService>,
 ) -> Result<App, BuildError> {
-    let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config)));
     let key_store = Arc::new(KeyStore::new(managed_store));
-    let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
     let price_catalog = cc_lb_pricing::global_catalog().clone();
     spawn_price_catalog_loader(&config, storage.clone(), price_catalog.clone());
     if let Some(storage) = storage.clone() {
@@ -302,6 +343,55 @@ pub fn build_app_with_storage(
         }
         None => (None, None),
     };
+    let runtime = Arc::new(ExtismRuntime::new());
+    let signer_factory_for_lifecycle = Arc::new(CompositeSignerFactory::new(
+        &config,
+        storage.clone(),
+        aead.clone(),
+    ));
+
+    let mut all_staged = Vec::new();
+    let (global_router, global_observability_hooks) =
+        build_global_chain(&config, &runtime, &mut all_staged)?;
+
+    let mut principal_chains: HashMap<String, (RouterPluginCache, ObservabilityHooksCache)> =
+        HashMap::new();
+    for (principal_id, spec) in &config.principals {
+        let router_cache = match &spec.router_plugin {
+            Some(plugin) => {
+                let manifest = manifest_from_plugin(plugin)?;
+                let (handle, slot) =
+                    runtime.instantiate_router_for(principal_id, &plugin.name, &manifest)?;
+                all_staged.push(slot);
+                RouterPluginCache::Explicit(handle)
+            }
+            None => RouterPluginCache::Inherit,
+        };
+        let hooks_cache = match &spec.observability_hooks {
+            Some(plugins) => {
+                let mut handles = Vec::with_capacity(plugins.len());
+                for plugin in plugins {
+                    let manifest = manifest_from_plugin(plugin)?;
+                    let (handle, slot) = runtime.instantiate_observability_for(
+                        principal_id,
+                        &plugin.name,
+                        &manifest,
+                    )?;
+                    all_staged.push(slot);
+                    handles.push(handle);
+                }
+                ObservabilityHooksCache::Explicit(handles)
+            }
+            None => ObservabilityHooksCache::Inherit,
+        };
+        principal_chains.insert(principal_id.clone(), (router_cache, hooks_cache));
+    }
+
+    let view = PrincipalView::from_config(&config, principal_chains)?;
+    runtime.commit_staged(all_staged)?;
+
+    let principal_view = Arc::new(ArcSwap::from(view));
+    let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
     let limit_engine = LimitEngine::new(concurrent_mgr, principal_view.clone());
     if let Some(storage) = storage.clone() {
         limit_engine.startup_replay(storage);
@@ -313,30 +403,14 @@ pub fn build_app_with_storage(
         principal_view.clone(),
     ));
 
-    let runtime = ExtismRuntime::new();
-    let signer_factory_for_lifecycle = Arc::new(CompositeSignerFactory::new(
-        &config,
-        storage.clone(),
-        aead.clone(),
-    ));
-    let router_plugin = match &config.plugins.router_plugin {
-        Some(plugin) => runtime.instantiate_router(&manifest_from_plugin(plugin)?)?,
-        None => Arc::new(BuiltinRouter::new(&config)?),
-    };
-    let mut observability_hooks: Vec<Arc<dyn ObservabilityHook>> = Vec::new();
-    for plugin in &config.plugins.observability_hooks {
-        observability_hooks
-            .push(runtime.instantiate_observability(&manifest_from_plugin(plugin)?)?);
-    }
-
     let error_normalizer = Arc::new(error_normalizer(&config)?);
     let (dispatcher, breaker_registry) = dispatcher(&config);
     let mut lifecycle = Lifecycle::new(
         builtin_authn.clone(),
         signer_factory_for_lifecycle,
-        router_plugin,
+        global_router,
         dispatcher,
-        observability_hooks,
+        global_observability_hooks,
         LifecycleConfig {
             messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
             files_body_cap_bytes: cap_to_usize(config.body.files_cap_bytes),
@@ -363,6 +437,7 @@ pub fn build_app_with_storage(
         Arc::new(ConfigWatcher::new_with_principal_view(
             path,
             config.clone(),
+            Arc::clone(&runtime),
             Some(principal_view.clone()),
         ))
     });
@@ -460,8 +535,9 @@ impl CurrentConfig for InMemoryCurrentConfig {
         config
             .validate()
             .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
-        self.principal_view
-            .store(PrincipalView::from_config(&config));
+        let principal_view = PrincipalView::from_config(&config, std::collections::HashMap::new())
+            .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
+        self.principal_view.store(principal_view);
         let config = Arc::new(config);
         self.current.store(config.clone());
         Ok(config)
@@ -870,13 +946,15 @@ fn error_normalizer(config: &Config) -> Result<ErrorNormalizer, BuildError> {
     Ok(normalizer)
 }
 
-fn manifest_from_plugin(plugin: &PluginRef) -> Result<PluginManifest, BuildError> {
+pub(crate) fn manifest_from_plugin(plugin: &PluginRef) -> Result<PluginManifest, ConfigError> {
     let artifact = plugin
         .wasm_path
         .as_ref()
-        .ok_or_else(|| BuildError::InvalidPlugin {
-            name: plugin.name.clone(),
-            reason: "missing wasm_path".to_owned(),
+        .ok_or_else(|| {
+            ConfigError::Validation(cc_lb_config::ValidationError {
+                field: format!("plugins.{}.wasm_path", plugin.name),
+                message: "missing plugin wasm path".to_owned(),
+            })
         })?
         .display()
         .to_string();
@@ -1002,5 +1080,15 @@ mod tests {
         };
         let _app = build_app_for_testing_postgres(&url).await?;
         Ok(())
+    }
+}
+
+impl From<GlobalChainError> for BuildError {
+    fn from(error: GlobalChainError) -> Self {
+        match error {
+            GlobalChainError::Builtin(source) => Self::Builtin(source),
+            GlobalChainError::Runtime(source) => Self::Runtime(source),
+            GlobalChainError::Config(source) => Self::Config(source),
+        }
     }
 }

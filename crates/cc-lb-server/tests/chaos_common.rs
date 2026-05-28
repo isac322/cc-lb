@@ -9,7 +9,7 @@ use cc_lb_config::{
     UpstreamKind, UpstreamSpec,
 };
 use cc_lb_server::app::build_app_with_path;
-use fake_anthropic::{app as fake_anthropic_app, AppConfig};
+use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;

@@ -9,7 +9,7 @@ use cc_lb_storage_api::types::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
-fn engine(enabled: bool) -> Arc<LimitEngine> {
+fn engine(enabled: bool) -> (Arc<LimitEngine>, Arc<PrincipalView>) {
     let mut principals = HashMap::new();
     principals.insert(
         "principal-1".to_owned(),
@@ -19,16 +19,25 @@ fn engine(enabled: bool) -> Arc<LimitEngine> {
             enabled,
             allowed_models: Vec::new(),
             credentials_ref: None,
+            router_plugin: None,
+            observability_hooks: None,
         },
     );
-    let view = PrincipalView::from_config(&Config {
-        principals,
-        ..Config::default()
-    });
+    let view = PrincipalView::from_config(
+        &Config {
+            principals,
+            ..Config::default()
+        },
+        std::collections::HashMap::new(),
+    )
+    .expect("principal view builds");
 
-    LimitEngine::new(
-        Arc::new(KeyConcurrencyManager::new()),
-        Arc::new(ArcSwap::from(view)),
+    (
+        LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(ArcSwap::from(view.clone())),
+        ),
+        view,
     )
 }
 
@@ -51,29 +60,29 @@ fn limit(kind: StoredLimitKind, window_secs: u64, cap_micros: i64) -> StoredLimi
 
 #[test]
 fn requests_cap_two_rejects_third() {
-    let engine = engine(true);
+    let (engine, view) = engine(true);
     let record = record(
         KeyStatus::Active,
         vec![limit(StoredLimitKind::Requests, 60, 2)],
     );
 
-    let first = engine.reserve(&record, "principal-1", "claude", 0, 0, None);
+    let first = engine.reserve(&view, &record, "principal-1", "claude", 0, 0, None);
     assert!(first.is_ok());
-    let second = engine.reserve(&record, "principal-1", "claude", 0, 0, None);
+    let second = engine.reserve(&view, &record, "principal-1", "claude", 0, 0, None);
     assert!(second.is_ok());
-    let third = engine.reserve(&record, "principal-1", "claude", 0, 0, None);
+    let third = engine.reserve(&view, &record, "principal-1", "claude", 0, 0, None);
     assert_eq!(third.err(), Some(RejectReason::RequestsRateLimit));
 }
 
 #[test]
 fn output_cap_rejects_single_request_above_cap() {
-    let engine = engine(true);
+    let (engine, view) = engine(true);
     let record = record(
         KeyStatus::Active,
         vec![limit(StoredLimitKind::OutputTokens, 60, 100)],
     );
 
-    let result = engine.reserve(&record, "principal-1", "claude", 200, 0, None);
+    let result = engine.reserve(&view, &record, "principal-1", "claude", 200, 0, None);
 
     assert_eq!(
         result.err(),
@@ -86,40 +95,40 @@ fn output_cap_rejects_single_request_above_cap() {
 
 #[test]
 fn cost_usd_cap_rejects_when_estimate_exceeds_cap() {
-    let engine = engine(true);
+    let (engine, view) = engine(true);
     let record = record(
         KeyStatus::Active,
         vec![limit(StoredLimitKind::CostUsd, 60, 1_000)],
     );
 
-    let result = engine.reserve(&record, "principal-1", "claude", 0, 0, Some(2_000));
+    let result = engine.reserve(&view, &record, "principal-1", "claude", 0, 0, Some(2_000));
 
     assert_eq!(result.err(), Some(RejectReason::CostRateLimit));
 }
 
 #[test]
 fn principal_disabled_rejects() {
-    let engine = engine(false);
+    let (engine, view) = engine(false);
     let record = record(KeyStatus::Active, Vec::new());
 
-    let result = engine.reserve(&record, "principal-1", "claude", 0, 0, None);
+    let result = engine.reserve(&view, &record, "principal-1", "claude", 0, 0, None);
 
     assert_eq!(result.err(), Some(RejectReason::PrincipalDisabled));
 }
 
 #[test]
 fn record_disabled_rejects() {
-    let engine = engine(true);
+    let (engine, view) = engine(true);
     let record = record(KeyStatus::Disabled, Vec::new());
 
-    let result = engine.reserve(&record, "principal-1", "claude", 0, 0, None);
+    let result = engine.reserve(&view, &record, "principal-1", "claude", 0, 0, None);
 
     assert_eq!(result.err(), Some(RejectReason::KeyDisabled));
 }
 
 #[test]
 fn reconcile_refund_leaves_actual_output_usage() {
-    let engine = engine(true);
+    let (engine, view) = engine(true);
     let record = record(
         KeyStatus::Active,
         vec![
@@ -129,7 +138,7 @@ fn reconcile_refund_leaves_actual_output_usage() {
     );
 
     let reservation = engine
-        .reserve(&record, "principal-1", "claude", 100, 0, None)
+        .reserve(&view, &record, "principal-1", "claude", 100, 0, None)
         .expect("reservation succeeds");
     engine.reconcile(reservation, 0, 50, 0);
 

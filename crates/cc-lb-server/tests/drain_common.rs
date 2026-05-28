@@ -8,10 +8,10 @@ use cc_lb_config::{
     AuthStrategy, Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, StorageConfig,
     UpstreamKind, UpstreamSpec,
 };
-use cc_lb_server::app::{build_app_with_path, BuildError};
+use cc_lb_server::app::{BuildError, build_app_with_path};
 use cc_lb_server::drain::DrainController;
 use cc_lb_server::signal::SignalHandle;
-use fake_anthropic::{app as fake_anthropic_app, AppConfig};
+use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};

@@ -3,7 +3,6 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use arc_swap::ArcSwap;
 use cc_lb_storage_api::types::{KeyStatus as StoredKeyStatus, StoredApiKeyRecord};
 use parking_lot::RwLock;
 use serde::Serialize;
@@ -67,7 +66,6 @@ struct LimitEngineInner {
     rolling: RwLock<HashMap<RollingKey, RingCounter>>,
     effective_limits: RwLock<HashMap<(String, String), Vec<Limit>>>,
     concurrent_mgr: Arc<KeyConcurrencyManager>,
-    principal_view: Arc<ArcSwap<PrincipalView>>,
 }
 
 pub struct Reservation {
@@ -144,20 +142,21 @@ impl RingCounter {
 impl LimitEngine {
     pub fn new(
         concurrent_mgr: Arc<KeyConcurrencyManager>,
-        principal_view: Arc<ArcSwap<PrincipalView>>,
+        _principal_view: Arc<arc_swap::ArcSwap<PrincipalView>>,
     ) -> Arc<Self> {
         Arc::new(Self {
             inner: Arc::new(LimitEngineInner {
                 rolling: RwLock::new(HashMap::new()),
                 effective_limits: RwLock::new(HashMap::new()),
                 concurrent_mgr,
-                principal_view,
             }),
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn reserve(
         self: &Arc<Self>,
+        view: &PrincipalView,
         record: &StoredApiKeyRecord,
         principal_id: &str,
         model: &str,
@@ -167,7 +166,6 @@ impl LimitEngine {
     ) -> Result<Reservation, RejectReason> {
         let now_sec = now_sec();
         let key_id = key_id_for(record);
-        let view = self.inner.principal_view.load();
 
         match view.principal_status(principal_id) {
             PrincipalStatus::Missing => return Err(RejectReason::PrincipalMissing),
@@ -376,16 +374,12 @@ impl LimitEngine {
 
     pub fn snapshot_for_principal(
         &self,
+        view: &PrincipalView,
         principal_id: &str,
         identity_filter: IdentityFilter,
     ) -> PrincipalLimitsSnapshot {
         let now_sec = now_sec();
-        let defaults = self
-            .inner
-            .principal_view
-            .load()
-            .default_limits(principal_id)
-            .to_vec();
+        let defaults = view.default_limits(principal_id).to_vec();
         let effective_limits = self.inner.effective_limits.read().clone();
         let mut identities = Vec::new();
 

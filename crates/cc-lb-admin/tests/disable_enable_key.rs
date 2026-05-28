@@ -22,12 +22,19 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
             Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
             Arc::new(arc_swap::ArcSwap::from(
-                cc_lb_core::api_keys::principal_view::PrincipalView::from_config(&Config::default()),
+                cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
+                    &Config::default(),
+                    std::collections::HashMap::new(),
+                )
+                .expect("principal view builds"),
             )),
         ),
         lifecycle: None,
         audit_sink: None,
-        principal_view: Arc::new(arc_swap::ArcSwap::from(PrincipalView::from_config(&config))),
+        principal_view: Arc::new(arc_swap::ArcSwap::from(
+            PrincipalView::from_config(&config, std::collections::HashMap::new())
+                .expect("principal view builds"),
+        )),
         config: Arc::new(config),
         admin_token: Some("test-token".to_owned()),
         start_time: std::time::Instant::now(),
@@ -48,6 +55,8 @@ fn test_config() -> Config {
             enabled: true,
             allowed_models: vec!["claude-3.5-sonnet".to_owned()],
             credentials_ref: None,
+            router_plugin: None,
+            observability_hooks: None,
         },
     );
     config
