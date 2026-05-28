@@ -31,6 +31,8 @@ pub enum StorageError {
     Serialization(#[from] serde_json::Error),
     #[error("aead: {0}")]
     Aead(String),
+    #[error("invalid input: {field} {reason}")]
+    InvalidInput { field: String, reason: String },
 }
 
 impl StorageError {
