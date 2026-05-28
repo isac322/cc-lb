@@ -31,6 +31,26 @@ const DEFAULT_MAX_CALL_DURATION_MS: u64 = 1_000;
 const DEFAULT_STORAGE_QUOTA_BYTES: usize = 1024 * 1024;
 const DEFAULT_OBSERVE_BATCH_COUNT: usize = 32;
 const DEFAULT_OBSERVE_FLUSH_MS: u64 = 100;
+const GLOBAL_PRINCIPAL: &str = "__global__";
+
+#[derive(Clone, Eq, PartialEq, Hash, Debug)]
+pub(crate) struct SlotKey {
+    principal: String,
+    plugin: String,
+}
+
+impl SlotKey {
+    fn new(principal: impl Into<String>, plugin: impl Into<String>) -> Self {
+        Self {
+            principal: principal.into(),
+            plugin: plugin.into(),
+        }
+    }
+
+    fn global(plugin: impl Into<String>) -> Self {
+        Self::new(GLOBAL_PRINCIPAL, plugin)
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct ExtismRuntimeConfig {
@@ -104,8 +124,8 @@ impl ResourceLimits {
 
 pub struct ExtismRuntime {
     config: ExtismRuntimeConfig,
-    manifests: RwLock<HashMap<String, PluginEntry>>,
-    instances: RwLock<HashMap<String, Arc<PluginSlot>>>,
+    manifests: RwLock<HashMap<SlotKey, PluginEntry>>,
+    instances: RwLock<HashMap<SlotKey, Arc<PluginSlot>>>,
     host_state: Arc<HostState>,
 }
 
@@ -139,22 +159,29 @@ impl ExtismRuntime {
     }
 
     fn register_slot(&self, manifest: &PluginManifest) -> Result<Arc<PluginSlot>, RuntimeError> {
+        self.register_slot_for_key(SlotKey::global(manifest.name.clone()), manifest)
+    }
+
+    fn register_slot_for_key(
+        &self,
+        key: SlotKey,
+        manifest: &PluginManifest,
+    ) -> Result<Arc<PluginSlot>, RuntimeError> {
         let entry = PluginEntry::from_manifest(manifest, &self.config)?;
         let cell = build_plugin_cell(&entry, self.host_state.clone())?;
-        let name = entry.name.clone();
 
         if let Some(slot) = self
             .instances
             .read()
             .map_err(|_| runtime_error("instance registry lock poisoned"))?
-            .get(&name)
+            .get(&key)
             .cloned()
         {
             slot.replace(entry.clone(), cell)?;
             self.manifests
                 .write()
                 .map_err(|_| runtime_error("manifest registry lock poisoned"))?
-                .insert(name, entry);
+                .insert(key, entry);
             return Ok(slot);
         }
 
@@ -162,20 +189,21 @@ impl ExtismRuntime {
         self.manifests
             .write()
             .map_err(|_| runtime_error("manifest registry lock poisoned"))?
-            .insert(name.clone(), entry);
+            .insert(key.clone(), entry);
         self.instances
             .write()
             .map_err(|_| runtime_error("instance registry lock poisoned"))?
-            .insert(name, slot.clone());
+            .insert(key, slot.clone());
         Ok(slot)
     }
 
     pub fn reload(&self, manifest_ref: &str) -> Result<(), RuntimeError> {
+        let key = SlotKey::global(manifest_ref.to_owned());
         let entry = self
             .manifests
             .read()
             .map_err(|_| runtime_error("manifest registry lock poisoned"))?
-            .get(manifest_ref)
+            .get(&key)
             .cloned()
             .ok_or_else(|| RuntimeError::InvalidManifest {
                 reason: format!("unknown plugin manifest: {manifest_ref}"),
@@ -186,7 +214,7 @@ impl ExtismRuntime {
             .instances
             .read()
             .map_err(|_| runtime_error("instance registry lock poisoned"))?
-            .get(manifest_ref)
+            .get(&key)
             .cloned()
             .ok_or_else(|| RuntimeError::InstantiateFailed {
                 reason: format!("plugin instance not registered: {manifest_ref}"),
@@ -195,7 +223,7 @@ impl ExtismRuntime {
         self.manifests
             .write()
             .map_err(|_| runtime_error("manifest registry lock poisoned"))?
-            .insert(manifest_ref.to_owned(), refreshed);
+            .insert(key, refreshed);
         Ok(())
     }
 
@@ -558,5 +586,79 @@ fn metadata_usize(
 fn runtime_error(reason: impl Into<String>) -> RuntimeError {
     RuntimeError::InstantiateFailed {
         reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+    use std::fs;
+
+    use cc_lb_plugin_api::PluginManifest;
+    use serde_json::json;
+
+    use super::*;
+
+    #[test]
+    fn slots_with_same_plugin_name_and_different_principals_coexist() {
+        let fixture = wasm_manifest("router", router_module());
+        let runtime = ExtismRuntime::new();
+        let alice_key = SlotKey::new("alice", "router");
+        let bob_key = SlotKey::new("bob", "router");
+
+        let alice_slot = runtime
+            .register_slot_for_key(alice_key.clone(), &fixture.manifest)
+            .expect("alice router slot registers");
+        let bob_slot = runtime
+            .register_slot_for_key(bob_key.clone(), &fixture.manifest)
+            .expect("bob router slot registers");
+
+        assert!(!Arc::ptr_eq(&alice_slot, &bob_slot));
+        let instances = runtime
+            .instances
+            .read()
+            .expect("instances lock is readable");
+        assert_eq!(instances.len(), 2);
+        assert!(instances.contains_key(&alice_key));
+        assert!(instances.contains_key(&bob_key));
+    }
+
+    struct WasmManifestFixture {
+        _dir: tempfile::TempDir,
+        manifest: PluginManifest,
+    }
+
+    fn wasm_manifest(name: &str, wat: &str) -> WasmManifestFixture {
+        let dir = tempfile::tempdir().expect("tempdir is created");
+        let wasm = wat::parse_str(wat).expect("wat parses");
+        let artifact = dir.path().join(format!("{name}.wasm"));
+        fs::write(&artifact, wasm).expect("wasm fixture is written");
+        WasmManifestFixture {
+            _dir: dir,
+            manifest: PluginManifest {
+                name: name.to_owned(),
+                artifact: artifact.to_string_lossy().into_owned(),
+                config: json!({}),
+                metadata: BTreeMap::new(),
+            },
+        }
+    }
+
+    fn router_module() -> &'static str {
+        r#"
+(module
+  (import "extism:host/env" "alloc" (func $alloc (param i64) (result i64)))
+  (import "extism:host/env" "store_u8" (func $store_u8 (param i64 i32)))
+  (import "extism:host/env" "output_set" (func $output_set (param i64 i64)))
+  (func $out (result i64)
+    (local $ptr i64)
+    (local.set $ptr (call $alloc (i64.const 2)))
+    (call $store_u8 (local.get $ptr) (i32.const 123))
+    (call $store_u8 (i64.add (local.get $ptr) (i64.const 1)) (i32.const 125))
+    (local.get $ptr))
+  (func (export "route") (result i32)
+    (call $output_set (call $out) (i64.const 2))
+    (i32.const 0)))
+"#
     }
 }

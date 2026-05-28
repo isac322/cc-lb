@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cc_lb_core::{spawn_audit_writer, AuditEntry};
+use cc_lb_core::{AuditEntry, spawn_audit_writer};
 use cc_lb_storage_redb::Storage;
 
 #[tokio::test(flavor = "current_thread")]

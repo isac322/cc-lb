@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use cc_lb_config::{Config, Limit as ConfigLimit, LimitKind as ConfigLimitKind};
+use cc_lb_config::{Config, ConfigError, Limit as ConfigLimit, LimitKind as ConfigLimitKind};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::api_keys::types::{Limit, LimitKind, PrincipalType};
@@ -29,26 +29,27 @@ pub struct PrincipalSpecCached {
 }
 
 impl PrincipalView {
-    pub fn from_config(config: &Config) -> Arc<PrincipalView> {
+    pub fn from_config(config: &Config) -> Result<Arc<PrincipalView>, ConfigError> {
         let specs = config
             .principals
             .iter()
-            .map(|(principal_id, principal)| {
+            .map(|(principal_id, principal)| -> Result<_, ConfigError> {
                 let mut exact = HashSet::new();
                 let mut builder = GlobSetBuilder::new();
 
                 for model in &principal.allowed_models {
                     if is_glob_pattern(model) {
-                        builder
-                            .add(Glob::new(model).expect("invalid principal allowed_models glob"));
+                        builder.add(Glob::new(model).map_err(|source| {
+                            invalid_allowed_models_glob(principal_id, model, source)
+                        })?);
                     } else {
                         exact.insert(model.clone());
                     }
                 }
 
-                let allowed_models = builder
-                    .build()
-                    .expect("invalid principal allowed_models glob set");
+                let allowed_models = builder.build().map_err(|source| {
+                    invalid_allowed_models_glob(principal_id, "<compiled glob set>", source)
+                })?;
 
                 let cached = PrincipalSpecCached {
                     id: principal_id.clone(),
@@ -64,11 +65,11 @@ impl PrincipalView {
                     enabled: principal.enabled,
                 };
 
-                (principal_id.clone(), cached)
+                Ok((principal_id.clone(), cached))
             })
-            .collect();
+            .collect::<Result<HashMap<_, _>, ConfigError>>()?;
 
-        Arc::new(PrincipalView { specs })
+        Ok(Arc::new(PrincipalView { specs }))
     }
 
     pub fn get(&self, principal_id: &str) -> Option<&PrincipalSpecCached> {
@@ -150,4 +151,16 @@ impl From<cc_lb_config::PrincipalType> for PrincipalType {
 
 fn is_glob_pattern(model: &str) -> bool {
     model.chars().any(|ch| matches!(ch, '*' | '?' | '[' | ']'))
+}
+
+fn invalid_allowed_models_glob(
+    principal_id: &str,
+    pattern: &str,
+    source: globset::Error,
+) -> ConfigError {
+    ConfigError::InvalidPrincipalAllowedModelsGlob {
+        principal_id: principal_id.to_owned(),
+        pattern: pattern.to_owned(),
+        message: source.to_string(),
+    }
 }

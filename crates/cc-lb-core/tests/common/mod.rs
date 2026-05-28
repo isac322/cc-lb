@@ -17,10 +17,10 @@ use cc_lb_core::{
     ApiKeyAwareSignerFactory, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_plugin_api::{
-    sign_request, DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal,
-    PrincipalKind, RequestContext, RetryDecision, RouteDecision, RouteError, RouterPlugin,
-    ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError, SignerFactory,
-    SigningCapability, Upstream, UpstreamDialect,
+    DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
+    RequestContext, RetryDecision, RouteDecision, RouteError, RouterPlugin, ShapedRequest,
+    ShapedRequestBuilder, SignedRequest, Signer, SignerError, SignerFactory, SigningCapability,
+    Upstream, UpstreamDialect, sign_request,
 };
 use cc_lb_storage_redb::Storage;
 use http::header::CONTENT_TYPE;
@@ -73,9 +73,10 @@ impl TestAuthn {
                     upstream_credential_ref: "test-upstream".to_owned(),
                 }),
                 Arc::new(KeyStore::new(storage)),
-                Arc::new(arc_swap::ArcSwap::from(PrincipalView::from_config(
-                    &cc_lb_config::Config::default(),
-                ))),
+                Arc::new(arc_swap::ArcSwap::from(
+                    PrincipalView::from_config(&cc_lb_config::Config::default())
+                        .expect("principal view builds"),
+                )),
             )),
             state,
             refresh_allowed: true,

@@ -31,7 +31,8 @@ async fn sighup_reloads_body_defaults() {
             Arc::new(arc_swap::ArcSwap::from(
                 cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
                     &cc_lb_config::Config::default(),
-                ),
+                )
+                .expect("principal view builds"),
             )),
         ),
         lifecycle: None,
@@ -39,7 +40,8 @@ async fn sighup_reloads_body_defaults() {
         principal_view: Arc::new(arc_swap::ArcSwap::from(
             cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
                 &cc_lb_admin::CurrentConfig::current_config((watcher.clone()).as_ref()),
-            ),
+            )
+            .expect("principal view builds"),
         )),
         config: watcher.clone(),
         admin_token: Some("test-token".to_string()),

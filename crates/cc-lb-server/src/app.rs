@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use axum::Json;
+use axum::Router;
 use axum::body::Body;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::State;
@@ -15,21 +17,19 @@ use axum::http::header::HeaderValue;
 use axum::http::{HeaderName, Request, Response, StatusCode};
 use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
-use axum::Json;
-use axum::Router;
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DownstreamAuthMode, PluginRef, TlsConfig};
 use cc_lb_core::BreakerState;
 use cc_lb_core::{
+    BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
+    CircuitBreakerDispatch, ErrorNormalizer, HopByHopStripLayer, Lifecycle, LifecycleConfig,
+    UpstreamDispatch, UpstreamKind,
     api_keys::{
         builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
         limit_engine::LimitEngine, principal_view::PrincipalView,
     },
     make_default_dispatcher, spawn_audit_writer,
     usage_pruner::UsagePruner,
-    BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
-    CircuitBreakerDispatch, ErrorNormalizer, HopByHopStripLayer, Lifecycle, LifecycleConfig,
-    UpstreamDispatch, UpstreamKind,
 };
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_plugin_api::{ObservabilityHook, PluginManifest, PluginRuntime};
@@ -219,7 +219,7 @@ pub fn build_app_with_storage(
         return Err(BuildError::StorageRequired);
     }
 
-    let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config)));
+    let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config)?));
     let key_store = storage
         .as_ref()
         .map(|storage| Arc::new(KeyStore::new(storage.clone())));
@@ -252,8 +252,11 @@ pub fn build_app_with_storage(
 
     let runtime = ExtismRuntime::new();
     let authn = builtin_authn.clone().ok_or(BuildError::StorageRequired)?;
-    let signer_factory_for_lifecycle =
-        Arc::new(CompositeSignerFactory::new(&config, storage.clone(), aead.clone()));
+    let signer_factory_for_lifecycle = Arc::new(CompositeSignerFactory::new(
+        &config,
+        storage.clone(),
+        aead.clone(),
+    ));
     let router_plugin = match &config.plugins.router_plugin {
         Some(plugin) => runtime.instantiate_router(&manifest_from_plugin(plugin)?)?,
         None => Arc::new(BuiltinRouter::new(&config)?),
@@ -394,8 +397,9 @@ impl CurrentConfig for InMemoryCurrentConfig {
         config
             .validate()
             .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
-        self.principal_view
-            .store(PrincipalView::from_config(&config));
+        let principal_view = PrincipalView::from_config(&config)
+            .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
+        self.principal_view.store(principal_view);
         let config = Arc::new(config);
         self.current.store(config.clone());
         Ok(config)
@@ -640,9 +644,10 @@ fn init_observability(config: &mut Config) -> Result<TracingGuard, BuildError> {
 }
 
 fn open_storage(config: &Config) -> Result<(Option<Arc<Storage>>, Arc<AeadService>), BuildError> {
-    let key_hex = std::env::var(&config.aead.key_env).map_err(|_| BuildError::StorageKeyMissing {
-        env: config.aead.key_env.clone(),
-    })?;
+    let key_hex =
+        std::env::var(&config.aead.key_env).map_err(|_| BuildError::StorageKeyMissing {
+            env: config.aead.key_env.clone(),
+        })?;
     let key = decode_hex_key(&key_hex)?;
     let aead = Arc::new(AeadService::from_master_key(key));
     let storage = match &config.storage {

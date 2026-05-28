@@ -1,29 +1,28 @@
 use std::convert::Infallible;
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axum::body::Body as AxumBody;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    shape_request, sign_request, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
-    RequestContext, RetryDecision, RouterPlugin, SignedRequest, SignerFactory, Upstream,
-    UpstreamError,
+    ObservabilityHook, ObserveEvent, Principal, PrincipalKind, RequestContext, RetryDecision,
+    RouterPlugin, SignedRequest, SignerFactory, Upstream, UpstreamError, shape_request,
+    sign_request,
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_redb::{RequestEvent, Storage, StoredApiKeyRecord};
 use http::header::{CONTENT_TYPE, RETRY_AFTER};
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use thiserror::Error;
 
-use crate::sse_relay;
 use crate::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, BuiltinAuthn};
 use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as LimitReservation};
 use crate::api_keys::types::LimitKind;
@@ -31,6 +30,7 @@ use crate::audit_writer::{AuditEntry, AuditWriterSink};
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
 use crate::hop_by_hop::strip_hop_by_hop;
+use crate::sse_relay;
 
 pub type Body = AxumBody;
 
@@ -1314,8 +1314,8 @@ fn limit_rejection_response(
         HeaderValue::from_static("application/json; charset=utf-8"),
     );
     if status == StatusCode::TOO_MANY_REQUESTS
-        && let Some(value) = retry_after_seconds
-            .and_then(|sec| HeaderValue::from_str(&sec.to_string()).ok())
+        && let Some(value) =
+            retry_after_seconds.and_then(|sec| HeaderValue::from_str(&sec.to_string()).ok())
     {
         response.headers_mut().insert(RETRY_AFTER, value);
     }

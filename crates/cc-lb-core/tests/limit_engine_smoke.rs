@@ -24,7 +24,8 @@ fn engine(enabled: bool) -> Arc<LimitEngine> {
     let view = PrincipalView::from_config(&Config {
         principals,
         ..Config::default()
-    });
+    })
+    .expect("principal view builds");
 
     LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),

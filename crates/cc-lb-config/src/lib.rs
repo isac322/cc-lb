@@ -7,24 +7,23 @@ mod validation;
 use std::env;
 use std::path::Path;
 
-use figment::providers::{Env, Format, Serialized, Toml};
 use figment::Figment;
+use figment::providers::{Env, Format, Serialized, Toml};
 use thiserror::Error;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 pub use types::{
     AdminConfig, AnthropicOAuthSignerConfig, ApiKeysConfig, AuthStrategy, BodyConfig,
-    BulkheadConfig, CircuitBreakerConfig, Config, ConfigOverrides, DnsConfig, DownstreamAuthConfig,
-    DownstreamAuthMode, EgressConfig, Limit, LimitKind, ListenerConfig, ListenerOverrides,
-    NoneModeConfig, NoneModeUpstreamKind, ObservabilityConfig, PluginRef, PluginsConfig,
-    PostgresPoolConfig, PriceCatalogConfig, PrincipalSpec, PrincipalType, SignersConfig,
-    StorageConfig, TimeoutsConfig, TlsConfig, UpstreamKind, UpstreamSpec, DEFAULT_ADMIN_TOKEN_ENV,
+    BulkheadConfig, CircuitBreakerConfig, Config, ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV,
     DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV,
-    DEFAULT_REDB_PATH,
-    DEFAULT_PLUGIN_BATCHED_EVENTS_PER_FLUSH, DEFAULT_PLUGIN_BATCHED_FLUSH_MS,
+    DEFAULT_PLUGIN_BATCHED_EVENTS_PER_FLUSH, DEFAULT_PLUGIN_BATCHED_FLUSH_MS, DEFAULT_REDB_PATH,
+    DnsConfig, DownstreamAuthConfig, DownstreamAuthMode, EgressConfig, Limit, LimitKind,
+    ListenerConfig, ListenerOverrides, NoneModeConfig, NoneModeUpstreamKind, ObservabilityConfig,
+    PluginRef, PluginsConfig, PostgresPoolConfig, PriceCatalogConfig, PrincipalSpec, PrincipalType,
+    SignersConfig, StorageConfig, TimeoutsConfig, TlsConfig, UpstreamKind, UpstreamSpec,
 };
-pub use validation::{validate_postgres_url, ValidationError};
+pub use validation::{ValidationError, validate_postgres_url};
 
 #[derive(Debug, Error)]
 pub enum ConfigError {
@@ -34,6 +33,12 @@ pub enum ConfigError {
     Validation(#[from] ValidationError),
     #[error("invalid postgres URL: {message}")]
     InvalidPostgresUrl { message: String },
+    #[error("principal {principal_id} has invalid allowed_models glob {pattern}: {message}")]
+    InvalidPrincipalAllowedModelsGlob {
+        principal_id: String,
+        pattern: String,
+        message: String,
+    },
     #[error("postgres statement timeout {statement}s must be less than request timeout {request}s")]
     StatementTimeoutExceedsRequestTimeout { statement: u64, request: u64 },
 }

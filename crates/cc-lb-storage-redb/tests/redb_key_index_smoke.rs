@@ -1,4 +1,4 @@
-use cc_lb_storage_redb::{Storage, KEY_INDEX_BY_HASH_V1};
+use cc_lb_storage_redb::{KEY_INDEX_BY_HASH_V1, Storage};
 
 #[test]
 fn key_index_roundtrip_is_encrypted_and_removable() -> Result<(), Box<dyn std::error::Error>> {

@@ -1,19 +1,19 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cc_lb_config::{
     AuthStrategy, Config, DownstreamAuthMode, Limit, LimitKind, NoneModeConfig,
     NoneModeUpstreamKind, PrincipalSpec, PrincipalType, StorageConfig, UpstreamKind, UpstreamSpec,
 };
-use cc_lb_pricing::{global_catalog, UpstreamKind as PricingUpstreamKind};
-use cc_lb_server::{build_app, signal::SignalHandle, BuildError};
+use cc_lb_pricing::{UpstreamKind as PricingUpstreamKind, global_catalog};
+use cc_lb_server::{BuildError, build_app, signal::SignalHandle};
 use reqwest::{Client, StatusCode};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::task::JoinHandle;
-use tokio::time::{sleep, timeout, Instant};
+use tokio::time::{Instant, sleep, timeout};
 use url::Url;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};

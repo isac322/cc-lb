@@ -24,6 +24,29 @@ files_cap_bytes = 1048576
     std::fs::write(path, config).unwrap();
 }
 
+pub fn write_config_with_principal_model(
+    path: &Path,
+    messages_cap_bytes: u64,
+    proxy_addr: SocketAddr,
+    model: &str,
+) {
+    let config = format!(
+        r#"[listener]
+proxy_addr = "{proxy_addr}"
+admin_addr = "127.0.0.1:19090"
+metrics_addr = "127.0.0.1:19091"
+
+[body]
+messages_cap_bytes = {messages_cap_bytes}
+files_cap_bytes = 1048576
+
+[principals.api-key]
+allowed_models = ["{model}"]
+"#
+    );
+    std::fs::write(path, config).unwrap();
+}
+
 pub fn load_config(path: &Path) -> Config {
     Config::load(path).unwrap()
 }

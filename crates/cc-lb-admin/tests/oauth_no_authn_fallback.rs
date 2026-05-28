@@ -2,7 +2,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use cc_lb_admin::{router, AdminState};
+use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_storage_redb::{OAuthCredentials, PrincipalKindLite, Storage, UpstreamKind};
@@ -18,16 +18,22 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
             Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
-            Arc::new(arc_swap::ArcSwap::from(
-                cc_lb_core::api_keys::principal_view::PrincipalView::from_config(&Config::default()),
-            )),
+            Arc::new(
+                arc_swap::ArcSwap::from(
+                    cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
+                        &Config::default(),
+                    )
+                    .expect("principal view builds"),
+                ),
+            ),
         ),
         lifecycle: None,
         audit_sink: None,
         principal_view: Arc::new(arc_swap::ArcSwap::from(
             cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
                 &cc_lb_admin::CurrentConfig::current_config((Arc::new(Config::default())).as_ref()),
-            ),
+            )
+            .expect("principal view builds"),
         )),
         config: Arc::new(Config::default()),
         admin_token: Some("test-token".to_string()),

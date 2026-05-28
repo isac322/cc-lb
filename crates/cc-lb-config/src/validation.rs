@@ -78,7 +78,8 @@ pub fn migrate_legacy_storage_toml(raw_toml: &str) -> Result<String, ValidationE
     let mut storage_was_legacy_only = false;
 
     if let Some(storage) = root.get_mut("storage").and_then(|v| v.as_table_mut()) {
-        let had_legacy = storage.contains_key("redb_path") || storage.contains_key("oauth_aead_key_env");
+        let had_legacy =
+            storage.contains_key("redb_path") || storage.contains_key("oauth_aead_key_env");
         let had_kind = storage.contains_key("kind");
         legacy_redb_path = storage.remove("redb_path");
         legacy_aead_env = storage.remove("oauth_aead_key_env");
@@ -107,8 +108,12 @@ pub fn migrate_legacy_storage_toml(raw_toml: &str) -> Result<String, ValidationE
         }
     }
 
-    toml::to_string(&root)
-        .map_err(|err| ValidationError::new("storage", format!("failed to migrate legacy [storage] block: {err}")))
+    toml::to_string(&root).map_err(|err| {
+        ValidationError::new(
+            "storage",
+            format!("failed to migrate legacy [storage] block: {err}"),
+        )
+    })
 }
 
 fn validate_tls(config: &Config) -> Result<(), ValidationError> {

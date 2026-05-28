@@ -1,8 +1,8 @@
 mod common;
 
 use std::collections::HashMap;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
@@ -14,8 +14,8 @@ use cc_lb_storage_redb::{KeyStatus, StoredApiKeyRecord};
 use http::StatusCode;
 
 use common::{
-    collect_body, lifecycle_with, messages_request, DispatchMode, MockDispatch, RecordingHook,
-    TestAuthn, TestState,
+    DispatchMode, MockDispatch, RecordingHook, TestAuthn, TestState, collect_body, lifecycle_with,
+    messages_request,
 };
 
 fn engine_with_allowed_models(allowed_models: Vec<String>) -> Arc<LimitEngine> {
@@ -33,7 +33,8 @@ fn engine_with_allowed_models(allowed_models: Vec<String>) -> Arc<LimitEngine> {
     let view = PrincipalView::from_config(&Config {
         principals,
         ..Config::default()
-    });
+    })
+    .expect("principal view builds");
     LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),
         Arc::new(ArcSwap::from(view)),

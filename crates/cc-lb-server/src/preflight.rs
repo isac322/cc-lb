@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DEFAULT_REDB_PATH, PluginRef, StorageConfig, TlsConfig};
+use cc_lb_core::api_keys::principal_view::PrincipalView;
 use cc_lb_plugin_api::{PluginManifest, PluginRuntime};
 use cc_lb_runtime_extism::ExtismRuntime;
 use thiserror::Error;
@@ -46,6 +47,8 @@ pub enum PreflightError {
     TlsCertMissing(PathBuf),
     #[error("failed to parse TLS files: {0}")]
     TlsParse(String),
+    #[error(transparent)]
+    Config(#[from] cc_lb_config::ConfigError),
 }
 
 pub async fn run(
@@ -92,6 +95,8 @@ async fn run_inner(
     }
 
     let runtime = ExtismRuntime::new();
+    PrincipalView::from_config(cfg)?;
+    report.successes.push("principal view built".to_owned());
     if let Some(plugin) = &cfg.plugins.router_plugin {
         dry_load_plugin(&runtime, plugin, PluginLoadKind::Router)?;
         report

@@ -874,9 +874,11 @@ mode = "none"
         )
         .expect_err("config should fail validation");
 
-        assert!(error
-            .to_string()
-            .contains("downstream_auth.none_mode must be set iff mode=none"));
+        assert!(
+            error
+                .to_string()
+                .contains("downstream_auth.none_mode must be set iff mode=none")
+        );
     }
 
     #[test]
@@ -896,9 +898,11 @@ upstream_credential_ref = "cred-1"
         )
         .expect_err("config should fail validation");
 
-        assert!(error
-            .to_string()
-            .contains("downstream_auth.none_mode must be set iff mode=none"));
+        assert!(
+            error
+                .to_string()
+                .contains("downstream_auth.none_mode must be set iff mode=none")
+        );
     }
 
     fn legacy_removed_message() -> String {

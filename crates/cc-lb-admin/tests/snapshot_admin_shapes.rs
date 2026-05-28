@@ -5,7 +5,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use cc_lb_admin::{router, AdminState};
+use cc_lb_admin::{AdminState, router};
 use cc_lb_config::{
     AuthStrategy, Config, Limit, LimitKind, PrincipalSpec, PrincipalType, UpstreamKind,
     UpstreamSpec,
@@ -64,7 +64,9 @@ fn test_config() -> Config {
 }
 
 fn test_state(config: Config, storage: Option<Arc<Storage>>) -> AdminState {
-    let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config)));
+    let principal_view = Arc::new(ArcSwap::from(
+        PrincipalView::from_config(&config).expect("principal view builds"),
+    ));
     let limit_engine = LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),
         principal_view.clone(),

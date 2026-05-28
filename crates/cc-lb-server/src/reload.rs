@@ -99,7 +99,14 @@ impl ConfigWatcher {
 
         let new_config = Arc::new(new_config);
         if let Some(principal_view) = &self.principal_view {
-            principal_view.store(PrincipalView::from_config(&new_config));
+            let new_principal_view = match PrincipalView::from_config(&new_config) {
+                Ok(view) => view,
+                Err(source) => {
+                    self.record_failure(&source);
+                    return Err(ReloadError::Config(source));
+                }
+            };
+            principal_view.store(new_principal_view);
         }
         self.current.store(Arc::clone(&new_config));
         metrics::counter!("cc_lb_config_reload_total", "outcome" => "success").increment(1);
