@@ -22,6 +22,7 @@ async fn sighup_reloads_body_defaults() {
     let watcher = Arc::new(ConfigWatcher::new(
         &config_path,
         reload_common::load_config(&config_path),
+        Arc::new(cc_lb_runtime_extism::ExtismRuntime::new()),
     ));
     let app = cc_lb_admin::router(AdminState {
         storage: None,
@@ -29,14 +30,20 @@ async fn sighup_reloads_body_defaults() {
         limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
             Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
             Arc::new(arc_swap::ArcSwap::from(
-                cc_lb_core::api_keys::principal_view::PrincipalView::from_config(&cc_lb_config::Config::default(), std::collections::HashMap::new())
+                cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
+                    &cc_lb_config::Config::default(),
+                    std::collections::HashMap::new(),
+                )
                 .expect("principal view builds"),
             )),
         ),
         lifecycle: None,
         audit_sink: None,
         principal_view: Arc::new(arc_swap::ArcSwap::from(
-            cc_lb_core::api_keys::principal_view::PrincipalView::from_config(&cc_lb_admin::CurrentConfig::current_config((watcher.clone()).as_ref()), std::collections::HashMap::new())
+            cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
+                &cc_lb_admin::CurrentConfig::current_config((watcher.clone()).as_ref()),
+                std::collections::HashMap::new(),
+            )
             .expect("principal view builds"),
         )),
         config: watcher.clone(),

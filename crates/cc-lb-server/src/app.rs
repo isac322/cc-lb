@@ -96,7 +96,7 @@ pub(crate) fn build_global_chain(
 }
 
 #[derive(Debug, Error)]
-pub(crate) enum GlobalChainError {
+pub enum GlobalChainError {
     #[error(transparent)]
     Builtin(#[from] BuiltinError),
     #[error(transparent)]
@@ -278,7 +278,7 @@ pub fn build_app_with_storage(
         }
         None => (None, None),
     };
-    let runtime = ExtismRuntime::new();
+    let runtime = Arc::new(ExtismRuntime::new());
     let signer_factory_for_lifecycle = Arc::new(CompositeSignerFactory::new(
         &config,
         storage.clone(),
@@ -375,6 +375,7 @@ pub fn build_app_with_storage(
         Arc::new(ConfigWatcher::new_with_principal_view(
             path,
             config.clone(),
+            Arc::clone(&runtime),
             Some(principal_view.clone()),
         ))
     });
@@ -805,7 +806,7 @@ fn error_normalizer(config: &Config) -> Result<ErrorNormalizer, BuildError> {
     Ok(normalizer)
 }
 
-fn manifest_from_plugin(plugin: &PluginRef) -> Result<PluginManifest, ConfigError> {
+pub(crate) fn manifest_from_plugin(plugin: &PluginRef) -> Result<PluginManifest, ConfigError> {
     let artifact = plugin
         .wasm_path
         .as_ref()

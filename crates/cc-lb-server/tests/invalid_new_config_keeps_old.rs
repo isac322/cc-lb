@@ -15,7 +15,11 @@ fn invalid_new_config_keeps_old() {
     let proxy_addr: SocketAddr = "127.0.0.1:18080".parse().unwrap();
     reload_common::write_config(&config_path, 100, proxy_addr);
 
-    let watcher = ConfigWatcher::new(&config_path, reload_common::load_config(&config_path));
+    let watcher = ConfigWatcher::new(
+        &config_path,
+        reload_common::load_config(&config_path),
+        Arc::new(cc_lb_runtime_extism::ExtismRuntime::new()),
+    );
     let before_failed = reload_common::counter_value(&handle, "cc_lb_config_reload_failed_total");
     std::fs::write(&config_path, "[listener\nthis is not valid toml").unwrap();
 
@@ -65,6 +69,7 @@ fn invalid_principal_view_reload_keeps_old_view() {
     let watcher = ConfigWatcher::new_with_principal_view(
         &config_path,
         initial_config,
+        Arc::new(cc_lb_runtime_extism::ExtismRuntime::new()),
         Some(principal_view.clone()),
     );
     reload_common::write_config_with_principal_model(&config_path, 200, proxy_addr, "[");
@@ -107,6 +112,7 @@ fn invalid_principal_plugin_reload_aborts_keeps_old_view_and_records_status() {
     let watcher = ConfigWatcher::new_with_principal_view(
         &config_path,
         initial_config,
+        Arc::new(cc_lb_runtime_extism::ExtismRuntime::new()),
         Some(principal_view.clone()),
     );
     reload_common::write_config_with_principal_plugins(

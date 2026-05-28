@@ -1241,7 +1241,7 @@ Max Concurrent: 8 (Wave 2 fully parallel)
   - Files: `crates/cc-lb-runtime-extism/tests/...` (or `tests/property/...`)
   - Pre-commit: `cargo fmt --check && cargo test -p cc-lb-runtime-extism slot_key_uniqueness`
 
-- [ ] 14. Loom test: `PrincipalView` swap + concurrent `handle()` safety
+- [x] 14. Loom test: `PrincipalView` swap + concurrent `handle()` safety
 
   **What to do**:
   - Add `crates/cc-lb-core/tests/loom_principal_view.rs` gated on `#[cfg(loom)]`.

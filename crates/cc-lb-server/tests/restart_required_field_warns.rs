@@ -1,6 +1,7 @@
 mod reload_common;
 
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use cc_lb_server::reload::ConfigWatcher;
 
@@ -12,7 +13,11 @@ fn restart_required_field_warns() {
     let proxy_b: SocketAddr = "127.0.0.1:18081".parse().unwrap();
     reload_common::write_config(&config_path, 100, proxy_a);
 
-    let watcher = ConfigWatcher::new(&config_path, reload_common::load_config(&config_path));
+    let watcher = ConfigWatcher::new(
+        &config_path,
+        reload_common::load_config(&config_path),
+        Arc::new(cc_lb_runtime_extism::ExtismRuntime::new()),
+    );
     reload_common::write_config(&config_path, 100, proxy_b);
 
     let logs = reload_common::capture_warn_logs(|| {
@@ -45,7 +50,11 @@ fn reload_warn_per_principal_path_change() {
         &observe_a,
     );
 
-    let watcher = ConfigWatcher::new(&config_path, reload_common::load_config(&config_path));
+    let watcher = ConfigWatcher::new(
+        &config_path,
+        reload_common::load_config(&config_path),
+        Arc::new(cc_lb_runtime_extism::ExtismRuntime::new()),
+    );
     reload_common::write_config_with_principal_plugins(
         &config_path,
         100,

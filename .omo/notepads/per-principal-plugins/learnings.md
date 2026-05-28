@@ -54,3 +54,10 @@
 - `ConfigWatcher` now owns an `Arc<ExtismRuntime>` and records `LastReloadStatus` through the `cc-lb-admin::CurrentConfig` trait; current admin routes are intentionally unchanged for T18 to surface later.
 - Reload staging builds per-principal router/hook caches before publishing `PrincipalView`, commits staged runtime slots before `principal_view.store`, and records principal/plugin names on per-principal plugin failures.
 - T15 keeps `Lifecycle` global plugin handles frozen; reload only stages configured global plugins when present and leaves a `TODO(T16)` marker after view publication for stale slot eviction.
+
+## 2026-05-28 T14
+
+- `crates/cc-lb-core/tests/loom_principal_view.rs` models the T10 same-snapshot dispatch pattern with `principal_view.load_full()` in one loom thread and `principal_view.store(new_view)` in another, then calls stub `RouterPlugin::route` and `ObservabilityHook::observe` through the resolved chain.
+- The test avoids Extism entirely and uses generation-tagged stub router/hook instances so a torn or mismatched router/hook chain would fail the observed upstream generation assertion.
+- `RUSTFLAGS="--cfg loom"` applies to dependencies too; `cc-lb-core` and `cc-lb-config` now keep loom builds on the minimal `PrincipalView`/config-type surface to avoid Tokio `net`/`signal` modules that are intentionally disabled under loom.
+- Verification passed with isolated target dirs: `RUSTFLAGS="--cfg loom" CARGO_TARGET_DIR=/tmp/cc-lb-t14-loom-target cargo test -p cc-lb-core --test loom_principal_view -- --nocapture` and `CARGO_TARGET_DIR=/tmp/cc-lb-t14-build-target cargo build --workspace`.

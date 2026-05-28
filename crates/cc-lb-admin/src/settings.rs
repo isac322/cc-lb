@@ -474,8 +474,8 @@ fn history_summary(config: &Config) -> HistorySummary {
 }
 
 fn plugin_count(config: &Config) -> usize {
-    let global_count =
-        usize::from(config.plugins.router_plugin.is_some()) + config.plugins.observability_hooks.len();
+    let global_count = usize::from(config.plugins.router_plugin.is_some())
+        + config.plugins.observability_hooks.len();
 
     let per_principal_count = config
         .principals
@@ -640,7 +640,7 @@ fn temp_file_name(file_name: &OsStr) -> OsString {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cc_lb_config::{PluginsConfig, PluginRef, PrincipalSpec};
+    use cc_lb_config::{PluginRef, PluginsConfig, PrincipalSpec};
     use std::collections::HashMap;
 
     fn plugin_ref(name: &str) -> PluginRef {
@@ -666,16 +666,20 @@ mod tests {
 
     #[test]
     fn test_plugin_count_with_per_principal_plugins() {
-        let mut principal_a = PrincipalSpec::default();
-        principal_a.router_plugin = Some(plugin_ref("principal_a_router"));
-        principal_a.observability_hooks = Some(vec![
-            plugin_ref("a_hook1"),
-            plugin_ref("a_hook2"),
-            plugin_ref("a_hook3"),
-        ]);
+        let principal_a = PrincipalSpec {
+            router_plugin: Some(plugin_ref("principal_a_router")),
+            observability_hooks: Some(vec![
+                plugin_ref("a_hook1"),
+                plugin_ref("a_hook2"),
+                plugin_ref("a_hook3"),
+            ]),
+            ..Default::default()
+        };
 
-        let mut principal_b = PrincipalSpec::default();
-        principal_b.observability_hooks = Some(vec![plugin_ref("b_hook1"), plugin_ref("b_hook2")]);
+        let principal_b = PrincipalSpec {
+            observability_hooks: Some(vec![plugin_ref("b_hook1"), plugin_ref("b_hook2")]),
+            ..Default::default()
+        };
 
         let mut principals = HashMap::new();
         principals.insert("principal_a".to_owned(), principal_a);
@@ -714,7 +718,10 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(plugin_count(&config), plugin_count(&config_with_empty_principals));
+        assert_eq!(
+            plugin_count(&config),
+            plugin_count(&config_with_empty_principals)
+        );
         assert_eq!(plugin_count(&config), 2);
     }
 }
