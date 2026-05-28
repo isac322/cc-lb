@@ -15,6 +15,7 @@ import { useConfigApply } from '../lib/hooks/useConfigApply';
 import { useConfigDraft } from '../lib/hooks/useConfigDraft';
 import { useConfigSchema } from '../lib/hooks/useConfigSchema';
 import { useConfigValidate } from '../lib/hooks/useConfigValidate';
+import { useStatus } from '../lib/hooks/useStatusOverview';
 
 export default function Settings() {
   const {
@@ -34,6 +35,7 @@ export default function Settings() {
   } = useConfigDraft();
   const { validate, validating } = useConfigValidate();
   const { apply, applying } = useConfigApply();
+  const { generation, replicaHistory } = useStatus();
 
   const [activeSection, setActiveSection] = useState<string>('');
   const [localDraft, setLocalDraft] = useState<Record<string, unknown> | null>(
@@ -284,6 +286,13 @@ export default function Settings() {
           </div>
         </div>
       </Modal>
+
+      <div className="mt-8 pt-4 border-t border-graphite-800 text-xs text-graphite-500 text-center">
+        Replica generation: {generation} • Recent replicas:{' '}
+        {replicaHistory.length > 0
+          ? replicaHistory.map((id) => id.substring(0, 8)).join(', ')
+          : 'none'}
+      </div>
     </>
   );
 }

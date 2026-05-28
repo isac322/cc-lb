@@ -53,7 +53,7 @@ use crate::dynamic_view_builder::{
     Stores as DynamicStores, build_dynamic_view, ensure_wasm_cache_dirs,
 };
 use crate::notify_listener::{NotifyListener, NotifyListenerParams};
-use crate::preflight::{self, PreflightOptions};
+use crate::preflight;
 use crate::reconcile::Reconciler;
 use crate::refresh::{LazyRefresher, OAuthRefresher};
 use crate::reload::ConfigWatcher;
@@ -214,24 +214,54 @@ impl App {
     }
 }
 
-pub async fn run_serve(config_path: &Path) -> Result<(), ServeError> {
+pub async fn run_serve(
+    config_path: &Path,
+    data_dir: Option<&Path>,
+    strict_preflight: bool,
+) -> Result<(), ServeError> {
     let mut config = Config::load(config_path)?;
-    let report = preflight::run(&config, PreflightOptions { skip_bind: false }).await?;
-    print_preflight_report(&report);
+    if let Some(data_dir) = data_dir {
+        config.runtime.data_dir = Some(data_dir.to_path_buf());
+    }
     cc_lb_observability::install_panic_hook(cc_lb_observability::RedactionPolicy::new(
         config.observability.user_prompt_redaction,
     ));
     let _guard = init_observability(&mut config)?;
-    let app = build_app_with_path(config, Some(config_path)).await?;
+    let app = build_app_with_path_inner(
+        config,
+        Some(config_path),
+        Some(StartupPreflight { strict_preflight }),
+    )
+    .await?;
     app.start().await?;
     Ok(())
 }
 
 fn print_preflight_report(report: &preflight::PreflightReport) {
-    tracing::info!("preflight: ok");
+    println!("preflight: ok");
+    println!("preflight: upstream_count: {}", report.upstream_count);
+    println!("preflight: upstream_warnings: {}", report.upstream_warnings);
+    println!("preflight: principal_count: {}", report.principal_count);
+    println!(
+        "preflight: principal_disabled_count: {}",
+        report.principal_disabled_count
+    );
+    println!(
+        "preflight: plugin_chain_entry_count: {}",
+        report.plugin_chain_entry_count
+    );
+    println!(
+        "preflight: plugin_blob_missing_count: {}",
+        report.plugin_blob_missing_count
+    );
     for warning in &report.warnings {
-        tracing::info!("preflight: warning: {warning}");
+        println!("preflight: warning: {warning}");
     }
+}
+
+#[derive(Clone, Copy)]
+struct StartupPreflight {
+    strict_preflight: bool,
 }
 
 pub async fn build_app(config: Config) -> Result<App, BuildError> {
@@ -392,9 +422,25 @@ pub async fn build_app_with_path(
     config: Config,
     config_path: Option<&Path>,
 ) -> Result<App, BuildError> {
+    build_app_with_path_inner(config, config_path, None).await
+}
+
+async fn build_app_with_path_inner(
+    config: Config,
+    config_path: Option<&Path>,
+    startup_preflight: Option<StartupPreflight>,
+) -> Result<App, BuildError> {
     config.validate()?;
     let (managed_store, storage, aead) = open_storage(&config).await?;
-    build_app_with_storage(config, config_path, managed_store, storage, aead).await
+    build_app_with_storage_inner(
+        config,
+        config_path,
+        managed_store,
+        storage,
+        aead,
+        startup_preflight,
+    )
+    .await
 }
 
 pub fn resolve_data_dir(
@@ -431,6 +477,17 @@ pub async fn build_app_with_storage(
     managed_store: Arc<dyn ManagedKeyStore>,
     storage: Arc<dyn Storage>,
     aead: Arc<AeadService>,
+) -> Result<App, BuildError> {
+    build_app_with_storage_inner(config, config_path, managed_store, storage, aead, None).await
+}
+
+async fn build_app_with_storage_inner(
+    config: Config,
+    config_path: Option<&Path>,
+    managed_store: Arc<dyn ManagedKeyStore>,
+    storage: Arc<dyn Storage>,
+    aead: Arc<AeadService>,
+    startup_preflight: Option<StartupPreflight>,
 ) -> Result<App, BuildError> {
     let key_store = Arc::new(KeyStore::new(managed_store));
     let price_catalog = cc_lb_pricing::global_catalog().clone();
@@ -490,27 +547,46 @@ pub async fn build_app_with_storage(
         plugin_registry: storage_for_dynamic.clone(),
         audit: Some(storage_for_dynamic.clone()),
     });
+    let lifecycle_config = LifecycleConfig {
+        messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
+        files_body_cap_bytes: cap_to_usize(config.body.files_cap_bytes),
+        replica_identity,
+    };
+    if let Some(startup_preflight) = startup_preflight {
+        let report = preflight::run_preflight(&stores, &lifecycle_config, &data_dir).await?;
+        print_preflight_report(&report);
+        if startup_preflight.strict_preflight && !report.warnings.is_empty() {
+            eprintln!(
+                "preflight: strict mode failed with {} warning(s)",
+                report.warnings.len()
+            );
+            std::process::exit(1);
+        }
+    }
     let oauth_anthropic = config.oauth.anthropic.clone().unwrap_or_default();
     let oauth_cfg = Arc::new(oauth_anthropic.clone());
     let refresh_cancel = CancellationToken::new();
     let lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>> =
-        replica_identity.as_ref().and_then(|identity| {
-            LazyRefresher::new(
-                stores.clone(),
-                aead.clone(),
-                oauth_cfg.clone(),
-                identity.id,
-                refresh_cancel.clone(),
-            )
-            .map(|refresher| {
-                Arc::new(refresher) as Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>
-            })
-            .map_err(|error| {
-                tracing::warn!(error = %error, "oauth lazy refresher client build failed");
-                error
-            })
-            .ok()
-        });
+        lifecycle_config
+            .replica_identity
+            .as_ref()
+            .and_then(|identity| {
+                LazyRefresher::new(
+                    stores.clone(),
+                    aead.clone(),
+                    oauth_cfg.clone(),
+                    identity.id,
+                    refresh_cancel.clone(),
+                )
+                .map(|refresher| {
+                    Arc::new(refresher) as Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>
+                })
+                .map_err(|error| {
+                    tracing::warn!(error = %error, "oauth lazy refresher client build failed");
+                    error
+                })
+                .ok()
+            });
     let initial_view = build_dynamic_view(
         &stores,
         &oauth_anthropic,
@@ -547,16 +623,15 @@ pub async fn build_app_with_storage(
     let notify_listener_task = Some(tokio::spawn(async move {
         notify_listener.run().await;
     }));
-    let replica_id = replica_identity.as_ref().map(|identity| identity.id);
+    let replica_id = lifecycle_config
+        .replica_identity
+        .as_ref()
+        .map(|identity| identity.id);
 
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
         dynamic_view_holder,
-        LifecycleConfig {
-            messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
-            files_body_cap_bytes: cap_to_usize(config.body.files_cap_bytes),
-            replica_identity,
-        },
+        lifecycle_config,
     );
     if let Some(audit_sink) = audit_sink.clone() {
         lifecycle = lifecycle.with_audit_sink(audit_sink);

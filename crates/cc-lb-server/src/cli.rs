@@ -27,6 +27,8 @@ pub enum Command {
         config: PathBuf,
         #[arg(long, value_name = "PATH")]
         data_dir: Option<PathBuf>,
+        #[arg(long)]
+        strict_preflight: bool,
     },
     Config {
         #[command(subcommand)]

@@ -406,6 +406,12 @@ impl PluginRegistryStore for EmptyPluginRegistryStore {
     async fn get_blob_bytes(&self, _sha256: [u8; 32]) -> StorageResult<Option<Vec<u8>>> {
         unimplemented!()
     }
+    async fn get_blob(
+        &self,
+        _sha256: [u8; 32],
+    ) -> StorageResult<Option<cc_lb_storage_api::WasmBlobRecord>> {
+        unimplemented!()
+    }
     async fn list_orphan_blobs(&self) -> StorageResult<Vec<[u8; 32]>> {
         unimplemented!()
     }

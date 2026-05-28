@@ -34,11 +34,6 @@ token_env = "CC_LB_ADMIN_TOKEN"
 [api_keys.price_catalog]
 cache_path = "${dataDir}/litellm.json"
 
-[upstreams.dummy]
-kind = "custom"
-base_url = "http://localhost:8081"
-auth_strategy = "api_key"
-
 [oauth.anthropic]
 client_id = "test-client"
 client_secret = "test-secret"

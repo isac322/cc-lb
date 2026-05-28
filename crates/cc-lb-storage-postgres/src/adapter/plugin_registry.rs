@@ -1,8 +1,8 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     MAX_WASM_BLOB_BYTES, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
-    PluginRegistryStore, PluginSlot, StorageError, StorageResult, WasmBlob, WasmRegistryEntry,
-    WasmRegistryEntryInput, sparse_order, validate_identifier,
+    PluginRegistryStore, PluginSlot, StorageError, StorageResult, WasmBlob, WasmBlobRecord,
+    WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -75,6 +75,21 @@ impl PluginRegistryStore for PostgresStorage {
             .fetch_optional(&self.pool)
             .await
             .map_err(map_sqlx_error)
+    }
+
+    async fn get_blob(&self, sha256: [u8; 32]) -> StorageResult<Option<WasmBlobRecord>> {
+        let row =
+            sqlx::query_scalar::<_, Vec<u8>>("SELECT sha256 FROM wasm_blobs_v2 WHERE sha256 = $1")
+                .bind(sha256.as_slice())
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(map_sqlx_error)?;
+        row.map(|bytes| {
+            Ok(WasmBlobRecord {
+                sha256: sha_to_array(&bytes)?,
+            })
+        })
+        .transpose()
     }
 
     async fn list_orphan_blobs(&self) -> StorageResult<Vec<[u8; 32]>> {

@@ -13,6 +13,7 @@ members = [
     "tests/tls",
     "tests/crash-recovery",
     "tests/integration",
+    "tests/real-client",
 ]
 exclude = ["fuzz"]
 resolver = "2"

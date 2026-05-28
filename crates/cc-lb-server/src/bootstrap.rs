@@ -94,7 +94,7 @@ pub async fn apply_bootstrap(
         let spec: BootstrapSpec = if content.trim().is_empty() {
             BootstrapSpec::default()
         } else {
-            serde_json::from_str::<BootstrapSpec>(&content).unwrap_or_default()
+            toml::from_str::<BootstrapSpec>(&content).unwrap_or_default()
         };
 
         for upstream in spec.upstreams {

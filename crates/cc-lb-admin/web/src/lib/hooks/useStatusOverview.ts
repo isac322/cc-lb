@@ -5,6 +5,7 @@ import type { StatusResponse } from '../types/v1';
 export function useStatus() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
   const [error, setError] = useState<Error | null>(null);
+  const [replicaHistory, setReplicaHistory] = useState<string[]>([]);
 
   useEffect(() => {
     let controller = new AbortController();
@@ -17,6 +18,14 @@ export function useStatus() {
         });
         setStatus(data);
         setError(null);
+
+        if (data.replica_id) {
+          const newReplicaId = data.replica_id;
+          setReplicaHistory((prev) => {
+            if (prev[0] === newReplicaId) return prev;
+            return [newReplicaId, ...prev].slice(0, 3);
+          });
+        }
       } catch (err) {
         if (err instanceof Error && err.name === 'AbortError') return;
         setError(err instanceof Error ? err : new Error(String(err)));
@@ -41,6 +50,7 @@ export function useStatus() {
     principals: status?.principals ?? [],
     generation: status?.generation ?? 0,
     replica_id: status?.replica_id,
+    replicaHistory,
     error,
   };
 }

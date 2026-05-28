@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{
     MAX_WASM_BLOB_BYTES, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
     PluginRegistryStore, PluginSlot, StorageError as ApiStorageError, StorageResult, WasmBlob,
-    WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
+    WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
 };
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
@@ -38,6 +38,14 @@ impl PluginRegistryStore for RedbStorage {
     async fn get_blob_bytes(&self, sha256: [u8; 32]) -> StorageResult<Option<Vec<u8>>> {
         let storage = self.clone();
         tokio::task::spawn_blocking(move || storage.get_blob_bytes_sync(sha256))
+            .await
+            .map_err(map_join_err)?
+            .map_err(map_redb_err)
+    }
+
+    async fn get_blob(&self, sha256: [u8; 32]) -> StorageResult<Option<WasmBlobRecord>> {
+        let storage = self.clone();
+        tokio::task::spawn_blocking(move || storage.get_blob_sync(sha256))
             .await
             .map_err(map_join_err)?
             .map_err(map_redb_err)
@@ -273,6 +281,14 @@ impl RedbStorage {
                     .map_err(StorageError::from)
             })
             .transpose()
+    }
+
+    fn get_blob_sync(&self, sha256: [u8; 32]) -> Result<Option<WasmBlobRecord>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let blobs = read_txn.open_table(WASM_BLOBS_V2)?;
+        Ok(blobs
+            .get(sha256.as_slice())?
+            .map(|_| WasmBlobRecord { sha256 }))
     }
 
     fn list_orphan_blobs_sync(&self) -> Result<Vec<[u8; 32]>, StorageError> {

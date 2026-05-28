@@ -1,23 +1,27 @@
 import { useState } from 'react';
-import { Button } from './primitives/Button';
-import { Modal } from './primitives/Modal';
 import { useCreate } from '../lib/hooks/useUpstreams';
 import type { UpstreamKind, UpstreamResponse } from '../lib/types/v1';
 import { OAuthConnectButton } from './OAuthConnectButton';
+import { Button } from './primitives/Button';
+import { Modal } from './primitives/Modal';
 
 interface UpstreamCreateDialogProps {
   onClose: () => void;
   onSuccess: () => void;
 }
 
-export function UpstreamCreateDialog({ onClose, onSuccess }: UpstreamCreateDialogProps) {
+export function UpstreamCreateDialog({
+  onClose,
+  onSuccess,
+}: UpstreamCreateDialogProps) {
   const [name, setName] = useState('');
   const [kind, setKind] = useState<UpstreamKind>('anthropic_api_key');
   const [apiKeyEnv, setApiKeyEnv] = useState('');
   const [baseUrl, setBaseUrl] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [createdUpstream, setCreatedUpstream] = useState<UpstreamResponse | null>(null);
+  const [createdUpstream, setCreatedUpstream] =
+    useState<UpstreamResponse | null>(null);
 
   const createUpstream = useCreate();
 
@@ -58,7 +62,8 @@ export function UpstreamCreateDialog({ onClose, onSuccess }: UpstreamCreateDialo
     return (
       <Modal isOpen={true} onClose={onClose} title="Connect OAuth">
         <p className="text-sm text-graphite-300 mb-4">
-          Upstream created successfully. Please connect Claude OAuth to continue.
+          Upstream created successfully. Please connect Claude OAuth to
+          continue.
         </p>
         <div className="py-6 flex justify-center">
           <OAuthConnectButton
@@ -78,8 +83,9 @@ export function UpstreamCreateDialog({ onClose, onSuccess }: UpstreamCreateDialo
       </p>
       <div className="space-y-4 py-4">
         <div className="space-y-2">
-          <label className="text-sm font-medium text-graphite-200">Name</label>
+          <label htmlFor="name" className="text-sm font-medium text-graphite-200">Name</label>
           <input
+            id="name"
             className="w-full bg-graphite-900 border border-graphite-700 rounded px-3 py-2 text-sm text-graphite-100 focus:outline-none focus:border-cyan-500"
             value={name}
             onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
@@ -130,10 +136,11 @@ export function UpstreamCreateDialog({ onClose, onSuccess }: UpstreamCreateDialo
 
         {kind === 'anthropic_api_key' && (
           <div className="space-y-2">
-            <label className="text-sm font-medium text-graphite-200">
+            <label htmlFor="api_key_env" className="text-sm font-medium text-graphite-200">
               API Key Env Var
             </label>
             <input
+              id="api_key_env"
               className="w-full bg-graphite-900 border border-graphite-700 rounded px-3 py-2 text-sm text-graphite-100 focus:outline-none focus:border-cyan-500"
               value={apiKeyEnv}
               onChange={(e: React.ChangeEvent<HTMLInputElement>) =>

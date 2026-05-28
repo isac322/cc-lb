@@ -15,6 +15,11 @@ pub struct WasmBlob {
     pub parse_validated_at_unix_secs: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WasmBlobRecord {
+    pub sha256: [u8; 32],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WasmRegistryEntryInput {
     pub name: String,
@@ -102,6 +107,8 @@ pub trait PluginRegistryStore: Send + Sync {
         blob: WasmBlob,
         entry: WasmRegistryEntryInput,
     ) -> StorageResult<WasmRegistryEntry>;
+
+    async fn get_blob(&self, sha256: [u8; 32]) -> StorageResult<Option<WasmBlobRecord>>;
 
     async fn get_blob_bytes(&self, sha256: [u8; 32]) -> StorageResult<Option<Vec<u8>>>;
 

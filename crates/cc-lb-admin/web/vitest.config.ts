@@ -5,6 +5,10 @@ export default defineConfig({
   plugins: [react()],
   test: {
     environment: 'jsdom',
-    include: ['src/lib/hooks/__tests__/**/*.test.ts'],
+    setupFiles: ['./vitest.setup.ts'],
+    include: [
+      'src/lib/hooks/__tests__/**/*.test.ts',
+      'src/components/__tests__/**/*.test.tsx'
+    ],
   },
 });

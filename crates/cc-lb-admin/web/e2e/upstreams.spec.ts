@@ -8,8 +8,8 @@ test.describe('Upstreams Management', () => {
     await page.goto('/upstreams');
   });
 
-  test('should list upstreams', async ({ page }) => {
-    await expect(page.getByRole('cell', { name: 'dummy' })).toBeVisible();
+  test('should list upstreams (empty initially)', async ({ page }) => {
+    await expect(page.getByText('No upstreams configured')).toBeVisible({ timeout: 10000 });
   });
 
   test('should create an API key upstream', async ({ page }) => {

@@ -1,20 +1,13 @@
-import {
-  CheckCircle2,
-  Edit2,
-  Power,
-  PowerOff,
-  RefreshCw,
-  Trash2,
-  XCircle,
-} from 'lucide-react';
+import { Edit2, Power, PowerOff, RefreshCw, Trash2 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { Button } from '../components/primitives/Button';
-import { UpstreamCreateDialog } from '../components/UpstreamCreateDialog';
-import { Modal } from '../components/primitives/Modal';
 import { EmptyState } from '../components/primitives/EmptyState';
 import { ErrorState } from '../components/primitives/ErrorState';
 import { LoadingState } from '../components/primitives/LoadingState';
-
+import { Modal } from '../components/primitives/Modal';
+import { StatusBadge } from '../components/StatusBadge';
+import { UpstreamCreateDialog } from '../components/UpstreamCreateDialog';
+import { useStatus } from '../lib/hooks/useStatusOverview';
 import {
   useDelete,
   useDisable,
@@ -22,42 +15,7 @@ import {
   useList,
   useUpdate,
 } from '../lib/hooks/useUpstreams';
-import { useStatus } from '../lib/hooks/useStatusOverview';
 import { ConflictError, type UpstreamResponse } from '../lib/types/v1';
-
-function UpstreamStatusBadge({
-  status,
-  error,
-}: {
-  status: string;
-  error?: string;
-}) {
-  if (status === 'active') {
-    return (
-      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-green-400/10 text-green-400">
-        <CheckCircle2 className="w-3 h-3" />
-        Active
-      </span>
-    );
-  }
-  if (status === 'disabled') {
-    return (
-      <span className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-graphite-600/20 text-graphite-400">
-        <PowerOff className="w-3 h-3" />
-        Disabled
-      </span>
-    );
-  }
-  return (
-    <span
-      className="inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium bg-red-400/10 text-red-400 cursor-help"
-      title={error || 'Error'}
-    >
-      <XCircle className="w-3 h-3" />
-      Error
-    </span>
-  );
-}
 
 export default function Upstreams() {
   const [isCreating, setIsCreating] = useState(false);
@@ -260,9 +218,16 @@ export default function Upstreams() {
                       {upstream.kind}
                     </td>
                     <td className="px-4 py-3">
-                      <UpstreamStatusBadge
-                        status={statusLabel}
-                        error={status?.last_apply_error}
+                      <StatusBadge
+                        status={statusLabel as 'active' | 'disabled' | 'error'}
+                        lastApplyError={status?.last_apply_error}
+                        lastApplyAt={
+                          status?.last_apply_at_unix_secs
+                            ? new Date(
+                                status.last_apply_at_unix_secs * 1000,
+                              ).toISOString()
+                            : null
+                        }
                       />
                     </td>
                     <td className="px-4 py-3 text-graphite-400">-</td>
@@ -325,17 +290,22 @@ export default function Upstreams() {
       )}
 
       {editingUpstream && (
-        <Modal isOpen={true} onClose={() => setEditingUpstream(null)} title="Edit Upstream">
+        <Modal
+          isOpen={true}
+          onClose={() => setEditingUpstream(null)}
+          title="Edit Upstream"
+        >
           <p className="text-sm text-graphite-300 mb-4">
             Update configuration for {editingUpstream.name}.
           </p>
           <form onSubmit={handleEditSubmit}>
             <div className="space-y-4 py-4">
               <div className="space-y-2">
-                <label className="text-sm font-medium text-graphite-200">
+                <label htmlFor="name" className="text-sm font-medium text-graphite-200">
                   Name
                 </label>
                 <input
+                  id="name"
                   className="w-full bg-graphite-900 border border-graphite-700 rounded px-3 py-2 text-sm text-graphite-100 focus:outline-none focus:border-cyan-500"
                   name="name"
                   defaultValue={editingUpstream.name}
@@ -343,10 +313,11 @@ export default function Upstreams() {
                 />
               </div>
               <div className="space-y-2">
-                <label className="text-sm font-medium text-graphite-200">
+                <label htmlFor="base_url" className="text-sm font-medium text-graphite-200">
                   Base URL
                 </label>
                 <input
+                  id="base_url"
                   className="w-full bg-graphite-900 border border-graphite-700 rounded px-3 py-2 text-sm text-graphite-100 focus:outline-none focus:border-cyan-500"
                   name="base_url"
                   placeholder="Optional"
@@ -382,10 +353,14 @@ export default function Upstreams() {
       )}
 
       {deletingUpstream && (
-        <Modal isOpen={true} onClose={() => setDeletingUpstream(null)} title="Delete Upstream">
+        <Modal
+          isOpen={true}
+          onClose={() => setDeletingUpstream(null)}
+          title="Delete Upstream"
+        >
           <p className="text-sm text-graphite-300 mb-4">
-            Are you sure you want to delete {deletingUpstream.name}? This
-            action cannot be undone.
+            Are you sure you want to delete {deletingUpstream.name}? This action
+            cannot be undone.
           </p>
           <div className="flex justify-end gap-2 mt-4">
             <Button
@@ -406,21 +381,22 @@ export default function Upstreams() {
       )}
 
       {conflictError && (
-        <Modal isOpen={true} onClose={() => setConflictError(null)} title="Conflict Detected">
+        <Modal
+          isOpen={true}
+          onClose={() => setConflictError(null)}
+          title="Conflict Detected"
+        >
           <p className="text-sm text-graphite-300 mb-4">
             Someone else just changed this upstream.
           </p>
           <div className="py-4">
             <p className="text-sm text-graphite-300 mb-4">
-              The current revision is {conflictError.latest.revision}. Would
-              you like to load the latest data?
+              The current revision is {conflictError.latest.revision}. Would you
+              like to load the latest data?
             </p>
           </div>
           <div className="flex justify-end gap-2 mt-4">
-            <Button
-              variant="secondary"
-              onClick={() => setConflictError(null)}
-            >
+            <Button variant="secondary" onClick={() => setConflictError(null)}>
               Cancel
             </Button>
             <Button

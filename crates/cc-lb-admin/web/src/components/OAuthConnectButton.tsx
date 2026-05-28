@@ -1,6 +1,10 @@
-import { useState, useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import {
+  useGet,
+  useOAuthComplete,
+  useOAuthStart,
+} from '../lib/hooks/useUpstreams';
 import { Button } from './primitives/Button';
-import { useOAuthStart, useGet, useOAuthComplete } from '../lib/hooks/useUpstreams';
 import { Modal } from './primitives/Modal';
 
 interface OAuthConnectButtonProps {
@@ -9,7 +13,11 @@ interface OAuthConnectButtonProps {
   onSuccess: () => void;
 }
 
-export function OAuthConnectButton({ upstreamId, initialRevision, onSuccess }: OAuthConnectButtonProps) {
+export function OAuthConnectButton({
+  upstreamId,
+  initialRevision,
+  onSuccess,
+}: OAuthConnectButtonProps) {
   const [isPolling, setIsPolling] = useState(false);
   const [showFallback, setShowFallback] = useState(false);
   const [stateToken, setStateToken] = useState<string | null>(null);
@@ -94,11 +102,7 @@ export function OAuthConnectButton({ upstreamId, initialRevision, onSuccess }: O
 
   return (
     <>
-      <Button
-        variant="primary"
-        onClick={handleStart}
-        disabled={isPolling}
-      >
+      <Button variant="primary" onClick={handleStart} disabled={isPolling}>
         {isPolling ? 'Waiting for authorization...' : 'Connect Claude OAuth'}
       </Button>
 
@@ -116,10 +120,15 @@ export function OAuthConnectButton({ upstreamId, initialRevision, onSuccess }: O
         </Button>
       )}
 
-      <Modal isOpen={showFallback} onClose={() => setShowFallback(false)} title="Manual OAuth Completion">
+      <Modal
+        isOpen={showFallback}
+        onClose={() => setShowFallback(false)}
+        title="Manual OAuth Completion"
+      >
         <div className="space-y-4 py-4">
           <p className="text-sm text-graphite-300">
-            If the automatic redirect didn't work, please paste the authorization code here.
+            If the automatic redirect didn't work, please paste the
+            authorization code here.
           </p>
           <div className="space-y-2">
             <label className="text-sm font-medium text-graphite-200">

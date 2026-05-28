@@ -61,13 +61,17 @@ fn run() -> Result<(), RunError> {
     let cli = Cli::from_arg_matches(&matches).map_err(RunError::Cli)?;
 
     match cli.command {
-        Some(Command::Serve { config, .. }) => {
+        Some(Command::Serve {
+            config,
+            data_dir,
+            strict_preflight,
+        }) => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .map_err(RunError::Runtime)?;
             runtime
-                .block_on(run_serve(&config))
+                .block_on(run_serve(&config, data_dir.as_deref(), strict_preflight))
                 .map_err(RunError::Serve)
         }
         Some(Command::Config {
