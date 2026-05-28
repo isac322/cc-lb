@@ -951,4 +951,73 @@ default_window_secs = 60
         assert!(principal.default_limits.is_empty());
         assert!(principal.enabled);
     }
+
+    #[test]
+    fn principal_spec_plugin_fields_round_trip_from_fixture() {
+        let fixture = include_str!(
+            "../tests/fixtures/per_principal_plugins/principal_with_plugins.toml"
+        );
+        let principal: PrincipalSpec =
+            toml::from_str(fixture).expect("fixture should deserialize into PrincipalSpec");
+
+        let router = principal
+            .router_plugin
+            .as_ref()
+            .expect("router_plugin should be Some");
+        assert_eq!(router.name, "alice-router");
+
+        let hooks = principal
+            .observability_hooks
+            .as_ref()
+            .expect("observability_hooks should be Some(_)");
+        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks[0].name, "alice-hook-events");
+        assert_eq!(hooks[1].name, "alice-hook-metrics");
+        assert!(hooks[1].sse_per_event);
+        assert_eq!(hooks[1].batched_events_per_flush, 16);
+    }
+
+    #[test]
+    fn principal_spec_omitting_plugin_fields_yields_none() {
+        let principal: PrincipalSpec = toml::from_str("allowed_models = []")
+            .expect("principal should deserialize");
+
+        assert!(
+            principal.router_plugin.is_none(),
+            "router_plugin must default to None to express 'inherit global'"
+        );
+        assert!(
+            principal.observability_hooks.is_none(),
+            "observability_hooks must default to None to express 'inherit global'"
+        );
+    }
+
+    #[test]
+    fn principal_spec_explicit_empty_hooks_distinct_from_inherit() {
+        let principal: PrincipalSpec =
+            toml::from_str("allowed_models = []\nobservability_hooks = []\n")
+                .expect("principal should deserialize");
+
+        let hooks = principal
+            .observability_hooks
+            .as_ref()
+            .expect("explicit empty list must round-trip as Some(vec![]), not None");
+        assert!(
+            hooks.is_empty(),
+            "explicit empty observability_hooks must yield Some(vec![]) (explicit no hooks)"
+        );
+    }
+
+    #[test]
+    fn principal_spec_rejects_unknown_field_typo() {
+        let toml_str =
+            "allowed_models = []\nrouter-plugin = { name = \"foo\" }\n"; // hyphenated typo
+        let err = toml::from_str::<PrincipalSpec>(toml_str)
+            .expect_err("hyphenated router-plugin must be rejected by deny_unknown_fields");
+        let message = err.to_string();
+        assert!(
+            message.contains("router-plugin") || message.contains("unknown field"),
+            "expected unknown-field error mentioning router-plugin, got: {message}"
+        );
+    }
 }
