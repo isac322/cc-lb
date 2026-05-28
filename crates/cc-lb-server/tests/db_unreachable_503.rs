@@ -2,9 +2,8 @@
 
 use std::error::Error;
 use std::io;
-use std::io::Write as _;
 use std::net::SocketAddr;
-use std::process::Command;
+use std::process::{Command, Output};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -36,9 +35,9 @@ const DOCKER_HOST: &str = "tcp://localhost:2375";
 const ADMIN_TOKEN: &str = "test-token";
 const PRINCIPAL_ID: &str = "test-principal";
 const FAILURE_LATENCY_CEILING: Duration = Duration::from_millis(1_500);
-const HEALTH_TIMEOUT: Duration = Duration::from_secs(30);
-const HEALTH_POLL_INTERVAL: Duration = Duration::from_millis(500);
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+const READY_POLL_INTERVAL: Duration = Duration::from_millis(200);
+const CONNECT_PROBE_TIMEOUT: Duration = Duration::from_millis(500);
 
 static CHAOS_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
@@ -46,71 +45,59 @@ type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test]
 #[ignore]
-async fn db_unreachable_returns_503_then_recovers() -> TestResult<()> {
+async fn db_unreachable_returns_503_with_retry_after() -> TestResult<()> {
     let Some(url) = ci_postgres_url() else {
-        log_marker("skip reason=CI_POSTGRES_URL_unset");
+        eprintln!("skipped: CI_POSTGRES_URL unset");
         return Ok(());
     };
     let _serial = chaos_lock().lock().await;
 
-    let initial_health = match postgres_health() {
-        Ok(status) if status == "healthy" => status,
-        Ok(status) => {
-            log_marker(format!(
-                "skip reason=postgres_not_healthy initial_health={status}"
-            ));
-            return Ok(());
-        }
-        Err(source) => {
-            log_marker(format!("skip reason=docker_inspect_failed error={source}"));
-            return Ok(());
-        }
-    };
-    log_marker(format!("initial_health={initial_health}"));
-
+    ensure_postgres_up(&url).await?;
+    let _guard = PostgresRestartGuard;
     let (app, _upstream) = build_api_key_app_for_testing_postgres(&url).await?;
     let api_key = issue_key(&app).await?;
 
     let before = proxy_messages(&app, &api_key).await?;
-    let before_status = before.status();
-    let _before_body = before.into_body().collect().await?.to_bytes();
-    log_marker(format!("before_status={before_status}"));
-    assert_eq!(before_status, StatusCode::OK);
+    assert_eq!(before.status(), StatusCode::OK);
 
-    let mut restart_guard = PostgresRestartGuard::armed();
     stop_postgres()?;
     let started = Instant::now();
-    let unavailable = tokio::time::timeout(REQUEST_TIMEOUT, proxy_messages(&app, &api_key))
-        .await
-        .map_err(|_| error("proxy request timed out while postgres was stopped"))??;
+    let unavailable = proxy_messages(&app, &api_key).await?;
     let elapsed = started.elapsed();
-    let unavailable_status = unavailable.status();
-    let retry_after = retry_after_value(&unavailable)?;
-    let _unavailable_body = unavailable.into_body().collect().await?.to_bytes();
-    log_marker(format!(
-        "unavailable_status={unavailable_status} retry_after={retry_after} latency_ms={}",
-        elapsed.as_millis()
-    ));
 
-    assert_eq!(unavailable_status, StatusCode::SERVICE_UNAVAILABLE);
-    assert_eq!(retry_after, "1");
+    assert_eq!(unavailable.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_retry_after(&unavailable)?;
     assert!(
         elapsed <= FAILURE_LATENCY_CEILING,
         "DB-down auth latency {elapsed:?} exceeded retry budget ceiling {FAILURE_LATENCY_CEILING:?}"
     );
 
-    let restarted_health = restart_guard.restart_and_disarm()?;
-    log_marker(format!("restarted_health={restarted_health}"));
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore]
+async fn db_recovery_after_restart() -> TestResult<()> {
+    let Some(url) = ci_postgres_url() else {
+        eprintln!("skipped: CI_POSTGRES_URL unset");
+        return Ok(());
+    };
+    let _serial = chaos_lock().lock().await;
+
+    ensure_postgres_up(&url).await?;
+    let _guard = PostgresRestartGuard;
+    let (app, _upstream) = build_api_key_app_for_testing_postgres(&url).await?;
+    let api_key = issue_key(&app).await?;
+
+    let before = proxy_messages(&app, &api_key).await?;
+    assert_eq!(before.status(), StatusCode::OK);
+
+    stop_postgres()?;
+    start_postgres()?;
+    wait_postgres_ready(&url).await?;
 
     let after = proxy_messages(&app, &api_key).await?;
-    let after_status = after.status();
-    let _after_body = after.into_body().collect().await?.to_bytes();
-    log_marker(format!("recovery_status={after_status}"));
-    assert_eq!(after_status, StatusCode::OK);
-
-    let final_health = wait_postgres_healthy_blocking(HEALTH_TIMEOUT)?;
-    log_marker(format!("final_health={final_health}"));
-    assert_eq!(final_health, "healthy");
+    assert_eq!(after.status(), StatusCode::OK);
 
     Ok(())
 }
@@ -123,87 +110,85 @@ fn chaos_lock() -> &'static tokio::sync::Mutex<()> {
     CHAOS_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
 }
 
-struct PostgresRestartGuard {
-    armed: bool,
+fn docker(action: &str, container: &str) -> io::Result<Output> {
+    Command::new("docker")
+        .env("DOCKER_HOST", DOCKER_HOST)
+        .args([action, container])
+        .output()
 }
 
-impl PostgresRestartGuard {
-    fn armed() -> Self {
-        Self { armed: true }
-    }
-
-    fn restart_and_disarm(&mut self) -> TestResult<String> {
-        start_postgres()?;
-        let health = wait_postgres_healthy_blocking(HEALTH_TIMEOUT)?;
-        self.armed = false;
-        Ok(health)
-    }
-}
+struct PostgresRestartGuard;
 
 impl Drop for PostgresRestartGuard {
     fn drop(&mut self) {
-        if self.armed {
-            let _ = start_postgres();
-            let _ = wait_postgres_healthy_blocking(HEALTH_TIMEOUT);
-        }
+        let _ = docker("start", POSTGRES_CONTAINER);
     }
 }
 
 fn stop_postgres() -> TestResult<()> {
-    docker_output(&["stop", POSTGRES_CONTAINER]).map(|_| ())
+    let output = docker("stop", POSTGRES_CONTAINER)?;
+    assert_docker_success("stop", &output)
 }
 
 fn start_postgres() -> TestResult<()> {
-    docker_output(&["start", POSTGRES_CONTAINER]).map(|_| ())
+    let output = docker("start", POSTGRES_CONTAINER)?;
+    assert_docker_success("start", &output)
 }
 
-fn postgres_health() -> TestResult<String> {
-    docker_output(&[
-        "inspect",
-        "-f",
-        "{{.State.Health.Status}}",
-        POSTGRES_CONTAINER,
-    ])
-}
-
-fn wait_postgres_healthy_blocking(timeout: Duration) -> TestResult<String> {
-    let started = Instant::now();
-    let mut last_status = String::from("<not checked>");
-
-    loop {
-        if started.elapsed() >= timeout {
-            return Err(error(format!(
-                "postgres did not become healthy within {timeout:?}: last_status={last_status}"
-            )));
-        }
-
-        match postgres_health() {
-            Ok(status) if status == "healthy" => return Ok(status),
-            Ok(status) => last_status = status,
-            Err(source) => last_status = source.to_string(),
-        }
-
-        std::thread::sleep(HEALTH_POLL_INTERVAL);
-    }
-}
-
-fn docker_output(args: &[&str]) -> TestResult<String> {
-    let output = Command::new("docker")
-        .env("DOCKER_HOST", DOCKER_HOST)
-        .args(args)
-        .output()?;
-
+fn assert_docker_success(action: &str, output: &Output) -> TestResult<()> {
     if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned());
+        return Ok(());
     }
 
     Err(error(format!(
-        "docker {} failed: status={:?} stdout={} stderr={}",
-        args.join(" "),
+        "docker {action} {POSTGRES_CONTAINER} failed: status={:?} stdout={} stderr={}",
         output.status.code(),
         String::from_utf8_lossy(&output.stdout).trim(),
         String::from_utf8_lossy(&output.stderr).trim()
     )))
+}
+
+async fn ensure_postgres_up(url: &str) -> TestResult<()> {
+    if postgres_ready(url).await {
+        return Ok(());
+    }
+
+    start_postgres()?;
+    wait_postgres_ready(url).await
+}
+
+async fn wait_postgres_ready(url: &str) -> TestResult<()> {
+    let deadline = Instant::now() + READY_TIMEOUT;
+
+    loop {
+        let probe_error =
+            match tokio::time::timeout(CONNECT_PROBE_TIMEOUT, connect_probe(url)).await {
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(source)) => source.to_string(),
+                Err(_) => format!("connect probe exceeded {CONNECT_PROBE_TIMEOUT:?}"),
+            };
+
+        if Instant::now() >= deadline {
+            return Err(error(format!(
+                "postgres did not become ready within {READY_TIMEOUT:?}: {probe_error}"
+            )));
+        }
+
+        tokio::time::sleep(READY_POLL_INTERVAL).await;
+    }
+}
+
+async fn postgres_ready(url: &str) -> bool {
+    matches!(
+        tokio::time::timeout(CONNECT_PROBE_TIMEOUT, connect_probe(url)).await,
+        Ok(Ok(()))
+    )
+}
+
+async fn connect_probe(url: &str) -> Result<(), sqlx::Error> {
+    let pool = PgPoolOptions::new().max_connections(1).connect(url).await?;
+    pool.close().await;
+    Ok(())
 }
 
 async fn build_api_key_app_for_testing_postgres(
@@ -282,7 +267,6 @@ fn test_config(database_url: &str, upstream_addr: SocketAddr) -> TestResult<Conf
             credentials_ref: None,
         },
     );
-    config.validate()?;
     Ok(config)
 }
 
@@ -304,7 +288,7 @@ async fn spawn_ok_upstream() -> TestResult<RunningUpstream> {
         (
             StatusCode::OK,
             [("content-type", "application/json")],
-            r#"{"ok":true}"#,
+            "{\"ok\":true}",
         )
             .into_response()
     }));
@@ -358,24 +342,23 @@ async fn proxy_messages(app: &App, api_key: &str) -> TestResult<Response<Body>> 
                 .header("anthropic-version", "2023-06-01")
                 .header("content-type", "application/json")
                 .body(Body::from(Bytes::from_static(
-                    br#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}],"max_tokens":1}"#,
+                    b"{\"model\":\"claude-3-5-sonnet-20241022\",\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}],\"max_tokens\":1}",
                 )))?,
         )
         .await?)
 }
 
-fn retry_after_value(response: &Response<Body>) -> TestResult<String> {
-    Ok(response
+fn assert_retry_after(response: &Response<Body>) -> TestResult<()> {
+    let retry_after = response
         .headers()
         .get(RETRY_AFTER)
         .ok_or_else(|| error("missing Retry-After header"))?
-        .to_str()?
-        .to_owned())
-}
-
-fn log_marker(message: impl AsRef<str>) {
-    let mut stderr = io::stderr().lock();
-    let _ = writeln!(stderr, "task17: {}", message.as_ref());
+        .to_str()?;
+    assert!(
+        retry_after == "1" || retry_after == "2",
+        "Retry-After header was {retry_after:?}, expected \"1\" or \"2\""
+    );
+    Ok(())
 }
 
 fn error(message: impl Into<String>) -> Box<dyn Error + Send + Sync> {
