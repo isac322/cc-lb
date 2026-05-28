@@ -74,6 +74,10 @@
         "proxy_addr": "[::]:8080"
       }
     },
+    "oauth": {
+      "$ref": "#/$defs/OAuthConfig",
+      "default": {}
+    },
     "observability": {
       "$ref": "#/$defs/ObservabilityConfig",
       "default": {
@@ -162,6 +166,38 @@
           "default": "CC_LB_MASTER_KEY"
         }
       }
+    },
+    "AnthropicOAuthConfig": {
+      "type": "object",
+      "properties": {
+        "auth_url": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://platform.claude.com/oauth/authorize"
+        },
+        "client_id": {
+          "type": "string",
+          "default": ""
+        },
+        "redirect_uri": {
+          "type": "string",
+          "format": "uri",
+          "default": "http://127.0.0.1/oauth/callback"
+        },
+        "scopes": {
+          "type": "array",
+          "default": [],
+          "items": {
+            "type": "string"
+          }
+        },
+        "token_url": {
+          "type": "string",
+          "format": "uri",
+          "default": "https://platform.claude.com/oauth/token"
+        }
+      },
+      "additionalProperties": false
     },
     "AnthropicOAuthSignerConfig": {
       "type": "object",
@@ -449,6 +485,21 @@
         "anthropic_key",
         "anthropic_o_auth"
       ]
+    },
+    "OAuthConfig": {
+      "type": "object",
+      "properties": {
+        "anthropic": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AnthropicOAuthConfig"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
     },
     "ObservabilityConfig": {
       "type": "object",

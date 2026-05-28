@@ -52,6 +52,7 @@ pub struct Config {
     pub api_keys: ApiKeysConfig,
     pub storage: StorageConfig,
     pub aead: AeadConfig,
+    pub oauth: OAuthConfig,
     pub signers: SignersConfig,
     pub observability: ObservabilityConfig,
     pub admin: AdminConfig,
@@ -474,6 +475,39 @@ impl Default for AeadConfig {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct AnthropicOAuthConfig {
+    pub client_id: String,
+    pub auth_url: Url,
+    pub token_url: Url,
+    pub redirect_uri: Url,
+    #[serde(default = "default_oauth_scopes")]
+    pub scopes: Vec<String>,
+}
+
+impl Default for AnthropicOAuthConfig {
+    fn default() -> Self {
+        Self {
+            client_id: String::new(),
+            auth_url: Url::parse("https://platform.claude.com/oauth/authorize")
+                .expect("hardcoded URL should parse"),
+            token_url: Url::parse("https://platform.claude.com/oauth/token")
+                .expect("hardcoded URL should parse"),
+            redirect_uri: Url::parse("http://127.0.0.1/oauth/callback")
+                .expect("hardcoded URL should parse"),
+            scopes: default_oauth_scopes(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct OAuthConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anthropic: Option<AnthropicOAuthConfig>,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PostgresPoolConfig {
     #[serde(default = "default_max_connections")]
@@ -766,6 +800,10 @@ fn default_anthropic_oauth_scopes() -> Vec<String> {
     vec!["messages".to_owned(), "files".to_owned()]
 }
 
+fn default_oauth_scopes() -> Vec<String> {
+    Vec::new()
+}
+
 fn default_tracing_level() -> String {
     "info".to_owned()
 }
@@ -1029,6 +1067,126 @@ default_window_secs = 60
         assert!(
             message.contains("router-plugin") || message.contains("unknown field"),
             "expected unknown-field error mentioning router-plugin, got: {message}"
+        );
+    }
+
+    #[test]
+    fn parses_minimal_oauth_block() {
+        let config = load_config(
+            r#"
+[oauth.anthropic]
+client_id = "test-client-id"
+auth_url = "https://example.com/oauth/authorize"
+token_url = "https://example.com/v1/oauth/token"
+redirect_uri = "https://localhost:8080/oauth/callback"
+
+[api_keys]
+"#,
+        )
+        .expect("config should load");
+
+        let oauth = config
+            .oauth
+            .anthropic
+            .expect("oauth.anthropic should exist");
+        assert_eq!(oauth.client_id, "test-client-id");
+        assert_eq!(
+            oauth.auth_url.as_str(),
+            "https://example.com/oauth/authorize"
+        );
+        assert_eq!(
+            oauth.token_url.as_str(),
+            "https://example.com/v1/oauth/token"
+        );
+        assert_eq!(
+            oauth.redirect_uri.as_str(),
+            "https://localhost:8080/oauth/callback"
+        );
+        assert!(
+            oauth.scopes.is_empty(),
+            "scopes should default to empty vec"
+        );
+    }
+
+    #[test]
+    fn oauth_block_with_scopes() {
+        let config = load_config(
+            r#"
+[oauth.anthropic]
+client_id = "test-id"
+auth_url = "https://example.com/authorize"
+token_url = "https://example.com/token"
+redirect_uri = "https://localhost:8080/callback"
+scopes = ["org:profile", "anthropic.com/full_access"]
+
+[api_keys]
+"#,
+        )
+        .expect("config should load");
+
+        let oauth = config
+            .oauth
+            .anthropic
+            .expect("oauth.anthropic should exist");
+        assert_eq!(oauth.scopes.len(), 2);
+        assert_eq!(oauth.scopes[0], "org:profile");
+        assert_eq!(oauth.scopes[1], "anthropic.com/full_access");
+    }
+
+    #[test]
+    fn rejects_empty_client_id() {
+        let err = load_config(
+            r#"
+[oauth.anthropic]
+client_id = ""
+auth_url = "https://example.com/oauth/authorize"
+token_url = "https://example.com/v1/oauth/token"
+redirect_uri = "https://localhost:8080/oauth/callback"
+
+[api_keys]
+"#,
+        )
+        .expect_err("config should reject empty client_id");
+
+        assert!(
+            err.to_string().contains("oauth.anthropic.client_id"),
+            "error should mention oauth.anthropic.client_id: {err}"
+        );
+    }
+
+    #[test]
+    fn rejects_invalid_url() {
+        let err = load_config(
+            r#"
+[oauth.anthropic]
+client_id = "test-id"
+auth_url = "not-a-valid-url"
+token_url = "https://example.com/token"
+redirect_uri = "https://localhost:8080/callback"
+
+[api_keys]
+"#,
+        )
+        .expect_err("config should fail with invalid URL");
+
+        assert!(
+            err.to_string().contains("auth_url") || err.to_string().contains("invalid"),
+            "error should mention auth_url or invalid: {err}"
+        );
+    }
+
+    #[test]
+    fn oauth_config_defaults_anthropic_none() {
+        let config = load_config(
+            r#"
+[api_keys]
+"#,
+        )
+        .expect("config should load");
+
+        assert!(
+            config.oauth.anthropic.is_none(),
+            "oauth.anthropic should default to None"
         );
     }
 }

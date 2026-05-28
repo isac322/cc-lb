@@ -32,6 +32,7 @@ pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     validate_credentials_refs(config)?;
     validate_plugins(config)?;
     validate_storage(config)?;
+    validate_oauth(config)?;
     Ok(())
 }
 
@@ -280,6 +281,18 @@ fn validate_storage(config: &Config) -> Result<(), ConfigError> {
         }
     }
 
+    Ok(())
+}
+
+fn validate_oauth(config: &Config) -> Result<(), ValidationError> {
+    if let Some(anthropic) = &config.oauth.anthropic
+        && anthropic.client_id.trim().is_empty()
+    {
+        return Err(ValidationError::new(
+            "oauth.anthropic.client_id",
+            "client_id cannot be empty",
+        ));
+    }
     Ok(())
 }
 
