@@ -8,6 +8,13 @@ pub const CURRENT_CONTRACT_VERSION: u32 = 1;
 pub trait AuditStore: Send + Sync {
     async fn append_audit(&self, entry: &AuditEntry) -> StorageResult<()>;
 
+    async fn append_audit_entries(&self, entries: &[AuditEntry]) -> StorageResult<()> {
+        for entry in entries {
+            self.append_audit(entry).await?;
+        }
+        Ok(())
+    }
+
     async fn query_audit(
         &self,
         principal_id: Option<&str>,

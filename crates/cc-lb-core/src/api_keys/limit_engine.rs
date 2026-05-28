@@ -3,6 +3,7 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use cc_lb_storage_api::Storage;
 use cc_lb_storage_api::types::{KeyStatus as StoredKeyStatus, StoredApiKeyRecord};
 use parking_lot::RwLock;
 use serde::Serialize;
@@ -484,8 +485,11 @@ impl LimitEngine {
         sort_windows(windows)
     }
 
-    pub fn startup_replay(&self, _storage: Arc<cc_lb_storage_redb::Storage>) {
-        // TODO(T22): rebuild rolling counters from PRINCIPAL_LIMIT_STATES_V1 + REQUEST_EVENTS_V1
+    pub fn startup_replay(&self, storage: Arc<dyn Storage>) {
+        let _ = storage;
+        tracing::warn!(
+            "limit engine startup replay is not implemented for trait storage; rolling counters start empty"
+        );
     }
 
     fn current_total(&self, key_id: &str, kind: LimitKind, window_sec: u64, now_sec: u64) -> i64 {

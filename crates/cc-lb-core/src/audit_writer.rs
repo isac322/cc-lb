@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cc_lb_storage_redb::{AuditEntry as StoredAuditEntry, Storage};
+use cc_lb_storage_api::{AuditEntry as StoredAuditEntry, Storage as StorageTrait};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -16,6 +16,25 @@ pub struct AuditWriterSink {
 
 #[derive(Debug)]
 pub struct AuditDropped;
+
+pub trait AuditStorageHandle {
+    fn into_audit_storage(self) -> Arc<dyn StorageTrait>;
+}
+
+impl AuditStorageHandle for Arc<dyn StorageTrait> {
+    fn into_audit_storage(self) -> Arc<dyn StorageTrait> {
+        self
+    }
+}
+
+impl<T> AuditStorageHandle for Arc<T>
+where
+    T: StorageTrait,
+{
+    fn into_audit_storage(self) -> Arc<dyn StorageTrait> {
+        self
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct AuditEntry {
@@ -47,9 +66,10 @@ impl AuditWriterSink {
 }
 
 pub fn spawn_audit_writer(
-    storage: Arc<Storage>,
+    storage: impl AuditStorageHandle,
     capacity: usize,
 ) -> (AuditWriterSink, JoinHandle<()>) {
+    let storage = storage.into_audit_storage();
     let (tx, mut rx) = mpsc::channel(capacity);
     let join = tokio::spawn(async move {
         let mut batch = Vec::with_capacity(AUDIT_BATCH_CAPACITY);
@@ -111,11 +131,9 @@ fn take_batch(batch: &mut Vec<StoredAuditEntry>) -> Vec<StoredAuditEntry> {
     std::mem::replace(batch, Vec::with_capacity(AUDIT_BATCH_CAPACITY))
 }
 
-async fn flush_batch(storage: Arc<Storage>, batch: Vec<StoredAuditEntry>) {
-    let result = tokio::task::spawn_blocking(move || storage.append_audit_entries(&batch)).await;
-    match result {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => tracing::warn!(error = %error, "audit writer batch append failed"),
-        Err(error) => tracing::warn!(error = %error, "audit writer blocking task failed"),
+async fn flush_batch(storage: Arc<dyn StorageTrait>, batch: Vec<StoredAuditEntry>) {
+    match storage.append_audit_entries(&batch).await {
+        Ok(()) => {}
+        Err(error) => tracing::warn!(error = %error, "audit writer batch append failed"),
     }
 }
