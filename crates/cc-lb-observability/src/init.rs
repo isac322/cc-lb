@@ -12,8 +12,8 @@ use tracing_subscriber::layer::{Layer, SubscriberExt};
 use tracing_subscriber::{EnvFilter, Registry};
 
 use crate::cclb_metrics::{
-    register_prometheus14_metrics, touch_prometheus14_metric_handles,
-    PROMETHEUS14_METRIC_DEFINITIONS,
+    PROMETHEUS14_METRIC_DEFINITIONS, register_prometheus14_metrics,
+    touch_prometheus14_metric_handles,
 };
 use crate::panic_hook::install_panic_hook;
 use crate::redaction::{RedactingMakeWriter, RedactionLayer, RedactionPolicy};

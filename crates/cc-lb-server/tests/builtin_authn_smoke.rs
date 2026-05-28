@@ -7,10 +7,10 @@ use cc_lb_config::{
     Config, DownstreamAuthMode, Limit, LimitKind, NoneModeConfig, NoneModeUpstreamKind,
     PrincipalSpec, PrincipalType,
 };
+use cc_lb_core::api_keys::builtin_authn::{BuiltinAuthError as AuthnError, BuiltinAuthn};
 use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_core::api_keys::principal_view::PrincipalView;
 use cc_lb_core::api_keys::secret;
-use cc_lb_core::api_keys::builtin_authn::{BuiltinAuthError as AuthnError, BuiltinAuthn};
 use cc_lb_storage_redb::{
     IssueParams, KeyStatus, Limit as StorageLimit, LimitKind as StorageLimitKind,
     PrincipalKindLite, Storage, UpstreamKind,
@@ -32,9 +32,10 @@ impl Harness {
             [31; 32],
         )?);
         let key_store = Arc::new(KeyStore::new(storage.clone()));
-        let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config(
-            principal_enabled,
-        ))));
+        let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(
+            &config(principal_enabled),
+            std::collections::HashMap::new(),
+        )?));
 
         Ok(Self {
             _dir: dir,
@@ -60,7 +61,9 @@ fn valid_key_returns_authn_success() -> Result<(), Box<dyn std::error::Error>> {
     let (record, plaintext) = harness.key_store.create("u1", create_params(None))?;
     let headers = headers_with_key(plaintext.expose());
 
-    let success = harness.authn().authenticate(&headers)?;
+    let success = harness
+        .authn()
+        .authenticate(&headers, &harness.principal_view.load())?;
 
     assert_eq!(success.principal_id, "u1");
     assert_eq!(success.record, record);
@@ -74,7 +77,10 @@ fn valid_key_returns_authn_success() -> Result<(), Box<dyn std::error::Error>> {
 fn missing_header_returns_missing_header() -> Result<(), Box<dyn std::error::Error>> {
     let harness = Harness::new(true)?;
 
-    let error = harness.authn().authenticate(&HeaderMap::new()).unwrap_err();
+    let error = harness
+        .authn()
+        .authenticate(&HeaderMap::new(), &harness.principal_view.load())
+        .unwrap_err();
 
     assert_eq!(error, AuthnError::MissingHeader);
     assert_eq!(error.http_status(), 401);
@@ -87,7 +93,10 @@ fn bad_format_returns_invalid_format() -> Result<(), Box<dyn std::error::Error>>
 
     let error = harness
         .authn()
-        .authenticate(&headers_with_key("not-a-key"))
+        .authenticate(
+            &headers_with_key("not-a-key"),
+            &harness.principal_view.load(),
+        )
         .unwrap_err();
 
     assert_eq!(error, AuthnError::InvalidFormat);
@@ -102,7 +111,10 @@ fn unknown_key_returns_not_found() -> Result<(), Box<dyn std::error::Error>> {
 
     let error = harness
         .authn()
-        .authenticate(&headers_with_key(generated.plaintext.expose()))
+        .authenticate(
+            &headers_with_key(generated.plaintext.expose()),
+            &harness.principal_view.load(),
+        )
         .unwrap_err();
 
     assert_eq!(error, AuthnError::NotFound);
@@ -138,7 +150,7 @@ fn tampered_secret_returns_signature_mismatch() -> Result<(), Box<dyn std::error
 
     let error = harness
         .authn()
-        .authenticate(&headers_with_key(&tampered))
+        .authenticate(&headers_with_key(&tampered), &harness.principal_view.load())
         .unwrap_err();
 
     assert_eq!(error, AuthnError::SignatureMismatch);
@@ -155,7 +167,10 @@ fn disabled_key_returns_key_disabled() -> Result<(), Box<dyn std::error::Error>>
 
     let error = harness
         .authn()
-        .authenticate(&headers_with_key(plaintext.expose()))
+        .authenticate(
+            &headers_with_key(plaintext.expose()),
+            &harness.principal_view.load(),
+        )
         .unwrap_err();
 
     assert_eq!(error, AuthnError::KeyDisabled);
@@ -170,7 +185,10 @@ fn expired_key_returns_expired() -> Result<(), Box<dyn std::error::Error>> {
 
     let error = harness
         .authn()
-        .authenticate(&headers_with_key(plaintext.expose()))
+        .authenticate(
+            &headers_with_key(plaintext.expose()),
+            &harness.principal_view.load(),
+        )
         .unwrap_err();
 
     assert_eq!(error, AuthnError::Expired);
@@ -185,7 +203,10 @@ fn disabled_principal_returns_principal_disabled() -> Result<(), Box<dyn std::er
 
     let error = harness
         .authn()
-        .authenticate(&headers_with_key(plaintext.expose()))
+        .authenticate(
+            &headers_with_key(plaintext.expose()),
+            &harness.principal_view.load(),
+        )
         .unwrap_err();
 
     assert_eq!(error, AuthnError::PrincipalDisabled);
@@ -236,6 +257,8 @@ fn config(principal_enabled: bool) -> Config {
             enabled: principal_enabled,
             allowed_models: vec!["*".to_owned()],
             credentials_ref: None,
+            router_plugin: None,
+            observability_hooks: None,
         },
     );
 

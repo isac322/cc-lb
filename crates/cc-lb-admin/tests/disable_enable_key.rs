@@ -4,11 +4,11 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use cc_lb_admin::{router, AdminState};
+use cc_lb_admin::{AdminState, router};
 use cc_lb_config::{Config, Limit, LimitKind, PrincipalSpec, PrincipalType};
 use cc_lb_core::api_keys::principal_view::PrincipalView;
 use cc_lb_storage_redb::Storage;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 fn test_state(storage: Arc<Storage>) -> AdminState {
@@ -18,13 +18,18 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
             Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
-            Arc::new(arc_swap::ArcSwap::from(
-                cc_lb_core::api_keys::principal_view::PrincipalView::from_config(&Config::default()),
-            )),
+            Arc::new(
+                arc_swap::ArcSwap::from(
+                    cc_lb_core::api_keys::principal_view::PrincipalView::from_config(&Config::default(), std::collections::HashMap::new())
+                    .expect("principal view builds"),
+                ),
+            ),
         ),
         lifecycle: None,
         audit_sink: None,
-        principal_view: Arc::new(arc_swap::ArcSwap::from(PrincipalView::from_config(&config))),
+        principal_view: Arc::new(arc_swap::ArcSwap::from(
+            PrincipalView::from_config(&config, std::collections::HashMap::new()).expect("principal view builds"),
+        )),
         config: Arc::new(config),
         admin_token: Some("test-token".to_owned()),
         start_time: std::time::Instant::now(),
@@ -45,6 +50,8 @@ fn test_config() -> Config {
             enabled: true,
             allowed_models: vec!["claude-3.5-sonnet".to_owned()],
             credentials_ref: None,
+            router_plugin: None,
+            observability_hooks: None,
         },
     );
     config
@@ -148,11 +155,11 @@ async fn disable_then_list_shows_disabled() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = list_keys(app).await;
-    assert!(body["keys"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|record| record["key_id"] == json!(key_id) && record["status"] == json!("disabled")));
+    assert!(
+        body["keys"].as_array().unwrap().iter().any(
+            |record| record["key_id"] == json!(key_id) && record["status"] == json!("disabled")
+        )
+    );
 }
 
 #[tokio::test]
@@ -169,11 +176,13 @@ async fn disable_then_enable_restores_active() {
     assert_eq!(enable.status(), StatusCode::OK);
 
     let body = list_keys(app).await;
-    assert!(body["keys"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|record| record["key_id"] == json!(key_id) && record["status"] == json!("active")));
+    assert!(
+        body["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|record| record["key_id"] == json!(key_id) && record["status"] == json!("active"))
+    );
 }
 
 #[tokio::test]
@@ -205,11 +214,11 @@ async fn disable_on_already_disabled_idempotent() {
     assert_eq!(second.status(), StatusCode::OK);
 
     let body = list_keys(app).await;
-    assert!(body["keys"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|record| record["key_id"] == json!(key_id) && record["status"] == json!("disabled")));
+    assert!(
+        body["keys"].as_array().unwrap().iter().any(
+            |record| record["key_id"] == json!(key_id) && record["status"] == json!("disabled")
+        )
+    );
 }
 
 #[tokio::test]

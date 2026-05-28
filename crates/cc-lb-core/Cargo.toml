@@ -11,6 +11,12 @@ redb = []
 postgres = []
 
 [dependencies]
+cc-lb-config = { path = "../cc-lb-config" }
+cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
+globset.workspace = true
+serde = { workspace = true, features = ["derive"] }
+
+[target.'cfg(not(loom))'.dependencies]
 arc-swap.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
@@ -23,12 +29,9 @@ cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
-cc-lb-config = { path = "../cc-lb-config" }
-cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 dashmap.workspace = true
 eventsource-stream.workspace = true
 futures-core = "0.3"
-globset.workspace = true
 hickory-resolver = { workspace = true, features = ["tokio"] }
 http.workspace = true
 http-body-util.workspace = true
@@ -38,7 +41,6 @@ hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", 
 metrics.workspace = true
 parking_lot = "0.12"
 rand = "0.10"
-serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2 = "0.11"
 subtle = "2.6.1"
@@ -56,7 +58,12 @@ tempfile.workspace = true
 tower = { workspace = true, features = ["util"] }
 
 [target.'cfg(loom)'.dependencies]
+arc-swap.workspace = true
+bytes.workspace = true
+http.workspace = true
 loom = "0.7"
+serde_json.workspace = true
+url.workspace = true
 
 [lints.rust]
 unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

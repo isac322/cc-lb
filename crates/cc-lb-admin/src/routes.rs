@@ -62,6 +62,7 @@ pub fn build_router(state: AdminState) -> Router {
             get(principal_key_usage),
         )
         .route("/admin/audit", get(query_audit))
+        .route("/admin/status", get(crate::status::handler))
         .route("/admin/upstreams", get(list_upstreams))
         .route("/admin/upstreams/{name}/drain", post(drain_upstream))
         .route("/admin/killswitch", post(set_killswitch))
