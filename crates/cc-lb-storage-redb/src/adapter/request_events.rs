@@ -32,4 +32,19 @@ impl RequestEventStore for RedbStorage {
         .map_err(map_join_err)?
         .map_err(map_redb_err)
     }
+
+    async fn prune_request_events_before(
+        &self,
+        cutoff_ms_x_1m: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        let storage = self.clone();
+
+        tokio::task::spawn_blocking(move || {
+            RedbStorage::prune_request_events_before(&storage, cutoff_ms_x_1m, batch_size)
+        })
+        .await
+        .map_err(map_join_err)?
+        .map_err(map_redb_err)
+    }
 }

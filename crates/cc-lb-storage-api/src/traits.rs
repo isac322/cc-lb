@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::{BackendKind, StorageResult, types::*};
+use crate::{BackendKind, StorageError, StorageResult, types::*};
 
 pub const CURRENT_CONTRACT_VERSION: u32 = 1;
 
@@ -17,6 +17,18 @@ pub trait AuditStore: Send + Sync {
     ) -> StorageResult<Vec<AuditEntry>>;
 
     async fn prune_audit(&self, older_than: u64) -> StorageResult<u64>;
+
+    async fn prune_audit_before(
+        &self,
+        cutoff_ts_x_1m: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        let _ = cutoff_ts_x_1m;
+        let _ = batch_size;
+        Err(StorageError::Fatal {
+            message: "prune_audit_before is not implemented for this storage backend".to_owned(),
+        })
+    }
 }
 
 #[async_trait]
@@ -29,6 +41,19 @@ pub trait RequestEventStore: Send + Sync {
         until: u64,
         limit: usize,
     ) -> StorageResult<Vec<RequestEvent>>;
+
+    async fn prune_request_events_before(
+        &self,
+        cutoff_ms_x_1m: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        let _ = cutoff_ms_x_1m;
+        let _ = batch_size;
+        Err(StorageError::Fatal {
+            message: "prune_request_events_before is not implemented for this storage backend"
+                .to_owned(),
+        })
+    }
 }
 
 #[async_trait]

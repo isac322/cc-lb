@@ -12,6 +12,8 @@ use crate::{
     error_map::map_sqlx_error,
 };
 
+const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
+
 #[async_trait]
 impl AuditStore for PostgresStorage {
     async fn append_audit(&self, entry: &AuditEntry) -> StorageResult<()> {
@@ -75,6 +77,28 @@ impl AuditStore for PostgresStorage {
             .execute(&self.pool)
             .await
             .map_err(map_sqlx_error)?;
+        Ok(result.rows_affected())
+    }
+
+    async fn prune_audit_before(
+        &self,
+        cutoff_ts_x_1m: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        if batch_size == 0 {
+            return Ok(0);
+        }
+
+        let cutoff_ts = cutoff_ts_x_1m / KEY_SEQUENCE_SCALE;
+        let result = sqlx::query(
+            "DELETE FROM audit_log_v1              WHERE seq IN (                 SELECT seq FROM audit_log_v1                 WHERE ts < $1                 ORDER BY seq ASC                 LIMIT $2             )",
+        )
+        .bind(unix_secs_to_datetime(cutoff_ts, "audit prune before cutoff")?)
+        .bind(u64_to_i64(batch_size as u64, "audit prune before batch size")?)
+        .execute(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
         Ok(result.rows_affected())
     }
 }
