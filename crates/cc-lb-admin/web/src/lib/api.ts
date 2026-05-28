@@ -64,10 +64,11 @@ async function fetchWithAuth(
 
 export async function getJson<T>(
   path: string,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; headers?: HeadersInit },
 ): Promise<T> {
   const res = await fetchWithAuth(path, {
     method: 'GET',
+    headers: options?.headers,
     signal: options?.signal,
   });
   return res.json();
@@ -76,11 +77,11 @@ export async function getJson<T>(
 export async function postJson<T, B>(
   path: string,
   body: B,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; headers?: HeadersInit },
 ): Promise<T> {
   const res = await fetchWithAuth(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
     body: JSON.stringify(body),
     signal: options?.signal,
   });
@@ -90,11 +91,11 @@ export async function postJson<T, B>(
 export async function putJson<T, B>(
   path: string,
   body: B,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; headers?: HeadersInit },
 ): Promise<T> {
   const res = await fetchWithAuth(path, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
     body: JSON.stringify(body),
     signal: options?.signal,
   });
@@ -103,10 +104,28 @@ export async function putJson<T, B>(
 
 export async function deleteJson<T>(
   path: string,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; headers?: HeadersInit },
 ): Promise<T> {
   const res = await fetchWithAuth(path, {
     method: 'DELETE',
+    headers: options?.headers,
+    signal: options?.signal,
+  });
+  if (res.status === 204) {
+    return {} as T;
+  }
+  return res.json();
+}
+
+export async function patchJson<T, B>(
+  path: string,
+  body: B,
+  options?: { signal?: AbortSignal; headers?: HeadersInit },
+): Promise<T> {
+  const res = await fetchWithAuth(path, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(body),
     signal: options?.signal,
   });
   return res.json();
