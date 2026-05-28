@@ -58,6 +58,8 @@ fn test_config() -> Config {
             enabled: true,
             allowed_models: vec!["claude-3-5-sonnet".to_string()],
             credentials_ref: Some("anthropic-key".to_string()),
+            router_plugin: None,
+            observability_hooks: None,
         },
     );
     config

@@ -317,6 +317,17 @@ pub struct PrincipalSpec {
     pub allowed_models: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credentials_ref: Option<String>,
+    /// Per-principal router plugin override.
+    /// - `None`: inherit the global `PluginsConfig.router_plugin` (default behaviour).
+    /// - `Some(PluginRef)`: override the global router for this principal.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_plugin: Option<PluginRef>,
+    /// Per-principal observability hooks override.
+    /// - `None`: inherit `PluginsConfig.observability_hooks` (default behaviour).
+    /// - `Some(vec![])`: explicit empty — emit no observability events for this principal.
+    /// - `Some(vec![...])`: replace the global hook chain with this list (no concat/merge).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observability_hooks: Option<Vec<PluginRef>>,
 }
 
 impl Default for PrincipalSpec {
@@ -327,6 +338,8 @@ impl Default for PrincipalSpec {
             enabled: true,
             allowed_models: Vec::new(),
             credentials_ref: None,
+            router_plugin: None,
+            observability_hooks: None,
         }
     }
 }

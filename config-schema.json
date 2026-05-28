@@ -619,9 +619,30 @@
           "type": "boolean",
           "default": true
         },
+        "observability_hooks": {
+          "description": "Per-principal observability hooks override.\n- `None`: inherit `PluginsConfig.observability_hooks` (default behaviour).\n- `Some(vec![])`: explicit empty — emit no observability events for this principal.\n- `Some(vec![...])`: replace the global hook chain with this list (no concat/merge).",
+          "type": [
+            "array",
+            "null"
+          ],
+          "items": {
+            "$ref": "#/$defs/PluginRef"
+          }
+        },
         "principal_type": {
           "$ref": "#/$defs/PrincipalType",
           "default": "machine"
+        },
+        "router_plugin": {
+          "description": "Per-principal router plugin override.\n- `None`: inherit the global `PluginsConfig.router_plugin` (default behaviour).\n- `Some(PluginRef)`: override the global router for this principal.",
+          "anyOf": [
+            {
+              "$ref": "#/$defs/PluginRef"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       },
       "additionalProperties": false

@@ -22,6 +22,8 @@ fn sample_config(enabled: bool) -> Config {
                 "claude-3-5-sonnet-*".to_owned(),
             ],
             credentials_ref: None,
+            router_plugin: None,
+            observability_hooks: None,
         },
     );
 

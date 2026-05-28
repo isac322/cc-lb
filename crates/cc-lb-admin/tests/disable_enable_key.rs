@@ -52,6 +52,8 @@ fn test_config() -> Config {
             enabled: true,
             allowed_models: vec!["claude-3.5-sonnet".to_owned()],
             credentials_ref: None,
+            router_plugin: None,
+            observability_hooks: None,
         },
     );
     config

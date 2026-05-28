@@ -236,6 +236,8 @@ fn config(principal_enabled: bool) -> Config {
             enabled: principal_enabled,
             allowed_models: vec!["*".to_owned()],
             credentials_ref: None,
+            router_plugin: None,
+            observability_hooks: None,
         },
     );
 

@@ -19,6 +19,8 @@ fn engine(enabled: bool) -> Arc<LimitEngine> {
             enabled,
             allowed_models: Vec::new(),
             credentials_ref: None,
+            router_plugin: None,
+            observability_hooks: None,
         },
     );
     let view = PrincipalView::from_config(&Config {
