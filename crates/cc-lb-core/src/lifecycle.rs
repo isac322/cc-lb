@@ -238,6 +238,22 @@ impl Lifecycle {
         }
     }
 
+    pub fn new_with_dynamic_view(
+        authn: Arc<BuiltinAuthn>,
+        dynamic_view: Arc<DynamicViewHolder>,
+        config: LifecycleConfig,
+    ) -> Self {
+        Self {
+            authn,
+            dynamic_view,
+            config,
+            limit_engine: None,
+            limit_subject_provider: None,
+            audit_sink: None,
+            request_event_storage: None,
+        }
+    }
+
     pub fn with_error_normalizer(self, error_normalizer: Arc<ErrorNormalizer>) -> Self {
         let current = self.dynamic_view.load();
         let next = DynamicViewBuilder::from_view(&current)

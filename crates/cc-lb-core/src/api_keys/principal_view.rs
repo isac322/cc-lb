@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use cc_lb_config::{Config, ConfigError, Limit as ConfigLimit, LimitKind as ConfigLimitKind};
 use cc_lb_plugin_api::{ObservabilityHook, RouterPlugin};
+use cc_lb_storage_api::{PrincipalKind as DbPrincipalKind, PrincipalRecord};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 use crate::api_keys::types::{Limit, LimitKind, PrincipalType};
@@ -25,6 +26,8 @@ pub enum ObservabilityHooksCache {
     Inherit,
     Explicit(Vec<Arc<dyn ObservabilityHook>>),
 }
+
+pub type PrincipalRoutingArtifacts = (RouterPluginCache, ObservabilityHooksCache);
 
 #[derive(Debug)]
 pub struct PrincipalView {
@@ -121,6 +124,64 @@ impl PrincipalView {
         Ok(Arc::new(PrincipalView { specs }))
     }
 
+    pub fn from_db(
+        principals: &[PrincipalRecord],
+        mut principal_chains: HashMap<String, PrincipalRoutingArtifacts>,
+    ) -> Self {
+        let specs = principals
+            .iter()
+            .filter(|principal| principal.deleted_at_unix_secs.is_none())
+            .map(|principal| {
+                let mut exact = HashSet::new();
+                let mut builder = GlobSetBuilder::new();
+
+                for model in &principal.allowed_models {
+                    if is_glob_pattern(model) {
+                        match Glob::new(model) {
+                            Ok(glob) => {
+                                builder.add(glob);
+                            }
+                            Err(_) => {
+                                exact.insert(model.clone());
+                            }
+                        }
+                    } else {
+                        exact.insert(model.clone());
+                    }
+                }
+
+                let allowed_models = builder.build().unwrap_or_else(|_| {
+                    GlobSetBuilder::new()
+                        .build()
+                        .unwrap_or_else(|_| unreachable!("empty glob set builds"))
+                });
+                let (router_plugin, observability_hooks) = principal_chains
+                    .remove(&principal.name)
+                    .unwrap_or((RouterPluginCache::Inherit, ObservabilityHooksCache::Inherit));
+
+                let cached = PrincipalSpecCached {
+                    id: principal.name.clone(),
+                    principal_type: principal.kind.into(),
+                    allowed_models,
+                    allowed_models_exact: exact,
+                    default_limits: principal
+                        .default_limits
+                        .iter()
+                        .cloned()
+                        .map(Into::into)
+                        .collect(),
+                    enabled: principal.enabled,
+                    router_plugin,
+                    observability_hooks,
+                };
+
+                (principal.name.clone(), cached)
+            })
+            .collect();
+
+        Self { specs }
+    }
+
     pub fn get(&self, principal_id: &str) -> Option<&PrincipalSpecCached> {
         self.specs.get(principal_id)
     }
@@ -208,6 +269,16 @@ impl From<ConfigLimit> for Limit {
     }
 }
 
+impl From<cc_lb_storage_api::Limit> for Limit {
+    fn from(value: cc_lb_storage_api::Limit) -> Self {
+        Self {
+            kind: value.kind.into(),
+            window: std::time::Duration::from_secs(value.window_secs),
+            cap_micros: value.cap_micros,
+        }
+    }
+}
+
 impl From<ConfigLimitKind> for LimitKind {
     fn from(value: ConfigLimitKind) -> Self {
         match value {
@@ -217,6 +288,28 @@ impl From<ConfigLimitKind> for LimitKind {
             ConfigLimitKind::TotalTokens => Self::TotalTokens,
             ConfigLimitKind::CostUsd => Self::CostUsd,
             ConfigLimitKind::Concurrent => Self::Concurrent,
+        }
+    }
+}
+
+impl From<DbPrincipalKind> for PrincipalType {
+    fn from(value: DbPrincipalKind) -> Self {
+        match value {
+            DbPrincipalKind::Human => Self::Human,
+            DbPrincipalKind::Machine | DbPrincipalKind::Admin => Self::Machine,
+        }
+    }
+}
+
+impl From<cc_lb_storage_api::LimitKind> for LimitKind {
+    fn from(value: cc_lb_storage_api::LimitKind) -> Self {
+        match value {
+            cc_lb_storage_api::LimitKind::Requests => Self::Requests,
+            cc_lb_storage_api::LimitKind::InputTokens => Self::InputTokens,
+            cc_lb_storage_api::LimitKind::OutputTokens => Self::OutputTokens,
+            cc_lb_storage_api::LimitKind::TotalTokens => Self::TotalTokens,
+            cc_lb_storage_api::LimitKind::CostUsd => Self::CostUsd,
+            cc_lb_storage_api::LimitKind::Concurrent => Self::Concurrent,
         }
     }
 }

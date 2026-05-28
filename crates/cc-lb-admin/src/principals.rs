@@ -218,7 +218,7 @@ pub async fn principal_limits(
     };
 
     Ok(Json(state.limit_engine.snapshot_for_principal(
-        &view,
+        view,
         &principal_id,
         identity_filter,
     )))

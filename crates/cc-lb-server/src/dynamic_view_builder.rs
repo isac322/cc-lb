@@ -1,0 +1,482 @@
+use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use async_trait::async_trait;
+use cc_lb_config::AnthropicOAuthConfig;
+use cc_lb_core::api_keys::principal_view::{
+    ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView, RouterPluginCache,
+};
+use cc_lb_core::{
+    ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamStatusEntry,
+    UpstreamStatusSnapshot, make_default_dispatcher,
+};
+use cc_lb_dialect_anthropic::{AnthropicDirectDialect, CustomAnthropicSpecDialect};
+use cc_lb_plugin_api::{
+    PluginManifest, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, Signer,
+    SignerError, SignerFactory, Upstream, UpstreamDialect,
+};
+use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
+use cc_lb_storage_api::{
+    PluginRegistryStore, PluginSlot, PrincipalRecord, PrincipalStore, StorageError, StorageResult,
+    UpstreamRecord, UpstreamStore,
+};
+use cc_lb_storage_api::upstream::UpstreamKind;
+use thiserror::Error;
+
+pub struct Stores {
+    pub upstreams: Arc<dyn UpstreamStore>,
+    pub principals: Arc<dyn PrincipalStore>,
+    pub plugin_registry: Arc<dyn PluginRegistryStore>,
+}
+
+#[derive(Debug, Error)]
+pub enum RebindError {
+    #[error(transparent)]
+    Storage(#[from] StorageError),
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Plugin(#[from] cc_lb_plugin_api::RuntimeError),
+}
+
+pub fn ensure_wasm_cached(
+    data_dir: &Path,
+    sha256: [u8; 32],
+    fetch: impl FnOnce() -> StorageResult<Option<Vec<u8>>>,
+) -> io::Result<PathBuf> {
+    let cache_dir = data_dir.join("plugins").join("wasm").join("cache");
+    let tmp_dir = cache_dir.join(".tmp");
+    fs::create_dir_all(&tmp_dir)?;
+    let target = cache_dir.join(format!("{}.wasm", hex_sha256(sha256)));
+    if target.exists() {
+        return Ok(target);
+    }
+
+    let bytes = fetch().map_err(io::Error::other)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("wasm blob {} not found", hex_sha256(sha256)),
+        )
+    })?;
+    let tmp = tmp_dir.join(format!("{}.wasm", uuid::Uuid::new_v4()));
+    {
+        let mut file = File::create(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+    }
+    match fs::rename(&tmp, &target) {
+        Ok(()) => Ok(target),
+        Err(_) if target.exists() => {
+            let _ = fs::remove_file(&tmp);
+            Ok(target)
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&tmp);
+            Err(error)
+        }
+    }
+}
+
+pub async fn build_dynamic_view(
+    stores: &Stores,
+    oauth_anthropic: &AnthropicOAuthConfig,
+    current_generation: u64,
+    runtime: &ExtismRuntime,
+    data_dir: &Path,
+) -> Result<Arc<DynamicView>, RebindError> {
+    let upstreams = list_upstreams(stores).await?;
+    let principals = list_principals(stores).await?;
+    let mut staged = Vec::new();
+    let principal_chains =
+        build_principal_chains(stores, runtime, data_dir, &principals, &mut staged).await?;
+    let principal_view = Arc::new(PrincipalView::from_db(&principals, principal_chains));
+    let now = unix_now_secs();
+    let (routes, statuses) = apply_upstreams(stores, &upstreams, oauth_anthropic, now).await?;
+    let global_router = Arc::new(DbRouter::new(routes));
+    let signer_factory = Arc::new(DbCompositeSignerFactory::new(upstreams));
+    let dispatcher = make_default_dispatcher(50);
+    let snapshot = Arc::new(UpstreamStatusSnapshot {
+        entries: statuses,
+        applied_at_unix_secs: unix_now_secs(),
+    });
+
+    runtime.commit_staged(staged)?;
+
+    Ok(DynamicViewBuilder::new(current_generation)
+        .signer_factory(signer_factory)
+        .global_router(global_router)
+        .dispatcher(dispatcher)
+        .global_observability_hooks(Vec::new())
+        .error_normalizer(Arc::new(ErrorNormalizer::new()))
+        .principal_view(principal_view)
+        .upstream_status_snapshot(snapshot)
+        .build())
+}
+
+async fn list_upstreams(stores: &Stores) -> StorageResult<Vec<UpstreamRecord>> {
+    let mut all = Vec::new();
+    let mut after = None;
+    loop {
+        let page = stores.upstreams.list(after, 100).await?;
+        if page.is_empty() {
+            break;
+        }
+        after = page.last().map(|record| record.id);
+        all.extend(
+            page.into_iter()
+                .filter(|record| record.deleted_at_unix_secs.is_none()),
+        );
+    }
+    Ok(all)
+}
+
+async fn list_principals(stores: &Stores) -> StorageResult<Vec<PrincipalRecord>> {
+    let mut all = Vec::new();
+    let mut offset = 0;
+    loop {
+        let page = stores.principals.list(offset, 100, false).await?;
+        if page.is_empty() {
+            break;
+        }
+        offset += page.len();
+        all.extend(page);
+    }
+    Ok(all)
+}
+
+async fn build_principal_chains(
+    stores: &Stores,
+    runtime: &ExtismRuntime,
+    data_dir: &Path,
+    principals: &[PrincipalRecord],
+    staged: &mut Vec<StagedSlot>,
+) -> Result<HashMap<String, PrincipalRoutingArtifacts>, RebindError> {
+    let registry = list_registry_by_id(stores).await?;
+    let mut chains = HashMap::new();
+    for principal in principals {
+        let router_entries = stores
+            .plugin_registry
+            .list_chain_for_principal(principal.id, PluginSlot::Router)
+            .await?;
+        let hook_entries = stores
+            .plugin_registry
+            .list_chain_for_principal(principal.id, PluginSlot::ObservabilityHook)
+            .await?;
+
+        let router = if let Some(entry) = router_entries.into_iter().min_by_key(|entry| entry.order)
+        {
+            let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
+            })?;
+            let registry_entry = stores
+                .plugin_registry
+                .get_registry_entry_by_sha(registry_entry.sha256)
+                .await?
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "plugin registry sha not found")
+                })?;
+            let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
+            let manifest = PluginManifest {
+                name: registry_entry.name,
+                artifact: wasm_path.to_string_lossy().into_owned(),
+                config: entry.config,
+                metadata: Default::default(),
+            };
+            let (handle, slot) =
+                runtime.instantiate_router_for(&principal.name, &manifest.name, &manifest)?;
+            staged.push(slot);
+            RouterPluginCache::Explicit(handle)
+        } else {
+            RouterPluginCache::Inherit
+        };
+
+        let mut hooks = Vec::new();
+        let mut hook_entries = hook_entries;
+        hook_entries.sort_by_key(|entry| entry.order);
+        for entry in hook_entries {
+            let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
+            })?;
+            let registry_entry = stores
+                .plugin_registry
+                .get_registry_entry_by_sha(registry_entry.sha256)
+                .await?
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "plugin registry sha not found")
+                })?;
+            let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
+            let manifest = PluginManifest {
+                name: registry_entry.name,
+                artifact: wasm_path.to_string_lossy().into_owned(),
+                config: entry.config,
+                metadata: Default::default(),
+            };
+            let (handle, slot) = runtime.instantiate_observability_for(
+                &principal.name,
+                &manifest.name,
+                &manifest,
+            )?;
+            staged.push(slot);
+            hooks.push(handle);
+        }
+        let hooks = if hooks.is_empty() {
+            ObservabilityHooksCache::Inherit
+        } else {
+            ObservabilityHooksCache::Explicit(hooks)
+        };
+        chains.insert(principal.name.clone(), (router, hooks));
+    }
+    Ok(chains)
+}
+
+async fn list_registry_by_id(
+    stores: &Stores,
+) -> StorageResult<HashMap<uuid::Uuid, cc_lb_storage_api::WasmRegistryEntry>> {
+    let mut all = HashMap::new();
+    let mut after = None;
+    loop {
+        let page = stores.plugin_registry.list_registry(after, 100).await?;
+        if page.is_empty() {
+            break;
+        }
+        after = page.last().map(|entry| entry.id);
+        all.extend(page.into_iter().map(|entry| (entry.id, entry)));
+    }
+    Ok(all)
+}
+
+async fn materialize_wasm(
+    stores: &Stores,
+    data_dir: &Path,
+    sha256: [u8; 32],
+) -> Result<PathBuf, RebindError> {
+    let cache_path = data_dir
+        .join("plugins")
+        .join("wasm")
+        .join("cache")
+        .join(format!("{}.wasm", hex_sha256(sha256)));
+    if cache_path.exists() {
+        return Ok(cache_path);
+    }
+    let bytes = stores.plugin_registry.get_blob_bytes(sha256).await?;
+    ensure_wasm_cached(data_dir, sha256, || Ok(bytes)).map_err(RebindError::Io)
+}
+
+async fn apply_upstreams(
+    stores: &Stores,
+    upstreams: &[UpstreamRecord],
+    _oauth_anthropic: &AnthropicOAuthConfig,
+    now: u64,
+) -> StorageResult<(Vec<DbRoute>, HashMap<String, UpstreamStatusEntry>)> {
+    let mut routes = Vec::new();
+    let mut statuses = HashMap::new();
+    for upstream in upstreams {
+        if !upstream.enabled {
+            stores
+                .upstreams
+                .set_last_apply_error(upstream.id, None)
+                .await?;
+            statuses.insert(
+                upstream.name.clone(),
+                UpstreamStatusEntry {
+                    status: ApplyStatus::Disabled,
+                    last_apply_error: None,
+                    last_apply_at_unix_secs: now,
+                },
+            );
+            continue;
+        }
+
+        match validate_upstream(upstream) {
+            Ok(route) => {
+                stores
+                    .upstreams
+                    .set_last_apply_error(upstream.id, None)
+                    .await?;
+                routes.push(route);
+                statuses.insert(
+                    upstream.name.clone(),
+                    UpstreamStatusEntry {
+                        status: ApplyStatus::Active,
+                        last_apply_error: None,
+                        last_apply_at_unix_secs: now,
+                    },
+                );
+            }
+            Err(message) => {
+                stores
+                    .upstreams
+                    .set_last_apply_error(upstream.id, Some(message.clone()))
+                    .await?;
+                statuses.insert(
+                    upstream.name.clone(),
+                    UpstreamStatusEntry {
+                        status: ApplyStatus::Error,
+                        last_apply_error: Some(message),
+                        last_apply_at_unix_secs: now,
+                    },
+                );
+            }
+        }
+    }
+    Ok((routes, statuses))
+}
+
+fn validate_upstream(upstream: &UpstreamRecord) -> Result<DbRoute, String> {
+    let upstream_target = match upstream.kind {
+        UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth => Upstream::AnthropicDirect,
+        UpstreamKind::Custom => Upstream::CustomAnthropicSpec {
+            base_url: upstream
+                .base_url
+                .clone()
+                .ok_or_else(|| "custom upstream missing base_url".to_owned())?,
+        },
+    };
+    let dialect: Arc<dyn UpstreamDialect> = match upstream.kind {
+        UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth => Arc::new(
+            AnthropicDirectDialect::with_base_url(upstream.base_url.clone()),
+        ),
+        UpstreamKind::Custom => Arc::new(CustomAnthropicSpecDialect),
+    };
+    match upstream.kind {
+        UpstreamKind::AnthropicApiKey if upstream.api_key_ciphertext.is_none() => {
+            return Err("anthropic api-key upstream missing api_key_ciphertext".to_owned());
+        }
+        UpstreamKind::AnthropicOauth => {
+            let ciphertext = upstream
+                .oauth_credentials
+                .as_ref()
+                .ok_or_else(|| "anthropic oauth upstream missing oauth credentials".to_owned())?
+                .ciphertext();
+            if ciphertext.len() < 29 {
+                return Err("anthropic oauth credentials ciphertext is corrupt".to_owned());
+            }
+        }
+        _ => {}
+    }
+    Ok(DbRoute {
+        name: upstream.name.clone(),
+        upstream: upstream_target,
+        dialect,
+    })
+}
+
+#[derive(Clone)]
+struct DbRoute {
+    name: String,
+    upstream: Upstream,
+    dialect: Arc<dyn UpstreamDialect>,
+}
+
+struct DbRouter {
+    routes: Vec<DbRoute>,
+}
+
+impl DbRouter {
+    fn new(routes: Vec<DbRoute>) -> Self {
+        Self { routes }
+    }
+}
+
+impl RouterPlugin for DbRouter {
+    fn route(
+        &self,
+        _ctx: &RequestContext,
+        _principal: &Principal,
+    ) -> Result<RouteDecision, RouteError> {
+        let route = self.routes.first().ok_or_else(|| RouteError::NoRoute {
+            reason: "no active upstreams in dynamic view".to_owned(),
+        })?;
+        tracing::debug!(upstream = route.name.as_str(), "dynamic route selected");
+        Ok(RouteDecision {
+            upstream: route.upstream.clone(),
+            dialect: route.dialect.clone(),
+        })
+    }
+}
+
+#[derive(Clone)]
+struct DbCompositeSignerFactory {
+    upstreams: Vec<UpstreamRecord>,
+    downstream_api_key: Option<String>,
+}
+
+impl DbCompositeSignerFactory {
+    fn new(upstreams: Vec<UpstreamRecord>) -> Self {
+        Self {
+            upstreams,
+            downstream_api_key: None,
+        }
+    }
+
+    fn with_downstream_api_key(&self, api_key: String) -> Self {
+        Self {
+            upstreams: self.upstreams.clone(),
+            downstream_api_key: Some(api_key),
+        }
+    }
+}
+
+impl cc_lb_core::ApiKeyAwareSignerFactory for DbCompositeSignerFactory {
+    fn with_api_key(&self, api_key: String) -> Arc<dyn SignerFactory> {
+        Arc::new(self.with_downstream_api_key(api_key))
+    }
+}
+
+#[async_trait]
+impl SignerFactory for DbCompositeSignerFactory {
+    async fn build(&self, upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
+        let record = self
+            .upstreams
+            .iter()
+            .find(|candidate| upstream_matches(candidate, upstream))
+            .ok_or_else(|| SignerError::MissingCredentials {
+                reason: "upstream not present in dynamic signer view".to_owned(),
+            })?;
+        match record.kind {
+            UpstreamKind::AnthropicApiKey | UpstreamKind::Custom => {
+                let api_key = self.downstream_api_key.clone().ok_or_else(|| {
+                    SignerError::MissingCredentials {
+                        reason: "dynamic api-key signer requires downstream api key until Task 22 storage signer lands".to_owned(),
+                    }
+                })?;
+                cc_lb_signer_anthropic_key::AnthropicKeySignerFactory::new(api_key)
+                    .build(upstream)
+                    .await
+            }
+            UpstreamKind::AnthropicOauth => Err(SignerError::MissingCredentials {
+                reason: "dynamic oauth signer placeholder until Task 22 lands".to_owned(),
+            }),
+        }
+    }
+}
+
+fn upstream_matches(record: &UpstreamRecord, upstream: &Upstream) -> bool {
+    matches!(
+        (&record.kind, upstream),
+        (
+            UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth,
+            Upstream::AnthropicDirect
+        ) | (UpstreamKind::Custom, Upstream::CustomAnthropicSpec { .. })
+    )
+}
+
+fn unix_now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn hex_sha256(sha256: [u8; 32]) -> String {
+    let mut output = String::with_capacity(64);
+    for byte in sha256 {
+        use std::fmt::Write as _;
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
+}

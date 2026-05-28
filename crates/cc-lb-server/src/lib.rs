@@ -15,6 +15,7 @@ pub mod builtins;
 pub mod chaos;
 pub mod cli;
 pub mod drain;
+pub mod dynamic_view_builder;
 pub mod preflight;
 pub mod reload;
 pub mod replica;

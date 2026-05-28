@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
@@ -25,14 +25,11 @@ use cc_lb_config::{Limit, LimitKind, PrincipalSpec, PrincipalType};
 use cc_lb_core::BreakerState;
 use cc_lb_core::{
     BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
-    CircuitBreakerDispatch, DynamicViewBuilder, DynamicViewHolder, ErrorNormalizer,
-    HopByHopStripLayer, Lifecycle, LifecycleConfig, UpstreamDispatch, UpstreamKind,
+    CircuitBreakerDispatch, DynamicViewBuilder, DynamicViewHolder, HopByHopStripLayer, Lifecycle,
+    LifecycleConfig, UpstreamDispatch,
     api_keys::{
-        builtin_authn::BuiltinAuthn,
-        concurrent_guard::KeyConcurrencyManager,
-        key_store::KeyStore,
-        limit_engine::LimitEngine,
-        principal_view::{ObservabilityHooksCache, PrincipalView, RouterPluginCache},
+        builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
+        limit_engine::LimitEngine, principal_view::PrincipalView,
     },
     make_default_dispatcher, spawn_audit_writer,
     usage_pruner::UsagePruner,
@@ -51,10 +48,9 @@ use tower::ServiceBuilder;
 
 use crate::bootstrap;
 use crate::build_meta::BuildMeta;
-use crate::builtins::{
-    self, BuiltinError, BuiltinRouter, CompositeSignerFactory, NoopObservabilityHook,
-};
+use crate::builtins::{BuiltinError, BuiltinRouter, NoopObservabilityHook};
 use crate::drain::DrainController;
+use crate::dynamic_view_builder::{Stores as DynamicStores, build_dynamic_view};
 use crate::preflight::{self, PreflightOptions};
 use crate::reload::ConfigWatcher;
 use crate::replica;
@@ -435,51 +431,18 @@ pub async fn build_app_with_storage(
     let (sink, audit_writer_task) = spawn_audit_writer(storage.clone(), 1024);
     let audit_sink = Some(Arc::new(sink));
     let runtime = Arc::new(ExtismRuntime::new());
-    let signer_factory_for_lifecycle = Arc::new(CompositeSignerFactory::new(
+    let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
+    let storage_for_dynamic = storage.clone();
+    let env_token = std::env::var("CC_LB_BOOTSTRAP_ADMIN_TOKEN").ok();
+    bootstrap::apply_bootstrap(
         &config,
-        storage.clone(),
-        aead.clone(),
-    ));
-
-    let mut all_staged = Vec::new();
-    let (global_router, global_observability_hooks) =
-        build_global_chain(&config, &runtime, &mut all_staged)?;
-
-    let mut principal_chains: HashMap<String, (RouterPluginCache, ObservabilityHooksCache)> =
-        HashMap::new();
-    for (principal_id, spec) in &config.principals {
-        let router_cache = match &spec.router_plugin {
-            Some(plugin) => {
-                let manifest = manifest_from_plugin(plugin)?;
-                let (handle, slot) =
-                    runtime.instantiate_router_for(principal_id, &plugin.name, &manifest)?;
-                all_staged.push(slot);
-                RouterPluginCache::Explicit(handle)
-            }
-            None => RouterPluginCache::Inherit,
-        };
-        let hooks_cache = match &spec.observability_hooks {
-            Some(plugins) => {
-                let mut handles = Vec::with_capacity(plugins.len());
-                for plugin in plugins {
-                    let manifest = manifest_from_plugin(plugin)?;
-                    let (handle, slot) = runtime.instantiate_observability_for(
-                        principal_id,
-                        &plugin.name,
-                        &manifest,
-                    )?;
-                    all_staged.push(slot);
-                    handles.push(handle);
-                }
-                ObservabilityHooksCache::Explicit(handles)
-            }
-            None => ObservabilityHooksCache::Inherit,
-        };
-        principal_chains.insert(principal_id.clone(), (router_cache, hooks_cache));
-    }
-
-    let principal_view = PrincipalView::from_config(&config, principal_chains)?;
-    runtime.commit_staged(all_staged)?;
+        storage.as_ref(),
+        storage.as_ref(),
+        storage.as_ref(),
+        env_token,
+        &data_dir,
+    )
+    .await?;
 
     let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
     let limit_engine = LimitEngine::new(concurrent_mgr);
@@ -490,12 +453,9 @@ pub async fn build_app_with_storage(
         key_store.clone(),
     ));
 
-    let error_normalizer = Arc::new(error_normalizer(&config)?);
-    let (dispatcher, breaker_registry) = dispatcher(&config);
+    let (_dispatcher, breaker_registry) = dispatcher(&config);
 
     let replica_identity = {
-        let data_dir = std::path::PathBuf::from("./data");
-        std::fs::create_dir_all(&data_dir).ok();
         match replica::load_or_create_replica_id(&data_dir) {
             Ok(id) => {
                 let started_at_unix_secs = std::time::SystemTime::now()
@@ -514,20 +474,25 @@ pub async fn build_app_with_storage(
         }
     };
 
-    let mut lifecycle = Lifecycle::new(
+    let stores = DynamicStores {
+        upstreams: storage_for_dynamic.clone(),
+        principals: storage_for_dynamic.clone(),
+        plugin_registry: storage_for_dynamic,
+    };
+    let oauth_anthropic = config.oauth.anthropic.clone().unwrap_or_default();
+    let initial_view =
+        build_dynamic_view(&stores, &oauth_anthropic, 0, &runtime, &data_dir).await?;
+    let dynamic_view_holder = Arc::new(DynamicViewHolder::new(initial_view));
+
+    let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
-        principal_view.clone(),
-        signer_factory_for_lifecycle,
-        global_router,
-        dispatcher,
-        global_observability_hooks,
+        dynamic_view_holder,
         LifecycleConfig {
             messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
             files_body_cap_bytes: cap_to_usize(config.body.files_cap_bytes),
             replica_identity,
         },
-    )
-    .with_error_normalizer(error_normalizer);
+    );
     if let Some(audit_sink) = audit_sink.clone() {
         lifecycle = lifecycle.with_audit_sink(audit_sink);
     }
@@ -565,17 +530,6 @@ pub async fn build_app_with_storage(
         builtin_authn: Some(builtin_authn.clone()),
     };
 
-    let env_token = std::env::var("CC_LB_BOOTSTRAP_ADMIN_TOKEN").ok();
-    let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
-    let _ = bootstrap::apply_bootstrap(
-        &config,
-        storage.as_ref(),
-        storage.as_ref(),
-        storage.as_ref(),
-        env_token,
-        &data_dir,
-    )
-    .await;
 
     let admin_config: Arc<dyn CurrentConfig> = match &config_watcher {
         Some(watcher) => watcher.clone(),
@@ -975,16 +929,6 @@ fn dispatcher(config: &Config) -> (Arc<dyn UpstreamDispatch>, Arc<BreakerRegistr
     )
 }
 
-fn error_normalizer(config: &Config) -> Result<ErrorNormalizer, BuildError> {
-    let mut normalizer = ErrorNormalizer::new();
-    for spec in config.upstreams.values() {
-        let upstream = builtins::upstream_from_spec(spec)?;
-        let kind = UpstreamKind::from(&upstream);
-        normalizer.register_dialect(kind, builtins::dialect_for_spec(spec)?);
-    }
-    Ok(normalizer)
-}
-
 pub(crate) fn manifest_from_plugin(plugin: &PluginRef) -> Result<PluginManifest, ConfigError> {
     let artifact = plugin
         .wasm_path
@@ -1097,6 +1041,10 @@ pub enum BuildError {
     Io(#[from] std::io::Error),
     #[error(transparent)]
     Tls(#[from] crate::tls::TlsError),
+    #[error(transparent)]
+    Rebind(#[from] crate::dynamic_view_builder::RebindError),
+    #[error(transparent)]
+    Bootstrap(#[from] crate::bootstrap::BootstrapError),
     #[error("missing storage key env {env}")]
     StorageKeyMissing { env: String },
     #[error("storage key must be 64 hexadecimal characters")]
