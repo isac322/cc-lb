@@ -17,12 +17,12 @@ use cc_lb_core::{
     ApiKeyAwareSignerFactory, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_plugin_api::{
-    sign_request, DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal,
-    PrincipalKind, RequestContext, RetryDecision, RouteDecision, RouteError, RouterPlugin,
-    ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError, SignerFactory,
-    SigningCapability, Upstream, UpstreamDialect,
+    DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
+    RequestContext, RetryDecision, RouteDecision, RouteError, RouterPlugin, ShapedRequest,
+    ShapedRequestBuilder, SignedRequest, Signer, SignerError, SignerFactory, SigningCapability,
+    Upstream, UpstreamDialect, sign_request,
 };
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
 use http_body_util::BodyExt;
@@ -64,6 +64,7 @@ impl TestAuthn {
                 .expect("test auth storage opens"),
         );
         let _dir = Box::leak(Box::new(dir));
+        let managed_key_store = RedbManagedKeyStore::new(storage);
         Self {
             authn: Arc::new(BuiltinAuthn::new(
                 DownstreamAuthMode::None,
@@ -72,7 +73,7 @@ impl TestAuthn {
                     upstream_kind: NoneModeUpstreamKind::AnthropicKey,
                     upstream_credential_ref: "test-upstream".to_owned(),
                 }),
-                Arc::new(KeyStore::new(storage)),
+                Arc::new(KeyStore::new(Arc::new(managed_key_store))),
                 Arc::new(arc_swap::ArcSwap::from(PrincipalView::from_config(
                     &cc_lb_config::Config::default(),
                 ))),

@@ -81,7 +81,7 @@ impl BuiltinAuthn {
         }
     }
 
-    pub fn authenticate(
+    pub async fn authenticate(
         &self,
         headers: &http::HeaderMap,
     ) -> Result<AuthnSuccess, BuiltinAuthError> {
@@ -95,6 +95,7 @@ impl BuiltinAuthn {
         let (principal_id, key_id_storage, record) = self
             .key_store
             .lookup_by_index_hash(&index_hash)
+            .await
             .map_err(|_| BuiltinAuthError::NotFound)?
             .ok_or(BuiltinAuthError::NotFound)?;
 
