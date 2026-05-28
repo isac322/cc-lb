@@ -244,6 +244,111 @@ impl ExtismRuntime {
         }
         Ok(slot)
     }
+
+    fn stage_slot(
+        &self,
+        principal_id: &str,
+        plugin_name: &str,
+        manifest: &PluginManifest,
+        hook: &'static str,
+    ) -> Result<(Arc<PluginSlot>, StagedSlot), RuntimeError> {
+        let key = SlotKey::new(principal_id, plugin_name);
+        let entry = PluginEntry::from_manifest(manifest, &self.config)?;
+        let cell = build_plugin_cell(&entry, self.host_state.clone())?;
+        let slot = Arc::new(PluginSlot::new(entry.clone(), cell));
+        if !slot.function_exists(hook)? {
+            return Err(RuntimeError::InstantiateFailed {
+                reason: format!("plugin {} does not export {hook}", manifest.name),
+            });
+        }
+        Ok((
+            slot.clone(),
+            StagedSlot {
+                key,
+                entry,
+                slot,
+            },
+        ))
+    }
+
+    pub fn instantiate_router_for(
+        &self,
+        principal_id: &str,
+        plugin_name: &str,
+        manifest: &PluginManifest,
+    ) -> Result<(Arc<dyn RouterPlugin>, StagedSlot), RuntimeError> {
+        let (slot, staged) = self.stage_slot(principal_id, plugin_name, manifest, "route")?;
+        Ok((Arc::new(ExtismRouterPlugin::new(slot)), staged))
+    }
+
+    pub fn instantiate_observability_for(
+        &self,
+        principal_id: &str,
+        plugin_name: &str,
+        manifest: &PluginManifest,
+    ) -> Result<(Arc<dyn ObservabilityHook>, StagedSlot), RuntimeError> {
+        let (slot, staged) = self.stage_slot(principal_id, plugin_name, manifest, "observe")?;
+        let limits = slot.limits()?;
+        Ok((Arc::new(ExtismObservabilityHook::new(slot, limits)), staged))
+    }
+
+    pub fn instantiate_router_global(
+        &self,
+        plugin_name: &str,
+        manifest: &PluginManifest,
+    ) -> Result<(Arc<dyn RouterPlugin>, StagedSlot), RuntimeError> {
+        self.instantiate_router_for(GLOBAL_PRINCIPAL, plugin_name, manifest)
+    }
+
+    pub fn instantiate_observability_global(
+        &self,
+        plugin_name: &str,
+        manifest: &PluginManifest,
+    ) -> Result<(Arc<dyn ObservabilityHook>, StagedSlot), RuntimeError> {
+        self.instantiate_observability_for(GLOBAL_PRINCIPAL, plugin_name, manifest)
+    }
+
+    pub fn commit_staged(&self, staged: Vec<StagedSlot>) -> Result<(), RuntimeError> {
+        let mut instances = self
+            .instances
+            .write()
+            .map_err(|_| runtime_error("instance registry lock poisoned"))?;
+        let mut manifests = self
+            .manifests
+            .write()
+            .map_err(|_| runtime_error("manifest registry lock poisoned"))?;
+        for StagedSlot { key, entry, slot } in staged {
+            manifests.insert(key.clone(), entry);
+            instances.insert(key, slot);
+        }
+        Ok(())
+    }
+
+    pub fn evict_slot(&self, principal_id: &str, plugin_name: &str) {
+        let key = SlotKey::new(principal_id, plugin_name);
+        if let Ok(mut manifests) = self.manifests.write() {
+            manifests.remove(&key);
+        }
+        if let Ok(mut instances) = self.instances.write() {
+            instances.remove(&key);
+        }
+    }
+
+    pub fn registered_slot_keys(&self) -> Vec<(String, String)> {
+        let Ok(instances) = self.instances.read() else {
+            return Vec::new();
+        };
+        instances
+            .keys()
+            .map(|k| (k.principal.clone(), k.plugin.clone()))
+            .collect()
+    }
+}
+
+pub struct StagedSlot {
+    key: SlotKey,
+    entry: PluginEntry,
+    slot: Arc<PluginSlot>,
 }
 
 impl Default for ExtismRuntime {
@@ -621,6 +726,125 @@ mod tests {
         assert_eq!(instances.len(), 2);
         assert!(instances.contains_key(&alice_key));
         assert!(instances.contains_key(&bob_key));
+    }
+
+    #[test]
+    fn instantiate_router_for_stages_without_touching_live_maps() {
+        let fixture = wasm_manifest("router", router_module());
+        let runtime = ExtismRuntime::new();
+
+        let (_handle, staged) = runtime
+            .instantiate_router_for("alice", "alice-router", &fixture.manifest)
+            .expect("staging succeeds");
+
+        assert!(
+            runtime.registered_slot_keys().is_empty(),
+            "staging must NOT touch live instances map until commit_staged"
+        );
+
+        runtime
+            .commit_staged(vec![staged])
+            .expect("commit succeeds");
+
+        let keys = runtime.registered_slot_keys();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(
+            keys[0],
+            ("alice".to_owned(), "alice-router".to_owned()),
+            "committed key uses (principal_id, plugin_name) pair"
+        );
+    }
+
+    #[test]
+    fn commit_staged_registers_both_principal_and_global_in_one_batch() {
+        let fixture = wasm_manifest("router", router_module());
+        let runtime = ExtismRuntime::new();
+
+        let (_global_handle, global_staged) = runtime
+            .instantiate_router_global("shared", &fixture.manifest)
+            .expect("global staging");
+        let (_alice_handle, alice_staged) = runtime
+            .instantiate_router_for("alice", "shared", &fixture.manifest)
+            .expect("alice staging");
+
+        assert!(runtime.registered_slot_keys().is_empty());
+
+        runtime
+            .commit_staged(vec![global_staged, alice_staged])
+            .expect("commit");
+
+        let mut keys = runtime.registered_slot_keys();
+        keys.sort();
+        assert_eq!(
+            keys,
+            vec![
+                ("__global__".to_owned(), "shared".to_owned()),
+                ("alice".to_owned(), "shared".to_owned()),
+            ],
+            "global and per-principal slots with same plugin name commit as distinct keys"
+        );
+    }
+
+    #[test]
+    fn instantiate_router_for_with_missing_export_returns_err_without_staging() {
+        let fixture = wasm_manifest("noroute", noroute_module());
+        let runtime = ExtismRuntime::new();
+
+        let err = runtime
+            .instantiate_router_for("alice", "noroute", &fixture.manifest)
+            .map(|_| ())
+            .expect_err("missing 'route' export must fail");
+        let message = format!("{err:?}");
+        assert!(
+            message.contains("does not export route"),
+            "error must surface missing-export cause, got: {message}"
+        );
+        assert!(
+            runtime.registered_slot_keys().is_empty(),
+            "failed staging must NOT leave anything in instances map"
+        );
+    }
+
+    #[test]
+    fn evict_slot_removes_committed_entry() {
+        let fixture = wasm_manifest("router", router_module());
+        let runtime = ExtismRuntime::new();
+        let (_handle, staged) = runtime
+            .instantiate_router_for("alice", "alice-router", &fixture.manifest)
+            .expect("staging");
+        runtime.commit_staged(vec![staged]).expect("commit");
+        assert_eq!(runtime.registered_slot_keys().len(), 1);
+
+        runtime.evict_slot("alice", "alice-router");
+
+        assert!(
+            runtime.registered_slot_keys().is_empty(),
+            "evict_slot must remove the entry from both instances and manifests"
+        );
+    }
+
+    #[test]
+    fn instantiate_observability_for_stages_observe_export_check() {
+        let fixture = wasm_manifest("hook", observe_module());
+        let runtime = ExtismRuntime::new();
+
+        let (_handle, staged) = runtime
+            .instantiate_observability_for("alice", "alice-hook", &fixture.manifest)
+            .expect("observability staging");
+        runtime.commit_staged(vec![staged]).expect("commit");
+
+        assert_eq!(
+            runtime.registered_slot_keys(),
+            vec![("alice".to_owned(), "alice-hook".to_owned())]
+        );
+    }
+
+    fn noroute_module() -> &'static str {
+        r#"(module (func (export "shape") (result i32) (i32.const 0)))"#
+    }
+
+    fn observe_module() -> &'static str {
+        r#"(module (func (export "observe") (result i32) (i32.const 0)))"#
     }
 
     struct WasmManifestFixture {
