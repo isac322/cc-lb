@@ -10,6 +10,15 @@ env:
   CC_LB_ADMIN_SKIP_SPA: "1"
 
 jobs:
+  audit-redaction-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: ripgrep
+      - run: bash scripts/lint-audit-redaction.sh
+
   cargo-deny:
     runs-on: ubuntu-latest
     steps:
