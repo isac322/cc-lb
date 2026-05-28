@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -220,6 +221,31 @@ fn validate_plugins(config: &Config) -> Result<(), ValidationError> {
 
     for (index, plugin) in config.plugins.observability_hooks.iter().enumerate() {
         validate_plugin_ref(&format!("plugins.observability_hooks.{index}"), plugin)?;
+    }
+
+    for (principal_id, principal) in &config.principals {
+        if let Some(plugin) = &principal.router_plugin {
+            validate_plugin_ref(
+                &format!("principals.{principal_id}.router_plugin"),
+                plugin,
+            )?;
+        }
+        if let Some(hooks) = &principal.observability_hooks {
+            let mut seen: HashSet<&str> = HashSet::new();
+            for (index, plugin) in hooks.iter().enumerate() {
+                let path = format!("principals.{principal_id}.observability_hooks.{index}");
+                validate_plugin_ref(&path, plugin)?;
+                if !seen.insert(plugin.name.as_str()) {
+                    return Err(ValidationError::new(
+                        format!("principals.{principal_id}.observability_hooks"),
+                        format!(
+                            "duplicate plugin name '{}' within principal observability_hooks",
+                            plugin.name
+                        ),
+                    ));
+                }
+            }
+        }
     }
 
     Ok(())
