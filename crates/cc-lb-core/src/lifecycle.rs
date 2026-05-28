@@ -362,16 +362,29 @@ impl Lifecycle {
             }
         };
         let principal_id = success.principal_id.clone();
-        let cached = view
-            .get(&principal_id)
-            .expect("auth verified existence in same view snapshot");
+        let Some(cached) = view.get(&principal_id) else {
+            tracing::error!(%principal_id, "authenticated principal missing from principal view");
+            observe_error(
+                &self.global_observability_hooks,
+                "principal_missing",
+                "authenticated principal is unavailable",
+                "authn",
+            );
+            let response = anthropic_error_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "api_error",
+                "authenticated principal is unavailable",
+            );
+            observe_finished(
+                &self.global_observability_hooks,
+                StatusCode::INTERNAL_SERVER_ERROR,
+                started,
+            );
+            return Ok(response);
+        };
         let router = cached.resolved_router(&self.global_router);
         let hooks = cached.resolved_hooks(&self.global_observability_hooks);
-        let stream_hooks = StreamHooks::new(
-            view.clone(),
-            principal_id.clone(),
-            self.global_observability_hooks.clone(),
-        );
+        let stream_hooks = StreamHooks::new(hooks);
         let principal = Principal {
             id: principal_id,
             kind: PrincipalKind::ApiKey,
@@ -899,29 +912,18 @@ impl Lifecycle {
 
 #[derive(Clone)]
 struct StreamHooks {
-    view: Arc<PrincipalView>,
-    principal_id: String,
-    global_observability_hooks: Arc<[Arc<dyn ObservabilityHook>]>,
+    hooks: Arc<[Arc<dyn ObservabilityHook>]>,
 }
 
 impl StreamHooks {
-    fn new(
-        view: Arc<PrincipalView>,
-        principal_id: String,
-        global_observability_hooks: Arc<[Arc<dyn ObservabilityHook>]>,
-    ) -> Self {
+    fn new(hooks: &[Arc<dyn ObservabilityHook>]) -> Self {
         Self {
-            view,
-            principal_id,
-            global_observability_hooks,
+            hooks: hooks.iter().cloned().collect(),
         }
     }
 
     fn as_slice(&self) -> &[Arc<dyn ObservabilityHook>] {
-        self.view
-            .get(&self.principal_id)
-            .expect("auth verified existence in same view snapshot")
-            .resolved_hooks(&self.global_observability_hooks)
+        &self.hooks
     }
 }
 

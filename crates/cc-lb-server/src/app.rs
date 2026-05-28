@@ -19,6 +19,8 @@ use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, ConfigError, DownstreamAuthMode, PluginRef, TlsConfig};
+#[cfg(feature = "postgres")]
+use cc_lb_config::{Limit, LimitKind, PrincipalSpec, PrincipalType};
 use cc_lb_core::BreakerState;
 use cc_lb_core::{
     BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
@@ -219,9 +221,9 @@ pub async fn run_serve(config_path: &Path) -> Result<(), ServeError> {
 }
 
 fn print_preflight_report(report: &preflight::PreflightReport) {
-    println!("preflight: ok");
+    tracing::info!("preflight: ok");
     for warning in &report.warnings {
-        println!("preflight: warning: {warning}");
+        tracing::info!("preflight: warning: {warning}");
     }
 }
 
@@ -252,12 +254,54 @@ pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError
 }
 
 #[cfg(feature = "postgres")]
+const POSTGRES_TEST_SCHEMA: &str = "cc_lb_app_test";
+
+#[cfg(feature = "postgres")]
+async fn reset_app_testing_postgres_schema(database_url: &str) -> Result<(), BuildError> {
+    use sqlx::postgres::PgPoolOptions;
+
+    let pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(database_url)
+        .await
+        .map_err(|e| BuildError::StorageConnect {
+            message: e.to_string(),
+        })?;
+    sqlx::query("DROP SCHEMA IF EXISTS cc_lb_app_test CASCADE")
+        .execute(&pool)
+        .await
+        .map_err(|e| BuildError::StorageConnect {
+            message: e.to_string(),
+        })?;
+    sqlx::query("CREATE SCHEMA cc_lb_app_test")
+        .execute(&pool)
+        .await
+        .map_err(|e| BuildError::StorageConnect {
+            message: e.to_string(),
+        })?;
+    pool.close().await;
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
 pub async fn build_app_for_testing_postgres(database_url: &str) -> Result<App, BuildError> {
     use cc_lb_storage_api::{BackendKind, Storage as StorageTrait};
     use sqlx::postgres::PgPoolOptions;
 
+    reset_app_testing_postgres_schema(database_url).await?;
+    let search_path = format!("{POSTGRES_TEST_SCHEMA}, public");
     let pool = PgPoolOptions::new()
         .max_connections(2)
+        .after_connect(move |connection, _metadata| {
+            let search_path = search_path.clone();
+            Box::pin(async move {
+                sqlx::query("SELECT set_config('search_path', $1, false)")
+                    .bind(&search_path)
+                    .execute(&mut *connection)
+                    .await?;
+                Ok(())
+            })
+        })
         .connect(database_url)
         .await
         .map_err(|e| BuildError::StorageConnect {
@@ -287,6 +331,14 @@ pub async fn build_app_for_testing_postgres(database_url: &str) -> Result<App, B
         ));
     let key = [0u8; 32];
     let aead = Arc::new(AeadService::from_master_key(key));
+    let config = build_app_for_testing_postgres_config(database_url);
+    build_app_with_storage(config, None, managed_store, None, aead)
+}
+
+#[cfg(feature = "postgres")]
+fn build_app_for_testing_postgres_config(database_url: &str) -> Config {
+    const TEST_ADMIN_TOKEN: &str = "test-token";
+
     let mut config = Config {
         storage: cc_lb_config::StorageConfig::Postgres {
             url: database_url.to_owned(),
@@ -294,6 +346,23 @@ pub async fn build_app_for_testing_postgres(database_url: &str) -> Result<App, B
         },
         ..Config::default()
     };
+    config.admin.token = Some(TEST_ADMIN_TOKEN.to_owned());
+    config.principals.insert(
+        "test-principal".to_owned(),
+        PrincipalSpec {
+            principal_type: PrincipalType::Machine,
+            default_limits: vec![Limit {
+                kind: LimitKind::Requests,
+                window: Duration::from_secs(60),
+                cap_micros: 1_000_000,
+            }],
+            enabled: true,
+            allowed_models: vec!["*".to_owned()],
+            credentials_ref: None,
+            router_plugin: None,
+            observability_hooks: None,
+        },
+    );
     config.upstreams.insert(
         "test-upstream".to_owned(),
         cc_lb_config::UpstreamSpec {
@@ -306,13 +375,9 @@ pub async fn build_app_for_testing_postgres(database_url: &str) -> Result<App, B
         },
     );
     config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
-    config.downstream_auth.mode = DownstreamAuthMode::None;
-    config.downstream_auth.none_mode = Some(cc_lb_config::NoneModeConfig {
-        principal_id: "test-principal".to_owned(),
-        upstream_kind: cc_lb_config::NoneModeUpstreamKind::AnthropicKey,
-        upstream_credential_ref: "test-cred".to_owned(),
-    });
-    build_app_with_storage(config, None, managed_store, None, aead)
+    config.downstream_auth.mode = DownstreamAuthMode::ApiKey;
+    config.downstream_auth.none_mode = None;
+    config
 }
 
 pub async fn build_app_with_path(
@@ -1072,7 +1137,9 @@ pub enum BuildError {
 
 #[cfg(all(test, feature = "postgres"))]
 mod tests {
-    use super::build_app_for_testing_postgres;
+    use cc_lb_config::DownstreamAuthMode;
+
+    use super::{build_app_for_testing_postgres, build_app_for_testing_postgres_config};
 
     #[tokio::test]
     async fn build_app_for_testing_postgres_smoke() -> Result<(), Box<dyn std::error::Error>> {
@@ -1080,6 +1147,8 @@ mod tests {
             Ok(u) => u,
             Err(_) => return Ok(()),
         };
+        let config = build_app_for_testing_postgres_config(&url);
+        assert_eq!(config.downstream_auth.mode, DownstreamAuthMode::ApiKey);
         let _app = build_app_for_testing_postgres(&url).await?;
         Ok(())
     }

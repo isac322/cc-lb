@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Weak};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cc_lb_storage_api::types::{KeyStatus as StoredKeyStatus, StoredApiKeyRecord};
 use parking_lot::RwLock;
@@ -726,9 +726,10 @@ fn key_id_for(record: &StoredApiKeyRecord) -> String {
 }
 
 fn now_sec() -> u64 {
+    // unix_epoch is a precondition; sub-epoch system clocks fall back to 0
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .expect("system clock before unix epoch")
+        .unwrap_or(Duration::ZERO)
         .as_secs()
 }
 
