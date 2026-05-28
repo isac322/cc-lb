@@ -846,7 +846,11 @@ dependencies = [
  "async-trait",
  "cc-lb-aead",
  "cc-lb-storage-api",
+ "cc-lb-storage-postgres",
+ "cc-lb-storage-redb",
  "futures",
+ "serde_json",
+ "sqlx",
  "tempfile",
  "tokio",
 ]
