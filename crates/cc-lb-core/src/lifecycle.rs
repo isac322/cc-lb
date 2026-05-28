@@ -313,27 +313,30 @@ impl Lifecycle {
             downstream_user_agent: header_to_string(&ctx.downstream_headers, "user-agent"),
         });
 
-        let success =
-            if let Some(success) = self.authn.authenticate_none_mode(&ctx.downstream_headers) {
-                success
-            } else {
-                match self.authn.authenticate(&ctx.downstream_headers).await {
-                    Ok(success) => success,
-                    Err(source) => {
-                        record_key_auth_failure_metric(&source);
-                        self.observe_error("authentication_error", &source.to_string(), "authn");
-                        let status = StatusCode::from_u16(source.http_status())
-                            .unwrap_or(StatusCode::UNAUTHORIZED);
-                        let response = anthropic_error_response(
-                            status,
-                            "authentication_error",
-                            &source.to_string(),
-                        );
-                        self.observe_finished(status, started);
-                        return Ok(response);
-                    }
+        let success = if let Some(success) = self
+            .authn
+            .authenticate_none_mode(&ctx.downstream_headers)
+            .await
+        {
+            success
+        } else {
+            match self.authn.authenticate(&ctx.downstream_headers).await {
+                Ok(success) => success,
+                Err(source) => {
+                    record_key_auth_failure_metric(&source);
+                    self.observe_error("authentication_error", &source.to_string(), "authn");
+                    let status = StatusCode::from_u16(source.http_status())
+                        .unwrap_or(StatusCode::UNAUTHORIZED);
+                    let response = anthropic_error_response(
+                        status,
+                        "authentication_error",
+                        &source.to_string(),
+                    );
+                    self.observe_finished(status, started);
+                    return Ok(response);
                 }
-            };
+            }
+        };
         let principal = Principal {
             id: success.principal_id.clone(),
             kind: PrincipalKind::ApiKey,
@@ -1106,6 +1109,7 @@ fn key_auth_failure_reason(source: &BuiltinAuthError) -> &'static str {
         BuiltinAuthError::KeyDisabled => "Disabled",
         BuiltinAuthError::KeyRevoked => "Revoked",
         BuiltinAuthError::PrincipalDisabled => "PrincipalDisabled",
+        BuiltinAuthError::Unavailable => "Unavailable",
         BuiltinAuthError::MissingHeader
         | BuiltinAuthError::InvalidFormat
         | BuiltinAuthError::NotFound
