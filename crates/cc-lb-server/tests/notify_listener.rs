@@ -198,11 +198,12 @@ async fn fixture() -> Fixture {
         upstreams: storage.clone(),
         principals: storage.clone(),
         plugin_registry: storage.clone(),
+        audit: None,
     });
     let oauth = Arc::new(AnthropicOAuthConfig::default());
     let aead = Arc::new(AeadService::from_master_key([24; 32]));
     let runtime = Arc::new(ExtismRuntime::new());
-    let initial = build_dynamic_view(&stores, &oauth, aead.clone(), 0, &runtime, dir.path())
+    let initial = build_dynamic_view(&stores, &oauth, aead.clone(), None, 0, &runtime, dir.path())
         .await
         .expect("initial dynamic view builds");
     let holder = Arc::new(DynamicViewHolder::new(initial));
@@ -232,6 +233,7 @@ async fn spawn_listener(
         runtime: fixture.runtime.clone(),
         aead: fixture.aead.clone(),
         data_dir: fixture._dir.path().to_path_buf(),
+        lazy_refresher: None,
     }));
     let task = tokio::spawn(async move {
         listener.run().await;
@@ -314,6 +316,7 @@ async fn cancel_during_rebuild_graceful() {
         )),
         principals: fixture.storage.clone(),
         plugin_registry: fixture.storage.clone(),
+        audit: None,
     });
     let task = spawn_listener(&fixture, notifier.clone(), cancel.clone(), stores).await;
 
@@ -339,6 +342,7 @@ async fn rebuild_failure_does_not_swap_view() {
         upstreams: Arc::new(ControlledUpstreamStore::failing(fixture.storage.clone())),
         principals: fixture.storage.clone(),
         plugin_registry: fixture.storage.clone(),
+        audit: None,
     });
     let task = spawn_listener(&fixture, notifier.clone(), cancel.clone(), stores).await;
 

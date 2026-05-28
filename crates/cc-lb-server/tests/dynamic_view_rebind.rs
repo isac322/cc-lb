@@ -20,6 +20,7 @@ fn stores(storage: Arc<Storage>) -> Stores {
         upstreams: storage.clone(),
         principals: storage.clone(),
         plugin_registry: storage,
+        audit: None,
     }
 }
 
@@ -71,6 +72,7 @@ async fn build(
         stores,
         &oauth_config(),
         Arc::new(AeadService::from_master_key([1; 32])),
+        None,
         current_generation,
         runtime,
         data_dir,

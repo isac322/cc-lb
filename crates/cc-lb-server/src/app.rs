@@ -57,6 +57,7 @@ use crate::dynamic_view_builder::{
 use crate::notify_listener::{NotifyListener, NotifyListenerParams};
 use crate::preflight::{self, PreflightOptions};
 use crate::reconcile::Reconciler;
+use crate::refresh::{LazyRefresher, OAuthRefresher};
 use crate::reload::ConfigWatcher;
 use crate::replica;
 use crate::signal;
@@ -499,12 +500,34 @@ pub async fn build_app_with_storage(
         upstreams: storage_for_dynamic.clone(),
         principals: storage_for_dynamic.clone(),
         plugin_registry: storage_for_dynamic.clone(),
+        audit: Some(storage_for_dynamic.clone()),
     });
     let oauth_anthropic = config.oauth.anthropic.clone().unwrap_or_default();
+    let oauth_cfg = Arc::new(oauth_anthropic.clone());
+    let refresh_cancel = CancellationToken::new();
+    let lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>> =
+        replica_identity.as_ref().and_then(|identity| {
+            LazyRefresher::new(
+                stores.clone(),
+                aead.clone(),
+                oauth_cfg.clone(),
+                identity.id,
+                refresh_cancel.clone(),
+            )
+            .map(|refresher| {
+                Arc::new(refresher) as Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>
+            })
+            .map_err(|error| {
+                tracing::warn!(error = %error, "oauth lazy refresher client build failed");
+                error
+            })
+            .ok()
+        });
     let initial_view = build_dynamic_view(
         &stores,
         &oauth_anthropic,
         aead.clone(),
+        lazy_refresher.clone(),
         0,
         &runtime,
         &data_dir,
@@ -531,10 +554,12 @@ pub async fn build_app_with_storage(
         runtime: Arc::clone(&runtime),
         aead: aead.clone(),
         data_dir: data_dir.clone(),
+        lazy_refresher: lazy_refresher.clone(),
     }));
     let notify_listener_task = Some(tokio::spawn(async move {
         notify_listener.run().await;
     }));
+    let replica_id = replica_identity.as_ref().map(|identity| identity.id);
 
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
@@ -580,10 +605,21 @@ pub async fn build_app_with_storage(
         Arc::new(oauth_anthropic),
         runtime.clone(),
         aead.clone(),
+        lazy_refresher.clone(),
         reconcile_cancel.clone(),
         data_dir.clone(),
     );
     spawn_reconcile_shutdown(signals.subscribe(), reconcile_cancel);
+    if let Some(replica_id) = replica_id {
+        spawn_oauth_refresher(
+            stores.clone(),
+            aead.clone(),
+            oauth_cfg,
+            replica_id,
+            refresh_cancel.clone(),
+        );
+        spawn_reconcile_shutdown(signals.subscribe(), refresh_cancel);
+    }
     let state = ProxyState {
         lifecycle: lifecycle.clone(),
         breaker_registry,
@@ -635,19 +671,43 @@ pub async fn build_app_with_storage(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_reconciler(
     stores: Arc<DynamicStores>,
     holder: Arc<DynamicViewHolder>,
     oauth_cfg: Arc<cc_lb_config::AnthropicOAuthConfig>,
     runtime: Arc<ExtismRuntime>,
     aead: Arc<AeadService>,
+    lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     cancel: CancellationToken,
     data_dir: PathBuf,
 ) {
     let reconciler = Arc::new(Reconciler::new(
-        stores, holder, oauth_cfg, runtime, aead, cancel, data_dir,
+        stores,
+        holder,
+        oauth_cfg,
+        runtime,
+        aead,
+        lazy_refresher,
+        cancel,
+        data_dir,
     ));
     tokio::spawn(reconciler.run());
+}
+
+fn spawn_oauth_refresher(
+    stores: Arc<DynamicStores>,
+    aead: Arc<AeadService>,
+    oauth_cfg: Arc<cc_lb_config::AnthropicOAuthConfig>,
+    replica_id: uuid::Uuid,
+    cancel: CancellationToken,
+) {
+    match OAuthRefresher::new(stores, aead, oauth_cfg, replica_id, cancel) {
+        Ok(refresher) => {
+            tokio::spawn(Arc::new(refresher).run());
+        }
+        Err(error) => tracing::warn!(error = %error, "oauth refresher client build failed"),
+    }
 }
 
 fn spawn_reconcile_shutdown(shutdown: watch::Receiver<bool>, cancel: CancellationToken) {

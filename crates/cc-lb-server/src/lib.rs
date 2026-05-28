@@ -19,6 +19,7 @@ pub mod dynamic_view_builder;
 pub mod notify_listener;
 pub mod preflight;
 pub mod reconcile;
+pub mod refresh;
 pub mod reload;
 pub mod replica;
 pub(crate) mod revision_hash;

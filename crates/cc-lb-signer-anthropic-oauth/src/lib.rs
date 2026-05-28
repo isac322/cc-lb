@@ -22,6 +22,7 @@ use oauth2::ClientId;
 use secrecy::{ExposeSecret, SecretString};
 use tokio::sync::Mutex;
 use url::Url;
+use uuid::Uuid;
 
 const OAUTH_EXPIRY_SKEW_SECS: u64 = 30;
 
@@ -33,6 +34,141 @@ pub use refresh::{
     BREAKER_FAILURE_THRESHOLD, BreakerMap, CircuitBreakerState, REFRESH_BUFFER_SECS, RefreshError,
 };
 pub use single_flight::{RefreshLocks, new_refresh_locks};
+
+#[derive(Debug, thiserror::Error)]
+pub enum LazyRefreshError {
+    #[error("refresh failed: {reason}")]
+    Failed { reason: String },
+}
+
+#[async_trait]
+pub trait LazyRefreshHandle: Send + Sync {
+    async fn refresh_one(&self, upstream_id: Uuid) -> Result<(), LazyRefreshError>;
+}
+
+#[derive(Clone)]
+pub struct AnthropicOAuthSignerFactoryWithLazyRefresh<Inner: SignerFactory + Clone> {
+    inner: Inner,
+    refresh_handle: Arc<dyn LazyRefreshHandle>,
+    upstream_id: Uuid,
+}
+
+impl<Inner> AnthropicOAuthSignerFactoryWithLazyRefresh<Inner>
+where
+    Inner: SignerFactory + Clone,
+{
+    pub fn new(
+        inner: Inner,
+        refresh_handle: Arc<dyn LazyRefreshHandle>,
+        upstream_id: Uuid,
+    ) -> Self {
+        Self {
+            inner,
+            refresh_handle,
+            upstream_id,
+        }
+    }
+}
+
+impl<Inner> fmt::Debug for AnthropicOAuthSignerFactoryWithLazyRefresh<Inner>
+where
+    Inner: SignerFactory + Clone + fmt::Debug,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AnthropicOAuthSignerFactoryWithLazyRefresh")
+            .field("inner", &self.inner)
+            .field("refresh_handle", &"LazyRefreshHandle")
+            .field("upstream_id", &self.upstream_id)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl<Inner> SignerFactory for AnthropicOAuthSignerFactoryWithLazyRefresh<Inner>
+where
+    Inner: SignerFactory + Clone + Send + Sync + 'static,
+{
+    async fn build(&self, upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
+        match self.inner.build(upstream).await {
+            Ok(signer) => Ok(Arc::new(LazyRefreshSigner {
+                signer,
+                inner: self.inner.clone(),
+                refresh_handle: self.refresh_handle.clone(),
+                upstream_id: self.upstream_id,
+                upstream: upstream.clone(),
+            })),
+            Err(original @ SignerError::ExpiredToken { .. }) => {
+                if self
+                    .refresh_handle
+                    .refresh_one(self.upstream_id)
+                    .await
+                    .is_err()
+                {
+                    return Err(original);
+                }
+                self.inner.build(upstream).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+}
+
+struct LazyRefreshSigner<Inner: SignerFactory + Clone> {
+    signer: Arc<dyn Signer>,
+    inner: Inner,
+    refresh_handle: Arc<dyn LazyRefreshHandle>,
+    upstream_id: Uuid,
+    upstream: Upstream,
+}
+
+impl<Inner> fmt::Debug for LazyRefreshSigner<Inner>
+where
+    Inner: SignerFactory + Clone,
+{
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("LazyRefreshSigner")
+            .field("signer", &"Signer")
+            .field("refresh_handle", &"LazyRefreshHandle")
+            .field("upstream_id", &self.upstream_id)
+            .finish()
+    }
+}
+
+#[async_trait]
+impl<Inner> Signer for LazyRefreshSigner<Inner>
+where
+    Inner: SignerFactory + Clone + Send + Sync + 'static,
+{
+    async fn sign(
+        &self,
+        shaped: ShapedRequest,
+        capability: &mut SigningCapability,
+    ) -> Result<SignedRequest, SignerError> {
+        let retry_shape = shaped.clone();
+        match self.signer.sign(shaped, capability).await {
+            Ok(signed) => Ok(signed),
+            Err(original @ SignerError::ExpiredToken { .. }) => {
+                if self
+                    .refresh_handle
+                    .refresh_one(self.upstream_id)
+                    .await
+                    .is_err()
+                {
+                    return Err(original);
+                }
+                let refreshed = self.inner.build(&self.upstream).await?;
+                refreshed.sign(retry_shape, capability).await
+            }
+            Err(error) => Err(error),
+        }
+    }
+
+    async fn on_unauthorized(&self, err: &UpstreamError) -> RetryDecision {
+        self.signer.on_unauthorized(err).await
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct AnthropicOAuthSharedState {

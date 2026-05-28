@@ -22,8 +22,8 @@ use cc_lb_plugin_api::{
 };
 use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
 use cc_lb_storage_api::{
-    PluginRegistryStore, PluginSlot, PrincipalRecord, PrincipalStore, StorageError, StorageResult,
-    UpstreamRecord, UpstreamStore,
+    AuditStore, PluginRegistryStore, PluginSlot, PrincipalRecord, PrincipalStore, StorageError,
+    StorageResult, UpstreamRecord, UpstreamStore,
 };
 use cc_lb_storage_api::upstream::UpstreamKind;
 use thiserror::Error;
@@ -34,6 +34,7 @@ pub struct Stores {
     pub upstreams: Arc<dyn UpstreamStore>,
     pub principals: Arc<dyn PrincipalStore>,
     pub plugin_registry: Arc<dyn PluginRegistryStore>,
+    pub audit: Option<Arc<dyn AuditStore>>,
 }
 
 #[derive(Debug, Error)]
@@ -102,6 +103,7 @@ pub async fn build_dynamic_view(
     stores: &Stores,
     oauth_anthropic: &AnthropicOAuthConfig,
     aead: Arc<AeadService>,
+    lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     current_generation: u64,
     runtime: &ExtismRuntime,
     data_dir: &Path,
@@ -120,6 +122,7 @@ pub async fn build_dynamic_view(
         upstreams,
         stores.upstreams.clone(),
         aead,
+        lazy_refresher,
     ));
     let dispatcher = make_default_dispatcher(50);
     let snapshot = Arc::new(UpstreamStatusSnapshot {
@@ -428,6 +431,7 @@ struct DbCompositeSignerFactory {
     upstreams: Vec<UpstreamRecord>,
     upstream_store: Arc<dyn UpstreamStore>,
     aead: Arc<AeadService>,
+    lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     downstream_api_key: Option<String>,
 }
 
@@ -436,11 +440,13 @@ impl DbCompositeSignerFactory {
         upstreams: Vec<UpstreamRecord>,
         upstream_store: Arc<dyn UpstreamStore>,
         aead: Arc<AeadService>,
+        lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     ) -> Self {
         Self {
             upstreams,
             upstream_store,
             aead,
+            lazy_refresher,
             downstream_api_key: None,
         }
     }
@@ -450,6 +456,7 @@ impl DbCompositeSignerFactory {
             upstreams: self.upstreams.clone(),
             upstream_store: self.upstream_store.clone(),
             aead: self.aead.clone(),
+            lazy_refresher: self.lazy_refresher.clone(),
             downstream_api_key: Some(api_key),
         }
     }
@@ -483,13 +490,23 @@ impl SignerFactory for DbCompositeSignerFactory {
                     .await
             }
             UpstreamKind::AnthropicOauth => {
-                cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory::for_upstream_name(
-                    self.upstream_store.clone(),
-                    self.aead.clone(),
-                    record.name.clone(),
-                )
-                .build(upstream)
-                .await
+                let factory =
+                    cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory::for_upstream_name(
+                        self.upstream_store.clone(),
+                        self.aead.clone(),
+                        record.name.clone(),
+                    );
+                if let Some(handle) = &self.lazy_refresher {
+                    cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactoryWithLazyRefresh::new(
+                        factory,
+                        handle.clone(),
+                        record.id,
+                    )
+                    .build(upstream)
+                    .await
+                } else {
+                    factory.build(upstream).await
+                }
             }
         }
     }

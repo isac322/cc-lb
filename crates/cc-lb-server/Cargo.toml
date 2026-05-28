@@ -57,10 +57,12 @@ notify.workspace = true
 oauth2.workspace = true
 nix = { version = "0.31.3", features = ["resource"] }
 rand = { version = "0.10", features = ["std", "std_rng"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
 rustls = { workspace = true, default-features = false, features = ["std", "ring", "tls12"] }
 rustls-pemfile = "2"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
+sha2 = "0.11"
 sqlx = { workspace = true, optional = true }
 tempfile.workspace = true
 thiserror.workspace = true
@@ -74,6 +76,7 @@ uuid = { workspace = true, features = ["v4", "serde"] }
 xxhash-rust.workspace = true
 
 [dev-dependencies]
+base64.workspace = true
 metrics-exporter-prometheus.workspace = true
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic" }
 redb.workspace = true

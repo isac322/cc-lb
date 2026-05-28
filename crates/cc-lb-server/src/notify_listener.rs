@@ -22,6 +22,7 @@ pub struct NotifyListener {
     runtime: Arc<ExtismRuntime>,
     aead: Arc<AeadService>,
     data_dir: PathBuf,
+    lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
 }
 
 pub struct NotifyListenerParams {
@@ -33,6 +34,7 @@ pub struct NotifyListenerParams {
     pub runtime: Arc<ExtismRuntime>,
     pub aead: Arc<AeadService>,
     pub data_dir: PathBuf,
+    pub lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
 }
 
 impl NotifyListener {
@@ -46,6 +48,7 @@ impl NotifyListener {
             runtime: params.runtime,
             aead: params.aead,
             data_dir: params.data_dir,
+            lazy_refresher: params.lazy_refresher,
         }
     }
 
@@ -110,6 +113,7 @@ impl NotifyListener {
             &self.stores,
             &self.oauth_cfg,
             self.aead.clone(),
+            self.lazy_refresher.clone(),
             current_generation,
             &self.runtime,
             &self.data_dir,

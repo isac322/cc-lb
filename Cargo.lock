@@ -750,6 +750,7 @@ dependencies = [
  "async-stream",
  "async-trait",
  "axum",
+ "base64",
  "bytes",
  "cc-lb-admin",
  "cc-lb-aead",
@@ -776,10 +777,12 @@ dependencies = [
  "oauth2",
  "rand 0.10.1",
  "redb",
+ "reqwest",
  "rustls",
  "rustls-pemfile",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",
@@ -838,6 +841,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "url",
+ "uuid",
 ]
 
 [[package]]

@@ -51,6 +51,7 @@ fn stores(storage: Arc<Storage>) -> Arc<Stores> {
         upstreams: storage.clone(),
         principals: storage.clone(),
         plugin_registry: storage,
+        audit: None,
     })
 }
 
@@ -92,6 +93,7 @@ async fn initial_holder(
         stores,
         &AnthropicOAuthConfig::default(),
         Arc::new(AeadService::from_master_key([25; 32])),
+        None,
         0,
         runtime,
         data_dir,
@@ -114,6 +116,7 @@ fn reconciler(
         Arc::new(AnthropicOAuthConfig::default()),
         runtime,
         Arc::new(AeadService::from_master_key([25; 32])),
+        None,
         cancel,
         data_dir.to_path_buf(),
     ))
@@ -188,6 +191,7 @@ async fn cancel_during_tick_is_graceful() {
         upstreams: blocking_store.clone(),
         principals: Arc::new(EmptyPrincipalStore),
         plugin_registry: Arc::new(EmptyPluginRegistryStore),
+        audit: None,
     });
     let (_dir, storage) = storage_fixture();
     let runtime = Arc::new(ExtismRuntime::new());

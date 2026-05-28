@@ -46,13 +46,15 @@ pub enum AuditPayload {
     },
     UpstreamOauthRefreshSuccess {
         upstream_id: String,
+        upstream_name: String,
         expires_at_unix_secs: u64,
         access_token_fingerprint: String,
         replica_id: Uuid,
     },
     UpstreamOauthRefreshFailure {
         upstream_id: String,
-        reason_class: &'static str,
+        upstream_name: String,
+        reason: String,
         replica_id: Uuid,
     },
     PluginRegistryUpload {
@@ -137,22 +139,28 @@ impl fmt::Display for AuditPayload {
             ),
             AuditPayload::UpstreamOauthRefreshSuccess {
                 upstream_id,
+                upstream_name,
                 expires_at_unix_secs,
                 access_token_fingerprint,
                 replica_id,
             } => write!(
                 f,
-                "upstream_oauth_refresh_success(id={}, expires={}, fingerprint={}, replica={})",
-                upstream_id, expires_at_unix_secs, access_token_fingerprint, replica_id
+                "upstream_oauth_refresh_success(id={}, name={}, expires={}, fingerprint={}, replica={})",
+                upstream_id,
+                upstream_name,
+                expires_at_unix_secs,
+                access_token_fingerprint,
+                replica_id
             ),
             AuditPayload::UpstreamOauthRefreshFailure {
                 upstream_id,
-                reason_class,
+                upstream_name,
+                reason,
                 replica_id,
             } => write!(
                 f,
-                "upstream_oauth_refresh_failure(id={}, reason={}, replica={})",
-                upstream_id, reason_class, replica_id
+                "upstream_oauth_refresh_failure(id={}, name={}, reason={}, replica={})",
+                upstream_id, upstream_name, reason, replica_id
             ),
             AuditPayload::PluginRegistryUpload {
                 sha256,

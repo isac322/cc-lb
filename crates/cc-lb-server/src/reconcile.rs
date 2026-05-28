@@ -19,17 +19,20 @@ pub struct Reconciler {
     pub oauth_cfg: Arc<AnthropicOAuthConfig>,
     pub runtime: Arc<ExtismRuntime>,
     pub aead: Arc<AeadService>,
+    pub lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     pub cancel: CancellationToken,
     pub data_dir: PathBuf,
 }
 
 impl Reconciler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         stores: Arc<Stores>,
         holder: Arc<DynamicViewHolder>,
         oauth_cfg: Arc<AnthropicOAuthConfig>,
         runtime: Arc<ExtismRuntime>,
         aead: Arc<AeadService>,
+        lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
         cancel: CancellationToken,
         data_dir: PathBuf,
     ) -> Self {
@@ -39,6 +42,7 @@ impl Reconciler {
             oauth_cfg,
             runtime,
             aead,
+            lazy_refresher,
             cancel,
             data_dir,
         }
@@ -85,6 +89,7 @@ impl Reconciler {
             &self.stores,
             &self.oauth_cfg,
             self.aead.clone(),
+            self.lazy_refresher.clone(),
             generation,
             &self.runtime,
             &self.data_dir,
