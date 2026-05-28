@@ -610,6 +610,7 @@ dependencies = [
  "tracing",
  "ulid",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -784,6 +785,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "uuid",
  "wat",
 ]
 
