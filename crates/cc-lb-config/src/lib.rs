@@ -24,8 +24,8 @@ pub use types::{
     DEFAULT_PLUGIN_BATCHED_FLUSH_MS, DEFAULT_REDB_PATH, DnsConfig, DownstreamAuthConfig,
     DownstreamAuthMode, EgressConfig, Limit, LimitKind, ListenerConfig, ListenerOverrides,
     NoneModeConfig, NoneModeUpstreamKind, ObservabilityConfig, PluginRef, PluginsConfig,
-    PostgresPoolConfig, PriceCatalogConfig, PrincipalSpec, PrincipalType, SignersConfig,
-    StorageConfig, TimeoutsConfig, TlsConfig, UpstreamKind, UpstreamSpec,
+    PostgresPoolConfig, PriceCatalogConfig, PrincipalSpec, PrincipalType, RestartRequiredField,
+    SignersConfig, StorageConfig, TimeoutsConfig, TlsConfig, UpstreamKind, UpstreamSpec,
 };
 pub use validation::{ValidationError, validate_postgres_url};
 

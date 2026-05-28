@@ -9,9 +9,10 @@ export default async function globalSetup() {
   const workspaceRoot = path.resolve(process.cwd(), '../../..');
   
   const dataDir = path.join(workspaceRoot, 'data-test');
-  if (!fs.existsSync(dataDir)) {
-    fs.mkdirSync(dataDir, { recursive: true });
+  if (fs.existsSync(dataDir)) {
+    fs.rmSync(dataDir, { recursive: true, force: true });
   }
+  fs.mkdirSync(dataDir, { recursive: true });
 
   // Create a temporary config file for cc-lb
   const configPath = path.join(workspaceRoot, 'cc-lb-test-config.toml');
@@ -54,7 +55,13 @@ scopes = ["messages", "files"]
   ccLbProcess = spawn('cargo', ['run', '-p', 'cc-lb-server', '--', 'serve', '--config', configPath], {
     cwd: workspaceRoot,
     stdio: 'inherit',
-    env: { ...process.env, RUST_LOG: 'info', CC_LB_MASTER_KEY: '0000000000000000000000000000000000000000000000000000000000000000', CC_LB_ADMIN_TOKEN: 'test-admin-token' }
+    env: { 
+      ...process.env, 
+      RUST_LOG: 'info', 
+      CC_LB_MASTER_KEY: '0000000000000000000000000000000000000000000000000000000000000000', 
+      CC_LB_ADMIN_TOKEN: 'test-admin-token',
+      TEST_API_KEY: 'test-api-key-value'
+    }
   });
 
   // Wait for servers to start

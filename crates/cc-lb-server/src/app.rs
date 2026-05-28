@@ -56,7 +56,7 @@ use crate::notify_listener::{NotifyListener, NotifyListenerParams};
 use crate::preflight;
 use crate::reconcile::Reconciler;
 use crate::refresh::{LazyRefresher, OAuthRefresher};
-use crate::reload::ConfigWatcher;
+use crate::reload::{ConfigWatcher, summarize_restart_required};
 use crate::replica;
 use crate::signal;
 use crate::storage_factory;
@@ -832,6 +832,7 @@ fn spawn_reload_watcher(config_watcher: Arc<ConfigWatcher>) -> JoinHandle<()> {
 }
 
 struct InMemoryCurrentConfig {
+    process_start_config: Arc<Config>,
     current: ArcSwap<Config>,
     draft: Mutex<Option<Config>>,
     dynamic_view: Arc<DynamicViewHolder>,
@@ -839,7 +840,9 @@ struct InMemoryCurrentConfig {
 
 impl InMemoryCurrentConfig {
     fn new(config: Config, dynamic_view: Arc<DynamicViewHolder>) -> Self {
+        let process_start_config = Arc::new(config.clone());
         Self {
+            process_start_config,
             current: ArcSwap::from_pointee(config),
             draft: Mutex::new(None),
             dynamic_view,
@@ -850,6 +853,10 @@ impl InMemoryCurrentConfig {
 impl CurrentConfig for InMemoryCurrentConfig {
     fn current_config(&self) -> Arc<Config> {
         self.current.load_full()
+    }
+
+    fn restart_required_changes(&self) -> Vec<cc_lb_config::RestartRequiredField> {
+        summarize_restart_required(&self.process_start_config, &self.current_config())
     }
 
     fn put_draft_config(&self, config: Config) -> Result<(), ConfigDraftError> {

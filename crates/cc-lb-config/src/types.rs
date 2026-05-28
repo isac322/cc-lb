@@ -63,6 +63,14 @@ pub struct Config {
     pub egress: EgressConfig,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct RestartRequiredField {
+    pub field: String,
+    pub current: String,
+    pub new: String,
+    pub reason: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct ListenerConfig {

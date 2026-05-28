@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use cc_lb_admin::{LastReloadStatus, ReloadOutcome};
-use cc_lb_config::{Config, ConfigError, StorageConfig};
+use cc_lb_config::{Config, ConfigError, RestartRequiredField, StorageConfig};
 use cc_lb_core::DynamicViewHolder;
 use notify::{Event, RecursiveMode, Watcher};
 use thiserror::Error;
@@ -17,6 +17,7 @@ const BROADCAST_CAPACITY: usize = 16;
 
 pub struct ConfigWatcher {
     path: PathBuf,
+    process_start_config: Arc<Config>,
     current: ArcSwap<Config>,
     reload_tx: broadcast::Sender<Arc<Config>>,
     reloads_attempted: AtomicUsize,
@@ -40,8 +41,10 @@ impl ConfigWatcher {
         dynamic_view: Option<Arc<DynamicViewHolder>>,
     ) -> Self {
         let (reload_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let process_start_config = Arc::new(initial_config.clone());
         Self {
             path: path.as_ref().to_path_buf(),
+            process_start_config,
             current: ArcSwap::from_pointee(initial_config),
             reload_tx,
             reloads_attempted: AtomicUsize::new(0),
@@ -104,7 +107,15 @@ impl ConfigWatcher {
         }
 
         self.record_attempt();
-        warn_restart_required_changes(&current_config, &new_config);
+        for change in summarize_restart_required(&current_config, &new_config) {
+            tracing::warn!(
+                field = %change.field,
+                current = %change.current,
+                new = %change.new,
+                reason = %change.reason,
+                "restart required to apply"
+            );
+        }
 
         let new_config = Arc::new(new_config);
         if self.dynamic_view.is_some() {
@@ -215,6 +226,10 @@ impl cc_lb_admin::CurrentConfig for ConfigWatcher {
     fn last_reload_status(&self) -> Option<LastReloadStatus> {
         self.last_reload_status.load().as_ref().clone()
     }
+
+    fn restart_required_changes(&self) -> Vec<RestartRequiredField> {
+        summarize_restart_required(&self.process_start_config, &self.current_config())
+    }
 }
 
 #[derive(Debug, Error)]
@@ -229,74 +244,120 @@ enum FileWatchError {
     Notify(#[from] notify::Error),
 }
 
-fn warn_restart_required_changes(current: &Config, new_config: &Config) {
-    warn_if_changed(
-        &current.listener.proxy_addr,
-        &new_config.listener.proxy_addr,
+pub fn summarize_restart_required(
+    current: &Config,
+    new_config: &Config,
+) -> Vec<RestartRequiredField> {
+    let mut changes = Vec::new();
+    push_changed(
+        &mut changes,
         "listener.proxy_addr",
+        current.listener.proxy_addr.to_string(),
+        new_config.listener.proxy_addr.to_string(),
+        "socket binding changes require a process restart",
     );
-    warn_if_changed(
-        &current.listener.admin_addr,
-        &new_config.listener.admin_addr,
+    push_changed(
+        &mut changes,
         "listener.admin_addr",
+        current.listener.admin_addr.to_string(),
+        new_config.listener.admin_addr.to_string(),
+        "socket binding changes require a process restart",
     );
-    warn_if_changed(
-        &current.listener.metrics_addr,
-        &new_config.listener.metrics_addr,
+    push_changed(
+        &mut changes,
         "listener.metrics_addr",
+        current.listener.metrics_addr.to_string(),
+        new_config.listener.metrics_addr.to_string(),
+        "socket binding changes require a process restart",
     );
-    warn_if_changed(
-        &current
-            .listener
-            .tls
-            .as_ref()
-            .and_then(|tls| tls.cert_path.as_ref()),
-        &new_config
-            .listener
-            .tls
-            .as_ref()
-            .and_then(|tls| tls.cert_path.as_ref()),
+    push_changed(
+        &mut changes,
         "listener.tls.cert_path",
+        path_option_string(
+            current
+                .listener
+                .tls
+                .as_ref()
+                .and_then(|tls| tls.cert_path.as_ref()),
+        ),
+        path_option_string(
+            new_config
+                .listener
+                .tls
+                .as_ref()
+                .and_then(|tls| tls.cert_path.as_ref()),
+        ),
+        "listener TLS certificate changes require a process restart",
     );
-    warn_if_changed(
-        &current
-            .listener
-            .tls
-            .as_ref()
-            .and_then(|tls| tls.key_path.as_ref()),
-        &new_config
-            .listener
-            .tls
-            .as_ref()
-            .and_then(|tls| tls.key_path.as_ref()),
+    push_changed(
+        &mut changes,
         "listener.tls.key_path",
+        path_option_string(
+            current
+                .listener
+                .tls
+                .as_ref()
+                .and_then(|tls| tls.key_path.as_ref()),
+        ),
+        path_option_string(
+            new_config
+                .listener
+                .tls
+                .as_ref()
+                .and_then(|tls| tls.key_path.as_ref()),
+        ),
+        "listener TLS key changes require a process restart",
     );
-    warn_if_changed(
-        &current.tls.as_ref().and_then(|tls| tls.cert_path.as_ref()),
-        &new_config
-            .tls
-            .as_ref()
-            .and_then(|tls| tls.cert_path.as_ref()),
+    push_changed(
+        &mut changes,
         "tls.cert_path",
+        path_option_string(current.tls.as_ref().and_then(|tls| tls.cert_path.as_ref())),
+        path_option_string(
+            new_config
+                .tls
+                .as_ref()
+                .and_then(|tls| tls.cert_path.as_ref()),
+        ),
+        "TLS certificate changes require a process restart",
     );
-    warn_if_changed(
-        &current.tls.as_ref().and_then(|tls| tls.key_path.as_ref()),
-        &new_config
-            .tls
-            .as_ref()
-            .and_then(|tls| tls.key_path.as_ref()),
+    push_changed(
+        &mut changes,
         "tls.key_path",
+        path_option_string(current.tls.as_ref().and_then(|tls| tls.key_path.as_ref())),
+        path_option_string(
+            new_config
+                .tls
+                .as_ref()
+                .and_then(|tls| tls.key_path.as_ref()),
+        ),
+        "TLS key changes require a process restart",
     );
-    warn_storage_restart_required(&current.storage, &new_config.storage);
-    warn_aead_restart_required(&current.aead.key_env, &new_config.aead.key_env);
+    summarize_storage_restart_required(&mut changes, &current.storage, &new_config.storage);
+    push_changed(
+        &mut changes,
+        "aead.key_env",
+        current.aead.key_env.clone(),
+        new_config.aead.key_env.clone(),
+        "storage encryption key environment changes require a process restart",
+    );
+    summarize_oauth_restart_required(&mut changes, current, new_config);
+    changes
 }
 
-fn warn_storage_restart_required(current: &StorageConfig, new_config: &StorageConfig) {
+fn summarize_storage_restart_required(
+    changes: &mut Vec<RestartRequiredField>,
+    current: &StorageConfig,
+    new_config: &StorageConfig,
+) {
     match (current, new_config) {
         (StorageConfig::Redb { path: current }, StorageConfig::Redb { path: new_config }) => {
-            if current != new_config {
-                tracing::warn!("storage backend changed; restart required to apply");
-            }
+            push_changed(
+                changes,
+                "storage.path",
+                current.display().to_string(),
+                new_config.display().to_string(),
+                "storage backend changes require a process restart",
+            );
         }
         (
             StorageConfig::Postgres {
@@ -308,25 +369,121 @@ fn warn_storage_restart_required(current: &StorageConfig, new_config: &StorageCo
                 pool: new_pool,
             },
         ) => {
-            if current_url != new_url {
-                tracing::warn!("storage backend changed; restart required to apply");
-            } else if current_pool != new_pool {
-                tracing::warn!(field = "storage.pool", "restart required to apply");
-            }
+            push_changed(
+                changes,
+                "storage.url",
+                current_url.clone(),
+                new_url.clone(),
+                "storage backend changes require a process restart",
+            );
+            push_changed(
+                changes,
+                "storage.pool",
+                format!("{current_pool:?}"),
+                format!("{new_pool:?}"),
+                "storage pool changes require a process restart",
+            );
         }
-        _ => tracing::warn!("storage backend changed; restart required to apply"),
+        _ => push_changed(
+            changes,
+            "storage.kind",
+            storage_kind(current).to_owned(),
+            storage_kind(new_config).to_owned(),
+            "storage backend changes require a process restart",
+        ),
     }
 }
 
-fn warn_aead_restart_required(current: &str, new_config: &str) {
-    if current != new_config {
-        tracing::warn!("aead key env changed; restart required to apply");
+fn summarize_oauth_restart_required(
+    changes: &mut Vec<RestartRequiredField>,
+    current: &Config,
+    new_config: &Config,
+) {
+    let current = current.oauth.anthropic.as_ref();
+    let new_config = new_config.oauth.anthropic.as_ref();
+    push_changed(
+        changes,
+        "oauth.anthropic.client_id",
+        current
+            .map(|oauth| oauth.client_id.clone())
+            .unwrap_or_default(),
+        new_config
+            .map(|oauth| oauth.client_id.clone())
+            .unwrap_or_default(),
+        "Anthropic OAuth client changes require a process restart",
+    );
+    push_changed(
+        changes,
+        "oauth.anthropic.auth_url",
+        current
+            .map(|oauth| oauth.auth_url.to_string())
+            .unwrap_or_default(),
+        new_config
+            .map(|oauth| oauth.auth_url.to_string())
+            .unwrap_or_default(),
+        "Anthropic OAuth endpoint changes require a process restart",
+    );
+    push_changed(
+        changes,
+        "oauth.anthropic.token_url",
+        current
+            .map(|oauth| oauth.token_url.to_string())
+            .unwrap_or_default(),
+        new_config
+            .map(|oauth| oauth.token_url.to_string())
+            .unwrap_or_default(),
+        "Anthropic OAuth endpoint changes require a process restart",
+    );
+    push_changed(
+        changes,
+        "oauth.anthropic.redirect_uri",
+        current
+            .map(|oauth| oauth.redirect_uri.to_string())
+            .unwrap_or_default(),
+        new_config
+            .map(|oauth| oauth.redirect_uri.to_string())
+            .unwrap_or_default(),
+        "Anthropic OAuth redirect changes require a process restart",
+    );
+    push_changed(
+        changes,
+        "oauth.anthropic.scopes",
+        current
+            .map(|oauth| oauth.scopes.join(","))
+            .unwrap_or_default(),
+        new_config
+            .map(|oauth| oauth.scopes.join(","))
+            .unwrap_or_default(),
+        "Anthropic OAuth scope changes require a process restart",
+    );
+}
+
+fn push_changed(
+    changes: &mut Vec<RestartRequiredField>,
+    field: &str,
+    current: String,
+    new: String,
+    reason: &str,
+) {
+    if current != new {
+        changes.push(RestartRequiredField {
+            field: field.to_owned(),
+            current,
+            new,
+            reason: reason.to_owned(),
+        });
     }
 }
 
-fn warn_if_changed<T: PartialEq>(current: &T, new_config: &T, field: &str) {
-    if current != new_config {
-        tracing::warn!(field = field, "restart required to apply");
+fn path_option_string(path: Option<&PathBuf>) -> String {
+    path.map(|path| path.display().to_string())
+        .unwrap_or_default()
+}
+
+fn storage_kind(storage: &StorageConfig) -> &'static str {
+    match storage {
+        StorageConfig::Redb { .. } => "redb",
+        StorageConfig::Postgres { .. } => "postgres",
     }
 }
 

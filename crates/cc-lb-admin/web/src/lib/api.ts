@@ -42,11 +42,19 @@ async function fetchWithAuth(
       let message = res.statusText;
       try {
         body = await res.json();
-        if (body && typeof body === 'object' && 'code' in body) {
-          code = String((body as Record<string, unknown>).code);
-        }
-        if (body && typeof body === 'object' && 'message' in body) {
-          message = String((body as Record<string, unknown>).message);
+        if (body && typeof body === 'object') {
+          const b = body as Record<string, unknown>;
+          if ('code' in b) {
+            code = String(b.code);
+          } else if ('error' in b) {
+            code = String(b.error);
+          }
+          
+          if ('message' in b) {
+            message = String(b.message);
+          } else if ('detail' in b) {
+            message = String(b.detail);
+          }
         }
       } catch {
         // ignore json parse error
@@ -520,6 +528,13 @@ export interface ApplyConfigRequest {
 export interface ApplyConfigResponse {
   applied_revision: number;
   applied_at_unix_secs: number;
+}
+
+export interface RestartRequiredField {
+  field: string;
+  current: string;
+  new: string;
+  reason: string;
 }
 
 export interface HistorySummary {

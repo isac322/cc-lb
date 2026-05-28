@@ -169,6 +169,13 @@ export interface BuildInfo {
   target: string;
 }
 
+export interface RestartRequiredField {
+  field: string;
+  current: string;
+  new: string;
+  reason: string;
+}
+
 export interface StatusResponse {
   version: string;
   git_sha: string;
@@ -181,6 +188,7 @@ export interface StatusResponse {
   plugin_chain_summary: PluginChainSummary;
   killswitch: boolean;
   last_reload_status?: unknown;
+  restart_required_changes: RestartRequiredField[];
 }
 
 export interface OAuthStartResponse {

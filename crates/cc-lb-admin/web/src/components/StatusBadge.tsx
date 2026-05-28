@@ -50,7 +50,7 @@ export function StatusBadge({
 
   const truncatedError =
     lastApplyError.length > 500
-      ? lastApplyError.slice(0, 500) + '...'
+      ? `${lastApplyError.slice(0, 500)}...`
       : lastApplyError;
 
   const relativeTime = lastApplyAt

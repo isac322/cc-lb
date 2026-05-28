@@ -16,6 +16,7 @@ import { useConfigDraft } from '../lib/hooks/useConfigDraft';
 import { useConfigSchema } from '../lib/hooks/useConfigSchema';
 import { useConfigValidate } from '../lib/hooks/useConfigValidate';
 import { useStatus } from '../lib/hooks/useStatusOverview';
+import type { RestartRequiredField } from '../lib/types/v1';
 
 export default function Settings() {
   const {
@@ -35,7 +36,8 @@ export default function Settings() {
   } = useConfigDraft();
   const { validate, validating } = useConfigValidate();
   const { apply, applying } = useConfigApply();
-  const { generation, replicaHistory } = useStatus();
+  const { generation, replicaHistory, restartRequiredChanges, refreshStatus } =
+    useStatus();
 
   const [activeSection, setActiveSection] = useState<string>('');
   const [localDraft, setLocalDraft] = useState<Record<string, unknown> | null>(
@@ -142,6 +144,7 @@ export default function Settings() {
       await apply(draftData.revision);
       setApplyModalOpen(false);
       fetchDraft(); // Refresh draft state
+      await refreshStatus();
       // In a real app, we might want to trigger a global reload or show a success toast
     } catch {
       // Error handled by hook
@@ -177,6 +180,9 @@ export default function Settings() {
         }
         main={
           <div className="space-y-8">
+            {restartRequiredChanges.length > 0 && (
+              <RestartRequiredBanner changes={restartRequiredChanges} />
+            )}
             <div className="p-4 bg-graphite-900 border border-graphite-800 rounded-md text-sm text-graphite-300">
               Upstreams are managed at{' '}
               <Link to="/upstreams" className="text-blue-400 hover:underline">
@@ -294,5 +300,58 @@ export default function Settings() {
           : 'none'}
       </div>
     </>
+  );
+}
+
+function RestartRequiredBanner({
+  changes,
+}: {
+  changes: RestartRequiredField[];
+}) {
+  const fields = changes.map((change) => change.field).join(', ');
+
+  return (
+    <div className="rounded-md border border-yellow-800 bg-yellow-900/20 p-4 text-yellow-100 shadow-lg shadow-yellow-950/20">
+      <div className="flex items-start justify-between gap-4">
+        <div className="space-y-1">
+          <p className="text-sm font-semibold text-yellow-50">
+            Restart required
+          </p>
+          <p className="text-sm text-yellow-200">
+            Restart required for changes to: {fields}
+          </p>
+        </div>
+        <span className="rounded-full border border-yellow-700 bg-yellow-500/10 px-2 py-1 text-xs font-medium uppercase tracking-wide text-yellow-200">
+          Action needed
+        </span>
+      </div>
+      <details className="mt-3 text-sm text-yellow-100">
+        <summary className="cursor-pointer select-none text-yellow-200 hover:text-yellow-100">
+          Show restart-required details
+        </summary>
+        <div className="mt-3 space-y-2">
+          {changes.map((change) => (
+            <div
+              key={change.field}
+              className="rounded border border-yellow-800/70 bg-graphite-950/40 p-3"
+            >
+              <div className="font-mono text-xs text-yellow-100">
+                {change.field}
+              </div>
+              <div className="mt-1 text-xs text-yellow-200">
+                <span className="text-yellow-300">Current:</span>{' '}
+                <span className="font-mono">{change.current || '(unset)'}</span>
+                <span className="mx-2 text-yellow-400">to</span>
+                <span className="text-yellow-300">New:</span>{' '}
+                <span className="font-mono">{change.new || '(unset)'}</span>
+              </div>
+              <div className="mt-1 text-xs text-yellow-300/80">
+                {change.reason}
+              </div>
+            </div>
+          ))}
+        </div>
+      </details>
+    </div>
   );
 }

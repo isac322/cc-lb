@@ -13,7 +13,7 @@ use std::sync::Arc;
 
 use axum::Router;
 use cc_lb_aead::AeadService;
-use cc_lb_config::Config;
+use cc_lb_config::{Config, RestartRequiredField};
 use serde::Serialize;
 
 use cc_lb_core::{
@@ -65,6 +65,10 @@ pub enum ReloadOutcome {
 
 pub trait CurrentConfig: Send + Sync {
     fn current_config(&self) -> Arc<Config>;
+
+    fn restart_required_changes(&self) -> Vec<RestartRequiredField> {
+        Vec::new()
+    }
 
     fn last_reload_status(&self) -> Option<LastReloadStatus> {
         None

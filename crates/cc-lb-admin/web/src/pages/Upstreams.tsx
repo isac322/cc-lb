@@ -301,7 +301,10 @@ export default function Upstreams() {
           <form onSubmit={handleEditSubmit}>
             <div className="space-y-4 py-4">
               <div className="space-y-2">
-                <label htmlFor="name" className="text-sm font-medium text-graphite-200">
+                <label
+                  htmlFor="name"
+                  className="text-sm font-medium text-graphite-200"
+                >
                   Name
                 </label>
                 <input
@@ -313,7 +316,10 @@ export default function Upstreams() {
                 />
               </div>
               <div className="space-y-2">
-                <label htmlFor="base_url" className="text-sm font-medium text-graphite-200">
+                <label
+                  htmlFor="base_url"
+                  className="text-sm font-medium text-graphite-200"
+                >
                   Base URL
                 </label>
                 <input

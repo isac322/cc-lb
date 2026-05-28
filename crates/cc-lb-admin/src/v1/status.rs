@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
+use cc_lb_config::RestartRequiredField;
 use cc_lb_core::{ApplyStatus, ReplicaIdentity};
 use cc_lb_storage_api::{
     PluginChainEntry, PluginRegistryStore, PluginSlot, PrincipalKind, PrincipalRecord,
@@ -35,6 +36,7 @@ struct StatusResponse {
     plugin_chain_summary: PluginChainSummary,
     killswitch: bool,
     last_reload_status: Option<LastReloadStatus>,
+    restart_required_changes: Vec<RestartRequiredField>,
 }
 
 #[derive(Debug, Serialize)]
@@ -185,6 +187,7 @@ async fn build_status(state: &AdminState) -> Result<StatusResponse, StatusError>
         plugin_chain_summary: chain_summary,
         killswitch: storage.killswitch_enabled().await?,
         last_reload_status: state.config.last_reload_status(),
+        restart_required_changes: state.config.restart_required_changes(),
     })
 }
 

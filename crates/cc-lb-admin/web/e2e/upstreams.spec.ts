@@ -2,9 +2,28 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Upstreams Management', () => {
   test.beforeEach(async ({ page }) => {
+    page.on('response', async response => {
+      if (response.url().includes('/admin/v1/upstreams')) {
+        console.log(`${response.request().method()} /admin/v1/upstreams RESPONSE:`, response.status(), await response.text().catch(() => ''));
+      }
+    });
     await page.addInitScript(() => {
       localStorage.setItem('cc-lb-admin-token', 'test-admin-token');
     });
+    await page.goto('/upstreams');
+    await page.waitForLoadState('networkidle');
+  });
+
+  test('should list upstreams (empty initially)', async ({ page }) => {
+    const content = await page.content();
+    console.log("PAGE CONTENT:", content);
+    await expect(page.getByText('No upstreams configured')).toBeVisible({ timeout: 10000 });
+  });
+    await page.addInitScript(() => {
+      localStorage.setItem('cc-lb-admin-token', 'test-admin-token');
+    });
+    await page.goto('/upstreams');
+  });
     await page.goto('/upstreams');
   });
 
@@ -27,6 +46,14 @@ test.describe('Upstreams Management', () => {
   });
 
   test('should edit an upstream', async ({ page }) => {
+    // Create an upstream first since we start empty
+    await page.getByRole('button', { name: '+ New Upstream' }).click();
+    await page.getByLabel('Name').fill('test-api-key-upstream');
+    await page.getByLabel('Anthropic API Key').check();
+    await page.getByLabel('API Key Env Var').fill('TEST_API_KEY');
+    await page.getByRole('button', { name: 'Create' }).click();
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+
     await page.waitForSelector('table');
     
     const row = page.getByRole('row', { name: /test-api-key-upstream/ });
@@ -41,6 +68,14 @@ test.describe('Upstreams Management', () => {
   });
 
   test('should enable/disable an upstream', async ({ page }) => {
+    // Create an upstream first
+    await page.getByRole('button', { name: '+ New Upstream' }).click();
+    await page.getByLabel('Name').fill('test-api-key-upstream');
+    await page.getByLabel('Anthropic API Key').check();
+    await page.getByLabel('API Key Env Var').fill('TEST_API_KEY');
+    await page.getByRole('button', { name: 'Create' }).click();
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+
     await page.waitForSelector('table');
     const row = page.getByRole('row', { name: /test-api-key-upstream/ });
     
@@ -52,6 +87,14 @@ test.describe('Upstreams Management', () => {
   });
 
   test('should delete an upstream', async ({ page }) => {
+    // Create an upstream first
+    await page.getByRole('button', { name: '+ New Upstream' }).click();
+    await page.getByLabel('Name').fill('test-api-key-upstream');
+    await page.getByLabel('Anthropic API Key').check();
+    await page.getByLabel('API Key Env Var').fill('TEST_API_KEY');
+    await page.getByRole('button', { name: 'Create' }).click();
+    await expect(page.getByRole('dialog')).not.toBeVisible();
+
     await page.waitForSelector('table');
     const row = page.getByRole('row', { name: /test-api-key-upstream/ });
     

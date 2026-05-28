@@ -83,7 +83,12 @@ export function UpstreamCreateDialog({
       </p>
       <div className="space-y-4 py-4">
         <div className="space-y-2">
-          <label htmlFor="name" className="text-sm font-medium text-graphite-200">Name</label>
+          <label
+            htmlFor="name"
+            className="text-sm font-medium text-graphite-200"
+          >
+            Name
+          </label>
           <input
             id="name"
             className="w-full bg-graphite-900 border border-graphite-700 rounded px-3 py-2 text-sm text-graphite-100 focus:outline-none focus:border-cyan-500"
@@ -136,7 +141,10 @@ export function UpstreamCreateDialog({
 
         {kind === 'anthropic_api_key' && (
           <div className="space-y-2">
-            <label htmlFor="api_key_env" className="text-sm font-medium text-graphite-200">
+            <label
+              htmlFor="api_key_env"
+              className="text-sm font-medium text-graphite-200"
+            >
               API Key Env Var
             </label>
             <input
