@@ -110,6 +110,29 @@ async fn run_inner(
             .push(format!("plugin {} dry-loaded", plugin.name));
     }
 
+    let principals = cfg.principals.iter().collect::<BTreeMap<_, _>>();
+    for (principal_name, principal) in principals {
+        if let Some(plugin) = &principal.router_plugin {
+            let path = format!("principals.{principal_name}.router_plugin");
+            dry_load_plugin(&runtime, plugin, PluginLoadKind::Router)
+                .map_err(|error| PreflightError::Plugin(format!("{path}: {error}")))?;
+            report
+                .successes
+                .push(format!("plugin {} dry-loaded ({path})", plugin.name));
+        }
+
+        if let Some(plugins) = &principal.observability_hooks {
+            for (index, plugin) in plugins.iter().enumerate() {
+                let path = format!("principals.{principal_name}.observability_hooks.{index}");
+                dry_load_plugin(&runtime, plugin, PluginLoadKind::Observability)
+                    .map_err(|error| PreflightError::Plugin(format!("{path}: {error}")))?;
+                report
+                    .successes
+                    .push(format!("plugin {} dry-loaded ({path})", plugin.name));
+            }
+        }
+    }
+
     for name in cfg.upstreams.keys() {
         report.warnings.push(format!(
             "upstream {name}: probe skipped (offline preflight)"
@@ -455,14 +478,19 @@ mod tests {
             .await
             .expect("global and per-principal plugins should all dry-load");
 
-        assert!(
-            report
-                .successes
-                .iter()
-                .any(|entry| entry == "principal view built"),
-            "preflight should preserve existing principal-view success entry: {:?}",
-            report.successes
-        );
+        for expected in [
+            "principal view built",
+            "plugin alice-router dry-loaded (principals.alice.router_plugin)",
+            "plugin alice-hook dry-loaded (principals.alice.observability_hooks.0)",
+            "plugin bob-router dry-loaded (principals.bob.router_plugin)",
+            "plugin bob-hook-a dry-loaded (principals.bob.observability_hooks.0)",
+        ] {
+            assert!(
+                report.successes.iter().any(|entry| entry == expected),
+                "preflight should report success for {expected}: {:?}",
+                report.successes
+            );
+        }
     }
 
     fn config_with_global_plugins(fixtures: &PluginFixtures) -> Config {
