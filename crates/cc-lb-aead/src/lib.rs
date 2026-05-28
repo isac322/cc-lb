@@ -6,8 +6,10 @@
 //! implementations can encrypt and decrypt opaque ciphertext without coupling
 //! backends to crypto details.
 
+pub mod encrypted_field;
 pub mod error;
 pub mod service;
 
+pub use encrypted_field::{AeadEncryptedField, OAuthTokenBundle};
 pub use error::{AeadError, AeadResult};
 pub use service::AeadService;
