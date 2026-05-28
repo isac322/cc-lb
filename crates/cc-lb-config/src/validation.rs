@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -78,7 +79,8 @@ pub fn migrate_legacy_storage_toml(raw_toml: &str) -> Result<String, ValidationE
     let mut storage_was_legacy_only = false;
 
     if let Some(storage) = root.get_mut("storage").and_then(|v| v.as_table_mut()) {
-        let had_legacy = storage.contains_key("redb_path") || storage.contains_key("oauth_aead_key_env");
+        let had_legacy =
+            storage.contains_key("redb_path") || storage.contains_key("oauth_aead_key_env");
         let had_kind = storage.contains_key("kind");
         legacy_redb_path = storage.remove("redb_path");
         legacy_aead_env = storage.remove("oauth_aead_key_env");
@@ -107,8 +109,12 @@ pub fn migrate_legacy_storage_toml(raw_toml: &str) -> Result<String, ValidationE
         }
     }
 
-    toml::to_string(&root)
-        .map_err(|err| ValidationError::new("storage", format!("failed to migrate legacy [storage] block: {err}")))
+    toml::to_string(&root).map_err(|err| {
+        ValidationError::new(
+            "storage",
+            format!("failed to migrate legacy [storage] block: {err}"),
+        )
+    })
 }
 
 fn validate_tls(config: &Config) -> Result<(), ValidationError> {
@@ -215,6 +221,31 @@ fn validate_plugins(config: &Config) -> Result<(), ValidationError> {
 
     for (index, plugin) in config.plugins.observability_hooks.iter().enumerate() {
         validate_plugin_ref(&format!("plugins.observability_hooks.{index}"), plugin)?;
+    }
+
+    for (principal_id, principal) in &config.principals {
+        if let Some(plugin) = &principal.router_plugin {
+            validate_plugin_ref(
+                &format!("principals.{principal_id}.router_plugin"),
+                plugin,
+            )?;
+        }
+        if let Some(hooks) = &principal.observability_hooks {
+            let mut seen: HashSet<&str> = HashSet::new();
+            for (index, plugin) in hooks.iter().enumerate() {
+                let path = format!("principals.{principal_id}.observability_hooks.{index}");
+                validate_plugin_ref(&path, plugin)?;
+                if !seen.insert(plugin.name.as_str()) {
+                    return Err(ValidationError::new(
+                        format!("principals.{principal_id}.observability_hooks"),
+                        format!(
+                            "duplicate plugin name '{}' within principal observability_hooks",
+                            plugin.name
+                        ),
+                    ));
+                }
+            }
+        }
     }
 
     Ok(())

@@ -58,13 +58,17 @@ fn test_config() -> Config {
             enabled: true,
             allowed_models: vec!["claude-3-5-sonnet".to_string()],
             credentials_ref: Some("anthropic-key".to_string()),
+            router_plugin: None,
+            observability_hooks: None,
         },
     );
     config
 }
 
 fn test_state(config: Config, storage: Option<Arc<Storage>>) -> AdminState {
-    let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config)));
+    let principal_view = Arc::new(ArcSwap::from(
+        PrincipalView::from_config(&config, std::collections::HashMap::new()).expect("principal view builds"),
+    ));
     let limit_engine = LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),
         principal_view.clone(),

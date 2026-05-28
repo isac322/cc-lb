@@ -57,7 +57,6 @@ pub fn upstream(name: &str, kind: UpstreamKind, base_url: Option<&str>) -> (Stri
     )
 }
 
-
 pub fn use_temp_redb(config: &mut Config, prefix: &str, key_env: &'static str) {
     config.storage = StorageConfig::Redb {
         path: unique_redb_path(prefix),

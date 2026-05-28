@@ -3,11 +3,10 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    DialectError, ObservabilityError, ObservabilityHook,
-    ObserveEvent, PluginManifest, PluginRuntime, Principal,
-    RequestContext, RetryDecision, RouteDecision, RouteError, RouterPlugin, ShapedRequest,
-    ShapedRequestBuilder, SignedRequest, Signer, SignerError, SignerFactory, SigningCapability,
-    Upstream, UpstreamDialect,
+    DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, PluginManifest,
+    PluginRuntime, Principal, RequestContext, RetryDecision, RouteDecision, RouteError,
+    RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError,
+    SignerFactory, SigningCapability, Upstream, UpstreamDialect,
 };
 use http::{HeaderMap, Method, StatusCode};
 

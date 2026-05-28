@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use axum::{routing::any, Router};
+use axum::{Router, routing::any};
 use cc_lb_config::{
     AuthStrategy, Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, StorageConfig,
     UpstreamKind, UpstreamSpec,

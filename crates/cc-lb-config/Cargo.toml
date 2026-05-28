@@ -19,15 +19,17 @@ clap = { workspace = true, features = ["derive"] }
 figment = { workspace = true, features = ["env", "toml"] }
 humantime = "2"
 humantime_serde_dep = { package = "humantime-serde", version = "1" }
-notify.workspace = true
 schemars.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["macros", "rt", "signal", "sync", "time"] }
-tracing.workspace = true
 toml = "0.9"
+tracing.workspace = true
 url = { workspace = true, features = ["serde"] }
+
+[target.'cfg(not(loom))'.dependencies]
+notify.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "signal", "sync", "time"] }
 
 [build-dependencies]
 humantime = "2"
@@ -39,3 +41,6 @@ url = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(loom)'] }

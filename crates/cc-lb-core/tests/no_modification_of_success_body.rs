@@ -2,8 +2,8 @@ mod common;
 
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use async_trait::async_trait;
 use axum::body::Body;
@@ -18,7 +18,7 @@ use http_body_util::BodyExt;
 use url::Url;
 
 use common::{
-    lifecycle_with_parts, messages_request, RecordingHook, TestAuthn, TestRouter, TestState,
+    RecordingHook, TestAuthn, TestRouter, TestState, lifecycle_with_parts, messages_request,
 };
 
 #[tokio::test]

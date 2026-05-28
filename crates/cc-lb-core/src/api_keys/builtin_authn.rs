@@ -87,9 +87,14 @@ impl BuiltinAuthn {
         }
     }
 
+    pub(crate) fn principal_view_cell(&self) -> Arc<arc_swap::ArcSwap<PrincipalView>> {
+        self.principal_view.clone()
+    }
+
     pub async fn authenticate(
         &self,
         headers: &http::HeaderMap,
+        view: &PrincipalView,
     ) -> Result<AuthnSuccess, BuiltinAuthError> {
         let input = headers
             .get("x-api-key")
@@ -126,7 +131,6 @@ impl BuiltinAuthn {
             }
         }
 
-        let view = self.principal_view.load();
         view.get(&principal_id)
             .ok_or(BuiltinAuthError::PrincipalMissing)?;
         if view.principal_status(&principal_id) != PrincipalStatus::Active {
@@ -226,7 +230,10 @@ mod tests {
         );
 
         let success = authn
-            .authenticate(&headers(generated.plaintext.expose()))
+            .authenticate(
+                &headers(generated.plaintext.expose()),
+                &authn.principal_view_cell().load(),
+            )
             .await
             .expect("generated key authenticates");
 
@@ -252,7 +259,10 @@ mod tests {
 
         let error = authn_error(
             authn
-                .authenticate(&headers(generated.plaintext.expose()))
+                .authenticate(
+                    &headers(generated.plaintext.expose()),
+                    &authn.principal_view_cell().load(),
+                )
                 .await,
         );
 
@@ -267,7 +277,10 @@ mod tests {
 
         let error = authn_error(
             authn
-                .authenticate(&headers(generated.plaintext.expose()))
+                .authenticate(
+                    &headers(generated.plaintext.expose()),
+                    &authn.principal_view_cell().load(),
+                )
                 .await,
         );
 
@@ -282,7 +295,10 @@ mod tests {
 
         let error = authn_error(
             authn
-                .authenticate(&headers(generated.plaintext.expose()))
+                .authenticate(
+                    &headers(generated.plaintext.expose()),
+                    &authn.principal_view_cell().load(),
+                )
                 .await,
         );
 
@@ -347,14 +363,20 @@ mod tests {
                 enabled,
                 allowed_models: Vec::new(),
                 credentials_ref: None,
+                router_plugin: None,
+                observability_hooks: None,
             },
         );
-        Arc::new(arc_swap::ArcSwap::from(PrincipalView::from_config(
-            &Config {
-                principals,
-                ..Config::default()
-            },
-        )))
+        Arc::new(arc_swap::ArcSwap::from(
+            PrincipalView::from_config(
+                &Config {
+                    principals,
+                    ..Config::default()
+                },
+                HashMap::new(),
+            )
+            .expect("principal view builds"),
+        ))
     }
 
     fn headers(api_key: &str) -> HeaderMap {

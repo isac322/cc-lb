@@ -75,3 +75,4 @@ metrics-exporter-prometheus.workspace = true
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic" }
 redb.workspace = true
 tracing-subscriber.workspace = true
+wat.workspace = true

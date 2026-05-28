@@ -28,9 +28,9 @@ pub use traits::{
     ObservabilityHook, PluginRuntime, RouterPlugin, Signer, SignerFactory, UpstreamDialect,
 };
 pub use types::{
-    shape_request, sign_request, AuthStrategy, ObserveEvent, PluginManifest, Principal,
-    PrincipalKind, PrincipalQuotas, RequestContext, RetryDecision, RouteDecision, ShapedRequest,
-    ShapedRequestBuilder, SignedRequest, SigningCapability, Upstream,
+    AuthStrategy, ObserveEvent, PluginManifest, Principal, PrincipalKind, PrincipalQuotas,
+    RequestContext, RetryDecision, RouteDecision, ShapedRequest, ShapedRequestBuilder,
+    SignedRequest, SigningCapability, Upstream, shape_request, sign_request,
 };
 
 mod private {

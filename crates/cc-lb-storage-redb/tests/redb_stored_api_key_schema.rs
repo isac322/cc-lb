@@ -1,18 +1,18 @@
-use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bincode::config::standard;
 use bincode::serde::{decode_from_slice, encode_to_vec};
 use cc_lb_storage_api::types::{
     ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind, PrincipalKindLite,
     StoredApiKeyRecord, UpstreamKind,
 };
-use cc_lb_storage_redb::{api_key_storage_key, Storage, API_KEYS_V1};
+use cc_lb_storage_redb::{API_KEYS_V1, Storage, api_key_storage_key};
 use redb::ReadableDatabase;
 use serde::{Deserialize, Serialize};
 
 #[test]
-fn redb_stored_api_key_schema_roundtrip_preserves_new_fields(
-) -> Result<(), Box<dyn std::error::Error>> {
+fn redb_stored_api_key_schema_roundtrip_preserves_new_fields()
+-> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("api_keys.redb");
     let storage = Storage::open(&path, [11; 32])?;

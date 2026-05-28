@@ -1,3 +1,6 @@
+use std::collections::BTreeMap;
+
+use axum::{Json, extract::State};
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, PluginRef, UpstreamKind};
 use cc_lb_core::{BreakerRegistry, BreakerState, BulkheadRegistry, DrainController};
@@ -5,9 +8,10 @@ use cc_lb_storage_api::{
     OAuthCredentials, RequestEventUpstream, Storage, StorageError, UsageRollupResolution,
 };
 use serde::Serialize;
+use serde::de::DeserializeOwned;
+use sha2::{Digest, Sha256};
 
-use crate::PluginRuntimeStatus;
-use crate::credential_crypto::{decrypt_json, oauth_aad};
+use crate::{AdminState, LastReloadStatus};
 
 const RECENT_ERROR_WINDOW_SECS: u64 = 15 * 60;
 const EXPIRING_SOON_SECS: u64 = 300;
@@ -49,6 +53,33 @@ pub struct DrainHealth {
 #[derive(Debug, Clone, Serialize)]
 pub struct PluginsStatusResponse {
     pub plugins: Vec<PluginStatusEntry>,
+    pub principals: BTreeMap<String, PrincipalPluginsStatus>,
+    pub last_reload_status: Option<LastReloadStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PrincipalPluginsStatus {
+    pub router_plugin: Option<PluginRefRedacted>,
+    pub observability_hooks: Vec<PluginRefRedacted>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginRefRedacted {
+    pub name: String,
+    pub wasm_path: Option<String>,
+    pub config_hash: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct PluginRuntimeEntryStatus {
+    pub loaded: bool,
+    pub disabled: bool,
+    pub failure_count: u64,
+    pub last_error: Option<String>,
+}
+
+pub trait PluginRuntimeStatus {
+    fn plugin_status(&self, name: &str) -> Option<PluginRuntimeEntryStatus>;
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -83,10 +114,21 @@ pub struct OAuthCredentialStatus {
     pub scopes: Vec<String>,
 }
 
+pub async fn handler(State(state): State<AdminState>) -> Json<PluginsStatusResponse> {
+    let config = state.config.current_config();
+    Json(build_status_response(
+        &config,
+        None,
+        state.config.last_reload_status(),
+    ))
+}
+
 #[derive(Debug)]
 pub enum StatusBuildError {
     UnknownUpstream,
     Storage(StorageError),
+    Crypto,
+    Json,
 }
 
 pub async fn build_upstream_health(
@@ -126,6 +168,14 @@ pub fn build_plugins_status(
     config: &Config,
     runtime_status: Option<&dyn PluginRuntimeStatus>,
 ) -> PluginsStatusResponse {
+    build_status_response(config, runtime_status, None)
+}
+
+pub fn build_status_response(
+    config: &Config,
+    runtime_status: Option<&dyn PluginRuntimeStatus>,
+    last_reload_status: Option<LastReloadStatus>,
+) -> PluginsStatusResponse {
     let mut plugins = Vec::new();
     if let Some(plugin) = &config.plugins.router_plugin {
         plugins.push(plugin_entry("router", plugin, runtime_status));
@@ -133,7 +183,12 @@ pub fn build_plugins_status(
     for plugin in &config.plugins.observability_hooks {
         plugins.push(plugin_entry("observability", plugin, runtime_status));
     }
-    PluginsStatusResponse { plugins }
+
+    PluginsStatusResponse {
+        plugins,
+        principals: build_principals_status(config),
+        last_reload_status,
+    }
 }
 
 pub async fn build_oauth_status(
@@ -210,6 +265,8 @@ impl StatusBuildError {
         match self {
             Self::UnknownUpstream => "unknown_upstream",
             Self::Storage(_) => "storage_error",
+            Self::Crypto => "crypto_error",
+            Self::Json => "json_error",
         }
     }
 }
@@ -304,6 +361,63 @@ fn plugin_entry(
         batched_events_per_flush: Some(u64::from(plugin.batched_events_per_flush)),
         batched_flush_ms: Some(plugin.batched_flush_ms),
     }
+}
+
+fn build_principals_status(config: &Config) -> BTreeMap<String, PrincipalPluginsStatus> {
+    config
+        .principals
+        .iter()
+        .map(|(principal_id, principal)| {
+            (
+                principal_id.clone(),
+                PrincipalPluginsStatus {
+                    router_plugin: principal.router_plugin.as_ref().map(redact_plugin_ref),
+                    observability_hooks: principal
+                        .observability_hooks
+                        .as_deref()
+                        .unwrap_or_default()
+                        .iter()
+                        .map(redact_plugin_ref)
+                        .collect(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn redact_plugin_ref(plugin: &PluginRef) -> PluginRefRedacted {
+    PluginRefRedacted {
+        name: plugin.name.clone(),
+        wasm_path: plugin
+            .wasm_path
+            .as_ref()
+            .map(|path| path.display().to_string()),
+        config_hash: config_hash(&plugin.config),
+    }
+}
+
+fn config_hash(config: &serde_json::Value) -> String {
+    let serialized = serde_json::to_string(config).expect("serde_json::Value serializes");
+    let digest = Sha256::digest(serialized.as_bytes());
+    digest[..8]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn decrypt_json<T: DeserializeOwned>(
+    aead: &AeadService,
+    ciphertext: &[u8],
+    aad: &[u8],
+) -> Result<T, StatusBuildError> {
+    let plaintext = aead
+        .decrypt(ciphertext, aad)
+        .map_err(|_| StatusBuildError::Crypto)?;
+    serde_json::from_slice(&plaintext).map_err(|_| StatusBuildError::Json)
+}
+
+fn oauth_aad(principal_id: &str, provider: &str) -> Vec<u8> {
+    format!("oauth:{principal_id}:{provider}").into_bytes()
 }
 
 fn request_event_upstream_kind(kind: &UpstreamKind) -> RequestEventUpstream {

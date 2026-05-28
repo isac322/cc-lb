@@ -2,19 +2,16 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
-use cc_lb_core::ApiKeyAwareSignerFactory;
 use cc_lb_config::{AuthStrategy as ConfigAuthStrategy, Config, UpstreamKind, UpstreamSpec};
+use cc_lb_core::ApiKeyAwareSignerFactory;
 use cc_lb_dialect_anthropic::{AnthropicDirectDialect, CustomAnthropicSpecDialect};
 use cc_lb_plugin_api::{
     AuthStrategy, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext,
-    RouteDecision,
-    RouteError, RouterPlugin, SignerError, SignerFactory, Upstream, UpstreamDialect,
+    RouteDecision, RouteError, RouterPlugin, SignerError, SignerFactory, Upstream, UpstreamDialect,
 };
 use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
 use cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory;
 use cc_lb_storage_redb::Storage;
-
-
 
 #[derive(Clone)]
 pub struct BuiltinRouter {
