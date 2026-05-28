@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use tokio::time::sleep;
 
 use crate::modes::FakeMode;
+use crate::oauth::{OAuthState, authorize, refresh_history, token};
 use crate::sse::streaming_response;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -36,6 +37,7 @@ impl Default for AppConfig {
 #[derive(Debug)]
 pub struct AppState {
     config: AppConfig,
+    pub(crate) oauth: OAuthState,
     request_counts: Mutex<BTreeMap<&'static str, u64>>,
     last_x_api_key: Mutex<Option<String>>,
     last_selected_headers: Mutex<BTreeMap<&'static str, Option<String>>>,
@@ -45,6 +47,7 @@ impl AppState {
     fn new(config: AppConfig) -> Self {
         Self {
             config,
+            oauth: OAuthState::default(),
             request_counts: Mutex::new(BTreeMap::new()),
             last_x_api_key: Mutex::new(None),
             last_selected_headers: Mutex::new(BTreeMap::from([
@@ -93,6 +96,10 @@ pub fn app(config: AppConfig) -> Router {
     Router::new()
         .route("/v1/messages", post(messages))
         .route("/v1/messages/count_tokens", post(count_tokens))
+        .route("/oauth/authorize", get(authorize))
+        .route("/oauth/token", post(token))
+        .route("/v1/oauth/token", post(token))
+        .route("/__refresh_history", get(refresh_history))
         .route("/__last_request", get(last_request))
         .route("/v1/models", get(list_models))
         .route("/v1/models/{id}", get(get_model))
