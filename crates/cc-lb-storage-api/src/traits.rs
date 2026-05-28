@@ -185,10 +185,8 @@ pub trait ManagedKeyStore: Send + Sync {
         index_hash: &[u8; 32],
     ) -> StorageResult<Option<(String, String, StoredApiKeyRecord)>>;
 
-    async fn list_by_principal(
-        &self,
-        principal_id: &str,
-    ) -> StorageResult<Vec<StoredApiKeyRecord>>;
+    async fn list_by_principal(&self, principal_id: &str)
+    -> StorageResult<Vec<StoredApiKeyRecord>>;
 
     async fn list_all(&self) -> StorageResult<Vec<(String, String, StoredApiKeyRecord)>>;
 
@@ -199,11 +197,7 @@ pub trait ManagedKeyStore: Send + Sync {
         mutation: ApiKeyMutation,
     ) -> StorageResult<()>;
 
-    async fn revoke_zero_secrets(
-        &self,
-        principal_id: &str,
-        key_id: &str,
-    ) -> StorageResult<()>;
+    async fn revoke_zero_secrets(&self, principal_id: &str, key_id: &str) -> StorageResult<()>;
 }
 
 #[async_trait]
