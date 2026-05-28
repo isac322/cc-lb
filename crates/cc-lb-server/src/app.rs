@@ -8,6 +8,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use axum::Json;
+use axum::Router;
 use axum::body::Body;
 use axum::error_handling::HandleErrorLayer;
 use axum::extract::State;
@@ -15,26 +17,25 @@ use axum::http::header::HeaderValue;
 use axum::http::{HeaderName, Request, Response, StatusCode};
 use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
-use axum::Json;
-use axum::Router;
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DownstreamAuthMode, PluginRef, TlsConfig};
 use cc_lb_core::BreakerState;
 use cc_lb_core::{
+    BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
+    CircuitBreakerDispatch, ErrorNormalizer, HopByHopStripLayer, Lifecycle, LifecycleConfig,
+    UpstreamDispatch, UpstreamKind,
     api_keys::{
         builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
         limit_engine::LimitEngine, principal_view::PrincipalView,
     },
     make_default_dispatcher, spawn_audit_writer,
     usage_pruner::UsagePruner,
-    BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
-    CircuitBreakerDispatch, ErrorNormalizer, HopByHopStripLayer, Lifecycle, LifecycleConfig,
-    UpstreamDispatch, UpstreamKind,
 };
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_plugin_api::{ObservabilityHook, PluginManifest, PluginRuntime};
 use cc_lb_pricing::LiteLlmLoader;
 use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_storage_api::ManagedKeyStore;
 use cc_lb_storage_redb::Storage;
 use http_body_util::BodyExt;
 use serde::Serialize;
@@ -169,7 +170,7 @@ pub async fn run_serve(config_path: &Path) -> Result<(), ServeError> {
         config.observability.user_prompt_redaction,
     ));
     let _guard = init_observability(&mut config)?;
-    let app = build_app_with_path(config, Some(config_path))?;
+    let app = build_app_with_path(config, Some(config_path)).await?;
     app.start().await?;
     Ok(())
 }
@@ -181,8 +182,8 @@ fn print_preflight_report(report: &preflight::PreflightReport) {
     }
 }
 
-pub fn build_app(config: Config) -> Result<App, BuildError> {
-    build_app_with_path(config, None)
+pub async fn build_app(config: Config) -> Result<App, BuildError> {
+    build_app_with_path(config, None).await
 }
 
 pub fn build_app_for_testing(mut config: Config) -> Result<App, BuildError> {
@@ -190,7 +191,11 @@ pub fn build_app_for_testing(mut config: Config) -> Result<App, BuildError> {
     let path = dir.path().join("storage.redb");
     let key = [0u8; 32];
     let aead = Arc::new(AeadService::from_master_key(key));
-    let storage = Some(Arc::new(cc_lb_storage_redb::Storage::open(&path, key)?));
+    let storage_arc = Arc::new(cc_lb_storage_redb::Storage::open(&path, key)?);
+    let managed_store: Arc<dyn ManagedKeyStore> = Arc::new(
+        cc_lb_storage_redb::RedbManagedKeyStore::new(storage_arc.clone()),
+    );
+    let storage = Some(storage_arc);
     config.storage = cc_lb_config::StorageConfig::Redb { path };
     config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
     config.downstream_auth.mode = DownstreamAuthMode::None;
@@ -200,31 +205,27 @@ pub fn build_app_for_testing(mut config: Config) -> Result<App, BuildError> {
         upstream_credential_ref: "test-cred".to_owned(),
     });
     std::mem::forget(dir);
-    build_app_with_storage(config, None, storage, aead)
+    build_app_with_storage(config, None, managed_store, storage, aead)
 }
 
-pub fn build_app_with_path(config: Config, config_path: Option<&Path>) -> Result<App, BuildError> {
+pub async fn build_app_with_path(
+    config: Config,
+    config_path: Option<&Path>,
+) -> Result<App, BuildError> {
     config.validate()?;
-    let (storage, aead) = open_storage(&config)?;
-    build_app_with_storage(config, config_path, storage, aead)
+    let (managed_store, storage, aead) = open_storage(&config).await?;
+    build_app_with_storage(config, config_path, managed_store, storage, aead)
 }
 
 pub fn build_app_with_storage(
     config: Config,
     config_path: Option<&Path>,
+    managed_store: Arc<dyn ManagedKeyStore>,
     storage: Option<Arc<cc_lb_storage_redb::Storage>>,
     aead: Arc<AeadService>,
 ) -> Result<App, BuildError> {
-    if matches!(config.downstream_auth.mode, DownstreamAuthMode::ApiKey) && storage.is_none() {
-        return Err(BuildError::StorageRequired);
-    }
-
     let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config)));
-    let key_store = storage.as_ref().map(|storage| {
-        Arc::new(KeyStore::new(Arc::new(
-            cc_lb_storage_redb::RedbManagedKeyStore::new(storage.clone()),
-        )))
-    });
+    let key_store = Arc::new(KeyStore::new(managed_store));
     let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
     let price_catalog = cc_lb_pricing::global_catalog().clone();
     spawn_price_catalog_loader(&config, storage.clone(), price_catalog.clone());
@@ -243,19 +244,19 @@ pub fn build_app_with_storage(
     if let Some(storage) = storage.clone() {
         limit_engine.startup_replay(storage);
     }
-    let builtin_authn = key_store.as_ref().map(|key_store| {
-        Arc::new(BuiltinAuthn::new(
-            config.downstream_auth.mode.clone(),
-            config.downstream_auth.none_mode.clone(),
-            key_store.clone(),
-            principal_view.clone(),
-        ))
-    });
+    let builtin_authn = Arc::new(BuiltinAuthn::new(
+        config.downstream_auth.mode.clone(),
+        config.downstream_auth.none_mode.clone(),
+        key_store.clone(),
+        principal_view.clone(),
+    ));
 
     let runtime = ExtismRuntime::new();
-    let authn = builtin_authn.clone().ok_or(BuildError::StorageRequired)?;
-    let signer_factory_for_lifecycle =
-        Arc::new(CompositeSignerFactory::new(&config, storage.clone(), aead.clone()));
+    let signer_factory_for_lifecycle = Arc::new(CompositeSignerFactory::new(
+        &config,
+        storage.clone(),
+        aead.clone(),
+    ));
     let router_plugin = match &config.plugins.router_plugin {
         Some(plugin) => runtime.instantiate_router(&manifest_from_plugin(plugin)?)?,
         None => Arc::new(BuiltinRouter::new(&config)?),
@@ -269,7 +270,7 @@ pub fn build_app_with_storage(
     let error_normalizer = Arc::new(error_normalizer(&config)?);
     let (dispatcher, breaker_registry) = dispatcher(&config);
     let mut lifecycle = Lifecycle::new(
-        authn.clone(),
+        builtin_authn.clone(),
         signer_factory_for_lifecycle,
         router_plugin,
         dispatcher,
@@ -283,7 +284,7 @@ pub fn build_app_with_storage(
     if let Some(audit_sink) = audit_sink.clone() {
         lifecycle = lifecycle.with_audit_sink(audit_sink);
     }
-    lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), authn.clone());
+    lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), builtin_authn.clone());
     if let Some(storage) = storage.clone() {
         lifecycle = lifecycle.with_request_event_storage(storage);
     }
@@ -313,8 +314,8 @@ pub fn build_app_with_storage(
         breaker_registry,
         start_time,
         drain_controller: drain_controller.clone(),
-        key_store: key_store.clone(),
-        builtin_authn,
+        key_store: Some(key_store.clone()),
+        builtin_authn: Some(builtin_authn.clone()),
     };
     let admin_config: Arc<dyn CurrentConfig> = match &config_watcher {
         Some(watcher) => watcher.clone(),
@@ -325,7 +326,7 @@ pub fn build_app_with_storage(
     };
     let admin_state = AdminState {
         storage: storage.clone(),
-        key_store,
+        key_store: Some(key_store),
         aead: aead.clone(),
         limit_engine: limit_engine.clone(),
         lifecycle: Some(lifecycle.clone()),
@@ -642,17 +643,95 @@ fn init_observability(config: &mut Config) -> Result<TracingGuard, BuildError> {
     .map_err(BuildError::from)
 }
 
-fn open_storage(config: &Config) -> Result<(Option<Arc<Storage>>, Arc<AeadService>), BuildError> {
-    let key_hex = std::env::var(&config.aead.key_env).map_err(|_| BuildError::StorageKeyMissing {
-        env: config.aead.key_env.clone(),
-    })?;
+async fn open_storage(
+    config: &Config,
+) -> Result<
+    (
+        Arc<dyn ManagedKeyStore>,
+        Option<Arc<cc_lb_storage_redb::Storage>>,
+        Arc<AeadService>,
+    ),
+    BuildError,
+> {
+    let key_hex =
+        std::env::var(&config.aead.key_env).map_err(|_| BuildError::StorageKeyMissing {
+            env: config.aead.key_env.clone(),
+        })?;
     let key = decode_hex_key(&key_hex)?;
     let aead = Arc::new(AeadService::from_master_key(key));
-    let storage = match &config.storage {
-        cc_lb_config::StorageConfig::Redb { path } => Some(Arc::new(Storage::open(path, key)?)),
-        cc_lb_config::StorageConfig::Postgres { .. } => None,
-    };
-    Ok((storage, aead))
+    match &config.storage {
+        cc_lb_config::StorageConfig::Redb { path } => {
+            let storage = Arc::new(Storage::open(path, key)?);
+            let managed = cc_lb_storage_redb::RedbManagedKeyStore::new(storage.clone());
+            Ok((Arc::new(managed), Some(storage), aead))
+        }
+        cc_lb_config::StorageConfig::Postgres {
+            url,
+            pool: pool_config,
+        } => open_postgres_managed(url, pool_config, aead).await,
+    }
+}
+
+#[cfg(feature = "postgres")]
+async fn open_postgres_managed(
+    url: &str,
+    pool_config: &cc_lb_config::PostgresPoolConfig,
+    aead: Arc<AeadService>,
+) -> Result<
+    (
+        Arc<dyn ManagedKeyStore>,
+        Option<Arc<cc_lb_storage_redb::Storage>>,
+        Arc<AeadService>,
+    ),
+    BuildError,
+> {
+    use cc_lb_storage_api::{BackendKind, Storage as StorageTrait};
+    use sqlx::postgres::PgPoolOptions;
+    use std::time::Duration;
+
+    let pool = PgPoolOptions::new()
+        .max_connections(pool_config.max_connections)
+        .min_connections(pool_config.min_connections)
+        .acquire_timeout(Duration::from_secs(pool_config.acquire_timeout_secs))
+        .idle_timeout(Duration::from_secs(pool_config.idle_timeout_secs))
+        .connect(url)
+        .await
+        .map_err(|e| BuildError::StorageConnect {
+            message: e.to_string(),
+        })?;
+
+    let init_storage: Arc<dyn StorageTrait> =
+        Arc::new(cc_lb_storage_postgres::PostgresStorage::new(pool.clone()));
+    init_storage
+        .initialize(BackendKind::Postgres)
+        .await
+        .map_err(|e| BuildError::StorageConnect {
+            message: e.to_string(),
+        })?;
+
+    let managed = cc_lb_storage_postgres::PostgresManagedKeyStore::new(
+        pool,
+        Arc::new(cc_lb_storage_postgres::adapter::retry::RetryPolicy::default()),
+    );
+    Ok((Arc::new(managed), None, aead))
+}
+
+#[cfg(not(feature = "postgres"))]
+async fn open_postgres_managed(
+    _url: &str,
+    _pool_config: &cc_lb_config::PostgresPoolConfig,
+    _aead: Arc<AeadService>,
+) -> Result<
+    (
+        Arc<dyn ManagedKeyStore>,
+        Option<Arc<cc_lb_storage_redb::Storage>>,
+        Arc<AeadService>,
+    ),
+    BuildError,
+> {
+    Err(BuildError::StorageConnect {
+        message: "postgres feature is not enabled".to_owned(),
+    })
 }
 
 fn decode_hex_key(value: &str) -> Result<[u8; 32], BuildError> {
@@ -841,10 +920,10 @@ pub enum BuildError {
     StorageKeyMissing { env: String },
     #[error("storage key must be 64 hexadecimal characters")]
     InvalidStorageKey,
-    #[error("storage.redb_path is required for builtin downstream auth")]
-    StorageRequired,
     #[error("invalid plugin {name}: {reason}")]
     InvalidPlugin { name: String, reason: String },
     #[error("{field}: {message}")]
     InvalidTlsConfig { field: String, message: String },
+    #[error("storage connection failed: {message}")]
+    StorageConnect { message: String },
 }
