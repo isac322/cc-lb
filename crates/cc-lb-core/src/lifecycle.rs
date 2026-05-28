@@ -84,6 +84,7 @@ pub trait LimitSubjectProvider: Send + Sync {
         &self,
         ctx: &RequestContext,
         principal: &Principal,
+        authn_success: &AuthnSuccess,
     ) -> Option<LimitSubject>;
 }
 
@@ -108,6 +109,7 @@ impl LimitSubjectProvider for StaticLimitSubjectProvider {
         &self,
         _ctx: &RequestContext,
         _principal: &Principal,
+        _authn_success: &AuthnSuccess,
     ) -> Option<LimitSubject> {
         Some(self.subject.clone())
     }
@@ -117,21 +119,17 @@ impl LimitSubjectProvider for StaticLimitSubjectProvider {
 impl LimitSubjectProvider for BuiltinAuthn {
     async fn limit_subject(
         &self,
-        ctx: &RequestContext,
+        _ctx: &RequestContext,
         _principal: &Principal,
+        authn_success: &AuthnSuccess,
     ) -> Option<LimitSubject> {
-        self.authenticate(&ctx.downstream_headers)
-            .await
-            .ok()
-            .map(|success| {
-                let mut record = success.record;
-                record.key_hash_b64 = success.key_id.clone();
-                LimitSubject {
-                    principal_id: success.principal_id,
-                    key_id: success.key_id,
-                    record,
-                }
-            })
+        let mut record = authn_success.record.clone();
+        record.key_hash_b64 = authn_success.key_id.clone();
+        Some(LimitSubject {
+            principal_id: authn_success.principal_id.clone(),
+            key_id: authn_success.key_id.clone(),
+            record,
+        })
     }
 }
 
@@ -327,11 +325,19 @@ impl Lifecycle {
                     self.observe_error("authentication_error", &source.to_string(), "authn");
                     let status = StatusCode::from_u16(source.http_status())
                         .unwrap_or(StatusCode::UNAUTHORIZED);
-                    let response = anthropic_error_response(
-                        status,
-                        "authentication_error",
-                        &source.to_string(),
-                    );
+                    let response = match &source {
+                        BuiltinAuthError::Unavailable => anthropic_error_response_with_retry_after(
+                            StatusCode::SERVICE_UNAVAILABLE,
+                            "authentication_error",
+                            &source.to_string(),
+                            1,
+                        ),
+                        _ => anthropic_error_response(
+                            status,
+                            "authentication_error",
+                            &source.to_string(),
+                        ),
+                    };
                     self.observe_finished(status, started);
                     return Ok(response);
                 }
@@ -372,7 +378,7 @@ impl Lifecycle {
             upstream: route.upstream.clone(),
         });
 
-        let mut active_limit = match self.reserve_limit(&ctx, &principal, &route).await {
+        let mut active_limit = match self.reserve_limit(&ctx, &principal, &route, &success).await {
             Ok(active_limit) => active_limit,
             Err(response) => {
                 self.observe_finished_for_principal(
@@ -503,6 +509,7 @@ impl Lifecycle {
         ctx: &RequestContext,
         principal: &Principal,
         route: &cc_lb_plugin_api::RouteDecision,
+        authn_success: &AuthnSuccess,
     ) -> Result<Option<ActiveLimit>, Response<Body>> {
         let (Some(limit_engine), Some(subject_provider)) = (
             self.limit_engine.as_ref(),
@@ -510,7 +517,7 @@ impl Lifecycle {
         ) else {
             return Ok(None);
         };
-        let Some(subject) = subject_provider.limit_subject(ctx, principal).await else {
+        let Some(subject) = subject_provider.limit_subject(ctx, principal, authn_success).await else {
             return Ok(None);
         };
         let limit_request = LimitRequest::from_body(&ctx.body_bytes);
