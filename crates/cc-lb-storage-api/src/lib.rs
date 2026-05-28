@@ -1,4 +1,5 @@
 pub mod error;
+pub mod sparse_order;
 pub mod traits;
 pub mod types;
 pub mod validation;
