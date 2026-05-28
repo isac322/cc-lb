@@ -55,7 +55,8 @@ pub fn config_value(default_requests_per_window: u64) -> Value {
 
 pub fn test_state(config: Config, storage: Option<Arc<RedbStorage>>) -> AdminState {
     let principal_view = Arc::new(ArcSwap::from(
-        PrincipalView::from_config(&config, std::collections::HashMap::new()).expect("principal view builds"),
+        PrincipalView::from_config(&config, std::collections::HashMap::new())
+            .expect("principal view builds"),
     ));
     AdminState {
         storage,
@@ -85,7 +86,8 @@ pub fn apply_state(
 ) -> AdminState {
     let config = reloader.current();
     let principal_view = Arc::new(ArcSwap::from(
-        PrincipalView::from_config(&config, std::collections::HashMap::new()).expect("principal view builds"),
+        PrincipalView::from_config(&config, std::collections::HashMap::new())
+            .expect("principal view builds"),
     ));
     AdminState {
         storage: Some(test_storage()),

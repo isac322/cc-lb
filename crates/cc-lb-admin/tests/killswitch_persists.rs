@@ -16,17 +16,21 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
             Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
-            Arc::new(
-                arc_swap::ArcSwap::from(
-                    cc_lb_core::api_keys::principal_view::PrincipalView::from_config(&Config::default(), std::collections::HashMap::new())
-                    .expect("principal view builds"),
-                ),
-            ),
+            Arc::new(arc_swap::ArcSwap::from(
+                cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
+                    &Config::default(),
+                    std::collections::HashMap::new(),
+                )
+                .expect("principal view builds"),
+            )),
         ),
         lifecycle: None,
         audit_sink: None,
         principal_view: Arc::new(arc_swap::ArcSwap::from(
-            cc_lb_core::api_keys::principal_view::PrincipalView::from_config(&cc_lb_admin::CurrentConfig::current_config((Arc::new(Config::default())).as_ref()), std::collections::HashMap::new())
+            cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
+                &cc_lb_admin::CurrentConfig::current_config((Arc::new(Config::default())).as_ref()),
+                std::collections::HashMap::new(),
+            )
             .expect("principal view builds"),
         )),
         config: Arc::new(Config::default()),
