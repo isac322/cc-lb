@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
+import { Link } from 'react-router';
 import { Button } from '../components/primitives/Button';
 import { ErrorState } from '../components/primitives/ErrorState';
 import { LoadingState } from '../components/primitives/LoadingState';
@@ -6,11 +7,9 @@ import { Modal } from '../components/primitives/Modal';
 import { DiffPreviewPanel } from '../components/settings/DiffPreviewPanel';
 import { FormSection } from '../components/settings/FormSection';
 import { HistoryDrawer } from '../components/settings/HistoryDrawer';
-import { PrincipalsEditor } from '../components/settings/PrincipalsEditor';
 import { SchemaForm } from '../components/settings/SchemaForm';
 import { SectionNav } from '../components/settings/SectionNav';
 import { SettingsLayout } from '../components/settings/SettingsLayout';
-import { UpstreamsEditor } from '../components/settings/UpstreamsEditor';
 import { ValidateApplyBar } from '../components/settings/ValidateApplyBar';
 import { useConfigApply } from '../lib/hooks/useConfigApply';
 import { useConfigDraft } from '../lib/hooks/useConfigDraft';
@@ -176,7 +175,24 @@ export default function Settings() {
         }
         main={
           <div className="space-y-8">
+            <div className="p-4 bg-graphite-900 border border-graphite-800 rounded-md text-sm text-graphite-300">
+              Upstreams are managed at{' '}
+              <Link to="/upstreams" className="text-blue-400 hover:underline">
+                /upstreams
+              </Link>{' '}
+              • Principals at{' '}
+              <Link to="/principals" className="text-blue-400 hover:underline">
+                /principals
+              </Link>{' '}
+              • Plugins at{' '}
+              <Link to="/plugins" className="text-blue-400 hover:underline">
+                /plugins
+              </Link>
+            </div>
             {schema.coverage_checklist.map((key) => {
+              if (['upstreams', 'principals', 'plugins'].includes(key))
+                return null;
+
               const props = (schema.schema as Record<string, unknown>)
                 .properties as Record<string, unknown>;
               const propSchema = props?.[key] as Record<string, unknown>;
@@ -189,46 +205,18 @@ export default function Settings() {
                   title={(propSchema.title as string) || key}
                   description={propSchema.description as string | undefined}
                 >
-                  {key === 'upstreams' ? (
-                    <UpstreamsEditor
-                      schema={propSchema as Record<string, unknown>}
-                      rootSchema={schema.schema as Record<string, unknown>}
-                      value={
-                        (localDraft[key] as Record<string, unknown>[]) || []
-                      }
-                      onChange={(val) => handleDraftChange(key, val)}
-                      error={
-                        draftData.last_validation_error?.startsWith(key)
-                          ? draftData.last_validation_error
-                          : undefined
-                      }
-                    />
-                  ) : key === 'principals' ? (
-                    <PrincipalsEditor
-                      schema={propSchema as Record<string, unknown>}
-                      rootSchema={schema.schema as Record<string, unknown>}
-                      value={(localDraft[key] as Record<string, unknown>) || {}}
-                      onChange={(val) => handleDraftChange(key, val)}
-                      error={
-                        draftData.last_validation_error?.startsWith(key)
-                          ? draftData.last_validation_error
-                          : undefined
-                      }
-                    />
-                  ) : (
-                    <SchemaForm
-                      schema={propSchema as Record<string, unknown>}
-                      rootSchema={schema.schema as Record<string, unknown>}
-                      value={localDraft[key]}
-                      onChange={(val) => handleDraftChange(key, val)}
-                      path={key}
-                      error={
-                        draftData.last_validation_error?.startsWith(key)
-                          ? draftData.last_validation_error
-                          : undefined
-                      }
-                    />
-                  )}
+                  <SchemaForm
+                    schema={propSchema as Record<string, unknown>}
+                    rootSchema={schema.schema as Record<string, unknown>}
+                    value={localDraft[key]}
+                    onChange={(val) => handleDraftChange(key, val)}
+                    path={key}
+                    error={
+                      draftData.last_validation_error?.startsWith(key)
+                        ? draftData.last_validation_error
+                        : undefined
+                    }
+                  />
                 </FormSection>
               );
             })}
