@@ -21,7 +21,7 @@ use crate::service::AeadService;
 /// - Decryption fails if AAD does not match.
 /// - Plaintext is never cached or exposed through Debug output.
 /// - Ciphertext tampering is detected by authenticated encryption.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AeadEncryptedField<T: Serialize + for<'de> Deserialize<'de>> {
     ciphertext: Vec<u8>,
     _phantom: PhantomData<T>,

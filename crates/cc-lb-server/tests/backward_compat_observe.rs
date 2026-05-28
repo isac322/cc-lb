@@ -58,10 +58,10 @@ async fn observe_stream_bytes(config: Config) -> Result<Vec<u8>, Box<dyn std::er
         config.downstream_auth.mode.clone(),
         config.downstream_auth.none_mode.clone(),
         Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(storage)))),
-        Arc::new(ArcSwap::from(view)),
     ));
     let lifecycle = Lifecycle::new(
         authn,
+        view,
         Arc::new(NoopApiKeySignerFactory),
         Arc::new(BuiltinRouter::new(&config)?),
         Arc::new(DeterministicDispatch::new()),

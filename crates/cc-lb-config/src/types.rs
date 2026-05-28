@@ -56,6 +56,7 @@ pub struct Config {
     pub signers: SignersConfig,
     pub observability: ObservabilityConfig,
     pub admin: AdminConfig,
+    pub runtime: RuntimeConfig,
     pub circuit_breaker: CircuitBreakerConfig,
     pub bulkhead: BulkheadConfig,
     pub dns: DnsConfig,
@@ -608,6 +609,13 @@ impl Default for AdminConfig {
             token: None,
         }
     }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct RuntimeConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

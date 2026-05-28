@@ -1,16 +1,13 @@
-use std::{collections::HashMap, path::PathBuf, sync::Arc};
+mod admin_test_common;
 
-use arc_swap::ArcSwap;
+use std::{path::PathBuf, sync::Arc};
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
 use cc_lb_admin::{AdminState, CurrentConfig, LastReloadStatus, ReloadOutcome, router};
 use cc_lb_config::{Config, PluginRef, PluginsConfig, PrincipalSpec};
-use cc_lb_core::api_keys::{
-    concurrent_guard::KeyConcurrencyManager, limit_engine::LimitEngine,
-    principal_view::PrincipalView,
-};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -31,20 +28,15 @@ impl CurrentConfig for StaticConfig {
 }
 
 fn test_state(config: Config, last_reload_status: Option<LastReloadStatus>) -> AdminState {
-    let principal_view = Arc::new(ArcSwap::from(
-        PrincipalView::from_config(&config, HashMap::new()).expect("principal view builds"),
-    ));
+    let config = Config::default();
     AdminState {
         storage: None,
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: LimitEngine::new(
-            Arc::new(KeyConcurrencyManager::new()),
-            principal_view.clone(),
-        ),
+        limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,
         audit_sink: None,
-        principal_view,
+        dynamic_view: admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(StaticConfig {
             config: Arc::new(config),
             last_reload_status,

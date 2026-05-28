@@ -99,6 +99,10 @@
       },
       "default": {}
     },
+    "runtime": {
+      "$ref": "#/$defs/RuntimeConfig",
+      "default": {}
+    },
     "signers": {
       "$ref": "#/$defs/SignersConfig",
       "default": {
@@ -704,6 +708,17 @@
         "human",
         "machine"
       ]
+    },
+    "RuntimeConfig": {
+      "type": "object",
+      "properties": {
+        "data_dir": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
     },
     "SignersConfig": {
       "type": "object",

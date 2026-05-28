@@ -1,6 +1,7 @@
+mod admin_test_common;
+
 use std::{sync::Arc, time::Duration};
 
-use arc_swap::ArcSwap;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -9,10 +10,6 @@ use cc_lb_admin::{AdminState, router};
 use cc_lb_config::{
     AuthStrategy, Config, Limit, LimitKind, PrincipalSpec, PrincipalType, UpstreamKind,
     UpstreamSpec,
-};
-use cc_lb_core::api_keys::{
-    concurrent_guard::KeyConcurrencyManager, limit_engine::LimitEngine,
-    principal_view::PrincipalView,
 };
 use cc_lb_storage_redb::Storage;
 use http_body_util::BodyExt;
@@ -66,14 +63,7 @@ fn test_config() -> Config {
 }
 
 fn test_state(config: Config, storage: Option<Arc<Storage>>) -> AdminState {
-    let principal_view = Arc::new(ArcSwap::from(
-        PrincipalView::from_config(&config, std::collections::HashMap::new())
-            .expect("principal view builds"),
-    ));
-    let limit_engine = LimitEngine::new(
-        Arc::new(KeyConcurrencyManager::new()),
-        principal_view.clone(),
-    );
+    let limit_engine = admin_test_common::limit_engine();
     AdminState {
         storage: storage.map(|s| s as Arc<dyn cc_lb_storage_api::Storage>),
         key_store: None,
@@ -81,7 +71,7 @@ fn test_state(config: Config, storage: Option<Arc<Storage>>) -> AdminState {
         limit_engine,
         lifecycle: None,
         audit_sink: None,
-        principal_view,
+        dynamic_view: admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(config),
         admin_token: Some("test-token".to_string()),
         start_time: std::time::Instant::now(),

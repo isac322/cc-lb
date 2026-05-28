@@ -1,20 +1,18 @@
 mod reload_common;
 
-use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_config::{Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
 use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_core::api_keys::key_store::KeyStore;
-use cc_lb_core::api_keys::principal_view::PrincipalView;
 use cc_lb_core::{
-    ApiKeyAwareSignerFactory, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch,
+    ApiKeyAwareSignerFactory, DispatchError, DynamicViewHolder, Lifecycle, LifecycleConfig,
+    UpstreamDispatch,
 };
 use cc_lb_plugin_api::{
     RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
@@ -40,15 +38,12 @@ fn reload_evicts_stale_slots() {
 
     let initial_config = reload_common::load_config(&config_path);
     let runtime = Arc::new(cc_lb_runtime_extism::ExtismRuntime::new());
-    let principal_view = Arc::new(ArcSwap::from(
-        PrincipalView::from_config(&initial_config, BTreeMap::new().into_iter().collect())
-            .expect("principal view builds"),
-    ));
+    let dynamic_view = reload_common::dynamic_view_holder(&initial_config);
     let watcher = ConfigWatcher::new_with_principal_view(
         &config_path,
         initial_config,
         runtime.clone(),
-        Some(principal_view),
+        Some(dynamic_view),
     );
 
     watcher.reload_now().expect("initial reload stages slots");
@@ -89,21 +84,18 @@ async fn reload_inflight_request_unaffected_by_eviction() -> Result<(), Box<dyn 
 
     let initial_config = reload_common::load_config(&config_path);
     let runtime = Arc::new(cc_lb_runtime_extism::ExtismRuntime::new());
-    let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(
-        &initial_config,
-        BTreeMap::new().into_iter().collect(),
-    )?));
+    let dynamic_view = reload_common::dynamic_view_holder(&initial_config);
     let watcher = Arc::new(ConfigWatcher::new_with_principal_view(
         &config_path,
         initial_config,
         runtime.clone(),
-        Some(principal_view.clone()),
+        Some(dynamic_view.clone()),
     ));
     watcher.reload_now()?;
 
     let lifecycle = lifecycle_with_view(
         watcher.current_config(),
-        principal_view.clone(),
+        dynamic_view.clone(),
         BlockedDispatch::default(),
     )?;
     let request_entered_dispatch = lifecycle.dispatch.request_entered_dispatch.clone();
@@ -243,7 +235,7 @@ struct LifecycleHarness {
 
 fn lifecycle_with_view(
     config: Arc<Config>,
-    principal_view: Arc<ArcSwap<PrincipalView>>,
+    dynamic_view: Arc<DynamicViewHolder>,
     dispatch: BlockedDispatch,
 ) -> Result<LifecycleHarness, Box<dyn std::error::Error>> {
     let storage_dir = tempfile::tempdir()?;
@@ -260,10 +252,10 @@ fn lifecycle_with_view(
             upstream_credential_ref: "test-upstream".to_owned(),
         }),
         Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(storage)))),
-        principal_view,
     ));
     let lifecycle = Lifecycle::new(
         authn,
+        dynamic_view.load().principal_view.clone(),
         Arc::new(NoopSignerFactory),
         Arc::new(BuiltinRouter::new(&config)?),
         Arc::new(dispatch.clone()),

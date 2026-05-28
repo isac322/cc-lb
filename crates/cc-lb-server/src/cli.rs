@@ -25,6 +25,8 @@ pub enum Command {
     Serve {
         #[arg(long, value_name = "PATH")]
         config: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        data_dir: Option<PathBuf>,
     },
     Config {
         #[command(subcommand)]
@@ -37,5 +39,7 @@ pub enum ConfigCommand {
     Validate {
         #[arg(long, value_name = "PATH")]
         config: PathBuf,
+        #[arg(long, value_name = "PATH")]
+        data_dir: Option<PathBuf>,
     },
 }

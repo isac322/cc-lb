@@ -10,6 +10,7 @@ use cc_lb_config::{Config, ConfigError, PluginRef, StorageConfig};
 use cc_lb_core::api_keys::principal_view::{
     ObservabilityHooksCache, PrincipalView, RouterPluginCache,
 };
+use cc_lb_core::{DynamicViewBuilder, DynamicViewHolder};
 use cc_lb_plugin_api::RuntimeError;
 use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
 use notify::{Event, RecursiveMode, Watcher};
@@ -29,7 +30,7 @@ pub struct ConfigWatcher {
     reloads_attempted: AtomicUsize,
     runtime: Arc<ExtismRuntime>,
     last_reload_status: Arc<ArcSwap<Option<LastReloadStatus>>>,
-    principal_view: Option<Arc<ArcSwap<PrincipalView>>>,
+    dynamic_view: Option<Arc<DynamicViewHolder>>,
 }
 
 impl ConfigWatcher {
@@ -45,7 +46,7 @@ impl ConfigWatcher {
         path: impl AsRef<Path>,
         initial_config: Config,
         runtime: Arc<ExtismRuntime>,
-        principal_view: Option<Arc<ArcSwap<PrincipalView>>>,
+        dynamic_view: Option<Arc<DynamicViewHolder>>,
     ) -> Self {
         let (reload_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
         Self {
@@ -55,7 +56,7 @@ impl ConfigWatcher {
             reloads_attempted: AtomicUsize::new(0),
             runtime,
             last_reload_status: Arc::new(ArcSwap::from(Arc::new(None))),
-            principal_view,
+            dynamic_view,
         }
     }
 
@@ -116,20 +117,16 @@ impl ConfigWatcher {
         warn_restart_required_changes(&current_config, &new_config);
 
         let new_config = Arc::new(new_config);
-        if let Some(principal_view) = &self.principal_view {
+        if let Some(dynamic_view) = &self.dynamic_view {
             let mut all_staged: Vec<StagedSlot> = Vec::new();
-            if new_config.plugins.router_plugin.is_some()
-                || !new_config.plugins.observability_hooks.is_empty()
-            {
-                let (_new_global_router, _new_global_observability_hooks) =
-                    match build_global_chain(&new_config, &self.runtime, &mut all_staged) {
-                        Ok(global_chain) => global_chain,
-                        Err(source) => {
-                            self.record_failure(source.to_string(), None, None, config_path);
-                            return Err(ReloadError::GlobalChain(source));
-                        }
-                    };
-            }
+            let (new_global_router, new_global_observability_hooks) =
+                match build_global_chain(&new_config, &self.runtime, &mut all_staged) {
+                    Ok(global_chain) => global_chain,
+                    Err(source) => {
+                        self.record_failure(source.to_string(), None, None, config_path);
+                        return Err(ReloadError::GlobalChain(source));
+                    }
+                };
 
             let mut principal_chains = HashMap::new();
             let mut per_principal_staged = Vec::new();
@@ -224,7 +221,14 @@ impl ConfigWatcher {
                 self.record_failure(source.to_string(), None, None, config_path);
                 return Err(ReloadError::Runtime(source));
             }
-            principal_view.store(new_principal_view);
+            let current_view = dynamic_view.load();
+            dynamic_view.store(
+                DynamicViewBuilder::from_view(&current_view)
+                    .global_router(new_global_router)
+                    .global_observability_hooks(new_global_observability_hooks)
+                    .principal_view(new_principal_view)
+                    .build(),
+            );
             let referenced: HashSet<(String, String)> = referenced_slot_keys(&new_config);
             for (principal, plugin) in self.runtime.registered_slot_keys() {
                 if !referenced.contains(&(principal.clone(), plugin.clone())) {

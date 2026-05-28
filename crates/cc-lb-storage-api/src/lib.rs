@@ -5,6 +5,7 @@ pub mod runtime_change_notifier;
 pub mod sparse_order;
 pub mod traits;
 pub mod types;
+pub mod upstream;
 pub mod validation;
 
 pub use error::{StorageError, StorageResult};
@@ -13,4 +14,5 @@ pub use principal::*;
 pub use runtime_change_notifier::*;
 pub use traits::*;
 pub use types::*;
+pub use upstream::*;
 pub use validation::validate_identifier;

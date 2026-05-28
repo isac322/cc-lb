@@ -1,6 +1,5 @@
 mod reload_common;
 
-use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -8,16 +7,15 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use arc_swap::ArcSwap;
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_config::{Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
 use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_core::api_keys::key_store::KeyStore;
-use cc_lb_core::api_keys::principal_view::PrincipalView;
 use cc_lb_core::{
-    ApiKeyAwareSignerFactory, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch,
+    ApiKeyAwareSignerFactory, DispatchError, DynamicViewHolder, Lifecycle, LifecycleConfig,
+    UpstreamDispatch,
 };
 use cc_lb_plugin_api::{
     ObservabilityError, ObservabilityHook, ObserveEvent, RetryDecision, ShapedRequest,
@@ -51,15 +49,12 @@ async fn hot_reload_race_keeps_requests_successful_and_observed()
 
     let initial_config = reload_common::load_config(&config_path);
     let runtime = Arc::new(ExtismRuntime::new());
-    let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(
-        &initial_config,
-        HashMap::new(),
-    )?));
+    let dynamic_view = reload_common::dynamic_view_holder(&initial_config);
     let watcher = Arc::new(ConfigWatcher::new_with_principal_view(
         &config_path,
         initial_config,
         runtime.clone(),
-        Some(principal_view.clone()),
+        Some(dynamic_view.clone()),
     ));
     watcher.reload_now()?;
     assert_eq!(
@@ -70,7 +65,7 @@ async fn hot_reload_race_keeps_requests_successful_and_observed()
     let observed_events = Arc::new(AtomicUsize::new(0));
     let lifecycle = Arc::new(lifecycle_with_view(
         watcher.current_config(),
-        principal_view,
+        dynamic_view,
         observed_events.clone(),
     )?);
     let start = Arc::new(Barrier::new(CLIENT_TASKS + 2));
@@ -144,7 +139,7 @@ async fn hot_reload_race_keeps_requests_successful_and_observed()
 
 fn lifecycle_with_view(
     config: Arc<Config>,
-    principal_view: Arc<ArcSwap<PrincipalView>>,
+    dynamic_view: Arc<DynamicViewHolder>,
     observed_events: Arc<AtomicUsize>,
 ) -> Result<Lifecycle, Box<dyn std::error::Error>> {
     let storage_dir = tempfile::tempdir()?;
@@ -161,10 +156,10 @@ fn lifecycle_with_view(
             upstream_credential_ref: "test-upstream".to_owned(),
         }),
         Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(storage)))),
-        principal_view,
     ));
     Ok(Lifecycle::new(
         authn,
+        dynamic_view.load().principal_view.clone(),
         Arc::new(NoopApiKeySignerFactory),
         Arc::new(BuiltinRouter::new(&config)?),
         Arc::new(OkDispatch),

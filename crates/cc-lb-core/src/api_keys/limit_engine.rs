@@ -141,10 +141,7 @@ impl RingCounter {
 }
 
 impl LimitEngine {
-    pub fn new(
-        concurrent_mgr: Arc<KeyConcurrencyManager>,
-        _principal_view: Arc<arc_swap::ArcSwap<PrincipalView>>,
-    ) -> Arc<Self> {
+    pub fn new(concurrent_mgr: Arc<KeyConcurrencyManager>) -> Arc<Self> {
         Arc::new(Self {
             inner: Arc::new(LimitEngineInner {
                 rolling: RwLock::new(HashMap::new()),

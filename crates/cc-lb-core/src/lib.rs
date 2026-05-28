@@ -16,6 +16,8 @@ mod dns_cache;
 #[cfg(not(loom))]
 mod drain;
 #[cfg(not(loom))]
+mod dynamic_view;
+#[cfg(not(loom))]
 mod error_format;
 #[cfg(not(loom))]
 mod error_normalizer;
@@ -55,6 +57,11 @@ pub use dns_cache::{
 };
 #[cfg(not(loom))]
 pub use drain::{DrainController, proxy_drain_middleware};
+#[cfg(not(loom))]
+pub use dynamic_view::{
+    ApplyStatus, DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusEntry,
+    UpstreamStatusSnapshot,
+};
 #[cfg(not(loom))]
 pub use error_format::{anthropic_error_body, anthropic_error_response};
 #[cfg(not(loom))]

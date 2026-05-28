@@ -1,13 +1,10 @@
 mod reload_common;
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::path::Path;
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
 use cc_lb_admin::{CurrentConfig, ReloadOutcome};
-use cc_lb_core::api_keys::principal_view::PrincipalView;
 use cc_lb_server::reload::ConfigWatcher;
 
 #[test]
@@ -23,19 +20,17 @@ fn per_principal_instantiation_failure_aborts_reload() {
 
     let initial_config = reload_common::load_config(&config_path);
     let runtime = Arc::new(cc_lb_runtime_extism::ExtismRuntime::new());
-    let principal_view = Arc::new(ArcSwap::from(
-        PrincipalView::from_config(&initial_config, HashMap::new()).expect("principal view builds"),
-    ));
+    let dynamic_view = reload_common::dynamic_view_holder(&initial_config);
     let watcher = ConfigWatcher::new_with_principal_view(
         &config_path,
         initial_config,
         runtime.clone(),
-        Some(principal_view.clone()),
+        Some(dynamic_view.clone()),
     );
     watcher
         .reload_now()
         .expect("initial reload stages principal plugin slots");
-    let previous_view = principal_view.load_full();
+    let previous_view = dynamic_view.load();
     let mut pre_reload_keys = runtime.registered_slot_keys();
     pre_reload_keys.sort();
     assert_eq!(
@@ -60,8 +55,8 @@ fn per_principal_instantiation_failure_aborts_reload() {
         "reload must fail when charlie's plugin artifact is invalid"
     );
     assert_eq!(watcher.current_config().body.messages_cap_bytes, 100);
-    assert!(Arc::ptr_eq(&previous_view, &principal_view.load_full()));
-    let loaded_view = principal_view.load();
+    assert!(Arc::ptr_eq(&previous_view, &dynamic_view.load()));
+    let loaded_view = dynamic_view.load().principal_view.clone();
     assert!(loaded_view.get("alice").is_some());
     assert!(loaded_view.get("bob").is_some());
     assert!(loaded_view.get("charlie").is_none());

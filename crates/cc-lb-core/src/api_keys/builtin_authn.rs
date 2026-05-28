@@ -18,7 +18,6 @@ pub struct BuiltinAuthn {
     mode: DownstreamAuthMode,
     none_mode: Option<NoneModeConfig>,
     key_store: Arc<KeyStore>,
-    principal_view: Arc<arc_swap::ArcSwap<PrincipalView>>,
 }
 
 #[derive(Debug, Clone)]
@@ -77,18 +76,12 @@ impl BuiltinAuthn {
         mode: DownstreamAuthMode,
         none_mode: Option<NoneModeConfig>,
         key_store: Arc<KeyStore>,
-        principal_view: Arc<arc_swap::ArcSwap<PrincipalView>>,
     ) -> Self {
         Self {
             mode,
             none_mode,
             key_store,
-            principal_view,
         }
-    }
-
-    pub(crate) fn principal_view_cell(&self) -> Arc<arc_swap::ArcSwap<PrincipalView>> {
-        self.principal_view.clone()
     }
 
     pub async fn authenticate(
@@ -232,7 +225,7 @@ mod tests {
         let success = authn
             .authenticate(
                 &headers(generated.plaintext.expose()),
-                &authn.principal_view_cell().load(),
+                &principal_view(true),
             )
             .await
             .expect("generated key authenticates");
@@ -261,7 +254,7 @@ mod tests {
             authn
                 .authenticate(
                     &headers(generated.plaintext.expose()),
-                    &authn.principal_view_cell().load(),
+                    &principal_view(true),
                 )
                 .await,
         );
@@ -279,7 +272,7 @@ mod tests {
             authn
                 .authenticate(
                     &headers(generated.plaintext.expose()),
-                    &authn.principal_view_cell().load(),
+                    &principal_view(true),
                 )
                 .await,
         );
@@ -297,7 +290,7 @@ mod tests {
             authn
                 .authenticate(
                     &headers(generated.plaintext.expose()),
-                    &authn.principal_view_cell().load(),
+                    &principal_view(true),
                 )
                 .await,
         );

@@ -3,7 +3,6 @@ mod common;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use arc_swap::ArcSwap;
 use bytes::Bytes;
 use cc_lb_config::{
     Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, PrincipalSpec, PrincipalType,
@@ -35,7 +34,6 @@ fn builtin_authn_accepts_bound_principal_view() -> Result<(), Box<dyn std::error
         DownstreamAuthMode::ApiKey,
         None,
         Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(storage)))),
-        Arc::new(ArcSwap::from(view.clone())),
     );
 
     let error = tokio::runtime::Builder::new_current_thread()
@@ -50,10 +48,7 @@ fn builtin_authn_accepts_bound_principal_view() -> Result<(), Box<dyn std::error
 #[test]
 fn limit_engine_reserve_accepts_bound_principal_view() {
     let view = principal_view("principal-a", None);
-    let engine = LimitEngine::new(
-        Arc::new(KeyConcurrencyManager::new()),
-        Arc::new(ArcSwap::from(view.clone())),
-    );
+    let engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()));
     let record = StoredApiKeyRecord {
         key_hash_b64: "key-a".to_owned(),
         status: KeyStatus::Active,
@@ -100,6 +95,7 @@ async fn lifecycle_per_principal_dispatch_hits_correct_router_and_hook()
     let authn = none_mode_authn("principal-a", view.clone(), state.clone())?;
     let lifecycle = Lifecycle::new(
         authn.authn.clone(),
+        view,
         Arc::new(authn),
         global_router,
         Arc::new(MockDispatch {
@@ -196,8 +192,8 @@ fn none_mode_authn(
                 upstream_credential_ref: "test-upstream".to_owned(),
             }),
             Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(storage)))),
-            Arc::new(ArcSwap::from(view)),
         )),
+        principal_view: view,
         state,
         refresh_allowed: true,
     })

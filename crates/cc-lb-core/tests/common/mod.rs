@@ -54,6 +54,7 @@ impl Default for TestState {
 #[derive(Clone)]
 pub struct TestAuthn {
     pub authn: Arc<BuiltinAuthn>,
+    pub principal_view: Arc<PrincipalView>,
     pub state: TestState,
     pub refresh_allowed: bool,
 }
@@ -80,8 +81,8 @@ impl TestAuthn {
                     upstream_credential_ref: "test-upstream".to_owned(),
                 }),
                 Arc::new(KeyStore::new(Arc::new(managed_key_store))),
-                Arc::new(arc_swap::ArcSwap::from(view)),
             )),
+            principal_view: view,
             state,
             refresh_allowed: true,
         }
@@ -305,6 +306,7 @@ pub fn lifecycle_with_parts(
 ) -> Lifecycle {
     Lifecycle::new(
         authn.authn.clone(),
+        authn.principal_view.clone(),
         Arc::new(authn),
         global_router,
         dispatcher,

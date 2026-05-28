@@ -1,14 +1,11 @@
 mod reload_common;
 
-use std::collections::HashMap;
 use std::fs;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
-use cc_lb_core::api_keys::principal_view::PrincipalView;
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_server::reload::ConfigWatcher;
 
@@ -54,15 +51,12 @@ fn boot_and_measure(
 ) -> Result<(Arc<ExtismRuntime>, u64), Box<dyn std::error::Error>> {
     let config = reload_common::load_config(config_path);
     let runtime = Arc::new(ExtismRuntime::new());
-    let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(
-        &config,
-        HashMap::new(),
-    )?));
+    let dynamic_view = reload_common::dynamic_view_holder(&config);
     let watcher = ConfigWatcher::new_with_principal_view(
         config_path,
         config,
         runtime.clone(),
-        Some(principal_view),
+        Some(dynamic_view),
     );
     watcher.reload_now()?;
     Ok((runtime, vmrss_kib()?))

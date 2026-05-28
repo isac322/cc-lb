@@ -91,7 +91,13 @@ pub async fn principal_key_usage(
         .as_ref()
         .ok_or(ManagementError::StorageUnavailable)?;
 
-    if state.principal_view.load().get(&principal_id).is_none() {
+    if state
+        .dynamic_view
+        .load()
+        .principal_view
+        .get(&principal_id)
+        .is_none()
+    {
         return Err(ManagementError::UnknownPrincipal);
     }
 
@@ -198,7 +204,8 @@ pub async fn principal_limits(
     Path(principal_id): Path<String>,
     Query(query): Query<PrincipalLimitsQuery>,
 ) -> Result<Json<PrincipalLimitsSnapshot>, StatusCode> {
-    let view = state.principal_view.load();
+    let dynamic_view = state.dynamic_view.load();
+    let view = &dynamic_view.principal_view;
     if view.get(&principal_id).is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
@@ -251,7 +258,13 @@ async fn build_principal_usage(
     principal_id: &str,
     query: PrincipalUsageQuery,
 ) -> Result<PrincipalUsageResponse, PrincipalUsageError> {
-    if state.principal_view.load().get(principal_id).is_none() {
+    if state
+        .dynamic_view
+        .load()
+        .principal_view
+        .get(principal_id)
+        .is_none()
+    {
         return Err(PrincipalUsageError::UnknownPrincipal);
     }
     let storage = state

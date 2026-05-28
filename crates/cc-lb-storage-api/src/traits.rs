@@ -277,6 +277,9 @@ pub trait MetaStore: Send + Sync {
 #[async_trait]
 pub trait Storage:
     AuditStore
+    + crate::plugin_registry::PluginRegistryStore
+    + crate::principal::PrincipalStore
+    + crate::upstream::UpstreamStore
     + RequestEventStore
     + QuotaStore
     + LimitStateStore
@@ -293,6 +296,9 @@ pub trait Storage:
 
 impl<T> Storage for T where
     T: AuditStore
+        + crate::plugin_registry::PluginRegistryStore
+        + crate::principal::PrincipalStore
+        + crate::upstream::UpstreamStore
         + RequestEventStore
         + QuotaStore
         + LimitStateStore

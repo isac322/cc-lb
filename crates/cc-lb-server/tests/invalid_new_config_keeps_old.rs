@@ -3,8 +3,6 @@ mod reload_common;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
-use cc_lb_core::api_keys::principal_view::PrincipalView;
 use cc_lb_server::reload::ConfigWatcher;
 
 #[test]
@@ -61,16 +59,13 @@ fn invalid_principal_view_reload_keeps_old_view() {
     reload_common::write_config_with_principal_model(&config_path, 100, proxy_addr, "*");
 
     let initial_config = reload_common::load_config(&config_path);
-    let principal_view = Arc::new(ArcSwap::from(
-        PrincipalView::from_config(&initial_config, std::collections::HashMap::new())
-            .expect("principal view builds"),
-    ));
-    let before_view = principal_view.load_full();
+    let dynamic_view = reload_common::dynamic_view_holder(&initial_config);
+    let before_view = dynamic_view.load();
     let watcher = ConfigWatcher::new_with_principal_view(
         &config_path,
         initial_config,
         Arc::new(cc_lb_runtime_extism::ExtismRuntime::new()),
-        Some(principal_view.clone()),
+        Some(dynamic_view.clone()),
     );
     reload_common::write_config_with_principal_model(&config_path, 200, proxy_addr, "[");
 
@@ -79,7 +74,7 @@ fn invalid_principal_view_reload_keeps_old_view() {
     });
 
     assert_eq!(watcher.current_config().body.messages_cap_bytes, 100);
-    assert!(Arc::ptr_eq(&before_view, &principal_view.load_full()));
+    assert!(Arc::ptr_eq(&before_view, &dynamic_view.load()));
     assert!(logs.contains("configuration reload failed"));
     assert!(logs.contains("invalid allowed_models glob"));
 }
@@ -104,16 +99,13 @@ fn invalid_principal_plugin_reload_aborts_keeps_old_view_and_records_status() {
     );
 
     let initial_config = reload_common::load_config(&config_path);
-    let principal_view = Arc::new(ArcSwap::from(
-        PrincipalView::from_config(&initial_config, std::collections::HashMap::new())
-            .expect("principal view builds"),
-    ));
-    let before_view = principal_view.load_full();
+    let dynamic_view = reload_common::dynamic_view_holder(&initial_config);
+    let before_view = dynamic_view.load();
     let watcher = ConfigWatcher::new_with_principal_view(
         &config_path,
         initial_config,
         Arc::new(cc_lb_runtime_extism::ExtismRuntime::new()),
-        Some(principal_view.clone()),
+        Some(dynamic_view.clone()),
     );
     reload_common::write_config_with_principal_plugins(
         &config_path,
@@ -128,7 +120,7 @@ fn invalid_principal_plugin_reload_aborts_keeps_old_view_and_records_status() {
     });
 
     assert_eq!(watcher.current_config().body.messages_cap_bytes, 100);
-    assert!(Arc::ptr_eq(&before_view, &principal_view.load_full()));
+    assert!(Arc::ptr_eq(&before_view, &dynamic_view.load()));
     let status = <ConfigWatcher as cc_lb_admin::CurrentConfig>::last_reload_status(&watcher)
         .expect("failed reload status is recorded");
     assert_eq!(

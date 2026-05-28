@@ -4,7 +4,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-use arc_swap::ArcSwap;
 use bytes::Bytes;
 use cc_lb_config::{Config, PrincipalSpec, PrincipalType};
 use cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager;
@@ -43,10 +42,7 @@ fn engine_with_allowed_models(
     )
     .expect("principal view builds");
     (
-        LimitEngine::new(
-            Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(ArcSwap::from(view.clone())),
-        ),
+        LimitEngine::new(Arc::new(KeyConcurrencyManager::new())),
         view,
     )
 }

@@ -8,7 +8,6 @@ pub mod routes;
 pub mod settings;
 pub mod status;
 
-use arc_swap::ArcSwap;
 use std::sync::Arc;
 
 use axum::Router;
@@ -17,8 +16,8 @@ use cc_lb_config::Config;
 use serde::Serialize;
 
 use cc_lb_core::{
-    AuditWriterSink, Lifecycle,
-    api_keys::{key_store::KeyStore, limit_engine::LimitEngine, principal_view::PrincipalView},
+    AuditWriterSink, DynamicViewHolder, Lifecycle,
+    api_keys::{key_store::KeyStore, limit_engine::LimitEngine},
 };
 use cc_lb_storage_api::Storage;
 
@@ -30,7 +29,7 @@ pub struct AdminState {
     pub limit_engine: Arc<LimitEngine>,
     pub lifecycle: Option<Arc<Lifecycle>>,
     pub audit_sink: Option<Arc<AuditWriterSink>>,
-    pub principal_view: Arc<ArcSwap<PrincipalView>>,
+    pub dynamic_view: Arc<DynamicViewHolder>,
     pub config: Arc<dyn CurrentConfig>,
     pub admin_token: Option<String>,
     pub start_time: std::time::Instant,

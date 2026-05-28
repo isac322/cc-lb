@@ -402,7 +402,8 @@ pub async fn issue_principal_key(
         return Err(ManagementError::UnknownPrincipal);
     }
 
-    let principal_view = state.principal_view.load();
+    let dynamic_view = state.dynamic_view.load();
+    let principal_view = &dynamic_view.principal_view;
     let principal = principal_view
         .get(&principal_id)
         .ok_or(ManagementError::UnknownPrincipal)?;
@@ -569,7 +570,8 @@ pub async fn update_principal_key(
     }
 
     if let Some(limit_overrides) = request.limit_overrides.as_ref() {
-        let principal_view = state.principal_view.load();
+        let dynamic_view = state.dynamic_view.load();
+        let principal_view = &dynamic_view.principal_view;
         let default_limits = principal_view.default_limits(&principal_id);
         validate_limit_overrides(limit_overrides, default_limits)?;
     }
@@ -690,7 +692,13 @@ fn ensure_principal_value(
 }
 
 async fn principal_exists_in_current_or_draft(state: &AdminState, principal_id: &str) -> bool {
-    if state.principal_view.load().get(principal_id).is_some() {
+    if state
+        .dynamic_view
+        .load()
+        .principal_view
+        .get(principal_id)
+        .is_some()
+    {
         return true;
     }
     let Some(storage) = state.storage.as_ref() else {

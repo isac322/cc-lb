@@ -1,37 +1,27 @@
+mod admin_test_common;
+
 mod config_admin_common;
 
 use std::sync::Arc;
 
-use arc_swap::ArcSwap;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
-use cc_lb_core::api_keys::{
-    concurrent_guard::KeyConcurrencyManager, limit_engine::LimitEngine,
-    principal_view::PrincipalView,
-};
 use tower::ServiceExt;
 
 fn test_state() -> AdminState {
     let config = Config::default();
-    let principal_view = Arc::new(ArcSwap::from(
-        PrincipalView::from_config(&config, std::collections::HashMap::new())
-            .expect("principal view builds"),
-    ));
     AdminState {
         storage: None,
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: LimitEngine::new(
-            Arc::new(KeyConcurrencyManager::new()),
-            principal_view.clone(),
-        ),
+        limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,
         audit_sink: None,
-        principal_view,
+        dynamic_view: admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(config),
         admin_token: Some("test-token".to_owned()),
         start_time: std::time::Instant::now(),

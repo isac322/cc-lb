@@ -9,6 +9,7 @@
 // 5: storage initialization failed (InitFailed)
 
 pub mod app;
+pub mod bootstrap;
 pub mod build_meta;
 pub mod builtins;
 pub mod chaos;

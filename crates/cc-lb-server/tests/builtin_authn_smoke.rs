@@ -53,12 +53,7 @@ impl Harness {
     }
 
     fn authn(&self) -> BuiltinAuthn {
-        BuiltinAuthn::new(
-            DownstreamAuthMode::ApiKey,
-            None,
-            self.key_store.clone(),
-            self.principal_view.clone(),
-        )
+        BuiltinAuthn::new(DownstreamAuthMode::ApiKey, None, self.key_store.clone())
     }
 
     fn block_on<F: Future>(&self, future: F) -> F::Output {
@@ -243,7 +238,6 @@ fn mode_none_returns_authn_success_from_none_mode() -> Result<(), Box<dyn std::e
             upstream_credential_ref: "oauth-prod".to_owned(),
         }),
         harness.key_store.clone(),
-        harness.principal_view.clone(),
     );
 
     let success = harness

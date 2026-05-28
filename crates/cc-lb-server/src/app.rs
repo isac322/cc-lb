@@ -1,8 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
+use std::fs;
 use std::io;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -24,8 +25,8 @@ use cc_lb_config::{Limit, LimitKind, PrincipalSpec, PrincipalType};
 use cc_lb_core::BreakerState;
 use cc_lb_core::{
     BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
-    CircuitBreakerDispatch, ErrorNormalizer, HopByHopStripLayer, Lifecycle, LifecycleConfig,
-    UpstreamDispatch, UpstreamKind,
+    CircuitBreakerDispatch, DynamicViewBuilder, DynamicViewHolder, ErrorNormalizer,
+    HopByHopStripLayer, Lifecycle, LifecycleConfig, UpstreamDispatch, UpstreamKind,
     api_keys::{
         builtin_authn::BuiltinAuthn,
         concurrent_guard::KeyConcurrencyManager,
@@ -48,6 +49,7 @@ use tokio::sync::watch;
 use tokio::task::{JoinError, JoinHandle};
 use tower::ServiceBuilder;
 
+use crate::bootstrap;
 use crate::build_meta::BuildMeta;
 use crate::builtins::{
     self, BuiltinError, BuiltinRouter, CompositeSignerFactory, NoopObservabilityHook,
@@ -250,7 +252,7 @@ pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError
         upstream_credential_ref: "test-cred".to_owned(),
     });
     std::mem::forget(dir);
-    build_app_with_storage(config, None, managed_store, storage, aead)
+    build_app_with_storage(config, None, managed_store, storage, aead).await
 }
 
 #[cfg(feature = "postgres")]
@@ -332,7 +334,7 @@ pub async fn build_app_for_testing_postgres(database_url: &str) -> Result<App, B
     let key = [0u8; 32];
     let aead = Arc::new(AeadService::from_master_key(key));
     let config = build_app_for_testing_postgres_config(database_url);
-    build_app_with_storage(config, None, managed_store, init_storage, aead)
+    build_app_with_storage(config, None, managed_store, init_storage, aead).await
 }
 
 #[cfg(feature = "postgres")]
@@ -380,16 +382,45 @@ fn build_app_for_testing_postgres_config(database_url: &str) -> Config {
     config
 }
 
+
 pub async fn build_app_with_path(
     config: Config,
     config_path: Option<&Path>,
 ) -> Result<App, BuildError> {
     config.validate()?;
     let (managed_store, storage, aead) = open_storage(&config).await?;
-    build_app_with_storage(config, config_path, managed_store, storage, aead)
+    build_app_with_storage(config, config_path, managed_store, storage, aead).await
 }
 
-pub fn build_app_with_storage(
+pub fn resolve_data_dir(
+    cli: Option<&Path>,
+    config_value: Option<&Path>,
+    env_var: &str,
+) -> Result<PathBuf, BuildError> {
+    let data_dir = if let Ok(env_path) = std::env::var(env_var) {
+        PathBuf::from(env_path)
+    } else if let Some(cli_path) = cli {
+        cli_path.to_path_buf()
+    } else if let Some(config_path) = config_value {
+        config_path.to_path_buf()
+    } else {
+        PathBuf::from("./data")
+    };
+
+    if !data_dir.exists() {
+        fs::create_dir_all(&data_dir)?;
+        #[cfg(unix)]
+        {
+            use std::fs::Permissions;
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&data_dir, Permissions::from_mode(0o700))?;
+        }
+    }
+
+    Ok(data_dir)
+}
+
+pub async fn build_app_with_storage(
     config: Config,
     config_path: Option<&Path>,
     managed_store: Arc<dyn ManagedKeyStore>,
@@ -447,18 +478,16 @@ pub fn build_app_with_storage(
         principal_chains.insert(principal_id.clone(), (router_cache, hooks_cache));
     }
 
-    let view = PrincipalView::from_config(&config, principal_chains)?;
+    let principal_view = PrincipalView::from_config(&config, principal_chains)?;
     runtime.commit_staged(all_staged)?;
 
-    let principal_view = Arc::new(ArcSwap::from(view));
     let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
-    let limit_engine = LimitEngine::new(concurrent_mgr, principal_view.clone());
+    let limit_engine = LimitEngine::new(concurrent_mgr);
     limit_engine.startup_replay(storage.clone());
     let builtin_authn = Arc::new(BuiltinAuthn::new(
         config.downstream_auth.mode.clone(),
         config.downstream_auth.none_mode.clone(),
         key_store.clone(),
-        principal_view.clone(),
     ));
 
     let error_normalizer = Arc::new(error_normalizer(&config)?);
@@ -487,6 +516,7 @@ pub fn build_app_with_storage(
 
     let mut lifecycle = Lifecycle::new(
         builtin_authn.clone(),
+        principal_view.clone(),
         signer_factory_for_lifecycle,
         global_router,
         dispatcher,
@@ -504,6 +534,7 @@ pub fn build_app_with_storage(
     lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), builtin_authn.clone());
     lifecycle = lifecycle.with_request_event_storage(storage.clone());
     let lifecycle = Arc::new(lifecycle);
+    let dynamic_view = lifecycle.dynamic_view();
 
     let start_time = std::time::Instant::now();
     let drain_controller = DrainController::new();
@@ -517,7 +548,7 @@ pub fn build_app_with_storage(
             path,
             config.clone(),
             Arc::clone(&runtime),
-            Some(principal_view.clone()),
+            Some(dynamic_view.clone()),
         ))
     });
     let signals = signal::install(
@@ -533,11 +564,24 @@ pub fn build_app_with_storage(
         key_store: Some(key_store.clone()),
         builtin_authn: Some(builtin_authn.clone()),
     };
+
+    let env_token = std::env::var("CC_LB_BOOTSTRAP_ADMIN_TOKEN").ok();
+    let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
+    let _ = bootstrap::apply_bootstrap(
+        &config,
+        storage.as_ref(),
+        storage.as_ref(),
+        storage.as_ref(),
+        env_token,
+        &data_dir,
+    )
+    .await;
+
     let admin_config: Arc<dyn CurrentConfig> = match &config_watcher {
         Some(watcher) => watcher.clone(),
         None => Arc::new(InMemoryCurrentConfig::new(
             config.clone(),
-            principal_view.clone(),
+            dynamic_view.clone(),
         )),
     };
     let admin_state = AdminState {
@@ -547,7 +591,7 @@ pub fn build_app_with_storage(
         limit_engine: limit_engine.clone(),
         lifecycle: Some(lifecycle.clone()),
         audit_sink: audit_sink.clone(),
-        principal_view: principal_view.clone(),
+        dynamic_view: dynamic_view.clone(),
         config: admin_config,
         admin_token: config
             .admin
@@ -574,15 +618,15 @@ pub fn build_app_with_storage(
 struct InMemoryCurrentConfig {
     current: ArcSwap<Config>,
     draft: Mutex<Option<Config>>,
-    principal_view: Arc<ArcSwap<PrincipalView>>,
+    dynamic_view: Arc<DynamicViewHolder>,
 }
 
 impl InMemoryCurrentConfig {
-    fn new(config: Config, principal_view: Arc<ArcSwap<PrincipalView>>) -> Self {
+    fn new(config: Config, dynamic_view: Arc<DynamicViewHolder>) -> Self {
         Self {
             current: ArcSwap::from_pointee(config),
             draft: Mutex::new(None),
-            principal_view,
+            dynamic_view,
         }
     }
 }
@@ -616,7 +660,12 @@ impl CurrentConfig for InMemoryCurrentConfig {
             .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
         let principal_view = PrincipalView::from_config(&config, std::collections::HashMap::new())
             .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
-        self.principal_view.store(principal_view);
+        let current_view = self.dynamic_view.load();
+        self.dynamic_view.store(
+            DynamicViewBuilder::from_view(&current_view)
+                .principal_view(principal_view)
+                .build(),
+        );
         let config = Arc::new(config);
         self.current.store(config.clone());
         Ok(config)
@@ -1086,5 +1135,143 @@ impl From<GlobalChainError> for BuildError {
             GlobalChainError::Runtime(source) => Self::Runtime(source),
             GlobalChainError::Config(source) => Self::Config(source),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn data_dir_cli_overrides_config() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let config_dir = tempfile::tempdir().unwrap();
+
+        let result = resolve_data_dir(
+            Some(temp_dir.path()),
+            Some(config_dir.path()),
+            "NONEXISTENT_ENV",
+        );
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), temp_dir.path());
+    }
+
+    #[test]
+    fn data_dir_config_used_when_no_override() {
+        let config_dir = tempfile::tempdir().unwrap();
+
+        let result = resolve_data_dir(None, Some(config_dir.path()), "NONEXISTENT_ENV");
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), config_dir.path());
+    }
+
+    #[test]
+    fn data_dir_default_when_all_absent() {
+        let result = resolve_data_dir(None, None, "NONEXISTENT_ENV");
+
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), PathBuf::from("./data"));
+    }
+
+    #[tokio::test]
+    async fn bootstrap_token_env_seeds_admin() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("storage.redb");
+        let key = [0u8; 32];
+        let storage = cc_lb_storage_redb::Storage::open(&path, key).unwrap();
+
+        let config = cc_lb_config::Config::default();
+        let token = "test-token-001".to_string();
+
+        let result = bootstrap::apply_bootstrap(
+            &config,
+            &storage,
+            &storage,
+            &storage,
+            Some(token),
+            dir.path(),
+        )
+        .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_toml_idempotent_on_restart() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("storage.redb");
+        let key = [0u8; 32];
+        let storage = cc_lb_storage_redb::Storage::open(&path, key).unwrap();
+
+        let config = cc_lb_config::Config::default();
+        let bootstrap_file = dir.path().join("bootstrap.toml");
+        fs::write(&bootstrap_file, "").unwrap();
+
+        let result1 =
+            bootstrap::apply_bootstrap(&config, &storage, &storage, &storage, None, dir.path())
+                .await;
+        assert!(result1.is_ok());
+
+        let result2 =
+            bootstrap::apply_bootstrap(&config, &storage, &storage, &storage, None, dir.path())
+                .await;
+        assert!(result2.is_ok());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_toml_renamed_after_apply() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("storage.redb");
+        let key = [0u8; 32];
+        let storage = cc_lb_storage_redb::Storage::open(&path, key).unwrap();
+
+        let config = cc_lb_config::Config::default();
+        let bootstrap_file = dir.path().join("bootstrap.toml");
+        fs::write(&bootstrap_file, "").unwrap();
+
+        assert!(bootstrap_file.exists());
+        let result =
+            bootstrap::apply_bootstrap(&config, &storage, &storage, &storage, None, dir.path())
+                .await;
+        assert!(result.is_ok());
+
+        assert!(!bootstrap_file.exists());
+        let entries: Vec<_> = fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter(|e| {
+                e.file_name()
+                    .to_string_lossy()
+                    .starts_with("bootstrap.toml.consumed-")
+            })
+            .collect();
+        assert_eq!(entries.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn missing_env_and_file_is_noop() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("storage.redb");
+        let key = [0u8; 32];
+        let storage = cc_lb_storage_redb::Storage::open(&path, key).unwrap();
+
+        let config = cc_lb_config::Config::default();
+
+        let result =
+            bootstrap::apply_bootstrap(&config, &storage, &storage, &storage, None, dir.path())
+                .await;
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn redb_minimal_fixture_parses() {
+        let fixture_path = "tests/fixtures/redb-minimal.toml";
+        assert!(std::path::Path::new(fixture_path).exists());
+
+        let content = fs::read_to_string(fixture_path).unwrap();
+        assert!(!content.is_empty());
+        assert!(content.contains("[listener]"));
+        assert!(content.contains("[storage]"));
     }
 }

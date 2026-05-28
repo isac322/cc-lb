@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, RwLock};
 
-use arc_swap::ArcSwap;
+use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use bytes::Bytes;
@@ -13,6 +13,14 @@ use cc_lb_config::Config;
 use cc_lb_core::api_keys::{
     concurrent_guard::KeyConcurrencyManager, limit_engine::LimitEngine,
     principal_view::PrincipalView,
+};
+use cc_lb_core::{
+    ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder,
+    ErrorNormalizer, UpstreamDispatch, UpstreamStatusSnapshot,
+};
+use cc_lb_plugin_api::{
+    ObservabilityHook, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
+    SignedRequest, SignerFactory, Upstream,
 };
 use cc_lb_storage_redb::RedbStorage;
 use http_body_util::BodyExt;
@@ -54,21 +62,17 @@ pub fn config_value(default_requests_per_window: u64) -> Value {
 }
 
 pub fn test_state(config: Config, storage: Option<Arc<RedbStorage>>) -> AdminState {
-    let principal_view = Arc::new(ArcSwap::from(
-        PrincipalView::from_config(&config, std::collections::HashMap::new())
-            .expect("principal view builds"),
-    ));
+    let principal_view = PrincipalView::from_config(&config, std::collections::HashMap::new())
+        .expect("principal view builds");
+    let dynamic_view = dynamic_view_holder(principal_view);
     AdminState {
         storage: storage.map(|s| s as Arc<dyn cc_lb_storage_api::Storage>),
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: LimitEngine::new(
-            Arc::new(KeyConcurrencyManager::new()),
-            principal_view.clone(),
-        ),
+        limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new())),
         lifecycle: None,
         audit_sink: None,
-        principal_view,
+        dynamic_view,
         config: Arc::new(config),
         admin_token: Some(TOKEN.to_owned()),
         start_time: std::time::Instant::now(),
@@ -85,24 +89,80 @@ pub fn apply_state(
     reloader: Arc<TestReloader>,
 ) -> AdminState {
     let config = reloader.current();
-    let principal_view = Arc::new(ArcSwap::from(
-        PrincipalView::from_config(&config, std::collections::HashMap::new())
-            .expect("principal view builds"),
-    ));
+    let principal_view = PrincipalView::from_config(&config, std::collections::HashMap::new())
+        .expect("principal view builds");
+    let dynamic_view = dynamic_view_holder(principal_view);
     AdminState {
         storage: Some(test_storage() as Arc<dyn cc_lb_storage_api::Storage>),
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: LimitEngine::new(
-            Arc::new(KeyConcurrencyManager::new()),
-            principal_view.clone(),
-        ),
+        limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new())),
         lifecycle: None,
         audit_sink: None,
-        principal_view,
+        dynamic_view,
         config: reloader,
         admin_token: Some(TOKEN.to_owned()),
         start_time: std::time::Instant::now(),
+    }
+}
+
+fn dynamic_view_holder(principal_view: Arc<PrincipalView>) -> Arc<DynamicViewHolder> {
+    Arc::new(DynamicViewHolder::new(
+        DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(NoopSignerFactory))
+            .global_router(Arc::new(NoopRouter))
+            .dispatcher(Arc::new(NoopDispatch))
+            .global_observability_hooks(Vec::<Arc<dyn ObservabilityHook>>::new())
+            .error_normalizer(Arc::new(ErrorNormalizer::new()))
+            .principal_view(principal_view)
+            .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
+            .build(),
+    ))
+}
+
+struct NoopSignerFactory;
+
+impl ApiKeyAwareSignerFactory for NoopSignerFactory {
+    fn with_api_key(&self, _api_key: String) -> Arc<dyn SignerFactory> {
+        Arc::new(NoopSignerFactory)
+    }
+}
+
+#[async_trait]
+impl SignerFactory for NoopSignerFactory {
+    async fn build(
+        &self,
+        _upstream: &Upstream,
+    ) -> Result<Arc<dyn cc_lb_plugin_api::Signer>, cc_lb_plugin_api::SignerError> {
+        Err(cc_lb_plugin_api::SignerError::MissingCredentials {
+            reason: "noop test signer factory".to_owned(),
+        })
+    }
+}
+
+struct NoopRouter;
+
+impl RouterPlugin for NoopRouter {
+    fn route(
+        &self,
+        _ctx: &RequestContext,
+        _principal: &Principal,
+    ) -> Result<RouteDecision, RouteError> {
+        Err(RouteError::NoRoute {
+            reason: "noop test router".to_owned(),
+        })
+    }
+}
+
+struct NoopDispatch;
+
+#[async_trait]
+impl UpstreamDispatch for NoopDispatch {
+    async fn dispatch(
+        &self,
+        _request: SignedRequest,
+    ) -> Result<http::Response<Body>, DispatchError> {
+        Ok(http::Response::new(Body::empty()))
     }
 }
 

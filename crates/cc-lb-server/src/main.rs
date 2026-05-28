@@ -61,7 +61,7 @@ fn run() -> Result<(), RunError> {
     let cli = Cli::from_arg_matches(&matches).map_err(RunError::Cli)?;
 
     match cli.command {
-        Some(Command::Serve { config }) => {
+        Some(Command::Serve { config, .. }) => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
@@ -71,7 +71,7 @@ fn run() -> Result<(), RunError> {
                 .map_err(RunError::Serve)
         }
         Some(Command::Config {
-            command: ConfigCommand::Validate { config },
+            command: ConfigCommand::Validate { config, .. },
         }) => validate::run(&config).map_err(RunError::Validation),
         None => {
             let mut command = Cli::command();

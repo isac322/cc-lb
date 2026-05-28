@@ -1,4 +1,3 @@
-use arc_swap::ArcSwap;
 use cc_lb_config::{Config, PrincipalSpec, PrincipalType};
 use cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_core::api_keys::limit_engine::{LimitEngine, RejectReason};
@@ -33,10 +32,7 @@ fn engine(enabled: bool) -> (Arc<LimitEngine>, Arc<PrincipalView>) {
     .expect("principal view builds");
 
     (
-        LimitEngine::new(
-            Arc::new(KeyConcurrencyManager::new()),
-            Arc::new(ArcSwap::from(view.clone())),
-        ),
+        LimitEngine::new(Arc::new(KeyConcurrencyManager::new())),
         view,
     )
 }

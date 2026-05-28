@@ -1,3 +1,5 @@
+mod admin_test_common;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -23,32 +25,16 @@ fn test_config(issuer_base_url: String) -> Config {
 }
 
 fn test_state(storage: Arc<Storage>, issuer_base_url: String) -> AdminState {
+    let config = test_config(issuer_base_url);
     AdminState {
         storage: Some(storage.clone()),
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
-            Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
-            Arc::new(arc_swap::ArcSwap::from(
-                cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
-                    &Config::default(),
-                    std::collections::HashMap::new(),
-                )
-                .expect("principal view builds"),
-            )),
-        ),
+        limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,
         audit_sink: None,
-        principal_view: Arc::new(arc_swap::ArcSwap::from(
-            cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
-                &cc_lb_admin::CurrentConfig::current_config(
-                    (Arc::new(test_config(issuer_base_url.clone()))).as_ref(),
-                ),
-                std::collections::HashMap::new(),
-            )
-            .expect("principal view builds"),
-        )),
-        config: Arc::new(test_config(issuer_base_url)),
+        dynamic_view: admin_test_common::dynamic_view_holder(&config),
+        config: Arc::new(config),
         admin_token: Some("test-token".to_string()),
         start_time: std::time::Instant::now(),
     }

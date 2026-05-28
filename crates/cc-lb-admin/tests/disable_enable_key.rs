@@ -1,3 +1,5 @@
+mod admin_test_common;
+
 use std::{sync::Arc, time::Duration};
 
 use axum::{
@@ -6,7 +8,7 @@ use axum::{
 };
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::{Config, Limit, LimitKind, PrincipalSpec, PrincipalType};
-use cc_lb_core::api_keys::{key_store::KeyStore, principal_view::PrincipalView};
+use cc_lb_core::api_keys::key_store::KeyStore;
 use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -19,22 +21,10 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
             storage.clone(),
         ))))),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
-            Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
-            Arc::new(arc_swap::ArcSwap::from(
-                cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
-                    &Config::default(),
-                    std::collections::HashMap::new(),
-                )
-                .expect("principal view builds"),
-            )),
-        ),
+        limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,
         audit_sink: None,
-        principal_view: Arc::new(arc_swap::ArcSwap::from(
-            PrincipalView::from_config(&config, std::collections::HashMap::new())
-                .expect("principal view builds"),
-        )),
+        dynamic_view: admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(config),
         admin_token: Some("test-token".to_owned()),
         start_time: std::time::Instant::now(),
