@@ -20,7 +20,8 @@ use cc_lb_plugin_api::{
     ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext, RouteDecision,
     RouteError, RouterPlugin, Upstream,
 };
-use cc_lb_storage_redb::{KeyStatus, Storage, StoredApiKeyRecord};
+use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
+use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
 use http::{HeaderMap, StatusCode};
 use url::Url;
 
@@ -33,11 +34,14 @@ fn builtin_authn_accepts_bound_principal_view() -> Result<(), Box<dyn std::error
     let authn = BuiltinAuthn::new(
         DownstreamAuthMode::ApiKey,
         None,
-        Arc::new(KeyStore::new(storage)),
+        Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(storage)))),
         Arc::new(ArcSwap::from(view.clone())),
     );
 
-    let error = authn.authenticate(&HeaderMap::new(), &view).unwrap_err();
+    let error = tokio::runtime::Builder::new_current_thread()
+        .build()?
+        .block_on(authn.authenticate(&HeaderMap::new(), &view))
+        .unwrap_err();
 
     assert_eq!(error, BuiltinAuthError::MissingHeader);
     Ok(())
@@ -191,7 +195,7 @@ fn none_mode_authn(
                 upstream_kind: NoneModeUpstreamKind::AnthropicKey,
                 upstream_credential_ref: "test-upstream".to_owned(),
             }),
-            Arc::new(KeyStore::new(storage)),
+            Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(storage)))),
             Arc::new(ArcSwap::from(view)),
         )),
         state,

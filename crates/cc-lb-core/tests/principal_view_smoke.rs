@@ -35,7 +35,8 @@ fn sample_config(enabled: bool) -> Config {
 
 #[test]
 fn principal_view_smoke() {
-    let view = PrincipalView::from_config(&sample_config(true), std::collections::HashMap::new()).expect("principal view builds");
+    let view = PrincipalView::from_config(&sample_config(true), std::collections::HashMap::new())
+        .expect("principal view builds");
 
     let spec = view.get("u1");
     assert!(spec.is_some());
@@ -52,7 +53,8 @@ fn principal_view_smoke() {
 
 #[test]
 fn disabled_status() {
-    let view = PrincipalView::from_config(&sample_config(false), std::collections::HashMap::new()).expect("principal view builds");
+    let view = PrincipalView::from_config(&sample_config(false), std::collections::HashMap::new())
+        .expect("principal view builds");
 
     assert_eq!(view.principal_status("u1"), PrincipalStatus::Disabled);
 }
@@ -66,7 +68,8 @@ fn invalid_allowed_models_glob_returns_config_error() {
         .expect("sample principal exists")
         .allowed_models = vec!["[".to_owned()];
 
-    let error = PrincipalView::from_config(&config, std::collections::HashMap::new()).expect_err("invalid glob is rejected");
+    let error = PrincipalView::from_config(&config, std::collections::HashMap::new())
+        .expect_err("invalid glob is rejected");
 
     assert!(matches!(
         error,
