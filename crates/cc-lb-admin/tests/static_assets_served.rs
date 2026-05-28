@@ -13,22 +13,19 @@ use tower::ServiceExt;
 fn test_state() -> AdminState {
     AdminState {
         storage: None,
+        key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
             Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
             Arc::new(arc_swap::ArcSwap::from(
-                cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
-                    &Config::default(),
-                ),
+                cc_lb_core::api_keys::principal_view::PrincipalView::from_config(&Config::default()),
             )),
         ),
         lifecycle: None,
         audit_sink: None,
         principal_view: Arc::new(arc_swap::ArcSwap::from(
             cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
-                &cc_lb_admin::CurrentConfig::current_config(
-                    (Arc::new(Config::default())).as_ref(),
-                ),
+                &cc_lb_admin::CurrentConfig::current_config((Arc::new(Config::default())).as_ref()),
             ),
         )),
         config: Arc::new(Config::default()),

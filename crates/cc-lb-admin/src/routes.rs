@@ -497,7 +497,7 @@ async fn issue_principal_key(
     Path(id): Path<String>,
     Json(request): Json<management::IssueKeyRequest>,
 ) -> axum::response::Response {
-    match management::issue_principal_key(&state, id, request) {
+    match management::issue_principal_key(&state, id, request).await {
         Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
         Err(error) => management_error_response(error),
     }
@@ -507,7 +507,7 @@ async fn list_principal_keys(
     State(state): State<AdminState>,
     Path(id): Path<String>,
 ) -> axum::response::Response {
-    match management::list_principal_keys(&state, id) {
+    match management::list_principal_keys(&state, id).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => management_error_response(error),
     }
@@ -517,7 +517,7 @@ async fn get_principal_key(
     State(state): State<AdminState>,
     Path((id, key_id)): Path<(String, String)>,
 ) -> axum::response::Response {
-    match management::get_principal_key(&state, id, key_id) {
+    match management::get_principal_key(&state, id, key_id).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => management_error_response(error),
     }
@@ -528,7 +528,7 @@ async fn update_principal_key(
     Path((id, key_id)): Path<(String, String)>,
     Json(request): Json<management::UpdateKeyRequest>,
 ) -> axum::response::Response {
-    match management::update_principal_key(&state, id, key_id, request) {
+    match management::update_principal_key(&state, id, key_id, request).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => management_error_response(error),
     }
@@ -538,7 +538,7 @@ async fn revoke_principal_key(
     State(state): State<AdminState>,
     Path((id, key_id)): Path<(String, String)>,
 ) -> axum::response::Response {
-    match management::revoke_principal_key(&state, id, key_id) {
+    match management::revoke_principal_key(&state, id, key_id).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => management_error_response(error),
     }
@@ -548,7 +548,7 @@ async fn disable_principal_key(
     State(state): State<AdminState>,
     Path((id, key_id)): Path<(String, String)>,
 ) -> axum::response::Response {
-    match management::disable_principal_key(&state, id, key_id) {
+    match management::disable_principal_key(&state, id, key_id).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => management_error_response(error),
     }
@@ -558,7 +558,7 @@ async fn enable_principal_key(
     State(state): State<AdminState>,
     Path((id, key_id)): Path<(String, String)>,
 ) -> axum::response::Response {
-    match management::enable_principal_key(&state, id, key_id) {
+    match management::enable_principal_key(&state, id, key_id).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => management_error_response(error),
     }

@@ -2,11 +2,11 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use cc_lb_admin::{router, AdminState};
+use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_storage_api::types::{PrincipalKindLite, UpstreamKind};
-use cc_lb_storage_redb::{OAuthCredentials, Storage};
+use cc_lb_storage_redb::{OAuthCredentials, RedbManagedKeyStore, Storage};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use std::sync::Arc;
@@ -15,7 +15,10 @@ use tower::ServiceExt;
 
 fn test_state(storage: Arc<Storage>) -> AdminState {
     AdminState {
-        storage: Some(storage),
+        storage: Some(storage.clone()),
+        key_store: Some(Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(
+            storage.clone(),
+        ))))),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
             Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
@@ -84,9 +87,10 @@ async fn oauth_status_derives_from_managed_key() {
     storage
         .put_oauth("alice", "anthropic_oauth", &oauth_credentials())
         .unwrap();
-    let key_store = KeyStore::new(storage.clone());
+    let key_store = KeyStore::new(Arc::new(RedbManagedKeyStore::new(storage.clone())));
     key_store
         .create("alice", managed_key_params("anthropic_oauth"))
+        .await
         .unwrap();
 
     let app = router(test_state(storage));

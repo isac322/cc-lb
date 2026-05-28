@@ -88,6 +88,14 @@ impl KeyStore {
         Ok(self.storage.lookup_by_index_hash(index_hash).await?)
     }
 
+    pub async fn get(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+    ) -> Result<Option<StoredApiKeyRecord>> {
+        Ok(self.storage.get(principal_id, key_id).await?)
+    }
+
     pub async fn list_by_principal(&self, principal_id: &str) -> Result<Vec<StoredApiKeyRecord>> {
         Ok(self.storage.list_by_principal(principal_id).await?)
     }

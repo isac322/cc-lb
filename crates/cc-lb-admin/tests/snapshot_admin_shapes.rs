@@ -5,7 +5,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use cc_lb_admin::{router, AdminState};
+use cc_lb_admin::{AdminState, router};
 use cc_lb_config::{
     AuthStrategy, Config, Limit, LimitKind, PrincipalSpec, PrincipalType, UpstreamKind,
     UpstreamSpec,
@@ -71,6 +71,7 @@ fn test_state(config: Config, storage: Option<Arc<Storage>>) -> AdminState {
     );
     AdminState {
         storage,
+        key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine,
         lifecycle: None,

@@ -15,13 +15,14 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::Config;
 use cc_lb_core::{
     AuditWriterSink, Lifecycle,
-    api_keys::{limit_engine::LimitEngine, principal_view::PrincipalView},
+    api_keys::{key_store::KeyStore, limit_engine::LimitEngine, principal_view::PrincipalView},
 };
 use cc_lb_storage_redb::Storage;
 
 #[derive(Clone)]
 pub struct AdminState {
     pub storage: Option<Arc<Storage>>,
+    pub key_store: Option<Arc<KeyStore>>,
     pub aead: Arc<AeadService>,
     pub limit_engine: Arc<LimitEngine>,
     pub lifecycle: Option<Arc<Lifecycle>>,

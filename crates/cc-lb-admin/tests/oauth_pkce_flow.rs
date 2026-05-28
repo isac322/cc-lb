@@ -2,7 +2,7 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use cc_lb_admin::{router, AdminState};
+use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_storage_redb::Storage;
 use http_body_util::{BodyExt, Empty};
@@ -24,7 +24,8 @@ fn test_config(issuer_base_url: String) -> Config {
 
 fn test_state(storage: Arc<Storage>, issuer_base_url: String) -> AdminState {
     AdminState {
-        storage: Some(storage),
+        storage: Some(storage.clone()),
+        key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
             Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),

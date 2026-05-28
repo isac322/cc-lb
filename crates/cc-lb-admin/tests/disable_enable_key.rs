@@ -4,17 +4,20 @@ use axum::{
     body::Body,
     http::{Request, StatusCode},
 };
-use cc_lb_admin::{router, AdminState};
+use cc_lb_admin::{AdminState, router};
 use cc_lb_config::{Config, Limit, LimitKind, PrincipalSpec, PrincipalType};
-use cc_lb_core::api_keys::principal_view::PrincipalView;
-use cc_lb_storage_redb::Storage;
-use serde_json::{json, Value};
+use cc_lb_core::api_keys::{key_store::KeyStore, principal_view::PrincipalView};
+use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
+use serde_json::{Value, json};
 use tower::ServiceExt;
 
 fn test_state(storage: Arc<Storage>) -> AdminState {
     let config = test_config();
     AdminState {
-        storage: Some(storage),
+        storage: Some(storage.clone()),
+        key_store: Some(Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(
+            storage.clone(),
+        ))))),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
             Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
@@ -148,11 +151,11 @@ async fn disable_then_list_shows_disabled() {
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = list_keys(app).await;
-    assert!(body["keys"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|record| record["key_id"] == json!(key_id) && record["status"] == json!("disabled")));
+    assert!(
+        body["keys"].as_array().unwrap().iter().any(
+            |record| record["key_id"] == json!(key_id) && record["status"] == json!("disabled")
+        )
+    );
 }
 
 #[tokio::test]
@@ -169,11 +172,13 @@ async fn disable_then_enable_restores_active() {
     assert_eq!(enable.status(), StatusCode::OK);
 
     let body = list_keys(app).await;
-    assert!(body["keys"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|record| record["key_id"] == json!(key_id) && record["status"] == json!("active")));
+    assert!(
+        body["keys"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|record| record["key_id"] == json!(key_id) && record["status"] == json!("active"))
+    );
 }
 
 #[tokio::test]
@@ -205,11 +210,11 @@ async fn disable_on_already_disabled_idempotent() {
     assert_eq!(second.status(), StatusCode::OK);
 
     let body = list_keys(app).await;
-    assert!(body["keys"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .any(|record| record["key_id"] == json!(key_id) && record["status"] == json!("disabled")));
+    assert!(
+        body["keys"].as_array().unwrap().iter().any(
+            |record| record["key_id"] == json!(key_id) && record["status"] == json!("disabled")
+        )
+    );
 }
 
 #[tokio::test]
