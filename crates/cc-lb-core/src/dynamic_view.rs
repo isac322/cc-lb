@@ -2,11 +2,12 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use cc_lb_plugin_api::ApiKeyAwareSignerFactory;
 use cc_lb_plugin_api::{ObservabilityHook, RouterPlugin};
 
 use crate::api_keys::principal_view::PrincipalView;
 use crate::error_normalizer::ErrorNormalizer;
-use crate::lifecycle::{ApiKeyAwareSignerFactory, UpstreamDispatch};
+use crate::lifecycle::UpstreamDispatch;
 
 #[non_exhaustive]
 pub struct DynamicView {
@@ -48,6 +49,7 @@ impl DynamicViewHolder {
 pub struct UpstreamStatusSnapshot {
     pub entries: HashMap<String, UpstreamStatusEntry>,
     pub applied_at_unix_secs: u64,
+    pub revision_hash: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]

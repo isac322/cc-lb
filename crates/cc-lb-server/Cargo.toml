@@ -64,12 +64,14 @@ serde_json.workspace = true
 sqlx = { workspace = true, optional = true }
 tempfile.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
+tokio = { workspace = true, features = ["net", "process", "rt", "rt-multi-thread", "signal", "sync", "time", "test-util"] }
+tokio-util.workspace = true
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tower = { workspace = true, features = ["timeout", "util"] }
 tracing.workspace = true
 url.workspace = true
 uuid = { workspace = true, features = ["v4", "serde"] }
+xxhash-rust.workspace = true
 
 [dev-dependencies]
 metrics-exporter-prometheus.workspace = true

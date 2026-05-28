@@ -78,6 +78,12 @@ pub enum SignerError {
         /// Redacted storage failure reason.
         reason: String,
     },
+    /// OAuth access token is expired or within the signer refresh skew window.
+    #[error("expired token: {reason}")]
+    ExpiredToken {
+        /// Redacted expiry reason.
+        reason: String,
+    },
     /// The factory was asked to build a signer for the wrong strategy.
     #[error("wrong signer strategy: {strategy:?}")]
     WrongStrategy {

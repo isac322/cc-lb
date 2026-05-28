@@ -3,9 +3,11 @@ use std::collections::BTreeMap;
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use cc_lb_core::{ApplyStatus, ReplicaIdentity};
 use cc_lb_storage_api::{
-    Limit, PluginChainEntry, PluginRegistryStore, PluginSlot, PrincipalKind, PrincipalRecord,
-    PrincipalStore, StorageError, UpstreamKind, UpstreamRecord, UpstreamStore, WasmRegistryEntry,
+    PluginChainEntry, PluginRegistryStore, PluginSlot, PrincipalKind, PrincipalRecord,
+    PrincipalStore, Storage, StorageError, UpstreamRecord, UpstreamStore, WasmRegistryEntry,
 };
+use cc_lb_storage_api::principal::Limit;
+use cc_lb_storage_api::upstream::UpstreamKind;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -181,7 +183,7 @@ async fn build_status(state: &AdminState) -> Result<StatusResponse, StatusError>
         upstreams,
         principals: principals.into_iter().map(status_principal).collect(),
         plugin_chain_summary: chain_summary,
-        killswitch: storage.killswitch_enabled()?,
+        killswitch: storage.killswitch_enabled().await?,
         last_reload_status: state.config.last_reload_status(),
     })
 }
@@ -213,7 +215,7 @@ async fn build_export(
     })
 }
 
-fn storage(state: &AdminState) -> Result<&cc_lb_storage_redb::Storage, StatusError> {
+fn storage(state: &AdminState) -> Result<&dyn Storage, StatusError> {
     state
         .storage
         .as_deref()
@@ -221,7 +223,7 @@ fn storage(state: &AdminState) -> Result<&cc_lb_storage_redb::Storage, StatusErr
 }
 
 async fn all_upstreams(
-    storage: &cc_lb_storage_redb::Storage,
+    storage: &dyn Storage,
 ) -> Result<Vec<UpstreamRecord>, StorageError> {
     let mut all = Vec::new();
     let mut after = None;
@@ -242,7 +244,7 @@ async fn all_upstreams(
 }
 
 async fn all_principals(
-    storage: &cc_lb_storage_redb::Storage,
+    storage: &dyn Storage,
 ) -> Result<Vec<PrincipalRecord>, StorageError> {
     let mut all = Vec::new();
     let mut offset = 0;
@@ -263,7 +265,7 @@ async fn all_principals(
 }
 
 async fn all_registry(
-    storage: &cc_lb_storage_redb::Storage,
+    storage: &dyn Storage,
 ) -> Result<Vec<WasmRegistryEntry>, StorageError> {
     let mut all = Vec::new();
     let mut after = None;
@@ -284,7 +286,7 @@ async fn all_registry(
 }
 
 async fn plugin_chain_summary(
-    storage: &cc_lb_storage_redb::Storage,
+    storage: &dyn Storage,
     principals: &[PrincipalRecord],
 ) -> Result<PluginChainSummary, StorageError> {
     let mut summary = PluginChainSummary::default();
@@ -305,7 +307,7 @@ async fn plugin_chain_summary(
 }
 
 async fn export_chains(
-    storage: &cc_lb_storage_redb::Storage,
+    storage: &dyn Storage,
     principals: &[PrincipalRecord],
     registry_by_id: &BTreeMap<uuid::Uuid, String>,
 ) -> Result<BTreeMap<String, ExportPrincipalChains>, StorageError> {
@@ -386,7 +388,7 @@ fn export_principal(record: PrincipalRecord) -> ExportPrincipal {
 }
 
 async fn export_registry(
-    storage: &cc_lb_storage_redb::Storage,
+    storage: &dyn Storage,
     registry: &[WasmRegistryEntry],
 ) -> Result<Vec<ExportRegistryEntry>, StorageError> {
     let mut exported = Vec::with_capacity(registry.len());

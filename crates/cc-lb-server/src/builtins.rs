@@ -12,7 +12,6 @@ use cc_lb_plugin_api::{
 use cc_lb_signer_anthropic_key::AnthropicKeySignerFactory;
 use cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory;
 use cc_lb_storage_api::Storage;
-use oauth2::{ClientId, TokenUrl};
 
 #[derive(Clone)]
 pub struct BuiltinRouter {
@@ -149,24 +148,11 @@ impl SignerFactory for CompositeSignerFactory {
 pub fn anthropic_oauth_factory(
     _config: &Config,
     storage: Arc<dyn Storage>,
-    _aead: Arc<AeadService>,
+    aead: Arc<AeadService>,
     _principal_id: &str,
-    provider: &str,
+    _provider: &str,
 ) -> Option<Arc<AnthropicOAuthSignerFactory>> {
-    let client_id = oauth_client_id(_config)?;
-    let token_url = TokenUrl::new(oauth_endpoint(
-        &_config.signers.anthropic_oauth.issuer_base_url,
-        "/v1/oauth/token",
-    ))
-    .ok()?;
-    Some(Arc::new(AnthropicOAuthSignerFactory::new(
-        _principal_id,
-        provider,
-        storage,
-        _aead,
-        token_url,
-        ClientId::new(client_id),
-    )))
+    Some(Arc::new(AnthropicOAuthSignerFactory::new(storage, aead)))
 }
 
 pub fn oauth_client_id(config: &Config) -> Option<String> {

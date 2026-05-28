@@ -8,9 +8,9 @@ use async_trait::async_trait;
 use axum::body::Body as AxumBody;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    ObservabilityHook, ObserveEvent, Principal, PrincipalKind, RequestContext, RetryDecision,
-    RouterPlugin, SignedRequest, SignerFactory, Upstream, UpstreamError, shape_request,
-    sign_request,
+    ApiKeyAwareSignerFactory, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
+    RequestContext, RetryDecision, RouterPlugin, SignedRequest, Upstream, UpstreamError,
+    shape_request, sign_request,
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_api::{
@@ -99,10 +99,6 @@ pub trait LimitSubjectProvider: Send + Sync {
         principal: &Principal,
         authn_success: &AuthnSuccess,
     ) -> Option<LimitSubject>;
-}
-
-pub trait ApiKeyAwareSignerFactory: Send + Sync {
-    fn with_api_key(&self, api_key: String) -> Arc<dyn SignerFactory>;
 }
 
 #[derive(Clone, Debug)]

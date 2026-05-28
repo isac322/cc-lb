@@ -41,6 +41,8 @@ pub use bulkhead::{
     make_default_dispatcher, make_http_dispatcher_with_connector,
 };
 #[cfg(not(loom))]
+pub use cc_lb_plugin_api::ApiKeyAwareSignerFactory;
+#[cfg(not(loom))]
 pub use circuit_breaker::{
     BreakerConfig, BreakerError, BreakerRegistry, BreakerState, CircuitBreaker,
     CircuitBreakerConfig, CircuitBreakerDispatch, Permit,
@@ -72,8 +74,8 @@ pub use error_normalizer::{ErrorNormalizer, NormalizerError, UpstreamKind};
 pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop};
 #[cfg(not(loom))]
 pub use lifecycle::{
-    ApiKeyAwareSignerFactory, Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig,
-    LimitSubject, LimitSubjectProvider, ProxyError, ReplicaIdentity, UpstreamDispatch,
+    Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig, LimitSubject,
+    LimitSubjectProvider, ProxyError, ReplicaIdentity, UpstreamDispatch,
 };
 #[cfg(not(loom))]
 pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};

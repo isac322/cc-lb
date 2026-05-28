@@ -15,4 +15,5 @@ pub use runtime_change_notifier::*;
 pub use traits::*;
 pub use types::*;
 pub use upstream::*;
+pub use uuid::Uuid as UpstreamRecordId;
 pub use validation::validate_identifier;

@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::{BackendKind, StorageError, StorageResult, types::*};
+use crate::{BackendKind, RuntimeChangeNotifier, StorageError, StorageResult, types::*};
 
 pub const CURRENT_CONTRACT_VERSION: u32 = 1;
 
@@ -288,6 +288,7 @@ pub trait Storage:
     + ApiKeyStore
     + ConfigStore
     + MetaStore
+    + RuntimeChangeNotifier
     + Send
     + Sync
     + 'static
@@ -307,6 +308,7 @@ impl<T> Storage for T where
         + ApiKeyStore
         + ConfigStore
         + MetaStore
+        + RuntimeChangeNotifier
         + Send
         + Sync
         + 'static

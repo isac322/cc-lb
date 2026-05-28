@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use cc_lb_aead::AeadService;
 use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_core::{ApplyStatus, DynamicView};
@@ -69,6 +70,7 @@ async fn build(
     build_dynamic_view(
         stores,
         &oauth_config(),
+        Arc::new(AeadService::from_master_key([1; 32])),
         current_generation,
         runtime,
         data_dir,

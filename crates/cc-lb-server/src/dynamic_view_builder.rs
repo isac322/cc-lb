@@ -6,6 +6,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use cc_lb_aead::AeadService;
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_core::api_keys::principal_view::{
     ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView, RouterPluginCache,
@@ -26,6 +27,8 @@ use cc_lb_storage_api::{
 };
 use cc_lb_storage_api::upstream::UpstreamKind;
 use thiserror::Error;
+
+use crate::reconcile::collect_revision_hash;
 
 pub struct Stores {
     pub upstreams: Arc<dyn UpstreamStore>,
@@ -98,6 +101,7 @@ pub fn ensure_wasm_cached(
 pub async fn build_dynamic_view(
     stores: &Stores,
     oauth_anthropic: &AnthropicOAuthConfig,
+    aead: Arc<AeadService>,
     current_generation: u64,
     runtime: &ExtismRuntime,
     data_dir: &Path,
@@ -110,12 +114,18 @@ pub async fn build_dynamic_view(
     let principal_view = Arc::new(PrincipalView::from_db(&principals, principal_chains));
     let now = unix_now_secs();
     let (routes, statuses) = apply_upstreams(stores, &upstreams, oauth_anthropic, now).await?;
+    let revision_hash = collect_revision_hash(stores).await?;
     let global_router = Arc::new(DbRouter::new(routes));
-    let signer_factory = Arc::new(DbCompositeSignerFactory::new(upstreams));
+    let signer_factory = Arc::new(DbCompositeSignerFactory::new(
+        upstreams,
+        stores.upstreams.clone(),
+        aead,
+    ));
     let dispatcher = make_default_dispatcher(50);
     let snapshot = Arc::new(UpstreamStatusSnapshot {
         entries: statuses,
         applied_at_unix_secs: unix_now_secs(),
+        revision_hash,
     });
 
     runtime.commit_staged(staged)?;
@@ -416,13 +426,21 @@ impl RouterPlugin for DbRouter {
 #[derive(Clone)]
 struct DbCompositeSignerFactory {
     upstreams: Vec<UpstreamRecord>,
+    upstream_store: Arc<dyn UpstreamStore>,
+    aead: Arc<AeadService>,
     downstream_api_key: Option<String>,
 }
 
 impl DbCompositeSignerFactory {
-    fn new(upstreams: Vec<UpstreamRecord>) -> Self {
+    fn new(
+        upstreams: Vec<UpstreamRecord>,
+        upstream_store: Arc<dyn UpstreamStore>,
+        aead: Arc<AeadService>,
+    ) -> Self {
         Self {
             upstreams,
+            upstream_store,
+            aead,
             downstream_api_key: None,
         }
     }
@@ -430,6 +448,8 @@ impl DbCompositeSignerFactory {
     fn with_downstream_api_key(&self, api_key: String) -> Self {
         Self {
             upstreams: self.upstreams.clone(),
+            upstream_store: self.upstream_store.clone(),
+            aead: self.aead.clone(),
             downstream_api_key: Some(api_key),
         }
     }
@@ -462,9 +482,15 @@ impl SignerFactory for DbCompositeSignerFactory {
                     .build(upstream)
                     .await
             }
-            UpstreamKind::AnthropicOauth => Err(SignerError::MissingCredentials {
-                reason: "dynamic oauth signer placeholder until Task 22 lands".to_owned(),
-            }),
+            UpstreamKind::AnthropicOauth => {
+                cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory::for_upstream_name(
+                    self.upstream_store.clone(),
+                    self.aead.clone(),
+                    record.name.clone(),
+                )
+                .build(upstream)
+                .await
+            }
         }
     }
 }

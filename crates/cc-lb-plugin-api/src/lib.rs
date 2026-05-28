@@ -25,7 +25,8 @@ pub use errors::{
     DialectError, ObservabilityError, RouteError, RuntimeError, SignerError, UpstreamError,
 };
 pub use traits::{
-    ObservabilityHook, PluginRuntime, RouterPlugin, Signer, SignerFactory, UpstreamDialect,
+    ApiKeyAwareSignerFactory, ObservabilityHook, PluginRuntime, RouterPlugin, Signer,
+    SignerFactory, UpstreamDialect,
 };
 pub use types::{
     AuthStrategy, ObserveEvent, PluginManifest, Principal, PrincipalKind, PrincipalQuotas,

@@ -37,13 +37,14 @@ use cc_lb_core::{
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_plugin_api::{ObservabilityHook, PluginManifest, RouterPlugin, RuntimeError};
 use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
-use cc_lb_storage_api::{ManagedKeyStore, Storage};
+use cc_lb_storage_api::{ManagedKeyStore, RuntimeChangeNotifier, Storage};
 use http_body_util::BodyExt;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::{JoinError, JoinHandle};
+use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 
 use crate::bootstrap;
@@ -53,7 +54,9 @@ use crate::drain::DrainController;
 use crate::dynamic_view_builder::{
     Stores as DynamicStores, build_dynamic_view, ensure_wasm_cache_dirs,
 };
+use crate::notify_listener::{NotifyListener, NotifyListenerParams};
 use crate::preflight::{self, PreflightOptions};
+use crate::reconcile::Reconciler;
 use crate::reload::ConfigWatcher;
 use crate::replica;
 use crate::signal;
@@ -114,6 +117,9 @@ pub struct App {
     pub proxy_addr: SocketAddr,
     pub admin_addr: SocketAddr,
     pub reload_task: Option<JoinHandle<()>>,
+    notify_cancel: Option<CancellationToken>,
+    notifier_task: Option<JoinHandle<()>>,
+    notify_listener_task: Option<JoinHandle<()>>,
     audit_writer_task: Option<JoinHandle<()>>,
     signals: signal::SignalHandle,
     drain_controller: DrainController,
@@ -152,6 +158,9 @@ impl App {
             proxy_addr,
             admin_addr,
             reload_task,
+            notify_cancel,
+            notifier_task,
+            notify_listener_task,
             audit_writer_task,
             signals,
             drain_controller: _,
@@ -196,6 +205,15 @@ impl App {
 
         if let Some(task) = reload_task {
             task.abort();
+        }
+        if let Some(cancel) = notify_cancel {
+            cancel.cancel();
+        }
+        if let Some(task) = notifier_task {
+            let _ = task.await;
+        }
+        if let Some(task) = notify_listener_task {
+            let _ = task.await;
         }
         let _ = admin_stop_tx.send(true);
         let _ = admin.await;
@@ -477,15 +495,46 @@ pub async fn build_app_with_storage(
         }
     };
 
-    let stores = DynamicStores {
+    let stores = Arc::new(DynamicStores {
         upstreams: storage_for_dynamic.clone(),
         principals: storage_for_dynamic.clone(),
-        plugin_registry: storage_for_dynamic,
-    };
+        plugin_registry: storage_for_dynamic.clone(),
+    });
     let oauth_anthropic = config.oauth.anthropic.clone().unwrap_or_default();
-    let initial_view =
-        build_dynamic_view(&stores, &oauth_anthropic, 0, &runtime, &data_dir).await?;
+    let initial_view = build_dynamic_view(
+        &stores,
+        &oauth_anthropic,
+        aead.clone(),
+        0,
+        &runtime,
+        &data_dir,
+    )
+    .await?;
     let dynamic_view_holder = Arc::new(DynamicViewHolder::new(initial_view));
+    let notify_cancel = CancellationToken::new();
+    let notifier: Arc<dyn RuntimeChangeNotifier> = storage_for_dynamic.clone();
+    let notifier_task = {
+        let notifier = Arc::clone(&notifier);
+        let cancel = notify_cancel.clone();
+        Some(tokio::spawn(async move {
+            if let Err(error) = notifier.run(cancel).await {
+                tracing::error!(error = %error, "runtime change notifier task failed");
+            }
+        }))
+    };
+    let notify_listener = Arc::new(NotifyListener::new(NotifyListenerParams {
+        notifier,
+        cancel: notify_cancel.clone(),
+        holder: Arc::clone(&dynamic_view_holder),
+        stores: Arc::clone(&stores),
+        oauth_cfg: Arc::new(oauth_anthropic.clone()),
+        runtime: Arc::clone(&runtime),
+        aead: aead.clone(),
+        data_dir: data_dir.clone(),
+    }));
+    let notify_listener_task = Some(tokio::spawn(async move {
+        notify_listener.run().await;
+    }));
 
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
@@ -524,6 +573,17 @@ pub async fn build_app_with_storage(
         Duration::from_secs(config.timeouts.drain_secs),
         sighup_handler(reload_tls_state, config_watcher.clone()),
     );
+    let reconcile_cancel = CancellationToken::new();
+    spawn_reconciler(
+        stores.clone(),
+        dynamic_view.clone(),
+        Arc::new(oauth_anthropic),
+        runtime.clone(),
+        aead.clone(),
+        reconcile_cancel.clone(),
+        data_dir.clone(),
+    );
+    spawn_reconcile_shutdown(signals.subscribe(), reconcile_cancel);
     let state = ProxyState {
         lifecycle: lifecycle.clone(),
         breaker_registry,
@@ -565,11 +625,36 @@ pub async fn build_app_with_storage(
         proxy_addr: config.listener.proxy_addr,
         admin_addr: config.listener.admin_addr,
         reload_task,
+        notify_cancel: Some(notify_cancel),
+        notifier_task,
+        notify_listener_task,
         audit_writer_task: Some(audit_writer_task),
         signals,
         drain_controller,
         tls_state,
     })
+}
+
+fn spawn_reconciler(
+    stores: Arc<DynamicStores>,
+    holder: Arc<DynamicViewHolder>,
+    oauth_cfg: Arc<cc_lb_config::AnthropicOAuthConfig>,
+    runtime: Arc<ExtismRuntime>,
+    aead: Arc<AeadService>,
+    cancel: CancellationToken,
+    data_dir: PathBuf,
+) {
+    let reconciler = Arc::new(Reconciler::new(
+        stores, holder, oauth_cfg, runtime, aead, cancel, data_dir,
+    ));
+    tokio::spawn(reconciler.run());
+}
+
+fn spawn_reconcile_shutdown(shutdown: watch::Receiver<bool>, cancel: CancellationToken) {
+    tokio::spawn(async move {
+        signal::wait_for_shutdown(shutdown).await;
+        cancel.cancel();
+    });
 }
 
 struct InMemoryCurrentConfig {
