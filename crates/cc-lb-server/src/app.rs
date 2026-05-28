@@ -38,10 +38,8 @@ use cc_lb_core::{
 };
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_plugin_api::{ObservabilityHook, PluginManifest, RouterPlugin, RuntimeError};
-use cc_lb_pricing::LiteLlmLoader;
 use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
-use cc_lb_storage_api::ManagedKeyStore;
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_api::{ManagedKeyStore, Storage};
 use http_body_util::BodyExt;
 use serde::Serialize;
 use thiserror::Error;
@@ -58,6 +56,7 @@ use crate::drain::DrainController;
 use crate::preflight::{self, PreflightOptions};
 use crate::reload::ConfigWatcher;
 use crate::signal;
+use crate::storage_factory;
 use crate::tls::{ReloadableListener, TlsState};
 use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig};
 
@@ -240,7 +239,7 @@ pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError
     let managed_store: Arc<dyn ManagedKeyStore> = Arc::new(
         cc_lb_storage_redb::RedbManagedKeyStore::new(storage_arc.clone()),
     );
-    let storage = Some(storage_arc);
+    let storage: Arc<dyn Storage> = storage_arc.clone();
     config.storage = cc_lb_config::StorageConfig::Redb { path };
     config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
     config.downstream_auth.mode = DownstreamAuthMode::None;
@@ -332,7 +331,7 @@ pub async fn build_app_for_testing_postgres(database_url: &str) -> Result<App, B
     let key = [0u8; 32];
     let aead = Arc::new(AeadService::from_master_key(key));
     let config = build_app_for_testing_postgres_config(database_url);
-    build_app_with_storage(config, None, managed_store, None, aead)
+    build_app_with_storage(config, None, managed_store, init_storage, aead)
 }
 
 #[cfg(feature = "postgres")]
@@ -393,23 +392,16 @@ pub fn build_app_with_storage(
     config: Config,
     config_path: Option<&Path>,
     managed_store: Arc<dyn ManagedKeyStore>,
-    storage: Option<Arc<cc_lb_storage_redb::Storage>>,
+    storage: Arc<dyn Storage>,
     aead: Arc<AeadService>,
 ) -> Result<App, BuildError> {
     let key_store = Arc::new(KeyStore::new(managed_store));
     let price_catalog = cc_lb_pricing::global_catalog().clone();
     spawn_price_catalog_loader(&config, storage.clone(), price_catalog.clone());
-    if let Some(storage) = storage.clone() {
-        let pruner = UsagePruner::new(storage, config.api_keys.usage_retention_days);
-        let _usage_pruner_task = tokio::spawn(pruner.start_daemon());
-    }
-    let (audit_sink, audit_writer_task) = match storage.clone() {
-        Some(storage) => {
-            let (sink, task) = spawn_audit_writer(storage, 1024);
-            (Some(Arc::new(sink)), Some(task))
-        }
-        None => (None, None),
-    };
+    let pruner = UsagePruner::new(storage.clone(), config.api_keys.usage_retention_days);
+    let _usage_pruner_task = tokio::spawn(pruner.start_daemon());
+    let (sink, audit_writer_task) = spawn_audit_writer(storage.clone(), 1024);
+    let audit_sink = Some(Arc::new(sink));
     let runtime = Arc::new(ExtismRuntime::new());
     let signer_factory_for_lifecycle = Arc::new(CompositeSignerFactory::new(
         &config,
@@ -460,9 +452,7 @@ pub fn build_app_with_storage(
     let principal_view = Arc::new(ArcSwap::from(view));
     let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
     let limit_engine = LimitEngine::new(concurrent_mgr, principal_view.clone());
-    if let Some(storage) = storage.clone() {
-        limit_engine.startup_replay(storage);
-    }
+    limit_engine.startup_replay(storage.clone());
     let builtin_authn = Arc::new(BuiltinAuthn::new(
         config.downstream_auth.mode.clone(),
         config.downstream_auth.none_mode.clone(),
@@ -488,9 +478,7 @@ pub fn build_app_with_storage(
         lifecycle = lifecycle.with_audit_sink(audit_sink);
     }
     lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), builtin_authn.clone());
-    if let Some(storage) = storage.clone() {
-        lifecycle = lifecycle.with_request_event_storage(storage);
-    }
+    lifecycle = lifecycle.with_request_event_storage(storage.clone());
     let lifecycle = Arc::new(lifecycle);
 
     let start_time = std::time::Instant::now();
@@ -529,7 +517,7 @@ pub fn build_app_with_storage(
         )),
     };
     let admin_state = AdminState {
-        storage: storage.clone(),
+        storage: Some(storage.clone()),
         key_store: Some(key_store),
         aead: aead.clone(),
         limit_engine: limit_engine.clone(),
@@ -552,7 +540,7 @@ pub fn build_app_with_storage(
         proxy_addr: config.listener.proxy_addr,
         admin_addr: config.listener.admin_addr,
         reload_task,
-        audit_writer_task,
+        audit_writer_task: Some(audit_writer_task),
         signals,
         drain_controller,
         tls_state,
@@ -625,31 +613,20 @@ struct ProxyState {
 
 fn spawn_price_catalog_loader(
     config: &Config,
-    storage: Option<Arc<Storage>>,
+    storage: Arc<dyn Storage>,
     price_catalog: Arc<cc_lb_pricing::PriceCatalog>,
 ) {
-    let Some(storage) = storage else {
-        return;
-    };
+    let _storage = storage;
     if tokio::runtime::Handle::try_current().is_err() {
         tracing::warn!("tokio runtime unavailable; litellm price catalog loader not started");
         return;
     }
 
-    let price_catalog_config = &config.api_keys.price_catalog;
-    let loader = LiteLlmLoader::new(
-        price_catalog.clone(),
-        storage,
-        price_catalog_config.url.clone(),
-        price_catalog_config.refresh_interval,
-        price_catalog_config.cache_path.clone(),
+    let _price_catalog_config = &config.api_keys.price_catalog;
+    let _ = price_catalog;
+    tracing::warn!(
+        "litellm price catalog loader requires a storage-agnostic cache adapter before it can run with unified storage"
     );
-    let _loader_task = loader.start_daemon();
-    tokio::spawn(async move {
-        if !LiteLlmLoader::wait_for_first_snapshot(&price_catalog, Duration::from_secs(10)).await {
-            tracing::warn!("litellm price catalog first snapshot unavailable; startup continuing");
-        }
-    });
 }
 
 #[derive(Clone, Serialize)]
@@ -850,93 +827,15 @@ fn init_observability(config: &mut Config) -> Result<TracingGuard, BuildError> {
 
 pub async fn open_storage(
     config: &Config,
-) -> Result<
-    (
-        Arc<dyn ManagedKeyStore>,
-        Option<Arc<cc_lb_storage_redb::Storage>>,
-        Arc<AeadService>,
-    ),
-    BuildError,
-> {
+) -> Result<(Arc<dyn ManagedKeyStore>, Arc<dyn Storage>, Arc<AeadService>), BuildError> {
     let key_hex =
         std::env::var(&config.aead.key_env).map_err(|_| BuildError::StorageKeyMissing {
             env: config.aead.key_env.clone(),
         })?;
     let key = decode_hex_key(&key_hex)?;
     let aead = Arc::new(AeadService::from_master_key(key));
-    match &config.storage {
-        cc_lb_config::StorageConfig::Redb { path } => {
-            let storage = Arc::new(Storage::open(path, key)?);
-            let managed = cc_lb_storage_redb::RedbManagedKeyStore::new(storage.clone());
-            Ok((Arc::new(managed), Some(storage), aead))
-        }
-        cc_lb_config::StorageConfig::Postgres {
-            url,
-            pool: pool_config,
-        } => open_postgres_managed(url, pool_config, aead).await,
-    }
-}
-
-#[cfg(feature = "postgres")]
-async fn open_postgres_managed(
-    url: &str,
-    pool_config: &cc_lb_config::PostgresPoolConfig,
-    aead: Arc<AeadService>,
-) -> Result<
-    (
-        Arc<dyn ManagedKeyStore>,
-        Option<Arc<cc_lb_storage_redb::Storage>>,
-        Arc<AeadService>,
-    ),
-    BuildError,
-> {
-    use cc_lb_storage_api::{BackendKind, Storage as StorageTrait};
-    use sqlx::postgres::PgPoolOptions;
-    use std::time::Duration;
-
-    let pool = PgPoolOptions::new()
-        .max_connections(pool_config.max_connections)
-        .min_connections(pool_config.min_connections)
-        .acquire_timeout(Duration::from_secs(pool_config.acquire_timeout_secs))
-        .idle_timeout(Duration::from_secs(pool_config.idle_timeout_secs))
-        .connect(url)
-        .await
-        .map_err(|e| BuildError::StorageConnect {
-            message: e.to_string(),
-        })?;
-
-    let init_storage: Arc<dyn StorageTrait> =
-        Arc::new(cc_lb_storage_postgres::PostgresStorage::new(pool.clone()));
-    init_storage
-        .initialize(BackendKind::Postgres)
-        .await
-        .map_err(|e| BuildError::StorageConnect {
-            message: e.to_string(),
-        })?;
-
-    let managed = cc_lb_storage_postgres::PostgresManagedKeyStore::new(
-        pool,
-        Arc::new(cc_lb_storage_postgres::adapter::retry::RetryPolicy::default()),
-    );
-    Ok((Arc::new(managed), None, aead))
-}
-
-#[cfg(not(feature = "postgres"))]
-async fn open_postgres_managed(
-    _url: &str,
-    _pool_config: &cc_lb_config::PostgresPoolConfig,
-    _aead: Arc<AeadService>,
-) -> Result<
-    (
-        Arc<dyn ManagedKeyStore>,
-        Option<Arc<cc_lb_storage_redb::Storage>>,
-        Arc<AeadService>,
-    ),
-    BuildError,
-> {
-    Err(BuildError::StorageConnect {
-        message: "postgres feature is not enabled".to_owned(),
-    })
+    let opened = storage_factory::open_storage(&config.storage, aead.clone(), key).await?;
+    Ok((opened.managed_key_store, opened.storage, aead))
 }
 
 fn decode_hex_key(value: &str) -> Result<[u8; 32], BuildError> {
@@ -1119,6 +1018,8 @@ pub enum BuildError {
     Observability(#[from] cc_lb_observability::InitError),
     #[error(transparent)]
     Storage(#[from] cc_lb_storage_redb::StorageError),
+    #[error(transparent)]
+    StorageFactory(#[from] crate::storage_factory::StorageFactoryError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error(transparent)]
