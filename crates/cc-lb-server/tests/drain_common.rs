@@ -48,7 +48,9 @@ pub async fn start_app(drain_secs: u64, fake_config: AppConfig) -> RunningApp {
     config.listener.admin_addr = admin_addr;
     config.listener.metrics_addr = metrics_addr;
 
-    let app = build_app_with_path(config, Some(&config_path)).expect("build app");
+    let app = build_app_with_path(config, Some(&config_path))
+        .await
+        .expect("build app");
     let controller = app.drain_controller();
     let signals = app.signal_handle();
     let server = tokio::spawn(async move { app.start().await });
@@ -74,7 +76,7 @@ pub async fn start_router(drain_secs: u64, fake_config: AppConfig) -> RunningRou
     let mut config = config_for_upstream(upstream_addr, drain_secs);
     config.listener.proxy_addr = proxy_addr;
 
-    let app = build_app_with_path(config, None).expect("build app");
+    let app = build_app_with_path(config, None).await.expect("build app");
     let controller = app.drain_controller();
     let router = app.router;
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
