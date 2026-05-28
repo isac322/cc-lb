@@ -1,10 +1,12 @@
 use std::sync::Arc;
 
-use cc_lb_storage_api::types::{
-    ApiKeyMutation, IssueParams, KeyStatus, Limit, PrincipalKindLite, StoredApiKeyRecord,
-    UpstreamKind,
+use cc_lb_storage_api::{
+    ManagedKeyStore, StorageError,
+    types::{
+        ApiKeyMutation, IssueParams, KeyStatus, Limit, PrincipalKindLite, StoredApiKeyRecord,
+        UpstreamKind,
+    },
 };
-use cc_lb_storage_redb::{Storage, StorageError};
 use thiserror::Error;
 
 use super::secret::{self, NewKeyOutput, RedactedSecret};
@@ -13,7 +15,7 @@ pub type Result<T> = std::result::Result<T, KeyStoreError>;
 
 #[derive(Clone)]
 pub struct KeyStore {
-    storage: Arc<Storage>,
+    storage: Arc<dyn ManagedKeyStore>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -31,8 +33,6 @@ pub struct CreateParams {
 pub enum KeyStoreError {
     #[error(transparent)]
     Storage(#[from] StorageError),
-    #[error("api key index inconsistency: {reason}")]
-    IndexInconsistency { reason: String },
     #[error("api key {principal_id}/{key_id} is already revoked")]
     KeyAlreadyRevoked {
         principal_id: String,
@@ -41,11 +41,11 @@ pub enum KeyStoreError {
 }
 
 impl KeyStore {
-    pub fn new(storage: Arc<Storage>) -> Self {
+    pub fn new(storage: Arc<dyn ManagedKeyStore>) -> Self {
         Self { storage }
     }
 
-    pub fn create(
+    pub async fn create(
         &self,
         principal_id: &str,
         params: CreateParams,
@@ -73,66 +73,52 @@ impl KeyStore {
             index_hash,
         };
 
-        self.storage
-            .issue_api_key_record_with_index(principal_id, &key_id, issue_params)?;
-
         let record = self
             .storage
-            .get_api_key(principal_id, &key_id)?
-            .ok_or_else(|| KeyStoreError::IndexInconsistency {
-                reason: format!("issued api key row missing for {principal_id}/{key_id}"),
-            })?;
+            .issue(principal_id, &key_id, issue_params)
+            .await?;
 
         Ok((record, plaintext))
     }
 
-    pub fn lookup_by_index_hash(
+    pub async fn lookup_by_index_hash(
         &self,
         index_hash: &[u8; 32],
     ) -> Result<Option<(String, String, StoredApiKeyRecord)>> {
-        let Some(composite_row_key) = self.storage.get_composite_by_index(index_hash)? else {
-            return Ok(None);
-        };
-
-        let (principal_id, key_id) = decode_composite_row_key(&composite_row_key)?;
-        let Some(record) = self.storage.get_api_key(&principal_id, &key_id)? else {
-            eprintln!(
-                "WARN api key index points to missing row principal_id={principal_id} key_id={key_id}"
-            );
-            return Ok(None);
-        };
-
-        Ok(Some((principal_id, key_id, record)))
+        Ok(self.storage.lookup_by_index_hash(index_hash).await?)
     }
 
-    pub fn list_by_principal(&self, principal_id: &str) -> Result<Vec<StoredApiKeyRecord>> {
-        Ok(self.storage.list_api_keys(principal_id)?)
+    pub async fn list_by_principal(&self, principal_id: &str) -> Result<Vec<StoredApiKeyRecord>> {
+        Ok(self.storage.list_by_principal(principal_id).await?)
     }
 
-    pub fn list_all(&self) -> Result<Vec<StoredApiKeyRecord>> {
+    pub async fn list_all(&self) -> Result<Vec<StoredApiKeyRecord>> {
         Ok(self
             .storage
-            .list_api_keys_all()?
+            .list_all()
+            .await?
             .into_iter()
             .map(|(_, _, record)| record)
             .collect())
     }
 
-    pub fn disable(&self, principal_id: &str, key_id: &str) -> Result<()> {
-        self.storage.update_api_key_record(
-            principal_id,
-            key_id,
-            ApiKeyMutation {
-                status: Some(KeyStatus::Disabled),
-                ..Default::default()
-            },
-        )?;
+    pub async fn disable(&self, principal_id: &str, key_id: &str) -> Result<()> {
+        self.storage
+            .update(
+                principal_id,
+                key_id,
+                ApiKeyMutation {
+                    status: Some(KeyStatus::Disabled),
+                    ..Default::default()
+                },
+            )
+            .await?;
         Ok(())
     }
 
-    pub fn enable(&self, principal_id: &str, key_id: &str) -> Result<()> {
+    pub async fn enable(&self, principal_id: &str, key_id: &str) -> Result<()> {
         if matches!(
-            self.storage.get_api_key(principal_id, key_id)?,
+            self.storage.get(principal_id, key_id).await?,
             Some(StoredApiKeyRecord {
                 status: KeyStatus::Revoked,
                 ..
@@ -144,49 +130,191 @@ impl KeyStore {
             });
         }
 
-        self.storage.update_api_key_record(
-            principal_id,
-            key_id,
-            ApiKeyMutation {
-                status: Some(KeyStatus::Active),
-                ..Default::default()
-            },
-        )?;
+        self.storage
+            .update(
+                principal_id,
+                key_id,
+                ApiKeyMutation {
+                    status: Some(KeyStatus::Active),
+                    ..Default::default()
+                },
+            )
+            .await?;
         Ok(())
     }
 
-    pub fn revoke(&self, principal_id: &str, key_id: &str) -> Result<()> {
+    pub async fn revoke(&self, principal_id: &str, key_id: &str) -> Result<()> {
         self.storage
-            .revoke_api_key_record_zero_secret_fields(principal_id, key_id)?;
+            .revoke_zero_secrets(principal_id, key_id)
+            .await?;
         Ok(())
     }
 
-    pub fn patch(&self, principal_id: &str, key_id: &str, mutation: ApiKeyMutation) -> Result<()> {
-        self.storage
-            .update_api_key_record(principal_id, key_id, mutation)?;
+    pub async fn patch(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+        mutation: ApiKeyMutation,
+    ) -> Result<()> {
+        self.storage.update(principal_id, key_id, mutation).await?;
         Ok(())
     }
 }
 
-fn decode_composite_row_key(composite_row_key: &[u8]) -> Result<(String, String)> {
-    let Some(separator_index) = composite_row_key.iter().position(|byte| *byte == 0) else {
-        return Err(KeyStoreError::IndexInconsistency {
-            reason: "composite row key missing NUL separator".to_owned(),
-        });
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cc_lb_storage_api::types::LimitKind;
+    use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
 
-    let (principal_id_bytes, remainder) = composite_row_key.split_at(separator_index);
-    let key_id_bytes = &remainder[1..];
-    let principal_id = std::str::from_utf8(principal_id_bytes)
-        .map_err(|error| KeyStoreError::IndexInconsistency {
-            reason: format!("principal id is not UTF-8: {error}"),
-        })?
-        .to_owned();
-    let key_id = std::str::from_utf8(key_id_bytes)
-        .map_err(|error| KeyStoreError::IndexInconsistency {
-            reason: format!("key id is not UTF-8: {error}"),
-        })?
-        .to_owned();
+    #[tokio::test]
+    async fn create_lists_principal() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (_dir, store) = new_store()?;
 
-    Ok((principal_id, key_id))
+        store
+            .create("principal-1", create_params("managed key"))
+            .await?;
+
+        let listed = store.list_by_principal("principal-1").await?;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].label, "managed key");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lookup_by_index_hash_returns_matching_key()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (_dir, store) = new_store()?;
+        let (record, secret) = store
+            .create("principal-1", create_params("managed key"))
+            .await?;
+        let (key_id, _) = secret::parse(secret.expose())?;
+
+        let lookup = store
+            .lookup_by_index_hash(&record.index_hash)
+            .await?
+            .expect("index lookup returns record");
+
+        assert_eq!(lookup.0, "principal-1");
+        assert_eq!(lookup.1, key_id);
+        assert_eq!(lookup.2, record);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn revoke_removes_index() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (_dir, store) = new_store()?;
+        let (record, secret) = store
+            .create("principal-1", create_params("managed key"))
+            .await?;
+        let (key_id, _) = secret::parse(secret.expose())?;
+        let index_hash = record.index_hash;
+
+        store.revoke("principal-1", &key_id).await?;
+
+        assert!(store.lookup_by_index_hash(&index_hash).await?.is_none());
+        let listed = store.list_by_principal("principal-1").await?;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].status, KeyStatus::Revoked);
+        assert!(listed[0].revoked_at_unix_secs.is_some());
+        assert_eq!(listed[0].index_hash, [0; 32]);
+        assert_eq!(listed[0].verify_hash, [0; 32]);
+        assert_eq!(listed[0].secret_salt, [0; 16]);
+        assert_eq!(listed[0].last_4, "");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disable_keeps_index() -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (_dir, store) = new_store()?;
+        let (record, secret) = store
+            .create("principal-1", create_params("managed key"))
+            .await?;
+        let (key_id, _) = secret::parse(secret.expose())?;
+
+        store.disable("principal-1", &key_id).await?;
+
+        let lookup = store
+            .lookup_by_index_hash(&record.index_hash)
+            .await?
+            .expect("disabled key remains indexed");
+        assert_eq!(lookup.2.status, KeyStatus::Disabled);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn patch_label_change_reflected_in_list()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let (_dir, store) = new_store()?;
+        let (_record, secret) = store
+            .create("principal-1", create_params("managed key"))
+            .await?;
+        let (key_id, _) = secret::parse(secret.expose())?;
+
+        store
+            .patch(
+                "principal-1",
+                &key_id,
+                ApiKeyMutation {
+                    label: Some("renamed key".to_owned()),
+                    ..Default::default()
+                },
+            )
+            .await?;
+
+        let listed = store.list_by_principal("principal-1").await?;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].label, "renamed key");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn enable_on_revoked_returns_err() -> std::result::Result<(), Box<dyn std::error::Error>>
+    {
+        let (_dir, store) = new_store()?;
+        let (_record, secret) = store
+            .create("principal-1", create_params("managed key"))
+            .await?;
+        let (key_id, _) = secret::parse(secret.expose())?;
+
+        store.revoke("principal-1", &key_id).await?;
+        let error = store
+            .enable("principal-1", &key_id)
+            .await
+            .expect_err("revoked key cannot be enabled");
+
+        assert!(matches!(error, KeyStoreError::KeyAlreadyRevoked { .. }));
+
+        Ok(())
+    }
+
+    fn new_store() -> std::result::Result<(tempfile::TempDir, KeyStore), Box<dyn std::error::Error>>
+    {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("key_store.redb");
+        let storage = Storage::open(&path, [21; 32])?;
+        let managed_store = RedbManagedKeyStore::new(Arc::new(storage));
+        Ok((dir, KeyStore::new(Arc::new(managed_store))))
+    }
+
+    fn create_params(label: &str) -> CreateParams {
+        CreateParams {
+            upstream_kind: UpstreamKind::AnthropicKey,
+            upstream_credential_ref: "anthropic-prod".to_owned(),
+            label: label.to_owned(),
+            description: Some("test key".to_owned()),
+            expires_at_unix_secs: Some(1_800_000_000),
+            limit_overrides: vec![Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 100,
+            }],
+            principal_kind: PrincipalKindLite::Machine,
+        }
+    }
 }

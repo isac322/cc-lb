@@ -1,16 +1,16 @@
 use std::convert::Infallible;
 use std::fmt::Write as _;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use axum::body::Body as AxumBody;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    shape_request, sign_request, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
-    RequestContext, RetryDecision, RouterPlugin, SignedRequest, SignerFactory, Upstream,
-    UpstreamError,
+    ObservabilityHook, ObserveEvent, Principal, PrincipalKind, RequestContext, RetryDecision,
+    RouterPlugin, SignedRequest, SignerFactory, Upstream, UpstreamError, shape_request,
+    sign_request,
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_api::types::StoredApiKeyRecord;
@@ -18,13 +18,12 @@ use cc_lb_storage_redb::{RequestEvent, Storage};
 use http::header::{CONTENT_TYPE, RETRY_AFTER};
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
-use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use thiserror::Error;
 
-use crate::sse_relay;
 use crate::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, BuiltinAuthn};
 use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as LimitReservation};
 use crate::api_keys::types::LimitKind;
@@ -32,6 +31,7 @@ use crate::audit_writer::{AuditEntry, AuditWriterSink};
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
 use crate::hop_by_hop::strip_hop_by_hop;
+use crate::sse_relay;
 
 pub type Body = AxumBody;
 
@@ -78,8 +78,13 @@ pub trait UpstreamDispatch: Send + Sync {
     async fn dispatch(&self, request: SignedRequest) -> Result<Response<Body>, DispatchError>;
 }
 
+#[async_trait]
 pub trait LimitSubjectProvider: Send + Sync {
-    fn limit_subject(&self, ctx: &RequestContext, principal: &Principal) -> Option<LimitSubject>;
+    async fn limit_subject(
+        &self,
+        ctx: &RequestContext,
+        principal: &Principal,
+    ) -> Option<LimitSubject>;
 }
 
 pub trait ApiKeyAwareSignerFactory: Send + Sync {
@@ -97,15 +102,26 @@ struct StaticLimitSubjectProvider {
     subject: LimitSubject,
 }
 
+#[async_trait]
 impl LimitSubjectProvider for StaticLimitSubjectProvider {
-    fn limit_subject(&self, _ctx: &RequestContext, _principal: &Principal) -> Option<LimitSubject> {
+    async fn limit_subject(
+        &self,
+        _ctx: &RequestContext,
+        _principal: &Principal,
+    ) -> Option<LimitSubject> {
         Some(self.subject.clone())
     }
 }
 
+#[async_trait]
 impl LimitSubjectProvider for BuiltinAuthn {
-    fn limit_subject(&self, ctx: &RequestContext, _principal: &Principal) -> Option<LimitSubject> {
+    async fn limit_subject(
+        &self,
+        ctx: &RequestContext,
+        _principal: &Principal,
+    ) -> Option<LimitSubject> {
         self.authenticate(&ctx.downstream_headers)
+            .await
             .ok()
             .map(|success| {
                 let mut record = success.record;
@@ -297,23 +313,27 @@ impl Lifecycle {
             downstream_user_agent: header_to_string(&ctx.downstream_headers, "user-agent"),
         });
 
-        let success = match (
-            self.authn.authenticate_none_mode(&ctx.downstream_headers),
-            self.authn.authenticate(&ctx.downstream_headers),
-        ) {
-            (Some(success), _) => success,
-            (None, Ok(success)) => success,
-            (None, Err(source)) => {
-                record_key_auth_failure_metric(&source);
-                self.observe_error("authentication_error", &source.to_string(), "authn");
-                let status =
-                    StatusCode::from_u16(source.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
-                let response =
-                    anthropic_error_response(status, "authentication_error", &source.to_string());
-                self.observe_finished(status, started);
-                return Ok(response);
-            }
-        };
+        let success =
+            if let Some(success) = self.authn.authenticate_none_mode(&ctx.downstream_headers) {
+                success
+            } else {
+                match self.authn.authenticate(&ctx.downstream_headers).await {
+                    Ok(success) => success,
+                    Err(source) => {
+                        record_key_auth_failure_metric(&source);
+                        self.observe_error("authentication_error", &source.to_string(), "authn");
+                        let status = StatusCode::from_u16(source.http_status())
+                            .unwrap_or(StatusCode::UNAUTHORIZED);
+                        let response = anthropic_error_response(
+                            status,
+                            "authentication_error",
+                            &source.to_string(),
+                        );
+                        self.observe_finished(status, started);
+                        return Ok(response);
+                    }
+                }
+            };
         let principal = Principal {
             id: success.principal_id.clone(),
             kind: PrincipalKind::ApiKey,
@@ -349,7 +369,7 @@ impl Lifecycle {
             upstream: route.upstream.clone(),
         });
 
-        let mut active_limit = match self.reserve_limit(&ctx, &principal, &route) {
+        let mut active_limit = match self.reserve_limit(&ctx, &principal, &route).await {
             Ok(active_limit) => active_limit,
             Err(response) => {
                 self.observe_finished_for_principal(
@@ -475,7 +495,7 @@ impl Lifecycle {
     }
 
     #[allow(clippy::result_large_err)]
-    fn reserve_limit(
+    async fn reserve_limit(
         &self,
         ctx: &RequestContext,
         principal: &Principal,
@@ -487,7 +507,7 @@ impl Lifecycle {
         ) else {
             return Ok(None);
         };
-        let Some(subject) = subject_provider.limit_subject(ctx, principal) else {
+        let Some(subject) = subject_provider.limit_subject(ctx, principal).await else {
             return Ok(None);
         };
         let limit_request = LimitRequest::from_body(&ctx.body_bytes);
@@ -1315,8 +1335,8 @@ fn limit_rejection_response(
         HeaderValue::from_static("application/json; charset=utf-8"),
     );
     if status == StatusCode::TOO_MANY_REQUESTS
-        && let Some(value) = retry_after_seconds
-            .and_then(|sec| HeaderValue::from_str(&sec.to_string()).ok())
+        && let Some(value) =
+            retry_after_seconds.and_then(|sec| HeaderValue::from_str(&sec.to_string()).ok())
     {
         response.headers_mut().insert(RETRY_AFTER, value);
     }
