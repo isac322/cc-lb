@@ -20,11 +20,11 @@ use cc_lb_core::{
     AuditWriterSink, Lifecycle,
     api_keys::{key_store::KeyStore, limit_engine::LimitEngine, principal_view::PrincipalView},
 };
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_api::Storage;
 
 #[derive(Clone)]
 pub struct AdminState {
-    pub storage: Option<Arc<Storage>>,
+    pub storage: Option<Arc<dyn Storage>>,
     pub key_store: Option<Arc<KeyStore>>,
     pub aead: Arc<AeadService>,
     pub limit_engine: Arc<LimitEngine>,

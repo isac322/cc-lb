@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{AdminState, management::ManagementError};
 use cc_lb_core::api_keys::limit_engine::{IdentityFilter, PrincipalLimitsSnapshot};
-use cc_lb_storage_redb::{StorageError, UsageRollup, UsageRollupResolution};
+use cc_lb_storage_api::{StorageError, UsageRollup, UsageRollupResolution};
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct KeyUsageQuery {
@@ -86,12 +86,16 @@ pub async fn principal_key_usage(
         .storage
         .as_ref()
         .ok_or(ManagementError::StorageUnavailable)?;
+    let key_store = state
+        .key_store
+        .as_ref()
+        .ok_or(ManagementError::StorageUnavailable)?;
 
     if state.principal_view.load().get(&principal_id).is_none() {
         return Err(ManagementError::UnknownPrincipal);
     }
 
-    if storage.get_api_key(&principal_id, &key_id)?.is_none() {
+    if key_store.get(&principal_id, &key_id).await?.is_none() {
         return Err(ManagementError::UnknownApiKey);
     }
 
@@ -122,7 +126,9 @@ pub async fn principal_key_usage(
         .div_ceil(step_ms)
         .max(1);
 
-    let events = storage.query_request_events(range_start_ms, range_end_ms, usize::MAX)?;
+    let events = storage
+        .query_request_events(range_start_ms, range_end_ms, usize::MAX)
+        .await?;
 
     let mut aggregates: BTreeMap<u64, UsageSeries> = BTreeMap::new();
     for event in events.into_iter().filter(|event| {
@@ -176,7 +182,7 @@ pub async fn principal_usage(
         return principal_usage_error_response(PrincipalUsageError::InvalidGroupBy);
     }
 
-    match build_principal_usage(&state, &principal_id, query) {
+    match build_principal_usage(&state, &principal_id, query).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => principal_usage_error_response(error),
     }
@@ -240,7 +246,7 @@ struct PrincipalUsageAccumulator {
 const MAX_PRINCIPAL_USAGE_BUCKETS_PER_SERIES: u64 = 1_440;
 const MAX_PRINCIPAL_USAGE_GROUPED_SERIES: usize = 20;
 
-fn build_principal_usage(
+async fn build_principal_usage(
     state: &AdminState,
     principal_id: &str,
     query: PrincipalUsageQuery,
@@ -261,6 +267,7 @@ fn build_principal_usage(
         principal_usage_window(range, step, now_unix_secs);
     let rollups = storage
         .query_usage_rollups_in_range(step, window_start_unix_secs, window_end_unix_secs)
+        .await
         .map_err(PrincipalUsageError::Storage)?
         .into_iter()
         .filter(|rollup| rollup.principal == principal_id)

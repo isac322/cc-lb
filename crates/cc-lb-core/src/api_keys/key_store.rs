@@ -100,14 +100,8 @@ impl KeyStore {
         Ok(self.storage.list_by_principal(principal_id).await?)
     }
 
-    pub async fn list_all(&self) -> Result<Vec<StoredApiKeyRecord>> {
-        Ok(self
-            .storage
-            .list_all()
-            .await?
-            .into_iter()
-            .map(|(_, _, record)| record)
-            .collect())
+    pub async fn list_all(&self) -> Result<Vec<(String, String, StoredApiKeyRecord)>> {
+        Ok(self.storage.list_all().await?)
     }
 
     pub async fn disable(&self, principal_id: &str, key_id: &str) -> Result<()> {

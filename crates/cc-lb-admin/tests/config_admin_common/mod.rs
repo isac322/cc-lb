@@ -59,7 +59,7 @@ pub fn test_state(config: Config, storage: Option<Arc<RedbStorage>>) -> AdminSta
             .expect("principal view builds"),
     ));
     AdminState {
-        storage,
+        storage: storage.map(|s| s as Arc<dyn cc_lb_storage_api::Storage>),
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: LimitEngine::new(
@@ -90,7 +90,7 @@ pub fn apply_state(
             .expect("principal view builds"),
     ));
     AdminState {
-        storage: Some(test_storage()),
+        storage: Some(test_storage() as Arc<dyn cc_lb_storage_api::Storage>),
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: LimitEngine::new(

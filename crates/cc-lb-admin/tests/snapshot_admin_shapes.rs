@@ -75,7 +75,7 @@ fn test_state(config: Config, storage: Option<Arc<Storage>>) -> AdminState {
         principal_view.clone(),
     );
     AdminState {
-        storage,
+        storage: storage.map(|s| s as Arc<dyn cc_lb_storage_api::Storage>),
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine,
