@@ -27,8 +27,8 @@ impl AuditStore for PostgresStorage {
         .bind(&entry.upstream)
         .bind(entry.model.as_deref())
         .bind(i32::from(entry.status))
-        .bind(u64_to_i64(entry.input_tokens, "audit input_tokens")?)
-        .bind(u64_to_i64(entry.output_tokens, "audit output_tokens")?)
+        .bind(u64_to_i64(entry.input_tokens.unwrap_or(0), "audit input_tokens")?)
+        .bind(u64_to_i64(entry.output_tokens.unwrap_or(0), "audit output_tokens")?)
         .bind(u64_to_i64(entry.duration_ms, "audit duration_ms")?)
         .bind(entry.agent_label.as_deref())
         .bind(entry.kind.as_deref())
@@ -100,19 +100,24 @@ fn row_to_audit_entry(row: PgRow) -> StorageResult<AuditEntry> {
             row.try_get("status").map_err(map_sqlx_error)?,
             "audit status",
         )?,
-        input_tokens: i64_to_u64(
+        input_tokens: Some(i64_to_u64(
             row.try_get("input_tokens").map_err(map_sqlx_error)?,
             "audit input_tokens",
-        )?,
-        output_tokens: i64_to_u64(
+        )?),
+        output_tokens: Some(i64_to_u64(
             row.try_get("output_tokens").map_err(map_sqlx_error)?,
             "audit output_tokens",
-        )?,
+        )?),
         duration_ms: i64_to_u64(
             row.try_get("duration_ms").map_err(map_sqlx_error)?,
             "audit duration_ms",
         )?,
         agent_label: row.try_get("agent_label").map_err(map_sqlx_error)?,
+        api_key_id: None,
+        cost_usd_micros: None,
+        limit_violation: None,
+        admin_action: None,
+        actor: None,
         kind: row.try_get("kind").map_err(map_sqlx_error)?,
         payload,
     })

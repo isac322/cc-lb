@@ -663,5 +663,6 @@ fn request_event(
         output_tokens,
         duration_ms,
         error_code: None,
+        ..Default::default()
     }
 }

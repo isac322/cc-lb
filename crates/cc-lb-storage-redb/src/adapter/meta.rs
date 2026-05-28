@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use cc_lb_storage_api::{BackendKind, MetaStore, StorageResult, CURRENT_CONTRACT_VERSION};
+use cc_lb_storage_api::{BackendKind, CURRENT_CONTRACT_VERSION, MetaStore, StorageResult};
 
 use crate::RedbStorage;
 

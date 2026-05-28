@@ -719,17 +719,18 @@ impl Lifecycle {
             (self.request_event_storage.as_ref(), active_limit.as_ref())
         {
             let event = RequestEvent {
-                ts_ms: unix_now_ms(),
-                principal_id: active_limit.subject.principal_id.clone(),
-                key_id: active_limit.subject.key_id.clone(),
-                model: active_limit.request.model.clone(),
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-                cache_creation_input_tokens: usage.cache_creation_input_tokens,
-                cache_read_input_tokens: usage.cache_read_input_tokens,
-                cost_usd_micros: cost_micros as i64,
+                ts_ms: Some(unix_now_ms()),
+                principal_id: Some(active_limit.subject.principal_id.clone()),
+                key_id: Some(active_limit.subject.key_id.clone()),
+                model: Some(active_limit.request.model.clone()),
+                input_tokens: Some(usage.input_tokens),
+                output_tokens: Some(usage.output_tokens),
+                cache_creation_input_tokens: Some(usage.cache_creation_input_tokens),
+                cache_read_input_tokens: Some(usage.cache_read_input_tokens),
+                cost_usd_micros: Some(cost_micros as i64),
                 duration_ms: duration_to_ms(duration),
                 status: status.as_u16(),
+                ..Default::default()
             };
             if let Err(error) = storage.append_request_event(&event) {
                 tracing::warn!(%error, "failed to append api key request event");

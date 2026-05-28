@@ -1,11 +1,12 @@
 use std::collections::BTreeMap;
 
+use cc_lb_storage_api::types::{
+    RequestEvent, UsageRollup, UsageRollupKey, UsageRollupResolution, UsageRollupRun,
+};
 use redb::{ReadableDatabase, ReadableTable};
-use serde::{Deserialize, Serialize};
 
 use crate::{
-    REQUEST_EVENTS_V1, RequestEvent, Storage, StorageError, USAGE_ROLLUP_CHECKPOINTS_V1,
-    USAGE_ROLLUPS_V1,
+    REQUEST_EVENTS_V1, Storage, StorageError, USAGE_ROLLUP_CHECKPOINTS_V1, USAGE_ROLLUPS_V1,
 };
 
 const REQUEST_EVENT_CHECKPOINT_KEY: &str = "request_events_v1_high_water";
@@ -13,64 +14,6 @@ const MINUTE_SECS: u64 = 60;
 const HOUR_SECS: u64 = 60 * 60;
 const UNKNOWN_DIMENSION: &str = "unknown";
 const MAX_DIMENSION_CHARS: usize = 64;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum UsageRollupResolution {
-    Minute,
-    Hour,
-}
-
-impl UsageRollupResolution {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Minute => "minute",
-            Self::Hour => "hour",
-        }
-    }
-
-    fn bucket_start(self, ts: u64) -> u64 {
-        let width = match self {
-            Self::Minute => MINUTE_SECS,
-            Self::Hour => HOUR_SECS,
-        };
-        ts - (ts % width)
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-pub struct UsageRollupKey {
-    pub resolution: UsageRollupResolution,
-    pub bucket_start: u64,
-    pub principal: String,
-    pub upstream: String,
-    pub model: String,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UsageRollup {
-    pub resolution: UsageRollupResolution,
-    pub bucket_start: u64,
-    pub principal: String,
-    pub upstream: String,
-    pub model: String,
-    pub request_count: u64,
-    pub input_tokens: u64,
-    pub output_tokens: u64,
-    pub error_count: u64,
-    pub latency_count: u64,
-    pub latency_ms_sum: u64,
-    pub latency_ms_min: Option<u64>,
-    pub latency_ms_max: Option<u64>,
-    pub virtual_cost_micros: u64,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UsageRollupRun {
-    pub processed_events: u64,
-    pub updated_rollups: u64,
-    pub checkpoint: Option<u64>,
-}
 
 #[derive(Debug, Default)]
 struct UsageRollupDelta {
@@ -120,9 +63,9 @@ impl Storage {
                 let encoded_key = usage_rollup_key(&key);
                 let mut rollup = match rollups.get(encoded_key.as_slice())? {
                     Some(stored) => serde_json::from_slice(stored.value())?,
-                    None => UsageRollup::empty(&key),
+                    None => empty_usage_rollup(&key),
                 };
-                rollup.apply_delta(delta);
+                apply_delta(&mut rollup, delta);
                 let payload = serde_json::to_vec(&rollup)?;
                 rollups.insert(encoded_key.as_slice(), payload.as_slice())?;
                 updated_rollups += 1;
@@ -197,57 +140,57 @@ pub fn usage_rollup_key(key: &UsageRollupKey) -> Vec<u8> {
     encoded
 }
 
-impl UsageRollup {
-    fn empty(key: &UsageRollupKey) -> Self {
-        Self {
-            resolution: key.resolution,
-            bucket_start: key.bucket_start,
-            principal: key.principal.clone(),
-            upstream: key.upstream.clone(),
-            model: key.model.clone(),
-            request_count: 0,
-            input_tokens: 0,
-            output_tokens: 0,
-            error_count: 0,
-            latency_count: 0,
-            latency_ms_sum: 0,
-            latency_ms_min: None,
-            latency_ms_max: None,
-            virtual_cost_micros: 0,
-        }
-    }
-
-    fn apply_delta(&mut self, delta: UsageRollupDelta) {
-        self.request_count += delta.request_count;
-        self.input_tokens += delta.input_tokens;
-        self.output_tokens += delta.output_tokens;
-        self.error_count += delta.error_count;
-        self.latency_count += delta.latency_count;
-        self.latency_ms_sum += delta.latency_ms_sum;
-        self.latency_ms_min = min_option(self.latency_ms_min, delta.latency_ms_min);
-        self.latency_ms_max = max_option(self.latency_ms_max, delta.latency_ms_max);
-        self.virtual_cost_micros += delta.virtual_cost_micros;
+fn empty_usage_rollup(key: &UsageRollupKey) -> UsageRollup {
+    UsageRollup {
+        resolution: key.resolution,
+        bucket_start: key.bucket_start,
+        principal: key.principal.clone(),
+        upstream: key.upstream.clone(),
+        model: key.model.clone(),
+        request_count: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        error_count: 0,
+        latency_count: 0,
+        latency_ms_sum: 0,
+        latency_ms_min: None,
+        latency_ms_max: None,
+        virtual_cost_micros: 0,
     }
 }
 
-impl UsageRollupKey {
-    fn from_event(resolution: UsageRollupResolution, event: &RequestEvent) -> Self {
-        Self {
-            resolution,
-            bucket_start: resolution.bucket_start(event.ts_ms / 1000),
-            principal: normalize_dimension(Some(event.principal_id.as_str())),
-            upstream: UNKNOWN_DIMENSION.to_owned(),
-            model: normalize_dimension(Some(event.model.as_str())),
-        }
+fn apply_delta(rollup: &mut UsageRollup, delta: UsageRollupDelta) {
+    rollup.request_count += delta.request_count;
+    rollup.input_tokens += delta.input_tokens;
+    rollup.output_tokens += delta.output_tokens;
+    rollup.error_count += delta.error_count;
+    rollup.latency_count += delta.latency_count;
+    rollup.latency_ms_sum += delta.latency_ms_sum;
+    rollup.latency_ms_min = min_option(rollup.latency_ms_min, delta.latency_ms_min);
+    rollup.latency_ms_max = max_option(rollup.latency_ms_max, delta.latency_ms_max);
+    rollup.virtual_cost_micros += delta.virtual_cost_micros;
+}
+
+fn usage_rollup_key_from_event(
+    resolution: UsageRollupResolution,
+    event: &RequestEvent,
+) -> UsageRollupKey {
+    UsageRollupKey {
+        resolution,
+        bucket_start: bucket_start(resolution, event_ts_ms(event) / 1000),
+        principal: normalize_dimension(event.principal_id.as_deref()),
+        upstream: UNKNOWN_DIMENSION.to_owned(),
+        model: normalize_dimension(event.model.as_deref()),
     }
 }
 
 impl UsageRollupDelta {
     fn add_event(&mut self, event: &RequestEvent) {
         self.request_count += 1;
-        self.input_tokens +=
-            event.input_tokens + event.cache_creation_input_tokens + event.cache_read_input_tokens;
-        self.output_tokens += event.output_tokens;
+        self.input_tokens += event.input_tokens.unwrap_or(0)
+            + event.cache_creation_input_tokens.unwrap_or(0)
+            + event.cache_read_input_tokens.unwrap_or(0);
+        self.output_tokens += event.output_tokens.unwrap_or(0);
         if event.status >= 400 {
             self.error_count += 1;
         }
@@ -255,17 +198,29 @@ impl UsageRollupDelta {
         self.latency_ms_sum += event.duration_ms;
         self.latency_ms_min = min_option(self.latency_ms_min, Some(event.duration_ms));
         self.latency_ms_max = max_option(self.latency_ms_max, Some(event.duration_ms));
-        self.virtual_cost_micros += event.cost_usd_micros.max(0) as u64;
+        self.virtual_cost_micros += event.cost_usd_micros.unwrap_or(0).max(0) as u64;
     }
 }
 
 fn add_event_deltas(deltas: &mut BTreeMap<UsageRollupKey, UsageRollupDelta>, event: &RequestEvent) {
     for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
         deltas
-            .entry(UsageRollupKey::from_event(resolution, event))
+            .entry(usage_rollup_key_from_event(resolution, event))
             .or_default()
             .add_event(event);
     }
+}
+
+fn bucket_start(resolution: UsageRollupResolution, ts: u64) -> u64 {
+    let width = match resolution {
+        UsageRollupResolution::Minute => MINUTE_SECS,
+        UsageRollupResolution::Hour => HOUR_SECS,
+    };
+    ts - (ts % width)
+}
+
+fn event_ts_ms(event: &RequestEvent) -> u64 {
+    event.ts_ms.unwrap_or_else(|| event.ts.saturating_mul(1000))
 }
 
 fn normalize_dimension(value: Option<&str>) -> String {

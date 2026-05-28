@@ -5,14 +5,9 @@ expression: "serde_json::to_string_pretty(&json).unwrap()"
 {
   "entries": [
     {
-      "actor": null,
-      "admin_action": null,
       "agent_label": null,
-      "api_key_id": null,
-      "cost_usd_micros": null,
       "duration_ms": 100,
       "input_tokens": 10,
-      "limit_violation": null,
       "model": null,
       "output_tokens": 10,
       "principal_id": "alice",

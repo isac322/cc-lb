@@ -1,6 +1,5 @@
 ---
 source: crates/cc-lb-admin/tests/snapshot_admin_shapes.rs
-assertion_line: 105
 expression: "serde_json::to_string_pretty(&json).unwrap()"
 ---
 {
@@ -45,6 +44,7 @@ expression: "serde_json::to_string_pretty(&json).unwrap()"
     "metrics_addr": "[::1]:9091",
     "proxy_addr": "[::]:8080"
   },
+  "oauth": {},
   "observability": {
     "log_redaction": true,
     "tracing_level": "info",

@@ -101,6 +101,8 @@ impl From<AuditEntry> for StoredAuditEntry {
             limit_violation: value.limit_violation,
             admin_action: value.admin_action,
             actor: value.actor,
+            kind: None,
+            payload: None,
         }
     }
 }

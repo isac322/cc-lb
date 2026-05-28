@@ -1,15 +1,15 @@
 use async_trait::async_trait;
-use cc_lb_storage_api::{types::AuditEntry as ApiAuditEntry, AuditStore, StorageResult};
+use cc_lb_storage_api::{AuditStore, StorageResult, types::AuditEntry};
 
-use crate::{AuditEntry as RedbAuditEntry, RedbStorage};
+use crate::RedbStorage;
 
 use super::error_map::{map_join_err, map_redb_err};
 
 #[async_trait]
 impl AuditStore for RedbStorage {
-    async fn append_audit(&self, entry: &ApiAuditEntry) -> StorageResult<()> {
+    async fn append_audit(&self, entry: &AuditEntry) -> StorageResult<()> {
         let storage = self.clone();
-        let entry = to_redb_audit_entry(entry);
+        let entry = entry.clone();
 
         tokio::task::spawn_blocking(move || RedbStorage::append_audit(&storage, &entry))
             .await
@@ -23,7 +23,7 @@ impl AuditStore for RedbStorage {
         since: u64,
         until: u64,
         limit: usize,
-    ) -> StorageResult<Vec<ApiAuditEntry>> {
+    ) -> StorageResult<Vec<AuditEntry>> {
         let storage = self.clone();
         let principal_id = principal_id.map(str::to_owned);
 
@@ -32,7 +32,6 @@ impl AuditStore for RedbStorage {
         })
         .await
         .map_err(map_join_err)?
-        .map(|entries| entries.into_iter().map(to_api_audit_entry).collect())
         .map_err(map_redb_err)
     }
 
@@ -43,41 +42,5 @@ impl AuditStore for RedbStorage {
             .await
             .map_err(map_join_err)?
             .map_err(map_redb_err)
-    }
-}
-
-fn to_redb_audit_entry(entry: &ApiAuditEntry) -> RedbAuditEntry {
-    RedbAuditEntry {
-        ts: entry.ts,
-        request_id: entry.request_id.clone(),
-        principal_id: entry.principal_id.clone(),
-        route: entry.route.clone(),
-        upstream: entry.upstream.clone(),
-        model: entry.model.clone(),
-        status: entry.status,
-        input_tokens: entry.input_tokens,
-        output_tokens: entry.output_tokens,
-        duration_ms: entry.duration_ms,
-        agent_label: entry.agent_label.clone(),
-        kind: entry.kind.clone(),
-        payload: entry.payload.clone(),
-    }
-}
-
-fn to_api_audit_entry(entry: RedbAuditEntry) -> ApiAuditEntry {
-    ApiAuditEntry {
-        ts: entry.ts,
-        request_id: entry.request_id,
-        principal_id: entry.principal_id,
-        route: entry.route,
-        upstream: entry.upstream,
-        model: entry.model,
-        status: entry.status,
-        input_tokens: entry.input_tokens,
-        output_tokens: entry.output_tokens,
-        duration_ms: entry.duration_ms,
-        agent_label: entry.agent_label,
-        kind: entry.kind,
-        payload: entry.payload,
     }
 }

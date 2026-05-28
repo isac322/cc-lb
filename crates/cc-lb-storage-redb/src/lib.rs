@@ -1,9 +1,9 @@
 #![forbid(unsafe_code)]
 
+mod adapter;
 mod audit;
 mod config_store;
-#[path = "adapter/error_map.rs"]
-mod error_map;
+use adapter::error_map;
 mod key_index;
 pub mod managed_keys;
 mod migration;
@@ -18,12 +18,12 @@ use std::sync::Arc;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use thiserror::Error;
 
-pub use audit::AuditEntry;
-pub use config_store::{ConfigDraftState, HistoryEntry, HistorySummary};
-pub use oauth::{OAuthCredentials, api_key_storage_key, oauth_key};
+pub use cc_lb_storage_api::types::{
+    AuditEntry, ConfigDraftState, HistoryEntry, HistorySummary, OAuthCredentials, RequestEvent,
+    RequestEventUpstream, UsageRollup, UsageRollupResolution, UsageRollupRun,
+};
+pub use oauth::{api_key_storage_key, oauth_key};
 pub use price_catalog::PriceSnapshot;
-pub use request_events::{RequestEvent, RequestEventUpstream};
-pub use usage_rollups::{UsageRollup, UsageRollupResolution, UsageRollupRun};
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 1;
 

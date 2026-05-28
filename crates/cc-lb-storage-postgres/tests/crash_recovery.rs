@@ -320,8 +320,12 @@ async fn seed_request_events(storage: &PostgresStorage) -> Result<(), Box<dyn st
                 status: 200,
                 input_tokens: Some(10 + index),
                 output_tokens: Some(20 + index),
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
+                cost_usd_micros: None,
                 duration_ms: 30 + index,
                 error_code: None,
+                ..Default::default()
             })
             .await?;
     }
