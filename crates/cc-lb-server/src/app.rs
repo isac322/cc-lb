@@ -643,7 +643,7 @@ fn init_observability(config: &mut Config) -> Result<TracingGuard, BuildError> {
     .map_err(BuildError::from)
 }
 
-async fn open_storage(
+pub async fn open_storage(
     config: &Config,
 ) -> Result<
     (
