@@ -6,3 +6,4 @@ pub mod managed_keys;
 pub mod multi_instance;
 pub mod pool_exhaustion;
 pub mod revisioning_meta;
+pub mod storage_roundtrips;
