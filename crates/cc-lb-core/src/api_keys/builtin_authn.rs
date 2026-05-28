@@ -81,9 +81,14 @@ impl BuiltinAuthn {
         }
     }
 
+    pub(crate) fn principal_view_cell(&self) -> Arc<arc_swap::ArcSwap<PrincipalView>> {
+        self.principal_view.clone()
+    }
+
     pub fn authenticate(
         &self,
         headers: &http::HeaderMap,
+        view: &PrincipalView,
     ) -> Result<AuthnSuccess, BuiltinAuthError> {
         let input = headers
             .get("x-api-key")
@@ -119,7 +124,6 @@ impl BuiltinAuthn {
             }
         }
 
-        let view = self.principal_view.load();
         view.get(&principal_id)
             .ok_or(BuiltinAuthError::PrincipalMissing)?;
         if view.principal_status(&principal_id) != PrincipalStatus::Active {

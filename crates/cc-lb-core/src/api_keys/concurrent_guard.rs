@@ -1,12 +1,12 @@
 #[cfg(loom)]
-use loom::sync::atomic::AtomicU32;
-#[cfg(loom)]
 use loom::sync::Arc;
+#[cfg(loom)]
+use loom::sync::atomic::AtomicU32;
+#[cfg(not(loom))]
+use std::sync::Arc;
 #[cfg(not(loom))]
 use std::sync::atomic::AtomicU32;
 use std::sync::atomic::Ordering;
-#[cfg(not(loom))]
-use std::sync::Arc;
 
 use dashmap::DashMap;
 

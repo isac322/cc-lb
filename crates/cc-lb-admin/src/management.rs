@@ -678,7 +678,8 @@ async fn apply_principal_change<T, F>(
 where
     F: FnMut(&mut Value) -> Result<T>,
 {
-    crate::settings::apply_draft_principal_change(storage, current, now_unix_secs, transform).await?
+    crate::settings::apply_draft_principal_change(storage, current, now_unix_secs, transform)
+        .await?
 }
 
 fn principals_object(principals: &mut Value) -> Result<&mut serde_json::Map<String, Value>> {

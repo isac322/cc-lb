@@ -6,7 +6,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use cc_lb_core::SseBatchConfig;
 use http_body_util::BodyExt;
-use sse_relay_support::{body_from_chunks, collect_response_body, relay_for, RecordingHook};
+use sse_relay_support::{RecordingHook, body_from_chunks, collect_response_body, relay_for};
 
 const MESSAGE_START_WITH_CACHE: &str = "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":10,\"cache_creation_input_tokens\":5,\"cache_read_input_tokens\":3,\"output_tokens\":1}}}\n\n";
 const CONTENT_DELTA: &str = "event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\n\n";

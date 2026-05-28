@@ -1,7 +1,10 @@
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
-use axum::{body::Body, http::{Request, StatusCode}};
+use axum::{
+    body::Body,
+    http::{Request, StatusCode},
+};
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_core::api_keys::{
@@ -12,7 +15,9 @@ use tower::ServiceExt;
 
 fn test_state() -> AdminState {
     let config = Config::default();
-    let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config)));
+    let principal_view = Arc::new(ArcSwap::from(
+        PrincipalView::from_config(&config, std::collections::HashMap::new()).expect("principal view builds"),
+    ));
     AdminState {
         storage: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),

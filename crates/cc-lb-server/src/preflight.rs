@@ -7,6 +7,7 @@ use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DEFAULT_REDB_PATH, PluginRef, StorageConfig, TlsConfig};
+use cc_lb_core::api_keys::principal_view::PrincipalView;
 use cc_lb_plugin_api::{PluginManifest, PluginRuntime};
 use cc_lb_runtime_extism::ExtismRuntime;
 use thiserror::Error;
@@ -46,6 +47,8 @@ pub enum PreflightError {
     TlsCertMissing(PathBuf),
     #[error("failed to parse TLS files: {0}")]
     TlsParse(String),
+    #[error(transparent)]
+    Config(#[from] cc_lb_config::ConfigError),
 }
 
 pub async fn run(
@@ -92,6 +95,8 @@ async fn run_inner(
     }
 
     let runtime = ExtismRuntime::new();
+    PrincipalView::from_config(cfg, std::collections::HashMap::new())?;
+    report.successes.push("principal view built".to_owned());
     if let Some(plugin) = &cfg.plugins.router_plugin {
         dry_load_plugin(&runtime, plugin, PluginLoadKind::Router)?;
         report
@@ -103,6 +108,29 @@ async fn run_inner(
         report
             .successes
             .push(format!("plugin {} dry-loaded", plugin.name));
+    }
+
+    let principals = cfg.principals.iter().collect::<BTreeMap<_, _>>();
+    for (principal_name, principal) in principals {
+        if let Some(plugin) = &principal.router_plugin {
+            let path = format!("principals.{principal_name}.router_plugin");
+            dry_load_plugin(&runtime, plugin, PluginLoadKind::Router)
+                .map_err(|error| PreflightError::Plugin(format!("{path}: {error}")))?;
+            report
+                .successes
+                .push(format!("plugin {} dry-loaded ({path})", plugin.name));
+        }
+
+        if let Some(plugins) = &principal.observability_hooks {
+            for (index, plugin) in plugins.iter().enumerate() {
+                let path = format!("principals.{principal_name}.observability_hooks.{index}");
+                dry_load_plugin(&runtime, plugin, PluginLoadKind::Observability)
+                    .map_err(|error| PreflightError::Plugin(format!("{path}: {error}")))?;
+                report
+                    .successes
+                    .push(format!("plugin {} dry-loaded ({path})", plugin.name));
+            }
+        }
     }
 
     for name in cfg.upstreams.keys() {
@@ -340,5 +368,160 @@ fn ulimit_warning() -> Option<String> {
     #[cfg(not(target_os = "linux"))]
     {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    use cc_lb_config::{Config, PluginRef, PrincipalSpec};
+    use tempfile::TempDir;
+
+    use super::{PreflightOptions, run_offline};
+
+    const ROUTER_WASM: &[u8] = &[
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f,
+        0x03, 0x02, 0x01, 0x00, 0x07, 0x09, 0x01, 0x05, 0x72, 0x6f, 0x75, 0x74, 0x65, 0x00, 0x00,
+        0x0a, 0x06, 0x01, 0x04, 0x00, 0x41, 0x00, 0x0b,
+    ];
+    const OBSERVE_WASM: &[u8] = &[
+        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f,
+        0x03, 0x02, 0x01, 0x00, 0x07, 0x0b, 0x01, 0x07, 0x6f, 0x62, 0x73, 0x65, 0x72, 0x76, 0x65,
+        0x00, 0x00, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x41, 0x00, 0x0b,
+    ];
+
+    struct PluginFixtures {
+        dir: TempDir,
+        router: PathBuf,
+        observe: PathBuf,
+    }
+
+    impl PluginFixtures {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().expect("tempdir is created");
+            let router = write_plugin(dir.path(), "router.wasm", ROUTER_WASM);
+            let observe = write_plugin(dir.path(), "observe.wasm", OBSERVE_WASM);
+            Self {
+                dir,
+                router,
+                observe,
+            }
+        }
+
+        fn missing_path(&self, name: &str) -> PathBuf {
+            self.dir.path().join(name)
+        }
+    }
+
+    #[tokio::test]
+    async fn preflight_aborts_on_principal_plugin_failure() {
+        let fixtures = PluginFixtures::new();
+        let mut config = config_with_global_plugins(&fixtures);
+        config.principals.insert(
+            "alice".to_owned(),
+            principal(
+                Some(plugin("alice-router", &fixtures.router)),
+                Some(vec![plugin("alice-hook", &fixtures.observe)]),
+            ),
+        );
+        config.principals.insert(
+            "bob".to_owned(),
+            principal(
+                Some(plugin(
+                    "bob-router",
+                    &fixtures.missing_path("bob-router.wasm"),
+                )),
+                Some(vec![plugin("bob-hook", &fixtures.observe)]),
+            ),
+        );
+        config.principals.insert(
+            "carol".to_owned(),
+            principal(
+                Some(plugin("carol-router", &fixtures.router)),
+                Some(vec![plugin("carol-hook", &fixtures.observe)]),
+            ),
+        );
+
+        let error = run_offline(&config, PreflightOptions { skip_bind: true })
+            .await
+            .expect_err("bob's bad router plugin must abort preflight");
+        let message = error.to_string();
+
+        assert!(
+            message.contains("principals.bob.router_plugin"),
+            "error must include the failing principal plugin path, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_all_valid() {
+        let fixtures = PluginFixtures::new();
+        let mut config = config_with_global_plugins(&fixtures);
+        config.principals.insert(
+            "alice".to_owned(),
+            principal(
+                Some(plugin("alice-router", &fixtures.router)),
+                Some(vec![plugin("alice-hook", &fixtures.observe)]),
+            ),
+        );
+        config.principals.insert(
+            "bob".to_owned(),
+            principal(
+                Some(plugin("bob-router", &fixtures.router)),
+                Some(vec![plugin("bob-hook-a", &fixtures.observe)]),
+            ),
+        );
+
+        let report = run_offline(&config, PreflightOptions { skip_bind: true })
+            .await
+            .expect("global and per-principal plugins should all dry-load");
+
+        for expected in [
+            "principal view built",
+            "plugin alice-router dry-loaded (principals.alice.router_plugin)",
+            "plugin alice-hook dry-loaded (principals.alice.observability_hooks.0)",
+            "plugin bob-router dry-loaded (principals.bob.router_plugin)",
+            "plugin bob-hook-a dry-loaded (principals.bob.observability_hooks.0)",
+        ] {
+            assert!(
+                report.successes.iter().any(|entry| entry == expected),
+                "preflight should report success for {expected}: {:?}",
+                report.successes
+            );
+        }
+    }
+
+    fn config_with_global_plugins(fixtures: &PluginFixtures) -> Config {
+        let mut config = Config::default();
+        config.plugins.router_plugin = Some(plugin("global-router", &fixtures.router));
+        config.plugins.observability_hooks = vec![plugin("global-hook", &fixtures.observe)];
+        config
+    }
+
+    fn principal(
+        router_plugin: Option<PluginRef>,
+        observability_hooks: Option<Vec<PluginRef>>,
+    ) -> PrincipalSpec {
+        PrincipalSpec {
+            router_plugin,
+            observability_hooks,
+            ..PrincipalSpec::default()
+        }
+    }
+
+    fn plugin(name: &str, wasm_path: &Path) -> PluginRef {
+        PluginRef {
+            name: name.to_owned(),
+            wasm_path: Some(wasm_path.to_owned()),
+            ..PluginRef::default()
+        }
+    }
+
+    fn write_plugin(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        fs::write(&path, bytes).expect("wasm fixture is written");
+        path
     }
 }

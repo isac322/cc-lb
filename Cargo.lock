@@ -522,6 +522,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha2 0.11.0",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -722,6 +723,7 @@ dependencies = [
  "extism",
  "http",
  "metrics",
+ "proptest",
  "ring",
  "serde",
  "serde_json",
@@ -779,6 +781,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "wat",
 ]
 
 [[package]]
