@@ -13,7 +13,8 @@ use cc_lb_plugin_api::{
     UpstreamError,
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
-use cc_lb_storage_redb::{RequestEvent, Storage, StoredApiKeyRecord};
+use cc_lb_storage_api::types::StoredApiKeyRecord;
+use cc_lb_storage_redb::{RequestEvent, Storage};
 use http::header::{CONTENT_TYPE, RETRY_AFTER};
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};

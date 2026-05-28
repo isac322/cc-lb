@@ -2,10 +2,11 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use bincode::config::standard;
 use bincode::serde::{decode_from_slice, encode_to_vec};
-use cc_lb_storage_redb::{
-    api_key_storage_key, ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind,
-    PrincipalKindLite, Storage, StoredApiKeyRecord, UpstreamKind, API_KEYS_V1,
+use cc_lb_storage_api::types::{
+    ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind, PrincipalKindLite,
+    StoredApiKeyRecord, UpstreamKind,
 };
+use cc_lb_storage_redb::{api_key_storage_key, Storage, API_KEYS_V1};
 use redb::ReadableDatabase;
 use serde::{Deserialize, Serialize};
 

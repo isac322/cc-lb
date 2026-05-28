@@ -1,9 +1,10 @@
 use std::sync::Arc;
 
-use cc_lb_storage_redb::{
-    ApiKeyMutation, IssueParams, KeyStatus, Limit, PrincipalKindLite, Storage, StorageError,
-    StoredApiKeyRecord, UpstreamKind,
+use cc_lb_storage_api::types::{
+    ApiKeyMutation, IssueParams, KeyStatus, Limit, PrincipalKindLite, StoredApiKeyRecord,
+    UpstreamKind,
 };
+use cc_lb_storage_redb::{Storage, StorageError};
 use thiserror::Error;
 
 use super::secret::{self, NewKeyOutput, RedactedSecret};

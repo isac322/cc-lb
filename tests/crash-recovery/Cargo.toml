@@ -8,6 +8,7 @@ publish = false
 
 [dependencies]
 cc-lb-core = { path = "../../crates/cc-lb-core" }
+cc-lb-storage-api = { path = "../../crates/cc-lb-storage-api" }
 cc-lb-storage-redb = { path = "../../crates/cc-lb-storage-redb", features = ["crash-test-hooks"] }
 redb.workspace = true
 serde_json.workspace = true

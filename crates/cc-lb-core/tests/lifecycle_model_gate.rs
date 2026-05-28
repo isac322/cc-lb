@@ -10,7 +10,7 @@ use cc_lb_config::{Config, PrincipalSpec, PrincipalType};
 use cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_core::api_keys::limit_engine::LimitEngine;
 use cc_lb_core::api_keys::principal_view::PrincipalView;
-use cc_lb_storage_redb::{KeyStatus, StoredApiKeyRecord};
+use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
 use http::StatusCode;
 
 use common::{

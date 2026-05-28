@@ -17,10 +17,7 @@ use thiserror::Error;
 
 pub use audit::AuditEntry;
 pub use config_store::{ConfigDraftState, HistoryEntry, HistorySummary};
-pub use oauth::{
-    ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind, OAuthCredentials, PrincipalKindLite,
-    StoredApiKeyRecord, UpstreamKind, api_key_storage_key, oauth_key,
-};
+pub use oauth::{OAuthCredentials, api_key_storage_key, oauth_key};
 pub use price_catalog::PriceSnapshot;
 pub use request_events::{RequestEvent, RequestEventUpstream};
 pub use usage_rollups::{UsageRollup, UsageRollupResolution, UsageRollupRun};

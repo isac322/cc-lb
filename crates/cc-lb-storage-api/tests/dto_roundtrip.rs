@@ -2,10 +2,10 @@
 
 use cc_lb_storage_api::{
     AnthropicApiKeyCredential, ApiKeyRecord, AuditEntry, BackendKind, BucketKind, ConfigDraftState,
-    HistoryEntry, HistorySummary, IssuedKey, OAuthCredentials, PrincipalLimitIdentityKind,
-    PrincipalLimitKind, PrincipalLimitState, RequestEvent, RequestEventUpstream, StorageError,
-    StoredApiKeyRecord, StoredHistoryEntry, UsageRollup, UsageRollupKey, UsageRollupResolution,
-    UsageRollupRun,
+    HistoryEntry, HistorySummary, IssuedKey, KeyStatus, Limit, LimitKind, OAuthCredentials,
+    PrincipalKindLite, PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState,
+    RequestEvent, RequestEventUpstream, StorageError, StoredApiKeyRecord, StoredHistoryEntry,
+    UpstreamKind, UsageRollup, UsageRollupKey, UsageRollupResolution, UsageRollupRun,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -219,10 +219,25 @@ backend = 'redb'"
         revoked_at_unix_secs: Some(1_716_000_020),
     });
     assert_json_roundtrip(StoredApiKeyRecord {
-        label: Some("default".to_owned()),
+        label: "default".to_owned(),
         issued_at_unix_secs: 1_716_000_010,
         revoked_at_unix_secs: Some(1_716_000_020),
         key_hash_b64: "YWJjMTIz".to_owned(),
+        verify_hash: [1; 32],
+        secret_salt: [2; 16],
+        upstream_kind: UpstreamKind::AnthropicKey,
+        upstream_credential_ref: "anthropic-prod".to_owned(),
+        limit_overrides: vec![Limit {
+            kind: LimitKind::Requests,
+            window_secs: 60,
+            cap_micros: 100,
+        }],
+        status: KeyStatus::Active,
+        expires_at_unix_secs: Some(1_800_000_000),
+        last_4: "c123".to_owned(),
+        description: Some("default key".to_owned()),
+        principal_kind: PrincipalKindLite::Machine,
+        index_hash: [3; 32],
     });
 
     assert_json_roundtrip(BucketKind::OutputTokens);

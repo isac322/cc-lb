@@ -6,7 +6,7 @@ use arc_swap::ArcSwap;
 use cc_lb_loom_tests::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_loom_tests::api_keys::limit_engine::LimitEngine;
 use cc_lb_loom_tests::api_keys::principal_view::PrincipalView;
-use cc_lb_storage_redb::{
+use cc_lb_storage_api::types::{
     KeyStatus, Limit as StoredLimit, LimitKind as StoredLimitKind, StoredApiKeyRecord,
 };
 use loom::sync::{Arc, Mutex};

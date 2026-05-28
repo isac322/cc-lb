@@ -4,7 +4,7 @@ use std::sync::{Arc, Weak};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
-use cc_lb_storage_redb::{KeyStatus as StoredKeyStatus, StoredApiKeyRecord};
+use cc_lb_storage_api::types::{KeyStatus as StoredKeyStatus, StoredApiKeyRecord};
 use parking_lot::RwLock;
 use serde::Serialize;
 
@@ -716,14 +716,14 @@ fn effective_limits(record: &StoredApiKeyRecord, defaults: &[Limit]) -> Vec<Limi
     limits
 }
 
-fn convert_limit_kind(kind: cc_lb_storage_redb::LimitKind) -> LimitKind {
+fn convert_limit_kind(kind: cc_lb_storage_api::types::LimitKind) -> LimitKind {
     match kind {
-        cc_lb_storage_redb::LimitKind::Requests => LimitKind::Requests,
-        cc_lb_storage_redb::LimitKind::InputTokens => LimitKind::InputTokens,
-        cc_lb_storage_redb::LimitKind::OutputTokens => LimitKind::OutputTokens,
-        cc_lb_storage_redb::LimitKind::TotalTokens => LimitKind::TotalTokens,
-        cc_lb_storage_redb::LimitKind::CostUsd => LimitKind::CostUsd,
-        cc_lb_storage_redb::LimitKind::Concurrent => LimitKind::Concurrent,
+        cc_lb_storage_api::types::LimitKind::Requests => LimitKind::Requests,
+        cc_lb_storage_api::types::LimitKind::InputTokens => LimitKind::InputTokens,
+        cc_lb_storage_api::types::LimitKind::OutputTokens => LimitKind::OutputTokens,
+        cc_lb_storage_api::types::LimitKind::TotalTokens => LimitKind::TotalTokens,
+        cc_lb_storage_api::types::LimitKind::CostUsd => LimitKind::CostUsd,
+        cc_lb_storage_api::types::LimitKind::Concurrent => LimitKind::Concurrent,
     }
 }
 
