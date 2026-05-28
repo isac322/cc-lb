@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use cc_lb_storage_api::Storage;
+
 const DAY_MS: u64 = 86_400_000;
 const DAY_SECS: u64 = 86_400;
 const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
@@ -9,14 +11,33 @@ const PRUNE_BATCH_SLEEP: Duration = Duration::from_millis(50);
 const PRUNE_TICK: Duration = Duration::from_secs(DAY_SECS);
 
 pub struct UsagePruner {
-    storage: Arc<cc_lb_storage_redb::Storage>,
+    storage: Arc<dyn Storage>,
     retention_days: u64,
 }
 
+pub trait IntoUsagePrunerStorage {
+    fn into_usage_pruner_storage(self) -> Arc<dyn Storage>;
+}
+
+impl IntoUsagePrunerStorage for Arc<dyn Storage> {
+    fn into_usage_pruner_storage(self) -> Arc<dyn Storage> {
+        self
+    }
+}
+
+impl<Store> IntoUsagePrunerStorage for Arc<Store>
+where
+    Store: Storage,
+{
+    fn into_usage_pruner_storage(self) -> Arc<dyn Storage> {
+        self
+    }
+}
+
 impl UsagePruner {
-    pub fn new(storage: Arc<cc_lb_storage_redb::Storage>, retention_days: u64) -> Self {
+    pub fn new(storage: impl IntoUsagePrunerStorage, retention_days: u64) -> Self {
         Self {
-            storage,
+            storage: storage.into_usage_pruner_storage(),
             retention_days,
         }
     }
@@ -73,20 +94,14 @@ impl UsagePruner {
     async fn prune_request_events(&self, cutoff_ms_x_1m: u64) -> u64 {
         let mut total_removed = 0;
         loop {
-            let storage = Arc::clone(&self.storage);
-            let batch = tokio::task::spawn_blocking(move || {
-                storage.prune_request_events_before(cutoff_ms_x_1m, PRUNE_BATCH_SIZE)
-            })
-            .await;
-
-            let removed = match batch {
-                Ok(Ok(removed)) => removed,
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "usage pruner failed to prune request events");
-                    break;
-                }
+            let removed = match self
+                .storage
+                .prune_request_events_before(cutoff_ms_x_1m, PRUNE_BATCH_SIZE)
+                .await
+            {
+                Ok(removed) => removed,
                 Err(error) => {
-                    tracing::warn!(%error, "usage pruner request events task failed");
+                    tracing::warn!(%error, "usage pruner failed to prune request events");
                     break;
                 }
             };
@@ -108,20 +123,14 @@ impl UsagePruner {
     async fn prune_audit_log(&self, cutoff_ts_x_1m: u64) -> u64 {
         let mut total_removed = 0;
         loop {
-            let storage = Arc::clone(&self.storage);
-            let batch = tokio::task::spawn_blocking(move || {
-                storage.prune_audit_before(cutoff_ts_x_1m, PRUNE_BATCH_SIZE)
-            })
-            .await;
-
-            let removed = match batch {
-                Ok(Ok(removed)) => removed,
-                Ok(Err(error)) => {
-                    tracing::warn!(%error, "usage pruner failed to prune audit log");
-                    break;
-                }
+            let removed = match self
+                .storage
+                .prune_audit_before(cutoff_ts_x_1m, PRUNE_BATCH_SIZE)
+                .await
+            {
+                Ok(removed) => removed,
                 Err(error) => {
-                    tracing::warn!(%error, "usage pruner audit log task failed");
+                    tracing::warn!(%error, "usage pruner failed to prune audit log");
                     break;
                 }
             };

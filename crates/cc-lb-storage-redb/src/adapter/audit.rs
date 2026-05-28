@@ -43,4 +43,19 @@ impl AuditStore for RedbStorage {
             .map_err(map_join_err)?
             .map_err(map_redb_err)
     }
+
+    async fn prune_audit_before(
+        &self,
+        cutoff_ts_x_1m: u64,
+        batch_size: usize,
+    ) -> StorageResult<u64> {
+        let storage = self.clone();
+
+        tokio::task::spawn_blocking(move || {
+            RedbStorage::prune_audit_before(&storage, cutoff_ts_x_1m, batch_size)
+        })
+        .await
+        .map_err(map_join_err)?
+        .map_err(map_redb_err)
+    }
 }
