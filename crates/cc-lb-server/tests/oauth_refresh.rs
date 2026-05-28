@@ -300,7 +300,7 @@ async fn metric_counter_increments_per_outcome() {
     let metrics = prometheus();
     let fixture = Fixture::new().await;
     let before_success = counter(metrics, "metric-success", "success");
-    let before_failure = counter(metrics, "metric-failure", "failure");
+    let before_failure = counter(metrics, "metric-failure", "http_error");
     fixture
         .create_oauth_upstream("metric-success", now_secs())
         .await;
@@ -340,7 +340,7 @@ async fn metric_counter_increments_per_outcome() {
         .expect("sweep");
 
     assert!(counter(metrics, "metric-success", "success") > before_success);
-    assert!(counter(metrics, "metric-failure", "failure") > before_failure);
+    assert!(counter(metrics, "metric-failure", "http_error") > before_failure);
 }
 
 #[tokio::test]

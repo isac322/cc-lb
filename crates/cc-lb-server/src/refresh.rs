@@ -1,10 +1,11 @@
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_core::AuditPayload;
+use cc_lb_observability::{OAuthRefreshOutcome, record_oauth_refresh, set_oauth_refresh_lag};
 use cc_lb_signer_anthropic_oauth::{LazyRefreshError, LazyRefreshHandle};
 use cc_lb_storage_api::{AuditEntry, AuditStore, StorageError, StorageResult, UpstreamRecord};
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -106,8 +107,11 @@ impl OAuthRefresher {
                     }
                     after = page.last().map(|record| record.id);
                     for record in page {
-                        if is_refresh_candidate(&record, &self.aead, now) {
-                            candidates.push(record);
+                        if let Some(lag_seconds) = refresh_lag_seconds(&record, &self.aead, now) {
+                            set_oauth_refresh_lag(&record.name, lag_seconds);
+                            if lag_seconds > 0.0 {
+                                candidates.push(record);
+                            }
                         }
                     }
                 }
@@ -250,12 +254,28 @@ async fn refresh_flow(
     cancel: &CancellationToken,
     upstream: UpstreamRecord,
 ) -> Result<(), RefreshError> {
-    let previous = upstream
-        .oauth_credentials
-        .as_ref()
-        .ok_or(RefreshError::MissingCredentials)?
-        .decrypt(aead, upstream.id.as_bytes())
-        .map_err(|_| RefreshError::Decrypt)?;
+    let started = Instant::now();
+    let previous = match upstream.oauth_credentials.as_ref() {
+        Some(credentials) => match credentials.decrypt(aead, upstream.id.as_bytes()) {
+            Ok(previous) => previous,
+            Err(_) => {
+                record_oauth_refresh(
+                    &upstream.name,
+                    OAuthRefreshOutcome::Network,
+                    started.elapsed(),
+                );
+                return Err(RefreshError::Decrypt);
+            }
+        },
+        None => {
+            record_oauth_refresh(
+                &upstream.name,
+                OAuthRefreshOutcome::Network,
+                started.elapsed(),
+            );
+            return Err(RefreshError::MissingCredentials);
+        }
+    };
     let token = request_refresh(http, oauth_cfg, cancel, &previous.refresh_token).await;
     match token {
         Ok(response) => {
@@ -273,13 +293,35 @@ async fn refresh_flow(
             };
             let fingerprint = access_token_fingerprint(&bundle.access_token);
             let expires_at = bundle.expires_at_unix_secs;
-            let encrypted = EncryptedOAuthTokens::encrypt(aead, &bundle, upstream.id.as_bytes())
-                .map_err(|_| RefreshError::Encrypt)?;
-            stores
+            let encrypted =
+                match EncryptedOAuthTokens::encrypt(aead, &bundle, upstream.id.as_bytes()) {
+                    Ok(encrypted) => encrypted,
+                    Err(_) => {
+                        record_oauth_refresh(
+                            &upstream.name,
+                            OAuthRefreshOutcome::Network,
+                            started.elapsed(),
+                        );
+                        return Err(RefreshError::Encrypt);
+                    }
+                };
+            if let Err(error) = stores
                 .upstreams
                 .complete_refresh(upstream.id, replica_id, encrypted)
-                .await?;
-            increment_metric(&upstream.name, "success");
+                .await
+            {
+                record_oauth_refresh(
+                    &upstream.name,
+                    OAuthRefreshOutcome::Network,
+                    started.elapsed(),
+                );
+                return Err(error.into());
+            }
+            record_oauth_refresh(
+                &upstream.name,
+                OAuthRefreshOutcome::Success,
+                started.elapsed(),
+            );
             emit_audit(
                 audit,
                 AuditPayload::UpstreamOauthRefreshSuccess {
@@ -296,7 +338,7 @@ async fn refresh_flow(
             Ok(())
         }
         Err(error) => {
-            increment_metric(&upstream.name, "failure");
+            record_oauth_refresh(&upstream.name, refresh_outcome(&error), started.elapsed());
             let reason = reason_for(&error);
             let release_result = stores
                 .upstreams
@@ -349,20 +391,17 @@ async fn request_refresh(
     serde_json::from_slice(&bytes).map_err(RefreshError::Parse)
 }
 
-fn is_refresh_candidate(record: &UpstreamRecord, aead: &AeadService, now: u64) -> bool {
+fn refresh_lag_seconds(record: &UpstreamRecord, aead: &AeadService, now: u64) -> Option<f64> {
     if record.kind != UpstreamKind::AnthropicOauth
         || !record.enabled
         || record.deleted_at_unix_secs.is_some()
     {
-        return false;
+        return None;
     }
-    let Some(encrypted) = &record.oauth_credentials else {
-        return false;
-    };
-    encrypted
-        .decrypt(aead, record.id.as_bytes())
-        .map(|bundle| bundle.expires_at_unix_secs < now.saturating_add(LOOKAHEAD_SECS))
-        .unwrap_or(false)
+    let encrypted = record.oauth_credentials.as_ref()?;
+    let bundle = encrypted.decrypt(aead, record.id.as_bytes()).ok()?;
+    let window_opened = bundle.expires_at_unix_secs.saturating_sub(LOOKAHEAD_SECS);
+    Some(now.saturating_sub(window_opened) as f64)
 }
 
 fn access_token_fingerprint(access_token: &str) -> String {
@@ -380,13 +419,17 @@ fn to_hex(bytes: &[u8]) -> String {
     out
 }
 
-fn increment_metric(upstream: &str, outcome: &'static str) {
-    metrics::counter!(
-        "cclb_oauth_refresh_total",
-        "upstream" => upstream.to_owned(),
-        "outcome" => outcome
-    )
-    .increment(1);
+fn refresh_outcome(error: &RefreshError) -> OAuthRefreshOutcome {
+    match error {
+        RefreshError::Status(_) => OAuthRefreshOutcome::HttpError,
+        RefreshError::Parse(_) => OAuthRefreshOutcome::Parse,
+        RefreshError::Http(_)
+        | RefreshError::Cancelled
+        | RefreshError::MissingCredentials
+        | RefreshError::Decrypt
+        | RefreshError::Encrypt
+        | RefreshError::Storage(_) => OAuthRefreshOutcome::Network,
+    }
 }
 
 async fn emit_audit(

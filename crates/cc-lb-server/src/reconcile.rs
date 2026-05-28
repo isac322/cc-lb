@@ -5,6 +5,7 @@ use std::time::Duration;
 use cc_lb_aead::AeadService;
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_core::DynamicViewHolder;
+use cc_lb_observability::{ReconcileOutcome, record_reconcile};
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_storage_api::{PluginSlot, StorageResult};
 use tokio_util::sync::CancellationToken;
@@ -79,7 +80,7 @@ impl Reconciler {
         let hash = collect_revision_hash(&self.stores).await?;
         let current = self.holder.load();
         if hash == current.upstream_status_snapshot.revision_hash {
-            metrics::counter!("cclb_reconcile_total", "outcome" => "unchanged").increment(1);
+            record_reconcile(ReconcileOutcome::Unchanged);
             return Ok(());
         }
 
@@ -98,11 +99,10 @@ impl Reconciler {
         {
             Ok(view) => {
                 self.holder.store(view);
-                metrics::counter!("cclb_reconcile_total", "outcome" => "changed").increment(1);
+                record_reconcile(ReconcileOutcome::Changed);
             }
             Err(error) => {
                 tracing::warn!(error = %error, "dynamic reconciliation rebuild failed");
-                metrics::counter!("cclb_reconcile_total", "outcome" => "error").increment(1);
             }
         }
         Ok(())
