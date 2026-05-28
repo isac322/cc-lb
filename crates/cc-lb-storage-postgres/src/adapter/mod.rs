@@ -6,6 +6,7 @@ pub mod api_keys;
 pub mod audit;
 pub mod config_store;
 pub mod limit_state;
+pub mod managed_keys;
 pub mod meta;
 pub mod oauth_credentials;
 pub mod quota;
