@@ -2,7 +2,7 @@ use std::error::Error;
 
 use cc_lb_storage_api::StorageError as ApiStorageError;
 
-use crate::{StorageError, CURRENT_SCHEMA_VERSION};
+use crate::{CURRENT_SCHEMA_VERSION, StorageError};
 
 pub(crate) fn map_redb_err(error: StorageError) -> ApiStorageError {
     match error {
@@ -12,6 +12,18 @@ pub(crate) fn map_redb_err(error: StorageError) -> ApiStorageError {
         StorageError::RedbStorage(source) => redb_transient(source),
         StorageError::Commit(source) => redb_transient(source),
         StorageError::Json(error) => ApiStorageError::Serialization(error),
+        StorageError::BincodeEncode(error) => ApiStorageError::Corrupted {
+            message: format!("redb bincode encode error: {error}"),
+        },
+        StorageError::BincodeDecode(error) => ApiStorageError::Corrupted {
+            message: format!("redb bincode decode error: {error}"),
+        },
+        StorageError::AeadAuthenticationFailed => {
+            ApiStorageError::Aead("redb AEAD authentication failed".to_owned())
+        }
+        StorageError::CiphertextTooShort(len) => {
+            ApiStorageError::Aead(format!("redb ciphertext is too short: {len} bytes"))
+        }
         StorageError::UnsupportedSchemaVersion { found, current } => {
             ApiStorageError::SchemaMismatch {
                 found,
