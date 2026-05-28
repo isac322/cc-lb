@@ -10,7 +10,7 @@ use cc_lb_core::api_keys::secret;
 use cc_lb_core::api_keys::types::{
     Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalType as CorePrincipalType,
 };
-use cc_lb_storage_redb::{
+use cc_lb_storage_api::types::{
     ApiKeyMutation, KeyStatus, Limit, LimitKind, PrincipalKindLite, StoredApiKeyRecord,
     UpstreamKind,
 };

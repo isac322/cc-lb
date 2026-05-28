@@ -11,10 +11,11 @@ use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_core::api_keys::principal_view::PrincipalView;
 use cc_lb_core::api_keys::secret;
 use cc_lb_core::api_keys::builtin_authn::{BuiltinAuthError as AuthnError, BuiltinAuthn};
-use cc_lb_storage_redb::{
+use cc_lb_storage_api::types::{
     IssueParams, KeyStatus, Limit as StorageLimit, LimitKind as StorageLimitKind,
-    PrincipalKindLite, Storage, UpstreamKind,
+    PrincipalKindLite, UpstreamKind,
 };
+use cc_lb_storage_redb::Storage;
 use http::{HeaderMap, HeaderValue};
 
 struct Harness {

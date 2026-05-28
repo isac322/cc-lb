@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
-use cc_lb_storage_redb::{KeyStatus, StoredApiKeyRecord};
+use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord, UpstreamKind};
 
 use crate::api_keys::{
     key_store::KeyStore,
@@ -22,7 +22,7 @@ pub struct BuiltinAuthn {
 pub struct AuthnSuccess {
     pub principal_id: String,
     pub key_id: String,
-    pub upstream_kind: cc_lb_storage_redb::UpstreamKind,
+    pub upstream_kind: UpstreamKind,
     pub upstream_credential_ref: String,
     pub record: StoredApiKeyRecord,
     pub last_4: String,
@@ -171,9 +171,9 @@ impl BuiltinAuthn {
     }
 }
 
-pub fn map_none_mode_upstream_kind(kind: NoneModeUpstreamKind) -> cc_lb_storage_redb::UpstreamKind {
+pub fn map_none_mode_upstream_kind(kind: NoneModeUpstreamKind) -> UpstreamKind {
     match kind {
-        NoneModeUpstreamKind::AnthropicKey => cc_lb_storage_redb::UpstreamKind::AnthropicKey,
-        NoneModeUpstreamKind::AnthropicOAuth => cc_lb_storage_redb::UpstreamKind::AnthropicOAuth,
+        NoneModeUpstreamKind::AnthropicKey => UpstreamKind::AnthropicKey,
+        NoneModeUpstreamKind::AnthropicOAuth => UpstreamKind::AnthropicOAuth,
     }
 }

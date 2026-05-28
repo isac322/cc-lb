@@ -5,7 +5,8 @@ use axum::{
 use cc_lb_admin::{router, AdminState};
 use cc_lb_config::Config;
 use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
-use cc_lb_storage_redb::{OAuthCredentials, PrincipalKindLite, Storage, UpstreamKind};
+use cc_lb_storage_api::types::{PrincipalKindLite, UpstreamKind};
+use cc_lb_storage_redb::{OAuthCredentials, Storage};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use std::sync::Arc;

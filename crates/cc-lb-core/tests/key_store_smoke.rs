@@ -2,9 +2,10 @@ use std::sync::Arc;
 
 use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore, KeyStoreError};
 use cc_lb_core::api_keys::secret;
-use cc_lb_storage_redb::{
-    ApiKeyMutation, KeyStatus, Limit, LimitKind, PrincipalKindLite, Storage, UpstreamKind,
+use cc_lb_storage_api::types::{
+    ApiKeyMutation, KeyStatus, Limit, LimitKind, PrincipalKindLite, UpstreamKind,
 };
+use cc_lb_storage_redb::Storage;
 
 #[test]
 fn create_lists_principal() -> Result<(), Box<dyn std::error::Error>> {
