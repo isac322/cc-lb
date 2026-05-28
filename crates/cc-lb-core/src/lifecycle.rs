@@ -13,8 +13,10 @@ use cc_lb_plugin_api::{
     sign_request,
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
-use cc_lb_storage_api::types::StoredApiKeyRecord;
-use cc_lb_storage_redb::{RequestEvent, Storage};
+use cc_lb_storage_api::{
+    Storage,
+    types::{RequestEvent, StoredApiKeyRecord},
+};
 use http::header::{CONTENT_TYPE, RETRY_AFTER};
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
@@ -198,7 +200,7 @@ pub struct Lifecycle {
     limit_engine: Option<Arc<LimitEngine>>,
     limit_subject_provider: Option<Arc<dyn LimitSubjectProvider>>,
     audit_sink: Option<Arc<AuditWriterSink>>,
-    request_event_storage: Option<Arc<Storage>>,
+    request_event_storage: Option<Arc<dyn Storage>>,
 }
 
 impl Lifecycle {
@@ -236,7 +238,7 @@ impl Lifecycle {
         self
     }
 
-    pub fn with_request_event_storage(mut self, storage: Arc<Storage>) -> Self {
+    pub fn with_request_event_storage(mut self, storage: Arc<dyn Storage>) -> Self {
         self.request_event_storage = Some(storage);
         self
     }
@@ -732,7 +734,7 @@ impl Lifecycle {
                 status: status.as_u16(),
                 ..Default::default()
             };
-            if let Err(error) = storage.append_request_event(&event) {
+            if let Err(error) = storage.append_request_event(&event).await {
                 tracing::warn!(%error, "failed to append api key request event");
             }
         }

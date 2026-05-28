@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{AuditEntry, AuditStore, StorageResult};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::{Row, postgres::PgRow};
+use sqlx::{Postgres, QueryBuilder, Row, postgres::PgRow};
 
 use crate::{
     adapter::{
@@ -13,6 +13,22 @@ use crate::{
 };
 
 const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
+
+struct AuditInsertRow<'a> {
+    ts: DateTime<Utc>,
+    request_id: &'a str,
+    principal_id: &'a str,
+    route: &'a str,
+    upstream: &'a str,
+    model: Option<&'a str>,
+    status: i32,
+    input_tokens: i64,
+    output_tokens: i64,
+    duration_ms: i64,
+    agent_label: Option<&'a str>,
+    kind: Option<&'a str>,
+    payload: Option<Vec<u8>>,
+}
 
 #[async_trait]
 impl AuditStore for PostgresStorage {
@@ -38,6 +54,45 @@ impl AuditStore for PostgresStorage {
         .execute(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
+
+        Ok(())
+    }
+
+    async fn append_audit_entries(&self, entries: &[AuditEntry]) -> StorageResult<()> {
+        if entries.is_empty() {
+            return Ok(());
+        }
+
+        let rows = entries
+            .iter()
+            .map(audit_insert_row)
+            .collect::<StorageResult<Vec<_>>>()?;
+
+        let mut query_builder = QueryBuilder::<Postgres>::new(
+            "INSERT INTO audit_log_v1 (ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, kind, payload) ",
+        );
+        query_builder.push_values(rows.iter(), |mut values, row| {
+            values
+                .push_bind(row.ts.clone())
+                .push_bind(row.request_id)
+                .push_bind(row.principal_id)
+                .push_bind(row.route)
+                .push_bind(row.upstream)
+                .push_bind(row.model)
+                .push_bind(row.status)
+                .push_bind(row.input_tokens)
+                .push_bind(row.output_tokens)
+                .push_bind(row.duration_ms)
+                .push_bind(row.agent_label)
+                .push_bind(row.kind)
+                .push_bind(row.payload.as_deref());
+        });
+
+        query_builder
+            .build()
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
 
         Ok(())
     }
@@ -101,6 +156,24 @@ impl AuditStore for PostgresStorage {
 
         Ok(result.rows_affected())
     }
+}
+
+fn audit_insert_row(entry: &AuditEntry) -> StorageResult<AuditInsertRow<'_>> {
+    Ok(AuditInsertRow {
+        ts: unix_secs_to_datetime(entry.ts, "audit ts")?,
+        request_id: &entry.request_id,
+        principal_id: &entry.principal_id,
+        route: &entry.route,
+        upstream: &entry.upstream,
+        model: entry.model.as_deref(),
+        status: i32::from(entry.status),
+        input_tokens: u64_to_i64(entry.input_tokens.unwrap_or(0), "audit input_tokens")?,
+        output_tokens: u64_to_i64(entry.output_tokens.unwrap_or(0), "audit output_tokens")?,
+        duration_ms: u64_to_i64(entry.duration_ms, "audit duration_ms")?,
+        agent_label: entry.agent_label.as_deref(),
+        kind: entry.kind.as_deref(),
+        payload: entry.payload.as_ref().map(serde_json::to_vec).transpose()?,
+    })
 }
 
 fn row_to_audit_entry(row: PgRow) -> StorageResult<AuditEntry> {
