@@ -1461,7 +1461,7 @@ Max Concurrent: 8 (Wave 2 fully parallel)
   - Files: `crates/cc-lb-server/src/reload.rs`, `crates/cc-lb-runtime-extism/src/lib.rs` (small helper if needed)
   - Pre-commit: `cargo fmt --check && cargo clippy --workspace -- -D warnings && cargo test -p cc-lb-server && cargo test -p cc-lb-runtime-extism`
 
-- [ ] 17. Fault-injection integration test: per-principal instantiation failure aborts reload
+- [x] 17. Fault-injection integration test: per-principal instantiation failure aborts reload
 
   **What to do**:
   - Add `tests/integration/per_principal_reload_fault_injection.rs` (or extend the existing integration suite at `tests/integration/`).

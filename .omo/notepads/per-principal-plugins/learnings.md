@@ -68,3 +68,10 @@
 - The response keeps legacy `plugins` unchanged and adds `principals: { id -> { router_plugin, observability_hooks } }`; per-principal plugin refs expose `name`, `wasm_path`, and `config_hash` only.
 - `config_hash` uses `sha2::Sha256` over `serde_json::to_string(&plugin_ref.config)` and emits the first 16 lowercase hex characters; raw `config` values are not serialized in `/admin/status`.
 - Verification passed: `cargo build -p cc-lb-admin`, `cargo test -p cc-lb-admin`, and `cargo clippy -p cc-lb-admin -- -D warnings`.
+
+## 2026-05-28 T17
+
+- `crates/cc-lb-server/tests/per_principal_reload_fault_injection.rs` drives reload through real TOML config IO and `ConfigWatcher::reload_now()` with an `ExtismRuntime` and public `registered_slot_keys()` snapshots.
+- A non-existent plugin artifact fails during `Config::load` validation with no principal/plugin status, so the per-principal instantiation fault uses an existing but invalid Wasm file for `charlie.router_plugin` to exercise the runtime failure path that records `principal = Some("charlie")` and `plugin = Some("charlie-router")`.
+- The test asserts reload returns `Err`, the old `PrincipalView` `Arc` remains installed with Alice/Bob present and Charlie absent, `LastReloadStatus` reports failure via the `CurrentConfig` trait, and runtime slot keys remain equal to the sorted pre-reload snapshot.
+- Verification passed: `cargo test -p cc-lb-server --test per_principal_reload_fault_injection`, `cargo build -p cc-lb-server`, and `cargo clippy -p cc-lb-server -- -D warnings`; LSP diagnostics were unavailable because `rust-analyzer` is not installed.
