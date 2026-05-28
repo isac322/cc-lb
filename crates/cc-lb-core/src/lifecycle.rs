@@ -173,9 +173,9 @@ impl UpstreamDispatch for HyperDispatcher {
 pub struct Lifecycle {
     authn: Arc<BuiltinAuthn>,
     signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
-    router: Arc<dyn RouterPlugin>,
+    global_router: Arc<dyn RouterPlugin>,
     dispatcher: Arc<dyn UpstreamDispatch>,
-    observability_hooks: Vec<Arc<dyn ObservabilityHook>>,
+    global_observability_hooks: Vec<Arc<dyn ObservabilityHook>>,
     error_normalizer: Arc<ErrorNormalizer>,
     config: LifecycleConfig,
     limit_engine: Option<Arc<LimitEngine>>,
@@ -188,17 +188,17 @@ impl Lifecycle {
     pub fn new(
         authn: Arc<BuiltinAuthn>,
         signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
-        router: Arc<dyn RouterPlugin>,
+        global_router: Arc<dyn RouterPlugin>,
         dispatcher: Arc<dyn UpstreamDispatch>,
-        observability_hooks: Vec<Arc<dyn ObservabilityHook>>,
+        global_observability_hooks: Vec<Arc<dyn ObservabilityHook>>,
         config: LifecycleConfig,
     ) -> Self {
         Self {
             authn,
             signer_factory,
-            router,
+            global_router,
             dispatcher,
-            observability_hooks,
+            global_observability_hooks,
             error_normalizer: Arc::new(ErrorNormalizer::new()),
             config,
             limit_engine: None,
@@ -324,7 +324,7 @@ impl Lifecycle {
             kind: principal.kind.clone(),
         });
 
-        let route = match self.router.route(&ctx, &principal) {
+        let route = match self.global_router.route(&ctx, &principal) {
             Ok(route) => route,
             Err(source) => {
                 self.observe_error("route_not_configured", &source.to_string(), "router");
@@ -745,7 +745,7 @@ impl Lifecycle {
     ) -> Response<Body> {
         let (mut parts, mut body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
-        let hooks = self.observability_hooks.clone();
+        let hooks = self.global_observability_hooks.clone();
         let stream = async_stream::stream! {
             let mut batch_index = 0_u64;
             let mut buffer: Vec<u8> = Vec::new();
@@ -787,7 +787,7 @@ impl Lifecycle {
     }
 
     fn observe(&self, event: ObserveEvent) {
-        observe_many(&self.observability_hooks, event);
+        observe_many(&self.global_observability_hooks, event);
     }
 
     fn observe_error(&self, code: &str, message: &str, source: &str) {

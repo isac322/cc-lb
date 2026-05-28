@@ -270,17 +270,17 @@ pub fn lifecycle_with(
 
 pub fn lifecycle_with_parts(
     authn: TestAuthn,
-    router: Arc<dyn RouterPlugin>,
+    global_router: Arc<dyn RouterPlugin>,
     dispatcher: Arc<dyn UpstreamDispatch>,
-    hooks: Vec<Arc<dyn ObservabilityHook>>,
+    global_observability_hooks: Vec<Arc<dyn ObservabilityHook>>,
     config: LifecycleConfig,
 ) -> Lifecycle {
     Lifecycle::new(
         authn.authn.clone(),
         Arc::new(authn),
-        router,
+        global_router,
         dispatcher,
-        hooks,
+        global_observability_hooks,
         config,
     )
 }

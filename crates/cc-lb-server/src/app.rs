@@ -219,7 +219,10 @@ pub fn build_app_with_storage(
         return Err(BuildError::StorageRequired);
     }
 
-    let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config, std::collections::HashMap::new())?));
+    let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(
+        &config,
+        std::collections::HashMap::new(),
+    )?));
     let key_store = storage
         .as_ref()
         .map(|storage| Arc::new(KeyStore::new(storage.clone())));
@@ -257,13 +260,13 @@ pub fn build_app_with_storage(
         storage.clone(),
         aead.clone(),
     ));
-    let router_plugin = match &config.plugins.router_plugin {
+    let global_router = match &config.plugins.router_plugin {
         Some(plugin) => runtime.instantiate_router(&manifest_from_plugin(plugin)?)?,
         None => Arc::new(BuiltinRouter::new(&config)?),
     };
-    let mut observability_hooks: Vec<Arc<dyn ObservabilityHook>> = Vec::new();
+    let mut global_observability_hooks: Vec<Arc<dyn ObservabilityHook>> = Vec::new();
     for plugin in &config.plugins.observability_hooks {
-        observability_hooks
+        global_observability_hooks
             .push(runtime.instantiate_observability(&manifest_from_plugin(plugin)?)?);
     }
 
@@ -272,9 +275,9 @@ pub fn build_app_with_storage(
     let mut lifecycle = Lifecycle::new(
         authn.clone(),
         signer_factory_for_lifecycle,
-        router_plugin,
+        global_router,
         dispatcher,
-        observability_hooks,
+        global_observability_hooks,
         LifecycleConfig {
             messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
             files_body_cap_bytes: cap_to_usize(config.body.files_cap_bytes),
