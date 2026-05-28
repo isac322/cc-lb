@@ -15,7 +15,7 @@ postgres = []
 async-trait.workspace = true
 async-stream.workspace = true
 arc-swap.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["multipart"] }
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
@@ -40,10 +40,13 @@ hyper-util = { workspace = true, features = ["client", "client-legacy", "http1",
 oauth2.workspace = true
 secrecy.workspace = true
 sha2 = "0.11"
+extism.workspace = true
+tower.workspace = true
 thiserror.workspace = true
 ring.workspace = true
 toml = "0.9"
 url.workspace = true
+uuid.workspace = true
 mime_guess = "2.0.5"
 nix = { version = "0.31.3", features = ["signal"] }
 
@@ -56,3 +59,4 @@ tempfile.workspace = true
 cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
 redb.workspace = true
 mock-anthropic-oauth-server = { path = "../../tests/fixtures/mock-anthropic-oauth-server" }
+fake-anthropic = { path = "../../tests/fixtures/fake-anthropic" }

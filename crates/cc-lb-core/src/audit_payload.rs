@@ -36,9 +36,11 @@ pub enum AuditPayload {
     },
     UpstreamOauthStart {
         upstream_id: String,
+        upstream_name: String,
     },
     UpstreamOauthComplete {
         upstream_id: String,
+        upstream_name: String,
         expires_at_unix_secs: u64,
         access_token_fingerprint: String,
     },
@@ -113,17 +115,25 @@ impl fmt::Display for AuditPayload {
             AuditPayload::UpstreamDisable { upstream_id } => {
                 write!(f, "upstream_disable(id={})", upstream_id)
             }
-            AuditPayload::UpstreamOauthStart { upstream_id } => {
-                write!(f, "upstream_oauth_start(id={})", upstream_id)
+            AuditPayload::UpstreamOauthStart {
+                upstream_id,
+                upstream_name,
+            } => {
+                write!(
+                    f,
+                    "upstream_oauth_start(id={}, name={})",
+                    upstream_id, upstream_name
+                )
             }
             AuditPayload::UpstreamOauthComplete {
                 upstream_id,
+                upstream_name,
                 expires_at_unix_secs,
                 access_token_fingerprint,
             } => write!(
                 f,
-                "upstream_oauth_complete(id={}, expires={}, fingerprint={})",
-                upstream_id, expires_at_unix_secs, access_token_fingerprint
+                "upstream_oauth_complete(id={}, name={}, expires={}, fingerprint={})",
+                upstream_id, upstream_name, expires_at_unix_secs, access_token_fingerprint
             ),
             AuditPayload::UpstreamOauthRefreshSuccess {
                 upstream_id,
@@ -188,6 +198,7 @@ mod tests {
     fn audit_payload_serializes_without_secret_fields() {
         let payload = AuditPayload::UpstreamOauthComplete {
             upstream_id: "test-upstream".to_string(),
+            upstream_name: "test-upstream".to_string(),
             expires_at_unix_secs: 1234567890,
             access_token_fingerprint: "abc12345".to_string(),
         };
@@ -204,6 +215,7 @@ mod tests {
     fn oauth_complete_emits_fingerprint_only() {
         let payload = AuditPayload::UpstreamOauthComplete {
             upstream_id: "primary".to_string(),
+            upstream_name: "primary".to_string(),
             expires_at_unix_secs: 1700000000,
             access_token_fingerprint: "deadbeef".to_string(),
         };

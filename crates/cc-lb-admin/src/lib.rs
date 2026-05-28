@@ -7,6 +7,7 @@ pub mod principals;
 pub mod routes;
 pub mod settings;
 pub mod status;
+pub mod v1;
 
 use std::sync::Arc;
 

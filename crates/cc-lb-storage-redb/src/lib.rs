@@ -139,6 +139,10 @@ pub enum StorageError {
     PrincipalReferencedByAudit { id: String },
     #[error("plugin registry conflict: {message}")]
     PluginRegistryConflict { message: String },
+    #[error("stale plugin registry revision; current revision is {current}")]
+    StalePluginRegistryRevision { current: u64 },
+    #[error("plugin registry revision overflow")]
+    PluginRegistryRevisionOverflow,
     #[error("stale plugin chain revision; current revision is {current}")]
     StalePluginChainRevision { current: u64 },
     #[error("plugin chain revision overflow")]

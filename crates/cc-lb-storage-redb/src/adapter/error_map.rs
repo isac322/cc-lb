@@ -63,6 +63,12 @@ pub(crate) fn map_redb_err(error: StorageError) -> ApiStorageError {
             message: format!("redb principal {id} is referenced by audit entries"),
         },
         StorageError::PluginRegistryConflict { message } => ApiStorageError::Conflict { message },
+        StorageError::StalePluginRegistryRevision { current } => ApiStorageError::Conflict {
+            message: format!("stale redb plugin registry revision; current revision is {current}"),
+        },
+        StorageError::PluginRegistryRevisionOverflow => ApiStorageError::Fatal {
+            message: "redb plugin registry revision overflow".to_owned(),
+        },
         StorageError::StalePluginChainRevision { current } => ApiStorageError::Conflict {
             message: format!("stale redb plugin chain revision; current revision is {current}"),
         },

@@ -68,8 +68,8 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/admin/killswitch", post(set_killswitch))
         .route("/admin/killswitch", delete(clear_killswitch))
         .route("/admin/oauth/{id}", get(crate::oauth::oauth_status))
-        .route("/admin/oauth/start", post(crate::oauth::start_oauth))
-        .route("/admin/oauth/complete", post(crate::oauth::complete_oauth))
+        .route("/admin/oauth/start", post(legacy_oauth_gone))
+        .route("/admin/oauth/complete", post(legacy_oauth_gone))
         .route("/admin/config/current", get(get_config))
         .route("/admin/config/schema", get(get_config_schema))
         .route(
@@ -81,17 +81,29 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/admin/config/history", get(get_config_history))
         .route("/admin/config/diff", get(get_config_diff))
         .route("/admin/config/reload", post(reload_config))
+        .merge(crate::v1::plugins::router())
+        .merge(crate::v1::plugins_wasm::router())
+        .merge(crate::v1::oauth::router())
+        .merge(crate::v1::principals::router())
+        .merge(crate::v1::upstreams::router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_admin_auth,
         ));
 
     Router::new()
+        .merge(protected_routes)
         .route("/", get(serve_index))
         .route("/{*file}", get(serve_asset))
         .route("/admin/health", get(health))
-        .merge(protected_routes)
         .with_state(state)
+}
+
+async fn legacy_oauth_gone() -> impl IntoResponse {
+    (
+        StatusCode::GONE,
+        Json(json!({ "error": "moved_to_v1_upstream_keyed" })),
+    )
 }
 
 async fn serve_index() -> impl IntoResponse {

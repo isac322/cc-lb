@@ -105,6 +105,8 @@ pub trait PluginRegistryStore: Send + Sync {
 
     async fn get_blob_bytes(&self, sha256: [u8; 32]) -> StorageResult<Option<Vec<u8>>>;
 
+    async fn list_orphan_blobs(&self) -> StorageResult<Vec<[u8; 32]>>;
+
     async fn list_registry(
         &self,
         after: Option<Uuid>,
@@ -114,6 +116,21 @@ pub trait PluginRegistryStore: Send + Sync {
     async fn get_registry_entry_by_sha(
         &self,
         sha256: [u8; 32],
+    ) -> StorageResult<Option<WasmRegistryEntry>>;
+
+    async fn get_registry_entry_by_id(&self, id: Uuid) -> StorageResult<Option<WasmRegistryEntry>>;
+
+    async fn update_registry_label(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+        label: Option<String>,
+    ) -> StorageResult<WasmRegistryEntry>;
+
+    async fn delete_registry_entry(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
     ) -> StorageResult<Option<WasmRegistryEntry>>;
 
     async fn decrement_blob_refcount_or_delete(&self, sha256: [u8; 32]) -> StorageResult<bool>;
@@ -140,7 +157,7 @@ pub trait PluginRegistryStore: Send + Sync {
         &self,
         principal_id: Uuid,
         slot: PluginSlot,
-        new_orders: Vec<(Uuid, i64)>,
+        new_orders: Vec<(Uuid, i64, u64)>,
     ) -> StorageResult<Vec<PluginChainEntry>>;
 
     async fn delete_chain_entry(&self, id: Uuid) -> StorageResult<bool>;

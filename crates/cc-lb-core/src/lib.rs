@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod api_keys;
+pub mod audit_payload;
 #[cfg(not(loom))]
 pub mod audit_writer;
 #[cfg(not(loom))]
@@ -31,6 +32,7 @@ mod sse_error_frame;
 mod sse_relay;
 #[cfg(not(loom))]
 pub mod usage_pruner;
+pub use audit_payload::AuditPayload;
 #[cfg(not(loom))]
 pub use audit_writer::{AuditDropped, AuditEntry, AuditWriterSink, spawn_audit_writer};
 #[cfg(not(loom))]

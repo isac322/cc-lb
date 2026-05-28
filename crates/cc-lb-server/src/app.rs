@@ -50,7 +50,9 @@ use crate::bootstrap;
 use crate::build_meta::BuildMeta;
 use crate::builtins::{BuiltinError, BuiltinRouter, NoopObservabilityHook};
 use crate::drain::DrainController;
-use crate::dynamic_view_builder::{Stores as DynamicStores, build_dynamic_view};
+use crate::dynamic_view_builder::{
+    Stores as DynamicStores, build_dynamic_view, ensure_wasm_cache_dirs,
+};
 use crate::preflight::{self, PreflightOptions};
 use crate::reload::ConfigWatcher;
 use crate::replica;
@@ -443,6 +445,7 @@ pub async fn build_app_with_storage(
         &data_dir,
     )
     .await?;
+    ensure_wasm_cache_dirs(&data_dir)?;
 
     let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
     let limit_engine = LimitEngine::new(concurrent_mgr);

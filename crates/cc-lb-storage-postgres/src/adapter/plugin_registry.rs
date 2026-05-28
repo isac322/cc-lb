@@ -77,6 +77,16 @@ impl PluginRegistryStore for PostgresStorage {
             .map_err(map_sqlx_error)
     }
 
+    async fn list_orphan_blobs(&self) -> StorageResult<Vec<[u8; 32]>> {
+        let rows = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT sha256 FROM wasm_blobs_v2 WHERE refcount = 0 ORDER BY sha256 ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        rows.into_iter().map(|row| sha_to_array(&row)).collect()
+    }
+
     async fn list_registry(
         &self,
         after: Option<Uuid>,
@@ -97,6 +107,69 @@ impl PluginRegistryStore for PostgresStorage {
         let row = sqlx::query("SELECT r.*, b.refcount FROM wasm_registry_v2 r JOIN wasm_blobs_v2 b ON b.sha256 = r.sha256 WHERE r.sha256 = $1")
             .bind(sha256.as_slice()).fetch_optional(&self.pool).await.map_err(map_sqlx_error)?;
         row.map(registry_from_row).transpose()
+    }
+
+    async fn get_registry_entry_by_id(&self, id: Uuid) -> StorageResult<Option<WasmRegistryEntry>> {
+        let row = sqlx::query("SELECT r.*, b.refcount FROM wasm_registry_v2 r JOIN wasm_blobs_v2 b ON b.sha256 = r.sha256 WHERE r.id = $1")
+            .bind(id).fetch_optional(&self.pool).await.map_err(map_sqlx_error)?;
+        row.map(registry_from_row).transpose()
+    }
+
+    async fn update_registry_label(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+        label: Option<String>,
+    ) -> StorageResult<WasmRegistryEntry> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let row = sqlx::query("UPDATE wasm_registry_v2 SET label=$1, revision=revision+1 WHERE id=$2 AND revision=$3 RETURNING *")
+            .bind(label).bind(id).bind(u64_to_i64(expected_revision, "wasm_registry.revision")?)
+            .fetch_optional(&mut *tx).await.map_err(map_sqlx_error)?;
+        let row = match row {
+            Some(row) => row,
+            None => return Err(conflict("stale or missing plugin registry revision")),
+        };
+        sqlx::query("SELECT pg_notify('cclb_plugin_changed', $1)")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        self.get_registry_entry_by_id(row.try_get("id").map_err(map_sqlx_error)?)
+            .await?
+            .ok_or_else(|| conflict("updated plugin registry row disappeared"))
+    }
+
+    async fn delete_registry_entry(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+    ) -> StorageResult<Option<WasmRegistryEntry>> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let row = sqlx::query("SELECT r.*, b.refcount FROM wasm_registry_v2 r JOIN wasm_blobs_v2 b ON b.sha256 = r.sha256 WHERE r.id = $1")
+            .bind(id).fetch_optional(&mut *tx).await.map_err(map_sqlx_error)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
+        let entry = registry_from_row(row)?;
+        if entry.revision != expected_revision {
+            return Err(conflict(format!(
+                "stale plugin registry revision; current revision is {}",
+                entry.revision
+            )));
+        }
+        sqlx::query("DELETE FROM wasm_registry_v2 WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        sqlx::query("SELECT pg_notify('cclb_plugin_changed', $1)")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(Some(entry))
     }
 
     async fn decrement_blob_refcount_or_delete(&self, sha256: [u8; 32]) -> StorageResult<bool> {
@@ -184,20 +257,23 @@ impl PluginRegistryStore for PostgresStorage {
         &self,
         principal_id: Uuid,
         slot: PluginSlot,
-        new_orders: Vec<(Uuid, i64)>,
+        new_orders: Vec<(Uuid, i64, u64)>,
     ) -> StorageResult<Vec<PluginChainEntry>> {
         if sparse_order::needs_rebalance(
             &new_orders
                 .iter()
-                .map(|(_, order)| *order)
+                .map(|(_, order, _)| *order)
                 .collect::<Vec<_>>(),
         ) {
             return Err(conflict("plugin chain order gaps need rebalance"));
         }
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        for (id, order) in new_orders {
-            sqlx::query("UPDATE plugin_chains_v2 SET order_value=$4, revision=revision+1 WHERE id=$1 AND principal_id=$2 AND slot=$3")
-                .bind(id).bind(principal_id).bind(slot.as_str()).bind(order).execute(&mut *tx).await.map_err(map_sqlx_error)?;
+        for (id, order, expected_revision) in new_orders {
+            let result = sqlx::query("UPDATE plugin_chains_v2 SET order_value=$5, revision=revision+1 WHERE id=$1 AND principal_id=$2 AND slot=$3 AND revision=$4")
+                .bind(id).bind(principal_id).bind(slot.as_str()).bind(u64_to_i64(expected_revision, "plugin_chain.revision")?).bind(order).execute(&mut *tx).await.map_err(map_sqlx_error)?;
+            if result.rows_affected() == 0 {
+                return Err(conflict("stale or missing plugin chain revision"));
+            }
         }
         sqlx::query("SELECT pg_notify('cclb_plugin_chain_changed', $1)")
             .bind(principal_id.to_string())
@@ -247,7 +323,7 @@ impl PluginRegistryStore for PostgresStorage {
             entries
                 .into_iter()
                 .zip(orders)
-                .map(|(entry, order)| (entry.id, order))
+                .map(|(entry, order)| (entry.id, order, entry.revision))
                 .collect(),
         )
         .await

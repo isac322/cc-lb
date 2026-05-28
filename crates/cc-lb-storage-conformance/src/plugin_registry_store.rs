@@ -18,6 +18,8 @@ where
     get_blob_bytes_returns_persisted_blob(storage).await?;
     registry_list_paginates(storage).await?;
     get_registry_entry_by_sha_returns_entry(storage).await?;
+    registry_label_update_with_correct_revision_bumps_and_persists(storage).await?;
+    registry_label_update_with_stale_revision_conflicts(storage).await?;
     chain_insert_preserves_sparse_order(storage).await?;
     list_chain_for_principal_returns_ordered(storage).await?;
     refcount_increment_on_chain_insert(storage).await?;
@@ -30,8 +32,52 @@ where
     delete_chain_entry_decrements_refcount(storage).await?;
     delete_chain_entry_missing_is_false(storage).await?;
     decrement_blob_refcount_or_delete_missing_is_false(storage).await?;
+    list_orphan_blobs_returns_zero_refcount_sha(storage).await?;
     validate_identifier_rejects_bad_name(storage).await?;
     fk_on_delete_restrict(storage).await?;
+    Ok(())
+}
+
+pub async fn registry_label_update_with_correct_revision_bumps_and_persists<
+    S: PluginRegistryStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let created = storage
+        .persist_wasm_upload(blob(31, b"label".to_vec()), entry("plugin-label-update"))
+        .await?;
+    let updated = storage
+        .update_registry_label(created.id, created.revision, Some("Updated".to_owned()))
+        .await?;
+    ensure!(updated.revision == created.revision + 1, "revision bumps");
+    ensure!(updated.label.as_deref() == Some("Updated"), "label changed");
+    ensure!(
+        storage
+            .get_registry_entry_by_id(created.id)
+            .await?
+            .is_some_and(|entry| entry.label.as_deref() == Some("Updated")),
+        "label persists"
+    );
+    Ok(())
+}
+
+pub async fn registry_label_update_with_stale_revision_conflicts<S: PluginRegistryStore>(
+    storage: &S,
+) -> Result<()> {
+    let created = storage
+        .persist_wasm_upload(
+            blob(32, b"stale-label".to_vec()),
+            entry("plugin-label-stale"),
+        )
+        .await?;
+    let err = storage
+        .update_registry_label(created.id, created.revision + 1, None)
+        .await
+        .expect_err("stale registry label revision conflicts");
+    ensure!(
+        matches!(err, StorageError::Conflict { .. }),
+        "stale registry label revision conflict"
+    );
     Ok(())
 }
 
@@ -255,7 +301,7 @@ pub async fn reorder_chain_valid_orders<S: PluginRegistryStore>(storage: &S) -> 
         .reorder_chain(
             first.principal_id,
             first.slot,
-            vec![(first.id, sparse_order::STEP * 3)],
+            vec![(first.id, sparse_order::STEP * 3, first.revision)],
         )
         .await?;
     ensure!(
@@ -273,7 +319,7 @@ pub async fn reorder_chain_needs_rebalance_conflicts<S: PluginRegistryStore>(
         .reorder_chain(
             first.principal_id,
             first.slot,
-            vec![(first.id, 1000), (Uuid::new_v4(), 1001)],
+            vec![(first.id, 1000, first.revision), (Uuid::new_v4(), 1001, 0)],
         )
         .await
         .expect_err("tight gap conflicts");
@@ -336,6 +382,20 @@ pub async fn decrement_blob_refcount_or_delete_missing_is_false<S: PluginRegistr
     ensure!(
         !storage.decrement_blob_refcount_or_delete([99; 32]).await?,
         "missing blob false"
+    );
+    Ok(())
+}
+
+pub async fn list_orphan_blobs_returns_zero_refcount_sha<S: PluginRegistryStore>(
+    storage: &S,
+) -> Result<()> {
+    let created = storage
+        .persist_wasm_upload(blob(23, b"orphan".to_vec()), entry("plugin-orphan"))
+        .await?;
+    let orphaned = storage.list_orphan_blobs().await?;
+    ensure!(
+        orphaned.contains(&created.sha256),
+        "fresh upload has zero chain refcount"
     );
     Ok(())
 }

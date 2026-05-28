@@ -43,14 +43,28 @@ pub enum RebindError {
     Plugin(#[from] cc_lb_plugin_api::RuntimeError),
 }
 
+pub fn ensure_wasm_cache_dirs(data_dir: &Path) -> io::Result<()> {
+    let cache_dir = data_dir.join("plugins").join("wasm").join("cache");
+    let tmp_dir = cache_dir.join(".tmp");
+    fs::create_dir_all(&tmp_dir)?;
+    #[cfg(unix)]
+    {
+        use std::fs::Permissions;
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&cache_dir, Permissions::from_mode(0o700))?;
+        fs::set_permissions(&tmp_dir, Permissions::from_mode(0o700))?;
+    }
+    Ok(())
+}
+
 pub fn ensure_wasm_cached(
     data_dir: &Path,
     sha256: [u8; 32],
     fetch: impl FnOnce() -> StorageResult<Option<Vec<u8>>>,
 ) -> io::Result<PathBuf> {
+    ensure_wasm_cache_dirs(data_dir)?;
     let cache_dir = data_dir.join("plugins").join("wasm").join("cache");
     let tmp_dir = cache_dir.join(".tmp");
-    fs::create_dir_all(&tmp_dir)?;
     let target = cache_dir.join(format!("{}.wasm", hex_sha256(sha256)));
     if target.exists() {
         return Ok(target);
