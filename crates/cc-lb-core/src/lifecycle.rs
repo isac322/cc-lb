@@ -25,6 +25,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use serde_json::{Value, json};
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, BuiltinAuthn};
 use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as LimitReservation};
@@ -44,9 +45,16 @@ const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug)]
+pub struct ReplicaIdentity {
+    pub id: Uuid,
+    pub started_at_unix_secs: u64,
+}
+
+#[derive(Clone, Debug)]
 pub struct LifecycleConfig {
     pub messages_body_cap_bytes: usize,
     pub files_body_cap_bytes: usize,
+    pub replica_identity: Option<ReplicaIdentity>,
 }
 
 impl Default for LifecycleConfig {
@@ -54,6 +62,7 @@ impl Default for LifecycleConfig {
         Self {
             messages_body_cap_bytes: DEFAULT_MESSAGES_CAP_BYTES,
             files_body_cap_bytes: DEFAULT_FILES_CAP_BYTES,
+            replica_identity: None,
         }
     }
 }

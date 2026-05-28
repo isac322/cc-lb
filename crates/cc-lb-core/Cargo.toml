@@ -49,6 +49,7 @@ tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread"
 tracing.workspace = true
 ulid = "1"
 url.workspace = true
+uuid.workspace = true
 tower-service.workspace = true
 tower.workspace = true
 

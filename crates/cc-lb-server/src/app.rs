@@ -55,6 +55,7 @@ use crate::builtins::{
 use crate::drain::DrainController;
 use crate::preflight::{self, PreflightOptions};
 use crate::reload::ConfigWatcher;
+use crate::replica;
 use crate::signal;
 use crate::storage_factory;
 use crate::tls::{ReloadableListener, TlsState};
@@ -462,6 +463,28 @@ pub fn build_app_with_storage(
 
     let error_normalizer = Arc::new(error_normalizer(&config)?);
     let (dispatcher, breaker_registry) = dispatcher(&config);
+
+    let replica_identity = {
+        let data_dir = std::path::PathBuf::from("./data");
+        std::fs::create_dir_all(&data_dir).ok();
+        match replica::load_or_create_replica_id(&data_dir) {
+            Ok(id) => {
+                let started_at_unix_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                Some(cc_lb_core::ReplicaIdentity {
+                    id,
+                    started_at_unix_secs,
+                })
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load or create replica ID; proceeding without it");
+                None
+            }
+        }
+    };
+
     let mut lifecycle = Lifecycle::new(
         builtin_authn.clone(),
         signer_factory_for_lifecycle,
@@ -471,6 +494,7 @@ pub fn build_app_with_storage(
         LifecycleConfig {
             messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
             files_body_cap_bytes: cap_to_usize(config.body.files_cap_bytes),
+            replica_identity,
         },
     )
     .with_error_normalizer(error_normalizer);

@@ -16,6 +16,7 @@ pub mod cli;
 pub mod drain;
 pub mod preflight;
 pub mod reload;
+pub mod replica;
 pub mod signal;
 pub mod storage_factory;
 pub mod tls;
