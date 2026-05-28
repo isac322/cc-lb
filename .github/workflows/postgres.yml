@@ -30,6 +30,7 @@ jobs:
           - default
           - postgres-only
           - all-features
+          - no-default-features
 
     steps:
       - name: Free up disk space on runner
@@ -61,13 +62,33 @@ jobs:
         if: matrix.build-variant == 'default'
         run: cargo build --workspace
 
+      - name: Test workspace (default features = redb)
+        if: matrix.build-variant == 'default'
+        run: cargo test --workspace --no-run
+
       - name: Build workspace (postgres feature active; redb crate linked-but-unused)
         if: matrix.build-variant == 'postgres-only'
         run: cargo build --workspace --features postgres
 
+      - name: Test workspace (postgres feature active)
+        if: matrix.build-variant == 'postgres-only'
+        run: cargo test --workspace --no-run --features postgres
+
       - name: Build workspace (all features)
         if: matrix.build-variant == 'all-features'
         run: cargo build --workspace --all-features
+
+      - name: Test workspace (all features)
+        if: matrix.build-variant == 'all-features'
+        run: cargo test --workspace --no-run --all-features
+
+      - name: Build workspace (no default features)
+        if: matrix.build-variant == 'no-default-features'
+        run: cargo build --workspace --no-default-features
+
+      - name: Test workspace (no default features)
+        if: matrix.build-variant == 'no-default-features'
+        run: cargo test --workspace --no-run --no-default-features
 
   postgres-conformance:
     name: Postgres conformance
