@@ -6,6 +6,7 @@ mod oauth_pkce;
 pub mod principals;
 pub mod routes;
 pub mod settings;
+pub mod status;
 
 use arc_swap::ArcSwap;
 use std::sync::Arc;

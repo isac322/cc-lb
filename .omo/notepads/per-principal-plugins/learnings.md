@@ -61,3 +61,10 @@
 - The test avoids Extism entirely and uses generation-tagged stub router/hook instances so a torn or mismatched router/hook chain would fail the observed upstream generation assertion.
 - `RUSTFLAGS="--cfg loom"` applies to dependencies too; `cc-lb-core` and `cc-lb-config` now keep loom builds on the minimal `PrincipalView`/config-type surface to avoid Tokio `net`/`signal` modules that are intentionally disabled under loom.
 - Verification passed with isolated target dirs: `RUSTFLAGS="--cfg loom" CARGO_TARGET_DIR=/tmp/cc-lb-t14-loom-target cargo test -p cc-lb-core --test loom_principal_view -- --nocapture` and `CARGO_TARGET_DIR=/tmp/cc-lb-t14-build-target cargo build --workspace`.
+
+## 2026-05-28 T18
+
+- `/admin/status` is registered under the existing admin-auth protected routes and is backed by `cc_lb_admin::status::handler`, which reads `CurrentConfig::current_config()` plus `CurrentConfig::last_reload_status()`.
+- The response keeps legacy `plugins` unchanged and adds `principals: { id -> { router_plugin, observability_hooks } }`; per-principal plugin refs expose `name`, `wasm_path`, and `config_hash` only.
+- `config_hash` uses `sha2::Sha256` over `serde_json::to_string(&plugin_ref.config)` and emits the first 16 lowercase hex characters; raw `config` values are not serialized in `/admin/status`.
+- Verification passed: `cargo build -p cc-lb-admin`, `cargo test -p cc-lb-admin`, and `cargo clippy -p cc-lb-admin -- -D warnings`.

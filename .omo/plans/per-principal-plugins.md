@@ -1516,7 +1516,7 @@ Max Concurrent: 8 (Wave 2 fully parallel)
   - Files: `tests/integration/per_principal_reload_fault_injection.rs`
   - Pre-commit: `cargo fmt --check && cargo test --test per_principal_reload_fault_injection`
 
-- [ ] 18. Admin `/status` response: keep legacy `plugins` + add `principals: { id -> { router_plugin, observability_hooks } }` (redacted config)
+- [x] 18. Admin `/status` response: keep legacy `plugins` + add `principals: { id -> { router_plugin, observability_hooks } }` (redacted config)
 
   **What to do**:
   - In `crates/cc-lb-admin/src/status.rs:130-135` (the response builder):
