@@ -12,9 +12,14 @@ dto-roundtrip = []
 async-trait = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
+cc-lb-aead = { path = "../cc-lb-aead" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
+tokio = { workspace = true, features = ["sync"] }
+tokio-util = { workspace = true }
+url = { workspace = true, features = ["serde"] }
+uuid = { workspace = true }
 
 [dev-dependencies]
 cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }

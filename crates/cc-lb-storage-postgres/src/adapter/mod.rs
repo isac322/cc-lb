@@ -8,6 +8,7 @@ pub mod config_store;
 pub mod limit_state;
 pub mod managed_keys;
 pub mod meta;
+pub mod notifier;
 pub mod oauth_credentials;
 pub mod quota;
 pub mod request_events;

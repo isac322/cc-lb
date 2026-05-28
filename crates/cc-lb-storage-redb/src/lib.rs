@@ -7,6 +7,8 @@ use adapter::error_map;
 mod key_index;
 pub mod managed_keys;
 mod migration;
+#[path = "adapter/notifier.rs"]
+mod notifier_adapter;
 mod oauth;
 pub mod price_catalog;
 mod request_events;
@@ -15,9 +17,12 @@ mod usage_rollups;
 use std::path::Path;
 use std::sync::Arc;
 
+use cc_lb_storage_api::ChangeEvent;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use thiserror::Error;
+use tokio::sync::broadcast;
 
+pub use cc_lb_storage_api::RuntimeChangeNotifier;
 pub use cc_lb_storage_api::types::{
     AuditEntry, ConfigDraftState, HistoryEntry, HistorySummary, OAuthCredentials, RequestEvent,
     RequestEventUpstream, UsageRollup, UsageRollupResolution, UsageRollupRun,
@@ -56,6 +61,7 @@ pub(crate) const BACKEND_KIND_KEY: &str = "backend_kind";
 pub struct Storage {
     pub(crate) db: Arc<Database>,
     pub(crate) master_key: [u8; 32],
+    pub(crate) noop_change_tx: broadcast::Sender<ChangeEvent>,
 }
 
 pub type RedbStorage = Storage;
@@ -152,7 +158,11 @@ impl Storage {
         let db = Arc::new(Database::create(path)?);
         migration::initialize_schema(&db)?;
 
-        Ok(Self { db, master_key })
+        Ok(Self {
+            db,
+            master_key,
+            noop_change_tx: notifier_adapter::noop_change_sender(),
+        })
     }
 
     pub fn begin_read(&self) -> Result<redb::ReadTransaction, StorageError> {

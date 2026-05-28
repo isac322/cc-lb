@@ -64,7 +64,7 @@ pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop}
 #[cfg(not(loom))]
 pub use lifecycle::{
     ApiKeyAwareSignerFactory, Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig,
-    LimitSubject, LimitSubjectProvider, ProxyError, UpstreamDispatch, ReplicaIdentity,
+    LimitSubject, LimitSubjectProvider, ProxyError, ReplicaIdentity, UpstreamDispatch,
 };
 #[cfg(not(loom))]
 pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};

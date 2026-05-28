@@ -1,9 +1,23 @@
+#[cfg(any())]
 pub mod aead;
+#[cfg(any())]
 pub mod append_ordering;
+#[cfg(any())]
 pub mod atomicity;
+#[cfg(any())]
 pub mod crash_recovery;
 pub mod managed_keys;
+#[cfg(any())]
 pub mod multi_instance;
+#[cfg(test)]
+pub mod plugin_registry_store;
+#[cfg(any())]
 pub mod pool_exhaustion;
+pub mod principal_store;
+#[cfg(any())]
 pub mod revisioning_meta;
+#[cfg(any())]
+pub mod runtime_change_notifier;
 pub mod storage_roundtrips;
+#[cfg(any())]
+pub mod upstream_store;

@@ -79,7 +79,7 @@ impl<T: Serialize + for<'de> Deserialize<'de>> AeadEncryptedField<T> {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn from_ciphertext(ciphertext: Vec<u8>) -> Self {
+    pub fn from_ciphertext(ciphertext: Vec<u8>) -> Self {
         Self {
             ciphertext,
             _phantom: PhantomData,

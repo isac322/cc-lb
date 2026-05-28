@@ -76,6 +76,8 @@ jobs:
           components: llvm-tools-preview
       - name: Install WASI target for pinned toolchain
         run: rustup target add wasm32-wasip1
+      - name: Build Extism echo fixture
+        run: cargo build -p extism-echo-plugin --target wasm32-wasip1 --release
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov

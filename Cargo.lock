@@ -840,12 +840,17 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "cc-lb-aead",
  "cc-lb-storage-redb",
  "chrono",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -858,11 +863,15 @@ dependencies = [
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
  "cc-lb-storage-redb",
+ "chrono",
  "futures",
  "serde_json",
  "sqlx",
  "tempfile",
  "tokio",
+ "tokio-util",
+ "url",
+ "uuid",
 ]
 
 [[package]]
@@ -871,6 +880,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "bytes",
+ "cc-lb-aead",
  "cc-lb-pricing",
  "cc-lb-storage-api",
  "chrono",
@@ -879,7 +889,9 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -893,7 +905,6 @@ dependencies = [
  "bincode 2.0.1",
  "cc-lb-aead",
  "cc-lb-storage-api",
- "cc-lb-storage-conformance",
  "chacha20poly1305",
  "redb",
  "ring",
@@ -902,6 +913,8 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-util",
+ "uuid",
 ]
 
 [[package]]
@@ -1705,6 +1718,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "extism-echo-plugin"
+version = "0.1.0"
+dependencies = [
+ "extism-pdk",
+]
+
+[[package]]
 name = "extism-manifest"
 version = "1.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1713,6 +1733,32 @@ dependencies = [
  "base64",
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "extism-pdk"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "352fcb5a66eb74145a1c4a01f2bd15d59c62c85be73aac8471880c65b26b798f"
+dependencies = [
+ "anyhow",
+ "base64",
+ "extism-convert",
+ "extism-manifest",
+ "extism-pdk-derive",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "extism-pdk-derive"
+version = "1.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d086daea5fd844e3c5ac69ddfe36df4a9a43e7218cf7d1f888182b089b09806c"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
 ]
 
 [[package]]

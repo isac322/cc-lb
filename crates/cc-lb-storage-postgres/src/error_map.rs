@@ -7,6 +7,17 @@ pub fn map_sqlx_error(error: sqlx::Error) -> StorageError {
                 message: db_error.message().to_owned(),
             }
         }
+        sqlx::Error::Database(db_error) if db_error.is_foreign_key_violation() => {
+            StorageError::Conflict {
+                message: db_error.message().to_owned(),
+            }
+        }
+        sqlx::Error::Database(db_error) if db_error.is_check_violation() => {
+            StorageError::InvalidInput {
+                field: "postgres".to_owned(),
+                reason: db_error.message().to_owned(),
+            }
+        }
         sqlx::Error::PoolTimedOut => StorageError::Unavailable {
             message: "postgres connection pool timed out".to_owned(),
         },

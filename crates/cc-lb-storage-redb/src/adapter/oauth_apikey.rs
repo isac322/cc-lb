@@ -3,7 +3,7 @@ use cc_lb_storage_api::{ApiKeyStore, OAuthCredentialStore, StorageResult};
 
 use crate::RedbStorage;
 
-use super::error_map::{map_join_err, map_redb_err};
+use crate::adapter_error_map::{map_join_err, map_redb_err};
 
 #[async_trait]
 impl OAuthCredentialStore for RedbStorage {
