@@ -54,7 +54,7 @@ impl UpstreamState {
 async fn api_wildcard_forwarding() {
     let (upstream_addr, upstream_state, _upstream) = spawn_recording_upstream().await;
     let config = config_for_upstream(upstream_addr);
-    let app = build_app_for_testing(config).expect("build app");
+    let app = build_app_for_testing(config).await.expect("build app");
 
     let usage = app
         .router

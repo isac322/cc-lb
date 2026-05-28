@@ -46,7 +46,9 @@ impl UpstreamState {
 #[tokio::test]
 async fn forwards_selected_headers_to_fake_anthropic() {
     let (upstream_addr, _upstream) = spawn_fake_anthropic().await;
-    let app = build_app_for_testing(config_for_upstream(upstream_addr)).expect("build app");
+    let app = build_app_for_testing(config_for_upstream(upstream_addr))
+        .await
+        .expect("build app");
 
     let response = app
         .router
@@ -88,7 +90,9 @@ async fn forwards_selected_headers_to_fake_anthropic() {
 #[tokio::test]
 async fn strips_connection_before_upstream_forwarding() {
     let (upstream_addr, upstream_state, _upstream) = spawn_recording_upstream().await;
-    let app = build_app_for_testing(config_for_upstream(upstream_addr)).expect("build app");
+    let app = build_app_for_testing(config_for_upstream(upstream_addr))
+        .await
+        .expect("build app");
 
     let response = app
         .router

@@ -186,7 +186,7 @@ pub async fn build_app(config: Config) -> Result<App, BuildError> {
     build_app_with_path(config, None).await
 }
 
-pub fn build_app_for_testing(mut config: Config) -> Result<App, BuildError> {
+pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError> {
     let dir = tempfile::TempDir::new()?;
     let path = dir.path().join("storage.redb");
     let key = [0u8; 32];
@@ -206,6 +206,68 @@ pub fn build_app_for_testing(mut config: Config) -> Result<App, BuildError> {
     });
     std::mem::forget(dir);
     build_app_with_storage(config, None, managed_store, storage, aead)
+}
+
+#[cfg(feature = "postgres")]
+pub async fn build_app_for_testing_postgres(database_url: &str) -> Result<App, BuildError> {
+    use cc_lb_storage_api::{BackendKind, Storage as StorageTrait};
+    use sqlx::postgres::PgPoolOptions;
+
+    let pool = PgPoolOptions::new()
+        .max_connections(2)
+        .connect(database_url)
+        .await
+        .map_err(|e| BuildError::StorageConnect {
+            message: e.to_string(),
+        })?;
+
+    let init_storage: Arc<dyn StorageTrait> =
+        Arc::new(cc_lb_storage_postgres::PostgresStorage::new(pool.clone()));
+    init_storage
+        .initialize(BackendKind::Postgres)
+        .await
+        .map_err(|e| BuildError::StorageConnect {
+            message: e.to_string(),
+        })?;
+
+    sqlx::query("TRUNCATE managed_api_key_index_v1, managed_api_keys_v1")
+        .execute(&pool)
+        .await
+        .map_err(|e| BuildError::StorageConnect {
+            message: e.to_string(),
+        })?;
+
+    let managed_store: Arc<dyn ManagedKeyStore> =
+        Arc::new(cc_lb_storage_postgres::PostgresManagedKeyStore::new(
+            pool,
+            Arc::new(cc_lb_storage_postgres::adapter::retry::RetryPolicy::default()),
+        ));
+    let key = [0u8; 32];
+    let aead = Arc::new(AeadService::from_master_key(key));
+    let mut config = Config::default();
+    config.storage = cc_lb_config::StorageConfig::Postgres {
+        url: database_url.to_owned(),
+        pool: cc_lb_config::PostgresPoolConfig::default(),
+    };
+    config.upstreams.insert(
+        "test-upstream".to_owned(),
+        cc_lb_config::UpstreamSpec {
+            kind: cc_lb_config::UpstreamKind::AnthropicDirect,
+            base_url: None,
+            region: None,
+            project: None,
+            auth_strategy: cc_lb_config::AuthStrategy::ApiKey,
+            credentials_ref: None,
+        },
+    );
+    config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
+    config.downstream_auth.mode = DownstreamAuthMode::None;
+    config.downstream_auth.none_mode = Some(cc_lb_config::NoneModeConfig {
+        principal_id: "test-principal".to_owned(),
+        upstream_kind: cc_lb_config::NoneModeUpstreamKind::AnthropicKey,
+        upstream_credential_ref: "test-cred".to_owned(),
+    });
+    build_app_with_storage(config, None, managed_store, None, aead)
 }
 
 pub async fn build_app_with_path(
@@ -926,4 +988,19 @@ pub enum BuildError {
     InvalidTlsConfig { field: String, message: String },
     #[error("storage connection failed: {message}")]
     StorageConnect { message: String },
+}
+
+#[cfg(all(test, feature = "postgres"))]
+mod tests {
+    use super::build_app_for_testing_postgres;
+
+    #[tokio::test]
+    async fn build_app_for_testing_postgres_smoke() -> Result<(), Box<dyn std::error::Error>> {
+        let url = match std::env::var("CI_POSTGRES_URL") {
+            Ok(u) => u,
+            Err(_) => return Ok(()),
+        };
+        let _app = build_app_for_testing_postgres(&url).await?;
+        Ok(())
+    }
 }

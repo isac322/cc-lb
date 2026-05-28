@@ -13,7 +13,7 @@ use tower::ServiceExt;
 async fn healthz_always_200() {
     let (upstream_addr, _upstream) = healthcheck_common::spawn_upstream(StatusCode::OK).await;
     let config = healthcheck_common::config_for_upstream(upstream_addr, 5);
-    let app = build_app_for_testing(config).expect("build app");
+    let app = build_app_for_testing(config).await.expect("build app");
 
     let request = Request::builder()
         .method("GET")

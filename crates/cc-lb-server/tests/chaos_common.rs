@@ -32,7 +32,7 @@ pub async fn start_router(fake_config: AppConfig) -> RunningRouter {
     let mut config = config_for_upstream(upstream_addr);
     config.listener.proxy_addr = proxy_addr;
 
-    let app = build_app_with_path(config, None).expect("build app");
+    let app = build_app_with_path(config, None).await.expect("build app");
     let router = app.router;
     let server = tokio::spawn(async move { axum::serve(listener, router).await });
 

@@ -73,7 +73,7 @@ async fn files_content_route_is_registered_explicitly() {
 async fn files_content_forwards_exact_path_and_method() {
     let (upstream_addr, upstream_state, _upstream) = spawn_recording_upstream().await;
     let config = config_for_upstream(upstream_addr);
-    let app = build_app_for_testing(config).expect("build app");
+    let app = build_app_for_testing(config).await.expect("build app");
 
     let response = app
         .router
@@ -111,7 +111,7 @@ async fn files_content_forwards_exact_path_and_method() {
 async fn files_routes_remain_intact() {
     let (upstream_addr, upstream_state, _upstream) = spawn_recording_upstream().await;
     let config = config_for_upstream(upstream_addr);
-    let app = build_app_for_testing(config).expect("build app");
+    let app = build_app_for_testing(config).await.expect("build app");
 
     let files = app
         .router
