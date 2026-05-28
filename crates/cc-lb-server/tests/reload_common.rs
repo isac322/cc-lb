@@ -9,6 +9,18 @@ use cc_lb_config::Config;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tracing_subscriber::fmt::MakeWriter;
 
+pub const ROUTER_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x03,
+    0x02, 0x01, 0x00, 0x07, 0x09, 0x01, 0x05, 0x72, 0x6f, 0x75, 0x74, 0x65, 0x00, 0x00, 0x0a, 0x06,
+    0x01, 0x04, 0x00, 0x41, 0x00, 0x0b,
+];
+
+pub const OBSERVE_WASM: &[u8] = &[
+    0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f, 0x03,
+    0x02, 0x01, 0x00, 0x07, 0x0b, 0x01, 0x07, 0x6f, 0x62, 0x73, 0x65, 0x72, 0x76, 0x65, 0x00, 0x00,
+    0x0a, 0x06, 0x01, 0x04, 0x00, 0x41, 0x00, 0x0b,
+];
+
 pub fn write_config(path: &Path, messages_cap_bytes: u64, proxy_addr: SocketAddr) {
     let config = format!(
         r#"[listener]
@@ -45,6 +57,48 @@ allowed_models = ["{model}"]
 "#
     );
     std::fs::write(path, config).unwrap();
+}
+
+pub fn write_config_with_principal_plugins(
+    path: &Path,
+    messages_cap_bytes: u64,
+    proxy_addr: SocketAddr,
+    router_path: &Path,
+    observe_path: &Path,
+) {
+    let router_path = toml_path(router_path);
+    let observe_path = toml_path(observe_path);
+    let config = format!(
+        r#"[listener]
+proxy_addr = "{proxy_addr}"
+admin_addr = "127.0.0.1:19090"
+metrics_addr = "127.0.0.1:19091"
+
+[body]
+messages_cap_bytes = {messages_cap_bytes}
+files_cap_bytes = 1048576
+
+[principals.alice]
+allowed_models = ["*"]
+
+[principals.alice.router_plugin]
+name = "alice-router"
+wasm_path = "{router_path}"
+
+[[principals.alice.observability_hooks]]
+name = "alice-hook"
+wasm_path = "{observe_path}"
+"#
+    );
+    std::fs::write(path, config).unwrap();
+}
+
+pub fn write_bytes(path: &Path, bytes: &[u8]) {
+    std::fs::write(path, bytes).unwrap();
+}
+
+pub fn toml_path(path: &Path) -> String {
+    path.display().to_string().replace('\\', "\\\\")
 }
 
 pub fn load_config(path: &Path) -> Config {

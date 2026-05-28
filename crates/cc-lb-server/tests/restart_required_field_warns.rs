@@ -23,3 +23,47 @@ fn restart_required_field_warns() {
     assert!(logs.contains("listener.proxy_addr"));
     assert!(logs.contains("restart required to apply"));
 }
+
+#[test]
+fn reload_warn_per_principal_path_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let config_path = dir.path().join("cc-lb.toml");
+    let router_a = dir.path().join("router-a.wasm");
+    let router_b = dir.path().join("router-b.wasm");
+    let observe_a = dir.path().join("observe-a.wasm");
+    let observe_b = dir.path().join("observe-b.wasm");
+    reload_common::write_bytes(&router_a, reload_common::ROUTER_WASM);
+    reload_common::write_bytes(&router_b, reload_common::ROUTER_WASM);
+    reload_common::write_bytes(&observe_a, reload_common::OBSERVE_WASM);
+    reload_common::write_bytes(&observe_b, reload_common::OBSERVE_WASM);
+    let proxy_addr: SocketAddr = "127.0.0.1:18080".parse().unwrap();
+    reload_common::write_config_with_principal_plugins(
+        &config_path,
+        100,
+        proxy_addr,
+        &router_a,
+        &observe_a,
+    );
+
+    let watcher = ConfigWatcher::new(&config_path, reload_common::load_config(&config_path));
+    reload_common::write_config_with_principal_plugins(
+        &config_path,
+        100,
+        proxy_addr,
+        &router_b,
+        &observe_b,
+    );
+
+    let logs = reload_common::capture_warn_logs(|| {
+        watcher.reload_now().unwrap();
+    });
+
+    assert!(
+        logs.contains("principals.alice.router_plugin.wasm_path"),
+        "router path warning missing from logs: {logs}"
+    );
+    assert!(
+        logs.contains("principals.alice.observability_hooks.0.wasm_path"),
+        "observability path warning missing from logs: {logs}"
+    );
+}
