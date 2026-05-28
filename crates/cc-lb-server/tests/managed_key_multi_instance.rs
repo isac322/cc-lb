@@ -1,183 +1,254 @@
-//! Task 16 sub-cases:
-//! 1. Issue a managed key on instance A via the in-process `KeyStore::create` (or whatever public accessor `App` exposes — NOT an HTTP roundtrip).
-//! 2. On instance B: authenticate (call `app_b.builtin_authn().authenticate(...)`) with the same token → succeed.
-//! 3. On instance A: revoke the key (`KeyStore::revoke` or equivalent).
-//! 4. On instance B: authenticate same token → fail (NOT `Unavailable`; expect `InvalidKey` / `Revoked` / whatever variant means "no such active key").
-//! 5. Concurrent issue: spawn 50 tasks on A + 50 tasks on B issuing for the SAME principal → assert all 100 succeed AND 100 UNIQUE `key_id` values.
-//! 6. Cleanup: TRUNCATE `managed_api_key_index_v1, managed_api_keys_v1` in test setup OR a guard.
-//!
-//! QA Scenarios (MANDATORY):
-//! Scenario: Cross-instance issue + auth + revoke
-//! Scenario: 100 concurrent issues across two instances
-//! Scenario: CI_POSTGRES_URL unset → SKIP (not FAIL)
-
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::error::Error;
-use std::sync::Arc;
-use std::time::Duration;
+use std::io;
+use std::net::SocketAddr;
+use std::sync::{Arc, OnceLock};
+use std::time::{Duration, Instant};
 
-use arc_swap::ArcSwap;
+use axum::Router;
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
+use axum::routing::any;
+use cc_lb_aead::AeadService;
 use cc_lb_config::{
-    Config, DownstreamAuthMode, Limit as ConfigLimit, LimitKind as ConfigLimitKind, PrincipalSpec,
-    PrincipalType,
+    AuthStrategy, Config, DownstreamAuthMode, Limit, LimitKind, PostgresPoolConfig, PrincipalSpec,
+    PrincipalType, StorageConfig, UpstreamKind, UpstreamSpec,
 };
-use cc_lb_core::api_keys::{
-    builtin_authn::{BuiltinAuthError, BuiltinAuthn},
-    key_store::{CreateParams, KeyStore},
-    principal_view::PrincipalView,
-    secret,
-};
-use cc_lb_server::app::{App, build_app_for_testing_postgres};
-use cc_lb_storage_api::types::{Limit, LimitKind, PrincipalKindLite, UpstreamKind};
-use cc_lb_storage_postgres::{PostgresManagedKeyStore, adapter::retry::RetryPolicy};
-use http::{HeaderMap, HeaderValue};
+use cc_lb_server::app::{App, build_app_with_storage};
+use cc_lb_storage_api::{BackendKind, ManagedKeyStore, Storage as StorageTrait};
+use cc_lb_storage_postgres::adapter::retry::RetryPolicy;
+use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage};
+use serde_json::{Value, json};
 use sqlx::postgres::PgPoolOptions;
-use tokio::sync::Mutex;
-use tokio::task::JoinSet;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
+use url::Url;
 
-static TEST_LOCK: Mutex<()> = Mutex::const_new(());
-
+const ADMIN_TOKEN: &str = "test-token";
 const PRINCIPAL_ID: &str = "multi-instance-principal";
 const TASKS_PER_INSTANCE: usize = 50;
-const TOTAL_EXPECTED_KEYS: usize = TASKS_PER_INSTANCE * 2;
+const EXPECTED_ISSUED_KEYS: usize = TASKS_PER_INSTANCE * 2;
+const READY_TIMEOUT: Duration = Duration::from_secs(10);
+const READY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+const MESSAGES_BODY: &str = r#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}],"max_tokens":1}"#;
 
-// App has no public key_store/builtin_authn accessor, so each test keeps two
-// real App fixtures alive and attaches per-instance handles to the same DB.
-struct TestInstance {
-    _app: App,
-    key_store: Arc<KeyStore>,
-    builtin_authn: BuiltinAuthn,
-}
+static POSTGRES_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
 
 type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
 
-#[tokio::test]
-async fn cross_instance_issue_auth_revoke() {
-    let Ok(url) = std::env::var("CI_POSTGRES_URL") else {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn cross_instance_issue_auth_revoke() -> TestResult<()> {
+    let Some(database_url) = ci_postgres_url() else {
         eprintln!("skipped: CI_POSTGRES_URL unset");
-        return;
+        return Ok(());
     };
+    let _serial = postgres_test_lock().lock().await;
 
-    let _guard = TEST_LOCK.lock().await;
+    reset_managed_key_tables(&database_url).await?;
+    let upstream = spawn_ok_upstream().await?;
+    let (instance_a, instance_b) = spawn_two_instances(&database_url, upstream.addr).await?;
 
-    if let Err(error) = run_cross_instance_issue_auth_revoke(&url).await {
-        panic!("cross-instance issue/auth/revoke failed: {error}");
-    }
-}
+    let issued = issue_key(instance_a.admin_addr, "issued-on-instance-a").await?;
+    assert_eq!(issued.principal_id, PRINCIPAL_ID);
 
-#[tokio::test]
-async fn concurrent_cross_instance_issue() {
-    let Ok(url) = std::env::var("CI_POSTGRES_URL") else {
-        eprintln!("skipped: CI_POSTGRES_URL unset");
-        return;
-    };
-
-    let _guard = TEST_LOCK.lock().await;
-
-    if let Err(error) = run_concurrent_cross_instance_issue(&url).await {
-        panic!("concurrent cross-instance issue failed: {error}");
-    }
-}
-
-async fn run_cross_instance_issue_auth_revoke(database_url: &str) -> TestResult<()> {
-    let instance_a = build_test_instance(database_url, 4).await?;
-    let instance_b = build_test_instance(database_url, 4).await?;
-    clean_database(database_url).await?;
-
-    let (record, plaintext) = instance_a
-        .key_store
-        .create(PRINCIPAL_ID, create_params("issued-on-instance-a"))
-        .await?;
-    let headers = headers_with_key(plaintext.expose())?;
-    let (key_id, _) = secret::parse(plaintext.expose())?;
-
-    let success = instance_b.builtin_authn.authenticate(&headers).await?;
-    assert_eq!(success.principal_id, PRINCIPAL_ID);
-    assert_eq!(success.key_id, key_id);
-    assert_eq!(success.record, record);
-
-    instance_a.key_store.revoke(PRINCIPAL_ID, &key_id).await?;
-
-    let error = instance_b
-        .builtin_authn
-        .authenticate(&headers)
-        .await
-        .expect_err("revoked key must not authenticate on instance B");
-    assert_ne!(error, BuiltinAuthError::Unavailable);
+    let authenticated = proxy_messages(instance_b.proxy_addr, &issued.plaintext_key).await?;
+    assert_eq!(
+        authenticated.status, 200,
+        "instance B should accept key issued by instance A: body={}",
+        authenticated.body
+    );
     assert!(
-        matches!(
-            error,
-            BuiltinAuthError::NotFound | BuiltinAuthError::KeyRevoked
-        ),
-        "expected inactive-key auth failure after revoke, got {error:?}"
+        authenticated.body.contains("\"ok\":true"),
+        "unexpected proxy success body: {}",
+        authenticated.body
+    );
+
+    let revoked = revoke_key(instance_a.admin_addr, &issued.key_id).await?;
+    assert_eq!(
+        revoked.status, 200,
+        "instance A revoke should succeed: body={}",
+        revoked.body
+    );
+
+    let rejected = proxy_messages(instance_b.proxy_addr, &issued.plaintext_key).await?;
+    assert_eq!(
+        rejected.status, 401,
+        "instance B should reject key revoked by instance A: body={}",
+        rejected.body
+    );
+    assert_ne!(
+        rejected.status, 503,
+        "revoked key must not look unavailable"
     );
 
     Ok(())
 }
 
-async fn run_concurrent_cross_instance_issue(database_url: &str) -> TestResult<()> {
-    let instance_a = build_test_instance(database_url, 32).await?;
-    let instance_b = build_test_instance(database_url, 32).await?;
-    clean_database(database_url).await?;
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_cross_instance_issue() -> TestResult<()> {
+    let Some(database_url) = ci_postgres_url() else {
+        eprintln!("skipped: CI_POSTGRES_URL unset");
+        return Ok(());
+    };
+    let _serial = postgres_test_lock().lock().await;
 
-    let mut tasks = JoinSet::new();
+    reset_managed_key_tables(&database_url).await?;
+    let upstream = spawn_ok_upstream().await?;
+    let (instance_a, instance_b) = spawn_two_instances(&database_url, upstream.addr).await?;
+
+    let mut tasks = Vec::with_capacity(EXPECTED_ISSUED_KEYS);
     for index in 0..TASKS_PER_INSTANCE {
-        let key_store = instance_a.key_store.clone();
-        tasks.spawn(issue_key(key_store, format!("instance-a-{index}")));
+        let admin_addr = instance_a.admin_addr;
+        tasks.push(tokio::task::spawn(async move {
+            issue_key(admin_addr, &format!("instance-a-{index}")).await
+        }));
     }
     for index in 0..TASKS_PER_INSTANCE {
-        let key_store = instance_b.key_store.clone();
-        tasks.spawn(issue_key(key_store, format!("instance-b-{index}")));
+        let admin_addr = instance_b.admin_addr;
+        tasks.push(tokio::task::spawn(async move {
+            issue_key(admin_addr, &format!("instance-b-{index}")).await
+        }));
     }
 
-    let mut key_ids = HashSet::new();
-    while let Some(result) = tasks.join_next().await {
-        let key_id = result??;
-        assert!(key_ids.insert(key_id), "duplicate key_id issued");
+    let mut key_ids = HashSet::with_capacity(EXPECTED_ISSUED_KEYS);
+    for task in tasks {
+        let issued = task.await??;
+        assert!(
+            key_ids.insert(issued.key_id),
+            "duplicate key_id issued by concurrent requests"
+        );
     }
 
-    assert_eq!(key_ids.len(), TOTAL_EXPECTED_KEYS);
-    println!("issued={} unique={}", TOTAL_EXPECTED_KEYS, key_ids.len());
+    assert_eq!(key_ids.len(), EXPECTED_ISSUED_KEYS);
+    println!("issued={} unique={}", EXPECTED_ISSUED_KEYS, key_ids.len());
 
     Ok(())
 }
 
-async fn build_test_instance(database_url: &str, max_connections: u32) -> TestResult<TestInstance> {
-    let app = build_app_for_testing_postgres(database_url).await?;
+fn ci_postgres_url() -> Option<String> {
+    std::env::var("CI_POSTGRES_URL").ok()
+}
+
+fn postgres_test_lock() -> &'static tokio::sync::Mutex<()> {
+    POSTGRES_TEST_LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+async fn spawn_two_instances(
+    database_url: &str,
+    upstream_addr: SocketAddr,
+) -> TestResult<(RunningApp, RunningApp)> {
+    let instance_a = tokio::task::spawn(build_running_app(
+        database_url.to_owned(),
+        upstream_addr,
+        "instance-a",
+    ));
+    let instance_b = tokio::task::spawn(build_running_app(
+        database_url.to_owned(),
+        upstream_addr,
+        "instance-b",
+    ));
+
+    let (instance_a, instance_b) = tokio::join!(instance_a, instance_b);
+    Ok((instance_a??, instance_b??))
+}
+
+async fn build_running_app(
+    database_url: String,
+    upstream_addr: SocketAddr,
+    label: &'static str,
+) -> TestResult<RunningApp> {
     let pool = PgPoolOptions::new()
-        .max_connections(max_connections)
-        .connect(database_url)
+        .max_connections(16)
+        .connect(&database_url)
         .await?;
-    let managed_store = Arc::new(PostgresManagedKeyStore::new(
+    let managed_store: Arc<dyn ManagedKeyStore> = Arc::new(PostgresManagedKeyStore::new(
         pool,
         Arc::new(RetryPolicy::default()),
     ));
-    let key_store = Arc::new(KeyStore::new(managed_store));
-    let builtin_authn = BuiltinAuthn::new(
-        DownstreamAuthMode::ApiKey,
+    let mut app = build_app_with_storage(
+        test_config(&database_url, upstream_addr),
         None,
-        key_store.clone(),
-        principal_view(),
-    );
+        managed_store,
+        None,
+        Arc::new(AeadService::from_master_key([0; 32])),
+    )?;
 
-    Ok(TestInstance {
+    let proxy_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let admin_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let proxy_addr = proxy_listener.local_addr()?;
+    let admin_addr = admin_listener.local_addr()?;
+    app.proxy_addr = proxy_addr;
+    app.admin_addr = admin_addr;
+
+    let proxy_router = app.router.clone();
+    let admin_router = app.admin_router.clone();
+    let proxy_task =
+        tokio::task::spawn(async move { axum::serve(proxy_listener, proxy_router).await });
+    let admin_task =
+        tokio::task::spawn(async move { axum::serve(admin_listener, admin_router).await });
+
+    let running = RunningApp {
+        _label: label,
         _app: app,
-        key_store,
-        builtin_authn,
-    })
+        proxy_addr,
+        admin_addr,
+        proxy_task,
+        admin_task,
+    };
+    wait_for_status(running.proxy_addr, "/healthz", 200).await?;
+    wait_for_status(running.admin_addr, "/admin/health", 200).await?;
+    Ok(running)
 }
 
-async fn issue_key(key_store: Arc<KeyStore>, label: String) -> TestResult<String> {
-    let (_record, plaintext) = key_store.create(PRINCIPAL_ID, create_params(label)).await?;
-    let (key_id, _) = secret::parse(plaintext.expose())?;
-    Ok(key_id)
+fn test_config(database_url: &str, upstream_addr: SocketAddr) -> Config {
+    let mut config = Config::default();
+    config.listener.proxy_addr = "127.0.0.1:0".parse().expect("valid proxy addr");
+    config.listener.admin_addr = "127.0.0.1:0".parse().expect("valid admin addr");
+    config.storage = StorageConfig::Postgres {
+        url: database_url.to_owned(),
+        pool: PostgresPoolConfig::default(),
+    };
+    config.admin.token = Some(ADMIN_TOKEN.to_owned());
+    config.downstream_auth.mode = DownstreamAuthMode::ApiKey;
+    config.downstream_auth.none_mode = None;
+    config.principals.insert(
+        PRINCIPAL_ID.to_owned(),
+        PrincipalSpec {
+            principal_type: PrincipalType::Machine,
+            default_limits: vec![Limit {
+                kind: LimitKind::Requests,
+                window: Duration::from_secs(60),
+                cap_micros: 1_000_000,
+            }],
+            enabled: true,
+            allowed_models: vec!["*".to_owned()],
+            credentials_ref: None,
+        },
+    );
+    config.upstreams.insert(
+        "test-upstream".to_owned(),
+        UpstreamSpec {
+            kind: UpstreamKind::Custom,
+            base_url: Some(
+                Url::parse(&format!("http://{upstream_addr}")).expect("valid upstream URL"),
+            ),
+            region: None,
+            project: None,
+            auth_strategy: AuthStrategy::ApiKey,
+            credentials_ref: None,
+        },
+    );
+    config
 }
 
-async fn clean_database(database_url: &str) -> sqlx::Result<()> {
+async fn reset_managed_key_tables(database_url: &str) -> TestResult<()> {
     let pool = PgPoolOptions::new()
         .max_connections(1)
         .connect(database_url)
         .await?;
+    let storage: Arc<dyn StorageTrait> = Arc::new(PostgresStorage::new(pool.clone()));
+    storage.initialize(BackendKind::Postgres).await?;
     sqlx::query("TRUNCATE managed_api_key_index_v1, managed_api_keys_v1")
         .execute(&pool)
         .await?;
@@ -185,53 +256,239 @@ async fn clean_database(database_url: &str) -> sqlx::Result<()> {
     Ok(())
 }
 
-fn create_params(label: impl Into<String>) -> CreateParams {
-    CreateParams {
-        upstream_kind: UpstreamKind::AnthropicKey,
-        upstream_credential_ref: "anthropic-prod".to_owned(),
-        label: label.into(),
-        description: Some("multi-instance integration test".to_owned()),
-        expires_at_unix_secs: Some(4_102_444_800),
-        limit_overrides: vec![Limit {
-            kind: LimitKind::Requests,
-            window_secs: 60,
-            cap_micros: 100,
-        }],
-        principal_kind: PrincipalKindLite::Machine,
+struct RunningUpstream {
+    addr: SocketAddr,
+    task: JoinHandle<Result<(), io::Error>>,
+}
+
+impl Drop for RunningUpstream {
+    fn drop(&mut self) {
+        self.task.abort();
     }
 }
 
-fn principal_view() -> Arc<ArcSwap<PrincipalView>> {
-    Arc::new(ArcSwap::from(PrincipalView::from_config(
-        &principal_config(),
-    )))
+async fn spawn_ok_upstream() -> TestResult<RunningUpstream> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let router = Router::new().fallback(any(|| async {
+        (
+            StatusCode::OK,
+            [("content-type", "application/json")],
+            r#"{"ok":true}"#,
+        )
+            .into_response()
+    }));
+    let task = tokio::task::spawn(async move { axum::serve(listener, router).await });
+    Ok(RunningUpstream { addr, task })
 }
 
-fn principal_config() -> Config {
-    let mut principals = HashMap::new();
-    principals.insert(
-        PRINCIPAL_ID.to_owned(),
-        PrincipalSpec {
-            principal_type: PrincipalType::Machine,
-            default_limits: vec![ConfigLimit {
-                kind: ConfigLimitKind::Requests,
-                window: Duration::from_secs(60),
-                cap_micros: 1_000,
-            }],
-            enabled: true,
-            allowed_models: vec!["*".to_owned()],
-            credentials_ref: None,
-        },
+struct RunningApp {
+    _label: &'static str,
+    _app: App,
+    proxy_addr: SocketAddr,
+    admin_addr: SocketAddr,
+    proxy_task: JoinHandle<Result<(), io::Error>>,
+    admin_task: JoinHandle<Result<(), io::Error>>,
+}
+
+impl Drop for RunningApp {
+    fn drop(&mut self) {
+        self.proxy_task.abort();
+        self.admin_task.abort();
+    }
+}
+
+#[derive(Debug)]
+struct IssuedKey {
+    principal_id: String,
+    key_id: String,
+    plaintext_key: String,
+}
+
+async fn issue_key(admin_addr: SocketAddr, label: &str) -> TestResult<IssuedKey> {
+    let response = admin_post_json(
+        admin_addr,
+        &format!("/admin/principals/{PRINCIPAL_ID}/keys"),
+        json!({
+            "label": label,
+            "upstream_kind": "anthropic_key",
+            "upstream_credential_ref": "test-upstream",
+        }),
+    )
+    .await?;
+    assert_eq!(
+        response.status, 201,
+        "issue key failed for {label}: body={}",
+        response.body
     );
 
-    Config {
-        principals,
-        ..Config::default()
+    let payload: Value = serde_json::from_str(&response.body)?;
+    Ok(IssuedKey {
+        principal_id: json_string(&payload, "principal_id")?,
+        key_id: json_string(&payload, "key_id")?,
+        plaintext_key: json_string(&payload, "plaintext_key")?,
+    })
+}
+
+async fn revoke_key(admin_addr: SocketAddr, key_id: &str) -> TestResult<RawResponse> {
+    admin_post_body(
+        admin_addr,
+        &format!("/admin/principals/{PRINCIPAL_ID}/keys/{key_id}/revoke"),
+        "",
+        "application/octet-stream",
+    )
+    .await
+}
+
+async fn proxy_messages(proxy_addr: SocketAddr, api_key: &str) -> TestResult<RawResponse> {
+    http_post_body(
+        proxy_addr,
+        "/v1/messages",
+        MESSAGES_BODY,
+        "application/json",
+        &[("x-api-key", api_key), ("anthropic-version", "2023-06-01")],
+    )
+    .await
+}
+
+async fn admin_post_json(addr: SocketAddr, path: &str, body: Value) -> TestResult<RawResponse> {
+    admin_post_body(addr, path, &body.to_string(), "application/json").await
+}
+
+async fn admin_post_body(
+    addr: SocketAddr,
+    path: &str,
+    body: &str,
+    content_type: &str,
+) -> TestResult<RawResponse> {
+    let auth = format!("Bearer {ADMIN_TOKEN}");
+    http_post_body(
+        addr,
+        path,
+        body,
+        content_type,
+        &[("Authorization", auth.as_str())],
+    )
+    .await
+}
+
+async fn wait_for_status(addr: SocketAddr, path: &str, status: u16) -> TestResult<()> {
+    let deadline = Instant::now() + READY_TIMEOUT;
+    loop {
+        let last = match http_get(addr, path).await {
+            Ok(response) if response.status == status => return Ok(()),
+            Ok(response) => format!("status={} body={}", response.status, response.body),
+            Err(source) => source.to_string(),
+        };
+
+        if Instant::now() >= deadline {
+            return Err(error(format!(
+                "server {addr}{path} did not become ready with status {status}: {last}"
+            )));
+        }
+
+        tokio::time::sleep(READY_POLL_INTERVAL).await;
     }
 }
 
-fn headers_with_key(api_key: &str) -> TestResult<HeaderMap> {
-    let mut headers = HeaderMap::new();
-    headers.insert("x-api-key", HeaderValue::from_str(api_key)?);
-    Ok(headers)
+async fn http_get(addr: SocketAddr, path: &str) -> TestResult<RawResponse> {
+    raw_http(
+        addr,
+        &format!("GET {path} HTTP/1.1\r\nHost: {addr}\r\nConnection: close\r\n\r\n"),
+    )
+    .await
+}
+
+async fn http_post_body(
+    addr: SocketAddr,
+    path: &str,
+    body: &str,
+    content_type: &str,
+    extra_headers: &[(&str, &str)],
+) -> TestResult<RawResponse> {
+    let mut request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\ncontent-type: {content_type}\r\ncontent-length: {}\r\nConnection: close\r\n",
+        body.len()
+    );
+    for (name, value) in extra_headers {
+        request.push_str(name);
+        request.push_str(": ");
+        request.push_str(value);
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
+    request.push_str(body);
+    raw_http(addr, &request).await
+}
+
+#[derive(Debug)]
+struct RawResponse {
+    status: u16,
+    body: String,
+}
+
+async fn raw_http(addr: SocketAddr, request: &str) -> TestResult<RawResponse> {
+    let mut stream = TcpStream::connect(addr).await?;
+    stream.write_all(request.as_bytes()).await?;
+
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).await?;
+    let text = String::from_utf8_lossy(&bytes);
+    let status = text
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .unwrap_or(0);
+    let (_headers, body) = split_response(&text);
+    Ok(RawResponse { status, body })
+}
+
+fn split_response(text: &str) -> (String, String) {
+    let Some((headers, body)) = text.split_once("\r\n\r\n") else {
+        return (text.to_owned(), String::new());
+    };
+    let body = if headers
+        .lines()
+        .any(|line| line.eq_ignore_ascii_case("transfer-encoding: chunked"))
+    {
+        decode_chunked_body(body).unwrap_or_else(|| body.to_owned())
+    } else {
+        body.to_owned()
+    };
+    (headers.to_owned(), body)
+}
+
+fn decode_chunked_body(body: &str) -> Option<String> {
+    let mut remaining = body.as_bytes();
+    let mut decoded = Vec::new();
+
+    loop {
+        let line_end = remaining.windows(2).position(|window| window == b"\r\n")?;
+        let size_text = std::str::from_utf8(&remaining[..line_end]).ok()?;
+        let size = usize::from_str_radix(size_text.trim(), 16).ok()?;
+        remaining = &remaining[line_end + 2..];
+        if size == 0 {
+            break;
+        }
+        if remaining.len() < size + 2 {
+            return None;
+        }
+        decoded.extend_from_slice(&remaining[..size]);
+        remaining = &remaining[size + 2..];
+    }
+
+    String::from_utf8(decoded).ok()
+}
+
+fn json_string(payload: &Value, field: &str) -> TestResult<String> {
+    payload
+        .get(field)
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+        .ok_or_else(|| error(format!("response missing {field}: {payload}")))
+}
+
+fn error(message: impl Into<String>) -> Box<dyn Error + Send + Sync> {
+    Box::new(io::Error::other(message.into()))
 }
