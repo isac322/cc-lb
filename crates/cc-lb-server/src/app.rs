@@ -219,7 +219,7 @@ pub fn build_app_with_storage(
         return Err(BuildError::StorageRequired);
     }
 
-    let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config)?));
+    let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config, std::collections::HashMap::new())?));
     let key_store = storage
         .as_ref()
         .map(|storage| Arc::new(KeyStore::new(storage.clone())));
@@ -397,7 +397,7 @@ impl CurrentConfig for InMemoryCurrentConfig {
         config
             .validate()
             .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
-        let principal_view = PrincipalView::from_config(&config)
+        let principal_view = PrincipalView::from_config(&config, std::collections::HashMap::new())
             .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
         self.principal_view.store(principal_view);
         let config = Arc::new(config);

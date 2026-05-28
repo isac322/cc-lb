@@ -43,7 +43,10 @@ pub struct PrincipalSpecCached {
 }
 
 impl PrincipalView {
-    pub fn from_config(config: &Config) -> Result<Arc<PrincipalView>, ConfigError> {
+    pub fn from_config(
+        config: &Config,
+        mut principal_chains: HashMap<String, (RouterPluginCache, ObservabilityHooksCache)>,
+    ) -> Result<Arc<PrincipalView>, ConfigError> {
         let specs = config
             .principals
             .iter()
@@ -65,6 +68,13 @@ impl PrincipalView {
                     invalid_allowed_models_glob(principal_id, "<compiled glob set>", source)
                 })?;
 
+                let (router_plugin, observability_hooks) = principal_chains
+                    .remove(principal_id)
+                    .unwrap_or((
+                        RouterPluginCache::Inherit,
+                        ObservabilityHooksCache::Inherit,
+                    ));
+
                 let cached = PrincipalSpecCached {
                     id: principal_id.clone(),
                     principal_type: principal.principal_type.clone().into(),
@@ -77,8 +87,8 @@ impl PrincipalView {
                         .map(Into::into)
                         .collect(),
                     enabled: principal.enabled,
-                    router_plugin: RouterPluginCache::Inherit,
-                    observability_hooks: ObservabilityHooksCache::Inherit,
+                    router_plugin,
+                    observability_hooks,
                 };
 
                 Ok((principal_id.clone(), cached))

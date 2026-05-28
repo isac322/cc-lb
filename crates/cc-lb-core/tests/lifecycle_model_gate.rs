@@ -35,7 +35,7 @@ fn engine_with_allowed_models(allowed_models: Vec<String>) -> Arc<LimitEngine> {
     let view = PrincipalView::from_config(&Config {
         principals,
         ..Config::default()
-    })
+    }, std::collections::HashMap::new())
     .expect("principal view builds");
     LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),

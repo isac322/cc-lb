@@ -41,6 +41,21 @@ pub enum ConfigError {
     },
     #[error("postgres statement timeout {statement}s must be less than request timeout {request}s")]
     StatementTimeoutExceedsRequestTimeout { statement: u64, request: u64 },
+    #[error(
+        "principal {principal_id} plugin {plugin_name} is missing wasm_path"
+    )]
+    PerPrincipalPluginMissingWasmPath {
+        principal_id: String,
+        plugin_name: String,
+    },
+    #[error(
+        "principal {principal_id} plugin {plugin_name} failed to instantiate: {reason}"
+    )]
+    PerPrincipalPluginInstantiation {
+        principal_id: String,
+        plugin_name: String,
+        reason: String,
+    },
 }
 
 impl From<figment::Error> for ConfigError {

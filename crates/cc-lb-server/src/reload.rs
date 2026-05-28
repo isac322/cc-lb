@@ -99,7 +99,7 @@ impl ConfigWatcher {
 
         let new_config = Arc::new(new_config);
         if let Some(principal_view) = &self.principal_view {
-            let new_principal_view = match PrincipalView::from_config(&new_config) {
+            let new_principal_view = match PrincipalView::from_config(&new_config, std::collections::HashMap::new()) {
                 Ok(view) => view,
                 Err(source) => {
                     self.record_failure(&source);

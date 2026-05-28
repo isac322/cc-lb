@@ -58,7 +58,7 @@ fn invalid_principal_view_reload_keeps_old_view() {
 
     let initial_config = reload_common::load_config(&config_path);
     let principal_view = Arc::new(ArcSwap::from(
-        PrincipalView::from_config(&initial_config).expect("principal view builds"),
+        PrincipalView::from_config(&initial_config, std::collections::HashMap::new()).expect("principal view builds"),
     ));
     let before_view = principal_view.load_full();
     let watcher = ConfigWatcher::new_with_principal_view(

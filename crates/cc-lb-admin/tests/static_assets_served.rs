@@ -18,9 +18,7 @@ fn test_state() -> AdminState {
             Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
             Arc::new(
                 arc_swap::ArcSwap::from(
-                    cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
-                        &Config::default(),
-                    )
+                    cc_lb_core::api_keys::principal_view::PrincipalView::from_config(&Config::default(), std::collections::HashMap::new())
                     .expect("principal view builds"),
                 ),
             ),
@@ -28,9 +26,7 @@ fn test_state() -> AdminState {
         lifecycle: None,
         audit_sink: None,
         principal_view: Arc::new(arc_swap::ArcSwap::from(
-            cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
-                &cc_lb_admin::CurrentConfig::current_config((Arc::new(Config::default())).as_ref()),
-            )
+            cc_lb_core::api_keys::principal_view::PrincipalView::from_config(&cc_lb_admin::CurrentConfig::current_config((Arc::new(Config::default())).as_ref()), std::collections::HashMap::new())
             .expect("principal view builds"),
         )),
         config: Arc::new(Config::default()),

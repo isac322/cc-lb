@@ -74,7 +74,7 @@ impl TestAuthn {
                 }),
                 Arc::new(KeyStore::new(storage)),
                 Arc::new(arc_swap::ArcSwap::from(
-                    PrincipalView::from_config(&cc_lb_config::Config::default())
+                    PrincipalView::from_config(&cc_lb_config::Config::default(), std::collections::HashMap::new())
                         .expect("principal view builds"),
                 )),
             )),

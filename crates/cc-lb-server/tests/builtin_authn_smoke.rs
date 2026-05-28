@@ -34,7 +34,7 @@ impl Harness {
         let key_store = Arc::new(KeyStore::new(storage.clone()));
         let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config(
             principal_enabled,
-        ))?));
+        ), std::collections::HashMap::new())?));
 
         Ok(Self {
             _dir: dir,

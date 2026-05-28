@@ -95,7 +95,7 @@ async fn run_inner(
     }
 
     let runtime = ExtismRuntime::new();
-    PrincipalView::from_config(cfg)?;
+    PrincipalView::from_config(cfg, std::collections::HashMap::new())?;
     report.successes.push("principal view built".to_owned());
     if let Some(plugin) = &cfg.plugins.router_plugin {
         dry_load_plugin(&runtime, plugin, PluginLoadKind::Router)?;

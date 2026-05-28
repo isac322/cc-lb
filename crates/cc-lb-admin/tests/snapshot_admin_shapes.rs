@@ -67,7 +67,7 @@ fn test_config() -> Config {
 
 fn test_state(config: Config, storage: Option<Arc<Storage>>) -> AdminState {
     let principal_view = Arc::new(ArcSwap::from(
-        PrincipalView::from_config(&config).expect("principal view builds"),
+        PrincipalView::from_config(&config, std::collections::HashMap::new()).expect("principal view builds"),
     ));
     let limit_engine = LimitEngine::new(
         Arc::new(KeyConcurrencyManager::new()),
