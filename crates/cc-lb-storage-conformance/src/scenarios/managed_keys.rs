@@ -1,6 +1,6 @@
 //! Managed API key store conformance scenarios.
 
-use std::{future::Future, sync::Arc};
+use std::{collections::HashSet, future::Future, sync::Arc};
 
 use anyhow::{Result, ensure};
 use async_trait::async_trait;
@@ -221,7 +221,7 @@ pub async fn managed_keys_concurrent_issue_no_index_collision<B>(backend: Arc<B>
 where
     B: ManagedKeyBackend,
 {
-    const KEY_COUNT: u8 = 32;
+    const KEY_COUNT: u8 = 100;
 
     with_fixture(backend, |store| async move {
         let issues = (0..KEY_COUNT).map(|seed| {
@@ -239,6 +239,15 @@ where
             issued.len() == usize::from(KEY_COUNT),
             "all concurrent issues should complete"
         );
+        let unique: HashSet<&str> = issued
+            .iter()
+            .map(|(key_id, _, _)| key_id.as_str())
+            .collect();
+        println!(
+            "managed_keys_concurrent_issue_no_index_collision: {}/100 unique key_ids",
+            unique.len()
+        );
+        assert_eq!(unique.len(), 100);
 
         let listed = store.list_by_principal("principal-concurrent").await?;
         ensure!(
@@ -268,6 +277,29 @@ where
         Ok(())
     })
     .await
+}
+
+pub async fn managed_keys_cross_backend_equivalence(
+    redb: &dyn ManagedKeyStore,
+    postgres: &dyn ManagedKeyStore,
+) -> Result<()> {
+    let params = issue_params(121);
+    let redb_record = redb
+        .issue(
+            "principal-cross-backend-equivalence",
+            "key-cross-backend-equivalence",
+            params.clone(),
+        )
+        .await?;
+    let postgres_record = postgres
+        .issue(
+            "principal-cross-backend-equivalence",
+            "key-cross-backend-equivalence",
+            params,
+        )
+        .await?;
+
+    assert_record_bytes_eq(&redb_record, &postgres_record)
 }
 
 pub async fn managed_keys_equivalent_records<B>(backend: Arc<B>) -> Result<()>
