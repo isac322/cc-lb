@@ -26,7 +26,7 @@ use cc_lb_plugin_api::{
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_server::builtins::BuiltinRouter;
 use cc_lb_server::reload::ConfigWatcher;
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
 use http::header::CONTENT_TYPE;
 use http::{HeaderValue, Method, Request, Response, StatusCode};
 use http_body_util::BodyExt;
@@ -160,7 +160,7 @@ fn lifecycle_with_view(
             upstream_kind: NoneModeUpstreamKind::AnthropicKey,
             upstream_credential_ref: "test-upstream".to_owned(),
         }),
-        Arc::new(KeyStore::new(storage)),
+        Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(storage)))),
         principal_view,
     ));
     Ok(Lifecycle::new(

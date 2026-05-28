@@ -18,7 +18,8 @@ use tower::ServiceExt;
 fn test_state() -> AdminState {
     let config = Config::default();
     let principal_view = Arc::new(ArcSwap::from(
-        PrincipalView::from_config(&config, std::collections::HashMap::new()).expect("principal view builds"),
+        PrincipalView::from_config(&config, std::collections::HashMap::new())
+            .expect("principal view builds"),
     ));
     AdminState {
         storage: None,

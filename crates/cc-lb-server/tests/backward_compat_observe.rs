@@ -19,7 +19,7 @@ use cc_lb_plugin_api::{
     ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, Upstream,
 };
 use cc_lb_server::builtins::BuiltinRouter;
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
 use http::header::CONTENT_TYPE;
 use http::{HeaderValue, Method, Request, Response, StatusCode};
 use http_body_util::BodyExt;
@@ -57,7 +57,7 @@ async fn observe_stream_bytes(config: Config) -> Result<Vec<u8>, Box<dyn std::er
     let authn = Arc::new(BuiltinAuthn::new(
         config.downstream_auth.mode.clone(),
         config.downstream_auth.none_mode.clone(),
-        Arc::new(KeyStore::new(storage)),
+        Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(storage)))),
         Arc::new(ArcSwap::from(view)),
     ));
     let lifecycle = Lifecycle::new(
