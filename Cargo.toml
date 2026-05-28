@@ -47,7 +47,7 @@ http = "1"
 http-body-util = "0.1"
 hyper-rustls = { version = "0.27", default-features = false, features = ["http1", "http2", "ring", "webpki-roots"] }
 hyper-util = "0.1"
-insta = "1"
+insta = { version = "1", features = ["json"] }
 metrics = "0.24"
 metrics-exporter-prometheus = { version = "0.18", default-features = false, features = ["http-listener"] }
 notify = "8"

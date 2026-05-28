@@ -267,6 +267,10 @@ impl Lifecycle {
         Arc::clone(&self.dynamic_view)
     }
 
+    pub fn replica_identity(&self) -> Option<ReplicaIdentity> {
+        self.config.replica_identity.clone()
+    }
+
     pub fn with_audit_sink(mut self, audit_sink: Arc<AuditWriterSink>) -> Self {
         self.audit_sink = Some(audit_sink);
         self
