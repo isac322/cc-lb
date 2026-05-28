@@ -1758,7 +1758,7 @@ Max Concurrent: 8 (Wave 2 fully parallel)
   - Files: `tests/integration/sse_batching_per_principal.rs`
   - Pre-commit: `cargo fmt --check && cargo test --test sse_batching_per_principal`
 
-- [ ] 22. Memory ceiling test (200 principals × 3 plugins) + hot-reload race test
+- [x] 22. Memory ceiling test (200 principals × 3 plugins) + hot-reload race test
 
   **What to do**:
   - Add `tests/integration/memory_ceiling.rs`:

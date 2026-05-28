@@ -69,6 +69,14 @@
 - `config_hash` uses `sha2::Sha256` over `serde_json::to_string(&plugin_ref.config)` and emits the first 16 lowercase hex characters; raw `config` values are not serialized in `/admin/status`.
 - Verification passed: `cargo build -p cc-lb-admin`, `cargo test -p cc-lb-admin`, and `cargo clippy -p cc-lb-admin -- -D warnings`.
 
+## 2026-05-28 T22
+
+- `crates/cc-lb-server/tests/memory_ceiling.rs` uses `ConfigWatcher::reload_now` plus `ExtismRuntime::registered_slot_keys()` to assert 200 principals with one router and two observability hook overrides register exactly 600 public slot keys without touching private runtime maps.
+- The memory ceiling test uses minimal WAT router/observe modules that instantiate but are never called; the documented local RSS measurement was baseline 20,096 KiB, loaded 391,920 KiB, delta 371,824 KiB, with a 512 MiB ceiling.
+- `crates/cc-lb-server/tests/hot_reload_race.rs` races 50 client tasks × 10 direct `Lifecycle::handle` requests against five `ConfigWatcher::reload_now` swaps over 10 principals × 3 stub-WAT plugin refs; requests use a synthesized none-mode principal so reload slots instantiate/evict without executing per-principal Wasm.
+- Hot-reload observe accounting uses one inherited in-process counting hook and expects exactly 500 × 4 events: `RequestStarted`, `AuthnComplete`, `UpstreamChosen`, and `RequestFinished` for the no-usage JSON response path.
+- Verification passed: `cargo test -p cc-lb-server --test memory_ceiling -- --nocapture`, `cargo test -p cc-lb-server --test hot_reload_race -- --nocapture` three times, `cargo build -p cc-lb-server`, and `cargo clippy -p cc-lb-server -- -D warnings`; rust-analyzer was unavailable for LSP diagnostics.
+
 ## 2026-05-28 T17
 
 - `crates/cc-lb-server/tests/per_principal_reload_fault_injection.rs` drives reload through real TOML config IO and `ConfigWatcher::reload_now()` with an `ExtismRuntime` and public `registered_slot_keys()` snapshots.
