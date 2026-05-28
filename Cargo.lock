@@ -4791,6 +4791,7 @@ dependencies = [
  "redb",
  "serde_json",
  "tempfile",
+ "tokio",
 ]
 
 [[package]]

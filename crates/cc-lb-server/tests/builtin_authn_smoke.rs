@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -7,15 +8,15 @@ use cc_lb_config::{
     Config, DownstreamAuthMode, Limit, LimitKind, NoneModeConfig, NoneModeUpstreamKind,
     PrincipalSpec, PrincipalType,
 };
+use cc_lb_core::api_keys::builtin_authn::{BuiltinAuthError as AuthnError, BuiltinAuthn};
 use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_core::api_keys::principal_view::PrincipalView;
 use cc_lb_core::api_keys::secret;
-use cc_lb_core::api_keys::builtin_authn::{BuiltinAuthError as AuthnError, BuiltinAuthn};
 use cc_lb_storage_api::types::{
     IssueParams, KeyStatus, Limit as StorageLimit, LimitKind as StorageLimitKind,
     PrincipalKindLite, UpstreamKind,
 };
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
 use http::{HeaderMap, HeaderValue};
 
 struct Harness {
@@ -23,6 +24,7 @@ struct Harness {
     storage: Arc<Storage>,
     key_store: Arc<KeyStore>,
     principal_view: Arc<ArcSwap<PrincipalView>>,
+    runtime: tokio::runtime::Runtime,
 }
 
 impl Harness {
@@ -32,16 +34,20 @@ impl Harness {
             &dir.path().join("builtin_authn.redb"),
             [31; 32],
         )?);
-        let key_store = Arc::new(KeyStore::new(storage.clone()));
+        let key_store = Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(
+            storage.clone(),
+        ))));
         let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config(
             principal_enabled,
         ))));
+        let runtime = tokio::runtime::Builder::new_current_thread().build()?;
 
         Ok(Self {
             _dir: dir,
             storage,
             key_store,
             principal_view,
+            runtime,
         })
     }
 
@@ -53,15 +59,20 @@ impl Harness {
             self.principal_view.clone(),
         )
     }
+
+    fn block_on<F: Future>(&self, future: F) -> F::Output {
+        self.runtime.block_on(future)
+    }
 }
 
 #[test]
 fn valid_key_returns_authn_success() -> Result<(), Box<dyn std::error::Error>> {
     let harness = Harness::new(true)?;
-    let (record, plaintext) = harness.key_store.create("u1", create_params(None))?;
+    let (record, plaintext) =
+        harness.block_on(harness.key_store.create("u1", create_params(None)))?;
     let headers = headers_with_key(plaintext.expose());
 
-    let success = harness.authn().authenticate(&headers)?;
+    let success = harness.block_on(harness.authn().authenticate(&headers))?;
 
     assert_eq!(success.principal_id, "u1");
     assert_eq!(success.record, record);
@@ -75,7 +86,9 @@ fn valid_key_returns_authn_success() -> Result<(), Box<dyn std::error::Error>> {
 fn missing_header_returns_missing_header() -> Result<(), Box<dyn std::error::Error>> {
     let harness = Harness::new(true)?;
 
-    let error = harness.authn().authenticate(&HeaderMap::new()).unwrap_err();
+    let error = harness
+        .block_on(harness.authn().authenticate(&HeaderMap::new()))
+        .unwrap_err();
 
     assert_eq!(error, AuthnError::MissingHeader);
     assert_eq!(error.http_status(), 401);
@@ -87,8 +100,7 @@ fn bad_format_returns_invalid_format() -> Result<(), Box<dyn std::error::Error>>
     let harness = Harness::new(true)?;
 
     let error = harness
-        .authn()
-        .authenticate(&headers_with_key("not-a-key"))
+        .block_on(harness.authn().authenticate(&headers_with_key("not-a-key")))
         .unwrap_err();
 
     assert_eq!(error, AuthnError::InvalidFormat);
@@ -102,8 +114,11 @@ fn unknown_key_returns_not_found() -> Result<(), Box<dyn std::error::Error>> {
     let generated = secret::generate_new();
 
     let error = harness
-        .authn()
-        .authenticate(&headers_with_key(generated.plaintext.expose()))
+        .block_on(
+            harness
+                .authn()
+                .authenticate(&headers_with_key(generated.plaintext.expose())),
+        )
         .unwrap_err();
 
     assert_eq!(error, AuthnError::NotFound);
@@ -138,8 +153,7 @@ fn tampered_secret_returns_signature_mismatch() -> Result<(), Box<dyn std::error
     )?;
 
     let error = harness
-        .authn()
-        .authenticate(&headers_with_key(&tampered))
+        .block_on(harness.authn().authenticate(&headers_with_key(&tampered)))
         .unwrap_err();
 
     assert_eq!(error, AuthnError::SignatureMismatch);
@@ -150,13 +164,17 @@ fn tampered_secret_returns_signature_mismatch() -> Result<(), Box<dyn std::error
 #[test]
 fn disabled_key_returns_key_disabled() -> Result<(), Box<dyn std::error::Error>> {
     let harness = Harness::new(true)?;
-    let (_record, plaintext) = harness.key_store.create("u1", create_params(None))?;
+    let (_record, plaintext) =
+        harness.block_on(harness.key_store.create("u1", create_params(None)))?;
     let (key_id, _) = secret::parse(plaintext.expose())?;
-    harness.key_store.disable("u1", &key_id)?;
+    harness.block_on(harness.key_store.disable("u1", &key_id))?;
 
     let error = harness
-        .authn()
-        .authenticate(&headers_with_key(plaintext.expose()))
+        .block_on(
+            harness
+                .authn()
+                .authenticate(&headers_with_key(plaintext.expose())),
+        )
         .unwrap_err();
 
     assert_eq!(error, AuthnError::KeyDisabled);
@@ -167,11 +185,15 @@ fn disabled_key_returns_key_disabled() -> Result<(), Box<dyn std::error::Error>>
 #[test]
 fn expired_key_returns_expired() -> Result<(), Box<dyn std::error::Error>> {
     let harness = Harness::new(true)?;
-    let (_record, plaintext) = harness.key_store.create("u1", create_params(Some(0)))?;
+    let (_record, plaintext) =
+        harness.block_on(harness.key_store.create("u1", create_params(Some(0))))?;
 
     let error = harness
-        .authn()
-        .authenticate(&headers_with_key(plaintext.expose()))
+        .block_on(
+            harness
+                .authn()
+                .authenticate(&headers_with_key(plaintext.expose())),
+        )
         .unwrap_err();
 
     assert_eq!(error, AuthnError::Expired);
@@ -182,11 +204,15 @@ fn expired_key_returns_expired() -> Result<(), Box<dyn std::error::Error>> {
 #[test]
 fn disabled_principal_returns_principal_disabled() -> Result<(), Box<dyn std::error::Error>> {
     let harness = Harness::new(false)?;
-    let (_record, plaintext) = harness.key_store.create("u1", create_params(None))?;
+    let (_record, plaintext) =
+        harness.block_on(harness.key_store.create("u1", create_params(None)))?;
 
     let error = harness
-        .authn()
-        .authenticate(&headers_with_key(plaintext.expose()))
+        .block_on(
+            harness
+                .authn()
+                .authenticate(&headers_with_key(plaintext.expose())),
+        )
         .unwrap_err();
 
     assert_eq!(error, AuthnError::PrincipalDisabled);
@@ -208,8 +234,8 @@ fn mode_none_returns_authn_success_from_none_mode() -> Result<(), Box<dyn std::e
         harness.principal_view.clone(),
     );
 
-    let success = authn
-        .authenticate_none_mode(&http::HeaderMap::new())
+    let success = harness
+        .block_on(authn.authenticate_none_mode(&http::HeaderMap::new()))
         .expect("none mode should authenticate");
 
     assert_eq!(success.principal_id, "anon");

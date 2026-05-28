@@ -14,8 +14,8 @@ use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_core::api_keys::secret;
 use cc_lb_storage_api::types::{KeyStatus, Limit, LimitKind, PrincipalKindLite, UpstreamKind};
 use cc_lb_storage_redb::{
-    api_key_storage_key, AuditEntry, OAuthCredentials, Storage, API_KEYS_V1, AUDIT_LOG_V1,
-    CURRENT_SCHEMA_VERSION, KEY_INDEX_BY_HASH_V1, OAUTH_CREDENTIALS_V1,
+    API_KEYS_V1, AUDIT_LOG_V1, AuditEntry, CURRENT_SCHEMA_VERSION, KEY_INDEX_BY_HASH_V1,
+    OAUTH_CREDENTIALS_V1, OAuthCredentials, Storage, api_key_storage_key,
 };
 use redb::{ReadableDatabase, ReadableTable};
 
@@ -256,29 +256,47 @@ fn child_audit(path: &Path, control_dir: &Path, iteration: usize) -> TestResult 
 fn child_key_issuance(path: &Path, iteration: usize) -> TestResult {
     let storage = Arc::new(Storage::open(path, MASTER_KEY)?);
     storage.set_killswitch_enabled(true)?;
-    let key_store = KeyStore::new(storage);
-    let _ = key_store.create(
-        &key_issuance_principal(iteration),
-        create_params(iteration, "issued during crash"),
-    )?;
+    let key_store = KeyStore::new(Arc::new(cc_lb_storage_redb::RedbManagedKeyStore::new(
+        storage.clone(),
+    )));
+    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+    let _ = runtime.block_on(async {
+        key_store
+            .create(
+                &key_issuance_principal(iteration),
+                create_params(iteration, "issued during crash"),
+            )
+            .await
+    })?;
     Ok(())
 }
 
 fn child_key_revoke(path: &Path, control_dir: &Path, iteration: usize) -> TestResult {
     let storage = Arc::new(Storage::open(path, MASTER_KEY)?);
     storage.set_killswitch_enabled(true)?;
-    let key_store = KeyStore::new(storage);
-    let (_record, plaintext) = key_store.create(
-        &key_revoke_principal(iteration),
-        create_params(iteration, "revoked during crash"),
-    )?;
+    let key_store = KeyStore::new(Arc::new(cc_lb_storage_redb::RedbManagedKeyStore::new(
+        storage.clone(),
+    )));
+    let runtime = tokio::runtime::Builder::new_current_thread().build()?;
+    let (_record, plaintext) = runtime.block_on(async {
+        key_store
+            .create(
+                &key_revoke_principal(iteration),
+                create_params(iteration, "revoked during crash"),
+            )
+            .await
+    })?;
     let (key_id, secret_b64_bytes) = secret::parse(plaintext.expose())?;
     let index_hash = secret::compute_index_hash(&secret_b64_bytes);
 
     fs::write(control_dir.join(REVOKE_KEY_ID_FILE), key_id.as_bytes())?;
     fs::write(control_dir.join(REVOKE_INDEX_HASH_FILE), index_hash)?;
 
-    key_store.revoke(&key_revoke_principal(iteration), &key_id)?;
+    runtime.block_on(async {
+        key_store
+            .revoke(&key_revoke_principal(iteration), &key_id)
+            .await
+    })?;
     Ok(())
 }
 

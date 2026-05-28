@@ -13,3 +13,4 @@ cc-lb-storage-redb = { path = "../../crates/cc-lb-storage-redb", features = ["cr
 redb.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
