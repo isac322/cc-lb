@@ -1741,13 +1741,18 @@ version = "0.1.0"
 dependencies = [
  "async-stream",
  "axum",
+ "base64",
  "bytes",
  "clap",
  "http",
  "http-body-util",
+ "ring",
+ "serde",
  "serde_json",
  "tokio",
  "tower",
+ "url",
+ "uuid",
 ]
 
 [[package]]
