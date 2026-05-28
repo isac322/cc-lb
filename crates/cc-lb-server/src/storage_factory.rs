@@ -6,17 +6,42 @@ use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::StorageConfig;
-#[cfg(feature = "postgres")]
-use cc_lb_storage_api::Storage;
-use cc_lb_storage_api::{BackendKind, StorageError, StorageResult};
+use cc_lb_storage_api::{BackendKind, ManagedKeyStore, Storage, StorageError, StorageResult};
 
-pub enum StorageBackend {
+pub struct OpenedStorage {
+    pub storage: Arc<dyn Storage>,
+    pub managed_key_store: Arc<dyn ManagedKeyStore>,
+}
+
+impl OpenedStorage {
+    pub async fn put_anthropic_api_key_ciphertext(
+        &self,
+        storage_key: &str,
+        ciphertext: &[u8],
+    ) -> StorageResult<()> {
+        self.storage
+            .put_anthropic_api_key_ciphertext(storage_key, ciphertext)
+            .await
+    }
+
+    pub async fn get_oauth_ciphertext(
+        &self,
+        principal_id: &str,
+        provider: &str,
+    ) -> StorageResult<Option<Vec<u8>>> {
+        self.storage
+            .get_oauth_ciphertext(principal_id, provider)
+            .await
+    }
+}
+
+pub enum BackendHandle {
     Redb(Arc<cc_lb_storage_redb::Storage>),
     #[cfg(feature = "postgres")]
     Postgres(Arc<dyn Storage>),
 }
 
-impl StorageBackend {
+impl BackendHandle {
     pub async fn put_anthropic_api_key_ciphertext(
         &self,
         _storage_key: &str,
@@ -73,7 +98,7 @@ pub async fn open_storage(
     config: &StorageConfig,
     _aead: Arc<AeadService>,
     master_key: [u8; 32],
-) -> Result<StorageBackend, StorageFactoryError> {
+) -> Result<OpenedStorage, StorageFactoryError> {
     match config {
         StorageConfig::Redb { path } => open_redb(path, master_key).await,
         StorageConfig::Postgres {
@@ -91,20 +116,27 @@ pub async fn probe_postgres_connection(url: &str) -> Result<(), StorageFactoryEr
 async fn open_redb(
     path: &Path,
     master_key: [u8; 32],
-) -> Result<StorageBackend, StorageFactoryError> {
+) -> Result<OpenedStorage, StorageFactoryError> {
     let storage =
         cc_lb_storage_redb::Storage::open(path, master_key).map_err(map_redb_open_error)?;
     storage
         .initialize(BackendKind::Redb)
         .map_err(map_redb_open_error)?;
-    Ok(StorageBackend::Redb(Arc::new(storage)))
+    let storage = Arc::new(storage);
+    let managed_key_store = Arc::new(cc_lb_storage_redb::RedbManagedKeyStore::new(
+        storage.clone(),
+    ));
+    Ok(OpenedStorage {
+        storage: storage as Arc<dyn Storage>,
+        managed_key_store,
+    })
 }
 
 #[cfg(not(feature = "redb"))]
 async fn open_redb(
     _path: &Path,
     _master_key: [u8; 32],
-) -> Result<StorageBackend, StorageFactoryError> {
+) -> Result<OpenedStorage, StorageFactoryError> {
     Err(StorageFactoryError::FeatureDisabled {
         backend: "redb".to_owned(),
     })
@@ -141,7 +173,7 @@ fn map_init_error(
 async fn open_postgres(
     _url: &str,
     _pool: &cc_lb_config::PostgresPoolConfig,
-) -> Result<StorageBackend, StorageFactoryError> {
+) -> Result<OpenedStorage, StorageFactoryError> {
     Err(StorageFactoryError::FeatureDisabled {
         backend: "postgres".to_owned(),
     })
@@ -158,7 +190,7 @@ async fn probe_postgres_connection_impl(_url: &str) -> Result<(), StorageFactory
 async fn open_postgres(
     url: &str,
     pool_config: &cc_lb_config::PostgresPoolConfig,
-) -> Result<StorageBackend, StorageFactoryError> {
+) -> Result<OpenedStorage, StorageFactoryError> {
     use std::str::FromStr;
     use std::time::Duration;
 
@@ -197,13 +229,20 @@ async fn open_postgres(
             message: host_only(url) + ": " + &error.to_string(),
         })?;
 
-    let storage = cc_lb_storage_postgres::PostgresStorage::new(pool);
+    let storage = cc_lb_storage_postgres::PostgresStorage::new(pool.clone());
     let storage: Arc<dyn Storage> = Arc::new(storage);
     storage
         .initialize(BackendKind::Postgres)
         .await
         .map_err(|error| map_init_error(error, BackendKind::Postgres))?;
-    Ok(StorageBackend::Postgres(storage))
+    let managed_key_store = Arc::new(cc_lb_storage_postgres::PostgresManagedKeyStore::new(
+        pool,
+        Arc::new(cc_lb_storage_postgres::adapter::retry::RetryPolicy::default()),
+    ));
+    Ok(OpenedStorage {
+        storage,
+        managed_key_store,
+    })
 }
 
 #[cfg(feature = "postgres")]
