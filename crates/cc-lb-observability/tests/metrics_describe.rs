@@ -44,18 +44,10 @@ fn describes_all_required_metrics() {
             "cclb_key_auth_failures_total",
             "cclb_concurrent_rejects_total",
             "cclb_streaming_usage_missing_total",
-            "cclb_rebind_total",
-            "cclb_rebind_duration_seconds",
-            "cclb_oauth_refresh_total",
-            "cclb_oauth_refresh_duration_seconds",
-            "cclb_oauth_refresh_lag_seconds",
-            "cclb_wasm_cache_materialize_total",
-            "cclb_reconcile_total",
-            "cclb_notify_received_total",
         ]
     );
 
-    assert_eq!(definitions.len(), 39);
+    assert_eq!(definitions.len(), 31);
     assert_eq!(definitions[0].kind, MetricKind::Counter);
     assert_eq!(definitions[1].kind, MetricKind::Histogram);
     assert_eq!(definitions[3].kind, MetricKind::Gauge);

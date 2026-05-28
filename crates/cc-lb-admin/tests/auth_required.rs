@@ -69,7 +69,7 @@ async fn test_auth_success() {
 
     let req = Request::builder()
         .method("GET")
-        .uri("/admin/principals")
+        .uri("/admin/config/current")
         .header("Authorization", "Bearer test-token")
         .body(Body::empty())
         .unwrap();

@@ -1,11 +1,10 @@
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_core::DynamicViewHolder;
-use cc_lb_observability::record_notify_received;
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_storage_api::{ChangeChannel, ChangeEvent, RuntimeChangeNotifier};
 use tokio::sync::broadcast;
@@ -64,11 +63,8 @@ impl NotifyListener {
                 _ = self.cancel.cancelled() => break,
                 event = rx.recv() => {
                     match event {
-                        Ok(event) if is_rebind_channel(event.channel) => {
-                            record_notify_received(channel_label(event.channel));
-                            self.debounce_and_rebuild(&mut rx).await;
-                        },
-                        Ok(event) => record_notify_received(channel_label(event.channel)),
+                        Ok(event) if is_rebind_channel(event.channel) => self.debounce_and_rebuild(&mut rx).await,
+                        Ok(_) => {}
                         Err(broadcast::error::RecvError::Lagged(skipped)) => {
                             tracing::warn!(skipped, "runtime change listener lagged; rebuilding from latest storage state");
                             self.debounce_and_rebuild(&mut rx).await;
@@ -112,6 +108,7 @@ impl NotifyListener {
         }
 
         let current_generation = self.holder.load().generation;
+        let started = Instant::now();
         match dynamic_view_builder::build_dynamic_view(
             &self.stores,
             &self.oauth_cfg,
@@ -124,20 +121,28 @@ impl NotifyListener {
         .await
         {
             Ok(view) => {
+                let elapsed = started.elapsed();
                 if self.cancel.is_cancelled() {
                     return;
                 }
                 let generation = view.generation;
                 self.holder.store(view);
+                metrics::counter!("cclb_rebind_total", "outcome" => "success").increment(1);
+                metrics::histogram!("cclb_rebind_duration_seconds").record(elapsed.as_secs_f64());
                 tracing::info!(
                     generation,
+                    duration_ms = elapsed.as_millis(),
                     "dynamic view rebound after runtime change notification"
                 );
             }
             Err(error) => {
+                let elapsed = started.elapsed();
+                metrics::counter!("cclb_rebind_total", "outcome" => "error").increment(1);
+                metrics::histogram!("cclb_rebind_duration_seconds").record(elapsed.as_secs_f64());
                 tracing::error!(
                     error = %error,
                     current_generation,
+                    duration_ms = elapsed.as_millis(),
                     "dynamic view rebind failed after runtime change notification"
                 );
             }
@@ -148,7 +153,8 @@ impl NotifyListener {
 fn drain_pending_rebind_events(rx: &mut broadcast::Receiver<ChangeEvent>) {
     loop {
         match rx.try_recv() {
-            Ok(event) => record_notify_received(channel_label(event.channel)),
+            Ok(event) if is_rebind_channel(event.channel) => {}
+            Ok(_) => {}
             Err(broadcast::error::TryRecvError::Lagged(_)) => continue,
             Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed) => {
                 break;
@@ -165,13 +171,4 @@ fn is_rebind_channel(channel: ChangeChannel) -> bool {
             | ChangeChannel::PluginRegistry
             | ChangeChannel::PluginChain
     )
-}
-
-fn channel_label(channel: ChangeChannel) -> &'static str {
-    match channel {
-        ChangeChannel::Upstream => "upstream",
-        ChangeChannel::Principal => "principal",
-        ChangeChannel::PluginRegistry => "plugin_registry",
-        ChangeChannel::PluginChain => "plugin_chain",
-    }
 }

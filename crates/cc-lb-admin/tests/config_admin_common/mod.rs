@@ -62,8 +62,10 @@ pub fn config_value(default_requests_per_window: u64) -> Value {
 }
 
 pub fn test_state(config: Config, storage: Option<Arc<RedbStorage>>) -> AdminState {
-    let principal_view = PrincipalView::from_config(&config, std::collections::HashMap::new())
-        .expect("principal view builds");
+    let principal_view = Arc::new(PrincipalView::from_db(
+        &[],
+        std::collections::HashMap::new(),
+    ));
     let dynamic_view = dynamic_view_holder(principal_view);
     AdminState {
         storage: storage.map(|s| s as Arc<dyn cc_lb_storage_api::Storage>),
@@ -88,9 +90,10 @@ pub fn apply_state(
     _config_path: PathBuf,
     reloader: Arc<TestReloader>,
 ) -> AdminState {
-    let config = reloader.current();
-    let principal_view = PrincipalView::from_config(&config, std::collections::HashMap::new())
-        .expect("principal view builds");
+    let principal_view = Arc::new(PrincipalView::from_db(
+        &[],
+        std::collections::HashMap::new(),
+    ));
     let dynamic_view = dynamic_view_holder(principal_view);
     AdminState {
         storage: Some(test_storage() as Arc<dyn cc_lb_storage_api::Storage>),

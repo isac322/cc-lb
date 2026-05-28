@@ -1,8 +1,7 @@
 use std::sync::OnceLock;
 
 use cc_lb_observability::{
-    DYNAMIC_RUNTIME_METRIC_DEFINITIONS, prometheus14_metric_definitions, register_metrics,
-    touch_dynamic_runtime_metric_handles, touch_prometheus14_metrics,
+    prometheus14_metric_definitions, register_metrics, touch_prometheus14_metrics,
 };
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 
@@ -21,13 +20,9 @@ fn metric_appears() {
     let handle = prometheus_handle();
     register_metrics();
     touch_prometheus14_metrics();
-    touch_dynamic_runtime_metric_handles();
 
     let rendered = handle.render();
-    for definition in prometheus14_metric_definitions()
-        .iter()
-        .chain(DYNAMIC_RUNTIME_METRIC_DEFINITIONS.iter())
-    {
+    for definition in prometheus14_metric_definitions() {
         assert!(
             rendered.contains(definition.name),
             "missing metric {} in prometheus output:\n{}",

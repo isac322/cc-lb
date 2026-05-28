@@ -487,32 +487,11 @@ fn deserialize_and_validate_config(value: Value) -> Result<Config, String> {
 
 fn history_summary(config: &Config) -> HistorySummary {
     HistorySummary {
-        upstreams: config.upstreams.len(),
-        principals: config.principals.len(),
-        plugin_count: plugin_count(config),
+        upstreams: 0,
+        principals: 0,
+        plugin_count: 0,
         tls_enabled: config.tls.is_some() || config.listener.tls.is_some(),
     }
-}
-
-fn plugin_count(config: &Config) -> usize {
-    let global_count = usize::from(config.plugins.router_plugin.is_some())
-        + config.plugins.observability_hooks.len();
-
-    let per_principal_count = config
-        .principals
-        .values()
-        .map(|principal_spec| {
-            let router_count = usize::from(principal_spec.router_plugin.is_some());
-            let hooks_count = principal_spec
-                .observability_hooks
-                .as_ref()
-                .map(|hooks| hooks.len())
-                .unwrap_or(0);
-            router_count + hooks_count
-        })
-        .sum::<usize>();
-
-    global_count + per_principal_count
 }
 
 fn history_item(entry: HistoryEntry) -> ConfigHistoryItem {
@@ -656,93 +635,4 @@ fn temp_file_name(file_name: &OsStr) -> OsString {
     temp.push(file_name);
     temp.push(format!(".{}.tmp", std::process::id()));
     temp
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use cc_lb_config::{PluginRef, PluginsConfig, PrincipalSpec};
-    use std::collections::HashMap;
-
-    fn plugin_ref(name: &str) -> PluginRef {
-        PluginRef {
-            name: name.to_owned(),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn test_plugin_count_global_only() {
-        let config = Config {
-            plugins: PluginsConfig {
-                router_plugin: Some(plugin_ref("global_router")),
-                observability_hooks: vec![plugin_ref("hook1"), plugin_ref("hook2")],
-            },
-            principals: HashMap::new(),
-            ..Default::default()
-        };
-
-        assert_eq!(plugin_count(&config), 3);
-    }
-
-    #[test]
-    fn test_plugin_count_with_per_principal_plugins() {
-        let principal_a = PrincipalSpec {
-            router_plugin: Some(plugin_ref("principal_a_router")),
-            observability_hooks: Some(vec![
-                plugin_ref("a_hook1"),
-                plugin_ref("a_hook2"),
-                plugin_ref("a_hook3"),
-            ]),
-            ..Default::default()
-        };
-
-        let principal_b = PrincipalSpec {
-            observability_hooks: Some(vec![plugin_ref("b_hook1"), plugin_ref("b_hook2")]),
-            ..Default::default()
-        };
-
-        let mut principals = HashMap::new();
-        principals.insert("principal_a".to_owned(), principal_a);
-        principals.insert("principal_b".to_owned(), principal_b);
-
-        let config = Config {
-            plugins: PluginsConfig {
-                router_plugin: Some(plugin_ref("global_router")),
-                observability_hooks: vec![plugin_ref("global_hook1"), plugin_ref("global_hook2")],
-            },
-            principals,
-            ..Default::default()
-        };
-
-        // Expected: 1 global router + 2 global hooks + 1 principal_a router + 3 principal_a hooks + 0 principal_b router + 2 principal_b hooks = 9
-        assert_eq!(plugin_count(&config), 9);
-    }
-
-    #[test]
-    fn test_plugin_count_backward_compat_no_per_principal_plugins() {
-        let config = Config {
-            plugins: PluginsConfig {
-                router_plugin: Some(plugin_ref("global_router")),
-                observability_hooks: vec![plugin_ref("hook1")],
-            },
-            principals: HashMap::new(),
-            ..Default::default()
-        };
-
-        let config_with_empty_principals = Config {
-            plugins: PluginsConfig {
-                router_plugin: Some(plugin_ref("global_router")),
-                observability_hooks: vec![plugin_ref("hook1")],
-            },
-            principals: HashMap::new(),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            plugin_count(&config),
-            plugin_count(&config_with_empty_principals)
-        );
-        assert_eq!(plugin_count(&config), 2);
-    }
 }

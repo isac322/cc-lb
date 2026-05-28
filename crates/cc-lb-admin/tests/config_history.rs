@@ -38,8 +38,8 @@ async fn config_history_route_returns_applied_history() {
             toml::to_string_pretty(&config).unwrap(),
             1234,
             cc_lb_storage_redb::HistorySummary {
-                upstreams: config.upstreams.len(),
-                principals: config.principals.len(),
+                upstreams: 0,
+                principals: 0,
                 plugin_count: 0,
                 tls_enabled: false,
             },

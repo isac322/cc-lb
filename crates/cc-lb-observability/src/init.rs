@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use metrics::Unit;
-use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::SdkTracerProvider;
@@ -12,9 +12,8 @@ use tracing_subscriber::layer::{Layer, SubscriberExt};
 use tracing_subscriber::{EnvFilter, Registry};
 
 use crate::cclb_metrics::{
-    DYNAMIC_RUNTIME_METRIC_DEFINITIONS, PROMETHEUS14_METRIC_DEFINITIONS, REBIND_DURATION_BUCKETS,
-    register_dynamic_runtime_metrics, register_prometheus14_metrics,
-    touch_dynamic_runtime_metric_handles, touch_prometheus14_metric_handles,
+    PROMETHEUS14_METRIC_DEFINITIONS, register_prometheus14_metrics,
+    touch_prometheus14_metric_handles,
 };
 use crate::panic_hook::install_panic_hook;
 use crate::redaction::{RedactingMakeWriter, RedactionLayer, RedactionPolicy};
@@ -90,7 +89,7 @@ pub struct MetricDefinition {
     pub description: &'static str,
 }
 
-const METRIC_DEFINITIONS: [MetricDefinition; 39] = [
+const METRIC_DEFINITIONS: [MetricDefinition; 31] = [
     MetricDefinition {
         name: "cc_lb_requests_total",
         kind: MetricKind::Counter,
@@ -190,14 +189,6 @@ const METRIC_DEFINITIONS: [MetricDefinition; 39] = [
     PROMETHEUS14_METRIC_DEFINITIONS[11],
     PROMETHEUS14_METRIC_DEFINITIONS[12],
     PROMETHEUS14_METRIC_DEFINITIONS[13],
-    DYNAMIC_RUNTIME_METRIC_DEFINITIONS[0],
-    DYNAMIC_RUNTIME_METRIC_DEFINITIONS[1],
-    DYNAMIC_RUNTIME_METRIC_DEFINITIONS[2],
-    DYNAMIC_RUNTIME_METRIC_DEFINITIONS[3],
-    DYNAMIC_RUNTIME_METRIC_DEFINITIONS[4],
-    DYNAMIC_RUNTIME_METRIC_DEFINITIONS[5],
-    DYNAMIC_RUNTIME_METRIC_DEFINITIONS[6],
-    DYNAMIC_RUNTIME_METRIC_DEFINITIONS[7],
 ];
 
 pub fn init(cfg: &ObservabilityConfig) -> Result<TracingGuard, InitError> {
@@ -340,7 +331,6 @@ pub fn register_metrics() {
         "Virtual cost in micro-USD attributed to proxied responses by principal, upstream, and model."
     );
     register_prometheus14_metrics();
-    register_dynamic_runtime_metrics();
 
     touch_metrics();
 }
@@ -355,14 +345,7 @@ pub fn panic_total() -> u64 {
 }
 
 fn install_prometheus(cfg: &ObservabilityConfig) -> Result<Option<PrometheusHandle>, InitError> {
-    let builder = PrometheusBuilder::new()
-        .set_buckets_for_metric(
-            Matcher::Full("cclb_rebind_duration_seconds".to_owned()),
-            &REBIND_DURATION_BUCKETS,
-        )
-        .map_err(|source| InitError::Prometheus {
-            message: source.to_string(),
-        })?;
+    let builder = PrometheusBuilder::new();
 
     if let Some(endpoint) = cfg.prometheus_endpoint.as_deref() {
         let addr = parse_socket_addr(endpoint)?;
@@ -467,5 +450,4 @@ fn touch_metrics() {
     )
     .increment(0);
     touch_prometheus14_metric_handles();
-    touch_dynamic_runtime_metric_handles();
 }

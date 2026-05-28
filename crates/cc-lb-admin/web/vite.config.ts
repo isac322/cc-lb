@@ -6,8 +6,16 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   server: {
     proxy: {
-      '/admin': {
-        target: 'http://localhost:8082',
+      '/admin/v1': {
+        target: 'http://127.0.0.1:8082',
+        changeOrigin: true,
+      },
+      '/admin/events': {
+        target: 'http://127.0.0.1:8082',
+        changeOrigin: true,
+      },
+      '/admin/health': {
+        target: 'http://127.0.0.1:8082',
         changeOrigin: true,
       },
     },

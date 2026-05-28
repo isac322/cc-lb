@@ -9,9 +9,12 @@ import {
 } from 'lucide-react';
 import { useCallback, useEffect, useState } from 'react';
 import { Button } from '../components/primitives/Button';
-import { Modal } from '../components/primitives/Modal';
 import { UpstreamCreateDialog } from '../components/UpstreamCreateDialog';
-import { useStatus } from '../lib/hooks/useStatusOverview';
+import { Modal } from '../components/primitives/Modal';
+import { EmptyState } from '../components/primitives/EmptyState';
+import { ErrorState } from '../components/primitives/ErrorState';
+import { LoadingState } from '../components/primitives/LoadingState';
+
 import {
   useDelete,
   useDisable,
@@ -19,6 +22,7 @@ import {
   useList,
   useUpdate,
 } from '../lib/hooks/useUpstreams';
+import { useStatus } from '../lib/hooks/useStatusOverview';
 import { ConflictError, type UpstreamResponse } from '../lib/types/v1';
 
 function UpstreamStatusBadge({
@@ -185,11 +189,11 @@ export default function Upstreams() {
   };
 
   if (isLoading && upstreams.length === 0) {
-    return <div className="text-graphite-400">Loading upstreams...</div>;
+    return <LoadingState message="Loading upstreams..." />;
   }
 
   if (error && upstreams.length === 0) {
-    return <div className="text-red-400">Error: {error.message}</div>;
+    return <ErrorState message={error.message} onRetry={fetchUpstreams} />;
   }
 
   return (
@@ -218,7 +222,10 @@ export default function Upstreams() {
       </div>
 
       {upstreams.length === 0 ? (
-        <div className="text-graphite-400">No upstreams configured.</div>
+        <EmptyState
+          title="No upstreams configured"
+          message="Create an upstream to get started."
+        />
       ) : (
         <div className="bg-graphite-900 border border-graphite-800 rounded-lg overflow-hidden">
           <table className="w-full text-left text-sm">
@@ -236,7 +243,7 @@ export default function Upstreams() {
             <tbody className="divide-y divide-graphite-800">
               {upstreams.map((upstream) => {
                 const status = statusUpstreams.find(
-                  (s: { id: string }) => s.id === upstream.id,
+                  (s) => s.id === upstream.id,
                 );
                 const statusLabel =
                   status?.status || (upstream.enabled ? 'active' : 'disabled');
@@ -318,11 +325,7 @@ export default function Upstreams() {
       )}
 
       {editingUpstream && (
-        <Modal
-          isOpen={true}
-          onClose={() => setEditingUpstream(null)}
-          title="Edit Upstream"
-        >
+        <Modal isOpen={true} onClose={() => setEditingUpstream(null)} title="Edit Upstream">
           <p className="text-sm text-graphite-300 mb-4">
             Update configuration for {editingUpstream.name}.
           </p>
@@ -379,14 +382,10 @@ export default function Upstreams() {
       )}
 
       {deletingUpstream && (
-        <Modal
-          isOpen={true}
-          onClose={() => setDeletingUpstream(null)}
-          title="Delete Upstream"
-        >
+        <Modal isOpen={true} onClose={() => setDeletingUpstream(null)} title="Delete Upstream">
           <p className="text-sm text-graphite-300 mb-4">
-            Are you sure you want to delete {deletingUpstream.name}? This action
-            cannot be undone.
+            Are you sure you want to delete {deletingUpstream.name}? This
+            action cannot be undone.
           </p>
           <div className="flex justify-end gap-2 mt-4">
             <Button
@@ -407,22 +406,21 @@ export default function Upstreams() {
       )}
 
       {conflictError && (
-        <Modal
-          isOpen={true}
-          onClose={() => setConflictError(null)}
-          title="Conflict Detected"
-        >
+        <Modal isOpen={true} onClose={() => setConflictError(null)} title="Conflict Detected">
           <p className="text-sm text-graphite-300 mb-4">
             Someone else just changed this upstream.
           </p>
           <div className="py-4">
             <p className="text-sm text-graphite-300 mb-4">
-              The current revision is {conflictError.latest.revision}. Would you
-              like to load the latest data?
+              The current revision is {conflictError.latest.revision}. Would
+              you like to load the latest data?
             </p>
           </div>
           <div className="flex justify-end gap-2 mt-4">
-            <Button variant="secondary" onClick={() => setConflictError(null)}>
+            <Button
+              variant="secondary"
+              onClick={() => setConflictError(null)}
+            >
               Cancel
             </Button>
             <Button

@@ -203,6 +203,7 @@ fn snapshot_with_upstream_error(name: &str) -> UpstreamStatusSnapshot {
             },
         )]),
         applied_at_unix_secs: 1_800_000_001,
+        revision_hash: 0,
     }
 }
 

@@ -115,7 +115,7 @@ async fn admin_401_sleeps_100ms() {
 
     let req = Request::builder()
         .method("GET")
-        .uri("/admin/principals")
+        .uri("/admin/config/current")
         .header("Authorization", "Bearer wrong-token")
         .body(Body::empty())
         .unwrap();

@@ -25,9 +25,11 @@ pub fn limit_engine() -> Arc<LimitEngine> {
     LimitEngine::new(Arc::new(KeyConcurrencyManager::new()))
 }
 
-pub fn dynamic_view_holder(config: &Config) -> Arc<DynamicViewHolder> {
-    let principal_view = PrincipalView::from_config(config, std::collections::HashMap::new())
-        .expect("principal view builds");
+pub fn dynamic_view_holder(_config: &Config) -> Arc<DynamicViewHolder> {
+    let principal_view = Arc::new(PrincipalView::from_db(
+        &[],
+        std::collections::HashMap::new(),
+    ));
     Arc::new(DynamicViewHolder::new(
         DynamicViewBuilder::new(0)
             .signer_factory(Arc::new(NoopSignerFactory))

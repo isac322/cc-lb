@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
@@ -16,9 +16,6 @@ use cc_lb_core::{
     UpstreamStatusSnapshot, make_default_dispatcher,
 };
 use cc_lb_dialect_anthropic::{AnthropicDirectDialect, CustomAnthropicSpecDialect};
-use cc_lb_observability::{
-    RebindOutcome, WasmCacheMaterializeOutcome, record_rebind, record_wasm_cache_materialize,
-};
 use cc_lb_plugin_api::{
     PluginManifest, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, Signer,
     SignerError, SignerFactory, Upstream, UpstreamDialect,
@@ -74,90 +71,35 @@ pub fn ensure_wasm_cached(
     let tmp_dir = cache_dir.join(".tmp");
     let target = cache_dir.join(format!("{}.wasm", hex_sha256(sha256)));
     if target.exists() {
-        record_wasm_cache_materialize(WasmCacheMaterializeOutcome::Hit);
         return Ok(target);
     }
 
-    let bytes = match fetch().map_err(io::Error::other) {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => {
-            record_wasm_cache_materialize(WasmCacheMaterializeOutcome::Error);
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("wasm blob {} not found", hex_sha256(sha256)),
-            ));
-        }
-        Err(error) => {
-            record_wasm_cache_materialize(WasmCacheMaterializeOutcome::Error);
-            return Err(error);
-        }
-    };
+    let bytes = fetch().map_err(io::Error::other)?.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("wasm blob {} not found", hex_sha256(sha256)),
+        )
+    })?;
     let tmp = tmp_dir.join(format!("{}.wasm", uuid::Uuid::new_v4()));
     {
-        let mut file = match File::create(&tmp) {
-            Ok(file) => file,
-            Err(error) => {
-                record_wasm_cache_materialize(WasmCacheMaterializeOutcome::Error);
-                return Err(error);
-            }
-        };
-        if let Err(error) = file.write_all(&bytes) {
-            record_wasm_cache_materialize(WasmCacheMaterializeOutcome::Error);
-            return Err(error);
-        }
-        if let Err(error) = file.sync_all() {
-            record_wasm_cache_materialize(WasmCacheMaterializeOutcome::Error);
-            return Err(error);
-        }
+        let mut file = File::create(&tmp)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
     }
     match fs::rename(&tmp, &target) {
-        Ok(()) => {
-            record_wasm_cache_materialize(WasmCacheMaterializeOutcome::MissPersisted);
-            Ok(target)
-        }
+        Ok(()) => Ok(target),
         Err(_) if target.exists() => {
             let _ = fs::remove_file(&tmp);
-            record_wasm_cache_materialize(WasmCacheMaterializeOutcome::Hit);
             Ok(target)
         }
         Err(error) => {
             let _ = fs::remove_file(&tmp);
-            record_wasm_cache_materialize(WasmCacheMaterializeOutcome::Error);
             Err(error)
         }
     }
 }
 
 pub async fn build_dynamic_view(
-    stores: &Stores,
-    oauth_anthropic: &AnthropicOAuthConfig,
-    aead: Arc<AeadService>,
-    lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
-    current_generation: u64,
-    runtime: &ExtismRuntime,
-    data_dir: &Path,
-) -> Result<Arc<DynamicView>, RebindError> {
-    let start = Instant::now();
-    let result = build_dynamic_view_inner(
-        stores,
-        oauth_anthropic,
-        aead,
-        lazy_refresher,
-        current_generation,
-        runtime,
-        data_dir,
-    )
-    .await;
-    let outcome = if result.is_ok() {
-        RebindOutcome::Success
-    } else {
-        RebindOutcome::Error
-    };
-    record_rebind(outcome, start.elapsed());
-    result
-}
-
-async fn build_dynamic_view_inner(
     stores: &Stores,
     oauth_anthropic: &AnthropicOAuthConfig,
     aead: Arc<AeadService>,
@@ -345,16 +287,9 @@ async fn materialize_wasm(
         .join("cache")
         .join(format!("{}.wasm", hex_sha256(sha256)));
     if cache_path.exists() {
-        record_wasm_cache_materialize(WasmCacheMaterializeOutcome::Hit);
         return Ok(cache_path);
     }
-    let bytes = match stores.plugin_registry.get_blob_bytes(sha256).await {
-        Ok(bytes) => bytes,
-        Err(error) => {
-            record_wasm_cache_materialize(WasmCacheMaterializeOutcome::Error);
-            return Err(error.into());
-        }
-    };
+    let bytes = stores.plugin_registry.get_blob_bytes(sha256).await?;
     ensure_wasm_cached(data_dir, sha256, || Ok(bytes)).map_err(RebindError::Io)
 }
 

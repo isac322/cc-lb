@@ -32,7 +32,7 @@ async fn config_apply_current_admin_principals_smoke() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/admin/principals")
+                .uri("/admin/config/current")
                 .header("Authorization", "Bearer test-token")
                 .body(Body::empty())
                 .unwrap(),

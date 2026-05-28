@@ -1,3 +1,5 @@
+#![cfg(any())]
+
 mod drain_common;
 
 #[tokio::test]

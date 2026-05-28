@@ -1,4 +1,3 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -6,19 +5,12 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
 use cc_lb_admin::{LastReloadStatus, ReloadOutcome};
-use cc_lb_config::{Config, ConfigError, PluginRef, StorageConfig};
-use cc_lb_core::api_keys::principal_view::{
-    ObservabilityHooksCache, PrincipalView, RouterPluginCache,
-};
-use cc_lb_core::{DynamicViewBuilder, DynamicViewHolder};
-use cc_lb_plugin_api::RuntimeError;
-use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
+use cc_lb_config::{Config, ConfigError, StorageConfig};
+use cc_lb_core::DynamicViewHolder;
 use notify::{Event, RecursiveMode, Watcher};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
-
-use crate::app::{GlobalChainError, build_global_chain, manifest_from_plugin};
 
 const DEBOUNCE: Duration = Duration::from_millis(500);
 const BROADCAST_CAPACITY: usize = 16;
@@ -28,7 +20,6 @@ pub struct ConfigWatcher {
     current: ArcSwap<Config>,
     reload_tx: broadcast::Sender<Arc<Config>>,
     reloads_attempted: AtomicUsize,
-    runtime: Arc<ExtismRuntime>,
     last_reload_status: Arc<ArcSwap<Option<LastReloadStatus>>>,
     dynamic_view: Option<Arc<DynamicViewHolder>>,
 }
@@ -37,15 +28,15 @@ impl ConfigWatcher {
     pub fn new(
         path: impl AsRef<Path>,
         initial_config: Config,
-        runtime: Arc<ExtismRuntime>,
+        _runtime: Arc<cc_lb_runtime_extism::ExtismRuntime>,
     ) -> Self {
-        Self::new_with_principal_view(path, initial_config, runtime, None)
+        Self::new_with_principal_view(path, initial_config, _runtime, None)
     }
 
     pub fn new_with_principal_view(
         path: impl AsRef<Path>,
         initial_config: Config,
-        runtime: Arc<ExtismRuntime>,
+        _runtime: Arc<cc_lb_runtime_extism::ExtismRuntime>,
         dynamic_view: Option<Arc<DynamicViewHolder>>,
     ) -> Self {
         let (reload_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
@@ -54,7 +45,6 @@ impl ConfigWatcher {
             current: ArcSwap::from_pointee(initial_config),
             reload_tx,
             reloads_attempted: AtomicUsize::new(0),
-            runtime,
             last_reload_status: Arc::new(ArcSwap::from(Arc::new(None))),
             dynamic_view,
         }
@@ -117,124 +107,10 @@ impl ConfigWatcher {
         warn_restart_required_changes(&current_config, &new_config);
 
         let new_config = Arc::new(new_config);
-        if let Some(dynamic_view) = &self.dynamic_view {
-            let mut all_staged: Vec<StagedSlot> = Vec::new();
-            let (new_global_router, new_global_observability_hooks) =
-                match build_global_chain(&new_config, &self.runtime, &mut all_staged) {
-                    Ok(global_chain) => global_chain,
-                    Err(source) => {
-                        self.record_failure(source.to_string(), None, None, config_path);
-                        return Err(ReloadError::GlobalChain(source));
-                    }
-                };
-
-            let mut principal_chains = HashMap::new();
-            let mut per_principal_staged = Vec::new();
-            for (principal_id, spec) in &new_config.principals {
-                let router_cache = match &spec.router_plugin {
-                    Some(plugin) => {
-                        let manifest = match manifest_from_plugin(plugin) {
-                            Ok(manifest) => manifest,
-                            Err(source) => {
-                                self.record_failure(
-                                    source.to_string(),
-                                    Some(principal_id.clone()),
-                                    Some(plugin.name.clone()),
-                                    config_path,
-                                );
-                                return Err(ReloadError::Config(source));
-                            }
-                        };
-                        let (handle, slot) = match self.runtime.instantiate_router_for(
-                            principal_id,
-                            &plugin.name,
-                            &manifest,
-                        ) {
-                            Ok(value) => value,
-                            Err(source) => {
-                                self.record_failure(
-                                    source.to_string(),
-                                    Some(principal_id.clone()),
-                                    Some(plugin.name.clone()),
-                                    config_path,
-                                );
-                                return Err(ReloadError::Runtime(source));
-                            }
-                        };
-                        per_principal_staged.push(slot);
-                        RouterPluginCache::Explicit(handle)
-                    }
-                    None => RouterPluginCache::Inherit,
-                };
-                let hooks_cache = match &spec.observability_hooks {
-                    Some(plugins) => {
-                        let mut handles = Vec::with_capacity(plugins.len());
-                        for plugin in plugins {
-                            let manifest = match manifest_from_plugin(plugin) {
-                                Ok(manifest) => manifest,
-                                Err(source) => {
-                                    self.record_failure(
-                                        source.to_string(),
-                                        Some(principal_id.clone()),
-                                        Some(plugin.name.clone()),
-                                        config_path,
-                                    );
-                                    return Err(ReloadError::Config(source));
-                                }
-                            };
-                            let (handle, slot) = match self.runtime.instantiate_observability_for(
-                                principal_id,
-                                &plugin.name,
-                                &manifest,
-                            ) {
-                                Ok(value) => value,
-                                Err(source) => {
-                                    self.record_failure(
-                                        source.to_string(),
-                                        Some(principal_id.clone()),
-                                        Some(plugin.name.clone()),
-                                        config_path,
-                                    );
-                                    return Err(ReloadError::Runtime(source));
-                                }
-                            };
-                            per_principal_staged.push(slot);
-                            handles.push(handle);
-                        }
-                        ObservabilityHooksCache::Explicit(handles)
-                    }
-                    None => ObservabilityHooksCache::Inherit,
-                };
-                principal_chains.insert(principal_id.clone(), (router_cache, hooks_cache));
-            }
-            all_staged.extend(per_principal_staged);
-
-            let new_principal_view = match PrincipalView::from_config(&new_config, principal_chains)
-            {
-                Ok(view) => view,
-                Err(source) => {
-                    self.record_failure(source.to_string(), None, None, config_path);
-                    return Err(ReloadError::Config(source));
-                }
-            };
-            if let Err(source) = self.runtime.commit_staged(all_staged) {
-                self.record_failure(source.to_string(), None, None, config_path);
-                return Err(ReloadError::Runtime(source));
-            }
-            let current_view = dynamic_view.load();
-            dynamic_view.store(
-                DynamicViewBuilder::from_view(&current_view)
-                    .global_router(new_global_router)
-                    .global_observability_hooks(new_global_observability_hooks)
-                    .principal_view(new_principal_view)
-                    .build(),
+        if self.dynamic_view.is_some() {
+            tracing::debug!(
+                "dynamic runtime view reload is storage-driven; static config reload skips principal/plugin rebuild"
             );
-            let referenced: HashSet<(String, String)> = referenced_slot_keys(&new_config);
-            for (principal, plugin) in self.runtime.registered_slot_keys() {
-                if !referenced.contains(&(principal.clone(), plugin.clone())) {
-                    self.runtime.evict_slot(&principal, &plugin);
-                }
-            }
         }
         self.current.store(Arc::clone(&new_config));
         metrics::counter!("cc_lb_config_reload_total", "outcome" => "success").increment(1);
@@ -341,43 +217,10 @@ impl cc_lb_admin::CurrentConfig for ConfigWatcher {
     }
 }
 
-pub(crate) fn referenced_slot_keys(config: &Config) -> HashSet<(String, String)> {
-    let mut keys = HashSet::new();
-    for plugin in config
-        .plugins
-        .router_plugin
-        .iter()
-        .chain(config.plugins.observability_hooks.iter())
-    {
-        keys.insert(("__global__".to_owned(), plugin.name.clone()));
-    }
-
-    for (principal_name, spec) in &config.principals {
-        if let Some(plugin) = &spec.router_plugin {
-            keys.insert((principal_name.clone(), plugin.name.clone()));
-        }
-        for plugin in spec
-            .observability_hooks
-            .as_ref()
-            .map(|hooks| hooks.iter())
-            .into_iter()
-            .flatten()
-        {
-            keys.insert((principal_name.clone(), plugin.name.clone()));
-        }
-    }
-
-    keys
-}
-
 #[derive(Debug, Error)]
 pub enum ReloadError {
     #[error(transparent)]
     Config(#[from] ConfigError),
-    #[error(transparent)]
-    GlobalChain(#[from] GlobalChainError),
-    #[error(transparent)]
-    Runtime(#[from] RuntimeError),
 }
 
 #[derive(Debug, Error)]
@@ -444,17 +287,6 @@ fn warn_restart_required_changes(current: &Config, new_config: &Config) {
             .and_then(|tls| tls.key_path.as_ref()),
         "tls.key_path",
     );
-    warn_plugin_path_change(
-        "plugins.router_plugin.wasm_path",
-        current.plugins.router_plugin.as_ref(),
-        new_config.plugins.router_plugin.as_ref(),
-    );
-    warn_observability_hook_path_changes(
-        "plugins.observability_hooks",
-        &current.plugins.observability_hooks,
-        &new_config.plugins.observability_hooks,
-    );
-    warn_principal_plugin_path_changes(current, new_config);
     warn_storage_restart_required(&current.storage, &new_config.storage);
     warn_aead_restart_required(&current.aead.key_env, &new_config.aead.key_env);
 }
@@ -489,66 +321,6 @@ fn warn_storage_restart_required(current: &StorageConfig, new_config: &StorageCo
 fn warn_aead_restart_required(current: &str, new_config: &str) {
     if current != new_config {
         tracing::warn!("aead key env changed; restart required to apply");
-    }
-}
-
-fn warn_plugin_path_change(
-    field: &str,
-    current: Option<&PluginRef>,
-    new_config: Option<&PluginRef>,
-) {
-    warn_if_changed(
-        &current.and_then(|plugin| plugin.wasm_path.as_ref()),
-        &new_config.and_then(|plugin| plugin.wasm_path.as_ref()),
-        field,
-    );
-}
-
-fn warn_observability_hook_path_changes(
-    field_prefix: &str,
-    current: &[PluginRef],
-    new_config: &[PluginRef],
-) {
-    let max_len = current.len().max(new_config.len());
-    for index in 0..max_len {
-        let field = format!("{field_prefix}.{index}.wasm_path");
-        warn_if_changed(
-            &current
-                .get(index)
-                .and_then(|plugin| plugin.wasm_path.as_ref()),
-            &new_config
-                .get(index)
-                .and_then(|plugin| plugin.wasm_path.as_ref()),
-            &field,
-        );
-    }
-}
-
-fn warn_principal_plugin_path_changes(current: &Config, new_config: &Config) {
-    let mut principal_ids = BTreeSet::new();
-    principal_ids.extend(current.principals.keys());
-    principal_ids.extend(new_config.principals.keys());
-
-    for principal_id in principal_ids {
-        let current_principal = current.principals.get(principal_id);
-        let new_principal = new_config.principals.get(principal_id);
-        warn_plugin_path_change(
-            &format!("principals.{principal_id}.router_plugin.wasm_path"),
-            current_principal.and_then(|spec| spec.router_plugin.as_ref()),
-            new_principal.and_then(|spec| spec.router_plugin.as_ref()),
-        );
-
-        let current_hooks = current_principal
-            .and_then(|spec| spec.observability_hooks.as_deref())
-            .unwrap_or(&[]);
-        let new_hooks = new_principal
-            .and_then(|spec| spec.observability_hooks.as_deref())
-            .unwrap_or(&[]);
-        warn_observability_hook_path_changes(
-            &format!("principals.{principal_id}.observability_hooks"),
-            current_hooks,
-            new_hooks,
-        );
     }
 }
 

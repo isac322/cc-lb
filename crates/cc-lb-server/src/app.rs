@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
@@ -19,7 +18,7 @@ use axum::http::{HeaderName, Request, Response, StatusCode};
 use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, ConfigError, DownstreamAuthMode, PluginRef, TlsConfig};
+use cc_lb_config::{Config, DownstreamAuthMode, TlsConfig};
 #[cfg(feature = "postgres")]
 use cc_lb_config::{Limit, LimitKind, PrincipalSpec, PrincipalType};
 use cc_lb_core::BreakerState;
@@ -35,8 +34,7 @@ use cc_lb_core::{
     usage_pruner::UsagePruner,
 };
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
-use cc_lb_plugin_api::{ObservabilityHook, PluginManifest, RouterPlugin, RuntimeError};
-use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
+use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_storage_api::{ManagedKeyStore, RuntimeChangeNotifier, Storage};
 use http_body_util::BodyExt;
 use serde::Serialize;
@@ -49,7 +47,7 @@ use tower::ServiceBuilder;
 
 use crate::bootstrap;
 use crate::build_meta::BuildMeta;
-use crate::builtins::{BuiltinError, BuiltinRouter, NoopObservabilityHook};
+use crate::builtins::NoopObservabilityHook;
 use crate::drain::DrainController;
 use crate::dynamic_view_builder::{
     Stores as DynamicStores, build_dynamic_view, ensure_wasm_cache_dirs,
@@ -73,44 +71,6 @@ pub const PROXY_FILES_ROUTE_PATHS: &[&str] = &[
     PROXY_FILES_ROUTE_ITEM,
     PROXY_FILES_ROUTE_ITEM_CONTENT,
 ];
-
-#[allow(clippy::type_complexity)]
-pub(crate) fn build_global_chain(
-    config: &Config,
-    runtime: &ExtismRuntime,
-    staged: &mut Vec<StagedSlot>,
-) -> Result<(Arc<dyn RouterPlugin>, Vec<Arc<dyn ObservabilityHook>>), GlobalChainError> {
-    let global_router: Arc<dyn RouterPlugin> = match &config.plugins.router_plugin {
-        Some(plugin) => {
-            let manifest = manifest_from_plugin(plugin)?;
-            let (handle, slot) = runtime.instantiate_router_global(&plugin.name, &manifest)?;
-            staged.push(slot);
-            handle
-        }
-        None => Arc::new(BuiltinRouter::new(config)?),
-    };
-
-    let mut global_observability_hooks =
-        Vec::with_capacity(config.plugins.observability_hooks.len());
-    for plugin in &config.plugins.observability_hooks {
-        let manifest = manifest_from_plugin(plugin)?;
-        let (handle, slot) = runtime.instantiate_observability_global(&plugin.name, &manifest)?;
-        staged.push(slot);
-        global_observability_hooks.push(handle);
-    }
-
-    Ok((global_router, global_observability_hooks))
-}
-
-#[derive(Debug, Error)]
-pub enum GlobalChainError {
-    #[error(transparent)]
-    Builtin(#[from] BuiltinError),
-    #[error(transparent)]
-    Runtime(#[from] RuntimeError),
-    #[error(transparent)]
-    Config(#[from] ConfigError),
-}
 
 pub struct App {
     pub router: Router,
@@ -137,6 +97,34 @@ pub enum ServeError {
     Observability(#[from] cc_lb_observability::InitError),
     #[error(transparent)]
     Build(#[from] BuildError),
+}
+
+#[derive(Debug, Error)]
+pub enum BuildError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Config(#[from] cc_lb_config::ConfigError),
+    #[error(transparent)]
+    Preflight(#[from] crate::preflight::PreflightError),
+    #[error(transparent)]
+    Observability(#[from] cc_lb_observability::InitError),
+    #[error(transparent)]
+    Storage(#[from] cc_lb_storage_redb::StorageError),
+    #[error(transparent)]
+    StorageFactory(#[from] crate::storage_factory::StorageFactoryError),
+    #[error(transparent)]
+    Bootstrap(#[from] crate::bootstrap::BootstrapError),
+    #[error(transparent)]
+    Tls(#[from] crate::tls::TlsError),
+    #[error(transparent)]
+    Rebind(#[from] crate::dynamic_view_builder::RebindError),
+    #[error("storage is required")]
+    StorageRequired,
+    #[error("storage master key env {env} is missing")]
+    StorageKeyMissing { env: String },
+    #[error("storage master key must be 32 bytes encoded as 64 hex characters")]
+    InvalidStorageKey,
 }
 
 impl App {
@@ -717,6 +705,57 @@ fn spawn_reconcile_shutdown(shutdown: watch::Receiver<bool>, cancel: Cancellatio
     });
 }
 
+fn cap_to_usize(value: u64) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+fn build_tls_state(config: &Config) -> Result<Option<Arc<TlsState>>, BuildError> {
+    let Some((_label, tls_config)) = active_tls_config(config) else {
+        return Ok(None);
+    };
+    let Some(cert_path) = tls_config.cert_path.as_ref() else {
+        return Ok(None);
+    };
+    let Some(key_path) = tls_config.key_path.as_ref() else {
+        return Ok(None);
+    };
+    Ok(Some(Arc::new(TlsState::from_paths(cert_path, key_path)?)))
+}
+
+fn active_tls_config(config: &Config) -> Option<(&'static str, &TlsConfig)> {
+    config
+        .listener
+        .tls
+        .as_ref()
+        .map(|tls| ("listener", tls))
+        .or_else(|| config.tls.as_ref().map(|tls| ("legacy", tls)))
+}
+
+fn sighup_handler(
+    tls_state: Option<Arc<TlsState>>,
+    config_watcher: Option<Arc<ConfigWatcher>>,
+) -> Option<signal::SighupHandler> {
+    if tls_state.is_none() && config_watcher.is_none() {
+        return None;
+    }
+    Some(Arc::new(move || {
+        if let Some(tls_state) = &tls_state
+            && let Err(error) = tls_state.reload()
+        {
+            tracing::warn!(error = %error, "TLS reload failed");
+        }
+        if let Some(config_watcher) = &config_watcher
+            && let Err(error) = config_watcher.reload_now()
+        {
+            tracing::warn!(error = %error, "configuration reload failed");
+        }
+    }))
+}
+
+fn spawn_reload_watcher(config_watcher: Arc<ConfigWatcher>) -> JoinHandle<()> {
+    config_watcher.spawn_file_watcher()
+}
+
 struct InMemoryCurrentConfig {
     current: ArcSwap<Config>,
     draft: Mutex<Option<Config>>,
@@ -760,8 +799,10 @@ impl CurrentConfig for InMemoryCurrentConfig {
         config
             .validate()
             .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
-        let principal_view = PrincipalView::from_config(&config, std::collections::HashMap::new())
-            .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
+        let principal_view = Arc::new(PrincipalView::from_db(
+            &[],
+            std::collections::HashMap::new(),
+        ));
         let current_view = self.dynamic_view.load();
         self.dynamic_view.store(
             DynamicViewBuilder::from_view(&current_view)
@@ -1075,299 +1116,4 @@ fn dispatcher(config: &Config) -> (Arc<dyn UpstreamDispatch>, Arc<BreakerRegistr
         )),
         breaker_registry,
     )
-}
-
-pub(crate) fn manifest_from_plugin(plugin: &PluginRef) -> Result<PluginManifest, ConfigError> {
-    let artifact = plugin
-        .wasm_path
-        .as_ref()
-        .ok_or_else(|| {
-            ConfigError::Validation(cc_lb_config::ValidationError {
-                field: format!("plugins.{}.wasm_path", plugin.name),
-                message: "missing plugin wasm path".to_owned(),
-            })
-        })?
-        .display()
-        .to_string();
-    let mut metadata = BTreeMap::new();
-    metadata.insert(
-        "observe_batch_count".to_owned(),
-        serde_json::Value::from(plugin.batched_events_per_flush),
-    );
-    metadata.insert(
-        "observe_flush_ms".to_owned(),
-        serde_json::Value::from(plugin.batched_flush_ms),
-    );
-    Ok(PluginManifest {
-        name: plugin.name.clone(),
-        artifact,
-        config: plugin.config.clone(),
-        metadata,
-    })
-}
-
-fn build_tls_state(config: &Config) -> Result<Option<Arc<TlsState>>, BuildError> {
-    let Some((prefix, tls)) = active_tls_config(config) else {
-        return Ok(None);
-    };
-
-    let cert_path = tls
-        .cert_path
-        .as_deref()
-        .ok_or_else(|| BuildError::InvalidTlsConfig {
-            field: format!("{prefix}.cert_path"),
-            message: "missing TLS certificate path".to_owned(),
-        })?;
-    let key_path = tls
-        .key_path
-        .as_deref()
-        .ok_or_else(|| BuildError::InvalidTlsConfig {
-            field: format!("{prefix}.key_path"),
-            message: "missing TLS key path".to_owned(),
-        })?;
-
-    Ok(Some(Arc::new(TlsState::from_paths(cert_path, key_path)?)))
-}
-
-fn active_tls_config(config: &Config) -> Option<(&'static str, &TlsConfig)> {
-    if let Some(tls) = &config.listener.tls {
-        Some(("listener.tls", tls))
-    } else {
-        config.tls.as_ref().map(|tls| ("tls", tls))
-    }
-}
-
-fn spawn_reload_watcher(config_watcher: Arc<ConfigWatcher>) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        config_watcher.watch_file_changes().await;
-    })
-}
-
-fn sighup_handler(
-    tls_state: Option<Arc<TlsState>>,
-    config_watcher: Option<Arc<ConfigWatcher>>,
-) -> Option<signal::SighupHandler> {
-    if tls_state.is_none() && config_watcher.is_none() {
-        return None;
-    }
-
-    Some(Arc::new(move || {
-        if let Some(tls_state) = &tls_state {
-            match tls_state.reload() {
-                Ok(()) => tracing::info!("TLS certificate reload accepted"),
-                Err(source) => tracing::warn!(error = %source, "TLS certificate reload failed"),
-            }
-        }
-        if let Some(config_watcher) = &config_watcher {
-            let _result = config_watcher.reload_now();
-        }
-    }))
-}
-
-fn cap_to_usize(value: u64) -> usize {
-    match usize::try_from(value) {
-        Ok(value) => value,
-        Err(_) => usize::MAX,
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum BuildError {
-    #[error(transparent)]
-    Config(#[from] cc_lb_config::ConfigError),
-    #[error(transparent)]
-    Builtin(#[from] crate::builtins::BuiltinError),
-    #[error(transparent)]
-    Runtime(#[from] cc_lb_plugin_api::RuntimeError),
-    #[error(transparent)]
-    Observability(#[from] cc_lb_observability::InitError),
-    #[error(transparent)]
-    Storage(#[from] cc_lb_storage_redb::StorageError),
-    #[error(transparent)]
-    StorageFactory(#[from] crate::storage_factory::StorageFactoryError),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Tls(#[from] crate::tls::TlsError),
-    #[error(transparent)]
-    Rebind(#[from] crate::dynamic_view_builder::RebindError),
-    #[error(transparent)]
-    Bootstrap(#[from] crate::bootstrap::BootstrapError),
-    #[error("missing storage key env {env}")]
-    StorageKeyMissing { env: String },
-    #[error("storage key must be 64 hexadecimal characters")]
-    InvalidStorageKey,
-    #[error("invalid plugin {name}: {reason}")]
-    InvalidPlugin { name: String, reason: String },
-    #[error("{field}: {message}")]
-    InvalidTlsConfig { field: String, message: String },
-    #[error("storage connection failed: {message}")]
-    StorageConnect { message: String },
-}
-
-#[cfg(all(test, feature = "postgres"))]
-mod tests {
-    use cc_lb_config::DownstreamAuthMode;
-
-    use super::{build_app_for_testing_postgres, build_app_for_testing_postgres_config};
-
-    #[tokio::test]
-    async fn build_app_for_testing_postgres_smoke() -> Result<(), Box<dyn std::error::Error>> {
-        let url = match std::env::var("CI_POSTGRES_URL") {
-            Ok(u) => u,
-            Err(_) => return Ok(()),
-        };
-        let config = build_app_for_testing_postgres_config(&url);
-        assert_eq!(config.downstream_auth.mode, DownstreamAuthMode::ApiKey);
-        let _app = build_app_for_testing_postgres(&url).await?;
-        Ok(())
-    }
-}
-
-impl From<GlobalChainError> for BuildError {
-    fn from(error: GlobalChainError) -> Self {
-        match error {
-            GlobalChainError::Builtin(source) => Self::Builtin(source),
-            GlobalChainError::Runtime(source) => Self::Runtime(source),
-            GlobalChainError::Config(source) => Self::Config(source),
-        }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn data_dir_cli_overrides_config() {
-        let temp_dir = tempfile::tempdir().unwrap();
-        let config_dir = tempfile::tempdir().unwrap();
-
-        let result = resolve_data_dir(
-            Some(temp_dir.path()),
-            Some(config_dir.path()),
-            "NONEXISTENT_ENV",
-        );
-
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), temp_dir.path());
-    }
-
-    #[test]
-    fn data_dir_config_used_when_no_override() {
-        let config_dir = tempfile::tempdir().unwrap();
-
-        let result = resolve_data_dir(None, Some(config_dir.path()), "NONEXISTENT_ENV");
-
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), config_dir.path());
-    }
-
-    #[test]
-    fn data_dir_default_when_all_absent() {
-        let result = resolve_data_dir(None, None, "NONEXISTENT_ENV");
-
-        assert!(result.is_ok());
-        assert_eq!(result.unwrap(), PathBuf::from("./data"));
-    }
-
-    #[tokio::test]
-    async fn bootstrap_token_env_seeds_admin() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("storage.redb");
-        let key = [0u8; 32];
-        let storage = cc_lb_storage_redb::Storage::open(&path, key).unwrap();
-
-        let config = cc_lb_config::Config::default();
-        let token = "test-token-001".to_string();
-
-        let result = bootstrap::apply_bootstrap(
-            &config,
-            &storage,
-            &storage,
-            &storage,
-            Some(token),
-            dir.path(),
-        )
-        .await;
-        assert!(result.is_ok());
-    }
-
-    #[tokio::test]
-    async fn bootstrap_toml_idempotent_on_restart() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("storage.redb");
-        let key = [0u8; 32];
-        let storage = cc_lb_storage_redb::Storage::open(&path, key).unwrap();
-
-        let config = cc_lb_config::Config::default();
-        let bootstrap_file = dir.path().join("bootstrap.toml");
-        fs::write(&bootstrap_file, "").unwrap();
-
-        let result1 =
-            bootstrap::apply_bootstrap(&config, &storage, &storage, &storage, None, dir.path())
-                .await;
-        assert!(result1.is_ok());
-
-        let result2 =
-            bootstrap::apply_bootstrap(&config, &storage, &storage, &storage, None, dir.path())
-                .await;
-        assert!(result2.is_ok());
-    }
-
-    #[tokio::test]
-    async fn bootstrap_toml_renamed_after_apply() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("storage.redb");
-        let key = [0u8; 32];
-        let storage = cc_lb_storage_redb::Storage::open(&path, key).unwrap();
-
-        let config = cc_lb_config::Config::default();
-        let bootstrap_file = dir.path().join("bootstrap.toml");
-        fs::write(&bootstrap_file, "").unwrap();
-
-        assert!(bootstrap_file.exists());
-        let result =
-            bootstrap::apply_bootstrap(&config, &storage, &storage, &storage, None, dir.path())
-                .await;
-        assert!(result.is_ok());
-
-        assert!(!bootstrap_file.exists());
-        let entries: Vec<_> = fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(Result::ok)
-            .filter(|e| {
-                e.file_name()
-                    .to_string_lossy()
-                    .starts_with("bootstrap.toml.consumed-")
-            })
-            .collect();
-        assert_eq!(entries.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn missing_env_and_file_is_noop() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("storage.redb");
-        let key = [0u8; 32];
-        let storage = cc_lb_storage_redb::Storage::open(&path, key).unwrap();
-
-        let config = cc_lb_config::Config::default();
-
-        let result =
-            bootstrap::apply_bootstrap(&config, &storage, &storage, &storage, None, dir.path())
-                .await;
-        assert!(result.is_ok());
-    }
-
-    #[test]
-    fn redb_minimal_fixture_parses() {
-        let fixture_path = "tests/fixtures/redb-minimal.toml";
-        assert!(std::path::Path::new(fixture_path).exists());
-
-        let content = fs::read_to_string(fixture_path).unwrap();
-        assert!(!content.is_empty());
-        assert!(content.contains("[listener]"));
-        assert!(content.contains("[storage]"));
-    }
 }

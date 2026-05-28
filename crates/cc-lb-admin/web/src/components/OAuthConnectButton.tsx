@@ -1,19 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
-import { Button } from '../components/primitives/Button';
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '../components/primitives/Dialog';
-import { Input } from '../components/primitives/Input';
-import {
-  useGet,
-  useOAuthComplete,
-  useOAuthStart,
-} from '../lib/hooks/useUpstreams';
+import { useState, useEffect, useRef } from 'react';
+import { Button } from './primitives/Button';
+import { useOAuthStart, useGet, useOAuthComplete } from '../lib/hooks/useUpstreams';
+import { Modal } from './primitives/Modal';
 
 interface OAuthConnectButtonProps {
   upstreamId: string;
@@ -21,11 +9,7 @@ interface OAuthConnectButtonProps {
   onSuccess: () => void;
 }
 
-export function OAuthConnectButton({
-  upstreamId,
-  initialRevision,
-  onSuccess,
-}: OAuthConnectButtonProps) {
+export function OAuthConnectButton({ upstreamId, initialRevision, onSuccess }: OAuthConnectButtonProps) {
   const [isPolling, setIsPolling] = useState(false);
   const [showFallback, setShowFallback] = useState(false);
   const [stateToken, setStateToken] = useState<string | null>(null);
@@ -69,6 +53,8 @@ export function OAuthConnectButton({
 
       try {
         const upstream = await getUpstream(upstreamId);
+        // We check if revision has increased, which indicates the OAuth flow completed
+        // and updated the upstream record.
         if (upstream.revision > initialRevision) {
           setIsPolling(false);
           onSuccess();
@@ -108,7 +94,11 @@ export function OAuthConnectButton({
 
   return (
     <>
-      <Button variant="primary" onClick={handleStart} disabled={isPolling}>
+      <Button
+        variant="primary"
+        onClick={handleStart}
+        disabled={isPolling}
+      >
         {isPolling ? 'Waiting for authorization...' : 'Connect Claude OAuth'}
       </Button>
 
@@ -126,44 +116,39 @@ export function OAuthConnectButton({
         </Button>
       )}
 
-      <Dialog open={showFallback} onOpenChange={setShowFallback}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Manual OAuth Completion</DialogTitle>
-            <DialogDescription>
-              If the automatic redirect didn't work, please paste the
-              authorization code here.
-            </DialogDescription>
-          </DialogHeader>
-          <div className="space-y-4 py-4">
-            <div className="space-y-2">
-              <label className="text-sm font-medium text-graphite-200">
-                Authorization Code
-              </label>
-              <Input
-                value={manualCode}
-                onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                  setManualCode(e.target.value)
-                }
-                placeholder="Paste code here..."
-              />
-            </div>
-            {error && <div className="text-red-400 text-sm">{error}</div>}
+      <Modal isOpen={showFallback} onClose={() => setShowFallback(false)} title="Manual OAuth Completion">
+        <div className="space-y-4 py-4">
+          <p className="text-sm text-graphite-300">
+            If the automatic redirect didn't work, please paste the authorization code here.
+          </p>
+          <div className="space-y-2">
+            <label className="text-sm font-medium text-graphite-200">
+              Authorization Code
+            </label>
+            <input
+              className="w-full bg-graphite-900 border border-graphite-700 rounded px-3 py-2 text-sm text-graphite-100 focus:outline-none focus:border-cyan-500"
+              value={manualCode}
+              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+                setManualCode(e.target.value)
+              }
+              placeholder="Paste code here..."
+            />
           </div>
-          <DialogFooter>
-            <Button variant="secondary" onClick={() => setShowFallback(false)}>
-              Cancel
-            </Button>
-            <Button
-              variant="primary"
-              onClick={handleManualComplete}
-              disabled={!manualCode || isCompleting}
-            >
-              {isCompleting ? 'Completing...' : 'Complete'}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+          {error && <div className="text-red-400 text-sm">{error}</div>}
+        </div>
+        <div className="flex justify-end gap-2 mt-4">
+          <Button variant="secondary" onClick={() => setShowFallback(false)}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            onClick={handleManualComplete}
+            disabled={!manualCode || isCompleting}
+          >
+            {isCompleting ? 'Completing...' : 'Complete'}
+          </Button>
+        </div>
+      </Modal>
     </>
   );
 }

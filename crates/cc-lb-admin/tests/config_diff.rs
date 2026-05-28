@@ -42,8 +42,8 @@ async fn config_diff_route_returns_history_difference() {
                 toml::to_string_pretty(config).unwrap(),
                 1000 + revision,
                 cc_lb_storage_redb::HistorySummary {
-                    upstreams: config.upstreams.len(),
-                    principals: config.principals.len(),
+                    upstreams: 0,
+                    principals: 0,
                     plugin_count: 0,
                     tls_enabled: false,
                 },
