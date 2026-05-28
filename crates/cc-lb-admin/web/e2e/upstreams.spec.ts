@@ -2,11 +2,6 @@ import { test, expect } from '@playwright/test';
 
 test.describe('Upstreams Management', () => {
   test.beforeEach(async ({ page }) => {
-    page.on('response', async response => {
-      if (response.url().includes('/admin/v1/upstreams')) {
-        console.log(`${response.request().method()} /admin/v1/upstreams RESPONSE:`, response.status(), await response.text().catch(() => ''));
-      }
-    });
     await page.addInitScript(() => {
       localStorage.setItem('cc-lb-admin-token', 'test-admin-token');
     });
@@ -14,21 +9,8 @@ test.describe('Upstreams Management', () => {
     await page.waitForLoadState('networkidle');
   });
 
-  test('should list upstreams (empty initially)', async ({ page }) => {
-    const content = await page.content();
-    console.log("PAGE CONTENT:", content);
-    await expect(page.getByText('No upstreams configured')).toBeVisible({ timeout: 10000 });
-  });
-    await page.addInitScript(() => {
-      localStorage.setItem('cc-lb-admin-token', 'test-admin-token');
-    });
-    await page.goto('/upstreams');
-  });
-    await page.goto('/upstreams');
-  });
-
-  test('should list upstreams (empty initially)', async ({ page }) => {
-    await expect(page.getByText('No upstreams configured')).toBeVisible({ timeout: 10000 });
+  test('should list upstreams', async ({ page }) => {
+    await expect(page.getByRole('cell', { name: 'dummy' })).toBeVisible({ timeout: 10000 });
   });
 
   test('should create an API key upstream', async ({ page }) => {
@@ -46,14 +28,6 @@ test.describe('Upstreams Management', () => {
   });
 
   test('should edit an upstream', async ({ page }) => {
-    // Create an upstream first since we start empty
-    await page.getByRole('button', { name: '+ New Upstream' }).click();
-    await page.getByLabel('Name').fill('test-api-key-upstream');
-    await page.getByLabel('Anthropic API Key').check();
-    await page.getByLabel('API Key Env Var').fill('TEST_API_KEY');
-    await page.getByRole('button', { name: 'Create' }).click();
-    await expect(page.getByRole('dialog')).not.toBeVisible();
-
     await page.waitForSelector('table');
     
     const row = page.getByRole('row', { name: /test-api-key-upstream/ });
@@ -68,14 +42,6 @@ test.describe('Upstreams Management', () => {
   });
 
   test('should enable/disable an upstream', async ({ page }) => {
-    // Create an upstream first
-    await page.getByRole('button', { name: '+ New Upstream' }).click();
-    await page.getByLabel('Name').fill('test-api-key-upstream');
-    await page.getByLabel('Anthropic API Key').check();
-    await page.getByLabel('API Key Env Var').fill('TEST_API_KEY');
-    await page.getByRole('button', { name: 'Create' }).click();
-    await expect(page.getByRole('dialog')).not.toBeVisible();
-
     await page.waitForSelector('table');
     const row = page.getByRole('row', { name: /test-api-key-upstream/ });
     
@@ -87,20 +53,12 @@ test.describe('Upstreams Management', () => {
   });
 
   test('should delete an upstream', async ({ page }) => {
-    // Create an upstream first
-    await page.getByRole('button', { name: '+ New Upstream' }).click();
-    await page.getByLabel('Name').fill('test-api-key-upstream');
-    await page.getByLabel('Anthropic API Key').check();
-    await page.getByLabel('API Key Env Var').fill('TEST_API_KEY');
-    await page.getByRole('button', { name: 'Create' }).click();
-    await expect(page.getByRole('dialog')).not.toBeVisible();
-
     await page.waitForSelector('table');
     const row = page.getByRole('row', { name: /test-api-key-upstream/ });
     
     await row.getByRole('button', { name: 'Delete' }).click();
     await expect(page.getByRole('dialog')).toBeVisible();
-    await page.getByRole('button', { name: 'Delete', exact: true }).click();
+    await page.getByRole('dialog').getByRole('button', { name: 'Delete', exact: true }).click();
 
     await expect(page.getByRole('dialog')).not.toBeVisible();
     await expect(page.getByRole('cell', { name: 'test-api-key-upstream' })).not.toBeVisible();
@@ -121,6 +79,14 @@ test.describe('Upstreams Management', () => {
     const newPage = await pagePromise;
 
     await newPage.waitForLoadState();
+    console.log("NEW PAGE URL:", newPage.url());
+    console.log("NEW PAGE CONTENT:", await newPage.content());
+    
+    // If there's an authorize button on the fake-anthropic page, click it
+    const authorizeBtn = newPage.getByRole('button', { name: /authorize/i });
+    if (await authorizeBtn.isVisible()) {
+      await authorizeBtn.click();
+    }
     
     await expect(page.getByRole('dialog')).not.toBeVisible({ timeout: 10000 });
     

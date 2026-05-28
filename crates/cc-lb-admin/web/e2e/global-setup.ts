@@ -45,6 +45,14 @@ scopes = ["messages", "files"]
 `;
   fs.writeFileSync(configPath, config);
 
+  const bootstrapPath = path.join(dataDir, 'bootstrap.toml');
+  const bootstrapConfig = `
+[[upstreams]]
+name = "dummy"
+kind = "custom"
+`;
+  fs.writeFileSync(bootstrapPath, bootstrapConfig);
+
   console.log('Starting fake-anthropic...');
   fakeAnthropicProcess = spawn('cargo', ['run', '-p', 'fake-anthropic', '--', '--port', '8081'], {
     cwd: workspaceRoot,

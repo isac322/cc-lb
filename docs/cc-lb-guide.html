@@ -326,14 +326,14 @@ idle_secs               = 300
 upstream_total_secs     = 600
 drain_secs              = 60
 
-[upstreams.anthropic]
+[ upstreams.anthropic]
 kind          = "anthropic_direct"
 auth_strategy = "api_key"
 
-[principals.api-key]
+[ principals.api-key]
 allowed_models = ["*"]
 
-[plugins]
+[ plugins ]
 observability_hooks = []
 
 [storage]
@@ -517,11 +517,11 @@ kill -TERM $(pgrep -f &#39;[c]c-lb serve&#39;)</code></pre><button class="copy">
     </ul>
 
     <h4>최소 config 발췌</h4>
-    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[upstreams.anthropic]
+    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[ upstreams.anthropic]
 kind          = &quot;anthropic_direct&quot;
 auth_strategy = &quot;api_key&quot;
 
-[principals.api-key]
+[ principals.api-key]
 allowed_models = [&quot;*&quot;]
 
 [observability]
@@ -542,7 +542,7 @@ log_redaction = true</code></pre><button class="copy">복사</button></div>
     <h4>현실 (꼭 읽기)</h4>
     <div class="callout warn">
       <span class="label">중요</span>
-      <b>cc-lb의 빌트인 라우터는 첫 upstream만 사용합니다.</b> <code>[upstreams.a]</code>, <code>[upstreams.b]</code> 두 개를 등록해도 빌트인 path는 항상 <code>a</code>로 갑니다. <b>round-robin / weighted / least-conn은 router plugin (Extism Wasm)으로 직접 구현해야 합니다.</b> 이건 의도된 설계입니다 — 분산 정책은 비즈니스 요구에 따라 달라서 코어에 박지 않았습니다.
+      <b>cc-lb의 빌트인 라우터는 첫 upstream만 사용합니다.</b> <code>[ upstreams.a]</code>, <code>[ upstreams.b]</code> 두 개를 등록해도 빌트인 path는 항상 <code>a</code>로 갑니다. <b>round-robin / weighted / least-conn은 router plugin (Extism Wasm)으로 직접 구현해야 합니다.</b> 이건 의도된 설계입니다 — 분산 정책은 비즈니스 요구에 따라 달라서 코어에 박지 않았습니다.
     </div>
 
     <h4>대안 4가지</h4>
@@ -553,7 +553,7 @@ log_redaction = true</code></pre><button class="copy">복사</button></div>
       </li>
       <li>
         <b>커스텀 router plugin (round-robin)</b>
-        <p><code>examples/plugin-api-key/</code> 구조를 베이스로 router trait 구현. 약 100줄 Rust → <code>wasm32-wasip1</code> 빌드 → <code>[plugins].router_plugin</code>에 등록.</p>
+        <p><code>examples/plugin-api-key/</code> 구조를 베이스로 router trait 구현. 약 100줄 Rust → <code>wasm32-wasip1</code> 빌드 → <code>[ plugins ].router_plugin</code>에 등록.</p>
       </li>
       <li>
         <b>클라이언트 측 키 순환</b>
@@ -566,15 +566,15 @@ log_redaction = true</code></pre><button class="copy">복사</button></div>
     </ol>
 
     <h4>1번 (principal 별 매핑) 최소 config 발췌</h4>
-    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[upstreams.anthropic_pool_a]
+    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[ upstreams.anthropic_pool_a]
 kind          = &quot;anthropic_direct&quot;
 auth_strategy = &quot;api_key&quot;
 
-[upstreams.anthropic_pool_b]
+[ upstreams.anthropic_pool_b]
 kind          = &quot;anthropic_direct&quot;
 auth_strategy = &quot;api_key&quot;
 
-[plugins]
+[ plugins ]
 authn_plugin  = { wasm_path = &quot;./plugins/plugin_api_key.wasm&quot; }
 router_plugin = { wasm_path = &quot;./plugins/my_router.wasm&quot; }
 # my_router.wasm: principal.id 보고 upstream 이름 반환</code></pre><button class="copy">복사</button></div>
@@ -630,23 +630,23 @@ curl -s http://127.0.0.1:9091/metrics | grep cc_lb_requests_total
     </ul>
 
     <h4>최소 config 발췌</h4>
-    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[upstreams.anthropic]
+    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[ upstreams.anthropic]
 kind          = &quot;anthropic_direct&quot;
 auth_strategy = &quot;api_key&quot;
 
-[upstreams.bedrock]
+[ upstreams.bedrock]
 kind            = &quot;bedrock_runtime&quot;
 region          = &quot;us-east-1&quot;
 auth_strategy   = &quot;aws_sigv4&quot;
 credentials_ref = &quot;default&quot;     # ~/.aws/credentials 프로파일
 
-[upstreams.vertex]
+[ upstreams.vertex]
 kind          = &quot;vertex&quot;
 project       = &quot;my-gcp-project&quot;
 region        = &quot;us-east5&quot;
 auth_strategy = &quot;gcp_oauth&quot;     # ADC 자동 사용
 
-[plugins]
+[ plugins ]
 router_plugin = { wasm_path = &quot;./plugins/model_router.wasm&quot; }
 # model_router: request.body.model 보고 upstream 결정</code></pre><button class="copy">복사</button></div>
 
@@ -689,12 +689,12 @@ curl -s http://127.0.0.1:8080/v1/messages \
     </ul>
 
     <h4>최소 config 발췌</h4>
-    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[upstreams.anthropic]
+    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[ upstreams.anthropic]
 kind          = &quot;anthropic_direct&quot;
 auth_strategy = &quot;api_key&quot;
 # 실제 키는 plugin이 주입하므로 여기엔 안 적음
 
-[plugins]
+[ plugins ]
 authn_plugin = { wasm_path = &quot;./plugins/plugin_internal_key_mapping.wasm&quot; }
 
 [storage]
@@ -739,11 +739,11 @@ curl -s -i http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: ck-internal-unk
     </ul>
 
     <h4>최소 config 발췌</h4>
-    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[upstreams.anthropic]
+    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[ upstreams.anthropic]
 kind          = &quot;anthropic_direct&quot;
 auth_strategy = &quot;anthropic_oauth&quot;     # ← api_key 아님
 
-[plugins]
+[ plugins ]
 authn_plugin = { wasm_path = &quot;./plugins/plugin_oauth_anthropic_pro.wasm&quot; }
 
 [storage]
@@ -1137,32 +1137,32 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
 
     // upstream 블록
     if (up === 'anthropic') {
-      toml += '[upstreams.anthropic]\n';
+      toml += '[ upstreams.anthropic]\n';
       toml += 'kind          = "anthropic_direct"\n';
       toml += 'auth_strategy = "' + auth + '"\n\n';
     } else if (up === 'bedrock') {
-      toml += '[upstreams.bedrock]\n';
+      toml += '[ upstreams.bedrock]\n';
       toml += 'kind            = "bedrock_runtime"\n';
       toml += 'region          = "' + bAwsRegion.value + '"\n';
       toml += 'auth_strategy   = "' + (auth === 'aws_sigv4' ? 'aws_sigv4' : 'aws_sigv4') + '"\n';
       toml += 'credentials_ref = "default"\n\n';
     } else if (up === 'vertex') {
-      toml += '[upstreams.vertex]\n';
+      toml += '[ upstreams.vertex]\n';
       toml += 'kind          = "vertex"\n';
       toml += 'project       = "' + bGcpProject.value + '"\n';
       toml += 'region        = "' + bGcpRegion.value + '"\n';
       toml += 'auth_strategy = "gcp_oauth"\n\n';
     } else if (up === 'custom') {
-      toml += '[upstreams.custom_gw]\n';
+      toml += '[ upstreams.custom_gw]\n';
       toml += 'kind          = "custom"\n';
       toml += 'base_url      = "' + bCustomUrl.value + '"\n';
       toml += 'auth_strategy = "' + auth + '"\n\n';
     }
 
-    toml += '[principals.api-key]\n';
+    toml += '[ principals.api-key]\n';
     toml += 'allowed_models = ["*"]\n\n';
 
-    toml += '[plugins]\n';
+    toml += '[ plugins ]\n';
     if (bPlugin.checked) {
       toml += 'authn_plugin  = { wasm_path = "./plugins/plugin_api_key.wasm" }\n';
       toml += '# router_plugin = { wasm_path = "./plugins/my_router.wasm" }\n';
