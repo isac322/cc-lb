@@ -1,6 +1,6 @@
 use axum::{
     Json,
-    http::StatusCode,
+    http::{StatusCode, header},
     response::{IntoResponse, Response},
 };
 use cc_lb_config::PrincipalSpec;
@@ -10,9 +10,12 @@ use cc_lb_core::api_keys::secret;
 use cc_lb_core::api_keys::types::{
     Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalType as CorePrincipalType,
 };
-use cc_lb_storage_api::types::{
-    ApiKeyMutation, KeyStatus, Limit, LimitKind, PrincipalKindLite, StoredApiKeyRecord,
-    UpstreamKind,
+use cc_lb_storage_api::{
+    StorageError as ApiStorageError,
+    types::{
+        ApiKeyMutation, KeyStatus, Limit, LimitKind, PrincipalKindLite, StoredApiKeyRecord,
+        UpstreamKind,
+    },
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -41,6 +44,8 @@ pub enum ManagementError {
     InvalidRequest { message: String },
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("generated api key secret invalid")]
+    GeneratedKeyInvalid,
     #[error(transparent)]
     Storage(#[from] cc_lb_storage_redb::StorageError),
     #[error("limit_overrides invalid: {message}")]
@@ -52,7 +57,7 @@ pub enum ManagementError {
 impl IntoResponse for ManagementError {
     fn into_response(self) -> Response {
         match self {
-            ManagementError::StorageUnavailable => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+            ManagementError::StorageUnavailable => storage_unavailable_response(),
             ManagementError::Settings(error) => settings_management_error_response(error),
             ManagementError::Json(error) => {
                 tracing::error!(error = %error, "admin principal management json operation failed");
@@ -90,6 +95,10 @@ impl IntoResponse for ManagementError {
                 Json(serde_json::json!({ "error": message })),
             )
                 .into_response(),
+            ManagementError::GeneratedKeyInvalid => {
+                tracing::error!("admin api key generation produced an unparsable secret");
+                StatusCode::INTERNAL_SERVER_ERROR.into_response()
+            }
             ManagementError::Storage(error) => {
                 tracing::error!(error = %error, "admin api key management storage operation failed");
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -103,10 +112,7 @@ impl IntoResponse for ManagementError {
                 })),
             )
                 .into_response(),
-            ManagementError::KeyStore(error) => {
-                tracing::error!(error = %error, "admin api key management operation failed");
-                StatusCode::INTERNAL_SERVER_ERROR.into_response()
-            }
+            ManagementError::KeyStore(error) => key_store_error_response(error),
         }
     }
 }
@@ -386,16 +392,12 @@ pub async fn update_allowed_models(
     })
 }
 
-pub fn issue_principal_key(
+pub async fn issue_principal_key(
     state: &AdminState,
     principal_id: String,
     request: IssueKeyRequest,
 ) -> Result<IssueKeyResponse> {
-    let storage = state
-        .storage
-        .as_ref()
-        .ok_or(ManagementError::StorageUnavailable)?;
-    let key_store = KeyStore::new(storage.clone());
+    let key_store = admin_key_store(state)?;
     if !principal_exists_in_current_or_draft(state, &principal_id) {
         return Err(ManagementError::UnknownPrincipal);
     }
@@ -410,22 +412,22 @@ pub fn issue_principal_key(
 
     let label = request.label.unwrap_or_default();
     let principal_kind = principal_kind_lite(principal.principal_type());
-    let (record, plaintext) = key_store.create(
-        &principal_id,
-        CreateParams {
-            upstream_kind: request.upstream_kind,
-            upstream_credential_ref: request.upstream_credential_ref,
-            label,
-            description: request.description,
-            expires_at_unix_secs: request.expires_at_unix_secs,
-            limit_overrides: limit_overrides.clone(),
-            principal_kind,
-        },
-    )?;
+    let (record, plaintext) = key_store
+        .create(
+            &principal_id,
+            CreateParams {
+                upstream_kind: request.upstream_kind,
+                upstream_credential_ref: request.upstream_credential_ref,
+                label,
+                description: request.description,
+                expires_at_unix_secs: request.expires_at_unix_secs,
+                limit_overrides: limit_overrides.clone(),
+                principal_kind,
+            },
+        )
+        .await?;
     let (key_id, _) =
-        secret::parse(plaintext.expose()).map_err(|_| KeyStoreError::IndexInconsistency {
-            reason: "generated api key secret could not be parsed".to_owned(),
-        })?;
+        secret::parse(plaintext.expose()).map_err(|_| ManagementError::GeneratedKeyInvalid)?;
 
     enqueue_admin_audit(state, &principal_id, &key_id, "api_key_issue");
 
@@ -451,21 +453,18 @@ pub fn issue_principal_key(
     })
 }
 
-pub fn get_principal_key(
+pub async fn get_principal_key(
     state: &AdminState,
     principal_id: String,
     key_id: String,
 ) -> Result<ApiKeyRecord> {
-    let storage = state
-        .storage
-        .as_ref()
-        .ok_or(ManagementError::StorageUnavailable)?;
-    let key_store = KeyStore::new(storage.clone());
+    let key_store = admin_key_store(state)?;
     if !principal_exists_in_current_or_draft(state, &principal_id) {
         return Err(ManagementError::UnknownPrincipal);
     }
 
-    let record = find_key_by_id(&key_store, &principal_id, &key_id)?
+    let record = find_key_by_id(key_store, &principal_id, &key_id)
+        .await?
         .ok_or(ManagementError::UnknownApiKey)?;
 
     Ok(ApiKeyRecord {
@@ -488,19 +487,18 @@ pub fn get_principal_key(
     })
 }
 
-pub fn list_principal_keys(state: &AdminState, principal_id: String) -> Result<KeyListResponse> {
-    let storage = state
-        .storage
-        .as_ref()
-        .ok_or(ManagementError::StorageUnavailable)?;
-    let key_store = KeyStore::new(storage.clone());
+pub async fn list_principal_keys(
+    state: &AdminState,
+    principal_id: String,
+) -> Result<KeyListResponse> {
+    let key_store = admin_key_store(state)?;
     if !principal_exists_in_current_or_draft(state, &principal_id) {
         return Err(ManagementError::UnknownPrincipal);
     }
 
     let mut keys = Vec::new();
-    for record in key_store.list_by_principal(&principal_id)? {
-        let key_id = key_id_for_record(&key_store, &record)?;
+    for record in key_store.list_by_principal(&principal_id).await? {
+        let key_id = key_id_for_record(key_store, &record).await?;
         keys.push(ApiKeyRecord {
             key_id,
             label: if record.label.is_empty() {
@@ -524,25 +522,24 @@ pub fn list_principal_keys(state: &AdminState, principal_id: String) -> Result<K
     Ok(KeyListResponse { keys })
 }
 
-pub fn revoke_principal_key(
+pub async fn revoke_principal_key(
     state: &AdminState,
     principal_id: String,
     key_id: String,
 ) -> Result<RevokeKeyResponse> {
-    let storage = state
-        .storage
-        .as_ref()
-        .ok_or(ManagementError::StorageUnavailable)?;
-    let key_store = KeyStore::new(storage.clone());
+    let key_store = admin_key_store(state)?;
     if !principal_exists_in_current_or_draft(state, &principal_id) {
         return Err(ManagementError::UnknownPrincipal);
     }
 
-    if find_key_by_id(&key_store, &principal_id, &key_id)?.is_none() {
+    if find_key_by_id(key_store, &principal_id, &key_id)
+        .await?
+        .is_none()
+    {
         return Err(ManagementError::UnknownApiKey);
     }
 
-    key_store.revoke(&principal_id, &key_id)?;
+    key_store.revoke(&principal_id, &key_id).await?;
     enqueue_admin_audit(state, &principal_id, &key_id, "api_key_revoke");
 
     Ok(RevokeKeyResponse {
@@ -551,25 +548,18 @@ pub fn revoke_principal_key(
     })
 }
 
-pub fn update_principal_key(
+pub async fn update_principal_key(
     state: &AdminState,
     principal_id: String,
     key_id: String,
     request: UpdateKeyRequest,
 ) -> Result<UpdateKeyResponse> {
-    let storage = state
-        .storage
-        .as_ref()
-        .ok_or(ManagementError::StorageUnavailable)?;
-    let key_store = KeyStore::new(storage.clone());
+    let key_store = admin_key_store(state)?;
     if !principal_exists_in_current_or_draft(state, &principal_id) {
         return Err(ManagementError::UnknownPrincipal);
     }
 
-    let Some(existing_record) = storage
-        .get_api_key(&principal_id, &key_id)
-        .map_err(KeyStoreError::from)?
-    else {
+    let Some(existing_record) = find_key_by_id(key_store, &principal_id, &key_id).await? else {
         return Err(ManagementError::UnknownApiKey);
     };
     if existing_record.status == KeyStatus::Revoked {
@@ -578,27 +568,25 @@ pub fn update_principal_key(
         ));
     }
 
-    if find_key_by_id(&key_store, &principal_id, &key_id)?.is_none() {
-        return Err(ManagementError::UnknownApiKey);
-    }
-
     if let Some(limit_overrides) = request.limit_overrides.as_ref() {
         let principal_view = state.principal_view.load();
         let default_limits = principal_view.default_limits(&principal_id);
         validate_limit_overrides(limit_overrides, default_limits)?;
     }
 
-    key_store.patch(
-        &principal_id,
-        &key_id,
-        ApiKeyMutation {
-            label: request.label,
-            description: request.description.map(Some),
-            expires_at_unix_secs: request.expires_at_unix_secs,
-            limit_overrides: request.limit_overrides,
-            ..Default::default()
-        },
-    )?;
+    key_store
+        .patch(
+            &principal_id,
+            &key_id,
+            ApiKeyMutation {
+                label: request.label,
+                description: request.description.map(Some),
+                expires_at_unix_secs: request.expires_at_unix_secs,
+                limit_overrides: request.limit_overrides,
+                ..Default::default()
+            },
+        )
+        .await?;
     enqueue_admin_audit(state, &principal_id, &key_id, "api_key_patch");
 
     Ok(UpdateKeyResponse {
@@ -607,25 +595,24 @@ pub fn update_principal_key(
     })
 }
 
-pub fn disable_principal_key(
+pub async fn disable_principal_key(
     state: &AdminState,
     principal_id: String,
     key_id: String,
 ) -> Result<KeyStatusResponse> {
-    let storage = state
-        .storage
-        .as_ref()
-        .ok_or(ManagementError::StorageUnavailable)?;
-    let key_store = KeyStore::new(storage.clone());
+    let key_store = admin_key_store(state)?;
     if !principal_exists_in_current_or_draft(state, &principal_id) {
         return Err(ManagementError::UnknownPrincipal);
     }
 
-    if find_key_by_id(&key_store, &principal_id, &key_id)?.is_none() {
+    if find_key_by_id(key_store, &principal_id, &key_id)
+        .await?
+        .is_none()
+    {
         return Err(ManagementError::UnknownApiKey);
     }
 
-    key_store.disable(&principal_id, &key_id)?;
+    key_store.disable(&principal_id, &key_id).await?;
     enqueue_admin_audit(state, &principal_id, &key_id, "api_key_disable");
 
     Ok(KeyStatusResponse {
@@ -635,25 +622,24 @@ pub fn disable_principal_key(
     })
 }
 
-pub fn enable_principal_key(
+pub async fn enable_principal_key(
     state: &AdminState,
     principal_id: String,
     key_id: String,
 ) -> Result<KeyStatusResponse> {
-    let storage = state
-        .storage
-        .as_ref()
-        .ok_or(ManagementError::StorageUnavailable)?;
-    let key_store = KeyStore::new(storage.clone());
+    let key_store = admin_key_store(state)?;
     if !principal_exists_in_current_or_draft(state, &principal_id) {
         return Err(ManagementError::UnknownPrincipal);
     }
 
-    if storage.get_api_key(&principal_id, &key_id)?.is_none() {
+    if find_key_by_id(key_store, &principal_id, &key_id)
+        .await?
+        .is_none()
+    {
         return Err(ManagementError::UnknownApiKey);
     }
 
-    match key_store.enable(&principal_id, &key_id) {
+    match key_store.enable(&principal_id, &key_id).await {
         Ok(()) => {
             enqueue_admin_audit(state, &principal_id, &key_id, "api_key_enable");
             Ok(KeyStatusResponse {
@@ -678,7 +664,8 @@ async fn apply_principal_change<T, F>(
 where
     F: FnMut(&mut Value) -> Result<T>,
 {
-    crate::settings::apply_draft_principal_change(storage, current, now_unix_secs, transform).await?
+    crate::settings::apply_draft_principal_change(storage, current, now_unix_secs, transform)
+        .await?
 }
 
 fn principals_object(principals: &mut Value) -> Result<&mut serde_json::Map<String, Value>> {
@@ -724,34 +711,34 @@ where
     Option::<T>::deserialize(deserializer).map(Some)
 }
 
-fn key_id_for_record(key_store: &KeyStore, record: &StoredApiKeyRecord) -> Result<String> {
+fn admin_key_store(state: &AdminState) -> Result<&KeyStore> {
+    state
+        .key_store
+        .as_deref()
+        .ok_or(ManagementError::StorageUnavailable)
+}
+
+async fn key_id_for_record(key_store: &KeyStore, record: &StoredApiKeyRecord) -> Result<String> {
     if record.index_hash == [0; 32] {
         return Ok(String::new());
     }
 
     Ok(key_store
-        .lookup_by_index_hash(&record.index_hash)?
+        .lookup_by_index_hash(&record.index_hash)
+        .await?
         .map(|(_, key_id, _)| key_id)
         .unwrap_or_default())
 }
 
-fn find_key_by_id(
+async fn find_key_by_id(
     key_store: &KeyStore,
     principal_id: &str,
     key_id: &str,
 ) -> Result<Option<StoredApiKeyRecord>> {
-    for record in key_store.list_by_principal(principal_id)? {
-        let Some((_, current_key_id, current_record)) =
-            key_store.lookup_by_index_hash(&record.index_hash)?
-        else {
-            continue;
-        };
-        if current_key_id == key_id {
-            return Ok(Some(current_record));
-        }
-    }
-
-    Ok(None)
+    key_store
+        .get(principal_id, key_id)
+        .await
+        .map_err(Into::into)
 }
 
 fn validate_limit_overrides(overrides: &[Limit], defaults: &[PrincipalLimit]) -> Result<()> {
@@ -830,6 +817,29 @@ fn settings_management_error_response(error: crate::settings::SettingsError) -> 
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
+}
+
+fn key_store_error_response(error: KeyStoreError) -> Response {
+    match error {
+        KeyStoreError::Storage(
+            source @ (ApiStorageError::Unavailable { .. } | ApiStorageError::Transient { .. }),
+        ) => {
+            tracing::warn!(error = %source, "admin api key management storage unavailable");
+            storage_unavailable_response()
+        }
+        error => {
+            tracing::error!(error = %error, "admin api key management operation failed");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+fn storage_unavailable_response() -> Response {
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        [(header::RETRY_AFTER, "1")],
+    )
+        .into_response()
 }
 
 fn enqueue_principal_admin_audit(state: &AdminState, principal_id: &str, action: &str) {

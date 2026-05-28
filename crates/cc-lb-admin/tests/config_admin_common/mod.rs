@@ -57,6 +57,7 @@ pub fn test_state(config: Config, storage: Option<Arc<RedbStorage>>) -> AdminSta
     let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config)));
     AdminState {
         storage,
+        key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
@@ -84,6 +85,7 @@ pub fn apply_state(
     let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config)));
     AdminState {
         storage: Some(test_storage()),
+        key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),

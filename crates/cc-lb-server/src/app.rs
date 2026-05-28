@@ -220,9 +220,11 @@ pub fn build_app_with_storage(
     }
 
     let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config)));
-    let key_store = storage
-        .as_ref()
-        .map(|storage| Arc::new(KeyStore::new(storage.clone())));
+    let key_store = storage.as_ref().map(|storage| {
+        Arc::new(KeyStore::new(Arc::new(
+            cc_lb_storage_redb::RedbManagedKeyStore::new(storage.clone()),
+        )))
+    });
     let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
     let price_catalog = cc_lb_pricing::global_catalog().clone();
     spawn_price_catalog_loader(&config, storage.clone(), price_catalog.clone());
@@ -311,7 +313,7 @@ pub fn build_app_with_storage(
         breaker_registry,
         start_time,
         drain_controller: drain_controller.clone(),
-        key_store,
+        key_store: key_store.clone(),
         builtin_authn,
     };
     let admin_config: Arc<dyn CurrentConfig> = match &config_watcher {
@@ -323,6 +325,7 @@ pub fn build_app_with_storage(
     };
     let admin_state = AdminState {
         storage: storage.clone(),
+        key_store,
         aead: aead.clone(),
         limit_engine: limit_engine.clone(),
         lifecycle: Some(lifecycle.clone()),

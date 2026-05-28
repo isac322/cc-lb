@@ -20,6 +20,7 @@ fn test_state() -> AdminState {
     let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(&config)));
     AdminState {
         storage: None,
+        key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: LimitEngine::new(
             Arc::new(KeyConcurrencyManager::new()),
