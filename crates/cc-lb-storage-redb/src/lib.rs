@@ -2,7 +2,10 @@
 
 mod audit;
 mod config_store;
+#[path = "adapter/error_map.rs"]
+mod error_map;
 mod key_index;
+pub mod managed_keys;
 mod migration;
 mod oauth;
 pub mod price_catalog;
@@ -56,6 +59,7 @@ pub struct Storage {
 }
 
 pub type RedbStorage = Storage;
+pub use managed_keys::RedbManagedKeyStore;
 
 #[derive(Debug, Error)]
 pub enum StorageError {
