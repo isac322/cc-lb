@@ -10,6 +10,7 @@ pub mod meta;
 pub mod oauth_credentials;
 pub mod quota;
 pub mod request_events;
+pub mod retry;
 pub mod usage_rollups;
 
 #[derive(Debug, Clone)]
