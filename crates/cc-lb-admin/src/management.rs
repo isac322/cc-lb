@@ -47,7 +47,7 @@ pub enum ManagementError {
     #[error("generated api key secret invalid")]
     GeneratedKeyInvalid,
     #[error(transparent)]
-    Storage(#[from] cc_lb_storage_redb::StorageError),
+    Storage(#[from] ApiStorageError),
     #[error("limit_overrides invalid: {message}")]
     LimitOverridesInvalid { message: String },
     #[error(transparent)]
@@ -398,7 +398,7 @@ pub async fn issue_principal_key(
     request: IssueKeyRequest,
 ) -> Result<IssueKeyResponse> {
     let key_store = admin_key_store(state)?;
-    if !principal_exists_in_current_or_draft(state, &principal_id) {
+    if !principal_exists_in_current_or_draft(state, &principal_id).await {
         return Err(ManagementError::UnknownPrincipal);
     }
 
@@ -459,7 +459,7 @@ pub async fn get_principal_key(
     key_id: String,
 ) -> Result<ApiKeyRecord> {
     let key_store = admin_key_store(state)?;
-    if !principal_exists_in_current_or_draft(state, &principal_id) {
+    if !principal_exists_in_current_or_draft(state, &principal_id).await {
         return Err(ManagementError::UnknownPrincipal);
     }
 
@@ -492,7 +492,7 @@ pub async fn list_principal_keys(
     principal_id: String,
 ) -> Result<KeyListResponse> {
     let key_store = admin_key_store(state)?;
-    if !principal_exists_in_current_or_draft(state, &principal_id) {
+    if !principal_exists_in_current_or_draft(state, &principal_id).await {
         return Err(ManagementError::UnknownPrincipal);
     }
 
@@ -528,7 +528,7 @@ pub async fn revoke_principal_key(
     key_id: String,
 ) -> Result<RevokeKeyResponse> {
     let key_store = admin_key_store(state)?;
-    if !principal_exists_in_current_or_draft(state, &principal_id) {
+    if !principal_exists_in_current_or_draft(state, &principal_id).await {
         return Err(ManagementError::UnknownPrincipal);
     }
 
@@ -555,7 +555,7 @@ pub async fn update_principal_key(
     request: UpdateKeyRequest,
 ) -> Result<UpdateKeyResponse> {
     let key_store = admin_key_store(state)?;
-    if !principal_exists_in_current_or_draft(state, &principal_id) {
+    if !principal_exists_in_current_or_draft(state, &principal_id).await {
         return Err(ManagementError::UnknownPrincipal);
     }
 
@@ -601,7 +601,7 @@ pub async fn disable_principal_key(
     key_id: String,
 ) -> Result<KeyStatusResponse> {
     let key_store = admin_key_store(state)?;
-    if !principal_exists_in_current_or_draft(state, &principal_id) {
+    if !principal_exists_in_current_or_draft(state, &principal_id).await {
         return Err(ManagementError::UnknownPrincipal);
     }
 
@@ -628,7 +628,7 @@ pub async fn enable_principal_key(
     key_id: String,
 ) -> Result<KeyStatusResponse> {
     let key_store = admin_key_store(state)?;
-    if !principal_exists_in_current_or_draft(state, &principal_id) {
+    if !principal_exists_in_current_or_draft(state, &principal_id).await {
         return Err(ManagementError::UnknownPrincipal);
     }
 
@@ -656,7 +656,7 @@ pub async fn enable_principal_key(
 }
 
 async fn apply_principal_change<T, F>(
-    storage: &cc_lb_storage_redb::Storage,
+    storage: &dyn cc_lb_storage_api::Storage,
     current: &dyn crate::CurrentConfig,
     now_unix_secs: u64,
     transform: F,
@@ -689,14 +689,17 @@ fn ensure_principal_value(
     Ok(())
 }
 
-fn principal_exists_in_current_or_draft(state: &AdminState, principal_id: &str) -> bool {
+async fn principal_exists_in_current_or_draft(state: &AdminState, principal_id: &str) -> bool {
     if state.principal_view.load().get(principal_id).is_some() {
         return true;
     }
-    state
-        .storage
-        .as_ref()
-        .and_then(|storage| storage.get_config_draft().ok())
+    let Some(storage) = state.storage.as_ref() else {
+        return false;
+    };
+    storage
+        .get_config_draft()
+        .await
+        .ok()
         .and_then(|draft| draft.draft)
         .and_then(|draft| draft.get("principals").cloned())
         .and_then(|principals| principals.as_object().cloned())

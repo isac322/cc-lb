@@ -6,7 +6,7 @@ use axum::{
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use cc_lb_storage_redb::{OAuthCredentials as RedbOAuthCredentials, StorageError};
+use cc_lb_storage_api::{StorageError, types::OAuthCredentials};
 use oauth2::{AuthUrl, ClientId, TokenUrl};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -105,13 +105,37 @@ pub async fn complete_oauth(
     let Some(storage) = state.storage.as_ref() else {
         return StatusCode::NOT_IMPLEMENTED.into_response();
     };
-    let creds = RedbOAuthCredentials {
+    let creds = OAuthCredentials {
         access_token: creds.access_token,
         refresh_token: creds.refresh_token,
         expires_at: creds.expires_at,
         scopes: creds.scopes,
     };
-    match storage.put_oauth(&state_token.principal_id, &state_token.provider, &creds) {
+    let plaintext = match serde_json::to_vec(&creds) {
+        Ok(plaintext) => plaintext,
+        Err(error) => {
+            tracing::error!(error = %error, "admin oauth credential serialization failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    let ciphertext = match state
+        .aead
+        .encrypt(&plaintext, state_token.principal_id.as_bytes())
+    {
+        Ok(ciphertext) => ciphertext,
+        Err(error) => {
+            tracing::error!(error = %error, "admin oauth credential encryption failed");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    match storage
+        .put_oauth_ciphertext(
+            &state_token.principal_id,
+            &state_token.provider,
+            &ciphertext,
+        )
+        .await
+    {
         Ok(()) => Json(json!({ "status": "ok" })).into_response(),
         Err(error) => {
             tracing::error!(error = %error, "admin oauth storage operation failed");
@@ -143,7 +167,10 @@ pub async fn oauth_status(
         let Some(storage) = state.storage.as_ref() else {
             return StatusCode::NOT_IMPLEMENTED.into_response();
         };
-        match storage.get_oauth(principal_id, &oauth_credential_id) {
+        match storage
+            .get_oauth_ciphertext(principal_id, &oauth_credential_id)
+            .await
+        {
             Ok(Some(_)) => return Json(json!({ "enrolled": true })).into_response(),
             Ok(None) => {}
             Err(error) => {
@@ -153,19 +180,22 @@ pub async fn oauth_status(
         }
     }
 
-    if let Some(storage) = state.storage.as_ref() {
-        let records = match storage.list_api_keys_all() {
+    if let (Some(storage), Some(key_store)) = (state.storage.as_ref(), state.key_store.as_ref()) {
+        let records = match key_store.list_all().await {
             Ok(records) => records,
             Err(error) => {
                 tracing::error!(error = %error, "admin oauth status managed-key scan failed");
-                return storage_error_response(&error);
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
             }
         };
         for (principal_id, _key_id, record) in records {
             if record.upstream_credential_ref != oauth_credential_id {
                 continue;
             }
-            match storage.get_oauth(&principal_id, &oauth_credential_id) {
+            match storage
+                .get_oauth_ciphertext(&principal_id, &oauth_credential_id)
+                .await
+            {
                 Ok(Some(_)) => return Json(json!({ "enrolled": true })).into_response(),
                 Ok(None) => {}
                 Err(error) => {
@@ -180,14 +210,15 @@ pub async fn oauth_status(
 }
 
 fn storage_error_response(error: &StorageError) -> Response {
-    match error {
-        StorageError::RedbStorage(_) => (
+    if error.is_retryable() {
+        (
             StatusCode::SERVICE_UNAVAILABLE,
             [(header::RETRY_AFTER, "1")],
             Json(json!({ "error": "storage_error" })),
         )
-            .into_response(),
-        _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            .into_response()
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
     }
 }
 

@@ -6,7 +6,7 @@ use axum::{
     response::IntoResponse,
     routing::{delete, get, post, put},
 };
-use cc_lb_storage_redb::{Storage, StorageError};
+use cc_lb_storage_api::{Storage, StorageError};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -155,6 +155,7 @@ async fn query_audit(
 
     let entries = storage
         .query_audit(query.principal_id.as_deref(), since, until, limit)
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(json!({ "entries": entries })))
@@ -185,6 +186,7 @@ async fn set_killswitch(State(state): State<AdminState>) -> Result<Json<Value>, 
     };
     storage
         .set_killswitch_enabled(true)
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({ "status": "ok", "killswitch": true })))
 }
@@ -195,6 +197,7 @@ async fn clear_killswitch(State(state): State<AdminState>) -> Result<Json<Value>
     };
     storage
         .set_killswitch_enabled(false)
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({ "status": "ok", "killswitch": false })))
 }
@@ -339,7 +342,7 @@ async fn get_config_diff(
     }
 }
 
-fn config_storage(state: &AdminState) -> Result<&Storage, crate::settings::SettingsError> {
+fn config_storage(state: &AdminState) -> Result<&dyn Storage, crate::settings::SettingsError> {
     state
         .storage
         .as_deref()
