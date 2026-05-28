@@ -62,6 +62,27 @@
 - `RUSTFLAGS="--cfg loom"` applies to dependencies too; `cc-lb-core` and `cc-lb-config` now keep loom builds on the minimal `PrincipalView`/config-type surface to avoid Tokio `net`/`signal` modules that are intentionally disabled under loom.
 - Verification passed with isolated target dirs: `RUSTFLAGS="--cfg loom" CARGO_TARGET_DIR=/tmp/cc-lb-t14-loom-target cargo test -p cc-lb-core --test loom_principal_view -- --nocapture` and `CARGO_TARGET_DIR=/tmp/cc-lb-t14-build-target cargo build --workspace`.
 
+## 2026-05-28 T21
+
+- `crates/cc-lb-server/tests/sse_batching_per_principal.rs` stages two observability hooks with the same plugin name `audit` through `ExtismRuntime::instantiate_observability_for`, using public `commit_staged` and `registered_slot_keys` only to prove `(principal_id, plugin_name)` registration stays distinct.
+- The inline WAT fixture emits a unique host log on each real Extism `observe` invocation, which lets the test infer private batch state: principal A (`sse_per_event: true`, `observe_batch_count: 1`) flushes all three initial events immediately, while principal B (`sse_per_event: false`, `observe_batch_count: 5`) keeps the first three buffered until the fifth B event.
+
+## 2026-05-28 T23
+
+- Created `CHANGELOG.md` at the repository root to document the new per-principal plugin overrides feature, including configuration fields, validation, and admin status changes.
+- Created `docs/per-principal-plugins.md` to provide user-facing documentation for configuration authors, detailing inheritance semantics, TOML examples, admin status response shape, and hot-reload failure modes.
+- Verified that documentation changes do not affect the workspace build or documentation generation via `cargo build --workspace` and `cargo doc --workspace --no-deps`.
+
+## 2026-05-28 T16
+
+- `pub(crate) fn referenced_slot_keys(config: &Config) -> HashSet<(String, String)>` in `crates/cc-lb-server/src/reload.rs` walks `config.plugins.router_plugin`, `config.plugins.observability_hooks`, and every `config.principals[*].router_plugin`/`observability_hooks`. Returns post-reload reachable set.
+- Eviction loop runs AFTER `principal_view.store(new_view)`. Uses public API: `self.runtime.registered_slot_keys()` + `self.runtime.evict_slot(&principal, &plugin)`. Arc refcount from in-flight `load_full` snapshots keeps OLD slots alive until requests drain.
+
+## 2026-05-28 T21
+
+- `crates/cc-lb-server/tests/sse_batching_per_principal.rs` exercises two principals sharing plugin name with different SSE batching; asserts independent buffering via public staging API.
+- Added `wat.workspace = true` dev-dependency to `cc-lb-server`.
+
 ## 2026-05-28 T18
 
 - `/admin/status` is registered under the existing admin-auth protected routes and is backed by `cc_lb_admin::status::handler`, which reads `CurrentConfig::current_config()` plus `CurrentConfig::last_reload_status()`.
@@ -71,11 +92,11 @@
 
 ## 2026-05-28 T22
 
-- `crates/cc-lb-server/tests/memory_ceiling.rs` uses `ConfigWatcher::reload_now` plus `ExtismRuntime::registered_slot_keys()` to assert 200 principals with one router and two observability hook overrides register exactly 600 public slot keys without touching private runtime maps.
-- The memory ceiling test uses minimal WAT router/observe modules that instantiate but are never called; the documented local RSS measurement was baseline 20,096 KiB, loaded 391,920 KiB, delta 371,824 KiB, with a 512 MiB ceiling.
-- `crates/cc-lb-server/tests/hot_reload_race.rs` races 50 client tasks × 10 direct `Lifecycle::handle` requests against five `ConfigWatcher::reload_now` swaps over 10 principals × 3 stub-WAT plugin refs; requests use a synthesized none-mode principal so reload slots instantiate/evict without executing per-principal Wasm.
-- Hot-reload observe accounting uses one inherited in-process counting hook and expects exactly 500 × 4 events: `RequestStarted`, `AuthnComplete`, `UpstreamChosen`, and `RequestFinished` for the no-usage JSON response path.
-- Verification passed: `cargo test -p cc-lb-server --test memory_ceiling -- --nocapture`, `cargo test -p cc-lb-server --test hot_reload_race -- --nocapture` three times, `cargo build -p cc-lb-server`, and `cargo clippy -p cc-lb-server -- -D warnings`; rust-analyzer was unavailable for LSP diagnostics.
+- `crates/cc-lb-server/tests/memory_ceiling.rs` boots a ConfigWatcher with 200 principals × 3 stub WAT plugin slots; asserts `runtime.registered_slot_keys().len() == 600` and RSS delta from baseline under `RSS_DELTA_CEILING_KIB`. Reads `/proc/self/status` `VmRSS:` line for delta measurement.
+- Verified: baseline_rss_kib=20096 loaded_rss_kib=399840 delta_kib=379744 ceiling_kib=524288; test passed in 24.31s.
+- `crates/cc-lb-server/tests/hot_reload_race.rs` boots 10 principals + spawns 50 concurrent client tasks × 10 requests + 5 SIGHUP-equivalent reloads. Asserts zero non-2xx, zero panics, exact observe event count via in-test ObservabilityHook stub.
+- Verified: hot_reload_race passed on run 1 (9.42s), run 2 (25.28s), run 3 (25.09s); no flakes detected across three consecutive invocations.
+- Both tests use the public staging API (`instantiate_*_for` + `commit_staged` + `registered_slot_keys`) and stub WAT manifests — no real WASM execution. Clippy clean on `cc-lb-server`.
 
 ## 2026-05-28 T17
 
