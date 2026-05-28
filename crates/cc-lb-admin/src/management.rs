@@ -821,6 +821,18 @@ fn settings_management_error_response(error: crate::settings::SettingsError) -> 
 
 fn key_store_error_response(error: KeyStoreError) -> Response {
     match error {
+        KeyStoreError::Storage(ApiStorageError::InvalidInput { field, reason }) => {
+            tracing::warn!(%field, %reason, "admin api key management invalid input");
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({
+                    "error": "invalid_input",
+                    "field": field,
+                    "reason": reason,
+                })),
+            )
+                .into_response()
+        }
         KeyStoreError::Storage(
             source @ (ApiStorageError::Unavailable { .. } | ApiStorageError::Transient { .. }),
         ) => {

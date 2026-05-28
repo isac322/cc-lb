@@ -32,6 +32,10 @@ impl ManagedKeyStore for RedbManagedKeyStore {
     ) -> StorageResult<StoredApiKeyRecord> {
         validate_identifier("principal_id", principal_id)?;
         validate_identifier("key_id", key_id)?;
+        validate_identifier("label", &params.label)?;
+        if let Some(desc) = &params.description {
+            validate_identifier("description", desc)?;
+        }
 
         let storage = Arc::clone(&self.storage);
         let principal_id = principal_id.to_owned();
