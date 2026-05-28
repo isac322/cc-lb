@@ -254,6 +254,8 @@ fn test_config(database_url: &str, upstream_addr: SocketAddr) -> TestResult<Conf
             enabled: true,
             allowed_models: vec!["*".to_owned()],
             credentials_ref: None,
+            router_plugin: None,
+            observability_hooks: None,
         },
     );
     config.upstreams.insert(

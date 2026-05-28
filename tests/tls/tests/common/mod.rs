@@ -103,7 +103,9 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
         &key_path,
     );
     let config = Config::load(&config_path).expect("load config");
-    let app = build_app_with_path(config, Some(&config_path)).expect("build app");
+    let app = build_app_with_path(config, Some(&config_path))
+        .await
+        .expect("build app");
     let signals = app.signal_handle();
     let server = tokio::spawn(async move { app.start().await });
 

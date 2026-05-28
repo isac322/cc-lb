@@ -261,14 +261,7 @@ impl ExtismRuntime {
                 reason: format!("plugin {} does not export {hook}", manifest.name),
             });
         }
-        Ok((
-            slot.clone(),
-            StagedSlot {
-                key,
-                entry,
-                slot,
-            },
-        ))
+        Ok((slot.clone(), StagedSlot { key, entry, slot }))
     }
 
     pub fn instantiate_router_for(

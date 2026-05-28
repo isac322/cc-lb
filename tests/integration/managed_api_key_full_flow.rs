@@ -336,7 +336,7 @@ impl StartedServer {
     async fn start(config: Config) -> Result<Self, Box<dyn std::error::Error>> {
         let proxy_addr = config.listener.proxy_addr;
         let admin_addr = config.listener.admin_addr;
-        let app = build_app(config)?;
+        let app = build_app(config).await?;
         let signal = app.signal_handle();
         let task = tokio::spawn(async move { app.start().await });
         let server = Self {

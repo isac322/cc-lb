@@ -225,10 +225,7 @@ fn validate_plugins(config: &Config) -> Result<(), ValidationError> {
 
     for (principal_id, principal) in &config.principals {
         if let Some(plugin) = &principal.router_plugin {
-            validate_plugin_ref(
-                &format!("principals.{principal_id}.router_plugin"),
-                plugin,
-            )?;
+            validate_plugin_ref(&format!("principals.{principal_id}.router_plugin"), plugin)?;
         }
         if let Some(hooks) = &principal.observability_hooks {
             let mut seen: HashSet<&str> = HashSet::new();
