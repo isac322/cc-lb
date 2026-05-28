@@ -287,10 +287,12 @@ pub async fn build_app_for_testing_postgres(database_url: &str) -> Result<App, B
         ));
     let key = [0u8; 32];
     let aead = Arc::new(AeadService::from_master_key(key));
-    let mut config = Config::default();
-    config.storage = cc_lb_config::StorageConfig::Postgres {
-        url: database_url.to_owned(),
-        pool: cc_lb_config::PostgresPoolConfig::default(),
+    let mut config = Config {
+        storage: cc_lb_config::StorageConfig::Postgres {
+            url: database_url.to_owned(),
+            pool: cc_lb_config::PostgresPoolConfig::default(),
+        },
+        ..Config::default()
     };
     config.upstreams.insert(
         "test-upstream".to_owned(),

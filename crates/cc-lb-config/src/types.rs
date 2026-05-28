@@ -967,9 +967,8 @@ default_window_secs = 60
 
     #[test]
     fn principal_spec_plugin_fields_round_trip_from_fixture() {
-        let fixture = include_str!(
-            "../tests/fixtures/per_principal_plugins/principal_with_plugins.toml"
-        );
+        let fixture =
+            include_str!("../tests/fixtures/per_principal_plugins/principal_with_plugins.toml");
         let principal: PrincipalSpec =
             toml::from_str(fixture).expect("fixture should deserialize into PrincipalSpec");
 
@@ -992,8 +991,8 @@ default_window_secs = 60
 
     #[test]
     fn principal_spec_omitting_plugin_fields_yields_none() {
-        let principal: PrincipalSpec = toml::from_str("allowed_models = []")
-            .expect("principal should deserialize");
+        let principal: PrincipalSpec =
+            toml::from_str("allowed_models = []").expect("principal should deserialize");
 
         assert!(
             principal.router_plugin.is_none(),
@@ -1023,8 +1022,7 @@ default_window_secs = 60
 
     #[test]
     fn principal_spec_rejects_unknown_field_typo() {
-        let toml_str =
-            "allowed_models = []\nrouter-plugin = { name = \"foo\" }\n"; // hyphenated typo
+        let toml_str = "allowed_models = []\nrouter-plugin = { name = \"foo\" }\n"; // hyphenated typo
         let err = toml::from_str::<PrincipalSpec>(toml_str)
             .expect_err("hyphenated router-plugin must be rejected by deny_unknown_fields");
         let message = err.to_string();
