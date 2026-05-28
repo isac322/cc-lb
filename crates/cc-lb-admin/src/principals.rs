@@ -125,11 +125,12 @@ pub async fn principal_key_usage(
     let events = storage.query_request_events(range_start_ms, range_end_ms, usize::MAX)?;
 
     let mut aggregates: BTreeMap<u64, UsageSeries> = BTreeMap::new();
-    for event in events
-        .into_iter()
-        .filter(|event| event.principal_id == principal_id && event.key_id == key_id)
-    {
-        let bucket_offset = event.ts_ms.saturating_sub(range_start_ms) / step_ms;
+    for event in events.into_iter().filter(|event| {
+        event.principal_id.as_deref() == Some(principal_id.as_str())
+            && event.key_id.as_deref() == Some(key_id.as_str())
+    }) {
+        let event_ts_ms = event.ts_ms.unwrap_or_else(|| event.ts.saturating_mul(1000));
+        let bucket_offset = event_ts_ms.saturating_sub(range_start_ms) / step_ms;
         let bucket_offset = bucket_offset.min(bucket_count - 1);
         let bucket_start_ms = range_start_ms.saturating_add(bucket_offset.saturating_mul(step_ms));
         let entry = aggregates
@@ -139,10 +140,11 @@ pub async fn principal_key_usage(
                 ..UsageSeries::default()
             });
         entry.request_count += 1;
-        entry.input_tokens +=
-            event.input_tokens + event.cache_creation_input_tokens + event.cache_read_input_tokens;
-        entry.output_tokens += event.output_tokens;
-        entry.cost_usd_micros += event.cost_usd_micros;
+        entry.input_tokens += event.input_tokens.unwrap_or(0)
+            + event.cache_creation_input_tokens.unwrap_or(0)
+            + event.cache_read_input_tokens.unwrap_or(0);
+        entry.output_tokens += event.output_tokens.unwrap_or(0);
+        entry.cost_usd_micros += event.cost_usd_micros.unwrap_or(0);
     }
 
     let mut series = Vec::new();

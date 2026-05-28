@@ -375,6 +375,8 @@ pub async fn apply_config(
         limit_violation: None,
         admin_action: Some("config_apply".to_owned()),
         actor: Some("admin".to_owned()),
+        kind: None,
+        payload: None,
     })?;
 
     Ok(ApplyConfigResponse {

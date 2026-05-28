@@ -68,7 +68,11 @@ fn event(request_id: &str) -> RequestEvent {
         status: 200,
         input_tokens: Some(1),
         output_tokens: Some(2),
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+        cost_usd_micros: None,
         duration_ms: 3,
         error_code: None,
+        ..Default::default()
     }
 }

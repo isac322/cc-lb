@@ -172,12 +172,11 @@ fn audit_entry(index: usize) -> AuditEntry {
         upstream: "anthropic_direct".to_owned(),
         model: Some("claude-sonnet-4-5".to_owned()),
         status: 200,
-        input_tokens: index as u64,
-        output_tokens: (index * 2) as u64,
+        input_tokens: Some(index as u64),
+        output_tokens: Some((index * 2) as u64),
         duration_ms: 25,
         agent_label: Some("test-agent".to_owned()),
-        kind: None,
-        payload: None,
+        ..Default::default()
     }
 }
 
@@ -194,5 +193,6 @@ fn request_event(index: usize) -> RequestEvent {
         output_tokens: Some((index * 2) as u64),
         duration_ms: 25,
         error_code: None,
+        ..Default::default()
     }
 }

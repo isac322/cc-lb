@@ -75,17 +75,18 @@ fn new_storage() -> Result<(tempfile::TempDir, Arc<Storage>), Box<dyn std::error
 fn insert_request_events(storage: &Storage, ts_ms: u64) -> Result<(), Box<dyn std::error::Error>> {
     for index in 0..5 {
         storage.append_request_event(&RequestEvent {
-            ts_ms,
-            principal_id: "principal-1".to_owned(),
-            key_id: format!("key-{index}"),
-            model: "claude-sonnet-4-5".to_owned(),
-            input_tokens: 10,
-            output_tokens: 20,
-            cache_creation_input_tokens: 0,
-            cache_read_input_tokens: 0,
-            cost_usd_micros: 100,
+            ts_ms: Some(ts_ms),
+            principal_id: Some("principal-1".to_owned()),
+            key_id: Some(format!("key-{index}")),
+            model: Some("claude-sonnet-4-5".to_owned()),
+            input_tokens: Some(10),
+            output_tokens: Some(20),
+            cache_creation_input_tokens: Some(0),
+            cache_read_input_tokens: Some(0),
+            cost_usd_micros: Some(100),
             duration_ms: 25,
             status: 200,
+            ..Default::default()
         })?;
     }
     Ok(())

@@ -325,22 +325,23 @@ fn event(
     duration_ms: u64,
 ) -> RequestEvent {
     RequestEvent {
-        ts_ms: ts * 1000,
-        principal_id: principal.to_owned(),
-        key_id: "test-key".to_owned(),
-        model: model.to_owned(),
-        input_tokens: input_tokens.unwrap_or(0),
-        output_tokens: output_tokens.unwrap_or(0),
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
-        cost_usd_micros: match model {
+        ts_ms: Some(ts * 1000),
+        principal_id: Some(principal.to_owned()),
+        key_id: Some("test-key".to_owned()),
+        model: Some(model.to_owned()),
+        input_tokens,
+        output_tokens,
+        cache_creation_input_tokens: Some(0),
+        cache_read_input_tokens: Some(0),
+        cost_usd_micros: Some(match model {
             "claude-sonnet-4-5" => {
                 ((input_tokens.unwrap_or(0) * 3) + (output_tokens.unwrap_or(0) * 15)) as i64
             }
             _ => 0,
-        },
+        }),
         duration_ms,
         status,
+        ..Default::default()
     }
 }
 

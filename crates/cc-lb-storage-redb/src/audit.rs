@@ -1,31 +1,12 @@
 use bincode::config::standard;
 use bincode::serde::{decode_from_slice, encode_to_vec};
+use cc_lb_storage_api::types::AuditEntry;
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 
 use crate::{AUDIT_LOG_V1, Storage, StorageError};
 
 const AUDIT_SEQUENCE_SCALE: u64 = 1_000_000;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
-pub struct AuditEntry {
-    pub ts: u64,
-    pub request_id: String,
-    pub principal_id: String,
-    pub route: String,
-    pub upstream: String,
-    pub model: Option<String>,
-    pub status: u16,
-    pub input_tokens: Option<u64>,
-    pub output_tokens: Option<u64>,
-    pub duration_ms: u64,
-    pub agent_label: Option<String>,
-    pub api_key_id: Option<String>,
-    pub cost_usd_micros: Option<u64>,
-    pub limit_violation: Option<String>,
-    pub admin_action: Option<String>,
-    pub actor: Option<String>,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 struct AuditEntryV0 {
@@ -63,12 +44,35 @@ struct AuditEntryV1 {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct AuditEntryV2 {
+    ts: u64,
+    request_id: String,
+    principal_id: String,
+    route: String,
+    upstream: String,
+    model: Option<String>,
+    status: u16,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    duration_ms: u64,
+    agent_label: Option<String>,
+    api_key_id: Option<String>,
+    cost_usd_micros: Option<u64>,
+    limit_violation: Option<String>,
+    admin_action: Option<String>,
+    actor: Option<String>,
+    kind: Option<String>,
+    payload: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 enum AuditEntryWire {
     V0(AuditEntryV0),
     V1(AuditEntryV1),
+    V2(AuditEntryV2),
 }
 
-impl From<&AuditEntry> for AuditEntryV1 {
+impl From<&AuditEntry> for AuditEntryV2 {
     fn from(value: &AuditEntry) -> Self {
         Self {
             ts: value.ts,
@@ -87,6 +91,8 @@ impl From<&AuditEntry> for AuditEntryV1 {
             limit_violation: value.limit_violation.clone(),
             admin_action: value.admin_action.clone(),
             actor: value.actor.clone(),
+            kind: value.kind.clone(),
+            payload: value.payload.clone(),
         }
     }
 }
@@ -110,6 +116,8 @@ impl From<AuditEntryV0> for AuditEntry {
             limit_violation: None,
             admin_action: None,
             actor: None,
+            kind: None,
+            payload: None,
         }
     }
 }
@@ -133,6 +141,33 @@ impl From<AuditEntryV1> for AuditEntry {
             limit_violation: value.limit_violation,
             admin_action: value.admin_action,
             actor: value.actor,
+            kind: None,
+            payload: None,
+        }
+    }
+}
+
+impl From<AuditEntryV2> for AuditEntry {
+    fn from(value: AuditEntryV2) -> Self {
+        Self {
+            ts: value.ts,
+            request_id: value.request_id,
+            principal_id: value.principal_id,
+            route: value.route,
+            upstream: value.upstream,
+            model: value.model,
+            status: value.status,
+            input_tokens: value.input_tokens,
+            output_tokens: value.output_tokens,
+            duration_ms: value.duration_ms,
+            agent_label: value.agent_label,
+            api_key_id: value.api_key_id,
+            cost_usd_micros: value.cost_usd_micros,
+            limit_violation: value.limit_violation,
+            admin_action: value.admin_action,
+            actor: value.actor,
+            kind: value.kind,
+            payload: value.payload,
         }
     }
 }
@@ -300,7 +335,7 @@ fn decode_audit_key(key: &[u8]) -> Result<u64, StorageError> {
 
 fn encode_audit_entry(entry: &AuditEntry) -> Result<Vec<u8>, StorageError> {
     Ok(encode_to_vec(
-        AuditEntryWire::V1(AuditEntryV1::from(entry)),
+        AuditEntryWire::V2(AuditEntryV2::from(entry)),
         standard().with_variable_int_encoding(),
     )?)
 }
@@ -309,6 +344,7 @@ fn decode_audit_entry(value: &[u8]) -> Result<AuditEntry, StorageError> {
     match decode_from_slice::<AuditEntryWire, _>(value, standard().with_variable_int_encoding()) {
         Ok((AuditEntryWire::V0(entry), _)) => Ok(entry.into()),
         Ok((AuditEntryWire::V1(entry), _)) => Ok(entry.into()),
+        Ok((AuditEntryWire::V2(entry), _)) => Ok(entry.into()),
         Err(_) => Ok(serde_json::from_slice(value)?),
     }
 }

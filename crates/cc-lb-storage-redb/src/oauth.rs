@@ -4,28 +4,17 @@ use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use bincode::config::standard;
 use bincode::serde::{decode_from_slice, encode_to_vec};
-use cc_lb_storage_api::types::{ApiKeyMutation, IssueParams, KeyStatus, StoredApiKeyRecord};
+use cc_lb_storage_api::types::{
+    AnthropicApiKeyCredential, ApiKeyMutation, IssueParams, KeyStatus, OAuthCredentials,
+    StoredApiKeyRecord,
+};
 use chacha20poly1305::aead::{Aead, AeadCore, KeyInit, OsRng, Payload};
 use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
 use redb::{ReadableDatabase, ReadableTable};
-use serde::{Deserialize, Serialize};
 
 use crate::{API_KEYS_V1, OAUTH_CREDENTIALS_V1, Storage, StorageError};
 
 const NONCE_LEN: usize = 12;
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OAuthCredentials {
-    pub access_token: String,
-    pub refresh_token: String,
-    pub expires_at: u64,
-    pub scopes: Vec<String>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct AnthropicApiKeyCredential {
-    anthropic_api_key: String,
-}
 
 pub fn oauth_key(principal_id: &str, provider: &str) -> Vec<u8> {
     let mut key = Vec::with_capacity(principal_id.len() + 1 + provider.len());
@@ -92,6 +81,50 @@ impl Storage {
         }
         write_txn.commit()?;
         Ok(())
+    }
+
+    pub fn put_oauth_ciphertext(
+        &self,
+        principal_id: &str,
+        provider: &str,
+        ciphertext: &[u8],
+    ) -> Result<(), StorageError> {
+        let key = oauth_key(principal_id, provider);
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(OAUTH_CREDENTIALS_V1)?;
+            table.insert(key.as_slice(), ciphertext)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    pub fn get_oauth_ciphertext(
+        &self,
+        principal_id: &str,
+        provider: &str,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let key = oauth_key(principal_id, provider);
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(OAUTH_CREDENTIALS_V1)?;
+        Ok(table
+            .get(key.as_slice())?
+            .map(|stored| stored.value().to_vec()))
+    }
+
+    pub fn delete_oauth_ciphertext(
+        &self,
+        principal_id: &str,
+        provider: &str,
+    ) -> Result<bool, StorageError> {
+        let key = oauth_key(principal_id, provider);
+        let write_txn = self.db.begin_write()?;
+        let removed = {
+            let mut table = write_txn.open_table(OAUTH_CREDENTIALS_V1)?;
+            table.remove(key.as_slice())?.is_some()
+        };
+        write_txn.commit()?;
+        Ok(removed)
     }
 
     pub fn put_anthropic_api_key(
@@ -387,6 +420,105 @@ impl Storage {
         let plaintext = self.decrypt_value(storage_key.as_bytes(), &ciphertext)?;
         let credential = serde_json::from_slice::<AnthropicApiKeyCredential>(&plaintext)?;
         Ok(Some(credential.anthropic_api_key))
+    }
+
+    pub fn put_anthropic_api_key_ciphertext(
+        &self,
+        storage_key: &str,
+        ciphertext: &[u8],
+    ) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(OAUTH_CREDENTIALS_V1)?;
+            table.insert(storage_key.as_bytes(), ciphertext)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    pub fn get_anthropic_api_key_ciphertext(
+        &self,
+        storage_key: &str,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(OAUTH_CREDENTIALS_V1)?;
+        Ok(table
+            .get(storage_key.as_bytes())?
+            .map(|stored| stored.value().to_vec()))
+    }
+
+    pub fn put_api_key_ciphertext(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+        ciphertext: &[u8],
+    ) -> Result<(), StorageError> {
+        let storage_key = api_key_storage_key(principal_id, key_id);
+        let write_txn = self.db.begin_write()?;
+        {
+            let mut table = write_txn.open_table(API_KEYS_V1)?;
+            table.insert(storage_key.as_slice(), ciphertext)?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    pub fn get_api_key_ciphertext(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        let storage_key = api_key_storage_key(principal_id, key_id);
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(API_KEYS_V1)?;
+        Ok(table
+            .get(storage_key.as_slice())?
+            .map(|stored| stored.value().to_vec()))
+    }
+
+    pub fn list_api_key_ciphertexts(
+        &self,
+        principal_id: &str,
+    ) -> Result<Vec<(String, Vec<u8>)>, StorageError> {
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(API_KEYS_V1)?;
+        let mut records = Vec::new();
+        let prefix = principal_id.as_bytes();
+
+        for row in table.iter()? {
+            let (key, stored) = row?;
+            let key_bytes = key.value();
+            if !key_bytes.starts_with(prefix) || key_bytes.get(prefix.len()) != Some(&0) {
+                continue;
+            }
+            let Some((_, key_id)) = decode_api_key_storage_key(key_bytes) else {
+                continue;
+            };
+            records.push((key_id, stored.value().to_vec()));
+        }
+
+        Ok(records)
+    }
+
+    pub fn revoke_api_key_ciphertext(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+        revoked_ciphertext: &[u8],
+    ) -> Result<bool, StorageError> {
+        let storage_key = api_key_storage_key(principal_id, key_id);
+        let write_txn = self.db.begin_write()?;
+        let updated = {
+            let mut table = write_txn.open_table(API_KEYS_V1)?;
+            if table.get(storage_key.as_slice())?.is_some() {
+                table.insert(storage_key.as_slice(), revoked_ciphertext)?;
+                true
+            } else {
+                false
+            }
+        };
+        write_txn.commit()?;
+        Ok(updated)
     }
 
     fn encrypt_oauth(&self, principal_id: &str, plaintext: &[u8]) -> Result<Vec<u8>, StorageError> {

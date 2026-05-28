@@ -15,8 +15,8 @@ fn request_events_persist_across_reopen() -> Result<(), Box<dyn std::error::Erro
     let events = storage.query_request_events(1_800_000_000, u64::MAX, 10)?;
 
     assert_eq!(events.len(), 1);
-    assert_eq!(events[0].key_id, "req-0000");
-    assert_eq!(events[0].principal_id, "principal-a");
+    assert_eq!(events[0].key_id.as_deref(), Some("req-0000"));
+    assert_eq!(events[0].principal_id.as_deref(), Some("principal-a"));
     assert_eq!(events[0].status, 200);
     Ok(())
 }
@@ -34,9 +34,13 @@ fn request_events_query_returns_append_order_for_monotonic_keys()
 
     let events = storage.query_request_events(1_800_000_002, u64::MAX, 5)?;
     assert_eq!(events.len(), 5);
-    assert_eq!(events[0].key_id, "req-0020");
-    assert_eq!(events[4].key_id, "req-0024");
-    assert!(events.iter().all(|event| event.ts_ms >= 1_800_000_002));
+    assert_eq!(events[0].key_id.as_deref(), Some("req-0020"));
+    assert_eq!(events[4].key_id.as_deref(), Some("req-0024"));
+    assert!(
+        events
+            .iter()
+            .all(|event| event.ts_ms.unwrap_or_default() >= 1_800_000_002)
+    );
     Ok(())
 }
 
@@ -72,17 +76,18 @@ fn request_event_json_rows_exclude_payload_keys() -> Result<(), Box<dyn std::err
 
 fn event(index: usize) -> RequestEvent {
     RequestEvent {
-        ts_ms: 1_800_000_000 + (index / 10) as u64,
-        principal_id: "principal-a".to_owned(),
-        key_id: format!("req-{index:04}"),
-        model: "claude-sonnet-4-5".to_owned(),
-        input_tokens: index as u64,
-        output_tokens: (index * 2) as u64,
-        cache_creation_input_tokens: 0,
-        cache_read_input_tokens: 0,
-        cost_usd_micros: 0,
+        ts_ms: Some(1_800_000_000 + (index / 10) as u64),
+        principal_id: Some("principal-a".to_owned()),
+        key_id: Some(format!("req-{index:04}")),
+        model: Some("claude-sonnet-4-5".to_owned()),
+        input_tokens: Some(index as u64),
+        output_tokens: Some((index * 2) as u64),
+        cache_creation_input_tokens: Some(0),
+        cache_read_input_tokens: Some(0),
+        cost_usd_micros: Some(0),
         duration_ms: 25,
         status: 200,
+        ..Default::default()
     }
 }
 

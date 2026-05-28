@@ -1,43 +1,12 @@
+use cc_lb_storage_api::types::{
+    ConfigDraftState, HistoryEntry, HistorySummary, StoredHistoryEntry,
+};
 use redb::{ReadableDatabase, ReadableTable};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 use crate::{CONFIG_DRAFT_V1, CONFIG_HISTORY_V1, RedbStorage, StorageError};
 
 const CONFIG_DRAFT_KEY: &str = "draft";
 const CONFIG_HISTORY_LIMIT: usize = 50;
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
-pub struct ConfigDraftState {
-    pub draft: Option<Value>,
-    pub revision: u64,
-    pub last_validated_revision: Option<u64>,
-    pub last_validation_error: Option<String>,
-    pub saved_at_unix_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HistorySummary {
-    pub upstreams: usize,
-    pub principals: usize,
-    pub plugin_count: usize,
-    pub tls_enabled: bool,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct HistoryEntry {
-    pub revision: u64,
-    pub config_toml: String,
-    pub applied_at_unix_secs: u64,
-    pub summary: HistorySummary,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-struct StoredHistoryEntry {
-    config_toml: String,
-    applied_at_unix_secs: u64,
-    summary: HistorySummary,
-}
 
 impl RedbStorage {
     pub fn get_config_draft(&self) -> Result<ConfigDraftState, StorageError> {

@@ -117,8 +117,12 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         status: 429,
         input_tokens: Some(35),
         output_tokens: Some(0),
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+        cost_usd_micros: None,
         duration_ms: 42,
         error_code: Some("rate_limit".to_owned()),
+        ..Default::default()
     });
 
     assert_json_roundtrip(PrincipalLimitState {
