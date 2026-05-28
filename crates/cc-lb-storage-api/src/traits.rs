@@ -166,6 +166,47 @@ pub trait ApiKeyStore: Send + Sync {
 }
 
 #[async_trait]
+pub trait ManagedKeyStore: Send + Sync {
+    async fn issue(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+        params: IssueParams,
+    ) -> StorageResult<StoredApiKeyRecord>;
+
+    async fn get(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+    ) -> StorageResult<Option<StoredApiKeyRecord>>;
+
+    async fn lookup_by_index_hash(
+        &self,
+        index_hash: &[u8; 32],
+    ) -> StorageResult<Option<(String, String, StoredApiKeyRecord)>>;
+
+    async fn list_by_principal(
+        &self,
+        principal_id: &str,
+    ) -> StorageResult<Vec<StoredApiKeyRecord>>;
+
+    async fn list_all(&self) -> StorageResult<Vec<(String, String, StoredApiKeyRecord)>>;
+
+    async fn update(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+        mutation: ApiKeyMutation,
+    ) -> StorageResult<()>;
+
+    async fn revoke_zero_secrets(
+        &self,
+        principal_id: &str,
+        key_id: &str,
+    ) -> StorageResult<()>;
+}
+
+#[async_trait]
 pub trait ConfigStore: Send + Sync {
     async fn get_config_draft(&self) -> StorageResult<ConfigDraftState>;
 
