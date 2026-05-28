@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -225,7 +225,12 @@ impl ConfigWatcher {
                 return Err(ReloadError::Runtime(source));
             }
             principal_view.store(new_principal_view);
-            // TODO(T16): evict stale runtime slots after publishing the new view.
+            let referenced: HashSet<(String, String)> = referenced_slot_keys(&new_config);
+            for (principal, plugin) in self.runtime.registered_slot_keys() {
+                if !referenced.contains(&(principal.clone(), plugin.clone())) {
+                    self.runtime.evict_slot(&principal, &plugin);
+                }
+            }
         }
         self.current.store(Arc::clone(&new_config));
         metrics::counter!("cc_lb_config_reload_total", "outcome" => "success").increment(1);
@@ -330,6 +335,35 @@ impl cc_lb_admin::CurrentConfig for ConfigWatcher {
     fn last_reload_status(&self) -> Option<LastReloadStatus> {
         self.last_reload_status.load().as_ref().clone()
     }
+}
+
+pub(crate) fn referenced_slot_keys(config: &Config) -> HashSet<(String, String)> {
+    let mut keys = HashSet::new();
+    for plugin in config
+        .plugins
+        .router_plugin
+        .iter()
+        .chain(config.plugins.observability_hooks.iter())
+    {
+        keys.insert(("__global__".to_owned(), plugin.name.clone()));
+    }
+
+    for (principal_name, spec) in &config.principals {
+        if let Some(plugin) = &spec.router_plugin {
+            keys.insert((principal_name.clone(), plugin.name.clone()));
+        }
+        for plugin in spec
+            .observability_hooks
+            .as_ref()
+            .map(|hooks| hooks.iter())
+            .into_iter()
+            .flatten()
+        {
+            keys.insert((principal_name.clone(), plugin.name.clone()));
+        }
+    }
+
+    keys
 }
 
 #[derive(Debug, Error)]
