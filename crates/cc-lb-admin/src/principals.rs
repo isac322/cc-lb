@@ -190,7 +190,8 @@ pub async fn principal_limits(
     Path(principal_id): Path<String>,
     Query(query): Query<PrincipalLimitsQuery>,
 ) -> Result<Json<PrincipalLimitsSnapshot>, StatusCode> {
-    if state.principal_view.load().get(&principal_id).is_none() {
+    let view = state.principal_view.load();
+    if view.get(&principal_id).is_none() {
         return Err(StatusCode::NOT_FOUND);
     }
 
@@ -201,11 +202,11 @@ pub async fn principal_limits(
         _ => return Err(StatusCode::BAD_REQUEST),
     };
 
-    Ok(Json(
-        state
-            .limit_engine
-            .snapshot_for_principal(&principal_id, identity_filter),
-    ))
+    Ok(Json(state.limit_engine.snapshot_for_principal(
+        &view,
+        &principal_id,
+        identity_filter,
+    )))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

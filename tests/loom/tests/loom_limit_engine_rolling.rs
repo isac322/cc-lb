@@ -19,7 +19,7 @@ const MODEL: &str = "claude";
 #[test]
 fn loom_limit_engine_rolling_drop_refunds_full_reservations() {
     loom::model(|| {
-        let engine = engine();
+        let (engine, view) = engine();
         let record = record(vec![limit(StoredLimitKind::Requests, 60, 100)]);
         let mut handles = Vec::new();
 
@@ -28,7 +28,7 @@ fn loom_limit_engine_rolling_drop_refunds_full_reservations() {
             let record = record.clone();
             handles.push(thread::spawn(move || {
                 let reservation = engine
-                    .reserve(&record, PRINCIPAL_ID, MODEL, 0, 0, None)
+                    .reserve(&view, &record, PRINCIPAL_ID, MODEL, 0, 0, None)
                     .expect("reservation succeeds");
                 drop(reservation);
             }));
@@ -45,7 +45,7 @@ fn loom_limit_engine_rolling_drop_refunds_full_reservations() {
 #[test]
 fn loom_limit_engine_rolling_reconcile_keeps_actual_totals() {
     loom::model(|| {
-        let engine = engine();
+        let (engine, view) = engine();
         let record = record(vec![limit(StoredLimitKind::TotalTokens, 60, 1_000)]);
         let mut handles = Vec::new();
 
@@ -54,7 +54,7 @@ fn loom_limit_engine_rolling_reconcile_keeps_actual_totals() {
             let record = record.clone();
             handles.push(thread::spawn(move || {
                 let reservation = engine
-                    .reserve(&record, PRINCIPAL_ID, MODEL, 100, 50, None)
+                    .reserve(&view, &record, PRINCIPAL_ID, MODEL, 100, 50, None)
                     .expect("reservation succeeds");
                 engine.reconcile(reservation, 10, 5, 0);
             }));
@@ -71,10 +71,10 @@ fn loom_limit_engine_rolling_reconcile_keeps_actual_totals() {
 #[test]
 fn loom_limit_engine_rolling_drop_vs_reconcile_single_owner_wins() {
     loom::model(|| {
-        let engine = engine();
+        let (engine, view) = engine();
         let record = record(vec![limit(StoredLimitKind::TotalTokens, 60, 1_000)]);
         let reservation = engine
-            .reserve(&record, PRINCIPAL_ID, MODEL, 100, 50, None)
+            .reserve(&view, &record, PRINCIPAL_ID, MODEL, 100, 50, None)
             .expect("reservation succeeds");
         let slot = Arc::new(Mutex::new(Some(reservation)));
 
@@ -100,12 +100,15 @@ fn loom_limit_engine_rolling_drop_vs_reconcile_single_owner_wins() {
     });
 }
 
-fn engine() -> StdArc<LimitEngine> {
+fn engine() -> (StdArc<LimitEngine>, StdArc<PrincipalView>) {
     let view = PrincipalView::loom(Vec::new());
 
-    LimitEngine::new(
-        StdArc::new(KeyConcurrencyManager::new()),
-        StdArc::new(ArcSwap::from(view)),
+    (
+        LimitEngine::new(
+            StdArc::new(KeyConcurrencyManager::new()),
+            StdArc::new(ArcSwap::from(view.clone())),
+        ),
+        view,
     )
 }
 

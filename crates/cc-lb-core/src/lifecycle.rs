@@ -25,6 +25,7 @@ use thiserror::Error;
 
 use crate::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, BuiltinAuthn};
 use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as LimitReservation};
+use crate::api_keys::principal_view::PrincipalView;
 use crate::api_keys::types::LimitKind;
 use crate::audit_writer::{AuditEntry, AuditWriterSink};
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
@@ -78,7 +79,12 @@ pub trait UpstreamDispatch: Send + Sync {
 }
 
 pub trait LimitSubjectProvider: Send + Sync {
-    fn limit_subject(&self, ctx: &RequestContext, principal: &Principal) -> Option<LimitSubject>;
+    fn limit_subject(
+        &self,
+        ctx: &RequestContext,
+        principal: &Principal,
+        view: &PrincipalView,
+    ) -> Option<LimitSubject>;
 }
 
 pub trait ApiKeyAwareSignerFactory: Send + Sync {
@@ -97,14 +103,24 @@ struct StaticLimitSubjectProvider {
 }
 
 impl LimitSubjectProvider for StaticLimitSubjectProvider {
-    fn limit_subject(&self, _ctx: &RequestContext, _principal: &Principal) -> Option<LimitSubject> {
+    fn limit_subject(
+        &self,
+        _ctx: &RequestContext,
+        _principal: &Principal,
+        _view: &PrincipalView,
+    ) -> Option<LimitSubject> {
         Some(self.subject.clone())
     }
 }
 
 impl LimitSubjectProvider for BuiltinAuthn {
-    fn limit_subject(&self, ctx: &RequestContext, _principal: &Principal) -> Option<LimitSubject> {
-        self.authenticate(&ctx.downstream_headers)
+    fn limit_subject(
+        &self,
+        ctx: &RequestContext,
+        _principal: &Principal,
+        view: &PrincipalView,
+    ) -> Option<LimitSubject> {
+        self.authenticate(&ctx.downstream_headers, view)
             .ok()
             .map(|success| {
                 let mut record = success.record;
@@ -172,10 +188,11 @@ impl UpstreamDispatch for HyperDispatcher {
 
 pub struct Lifecycle {
     authn: Arc<BuiltinAuthn>,
+    principal_view: Arc<arc_swap::ArcSwap<PrincipalView>>,
     signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
     global_router: Arc<dyn RouterPlugin>,
     dispatcher: Arc<dyn UpstreamDispatch>,
-    global_observability_hooks: Vec<Arc<dyn ObservabilityHook>>,
+    global_observability_hooks: Arc<[Arc<dyn ObservabilityHook>]>,
     error_normalizer: Arc<ErrorNormalizer>,
     config: LifecycleConfig,
     limit_engine: Option<Arc<LimitEngine>>,
@@ -194,11 +211,12 @@ impl Lifecycle {
         config: LifecycleConfig,
     ) -> Self {
         Self {
+            principal_view: authn.principal_view_cell(),
             authn,
             signer_factory,
             global_router,
             dispatcher,
-            global_observability_hooks,
+            global_observability_hooks: Arc::from(global_observability_hooks),
             error_normalizer: Arc::new(ErrorNormalizer::new()),
             config,
             limit_engine: None,
@@ -283,7 +301,9 @@ impl Lifecycle {
         });
     }
 
+    #[allow(clippy::explicit_auto_deref)]
     pub async fn handle(&self, req: Request<Bytes>) -> Result<Response<Body>, ProxyError> {
+        let view = self.principal_view.load_full();
         let started = Instant::now();
         let parsed = self.parse(req);
         let ctx = match parsed {
@@ -291,49 +311,73 @@ impl Lifecycle {
             Err(response) => return Ok(*response),
         };
 
-        self.observe(ObserveEvent::RequestStarted {
-            request_id: ctx.request_id.clone(),
-            downstream_user_agent: header_to_string(&ctx.downstream_headers, "user-agent"),
-        });
+        // Pre-authn observe: global hooks only (no principal context). Silent no-op when global is empty.
+        observe_many(
+            &self.global_observability_hooks,
+            ObserveEvent::RequestStarted {
+                request_id: ctx.request_id.clone(),
+                downstream_user_agent: header_to_string(&ctx.downstream_headers, "user-agent"),
+            },
+        );
 
         let success = match (
             self.authn.authenticate_none_mode(&ctx.downstream_headers),
-            self.authn.authenticate(&ctx.downstream_headers),
+            self.authn.authenticate(&ctx.downstream_headers, &*view),
         ) {
             (Some(success), _) => success,
             (None, Ok(success)) => success,
             (None, Err(source)) => {
                 record_key_auth_failure_metric(&source);
-                self.observe_error("authentication_error", &source.to_string(), "authn");
+                observe_error(
+                    &self.global_observability_hooks,
+                    "authentication_error",
+                    &source.to_string(),
+                    "authn",
+                );
                 let status =
                     StatusCode::from_u16(source.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
                 let response =
                     anthropic_error_response(status, "authentication_error", &source.to_string());
-                self.observe_finished(status, started);
+                observe_finished(&self.global_observability_hooks, status, started);
                 return Ok(response);
             }
         };
+        let principal_id = success.principal_id.clone();
+        let cached = view
+            .get(&principal_id)
+            .expect("auth verified existence in same view snapshot");
+        let router = cached.resolved_router(&self.global_router);
+        let hooks = cached.resolved_hooks(&self.global_observability_hooks);
+        let stream_hooks = StreamHooks::new(
+            view.clone(),
+            principal_id.clone(),
+            self.global_observability_hooks.clone(),
+        );
         let principal = Principal {
-            id: success.principal_id.clone(),
+            id: principal_id,
             kind: PrincipalKind::ApiKey,
             claims: serde_json::Map::new(),
         };
 
-        self.observe(ObserveEvent::AuthnComplete {
-            principal_id: principal.id.clone(),
-            kind: principal.kind.clone(),
-        });
+        observe_many(
+            hooks,
+            ObserveEvent::AuthnComplete {
+                principal_id: principal.id.clone(),
+                kind: principal.kind.clone(),
+            },
+        );
 
-        let route = match self.global_router.route(&ctx, &principal) {
+        let route = match router.route(&ctx, &principal) {
             Ok(route) => route,
             Err(source) => {
-                self.observe_error("route_not_configured", &source.to_string(), "router");
+                observe_error(hooks, "route_not_configured", &source.to_string(), "router");
                 let response = anthropic_error_response(
                     StatusCode::BAD_GATEWAY,
                     "route_not_configured",
                     "no upstream route is configured for this request",
                 );
-                self.observe_finished_for_principal(
+                observe_finished_for_principal(
+                    hooks,
                     StatusCode::BAD_GATEWAY,
                     started,
                     &principal,
@@ -344,14 +388,18 @@ impl Lifecycle {
         };
         let metric_context = ApiKeyMetricContext::new(&success, &route.upstream, &ctx.body_bytes);
 
-        self.observe(ObserveEvent::UpstreamChosen {
-            upstream: route.upstream.clone(),
-        });
+        observe_many(
+            hooks,
+            ObserveEvent::UpstreamChosen {
+                upstream: route.upstream.clone(),
+            },
+        );
 
-        let mut active_limit = match self.reserve_limit(&ctx, &principal, &route) {
+        let mut active_limit = match self.reserve_limit(&view, &ctx, &principal, &route) {
             Ok(active_limit) => active_limit,
             Err(response) => {
-                self.observe_finished_for_principal(
+                observe_finished_for_principal(
+                    hooks,
                     response.status(),
                     started,
                     &principal,
@@ -367,14 +415,20 @@ impl Lifecycle {
         let signer = match signer_factory.build(&route.upstream).await {
             Ok(signer) => signer,
             Err(source) => {
-                self.observe_error("signing_error", &source.to_string(), "signer_factory");
+                observe_error(
+                    hooks,
+                    "signing_error",
+                    &source.to_string(),
+                    "signer_factory",
+                );
                 let mut response = anthropic_error_response(
                     StatusCode::BAD_GATEWAY,
                     "api_error",
                     "failed to prepare upstream credentials",
                 );
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
-                self.observe_finished_for_principal(
+                observe_finished_for_principal(
+                    hooks,
                     StatusCode::BAD_GATEWAY,
                     started,
                     &principal,
@@ -384,12 +438,16 @@ impl Lifecycle {
             }
         };
 
-        let mut response = match self.attempt(&ctx, &principal, &route, signer.clone()).await {
+        let mut response = match self
+            .attempt(hooks, &ctx, &principal, &route, signer.clone())
+            .await
+        {
             Ok(response) => response,
             Err(response) => {
                 let mut response = *response;
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
-                self.observe_finished_for_principal(
+                observe_finished_for_principal(
+                    hooks,
                     response.status(),
                     started,
                     &principal,
@@ -406,12 +464,16 @@ impl Lifecycle {
                 body: Some(unauthorized.body.clone()),
             };
             if let RetryDecision::Refresh { new_signer } = signer.on_unauthorized(&err).await {
-                response = match self.attempt(&ctx, &principal, &route, new_signer).await {
+                response = match self
+                    .attempt(hooks, &ctx, &principal, &route, new_signer)
+                    .await
+                {
                     Ok(response) => response,
                     Err(response) => {
                         let mut response = *response;
                         self.attach_limit_headers(&mut response, active_limit.as_ref());
-                        self.observe_finished_for_principal(
+                        observe_finished_for_principal(
+                            hooks,
                             response.status(),
                             started,
                             &principal,
@@ -429,7 +491,8 @@ impl Lifecycle {
                 );
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
                 record_api_key_request_metric(&metric_context, response.status());
-                self.observe_finished_for_principal(
+                observe_finished_for_principal(
+                    hooks,
                     response.status(),
                     started,
                     &principal,
@@ -449,7 +512,8 @@ impl Lifecycle {
             );
             self.attach_limit_headers(&mut response, active_limit.as_ref());
             record_api_key_request_metric(&metric_context, response.status());
-            self.observe_finished_for_principal(
+            observe_finished_for_principal(
+                hooks,
                 response.status(),
                 started,
                 &principal,
@@ -467,15 +531,18 @@ impl Lifecycle {
                 &metric_context,
                 started.elapsed(),
                 status,
+                hooks,
+                stream_hooks,
             )
             .await;
-        self.observe_finished_for_principal(status, started, &principal, &ctx.body_bytes);
+        observe_finished_for_principal(hooks, status, started, &principal, &ctx.body_bytes);
         Ok(response)
     }
 
     #[allow(clippy::result_large_err)]
     fn reserve_limit(
         &self,
+        view: &PrincipalView,
         ctx: &RequestContext,
         principal: &Principal,
         route: &cc_lb_plugin_api::RouteDecision,
@@ -486,7 +553,7 @@ impl Lifecycle {
         ) else {
             return Ok(None);
         };
-        let Some(subject) = subject_provider.limit_subject(ctx, principal) else {
+        let Some(subject) = subject_provider.limit_subject(ctx, principal, view) else {
             return Ok(None);
         };
         let limit_request = LimitRequest::from_body(&ctx.body_bytes);
@@ -502,6 +569,7 @@ impl Lifecycle {
             .map(|cost| cost as i64);
 
         match limit_engine.reserve(
+            view,
             &subject.record,
             &subject.principal_id,
             &limit_request.model,
@@ -538,6 +606,7 @@ impl Lifecycle {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn finish_success_response(
         &self,
         response: Response<Body>,
@@ -545,6 +614,8 @@ impl Lifecycle {
         metric_context: &ApiKeyMetricContext,
         duration: Duration,
         status: StatusCode,
+        hooks: &[Arc<dyn ObservabilityHook>],
+        stream_hooks: StreamHooks,
     ) -> Response<Body> {
         let mut active_limit = active_limit;
         if active_limit
@@ -553,8 +624,12 @@ impl Lifecycle {
             || is_sse_response(response.headers())
         {
             let response_status = response.status();
-            let mut response =
-                self.relay_response(response, response_status, Instant::now() - duration);
+            let mut response = self.relay_response(
+                response,
+                response_status,
+                Instant::now() - duration,
+                stream_hooks,
+            );
             self.attach_limit_headers(&mut response, active_limit.as_ref());
             return response;
         }
@@ -566,12 +641,15 @@ impl Lifecycle {
         };
         let usage = usage_from_json_body(&body);
         if usage.present {
-            self.observe(ObserveEvent::RequestFinished {
-                status,
-                input_tokens: Some(usage.input_tokens),
-                output_tokens: Some(usage.output_tokens),
-                duration_ms: duration_to_ms(duration),
-            });
+            observe_many(
+                hooks,
+                ObserveEvent::RequestFinished {
+                    status,
+                    input_tokens: Some(usage.input_tokens),
+                    output_tokens: Some(usage.output_tokens),
+                    duration_ms: duration_to_ms(duration),
+                },
+            );
         }
         let cost_micros = if usage.present {
             let cost_model = active_limit
@@ -691,6 +769,7 @@ impl Lifecycle {
 
     async fn attempt(
         &self,
+        hooks: &[Arc<dyn ObservabilityHook>],
         ctx: &RequestContext,
         principal: &Principal,
         route: &cc_lb_plugin_api::RouteDecision,
@@ -698,7 +777,7 @@ impl Lifecycle {
     ) -> Result<Response<Body>, Box<Response<Body>>> {
         let shaped = shape_request(route.dialect.as_ref(), ctx, &route.upstream, principal)
             .map_err(|source| {
-                self.observe_error("shape_error", &source.to_string(), "dialect");
+                observe_error(hooks, "shape_error", &source.to_string(), "dialect");
                 Box::new(anthropic_error_response(
                     StatusCode::BAD_GATEWAY,
                     "api_error",
@@ -708,7 +787,7 @@ impl Lifecycle {
         let signed = sign_request(signer.as_ref(), shaped)
             .await
             .map_err(|source| {
-                self.observe_error("signing_error", &source.to_string(), "signer");
+                observe_error(hooks, "signing_error", &source.to_string(), "signer");
                 Box::new(anthropic_error_response(
                     StatusCode::BAD_GATEWAY,
                     "api_error",
@@ -716,7 +795,12 @@ impl Lifecycle {
                 ))
             })?;
         self.dispatcher.dispatch(signed).await.map_err(|source| {
-            self.observe_error("upstream_dispatch_error", &source.to_string(), "dispatch");
+            observe_error(
+                hooks,
+                "upstream_dispatch_error",
+                &source.to_string(),
+                "dispatch",
+            );
             match source {
                 DispatchError::BulkheadFull { retry_after } => {
                     Box::new(anthropic_error_response_with_retry_after(
@@ -742,10 +826,10 @@ impl Lifecycle {
         response: Response<Body>,
         status: StatusCode,
         started: Instant,
+        hooks: StreamHooks,
     ) -> Response<Body> {
         let (mut parts, mut body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
-        let hooks = self.global_observability_hooks.clone();
         let stream = async_stream::stream! {
             let mut batch_index = 0_u64;
             let mut buffer: Vec<u8> = Vec::new();
@@ -759,7 +843,7 @@ impl Lifecycle {
                                 let raw = buffer.drain(..end).collect::<Vec<u8>>();
                                 accumulate_sse_usage(&raw, &mut usage);
                             }
-                            observe_many(&hooks, ObserveEvent::Chunk {
+                            observe_many(hooks.as_slice(), ObserveEvent::Chunk {
                                 batch_index,
                                 event_count: 1,
                                 total_bytes: data.len(),
@@ -776,7 +860,7 @@ impl Lifecycle {
             } else {
                 (None, None)
             };
-            observe_many(&hooks, ObserveEvent::RequestFinished {
+            observe_many(hooks.as_slice(), ObserveEvent::RequestFinished {
                 status,
                 input_tokens,
                 output_tokens,
@@ -785,54 +869,87 @@ impl Lifecycle {
         };
         Response::from_parts(parts, Body::from_stream(stream))
     }
+}
 
-    fn observe(&self, event: ObserveEvent) {
-        observe_many(&self.global_observability_hooks, event);
+#[derive(Clone)]
+struct StreamHooks {
+    view: Arc<PrincipalView>,
+    principal_id: String,
+    global_observability_hooks: Arc<[Arc<dyn ObservabilityHook>]>,
+}
+
+impl StreamHooks {
+    fn new(
+        view: Arc<PrincipalView>,
+        principal_id: String,
+        global_observability_hooks: Arc<[Arc<dyn ObservabilityHook>]>,
+    ) -> Self {
+        Self {
+            view,
+            principal_id,
+            global_observability_hooks,
+        }
     }
 
-    fn observe_error(&self, code: &str, message: &str, source: &str) {
-        self.observe(ObserveEvent::Error {
+    fn as_slice(&self) -> &[Arc<dyn ObservabilityHook>] {
+        self.view
+            .get(&self.principal_id)
+            .expect("auth verified existence in same view snapshot")
+            .resolved_hooks(&self.global_observability_hooks)
+    }
+}
+
+fn observe_error(hooks: &[Arc<dyn ObservabilityHook>], code: &str, message: &str, source: &str) {
+    observe_many(
+        hooks,
+        ObserveEvent::Error {
             code: code.to_owned(),
             message: message.to_owned(),
             source: source.to_owned(),
-        });
-    }
+        },
+    );
+}
 
-    fn observe_finished(&self, status: StatusCode, started: Instant) {
-        self.observe(ObserveEvent::RequestFinished {
+fn observe_finished(hooks: &[Arc<dyn ObservabilityHook>], status: StatusCode, started: Instant) {
+    observe_many(
+        hooks,
+        ObserveEvent::RequestFinished {
             status,
             input_tokens: None,
             output_tokens: None,
             duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-        });
-    }
+        },
+    );
+}
 
-    fn observe_finished_for_principal(
-        &self,
-        status: StatusCode,
-        started: Instant,
-        principal: &Principal,
-        body: &Bytes,
-    ) {
-        let model = extract_model(body).unwrap_or_else(|| "unknown".to_owned());
-        metrics::counter!(
-            "cc_lb_requests_total",
-            "principal" => principal.id.clone(),
-            "upstream" => "unknown",
-            "model" => model,
-            "status" => status.as_u16().to_string(),
-        )
-        .increment(1);
-        let usage = sse_relay::usage_from_json_bytes(body);
-        let input_tokens = (usage.input_tokens > 0).then_some(usage.input_tokens);
-        let output_tokens = (usage.output_tokens > 0).then_some(usage.output_tokens);
-        self.observe(ObserveEvent::RequestFinished {
+fn observe_finished_for_principal(
+    hooks: &[Arc<dyn ObservabilityHook>],
+    status: StatusCode,
+    started: Instant,
+    principal: &Principal,
+    body: &Bytes,
+) {
+    let model = extract_model(body).unwrap_or_else(|| "unknown".to_owned());
+    metrics::counter!(
+        "cc_lb_requests_total",
+        "principal" => principal.id.clone(),
+        "upstream" => "unknown",
+        "model" => model,
+        "status" => status.as_u16().to_string(),
+    )
+    .increment(1);
+    let usage = sse_relay::usage_from_json_bytes(body);
+    let input_tokens = (usage.input_tokens > 0).then_some(usage.input_tokens);
+    let output_tokens = (usage.output_tokens > 0).then_some(usage.output_tokens);
+    observe_many(
+        hooks,
+        ObserveEvent::RequestFinished {
             status,
             input_tokens,
             output_tokens,
             duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-        });
-    }
+        },
+    );
 }
 
 struct CollectedResponse {

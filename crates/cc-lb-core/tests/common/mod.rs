@@ -9,7 +9,9 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
+use cc_lb_config::{
+    Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, PrincipalSpec, PrincipalType,
+};
 use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_core::api_keys::key_store::KeyStore;
 use cc_lb_core::api_keys::principal_view::PrincipalView;
@@ -58,6 +60,10 @@ pub struct TestAuthn {
 
 impl TestAuthn {
     pub fn new(state: TestState) -> Self {
+        Self::with_principal_view(state, default_principal_view())
+    }
+
+    pub fn with_principal_view(state: TestState, view: Arc<PrincipalView>) -> Self {
         let dir = tempfile::tempdir().expect("test auth storage dir is created");
         let storage = Arc::new(
             Storage::open(&dir.path().join("test-auth.redb"), [7; 32])
@@ -73,15 +79,36 @@ impl TestAuthn {
                     upstream_credential_ref: "test-upstream".to_owned(),
                 }),
                 Arc::new(KeyStore::new(storage)),
-                Arc::new(arc_swap::ArcSwap::from(
-                    PrincipalView::from_config(&cc_lb_config::Config::default(), std::collections::HashMap::new())
-                        .expect("principal view builds"),
-                )),
+                Arc::new(arc_swap::ArcSwap::from(view)),
             )),
             state,
             refresh_allowed: true,
         }
     }
+}
+
+fn default_principal_view() -> Arc<PrincipalView> {
+    let mut principals = std::collections::HashMap::new();
+    principals.insert(
+        "principal-test".to_owned(),
+        PrincipalSpec {
+            principal_type: PrincipalType::Machine,
+            default_limits: Vec::new(),
+            enabled: true,
+            allowed_models: vec!["*".to_owned()],
+            credentials_ref: None,
+            router_plugin: None,
+            observability_hooks: None,
+        },
+    );
+    PrincipalView::from_config(
+        &Config {
+            principals,
+            ..Config::default()
+        },
+        std::collections::HashMap::new(),
+    )
+    .expect("principal view builds")
 }
 
 impl ApiKeyAwareSignerFactory for TestAuthn {

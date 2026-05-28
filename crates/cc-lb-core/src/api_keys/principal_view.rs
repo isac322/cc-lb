@@ -47,7 +47,7 @@ impl PrincipalView {
         config: &Config,
         mut principal_chains: HashMap<String, (RouterPluginCache, ObservabilityHooksCache)>,
     ) -> Result<Arc<PrincipalView>, ConfigError> {
-        let specs = config
+        let mut specs = config
             .principals
             .iter()
             .map(|(principal_id, principal)| -> Result<_, ConfigError> {
@@ -70,10 +70,7 @@ impl PrincipalView {
 
                 let (router_plugin, observability_hooks) = principal_chains
                     .remove(principal_id)
-                    .unwrap_or((
-                        RouterPluginCache::Inherit,
-                        ObservabilityHooksCache::Inherit,
-                    ));
+                    .unwrap_or((RouterPluginCache::Inherit, ObservabilityHooksCache::Inherit));
 
                 let cached = PrincipalSpecCached {
                     id: principal_id.clone(),
@@ -94,6 +91,32 @@ impl PrincipalView {
                 Ok((principal_id.clone(), cached))
             })
             .collect::<Result<HashMap<_, _>, ConfigError>>()?;
+
+        if matches!(
+            config.downstream_auth.mode,
+            cc_lb_config::DownstreamAuthMode::None
+        ) && let Some(none_mode) = &config.downstream_auth.none_mode
+            && !specs.contains_key(&none_mode.principal_id)
+        {
+            let (router_plugin, observability_hooks) = principal_chains
+                .remove(&none_mode.principal_id)
+                .unwrap_or((RouterPluginCache::Inherit, ObservabilityHooksCache::Inherit));
+            specs.insert(
+                none_mode.principal_id.clone(),
+                PrincipalSpecCached {
+                    id: none_mode.principal_id.clone(),
+                    principal_type: PrincipalType::Machine,
+                    allowed_models: GlobSetBuilder::new()
+                        .build()
+                        .expect("empty allowed-model glob set builds"),
+                    allowed_models_exact: HashSet::new(),
+                    default_limits: Vec::new(),
+                    enabled: true,
+                    router_plugin,
+                    observability_hooks,
+                },
+            );
+        }
 
         Ok(Arc::new(PrincipalView { specs }))
     }

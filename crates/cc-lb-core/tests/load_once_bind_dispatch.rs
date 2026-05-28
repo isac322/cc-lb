@@ -5,7 +5,9 @@ use std::sync::{Arc, Mutex};
 
 use arc_swap::ArcSwap;
 use bytes::Bytes;
-use cc_lb_config::{Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, PrincipalSpec, PrincipalType};
+use cc_lb_config::{
+    Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, PrincipalSpec, PrincipalType,
+};
 use cc_lb_core::api_keys::builtin_authn::{BuiltinAuthError, BuiltinAuthn};
 use cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_core::api_keys::key_store::KeyStore;
@@ -60,7 +62,8 @@ fn limit_engine_reserve_accepts_bound_principal_view() {
 }
 
 #[tokio::test]
-async fn lifecycle_per_principal_dispatch_hits_correct_router_and_hook() -> Result<(), Box<dyn std::error::Error>> {
+async fn lifecycle_per_principal_dispatch_hits_correct_router_and_hook()
+-> Result<(), Box<dyn std::error::Error>> {
     let explicit_router_hits = Arc::new(Mutex::new(Vec::new()));
     let global_router_hits = Arc::new(Mutex::new(Vec::new()));
     let explicit_hook_events = Arc::new(Mutex::new(Vec::new()));
@@ -111,7 +114,10 @@ async fn lifecycle_per_principal_dispatch_hits_correct_router_and_hook() -> Resu
     let (status, _headers, _body) = collect_body(response).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(global_router_hits.lock().unwrap().as_slice(), &[] as &[String]);
+    assert_eq!(
+        global_router_hits.lock().unwrap().as_slice(),
+        &[] as &[String]
+    );
     assert_eq!(
         explicit_router_hits.lock().unwrap().as_slice(),
         &["explicit:principal-a".to_owned()]
@@ -193,9 +199,14 @@ fn none_mode_authn(
     })
 }
 
-fn storage(name: &str) -> Result<(&'static tempfile::TempDir, Arc<Storage>), Box<dyn std::error::Error>> {
+fn storage(
+    name: &str,
+) -> Result<(&'static tempfile::TempDir, Arc<Storage>), Box<dyn std::error::Error>> {
     let dir = Box::leak(Box::new(tempfile::tempdir()?));
-    let storage = Arc::new(Storage::open(&dir.path().join(format!("{name}.redb")), [9; 32])?);
+    let storage = Arc::new(Storage::open(
+        &dir.path().join(format!("{name}.redb")),
+        [9; 32],
+    )?);
     Ok((dir, storage))
 }
 
@@ -205,7 +216,11 @@ struct RecordingRouter {
 }
 
 impl RouterPlugin for RecordingRouter {
-    fn route(&self, _ctx: &RequestContext, principal: &Principal) -> Result<RouteDecision, RouteError> {
+    fn route(
+        &self,
+        _ctx: &RequestContext,
+        principal: &Principal,
+    ) -> Result<RouteDecision, RouteError> {
         self.hits
             .lock()
             .unwrap()

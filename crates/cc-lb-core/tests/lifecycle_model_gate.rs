@@ -18,7 +18,9 @@ use common::{
     messages_request,
 };
 
-fn engine_with_allowed_models(allowed_models: Vec<String>) -> Arc<LimitEngine> {
+fn engine_with_allowed_models(
+    allowed_models: Vec<String>,
+) -> (Arc<LimitEngine>, Arc<PrincipalView>) {
     let mut principals = HashMap::new();
     principals.insert(
         "principal-test".to_owned(),
@@ -32,14 +34,20 @@ fn engine_with_allowed_models(allowed_models: Vec<String>) -> Arc<LimitEngine> {
             observability_hooks: None,
         },
     );
-    let view = PrincipalView::from_config(&Config {
-        principals,
-        ..Config::default()
-    }, std::collections::HashMap::new())
+    let view = PrincipalView::from_config(
+        &Config {
+            principals,
+            ..Config::default()
+        },
+        std::collections::HashMap::new(),
+    )
     .expect("principal view builds");
-    LimitEngine::new(
-        Arc::new(KeyConcurrencyManager::new()),
-        Arc::new(ArcSwap::from(view)),
+    (
+        LimitEngine::new(
+            Arc::new(KeyConcurrencyManager::new()),
+            Arc::new(ArcSwap::from(view.clone())),
+        ),
+        view,
     )
 }
 
@@ -55,8 +63,9 @@ fn active_record() -> StoredApiKeyRecord {
 async fn model_gate_rejects_disallowed_model_before_upstream() {
     let state = TestState::default();
     let hook = Arc::new(RecordingHook::default());
+    let (limit_engine, view) = engine_with_allowed_models(vec!["allowed-model".to_owned()]);
     let lifecycle = lifecycle_with(
-        TestAuthn::new(state.clone()),
+        TestAuthn::with_principal_view(state.clone(), view),
         MockDispatch {
             state: state.clone(),
             mode: DispatchMode::StreamingOk,
@@ -64,7 +73,7 @@ async fn model_gate_rejects_disallowed_model_before_upstream() {
         hook,
     )
     .with_static_limit_subject(
-        engine_with_allowed_models(vec!["allowed-model".to_owned()]),
+        limit_engine,
         "principal-test".to_owned(),
         "key-test".to_owned(),
         active_record(),
