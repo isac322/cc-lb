@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+#[cfg(not(loom))]
 mod hot_reload;
 mod types;
 mod validation;
@@ -10,7 +11,9 @@ use std::path::Path;
 use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
 use thiserror::Error;
+#[cfg(not(loom))]
 use tokio::sync::mpsc;
+#[cfg(not(loom))]
 use tokio::task::JoinHandle;
 
 pub use types::{
@@ -41,16 +44,12 @@ pub enum ConfigError {
     },
     #[error("postgres statement timeout {statement}s must be less than request timeout {request}s")]
     StatementTimeoutExceedsRequestTimeout { statement: u64, request: u64 },
-    #[error(
-        "principal {principal_id} plugin {plugin_name} is missing wasm_path"
-    )]
+    #[error("principal {principal_id} plugin {plugin_name} is missing wasm_path")]
     PerPrincipalPluginMissingWasmPath {
         principal_id: String,
         plugin_name: String,
     },
-    #[error(
-        "principal {principal_id} plugin {plugin_name} failed to instantiate: {reason}"
-    )]
+    #[error("principal {principal_id} plugin {plugin_name} failed to instantiate: {reason}")]
     PerPrincipalPluginInstantiation {
         principal_id: String,
         plugin_name: String,
@@ -101,6 +100,7 @@ impl Config {
         validation::validate_config(self)
     }
 
+    #[cfg(not(loom))]
     pub fn watch_for_reload(path: &Path, tx: mpsc::Sender<Config>) -> JoinHandle<()> {
         hot_reload::watch_for_reload(path, tx)
     }
