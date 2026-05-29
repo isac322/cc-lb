@@ -23,8 +23,11 @@ use uuid::Uuid;
 
 use crate::dynamic_view_builder::Stores;
 
-const SWEEP_INTERVAL_SECS: u64 = 60;
-const LOOKAHEAD_SECS: u64 = 300;
+// OAuth refresh cadence. The 10-minute sweep interval and 20-minute lookahead
+// assume Anthropic-issued OAuth tokens have TTL much greater than 20 minutes
+// (Claude OAuth = 8h). Sub-20-minute TTLs would cause per-tick refresh.
+const SWEEP_INTERVAL_SECS: u64 = 600;
+const LOOKAHEAD_SECS: u64 = 1200;
 const LEASE_TTL_SECS: u64 = 90;
 const PAGE_SIZE: usize = 100;
 
@@ -100,6 +103,11 @@ impl OAuthRefresher {
     }
 
     pub async fn sweep_once(&self) -> StorageResult<()> {
+        if !self.any_oauth_credential_registered().await? {
+            tracing::debug!("oauth refresh sweep skipped: no oauth credentials registered");
+            return Ok(());
+        }
+
         let candidates = self.candidates().await?;
         for upstream in candidates {
             if self.cancel.is_cancelled() {
@@ -140,6 +148,31 @@ impl OAuthRefresher {
             }
         }
         Ok(candidates)
+    }
+
+    async fn any_oauth_credential_registered(&self) -> StorageResult<bool> {
+        let mut after = None;
+        loop {
+            tokio::select! {
+                _ = self.cancel.cancelled() => return Ok(false),
+                page = self.stores.upstreams.list(after, PAGE_SIZE) => {
+                    let page = page?;
+                    if page.is_empty() {
+                        return Ok(false);
+                    }
+                    after = page.last().map(|record| record.id);
+                    for record in &page {
+                        if record.kind == UpstreamKind::AnthropicOauth
+                            && record.enabled
+                            && record.oauth_credentials.is_some()
+                            && record.deleted_at_unix_secs.is_none()
+                        {
+                            return Ok(true);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     async fn refresh_claimed(&self, upstream: UpstreamRecord) {
