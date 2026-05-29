@@ -99,12 +99,14 @@ test.describe.serial('Plugin Registry', () => {
 
     // Delete all entries
     const deleteButtons = page.locator('.space-y-4').filter({ has: page.locator('h3:has-text("router Chain")') }).locator('button[title="Remove from chain"]');
+    
+    await expect(deleteButtons.first()).toBeVisible();
+    
     const count = await deleteButtons.count();
     
     for (let i = 0; i < count; i++) {
       await deleteButtons.first().click();
-      // Wait for it to disappear
-      await page.waitForTimeout(500);
+      await expect(deleteButtons).toHaveCount(count - i - 1);
     }
 
     await expect(page.getByText('No plugins in this chain.')).toBeVisible();

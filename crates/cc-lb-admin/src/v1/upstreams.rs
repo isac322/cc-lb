@@ -1,7 +1,10 @@
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
-    http::{HeaderMap, HeaderValue, StatusCode, header::IF_MATCH},
+    http::{
+        HeaderMap, HeaderValue, StatusCode,
+        header::{ETAG, IF_MATCH},
+    },
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -344,38 +347,40 @@ async fn set_enabled(
     headers: HeaderMap,
     enabled: bool,
 ) -> Result<Response, UpstreamError> {
-    let expected_revision = parse_if_match(&headers)?;
-    let current = find_upstream(&state, &id)
-        .await?
-        .ok_or(UpstreamError::NotFound)?;
-    if current.revision != expected_revision {
-        return Err(UpstreamError::StaleRevision {
-            current_revision: current.revision,
-        });
-    }
-
     let storage = storage(&state)?;
-    match UpstreamStore::set_enabled(storage, current.id, expected_revision, enabled).await {
-        Ok(updated) => {
-            let payload = if enabled {
-                AuditPayload::UpstreamEnable {
-                    upstream_id: updated.id.to_string(),
-                }
-            } else {
-                AuditPayload::UpstreamDisable {
-                    upstream_id: updated.id.to_string(),
-                }
-            };
-            enqueue_upstream_audit(&state, &updated, payload);
-            let mut response = Json(upstream_response(&updated)).into_response();
-            add_dynamic_rebind_headers(&mut response, &state).await;
-            Ok(response)
-        }
+    let expected_revision = parse_if_match(&headers)?;
+    let Ok(id) = id.parse() else {
+        return Err(UpstreamError::BadRequest {
+            error: "invalid_upstream_id",
+            detail: "invalid uuid".to_owned(),
+        });
+    };
+
+    let updated = match UpstreamStore::set_enabled(storage, id, expected_revision, enabled).await {
+        Ok(updated) => updated,
         Err(StorageError::Conflict { message }) => {
-            stale_or_conflict(&state, &id, expected_revision, message).await
+            return stale_or_conflict(&state, &id.to_string(), expected_revision, message).await;
         }
-        Err(error) => Err(error.into()),
-    }
+        Err(error) => return Err(error.into()),
+    };
+
+    enqueue_upstream_audit(
+        &state,
+        &updated,
+        if enabled {
+            AuditPayload::UpstreamEnable {
+                upstream_id: updated.id.to_string(),
+            }
+        } else {
+            AuditPayload::UpstreamDisable {
+                upstream_id: updated.id.to_string(),
+            }
+        },
+    );
+
+    let mut response = respond_with_etag(updated);
+    crate::v1::add_dynamic_rebind_headers(&mut response, &state).await;
+    Ok(response)
 }
 
 async fn stale_or_conflict(
@@ -394,6 +399,14 @@ async fn stale_or_conflict(
     } else {
         Err(UpstreamError::Conflict { detail })
     }
+}
+
+fn respond_with_etag(record: UpstreamRecord) -> Response {
+    let mut response = Json(upstream_response(&record)).into_response();
+    if let Ok(etag) = etag_value(record.revision) {
+        response.headers_mut().insert(ETAG, etag);
+    }
+    response
 }
 
 fn storage(state: &AdminState) -> Result<&dyn Storage, UpstreamError> {
