@@ -6,13 +6,13 @@ export interface PrincipalWithId extends PrincipalSpec {
 }
 
 export function usePrincipalsManagement(mock?: boolean) {
-  const [principals, setPrincipals] = useState<PrincipalWithId[]>([]);
+  const [principalList, setPrincipalList] = useState<PrincipalWithId[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 
   const fetchPrincipals = useCallback(async () => {
     if (mock) {
-      setPrincipals([
+      setPrincipalList([
         {
           id: 'alice',
           disabled: false,
@@ -50,17 +50,17 @@ export function usePrincipalsManagement(mock?: boolean) {
       ]);
 
       const config = (draftRes.draft as Record<string, unknown>) || current;
-      const principalsMap =
+      const principalMap =
         (config.principals as Record<string, unknown>) || {};
 
-      const list = Object.entries(principalsMap).map(
+      const list = Object.entries(principalMap).map(
         ([id, spec]: [string, unknown]) => ({
           id,
           ...(spec as PrincipalSpec),
         }),
       );
 
-      setPrincipals(list);
+      setPrincipalList(list);
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
     } finally {
@@ -72,5 +72,5 @@ export function usePrincipalsManagement(mock?: boolean) {
     fetchPrincipals();
   }, [fetchPrincipals]);
 
-  return { principals, refresh: fetchPrincipals, isLoading, error };
+  return { principals: principalList, refresh: fetchPrincipals, isLoading, error };
 }

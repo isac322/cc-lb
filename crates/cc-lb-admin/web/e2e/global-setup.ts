@@ -47,7 +47,7 @@ scopes = ["messages", "files"]
 
   const bootstrapPath = path.join(dataDir, 'bootstrap.toml');
   const bootstrapConfig = `
-[[upstreams]]
+[[legacy-upstreams]]
 name = "dummy"
 kind = "custom"
 `;

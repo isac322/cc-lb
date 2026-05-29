@@ -14,9 +14,6 @@ metrics_addr = "127.0.0.1:9091"
 [admin]
 token_env = "CC_LB_ADMIN_TOKEN"
 
-[upstreams.dummy]
-base_url = "http://localhost:8081"
-
 [oauth.anthropic]
 client_id = "test-client"
 client_secret = "test-secret"

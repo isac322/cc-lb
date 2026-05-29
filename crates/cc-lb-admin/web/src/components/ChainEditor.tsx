@@ -340,7 +340,7 @@ function ChainList({ principalId, slot, registryEntries }: ChainListProps) {
 
 export function ChainEditor() {
   const [principalId, setPrincipalId] = useState('');
-  const [principals, setPrincipals] = useState<{ id: string; name: string }[]>(
+  const [principalList, setPrincipalList] = useState<{ id: string; name: string }[]>(
     [],
   );
   const [registryEntries, setRegistryEntries] = useState<
@@ -352,7 +352,7 @@ export function ChainEditor() {
 
   useEffect(() => {
     fetchPrincipals().then((res: unknown) =>
-      setPrincipals(
+      setPrincipalList(
         (res as { principals: { id: string; name: string }[] }).principals,
       ),
     );
@@ -373,7 +373,7 @@ export function ChainEditor() {
           className="mt-1 block w-full max-w-md rounded-md border-gray-300 shadow-sm focus:border-blue-500 focus:ring-blue-500 sm:text-sm border p-2"
         >
           <option value="">Select a principal...</option>
-          {principals.map((p) => (
+          {principalList.map((p) => (
             <option key={p.id} value={p.id}>
               {p.name}
             </option>

@@ -28,7 +28,7 @@ export default function Upstreams() {
     latest: UpstreamResponse;
   } | null>(null);
 
-  const [upstreams, setUpstreams] = useState<UpstreamResponse[]>([]);
+  const [upstreamList, setUpstreamList] = useState<UpstreamResponse[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 
@@ -43,7 +43,7 @@ export default function Upstreams() {
     setIsLoading(true);
     try {
       const res = await listUpstreams();
-      setUpstreams(res.upstreams);
+      setUpstreamList(res.upstreams);
       setError(null);
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
@@ -146,11 +146,11 @@ export default function Upstreams() {
     }
   };
 
-  if (isLoading && upstreams.length === 0) {
+  if (isLoading && upstreamList.length === 0) {
     return <LoadingState message="Loading upstreams..." />;
   }
 
-  if (error && upstreams.length === 0) {
+  if (error && upstreamList.length === 0) {
     return <ErrorState message={error.message} onRetry={fetchUpstreams} />;
   }
 
@@ -179,7 +179,7 @@ export default function Upstreams() {
         </div>
       </div>
 
-      {upstreams.length === 0 ? (
+      {upstreamList.length === 0 ? (
         <EmptyState
           title="No upstreams configured"
           message="Create an upstream to get started."
@@ -199,7 +199,7 @@ export default function Upstreams() {
               </tr>
             </thead>
             <tbody className="divide-y divide-graphite-800">
-              {upstreams.map((upstream) => {
+              {upstreamList.map((upstream) => {
                 const status = statusUpstreams.find(
                   (s) => s.id === upstream.id,
                 );
