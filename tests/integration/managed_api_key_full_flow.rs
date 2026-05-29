@@ -12,13 +12,17 @@ use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_pricing::{UpstreamKind as PricingUpstreamKind, global_catalog};
 use cc_lb_server::{BuildError, build_app, signal::SignalHandle};
 use cc_lb_storage_api::{
-    Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalCreate, PrincipalKind,
-    PrincipalStore, UpstreamCreate, UpstreamKind, UpstreamStore,
+    principal::{
+        Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalCreate, PrincipalKind,
+        PrincipalStore,
+    },
+    types::{
+        Limit as KeyLimit, LimitKind as KeyLimitKind, PrincipalKindLite,
+        UpstreamKind as KeyUpstreamKind,
+    },
+    upstream::{UpstreamCreate, UpstreamKind, UpstreamStore},
 };
-use cc_lb_storage_redb::{
-    Limit as KeyLimit, LimitKind as KeyLimitKind, PrincipalKindLite, Storage,
-    UpstreamKind as KeyUpstreamKind,
-};
+use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -666,22 +670,25 @@ async fn seed_runtime_state(
         now_secs(),
     )
     .await?;
-    let (_record, plaintext) = KeyStore::new(storage).create(
-        principal_name,
-        CreateParams {
-            upstream_kind: KeyUpstreamKind::AnthropicKey,
-            upstream_credential_ref: "anthropic-wiremock".to_owned(),
-            label: "prod".to_owned(),
-            description: None,
-            expires_at_unix_secs: None,
-            limit_overrides: vec![KeyLimit {
-                kind: KeyLimitKind::CostUsd,
-                window_secs: 60 * 60,
-                cap_micros: 1_000_000,
-            }],
-            principal_kind: PrincipalKindLite::Machine,
-        },
-    )?;
+    let managed_keys = Arc::new(RedbManagedKeyStore::new(storage));
+    let (_record, plaintext) = KeyStore::new(managed_keys)
+        .create(
+            principal_name,
+            CreateParams {
+                upstream_kind: KeyUpstreamKind::AnthropicKey,
+                upstream_credential_ref: "anthropic-wiremock".to_owned(),
+                label: "prod".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: vec![KeyLimit {
+                    kind: KeyLimitKind::CostUsd,
+                    window_secs: 60 * 60,
+                    cap_micros: 1_000_000,
+                }],
+                principal_kind: PrincipalKindLite::Machine,
+            },
+        )
+        .await?;
     let (key_id, _) = cc_lb_core::api_keys::secret::parse(plaintext.expose())?;
     Ok((plaintext.expose().to_owned(), key_id))
 }

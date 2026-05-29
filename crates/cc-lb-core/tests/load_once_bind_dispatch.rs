@@ -4,9 +4,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
-use cc_lb_config::{
-    Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, PrincipalSpec, PrincipalType,
-};
+use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
 use cc_lb_core::api_keys::builtin_authn::{BuiltinAuthError, BuiltinAuthn};
 use cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_core::api_keys::key_store::KeyStore;
@@ -33,7 +31,9 @@ fn builtin_authn_accepts_bound_principal_view() -> Result<(), Box<dyn std::error
     let authn = BuiltinAuthn::new(
         DownstreamAuthMode::ApiKey,
         None,
-        Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(storage)))),
+        Some(Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(
+            storage,
+        ))))),
     );
 
     let error = tokio::runtime::Builder::new_current_thread()
@@ -151,31 +151,17 @@ fn principal_view(
     principal_id: &str,
     chain: Option<(RouterPluginCache, ObservabilityHooksCache)>,
 ) -> Arc<PrincipalView> {
-    let mut principals = HashMap::new();
-    principals.insert(
-        principal_id.to_owned(),
-        PrincipalSpec {
-            principal_type: PrincipalType::Machine,
-            default_limits: Vec::new(),
-            enabled: true,
-            allowed_models: vec!["*".to_owned()],
-            credentials_ref: None,
-            router_plugin: None,
-            observability_hooks: None,
-        },
-    );
     let mut chains = HashMap::new();
     if let Some(chain) = chain {
         chains.insert(principal_id.to_owned(), chain);
     }
-    PrincipalView::from_config(
-        &Config {
-            principals,
-            ..Config::default()
-        },
+    Arc::new(PrincipalView::for_tests(
+        principal_id,
+        true,
+        vec!["*".to_owned()],
+        Vec::new(),
         chains,
-    )
-    .expect("principal view builds")
+    ))
 }
 
 fn none_mode_authn(
@@ -192,7 +178,9 @@ fn none_mode_authn(
                 upstream_kind: NoneModeUpstreamKind::AnthropicKey,
                 upstream_credential_ref: "test-upstream".to_owned(),
             }),
-            Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(storage)))),
+            Some(Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(
+                storage,
+            ))))),
         )),
         principal_view: view,
         state,

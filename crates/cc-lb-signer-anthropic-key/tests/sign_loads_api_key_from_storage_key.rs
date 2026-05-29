@@ -13,7 +13,7 @@ use cc_lb_storage_api::{
     AnthropicApiKeyCredential, ApiKeyStore, AuditEntry, AuditStore, BackendKind, ConfigDraftState,
     ConfigStore, HistoryEntry, HistorySummary, LimitStateStore, MetaStore, OAuthCredentialStore,
     PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, QuotaStore, RequestEvent,
-    RequestEventStore, Storage, StorageError, StorageResult, UsageRollup, UsageRollupResolution,
+    RequestEventStore, StorageError, StorageResult, UsageRollup, UsageRollupResolution,
     UsageRollupRun, UsageRollupStore,
 };
 use http::header::{AUTHORIZATION, USER_AGENT};
@@ -59,7 +59,7 @@ impl UpstreamDialect for DirectDialect {
 #[tokio::test]
 async fn sign_loads_api_key_from_storage_key() {
     let storage = Arc::new(MemoryStorage::default());
-    let signer_storage: Arc<dyn Storage> = storage.clone();
+    let signer_storage: Arc<dyn OAuthCredentialStore> = storage.clone();
     let aead = Arc::new(AeadService::from_master_key([0x24; 32]));
     let storage_key = "alice:real_anthropic_api_key";
     let credential = AnthropicApiKeyCredential {

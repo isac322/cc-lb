@@ -7,9 +7,11 @@ use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_server::preflight::{self, PreflightReport};
 use cc_lb_storage_api::{
     PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
-    PrincipalStore, UpstreamCreate, UpstreamKind, UpstreamStore, WasmBlob, WasmRegistryEntry,
+    PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob, WasmRegistryEntry,
     WasmRegistryEntryInput,
 };
+
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_redb::Storage;
 use serde_json::json;
 use tempfile::TempDir;

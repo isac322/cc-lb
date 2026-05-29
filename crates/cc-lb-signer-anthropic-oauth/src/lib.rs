@@ -15,7 +15,7 @@ use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
     SignerFactory, SigningCapability, Upstream, UpstreamError,
 };
-use cc_lb_storage_api::{OAuthCredentials, Storage, StorageError, UpstreamStore};
+use cc_lb_storage_api::{OAuthCredentialStore, OAuthCredentials, StorageError, UpstreamStore};
 use dashmap::DashMap;
 use http::header::{AUTHORIZATION, HeaderValue};
 use oauth2::ClientId;
@@ -181,7 +181,7 @@ pub struct AnthropicOAuthSharedState {
 pub struct AnthropicOAuthSigner {
     pub principal_id: String,
     pub provider: String,
-    pub storage: Arc<dyn Storage>,
+    pub storage: Arc<dyn OAuthCredentialStore>,
     pub aead: Arc<AeadService>,
     pub refresh_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     pub breaker_state: BreakerMap,
@@ -197,7 +197,7 @@ impl AnthropicOAuthSigner {
     pub fn new(
         principal_id: impl Into<String>,
         provider: impl Into<String>,
-        storage: Arc<dyn Storage>,
+        storage: Arc<dyn OAuthCredentialStore>,
         aead: Arc<AeadService>,
         token_url: Url,
         client_id: ClientId,
@@ -216,7 +216,7 @@ impl AnthropicOAuthSigner {
     pub fn with_http(
         principal_id: impl Into<String>,
         provider: impl Into<String>,
-        storage: Arc<dyn Storage>,
+        storage: Arc<dyn OAuthCredentialStore>,
         aead: Arc<AeadService>,
         token_url: Url,
         client_id: ClientId,
@@ -243,7 +243,7 @@ impl AnthropicOAuthSigner {
     pub fn with_shared_state(
         principal_id: impl Into<String>,
         provider: impl Into<String>,
-        storage: Arc<dyn Storage>,
+        storage: Arc<dyn OAuthCredentialStore>,
         aead: Arc<AeadService>,
         token_url: Url,
         client_id: ClientId,
@@ -683,9 +683,10 @@ mod tests {
     use cc_lb_plugin_api::{
         RequestContext, Upstream, UpstreamDialect, shape_request, sign_request,
     };
+    use cc_lb_storage_api::upstream::UpstreamKind;
     use cc_lb_storage_api::{
-        StorageError, StorageResult, UpstreamCreate, UpstreamKind, UpstreamRecord,
-        UpstreamRecordId, UpstreamStore, UpstreamUpdate, validate_identifier,
+        StorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamRecordId,
+        UpstreamStore, UpstreamUpdate, validate_identifier,
     };
     use http::header::{AUTHORIZATION, USER_AGENT};
     use http::{HeaderMap, HeaderValue, Method, StatusCode};

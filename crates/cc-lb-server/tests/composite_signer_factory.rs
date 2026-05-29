@@ -10,7 +10,8 @@ use cc_lb_plugin_api::{
 };
 use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory;
-use cc_lb_storage_api::{UpstreamCreate, UpstreamKind, UpstreamStore};
+use cc_lb_storage_api::upstream::UpstreamKind;
+use cc_lb_storage_api::{UpstreamCreate, UpstreamStore};
 use cc_lb_storage_redb::Storage;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};

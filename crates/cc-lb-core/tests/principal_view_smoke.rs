@@ -2,7 +2,9 @@ use std::time::Duration;
 
 use cc_lb_core::api_keys::principal_view::{PrincipalStatus, PrincipalView};
 use cc_lb_core::api_keys::types::{LimitKind as CoreLimitKind, PrincipalType as CorePrincipalType};
-use cc_lb_storage_api::{Limit, LimitKind, PrincipalKind as DbPrincipalKind, PrincipalRecord};
+use cc_lb_storage_api::principal::{
+    Limit, LimitKind, PrincipalKind as DbPrincipalKind, PrincipalRecord,
+};
 
 fn sample_principals(enabled: bool) -> Vec<PrincipalRecord> {
     vec![PrincipalRecord {

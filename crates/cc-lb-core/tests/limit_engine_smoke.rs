@@ -1,4 +1,3 @@
-use cc_lb_config::{Config, PrincipalSpec, PrincipalType};
 use cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_core::api_keys::limit_engine::{LimitEngine, RejectReason};
 use cc_lb_core::api_keys::principal_view::PrincipalView;
@@ -8,29 +7,14 @@ use cc_lb_storage_api::types::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
-// TODO(Task-35-followup): replace TOML config consumption with DB store read
 fn engine(enabled: bool) -> (Arc<LimitEngine>, Arc<PrincipalView>) {
-    let mut principals = HashMap::new();
-    principals.insert(
-        "principal-1".to_owned(),
-        PrincipalSpec {
-            principal_type: PrincipalType::Machine,
-            default_limits: Vec::new(),
-            enabled,
-            allowed_models: Vec::new(),
-            credentials_ref: None,
-            router_plugin: None,
-            observability_hooks: None,
-        },
-    );
-    let view = PrincipalView::from_config(
-        &Config {
-            principals,
-            ..Config::default()
-        },
-        std::collections::HashMap::new(),
-    )
-    .expect("principal view builds");
+    let view = Arc::new(PrincipalView::for_tests(
+        "principal-1",
+        enabled,
+        Vec::new(),
+        Vec::new(),
+        HashMap::new(),
+    ));
 
     (
         LimitEngine::new(Arc::new(KeyConcurrencyManager::new())),

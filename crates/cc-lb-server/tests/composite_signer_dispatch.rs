@@ -16,9 +16,11 @@ use cc_lb_core::{DynamicViewHolder, Lifecycle, LifecycleConfig};
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::{
-    PrincipalCreate, PrincipalKind, PrincipalStore, StorageResult, UpstreamCreate, UpstreamKind,
-    UpstreamRecord, UpstreamStore, UpstreamUpdate,
+    PrincipalCreate, PrincipalKind, PrincipalStore, StorageResult, UpstreamCreate, UpstreamRecord,
+    UpstreamStore, UpstreamUpdate,
 };
+
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_redb::Storage;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use http::Request;

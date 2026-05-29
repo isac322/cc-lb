@@ -9,9 +9,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use axum::body::Body;
 use bytes::Bytes;
-use cc_lb_config::{
-    Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, PrincipalSpec, PrincipalType,
-};
+use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
 use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_core::api_keys::key_store::KeyStore;
 use cc_lb_core::api_keys::principal_view::PrincipalView;
@@ -80,7 +78,7 @@ impl TestAuthn {
                     upstream_kind: NoneModeUpstreamKind::AnthropicKey,
                     upstream_credential_ref: "test-upstream".to_owned(),
                 }),
-                Arc::new(KeyStore::new(Arc::new(managed_key_store))),
+                Some(Arc::new(KeyStore::new(Arc::new(managed_key_store)))),
             )),
             principal_view: view,
             state,
@@ -89,29 +87,14 @@ impl TestAuthn {
     }
 }
 
-// TODO(Task-35-followup): replace TOML config consumption with DB store read
 fn default_principal_view() -> Arc<PrincipalView> {
-    let mut principals = std::collections::HashMap::new();
-    principals.insert(
-        "principal-test".to_owned(),
-        PrincipalSpec {
-            principal_type: PrincipalType::Machine,
-            default_limits: Vec::new(),
-            enabled: true,
-            allowed_models: vec!["*".to_owned()],
-            credentials_ref: None,
-            router_plugin: None,
-            observability_hooks: None,
-        },
-    );
-    PrincipalView::from_config(
-        &Config {
-            principals,
-            ..Config::default()
-        },
+    Arc::new(PrincipalView::for_tests(
+        "principal-test",
+        true,
+        vec!["*".to_owned()],
+        Vec::new(),
         std::collections::HashMap::new(),
-    )
-    .expect("principal view builds")
+    ))
 }
 
 impl ApiKeyAwareSignerFactory for TestAuthn {

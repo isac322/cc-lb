@@ -5,8 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use cc_lb_storage_api::{
-    PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamKind, UpstreamStore,
+    PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore,
 };
+
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_redb::Storage;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use tempfile::TempDir;

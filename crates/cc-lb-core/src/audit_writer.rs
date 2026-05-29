@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cc_lb_storage_api::{AuditEntry as StoredAuditEntry, Storage as StorageTrait};
+use cc_lb_storage_api::{AuditEntry as StoredAuditEntry, AuditStore, Storage as StorageTrait};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -18,20 +18,26 @@ pub struct AuditWriterSink {
 pub struct AuditDropped;
 
 pub trait AuditStorageHandle {
-    fn into_audit_storage(self) -> Arc<dyn StorageTrait>;
+    fn into_audit_storage(self) -> Arc<dyn AuditStore>;
+}
+
+impl AuditStorageHandle for Arc<dyn AuditStore> {
+    fn into_audit_storage(self) -> Arc<dyn AuditStore> {
+        self
+    }
 }
 
 impl AuditStorageHandle for Arc<dyn StorageTrait> {
-    fn into_audit_storage(self) -> Arc<dyn StorageTrait> {
+    fn into_audit_storage(self) -> Arc<dyn AuditStore> {
         self
     }
 }
 
 impl<T> AuditStorageHandle for Arc<T>
 where
-    T: StorageTrait,
+    T: AuditStore + 'static,
 {
-    fn into_audit_storage(self) -> Arc<dyn StorageTrait> {
+    fn into_audit_storage(self) -> Arc<dyn AuditStore> {
         self
     }
 }
@@ -131,7 +137,7 @@ fn take_batch(batch: &mut Vec<StoredAuditEntry>) -> Vec<StoredAuditEntry> {
     std::mem::replace(batch, Vec::with_capacity(AUDIT_BATCH_CAPACITY))
 }
 
-async fn flush_batch(storage: Arc<dyn StorageTrait>, batch: Vec<StoredAuditEntry>) {
+async fn flush_batch(storage: Arc<dyn AuditStore>, batch: Vec<StoredAuditEntry>) {
     match storage.append_audit_entries(&batch).await {
         Ok(()) => {}
         Err(error) => tracing::warn!(error = %error, "audit writer batch append failed"),

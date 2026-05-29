@@ -9,7 +9,7 @@ use cc_lb_plugin_api::{
     CredentialStrategy, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
     SignerFactory, SigningCapability, Upstream, UpstreamError,
 };
-use cc_lb_storage_api::{AnthropicApiKeyCredential, Storage};
+use cc_lb_storage_api::{AnthropicApiKeyCredential, OAuthCredentialStore};
 use http::header::{AUTHORIZATION, HeaderValue};
 use secrecy::{ExposeSecret, SecretString};
 
@@ -18,7 +18,7 @@ enum AnthropicKeyCredentialSource {
     Static(SecretString),
     Storage {
         storage_key: String,
-        storage: Arc<dyn Storage>,
+        storage: Arc<dyn OAuthCredentialStore>,
         aead: Arc<AeadService>,
     },
 }
@@ -56,7 +56,7 @@ impl AnthropicKeySigner {
 
     pub fn from_storage(
         storage_key: impl Into<String>,
-        storage: Arc<dyn Storage>,
+        storage: Arc<dyn OAuthCredentialStore>,
         aead: Arc<AeadService>,
     ) -> Self {
         Self {
@@ -130,7 +130,7 @@ impl AnthropicKeySignerFactory {
 
     pub fn from_storage(
         storage_key: impl Into<String>,
-        storage: Arc<dyn Storage>,
+        storage: Arc<dyn OAuthCredentialStore>,
         aead: Arc<AeadService>,
     ) -> Self {
         Self {
@@ -171,7 +171,7 @@ impl SignerFactory for AnthropicKeySignerFactory {
 }
 
 async fn load_stored_api_key(
-    storage: Arc<dyn Storage>,
+    storage: Arc<dyn OAuthCredentialStore>,
     aead: Arc<AeadService>,
     storage_key: String,
 ) -> Result<SecretString, SignerError> {

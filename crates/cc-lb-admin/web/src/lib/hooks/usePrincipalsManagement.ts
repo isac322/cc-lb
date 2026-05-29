@@ -44,9 +44,11 @@ export function usePrincipalsManagement(mock?: boolean) {
       setIsLoading(true);
       setError(null);
 
-      const response = await getJson<{ principals: Array<PrincipalRuntimeSpec & { id: string; enabled?: boolean }> }>(
-        '/admin/v1/principals',
-      );
+      const response = await getJson<{
+        principals: Array<
+          PrincipalRuntimeSpec & { id: string; enabled?: boolean }
+        >;
+      }>('/admin/v1/principals');
 
       const list = response.principals.map((principal) => ({
         ...principal,

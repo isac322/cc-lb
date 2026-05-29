@@ -12,6 +12,7 @@ pub mod managed_keys;
 pub mod meta;
 pub mod notifier;
 pub mod oauth_credentials;
+pub mod principals;
 pub mod quota;
 pub mod request_events;
 pub mod retry;

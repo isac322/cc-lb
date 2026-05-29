@@ -47,6 +47,33 @@ pub struct PrincipalSpecCached {
 }
 
 impl PrincipalView {
+    pub fn for_tests(
+        principal_id: &str,
+        enabled: bool,
+        allowed_models: Vec<String>,
+        default_limits: Vec<DbLimit>,
+        mut principal_chains: HashMap<String, PrincipalRoutingArtifacts>,
+    ) -> Self {
+        let principal = PrincipalRecord {
+            id: uuid::Uuid::new_v4(),
+            name: principal_id.to_owned(),
+            kind: DbPrincipalKind::Machine,
+            allowed_models,
+            default_limits,
+            enabled,
+            last_apply_error: None,
+            last_apply_at_unix_secs: None,
+            deleted_at_unix_secs: None,
+            revision: 1,
+            created_at_unix_secs: 0,
+            updated_at_unix_secs: 0,
+        };
+        principal_chains
+            .entry(principal_id.to_owned())
+            .or_insert((RouterPluginCache::Inherit, ObservabilityHooksCache::Inherit));
+        Self::from_db(&[principal], principal_chains)
+    }
+
     pub fn from_db(
         principals: &[PrincipalRecord],
         mut principal_chains: HashMap<String, PrincipalRoutingArtifacts>,

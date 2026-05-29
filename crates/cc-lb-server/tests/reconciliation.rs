@@ -12,9 +12,11 @@ use cc_lb_server::reconcile::Reconciler;
 use cc_lb_storage_api::{
     PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore,
     PluginSlot, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate,
-    StorageResult, UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStore, UpstreamUpdate,
-    WasmBlob, WasmRegistryEntry, WasmRegistryEntryInput,
+    StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate, WasmBlob,
+    WasmRegistryEntry, WasmRegistryEntryInput,
 };
+
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_redb::Storage;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tokio::sync::Notify;

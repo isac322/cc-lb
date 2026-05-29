@@ -662,16 +662,16 @@ async fn build_app_with_storage_inner(
         sighup_handler(reload_tls_state, config_watcher.clone()),
     );
     let reconcile_cancel = CancellationToken::new();
-    spawn_reconciler(
-        stores.clone(),
-        dynamic_view.clone(),
-        Arc::new(oauth_anthropic),
-        runtime.clone(),
-        aead.clone(),
-        lazy_refresher.clone(),
-        reconcile_cancel.clone(),
-        data_dir.clone(),
-    );
+    spawn_reconciler(ReconcilerParams {
+        stores: stores.clone(),
+        holder: dynamic_view.clone(),
+        oauth_cfg: Arc::new(oauth_anthropic),
+        runtime: runtime.clone(),
+        aead: aead.clone(),
+        lazy_refresher: lazy_refresher.clone(),
+        cancel: reconcile_cancel.clone(),
+        data_dir: data_dir.clone(),
+    });
     spawn_reconcile_shutdown(signals.subscribe(), reconcile_cancel);
     if let Some(replica_id) = replica_id {
         spawn_oauth_refresher(
@@ -763,7 +763,7 @@ impl DynamicViewRebinder for ServerDynamicViewRebinder {
     }
 }
 
-fn spawn_reconciler(
+struct ReconcilerParams {
     stores: Arc<DynamicStores>,
     holder: Arc<DynamicViewHolder>,
     oauth_cfg: Arc<cc_lb_config::AnthropicOAuthConfig>,
@@ -772,16 +772,18 @@ fn spawn_reconciler(
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     cancel: CancellationToken,
     data_dir: PathBuf,
-) {
+}
+
+fn spawn_reconciler(params: ReconcilerParams) {
     let reconciler = Arc::new(Reconciler::new(
-        stores,
-        holder,
-        oauth_cfg,
-        runtime,
-        aead,
-        lazy_refresher,
-        cancel,
-        data_dir,
+        params.stores,
+        params.holder,
+        params.oauth_cfg,
+        params.runtime,
+        params.aead,
+        params.lazy_refresher,
+        params.cancel,
+        params.data_dir,
     ));
     tokio::spawn(reconciler.run());
 }

@@ -230,7 +230,7 @@ mod tests {
         let json = serde_json::to_string(&encrypted).expect("serialize to json");
         assert!(json.contains('"')); // JSON string quotes
         // Base64 is human-readable within the JSON
-        assert!(json.chars().all(|c| c.is_ascii()));
+        assert!(json.is_ascii());
 
         // Deserialize back
         let decrypted_field: AeadEncryptedField<OAuthTokenBundle> =

@@ -27,5 +27,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
+cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 chrono = { workspace = true }
 tempfile = { workspace = true }
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-ring"] }

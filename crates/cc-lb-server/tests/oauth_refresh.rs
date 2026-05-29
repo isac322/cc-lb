@@ -24,9 +24,9 @@ use cc_lb_server::refresh::{LazyRefresher, OAuthRefresher};
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh,
 };
-use cc_lb_storage_api::{
-    PrincipalCreate, PrincipalKind, UpstreamCreate, UpstreamKind, UpstreamStore,
-};
+use cc_lb_storage_api::{PrincipalCreate, PrincipalKind, UpstreamCreate, UpstreamStore};
+
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_redb::Storage;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use http::Request;

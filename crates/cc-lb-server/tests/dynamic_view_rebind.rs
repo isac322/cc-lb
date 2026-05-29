@@ -7,8 +7,10 @@ use cc_lb_core::{ApplyStatus, DynamicView};
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::{
-    PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamKind, UpstreamStore,
+    PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore,
 };
+
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_redb::Storage;
 
 fn oauth_config() -> AnthropicOAuthConfig {
