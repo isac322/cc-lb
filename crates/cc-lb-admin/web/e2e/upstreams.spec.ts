@@ -46,20 +46,11 @@ test.describe.serial('Upstreams Management', () => {
     await page.waitForSelector('table');
     const row = page.getByRole('row', { name: /test-api-key-upstream/ });
     
-    const disableBtn = row.getByRole('button', { name: 'Disable' });
-    const enableBtn = row.getByRole('button', { name: 'Enable' });
-    
-    if (await disableBtn.isVisible()) {
-      await disableBtn.click();
-      await expect(row.getByText('Disabled')).toBeVisible();
-      await enableBtn.click();
-      await expect(row.getByText('Active')).toBeVisible();
-    } else {
-      await enableBtn.click();
-      await expect(row.getByText('Active')).toBeVisible();
-      await disableBtn.click();
-      await expect(row.getByText('Disabled')).toBeVisible();
-    }
+    await row.getByRole('button', { name: 'Disable' }).click();
+    await expect(row.getByText('Disabled')).toBeVisible({ timeout: 10000 });
+
+    await row.getByRole('button', { name: 'Enable' }).click();
+    await expect(row.getByText('Active')).toBeVisible({ timeout: 10000 });
   });
 
   test('should delete an upstream', async ({ page }) => {
