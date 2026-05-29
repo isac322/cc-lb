@@ -1,5 +1,6 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::StorageResult;
 
@@ -10,6 +11,7 @@ use crate::StorageResult;
 pub enum RateLimitKind {
     /// Request rate limit.
     Requests,
+    Tokens,
     /// Input token rate limit.
     InputTokens,
     /// Output token rate limit.
@@ -20,6 +22,7 @@ impl RateLimitKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Requests => "requests",
+            Self::Tokens => "tokens",
             Self::InputTokens => "input_tokens",
             Self::OutputTokens => "output_tokens",
         }
@@ -32,16 +35,16 @@ impl RateLimitKind {
 /// maintain downstream quotas and enforce global limits.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpstreamRateLimitObservationRecord {
-    /// Observation timestamp in milliseconds since Unix epoch.
-    pub ts_ms: u64,
     /// Upstream identifier.
-    pub upstream_id: String,
+    pub upstream_id: Uuid,
+    pub window: String,
     /// Rate limit kind (requests, input tokens, output tokens).
     pub kind: RateLimitKind,
+    pub limit: Option<u64>,
     /// Remaining quota reported by upstream.
-    pub remaining: u64,
-    /// Reset timestamp in milliseconds since Unix epoch.
-    pub reset_at_ms: u64,
+    pub remaining: Option<u64>,
+    pub reset: Option<String>,
+    pub observed_at_unix_secs: u64,
 }
 
 #[async_trait]
@@ -55,6 +58,6 @@ pub trait UpstreamRateLimitStateStore: Send + Sync {
     /// List all observations for the given upstream identifiers.
     async fn list_for_upstream_ids(
         &self,
-        upstream_ids: &[String],
+        upstream_ids: &[Uuid],
     ) -> StorageResult<Vec<UpstreamRateLimitObservationRecord>>;
 }

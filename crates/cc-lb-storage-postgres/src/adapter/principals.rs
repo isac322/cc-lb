@@ -27,7 +27,6 @@ impl PrincipalStore for PostgresStorage {
         let id = Uuid::new_v4();
         let now = unix_secs_to_datetime(now_unix_secs, "principal.now_unix_secs")?;
         let allowed_models = serde_json::to_value(&input.allowed_models)?;
-        let allowed_upstreams = serde_json::to_value(&input.allowed_upstreams)?;
         let default_limits = serde_json::to_value(&input.default_limits)?;
         let row = sqlx::query(
             "INSERT INTO principals_v1 (id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, revision, created_at, updated_at) VALUES ($1, $2, $3, $4, $5, $6, TRUE, 0, $7, $7) RETURNING *",
@@ -36,7 +35,7 @@ impl PrincipalStore for PostgresStorage {
         .bind(input.name)
         .bind(principal_kind_to_str(input.kind))
         .bind(allowed_models)
-        .bind(allowed_upstreams)
+        .bind(&input.allowed_upstreams)
         .bind(default_limits)
         .bind(now)
         .fetch_one(&self.pool)
@@ -48,7 +47,7 @@ impl PrincipalStore for PostgresStorage {
     }
 
     async fn get_by_id(&self, id: Uuid) -> StorageResult<Option<PrincipalRecord>> {
-        let row = sqlx::query("SELECT * FROM principals_v1 WHERE id = $1")
+        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at FROM principals_v1 WHERE id = $1")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -57,7 +56,7 @@ impl PrincipalStore for PostgresStorage {
     }
 
     async fn get_by_name(&self, name: &str) -> StorageResult<Option<PrincipalRecord>> {
-        let row = sqlx::query("SELECT * FROM principals_v1 WHERE name = $1")
+        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at FROM principals_v1 WHERE name = $1")
             .bind(name)
             .fetch_optional(&self.pool)
             .await
@@ -75,7 +74,7 @@ impl PrincipalStore for PostgresStorage {
             return Ok(Vec::new());
         }
         let rows = sqlx::query(
-            "SELECT * FROM principals_v1 WHERE ($1 OR deleted_at IS NULL) ORDER BY name ASC OFFSET $2 LIMIT $3",
+            "SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at FROM principals_v1 WHERE ($1 OR deleted_at IS NULL) ORDER BY name ASC OFFSET $2 LIMIT $3",
         )
         .bind(include_deleted)
         .bind(u64_to_i64(offset as u64, "principal.offset")?)
@@ -118,7 +117,7 @@ impl PrincipalStore for PostgresStorage {
         .bind(id)
         .bind(name)
         .bind(serde_json::to_value(allowed_models)?)
-        .bind(serde_json::to_value(allowed_upstreams)?)
+        .bind(&allowed_upstreams)
         .bind(serde_json::to_value(default_limits)?)
         .bind(now)
         .bind(u64_to_i64(expected_revision, "principal.revision")?)
@@ -290,7 +289,7 @@ impl PostgresStorage {
 
 fn principal_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PrincipalRecord> {
     let allowed_models: Value = row.try_get("allowed_models").map_err(map_sqlx_error)?;
-    let allowed_upstreams: Value = row.try_get("allowed_upstreams").map_err(map_sqlx_error)?;
+    let allowed_upstreams: Vec<Uuid> = row.try_get("allowed_upstreams").map_err(map_sqlx_error)?;
     let default_limits: Value = row.try_get("default_limits").map_err(map_sqlx_error)?;
     let created_at: DateTime<Utc> = row.try_get("created_at").map_err(map_sqlx_error)?;
     let updated_at: DateTime<Utc> = row.try_get("updated_at").map_err(map_sqlx_error)?;
@@ -306,7 +305,7 @@ fn principal_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PrincipalReco
                 .as_str(),
         )?,
         allowed_models: serde_json::from_value(allowed_models)?,
-        allowed_upstreams: serde_json::from_value(allowed_upstreams)?,
+        allowed_upstreams,
         default_limits: serde_json::from_value(default_limits)?,
         enabled: row.try_get("enabled").map_err(map_sqlx_error)?,
         last_apply_error: row.try_get("last_apply_error").map_err(map_sqlx_error)?,

@@ -18,6 +18,7 @@ pub mod quota;
 pub mod request_events;
 pub mod retry;
 pub mod upstreams;
+pub mod upstream_rate_limit;
 pub mod usage_rollups;
 
 #[derive(Debug, Clone)]
@@ -113,25 +114,5 @@ pub(crate) fn i32_to_u16(value: i32, field: &str) -> StorageResult<u16> {
 pub(crate) fn conflict(message: impl Into<String>) -> StorageError {
     StorageError::Conflict {
         message: message.into(),
-    }
-}
-
-#[async_trait::async_trait]
-impl cc_lb_storage_api::upstream_rate_limit::UpstreamRateLimitStateStore for PostgresStorage {
-    async fn put_observation(
-        &self,
-        _observation: &cc_lb_storage_api::upstream_rate_limit::UpstreamRateLimitObservationRecord,
-    ) -> Result<(), cc_lb_storage_api::StorageError> {
-        Ok(())
-    }
-
-    async fn list_for_upstream_ids(
-        &self,
-        _upstream_ids: &[String],
-    ) -> Result<
-        Vec<cc_lb_storage_api::upstream_rate_limit::UpstreamRateLimitObservationRecord>,
-        cc_lb_storage_api::StorageError,
-    > {
-        Ok(vec![])
     }
 }
