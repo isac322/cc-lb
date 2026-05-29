@@ -1,11 +1,12 @@
 #![cfg(feature = "dto-roundtrip")]
 
+use cc_lb_storage_api::types::{Limit, LimitKind};
 use cc_lb_storage_api::{
     AnthropicApiKeyCredential, ApiKeyRecord, AuditEntry, BackendKind, BucketKind, ConfigDraftState,
-    HistoryEntry, HistorySummary, IssuedKey, KeyStatus, Limit, LimitKind, OAuthCredentials,
-    PrincipalKindLite, PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState,
-    RequestEvent, RequestEventUpstream, StorageError, StoredApiKeyRecord, StoredHistoryEntry,
-    UpstreamKind, UsageRollup, UsageRollupKey, UsageRollupResolution, UsageRollupRun,
+    HistoryEntry, HistorySummary, IssuedKey, KeyStatus, OAuthCredentials, PrincipalKindLite,
+    PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, RequestEvent,
+    RequestEventUpstream, StorageError, StoredApiKeyRecord, StoredHistoryEntry, UpstreamKind,
+    UsageRollup, UsageRollupKey, UsageRollupResolution, UsageRollupRun,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -96,8 +97,8 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         upstream: "anthropic_direct".to_owned(),
         model: Some("claude-3-5-sonnet".to_owned()),
         status: 200,
-        input_tokens: 120,
-        output_tokens: 45,
+        input_tokens: Some(120),
+        output_tokens: Some(45),
         duration_ms: 873,
         agent_label: Some("billing-agent".to_owned()),
         kind: Some("request_completed".to_owned()),
@@ -105,6 +106,7 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
             "nested": { "cache": true },
             "tags": ["t6", "dto"]
         })),
+        ..Default::default()
     });
 
     assert_json_roundtrip(RequestEvent {
