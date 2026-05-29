@@ -34,9 +34,25 @@ jobs:
       RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@v6
-      # The base image already ships a working rustup + stable toolchain. Re-running
-      # dtolnay/rust-toolchain on top of it tries to re-install components and dies
-      # on a missing 'share/doc/clippy/README.md' file. Trust the image's toolchain.
+      # The messense/rust-musl-cross image ships rustc 1.94.0 but the workspace
+      # pins channel = "1.95.0" via rust-toolchain.toml. We cannot simply call
+      # `rustup update stable` because the image's preinstalled clippy package
+      # manifest is corrupt - it claims to own
+      # share/doc/clippy/{README.md,LICENSE-MIT} which do not exist on disk, so
+      # any rustup operation that removes the old clippy component fails. We
+      # install the pinned 1.95.0 toolchain as a fresh, separate directory and
+      # promote it to default, leaving the broken stable untouched.
+      - name: Install pinned Rust toolchain from rust-toolchain.toml
+        run: |
+          set -euo pipefail
+          channel=$(grep -E '^channel = ' rust-toolchain.toml | sed 's/.*"\(.*\)".*/\1/')
+          target=${{ runner.arch == 'X64' && 'x86_64-unknown-linux-musl' || 'aarch64-unknown-linux-musl' }}
+          rustup toolchain install "$channel" --no-self-update \
+            --component rustc,cargo,clippy,rustfmt \
+            --profile minimal \
+            --target "$target"
+          rustup default "$channel"
+          rustc --version
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
