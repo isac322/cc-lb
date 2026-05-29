@@ -12,7 +12,7 @@ env:
 
 jobs:
   matrix:
-    runs-on: ubuntu-latest
+    runs-on: oracle4
     steps:
       - name: Free up disk space on runner
         uses: jlumbroso/free-disk-space@v1.3.1

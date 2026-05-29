@@ -9,7 +9,7 @@ env:
 
 jobs:
   fmt:
-    runs-on: ubuntu-latest
+    runs-on: oracle4
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -18,7 +18,7 @@ jobs:
       - run: cargo fmt --check
 
   clippy:
-    runs-on: ubuntu-latest
+    runs-on: oracle4
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -30,7 +30,7 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   nextest:
-    runs-on: ubuntu-latest
+    runs-on: oracle4
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_TEST_DEBUG: line-tables-only

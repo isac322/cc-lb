@@ -9,7 +9,7 @@ env:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: oracle4
     container: messense/rust-musl-cross:x86_64-musl
     env:
       RUSTUP_TOOLCHAIN: stable
