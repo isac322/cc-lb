@@ -347,6 +347,7 @@ Temporary Items
 crates/cc-lb-server/data/
 
 # Wave 6 e2e: agent-generated test runtime artifacts (do not commit)
+/data/
 /data-test/
 crates/cc-lb-admin/web/test-results/
 crates/cc-lb-admin/web/playwright-report/
