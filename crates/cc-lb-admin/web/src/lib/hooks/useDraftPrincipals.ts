@@ -28,7 +28,7 @@ export function useDraftPrincipals(mock?: boolean) {
       const res = await postJson<
         PrincipalMutationResponse,
         CreatePrincipalRequest
-      >('/admin/principals', { id, spec });
+      >('/admin/v1/principals', { id, spec });
       setLastDraftRevision(res.revision);
       return res;
     },
@@ -47,7 +47,7 @@ export function useDraftPrincipals(mock?: boolean) {
       const res = await putJson<
         PrincipalMutationResponse,
         UpdatePrincipalRequest
-      >(`/admin/principals/${id}`, { spec });
+      >(`/admin/v1/principals/${id}`, { spec });
       setLastDraftRevision(res.revision);
       return res;
     },
@@ -63,7 +63,7 @@ export function useDraftPrincipals(mock?: boolean) {
       const res = await postJson<
         PrincipalMutationResponse,
         Record<string, never>
-      >(`/admin/principals/${id}/disable`, {});
+      >(`/admin/v1/principals/${id}/disable`, {});
       setLastDraftRevision(res.revision);
       return res;
     },
@@ -79,7 +79,7 @@ export function useDraftPrincipals(mock?: boolean) {
       const res = await postJson<
         PrincipalMutationResponse,
         Record<string, never>
-      >(`/admin/principals/${id}/enable`, {});
+      >(`/admin/v1/principals/${id}/enable`, {});
       setLastDraftRevision(res.revision);
       return res;
     },
@@ -98,7 +98,7 @@ export function useDraftPrincipals(mock?: boolean) {
       const res = await putJson<
         PrincipalAllowedModelsResponse,
         AllowedModelsRequest
-      >(`/admin/principals/${id}/allowed_models`, { allowed_models });
+      >(`/admin/v1/principals/${id}/allowed_models`, { allowed_models });
       setLastDraftRevision(res.revision);
       return res;
     },
@@ -111,7 +111,7 @@ export function useDraftPrincipals(mock?: boolean) {
         return;
       }
       await postJson<unknown, QuotaOverrideRequest>(
-        `/admin/principals/${id}/quota/override`,
+        `/admin/v1/principals/${id}/quota/override`,
         override,
       );
     },

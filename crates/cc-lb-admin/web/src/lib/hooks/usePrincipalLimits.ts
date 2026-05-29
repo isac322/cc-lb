@@ -27,7 +27,7 @@ export function usePrincipalLimits(principalId: string | null, mock?: boolean) {
       try {
         setIsLoading(true);
         const res = await getJson<PrincipalLimitsResponse>(
-          `/admin/principals/${principalId}/limits`,
+          `/admin/v1/principals/${principalId}/limits`,
           { signal: controller.signal },
         );
         setData(res);
