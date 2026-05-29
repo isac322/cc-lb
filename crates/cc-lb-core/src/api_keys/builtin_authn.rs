@@ -382,6 +382,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::large_enum_variant)]
     enum LookupAction {
         Return(Box<Option<(String, String, StoredApiKeyRecord)>>),
         Unavailable,
