@@ -3,9 +3,9 @@
 # Docker container: `cc-lb-postgres` (postgres:17-alpine on 127.0.0.1:5432)
 
 [listener]
-proxy_addr = "127.0.0.1:8080"
-admin_addr = "127.0.0.1:9090"
-metrics_addr = "127.0.0.1:9091"
+proxy_addr = "0.0.0.0:8080"
+admin_addr = "0.0.0.0:9090"
+metrics_addr = "0.0.0.0:9091"
 
 [body]
 messages_cap_bytes = 33554432
@@ -26,6 +26,14 @@ auth_strategy = "api_key"
 
 [principals.api-key]
 allowed_models = ["*"]
+
+[downstream_auth]
+mode = "none"
+
+[downstream_auth.none_mode]
+principal_id = "api-key"
+upstream_kind = "anthropic_key"
+upstream_credential_ref = "dev"
 
 [plugins]
 observability_hooks = []
