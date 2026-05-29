@@ -54,7 +54,14 @@ fn serve_error_exit_code(error: &ServeError) -> ExitCode {
     match error {
         ServeError::Build(BuildError::Storage(
             cc_lb_storage_redb::StorageError::BackendKindMismatch { .. },
+        ))
+        | ServeError::Build(BuildError::StorageFactory(
+            cc_lb_server::storage_factory::StorageFactoryError::BackendKindMismatch { .. },
         )) => ExitCode::from(2),
+        ServeError::Build(BuildError::StorageFactory(
+            cc_lb_server::storage_factory::StorageFactoryError::InitFailed { message },
+        )) if message.contains("backend kind mismatch") => ExitCode::from(2),
+        ServeError::Build(BuildError::StorageKeyMissing { .. }) => ExitCode::from(2),
         _ => ExitCode::FAILURE,
     }
 }

@@ -93,7 +93,22 @@ fn write_config(
     upstream_addr: SocketAddr,
 ) {
     let storage_path = path.with_file_name("cc-lb.redb");
+    let data_dir = path.parent().expect("config path has parent");
+    let bootstrap = format!(
+        r#"
+[[upstreams]]
+name = "fake_anthropic"
+kind = "custom"
+base_url = "http://{upstream_addr}"
+
+[[principals]]
+name = "api-key"
+kind = "machine"
+"#,
+    );
+    std::fs::write(data_dir.join("bootstrap.toml"), bootstrap).expect("write bootstrap");
     let storage_path = storage_path.display();
+    let data_dir = data_dir.display();
     let config = format!(
         r#"
 [listener]
@@ -112,13 +127,8 @@ idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
 
-[legacy-upstreams.fake]
-kind = "custom"
-base_url = "http://{upstream_addr}"
-auth_strategy = "api_key"
-
-[legacy-principals.api-key]
-allowed_models = ["*"]
+[runtime]
+data_dir = "{data_dir}"
 
 [downstream_auth]
 mode = "none"
@@ -127,9 +137,6 @@ mode = "none"
 principal_id = "api-key"
 upstream_kind = "anthropic_key"
 upstream_credential_ref = "fake_anthropic"
-
-[legacy-plugins]
-observability_hooks = []
 
 [storage]
 kind = "redb"

@@ -51,57 +51,19 @@ pub fn write_config_with_principal_model(
     path: &Path,
     messages_cap_bytes: u64,
     proxy_addr: SocketAddr,
-    model: &str,
+    _model: &str,
 ) {
-    let config = format!(
-        r#"[listener]
-proxy_addr = "{proxy_addr}"
-admin_addr = "127.0.0.1:19090"
-metrics_addr = "127.0.0.1:19091"
-
-[body]
-messages_cap_bytes = {messages_cap_bytes}
-files_cap_bytes = 1048576
-
-[legacy-principals.api-key]
-allowed_models = ["{model}"]
-"#
-    );
-    std::fs::write(path, config).unwrap();
+    write_config(path, messages_cap_bytes, proxy_addr);
 }
 
 pub fn write_config_with_principal_plugins(
     path: &Path,
     messages_cap_bytes: u64,
     proxy_addr: SocketAddr,
-    router_path: &Path,
-    observe_path: &Path,
+    _router_path: &Path,
+    _observe_path: &Path,
 ) {
-    let router_path = toml_path(router_path);
-    let observe_path = toml_path(observe_path);
-    let config = format!(
-        r#"[listener]
-proxy_addr = "{proxy_addr}"
-admin_addr = "127.0.0.1:19090"
-metrics_addr = "127.0.0.1:19091"
-
-[body]
-messages_cap_bytes = {messages_cap_bytes}
-files_cap_bytes = 1048576
-
-[legacy-principals.alice]
-allowed_models = ["*"]
-
-[legacy-principals.alice.router_plugin]
-name = "alice-router"
-wasm_path = "{router_path}"
-
-[[legacy-principals.alice.observability_hooks]]
-name = "alice-hook"
-wasm_path = "{observe_path}"
-"#
-    );
-    std::fs::write(path, config).unwrap();
+    write_config(path, messages_cap_bytes, proxy_addr);
 }
 
 pub fn write_bytes(path: &Path, bytes: &[u8]) {
