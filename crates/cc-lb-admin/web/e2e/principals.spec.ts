@@ -7,7 +7,11 @@ const execAsync = promisify(exec);
 
 test.describe('Principal Management', () => {
   test.beforeEach(async ({ page }) => {
-    await page.goto('/admin?tab=principals');
+    await page.addInitScript(() => {
+      localStorage.setItem('cc-lb-admin-token', 'test-admin-token');
+    });
+    await page.goto('/management');
+    await page.waitForLoadState('networkidle');
   });
 
   test('should list principals', async ({ page }) => {

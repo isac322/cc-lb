@@ -8,7 +8,11 @@ const __dirname = path.dirname(__filename);
 
 test.describe('Plugin Registry', () => {
   test.beforeEach(async ({ page }) => {
+    await page.addInitScript(() => {
+      localStorage.setItem('cc-lb-admin-token', 'test-admin-token');
+    });
     await page.goto('/plugins');
+    await page.waitForLoadState('networkidle');
   });
 
   test('uploads a wasm file', async ({ page }) => {
