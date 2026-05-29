@@ -109,6 +109,20 @@ sys.exit(1)
 PY
 }
 
+render_bootstrap() {
+  bootstrap_path=$1
+  cat > "$bootstrap_path" <<TOML
+[[upstreams]]
+name = "fake_anthropic"
+kind = "custom"
+base_url = "http://127.0.0.1:$fake_port"
+
+[[principals]]
+name = "api-key"
+kind = "machine"
+TOML
+}
+
 render_config() {
   config_path=$1
   cat > "$config_path" <<TOML
@@ -128,13 +142,8 @@ idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
 
-[legacy-upstreams.fake_anthropic]
-kind = "custom"
-base_url = "http://127.0.0.1:$fake_port"
-auth_strategy = "api_key"
-
-[legacy-principals.api-key]
-allowed_models = ["*"]
+[runtime]
+data_dir = "$TMP_DIR"
 
 [downstream_auth]
 mode = "none"
@@ -142,14 +151,17 @@ mode = "none"
 [downstream_auth.none_mode]
 principal_id = "api-key"
 upstream_kind = "anthropic_key"
-upstream_credential_ref = "fake_anthropic"
-
-[legacy-plugins]
-observability_hooks = []
+upstream_credential_ref = ""
 
 [storage]
-redb_path = "$TMP_DIR/cc-lb.redb"
-oauth_aead_key_env = "CC_LB_MASTER_KEY"
+kind = "redb"
+path = "$TMP_DIR/cc-lb.redb"
+
+[aead]
+key_env = "CC_LB_MASTER_KEY"
+
+[api_keys.price_catalog]
+cache_path = "$TMP_DIR/price-catalog.json"
 
 [observability]
 tracing_level = "warn"
@@ -227,6 +239,8 @@ proxy_port=$(free_port)
 admin_port=$(free_port)
 metrics_port=$(free_port)
 config_path="$TMP_DIR/cc-lb.toml"
+bootstrap_path="$TMP_DIR/bootstrap.toml"
+render_bootstrap "$bootstrap_path"
 render_config "$config_path"
 
 "$ROOT_DIR/target/debug/fake-anthropic" --port "$fake_port" > "$TMP_DIR/fake-anthropic.log" 2>&1 &
