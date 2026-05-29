@@ -351,3 +351,6 @@ crates/cc-lb-server/data/
 /data-test/
 crates/cc-lb-admin/web/test-results/
 crates/cc-lb-admin/web/playwright-report/
+
+# Test-spawned replica_id artifacts (Task 6 LoadReplicaId may run from any cwd in tests)
+**/data/replica_id
