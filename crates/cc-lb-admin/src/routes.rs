@@ -6,12 +6,17 @@ use axum::{
     response::IntoResponse,
     routing::{delete, get, post},
 };
+use cc_lb_core::api_keys::key_store::KeyStore;
 use cc_lb_storage_api::{Storage, StorageError};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{AdminState, auth::require_admin_auth};
+use crate::{
+    AdminState,
+    auth::require_admin_auth,
+    principals::{principal_key_usage, principal_limits, principal_usage},
+};
 
 #[derive(RustEmbed)]
 #[folder = "web/dist/"]
@@ -19,6 +24,25 @@ struct Assets;
 
 pub fn build_router(state: AdminState) -> Router {
     let protected_routes = Router::new()
+        .route("/admin/principals/{id}/usage", get(principal_usage))
+        .route("/admin/principals/{id}/limits", get(principal_limits))
+        .route("/admin/principals/{id}/keys/{key_id}", get(get_api_key))
+        .route(
+            "/admin/principals/{id}/keys/{key_id}/revoke",
+            post(revoke_api_key),
+        )
+        .route(
+            "/admin/principals/{id}/keys/{key_id}/disable",
+            post(disable_api_key),
+        )
+        .route(
+            "/admin/principals/{id}/keys/{key_id}/enable",
+            post(enable_api_key),
+        )
+        .route(
+            "/admin/principals/{id}/keys/{key_id}/usage",
+            get(principal_key_usage),
+        )
         .route("/admin/audit", get(query_audit))
         .route("/admin/status", get(crate::status::handler))
         .route("/admin/killswitch", post(set_killswitch))
@@ -51,6 +75,73 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/{*file}", get(serve_asset))
         .route("/admin/health", get(health))
         .with_state(state)
+}
+
+async fn get_api_key(
+    State(state): State<AdminState>,
+    Path((principal_id, key_id)): Path<(String, String)>,
+) -> Result<Json<Value>, StatusCode> {
+    let storage = state.storage.as_ref().ok_or(StatusCode::NOT_IMPLEMENTED)?;
+    let record = storage
+        .get_api_key(&principal_id, &key_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(json!({
+        "id": key_id,
+        "principal_id": principal_id,
+        "label": record.label,
+        "status": record.status,
+        "last_4": record.last_4,
+        "expires_at_unix_secs": record.expires_at_unix_secs,
+    })))
+}
+
+async fn disable_api_key(
+    State(state): State<AdminState>,
+    Path((principal_id, key_id)): Path<(String, String)>,
+) -> Result<Json<Value>, StatusCode> {
+    mutate_api_key(
+        &state,
+        &principal_id,
+        &key_id,
+        |keys, principal_id, key_id| keys.disable(principal_id, key_id),
+    )
+}
+
+async fn enable_api_key(
+    State(state): State<AdminState>,
+    Path((principal_id, key_id)): Path<(String, String)>,
+) -> Result<Json<Value>, StatusCode> {
+    mutate_api_key(
+        &state,
+        &principal_id,
+        &key_id,
+        |keys, principal_id, key_id| keys.enable(principal_id, key_id),
+    )
+}
+
+async fn revoke_api_key(
+    State(state): State<AdminState>,
+    Path((principal_id, key_id)): Path<(String, String)>,
+) -> Result<Json<Value>, StatusCode> {
+    mutate_api_key(
+        &state,
+        &principal_id,
+        &key_id,
+        |keys, principal_id, key_id| keys.revoke(principal_id, key_id),
+    )
+}
+
+fn mutate_api_key(
+    state: &AdminState,
+    principal_id: &str,
+    key_id: &str,
+    mutate: impl FnOnce(&KeyStore, &str, &str) -> cc_lb_core::api_keys::key_store::Result<()>,
+) -> Result<Json<Value>, StatusCode> {
+    let storage = state.storage.as_ref().ok_or(StatusCode::NOT_IMPLEMENTED)?;
+    mutate(&KeyStore::new(storage.clone()), principal_id, key_id)
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "status": "ok" })))
 }
 
 async fn serve_index() -> impl IntoResponse {

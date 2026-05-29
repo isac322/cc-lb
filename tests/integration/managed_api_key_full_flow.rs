@@ -23,7 +23,7 @@ use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, sleep, timeout};
+use tokio::time::{Instant, sleep};
 use url::Url;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -106,6 +106,24 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         "happy /v1/messages returned 200 with request and token rate-limit headers",
     )?;
 
+    let usage = wait_for_usage(&client, &server.admin_url, &key_id).await?;
+    append_step(
+        5,
+        "usage rollup observed at least one request event for issued key",
+    )?;
+    let first_series = usage["series"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|series| series["request_count"].as_u64().unwrap_or(0) > 0)
+        .expect("usage series with request count");
+    assert!(first_series["cost_usd_micros"].as_i64().unwrap_or(0) > 0);
+    assert!(first_series["request_count"].as_u64().unwrap_or(0) > 0);
+    append_step(
+        6,
+        "usage rollup has positive request_count and virtual_cost_micros",
+    )?;
+
     usage_tokens.store(10_000, Ordering::SeqCst);
     let mut rejected = None;
     for _ in 0..90 {
@@ -130,6 +148,92 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         "cost cap reached and subsequent /v1/messages returned 429 with Retry-After",
     )?;
 
+    let disable_response = client
+        .request(
+            "POST",
+            &format!(
+                "{}/admin/principals/u1/keys/{key_id}/disable",
+                server.admin_url
+            ),
+            &[("authorization", &format!("Bearer {ADMIN_TOKEN}"))],
+            &[],
+        )
+        .await?;
+    assert_eq!(
+        disable_response.status(),
+        StatusCode::OK,
+        "disable response: {}",
+        disable_response.text().await?
+    );
+    let disabled = send_message(&client, &server.proxy_url, Some(&plaintext_key)).await?;
+    assert_eq!(
+        disabled.status(),
+        StatusCode::FORBIDDEN,
+        "disabled response: {}",
+        disabled.text().await?
+    );
+    append_step(8, "disabled key rejects /v1/messages with 403")?;
+
+    let enable_response = client
+        .request(
+            "POST",
+            &format!(
+                "{}/admin/principals/u1/keys/{key_id}/enable",
+                server.admin_url
+            ),
+            &[("authorization", &format!("Bearer {ADMIN_TOKEN}"))],
+            &[],
+        )
+        .await?;
+    assert_eq!(
+        enable_response.status(),
+        StatusCode::OK,
+        "enable response: {}",
+        enable_response.text().await?
+    );
+    let key_response = client
+        .request(
+            "GET",
+            &format!("{}/admin/principals/u1/keys/{key_id}", server.admin_url),
+            &[("authorization", &format!("Bearer {ADMIN_TOKEN}"))],
+            &[],
+        )
+        .await?;
+    assert_eq!(
+        key_response.status(),
+        StatusCode::OK,
+        "get key response: {}",
+        key_response.text().await?
+    );
+    let key_body: Value = key_response.json().await?;
+    assert_eq!(key_body["status"], "active");
+    append_step(9, "enabled key reports Active through GET key endpoint")?;
+
+    let revoke_response = client
+        .request(
+            "POST",
+            &format!(
+                "{}/admin/principals/u1/keys/{key_id}/revoke",
+                server.admin_url
+            ),
+            &[("authorization", &format!("Bearer {ADMIN_TOKEN}"))],
+            &[],
+        )
+        .await?;
+    assert_eq!(
+        revoke_response.status(),
+        StatusCode::OK,
+        "revoke response: {}",
+        revoke_response.text().await?
+    );
+    let revoked = send_message(&client, &server.proxy_url, Some(&plaintext_key)).await?;
+    assert_eq!(
+        revoked.status(),
+        StatusCode::UNAUTHORIZED,
+        "revoked response: {}",
+        revoked.text().await?
+    );
+    append_step(10, "revoked key rejects /v1/messages with 401")?;
     server.shutdown().await;
 
     usage_tokens.store(20, Ordering::SeqCst);
@@ -397,7 +501,8 @@ impl StartedServer {
     async fn shutdown(mut self) {
         self.signal.start_shutdown();
         if let Some(task) = self.task.take() {
-            let _ = timeout(Duration::from_secs(5), task).await;
+            task.abort();
+            let _ = task.await;
         }
     }
 }
@@ -429,6 +534,44 @@ async fn send_message(
         .request("POST", &format!("{proxy_url}/v1/messages"), &headers, &body)
         .await
         .map_err(Into::into)
+}
+
+async fn wait_for_usage(
+    client: &TestClient,
+    admin_url: &str,
+    key_id: &str,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let deadline = Instant::now() + Duration::from_secs(65);
+    loop {
+        let response = client
+            .request(
+                "GET",
+                &format!("{admin_url}/admin/principals/u1/keys/{key_id}/usage?range=1h&step=1h"),
+                &[("authorization", &format!("Bearer {ADMIN_TOKEN}"))],
+                &[],
+            )
+            .await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "usage response: {}",
+            response.text().await?
+        );
+        let body: Value = response.json().await?;
+        let observed = body["series"].as_array().is_some_and(|series| {
+            !series.is_empty()
+                && series
+                    .iter()
+                    .any(|entry| entry["request_count"].as_u64().unwrap_or(0) >= 1)
+        });
+        if observed {
+            return Ok(body);
+        }
+        if Instant::now() >= deadline {
+            return Err("usage was not observed within 65s".into());
+        }
+        sleep(Duration::from_secs(5)).await;
+    }
 }
 
 async fn wait_for_price_catalog() -> Result<(), Box<dyn std::error::Error>> {
