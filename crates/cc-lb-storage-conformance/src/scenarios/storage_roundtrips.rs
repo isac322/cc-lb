@@ -188,7 +188,7 @@ where
 
         let history = HistoryEntry {
             revision,
-            config_toml: "[upstreams.primary]\nkind = \"anthropic_direct\"\n".to_owned(),
+            config_toml: "[oauth.anthropic]\nclient_id = \"test-client\"\n".to_owned(),
             applied_at_unix_secs: 1_800_400_010,
             summary: HistorySummary {
                 upstreams: 1,
