@@ -224,6 +224,40 @@ if ! wait_port "$proxy_port" cc-lb; then
   cat "$TMP_DIR/proxy.log" >&2 || true
   fail "cc-lb did not start"
 fi
+if ! wait_port "$admin_port" cc-lb-admin; then
+  printf '%s\n' '--- proxy log ---' >&2
+  cat "$TMP_DIR/proxy.log" >&2 || true
+  fail "cc-lb-admin did not start"
+fi
+
+# The test config sets downstream_auth.mode = "none" with
+# upstream_credential_ref = "real_client" / principal_id = "api-key", both of
+# which must exist in the dynamic store before cc-lb can route the request.
+# Master b82e211 (feat: runtime-dynamic-mgmt) replaced the previous
+# [upstreams.*] / [principals.*] TOML blocks with admin-API registration, so
+# every test harness must seed them at startup.
+principal_code=$(curl -sS -o "$TMP_DIR/admin-principal.json" -w '%{http_code}' -X POST \
+  -H 'Authorization: Bearer admin-token' \
+  -H 'content-type: application/json' \
+  --data '{"name":"api-key","kind":"machine","allowed_models":["*"]}' \
+  "http://127.0.0.1:$admin_port/admin/v1/principals") || principal_code=000
+if [ "$principal_code" != "201" ] && [ "$principal_code" != "409" ]; then
+  printf '%s\n' '--- admin-principal.json ---' >&2
+  cat "$TMP_DIR/admin-principal.json" >&2 || true
+  fail "register principal expected 201 or 409, got $principal_code"
+fi
+
+upstream_body=$(printf '{"name":"real_client","kind":"custom","base_url":"http://127.0.0.1:%s"}' "$fake_port")
+upstream_code=$(curl -sS -o "$TMP_DIR/admin-upstream.json" -w '%{http_code}' -X POST \
+  -H 'Authorization: Bearer admin-token' \
+  -H 'content-type: application/json' \
+  --data "$upstream_body" \
+  "http://127.0.0.1:$admin_port/admin/v1/upstreams") || upstream_code=000
+if [ "$upstream_code" != "201" ] && [ "$upstream_code" != "409" ]; then
+  printf '%s\n' '--- admin-upstream.json ---' >&2
+  cat "$TMP_DIR/admin-upstream.json" >&2 || true
+  fail "register upstream expected 201 or 409, got $upstream_code"
+fi
 
 set +e
 case "$client" in
