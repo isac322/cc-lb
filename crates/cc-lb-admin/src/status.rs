@@ -1,7 +1,6 @@
 use std::collections::BTreeMap;
 
 use axum::{Json, extract::State};
-use cc_lb_aead::AeadService;
 use cc_lb_config::Config;
 use cc_lb_core::{BreakerRegistry, BulkheadRegistry, DrainController};
 use cc_lb_storage_api::{RequestEventUpstream, Storage, StorageError};
@@ -88,24 +87,6 @@ pub struct PluginStatusEntry {
     pub batched_flush_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct OAuthStatusResponse {
-    pub credentials: Vec<OAuthCredentialStatus>,
-    pub observed: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct OAuthCredentialStatus {
-    pub principal_id: String,
-    pub provider: String,
-    pub has_credentials: bool,
-    pub expires_at_unix_secs: Option<u64>,
-    pub refresh_token_present: bool,
-    pub last_updated_unix_secs: Option<u64>,
-    pub status: &'static str,
-    pub scopes: Vec<String>,
-}
-
 pub async fn handler(State(state): State<AdminState>) -> Json<PluginsStatusResponse> {
     let config = state.config.current_config();
     Json(build_status_response(
@@ -152,18 +133,6 @@ pub fn build_status_response(
         principals: BTreeMap::new(),
         last_reload_status,
     }
-}
-
-pub async fn build_oauth_status(
-    _storage: &dyn Storage,
-    _aead: &AeadService,
-    _config: &Config,
-    _now_unix_secs: u64,
-) -> Result<OAuthStatusResponse, StatusBuildError> {
-    Ok(OAuthStatusResponse {
-        credentials: Vec::new(),
-        observed: false,
-    })
 }
 
 impl StatusBuildError {
