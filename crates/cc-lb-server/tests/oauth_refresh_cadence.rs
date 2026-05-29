@@ -1,6 +1,7 @@
+use std::io::{self, Write};
 use std::net::SocketAddr;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -21,13 +22,19 @@ use uuid::Uuid;
 struct MockUpstreamStore {
     inner: Arc<Storage>,
     claim_refresh_lease_calls: Arc<AtomicUsize>,
+    inject_error: Arc<AtomicBool>,
 }
 
 impl MockUpstreamStore {
-    fn new(inner: Arc<Storage>, claim_refresh_lease_calls: Arc<AtomicUsize>) -> Self {
+    fn new(
+        inner: Arc<Storage>,
+        claim_refresh_lease_calls: Arc<AtomicUsize>,
+        inject_error: Arc<AtomicBool>,
+    ) -> Self {
         Self {
             inner,
             claim_refresh_lease_calls,
+            inject_error,
         }
     }
 }
@@ -47,6 +54,11 @@ impl UpstreamStore for MockUpstreamStore {
     }
 
     async fn list(&self, after: Option<Uuid>, limit: usize) -> StorageResult<Vec<UpstreamRecord>> {
+        if self.inject_error.load(Ordering::SeqCst) {
+            return Err(cc_lb_storage_api::StorageError::Unavailable {
+                message: "injected list error".to_owned(),
+            });
+        }
         self.inner.list(after, limit).await
     }
 
@@ -120,6 +132,45 @@ impl UpstreamStore for MockUpstreamStore {
 
     async fn hard_delete(&self, id: Uuid) -> StorageResult<()> {
         self.inner.hard_delete(id).await
+    }
+}
+
+#[derive(Clone, Default)]
+struct CapturedLogs {
+    inner: Arc<Mutex<Vec<u8>>>,
+}
+
+impl CapturedLogs {
+    fn contents(&self) -> String {
+        let bytes = self.inner.lock().expect("captured logs lock");
+        String::from_utf8_lossy(&bytes).into_owned()
+    }
+}
+
+struct CapturedWriter {
+    logs: CapturedLogs,
+}
+
+impl Write for CapturedWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.logs
+            .inner
+            .lock()
+            .expect("captured logs lock")
+            .extend_from_slice(buf);
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl<'writer> tracing_subscriber::fmt::MakeWriter<'writer> for CapturedLogs {
+    type Writer = CapturedWriter;
+
+    fn make_writer(&'writer self) -> Self::Writer {
+        CapturedWriter { logs: self.clone() }
     }
 }
 
@@ -245,13 +296,17 @@ async fn spawn_mock_token_server() -> (SocketAddr, JoinHandle<()>) {
     (addr, handle)
 }
 
-fn mock_upstream_store(fixture: &Fixture) -> (Arc<MockUpstreamStore>, Arc<AtomicUsize>) {
+fn mock_upstream_store(
+    fixture: &Fixture,
+) -> (Arc<MockUpstreamStore>, Arc<AtomicUsize>, Arc<AtomicBool>) {
     let claim_calls = Arc::new(AtomicUsize::new(0));
+    let inject_error = Arc::new(AtomicBool::new(false));
     let upstreams = Arc::new(MockUpstreamStore::new(
         fixture.storage.clone(),
         claim_calls.clone(),
+        inject_error.clone(),
     ));
-    (upstreams, claim_calls)
+    (upstreams, claim_calls, inject_error)
 }
 
 async fn spawn_refresher(refresher: Arc<OAuthRefresher>) -> JoinHandle<()> {
@@ -345,7 +400,7 @@ async fn wait_for_ciphertext_change(
 #[tokio::test(start_paused = true)]
 async fn gate_skips_sweep_when_no_oauth_credential_registered() {
     let fixture = Fixture::new().await;
-    let (upstreams, claim_calls) = mock_upstream_store(&fixture);
+    let (upstreams, claim_calls, _inject_error) = mock_upstream_store(&fixture);
     let cancel = CancellationToken::new();
     let refresher = fixture.refresher(upstreams, Uuid::new_v4(), cancel.clone());
     let task = spawn_refresher(refresher).await;
@@ -367,7 +422,7 @@ async fn gate_proceeds_when_at_least_one_oauth_credential_exists() {
         .create_oauth_upstream("within-window", now_secs() + 600)
         .await;
     let before = oauth_ciphertext(&fixture, upstream_id).await;
-    let (upstreams, claim_calls) = mock_upstream_store(&fixture);
+    let (upstreams, claim_calls, _inject_error) = mock_upstream_store(&fixture);
     let cancel = CancellationToken::new();
     let refresher = fixture.refresher(upstreams, Uuid::new_v4(), cancel.clone());
     let task = spawn_refresher(refresher).await;
@@ -403,7 +458,7 @@ async fn refresh_does_not_fire_before_ten_minute_tick() {
     fixture
         .create_oauth_upstream("before-tick", now_secs() + 600)
         .await;
-    let (upstreams, claim_calls) = mock_upstream_store(&fixture);
+    let (upstreams, claim_calls, _inject_error) = mock_upstream_store(&fixture);
     let cancel = CancellationToken::new();
     let refresher = fixture.refresher(upstreams, Uuid::new_v4(), cancel.clone());
     let task = spawn_refresher(refresher).await;
@@ -432,7 +487,7 @@ async fn refresh_fires_for_token_within_twenty_minute_lookahead_and_not_outside(
         .await;
     let inside_before = oauth_ciphertext(&fixture, inside_id).await;
     let outside_before = oauth_ciphertext(&fixture, outside_id).await;
-    let (upstreams, claim_calls) = mock_upstream_store(&fixture);
+    let (upstreams, claim_calls, _inject_error) = mock_upstream_store(&fixture);
     let cancel = CancellationToken::new();
     let refresher = fixture.refresher(upstreams, Uuid::new_v4(), cancel.clone());
     let task = spawn_refresher(refresher).await;
@@ -463,5 +518,33 @@ async fn refresh_fires_for_token_within_twenty_minute_lookahead_and_not_outside(
 
 #[tokio::test(start_paused = true)]
 async fn candidates_error_does_not_trigger_empty_gate_early_return() {
-    todo!()
+    let logs = CapturedLogs::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(logs.clone())
+        .with_ansi(false)
+        .with_max_level(tracing::Level::DEBUG)
+        .finish();
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let fixture = Fixture::new().await;
+    let (upstreams, _claim_calls, inject_error) = mock_upstream_store(&fixture);
+    inject_error.store(true, Ordering::SeqCst);
+    let cancel = CancellationToken::new();
+    let refresher = fixture.refresher(upstreams, Uuid::new_v4(), cancel.clone());
+    let task = spawn_refresher(refresher).await;
+
+    advance_eleven_minutes().await;
+    shutdown_refresher(cancel, task).await;
+
+    let output = logs.contents();
+    assert!(
+        output
+            .lines()
+            .any(|line| line.contains("WARN") && line.contains("oauth refresh sweep failed")),
+        "expected WARN oauth refresh sweep failure log, captured logs:\n{output}"
+    );
+    assert!(
+        !output.contains("oauth refresh sweep skipped: no oauth credentials registered"),
+        "did not expect empty-gate debug log, captured logs:\n{output}"
+    );
 }
