@@ -216,6 +216,7 @@ impl RouterPlugin for RecordingRouter {
             .unwrap()
             .push(format!("{}:{}", self.name, principal.id));
         Ok(RouteDecision {
+            upstream_id: None,
             upstream: Upstream::CustomAnthropicSpec {
                 base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
             },

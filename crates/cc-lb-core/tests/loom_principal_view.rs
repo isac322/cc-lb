@@ -148,6 +148,7 @@ mod principal_view_swap {
             assert!(matches!(self.generation, 1 | 2));
 
             Ok(RouteDecision {
+                upstream_id: None,
                 upstream: Upstream::CustomAnthropicSpec {
                     base_url: generation_url(self.generation),
                 },

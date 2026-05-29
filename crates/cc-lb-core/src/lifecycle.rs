@@ -10,7 +10,7 @@ use bytes::Bytes;
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
     RequestContext, RetryDecision, RouterPlugin, SignedRequest, Upstream, UpstreamCandidate,
-    UpstreamError, shape_request, sign_request,
+    UpstreamError, UpstreamKind, shape_request, sign_request,
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_api::{
@@ -47,6 +47,52 @@ const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RequestKind {
+    AnthropicMessages,
+}
+
+impl RequestKind {
+    fn matches_upstream(self, kind: StorageUpstreamKind) -> bool {
+        match self {
+            Self::AnthropicMessages => matches!(
+                kind,
+                StorageUpstreamKind::AnthropicApiKey
+                    | StorageUpstreamKind::AnthropicOauth
+                    | StorageUpstreamKind::Custom
+            ),
+        }
+    }
+}
+
+pub fn build_candidates(
+    view: &DynamicView,
+    principal_id: &str,
+    request_kind: RequestKind,
+) -> Vec<UpstreamCandidate> {
+    let Some(allowed_upstreams) = view.principal_view.allowed_upstreams(principal_id) else {
+        return Vec::new();
+    };
+
+    let mut candidates: Vec<UpstreamCandidate> = view
+        .upstreams_snapshot()
+        .iter()
+        .filter(|upstream| upstream.enabled)
+        .filter(|upstream| upstream.deleted_at_unix_secs.is_none())
+        .filter(|upstream| request_kind.matches_upstream(upstream.kind))
+        .filter(|upstream| allowed_upstreams.is_empty() || allowed_upstreams.contains(&upstream.id))
+        .map(|upstream| UpstreamCandidate {
+            upstream_id: upstream.id,
+            name: upstream.name.clone(),
+            kind: upstream_kind_for_candidate(upstream.kind),
+            observed_rate_limits: Vec::new(),
+            observed_at_unix_secs: 0,
+        })
+        .collect();
+    candidates.sort_unstable_by_key(|c| c.upstream_id);
+    candidates
+}
 
 #[derive(Clone, Debug)]
 pub struct ReplicaIdentity {
@@ -440,13 +486,20 @@ impl Lifecycle {
         );
 
         let mut candidates: Vec<UpstreamCandidate> = view
-            .upstream_status_snapshot
-            .entries
-            .keys()
-            .filter_map(|upstream_id_str| {
-                Uuid::parse_str(upstream_id_str)
-                    .ok()
-                    .map(|upstream_id| UpstreamCandidate { upstream_id })
+            .upstreams_snapshot()
+            .iter()
+            .filter(|record| {
+                view.upstream_status_snapshot
+                    .entries
+                    .get(&record.id.to_string())
+                    .is_some_and(|entry| entry.status == ApplyStatus::Active)
+            })
+            .map(|record| UpstreamCandidate {
+                upstream_id: record.id,
+                name: record.name.clone(),
+                kind: upstream_kind_for_candidate(record.kind),
+                observed_rate_limits: Vec::new(),
+                observed_at_unix_secs: view.upstream_status_snapshot.applied_at_unix_secs,
             })
             .collect();
         candidates.sort_by(|a, b| a.upstream_id.cmp(&b.upstream_id));
@@ -1630,6 +1683,14 @@ fn route_upstream_matches_record(record: &UpstreamRecord, upstream: &Upstream) -
             record.base_url.as_ref() == Some(base_url)
         }
         _ => false,
+    }
+}
+
+fn upstream_kind_for_candidate(kind: StorageUpstreamKind) -> UpstreamKind {
+    match kind {
+        StorageUpstreamKind::AnthropicApiKey => UpstreamKind::AnthropicApiKey,
+        StorageUpstreamKind::AnthropicOauth => UpstreamKind::AnthropicOauth,
+        StorageUpstreamKind::Custom => UpstreamKind::Custom,
     }
 }
 

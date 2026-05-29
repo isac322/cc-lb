@@ -25,6 +25,7 @@ impl RouterPlugin for DummyRouter {
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
         Ok(RouteDecision {
+            upstream_id: None,
             upstream: Upstream::AnthropicDirect,
             dialect: Arc::new(DummyDialect),
         })

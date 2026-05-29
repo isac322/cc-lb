@@ -30,8 +30,9 @@ pub use traits::{
 };
 pub use types::{
     CredentialStrategy, ObserveEvent, PluginManifest, Principal, PrincipalKind, PrincipalQuotas,
-    RequestContext, RetryDecision, RouteDecision, ShapedRequest, ShapedRequestBuilder,
-    SignedRequest, SigningCapability, Upstream, UpstreamCandidate, shape_request, sign_request,
+    RateLimitKind, RateLimitObservation, RequestContext, RetryDecision, RouteDecision,
+    ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, Upstream,
+    UpstreamCandidate, UpstreamKind, shape_request, sign_request,
 };
 
 mod private {

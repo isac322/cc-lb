@@ -123,6 +123,7 @@ impl RouterPlugin for TestRouter {
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
         Ok(RouteDecision {
+            upstream_id: None,
             upstream: Upstream::CustomAnthropicSpec {
                 base_url: self.base_url.clone(),
             },

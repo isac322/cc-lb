@@ -422,6 +422,7 @@ impl RouterPlugin for DbRouter {
         })?;
         tracing::debug!(upstream = route.name.as_str(), "dynamic route selected");
         Ok(RouteDecision {
+            upstream_id: None,
             upstream: route.upstream.clone(),
             dialect: route.dialect.clone(),
         })

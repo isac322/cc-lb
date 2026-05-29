@@ -6,15 +6,17 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    DialectError, Principal, RequestContext, RetryDecision, RouteDecision, RouteError,
-    RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError,
-    SignerFactory, SigningCapability, Upstream, UpstreamCandidate, UpstreamDialect, UpstreamError,
+    DialectError, Principal, RateLimitKind, RateLimitObservation, RequestContext, RetryDecision,
+    RouteDecision, RouteError, RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest,
+    Signer, SignerError, SignerFactory, SigningCapability, Upstream, UpstreamCandidate,
+    UpstreamDialect, UpstreamError, UpstreamKind,
 };
 use http::header::{HeaderName, HeaderValue};
 use http::{HeaderMap, Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use url::Url;
+use uuid::Uuid;
 
 use crate::{PluginCallError, PluginSlot};
 
@@ -44,7 +46,7 @@ impl RouterPlugin for ExtismRouterPlugin {
                     "_version": 1,
                     "request": RequestContextWire::from(ctx),
                     "principal": principal,
-                    "candidates": candidates,
+                    "candidates": Vec::<CandidateWire>::from(candidates),
                 }),
             )
             .map_err(route_runtime_error)?;
@@ -53,6 +55,7 @@ impl RouterPlugin for ExtismRouterPlugin {
             PluginBinding::SelfPlugin => Arc::new(ExtismDialectPlugin::new(self.slot.clone())),
         };
         Ok(RouteDecision {
+            upstream_id: response.upstream_id,
             upstream: response.upstream,
             dialect,
         })
@@ -287,6 +290,93 @@ impl From<&RequestContext> for RequestContextWire {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct CandidateWire {
+    upstream_id: String,
+    name: String,
+    kind: String,
+    observed_rate_limits: Vec<RateLimitObservationWire>,
+    observed_at_unix_secs: u64,
+}
+
+impl From<&[UpstreamCandidate]> for Vec<CandidateWire> {
+    fn from(candidates: &[UpstreamCandidate]) -> Self {
+        candidates.iter().map(CandidateWire::from).collect()
+    }
+}
+
+impl From<&UpstreamCandidate> for CandidateWire {
+    fn from(candidate: &UpstreamCandidate) -> Self {
+        Self {
+            upstream_id: candidate.upstream_id.to_string(),
+            name: candidate.name.clone(),
+            kind: candidate.kind.as_str().to_owned(),
+            observed_rate_limits: candidate
+                .observed_rate_limits
+                .iter()
+                .map(RateLimitObservationWire::from)
+                .collect(),
+            observed_at_unix_secs: candidate.observed_at_unix_secs,
+        }
+    }
+}
+
+impl From<&[CandidateWire]> for Vec<UpstreamCandidate> {
+    fn from(candidates: &[CandidateWire]) -> Self {
+        candidates.iter().map(UpstreamCandidate::from).collect()
+    }
+}
+
+impl From<&CandidateWire> for UpstreamCandidate {
+    fn from(candidate: &CandidateWire) -> Self {
+        Self {
+            upstream_id: Uuid::parse_str(&candidate.upstream_id)
+                .expect("candidate wire upstream_id is a UUID"),
+            name: candidate.name.clone(),
+            kind: upstream_kind_from_wire(&candidate.kind),
+            observed_rate_limits: candidate
+                .observed_rate_limits
+                .iter()
+                .map(RateLimitObservation::from)
+                .collect(),
+            observed_at_unix_secs: candidate.observed_at_unix_secs,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct RateLimitObservationWire {
+    kind: String,
+    window: String,
+    limit: Option<u64>,
+    remaining: Option<u64>,
+    reset: Option<String>,
+}
+
+impl From<&RateLimitObservation> for RateLimitObservationWire {
+    fn from(observation: &RateLimitObservation) -> Self {
+        Self {
+            kind: observation.kind.as_str().to_owned(),
+            window: observation.window.clone(),
+            limit: observation.limit,
+            remaining: observation.remaining,
+            reset: observation.reset.clone(),
+        }
+    }
+}
+
+impl From<&RateLimitObservationWire> for RateLimitObservation {
+    fn from(observation: &RateLimitObservationWire) -> Self {
+        Self {
+            kind: rate_limit_kind_from_wire(&observation.kind),
+            window: observation.window.clone(),
+            limit: observation.limit,
+            remaining: observation.remaining,
+            reset: observation.reset.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct ShapedRequestWire {
     url: String,
@@ -317,6 +407,8 @@ struct RouteResponse {
     upstream: Upstream,
     #[serde(default)]
     dialect: Option<PluginBinding>,
+    #[serde(default)]
+    upstream_id: Option<Uuid>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -424,6 +516,25 @@ fn headers_from_wire(headers: Vec<HeaderWire>) -> Result<HeaderMap, WireError> {
         out.append(name, value);
     }
     Ok(out)
+}
+
+fn upstream_kind_from_wire(kind: &str) -> UpstreamKind {
+    match kind {
+        "anthropic_api_key" => UpstreamKind::AnthropicApiKey,
+        "anthropic_oauth" => UpstreamKind::AnthropicOauth,
+        "custom" => UpstreamKind::Custom,
+        other => panic!("unknown candidate upstream kind: {other}"),
+    }
+}
+
+fn rate_limit_kind_from_wire(kind: &str) -> RateLimitKind {
+    match kind {
+        "requests" => RateLimitKind::Requests,
+        "tokens" => RateLimitKind::Tokens,
+        "input_tokens" => RateLimitKind::InputTokens,
+        "output_tokens" => RateLimitKind::OutputTokens,
+        other => panic!("unknown rate limit kind: {other}"),
+    }
 }
 
 pub(crate) fn parse_versioned<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, WireError> {

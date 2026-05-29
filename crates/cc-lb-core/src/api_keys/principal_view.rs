@@ -5,6 +5,7 @@ use cc_lb_plugin_api::{ObservabilityHook, RouterPlugin};
 use cc_lb_storage_api::principal::{Limit as DbLimit, LimitKind as DbLimitKind};
 use cc_lb_storage_api::{PrincipalKind as DbPrincipalKind, PrincipalRecord};
 use globset::{Glob, GlobSet, GlobSetBuilder};
+use uuid::Uuid;
 
 use crate::api_keys::types::{Limit, LimitKind, PrincipalType};
 
@@ -40,6 +41,7 @@ pub struct PrincipalSpecCached {
     principal_type: PrincipalType,
     allowed_models: GlobSet,
     allowed_models_exact: HashSet<String>,
+    allowed_upstreams: Vec<Uuid>,
     default_limits: Vec<Limit>,
     enabled: bool,
     router_plugin: RouterPluginCache,
@@ -118,6 +120,7 @@ impl PrincipalView {
                     principal_type: principal.kind.into(),
                     allowed_models,
                     allowed_models_exact: exact,
+                    allowed_upstreams: principal.allowed_upstreams.clone(),
                     default_limits: principal
                         .default_limits
                         .iter()
@@ -176,6 +179,11 @@ impl PrincipalView {
             .map(|spec| spec.default_limits.as_slice())
             .unwrap_or(&[])
     }
+
+    pub fn allowed_upstreams(&self, principal_id: &str) -> Option<&[Uuid]> {
+        self.get(principal_id)
+            .map(PrincipalSpecCached::allowed_upstreams)
+    }
 }
 
 impl std::fmt::Debug for PrincipalSpecCached {
@@ -197,6 +205,10 @@ impl PrincipalSpecCached {
 
     pub fn principal_type(&self) -> PrincipalType {
         self.principal_type
+    }
+
+    pub fn allowed_upstreams(&self) -> &[Uuid] {
+        &self.allowed_upstreams
     }
 
     pub fn resolved_router<'a>(
@@ -289,6 +301,7 @@ mod tests {
             principal_type: PrincipalType::Machine,
             allowed_models: GlobSetBuilder::new().build().unwrap(),
             allowed_models_exact: HashSet::new(),
+            allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
             enabled: true,
             router_plugin: router,
