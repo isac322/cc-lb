@@ -23,7 +23,7 @@ on:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+  cancel-in-progress: true
 
 env:
   CC_LB_ADMIN_SKIP_SPA: "1"
