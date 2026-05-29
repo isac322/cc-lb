@@ -34,10 +34,7 @@ async fn seed_admin_if_absent(store: &dyn PrincipalStore, _token: &str) -> Stora
         default_limits: vec![],
     };
 
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap()
-        .as_secs();
+    let now = unix_now_secs();
 
     match store.get_by_name("admin").await {
         Ok(Some(_)) => Ok(()),
@@ -169,7 +166,7 @@ pub async fn apply_bootstrap(
 
         let timestamp = SystemTime::now()
             .duration_since(UNIX_EPOCH)
-            .unwrap()
+            .expect("system time is always after UNIX_EPOCH")
             .as_secs();
         let consumed_name = format!("bootstrap.toml.consumed-{}", timestamp);
         let consumed_path = data_dir.join(&consumed_name);
@@ -405,7 +402,7 @@ fn parse_plugin_slot(slot: &str) -> Option<PluginSlot> {
 fn unix_now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .expect("system time is always after UNIX_EPOCH")
         .as_secs()
 }
 

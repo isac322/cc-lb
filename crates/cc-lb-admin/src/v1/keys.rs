@@ -84,7 +84,7 @@ async fn issue_key(
 
     match key_store.create(&id, params) {
         Ok((record, plaintext)) => {
-            let (key_id, _) = secret::parse(plaintext.expose()).unwrap();
+            let (key_id, _) = secret::parse(plaintext.expose()).expect("plaintext key format is guaranteed by KeyStore::create");
             let response = IssueKeyResponse {
                 principal_id: id,
                 key_id,
@@ -173,7 +173,7 @@ async fn revoke_key(
         Ok(_) => {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
+                .expect("system time is always after UNIX_EPOCH")
                 .as_secs();
             let response = RevokeKeyResponse {
                 key_id,
