@@ -3,6 +3,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use http::{HeaderMap, StatusCode};
+
 use cc_lb_config::{
     Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, StorageConfig,
 };
@@ -17,8 +19,9 @@ use cc_lb_storage_redb::{
     Limit as KeyLimit, LimitKind as KeyLimitKind, PrincipalKindLite, Storage,
     UpstreamKind as KeyUpstreamKind,
 };
-use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep, timeout};
 use url::Url;
@@ -39,7 +42,7 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         std::env::set_var("CC_LB_ADMIN_TOKEN", ADMIN_TOKEN);
     }
 
-    let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
+    let client = TestClient::new(Duration::from_secs(10));
     let litellm = MockServer::start().await;
     let usage_tokens = Arc::new(AtomicU64::new(20));
     let upstream = MockServer::start().await;
@@ -72,7 +75,10 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         "setup complete: tempdir storage, wiremock LiteLLM/upstream, build_app server started",
     )?;
 
-    append_step(2, "principal u1, upstream, and API key seeded through runtime storage")?;
+    append_step(
+        2,
+        "principal u1, upstream, and API key seeded through runtime storage",
+    )?;
     append_step(3, &format!("issued key {key_id} for principal u1"))?;
 
     let happy = send_message(&client, &server.proxy_url, Some(&plaintext_key)).await?;
@@ -126,7 +132,6 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
 
     server.shutdown().await;
 
-
     usage_tokens.store(20, Ordering::SeqCst);
     let none_storage_path = dir.path().join("managed-api-key-none.redb");
     let none_config = base_config(
@@ -134,7 +139,7 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         Some(NoneModeConfig {
             principal_id: "anon".to_owned(),
             upstream_kind: NoneModeUpstreamKind::AnthropicKey,
-            upstream_credential_ref: "k1".to_owned(),
+            upstream_credential_ref: "anthropic-wiremock".to_owned(),
         }),
         none_storage_path.clone(),
         litellm.uri(),
@@ -183,6 +188,166 @@ impl Respond for UsageResponder {
     }
 }
 
+struct TestClient {
+    timeout: Duration,
+}
+
+struct TestResponse {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Vec<u8>,
+}
+
+impl TestClient {
+    fn new(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+
+    async fn get_status(&self, url: &str) -> std::io::Result<StatusCode> {
+        self.request("GET", url, &[], &[])
+            .await
+            .map(|response| response.status)
+    }
+
+    async fn request(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> std::io::Result<TestResponse> {
+        tokio::time::timeout(self.timeout, raw_http(method, url, headers, body))
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "request timed out"))?
+    }
+}
+
+impl TestResponse {
+    fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    fn headers(&self) -> &HeaderMap {
+        &self.headers
+    }
+
+    async fn text(&self) -> Result<String, std::string::FromUtf8Error> {
+        String::from_utf8(self.body.clone())
+    }
+
+    async fn json(&self) -> serde_json::Result<Value> {
+        serde_json::from_slice(&self.body)
+    }
+}
+
+async fn raw_http(
+    method: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> std::io::Result<TestResponse> {
+    let url = Url::parse(url).expect("test url");
+    let host = url.host_str().expect("test url host");
+    let port = url.port_or_known_default().expect("test url port");
+    let mut target = url.path().to_owned();
+    if let Some(query) = url.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    let authority = if url.port().is_some() {
+        format!("{host}:{port}")
+    } else {
+        host.to_owned()
+    };
+    let mut request = format!(
+        "{method} {target} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    for (name, value) in headers {
+        request.push_str(name);
+        request.push_str(": ");
+        request.push_str(value);
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
+
+    let mut stream = TcpStream::connect((host, port)).await?;
+    stream.write_all(request.as_bytes()).await?;
+    stream.write_all(body).await?;
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).await?;
+    parse_raw_response(&bytes)
+}
+
+fn parse_raw_response(bytes: &[u8]) -> std::io::Result<TestResponse> {
+    let header_end = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing headers"))?;
+    let head = String::from_utf8_lossy(&bytes[..header_end]);
+    let mut lines = head.split("\r\n");
+    let status_line = lines
+        .next()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing status"))?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .and_then(|code| StatusCode::from_u16(code).ok())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid status"))?;
+    let mut headers = HeaderMap::new();
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            let name = http::header::HeaderName::from_bytes(name.trim().as_bytes())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            let value = http::HeaderValue::from_str(value.trim())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            headers.insert(name, value);
+        }
+    }
+    let body = &bytes[header_end + 4..];
+    let body = if headers
+        .get(http::header::TRANSFER_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("chunked"))
+    {
+        decode_chunked(body)?
+    } else {
+        body.to_vec()
+    };
+    Ok(TestResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
+fn decode_chunked(mut bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut decoded = Vec::new();
+    loop {
+        let line_end = bytes
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "chunk size"))?;
+        let size_text = std::str::from_utf8(&bytes[..line_end])
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let size = usize::from_str_radix(size_text.trim(), 16)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        bytes = &bytes[line_end + 2..];
+        if size == 0 {
+            return Ok(decoded);
+        }
+        if bytes.len() < size + 2 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "chunk body",
+            ));
+        }
+        decoded.extend_from_slice(&bytes[..size]);
+        bytes = &bytes[size + 2..];
+    }
+}
+
 struct StartedServer {
     proxy_url: String,
     admin_url: String,
@@ -208,19 +373,17 @@ impl StartedServer {
     }
 
     async fn wait_ready(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let client = Client::builder().timeout(Duration::from_secs(1)).build()?;
+        let client = TestClient::new(Duration::from_secs(1));
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let proxy_ok = client
-                .get(format!("{}/healthz", self.proxy_url))
-                .send()
+                .get_status(&format!("{}/healthz", self.proxy_url))
                 .await
-                .is_ok_and(|response| response.status() == StatusCode::OK);
+                .is_ok_and(|status| status == StatusCode::OK);
             let admin_ok = client
-                .get(format!("{}/admin/health", self.admin_url))
-                .send()
+                .get_status(&format!("{}/admin/health", self.admin_url))
                 .await
-                .is_ok_and(|response| response.status() == StatusCode::OK);
+                .is_ok_and(|status| status == StatusCode::OK);
             if proxy_ok && admin_ok {
                 return Ok(());
             }
@@ -249,22 +412,23 @@ impl Drop for StartedServer {
 }
 
 async fn send_message(
-    client: &Client,
+    client: &TestClient,
     proxy_url: &str,
     key: Option<&str>,
-) -> Result<reqwest::Response, reqwest::Error> {
-    let mut request = client
-        .post(format!("{proxy_url}/v1/messages"))
-        .header("content-type", "application/json")
-        .json(&json!({
-            "model": MODEL,
-            "max_tokens": 100,
-            "messages": [{"role": "user", "content": "hi"}]
-        }));
+) -> Result<TestResponse, Box<dyn std::error::Error>> {
+    let body = serde_json::to_vec(&json!({
+        "model": MODEL,
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "hi"}]
+    }))?;
+    let mut headers = vec![("content-type", "application/json")];
     if let Some(key) = key {
-        request = request.header("x-api-key", key);
+        headers.push(("x-api-key", key));
     }
-    request.send().await
+    client
+        .request("POST", &format!("{proxy_url}/v1/messages"), &headers, &body)
+        .await
+        .map_err(Into::into)
 }
 
 async fn wait_for_price_catalog() -> Result<(), Box<dyn std::error::Error>> {
@@ -315,7 +479,6 @@ fn price_catalog_fixture() -> Value {
         }
     })
 }
-
 
 async fn seed_runtime_state(
     redb_path: &std::path::Path,

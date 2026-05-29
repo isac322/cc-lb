@@ -5,7 +5,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use reqwest::Client;
+use bytes::Bytes;
+use http::Request;
+use http_body_util::{BodyExt, Empty};
+use hyper_rustls::HttpsConnectorBuilder;
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::TokioExecutor;
 use serde_json::Value;
 use tokio::task::JoinHandle;
 use tokio::time::{self, Instant, MissedTickBehavior};
@@ -13,13 +19,15 @@ use tracing::{error, info, warn};
 
 use crate::{CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, UsdPerMillion};
 
+type HttpClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>;
+
 pub struct LiteLlmLoader {
     catalog: Arc<PriceCatalog>,
     storage: Arc<cc_lb_storage_redb::Storage>,
     url: String,
     refresh_interval: Duration,
     cache_path: PathBuf,
-    http: Client,
+    http: HttpClient,
     failure_count: Arc<AtomicU64>,
     last_failure_kind: Arc<Mutex<Option<String>>>,
 }
@@ -48,6 +56,16 @@ pub enum LoaderError {
     Storage(String),
 }
 
+fn build_http_client() -> HttpClient {
+    let connector = HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_http1()
+        .enable_http2()
+        .build();
+    Client::builder(TokioExecutor::new()).build(connector)
+}
+
 impl LiteLlmLoader {
     pub fn new(
         catalog: Arc<PriceCatalog>,
@@ -56,10 +74,7 @@ impl LiteLlmLoader {
         refresh_interval: Duration,
         cache_path: PathBuf,
     ) -> Self {
-        let http = Client::builder()
-            .timeout(Duration::from_secs(10))
-            .build()
-            .expect("reqwest client should build with rustls-tls");
+        let http = build_http_client();
 
         Self {
             catalog,
@@ -204,21 +219,23 @@ impl LiteLlmLoader {
     }
 
     async fn fetch_bytes(&self) -> Result<Vec<u8>, LoaderError> {
-        let response = self
-            .http
-            .get(&self.url)
-            .send()
+        let request = Request::get(self.url.as_str())
+            .body(Empty::<Bytes>::new())
+            .map_err(|error| LoaderError::Http(error.to_string()))?;
+        let response = tokio::time::timeout(Duration::from_secs(10), self.http.request(request))
             .await
+            .map_err(|_| LoaderError::Http("request timed out".to_owned()))?
             .map_err(|error| LoaderError::Http(error.to_string()))?;
         let status = response.status();
         if !status.is_success() {
             return Err(LoaderError::Http(format!("unexpected status {status}")));
         }
 
-        let bytes = response
-            .bytes()
+        let bytes = tokio::time::timeout(Duration::from_secs(10), response.into_body().collect())
             .await
-            .map_err(|error| LoaderError::Http(error.to_string()))?;
+            .map_err(|_| LoaderError::Http("response body timed out".to_owned()))?
+            .map_err(|error| LoaderError::Http(error.to_string()))?
+            .to_bytes();
         Ok(bytes.to_vec())
     }
 

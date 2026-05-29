@@ -22,12 +22,13 @@ use cc_lb_signer_anthropic_oauth::{
 use cc_lb_storage_api::{UpstreamCreate, UpstreamKind, UpstreamStore};
 use cc_lb_storage_redb::Storage;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
-use http::header::AUTHORIZATION;
+use http::header::{AUTHORIZATION, LOCATION};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tokio::net::TcpListener;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
@@ -112,16 +113,13 @@ impl Fixture {
     }
 
     fn refresher(&self, replica_id: Uuid, cancel: CancellationToken) -> Arc<OAuthRefresher> {
-        Arc::new(
-            OAuthRefresher::new(
-                self.stores.clone(),
-                self.aead.clone(),
-                self.oauth_cfg.clone(),
-                replica_id,
-                cancel,
-            )
-            .expect("refresher"),
-        )
+        Arc::new(OAuthRefresher::new(
+            self.stores.clone(),
+            self.aead.clone(),
+            self.oauth_cfg.clone(),
+            replica_id,
+            cancel,
+        ))
     }
 }
 
@@ -165,16 +163,13 @@ async fn expired_before_sweep_lazy_fires_and_retry_succeeds() {
     let fixture = Fixture::new().await;
     let upstream_id = fixture.create_oauth_upstream("lazy", now_secs()).await;
     let replica_id = Uuid::new_v4();
-    let lazy = Arc::new(
-        LazyRefresher::new(
-            fixture.stores.clone(),
-            fixture.aead.clone(),
-            fixture.oauth_cfg.clone(),
-            replica_id,
-            CancellationToken::new(),
-        )
-        .expect("lazy refresher"),
-    );
+    let lazy = Arc::new(LazyRefresher::new(
+        fixture.stores.clone(),
+        fixture.aead.clone(),
+        fixture.oauth_cfg.clone(),
+        replica_id,
+        CancellationToken::new(),
+    ));
     let base = AnthropicOAuthSignerFactory::for_upstream_name(
         fixture.storage.clone(),
         fixture.aead.clone(),
@@ -274,16 +269,13 @@ async fn cancel_during_refresh_returns_within_one_second() {
     let cancel = CancellationToken::new();
     let mut cfg = (*fixture.oauth_cfg).clone();
     cfg.token_url = Url::parse(&format!("http://{slow_addr}/oauth/token")).expect("slow url");
-    let refresher = Arc::new(
-        OAuthRefresher::new(
-            fixture.stores.clone(),
-            fixture.aead.clone(),
-            Arc::new(cfg),
-            Uuid::new_v4(),
-            cancel.clone(),
-        )
-        .expect("refresher"),
-    );
+    let refresher = Arc::new(OAuthRefresher::new(
+        fixture.stores.clone(),
+        fixture.aead.clone(),
+        Arc::new(cfg),
+        Uuid::new_v4(),
+        cancel.clone(),
+    ));
     let task = tokio::spawn(async move { refresher.sweep_once().await });
     tokio::time::sleep(Duration::from_millis(100)).await;
 
@@ -406,29 +398,27 @@ struct InitialTokens {
 }
 
 async fn initial_tokens(base: &str) -> InitialTokens {
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        .expect("client");
     let verifier = "verifier";
     let challenge = URL_SAFE_NO_PAD.encode(Sha256::digest(verifier.as_bytes()));
-    let authorize = client
-        .get(format!("{base}/oauth/authorize"))
-        .query(&[
-            ("response_type", "code"),
-            ("client_id", "test-client"),
-            ("redirect_uri", "http://localhost/callback"),
-            ("code_challenge", challenge.as_str()),
-            ("code_challenge_method", "S256"),
-        ])
-        .send()
+    let mut authorize_url = Url::parse(&format!("{base}/oauth/authorize")).expect("authorize url");
+    authorize_url
+        .query_pairs_mut()
+        .append_pair("response_type", "code")
+        .append_pair("client_id", "test-client")
+        .append_pair("redirect_uri", "http://localhost/callback")
+        .append_pair("code_challenge", challenge.as_str())
+        .append_pair("code_challenge_method", "S256");
+    let authorize = raw_http("GET", authorize_url.as_str(), &[], &[])
         .await
-        .expect("authorize")
-        .error_for_status()
-        .expect("authorize status");
+        .expect("authorize");
+    assert!(
+        authorize.status.is_redirection(),
+        "authorize status {}",
+        authorize.status
+    );
     let location = authorize
-        .headers()
-        .get(http::header::LOCATION)
+        .headers
+        .get(LOCATION)
         .expect("location")
         .to_str()
         .expect("location str");
@@ -437,23 +427,137 @@ async fn initial_tokens(base: &str) -> InitialTokens {
         .query_pairs()
         .find_map(|(name, value)| (name == "code").then(|| value.into_owned()))
         .expect("code");
-    client
-        .post(format!("{base}/oauth/token"))
-        .form(&[
-            ("grant_type", "authorization_code"),
-            ("client_id", "test-client"),
-            ("redirect_uri", "http://localhost/callback"),
-            ("code", &code),
-            ("code_verifier", verifier),
-        ])
-        .send()
-        .await
-        .expect("token")
-        .error_for_status()
-        .expect("token status")
-        .json()
-        .await
-        .expect("token json")
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("grant_type", "authorization_code");
+    serializer.append_pair("client_id", "test-client");
+    serializer.append_pair("redirect_uri", "http://localhost/callback");
+    serializer.append_pair("code", &code);
+    serializer.append_pair("code_verifier", verifier);
+    let body = serializer.finish();
+    let token = raw_http(
+        "POST",
+        &format!("{base}/oauth/token"),
+        &[("content-type", "application/x-www-form-urlencoded")],
+        body.as_bytes(),
+    )
+    .await
+    .expect("token");
+    assert!(token.status.is_success(), "token status {}", token.status);
+    serde_json::from_slice(&token.body).expect("token json")
+}
+
+struct RawHttpResponse {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Bytes,
+}
+
+async fn raw_http(
+    method: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> std::io::Result<RawHttpResponse> {
+    let url = Url::parse(url).expect("test url");
+    let host = url.host_str().expect("test url host");
+    let port = url.port_or_known_default().expect("test url port");
+    let mut target = url.path().to_owned();
+    if let Some(query) = url.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    let authority = if url.port().is_some() {
+        format!("{host}:{port}")
+    } else {
+        host.to_owned()
+    };
+    let mut request = format!(
+        "{method} {target} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    for (name, value) in headers {
+        request.push_str(name);
+        request.push_str(": ");
+        request.push_str(value);
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
+
+    let mut stream = TcpStream::connect((host, port)).await?;
+    stream.write_all(request.as_bytes()).await?;
+    stream.write_all(body).await?;
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).await?;
+    parse_raw_response(&bytes)
+}
+
+fn parse_raw_response(bytes: &[u8]) -> std::io::Result<RawHttpResponse> {
+    let header_end = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing headers"))?;
+    let head = String::from_utf8_lossy(&bytes[..header_end]);
+    let mut lines = head.split("\r\n");
+    let status_line = lines
+        .next()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing status"))?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .and_then(|code| StatusCode::from_u16(code).ok())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid status"))?;
+    let mut headers = HeaderMap::new();
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            let name = http::header::HeaderName::from_bytes(name.trim().as_bytes())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            let value = http::HeaderValue::from_str(value.trim())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            headers.insert(name, value);
+        }
+    }
+    let body = &bytes[header_end + 4..];
+    let body = if headers
+        .get(http::header::TRANSFER_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("chunked"))
+    {
+        decode_chunked(body)?
+    } else {
+        body.to_vec()
+    };
+    Ok(RawHttpResponse {
+        status,
+        headers,
+        body: Bytes::from(body),
+    })
+}
+
+fn decode_chunked(mut bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut decoded = Vec::new();
+    loop {
+        let line_end = bytes
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "chunk size"))?;
+        let size_text = std::str::from_utf8(&bytes[..line_end])
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let size = usize::from_str_radix(size_text.trim(), 16)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        bytes = &bytes[line_end + 2..];
+        if size == 0 {
+            return Ok(decoded);
+        }
+        if bytes.len() < size + 2 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "chunk body",
+            ));
+        }
+        decoded.extend_from_slice(&bytes[..size]);
+        bytes = &bytes[size + 2..];
+    }
 }
 
 async fn spawn_fake_anthropic() -> SocketAddr {
@@ -482,12 +586,10 @@ async fn spawn_slow_token_server() -> SocketAddr {
 }
 
 async fn refresh_history_len(base: &str) -> usize {
-    let body: Value = reqwest::get(format!("{base}/__refresh_history"))
+    let response = raw_http("GET", &format!("{base}/__refresh_history"), &[], &[])
         .await
-        .expect("history")
-        .json()
-        .await
-        .expect("history json");
+        .expect("history");
+    let body: Value = serde_json::from_slice(&response.body).expect("history json");
     body["refreshes"].as_array().expect("refreshes").len()
 }
 

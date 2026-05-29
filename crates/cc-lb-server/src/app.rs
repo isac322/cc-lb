@@ -572,21 +572,14 @@ async fn build_app_with_storage_inner(
             .replica_identity
             .as_ref()
             .and_then(|identity| {
-                LazyRefresher::new(
+                let refresher = LazyRefresher::new(
                     stores.clone(),
                     aead.clone(),
                     oauth_cfg.clone(),
                     identity.id,
                     refresh_cancel.clone(),
-                )
-                .map(|refresher| {
-                    Arc::new(refresher) as Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>
-                })
-                .map_err(|error| {
-                    tracing::warn!(error = %error, "oauth lazy refresher client build failed");
-                    error
-                })
-                .ok()
+                );
+                Some(Arc::new(refresher) as Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>)
             });
     let initial_view = build_dynamic_view(
         &stores,
@@ -805,12 +798,8 @@ fn spawn_oauth_refresher(
     replica_id: uuid::Uuid,
     cancel: CancellationToken,
 ) {
-    match OAuthRefresher::new(stores, aead, oauth_cfg, replica_id, cancel) {
-        Ok(refresher) => {
-            tokio::spawn(Arc::new(refresher).run());
-        }
-        Err(error) => tracing::warn!(error = %error, "oauth refresher client build failed"),
-    }
+    let refresher = OAuthRefresher::new(stores, aead, oauth_cfg, replica_id, cancel);
+    tokio::spawn(Arc::new(refresher).run());
 }
 
 fn spawn_reconcile_shutdown(shutdown: watch::Receiver<bool>, cancel: CancellationToken) {

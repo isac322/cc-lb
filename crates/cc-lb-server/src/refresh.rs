@@ -2,13 +2,20 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
+use bytes::Bytes;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_core::AuditPayload;
 use cc_lb_signer_anthropic_oauth::{LazyRefreshError, LazyRefreshHandle};
 use cc_lb_storage_api::{AuditEntry, AuditStore, StorageError, StorageResult, UpstreamRecord};
 use cc_lb_storage_api::upstream::UpstreamKind;
-use reqwest::StatusCode;
+use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
+use http::{HeaderValue, Request, StatusCode};
+use http_body_util::{BodyExt, Full};
+use hyper_rustls::HttpsConnectorBuilder;
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::TokioExecutor;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
@@ -21,12 +28,33 @@ const LOOKAHEAD_SECS: u64 = 300;
 const LEASE_TTL_SECS: u64 = 90;
 const PAGE_SIZE: usize = 100;
 
+type HyperTokenClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
+
+#[derive(Clone)]
+struct TokenHttpClient {
+    client: HyperTokenClient,
+    timeout: Duration,
+}
+
+impl TokenHttpClient {
+    fn new(timeout: Duration) -> Self {
+        let connector = HttpsConnectorBuilder::new()
+            .with_webpki_roots()
+            .https_or_http()
+            .enable_http1()
+            .enable_http2()
+            .build();
+        let client = Client::builder(TokioExecutor::new()).build(connector);
+        Self { client, timeout }
+    }
+}
+
 pub struct OAuthRefresher {
     pub stores: Arc<Stores>,
     pub aead: Arc<AeadService>,
     pub oauth_cfg: Arc<AnthropicOAuthConfig>,
     pub replica_id: Uuid,
-    pub http: reqwest::Client,
+    http: TokenHttpClient,
     pub cancel: CancellationToken,
 }
 
@@ -37,18 +65,16 @@ impl OAuthRefresher {
         oauth_cfg: Arc<AnthropicOAuthConfig>,
         replica_id: Uuid,
         cancel: CancellationToken,
-    ) -> Result<Self, reqwest::Error> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()?;
-        Ok(Self {
+    ) -> Self {
+        let http = TokenHttpClient::new(Duration::from_secs(30));
+        Self {
             stores,
             aead,
             oauth_cfg,
             replica_id,
             http,
             cancel,
-        })
+        }
     }
 
     pub async fn run(self: Arc<Self>) {
@@ -145,7 +171,7 @@ pub struct LazyRefresher {
     aead: Arc<AeadService>,
     oauth_cfg: Arc<AnthropicOAuthConfig>,
     replica_id: Uuid,
-    http: reqwest::Client,
+    http: TokenHttpClient,
     cancel: CancellationToken,
 }
 
@@ -156,18 +182,16 @@ impl LazyRefresher {
         oauth_cfg: Arc<AnthropicOAuthConfig>,
         replica_id: Uuid,
         cancel: CancellationToken,
-    ) -> Result<Self, reqwest::Error> {
-        let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()?;
-        Ok(Self {
+    ) -> Self {
+        let http = TokenHttpClient::new(Duration::from_secs(30));
+        Self {
             stores,
             aead,
             oauth_cfg,
             replica_id,
             http,
             cancel,
-        })
+        }
     }
 }
 
@@ -224,7 +248,7 @@ pub enum RefreshError {
     #[error("oauth token endpoint returned {0}")]
     Status(StatusCode),
     #[error("oauth token endpoint request failed: {0}")]
-    Http(reqwest::Error),
+    Http(String),
     #[error("oauth token response parse failed: {0}")]
     Parse(serde_json::Error),
     #[error("oauth refresh cancelled")]
@@ -246,7 +270,7 @@ async fn refresh_flow(
     aead: &AeadService,
     oauth_cfg: &AnthropicOAuthConfig,
     replica_id: Uuid,
-    http: &reqwest::Client,
+    http: &TokenHttpClient,
     cancel: &CancellationToken,
     upstream: UpstreamRecord,
 ) -> Result<(), RefreshError> {
@@ -321,22 +345,27 @@ async fn refresh_flow(
 }
 
 async fn request_refresh(
-    http: &reqwest::Client,
+    http: &TokenHttpClient,
     oauth_cfg: &AnthropicOAuthConfig,
     cancel: &CancellationToken,
     refresh_token: &str,
 ) -> Result<TokenResponse, RefreshError> {
-    let request = http
-        .post(oauth_cfg.token_url.clone())
-        .form(&[
-            ("grant_type", "refresh_token"),
-            ("client_id", oauth_cfg.client_id.as_str()),
-            ("refresh_token", refresh_token),
-        ])
-        .send();
+    let body = refresh_form_body(oauth_cfg.client_id.as_str(), refresh_token);
+    let content_length = HeaderValue::from_str(&body.len().to_string())
+        .map_err(|error| RefreshError::Http(error.to_string()))?;
+    let request = Request::post(oauth_cfg.token_url.as_str())
+        .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+        .header(CONTENT_LENGTH, content_length)
+        .body(Full::new(Bytes::from(body)))
+        .map_err(|error| RefreshError::Http(error.to_string()))?;
+
     let response = tokio::select! {
         _ = cancel.cancelled() => return Err(RefreshError::Cancelled),
-        response = request => response.map_err(RefreshError::Http)?,
+        response = tokio::time::timeout(http.timeout, http.client.request(request)) => {
+            response
+                .map_err(|_| RefreshError::Http("request timed out".to_owned()))?
+                .map_err(|error| RefreshError::Http(error.to_string()))?
+        }
     };
     let status = response.status();
     if !status.is_success() {
@@ -344,9 +373,22 @@ async fn request_refresh(
     }
     let bytes = tokio::select! {
         _ = cancel.cancelled() => return Err(RefreshError::Cancelled),
-        bytes = response.bytes() => bytes.map_err(RefreshError::Http)?,
+        bytes = tokio::time::timeout(http.timeout, response.into_body().collect()) => {
+            bytes
+                .map_err(|_| RefreshError::Http("response body timed out".to_owned()))?
+                .map_err(|error| RefreshError::Http(error.to_string()))?
+                .to_bytes()
+        }
     };
     serde_json::from_slice(&bytes).map_err(RefreshError::Parse)
+}
+
+fn refresh_form_body(client_id: &str, refresh_token: &str) -> String {
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("grant_type", "refresh_token");
+    serializer.append_pair("client_id", client_id);
+    serializer.append_pair("refresh_token", refresh_token);
+    serializer.finish()
 }
 
 fn is_refresh_candidate(record: &UpstreamRecord, aead: &AeadService, now: u64) -> bool {
