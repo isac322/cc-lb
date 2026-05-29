@@ -15,6 +15,13 @@ pub fn validate_identifier(name: &str, value: &str) -> StorageResult<()> {
         });
     }
 
+    if value.starts_with("system.") {
+        return Err(StorageError::InvalidInput {
+            field: name.to_string(),
+            reason: "identifier cannot use reserved system. prefix".to_string(),
+        });
+    }
+
     Ok(())
 }
 
@@ -58,6 +65,18 @@ mod tests {
         let err = validate_identifier("field", "id\0").unwrap_err();
         match err {
             StorageError::InvalidInput { .. } => {}
+            _ => panic!("Expected InvalidInput error"),
+        }
+    }
+
+    #[test]
+    fn test_validate_identifier_rejects_reserved_system_prefix() {
+        let err = validate_identifier("field", "system.reserved").unwrap_err();
+        match err {
+            StorageError::InvalidInput { field, reason } => {
+                assert_eq!(field, "field");
+                assert!(reason.contains("system"));
+            }
             _ => panic!("Expected InvalidInput error"),
         }
     }

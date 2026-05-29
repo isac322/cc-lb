@@ -1,0 +1,71 @@
+---
+source: crates/cc-lb-admin/tests/v1_status.rs
+expression: body
+---
+{
+  "exported_at_unix_secs": 1800000000,
+  "plugins": {
+    "chains": {
+      "principal-alpha": {
+        "ObservabilityHook": [],
+        "Router": [
+          {
+            "batched_events_per_flush": 3,
+            "batched_flush_ms": 250,
+            "config": {
+              "alpha": {
+                "alpha": false,
+                "zeta": true
+              },
+              "zeta": 1
+            },
+            "order": 1000,
+            "sse_per_event": true,
+            "wasm_registry_name": "plugin-alpha"
+          }
+        ]
+      }
+    },
+    "registry": [
+      {
+        "label": "fixture",
+        "name": "plugin-alpha",
+        "original_filename": "plugin-alpha.wasm",
+        "refcount": 1,
+        "sha256_hex": "0909090909090909090909090909090909090909090909090909090909090909",
+        "size_bytes": 9
+      }
+    ]
+  },
+  "principals": [
+    {
+      "allowed_models": [
+        "claude-3-*"
+      ],
+      "default_limits": [],
+      "enabled": true,
+      "kind": "machine",
+      "name": "principal-alpha",
+      "revision": 0
+    }
+  ],
+  "schema_version": 1,
+  "upstreams": [
+    {
+      "enabled": true,
+      "expires_at_unix_secs": null,
+      "kind": "custom",
+      "name": "alpha",
+      "oauth_credentials_present": false,
+      "revision": 1
+    },
+    {
+      "enabled": true,
+      "expires_at_unix_secs": null,
+      "kind": "custom",
+      "name": "bravo",
+      "oauth_credentials_present": false,
+      "revision": 1
+    }
+  ]
+}

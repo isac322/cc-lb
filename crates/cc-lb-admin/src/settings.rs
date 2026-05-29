@@ -20,16 +20,14 @@ pub const COVERAGE_CHECKLIST: &[&str] = &[
     "tls",
     "body",
     "timeouts",
-    "upstreams",
-    "principals",
-    "plugins",
     "downstream_auth",
     "api_keys",
     "storage",
     "aead",
-    "signers",
     "observability",
     "admin",
+    "oauth",
+    "runtime",
     "circuit_breaker",
     "bulkhead",
     "dns",
@@ -480,39 +478,57 @@ fn draft_response(state: ConfigDraftState) -> Result<ConfigDraftResponse, Settin
 }
 
 fn deserialize_and_validate_config(value: Value) -> Result<Config, String> {
+    reject_unknown_top_level_keys(&value)?;
     let config: Config = serde_json::from_value(value).map_err(|source| source.to_string())?;
     config.validate().map_err(|source| source.to_string())?;
     Ok(config)
 }
 
-fn history_summary(config: &Config) -> HistorySummary {
-    HistorySummary {
-        upstreams: config.upstreams.len(),
-        principals: config.principals.len(),
-        plugin_count: plugin_count(config),
-        tls_enabled: config.tls.is_some() || config.listener.tls.is_some(),
+fn reject_unknown_top_level_keys(value: &Value) -> Result<(), String> {
+    let Some(object) = value.as_object() else {
+        return Err("config draft must be a JSON object".to_owned());
+    };
+    let allowed = [
+        "listener",
+        "tls",
+        "body",
+        "timeouts",
+        "downstream_auth",
+        "api_keys",
+        "storage",
+        "aead",
+        "observability",
+        "admin",
+        "oauth",
+        "runtime",
+        "circuit_breaker",
+        "bulkhead",
+        "dns",
+        "egress",
+    ];
+    let allowed: BTreeSet<&str> = allowed.into_iter().collect();
+    let unknown: Vec<&str> = object
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !allowed.contains(key))
+        .collect();
+    if unknown.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "unknown top-level config keys: {}",
+            unknown.join(", ")
+        ))
     }
 }
 
-fn plugin_count(config: &Config) -> usize {
-    let global_count = usize::from(config.plugins.router_plugin.is_some())
-        + config.plugins.observability_hooks.len();
-
-    let per_principal_count = config
-        .principals
-        .values()
-        .map(|principal_spec| {
-            let router_count = usize::from(principal_spec.router_plugin.is_some());
-            let hooks_count = principal_spec
-                .observability_hooks
-                .as_ref()
-                .map(|hooks| hooks.len())
-                .unwrap_or(0);
-            router_count + hooks_count
-        })
-        .sum::<usize>();
-
-    global_count + per_principal_count
+fn history_summary(config: &Config) -> HistorySummary {
+    HistorySummary {
+        upstreams: 0,
+        principals: 0,
+        plugin_count: 0,
+        tls_enabled: config.tls.is_some() || config.listener.tls.is_some(),
+    }
 }
 
 fn history_item(entry: HistoryEntry) -> ConfigHistoryItem {
@@ -656,93 +672,4 @@ fn temp_file_name(file_name: &OsStr) -> OsString {
     temp.push(file_name);
     temp.push(format!(".{}.tmp", std::process::id()));
     temp
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use cc_lb_config::{PluginRef, PluginsConfig, PrincipalSpec};
-    use std::collections::HashMap;
-
-    fn plugin_ref(name: &str) -> PluginRef {
-        PluginRef {
-            name: name.to_owned(),
-            ..Default::default()
-        }
-    }
-
-    #[test]
-    fn test_plugin_count_global_only() {
-        let config = Config {
-            plugins: PluginsConfig {
-                router_plugin: Some(plugin_ref("global_router")),
-                observability_hooks: vec![plugin_ref("hook1"), plugin_ref("hook2")],
-            },
-            principals: HashMap::new(),
-            ..Default::default()
-        };
-
-        assert_eq!(plugin_count(&config), 3);
-    }
-
-    #[test]
-    fn test_plugin_count_with_per_principal_plugins() {
-        let principal_a = PrincipalSpec {
-            router_plugin: Some(plugin_ref("principal_a_router")),
-            observability_hooks: Some(vec![
-                plugin_ref("a_hook1"),
-                plugin_ref("a_hook2"),
-                plugin_ref("a_hook3"),
-            ]),
-            ..Default::default()
-        };
-
-        let principal_b = PrincipalSpec {
-            observability_hooks: Some(vec![plugin_ref("b_hook1"), plugin_ref("b_hook2")]),
-            ..Default::default()
-        };
-
-        let mut principals = HashMap::new();
-        principals.insert("principal_a".to_owned(), principal_a);
-        principals.insert("principal_b".to_owned(), principal_b);
-
-        let config = Config {
-            plugins: PluginsConfig {
-                router_plugin: Some(plugin_ref("global_router")),
-                observability_hooks: vec![plugin_ref("global_hook1"), plugin_ref("global_hook2")],
-            },
-            principals,
-            ..Default::default()
-        };
-
-        // Expected: 1 global router + 2 global hooks + 1 principal_a router + 3 principal_a hooks + 0 principal_b router + 2 principal_b hooks = 9
-        assert_eq!(plugin_count(&config), 9);
-    }
-
-    #[test]
-    fn test_plugin_count_backward_compat_no_per_principal_plugins() {
-        let config = Config {
-            plugins: PluginsConfig {
-                router_plugin: Some(plugin_ref("global_router")),
-                observability_hooks: vec![plugin_ref("hook1")],
-            },
-            principals: HashMap::new(),
-            ..Default::default()
-        };
-
-        let config_with_empty_principals = Config {
-            plugins: PluginsConfig {
-                router_plugin: Some(plugin_ref("global_router")),
-                observability_hooks: vec![plugin_ref("hook1")],
-            },
-            principals: HashMap::new(),
-            ..Default::default()
-        };
-
-        assert_eq!(
-            plugin_count(&config),
-            plugin_count(&config_with_empty_principals)
-        );
-        assert_eq!(plugin_count(&config), 2);
-    }
 }

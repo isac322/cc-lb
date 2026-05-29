@@ -30,7 +30,7 @@ fn restart_required_field_warns() {
 }
 
 #[test]
-fn reload_warn_per_principal_path_change() {
+fn reload_does_not_warn_per_principal_path_change() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("cc-lb.toml");
     let router_a = dir.path().join("router-a.wasm");
@@ -68,11 +68,7 @@ fn reload_warn_per_principal_path_change() {
     });
 
     assert!(
-        logs.contains("principals.alice.router_plugin.wasm_path"),
-        "router path warning missing from logs: {logs}"
-    );
-    assert!(
-        logs.contains("principals.alice.observability_hooks.0.wasm_path"),
-        "observability path warning missing from logs: {logs}"
+        !logs.contains("restart required to apply"),
+        "plugin changes should not produce restart-required warnings: {logs}"
     );
 }

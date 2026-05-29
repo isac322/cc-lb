@@ -28,25 +28,14 @@ async fn sighup_reloads_body_defaults() {
         storage: None,
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
-            Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
-            Arc::new(arc_swap::ArcSwap::from(
-                cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
-                    &cc_lb_config::Config::default(),
-                    std::collections::HashMap::new(),
-                )
-                .expect("principal view builds"),
-            )),
-        ),
+        limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(Arc::new(
+            cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new(),
+        )),
         lifecycle: None,
         audit_sink: None,
-        principal_view: Arc::new(arc_swap::ArcSwap::from(
-            cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
-                &cc_lb_admin::CurrentConfig::current_config((watcher.clone()).as_ref()),
-                std::collections::HashMap::new(),
-            )
-            .expect("principal view builds"),
-        )),
+        dynamic_view: reload_common::dynamic_view_holder(
+            &cc_lb_admin::CurrentConfig::current_config((watcher.clone()).as_ref()),
+        ),
         config: watcher.clone(),
         admin_token: Some("test-token".to_string()),
         start_time: std::time::Instant::now(),

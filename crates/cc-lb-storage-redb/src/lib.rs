@@ -15,9 +15,12 @@ mod usage_rollups;
 use std::path::Path;
 use std::sync::Arc;
 
+use cc_lb_storage_api::ChangeEvent;
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 use thiserror::Error;
+use tokio::sync::broadcast;
 
+pub use cc_lb_storage_api::RuntimeChangeNotifier;
 pub use cc_lb_storage_api::types::{
     AuditEntry, ConfigDraftState, HistoryEntry, HistorySummary, OAuthCredentials, RequestEvent,
     RequestEventUpstream, UsageRollup, UsageRollupResolution, UsageRollupRun,
@@ -25,7 +28,7 @@ pub use cc_lb_storage_api::types::{
 pub use oauth::{api_key_storage_key, oauth_key};
 pub use price_catalog::PriceSnapshot;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 pub const OAUTH_CREDENTIALS_V1: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("OAUTH_CREDENTIALS_V1");
@@ -47,6 +50,17 @@ pub const KILLSWITCH_V1: TableDefinition<&str, bool> = TableDefinition::new("KIL
 pub const CONFIG_DRAFT_V1: TableDefinition<&str, &[u8]> = TableDefinition::new("CONFIG_DRAFT_V1");
 pub const CONFIG_HISTORY_V1: TableDefinition<u64, &[u8]> =
     TableDefinition::new("CONFIG_HISTORY_V1");
+pub const PRINCIPALS_V2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("principals_v2");
+pub const PRINCIPALS_V2_BY_NAME: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("principals_v2_by_name");
+pub const UPSTREAMS_V2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("upstreams_v2");
+pub const UPSTREAMS_V2_BY_NAME: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("upstreams_v2_by_name");
+pub const WASM_BLOBS_V2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("wasm_blobs_v2");
+pub const WASM_REGISTRY_V2: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("wasm_registry_v2");
+pub const PLUGIN_CHAINS_V2: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("plugin_chains_v2");
 
 pub(crate) const SCHEMA_VERSION_KEY: &str = "version";
 pub(crate) const KILLSWITCH_KEY: &str = "enabled";
@@ -56,6 +70,7 @@ pub(crate) const BACKEND_KIND_KEY: &str = "backend_kind";
 pub struct Storage {
     pub(crate) db: Arc<Database>,
     pub(crate) master_key: [u8; 32],
+    pub(crate) noop_change_tx: broadcast::Sender<ChangeEvent>,
 }
 
 pub type RedbStorage = Storage;
@@ -106,8 +121,32 @@ pub enum StorageError {
     },
     #[error("stale config draft revision; current revision is {current}")]
     StaleDraftRevision { current: u64 },
+    #[error("upstream conflict: {0}")]
+    UpstreamConflict(String),
+    #[error("upstream not found")]
+    UpstreamNotFound,
     #[error("config revision overflow")]
     ConfigRevisionOverflow,
+    #[error("stale principal revision; current revision is {current}")]
+    StalePrincipalRevision { current: u64 },
+    #[error("principal revision overflow")]
+    PrincipalRevisionOverflow,
+    #[error("principal name already exists: {name}")]
+    PrincipalNameConflict { name: String },
+    #[error("principal is referenced by audit entries: {id}")]
+    PrincipalReferencedByAudit { id: String },
+    #[error("plugin registry conflict: {message}")]
+    PluginRegistryConflict { message: String },
+    #[error("stale plugin registry revision; current revision is {current}")]
+    StalePluginRegistryRevision { current: u64 },
+    #[error("plugin registry revision overflow")]
+    PluginRegistryRevisionOverflow,
+    #[error("stale plugin chain revision; current revision is {current}")]
+    StalePluginChainRevision { current: u64 },
+    #[error("plugin chain revision overflow")]
+    PluginChainRevisionOverflow,
+    #[error("plugin registry row is referenced by plugin chain: {id}")]
+    PluginRegistryReferenced { id: String },
     #[error("backend kind mismatch: stored={stored:?}, configured={configured:?}")]
     BackendKindMismatch {
         stored: cc_lb_storage_api::BackendKind,
@@ -152,7 +191,11 @@ impl Storage {
         let db = Arc::new(Database::create(path)?);
         migration::initialize_schema(&db)?;
 
-        Ok(Self { db, master_key })
+        Ok(Self {
+            db,
+            master_key,
+            noop_change_tx: adapter::notifier::noop_change_sender(),
+        })
     }
 
     pub fn begin_read(&self) -> Result<redb::ReadTransaction, StorageError> {

@@ -4,8 +4,10 @@ use redb::{Database, ReadableDatabase, ReadableTable};
 
 use crate::{
     API_KEYS_V1, AUDIT_LOG_V1, CONFIG_DRAFT_V1, CONFIG_HISTORY_V1, CURRENT_SCHEMA_VERSION,
-    KEY_INDEX_BY_HASH_V1, KILLSWITCH_KEY, KILLSWITCH_V1, OAUTH_CREDENTIALS_V1, PRICE_CATALOG_V1,
-    REQUEST_EVENTS_V1, SCHEMA_VERSION_KEY, SCHEMA_VERSION_V1, StorageError,
+    KEY_INDEX_BY_HASH_V1, KILLSWITCH_KEY, KILLSWITCH_V1, OAUTH_CREDENTIALS_V1, PLUGIN_CHAINS_V2,
+    PRICE_CATALOG_V1, PRINCIPALS_V2, PRINCIPALS_V2_BY_NAME, REQUEST_EVENTS_V1, SCHEMA_VERSION_KEY,
+    SCHEMA_VERSION_V1, StorageError, UPSTREAMS_V2, UPSTREAMS_V2_BY_NAME, WASM_BLOBS_V2,
+    WASM_REGISTRY_V2,
 };
 
 pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> {
@@ -22,6 +24,9 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
                 });
             }
             Some(0) => return Err(StorageError::InvalidSchemaVersion(0)),
+            Some(found) if found < CURRENT_SCHEMA_VERSION => {
+                schema.insert(SCHEMA_VERSION_KEY, &CURRENT_SCHEMA_VERSION)?;
+            }
             Some(_) => {}
             None => {
                 schema.insert(SCHEMA_VERSION_KEY, &CURRENT_SCHEMA_VERSION)?;
@@ -59,6 +64,27 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
     }
     {
         write_txn.open_table(CONFIG_HISTORY_V1)?;
+    }
+    {
+        write_txn.open_table(PRINCIPALS_V2)?;
+    }
+    {
+        write_txn.open_table(PRINCIPALS_V2_BY_NAME)?;
+    }
+    {
+        write_txn.open_table(UPSTREAMS_V2)?;
+    }
+    {
+        write_txn.open_table(UPSTREAMS_V2_BY_NAME)?;
+    }
+    {
+        write_txn.open_table(WASM_BLOBS_V2)?;
+    }
+    {
+        write_txn.open_table(WASM_REGISTRY_V2)?;
+    }
+    {
+        write_txn.open_table(PLUGIN_CHAINS_V2)?;
     }
 
     write_txn.commit()?;

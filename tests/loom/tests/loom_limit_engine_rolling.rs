@@ -2,7 +2,6 @@
 
 use std::sync::Arc as StdArc;
 
-use arc_swap::ArcSwap;
 use cc_lb_loom_tests::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_loom_tests::api_keys::limit_engine::LimitEngine;
 use cc_lb_loom_tests::api_keys::principal_view::PrincipalView;
@@ -25,6 +24,7 @@ fn loom_limit_engine_rolling_drop_refunds_full_reservations() {
 
         for _ in 0..2 {
             let engine = StdArc::clone(&engine);
+            let view = StdArc::clone(&view);
             let record = record.clone();
             handles.push(thread::spawn(move || {
                 let reservation = engine
@@ -51,6 +51,7 @@ fn loom_limit_engine_rolling_reconcile_keeps_actual_totals() {
 
         for _ in 0..2 {
             let engine = StdArc::clone(&engine);
+            let view = StdArc::clone(&view);
             let record = record.clone();
             handles.push(thread::spawn(move || {
                 let reservation = engine
@@ -104,10 +105,7 @@ fn engine() -> (StdArc<LimitEngine>, StdArc<PrincipalView>) {
     let view = PrincipalView::loom(Vec::new());
 
     (
-        LimitEngine::new(
-            StdArc::new(KeyConcurrencyManager::new()),
-            StdArc::new(ArcSwap::from(view.clone())),
-        ),
+        LimitEngine::new(StdArc::new(KeyConcurrencyManager::new())),
         view,
     )
 }

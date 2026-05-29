@@ -5,6 +5,7 @@ SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(CDPATH= cd -- "$SCRIPT_DIR/../.." && pwd)
 EVIDENCE_PATH=${CC_LB_TLS_EVIDENCE:-"$ROOT_DIR/.omo/evidence/task-47-cert-reload.log"}
 API_KEY='sk-ant-test'
+ADMIN_TOKEN='admin-token'
 FAKE_PID=''
 PROXY_PID=''
 STREAM_PID=''
@@ -122,6 +123,30 @@ wait_command() {
   fail "$name did not become ready"
 }
 
+seed_runtime() {
+  principal_code=$(curl -sS -o "$TMP_DIR/admin-principal.json" -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H 'content-type: application/json' \
+    --data '{"name":"api-key","kind":"machine","allowed_models":["*"]}' \
+    "http://127.0.0.1:$admin_port/admin/v1/principals") || principal_code=000
+  if [ "$principal_code" != "201" ] && [ "$principal_code" != "409" ]; then
+    cat "$TMP_DIR/admin-principal.json" >&2 || true
+    fail "create principal expected HTTP 201 or 409, got $principal_code"
+  fi
+
+  upstream_body=$(printf '{"name":"fake_anthropic","kind":"custom","base_url":"http://127.0.0.1:%s"}' "$fake_port")
+  upstream_code=$(curl -sS -o "$TMP_DIR/admin-upstream.json" -w '%{http_code}' -X POST \
+    -H "Authorization: Bearer $ADMIN_TOKEN" \
+    -H 'content-type: application/json' \
+    --data "$upstream_body" \
+    "http://127.0.0.1:$admin_port/admin/v1/upstreams") || upstream_code=000
+  if [ "$upstream_code" != "201" ] && [ "$upstream_code" != "409" ]; then
+    cat "$TMP_DIR/admin-upstream.json" >&2 || true
+    fail "create upstream expected HTTP 201 or 409, got $upstream_code"
+  fi
+  log "runtime_seeded=true"
+}
+
 cert_fingerprint() {
   openssl x509 -in "$1" -noout -fingerprint -sha256 | sed 's/^sha256 Fingerprint=//'
 }
@@ -185,16 +210,14 @@ idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
 
-[upstreams.fake_anthropic]
-kind = "custom"
-base_url = "http://127.0.0.1:$fake_port"
-auth_strategy = "api_key"
+[downstream_auth]
+mode = "none"
 
-[principals.api-key]
-allowed_models = ["*"]
+[downstream_auth.none_mode]
+principal_id = "api-key"
+upstream_kind = "anthropic_key"
+upstream_credential_ref = "fake_anthropic"
 
-[plugins]
-observability_hooks = []
 
 [storage]
 oauth_aead_key_env = "CC_LB_MASTER_KEY"
@@ -271,6 +294,7 @@ PROXY_PID=$!
 wait_command "cc-lb-admin" curl --fail --silent --show-error "http://127.0.0.1:$admin_port/admin/health"
 wait_command "cc-lb-proxy-tls" curl --fail --silent --show-error --cacert "$active_cert" --resolve "localhost:$proxy_port:127.0.0.1" "https://localhost:$proxy_port/healthz"
 wait_command "cc-lb-metrics" curl --fail --silent --show-error "http://127.0.0.1:$metrics_port/metrics"
+seed_runtime
 log "plain_http_admin=true plain_http_metrics=true proxy_tls_health=true"
 
 pre_status=$(curl --fail --silent --show-error --write-out '%{http_code}' --output "$TMP_DIR/pre.json" --cacert "$active_cert" --resolve "localhost:$proxy_port:127.0.0.1" -H "x-api-key: $API_KEY" "https://localhost:$proxy_port/v1/models")

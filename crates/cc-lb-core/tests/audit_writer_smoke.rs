@@ -2,12 +2,14 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_core::{AuditEntry, spawn_audit_writer};
+use cc_lb_storage_api::AuditStore;
 use cc_lb_storage_redb::Storage;
 
 #[tokio::test(flavor = "current_thread")]
 async fn flush_100() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, storage) = new_storage()?;
-    let (sink, join) = spawn_audit_writer(Arc::clone(&storage), 1024);
+    let audit_storage: Arc<dyn AuditStore> = storage.clone();
+    let (sink, join) = spawn_audit_writer(audit_storage, 1024);
 
     for index in 0..100 {
         sink.try_enqueue(audit_entry(index))
@@ -25,7 +27,8 @@ async fn flush_100() -> Result<(), Box<dyn std::error::Error>> {
 #[tokio::test(flavor = "current_thread")]
 async fn full_drops() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, storage) = new_storage()?;
-    let (sink, join) = spawn_audit_writer(storage, 4);
+    let audit_storage: Arc<dyn AuditStore> = storage.clone();
+    let (sink, join) = spawn_audit_writer(audit_storage, 4);
 
     let dropped = (0..100)
         .filter(|index| sink.try_enqueue(audit_entry(*index)).is_err())
@@ -41,7 +44,8 @@ async fn full_drops() -> Result<(), Box<dyn std::error::Error>> {
 #[tokio::test(flavor = "current_thread")]
 async fn shutdown_drain() -> Result<(), Box<dyn std::error::Error>> {
     let (_dir, storage) = new_storage()?;
-    let (sink, join) = spawn_audit_writer(Arc::clone(&storage), 1024);
+    let audit_storage: Arc<dyn AuditStore> = storage.clone();
+    let (sink, join) = spawn_audit_writer(audit_storage, 1024);
 
     for index in 0..20 {
         sink.try_enqueue(audit_entry(index))

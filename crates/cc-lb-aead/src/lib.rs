@@ -10,6 +10,6 @@ pub mod encrypted_field;
 pub mod error;
 pub mod service;
 
-pub use encrypted_field::{AeadEncryptedField, OAuthTokenBundle};
+pub use encrypted_field::{AeadEncryptedField, EncryptedOAuthTokens, OAuthTokenBundle};
 pub use error::{AeadError, AeadResult};
 pub use service::AeadService;

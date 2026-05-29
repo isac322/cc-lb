@@ -1,61 +1,57 @@
-use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
-use cc_lb_admin::{LastReloadStatus, ReloadOutcome};
-use cc_lb_config::{Config, ConfigError, PluginRef, StorageConfig};
-use cc_lb_core::api_keys::principal_view::{
-    ObservabilityHooksCache, PrincipalView, RouterPluginCache,
-};
-use cc_lb_plugin_api::RuntimeError;
-use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
+use cc_lb_admin::{DynamicViewRebinder, LastReloadStatus, ReloadOutcome};
+use cc_lb_config::{Config, ConfigError, RestartRequiredField, StorageConfig};
+use cc_lb_core::DynamicViewHolder;
 use notify::{Event, RecursiveMode, Watcher};
 use thiserror::Error;
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
-
-use crate::app::{GlobalChainError, build_global_chain, manifest_from_plugin};
 
 const DEBOUNCE: Duration = Duration::from_millis(500);
 const BROADCAST_CAPACITY: usize = 16;
 
 pub struct ConfigWatcher {
     path: PathBuf,
+    process_start_config: Arc<Config>,
     current: ArcSwap<Config>,
     reload_tx: broadcast::Sender<Arc<Config>>,
     reloads_attempted: AtomicUsize,
-    runtime: Arc<ExtismRuntime>,
     last_reload_status: Arc<ArcSwap<Option<LastReloadStatus>>>,
-    principal_view: Option<Arc<ArcSwap<PrincipalView>>>,
+    dynamic_view: Option<Arc<DynamicViewHolder>>,
+    dynamic_view_rebinder: Mutex<Option<Arc<dyn DynamicViewRebinder>>>,
 }
 
 impl ConfigWatcher {
     pub fn new(
         path: impl AsRef<Path>,
         initial_config: Config,
-        runtime: Arc<ExtismRuntime>,
+        _runtime: Arc<cc_lb_runtime_extism::ExtismRuntime>,
     ) -> Self {
-        Self::new_with_principal_view(path, initial_config, runtime, None)
+        Self::new_with_principal_view(path, initial_config, _runtime, None)
     }
 
     pub fn new_with_principal_view(
         path: impl AsRef<Path>,
         initial_config: Config,
-        runtime: Arc<ExtismRuntime>,
-        principal_view: Option<Arc<ArcSwap<PrincipalView>>>,
+        _runtime: Arc<cc_lb_runtime_extism::ExtismRuntime>,
+        dynamic_view: Option<Arc<DynamicViewHolder>>,
     ) -> Self {
         let (reload_tx, _) = broadcast::channel(BROADCAST_CAPACITY);
+        let process_start_config = Arc::new(initial_config.clone());
         Self {
             path: path.as_ref().to_path_buf(),
+            process_start_config,
             current: ArcSwap::from_pointee(initial_config),
             reload_tx,
             reloads_attempted: AtomicUsize::new(0),
-            runtime,
             last_reload_status: Arc::new(ArcSwap::from(Arc::new(None))),
-            principal_view,
+            dynamic_view,
+            dynamic_view_rebinder: Mutex::new(None),
         }
     }
 
@@ -69,6 +65,12 @@ impl ConfigWatcher {
 
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<Config>> {
         self.reload_tx.subscribe()
+    }
+
+    pub fn set_dynamic_view_rebinder(&self, rebinder: Arc<dyn DynamicViewRebinder>) {
+        if let Ok(mut current) = self.dynamic_view_rebinder.lock() {
+            *current = Some(rebinder);
+        }
     }
 
     pub fn reload_attempts(&self) -> usize {
@@ -113,124 +115,21 @@ impl ConfigWatcher {
         }
 
         self.record_attempt();
-        warn_restart_required_changes(&current_config, &new_config);
+        for change in summarize_restart_required(&current_config, &new_config) {
+            tracing::warn!(
+                field = %change.field,
+                current = %change.current,
+                new = %change.new,
+                reason = %change.reason,
+                "restart required to apply"
+            );
+        }
 
         let new_config = Arc::new(new_config);
-        if let Some(principal_view) = &self.principal_view {
-            let mut all_staged: Vec<StagedSlot> = Vec::new();
-            if new_config.plugins.router_plugin.is_some()
-                || !new_config.plugins.observability_hooks.is_empty()
-            {
-                let (_new_global_router, _new_global_observability_hooks) =
-                    match build_global_chain(&new_config, &self.runtime, &mut all_staged) {
-                        Ok(global_chain) => global_chain,
-                        Err(source) => {
-                            self.record_failure(source.to_string(), None, None, config_path);
-                            return Err(ReloadError::GlobalChain(source));
-                        }
-                    };
-            }
-
-            let mut principal_chains = HashMap::new();
-            let mut per_principal_staged = Vec::new();
-            for (principal_id, spec) in &new_config.principals {
-                let router_cache = match &spec.router_plugin {
-                    Some(plugin) => {
-                        let manifest = match manifest_from_plugin(plugin) {
-                            Ok(manifest) => manifest,
-                            Err(source) => {
-                                self.record_failure(
-                                    source.to_string(),
-                                    Some(principal_id.clone()),
-                                    Some(plugin.name.clone()),
-                                    config_path,
-                                );
-                                return Err(ReloadError::Config(source));
-                            }
-                        };
-                        let (handle, slot) = match self.runtime.instantiate_router_for(
-                            principal_id,
-                            &plugin.name,
-                            &manifest,
-                        ) {
-                            Ok(value) => value,
-                            Err(source) => {
-                                self.record_failure(
-                                    source.to_string(),
-                                    Some(principal_id.clone()),
-                                    Some(plugin.name.clone()),
-                                    config_path,
-                                );
-                                return Err(ReloadError::Runtime(source));
-                            }
-                        };
-                        per_principal_staged.push(slot);
-                        RouterPluginCache::Explicit(handle)
-                    }
-                    None => RouterPluginCache::Inherit,
-                };
-                let hooks_cache = match &spec.observability_hooks {
-                    Some(plugins) => {
-                        let mut handles = Vec::with_capacity(plugins.len());
-                        for plugin in plugins {
-                            let manifest = match manifest_from_plugin(plugin) {
-                                Ok(manifest) => manifest,
-                                Err(source) => {
-                                    self.record_failure(
-                                        source.to_string(),
-                                        Some(principal_id.clone()),
-                                        Some(plugin.name.clone()),
-                                        config_path,
-                                    );
-                                    return Err(ReloadError::Config(source));
-                                }
-                            };
-                            let (handle, slot) = match self.runtime.instantiate_observability_for(
-                                principal_id,
-                                &plugin.name,
-                                &manifest,
-                            ) {
-                                Ok(value) => value,
-                                Err(source) => {
-                                    self.record_failure(
-                                        source.to_string(),
-                                        Some(principal_id.clone()),
-                                        Some(plugin.name.clone()),
-                                        config_path,
-                                    );
-                                    return Err(ReloadError::Runtime(source));
-                                }
-                            };
-                            per_principal_staged.push(slot);
-                            handles.push(handle);
-                        }
-                        ObservabilityHooksCache::Explicit(handles)
-                    }
-                    None => ObservabilityHooksCache::Inherit,
-                };
-                principal_chains.insert(principal_id.clone(), (router_cache, hooks_cache));
-            }
-            all_staged.extend(per_principal_staged);
-
-            let new_principal_view = match PrincipalView::from_config(&new_config, principal_chains)
-            {
-                Ok(view) => view,
-                Err(source) => {
-                    self.record_failure(source.to_string(), None, None, config_path);
-                    return Err(ReloadError::Config(source));
-                }
-            };
-            if let Err(source) = self.runtime.commit_staged(all_staged) {
-                self.record_failure(source.to_string(), None, None, config_path);
-                return Err(ReloadError::Runtime(source));
-            }
-            principal_view.store(new_principal_view);
-            let referenced: HashSet<(String, String)> = referenced_slot_keys(&new_config);
-            for (principal, plugin) in self.runtime.registered_slot_keys() {
-                if !referenced.contains(&(principal.clone(), plugin.clone())) {
-                    self.runtime.evict_slot(&principal, &plugin);
-                }
-            }
+        if self.dynamic_view.is_some() {
+            tracing::debug!(
+                "dynamic runtime view reload is storage-driven; static config reload skips principal/plugin rebuild"
+            );
         }
         self.current.store(Arc::clone(&new_config));
         metrics::counter!("cc_lb_config_reload_total", "outcome" => "success").increment(1);
@@ -335,45 +234,20 @@ impl cc_lb_admin::CurrentConfig for ConfigWatcher {
     fn last_reload_status(&self) -> Option<LastReloadStatus> {
         self.last_reload_status.load().as_ref().clone()
     }
-}
 
-pub(crate) fn referenced_slot_keys(config: &Config) -> HashSet<(String, String)> {
-    let mut keys = HashSet::new();
-    for plugin in config
-        .plugins
-        .router_plugin
-        .iter()
-        .chain(config.plugins.observability_hooks.iter())
-    {
-        keys.insert(("__global__".to_owned(), plugin.name.clone()));
+    fn restart_required_changes(&self) -> Vec<RestartRequiredField> {
+        summarize_restart_required(&self.process_start_config, &self.current_config())
     }
 
-    for (principal_name, spec) in &config.principals {
-        if let Some(plugin) = &spec.router_plugin {
-            keys.insert((principal_name.clone(), plugin.name.clone()));
-        }
-        for plugin in spec
-            .observability_hooks
-            .as_ref()
-            .map(|hooks| hooks.iter())
-            .into_iter()
-            .flatten()
-        {
-            keys.insert((principal_name.clone(), plugin.name.clone()));
-        }
+    fn dynamic_view_rebinder(&self) -> Option<Arc<dyn DynamicViewRebinder>> {
+        self.dynamic_view_rebinder.lock().ok()?.clone()
     }
-
-    keys
 }
 
 #[derive(Debug, Error)]
 pub enum ReloadError {
     #[error(transparent)]
     Config(#[from] ConfigError),
-    #[error(transparent)]
-    GlobalChain(#[from] GlobalChainError),
-    #[error(transparent)]
-    Runtime(#[from] RuntimeError),
 }
 
 #[derive(Debug, Error)]
@@ -382,85 +256,120 @@ enum FileWatchError {
     Notify(#[from] notify::Error),
 }
 
-fn warn_restart_required_changes(current: &Config, new_config: &Config) {
-    warn_if_changed(
-        &current.listener.proxy_addr,
-        &new_config.listener.proxy_addr,
+pub fn summarize_restart_required(
+    current: &Config,
+    new_config: &Config,
+) -> Vec<RestartRequiredField> {
+    let mut changes = Vec::new();
+    push_changed(
+        &mut changes,
         "listener.proxy_addr",
+        current.listener.proxy_addr.to_string(),
+        new_config.listener.proxy_addr.to_string(),
+        "socket binding changes require a process restart",
     );
-    warn_if_changed(
-        &current.listener.admin_addr,
-        &new_config.listener.admin_addr,
+    push_changed(
+        &mut changes,
         "listener.admin_addr",
+        current.listener.admin_addr.to_string(),
+        new_config.listener.admin_addr.to_string(),
+        "socket binding changes require a process restart",
     );
-    warn_if_changed(
-        &current.listener.metrics_addr,
-        &new_config.listener.metrics_addr,
+    push_changed(
+        &mut changes,
         "listener.metrics_addr",
+        current.listener.metrics_addr.to_string(),
+        new_config.listener.metrics_addr.to_string(),
+        "socket binding changes require a process restart",
     );
-    warn_if_changed(
-        &current
-            .listener
-            .tls
-            .as_ref()
-            .and_then(|tls| tls.cert_path.as_ref()),
-        &new_config
-            .listener
-            .tls
-            .as_ref()
-            .and_then(|tls| tls.cert_path.as_ref()),
+    push_changed(
+        &mut changes,
         "listener.tls.cert_path",
+        path_option_string(
+            current
+                .listener
+                .tls
+                .as_ref()
+                .and_then(|tls| tls.cert_path.as_ref()),
+        ),
+        path_option_string(
+            new_config
+                .listener
+                .tls
+                .as_ref()
+                .and_then(|tls| tls.cert_path.as_ref()),
+        ),
+        "listener TLS certificate changes require a process restart",
     );
-    warn_if_changed(
-        &current
-            .listener
-            .tls
-            .as_ref()
-            .and_then(|tls| tls.key_path.as_ref()),
-        &new_config
-            .listener
-            .tls
-            .as_ref()
-            .and_then(|tls| tls.key_path.as_ref()),
+    push_changed(
+        &mut changes,
         "listener.tls.key_path",
+        path_option_string(
+            current
+                .listener
+                .tls
+                .as_ref()
+                .and_then(|tls| tls.key_path.as_ref()),
+        ),
+        path_option_string(
+            new_config
+                .listener
+                .tls
+                .as_ref()
+                .and_then(|tls| tls.key_path.as_ref()),
+        ),
+        "listener TLS key changes require a process restart",
     );
-    warn_if_changed(
-        &current.tls.as_ref().and_then(|tls| tls.cert_path.as_ref()),
-        &new_config
-            .tls
-            .as_ref()
-            .and_then(|tls| tls.cert_path.as_ref()),
+    push_changed(
+        &mut changes,
         "tls.cert_path",
+        path_option_string(current.tls.as_ref().and_then(|tls| tls.cert_path.as_ref())),
+        path_option_string(
+            new_config
+                .tls
+                .as_ref()
+                .and_then(|tls| tls.cert_path.as_ref()),
+        ),
+        "TLS certificate changes require a process restart",
     );
-    warn_if_changed(
-        &current.tls.as_ref().and_then(|tls| tls.key_path.as_ref()),
-        &new_config
-            .tls
-            .as_ref()
-            .and_then(|tls| tls.key_path.as_ref()),
+    push_changed(
+        &mut changes,
         "tls.key_path",
+        path_option_string(current.tls.as_ref().and_then(|tls| tls.key_path.as_ref())),
+        path_option_string(
+            new_config
+                .tls
+                .as_ref()
+                .and_then(|tls| tls.key_path.as_ref()),
+        ),
+        "TLS key changes require a process restart",
     );
-    warn_plugin_path_change(
-        "plugins.router_plugin.wasm_path",
-        current.plugins.router_plugin.as_ref(),
-        new_config.plugins.router_plugin.as_ref(),
+    summarize_storage_restart_required(&mut changes, &current.storage, &new_config.storage);
+    push_changed(
+        &mut changes,
+        "aead.key_env",
+        current.aead.key_env.clone(),
+        new_config.aead.key_env.clone(),
+        "storage encryption key environment changes require a process restart",
     );
-    warn_observability_hook_path_changes(
-        "plugins.observability_hooks",
-        &current.plugins.observability_hooks,
-        &new_config.plugins.observability_hooks,
-    );
-    warn_principal_plugin_path_changes(current, new_config);
-    warn_storage_restart_required(&current.storage, &new_config.storage);
-    warn_aead_restart_required(&current.aead.key_env, &new_config.aead.key_env);
+    summarize_oauth_restart_required(&mut changes, current, new_config);
+    changes
 }
 
-fn warn_storage_restart_required(current: &StorageConfig, new_config: &StorageConfig) {
+fn summarize_storage_restart_required(
+    changes: &mut Vec<RestartRequiredField>,
+    current: &StorageConfig,
+    new_config: &StorageConfig,
+) {
     match (current, new_config) {
         (StorageConfig::Redb { path: current }, StorageConfig::Redb { path: new_config }) => {
-            if current != new_config {
-                tracing::warn!("storage backend changed; restart required to apply");
-            }
+            push_changed(
+                changes,
+                "storage.path",
+                current.display().to_string(),
+                new_config.display().to_string(),
+                "storage backend changes require a process restart",
+            );
         }
         (
             StorageConfig::Postgres {
@@ -472,85 +381,121 @@ fn warn_storage_restart_required(current: &StorageConfig, new_config: &StorageCo
                 pool: new_pool,
             },
         ) => {
-            if current_url != new_url {
-                tracing::warn!("storage backend changed; restart required to apply");
-            } else if current_pool != new_pool {
-                tracing::warn!(field = "storage.pool", "restart required to apply");
-            }
+            push_changed(
+                changes,
+                "storage.url",
+                current_url.clone(),
+                new_url.clone(),
+                "storage backend changes require a process restart",
+            );
+            push_changed(
+                changes,
+                "storage.pool",
+                format!("{current_pool:?}"),
+                format!("{new_pool:?}"),
+                "storage pool changes require a process restart",
+            );
         }
-        _ => tracing::warn!("storage backend changed; restart required to apply"),
+        _ => push_changed(
+            changes,
+            "storage.kind",
+            storage_kind(current).to_owned(),
+            storage_kind(new_config).to_owned(),
+            "storage backend changes require a process restart",
+        ),
     }
 }
 
-fn warn_aead_restart_required(current: &str, new_config: &str) {
-    if current != new_config {
-        tracing::warn!("aead key env changed; restart required to apply");
-    }
-}
-
-fn warn_plugin_path_change(
-    field: &str,
-    current: Option<&PluginRef>,
-    new_config: Option<&PluginRef>,
+fn summarize_oauth_restart_required(
+    changes: &mut Vec<RestartRequiredField>,
+    current: &Config,
+    new_config: &Config,
 ) {
-    warn_if_changed(
-        &current.and_then(|plugin| plugin.wasm_path.as_ref()),
-        &new_config.and_then(|plugin| plugin.wasm_path.as_ref()),
-        field,
+    let current = current.oauth.anthropic.as_ref();
+    let new_config = new_config.oauth.anthropic.as_ref();
+    push_changed(
+        changes,
+        "oauth.anthropic.client_id",
+        current
+            .map(|oauth| oauth.client_id.clone())
+            .unwrap_or_default(),
+        new_config
+            .map(|oauth| oauth.client_id.clone())
+            .unwrap_or_default(),
+        "Anthropic OAuth client changes require a process restart",
+    );
+    push_changed(
+        changes,
+        "oauth.anthropic.auth_url",
+        current
+            .map(|oauth| oauth.auth_url.to_string())
+            .unwrap_or_default(),
+        new_config
+            .map(|oauth| oauth.auth_url.to_string())
+            .unwrap_or_default(),
+        "Anthropic OAuth endpoint changes require a process restart",
+    );
+    push_changed(
+        changes,
+        "oauth.anthropic.token_url",
+        current
+            .map(|oauth| oauth.token_url.to_string())
+            .unwrap_or_default(),
+        new_config
+            .map(|oauth| oauth.token_url.to_string())
+            .unwrap_or_default(),
+        "Anthropic OAuth endpoint changes require a process restart",
+    );
+    push_changed(
+        changes,
+        "oauth.anthropic.redirect_uri",
+        current
+            .map(|oauth| oauth.redirect_uri.to_string())
+            .unwrap_or_default(),
+        new_config
+            .map(|oauth| oauth.redirect_uri.to_string())
+            .unwrap_or_default(),
+        "Anthropic OAuth redirect changes require a process restart",
+    );
+    push_changed(
+        changes,
+        "oauth.anthropic.scopes",
+        current
+            .map(|oauth| oauth.scopes.join(","))
+            .unwrap_or_default(),
+        new_config
+            .map(|oauth| oauth.scopes.join(","))
+            .unwrap_or_default(),
+        "Anthropic OAuth scope changes require a process restart",
     );
 }
 
-fn warn_observability_hook_path_changes(
-    field_prefix: &str,
-    current: &[PluginRef],
-    new_config: &[PluginRef],
+fn push_changed(
+    changes: &mut Vec<RestartRequiredField>,
+    field: &str,
+    current: String,
+    new: String,
+    reason: &str,
 ) {
-    let max_len = current.len().max(new_config.len());
-    for index in 0..max_len {
-        let field = format!("{field_prefix}.{index}.wasm_path");
-        warn_if_changed(
-            &current
-                .get(index)
-                .and_then(|plugin| plugin.wasm_path.as_ref()),
-            &new_config
-                .get(index)
-                .and_then(|plugin| plugin.wasm_path.as_ref()),
-            &field,
-        );
+    if current != new {
+        changes.push(RestartRequiredField {
+            field: field.to_owned(),
+            current,
+            new,
+            reason: reason.to_owned(),
+        });
     }
 }
 
-fn warn_principal_plugin_path_changes(current: &Config, new_config: &Config) {
-    let mut principal_ids = BTreeSet::new();
-    principal_ids.extend(current.principals.keys());
-    principal_ids.extend(new_config.principals.keys());
-
-    for principal_id in principal_ids {
-        let current_principal = current.principals.get(principal_id);
-        let new_principal = new_config.principals.get(principal_id);
-        warn_plugin_path_change(
-            &format!("principals.{principal_id}.router_plugin.wasm_path"),
-            current_principal.and_then(|spec| spec.router_plugin.as_ref()),
-            new_principal.and_then(|spec| spec.router_plugin.as_ref()),
-        );
-
-        let current_hooks = current_principal
-            .and_then(|spec| spec.observability_hooks.as_deref())
-            .unwrap_or(&[]);
-        let new_hooks = new_principal
-            .and_then(|spec| spec.observability_hooks.as_deref())
-            .unwrap_or(&[]);
-        warn_observability_hook_path_changes(
-            &format!("principals.{principal_id}.observability_hooks"),
-            current_hooks,
-            new_hooks,
-        );
-    }
+fn path_option_string(path: Option<&PathBuf>) -> String {
+    path.map(|path| path.display().to_string())
+        .unwrap_or_default()
 }
 
-fn warn_if_changed<T: PartialEq>(current: &T, new_config: &T, field: &str) {
-    if current != new_config {
-        tracing::warn!(field = field, "restart required to apply");
+fn storage_kind(storage: &StorageConfig) -> &'static str {
+    match storage {
+        StorageConfig::Redb { .. } => "redb",
+        StorageConfig::Postgres { .. } => "postgres",
     }
 }
 

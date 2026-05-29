@@ -13,10 +13,11 @@ use axum::response::IntoResponse;
 use axum::routing::any;
 use cc_lb_aead::AeadService;
 use cc_lb_config::{
-    AuthStrategy, Config, DownstreamAuthMode, Limit, LimitKind, PostgresPoolConfig, PrincipalSpec,
-    PrincipalType, StorageConfig, UpstreamKind, UpstreamSpec,
+    AnthropicOAuthConfig, Config, DownstreamAuthMode, PostgresPoolConfig, StorageConfig,
 };
-use cc_lb_server::app::{App, build_app_for_testing_postgres, build_app_with_storage};
+use cc_lb_server::app::{
+    App, build_app_for_testing_postgres, build_app_with_storage, seed_app_testing_storage,
+};
 use cc_lb_storage_api::{
     BackendKind, ManagedKeyStore, PrincipalLimitIdentityKind, PrincipalLimitKind,
     PrincipalLimitState, Storage as StorageTrait,
@@ -196,6 +197,11 @@ async fn build_postgres_app(
 ) -> TestResult<App> {
     let storage: Arc<dyn StorageTrait> = Arc::new(PostgresStorage::new(pool.clone()));
     storage.initialize(BackendKind::Postgres).await?;
+    seed_app_testing_storage(
+        storage.as_ref(),
+        Some(Url::parse(&format!("http://{}", upstream_addr))?),
+    )
+    .await?;
     let managed_store: Arc<dyn ManagedKeyStore> = Arc::new(PostgresManagedKeyStore::new(
         pool,
         Arc::new(RetryPolicy::default()),
@@ -206,7 +212,8 @@ async fn build_postgres_app(
         managed_store,
         storage,
         Arc::new(AeadService::from_master_key([0; 32])),
-    )?)
+    )
+    .await?)
 }
 
 fn test_config(database_url: &str, upstream_addr: SocketAddr) -> TestResult<Config> {
@@ -218,37 +225,13 @@ fn test_config(database_url: &str, upstream_addr: SocketAddr) -> TestResult<Conf
     config.admin.token = Some(ADMIN_TOKEN.to_owned());
     config.downstream_auth.mode = DownstreamAuthMode::ApiKey;
     config.downstream_auth.none_mode = None;
-    config.signers.anthropic_oauth.client_id = "test-oauth-client".to_owned();
-    config.signers.anthropic_oauth.issuer_base_url = format!("http://{upstream_addr}");
-    config.signers.anthropic_oauth.redirect_uri =
-        "http://127.0.0.1/admin/oauth/callback".to_owned();
-    config.principals.insert(
-        PRINCIPAL_ID.to_owned(),
-        PrincipalSpec {
-            principal_type: PrincipalType::Machine,
-            default_limits: vec![Limit {
-                kind: LimitKind::Requests,
-                window: Duration::from_secs(60),
-                cap_micros: 1_000_000,
-            }],
-            enabled: true,
-            allowed_models: vec!["*".to_owned()],
-            credentials_ref: None,
-            router_plugin: None,
-            observability_hooks: None,
-        },
-    );
-    config.upstreams.insert(
-        "test-upstream".to_owned(),
-        UpstreamSpec {
-            kind: UpstreamKind::Custom,
-            base_url: Some(Url::parse(&format!("http://{upstream_addr}"))?),
-            region: None,
-            project: None,
-            auth_strategy: AuthStrategy::ApiKey,
-            credentials_ref: None,
-        },
-    );
+    config.oauth.anthropic = Some(AnthropicOAuthConfig {
+        client_id: "test-oauth-client".to_owned(),
+        auth_url: Url::parse(&format!("http://{upstream_addr}/oauth/authorize"))?,
+        token_url: Url::parse(&format!("http://{upstream_addr}/v1/oauth/token"))?,
+        redirect_uri: Url::parse("http://127.0.0.1/admin/oauth/callback")?,
+        scopes: Vec::new(),
+    });
     Ok(config)
 }
 

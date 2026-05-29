@@ -10,6 +10,15 @@ env:
   CC_LB_ADMIN_SKIP_SPA: "1"
 
 jobs:
+  audit-redaction-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: ripgrep
+      - run: bash scripts/lint-audit-redaction.sh
+
   cargo-deny:
     runs-on: ubuntu-latest
     steps:
@@ -67,6 +76,8 @@ jobs:
           components: llvm-tools-preview
       - name: Install WASI target for pinned toolchain
         run: rustup target add wasm32-wasip1
+      - name: Build Extism echo fixture
+        run: cargo build -p extism-echo-plugin --target wasm32-wasip1 --release
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
