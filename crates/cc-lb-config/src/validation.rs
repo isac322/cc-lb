@@ -34,9 +34,6 @@ pub fn validate_raw_toml(raw_toml: &str) -> Result<(), ValidationError> {
         return Ok(());
     };
 
-    if has_legacy_plugin(&table) || has_legacy_principal_quotas(&table) {
-        return Err(ValidationError::new("config", legacy_removed_message()));
-    }
 
     if let Some(storage) = table.get("storage").and_then(|v| v.as_table()) {
         let has_kind = storage.contains_key("kind");
@@ -251,41 +248,6 @@ fn validate_redb_path(path: &Path) -> Result<(), ValidationError> {
     }
 
     Ok(())
-}
-
-fn has_legacy_plugin(table: &toml::Table) -> bool {
-    table
-        .get("plugins")
-        .and_then(toml::Value::as_table)
-        .and_then(|plugins| plugins.get(&["authn", "_", "plugin"].concat()))
-        .is_some()
-}
-
-fn has_legacy_principal_quotas(table: &toml::Table) -> bool {
-    let Some(principals) = table.get("principals").and_then(toml::Value::as_table) else {
-        return false;
-    };
-
-    principals.values().any(|principal| {
-        principal
-            .as_table()
-            .map(|t| t.contains_key("quotas"))
-            .unwrap_or(false)
-    })
-}
-
-fn legacy_removed_message() -> String {
-    [
-        "v2 removed `plugins.",
-        &[
-            "authn",
-            "_",
-            "plugin",
-        ]
-        .concat(),
-        "` / `principals.*.quotas`; use `downstream_auth.mode` + `principals.*.default_limits` (sk-cclb-* API keys)",
-    ]
-    .concat()
 }
 
 fn ensure_existing_file(field: &str, path: &Path) -> Result<(), ValidationError> {
