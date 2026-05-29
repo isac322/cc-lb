@@ -114,15 +114,16 @@ jobs:
       - name: Run Postgres conformance tests
         run: cargo test -p cc-lb-storage-postgres --features postgres -- --test-threads=4
 
-      - name: Run cc-lb-server Postgres tests
-        run: cargo test -p cc-lb-server --features postgres,redb
-
-      - name: Run cc-lb-server Postgres integration test (multi-instance)
-        run: cargo test -p cc-lb-server --features postgres --test managed_key_multi_instance
-        continue-on-error: true
+      - name: Run cc-lb-server Postgres-gated tests
+        run: |
+          cargo test -p cc-lb-server --features postgres,redb \
+            --test postgres_full_storage_live \
+            --test managed_key_multi_instance \
+            --test pool_exhaustion \
+            --test bad_postgres_url_fatal
 
       - name: Run cc-lb-server DB unreachable chaos test (ignored)
-        run: cargo test -p cc-lb-server --features postgres --test db_unreachable_503 -- --ignored
+        run: cargo test -p cc-lb-server --features postgres,redb --test db_unreachable_503 -- --ignored
         continue-on-error: true
 
       - name: E2E smoke - cc-lb binary against postgres backend
