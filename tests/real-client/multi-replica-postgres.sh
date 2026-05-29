@@ -258,9 +258,6 @@ idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
 
-[legacy-plugins]
-observability_hooks = []
-
 [downstream_auth]
 mode = "none"
 

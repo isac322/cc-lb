@@ -49,16 +49,13 @@ idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
 
-[legacy-upstreams.real_client]
-kind = "anthropic_direct"
-base_url = "http://127.0.0.1:$fake_port"
-auth_strategy = "api_key"
+[downstream_auth]
+mode = "none"
 
-[legacy-principals.api-key]
-allowed_models = ["*"]
-
-[legacy-plugins]
-observability_hooks = []
+[downstream_auth.none_mode]
+principal_id = "api-key"
+upstream_kind = "anthropic_key"
+upstream_credential_ref = "real_client"
 
 [storage]
 kind = "postgres"
@@ -118,6 +115,31 @@ sys.exit(1)
 PY
 }
 
+seed_runtime() {
+  principal_code=$(curl -sS -o "$TMP_DIR/admin-principal.json" -w '%{http_code}' -X POST \
+    -H 'Authorization: Bearer test' \
+    -H 'content-type: application/json' \
+    --data '{"name":"api-key","kind":"machine","allowed_models":["*"]}' \
+    "http://127.0.0.1:$admin_port/admin/v1/principals") || principal_code=000
+  if [ "$principal_code" != "201" ] && [ "$principal_code" != "409" ]; then
+    echo "FAIL: create principal expected 201 or 409, got $principal_code" >&2
+    cat "$TMP_DIR/admin-principal.json" >&2 || true
+    exit 1
+  fi
+
+  upstream_body=$(printf '{"name":"real_client","kind":"custom","base_url":"http://127.0.0.1:%s"}' "$fake_port")
+  upstream_code=$(curl -sS -o "$TMP_DIR/admin-upstream.json" -w '%{http_code}' -X POST \
+    -H 'Authorization: Bearer test' \
+    -H 'content-type: application/json' \
+    --data "$upstream_body" \
+    "http://127.0.0.1:$admin_port/admin/v1/upstreams") || upstream_code=000
+  if [ "$upstream_code" != "201" ] && [ "$upstream_code" != "409" ]; then
+    echo "FAIL: create upstream expected 201 or 409, got $upstream_code" >&2
+    cat "$TMP_DIR/admin-upstream.json" >&2 || true
+    exit 1
+  fi
+}
+
 echo "===> step 1: spawn fake-anthropic on :$fake_port"
 cargo run -q -p fake-anthropic -- --port "$fake_port" > "$TMP_DIR/fake.log" 2>&1 &
 FAKE_PID=$!
@@ -133,6 +155,8 @@ if ! wait_port "$proxy_port" cc-lb; then
   echo "--- proxy.log ---" >&2; cat "$TMP_DIR/proxy.log" >&2 || true
   exit 1
 fi
+wait_port "$admin_port" cc-lb-admin
+seed_runtime
 
 echo "===> step 3: send /v1/messages through postgres-backed proxy"
 response=$(curl -sS -w '\n%{http_code}' -X POST \

@@ -111,6 +111,8 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
 
     wait_tls_status(proxy_addr, &cert_path, "/healthz", 200).await;
     wait_plain_status(admin_addr, "/admin/health", 200).await;
+    seed_runtime(admin_addr, upstream_addr).await;
+    wait_tls_status(proxy_addr, &cert_path, "/v1/models", 200).await;
 
     RunningTlsApp {
         proxy_addr,
@@ -479,6 +481,56 @@ async fn plain_get(addr: SocketAddr, path: &str) -> std::io::Result<PlainRespons
     })
 }
 
+async fn plain_post_json(
+    addr: SocketAddr,
+    path: &str,
+    body: &str,
+) -> std::io::Result<PlainResponse> {
+    let mut stream = TcpStream::connect(addr).await?;
+    let request = format!(
+        "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer admin-token\r\ncontent-type: application/json\r\ncontent-length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    stream.write_all(request.as_bytes()).await?;
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).await?;
+    let text = String::from_utf8_lossy(&bytes).to_string();
+    Ok(PlainResponse {
+        status: status_code(&text),
+        body: body(&text),
+    })
+}
+
+async fn seed_runtime(admin_addr: SocketAddr, upstream_addr: SocketAddr) {
+    let principal = plain_post_json(
+        admin_addr,
+        "/admin/v1/principals",
+        r#"{"name":"api-key","kind":"machine","allowed_models":["*"]}"#,
+    )
+    .await
+    .expect("seed principal");
+    assert!(
+        matches!(principal.status, 201 | 409),
+        "seed principal status={} body={}",
+        principal.status,
+        principal.body
+    );
+
+    let upstream_body = format!(
+        r#"{{"name":"fake_anthropic","kind":"custom","base_url":"http://{upstream_addr}"}}"#
+    );
+    let upstream = plain_post_json(admin_addr, "/admin/v1/upstreams", &upstream_body)
+        .await
+        .expect("seed upstream");
+    assert!(
+        matches!(upstream.status, 201 | 409),
+        "seed upstream status={} body={}",
+        upstream.status,
+        upstream.body
+    );
+}
+
 fn status_code(text: &str) -> u16 {
     text.lines()
         .next()
@@ -527,14 +579,6 @@ cert_path = "{}"
 key_path = "{}"
 reload_on_sighup = true
 
-[legacy-upstreams.fake]
-kind = "custom"
-base_url = "http://{upstream_addr}"
-auth_strategy = "api_key"
-
-[legacy-principals.api-key]
-allowed_models = ["*"]
-
 [downstream_auth]
 mode = "none"
 
@@ -543,8 +587,6 @@ principal_id = "api-key"
 upstream_kind = "anthropic_key"
 upstream_credential_ref = "fake_anthropic"
 
-[legacy-plugins]
-observability_hooks = []
 
 [storage]
 kind = "redb"
