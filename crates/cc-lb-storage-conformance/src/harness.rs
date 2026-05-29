@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{future::Future, sync::Arc};
 
 use anyhow::Result;
 use async_trait::async_trait;
@@ -48,6 +48,19 @@ impl<B: ConformanceBackend> ConformanceFixture<B> {
 
         Ok(())
     }
+}
+
+pub async fn with_conformance_fixture<B, F, Fut>(backend: Arc<B>, run: F) -> Result<()>
+where
+    B: ConformanceBackend,
+    F: FnOnce(Arc<B::Storage>) -> Fut,
+    Fut: Future<Output = Result<()>>,
+{
+    let mut fixture = ConformanceFixture::new(backend).await?;
+    let result = run(fixture.storage()).await;
+    let teardown = fixture.teardown().await;
+    result?;
+    teardown
 }
 
 pub fn scenario_applies_to_backend(kind: BackendKind, allowed: &[BackendKind]) -> bool {

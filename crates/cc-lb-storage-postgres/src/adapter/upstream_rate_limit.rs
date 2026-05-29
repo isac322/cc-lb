@@ -79,7 +79,8 @@ impl UpstreamRateLimitStateStore for PostgresStorage {
 }
 
 fn row_to_observation(row: PgRow) -> StorageResult<UpstreamRateLimitObservationRecord> {
-    let kind = rate_limit_kind_from_str(&row.try_get::<String, _>("kind").map_err(map_sqlx_error)?)?;
+    let kind =
+        rate_limit_kind_from_str(&row.try_get::<String, _>("kind").map_err(map_sqlx_error)?)?;
     let limit: Option<i64> = row.try_get("limit_value").map_err(map_sqlx_error)?;
     let remaining: Option<i64> = row.try_get("remaining").map_err(map_sqlx_error)?;
     let observed_at_unix_secs: i64 = row

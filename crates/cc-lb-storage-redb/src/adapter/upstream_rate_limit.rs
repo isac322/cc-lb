@@ -45,6 +45,13 @@ fn put_observation_sync(
     {
         let mut table = write_txn.open_table(UPSTREAM_RATE_LIMIT_STATE_V1)?;
         let key = observation_key(record.upstream_id, &record.window, record.kind.as_str());
+        if let Some(existing) = table.get(key.as_str())? {
+            let existing_record: UpstreamRateLimitObservationRecord =
+                serde_json::from_slice(existing.value())?;
+            if existing_record.observed_at_unix_secs > record.observed_at_unix_secs {
+                return Ok(());
+            }
+        }
         let payload = serde_json::to_vec(record)?;
         table.insert(key.as_str(), payload.as_slice())?;
     }

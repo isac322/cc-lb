@@ -9,6 +9,7 @@ use cc_lb_storage_api::{
     types::AuditEntry,
     validate_identifier,
 };
+use uuid::Uuid;
 
 use crate::harness::{ConformanceBackend, ConformanceFixture};
 
@@ -27,6 +28,7 @@ where
     stale_revision_conflict(Arc::clone(&backend)).await?;
     set_enabled_toggles(Arc::clone(&backend)).await?;
     allowed_models_persist_raw(Arc::clone(&backend)).await?;
+    principal_allowed_upstreams_roundtrip(Arc::clone(&backend)).await?;
     default_limits_roundtrip(Arc::clone(&backend)).await?;
     soft_delete_excludes_default_list(Arc::clone(&backend)).await?;
     hard_delete_removes_unreferenced(Arc::clone(&backend)).await?;
@@ -189,6 +191,49 @@ where
             .await?
             .unwrap();
         ensure!(fetched.allowed_models == ["claude-*", "custom/model"]);
+        Ok(())
+    })
+    .await
+}
+
+pub async fn principal_allowed_upstreams_roundtrip<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: AuditStore + PrincipalStore,
+{
+    with_fixture(backend, |storage| async move {
+        let upstream_a = Uuid::from_u128(0x0000000000000000000000000000000a);
+        let upstream_b = Uuid::from_u128(0x0000000000000000000000000000000b);
+        let upstream_c = Uuid::from_u128(0x0000000000000000000000000000000c);
+
+        let mut input = principal_create(14);
+        input.allowed_upstreams = vec![upstream_a, upstream_b];
+        let record = PrincipalStore::create(&*storage, input, BASE_TS).await?;
+        ensure!(record.allowed_upstreams == [upstream_a, upstream_b]);
+
+        let fetched = PrincipalStore::get_by_id(&*storage, record.id)
+            .await?
+            .expect("record should exist");
+        ensure!(fetched.allowed_upstreams == [upstream_a, upstream_b]);
+
+        let updated = PrincipalStore::update(
+            &*storage,
+            record.id,
+            record.revision,
+            PrincipalUpdate {
+                allowed_upstreams: Some(vec![upstream_c]),
+                ..PrincipalUpdate::default()
+            },
+            BASE_TS + 1,
+        )
+        .await?
+        .expect("record should exist");
+        ensure!(updated.allowed_upstreams == [upstream_c]);
+
+        let fetched = PrincipalStore::get_by_id(&*storage, record.id)
+            .await?
+            .expect("record should exist");
+        ensure!(fetched.allowed_upstreams == [upstream_c]);
         Ok(())
     })
     .await
