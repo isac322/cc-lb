@@ -3,6 +3,8 @@ name: musl-static
 on:
   pull_request:
   push:
+    branches:
+      - master
 
 env:
   CC_LB_ADMIN_SKIP_SPA: "1"
