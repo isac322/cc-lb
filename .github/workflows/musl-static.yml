@@ -17,7 +17,9 @@ jobs:
       RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      # The base image already ships a working rustup + stable toolchain. Re-running
+      # dtolnay/rust-toolchain on top of it tries to re-install components and dies
+      # on a missing 'share/doc/clippy/README.md' file. Trust the image's toolchain.
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
