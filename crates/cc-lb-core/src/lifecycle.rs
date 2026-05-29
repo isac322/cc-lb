@@ -14,8 +14,9 @@ use cc_lb_plugin_api::{
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_api::{
-    Storage,
+    Storage, UpstreamRecord,
     types::{RequestEvent, StoredApiKeyRecord},
+    upstream::UpstreamKind as StorageUpstreamKind,
 };
 use http::header::{CONTENT_TYPE, RETRY_AFTER};
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
@@ -32,7 +33,9 @@ use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as Li
 use crate::api_keys::principal_view::PrincipalView;
 use crate::api_keys::types::LimitKind;
 use crate::audit_writer::{AuditEntry, AuditWriterSink};
-use crate::dynamic_view::{DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot};
+use crate::dynamic_view::{
+    ApplyStatus, DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
+};
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
 use crate::hop_by_hop::strip_hop_by_hop;
@@ -493,10 +496,9 @@ impl Lifecycle {
             }
         };
 
-        let signer_factory = view.signer_factory.with_auth_context(
+        let signer_factory = view.signer_factory.with_router_choice(
             success.api_key.clone().unwrap_or_default(),
-            authn_upstream_kind_label(success.upstream_kind),
-            String::new(),
+            router_chosen_upstream_name(view.as_ref(), &route.upstream),
         );
         let signer = match signer_factory.build(&route.upstream).await {
             Ok(signer) => signer,
@@ -1599,10 +1601,42 @@ fn pricing_upstream_kind(upstream: &Upstream) -> Option<cc_lb_pricing::UpstreamK
     }
 }
 
-fn authn_upstream_kind_label(kind: cc_lb_storage_api::types::UpstreamKind) -> &'static str {
-    match kind {
-        cc_lb_storage_api::types::UpstreamKind::AnthropicKey => "anthropic_key",
-        cc_lb_storage_api::types::UpstreamKind::AnthropicOAuth => "anthropic_oauth",
+fn router_chosen_upstream_name(view: &DynamicView, upstream: &Upstream) -> String {
+    view.upstreams_snapshot()
+        .iter()
+        .find(|record| route_record_matches(view, record, upstream))
+        .map(|record| record.name.clone())
+        .unwrap_or_else(|| legacy_router_choice_name(upstream).to_owned())
+}
+
+fn route_record_matches(view: &DynamicView, record: &UpstreamRecord, upstream: &Upstream) -> bool {
+    record.enabled
+        && record.deleted_at_unix_secs.is_none()
+        && view
+            .upstream_status_snapshot
+            .entries
+            .get(&record.name)
+            .is_some_and(|entry| entry.status == ApplyStatus::Active)
+        && route_upstream_matches_record(record, upstream)
+}
+
+fn route_upstream_matches_record(record: &UpstreamRecord, upstream: &Upstream) -> bool {
+    match (&record.kind, upstream) {
+        (
+            StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth,
+            Upstream::AnthropicDirect,
+        ) => true,
+        (StorageUpstreamKind::Custom, Upstream::CustomAnthropicSpec { base_url }) => {
+            record.base_url.as_ref() == Some(base_url)
+        }
+        _ => false,
+    }
+}
+
+fn legacy_router_choice_name(upstream: &Upstream) -> &'static str {
+    match upstream {
+        Upstream::AnthropicDirect => "anthropic_direct",
+        Upstream::CustomAnthropicSpec { .. } => "custom_anthropic_spec",
     }
 }
 

@@ -20,7 +20,7 @@ use cc_lb_plugin_api::{
     DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
     RequestContext, RetryDecision, RouteDecision, RouteError, RouterPlugin, ShapedRequest,
     ShapedRequestBuilder, SignedRequest, Signer, SignerError, SignerFactory, SigningCapability,
-    Upstream, UpstreamDialect, sign_request,
+    Upstream, UpstreamCandidate, UpstreamDialect, sign_request,
 };
 use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
 use http::header::CONTENT_TYPE;
@@ -98,7 +98,11 @@ fn default_principal_view() -> Arc<PrincipalView> {
 }
 
 impl ApiKeyAwareSignerFactory for TestAuthn {
-    fn with_api_key(&self, _api_key: String) -> Arc<dyn SignerFactory> {
+    fn with_router_choice(
+        &self,
+        _api_key: String,
+        _router_chosen_upstream_name: String,
+    ) -> Arc<dyn SignerFactory> {
         Arc::new(TestSignerFactory {
             state: self.state.clone(),
             refresh_allowed: self.refresh_allowed,
@@ -116,6 +120,7 @@ impl RouterPlugin for TestRouter {
         &self,
         _ctx: &RequestContext,
         _principal: &Principal,
+        _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
         Ok(RouteDecision {
             upstream: Upstream::CustomAnthropicSpec {

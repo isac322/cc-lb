@@ -18,7 +18,7 @@ use cc_lb_core::{
 use cc_lb_dialect_anthropic::{AnthropicDirectDialect, CustomAnthropicSpecDialect};
 use cc_lb_plugin_api::{
     PluginManifest, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, Signer,
-    SignerError, SignerFactory, Upstream, UpstreamDialect,
+    SignerError, SignerFactory, Upstream, UpstreamCandidate, UpstreamDialect,
 };
 use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -119,7 +119,7 @@ pub async fn build_dynamic_view(
     let revision_hash = collect_revision_hash(stores).await?;
     let global_router = Arc::new(DbRouter::new(routes));
     let signer_factory = Arc::new(DbCompositeSignerFactory::new(
-        upstreams,
+        upstreams.clone(),
         stores.upstreams.clone(),
         aead,
         lazy_refresher,
@@ -141,6 +141,7 @@ pub async fn build_dynamic_view(
         .error_normalizer(Arc::new(ErrorNormalizer::new()))
         .principal_view(principal_view)
         .upstream_status_snapshot(snapshot)
+        .upstream_records(upstreams.clone())
         .build())
 }
 
@@ -414,6 +415,7 @@ impl RouterPlugin for DbRouter {
         &self,
         _ctx: &RequestContext,
         _principal: &Principal,
+        _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
         let route = self.routes.first().ok_or_else(|| RouteError::NoRoute {
             reason: "no active upstreams in dynamic view".to_owned(),
@@ -433,8 +435,7 @@ struct DbCompositeSignerFactory {
     aead: Arc<AeadService>,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     downstream_api_key: Option<String>,
-    auth_upstream_kind: Option<&'static str>,
-    auth_upstream_credential_ref: Option<String>,
+    router_chosen_upstream_name: Option<String>,
 }
 
 impl DbCompositeSignerFactory {
@@ -450,28 +451,14 @@ impl DbCompositeSignerFactory {
             aead,
             lazy_refresher,
             downstream_api_key: None,
-            auth_upstream_kind: None,
-            auth_upstream_credential_ref: None,
+            router_chosen_upstream_name: None,
         }
     }
 
-    fn with_downstream_api_key(&self, api_key: String) -> Self {
-        Self {
-            upstreams: self.upstreams.clone(),
-            upstream_store: self.upstream_store.clone(),
-            aead: self.aead.clone(),
-            lazy_refresher: self.lazy_refresher.clone(),
-            downstream_api_key: Some(api_key),
-            auth_upstream_kind: self.auth_upstream_kind,
-            auth_upstream_credential_ref: self.auth_upstream_credential_ref.clone(),
-        }
-    }
-
-    fn with_selected_upstream(
+    fn with_router_choice_state(
         &self,
         api_key: String,
-        upstream_kind: &'static str,
-        upstream_credential_ref: String,
+        router_chosen_upstream_name: String,
     ) -> Self {
         Self {
             upstreams: self.upstreams.clone(),
@@ -479,24 +466,18 @@ impl DbCompositeSignerFactory {
             aead: self.aead.clone(),
             lazy_refresher: self.lazy_refresher.clone(),
             downstream_api_key: Some(api_key),
-            auth_upstream_kind: Some(upstream_kind),
-            auth_upstream_credential_ref: Some(upstream_credential_ref),
+            router_chosen_upstream_name: Some(router_chosen_upstream_name),
         }
     }
 }
 
 impl cc_lb_core::ApiKeyAwareSignerFactory for DbCompositeSignerFactory {
-    fn with_api_key(&self, api_key: String) -> Arc<dyn SignerFactory> {
-        Arc::new(self.with_downstream_api_key(api_key))
-    }
-
-    fn with_auth_context(
+    fn with_router_choice(
         &self,
         api_key: String,
-        upstream_kind: &'static str,
-        upstream_credential_ref: String,
+        router_chosen_upstream_name: String,
     ) -> Arc<dyn SignerFactory> {
-        Arc::new(self.with_selected_upstream(api_key, upstream_kind, upstream_credential_ref))
+        Arc::new(self.with_router_choice_state(api_key, router_chosen_upstream_name))
     }
 }
 
@@ -550,17 +531,9 @@ impl DbCompositeSignerFactory {
             return false;
         }
 
-        let Some(auth_kind) = self.auth_upstream_kind else {
-            return true;
-        };
-        let Some(auth_ref) = self.auth_upstream_credential_ref.as_deref() else {
-            return true;
-        };
-        if auth_ref.is_empty() {
-            return true;
-        }
-
-        upstream_kind_matches_auth(candidate.kind, auth_kind) && candidate.name == auth_ref
+        self.router_chosen_upstream_name
+            .as_deref()
+            .is_some_and(|router_choice| candidate.name == router_choice)
     }
 }
 
@@ -571,15 +544,6 @@ fn upstream_matches(record: &UpstreamRecord, upstream: &Upstream) -> bool {
             UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth,
             Upstream::AnthropicDirect
         ) | (UpstreamKind::Custom, Upstream::CustomAnthropicSpec { .. })
-    )
-}
-
-fn upstream_kind_matches_auth(kind: UpstreamKind, auth_kind: &str) -> bool {
-    matches!(
-        (kind, auth_kind),
-        (UpstreamKind::AnthropicApiKey, "anthropic_key")
-            | (UpstreamKind::Custom, "anthropic_key")
-            | (UpstreamKind::AnthropicOauth, "anthropic_oauth")
     )
 }
 

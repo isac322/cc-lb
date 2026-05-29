@@ -15,7 +15,7 @@ use cc_lb_core::api_keys::principal_view::{
 use cc_lb_core::{Lifecycle, LifecycleConfig};
 use cc_lb_plugin_api::{
     ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext, RouteDecision,
-    RouteError, RouterPlugin, Upstream,
+    RouteError, RouterPlugin, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
 use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
@@ -209,6 +209,7 @@ impl RouterPlugin for RecordingRouter {
         &self,
         _ctx: &RequestContext,
         principal: &Principal,
+        _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
         self.hits
             .lock()

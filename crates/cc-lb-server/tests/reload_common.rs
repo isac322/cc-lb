@@ -99,7 +99,11 @@ pub fn dynamic_view_holder(_config: &Config) -> Arc<DynamicViewHolder> {
 struct NoopSignerFactory;
 
 impl ApiKeyAwareSignerFactory for NoopSignerFactory {
-    fn with_api_key(&self, _api_key: String) -> Arc<dyn SignerFactory> {
+    fn with_router_choice(
+        &self,
+        _api_key: String,
+        _router_chosen_upstream_name: String,
+    ) -> Arc<dyn SignerFactory> {
         Arc::new(NoopSignerFactory)
     }
 }

@@ -3,6 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use arc_swap::ArcSwap;
 use cc_lb_plugin_api::ApiKeyAwareSignerFactory;
 use cc_lb_plugin_api::{ObservabilityHook, RouterPlugin};
+use cc_lb_storage_api::UpstreamRecord;
 
 use crate::api_keys::principal_view::PrincipalView;
 use crate::error_normalizer::ErrorNormalizer;
@@ -18,6 +19,13 @@ pub struct DynamicView {
     pub principal_view: Arc<PrincipalView>,
     pub upstream_status_snapshot: Arc<UpstreamStatusSnapshot>,
     pub generation: u64,
+    upstream_records: Vec<UpstreamRecord>,
+}
+
+impl DynamicView {
+    pub fn upstreams_snapshot(&self) -> &[UpstreamRecord] {
+        &self.upstream_records
+    }
 }
 
 pub struct DynamicViewHolder {
@@ -74,6 +82,7 @@ pub struct DynamicViewBuilder {
     error_normalizer: Option<Arc<ErrorNormalizer>>,
     principal_view: Option<Arc<PrincipalView>>,
     upstream_status_snapshot: Option<Arc<UpstreamStatusSnapshot>>,
+    upstream_records: Vec<UpstreamRecord>,
 }
 
 impl DynamicViewBuilder {
@@ -87,6 +96,7 @@ impl DynamicViewBuilder {
             error_normalizer: None,
             principal_view: None,
             upstream_status_snapshot: None,
+            upstream_records: Vec::new(),
         }
     }
 
@@ -100,6 +110,7 @@ impl DynamicViewBuilder {
             error_normalizer: Some(Arc::clone(&view.error_normalizer)),
             principal_view: Some(Arc::clone(&view.principal_view)),
             upstream_status_snapshot: Some(Arc::clone(&view.upstream_status_snapshot)),
+            upstream_records: view.upstreams_snapshot().to_vec(),
         }
     }
 
@@ -152,6 +163,11 @@ impl DynamicViewBuilder {
         self
     }
 
+    pub fn upstream_records(mut self, records: Vec<UpstreamRecord>) -> Self {
+        self.upstream_records = records;
+        self
+    }
+
     pub fn build(self) -> Arc<DynamicView> {
         Arc::new(DynamicView {
             signer_factory: self
@@ -174,6 +190,7 @@ impl DynamicViewBuilder {
                 .expect("DynamicViewBuilder requires principal_view"),
             upstream_status_snapshot: self.upstream_status_snapshot.unwrap_or_default(),
             generation: self.previous_generation.saturating_add(1),
+            upstream_records: self.upstream_records,
         })
     }
 }
@@ -186,14 +203,18 @@ mod tests {
     use cc_lb_plugin_api::{
         ObservabilityError, ObserveEvent, Principal, RequestContext, RouteDecision, RouteError,
         SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, Upstream,
-        UpstreamError,
+        UpstreamCandidate, UpstreamError,
     };
     use http::{Response, StatusCode};
 
     struct TestSignerFactory;
 
     impl ApiKeyAwareSignerFactory for TestSignerFactory {
-        fn with_api_key(&self, _api_key: String) -> Arc<dyn SignerFactory> {
+        fn with_router_choice(
+            &self,
+            _api_key: String,
+            _router_chosen_upstream_name: String,
+        ) -> Arc<dyn SignerFactory> {
             Arc::new(TestSignerFactory)
         }
     }
@@ -229,6 +250,7 @@ mod tests {
             &self,
             _ctx: &RequestContext,
             _principal: &Principal,
+            _candidates: &[UpstreamCandidate],
         ) -> Result<RouteDecision, RouteError> {
             Err(RouteError::NoRoute {
                 reason: "test router has no route".to_owned(),
@@ -325,5 +347,11 @@ mod tests {
     fn builder_increments_generation() {
         let view = test_view(41);
         assert_eq!(view.generation, 42);
+    }
+
+    #[test]
+    fn upstreams_snapshot_defaults_empty() {
+        let view = test_view(0);
+        assert!(view.upstreams_snapshot().is_empty());
     }
 }

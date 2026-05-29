@@ -148,25 +148,6 @@ impl Fixture {
         .expect("principal created");
     }
 
-    async fn create_decoy_api_key_upstream_before(&self, before: Uuid) {
-        for index in 0..256_u16 {
-            let record = self
-                .storage
-                .create(UpstreamCreate {
-                    name: format!("decoy-{index}"),
-                    kind: UpstreamKind::AnthropicApiKey,
-                    base_url: Some(Url::parse(&self.fake_base).expect("fake url")),
-                    api_key_ciphertext: Some(vec![1; 32]),
-                })
-                .await
-                .expect("decoy upstream created");
-            if record.id < before {
-                return;
-            }
-        }
-        panic!("failed to create lower-id decoy upstream");
-    }
-
     fn refresher(&self, replica_id: Uuid, cancel: CancellationToken) -> Arc<OAuthRefresher> {
         Arc::new(OAuthRefresher::new(
             self.stores.clone(),
@@ -244,20 +225,17 @@ async fn expired_before_sweep_lazy_fires_and_retry_succeeds() {
 }
 
 #[tokio::test]
-async fn expired_oauth_upstream_selected_by_auth_ref_refreshes_during_message_request() {
+async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_message_request() {
     let fixture = Fixture::new().await;
     fixture.create_principal("oauth-principal").await;
     let tokens = initial_tokens(&fixture.fake_base).await;
-    let upstream_id = fixture
+    fixture
         .create_oauth_upstream_with_tokens(
             "oauth-target",
             now_secs().saturating_sub(1),
             tokens,
             Some(Url::parse(&fixture.fake_base).expect("fake url")),
         )
-        .await;
-    fixture
-        .create_decoy_api_key_upstream_before(upstream_id)
         .await;
     let cancel = CancellationToken::new();
     let replica_id = Uuid::new_v4();

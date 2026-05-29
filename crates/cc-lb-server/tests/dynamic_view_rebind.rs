@@ -148,6 +148,13 @@ async fn corrupt_oauth_upstream_is_error_while_other_upstreams_stay_active() {
 
     let view = build(&stores, 10, &runtime, dir.path()).await;
     assert_eq!(view.generation, 11);
+    let mut upstream_names = view
+        .upstreams_snapshot()
+        .iter()
+        .map(|record| record.name.as_str())
+        .collect::<Vec<_>>();
+    upstream_names.sort_unstable();
+    assert_eq!(upstream_names, ["corrupt", "healthy"]);
 
     let healthy = view
         .upstream_status_snapshot

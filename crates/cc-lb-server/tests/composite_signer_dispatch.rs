@@ -34,7 +34,7 @@ use url::Url;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn oauth_auth_ref_dispatches_to_matching_oauth_upstream_not_first_anthropic_direct() {
+async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic_direct() {
     let fixture = Fixture::new().await;
     fixture.create_principal("oauth-principal").await;
     let target_id = fixture

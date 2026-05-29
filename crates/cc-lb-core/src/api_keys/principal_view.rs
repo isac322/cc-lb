@@ -261,11 +261,17 @@ mod tests {
     use super::*;
     use cc_lb_plugin_api::{
         ObservabilityError, ObserveEvent, Principal, RequestContext, RouteDecision, RouteError,
+        UpstreamCandidate,
     };
 
     struct StubRouter(&'static str);
     impl RouterPlugin for StubRouter {
-        fn route(&self, _: &RequestContext, _: &Principal) -> Result<RouteDecision, RouteError> {
+        fn route(
+            &self,
+            _: &RequestContext,
+            _: &Principal,
+            _: &[UpstreamCandidate],
+        ) -> Result<RouteDecision, RouteError> {
             unimplemented!("StubRouter({}) is for identity comparison only", self.0)
         }
     }

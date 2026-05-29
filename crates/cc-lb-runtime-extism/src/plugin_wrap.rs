@@ -8,8 +8,7 @@ use bytes::Bytes;
 use cc_lb_plugin_api::{
     DialectError, Principal, RequestContext, RetryDecision, RouteDecision, RouteError,
     RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError,
-    SignerFactory, SigningCapability, Upstream, UpstreamCandidate, UpstreamDialect,
-    UpstreamError,
+    SignerFactory, SigningCapability, Upstream, UpstreamCandidate, UpstreamDialect, UpstreamError,
 };
 use http::header::{HeaderName, HeaderValue};
 use http::{HeaderMap, Method, StatusCode};
