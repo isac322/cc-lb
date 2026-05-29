@@ -59,6 +59,7 @@ impl PrincipalView {
             name: principal_id.to_owned(),
             kind: DbPrincipalKind::Machine,
             allowed_models,
+            allowed_upstreams: vec![],
             default_limits,
             enabled,
             last_apply_error: None,

@@ -1,6 +1,9 @@
 use async_trait::async_trait;
 
-use crate::{BackendKind, RuntimeChangeNotifier, StorageError, StorageResult, types::*};
+use crate::{
+    BackendKind, RuntimeChangeNotifier, StorageError, StorageResult, types::*,
+    upstream_rate_limit::UpstreamRateLimitStateStore,
+};
 
 pub const CURRENT_CONTRACT_VERSION: u32 = 1;
 
@@ -283,6 +286,7 @@ pub trait Storage:
     + RequestEventStore
     + QuotaStore
     + LimitStateStore
+    + UpstreamRateLimitStateStore
     + UsageRollupStore
     + OAuthCredentialStore
     + ApiKeyStore
@@ -303,6 +307,7 @@ impl<T> Storage for T where
         + RequestEventStore
         + QuotaStore
         + LimitStateStore
+        + UpstreamRateLimitStateStore
         + UsageRollupStore
         + OAuthCredentialStore
         + ApiKeyStore

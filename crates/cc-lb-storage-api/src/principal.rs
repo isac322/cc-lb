@@ -36,6 +36,7 @@ pub struct PrincipalRecord {
     pub name: String,
     pub kind: PrincipalKind,
     pub allowed_models: Vec<String>,
+    pub allowed_upstreams: Vec<Uuid>,
     pub default_limits: Vec<Limit>,
     pub enabled: bool,
     pub last_apply_error: Option<String>,
@@ -51,6 +52,7 @@ pub struct PrincipalCreate {
     pub name: String,
     pub kind: PrincipalKind,
     pub allowed_models: Vec<String>,
+    pub allowed_upstreams: Vec<Uuid>,
     pub default_limits: Vec<Limit>,
 }
 
@@ -58,6 +60,7 @@ pub struct PrincipalCreate {
 pub struct PrincipalUpdate {
     pub name: Option<String>,
     pub allowed_models: Option<Vec<String>>,
+    pub allowed_upstreams: Option<Vec<Uuid>>,
     pub default_limits: Option<Vec<Limit>>,
 }
 

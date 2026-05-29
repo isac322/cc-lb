@@ -673,6 +673,7 @@ async fn seed_runtime_state(
             name: principal_name.to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: vec!["claude-3-5-sonnet-*".to_owned()],
+            allowed_upstreams: vec![],
             default_limits: vec![
                 PrincipalLimit {
                     kind: PrincipalLimitKind::CostUsd,
@@ -700,7 +701,6 @@ async fn seed_runtime_state(
             principal_name,
             CreateParams {
                 upstream_kind: KeyUpstreamKind::AnthropicKey,
-                upstream_credential_ref: "anthropic-wiremock".to_owned(),
                 label: "prod".to_owned(),
                 description: None,
                 expires_at_unix_secs: None,

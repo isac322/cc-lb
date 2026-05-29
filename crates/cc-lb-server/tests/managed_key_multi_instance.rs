@@ -245,6 +245,7 @@ async fn seed_test_principal(storage: &dyn StorageTrait) -> TestResult<()> {
             name: PRINCIPAL_ID.to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: vec!["*".to_owned()],
+            allowed_upstreams: vec![],
             default_limits: vec![],
         },
         now,
@@ -326,7 +327,6 @@ async fn issue_key(admin_addr: SocketAddr, label: &str) -> TestResult<IssuedKey>
         json!({
             "label": label,
             "upstream_kind": "anthropic_key",
-            "upstream_credential_ref": "test-upstream",
         }),
     )
     .await?;

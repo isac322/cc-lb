@@ -112,6 +112,7 @@ where
             PrincipalUpdate {
                 name: Some("renamed-principal".to_owned()),
                 allowed_models: None,
+                allowed_upstreams: None,
                 default_limits: None,
             },
             BASE_TS + 1,
@@ -337,6 +338,7 @@ fn principal_create(index: usize) -> PrincipalCreate {
         name: format!("principal-{index:04}"),
         kind: PrincipalKind::Machine,
         allowed_models: vec!["claude-sonnet-*".to_owned()],
+        allowed_upstreams: vec![],
         default_limits: limits(),
     }
 }

@@ -401,6 +401,7 @@ pub async fn seed_app_testing_storage(
                         cap_micros: 1_000_000,
                     }],
                     allowed_models: vec!["*".to_owned()],
+                    allowed_upstreams: vec![],
                 },
                 now,
             )

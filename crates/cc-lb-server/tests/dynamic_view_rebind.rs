@@ -39,6 +39,7 @@ async fn create_principal(storage: &Storage, name: &str) -> cc_lb_storage_api::P
             name: name.to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: Vec::new(),
+            allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
         },
         1,

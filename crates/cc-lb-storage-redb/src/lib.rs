@@ -283,3 +283,20 @@ pub(crate) fn crash_test_sentinel_sleep(env_name: &str) {
 #[cfg(not(any(test, feature = "crash-test-hooks")))]
 #[inline]
 pub(crate) fn crash_test_sentinel_sleep(_: &str) {}
+
+#[async_trait::async_trait]
+impl cc_lb_storage_api::upstream_rate_limit::UpstreamRateLimitStateStore for Storage {
+    async fn put_observation(
+        &self,
+        _observation: &cc_lb_storage_api::upstream_rate_limit::UpstreamRateLimitObservationRecord,
+    ) -> Result<(), cc_lb_storage_api::StorageError> {
+        Ok(())
+    }
+
+    async fn list_for_upstream_ids(
+        &self,
+        _upstream_ids: &[String],
+    ) -> Result<Vec<cc_lb_storage_api::upstream_rate_limit::UpstreamRateLimitObservationRecord>, cc_lb_storage_api::StorageError> {
+        Ok(vec![])
+    }
+}

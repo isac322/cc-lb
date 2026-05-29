@@ -326,7 +326,6 @@ mod tests {
             label: label.to_owned(),
             description: Some("test key".to_owned()),
             upstream_kind: UpstreamKind::AnthropicKey,
-            upstream_credential_ref: "anthropic-prod".to_owned(),
             expires_at_unix_secs: Some(1_800_000_000),
             limit_overrides: vec![Limit {
                 kind: LimitKind::Requests,

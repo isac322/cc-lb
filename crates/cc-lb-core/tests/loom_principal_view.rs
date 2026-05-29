@@ -85,6 +85,7 @@ mod principal_view_swap {
             name: PRINCIPAL_ID.to_owned(),
             kind: DbPrincipalKind::Machine,
             allowed_models: vec!["claude-*".to_owned()],
+            allowed_upstreams: vec![],
             default_limits: Vec::new(),
             enabled: true,
             last_apply_error: None,

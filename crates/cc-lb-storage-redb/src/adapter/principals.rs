@@ -146,6 +146,7 @@ impl RedbStorage {
             name: input.name,
             kind: input.kind,
             allowed_models: input.allowed_models,
+            allowed_upstreams: input.allowed_upstreams,
             default_limits: input.default_limits,
             enabled: true,
             last_apply_error: None,

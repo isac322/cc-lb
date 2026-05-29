@@ -484,7 +484,7 @@ impl Lifecycle {
         let signer_factory = view.signer_factory.with_auth_context(
             success.api_key.clone().unwrap_or_default(),
             authn_upstream_kind_label(success.upstream_kind),
-            success.upstream_credential_ref.clone(),
+            String::new(),
         );
         let signer = match signer_factory.build(&route.upstream).await {
             Ok(signer) => signer,

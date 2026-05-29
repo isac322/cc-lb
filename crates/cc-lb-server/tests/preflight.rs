@@ -262,6 +262,7 @@ async fn seed_principal(
             name: name.to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models,
+            allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
         },
         1_800_000_000,

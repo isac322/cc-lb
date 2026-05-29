@@ -182,6 +182,7 @@ async fn seed_storage(storage_path: &Path, upstream_addr: SocketAddr) {
             name: "api-key".to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: Vec::new(),
+            allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
         },
         1,

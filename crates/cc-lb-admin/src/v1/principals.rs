@@ -53,6 +53,8 @@ struct CreatePrincipalBody {
     #[serde(default)]
     allowed_models: Vec<String>,
     #[serde(default)]
+    allowed_upstreams: Option<Vec<uuid::Uuid>>,
+    #[serde(default)]
     default_limits: Vec<Limit>,
 }
 
@@ -60,6 +62,7 @@ struct CreatePrincipalBody {
 struct UpdatePrincipalBody {
     name: Option<String>,
     allowed_models: Option<Vec<String>>,
+    allowed_upstreams: Option<Vec<uuid::Uuid>>,
     default_limits: Option<Vec<Limit>>,
 }
 
@@ -112,6 +115,7 @@ async fn create_principal(
         name: body.name,
         kind: body.kind,
         allowed_models: body.allowed_models,
+        allowed_upstreams: body.allowed_upstreams.unwrap_or_default(),
         default_limits: body.default_limits,
     };
 
@@ -206,6 +210,7 @@ async fn update_principal(
         PrincipalUpdate {
             name: body.name,
             allowed_models: body.allowed_models,
+            allowed_upstreams: body.allowed_upstreams,
             default_limits: body.default_limits,
         },
         fields_changed,
@@ -403,6 +408,9 @@ fn update_fields_changed(body: &UpdatePrincipalBody) -> Vec<&'static str> {
     }
     if body.allowed_models.is_some() {
         fields.push("allowed_models");
+    }
+    if body.allowed_upstreams.is_some() {
+        fields.push("allowed_upstreams");
     }
     if body.default_limits.is_some() {
         fields.push("default_limits");
