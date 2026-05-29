@@ -218,11 +218,11 @@ async fn apply_plugin_chain(
 
     let mut resolved = Vec::with_capacity(chain.plugins.len());
     for plugin in chain.plugins {
-        let slot = plugin.slot(chain.slot.as_deref());
-        let Some(slot) = parse_plugin_slot(slot.as_deref()) else {
+        let slot_name = plugin.slot(chain.slot.as_deref());
+        let Some(slot) = parse_plugin_slot(&slot_name) else {
             tracing::warn!(
                 principal_id = %principal.id,
-                slot = slot.as_deref().unwrap_or(""),
+                slot = slot_name.as_str(),
                 "bootstrap plugin chain slot is invalid; skipping chain"
             );
             return Ok(());
@@ -339,12 +339,12 @@ impl BootstrapPluginRef {
         }
     }
 
-    fn slot(&self, chain_slot: Option<&str>) -> Option<String> {
+    fn slot(&self, chain_slot: Option<&str>) -> String {
         match self {
             Self::Name(_) => chain_slot.map(ToOwned::to_owned),
             Self::Entry(entry) => entry.slot.as_deref().or(chain_slot).map(ToOwned::to_owned),
         }
-        .or_else(|| Some("observability_hook".to_owned()))
+        .unwrap_or_else(|| "observability_hook".to_owned())
     }
 
     fn config(&self) -> Option<&Value> {
@@ -391,10 +391,10 @@ fn parse_principal_kind(kind: Option<&str>) -> PrincipalKind {
     }
 }
 
-fn parse_plugin_slot(slot: Option<&str>) -> Option<PluginSlot> {
+fn parse_plugin_slot(slot: &str) -> Option<PluginSlot> {
     match slot {
-        Some("Router" | "router") => Some(PluginSlot::Router),
-        Some("ObservabilityHook" | "observability_hook") => Some(PluginSlot::ObservabilityHook),
+        "Router" | "router" => Some(PluginSlot::Router),
+        "ObservabilityHook" | "observability_hook" => Some(PluginSlot::ObservabilityHook),
         _ => None,
     }
 }
@@ -427,11 +427,7 @@ mod tests {
         let (dir, storage) = fixture();
         fs::write(
             dir.path().join("bootstrap.toml"),
-            r#"
-[[principals]]
-name = "alice"
-kind = "human"
-"#,
+            format!("{}\nname = \"alice\"\nkind = \"human\"\n", ["[[", "principals", "]]"].concat()),
         )
         .unwrap();
 
@@ -451,11 +447,7 @@ kind = "human"
 
         fs::write(
             dir.path().join("bootstrap.toml"),
-            r#"
-[[principals]]
-name = "alice"
-kind = "human"
-"#,
+            format!("{}\nname = \"alice\"\nkind = \"human\"\n", ["[[", "principals", "]]"].concat()),
         )
         .unwrap();
         apply_bootstrap(
