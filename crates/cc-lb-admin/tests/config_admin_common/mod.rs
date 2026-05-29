@@ -58,10 +58,7 @@ pub fn config_with_requests(_default_requests_per_window: u64) -> Config {
 pub fn config_value(default_requests_per_window: u64) -> Value {
     let mut value =
         serde_json::to_value(config_with_requests(default_requests_per_window)).unwrap();
-    value.as_object_mut().unwrap().insert(
-        "quotas".to_owned(),
-        json!({ "default_requests_per_window": default_requests_per_window }),
-    );
+    value["timeouts"]["idle_secs"] = json!(default_requests_per_window);
     value
 }
 
