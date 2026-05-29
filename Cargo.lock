@@ -4909,8 +4909,10 @@ name = "tests-integration"
 version = "0.1.0"
 dependencies = [
  "cc-lb-config",
+ "cc-lb-core",
  "cc-lb-pricing",
  "cc-lb-server",
+ "cc-lb-storage-api",
  "cc-lb-storage-redb",
  "reqwest",
  "serde_json",
@@ -4936,6 +4938,10 @@ dependencies = [
  "parking_lot",
  "serde",
 ]
+
+[[package]]
+name = "tests-multi-replica"
+version = "0.1.0"
 
 [[package]]
 name = "thiserror"

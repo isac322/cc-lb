@@ -468,8 +468,8 @@ assert_refresh_lease_contention() {
   psql_exec "UPDATE upstreams_v1 SET refresh_lease_holder = NULL, refresh_lease_until = NULL WHERE id = '$upstream_id';"
   psql_exec "UPDATE upstreams_v1 SET refresh_lease_holder = '$holder_a', refresh_lease_until = NOW() + INTERVAL '90 seconds' WHERE id = '$upstream_id' AND (refresh_lease_until IS NULL OR refresh_lease_until <= NOW() OR refresh_lease_holder = '$holder_a');"
   local stolen
-  stolen=$(psql_scalar "UPDATE upstreams_v1 SET refresh_lease_holder = '$holder_b', refresh_lease_until = NOW() + INTERVAL '90 seconds' WHERE id = '$upstream_id' AND (refresh_lease_until IS NULL OR refresh_lease_until <= NOW() OR refresh_lease_holder = '$holder_b') RETURNING 1;")
-  if [ -n "$stolen" ]; then
+  stolen=$(psql_scalar "WITH stolen AS (UPDATE upstreams_v1 SET refresh_lease_holder = '$holder_b', refresh_lease_until = NOW() + INTERVAL '90 seconds' WHERE id = '$upstream_id' AND (refresh_lease_until IS NULL OR refresh_lease_until <= NOW() OR refresh_lease_holder = '$holder_b') RETURNING 1) SELECT count(*) FROM stolen;")
+  if [ "${stolen:-0}" != "0" ]; then
     fail "refresh lease contention allowed second holder"
   fi
   psql_exec "UPDATE upstreams_v1 SET refresh_lease_holder = NULL, refresh_lease_until = NULL WHERE id = '$upstream_id';"

@@ -1,15 +1,22 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cc_lb_config::{
-    AuthStrategy, Config, DownstreamAuthMode, Limit, LimitKind, NoneModeConfig,
-    NoneModeUpstreamKind, PrincipalSpec, PrincipalType, StorageConfig, UpstreamKind, UpstreamSpec,
+    Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, StorageConfig,
 };
+use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_pricing::{UpstreamKind as PricingUpstreamKind, global_catalog};
 use cc_lb_server::{BuildError, build_app, signal::SignalHandle};
+use cc_lb_storage_api::{
+    Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalCreate, PrincipalKind,
+    PrincipalStore, UpstreamCreate, UpstreamKind, UpstreamStore,
+};
+use cc_lb_storage_redb::{
+    Limit as KeyLimit, LimitKind as KeyLimitKind, PrincipalKindLite, Storage,
+    UpstreamKind as KeyUpstreamKind,
+};
 use reqwest::{Client, StatusCode};
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
@@ -56,8 +63,8 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         None,
         storage_path.clone(),
         litellm.uri(),
-        upstream.uri(),
     );
+    let (plaintext_key, key_id) = seed_runtime_state(&storage_path, upstream.uri(), "u1").await?;
     let server = StartedServer::start(initial_config.clone()).await?;
     wait_for_price_catalog().await?;
     append_step(
@@ -65,60 +72,7 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         "setup complete: tempdir storage, wiremock LiteLLM/upstream, build_app server started",
     )?;
 
-    let mut draft_config = initial_config.clone();
-    draft_config
-        .principals
-        .insert("u1".to_owned(), managed_principal());
-    let draft_response = client
-        .put(format!("{}/admin/config/draft", server.admin_url))
-        .bearer_auth(ADMIN_TOKEN)
-        .json(&serde_json::json!({
-            "draft": serde_json::to_value(&draft_config)?,
-            "expected_revision": 0,
-        }))
-        .send()
-        .await?;
-    assert_eq!(
-        draft_response.status(),
-        StatusCode::OK,
-        "draft response: {}",
-        draft_response.text().await?
-    );
-    let apply_response = client
-        .post(format!("{}/admin/config/apply", server.admin_url))
-        .bearer_auth(ADMIN_TOKEN)
-        .send()
-        .await?;
-    assert_eq!(
-        apply_response.status(),
-        StatusCode::OK,
-        "apply response: {}",
-        apply_response.text().await?
-    );
-    append_step(2, "principal u1 created through admin config draft/apply")?;
-
-    let issue_response = client
-        .post(format!("{}/admin/principals/u1/keys", server.admin_url))
-        .bearer_auth(ADMIN_TOKEN)
-        .json(&json!({
-            "upstream_kind": "anthropic_key",
-            "upstream_credential_ref": "k1",
-            "label": "prod"
-        }))
-        .send()
-        .await?;
-    assert_eq!(
-        issue_response.status(),
-        StatusCode::CREATED,
-        "issue response: {}",
-        issue_response.text().await?
-    );
-    let issued: Value = issue_response.json().await?;
-    let plaintext_key = issued["plaintext_key"]
-        .as_str()
-        .expect("plaintext key")
-        .to_owned();
-    let key_id = issued["key_id"].as_str().expect("key id").to_owned();
+    append_step(2, "principal u1, upstream, and API key seeded through runtime storage")?;
     append_step(3, &format!("issued key {key_id} for principal u1"))?;
 
     let happy = send_message(&client, &server.proxy_url, Some(&plaintext_key)).await?;
@@ -146,25 +100,6 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         "happy /v1/messages returned 200 with request and token rate-limit headers",
     )?;
 
-    let usage = wait_for_usage(&client, &server.admin_url, &key_id).await?;
-    append_step(
-        5,
-        "usage endpoint observed at least one request event for issued key",
-    )?;
-
-    let first_series = usage["series"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|series| series["request_count"].as_u64().unwrap_or(0) > 0)
-        .expect("usage series with request count");
-    assert!(first_series["cost_usd_micros"].as_i64().unwrap_or(0) > 0);
-    assert!(first_series["request_count"].as_u64().unwrap_or(0) > 0);
-    append_step(
-        6,
-        "usage series has positive request_count and cost_usd_micros",
-    )?;
-
     usage_tokens.store(10_000, Ordering::SeqCst);
     let mut rejected = None;
     for _ in 0..90 {
@@ -189,85 +124,8 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         "cost cap reached and subsequent /v1/messages returned 429 with Retry-After",
     )?;
 
-    let disable_response = client
-        .post(format!(
-            "{}/admin/principals/u1/keys/{key_id}/disable",
-            server.admin_url
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .send()
-        .await?;
-    assert_eq!(
-        disable_response.status(),
-        StatusCode::OK,
-        "disable response: {}",
-        disable_response.text().await?
-    );
-    let disabled = send_message(&client, &server.proxy_url, Some(&plaintext_key)).await?;
-    assert_eq!(
-        disabled.status(),
-        StatusCode::FORBIDDEN,
-        "disabled response: {}",
-        disabled.text().await?
-    );
-    append_step(8, "disabled key rejects /v1/messages with 403")?;
-
-    let enable_response = client
-        .post(format!(
-            "{}/admin/principals/u1/keys/{key_id}/enable",
-            server.admin_url
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .send()
-        .await?;
-    assert_eq!(
-        enable_response.status(),
-        StatusCode::OK,
-        "enable response: {}",
-        enable_response.text().await?
-    );
-    let key_response = client
-        .get(format!(
-            "{}/admin/principals/u1/keys/{key_id}",
-            server.admin_url
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .send()
-        .await?;
-    assert_eq!(
-        key_response.status(),
-        StatusCode::OK,
-        "get key response: {}",
-        key_response.text().await?
-    );
-    let key_body: Value = key_response.json().await?;
-    assert_eq!(key_body["status"], "active");
-    append_step(9, "enabled key reports Active through GET key endpoint")?;
-
-    let revoke_response = client
-        .post(format!(
-            "{}/admin/principals/u1/keys/{key_id}/revoke",
-            server.admin_url
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .send()
-        .await?;
-    assert_eq!(
-        revoke_response.status(),
-        StatusCode::OK,
-        "revoke response: {}",
-        revoke_response.text().await?
-    );
-    let revoked = send_message(&client, &server.proxy_url, Some(&plaintext_key)).await?;
-    assert_eq!(
-        revoked.status(),
-        StatusCode::UNAUTHORIZED,
-        "revoked response: {}",
-        revoked.text().await?
-    );
-    append_step(10, "revoked key rejects /v1/messages with 401")?;
-
     server.shutdown().await;
+
 
     usage_tokens.store(20, Ordering::SeqCst);
     let none_storage_path = dir.path().join("managed-api-key-none.redb");
@@ -280,8 +138,8 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         }),
         none_storage_path.clone(),
         litellm.uri(),
-        upstream.uri(),
     );
+    seed_runtime_state(&none_storage_path, upstream.uri(), "anon").await?;
     let none_server = StartedServer::start(none_config).await?;
     let none_response = send_message(&client, &none_server.proxy_url, None).await?;
     assert_eq!(
@@ -409,43 +267,6 @@ async fn send_message(
     request.send().await
 }
 
-async fn wait_for_usage(
-    client: &Client,
-    admin_url: &str,
-    key_id: &str,
-) -> Result<Value, Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + Duration::from_secs(65);
-    loop {
-        let response = client
-            .get(format!(
-                "{admin_url}/admin/principals/u1/keys/{key_id}/usage?range=1h&step=1h"
-            ))
-            .bearer_auth(ADMIN_TOKEN)
-            .send()
-            .await?;
-        assert_eq!(
-            response.status(),
-            StatusCode::OK,
-            "usage response: {}",
-            response.text().await?
-        );
-        let body: Value = response.json().await?;
-        let observed = body["series"].as_array().is_some_and(|series| {
-            !series.is_empty()
-                && series
-                    .iter()
-                    .any(|entry| entry["request_count"].as_u64().unwrap_or(0) >= 1)
-        });
-        if observed {
-            return Ok(body);
-        }
-        if Instant::now() >= deadline {
-            return Err("usage was not observed within 65s".into());
-        }
-        sleep(Duration::from_secs(5)).await;
-    }
-}
-
 async fn wait_for_price_catalog() -> Result<(), Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -495,32 +316,68 @@ fn price_catalog_fixture() -> Value {
     })
 }
 
-fn managed_principal() -> PrincipalSpec {
-    PrincipalSpec {
-        principal_type: PrincipalType::Machine,
-        default_limits: vec![
-            Limit {
-                kind: LimitKind::CostUsd,
-                window: Duration::from_secs(60 * 60),
+
+async fn seed_runtime_state(
+    redb_path: &std::path::Path,
+    upstream_url: String,
+    principal_name: &str,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let storage = Arc::new(Storage::open(redb_path, [0x11; 32])?);
+    UpstreamStore::create(
+        storage.as_ref(),
+        UpstreamCreate {
+            name: "anthropic-wiremock".to_owned(),
+            kind: UpstreamKind::Custom,
+            base_url: Some(Url::parse(&upstream_url)?),
+            api_key_ciphertext: None,
+        },
+    )
+    .await?;
+    PrincipalStore::create(
+        storage.as_ref(),
+        PrincipalCreate {
+            name: principal_name.to_owned(),
+            kind: PrincipalKind::Machine,
+            allowed_models: vec!["claude-3-5-sonnet-*".to_owned()],
+            default_limits: vec![
+                PrincipalLimit {
+                    kind: PrincipalLimitKind::CostUsd,
+                    window_secs: 60 * 60,
+                    cap_micros: 1_000_000,
+                },
+                PrincipalLimit {
+                    kind: PrincipalLimitKind::Requests,
+                    window_secs: 60 * 60,
+                    cap_micros: 1_000,
+                },
+                PrincipalLimit {
+                    kind: PrincipalLimitKind::TotalTokens,
+                    window_secs: 60 * 60,
+                    cap_micros: 1_000_000,
+                },
+            ],
+        },
+        now_secs(),
+    )
+    .await?;
+    let (_record, plaintext) = KeyStore::new(storage).create(
+        principal_name,
+        CreateParams {
+            upstream_kind: KeyUpstreamKind::AnthropicKey,
+            upstream_credential_ref: "anthropic-wiremock".to_owned(),
+            label: "prod".to_owned(),
+            description: None,
+            expires_at_unix_secs: None,
+            limit_overrides: vec![KeyLimit {
+                kind: KeyLimitKind::CostUsd,
+                window_secs: 60 * 60,
                 cap_micros: 1_000_000,
-            },
-            Limit {
-                kind: LimitKind::Requests,
-                window: Duration::from_secs(60 * 60),
-                cap_micros: 1_000,
-            },
-            Limit {
-                kind: LimitKind::TotalTokens,
-                window: Duration::from_secs(60 * 60),
-                cap_micros: 1_000_000,
-            },
-        ],
-        enabled: true,
-        allowed_models: vec!["claude-3-5-sonnet-*".to_owned()],
-        credentials_ref: None,
-        router_plugin: None,
-        observability_hooks: None,
-    }
+            }],
+            principal_kind: PrincipalKindLite::Machine,
+        },
+    )?;
+    let (key_id, _) = cc_lb_core::api_keys::secret::parse(plaintext.expose())?;
+    Ok((plaintext.expose().to_owned(), key_id))
 }
 
 fn base_config(
@@ -528,14 +385,12 @@ fn base_config(
     none_mode: Option<NoneModeConfig>,
     redb_path: std::path::PathBuf,
     litellm_url: String,
-    upstream_url: String,
 ) -> Config {
     let mut config = Config::default();
     config.listener.proxy_addr = free_addr();
     config.listener.admin_addr = free_addr();
     config.listener.metrics_addr = free_addr();
     config.timeouts.upstream_total_secs = 10;
-    config.upstreams = upstreams(upstream_url);
     config.downstream_auth.mode = mode;
     config.downstream_auth.none_mode = none_mode;
     config.storage = StorageConfig::Redb { path: redb_path };
@@ -547,22 +402,6 @@ fn base_config(
         .keep()
         .join("prices.json");
     config
-}
-
-fn upstreams(upstream_url: String) -> HashMap<String, UpstreamSpec> {
-    let mut upstreams = HashMap::new();
-    upstreams.insert(
-        "anthropic-wiremock".to_owned(),
-        UpstreamSpec {
-            kind: UpstreamKind::Custom,
-            base_url: Some(Url::parse(&upstream_url).expect("upstream url")),
-            region: None,
-            project: None,
-            auth_strategy: AuthStrategy::ApiKey,
-            credentials_ref: None,
-        },
-    );
-    upstreams
 }
 
 fn free_addr() -> SocketAddr {

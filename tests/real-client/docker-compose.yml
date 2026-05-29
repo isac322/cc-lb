@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: cc_lb
       POSTGRES_DB: cc_lb
     ports:
-      - "55432:5432"
+      - "${CC_LB_MULTI_REPLICA_POSTGRES_PORT}:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U cc_lb -d cc_lb"]
       interval: 1s

@@ -13,6 +13,7 @@ members = [
     "tests/tls",
     "tests/crash-recovery",
     "tests/integration",
+    "tests/multi-replica",
     "tests/real-client",
 ]
 exclude = ["fuzz"]

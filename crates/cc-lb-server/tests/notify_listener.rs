@@ -102,10 +102,10 @@ impl UpstreamStore for ControlledUpstreamStore {
                 message: "injected list failure".to_owned(),
             });
         }
-        if let Some(started) = &self.list_started {
-            if let Some(sender) = started.lock().await.take() {
-                let _ = sender.send(());
-            }
+        if let Some(started) = &self.list_started
+            && let Some(sender) = started.lock().await.take()
+        {
+            let _ = sender.send(());
         }
         if let Some(delay) = self.delay_list {
             tokio::time::sleep(delay).await;
