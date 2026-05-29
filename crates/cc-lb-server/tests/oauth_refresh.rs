@@ -10,19 +10,28 @@ use axum::routing::post;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
-use cc_lb_config::AnthropicOAuthConfig;
+use cc_lb_config::{
+    AnthropicOAuthConfig, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind,
+};
+use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
+use cc_lb_core::{DynamicViewHolder, Lifecycle, LifecycleConfig};
 use cc_lb_plugin_api::{
     RequestContext, ShapedRequest, Upstream, UpstreamDialect, shape_request, sign_request,
 };
-use cc_lb_server::dynamic_view_builder::Stores;
+use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::refresh::{LazyRefresher, OAuthRefresher};
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh,
 };
-use cc_lb_storage_api::{UpstreamCreate, UpstreamKind, UpstreamStore};
+use cc_lb_storage_api::{
+    PrincipalCreate, PrincipalKind, UpstreamCreate, UpstreamKind, UpstreamStore,
+};
 use cc_lb_storage_redb::Storage;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
+use http::Request;
 use http::header::{AUTHORIZATION, LOCATION};
+use http_body_util::BodyExt;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use serde::Deserialize;
 use serde_json::Value;
@@ -85,12 +94,23 @@ impl Fixture {
 
     async fn create_oauth_upstream(&self, name: &str, expires_at: u64) -> Uuid {
         let tokens = initial_tokens(&self.fake_base).await;
+        self.create_oauth_upstream_with_tokens(name, expires_at, tokens, None)
+            .await
+    }
+
+    async fn create_oauth_upstream_with_tokens(
+        &self,
+        name: &str,
+        expires_at: u64,
+        tokens: InitialTokens,
+        base_url: Option<Url>,
+    ) -> Uuid {
         let record = self
             .storage
             .create(UpstreamCreate {
                 name: name.to_owned(),
                 kind: UpstreamKind::AnthropicOauth,
-                base_url: None,
+                base_url,
                 api_key_ciphertext: None,
             })
             .await
@@ -110,6 +130,40 @@ impl Fixture {
             .await
             .expect("tokens stored");
         record.id
+    }
+
+    async fn create_principal(&self, name: &str) {
+        cc_lb_storage_api::PrincipalStore::create(
+            self.storage.as_ref(),
+            PrincipalCreate {
+                name: name.to_owned(),
+                kind: PrincipalKind::Machine,
+                allowed_models: Vec::new(),
+                default_limits: Vec::new(),
+            },
+            now_secs(),
+        )
+        .await
+        .expect("principal created");
+    }
+
+    async fn create_decoy_api_key_upstream_before(&self, before: Uuid) {
+        for index in 0..256_u16 {
+            let record = self
+                .storage
+                .create(UpstreamCreate {
+                    name: format!("decoy-{index}"),
+                    kind: UpstreamKind::AnthropicApiKey,
+                    base_url: Some(Url::parse(&self.fake_base).expect("fake url")),
+                    api_key_ciphertext: Some(vec![1; 32]),
+                })
+                .await
+                .expect("decoy upstream created");
+            if record.id < before {
+                return;
+            }
+        }
+        panic!("failed to create lower-id decoy upstream");
     }
 
     fn refresher(&self, replica_id: Uuid, cancel: CancellationToken) -> Arc<OAuthRefresher> {
@@ -185,6 +239,73 @@ async fn expired_before_sweep_lazy_fires_and_retry_succeeds() {
         .expect("signed after lazy refresh");
 
     assert!(signed.headers().get(AUTHORIZATION).is_some());
+    assert_eq!(refresh_history_len(&fixture.fake_base).await, 1);
+}
+
+#[tokio::test]
+async fn expired_oauth_upstream_selected_by_auth_ref_refreshes_during_message_request() {
+    let fixture = Fixture::new().await;
+    fixture.create_principal("oauth-principal").await;
+    let tokens = initial_tokens(&fixture.fake_base).await;
+    let upstream_id = fixture
+        .create_oauth_upstream_with_tokens(
+            "oauth-target",
+            now_secs().saturating_sub(1),
+            tokens,
+            Some(Url::parse(&fixture.fake_base).expect("fake url")),
+        )
+        .await;
+    fixture
+        .create_decoy_api_key_upstream_before(upstream_id)
+        .await;
+    let cancel = CancellationToken::new();
+    let replica_id = Uuid::new_v4();
+    let lazy = Arc::new(LazyRefresher::new(
+        fixture.stores.clone(),
+        fixture.aead.clone(),
+        fixture.oauth_cfg.clone(),
+        replica_id,
+        cancel,
+    ));
+    let runtime = ExtismRuntime::new();
+    let view = build_dynamic_view(
+        fixture.stores.as_ref(),
+        fixture.oauth_cfg.as_ref(),
+        fixture.aead.clone(),
+        Some(lazy),
+        0,
+        &runtime,
+        fixture._dir.path(),
+    )
+    .await
+    .expect("dynamic view builds");
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        Arc::new(BuiltinAuthn::new(
+            DownstreamAuthMode::None,
+            Some(NoneModeConfig {
+                principal_id: "oauth-principal".to_owned(),
+                upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
+                upstream_credential_ref: "oauth-target".to_owned(),
+            }),
+            None,
+        )),
+        Arc::new(DynamicViewHolder::new(view)),
+        LifecycleConfig::default(),
+    );
+
+    let response = lifecycle
+        .handle(message_request())
+        .await
+        .expect("lifecycle response");
+    let status = response.status();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .expect("response body")
+        .to_bytes();
+
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert_eq!(refresh_history_len(&fixture.fake_base).await, 1);
 }
 
@@ -650,6 +771,19 @@ fn shaped_request() -> ShapedRequest {
         claims: serde_json::Map::new(),
     };
     shape_request(&DirectDialect, &ctx, &Upstream::AnthropicDirect, &principal).expect("shape")
+}
+
+fn message_request() -> Request<Bytes> {
+    Request::builder()
+        .method(Method::POST)
+        .uri("/v1/messages")
+        .header("x-api-key", "sk-ant-downstream")
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .body(Bytes::from_static(
+            br#"{"model":"claude-3-5-sonnet-20241022","max_tokens":16,"messages":[{"role":"user","content":"hi"}]}"#,
+        ))
+        .expect("request builds")
 }
 
 struct DirectDialect;

@@ -6,8 +6,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
 use cc_lb_plugin_api::{
-    CredentialStrategy, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
-    SigningCapability, Upstream, UpstreamError,
+    CredentialStrategy, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
+    SignerFactory, SigningCapability, Upstream, UpstreamError,
 };
 use cc_lb_storage_api::{AnthropicApiKeyCredential, Storage};
 use http::header::{AUTHORIZATION, HeaderValue};

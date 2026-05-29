@@ -568,19 +568,16 @@ async fn build_app_with_storage_inner(
     let oauth_cfg = Arc::new(oauth_anthropic.clone());
     let refresh_cancel = CancellationToken::new();
     let lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>> =
-        lifecycle_config
-            .replica_identity
-            .as_ref()
-            .and_then(|identity| {
-                let refresher = LazyRefresher::new(
-                    stores.clone(),
-                    aead.clone(),
-                    oauth_cfg.clone(),
-                    identity.id,
-                    refresh_cancel.clone(),
-                );
-                Some(Arc::new(refresher) as Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>)
-            });
+        lifecycle_config.replica_identity.as_ref().map(|identity| {
+            let refresher = LazyRefresher::new(
+                stores.clone(),
+                aead.clone(),
+                oauth_cfg.clone(),
+                identity.id,
+                refresh_cancel.clone(),
+            );
+            Arc::new(refresher) as Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>
+        });
     let initial_view = build_dynamic_view(
         &stores,
         &oauth_anthropic,

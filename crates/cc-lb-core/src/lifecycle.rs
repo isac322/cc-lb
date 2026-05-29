@@ -481,9 +481,11 @@ impl Lifecycle {
             }
         };
 
-        let signer_factory = view
-            .signer_factory
-            .with_api_key(success.api_key.clone().unwrap_or_default());
+        let signer_factory = view.signer_factory.with_auth_context(
+            success.api_key.clone().unwrap_or_default(),
+            authn_upstream_kind_label(success.upstream_kind),
+            success.upstream_credential_ref.clone(),
+        );
         let signer = match signer_factory.build(&route.upstream).await {
             Ok(signer) => signer,
             Err(source) => {
@@ -1582,6 +1584,13 @@ fn pricing_upstream_kind(upstream: &Upstream) -> Option<cc_lb_pricing::UpstreamK
         Upstream::AnthropicDirect | Upstream::CustomAnthropicSpec { .. } => {
             Some(cc_lb_pricing::UpstreamKind::AnthropicKey)
         }
+    }
+}
+
+fn authn_upstream_kind_label(kind: cc_lb_storage_redb::UpstreamKind) -> &'static str {
+    match kind {
+        cc_lb_storage_redb::UpstreamKind::AnthropicKey => "anthropic_key",
+        cc_lb_storage_redb::UpstreamKind::AnthropicOAuth => "anthropic_oauth",
     }
 }
 

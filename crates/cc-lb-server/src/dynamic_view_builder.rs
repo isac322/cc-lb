@@ -433,6 +433,8 @@ struct DbCompositeSignerFactory {
     aead: Arc<AeadService>,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     downstream_api_key: Option<String>,
+    auth_upstream_kind: Option<&'static str>,
+    auth_upstream_credential_ref: Option<String>,
 }
 
 impl DbCompositeSignerFactory {
@@ -448,6 +450,8 @@ impl DbCompositeSignerFactory {
             aead,
             lazy_refresher,
             downstream_api_key: None,
+            auth_upstream_kind: None,
+            auth_upstream_credential_ref: None,
         }
     }
 
@@ -458,6 +462,25 @@ impl DbCompositeSignerFactory {
             aead: self.aead.clone(),
             lazy_refresher: self.lazy_refresher.clone(),
             downstream_api_key: Some(api_key),
+            auth_upstream_kind: self.auth_upstream_kind,
+            auth_upstream_credential_ref: self.auth_upstream_credential_ref.clone(),
+        }
+    }
+
+    fn with_selected_upstream(
+        &self,
+        api_key: String,
+        upstream_kind: &'static str,
+        upstream_credential_ref: String,
+    ) -> Self {
+        Self {
+            upstreams: self.upstreams.clone(),
+            upstream_store: self.upstream_store.clone(),
+            aead: self.aead.clone(),
+            lazy_refresher: self.lazy_refresher.clone(),
+            downstream_api_key: Some(api_key),
+            auth_upstream_kind: Some(upstream_kind),
+            auth_upstream_credential_ref: Some(upstream_credential_ref),
         }
     }
 }
@@ -465,6 +488,15 @@ impl DbCompositeSignerFactory {
 impl cc_lb_core::ApiKeyAwareSignerFactory for DbCompositeSignerFactory {
     fn with_api_key(&self, api_key: String) -> Arc<dyn SignerFactory> {
         Arc::new(self.with_downstream_api_key(api_key))
+    }
+
+    fn with_auth_context(
+        &self,
+        api_key: String,
+        upstream_kind: &'static str,
+        upstream_credential_ref: String,
+    ) -> Arc<dyn SignerFactory> {
+        Arc::new(self.with_selected_upstream(api_key, upstream_kind, upstream_credential_ref))
     }
 }
 
@@ -474,7 +506,7 @@ impl SignerFactory for DbCompositeSignerFactory {
         let record = self
             .upstreams
             .iter()
-            .find(|candidate| upstream_matches(candidate, upstream))
+            .find(|candidate| self.record_matches(candidate, upstream))
             .ok_or_else(|| SignerError::MissingCredentials {
                 reason: "upstream not present in dynamic signer view".to_owned(),
             })?;
@@ -512,6 +544,26 @@ impl SignerFactory for DbCompositeSignerFactory {
     }
 }
 
+impl DbCompositeSignerFactory {
+    fn record_matches(&self, candidate: &UpstreamRecord, upstream: &Upstream) -> bool {
+        if !upstream_matches(candidate, upstream) {
+            return false;
+        }
+
+        let Some(auth_kind) = self.auth_upstream_kind else {
+            return true;
+        };
+        let Some(auth_ref) = self.auth_upstream_credential_ref.as_deref() else {
+            return true;
+        };
+        if auth_ref.is_empty() {
+            return true;
+        }
+
+        upstream_kind_matches_auth(candidate.kind, auth_kind) && candidate.name == auth_ref
+    }
+}
+
 fn upstream_matches(record: &UpstreamRecord, upstream: &Upstream) -> bool {
     matches!(
         (&record.kind, upstream),
@@ -519,6 +571,15 @@ fn upstream_matches(record: &UpstreamRecord, upstream: &Upstream) -> bool {
             UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth,
             Upstream::AnthropicDirect
         ) | (UpstreamKind::Custom, Upstream::CustomAnthropicSpec { .. })
+    )
+}
+
+fn upstream_kind_matches_auth(kind: UpstreamKind, auth_kind: &str) -> bool {
+    matches!(
+        (kind, auth_kind),
+        (UpstreamKind::AnthropicApiKey, "anthropic_key")
+            | (UpstreamKind::Custom, "anthropic_key")
+            | (UpstreamKind::AnthropicOauth, "anthropic_oauth")
     )
 }
 

@@ -162,7 +162,12 @@ fn exchange_code(state: Arc<AppState>, form: TokenForm) -> Response {
         Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
     }
 
-    token_response(&access_token, &refresh_token, record.scope.as_deref())
+    token_response(
+        &access_token,
+        &refresh_token,
+        record.scope.as_deref(),
+        state.config.tokens_expire_in,
+    )
 }
 
 fn rotate_refresh_token(state: Arc<AppState>, form: TokenForm) -> Response {
@@ -198,16 +203,26 @@ fn rotate_refresh_token(state: Arc<AppState>, form: TokenForm) -> Response {
         Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
     }
 
-    token_response(&access_token, &new_refresh_token, record.scope.as_deref())
+    token_response(
+        &access_token,
+        &new_refresh_token,
+        record.scope.as_deref(),
+        state.config.tokens_expire_in,
+    )
 }
 
-fn token_response(access_token: &str, refresh_token: &str, scope: Option<&str>) -> Response {
+fn token_response(
+    access_token: &str,
+    refresh_token: &str,
+    scope: Option<&str>,
+    expires_in: u64,
+) -> Response {
     json_response(
         StatusCode::OK,
         json!({
             "access_token": access_token,
             "refresh_token": refresh_token,
-            "expires_in": 3600,
+            "expires_in": expires_in,
             "scope": scope.unwrap_or("messages files"),
             "token_type": "Bearer",
         }),

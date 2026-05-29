@@ -23,6 +23,7 @@ static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 pub struct AppConfig {
     pub slow_mode_bps: u64,
     pub files_cap_bytes: usize,
+    pub tokens_expire_in: u64,
 }
 
 impl Default for AppConfig {
@@ -30,13 +31,14 @@ impl Default for AppConfig {
         Self {
             slow_mode_bps: 1024,
             files_cap_bytes: 104_857_600,
+            tokens_expire_in: 3600,
         }
     }
 }
 
 #[derive(Debug)]
 pub struct AppState {
-    config: AppConfig,
+    pub(crate) config: AppConfig,
     pub(crate) oauth: OAuthState,
     request_counts: Mutex<BTreeMap<&'static str, u64>>,
     last_x_api_key: Mutex<Option<String>>,
