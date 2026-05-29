@@ -102,22 +102,22 @@ files_cap_bytes = 1048576
     let observe_path = reload_common::toml_path(&fixture.observe_path);
     for principal_index in 0..PRINCIPAL_COUNT {
         config.push_str(&format!(
-            r#"[principals.principal_{principal_index:03}]
+            r#"[legacy-principals.principal_{principal_index:03}]
 allowed_models = ["*"]
 
 "#
         ));
         if include_plugins {
             config.push_str(&format!(
-                r#"[principals.principal_{principal_index:03}.router_plugin]
+                r#"[legacy-principals.principal_{principal_index:03}.router_plugin]
 name = "router"
 wasm_path = "{router_path}"
 
-[[principals.principal_{principal_index:03}.observability_hooks]]
+[[legacy-principals.principal_{principal_index:03}.observability_hooks]]
 name = "observe-a"
 wasm_path = "{observe_path}"
 
-[[principals.principal_{principal_index:03}.observability_hooks]]
+[[legacy-principals.principal_{principal_index:03}.observability_hooks]]
 name = "observe-b"
 wasm_path = "{observe_path}"
 

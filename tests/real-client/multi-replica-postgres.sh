@@ -5,8 +5,8 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 ROOT_DIR=$(cd -- "$SCRIPT_DIR/../.." && pwd)
 EVIDENCE_DIR="$ROOT_DIR/target/test-evidence/multi-replica"
 COMPOSE_FILE="$SCRIPT_DIR/docker-compose.yml"
-COMPOSE_PROJECT="cc-lb-real-client-multi-replica"
-POSTGRES_URL="${CI_POSTGRES_URL:-postgres://cc_lb:cc_lb@127.0.0.1:55432/cc_lb}"
+COMPOSE_PROJECT="${COMPOSE_PROJECT:-task37-${RANDOM}}"
+POSTGRES_URL="${CC_LB_MULTI_REPLICA_POSTGRES_URL:-}"
 ADMIN_TOKEN="00000000-0000-4000-8000-000000000037"
 MASTER_KEY="0000000000000000000000000000000000000000000000000000000000000000"
 UPSTREAM_NAME="multi-replica-oauth"
@@ -64,14 +64,15 @@ cleanup() {
   cleanup_pid_tree "$A_PID"
   cleanup_pid_tree "$B_PID"
   cleanup_pid_tree "$FAKE_PID"
+  DOCKER_HOST=tcp://localhost:2375 docker compose -f "$COMPOSE_FILE" -p "$COMPOSE_PROJECT" down -v >/dev/null 2>&1 || true
   if [ -n "$TMP_DIR" ] && [ -d "$TMP_DIR" ]; then
     rm -rf "$TMP_DIR"
   fi
 }
 trap cleanup EXIT INT TERM
 
-if [ "${RUN_MULTI_REPLICA:-0}" != "1" ]; then
-  warn_skip "RUN_MULTI_REPLICA not set"
+if [ -z "$POSTGRES_URL" ]; then
+  warn_skip "CC_LB_MULTI_REPLICA_POSTGRES_URL not set"
 fi
 if ! command -v docker >/dev/null 2>&1; then
   warn_skip "docker command not found"
@@ -82,6 +83,19 @@ fi
 if [ ! -f "$COMPOSE_FILE" ]; then
   fail "missing compose file: $COMPOSE_FILE"
 fi
+
+CC_LB_MULTI_REPLICA_POSTGRES_PORT=$(python3 - "$POSTGRES_URL" <<'PY'
+import sys
+import urllib.parse
+
+url = urllib.parse.urlparse(sys.argv[1])
+if url.hostname not in {"127.0.0.1", "localhost"} or url.port is None:
+    print("CC_LB_MULTI_REPLICA_POSTGRES_URL must use localhost with an explicit port", file=sys.stderr)
+    sys.exit(1)
+print(url.port)
+PY
+) || fail "invalid CC_LB_MULTI_REPLICA_POSTGRES_URL"
+export CC_LB_MULTI_REPLICA_POSTGRES_PORT
 
 ensure_port_free() {
   python3 - "$@" <<'PY'
@@ -244,7 +258,7 @@ idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
 
-[plugins]
+[legacy-plugins]
 observability_hooks = []
 
 [downstream_auth]

@@ -185,15 +185,15 @@ idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
 
-[upstreams.fake_anthropic]
+[legacy-upstreams.fake_anthropic]
 kind = "custom"
 base_url = "http://127.0.0.1:$fake_port"
 auth_strategy = "api_key"
 
-[principals.api-key]
+[legacy-principals.api-key]
 allowed_models = ["*"]
 
-[plugins]
+[legacy-plugins]
 observability_hooks = []
 
 [storage]

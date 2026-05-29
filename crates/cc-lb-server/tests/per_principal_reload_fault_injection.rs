@@ -107,10 +107,10 @@ fn write_config_with_principal_routers(
             let path = reload_common::toml_path(path);
             format!(
                 r#"
-[principals.charlie]
+[legacy-principals.charlie]
 allowed_models = ["*"]
 
-[principals.charlie.router_plugin]
+[legacy-principals.charlie.router_plugin]
 name = "charlie-router"
 wasm_path = "{path}"
 "#
@@ -127,7 +127,7 @@ metrics_addr = "127.0.0.1:19091"
 messages_cap_bytes = {messages_cap_bytes}
 files_cap_bytes = 1048576
 
-[upstreams.fake]
+[legacy-upstreams.fake]
 kind = "custom"
 base_url = "http://upstream.local/"
 auth_strategy = "api_key"
@@ -140,17 +140,17 @@ principal_id = "alice"
 upstream_kind = "anthropic_key"
 upstream_credential_ref = "test-upstream"
 
-[principals.alice]
+[legacy-principals.alice]
 allowed_models = ["*"]
 
-[principals.alice.router_plugin]
+[legacy-principals.alice.router_plugin]
 name = "alice-router"
 wasm_path = "{router_path}"
 
-[principals.bob]
+[legacy-principals.bob]
 allowed_models = ["*"]
 
-[principals.bob.router_plugin]
+[legacy-principals.bob.router_plugin]
 name = "bob-router"
 wasm_path = "{router_path}"
 {charlie_config}"#

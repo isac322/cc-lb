@@ -63,7 +63,7 @@ metrics_addr = "127.0.0.1:19091"
 messages_cap_bytes = {messages_cap_bytes}
 files_cap_bytes = 1048576
 
-[principals.api-key]
+[legacy-principals.api-key]
 allowed_models = ["{model}"]
 "#
     );
@@ -89,14 +89,14 @@ metrics_addr = "127.0.0.1:19091"
 messages_cap_bytes = {messages_cap_bytes}
 files_cap_bytes = 1048576
 
-[principals.alice]
+[legacy-principals.alice]
 allowed_models = ["*"]
 
-[principals.alice.router_plugin]
+[legacy-principals.alice.router_plugin]
 name = "alice-router"
 wasm_path = "{router_path}"
 
-[[principals.alice.observability_hooks]]
+[[legacy-principals.alice.observability_hooks]]
 name = "alice-hook"
 wasm_path = "{observe_path}"
 "#

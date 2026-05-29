@@ -9,7 +9,7 @@ fn validate_ok_config() {
         r#"
 [listener]
 
-[upstreams.fake]
+[legacy-upstreams.fake]
 kind = "custom"
 base_url = "http://127.0.0.1:9080"
 auth_strategy = "api_key"

@@ -14,17 +14,6 @@ idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
 
-[upstreams.fake]
-kind = "custom"
-base_url = "UPSTREAM_BASE_URL_PLACEHOLDER"
-auth_strategy = "o_auth"
-
-[principals.api-key]
-allowed_models = ["*"]
-
-[plugins]
-observability_hooks = []
-
 [storage]
 kind = "postgres"
 url = "will_be_replaced_at_runtime"

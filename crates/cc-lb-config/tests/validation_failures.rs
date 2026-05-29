@@ -47,7 +47,7 @@ cert_path = "/definitely/missing/cert.pem"
 #[test]
 fn dangling_credentials_ref_fails_with_field_path() {
     let (_dir, path) = common::temp_config(
-        r#"[upstreams.anthropic]
+        r#"[legacy-upstreams.anthropic]
 kind = "anthropic_direct"
 auth_strategy = "api_key"
 credentials_ref = "missing"
@@ -110,10 +110,10 @@ oauth_aead_key_env = "CC_LB_TEST_MASTER_KEY_INVALID"
 fn validation_principal_invalid_wasm_path_rejected() {
     let (dir, config_path) = common::temp_config("");
     let config_toml = format!(
-        r#"[principals.alice]
+        r#"[legacy-principals.alice]
 allowed_models = []
 
-[principals.alice.router_plugin]
+[legacy-principals.alice.router_plugin]
 name = "alice-router"
 wasm_path = "{}/definitely-missing.wasm"
 "#,
@@ -138,10 +138,10 @@ fn validation_principal_empty_plugin_name_rejected() {
     let (dir, config_path) = common::temp_config("");
     let wasm = common::write_temp_file(dir.path(), "router.wasm", b"\0asm\x01\x00\x00\x00");
     let config_toml = format!(
-        r#"[principals.alice]
+        r#"[legacy-principals.alice]
 allowed_models = []
 
-[principals.alice.router_plugin]
+[legacy-principals.alice.router_plugin]
 name = ""
 wasm_path = "{}"
 "#,
@@ -167,14 +167,14 @@ fn validation_principal_duplicate_observability_hook_names_rejected() {
     let wasm = common::write_temp_file(dir.path(), "hook.wasm", b"\0asm\x01\x00\x00\x00");
     let wasm_path = common::toml_path(&wasm);
     let config_toml = format!(
-        r#"[principals.alice]
+        r#"[legacy-principals.alice]
 allowed_models = []
 
-[[principals.alice.observability_hooks]]
+[[legacy-principals.alice.observability_hooks]]
 name = "shared-hook"
 wasm_path = "{wasm_path}"
 
-[[principals.alice.observability_hooks]]
+[[legacy-principals.alice.observability_hooks]]
 name = "shared-hook"
 wasm_path = "{wasm_path}"
 "#,
@@ -199,24 +199,24 @@ fn validation_same_plugin_name_across_principals_with_different_config_accepted(
     let wasm_a = common::write_temp_file(dir.path(), "router-a.wasm", b"\0asm\x01\x00\x00\x00");
     let wasm_b = common::write_temp_file(dir.path(), "router-b.wasm", b"\0asm\x01\x00\x00\x00");
     let config_toml = format!(
-        r#"[principals.alice]
+        r#"[legacy-principals.alice]
 allowed_models = []
 
-[principals.alice.router_plugin]
+[legacy-principals.alice.router_plugin]
 name = "shared-router"
 wasm_path = "{wasm_a}"
 
-[principals.alice.router_plugin.config]
+[legacy-principals.alice.router_plugin.config]
 upstream = "alice-upstream"
 
-[principals.bob]
+[legacy-principals.bob]
 allowed_models = []
 
-[principals.bob.router_plugin]
+[legacy-principals.bob.router_plugin]
 name = "shared-router"
 wasm_path = "{wasm_b}"
 
-[principals.bob.router_plugin.config]
+[legacy-principals.bob.router_plugin.config]
 upstream = "bob-upstream"
 "#,
         wasm_a = common::toml_path(&wasm_a),

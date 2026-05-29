@@ -14,18 +14,6 @@ idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
 
-[upstreams.real_client]
-kind = "vertex"
-base_url = "__FAKE_URL__"
-region = "__VERTEX_REGION__"
-project = "__PROJECT__"
-auth_strategy = "gcp_o_auth"
-[principals.api-key]
-allowed_models = ["*"]
-
-[plugins]
-observability_hooks = []
-
 [storage]
 kind = "redb"
 path = "__REDB_PATH__"

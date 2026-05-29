@@ -112,12 +112,12 @@ idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
 
-[upstreams.fake]
+[legacy-upstreams.fake]
 kind = "custom"
 base_url = "http://{upstream_addr}"
 auth_strategy = "api_key"
 
-[principals.api-key]
+[legacy-principals.api-key]
 allowed_models = ["*"]
 
 [downstream_auth]
@@ -128,7 +128,7 @@ principal_id = "api-key"
 upstream_kind = "anthropic_key"
 upstream_credential_ref = "fake_anthropic"
 
-[plugins]
+[legacy-plugins]
 observability_hooks = []
 
 [storage]

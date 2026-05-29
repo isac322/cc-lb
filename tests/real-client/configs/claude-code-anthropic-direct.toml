@@ -14,16 +14,6 @@ idle_secs = 300
 upstream_total_secs = 30
 drain_secs = 5
 
-[upstreams.real_client]
-kind = "anthropic_direct"
-base_url = "__FAKE_URL__"
-auth_strategy = "api_key"
-[principals.api-key]
-allowed_models = ["*"]
-
-[plugins]
-observability_hooks = []
-
 [storage]
 kind = "redb"
 path = "__REDB_PATH__"
