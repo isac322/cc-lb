@@ -8,11 +8,6 @@ fn validate_ok_config() {
         &config_path,
         r#"
 [listener]
-
-[legacy-upstreams.fake]
-kind = "custom"
-base_url = "http://127.0.0.1:9080"
-auth_strategy = "api_key"
 "#,
     )
     .unwrap();
@@ -27,8 +22,4 @@ auth_strategy = "api_key"
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(stdout.contains("validation: ok"), "stdout={stdout}");
     assert!(stdout.contains("preflight: ok"), "stdout={stdout}");
-    assert!(
-        stdout.contains("preflight: warning: upstream fake: probe skipped (offline preflight)"),
-        "stdout={stdout}"
-    );
 }
