@@ -34,6 +34,13 @@ pub fn validate_raw_toml(raw_toml: &str) -> Result<(), ValidationError> {
         return Ok(());
     };
 
+    if table.get("plugins").is_some() || table.get("principals").is_some() {
+        return Err(ValidationError::new(
+            "config",
+            "v2 removed `plugins.authn_plugin` / `principals.*.quotas`; use `downstream_auth.mode` + `principals.*.default_limits` (sk-cclb-* API keys)",
+        ));
+    }
+
     if let Some(storage) = table.get("storage").and_then(|v| v.as_table()) {
         let has_kind = storage.contains_key("kind");
         let has_legacy_redb = storage.contains_key("redb_path");

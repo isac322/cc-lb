@@ -9,7 +9,10 @@ use cc_lb_config::{
     Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, StorageConfig,
 };
 use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
-use cc_lb_pricing::{UpstreamKind as PricingUpstreamKind, global_catalog};
+use cc_lb_pricing::{
+    CatalogSnapshot, CatalogStatus, Pricing, UpstreamKind as PricingUpstreamKind, UsdPerMillion,
+    global_catalog,
+};
 use cc_lb_server::{BuildError, build_app, signal::SignalHandle};
 use cc_lb_storage_api::{
     principal::{
@@ -579,6 +582,7 @@ async fn wait_for_usage(
 }
 
 async fn wait_for_price_catalog() -> Result<(), Box<dyn std::error::Error>> {
+    seed_price_catalog();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if global_catalog()
@@ -592,6 +596,26 @@ async fn wait_for_price_catalog() -> Result<(), Box<dyn std::error::Error>> {
         }
         sleep(Duration::from_millis(100)).await;
     }
+}
+
+fn seed_price_catalog() {
+    let mut models = std::collections::HashMap::new();
+    models.insert(
+        MODEL.to_owned(),
+        Pricing {
+            model: MODEL.to_owned(),
+            input_per_million_usd: UsdPerMillion::from_whole_usd(3),
+            output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+        },
+    );
+    global_catalog().install_snapshot(CatalogSnapshot {
+        fetched_at_ms: now_secs() * 1000,
+        models,
+        raw_json: serde_json::to_vec(&price_catalog_fixture()).expect("price fixture serializes"),
+        cache_creation_per_million_usd: std::collections::HashMap::new(),
+        cache_read_per_million_usd: std::collections::HashMap::new(),
+        status: CatalogStatus::Ok,
+    });
 }
 
 fn append_step(step: u8, message: &str) -> std::io::Result<()> {

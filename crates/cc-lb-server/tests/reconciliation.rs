@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
@@ -24,9 +25,14 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 fn install_prometheus() -> PrometheusHandle {
-    PrometheusBuilder::new()
-        .install_recorder()
-        .expect("prometheus recorder")
+    static PROMETHEUS: OnceLock<PrometheusHandle> = OnceLock::new();
+    PROMETHEUS
+        .get_or_init(|| {
+            PrometheusBuilder::new()
+                .install_recorder()
+                .expect("prometheus recorder")
+        })
+        .clone()
 }
 
 fn labeled_counter_value(handle: &PrometheusHandle, name: &str, label: &str, value: &str) -> f64 {
