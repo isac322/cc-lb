@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 
-use crate::{BackendKind, StorageError, StorageResult, types::*};
+use crate::{BackendKind, RuntimeChangeNotifier, StorageError, StorageResult, types::*};
 
 pub const CURRENT_CONTRACT_VERSION: u32 = 1;
 
@@ -277,6 +277,9 @@ pub trait MetaStore: Send + Sync {
 #[async_trait]
 pub trait Storage:
     AuditStore
+    + crate::plugin_registry::PluginRegistryStore
+    + crate::principal::PrincipalStore
+    + crate::upstream::UpstreamStore
     + RequestEventStore
     + QuotaStore
     + LimitStateStore
@@ -285,6 +288,7 @@ pub trait Storage:
     + ApiKeyStore
     + ConfigStore
     + MetaStore
+    + RuntimeChangeNotifier
     + Send
     + Sync
     + 'static
@@ -293,6 +297,9 @@ pub trait Storage:
 
 impl<T> Storage for T where
     T: AuditStore
+        + crate::plugin_registry::PluginRegistryStore
+        + crate::principal::PrincipalStore
+        + crate::upstream::UpstreamStore
         + RequestEventStore
         + QuotaStore
         + LimitStateStore
@@ -301,6 +308,7 @@ impl<T> Storage for T where
         + ApiKeyStore
         + ConfigStore
         + MetaStore
+        + RuntimeChangeNotifier
         + Send
         + Sync
         + 'static

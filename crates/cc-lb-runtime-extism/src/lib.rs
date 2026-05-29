@@ -33,6 +33,8 @@ const DEFAULT_OBSERVE_BATCH_COUNT: usize = 32;
 const DEFAULT_OBSERVE_FLUSH_MS: u64 = 100;
 const GLOBAL_PRINCIPAL: &str = "__global__";
 
+// Guardrail exemption: per-principal plugin overrides require runtime slots to be
+// keyed by both principal and plugin so same-name plugins do not collide.
 #[derive(Clone, Eq, PartialEq, Hash, Debug)]
 pub(crate) struct SlotKey {
     principal: String,

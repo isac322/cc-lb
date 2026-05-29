@@ -2,7 +2,7 @@
 
 use std::process::ExitCode;
 
-use cc_lb_server::app::ServeError;
+use cc_lb_server::app::{BuildError, ServeError};
 use cc_lb_server::cli::{Cli, Command, ConfigCommand};
 use cc_lb_server::{run_serve, validate};
 use clap::FromArgMatches;
@@ -33,7 +33,7 @@ fn main() -> ExitCode {
         }
         Err(RunError::Serve(error)) => {
             eprintln!("{error}");
-            ExitCode::FAILURE
+            serve_error_exit_code(&error)
         }
         Err(RunError::Cli(error)) => {
             eprintln!("{error}");
@@ -50,6 +50,22 @@ fn main() -> ExitCode {
     }
 }
 
+fn serve_error_exit_code(error: &ServeError) -> ExitCode {
+    match error {
+        ServeError::Build(BuildError::Storage(
+            cc_lb_storage_redb::StorageError::BackendKindMismatch { .. },
+        ))
+        | ServeError::Build(BuildError::StorageFactory(
+            cc_lb_server::storage_factory::StorageFactoryError::BackendKindMismatch { .. },
+        )) => ExitCode::from(2),
+        ServeError::Build(BuildError::StorageFactory(
+            cc_lb_server::storage_factory::StorageFactoryError::InitFailed { message },
+        )) if message.contains("backend kind mismatch") => ExitCode::from(2),
+        ServeError::Build(BuildError::StorageKeyMissing { .. }) => ExitCode::from(2),
+        _ => ExitCode::FAILURE,
+    }
+}
+
 fn version_requested() -> bool {
     std::env::args_os()
         .skip(1)
@@ -61,17 +77,21 @@ fn run() -> Result<(), RunError> {
     let cli = Cli::from_arg_matches(&matches).map_err(RunError::Cli)?;
 
     match cli.command {
-        Some(Command::Serve { config }) => {
+        Some(Command::Serve {
+            config,
+            data_dir,
+            strict_preflight,
+        }) => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .map_err(RunError::Runtime)?;
             runtime
-                .block_on(run_serve(&config))
+                .block_on(run_serve(&config, data_dir.as_deref(), strict_preflight))
                 .map_err(RunError::Serve)
         }
         Some(Command::Config {
-            command: ConfigCommand::Validate { config },
+            command: ConfigCommand::Validate { config, .. },
         }) => validate::run(&config).map_err(RunError::Validation),
         None => {
             let mut command = Cli::command();

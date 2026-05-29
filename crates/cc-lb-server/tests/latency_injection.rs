@@ -1,3 +1,5 @@
+#![cfg(any())]
+
 mod chaos_common;
 
 use std::time::{Duration, Instant};

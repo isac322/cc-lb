@@ -86,32 +86,9 @@
         "user_prompt_redaction": false
       }
     },
-    "plugins": {
-      "$ref": "#/$defs/PluginsConfig",
-      "default": {
-        "observability_hooks": []
-      }
-    },
-    "principals": {
-      "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/PrincipalSpec"
-      },
+    "runtime": {
+      "$ref": "#/$defs/RuntimeConfig",
       "default": {}
-    },
-    "signers": {
-      "$ref": "#/$defs/SignersConfig",
-      "default": {
-        "anthropic_oauth": {
-          "client_id": "",
-          "issuer_base_url": "https://platform.claude.com",
-          "redirect_uri": "http://127.0.0.1/admin/oauth/callback",
-          "scopes": [
-            "messages",
-            "files"
-          ]
-        }
-      }
     },
     "storage": {
       "$ref": "#/$defs/StorageConfig",
@@ -139,13 +116,6 @@
           "type": "null"
         }
       ]
-    },
-    "upstreams": {
-      "type": "object",
-      "additionalProperties": {
-        "$ref": "#/$defs/UpstreamSpec"
-      },
-      "default": {}
     }
   },
   "$defs": {
@@ -173,7 +143,7 @@
         "auth_url": {
           "type": "string",
           "format": "uri",
-          "default": "https://platform.claude.com/oauth/authorize"
+          "default": "http://localhost/authorize"
         },
         "client_id": {
           "type": "string",
@@ -182,7 +152,7 @@
         "redirect_uri": {
           "type": "string",
           "format": "uri",
-          "default": "http://127.0.0.1/oauth/callback"
+          "default": "http://localhost/callback"
         },
         "scopes": {
           "type": "array",
@@ -194,35 +164,7 @@
         "token_url": {
           "type": "string",
           "format": "uri",
-          "default": "https://platform.claude.com/oauth/token"
-        }
-      },
-      "additionalProperties": false
-    },
-    "AnthropicOAuthSignerConfig": {
-      "type": "object",
-      "properties": {
-        "client_id": {
-          "type": "string",
-          "default": ""
-        },
-        "issuer_base_url": {
-          "type": "string",
-          "default": "https://platform.claude.com"
-        },
-        "redirect_uri": {
-          "type": "string",
-          "default": "http://127.0.0.1/admin/oauth/callback"
-        },
-        "scopes": {
-          "type": "array",
-          "default": [
-            "messages",
-            "files"
-          ],
-          "items": {
-            "type": "string"
-          }
+          "default": "http://localhost/token"
         }
       }
     },
@@ -245,14 +187,6 @@
         }
       },
       "additionalProperties": false
-    },
-    "AuthStrategy": {
-      "type": "string",
-      "enum": [
-        "api_key",
-        "o_auth",
-        "internal_forwarded"
-      ]
     },
     "BodyConfig": {
       "type": "object",
@@ -397,37 +331,6 @@
         }
       }
     },
-    "Limit": {
-      "type": "object",
-      "properties": {
-        "cap_micros": {
-          "type": "integer",
-          "format": "int64"
-        },
-        "kind": {
-          "$ref": "#/$defs/LimitKind"
-        },
-        "window": {
-          "$ref": "#/$defs/Duration"
-        }
-      },
-      "required": [
-        "kind",
-        "window",
-        "cap_micros"
-      ]
-    },
-    "LimitKind": {
-      "type": "string",
-      "enum": [
-        "requests",
-        "input_tokens",
-        "output_tokens",
-        "total_tokens",
-        "cost_usd",
-        "concurrent"
-      ]
-    },
     "ListenerConfig": {
       "type": "object",
       "properties": {
@@ -530,62 +433,6 @@
         }
       }
     },
-    "PluginRef": {
-      "type": "object",
-      "properties": {
-        "batched_events_per_flush": {
-          "type": "integer",
-          "format": "uint32",
-          "default": 32,
-          "minimum": 0
-        },
-        "batched_flush_ms": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 100,
-          "minimum": 0
-        },
-        "config": {
-          "default": {}
-        },
-        "name": {
-          "type": "string",
-          "default": ""
-        },
-        "sse_per_event": {
-          "type": "boolean",
-          "default": false
-        },
-        "wasm_path": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      }
-    },
-    "PluginsConfig": {
-      "type": "object",
-      "properties": {
-        "observability_hooks": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/PluginRef"
-          }
-        },
-        "router_plugin": {
-          "anyOf": [
-            {
-              "$ref": "#/$defs/PluginRef"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      }
-    },
     "PostgresPoolConfig": {
       "type": "object",
       "properties": {
@@ -643,82 +490,14 @@
       },
       "additionalProperties": false
     },
-    "PrincipalSpec": {
+    "RuntimeConfig": {
       "type": "object",
       "properties": {
-        "allowed_models": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "type": "string"
-          }
-        },
-        "credentials_ref": {
+        "data_dir": {
           "type": [
             "string",
             "null"
           ]
-        },
-        "default_limits": {
-          "type": "array",
-          "default": [],
-          "items": {
-            "$ref": "#/$defs/Limit"
-          }
-        },
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        },
-        "observability_hooks": {
-          "description": "Per-principal observability hooks override.\n- `None`: inherit `PluginsConfig.observability_hooks` (default behaviour).\n- `Some(vec![])`: explicit empty — emit no observability events for this principal.\n- `Some(vec![...])`: replace the global hook chain with this list (no concat/merge).",
-          "type": [
-            "array",
-            "null"
-          ],
-          "items": {
-            "$ref": "#/$defs/PluginRef"
-          }
-        },
-        "principal_type": {
-          "$ref": "#/$defs/PrincipalType",
-          "default": "machine"
-        },
-        "router_plugin": {
-          "description": "Per-principal router plugin override.\n- `None`: inherit the global `PluginsConfig.router_plugin` (default behaviour).\n- `Some(PluginRef)`: override the global router for this principal.",
-          "anyOf": [
-            {
-              "$ref": "#/$defs/PluginRef"
-            },
-            {
-              "type": "null"
-            }
-          ]
-        }
-      },
-      "additionalProperties": false
-    },
-    "PrincipalType": {
-      "type": "string",
-      "enum": [
-        "human",
-        "machine"
-      ]
-    },
-    "SignersConfig": {
-      "type": "object",
-      "properties": {
-        "anthropic_oauth": {
-          "$ref": "#/$defs/AnthropicOAuthSignerConfig",
-          "default": {
-            "client_id": "",
-            "issuer_base_url": "https://platform.claude.com",
-            "redirect_uri": "http://127.0.0.1/admin/oauth/callback",
-            "scopes": [
-              "messages",
-              "files"
-            ]
-          }
         }
       }
     },
@@ -824,53 +603,6 @@
           "default": true
         }
       }
-    },
-    "UpstreamKind": {
-      "type": "string",
-      "enum": [
-        "anthropic_direct",
-        "custom"
-      ]
-    },
-    "UpstreamSpec": {
-      "type": "object",
-      "properties": {
-        "auth_strategy": {
-          "$ref": "#/$defs/AuthStrategy"
-        },
-        "base_url": {
-          "type": [
-            "string",
-            "null"
-          ],
-          "format": "uri"
-        },
-        "credentials_ref": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "kind": {
-          "$ref": "#/$defs/UpstreamKind"
-        },
-        "project": {
-          "type": [
-            "string",
-            "null"
-          ]
-        },
-        "region": {
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "kind",
-        "auth_strategy"
-      ]
     }
   }
 }

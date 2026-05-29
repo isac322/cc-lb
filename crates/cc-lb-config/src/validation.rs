@@ -1,13 +1,9 @@
-use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
 use thiserror::Error;
 
-use crate::{
-    Config, ConfigError, DEFAULT_REDB_PATH, DownstreamAuthMode, PluginRef, StorageConfig,
-    UpstreamKind,
-};
+use crate::{Config, ConfigError, DEFAULT_REDB_PATH, DownstreamAuthMode, StorageConfig};
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 #[error("{field}: {message}")]
@@ -28,9 +24,6 @@ impl ValidationError {
 pub fn validate_config(config: &Config) -> Result<(), ConfigError> {
     validate_downstream_auth(config)?;
     validate_tls(config)?;
-    validate_upstreams(config)?;
-    validate_credentials_refs(config)?;
-    validate_plugins(config)?;
     validate_storage(config)?;
     validate_oauth(config)?;
     Ok(())
@@ -41,8 +34,11 @@ pub fn validate_raw_toml(raw_toml: &str) -> Result<(), ValidationError> {
         return Ok(());
     };
 
-    if has_legacy_plugin(&table) || has_legacy_principal_quotas(&table) {
-        return Err(ValidationError::new("config", legacy_removed_message()));
+    if table.get("plugins").is_some() || table.get("principals").is_some() {
+        return Err(ValidationError::new(
+            "config",
+            "v2 removed `plugins.authn_plugin` / `principals.*.quotas`; use `downstream_auth.mode` + `principals.*.default_limits` (sk-cclb-* API keys)",
+        ));
     }
 
     if let Some(storage) = table.get("storage").and_then(|v| v.as_table()) {
@@ -158,110 +154,6 @@ fn validate_tls_section(prefix: &str, tls: &crate::TlsConfig) -> Result<(), Vali
     ensure_existing_file(&key_field, key_path)
 }
 
-fn validate_upstreams(config: &Config) -> Result<(), ValidationError> {
-    for (name, upstream) in &config.upstreams {
-        match upstream.kind {
-            UpstreamKind::AnthropicDirect => {}
-            UpstreamKind::Custom => {
-                if upstream.base_url.is_none() {
-                    return Err(ValidationError::new(
-                        format!("upstreams.{name}.base_url"),
-                        "base_url is required for custom upstreams",
-                    ));
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_credentials_refs(config: &Config) -> Result<(), ValidationError> {
-    for (name, upstream) in &config.upstreams {
-        if let Some(reference) = &upstream.credentials_ref {
-            validate_credentials_ref(
-                config,
-                &format!("upstreams.{name}.credentials_ref"),
-                reference,
-            )?;
-        }
-    }
-
-    for (name, principal) in &config.principals {
-        if let Some(reference) = &principal.credentials_ref {
-            validate_credentials_ref(
-                config,
-                &format!("principals.{name}.credentials_ref"),
-                reference,
-            )?;
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_credentials_ref(
-    config: &Config,
-    field: &str,
-    reference: &str,
-) -> Result<(), ValidationError> {
-    if config.principals.contains_key(reference) || config.upstreams.contains_key(reference) {
-        Ok(())
-    } else {
-        Err(ValidationError::new(
-            field,
-            format!("dangling credentials_ref \"{reference}\""),
-        ))
-    }
-}
-
-fn validate_plugins(config: &Config) -> Result<(), ValidationError> {
-    if let Some(plugin) = &config.plugins.router_plugin {
-        validate_plugin_ref("plugins.router_plugin", plugin)?;
-    }
-
-    for (index, plugin) in config.plugins.observability_hooks.iter().enumerate() {
-        validate_plugin_ref(&format!("plugins.observability_hooks.{index}"), plugin)?;
-    }
-
-    for (principal_id, principal) in &config.principals {
-        if let Some(plugin) = &principal.router_plugin {
-            validate_plugin_ref(&format!("principals.{principal_id}.router_plugin"), plugin)?;
-        }
-        if let Some(hooks) = &principal.observability_hooks {
-            let mut seen: HashSet<&str> = HashSet::new();
-            for (index, plugin) in hooks.iter().enumerate() {
-                let path = format!("principals.{principal_id}.observability_hooks.{index}");
-                validate_plugin_ref(&path, plugin)?;
-                if !seen.insert(plugin.name.as_str()) {
-                    return Err(ValidationError::new(
-                        format!("principals.{principal_id}.observability_hooks"),
-                        format!(
-                            "duplicate plugin name '{}' within principal observability_hooks",
-                            plugin.name
-                        ),
-                    ));
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_plugin_ref(prefix: &str, plugin: &PluginRef) -> Result<(), ValidationError> {
-    require_non_empty(
-        &format!("{prefix}.name"),
-        Some(plugin.name.as_str()),
-        "plugin name is required",
-    )?;
-
-    let wasm_path = plugin.wasm_path.as_deref().ok_or_else(|| {
-        ValidationError::new(format!("{prefix}.wasm_path"), "missing plugin wasm path")
-    })?;
-    ensure_existing_file(&format!("{prefix}.wasm_path"), wasm_path)
-}
-
 fn validate_storage(config: &Config) -> Result<(), ConfigError> {
     match &config.storage {
         StorageConfig::Redb { path } => {
@@ -362,52 +254,6 @@ fn validate_redb_path(path: &Path) -> Result<(), ValidationError> {
     }
 
     Ok(())
-}
-
-fn require_non_empty(
-    field: &str,
-    value: Option<&str>,
-    message: &str,
-) -> Result<(), ValidationError> {
-    match value.map(str::trim) {
-        Some(value) if !value.is_empty() => Ok(()),
-        _ => Err(ValidationError::new(field, message)),
-    }
-}
-
-fn has_legacy_plugin(table: &toml::Table) -> bool {
-    table
-        .get("plugins")
-        .and_then(toml::Value::as_table)
-        .and_then(|plugins| plugins.get(&["authn", "_", "plugin"].concat()))
-        .is_some()
-}
-
-fn has_legacy_principal_quotas(table: &toml::Table) -> bool {
-    let Some(principals) = table.get("principals").and_then(toml::Value::as_table) else {
-        return false;
-    };
-
-    principals.values().any(|principal| {
-        principal
-            .as_table()
-            .map(|t| t.contains_key("quotas"))
-            .unwrap_or(false)
-    })
-}
-
-fn legacy_removed_message() -> String {
-    [
-        "v2 removed `plugins.",
-        &[
-            "authn",
-            "_",
-            "plugin",
-        ]
-        .concat(),
-        "` / `principals.*.quotas`; use `downstream_auth.mode` + `principals.*.default_limits` (sk-cclb-* API keys)",
-    ]
-    .concat()
 }
 
 fn ensure_existing_file(field: &str, path: &Path) -> Result<(), ValidationError> {

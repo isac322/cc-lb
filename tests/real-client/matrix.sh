@@ -43,6 +43,25 @@ for client in $clients; do
   done
 done
 
+if [ "${RUN_MULTI_REPLICA:-0}" = "1" ]; then
+  log="$EVIDENCE_DIR/task-37-multi-replica-postgres.log"
+  printf 'running multi-replica-postgres\n' > "$log"
+  set +e
+  "$SCRIPT_DIR/multi-replica-postgres.sh" >> "$log" 2>&1
+  code=$?
+  set -e
+  if [ "$code" -eq 0 ]; then
+    printf 'PASS multi-replica-postgres\n' | tee -a "$SUMMARY"
+  else
+    failures=$((failures + 1))
+    reason=$(grep -E 'FAIL multi-replica postgres:' "$log" | tail -n 1 | sed 's/^FAIL multi-replica postgres: //' || true)
+    [ -n "$reason" ] || reason="multi-replica-postgres.sh exited $code"
+    printf 'FAIL multi-replica-postgres (reason: %s)\n' "$reason" | tee -a "$SUMMARY"
+  fi
+else
+  printf 'SKIP multi-replica-postgres (reason: RUN_MULTI_REPLICA not set)\n' | tee -a "$SUMMARY"
+fi
+
 if [ "$failures" -ne 0 ]; then
   exit 1
 fi

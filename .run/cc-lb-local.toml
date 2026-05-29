@@ -18,28 +18,6 @@ idle_secs = 300
 upstream_total_secs = 600
 drain_secs = 60
 
-# Smoke upstream — paired with the `fake-anthropic (smoke upstream)` run configuration.
-[upstreams.fake_anthropic]
-kind = "custom"
-base_url = "http://127.0.0.1:9080"
-auth_strategy = "api_key"
-
-[principals.api-key]
-allowed_models = ["*"]
-
-[downstream_auth]
-mode = "none"
-
-[downstream_auth.none_mode]
-principal_id = "api-key"
-upstream_kind = "anthropic_key"
-upstream_credential_ref = "dev"
-
-[plugins]
-observability_hooks = []
-
-# Tagged storage format — needs `--features postgres` on the cc-lb-server build.
-# Schema (0001..0012) is auto-applied on startup via sqlx::migrate!.
 [storage]
 kind = "postgres"
 url = "postgres://cclb:cclb@127.0.0.1:5432/cclb"

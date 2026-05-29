@@ -1,4 +1,4 @@
-import { useSearchParams } from 'react-router';
+import { Link, useSearchParams } from 'react-router';
 import { EmbeddedLiveLog } from '../components/overview/EmbeddedLiveLog';
 import { KpiCardGrid } from '../components/overview/KpiCardGrid';
 import { PrincipalUsageStrip } from '../components/overview/PrincipalUsageStrip';
@@ -9,6 +9,7 @@ import type {
   DashboardUsageResponse,
 } from '../lib/api';
 import { useDashboardSummary } from '../lib/hooks/useDashboardSummary';
+import { useStatus } from '../lib/hooks/useStatusOverview';
 import { useUsageSeries } from '../lib/hooks/useUsageSeries';
 
 // Mock data for ?mock=1 mode
@@ -122,8 +123,37 @@ export default function Overview() {
   const usagePrincipalLoading = isMock ? false : usagePrincipalHook.isLoading;
   const usagePrincipalError = isMock ? null : usagePrincipalHook.error;
 
+  const { upstreams, principals } = useStatus();
+  const upstreamErrors = upstreams.filter((u) => u.status === 'error').length;
+  const principalErrors = principals.filter((p) => p.last_apply_error).length;
+  const totalErrors = upstreamErrors + principalErrors;
+
   return (
     <div className="space-y-6">
+      {totalErrors > 0 && (
+        <div className="p-4 bg-red-500/10 border border-red-500/20 rounded-md text-red-400 text-sm flex items-center justify-between">
+          <span>
+            <strong>
+              {totalErrors} resource{totalErrors === 1 ? '' : 's'}
+            </strong>{' '}
+            currently in error state ({upstreamErrors} upstreams,{' '}
+            {principalErrors} principals).
+          </span>
+          <div className="flex gap-3">
+            {upstreamErrors > 0 && (
+              <Link to="/upstreams" className="hover:underline">
+                View upstreams
+              </Link>
+            )}
+            {principalErrors > 0 && (
+              <Link to="/principals" className="hover:underline">
+                View principals
+              </Link>
+            )}
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center justify-end">
         <RangeSelector />
       </div>

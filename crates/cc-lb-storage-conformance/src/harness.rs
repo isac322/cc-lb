@@ -2,11 +2,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use cc_lb_storage_api::{BackendKind, Storage};
+use cc_lb_storage_api::BackendKind;
 
 #[async_trait]
 pub trait ConformanceBackend: Send + Sync + 'static {
-    type Storage: Storage;
+    type Storage: Send + Sync + 'static;
     type Fixture: Send + Sync;
 
     async fn create_fixture(&self) -> Result<Self::Fixture>;

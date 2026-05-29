@@ -1,3 +1,5 @@
+mod admin_test_common;
+
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -8,29 +10,15 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 fn test_state() -> AdminState {
+    let config = Config::default();
     AdminState {
         storage: None,
         key_store: None,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: cc_lb_core::api_keys::limit_engine::LimitEngine::new(
-            Arc::new(cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager::new()),
-            Arc::new(arc_swap::ArcSwap::from(
-                cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
-                    &Config::default(),
-                    std::collections::HashMap::new(),
-                )
-                .expect("principal view builds"),
-            )),
-        ),
+        limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,
         audit_sink: None,
-        principal_view: Arc::new(arc_swap::ArcSwap::from(
-            cc_lb_core::api_keys::principal_view::PrincipalView::from_config(
-                &cc_lb_admin::CurrentConfig::current_config((Arc::new(Config::default())).as_ref()),
-                std::collections::HashMap::new(),
-            )
-            .expect("principal view builds"),
-        )),
+        dynamic_view: admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(Config::default()),
         admin_token: Some("test-token".to_string()),
         start_time: std::time::Instant::now(),
@@ -42,20 +30,50 @@ async fn test_auth_required() {
     let app = router(test_state());
 
     let endpoints = vec![
-        ("/admin/principals", "GET"),
+        ("/admin/principals/alice/usage", "GET"),
         ("/admin/principals/alice/limits", "GET"),
-        ("/admin/principals/alice/keys", "GET"),
-        ("/admin/principals/alice/keys", "POST"),
+        ("/admin/principals/alice/keys/key-1", "GET"),
         ("/admin/principals/alice/keys/key-1/revoke", "POST"),
+        ("/admin/principals/alice/keys/key-1/disable", "POST"),
+        ("/admin/principals/alice/keys/key-1/enable", "POST"),
+        ("/admin/principals/alice/keys/key-1/usage", "GET"),
         ("/admin/audit", "GET"),
-        ("/admin/upstreams", "GET"),
-        ("/admin/upstreams/test/drain", "POST"),
+        ("/admin/status", "GET"),
         ("/admin/killswitch", "POST"),
         ("/admin/killswitch", "DELETE"),
-        ("/admin/oauth/start", "POST"),
-        ("/admin/oauth/complete", "POST"),
         ("/admin/config/current", "GET"),
         ("/admin/config/reload", "POST"),
+        ("/admin/v1/status", "GET"),
+        ("/admin/v1/upstreams", "GET"),
+        ("/admin/v1/upstreams", "POST"),
+        (
+            "/admin/v1/upstreams/00000000-0000-0000-0000-000000000001",
+            "GET",
+        ),
+        (
+            "/admin/v1/upstreams/00000000-0000-0000-0000-000000000001/enable",
+            "POST",
+        ),
+        (
+            "/admin/v1/upstreams/00000000-0000-0000-0000-000000000001/oauth/start",
+            "POST",
+        ),
+        ("/admin/v1/principals", "GET"),
+        ("/admin/v1/principals", "POST"),
+        (
+            "/admin/v1/principals/00000000-0000-0000-0000-000000000001",
+            "GET",
+        ),
+        (
+            "/admin/v1/principals/00000000-0000-0000-0000-000000000001/disable",
+            "POST",
+        ),
+        (
+            "/admin/v1/principals/00000000-0000-0000-0000-000000000001/plugin-chain",
+            "GET",
+        ),
+        ("/admin/v1/plugins/registry", "GET"),
+        ("/admin/v1/plugins/registry", "POST"),
     ];
 
     for (path, method) in endpoints {
@@ -81,7 +99,7 @@ async fn test_auth_success() {
 
     let req = Request::builder()
         .method("GET")
-        .uri("/admin/principals")
+        .uri("/admin/config/current")
         .header("Authorization", "Bearer test-token")
         .body(Body::empty())
         .unwrap();

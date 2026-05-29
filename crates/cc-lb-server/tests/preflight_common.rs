@@ -1,11 +1,9 @@
 #![allow(dead_code)]
 
-use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 
-use cc_lb_config::{AuthStrategy, Config, StorageConfig, UpstreamKind, UpstreamSpec};
-use url::Url;
+use cc_lb_config::{Config, StorageConfig};
 
 pub struct EnvGuard {
     key: &'static str,
@@ -37,24 +35,7 @@ impl Drop for EnvGuard {
 }
 
 pub fn base_config() -> Config {
-    Config {
-        upstreams: HashMap::new(),
-        ..Config::default()
-    }
-}
-
-pub fn upstream(name: &str, kind: UpstreamKind, base_url: Option<&str>) -> (String, UpstreamSpec) {
-    (
-        name.to_owned(),
-        UpstreamSpec {
-            kind,
-            base_url: base_url.map(|value| Url::parse(value).unwrap()),
-            region: None,
-            project: None,
-            auth_strategy: AuthStrategy::ApiKey,
-            credentials_ref: None,
-        },
-    )
+    Config::default()
 }
 
 pub fn use_temp_redb(config: &mut Config, prefix: &str, key_env: &'static str) {

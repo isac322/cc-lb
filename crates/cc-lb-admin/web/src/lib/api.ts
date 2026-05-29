@@ -42,11 +42,19 @@ async function fetchWithAuth(
       let message = res.statusText;
       try {
         body = await res.json();
-        if (body && typeof body === 'object' && 'code' in body) {
-          code = String((body as Record<string, unknown>).code);
-        }
-        if (body && typeof body === 'object' && 'message' in body) {
-          message = String((body as Record<string, unknown>).message);
+        if (body && typeof body === 'object') {
+          const b = body as Record<string, unknown>;
+          if ('code' in b) {
+            code = String(b.code);
+          } else if ('error' in b) {
+            code = String(b.error);
+          }
+
+          if ('message' in b) {
+            message = String(b.message);
+          } else if ('detail' in b) {
+            message = String(b.detail);
+          }
         }
       } catch {
         // ignore json parse error
@@ -64,10 +72,11 @@ async function fetchWithAuth(
 
 export async function getJson<T>(
   path: string,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; headers?: HeadersInit },
 ): Promise<T> {
   const res = await fetchWithAuth(path, {
     method: 'GET',
+    headers: options?.headers,
     signal: options?.signal,
   });
   return res.json();
@@ -76,11 +85,11 @@ export async function getJson<T>(
 export async function postJson<T, B>(
   path: string,
   body: B,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; headers?: HeadersInit },
 ): Promise<T> {
   const res = await fetchWithAuth(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
     body: JSON.stringify(body),
     signal: options?.signal,
   });
@@ -90,11 +99,11 @@ export async function postJson<T, B>(
 export async function putJson<T, B>(
   path: string,
   body: B,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; headers?: HeadersInit },
 ): Promise<T> {
   const res = await fetchWithAuth(path, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
     body: JSON.stringify(body),
     signal: options?.signal,
   });
@@ -103,10 +112,28 @@ export async function putJson<T, B>(
 
 export async function deleteJson<T>(
   path: string,
-  options?: { signal?: AbortSignal },
+  options?: { signal?: AbortSignal; headers?: HeadersInit },
 ): Promise<T> {
   const res = await fetchWithAuth(path, {
     method: 'DELETE',
+    headers: options?.headers,
+    signal: options?.signal,
+  });
+  if (res.status === 204) {
+    return {} as T;
+  }
+  return res.json();
+}
+
+export async function patchJson<T, B>(
+  path: string,
+  body: B,
+  options?: { signal?: AbortSignal; headers?: HeadersInit },
+): Promise<T> {
+  const res = await fetchWithAuth(path, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    body: JSON.stringify(body),
     signal: options?.signal,
   });
   return res.json();
@@ -364,7 +391,7 @@ export interface QuotasConfig {
   default_output_tokens: number;
 }
 
-export interface PrincipalSpec {
+export interface PrincipalRuntimeSpec {
   quotas?: QuotasConfig;
   disabled?: boolean;
   allowed_models: string[];
@@ -373,11 +400,11 @@ export interface PrincipalSpec {
 
 export interface CreatePrincipalRequest {
   id: string;
-  spec: PrincipalSpec;
+  spec: PrincipalRuntimeSpec;
 }
 
 export interface UpdatePrincipalRequest {
-  spec: PrincipalSpec;
+  spec: PrincipalRuntimeSpec;
 }
 
 export interface AllowedModelsRequest {
@@ -501,6 +528,13 @@ export interface ApplyConfigRequest {
 export interface ApplyConfigResponse {
   applied_revision: number;
   applied_at_unix_secs: number;
+}
+
+export interface RestartRequiredField {
+  field: string;
+  current: string;
+  new: string;
+  reason: string;
 }
 
 export interface HistorySummary {

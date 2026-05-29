@@ -12,13 +12,15 @@ path = "managed_api_key_full_flow.rs"
 
 [dev-dependencies]
 cc-lb-config = { path = "../../crates/cc-lb-config" }
+cc-lb-core = { path = "../../crates/cc-lb-core" }
 cc-lb-pricing = { path = "../../crates/cc-lb-pricing" }
 cc-lb-server = { path = "../../crates/cc-lb-server" }
+cc-lb-storage-api = { path = "../../crates/cc-lb-storage-api" }
 cc-lb-storage-redb = { path = "../../crates/cc-lb-storage-redb" }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+http.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"
 tempfile.workspace = true
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 url.workspace = true
 wiremock = "0.6"

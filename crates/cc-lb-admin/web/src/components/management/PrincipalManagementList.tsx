@@ -1,9 +1,10 @@
 import { useState } from 'react';
 import { pluralize } from '../../lib/format';
 import type { PrincipalWithId } from '../../lib/hooks/usePrincipalsManagement';
+import { useStatus } from '../../lib/hooks/useStatusOverview';
 import { Button } from '../primitives/Button';
-import { StatusChip } from '../primitives/StatusChip';
 import { Table } from '../primitives/Table';
+import { StatusBadge } from '../StatusBadge';
 import { EnableDisableSwitch } from './EnableDisableSwitch';
 import { KeyManagementPanel } from './KeyManagementPanel';
 import { PrincipalEditForm } from './PrincipalEditForm';
@@ -20,6 +21,7 @@ export function PrincipalManagementList({
   const [editingPrincipal, setEditingPrincipal] =
     useState<PrincipalWithId | null>(null);
   const [managingKeysFor, setManagingKeysFor] = useState<string | null>(null);
+  const { principals: statusPrincipals } = useStatus();
 
   return (
     <div className="space-y-4">
@@ -35,11 +37,20 @@ export function PrincipalManagementList({
           },
           {
             header: 'Status',
-            render: (p) => (
-              <StatusChip variant={p.disabled ? 'danger' : 'ok'}>
-                {p.disabled ? 'Disabled' : 'Enabled'}
-              </StatusChip>
-            ),
+            render: (p) => {
+              const status = statusPrincipals.find((s) => s.id === p.id);
+              const statusLabel = status?.last_apply_error
+                ? 'error'
+                : p.disabled
+                  ? 'disabled'
+                  : 'active';
+              return (
+                <StatusBadge
+                  status={statusLabel}
+                  lastApplyError={status?.last_apply_error}
+                />
+              );
+            },
           },
           {
             header: 'Quota',

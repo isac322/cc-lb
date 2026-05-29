@@ -24,20 +24,6 @@ upstream_total_secs = 600
 drain_secs = 60
 
 # Smoke upstream. Start fake-anthropic on port 9080 before running cc-lb.
-[upstreams.fake_anthropic]
-kind = "custom"
-base_url = "http://127.0.0.1:9080"
-auth_strategy = "api_key"
-
-# Optional principal defaults. Built-in authn uses the api-key principal when no plugin is configured.
-[principals.api-key]
-allowed_models = ["*"]
-
-# Wasm plugins are optional; when omitted, built-in x-api-key authn and first-upstream routing are used.
-[plugins]
-observability_hooks = []
-
-# Encrypted redb storage is optional for local smoke tests.
 [storage]
 oauth_aead_key_env = "CC_LB_MASTER_KEY"
 

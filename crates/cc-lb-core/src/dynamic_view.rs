@@ -1,0 +1,329 @@
+use std::{collections::HashMap, sync::Arc};
+
+use arc_swap::ArcSwap;
+use cc_lb_plugin_api::ApiKeyAwareSignerFactory;
+use cc_lb_plugin_api::{ObservabilityHook, RouterPlugin};
+
+use crate::api_keys::principal_view::PrincipalView;
+use crate::error_normalizer::ErrorNormalizer;
+use crate::lifecycle::UpstreamDispatch;
+
+#[non_exhaustive]
+pub struct DynamicView {
+    pub signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
+    pub global_router: Arc<dyn RouterPlugin>,
+    pub dispatcher: Arc<dyn UpstreamDispatch>,
+    pub global_observability_hooks: Arc<[Arc<dyn ObservabilityHook>]>,
+    pub error_normalizer: Arc<ErrorNormalizer>,
+    pub principal_view: Arc<PrincipalView>,
+    pub upstream_status_snapshot: Arc<UpstreamStatusSnapshot>,
+    pub generation: u64,
+}
+
+pub struct DynamicViewHolder {
+    inner: ArcSwap<DynamicView>,
+}
+
+impl DynamicViewHolder {
+    pub fn new(initial: Arc<DynamicView>) -> Self {
+        Self {
+            inner: ArcSwap::from(initial),
+        }
+    }
+
+    pub fn load(&self) -> Arc<DynamicView> {
+        self.inner.load_full()
+    }
+
+    pub fn store(&self, view: Arc<DynamicView>) {
+        self.inner.store(view);
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.inner.load().generation
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UpstreamStatusSnapshot {
+    pub entries: HashMap<String, UpstreamStatusEntry>,
+    pub applied_at_unix_secs: u64,
+    pub revision_hash: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpstreamStatusEntry {
+    pub status: ApplyStatus,
+    pub last_apply_error: Option<String>,
+    pub last_apply_at_unix_secs: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ApplyStatus {
+    Active,
+    Disabled,
+    Error,
+}
+
+pub struct DynamicViewBuilder {
+    previous_generation: u64,
+    signer_factory: Option<Arc<dyn ApiKeyAwareSignerFactory>>,
+    global_router: Option<Arc<dyn RouterPlugin>>,
+    dispatcher: Option<Arc<dyn UpstreamDispatch>>,
+    global_observability_hooks: Option<Arc<[Arc<dyn ObservabilityHook>]>>,
+    error_normalizer: Option<Arc<ErrorNormalizer>>,
+    principal_view: Option<Arc<PrincipalView>>,
+    upstream_status_snapshot: Option<Arc<UpstreamStatusSnapshot>>,
+}
+
+impl DynamicViewBuilder {
+    pub fn new(previous_generation: u64) -> Self {
+        Self {
+            previous_generation,
+            signer_factory: None,
+            global_router: None,
+            dispatcher: None,
+            global_observability_hooks: None,
+            error_normalizer: None,
+            principal_view: None,
+            upstream_status_snapshot: None,
+        }
+    }
+
+    pub fn from_view(view: &DynamicView) -> Self {
+        Self {
+            previous_generation: view.generation,
+            signer_factory: Some(Arc::clone(&view.signer_factory)),
+            global_router: Some(Arc::clone(&view.global_router)),
+            dispatcher: Some(Arc::clone(&view.dispatcher)),
+            global_observability_hooks: Some(Arc::clone(&view.global_observability_hooks)),
+            error_normalizer: Some(Arc::clone(&view.error_normalizer)),
+            principal_view: Some(Arc::clone(&view.principal_view)),
+            upstream_status_snapshot: Some(Arc::clone(&view.upstream_status_snapshot)),
+        }
+    }
+
+    pub fn signer_factory(mut self, signer_factory: Arc<dyn ApiKeyAwareSignerFactory>) -> Self {
+        self.signer_factory = Some(signer_factory);
+        self
+    }
+
+    pub fn global_router(mut self, global_router: Arc<dyn RouterPlugin>) -> Self {
+        self.global_router = Some(global_router);
+        self
+    }
+
+    pub fn dispatcher(mut self, dispatcher: Arc<dyn UpstreamDispatch>) -> Self {
+        self.dispatcher = Some(dispatcher);
+        self
+    }
+
+    pub fn global_observability_hooks(
+        mut self,
+        global_observability_hooks: Vec<Arc<dyn ObservabilityHook>>,
+    ) -> Self {
+        self.global_observability_hooks = Some(Arc::from(global_observability_hooks));
+        self
+    }
+
+    pub fn global_observability_hooks_arc(
+        mut self,
+        global_observability_hooks: Arc<[Arc<dyn ObservabilityHook>]>,
+    ) -> Self {
+        self.global_observability_hooks = Some(global_observability_hooks);
+        self
+    }
+
+    pub fn error_normalizer(mut self, error_normalizer: Arc<ErrorNormalizer>) -> Self {
+        self.error_normalizer = Some(error_normalizer);
+        self
+    }
+
+    pub fn principal_view(mut self, principal_view: Arc<PrincipalView>) -> Self {
+        self.principal_view = Some(principal_view);
+        self
+    }
+
+    pub fn upstream_status_snapshot(
+        mut self,
+        upstream_status_snapshot: Arc<UpstreamStatusSnapshot>,
+    ) -> Self {
+        self.upstream_status_snapshot = Some(upstream_status_snapshot);
+        self
+    }
+
+    pub fn build(self) -> Arc<DynamicView> {
+        Arc::new(DynamicView {
+            signer_factory: self
+                .signer_factory
+                .expect("DynamicViewBuilder requires signer_factory"),
+            global_router: self
+                .global_router
+                .expect("DynamicViewBuilder requires global_router"),
+            dispatcher: self
+                .dispatcher
+                .expect("DynamicViewBuilder requires dispatcher"),
+            global_observability_hooks: self
+                .global_observability_hooks
+                .expect("DynamicViewBuilder requires global_observability_hooks"),
+            error_normalizer: self
+                .error_normalizer
+                .expect("DynamicViewBuilder requires error_normalizer"),
+            principal_view: self
+                .principal_view
+                .expect("DynamicViewBuilder requires principal_view"),
+            upstream_status_snapshot: self.upstream_status_snapshot.unwrap_or_default(),
+            generation: self.previous_generation.saturating_add(1),
+        })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use cc_lb_plugin_api::{
+        ObservabilityError, ObserveEvent, Principal, RequestContext, RouteDecision, RouteError,
+        SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, Upstream,
+        UpstreamError,
+    };
+    use http::{Response, StatusCode};
+
+    struct TestSignerFactory;
+
+    impl ApiKeyAwareSignerFactory for TestSignerFactory {
+        fn with_api_key(&self, _api_key: String) -> Arc<dyn SignerFactory> {
+            Arc::new(TestSignerFactory)
+        }
+    }
+
+    #[async_trait]
+    impl SignerFactory for TestSignerFactory {
+        async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
+            Ok(Arc::new(TestSigner))
+        }
+    }
+
+    struct TestSigner;
+
+    #[async_trait]
+    impl Signer for TestSigner {
+        async fn sign(
+            &self,
+            shaped: cc_lb_plugin_api::ShapedRequest,
+            capability: &mut SigningCapability,
+        ) -> Result<SignedRequest, SignerError> {
+            Ok(SignedRequest::from_shaped(shaped, capability))
+        }
+
+        async fn on_unauthorized(&self, _err: &UpstreamError) -> cc_lb_plugin_api::RetryDecision {
+            cc_lb_plugin_api::RetryDecision::Fail
+        }
+    }
+
+    struct TestRouter;
+
+    impl RouterPlugin for TestRouter {
+        fn route(
+            &self,
+            _ctx: &RequestContext,
+            _principal: &Principal,
+        ) -> Result<RouteDecision, RouteError> {
+            Err(RouteError::NoRoute {
+                reason: "test router has no route".to_owned(),
+            })
+        }
+    }
+
+    struct TestDispatcher;
+
+    #[async_trait]
+    impl UpstreamDispatch for TestDispatcher {
+        async fn dispatch(
+            &self,
+            _request: SignedRequest,
+        ) -> Result<Response<crate::Body>, crate::DispatchError> {
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .body(crate::Body::from(Bytes::new()))
+                .expect("test response builds"))
+        }
+    }
+
+    struct TestHook;
+
+    impl ObservabilityHook for TestHook {
+        fn observe(&self, _event: ObserveEvent) -> Result<(), ObservabilityError> {
+            Ok(())
+        }
+    }
+
+    fn test_view(previous_generation: u64) -> Arc<DynamicView> {
+        let principal_view = Arc::new(PrincipalView::from_db(
+            &[],
+            std::collections::HashMap::new(),
+        ));
+        DynamicViewBuilder::new(previous_generation)
+            .signer_factory(Arc::new(TestSignerFactory))
+            .global_router(Arc::new(TestRouter))
+            .dispatcher(Arc::new(TestDispatcher))
+            .global_observability_hooks(vec![Arc::new(TestHook)])
+            .error_normalizer(Arc::new(ErrorNormalizer::new()))
+            .principal_view(principal_view)
+            .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
+            .build()
+    }
+
+    #[test]
+    fn generation_monotonic() {
+        let holder = DynamicViewHolder::new(test_view(0));
+        for expected in 2..=1000 {
+            let next = test_view(holder.generation());
+            holder.store(next);
+            assert_eq!(holder.generation(), expected);
+        }
+    }
+
+    #[test]
+    fn load_after_store_returns_new() {
+        let holder = DynamicViewHolder::new(test_view(0));
+        let next = test_view(holder.generation());
+        holder.store(Arc::clone(&next));
+        assert!(Arc::ptr_eq(&holder.load(), &next));
+    }
+
+    #[test]
+    fn concurrent_load_during_store_no_panic() {
+        let holder = Arc::new(DynamicViewHolder::new(test_view(0)));
+        let reader_holder = Arc::clone(&holder);
+        let reader = std::thread::spawn(move || {
+            for _ in 0..100 {
+                let generation = reader_holder.load().generation;
+                assert!(generation > 0);
+            }
+        });
+        for _ in 0..100 {
+            holder.store(test_view(holder.generation()));
+        }
+        reader.join().expect("reader does not panic");
+    }
+
+    #[test]
+    fn concurrent_store_serializes_via_arcswap() {
+        let holder = Arc::new(DynamicViewHolder::new(test_view(0)));
+        let first_holder = Arc::clone(&holder);
+        let second_holder = Arc::clone(&holder);
+        let first = std::thread::spawn(move || first_holder.store(test_view(1)));
+        let second = std::thread::spawn(move || second_holder.store(test_view(2)));
+        first.join().expect("first store completes");
+        second.join().expect("second store completes");
+        assert!(holder.generation() == 2 || holder.generation() == 3);
+    }
+
+    #[test]
+    fn builder_increments_generation() {
+        let view = test_view(41);
+        assert_eq!(view.generation, 42);
+    }
+}

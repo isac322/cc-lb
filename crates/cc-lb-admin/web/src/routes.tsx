@@ -10,7 +10,7 @@ const Settings = lazy(() => import('./pages/Settings'));
 const Upstreams = lazy(() => import('./pages/Upstreams'));
 const AdminActivity = lazy(() => import('./pages/AdminActivity'));
 const CredentialStatus = lazy(() => import('./pages/CredentialStatus'));
-const PluginStatus = lazy(() => import('./pages/PluginStatus'));
+const PluginRegistry = lazy(() => import('./pages/PluginRegistry'));
 
 function NotFound() {
   return (
@@ -35,7 +35,7 @@ export function AppRoutes() {
       <Route path="/upstreams" element={<Upstreams />} />
       <Route path="/activity" element={<AdminActivity />} />
       <Route path="/credentials" element={<CredentialStatus />} />
-      <Route path="/plugins" element={<PluginStatus />} />
+      <Route path="/plugins" element={<PluginRegistry />} />
       <Route path="*" element={<NotFound />} />
     </Routes>
   );

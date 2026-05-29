@@ -1,25 +1,42 @@
-use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
+use bytes::Bytes;
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, DEFAULT_REDB_PATH, PluginRef, StorageConfig, TlsConfig};
-use cc_lb_core::api_keys::principal_view::PrincipalView;
-use cc_lb_plugin_api::{PluginManifest, PluginRuntime};
-use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_config::{Config, DEFAULT_REDB_PATH, StorageConfig, TlsConfig};
+use cc_lb_core::LifecycleConfig;
+use cc_lb_storage_api::upstream::UpstreamKind;
+use cc_lb_storage_api::{
+    PluginChainEntry, PluginSlot, PrincipalRecord, StorageError as ApiStorageError, UpstreamRecord,
+};
+use http::{Request, StatusCode};
+use http_body_util::Empty;
+use hyper_rustls::HttpsConnectorBuilder;
+use hyper_util::client::legacy::Client;
+use hyper_util::client::legacy::connect::HttpConnector;
+use hyper_util::rt::TokioExecutor;
 use thiserror::Error;
 use tokio::net::TcpListener;
 
+use crate::dynamic_view_builder::Stores;
 use crate::storage_factory;
 use crate::tls;
 
-#[derive(Debug, Default, Clone)]
+type ProbeClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>;
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PreflightReport {
+    pub upstream_count: usize,
+    pub upstream_warnings: usize,
+    pub principal_count: usize,
+    pub principal_disabled_count: usize,
+    pub plugin_chain_entry_count: usize,
+    pub plugin_blob_missing_count: usize,
     pub warnings: Vec<String>,
-    pub successes: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -37,10 +54,6 @@ pub enum PreflightError {
     MasterKeyBadHex(String),
     #[error("storage: {0}")]
     Storage(String),
-    #[error("plugin: {0}")]
-    Plugin(String),
-    #[error("plugin {name}: missing wasm_path")]
-    PluginMissingArtifact { name: String },
     #[error("failed to bind {addr}: {message}")]
     ListenerBind { addr: SocketAddr, message: String },
     #[error("missing TLS certificate or key file: {0}")]
@@ -49,6 +62,47 @@ pub enum PreflightError {
     TlsParse(String),
     #[error(transparent)]
     Config(#[from] cc_lb_config::ConfigError),
+}
+
+pub async fn run_preflight(
+    stores: &Stores,
+    lifecycle_config: &LifecycleConfig,
+    data_dir: &Path,
+) -> Result<PreflightReport, PreflightError> {
+    let _replica_identity = lifecycle_config.replica_identity.as_ref();
+    let mut report = PreflightReport::default();
+
+    let upstreams = list_upstreams(stores).await?;
+    report.upstream_count = upstreams.len();
+    let client = build_probe_client();
+    for upstream in &upstreams {
+        if upstream.kind == UpstreamKind::Custom {
+            probe_custom_upstream(&client, upstream, &mut report).await;
+        }
+    }
+
+    let principals = list_principals(stores).await?;
+    report.principal_count = principals.len();
+    for principal in &principals {
+        if !principal.enabled {
+            report.principal_disabled_count += 1;
+        }
+        tracing::info!(
+            principal_id = %principal.id,
+            principal_name = principal.name.as_str(),
+            allowed_models_count = principal.allowed_models.len(),
+            enabled = principal.enabled,
+            "preflight principal summary"
+        );
+    }
+
+    let chain_entries = list_plugin_chain_entries(stores, &principals).await?;
+    report.plugin_chain_entry_count = chain_entries.len();
+    for entry in &chain_entries {
+        check_plugin_chain_entry(stores, data_dir, entry, &mut report).await?;
+    }
+
+    Ok(report)
 }
 
 pub async fn run(
@@ -70,114 +124,260 @@ async fn run_inner(
     options: PreflightOptions,
     probe_storage: bool,
 ) -> Result<PreflightReport, PreflightError> {
-    let mut report = PreflightReport::default();
-
+    let report = PreflightReport::default();
     if probe_storage {
         let key_name = &cfg.aead.key_env;
         let key_hex =
             env::var(key_name).map_err(|_| PreflightError::MasterKeyMissing(key_name.clone()))?;
         let key = decode_master_key(key_name, &key_hex)?;
-        report
-            .successes
-            .push(format!("storage master key resolved from {key_name}"));
         match &cfg.storage {
             StorageConfig::Redb { path } => validate_redb_path(path)?,
-            StorageConfig::Postgres { url, .. } => {
-                probe_postgres_connection(url).await?;
-            }
+            StorageConfig::Postgres { url, .. } => storage_factory::probe_postgres_connection(url)
+                .await
+                .map_err(|error| PreflightError::Storage(error.to_string()))?,
         }
-
         let aead = Arc::new(AeadService::from_master_key(key));
         let _storage = storage_factory::open_storage(&cfg.storage, aead, key)
             .await
             .map_err(|error| PreflightError::Storage(error.to_string()))?;
-        report.successes.push(storage_open_success(&cfg.storage));
     }
-
-    let runtime = ExtismRuntime::new();
-    PrincipalView::from_config(cfg, std::collections::HashMap::new())?;
-    report.successes.push("principal view built".to_owned());
-    if let Some(plugin) = &cfg.plugins.router_plugin {
-        dry_load_plugin(&runtime, plugin, PluginLoadKind::Router)?;
-        report
-            .successes
-            .push(format!("plugin {} dry-loaded", plugin.name));
-    }
-    for plugin in &cfg.plugins.observability_hooks {
-        dry_load_plugin(&runtime, plugin, PluginLoadKind::Observability)?;
-        report
-            .successes
-            .push(format!("plugin {} dry-loaded", plugin.name));
-    }
-
-    let principals = cfg.principals.iter().collect::<BTreeMap<_, _>>();
-    for (principal_name, principal) in principals {
-        if let Some(plugin) = &principal.router_plugin {
-            let path = format!("principals.{principal_name}.router_plugin");
-            dry_load_plugin(&runtime, plugin, PluginLoadKind::Router)
-                .map_err(|error| PreflightError::Plugin(format!("{path}: {error}")))?;
-            report
-                .successes
-                .push(format!("plugin {} dry-loaded ({path})", plugin.name));
-        }
-
-        if let Some(plugins) = &principal.observability_hooks {
-            for (index, plugin) in plugins.iter().enumerate() {
-                let path = format!("principals.{principal_name}.observability_hooks.{index}");
-                dry_load_plugin(&runtime, plugin, PluginLoadKind::Observability)
-                    .map_err(|error| PreflightError::Plugin(format!("{path}: {error}")))?;
-                report
-                    .successes
-                    .push(format!("plugin {} dry-loaded ({path})", plugin.name));
-            }
-        }
-    }
-
-    for name in cfg.upstreams.keys() {
-        report.warnings.push(format!(
-            "upstream {name}: probe skipped (offline preflight)"
-        ));
-    }
-
     if !options.skip_bind {
         bind_addr(cfg.listener.proxy_addr).await?;
         bind_addr(cfg.listener.admin_addr).await?;
         bind_addr(cfg.listener.metrics_addr).await?;
-        report
-            .successes
-            .push("listener bindability checked".to_owned());
     }
-
-    if let Some((_, tls_config)) = active_tls_config(cfg) {
+    if let Some((_label, tls_config)) = active_tls_config(cfg) {
         verify_tls(tls_config)?;
-        report.successes.push("tls files parsed".to_owned());
     }
-
-    if let Some(warning) = ulimit_warning() {
-        report.warnings.push(warning);
-    } else {
-        report.successes.push("ulimit checked".to_owned());
-    }
-
     Ok(report)
 }
 
+async fn list_upstreams(stores: &Stores) -> Result<Vec<UpstreamRecord>, PreflightError> {
+    let mut upstreams = Vec::new();
+    let mut after = None;
+    loop {
+        let page = stores
+            .upstreams
+            .list(after, 100)
+            .await
+            .map_err(storage_error)?;
+        if page.is_empty() {
+            break;
+        }
+        after = page.last().map(|record| record.id);
+        upstreams.extend(
+            page.into_iter()
+                .filter(|record| record.deleted_at_unix_secs.is_none()),
+        );
+    }
+    Ok(upstreams)
+}
+
+async fn list_principals(stores: &Stores) -> Result<Vec<PrincipalRecord>, PreflightError> {
+    let mut principals = Vec::new();
+    let mut offset = 0;
+    loop {
+        let page = stores
+            .principals
+            .list(offset, 100, false)
+            .await
+            .map_err(storage_error)?;
+        if page.is_empty() {
+            break;
+        }
+        offset += page.len();
+        principals.extend(page);
+    }
+    Ok(principals)
+}
+
+async fn list_plugin_chain_entries(
+    stores: &Stores,
+    principals: &[PrincipalRecord],
+) -> Result<Vec<PluginChainEntry>, PreflightError> {
+    let mut entries = Vec::new();
+    for principal in principals {
+        for slot in [PluginSlot::Router, PluginSlot::ObservabilityHook] {
+            entries.extend(
+                stores
+                    .plugin_registry
+                    .list_chain_for_principal(principal.id, slot)
+                    .await
+                    .map_err(storage_error)?,
+            );
+        }
+    }
+    Ok(entries)
+}
+
+async fn probe_custom_upstream(
+    client: &ProbeClient,
+    upstream: &UpstreamRecord,
+    report: &mut PreflightReport,
+) {
+    let Some(base_url) = upstream.base_url.as_ref() else {
+        push_upstream_warning(
+            report,
+            format!(
+                "upstream {}: custom upstream missing base_url",
+                upstream.name
+            ),
+        );
+        return;
+    };
+
+    match probe_head(client, base_url).await {
+        Ok(status) if status.is_success() => {}
+        Ok(status) => push_upstream_warning(
+            report,
+            format!(
+                "upstream {}: upstream probe failed for {}: status {}",
+                upstream.name, base_url, status
+            ),
+        ),
+        Err(error) => push_upstream_warning(
+            report,
+            format!(
+                "upstream {}: upstream probe failed for {}: {error}",
+                upstream.name, base_url
+            ),
+        ),
+    }
+}
+
+fn build_probe_client() -> ProbeClient {
+    let connector = HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_http1()
+        .enable_http2()
+        .build();
+    Client::builder(TokioExecutor::new()).build(connector)
+}
+
+async fn probe_head(client: &ProbeClient, base_url: &url::Url) -> Result<StatusCode, String> {
+    let request = Request::head(base_url.as_str())
+        .body(Empty::<Bytes>::new())
+        .map_err(|error| error.to_string())?;
+    let response = tokio::time::timeout(Duration::from_secs(5), client.request(request))
+        .await
+        .map_err(|_| "request timed out".to_owned())?
+        .map_err(|error| error.to_string())?;
+    Ok(response.status())
+}
+
+async fn check_plugin_chain_entry(
+    stores: &Stores,
+    data_dir: &Path,
+    entry: &PluginChainEntry,
+    report: &mut PreflightReport,
+) -> Result<(), PreflightError> {
+    let Some(registry_entry) = stores
+        .plugin_registry
+        .get_registry_entry_by_id(entry.wasm_registry_id)
+        .await
+        .map_err(storage_error)?
+    else {
+        push_plugin_warning(
+            report,
+            format!(
+                "plugin chain entry {}: missing wasm registry row {}",
+                entry.id, entry.wasm_registry_id
+            ),
+        );
+        return Ok(());
+    };
+
+    if stores
+        .plugin_registry
+        .get_blob(registry_entry.sha256)
+        .await
+        .map_err(storage_error)?
+        .is_none()
+    {
+        push_plugin_warning(
+            report,
+            format!(
+                "plugin chain entry {}: missing wasm blob {}",
+                entry.id,
+                hex_sha256(registry_entry.sha256)
+            ),
+        );
+        return Ok(());
+    }
+
+    let cache_path = wasm_cache_path(data_dir, registry_entry.sha256);
+    match tokio::fs::try_exists(&cache_path).await {
+        Ok(true) => tracing::info!(
+            plugin_chain_entry_id = %entry.id,
+            wasm_sha256 = hex_sha256(registry_entry.sha256).as_str(),
+            cache_path = %cache_path.display(),
+            "preflight plugin wasm cache present"
+        ),
+        Ok(false) => tracing::info!(
+            plugin_chain_entry_id = %entry.id,
+            wasm_sha256 = hex_sha256(registry_entry.sha256).as_str(),
+            cache_path = %cache_path.display(),
+            "preflight plugin wasm cache will be materialized at first use"
+        ),
+        Err(error) => tracing::info!(
+            plugin_chain_entry_id = %entry.id,
+            wasm_sha256 = hex_sha256(registry_entry.sha256).as_str(),
+            cache_path = %cache_path.display(),
+            error = %error,
+            "preflight plugin wasm cache existence check failed"
+        ),
+    }
+
+    Ok(())
+}
+
+fn push_upstream_warning(report: &mut PreflightReport, warning: String) {
+    report.upstream_warnings += 1;
+    report.warnings.push(warning);
+}
+
+fn push_plugin_warning(report: &mut PreflightReport, warning: String) {
+    report.plugin_blob_missing_count += 1;
+    report.warnings.push(warning);
+}
+
+fn wasm_cache_path(data_dir: &Path, sha256: [u8; 32]) -> PathBuf {
+    data_dir
+        .join("plugins")
+        .join("wasm")
+        .join("cache")
+        .join(format!("{}.wasm", hex_sha256(sha256)))
+}
+
+fn hex_sha256(sha256: [u8; 32]) -> String {
+    let mut output = String::with_capacity(64);
+    for byte in sha256 {
+        use std::fmt::Write as _;
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
+}
+
+fn storage_error(error: ApiStorageError) -> PreflightError {
+    PreflightError::Storage(error.to_string())
+}
+
 fn decode_master_key(env_name: &str, value: &str) -> Result<[u8; 32], PreflightError> {
+    let value = value.trim();
     if value.len() != 64 {
         return Err(PreflightError::MasterKeyBadLength {
             actual: value.len() / 2,
         });
     }
-
     let mut key = [0_u8; 32];
-    for (index, chunk) in value.as_bytes().chunks(2).enumerate() {
+    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
         let high = hex_nibble(chunk[0])
             .ok_or_else(|| PreflightError::MasterKeyBadHex(env_name.to_owned()))?;
         let low = hex_nibble(chunk[1])
             .ok_or_else(|| PreflightError::MasterKeyBadHex(env_name.to_owned()))?;
         key[index] = (high << 4) | low;
     }
-
     Ok(key)
 }
 
@@ -190,39 +390,10 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-fn storage_open_success(config: &StorageConfig) -> String {
-    match config {
-        StorageConfig::Redb { path } => format!("storage opened: {}", path.display()),
-        StorageConfig::Postgres { url, .. } => format!("storage opened: {}", postgres_host(url)),
-    }
-}
-
-fn postgres_host(url: &str) -> String {
-    url::Url::parse(url)
-        .ok()
-        .and_then(|url| url.host_str().map(str::to_owned))
-        .unwrap_or_else(|| "<unknown host>".to_owned())
-}
-
-async fn probe_postgres_connection(url: &str) -> Result<(), PreflightError> {
-    match storage_factory::probe_postgres_connection(url).await {
-        Ok(()) => Ok(()),
-        Err(error) => {
-            tracing::error!(
-                host = %postgres_host(url),
-                error = %error,
-                "postgres connection probe failed"
-            );
-            Err(PreflightError::Storage(error.to_string()))
-        }
-    }
-}
-
 fn validate_redb_path(path: &Path) -> Result<(), PreflightError> {
     if path == Path::new(DEFAULT_REDB_PATH) && !path.exists() {
         return Ok(());
     }
-
     if path.exists() {
         let metadata = fs::metadata(path).map_err(|error| {
             PreflightError::Storage(format!("cannot inspect path {}: {error}", path.display()))
@@ -233,14 +404,8 @@ fn validate_redb_path(path: &Path) -> Result<(), PreflightError> {
                 path.display()
             )));
         }
-        if metadata.permissions().readonly() {
-            return Err(PreflightError::Storage(format!(
-                "file is not writable: {}",
-                path.display()
-            )));
-        }
+        return Ok(());
     }
-
     let parent = path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
@@ -257,66 +422,16 @@ fn validate_redb_path(path: &Path) -> Result<(), PreflightError> {
             parent.display()
         )));
     }
-    if parent_metadata.permissions().readonly() {
-        return Err(PreflightError::Storage(format!(
-            "parent directory is not writable: {}",
-            parent.display()
-        )));
-    }
-
     Ok(())
 }
 
-enum PluginLoadKind {
-    Router,
-    Observability,
-}
-
-fn dry_load_plugin(
-    runtime: &ExtismRuntime,
-    plugin: &PluginRef,
-    kind: PluginLoadKind,
-) -> Result<(), PreflightError> {
-    let manifest = manifest_from_plugin(plugin)?;
-    let result = match kind {
-        PluginLoadKind::Router => runtime.instantiate_router(&manifest).map(|_| ()),
-        PluginLoadKind::Observability => runtime.instantiate_observability(&manifest).map(|_| ()),
-    };
-
-    result.map_err(|error| PreflightError::Plugin(error.to_string()))
-}
-
-fn manifest_from_plugin(plugin: &PluginRef) -> Result<PluginManifest, PreflightError> {
-    let artifact =
-        plugin
-            .wasm_path
-            .as_ref()
-            .ok_or_else(|| PreflightError::PluginMissingArtifact {
-                name: plugin.name.clone(),
-            })?;
-    let mut metadata = BTreeMap::new();
-    metadata.insert(
-        "observe_batch_count".to_owned(),
-        serde_json::Value::from(plugin.batched_events_per_flush),
-    );
-    metadata.insert(
-        "observe_flush_ms".to_owned(),
-        serde_json::Value::from(plugin.batched_flush_ms),
-    );
-    Ok(PluginManifest {
-        name: plugin.name.clone(),
-        artifact: artifact.display().to_string(),
-        config: plugin.config.clone(),
-        metadata,
-    })
-}
-
 fn active_tls_config(config: &Config) -> Option<(&'static str, &TlsConfig)> {
-    if let Some(tls) = &config.listener.tls {
-        Some(("listener.tls", tls))
-    } else {
-        config.tls.as_ref().map(|tls| ("tls", tls))
-    }
+    config
+        .listener
+        .tls
+        .as_ref()
+        .map(|tls| ("listener", tls))
+        .or_else(|| config.tls.as_ref().map(|tls| ("legacy", tls)))
 }
 
 fn verify_tls(tls_config: &TlsConfig) -> Result<(), PreflightError> {
@@ -328,200 +443,25 @@ fn verify_tls(tls_config: &TlsConfig) -> Result<(), PreflightError> {
         .key_path
         .as_ref()
         .ok_or_else(|| PreflightError::TlsCertMissing(PathBuf::from("listener.tls.key_path")))?;
-
     if !cert_path.exists() {
         return Err(PreflightError::TlsCertMissing(cert_path.clone()));
     }
     if !key_path.exists() {
         return Err(PreflightError::TlsCertMissing(key_path.clone()));
     }
-
     tls::load_certs(cert_path, key_path)
-        .map_err(|error| PreflightError::TlsParse(error.to_string()))?;
-    Ok(())
+        .map(|_| ())
+        .map_err(|error| PreflightError::TlsParse(error.to_string()))
 }
 
 async fn bind_addr(addr: SocketAddr) -> Result<(), PreflightError> {
-    TcpListener::bind(addr)
-        .await
-        .map(drop)
-        .map_err(|source| PreflightError::ListenerBind {
-            addr,
-            message: source.to_string(),
-        })
-}
-
-fn ulimit_warning() -> Option<String> {
-    #[cfg(target_os = "linux")]
-    {
-        use nix::sys::resource::{Resource, getrlimit};
-
-        match getrlimit(Resource::RLIMIT_NOFILE) {
-            Ok((soft, _hard)) if soft < 65_536 => Some(format!(
-                "ulimit: RLIMIT_NOFILE soft limit {soft} is below 65536"
-            )),
-            Ok(_) => None,
-            Err(error) => Some(format!("ulimit: could not read RLIMIT_NOFILE: {error}")),
-        }
-    }
-
-    #[cfg(not(target_os = "linux"))]
-    {
-        None
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use std::fs;
-    use std::path::{Path, PathBuf};
-
-    use cc_lb_config::{Config, PluginRef, PrincipalSpec};
-    use tempfile::TempDir;
-
-    use super::{PreflightOptions, run_offline};
-
-    const ROUTER_WASM: &[u8] = &[
-        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f,
-        0x03, 0x02, 0x01, 0x00, 0x07, 0x09, 0x01, 0x05, 0x72, 0x6f, 0x75, 0x74, 0x65, 0x00, 0x00,
-        0x0a, 0x06, 0x01, 0x04, 0x00, 0x41, 0x00, 0x0b,
-    ];
-    const OBSERVE_WASM: &[u8] = &[
-        0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00, 0x01, 0x05, 0x01, 0x60, 0x00, 0x01, 0x7f,
-        0x03, 0x02, 0x01, 0x00, 0x07, 0x0b, 0x01, 0x07, 0x6f, 0x62, 0x73, 0x65, 0x72, 0x76, 0x65,
-        0x00, 0x00, 0x0a, 0x06, 0x01, 0x04, 0x00, 0x41, 0x00, 0x0b,
-    ];
-
-    struct PluginFixtures {
-        dir: TempDir,
-        router: PathBuf,
-        observe: PathBuf,
-    }
-
-    impl PluginFixtures {
-        fn new() -> Self {
-            let dir = tempfile::tempdir().expect("tempdir is created");
-            let router = write_plugin(dir.path(), "router.wasm", ROUTER_WASM);
-            let observe = write_plugin(dir.path(), "observe.wasm", OBSERVE_WASM);
-            Self {
-                dir,
-                router,
-                observe,
-            }
-        }
-
-        fn missing_path(&self, name: &str) -> PathBuf {
-            self.dir.path().join(name)
-        }
-    }
-
-    #[tokio::test]
-    async fn preflight_aborts_on_principal_plugin_failure() {
-        let fixtures = PluginFixtures::new();
-        let mut config = config_with_global_plugins(&fixtures);
-        config.principals.insert(
-            "alice".to_owned(),
-            principal(
-                Some(plugin("alice-router", &fixtures.router)),
-                Some(vec![plugin("alice-hook", &fixtures.observe)]),
-            ),
-        );
-        config.principals.insert(
-            "bob".to_owned(),
-            principal(
-                Some(plugin(
-                    "bob-router",
-                    &fixtures.missing_path("bob-router.wasm"),
-                )),
-                Some(vec![plugin("bob-hook", &fixtures.observe)]),
-            ),
-        );
-        config.principals.insert(
-            "carol".to_owned(),
-            principal(
-                Some(plugin("carol-router", &fixtures.router)),
-                Some(vec![plugin("carol-hook", &fixtures.observe)]),
-            ),
-        );
-
-        let error = run_offline(&config, PreflightOptions { skip_bind: true })
+    let listener =
+        TcpListener::bind(addr)
             .await
-            .expect_err("bob's bad router plugin must abort preflight");
-        let message = error.to_string();
-
-        assert!(
-            message.contains("principals.bob.router_plugin"),
-            "error must include the failing principal plugin path, got: {message}"
-        );
-    }
-
-    #[tokio::test]
-    async fn preflight_all_valid() {
-        let fixtures = PluginFixtures::new();
-        let mut config = config_with_global_plugins(&fixtures);
-        config.principals.insert(
-            "alice".to_owned(),
-            principal(
-                Some(plugin("alice-router", &fixtures.router)),
-                Some(vec![plugin("alice-hook", &fixtures.observe)]),
-            ),
-        );
-        config.principals.insert(
-            "bob".to_owned(),
-            principal(
-                Some(plugin("bob-router", &fixtures.router)),
-                Some(vec![plugin("bob-hook-a", &fixtures.observe)]),
-            ),
-        );
-
-        let report = run_offline(&config, PreflightOptions { skip_bind: true })
-            .await
-            .expect("global and per-principal plugins should all dry-load");
-
-        for expected in [
-            "principal view built",
-            "plugin alice-router dry-loaded (principals.alice.router_plugin)",
-            "plugin alice-hook dry-loaded (principals.alice.observability_hooks.0)",
-            "plugin bob-router dry-loaded (principals.bob.router_plugin)",
-            "plugin bob-hook-a dry-loaded (principals.bob.observability_hooks.0)",
-        ] {
-            assert!(
-                report.successes.iter().any(|entry| entry == expected),
-                "preflight should report success for {expected}: {:?}",
-                report.successes
-            );
-        }
-    }
-
-    fn config_with_global_plugins(fixtures: &PluginFixtures) -> Config {
-        let mut config = Config::default();
-        config.plugins.router_plugin = Some(plugin("global-router", &fixtures.router));
-        config.plugins.observability_hooks = vec![plugin("global-hook", &fixtures.observe)];
-        config
-    }
-
-    fn principal(
-        router_plugin: Option<PluginRef>,
-        observability_hooks: Option<Vec<PluginRef>>,
-    ) -> PrincipalSpec {
-        PrincipalSpec {
-            router_plugin,
-            observability_hooks,
-            ..PrincipalSpec::default()
-        }
-    }
-
-    fn plugin(name: &str, wasm_path: &Path) -> PluginRef {
-        PluginRef {
-            name: name.to_owned(),
-            wasm_path: Some(wasm_path.to_owned()),
-            ..PluginRef::default()
-        }
-    }
-
-    fn write_plugin(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
-        let path = dir.join(name);
-        fs::write(&path, bytes).expect("wasm fixture is written");
-        path
-    }
+            .map_err(|source| PreflightError::ListenerBind {
+                addr,
+                message: source.to_string(),
+            })?;
+    drop(listener);
+    Ok(())
 }
