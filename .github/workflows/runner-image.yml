@@ -50,16 +50,39 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Pin BASE_TAG=latest to its concrete semver so the build is reproducible and our output tag mirrors the base's version.
+      - name: Resolve base image version tag
+        id: base
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          input_tag="${{ inputs.base_tag || 'latest' }}"
+          if [ "$input_tag" != "latest" ]; then
+            echo "Using explicit base tag: $input_tag"
+            echo "tag=$input_tag" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          digest=$(docker buildx imagetools inspect ghcr.io/falcondev-oss/actions-runner:latest --format '{{.Manifest.Digest}}')
+          echo "base latest digest = $digest"
+          version=$(gh api /orgs/falcondev-oss/packages/container/actions-runner/versions \
+            --jq ".[] | select(.name == \"$digest\") | .metadata.container.tags[] | select(. != \"latest\")" \
+            | head -n1)
+          if [ -z "$version" ]; then
+            echo "::error::Could not resolve a non-latest tag for base digest $digest"
+            exit 1
+          fi
+          echo "Resolved base latest -> $version"
+          echo "tag=$version" >> "$GITHUB_OUTPUT"
+
       - name: Compute image tags
         id: meta
         uses: docker/metadata-action@v5
         with:
           images: ${{ env.IMAGE_NAME }}
           tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=sha,prefix=sha-,format=short
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=${{ steps.base.outputs.tag }}
+            type=raw,value=latest
 
       # Single-platform arm64 build. Buildx still wraps the result in a
       # manifest list whose only entry is linux/arm64, so an amd64 client
@@ -73,7 +96,7 @@ jobs:
           platforms: linux/arm64
           push: ${{ github.event_name != 'pull_request' }}
           build-args: |
-            BASE_TAG=${{ inputs.base_tag || 'latest' }}
+            BASE_TAG=${{ steps.base.outputs.tag }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
