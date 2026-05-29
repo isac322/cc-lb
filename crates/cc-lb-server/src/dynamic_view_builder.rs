@@ -21,11 +21,11 @@ use cc_lb_plugin_api::{
     SignerError, SignerFactory, Upstream, UpstreamDialect,
 };
 use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     AuditStore, PluginRegistryStore, PluginSlot, PrincipalRecord, PrincipalStore, StorageError,
     StorageResult, UpstreamRecord, UpstreamStore,
 };
-use cc_lb_storage_api::upstream::UpstreamKind;
 use thiserror::Error;
 
 use crate::reconcile::collect_revision_hash;

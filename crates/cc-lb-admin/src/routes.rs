@@ -6,7 +6,6 @@ use axum::{
     response::IntoResponse,
     routing::{delete, get, post},
 };
-use cc_lb_core::api_keys::key_store::KeyStore;
 use cc_lb_storage_api::{Storage, StorageError};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
@@ -82,9 +81,13 @@ async fn get_api_key(
     State(state): State<AdminState>,
     Path((principal_id, key_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, StatusCode> {
-    let storage = state.storage.as_ref().ok_or(StatusCode::NOT_IMPLEMENTED)?;
-    let record = storage
-        .get_api_key(&principal_id, &key_id)
+    let key_store = state
+        .key_store
+        .as_ref()
+        .ok_or(StatusCode::NOT_IMPLEMENTED)?;
+    let record = key_store
+        .get(&principal_id, &key_id)
+        .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::NOT_FOUND)?;
     Ok(Json(json!({
@@ -101,47 +104,47 @@ async fn disable_api_key(
     State(state): State<AdminState>,
     Path((principal_id, key_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, StatusCode> {
-    mutate_api_key(
-        &state,
-        &principal_id,
-        &key_id,
-        |keys, principal_id, key_id| keys.disable(principal_id, key_id),
-    )
+    mutate_api_key(&state, &principal_id, &key_id, false).await
 }
 
 async fn enable_api_key(
     State(state): State<AdminState>,
     Path((principal_id, key_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, StatusCode> {
-    mutate_api_key(
-        &state,
-        &principal_id,
-        &key_id,
-        |keys, principal_id, key_id| keys.enable(principal_id, key_id),
-    )
+    mutate_api_key(&state, &principal_id, &key_id, true).await
 }
 
 async fn revoke_api_key(
     State(state): State<AdminState>,
     Path((principal_id, key_id)): Path<(String, String)>,
 ) -> Result<Json<Value>, StatusCode> {
-    mutate_api_key(
-        &state,
-        &principal_id,
-        &key_id,
-        |keys, principal_id, key_id| keys.revoke(principal_id, key_id),
-    )
+    let key_store = state
+        .key_store
+        .as_ref()
+        .ok_or(StatusCode::NOT_IMPLEMENTED)?;
+    key_store
+        .revoke(&principal_id, &key_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "status": "ok" })))
 }
 
-fn mutate_api_key(
+async fn mutate_api_key(
     state: &AdminState,
     principal_id: &str,
     key_id: &str,
-    mutate: impl FnOnce(&KeyStore, &str, &str) -> cc_lb_core::api_keys::key_store::Result<()>,
+    enable: bool,
 ) -> Result<Json<Value>, StatusCode> {
-    let storage = state.storage.as_ref().ok_or(StatusCode::NOT_IMPLEMENTED)?;
-    mutate(&KeyStore::new(storage.clone()), principal_id, key_id)
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let key_store = state
+        .key_store
+        .as_ref()
+        .ok_or(StatusCode::NOT_IMPLEMENTED)?;
+    let result = if enable {
+        key_store.enable(principal_id, key_id).await
+    } else {
+        key_store.disable(principal_id, key_id).await
+    };
+    result.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({ "status": "ok" })))
 }
 

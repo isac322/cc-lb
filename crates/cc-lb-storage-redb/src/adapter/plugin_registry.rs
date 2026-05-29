@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::{PLUGIN_CHAINS_V2, RedbStorage, StorageError, WASM_BLOBS_V2, WASM_REGISTRY_V2};
 
-use crate::adapter_error_map::{map_join_err, map_redb_err};
+use crate::error_map::{map_join_err, map_redb_err};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredWasmBlob {

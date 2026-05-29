@@ -6,14 +6,15 @@ use std::sync::Arc;
 use axum::http::StatusCode;
 use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_config::{Config, DownstreamAuthMode};
-use cc_lb_core::api_keys::{builtin_authn::BuiltinAuthn, key_store::KeyStore};
+use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_core::{
     ApplyStatus, DynamicViewBuilder, Lifecycle, LifecycleConfig, ReplicaIdentity,
     UpstreamStatusEntry, UpstreamStatusSnapshot,
 };
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
-    PrincipalStore, UpstreamCreate, UpstreamKind, UpstreamStore, WasmBlob, WasmRegistryEntryInput,
+    PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob, WasmRegistryEntryInput,
 };
 use config_admin_common::{app, authed_json, temp_storage, test_state};
 use serde_json::{Value, json};
@@ -31,7 +32,7 @@ async fn status_reflects_in_memory_dynamic_view_generation_and_replica_id() {
         Arc::new(BuiltinAuthn::new(
             DownstreamAuthMode::ApiKey,
             None,
-            Some(Arc::new(KeyStore::new(storage))),
+            state.key_store.clone(),
         )),
         state.dynamic_view.clone(),
         LifecycleConfig {

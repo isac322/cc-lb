@@ -3,12 +3,12 @@ use std::collections::BTreeMap;
 use axum::{Json, Router, extract::State, http::StatusCode, response::IntoResponse, routing::get};
 use cc_lb_config::RestartRequiredField;
 use cc_lb_core::{ApplyStatus, ReplicaIdentity};
+use cc_lb_storage_api::principal::Limit;
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     PluginChainEntry, PluginRegistryStore, PluginSlot, PrincipalKind, PrincipalRecord,
     PrincipalStore, Storage, StorageError, UpstreamRecord, UpstreamStore, WasmRegistryEntry,
 };
-use cc_lb_storage_api::principal::Limit;
-use cc_lb_storage_api::upstream::UpstreamKind;
 use serde::Serialize;
 use serde_json::{Value, json};
 
@@ -225,9 +225,7 @@ fn storage(state: &AdminState) -> Result<&dyn Storage, StatusError> {
         .ok_or(StatusError::StorageUnavailable)
 }
 
-async fn all_upstreams(
-    storage: &dyn Storage,
-) -> Result<Vec<UpstreamRecord>, StorageError> {
+async fn all_upstreams(storage: &dyn Storage) -> Result<Vec<UpstreamRecord>, StorageError> {
     let mut all = Vec::new();
     let mut after = None;
     loop {
@@ -246,9 +244,7 @@ async fn all_upstreams(
     Ok(all)
 }
 
-async fn all_principals(
-    storage: &dyn Storage,
-) -> Result<Vec<PrincipalRecord>, StorageError> {
+async fn all_principals(storage: &dyn Storage) -> Result<Vec<PrincipalRecord>, StorageError> {
     let mut all = Vec::new();
     let mut offset = 0;
     loop {
@@ -267,9 +263,7 @@ async fn all_principals(
     Ok(all)
 }
 
-async fn all_registry(
-    storage: &dyn Storage,
-) -> Result<Vec<WasmRegistryEntry>, StorageError> {
+async fn all_registry(storage: &dyn Storage) -> Result<Vec<WasmRegistryEntry>, StorageError> {
     let mut all = Vec::new();
     let mut after = None;
     loop {

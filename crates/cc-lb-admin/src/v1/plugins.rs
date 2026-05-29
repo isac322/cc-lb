@@ -7,8 +7,8 @@ use axum::{
 };
 use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_storage_api::{
-    PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore,
-    PluginSlot, PrincipalStore, Storage, StorageError, WasmRegistryEntry, sparse_order,
+    PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginSlot, PrincipalStore,
+    Storage, StorageError, WasmRegistryEntry, sparse_order,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -527,13 +527,12 @@ async fn infer_reorder_slot(
     Err(error(StatusCode::BAD_REQUEST, "entry_not_in_chain"))
 }
 
-async fn find_chain_entry(
-    storage: &dyn Storage,
-    id: Uuid,
-) -> Option<PluginChainEntry> {
+async fn find_chain_entry(storage: &dyn Storage, id: Uuid) -> Option<PluginChainEntry> {
     let mut offset = 0;
     loop {
-        let principals = PrincipalStore::list(storage, offset, DEFAULT_LIMIT, false).await.ok()?;
+        let principals = PrincipalStore::list(storage, offset, DEFAULT_LIMIT, false)
+            .await
+            .ok()?;
         if principals.is_empty() {
             return None;
         }
@@ -624,10 +623,7 @@ fn chain_with_etag(entry: PluginChainEntry) -> axum::response::Response {
     (headers, Json(entry)).into_response()
 }
 
-async fn registry_size_bytes(
-    storage: &dyn Storage,
-    sha256: [u8; 32],
-) -> Result<u64, StorageError> {
+async fn registry_size_bytes(storage: &dyn Storage, sha256: [u8; 32]) -> Result<u64, StorageError> {
     Ok(storage
         .get_blob_bytes(sha256)
         .await?

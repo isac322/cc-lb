@@ -11,7 +11,7 @@ use bytes::Bytes;
 use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig, router};
 use cc_lb_config::Config;
 use cc_lb_core::api_keys::{
-    concurrent_guard::KeyConcurrencyManager, limit_engine::LimitEngine,
+    concurrent_guard::KeyConcurrencyManager, key_store::KeyStore, limit_engine::LimitEngine,
     principal_view::PrincipalView,
 };
 use cc_lb_core::{
@@ -22,7 +22,7 @@ use cc_lb_plugin_api::{
     ObservabilityHook, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
     SignedRequest, SignerFactory, Upstream,
 };
-use cc_lb_storage_redb::RedbStorage;
+use cc_lb_storage_redb::{RedbManagedKeyStore, RedbStorage};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -41,6 +41,10 @@ pub fn test_storage() -> Arc<RedbStorage> {
     let storage = Arc::new(RedbStorage::open(&path, [0; 32]).unwrap());
     std::mem::forget(dir);
     storage
+}
+
+pub fn key_store(storage: Arc<RedbStorage>) -> Arc<KeyStore> {
+    Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(storage))))
 }
 
 pub fn minimal_config() -> Config {
@@ -67,9 +71,10 @@ pub fn test_state(config: Config, storage: Option<Arc<RedbStorage>>) -> AdminSta
         std::collections::HashMap::new(),
     ));
     let dynamic_view = dynamic_view_holder(principal_view);
+    let key_store = storage.clone().map(key_store);
     AdminState {
         storage: storage.map(|s| s as Arc<dyn cc_lb_storage_api::Storage>),
-        key_store: None,
+        key_store,
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new())),
         lifecycle: None,
@@ -95,9 +100,10 @@ pub fn apply_state(
         std::collections::HashMap::new(),
     ));
     let dynamic_view = dynamic_view_holder(principal_view);
+    let storage = test_storage();
     AdminState {
-        storage: Some(test_storage() as Arc<dyn cc_lb_storage_api::Storage>),
-        key_store: None,
+        storage: Some(storage.clone() as Arc<dyn cc_lb_storage_api::Storage>),
+        key_store: Some(key_store(storage)),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new())),
         lifecycle: None,

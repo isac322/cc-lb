@@ -25,6 +25,14 @@ pub fn limit_engine() -> Arc<LimitEngine> {
     LimitEngine::new(Arc::new(KeyConcurrencyManager::new()))
 }
 
+pub fn key_store(
+    storage: Arc<cc_lb_storage_redb::Storage>,
+) -> Arc<cc_lb_core::api_keys::key_store::KeyStore> {
+    Arc::new(cc_lb_core::api_keys::key_store::KeyStore::new(Arc::new(
+        cc_lb_storage_redb::RedbManagedKeyStore::new(storage),
+    )))
+}
+
 pub fn dynamic_view_holder(_config: &Config) -> Arc<DynamicViewHolder> {
     let principal_view = Arc::new(PrincipalView::from_db(
         &[],
@@ -112,7 +120,7 @@ pub fn spawn_admin_server() -> SpawnedAdminServer {
     let config = Config::default();
     let state = cc_lb_admin::AdminState {
         storage: Some(storage.clone()),
-        runtime_storage: Some(storage.clone()),
+        key_store: Some(key_store(storage.clone())),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: limit_engine(),
         lifecycle: None,

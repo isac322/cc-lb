@@ -31,7 +31,7 @@ fn test_state(storage: Arc<Storage>, audit_sink: Option<AuditWriterSink>) -> Adm
     let config = Config::default();
     AdminState {
         storage: Some(storage.clone()),
-        runtime_storage: Some(storage),
+        key_store: Some(admin_test_common::key_store(storage)),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: admin_test_common::limit_engine(),
         lifecycle: None,

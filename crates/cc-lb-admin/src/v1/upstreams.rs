@@ -10,11 +10,11 @@ use axum::{
 };
 use cc_lb_aead::AeadEncryptedField;
 use cc_lb_core::{AuditEntry, AuditPayload};
-use cc_lb_storage_api::{
-    PluginRegistryStore, PluginSlot, PrincipalStore, Storage, StorageError, UpstreamCreate,
-    UpstreamRecord, UpstreamStore, UpstreamUpdate,
-};
 use cc_lb_storage_api::upstream::UpstreamKind;
+use cc_lb_storage_api::{
+    PluginSlot, PrincipalStore, Storage, StorageError, UpstreamCreate, UpstreamRecord,
+    UpstreamStore, UpstreamUpdate,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use url::Url;

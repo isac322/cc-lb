@@ -1587,10 +1587,10 @@ fn pricing_upstream_kind(upstream: &Upstream) -> Option<cc_lb_pricing::UpstreamK
     }
 }
 
-fn authn_upstream_kind_label(kind: cc_lb_storage_redb::UpstreamKind) -> &'static str {
+fn authn_upstream_kind_label(kind: cc_lb_storage_api::types::UpstreamKind) -> &'static str {
     match kind {
-        cc_lb_storage_redb::UpstreamKind::AnthropicKey => "anthropic_key",
-        cc_lb_storage_redb::UpstreamKind::AnthropicOAuth => "anthropic_oauth",
+        cc_lb_storage_api::types::UpstreamKind::AnthropicKey => "anthropic_key",
+        cc_lb_storage_api::types::UpstreamKind::AnthropicOAuth => "anthropic_oauth",
     }
 }
 

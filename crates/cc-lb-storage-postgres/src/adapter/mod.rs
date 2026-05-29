@@ -1,4 +1,6 @@
-use cc_lb_storage_api::{StorageError, StorageResult};
+use std::sync::{Arc, atomic::AtomicBool};
+
+use cc_lb_storage_api::{ChangeEvent, StorageError, StorageResult};
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::PgPool;
 
@@ -18,11 +20,23 @@ pub mod usage_rollups;
 #[derive(Debug, Clone)]
 pub struct PostgresStorage {
     pub(crate) pool: PgPool,
+    pub(crate) listener_pool: PgPool,
+    pub(crate) change_tx: tokio::sync::broadcast::Sender<ChangeEvent>,
+    pub(crate) notifier_running: Arc<AtomicBool>,
 }
 
 impl PostgresStorage {
     pub fn new(pool: PgPool) -> Self {
-        Self { pool }
+        Self::new_with_listener_pool(pool.clone(), pool)
+    }
+
+    pub fn new_with_listener_pool(pool: PgPool, listener_pool: PgPool) -> Self {
+        Self {
+            pool,
+            listener_pool,
+            change_tx: notifier::change_sender(),
+            notifier_running: Arc::new(AtomicBool::new(false)),
+        }
     }
 }
 

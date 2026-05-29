@@ -9,11 +9,10 @@ use bytes::Bytes;
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DEFAULT_REDB_PATH, StorageConfig, TlsConfig};
 use cc_lb_core::LifecycleConfig;
-use cc_lb_storage_api::{
-    PluginChainEntry, PluginSlot, PrincipalRecord, StorageError as ApiStorageError,
-    UpstreamRecord,
-};
 use cc_lb_storage_api::upstream::UpstreamKind;
+use cc_lb_storage_api::{
+    PluginChainEntry, PluginSlot, PrincipalRecord, StorageError as ApiStorageError, UpstreamRecord,
+};
 use http::{Request, StatusCode};
 use http_body_util::Empty;
 use hyper_rustls::HttpsConnectorBuilder;

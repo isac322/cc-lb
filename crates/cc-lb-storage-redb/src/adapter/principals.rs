@@ -6,7 +6,7 @@ use cc_lb_storage_api::{
 use redb::{ReadableDatabase, ReadableTable};
 use uuid::Uuid;
 
-use crate::adapter_error_map::{map_join_err, map_redb_err};
+use crate::error_map::{map_join_err, map_redb_err};
 use crate::{PRINCIPALS_V2, PRINCIPALS_V2_BY_NAME, RedbStorage, StorageError};
 
 #[async_trait]

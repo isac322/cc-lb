@@ -2,8 +2,12 @@ use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
-    AuditEntry, AuditStore, Limit, LimitKind, PrincipalCreate, PrincipalKind, PrincipalRecord,
-    PrincipalStore, PrincipalUpdate, StorageError, validate_identifier,
+    AuditStore, PrincipalStore, StorageError,
+    principal::{
+        Limit, LimitKind, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalUpdate,
+    },
+    types::AuditEntry,
+    validate_identifier,
 };
 
 use crate::harness::{ConformanceBackend, ConformanceFixture};
@@ -358,11 +362,12 @@ fn audit_entry(record: &PrincipalRecord) -> AuditEntry {
         upstream: "primary".to_owned(),
         model: Some("claude-sonnet-4-5".to_owned()),
         status: 200,
-        input_tokens: 1,
-        output_tokens: 2,
+        input_tokens: Some(1),
+        output_tokens: Some(2),
         duration_ms: 3,
         agent_label: None,
         kind: Some("principal_store".to_owned()),
         payload: None,
+        ..Default::default()
     }
 }

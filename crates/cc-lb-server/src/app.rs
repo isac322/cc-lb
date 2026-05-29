@@ -418,7 +418,6 @@ fn build_app_for_testing_postgres_config(database_url: &str) -> Config {
     config
 }
 
-
 pub async fn build_app_with_path(
     config: Config,
     config_path: Option<&Path>,
@@ -518,7 +517,7 @@ async fn build_app_with_storage_inner(
     let builtin_authn = Arc::new(BuiltinAuthn::new(
         config.downstream_auth.mode.clone(),
         config.downstream_auth.none_mode.clone(),
-        key_store.clone(),
+        Some(key_store.clone()),
     ));
 
     let (_dispatcher, breaker_registry) = dispatcher(&config);
@@ -692,7 +691,6 @@ async fn build_app_with_storage_inner(
         key_store: Some(key_store.clone()),
         builtin_authn: Some(builtin_authn.clone()),
     };
-
 
     let admin_config: Arc<dyn CurrentConfig> = match &config_watcher {
         Some(watcher) => watcher.clone(),

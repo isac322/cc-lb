@@ -17,7 +17,8 @@ use cc_lb_admin::{AdminState, router};
 use cc_lb_aead::{AeadService, OAuthTokenBundle};
 use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_core::spawn_audit_writer;
-use cc_lb_storage_api::{UpstreamCreate, UpstreamKind, UpstreamStore};
+use cc_lb_storage_api::upstream::UpstreamKind;
+use cc_lb_storage_api::{UpstreamCreate, UpstreamStore};
 use cc_lb_storage_redb::Storage;
 use http_body_util::{BodyExt, Empty};
 use hyper_rustls::HttpsConnectorBuilder;
@@ -48,8 +49,8 @@ impl Fixture {
         let config = test_config(oauth_addr);
         let (audit_sink, audit_task) = spawn_audit_writer(storage.clone(), 64);
         let state = AdminState {
-            storage: Some(Arc::clone(&storage)),
-            runtime_storage: Some(storage.clone()),
+            storage: Some(storage.clone()),
+            key_store: Some(admin_test_common::key_store(storage.clone())),
             aead: Arc::clone(&aead),
             limit_engine: admin_test_common::limit_engine(),
             lifecycle: None,

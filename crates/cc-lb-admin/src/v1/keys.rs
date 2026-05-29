@@ -5,9 +5,9 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
-use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
+use cc_lb_core::api_keys::key_store::CreateParams;
 use cc_lb_core::api_keys::secret;
-use cc_lb_storage_redb::{PrincipalKindLite, UpstreamKind};
+use cc_lb_storage_api::types::{PrincipalKindLite, UpstreamKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -62,15 +62,13 @@ async fn issue_key(
     Path(id): Path<String>,
     Json(body): Json<IssueKeyRequest>,
 ) -> axum::response::Response {
-    let Some(storage) = state.storage.clone() else {
+    let Some(key_store) = state.key_store.clone() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "error": "storage_unavailable" })),
+            Json(json!({ "error": "key_store_unavailable" })),
         )
             .into_response();
     };
-
-    let key_store = KeyStore::new(storage);
 
     let params = CreateParams {
         upstream_kind: UpstreamKind::AnthropicKey,
@@ -82,9 +80,10 @@ async fn issue_key(
         principal_kind: PrincipalKindLite::Machine,
     };
 
-    match key_store.create(&id, params) {
+    match key_store.create(&id, params).await {
         Ok((record, plaintext)) => {
-            let (key_id, _) = secret::parse(plaintext.expose()).expect("plaintext key format is guaranteed by KeyStore::create");
+            let (key_id, _) = secret::parse(plaintext.expose())
+                .expect("plaintext key format is guaranteed by KeyStore::create");
             let response = IssueKeyResponse {
                 principal_id: id,
                 key_id,
@@ -108,17 +107,15 @@ async fn list_keys(
     State(state): State<AdminState>,
     Path(id): Path<String>,
 ) -> axum::response::Response {
-    let Some(storage) = state.storage.clone() else {
+    let Some(key_store) = state.key_store.clone() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "error": "storage_unavailable" })),
+            Json(json!({ "error": "key_store_unavailable" })),
         )
             .into_response();
     };
 
-    let key_store = KeyStore::new(storage);
-
-    match key_store.list_by_principal(&id) {
+    match key_store.list_by_principal(&id).await {
         Ok(records) => {
             let mut keys = Vec::new();
             for r in records {
@@ -127,6 +124,7 @@ async fn list_keys(
                 } else {
                     key_store
                         .lookup_by_index_hash(&r.index_hash)
+                        .await
                         .unwrap_or(None)
                         .map(|(_, key_id, _)| key_id)
                         .unwrap_or_default()
@@ -159,17 +157,15 @@ async fn revoke_key(
     State(state): State<AdminState>,
     Path((id, key_id)): Path<(String, String)>,
 ) -> axum::response::Response {
-    let Some(storage) = state.storage.clone() else {
+    let Some(key_store) = state.key_store.clone() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(json!({ "error": "storage_unavailable" })),
+            Json(json!({ "error": "key_store_unavailable" })),
         )
             .into_response();
     };
 
-    let key_store = KeyStore::new(storage);
-
-    match key_store.revoke(&id, &key_id) {
+    match key_store.revoke(&id, &key_id).await {
         Ok(_) => {
             let now = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

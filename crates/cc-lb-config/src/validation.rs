@@ -34,7 +34,6 @@ pub fn validate_raw_toml(raw_toml: &str) -> Result<(), ValidationError> {
         return Ok(());
     };
 
-
     if let Some(storage) = table.get("storage").and_then(|v| v.as_table()) {
         let has_kind = storage.contains_key("kind");
         let has_legacy_redb = storage.contains_key("redb_path");

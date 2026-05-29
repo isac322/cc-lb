@@ -6,11 +6,11 @@ use axum::{
     routing::{get, post, put},
 };
 use cc_lb_core::{AuditEntry, AuditPayload};
+use cc_lb_storage_api::principal::Limit;
 use cc_lb_storage_api::{
     PluginSlot, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate,
     StorageError,
 };
-use cc_lb_storage_api::principal::Limit;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -245,7 +245,8 @@ async fn set_enabled(
         return error_response(StatusCode::BAD_REQUEST, "invalid_principal_id");
     };
 
-    match PrincipalStore::set_enabled(storage, id, expected_revision, enabled, unix_now_secs()).await
+    match PrincipalStore::set_enabled(storage, id, expected_revision, enabled, unix_now_secs())
+        .await
     {
         Ok(Some(record)) => {
             emit_audit(
@@ -300,8 +301,7 @@ async fn delete_principal(
             .into_response();
     }
 
-    match PrincipalStore::soft_delete(storage, id, expected_revision, unix_now_secs()).await
-    {
+    match PrincipalStore::soft_delete(storage, id, expected_revision, unix_now_secs()).await {
         Ok(Some(record)) => {
             emit_audit(
                 &state,
@@ -350,8 +350,7 @@ async fn update_principal_record(
         return error_response(StatusCode::BAD_REQUEST, "invalid_principal_id");
     };
 
-    match PrincipalStore::update(storage, id, expected_revision, update, unix_now_secs()).await
-    {
+    match PrincipalStore::update(storage, id, expected_revision, update, unix_now_secs()).await {
         Ok(Some(record)) => {
             emit_audit(
                 &state,

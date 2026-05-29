@@ -1,8 +1,6 @@
 #![forbid(unsafe_code)]
 
 mod adapter;
-#[path = "adapter/error_map.rs"]
-mod adapter_error_map;
 mod audit;
 mod config_store;
 use adapter::error_map;

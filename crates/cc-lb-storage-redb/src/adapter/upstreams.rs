@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use crate::{RedbStorage, UPSTREAMS_V2, UPSTREAMS_V2_BY_NAME};
 
-use crate::adapter_error_map::{map_join_err, map_redb_err};
+use crate::error_map::{map_join_err, map_redb_err};
 
 #[async_trait]
 impl UpstreamStore for RedbStorage {

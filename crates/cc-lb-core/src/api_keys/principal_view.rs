@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use cc_lb_plugin_api::{ObservabilityHook, RouterPlugin};
+use cc_lb_storage_api::principal::{Limit as DbLimit, LimitKind as DbLimitKind};
 use cc_lb_storage_api::{PrincipalKind as DbPrincipalKind, PrincipalRecord};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
@@ -191,8 +192,8 @@ impl PrincipalSpecCached {
     }
 }
 
-impl From<cc_lb_storage_api::Limit> for Limit {
-    fn from(value: cc_lb_storage_api::Limit) -> Self {
+impl From<DbLimit> for Limit {
+    fn from(value: DbLimit) -> Self {
         Self {
             kind: value.kind.into(),
             window: std::time::Duration::from_secs(value.window_secs),
@@ -210,15 +211,15 @@ impl From<DbPrincipalKind> for PrincipalType {
     }
 }
 
-impl From<cc_lb_storage_api::LimitKind> for LimitKind {
-    fn from(value: cc_lb_storage_api::LimitKind) -> Self {
+impl From<DbLimitKind> for LimitKind {
+    fn from(value: DbLimitKind) -> Self {
         match value {
-            cc_lb_storage_api::LimitKind::Requests => Self::Requests,
-            cc_lb_storage_api::LimitKind::InputTokens => Self::InputTokens,
-            cc_lb_storage_api::LimitKind::OutputTokens => Self::OutputTokens,
-            cc_lb_storage_api::LimitKind::TotalTokens => Self::TotalTokens,
-            cc_lb_storage_api::LimitKind::CostUsd => Self::CostUsd,
-            cc_lb_storage_api::LimitKind::Concurrent => Self::Concurrent,
+            DbLimitKind::Requests => Self::Requests,
+            DbLimitKind::InputTokens => Self::InputTokens,
+            DbLimitKind::OutputTokens => Self::OutputTokens,
+            DbLimitKind::TotalTokens => Self::TotalTokens,
+            DbLimitKind::CostUsd => Self::CostUsd,
+            DbLimitKind::Concurrent => Self::Concurrent,
         }
     }
 }
