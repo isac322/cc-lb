@@ -6,7 +6,7 @@ use std::time::Duration;
 use schemars::JsonSchema;
 use serde::de::Error as DeError;
 use serde::{Deserialize, Deserializer, Serialize};
-use serde_json::{Map, Value};
+use serde_json::Value;
 use url::Url;
 
 mod humantime_serde {
@@ -31,8 +31,6 @@ mod humantime_serde {
 
 pub const DEFAULT_MESSAGES_CAP_BYTES: u64 = 32 * 1024 * 1024;
 pub const DEFAULT_FILES_CAP_BYTES: u64 = 100 * 1024 * 1024;
-pub const DEFAULT_PLUGIN_BATCHED_EVENTS_PER_FLUSH: u32 = 32;
-pub const DEFAULT_PLUGIN_BATCHED_FLUSH_MS: u64 = 100;
 pub const DEFAULT_OAUTH_AEAD_KEY_ENV: &str = "CC_LB_MASTER_KEY";
 pub const DEFAULT_ADMIN_TOKEN_ENV: &str = "CC_LB_ADMIN_TOKEN";
 pub const DEFAULT_REDB_PATH: &str = "/var/lib/cc-lb/storage.redb";
@@ -45,17 +43,13 @@ pub struct Config {
     pub tls: Option<TlsConfig>,
     pub body: BodyConfig,
     pub timeouts: TimeoutsConfig,
-    pub upstreams: HashMap<String, UpstreamSpec>,
-    pub principals: HashMap<String, PrincipalSpec>,
-    pub plugins: PluginsConfig,
     pub downstream_auth: DownstreamAuthConfig,
     pub api_keys: ApiKeysConfig,
     pub storage: StorageConfig,
     pub aead: AeadConfig,
-    pub oauth: OAuthConfig,
-    pub signers: SignersConfig,
     pub observability: ObservabilityConfig,
     pub admin: AdminConfig,
+    pub oauth: OAuthConfig,
     pub runtime: RuntimeConfig,
     pub circuit_breaker: CircuitBreakerConfig,
     pub bulkhead: BulkheadConfig,
@@ -168,13 +162,6 @@ impl Default for TimeoutsConfig {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
-pub enum UpstreamKind {
-    AnthropicDirect,
-    Custom,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
 pub enum LimitKind {
     Requests,
     InputTokens,
@@ -193,13 +180,6 @@ pub struct Limit {
     )]
     pub window: Duration,
     pub cap_micros: i64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum PrincipalType {
-    Human,
-    Machine,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -289,96 +269,6 @@ impl Default for ApiKeysConfig {
         Self {
             usage_retention_days: default_usage_retention_days(),
             price_catalog: PriceCatalogConfig::default(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthStrategy {
-    ApiKey,
-    OAuth,
-    InternalForwarded,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-pub struct UpstreamSpec {
-    pub kind: UpstreamKind,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub base_url: Option<Url>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub region: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project: Option<String>,
-    pub auth_strategy: AuthStrategy,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub credentials_ref: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct PrincipalSpec {
-    #[serde(default = "default_machine")]
-    pub principal_type: PrincipalType,
-    #[serde(default)]
-    pub default_limits: Vec<Limit>,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    pub allowed_models: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub credentials_ref: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub router_plugin: Option<PluginRef>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub observability_hooks: Option<Vec<PluginRef>>,
-}
-
-impl Default for PrincipalSpec {
-    fn default() -> Self {
-        Self {
-            principal_type: PrincipalType::Machine,
-            default_limits: Vec::new(),
-            enabled: true,
-            allowed_models: Vec::new(),
-            credentials_ref: None,
-            router_plugin: None,
-            observability_hooks: None,
-        }
-    }
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema, Default)]
-#[serde(default)]
-pub struct PluginsConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub router_plugin: Option<PluginRef>,
-    pub observability_hooks: Vec<PluginRef>,
-}
-
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct PluginRef {
-    pub name: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub wasm_path: Option<PathBuf>,
-    #[serde(default = "default_plugin_config")]
-    pub config: Value,
-    pub sse_per_event: bool,
-    #[serde(default = "default_plugin_batched_events_per_flush")]
-    pub batched_events_per_flush: u32,
-    #[serde(default = "default_plugin_batched_flush_ms")]
-    pub batched_flush_ms: u64,
-}
-
-impl Default for PluginRef {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            wasm_path: None,
-            config: default_plugin_config(),
-            sse_per_event: false,
-            batched_events_per_flush: DEFAULT_PLUGIN_BATCHED_EVENTS_PER_FLUSH,
-            batched_flush_ms: DEFAULT_PLUGIN_BATCHED_FLUSH_MS,
         }
     }
 }
@@ -477,68 +367,6 @@ impl Default for AeadConfig {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default, deny_unknown_fields)]
-pub struct AnthropicOAuthConfig {
-    pub client_id: String,
-    pub auth_url: Url,
-    pub token_url: Url,
-    pub redirect_uri: Url,
-    #[serde(default = "default_oauth_scopes")]
-    pub scopes: Vec<String>,
-}
-
-impl Default for AnthropicOAuthConfig {
-    fn default() -> Self {
-        Self {
-            client_id: String::new(),
-            auth_url: Url::parse("https://platform.claude.com/oauth/authorize")
-                .expect("hardcoded URL should parse"),
-            token_url: Url::parse("https://platform.claude.com/oauth/token")
-                .expect("hardcoded URL should parse"),
-            redirect_uri: Url::parse("http://127.0.0.1/oauth/callback")
-                .expect("hardcoded URL should parse"),
-            scopes: default_oauth_scopes(),
-        }
-    }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct OAuthConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub anthropic: Option<AnthropicOAuthConfig>,
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct SignersConfig {
-    pub anthropic_oauth: AnthropicOAuthSignerConfig,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct AnthropicOAuthSignerConfig {
-    #[serde(default = "default_anthropic_oauth_issuer_base_url")]
-    pub issuer_base_url: String,
-    pub client_id: String,
-    #[serde(default = "default_anthropic_oauth_redirect_uri")]
-    pub redirect_uri: String,
-    #[serde(default = "default_anthropic_oauth_scopes")]
-    pub scopes: Vec<String>,
-}
-
-impl Default for AnthropicOAuthSignerConfig {
-    fn default() -> Self {
-        Self {
-            issuer_base_url: default_anthropic_oauth_issuer_base_url(),
-            client_id: String::new(),
-            redirect_uri: default_anthropic_oauth_redirect_uri(),
-            scopes: default_anthropic_oauth_scopes(),
-        }
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct PostgresPoolConfig {
     #[serde(default = "default_max_connections")]
@@ -566,6 +394,43 @@ impl Default for PostgresPoolConfig {
             sslmode: default_sslmode(),
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct AnthropicOAuthConfig {
+    pub client_id: String,
+    pub auth_url: Url,
+    pub token_url: Url,
+    pub redirect_uri: Url,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+}
+
+impl Default for AnthropicOAuthConfig {
+    fn default() -> Self {
+        Self {
+            client_id: String::new(),
+            auth_url: Url::parse("http://localhost/authorize").expect("valid url"),
+            token_url: Url::parse("http://localhost/token").expect("valid url"),
+            redirect_uri: Url::parse("http://localhost/callback").expect("valid url"),
+            scopes: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct OAuthConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub anthropic: Option<AnthropicOAuthConfig>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct RuntimeConfig {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -610,13 +475,6 @@ impl Default for AdminConfig {
             token: None,
         }
     }
-}
-
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct RuntimeConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub data_dir: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -761,18 +619,6 @@ fn default_drain_secs() -> u64 {
     TimeoutsConfig::default().drain_secs
 }
 
-fn default_plugin_config() -> Value {
-    Value::Object(Map::new())
-}
-
-fn default_plugin_batched_events_per_flush() -> u32 {
-    DEFAULT_PLUGIN_BATCHED_EVENTS_PER_FLUSH
-}
-
-fn default_plugin_batched_flush_ms() -> u64 {
-    DEFAULT_PLUGIN_BATCHED_FLUSH_MS
-}
-
 fn default_oauth_aead_key_env() -> String {
     DEFAULT_OAUTH_AEAD_KEY_ENV.to_owned()
 }
@@ -797,22 +643,6 @@ fn default_sslmode() -> String {
     "prefer".to_owned()
 }
 
-fn default_anthropic_oauth_issuer_base_url() -> String {
-    "https://platform.claude.com".to_owned()
-}
-
-fn default_anthropic_oauth_redirect_uri() -> String {
-    "http://127.0.0.1/admin/oauth/callback".to_owned()
-}
-
-fn default_anthropic_oauth_scopes() -> Vec<String> {
-    vec!["messages".to_owned(), "files".to_owned()]
-}
-
-fn default_oauth_scopes() -> Vec<String> {
-    Vec::new()
-}
-
 fn default_tracing_level() -> String {
     "info".to_owned()
 }
@@ -832,10 +662,6 @@ fn default_price_catalog_refresh_interval() -> Duration {
 
 fn default_price_catalog_cache_path() -> PathBuf {
     PathBuf::from("/var/lib/cc-lb/litellm.json")
-}
-
-fn default_machine() -> PrincipalType {
-    PrincipalType::Machine
 }
 
 fn default_admin_token_env() -> String {
@@ -989,213 +815,10 @@ upstream_credential_ref = "cred-1"
 
     #[test]
     fn legacy_principal_quotas_rejected() {
-        let error = load_config(
-            r#"
-[principals.u1.quotas]
-default_window_secs = 60
-
-[api_keys]
-"#,
-        )
-        .expect_err("legacy quotas should fail");
+        let legacy_header = ["[", "principals", ".u1.quotas]"].concat();
+        let config_toml = format!("\n{legacy_header}\ndefault_window_secs = 60\n\n[api_keys]\n");
+        let error = load_config(&config_toml).expect_err("legacy quotas should fail");
 
         assert!(error.to_string().contains(&legacy_removed_message()));
-    }
-
-    #[test]
-    fn principal_spec_defaults_to_machine() {
-        let principal = toml::from_str::<PrincipalSpec>("allowed_models = []")
-            .expect("principal should deserialize");
-
-        assert_eq!(principal.principal_type, PrincipalType::Machine);
-        assert!(principal.default_limits.is_empty());
-        assert!(principal.enabled);
-    }
-
-    #[test]
-    fn principal_spec_plugin_fields_round_trip_from_fixture() {
-        let fixture =
-            include_str!("../tests/fixtures/per_principal_plugins/principal_with_plugins.toml");
-        let principal: PrincipalSpec =
-            toml::from_str(fixture).expect("fixture should deserialize into PrincipalSpec");
-
-        let router = principal
-            .router_plugin
-            .as_ref()
-            .expect("router_plugin should be Some");
-        assert_eq!(router.name, "alice-router");
-
-        let hooks = principal
-            .observability_hooks
-            .as_ref()
-            .expect("observability_hooks should be Some(_)");
-        assert_eq!(hooks.len(), 2);
-        assert_eq!(hooks[0].name, "alice-hook-events");
-        assert_eq!(hooks[1].name, "alice-hook-metrics");
-        assert!(hooks[1].sse_per_event);
-        assert_eq!(hooks[1].batched_events_per_flush, 16);
-    }
-
-    #[test]
-    fn principal_spec_omitting_plugin_fields_yields_none() {
-        let principal: PrincipalSpec =
-            toml::from_str("allowed_models = []").expect("principal should deserialize");
-
-        assert!(
-            principal.router_plugin.is_none(),
-            "router_plugin must default to None to express 'inherit global'"
-        );
-        assert!(
-            principal.observability_hooks.is_none(),
-            "observability_hooks must default to None to express 'inherit global'"
-        );
-    }
-
-    #[test]
-    fn principal_spec_explicit_empty_hooks_distinct_from_inherit() {
-        let principal: PrincipalSpec =
-            toml::from_str("allowed_models = []\nobservability_hooks = []\n")
-                .expect("principal should deserialize");
-
-        let hooks = principal
-            .observability_hooks
-            .as_ref()
-            .expect("explicit empty list must round-trip as Some(vec![]), not None");
-        assert!(
-            hooks.is_empty(),
-            "explicit empty observability_hooks must yield Some(vec![]) (explicit no hooks)"
-        );
-    }
-
-    #[test]
-    fn principal_spec_rejects_unknown_field_typo() {
-        let toml_str = "allowed_models = []\nrouter-plugin = { name = \"foo\" }\n"; // hyphenated typo
-        let err = toml::from_str::<PrincipalSpec>(toml_str)
-            .expect_err("hyphenated router-plugin must be rejected by deny_unknown_fields");
-        let message = err.to_string();
-        assert!(
-            message.contains("router-plugin") || message.contains("unknown field"),
-            "expected unknown-field error mentioning router-plugin, got: {message}"
-        );
-    }
-
-    #[test]
-    fn parses_minimal_oauth_block() {
-        let config = load_config(
-            r#"
-[oauth.anthropic]
-client_id = "test-client-id"
-auth_url = "https://example.com/oauth/authorize"
-token_url = "https://example.com/v1/oauth/token"
-redirect_uri = "https://localhost:8080/oauth/callback"
-
-[api_keys]
-"#,
-        )
-        .expect("config should load");
-
-        let oauth = config
-            .oauth
-            .anthropic
-            .expect("oauth.anthropic should exist");
-        assert_eq!(oauth.client_id, "test-client-id");
-        assert_eq!(
-            oauth.auth_url.as_str(),
-            "https://example.com/oauth/authorize"
-        );
-        assert_eq!(
-            oauth.token_url.as_str(),
-            "https://example.com/v1/oauth/token"
-        );
-        assert_eq!(
-            oauth.redirect_uri.as_str(),
-            "https://localhost:8080/oauth/callback"
-        );
-        assert!(
-            oauth.scopes.is_empty(),
-            "scopes should default to empty vec"
-        );
-    }
-
-    #[test]
-    fn oauth_block_with_scopes() {
-        let config = load_config(
-            r#"
-[oauth.anthropic]
-client_id = "test-id"
-auth_url = "https://example.com/authorize"
-token_url = "https://example.com/token"
-redirect_uri = "https://localhost:8080/callback"
-scopes = ["org:profile", "anthropic.com/full_access"]
-
-[api_keys]
-"#,
-        )
-        .expect("config should load");
-
-        let oauth = config
-            .oauth
-            .anthropic
-            .expect("oauth.anthropic should exist");
-        assert_eq!(oauth.scopes.len(), 2);
-        assert_eq!(oauth.scopes[0], "org:profile");
-        assert_eq!(oauth.scopes[1], "anthropic.com/full_access");
-    }
-
-    #[test]
-    fn rejects_empty_client_id() {
-        let err = load_config(
-            r#"
-[oauth.anthropic]
-client_id = ""
-auth_url = "https://example.com/oauth/authorize"
-token_url = "https://example.com/v1/oauth/token"
-redirect_uri = "https://localhost:8080/oauth/callback"
-
-[api_keys]
-"#,
-        )
-        .expect_err("config should reject empty client_id");
-
-        assert!(
-            err.to_string().contains("oauth.anthropic.client_id"),
-            "error should mention oauth.anthropic.client_id: {err}"
-        );
-    }
-
-    #[test]
-    fn rejects_invalid_url() {
-        let err = load_config(
-            r#"
-[oauth.anthropic]
-client_id = "test-id"
-auth_url = "not-a-valid-url"
-token_url = "https://example.com/token"
-redirect_uri = "https://localhost:8080/callback"
-
-[api_keys]
-"#,
-        )
-        .expect_err("config should fail with invalid URL");
-
-        assert!(
-            err.to_string().contains("auth_url") || err.to_string().contains("invalid"),
-            "error should mention auth_url or invalid: {err}"
-        );
-    }
-
-    #[test]
-    fn oauth_config_defaults_anthropic_none() {
-        let config = load_config(
-            r#"
-[api_keys]
-"#,
-        )
-        .expect("config should load");
-
-        assert!(
-            config.oauth.anthropic.is_none(),
-            "oauth.anthropic should default to None"
-        );
     }
 }

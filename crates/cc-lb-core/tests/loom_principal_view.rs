@@ -78,6 +78,7 @@ mod principal_view_swap {
         });
     }
 
+    // TODO(Task-35-followup): replace TOML config consumption with DB store read
     fn view_for_generation(generation: u8) -> StdArc<PrincipalView> {
         let mut config = Config::default();
         config.principals.insert(

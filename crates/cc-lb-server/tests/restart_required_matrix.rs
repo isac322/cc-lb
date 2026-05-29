@@ -70,6 +70,7 @@ fn oauth_anthropic_client_id_change_returns_entry() {
     assert_field(&changes, "oauth.anthropic.client_id");
 }
 
+// TODO(Task-35-followup): replace TOML config consumption with DB store read
 #[test]
 fn plugins_field_change_returns_empty() {
     let mut current = Config::default();

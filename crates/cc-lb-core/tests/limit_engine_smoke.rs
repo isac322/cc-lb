@@ -8,6 +8,7 @@ use cc_lb_storage_api::types::{
 use std::collections::HashMap;
 use std::sync::Arc;
 
+// TODO(Task-35-followup): replace TOML config consumption with DB store read
 fn engine(enabled: bool) -> (Arc<LimitEngine>, Arc<PrincipalView>) {
     let mut principals = HashMap::new();
     principals.insert(

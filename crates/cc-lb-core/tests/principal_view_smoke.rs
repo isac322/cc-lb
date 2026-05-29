@@ -5,6 +5,7 @@ use cc_lb_config::{Config, Limit, LimitKind, PrincipalSpec, PrincipalType};
 use cc_lb_core::api_keys::principal_view::{PrincipalStatus, PrincipalView};
 use cc_lb_core::api_keys::types::PrincipalType as CorePrincipalType;
 
+// TODO(Task-35-followup): replace TOML config consumption with DB store read
 fn sample_config(enabled: bool) -> Config {
     let mut principals = HashMap::new();
     principals.insert(

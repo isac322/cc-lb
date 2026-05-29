@@ -146,6 +146,7 @@ async fn lifecycle_per_principal_dispatch_hits_correct_router_and_hook()
     Ok(())
 }
 
+// TODO(Task-35-followup): replace TOML config consumption with DB store read
 fn principal_view(
     principal_id: &str,
     chain: Option<(RouterPluginCache, ObservabilityHooksCache)>,

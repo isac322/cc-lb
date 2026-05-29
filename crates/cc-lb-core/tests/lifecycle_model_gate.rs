@@ -17,6 +17,7 @@ use common::{
     messages_request,
 };
 
+// TODO(Task-35-followup): replace TOML config consumption with DB store read
 fn engine_with_allowed_models(
     allowed_models: Vec<String>,
 ) -> (Arc<LimitEngine>, Arc<PrincipalView>) {

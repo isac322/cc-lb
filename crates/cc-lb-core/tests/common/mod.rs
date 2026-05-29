@@ -89,6 +89,7 @@ impl TestAuthn {
     }
 }
 
+// TODO(Task-35-followup): replace TOML config consumption with DB store read
 fn default_principal_view() -> Arc<PrincipalView> {
     let mut principals = std::collections::HashMap::new();
     principals.insert(
