@@ -14,7 +14,8 @@ use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_core::api_keys::key_store::KeyStore;
 use cc_lb_core::api_keys::principal_view::PrincipalView;
 use cc_lb_core::{
-    ApiKeyAwareSignerFactory, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch,
+    ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder,
+    ErrorNormalizer, Lifecycle, LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_plugin_api::{
     DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
@@ -22,6 +23,7 @@ use cc_lb_plugin_api::{
     ShapedRequestBuilder, SignedRequest, Signer, SignerError, SignerFactory, SigningCapability,
     Upstream, UpstreamCandidate, UpstreamDialect, sign_request,
 };
+use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
@@ -294,15 +296,41 @@ pub fn lifecycle_with_parts(
     global_observability_hooks: Vec<Arc<dyn ObservabilityHook>>,
     config: LifecycleConfig,
 ) -> Lifecycle {
-    Lifecycle::new(
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .global_router(global_router)
+        .dispatcher(dispatcher)
+        .global_observability_hooks(global_observability_hooks)
+        .error_normalizer(Arc::new(ErrorNormalizer::new()))
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(vec![default_upstream_record()])
+        .build();
+    Lifecycle::new_with_dynamic_view(
         authn.authn.clone(),
-        authn.principal_view.clone(),
-        Arc::new(authn),
-        global_router,
-        dispatcher,
-        global_observability_hooks,
+        Arc::new(DynamicViewHolder::new(view)),
         config,
     )
+}
+
+fn default_upstream_record() -> UpstreamRecord {
+    UpstreamRecord {
+        id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
+            .expect("default upstream id parses"),
+        name: "test-upstream".to_owned(),
+        kind: StorageUpstreamKind::Custom,
+        base_url: Some(Url::parse("http://upstream.local/").expect("test URL parses")),
+        enabled: true,
+        oauth_credentials: None,
+        api_key_ciphertext: None,
+        refresh_lease_holder: None,
+        refresh_lease_until_unix_secs: None,
+        last_apply_error: None,
+        last_apply_at_unix_secs: None,
+        deleted_at_unix_secs: None,
+        revision: 1,
+        created_at_unix_secs: 0,
+        updated_at_unix_secs: 0,
+    }
 }
 
 pub fn messages_request(body: Bytes) -> Request<Bytes> {

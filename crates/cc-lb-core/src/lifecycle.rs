@@ -10,7 +10,7 @@ use bytes::Bytes;
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
     RequestContext, RetryDecision, RouterPlugin, SignedRequest, Upstream, UpstreamCandidate,
-    UpstreamError, UpstreamKind, shape_request, sign_request,
+    UpstreamError, UpstreamKind as CandidateUpstreamKind, shape_request, sign_request,
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_api::{
@@ -34,7 +34,7 @@ use crate::api_keys::principal_view::PrincipalView;
 use crate::api_keys::types::LimitKind;
 use crate::audit_writer::{AuditEntry, AuditWriterSink};
 use crate::dynamic_view::{
-    ApplyStatus, DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
+    DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
 };
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
@@ -485,24 +485,7 @@ impl Lifecycle {
             },
         );
 
-        let mut candidates: Vec<UpstreamCandidate> = view
-            .upstreams_snapshot()
-            .iter()
-            .filter(|record| {
-                view.upstream_status_snapshot
-                    .entries
-                    .get(&record.id.to_string())
-                    .is_some_and(|entry| entry.status == ApplyStatus::Active)
-            })
-            .map(|record| UpstreamCandidate {
-                upstream_id: record.id,
-                name: record.name.clone(),
-                kind: upstream_kind_for_candidate(record.kind),
-                observed_rate_limits: Vec::new(),
-                observed_at_unix_secs: view.upstream_status_snapshot.applied_at_unix_secs,
-            })
-            .collect();
-        candidates.sort_by(|a, b| a.upstream_id.cmp(&b.upstream_id));
+        let candidates = build_candidates(&view, &principal.id, RequestKind::AnthropicMessages);
 
         let route = match router.route(&ctx, &principal, &candidates) {
             Ok(route) => route,
@@ -522,6 +505,86 @@ impl Lifecycle {
                 );
                 return Ok(response);
             }
+        };
+
+        let resolved_upstream_id = match route
+            .upstream_id
+            .or_else(|| candidates.first().map(|candidate| candidate.upstream_id))
+        {
+            Some(upstream_id) if candidates.iter().any(|c| c.upstream_id == upstream_id) => {
+                upstream_id
+            }
+            _ => {
+                observe_error(
+                    hooks,
+                    "route_not_configured",
+                    "router selected an upstream outside the candidate set",
+                    "router",
+                );
+                let response = anthropic_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "route_not_configured",
+                    "no upstream route is configured for this request",
+                );
+                observe_finished_for_principal(
+                    hooks,
+                    StatusCode::BAD_GATEWAY,
+                    started,
+                    &principal,
+                    &ctx.body_bytes,
+                );
+                return Ok(response);
+            }
+        };
+        let Some(resolved_record) = view
+            .upstreams_snapshot()
+            .iter()
+            .find(|record| record.id == resolved_upstream_id)
+        else {
+            observe_error(
+                hooks,
+                "route_not_configured",
+                "router selected an upstream missing from the dynamic view",
+                "router",
+            );
+            let response = anthropic_error_response(
+                StatusCode::BAD_GATEWAY,
+                "route_not_configured",
+                "no upstream route is configured for this request",
+            );
+            observe_finished_for_principal(
+                hooks,
+                StatusCode::BAD_GATEWAY,
+                started,
+                &principal,
+                &ctx.body_bytes,
+            );
+            return Ok(response);
+        };
+        let router_chosen_upstream_name = resolved_record.name.clone();
+        let route_upstream = match upstream_for_record(resolved_record) {
+            Ok(upstream) => upstream,
+            Err(reason) => {
+                observe_error(hooks, "route_not_configured", &reason, "router");
+                let response = anthropic_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "route_not_configured",
+                    "no upstream route is configured for this request",
+                );
+                observe_finished_for_principal(
+                    hooks,
+                    StatusCode::BAD_GATEWAY,
+                    started,
+                    &principal,
+                    &ctx.body_bytes,
+                );
+                return Ok(response);
+            }
+        };
+        let route = cc_lb_plugin_api::RouteDecision {
+            upstream_id: Some(resolved_upstream_id),
+            upstream: route_upstream,
+            dialect: route.dialect,
         };
         let metric_context = ApiKeyMetricContext::new(&success, &route.upstream, &ctx.body_bytes);
 
@@ -551,7 +614,7 @@ impl Lifecycle {
 
         let signer_factory = view.signer_factory.with_router_choice(
             success.api_key.clone().unwrap_or_default(),
-            router_chosen_upstream_name(view.as_ref(), &route.upstream),
+            router_chosen_upstream_name,
         );
         let signer = match signer_factory.build(&route.upstream).await {
             Ok(signer) => signer,
@@ -1654,50 +1717,25 @@ fn pricing_upstream_kind(upstream: &Upstream) -> Option<cc_lb_pricing::UpstreamK
     }
 }
 
-fn router_chosen_upstream_name(view: &DynamicView, upstream: &Upstream) -> String {
-    view.upstreams_snapshot()
-        .iter()
-        .find(|record| route_record_matches(view, record, upstream))
-        .map(|record| record.name.clone())
-        .unwrap_or_else(|| legacy_router_choice_name(upstream).to_owned())
-}
-
-fn route_record_matches(view: &DynamicView, record: &UpstreamRecord, upstream: &Upstream) -> bool {
-    record.enabled
-        && record.deleted_at_unix_secs.is_none()
-        && view
-            .upstream_status_snapshot
-            .entries
-            .get(&record.name)
-            .is_some_and(|entry| entry.status == ApplyStatus::Active)
-        && route_upstream_matches_record(record, upstream)
-}
-
-fn route_upstream_matches_record(record: &UpstreamRecord, upstream: &Upstream) -> bool {
-    match (&record.kind, upstream) {
-        (
-            StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth,
-            Upstream::AnthropicDirect,
-        ) => true,
-        (StorageUpstreamKind::Custom, Upstream::CustomAnthropicSpec { base_url }) => {
-            record.base_url.as_ref() == Some(base_url)
+fn upstream_for_record(record: &UpstreamRecord) -> Result<Upstream, String> {
+    match record.kind {
+        StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth => {
+            Ok(Upstream::AnthropicDirect)
         }
-        _ => false,
+        StorageUpstreamKind::Custom => Ok(Upstream::CustomAnthropicSpec {
+            base_url: record
+                .base_url
+                .clone()
+                .ok_or_else(|| "custom upstream missing base_url".to_owned())?,
+        }),
     }
 }
 
-fn upstream_kind_for_candidate(kind: StorageUpstreamKind) -> UpstreamKind {
+fn upstream_kind_for_candidate(kind: StorageUpstreamKind) -> CandidateUpstreamKind {
     match kind {
-        StorageUpstreamKind::AnthropicApiKey => UpstreamKind::AnthropicApiKey,
-        StorageUpstreamKind::AnthropicOauth => UpstreamKind::AnthropicOauth,
-        StorageUpstreamKind::Custom => UpstreamKind::Custom,
-    }
-}
-
-fn legacy_router_choice_name(upstream: &Upstream) -> &'static str {
-    match upstream {
-        Upstream::AnthropicDirect => "anthropic_direct",
-        Upstream::CustomAnthropicSpec { .. } => "custom_anthropic_spec",
+        StorageUpstreamKind::AnthropicApiKey => CandidateUpstreamKind::AnthropicApiKey,
+        StorageUpstreamKind::AnthropicOauth => CandidateUpstreamKind::AnthropicOauth,
+        StorageUpstreamKind::Custom => CandidateUpstreamKind::Custom,
     }
 }
 

@@ -46,7 +46,7 @@ impl RouterPlugin for ExtismRouterPlugin {
                     "_version": 1,
                     "request": RequestContextWire::from(ctx),
                     "principal": principal,
-                    "candidates": Vec::<CandidateWire>::from(candidates),
+                    "candidates": candidates_to_wire(candidates),
                 }),
             )
             .map_err(route_runtime_error)?;
@@ -299,10 +299,8 @@ pub(crate) struct CandidateWire {
     observed_at_unix_secs: u64,
 }
 
-impl From<&[UpstreamCandidate]> for Vec<CandidateWire> {
-    fn from(candidates: &[UpstreamCandidate]) -> Self {
-        candidates.iter().map(CandidateWire::from).collect()
-    }
+fn candidates_to_wire(candidates: &[UpstreamCandidate]) -> Vec<CandidateWire> {
+    candidates.iter().map(CandidateWire::from).collect()
 }
 
 impl From<&UpstreamCandidate> for CandidateWire {
@@ -321,10 +319,9 @@ impl From<&UpstreamCandidate> for CandidateWire {
     }
 }
 
-impl From<&[CandidateWire]> for Vec<UpstreamCandidate> {
-    fn from(candidates: &[CandidateWire]) -> Self {
-        candidates.iter().map(UpstreamCandidate::from).collect()
-    }
+#[allow(dead_code)]
+fn candidates_from_wire(candidates: &[CandidateWire]) -> Vec<UpstreamCandidate> {
+    candidates.iter().map(UpstreamCandidate::from).collect()
 }
 
 impl From<&CandidateWire> for UpstreamCandidate {

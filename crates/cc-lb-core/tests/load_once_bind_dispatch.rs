@@ -12,12 +12,15 @@ use cc_lb_core::api_keys::limit_engine::LimitEngine;
 use cc_lb_core::api_keys::principal_view::{
     ObservabilityHooksCache, PrincipalView, RouterPluginCache,
 };
-use cc_lb_core::{Lifecycle, LifecycleConfig};
+use cc_lb_core::{
+    DynamicViewBuilder, DynamicViewHolder, ErrorNormalizer, Lifecycle, LifecycleConfig,
+};
 use cc_lb_plugin_api::{
     ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext, RouteDecision,
     RouteError, RouterPlugin, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
+use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
 use http::{HeaderMap, StatusCode};
 use url::Url;
@@ -93,16 +96,21 @@ async fn lifecycle_per_principal_dispatch_hits_correct_router_and_hook()
     );
     let state = TestState::default();
     let authn = none_mode_authn("principal-a", view.clone(), state.clone())?;
-    let lifecycle = Lifecycle::new(
-        authn.authn.clone(),
-        view,
-        Arc::new(authn),
-        global_router,
-        Arc::new(MockDispatch {
+    let dynamic_view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .global_router(global_router)
+        .dispatcher(Arc::new(MockDispatch {
             state,
             mode: DispatchMode::Statuses(Arc::new(Mutex::new(vec![StatusCode::OK].into()))),
-        }),
-        vec![global_hook],
+        }))
+        .global_observability_hooks(vec![global_hook])
+        .error_normalizer(Arc::new(ErrorNormalizer::new()))
+        .principal_view(view)
+        .upstream_records(vec![test_upstream_record()])
+        .build();
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        authn.authn.clone(),
+        Arc::new(DynamicViewHolder::new(dynamic_view)),
         LifecycleConfig::default(),
     );
 
@@ -197,6 +205,27 @@ fn storage(
         [9; 32],
     )?);
     Ok((dir, storage))
+}
+
+fn test_upstream_record() -> UpstreamRecord {
+    UpstreamRecord {
+        id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
+            .expect("test upstream id parses"),
+        name: "test-upstream".to_owned(),
+        kind: StorageUpstreamKind::Custom,
+        base_url: Some(Url::parse("http://upstream.local/").expect("test URL parses")),
+        enabled: true,
+        oauth_credentials: None,
+        api_key_ciphertext: None,
+        refresh_lease_holder: None,
+        refresh_lease_until_unix_secs: None,
+        last_apply_error: None,
+        last_apply_at_unix_secs: None,
+        deleted_at_unix_secs: None,
+        revision: 1,
+        created_at_unix_secs: 0,
+        updated_at_unix_secs: 0,
+    }
 }
 
 struct RecordingRouter {
