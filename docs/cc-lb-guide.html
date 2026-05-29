@@ -326,18 +326,23 @@ idle_secs               = 300
 upstream_total_secs     = 600
 drain_secs              = 60
 
-[ upstreams.anthropic]
-kind          = "anthropic_direct"
-auth_strategy = "api_key"
+[runtime]
+data_dir = "./data"
 
-[ principals.api-key]
-allowed_models = ["*"]
+[downstream_auth]
+mode = "none"
 
-[ plugins ]
-observability_hooks = []
+[downstream_auth.none_mode]
+principal_id = "api-key"
+upstream_kind = "anthropic_key"
+upstream_credential_ref = "anthropic"
 
 [storage]
-oauth_aead_key_env = "CC_LB_MASTER_KEY"
+kind = "redb"
+path = "./data/cc-lb.redb"
+
+[aead]
+key_env = "CC_LB_MASTER_KEY"
 
 [observability]
 tracing_level         = "info"
@@ -375,7 +380,7 @@ cache_ttl_ceiling_secs = 300
 
       <li>
         <h3>환경변수 (마스터키 + admin 토큰)</h3>
-        <p><code>[storage]</code>의 <code>oauth_aead_key_env</code>가 가리키는 변수와 <code>[admin]</code>의 <code>token_env</code>를 설정합니다. Quick start에서는 <code>redb_path</code>가 비어 있어 OAuth/quota 저장은 메모리 전용이지만, 마스터키 형식 검증은 통과해야 합니다.</p>
+        <p><code>[aead]</code>의 <code>key_env</code>가 가리키는 변수와 <code>[admin]</code>의 <code>token_env</code>를 설정합니다. Quick start는 <code>./data/cc-lb.redb</code>를 사용하고, upstream/principal은 서버가 뜬 뒤 admin v1 API로 생성합니다.</p>
         <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>export CC_LB_MASTER_KEY=$(openssl rand -hex 32)   # 64자 hex 필수
 export CC_LB_ADMIN_TOKEN=$(openssl rand -hex 24)</code></pre><button class="copy">복사</button></div>
       </li>
@@ -383,7 +388,7 @@ export CC_LB_ADMIN_TOKEN=$(openssl rand -hex 24)</code></pre><button class="copy
       <li>
         <h3>띄우기 전에 한 번 검증</h3>
         <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>./target/debug/cc-lb config validate --config quickstart.toml
-# &quot;validation: ok&quot; + 각 upstream &quot;probe: skipped (offline)&quot; → exit 0</code></pre><button class="copy">복사</button></div>
+# &quot;validation: ok&quot; → exit 0</code></pre><button class="copy">복사</button></div>
         <p class="toc-meta">네트워크 호출 없이 TOML 파싱, 마스터키 형식, plugin dry-load, TLS 파일 존재만 확인합니다.</p>
       </li>
 
@@ -391,6 +396,38 @@ export CC_LB_ADMIN_TOKEN=$(openssl rand -hex 24)</code></pre><button class="copy
         <h3>서버 실행</h3>
         <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>./target/debug/cc-lb serve --config quickstart.toml</code></pre><button class="copy">복사</button></div>
         <p>3개 리스너가 동시에 뜹니다: <code>:8080</code> 프록시, <code>:9090</code> 관리 API + UI, <code>:9091</code> Prometheus.</p>
+      </li>
+
+      <li>
+        <h3>Admin v1 API로 upstream/principal 생성</h3>
+        <p>정적 <code>quickstart.toml</code>에는 런타임 엔티티를 넣지 않습니다. 서버가 뜬 뒤 admin v1 API로 생성합니다.</p>
+        <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># upstream creation: POST /admin/v1/upstreams
+curl -s -X POST http://127.0.0.1:9090/admin/v1/upstreams \
+  -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
+  -H &quot;content-type: application/json&quot; \
+  -d &#39;{&quot;name&quot;:&quot;anthropic&quot;,&quot;kind&quot;:&quot;custom&quot;,&quot;base_url&quot;:&quot;https://api.anthropic.com&quot;}&#39;
+
+# principal creation: POST /admin/v1/principals
+principal_id=$(curl -s -X POST http://127.0.0.1:9090/admin/v1/principals \
+  -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
+  -H &quot;content-type: application/json&quot; \
+  -d &#39;{&quot;name&quot;:&quot;api-key&quot;,&quot;kind&quot;:&quot;machine&quot;,&quot;allowed_models&quot;:[&quot;*&quot;]}&#39; | jq -r .id)
+
+# plugin chain: POST /admin/v1/principals/{principal_id}/plugin-chain
+# 먼저 /admin/v1/plugins/wasm 에 Wasm을 업로드해서 wasm_registry_id를 얻은 뒤 연결합니다.
+curl -s -X POST &quot;http://127.0.0.1:9090/admin/v1/principals/$principal_id/plugin-chain&quot; \
+  -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
+  -H &quot;content-type: application/json&quot; \
+  -d &#39;{&quot;slot&quot;:&quot;observability_hook&quot;,&quot;wasm_registry_id&quot;:&quot;00000000-0000-0000-0000-000000000000&quot;,&quot;config&quot;:{}}&#39;</code></pre><button class="copy">복사</button></div>
+        <p><code>bootstrap.toml</code>로 초기 시드가 필요하면 <code>data_dir</code> 아래에 아래 형식으로 두면 됩니다. 이 배열-of-tables 형식은 bootstrap seeder에서만 사용합니다.</p>
+        <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>&#91;&#91;upstreams&#93;&#93;
+name = &quot;anthropic&quot;
+kind = &quot;custom&quot;
+base_url = &quot;https://api.anthropic.com&quot;
+
+&#91;&#91;principals&#93;&#93;
+name = &quot;api-key&quot;
+kind = &quot;machine&quot;</code></pre><button class="copy">복사</button></div>
       </li>
 
       <li>
@@ -517,12 +554,13 @@ kill -TERM $(pgrep -f &#39;[c]c-lb serve&#39;)</code></pre><button class="copy">
     </ul>
 
     <h4>최소 config 발췌</h4>
-    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[ upstreams.anthropic]
-kind          = &quot;anthropic_direct&quot;
-auth_strategy = &quot;api_key&quot;
+    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[downstream_auth]
+mode = &quot;none&quot;
 
-[ principals.api-key]
-allowed_models = [&quot;*&quot;]
+[downstream_auth.none_mode]
+principal_id = &quot;api-key&quot;
+upstream_kind = &quot;anthropic_key&quot;
+upstream_credential_ref = &quot;anthropic&quot;
 
 [observability]
 tracing_level = &quot;info&quot;
@@ -542,7 +580,7 @@ log_redaction = true</code></pre><button class="copy">복사</button></div>
     <h4>현실 (꼭 읽기)</h4>
     <div class="callout warn">
       <span class="label">중요</span>
-      <b>cc-lb의 빌트인 라우터는 첫 upstream만 사용합니다.</b> <code>[ upstreams.a]</code>, <code>[ upstreams.b]</code> 두 개를 등록해도 빌트인 path는 항상 <code>a</code>로 갑니다. <b>round-robin / weighted / least-conn은 router plugin (Extism Wasm)으로 직접 구현해야 합니다.</b> 이건 의도된 설계입니다 — 분산 정책은 비즈니스 요구에 따라 달라서 코어에 박지 않았습니다.
+      <b>cc-lb의 빌트인 라우터는 첫 upstream만 사용합니다.</b> <code>/admin/v1/upstreams</code>로 upstream 두 개를 등록해도 별도 라우터가 없으면 빌트인 path는 기본 upstream으로 갑니다. <b>round-robin / weighted / least-conn은 router plugin (Extism Wasm)으로 직접 구현해야 합니다.</b> 이건 의도된 설계입니다 — 분산 정책은 비즈니스 요구에 따라 달라서 코어에 박지 않았습니다.
     </div>
 
     <h4>대안 4가지</h4>
@@ -553,7 +591,7 @@ log_redaction = true</code></pre><button class="copy">복사</button></div>
       </li>
       <li>
         <b>커스텀 router plugin (round-robin)</b>
-        <p><code>examples/plugin-api-key/</code> 구조를 베이스로 router trait 구현. 약 100줄 Rust → <code>wasm32-wasip1</code> 빌드 → <code>[ plugins ].router_plugin</code>에 등록.</p>
+        <p><code>examples/plugin-api-key/</code> 구조를 베이스로 router trait 구현. 약 100줄 Rust → <code>wasm32-wasip1</code> 빌드 → <code>/admin/v1/plugins/wasm</code> 업로드 후 <code>/admin/v1/principals/{principal_id}/plugin-chain</code>에 등록.</p>
       </li>
       <li>
         <b>클라이언트 측 키 순환</b>
@@ -566,17 +604,9 @@ log_redaction = true</code></pre><button class="copy">복사</button></div>
     </ol>
 
     <h4>1번 (principal 별 매핑) 최소 config 발췌</h4>
-    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[ upstreams.anthropic_pool_a]
-kind          = &quot;anthropic_direct&quot;
-auth_strategy = &quot;api_key&quot;
-
-[ upstreams.anthropic_pool_b]
-kind          = &quot;anthropic_direct&quot;
-auth_strategy = &quot;api_key&quot;
-
-[ plugins ]
-authn_plugin  = { wasm_path = &quot;./plugins/plugin_api_key.wasm&quot; }
-router_plugin = { wasm_path = &quot;./plugins/my_router.wasm&quot; }
+    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code># Create anthropic_pool_a and anthropic_pool_b with POST /admin/v1/upstreams.
+# Upload auth/router Wasm files with POST /admin/v1/plugins/wasm.
+# Attach them with POST /admin/v1/principals/{principal_id}/plugin-chain.
 # my_router.wasm: principal.id 보고 upstream 이름 반환</code></pre><button class="copy">복사</button></div>
 
     <h4>2번 (custom router plugin) 스켈레톤</h4>
@@ -602,7 +632,7 @@ pub fn route(Json(input): Json&lt;RouteInput&gt;) -&gt; FnResult&lt;Json&lt;Rout
     <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>rustup target add wasm32-wasip1
 cargo build --target wasm32-wasip1 --release -p my-router
 cp target/wasm32-wasip1/release/my_router.wasm ./plugins/
-# 그 후 cc-lb 재시작 (config 파일의 plugins.router_plugin 경로 가리키게)</code></pre><button class="copy">복사</button></div>
+# 그 후 /admin/v1/plugins/wasm 업로드와 /admin/v1/principals/{principal_id}/plugin-chain 연결</code></pre><button class="copy">복사</button></div>
 
     <h4>확인</h4>
     <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 다른 키로 두 번 호출
@@ -630,25 +660,10 @@ curl -s http://127.0.0.1:9091/metrics | grep cc_lb_requests_total
     </ul>
 
     <h4>최소 config 발췌</h4>
-    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[ upstreams.anthropic]
-kind          = &quot;anthropic_direct&quot;
-auth_strategy = &quot;api_key&quot;
-
-[ upstreams.bedrock]
-kind            = &quot;bedrock_runtime&quot;
-region          = &quot;us-east-1&quot;
-auth_strategy   = &quot;aws_sigv4&quot;
-credentials_ref = &quot;default&quot;     # ~/.aws/credentials 프로파일
-
-[ upstreams.vertex]
-kind          = &quot;vertex&quot;
-project       = &quot;my-gcp-project&quot;
-region        = &quot;us-east5&quot;
-auth_strategy = &quot;gcp_oauth&quot;     # ADC 자동 사용
-
-[ plugins ]
-router_plugin = { wasm_path = &quot;./plugins/model_router.wasm&quot; }
-# model_router: request.body.model 보고 upstream 결정</code></pre><button class="copy">복사</button></div>
+    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code># Create provider upstreams with POST /admin/v1/upstreams.
+# Bedrock/Vertex credentials still come from the standard AWS/GCP environments.
+# Upload model_router.wasm with POST /admin/v1/plugins/wasm, then attach it with
+# POST /admin/v1/principals/{principal_id}/plugin-chain.</code></pre><button class="copy">복사</button></div>
 
     <h4>실행 + 확인</h4>
     <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># AWS / GCP credential은 표준 위치에 있어야 함
@@ -689,17 +704,16 @@ curl -s http://127.0.0.1:8080/v1/messages \
     </ul>
 
     <h4>최소 config 발췌</h4>
-    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[ upstreams.anthropic]
-kind          = &quot;anthropic_direct&quot;
-auth_strategy = &quot;api_key&quot;
-# 실제 키는 plugin이 주입하므로 여기엔 안 적음
+    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[storage]
+kind = &quot;redb&quot;
+path = &quot;/var/lib/cc-lb/cc-lb.redb&quot;
 
-[ plugins ]
-authn_plugin = { wasm_path = &quot;./plugins/plugin_internal_key_mapping.wasm&quot; }
+[aead]
+key_env = &quot;CC_LB_MASTER_KEY&quot;
 
-[storage]
-redb_path          = &quot;/var/lib/cc-lb/cc-lb.redb&quot;   # 매핑 영속화 위해 필요
-oauth_aead_key_env = &quot;CC_LB_MASTER_KEY&quot;</code></pre><button class="copy">복사</button></div>
+# Create the upstream with POST /admin/v1/upstreams.
+# Upload plugin_internal_key_mapping.wasm with POST /admin/v1/plugins/wasm,
+# then attach it with POST /admin/v1/principals/{principal_id}/plugin-chain.</code></pre><button class="copy">복사</button></div>
 
     <h4>빌드 + 실행</h4>
     <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>rustup target add wasm32-wasip1
@@ -735,34 +749,33 @@ curl -s -i http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: ck-internal-unk
     <ul>
       <li><code>examples/plugin-oauth-anthropic-pro/</code> + <code>anthropic_oauth</code> signer 조합. <span class="pill ok">자동 refresh + single-flight 검증됨 (T15)</span></li>
       <li>토큰은 redb에 ChaCha20-Poly1305로 AEAD 암호화되어 저장됩니다. 마스터키 (<code>CC_LB_MASTER_KEY</code>) 없으면 복호화 불가.</li>
-      <li>최초 토큰 등록은 admin REST의 PKCE 흐름으로 합니다 (<code>POST /admin/oauth/start</code> → 본인 브라우저에서 인증 → callback → <code>POST /admin/oauth/complete</code>).</li>
+      <li>최초 토큰 등록은 admin REST의 PKCE 흐름으로 합니다 (<code>POST /admin/v1/upstreams/{upstream_id}/oauth/start</code> → 본인 브라우저에서 인증 → callback → <code>POST /admin/v1/upstreams/{upstream_id}/oauth/complete</code>).</li>
     </ul>
 
     <h4>최소 config 발췌</h4>
-    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[ upstreams.anthropic]
-kind          = &quot;anthropic_direct&quot;
-auth_strategy = &quot;anthropic_oauth&quot;     # ← api_key 아님
+    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[storage]
+kind = &quot;redb&quot;
+path = &quot;/var/lib/cc-lb/cc-lb.redb&quot;
 
-[ plugins ]
-authn_plugin = { wasm_path = &quot;./plugins/plugin_oauth_anthropic_pro.wasm&quot; }
-
-[storage]
-redb_path          = &quot;/var/lib/cc-lb/cc-lb.redb&quot;   # 토큰 저장 위해 필수
-oauth_aead_key_env = &quot;CC_LB_MASTER_KEY&quot;
+[aead]
+key_env = &quot;CC_LB_MASTER_KEY&quot;
 
 [admin]
-token_env = &quot;CC_LB_ADMIN_TOKEN&quot;</code></pre><button class="copy">복사</button></div>
+token_env = &quot;CC_LB_ADMIN_TOKEN&quot;
+
+# Create an anthropic_oauth upstream with POST /admin/v1/upstreams,
+# then use /admin/v1/upstreams/{upstream_id}/oauth/start and /complete.</code></pre><button class="copy">복사</button></div>
 
     <h4>최초 토큰 등록 (PKCE)</h4>
     <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 1) 인증 URL 받기
-curl -s -X POST http://127.0.0.1:9090/admin/oauth/start \
+curl -s -X POST http://127.0.0.1:9090/admin/v1/upstreams/$UPSTREAM_ID/oauth/start \
   -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
   -H &quot;content-type: application/json&quot; \
-  -d &#39;{&quot;principal_id&quot;: &quot;me&quot;}&#39;
+  -d &#39;{}&#39;
 # 응답에 들어있는 url을 브라우저에서 열고 Anthropic 로그인
 
 # 2) 브라우저가 콜백한 code를 cc-lb에 전달 (PKCE verifier는 1단계에서 받은 값)
-curl -s -X POST http://127.0.0.1:9090/admin/oauth/complete \
+curl -s -X POST http://127.0.0.1:9090/admin/v1/upstreams/$UPSTREAM_ID/oauth/complete \
   -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
   -H &quot;content-type: application/json&quot; \
   -d &#39;{&quot;principal_id&quot;:&quot;me&quot;,&quot;code&quot;:&quot;...&quot;,&quot;code_verifier&quot;:&quot;...&quot;}&#39;</code></pre><button class="copy">복사</button></div>
@@ -1135,45 +1148,22 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
     toml += 'upstream_total_secs     = 600\n';
     toml += 'drain_secs              = 60\n\n';
 
-    // upstream 블록
-    if (up === 'anthropic') {
-      toml += '[ upstreams.anthropic]\n';
-      toml += 'kind          = "anthropic_direct"\n';
-      toml += 'auth_strategy = "' + auth + '"\n\n';
-    } else if (up === 'bedrock') {
-      toml += '[ upstreams.bedrock]\n';
-      toml += 'kind            = "bedrock_runtime"\n';
-      toml += 'region          = "' + bAwsRegion.value + '"\n';
-      toml += 'auth_strategy   = "' + (auth === 'aws_sigv4' ? 'aws_sigv4' : 'aws_sigv4') + '"\n';
-      toml += 'credentials_ref = "default"\n\n';
-    } else if (up === 'vertex') {
-      toml += '[ upstreams.vertex]\n';
-      toml += 'kind          = "vertex"\n';
-      toml += 'project       = "' + bGcpProject.value + '"\n';
-      toml += 'region        = "' + bGcpRegion.value + '"\n';
-      toml += 'auth_strategy = "gcp_oauth"\n\n';
-    } else if (up === 'custom') {
-      toml += '[ upstreams.custom_gw]\n';
-      toml += 'kind          = "custom"\n';
-      toml += 'base_url      = "' + bCustomUrl.value + '"\n';
-      toml += 'auth_strategy = "' + auth + '"\n\n';
-    }
-
-    toml += '[ principals.api-key]\n';
-    toml += 'allowed_models = ["*"]\n\n';
-
-    toml += '[ plugins ]\n';
-    if (bPlugin.checked) {
-      toml += 'authn_plugin  = { wasm_path = "./plugins/plugin_api_key.wasm" }\n';
-      toml += '# router_plugin = { wasm_path = "./plugins/my_router.wasm" }\n';
-    }
-    toml += 'observability_hooks = []\n\n';
+    var upstreamName = up === 'custom' ? 'custom_gw' : up;
+    var upstreamBaseUrl = up === 'custom' ? bCustomUrl.value : 'https://api.anthropic.com';
+    toml += '[runtime]\n';
+    toml += 'data_dir = "/var/lib/cc-lb"\n\n';
+    toml += '[downstream_auth]\n';
+    toml += 'mode = "none"\n\n';
+    toml += '[downstream_auth.none_mode]\n';
+    toml += 'principal_id = "api-key"\n';
+    toml += 'upstream_kind = "anthropic_key"\n';
+    toml += 'upstream_credential_ref = "' + upstreamName + '"\n\n';
 
     toml += '[storage]\n';
-    if (bStorage.checked) {
-      toml += 'redb_path          = "/var/lib/cc-lb/cc-lb.redb"\n';
-    }
-    toml += 'oauth_aead_key_env = "CC_LB_MASTER_KEY"\n\n';
+    toml += 'kind = "redb"\n';
+    toml += 'path = "' + (bStorage.checked ? '/var/lib/cc-lb/cc-lb.redb' : './cc-lb.redb') + '"\n\n';
+    toml += '[aead]\n';
+    toml += 'key_env = "CC_LB_MASTER_KEY"\n\n';
 
     toml += '[observability]\n';
     toml += 'tracing_level         = "info"\n';
@@ -1217,7 +1207,22 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
     cmd += './target/debug/cc-lb config validate --config cc-lb.toml\n';
     cmd += '\n# 3) 실행\n';
     cmd += './target/debug/cc-lb serve --config cc-lb.toml\n';
-    cmd += '\n# 4) 호출 (model은 사용 중인 provider에 맞춰 조정)\n';
+    cmd += '\n# 4) admin v1 API로 런타임 엔티티 생성\n';
+    cmd += 'principal_id=$(curl -s -X POST http://127.0.0.1:9090/admin/v1/principals \\\n';
+    cmd += '  -H "Authorization: Bearer $CC_LB_ADMIN_TOKEN" \\\n';
+    cmd += '  -H "content-type: application/json" \\\n';
+    cmd += '  -d \'{"name":"api-key","kind":"machine","allowed_models":["*"]}\' | jq -r .id)\n';
+    cmd += 'curl -s -X POST http://127.0.0.1:9090/admin/v1/upstreams \\\n';
+    cmd += '  -H "Authorization: Bearer $CC_LB_ADMIN_TOKEN" \\\n';
+    cmd += '  -H "content-type: application/json" \\\n';
+    cmd += '  -d \'{"name":"' + upstreamName + '","kind":"custom","base_url":"' + upstreamBaseUrl + '"}\'\n';
+    if (bPlugin.checked) {
+      cmd += '# Upload Wasm first with POST /admin/v1/plugins/wasm, then replace the placeholder id.\n';
+      cmd += 'curl -s -X POST "http://127.0.0.1:9090/admin/v1/principals/$principal_id/plugin-chain" \\\n';
+      cmd += '  -H "Authorization: Bearer $CC_LB_ADMIN_TOKEN" -H "content-type: application/json" \\\n';
+      cmd += '  -d \'{"slot":"ObservabilityHook","wasm_registry_id":"00000000-0000-0000-0000-000000000000","config":{}}\'\n';
+    }
+    cmd += '\n# 5) 호출 (model은 사용 중인 provider에 맞춰 조정)\n';
     var sampleModel = up === 'bedrock'
       ? 'anthropic.claude-sonnet-4-5-20250929-v1:0'
       : 'claude-sonnet-4-5-20250929';
