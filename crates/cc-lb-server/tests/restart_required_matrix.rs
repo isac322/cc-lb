@@ -1,9 +1,7 @@
 use std::net::SocketAddr;
 use std::path::PathBuf;
 
-use cc_lb_config::{
-    AnthropicOAuthConfig, Config, PluginRef, PostgresPoolConfig, StorageConfig, TlsConfig,
-};
+use cc_lb_config::{AnthropicOAuthConfig, Config, PostgresPoolConfig, StorageConfig, TlsConfig};
 use cc_lb_server::reload::summarize_restart_required;
 use url::Url;
 
@@ -70,24 +68,6 @@ fn oauth_anthropic_client_id_change_returns_entry() {
     assert_field(&changes, "oauth.anthropic.client_id");
 }
 
-// TODO(Task-35-followup): replace TOML config consumption with DB store read
-#[test]
-fn plugins_field_change_returns_empty() {
-    let mut current = Config::default();
-    let mut new_config = current.clone();
-    current.plugins.router_plugin = Some(plugin_ref("router-a", "/tmp/router-a.wasm"));
-    new_config.plugins.router_plugin = Some(plugin_ref("router-b", "/tmp/router-b.wasm"));
-    current.plugins.observability_hooks = vec![plugin_ref("hook-a", "/tmp/hook-a.wasm")];
-    new_config.plugins.observability_hooks = vec![plugin_ref("hook-b", "/tmp/hook-b.wasm")];
-
-    let changes = summarize_restart_required(&current, &new_config);
-
-    assert!(
-        changes.is_empty(),
-        "plugin changes were not eliminated: {changes:?}"
-    );
-}
-
 fn socket(value: &str) -> SocketAddr {
     value.parse().expect("valid socket address")
 }
@@ -99,14 +79,6 @@ fn anthropic_oauth(client_id: &str) -> AnthropicOAuthConfig {
         token_url: Url::parse("https://example.test/oauth/token").unwrap(),
         redirect_uri: Url::parse("https://example.test/oauth/callback").unwrap(),
         scopes: vec!["messages".to_owned()],
-    }
-}
-
-fn plugin_ref(name: &str, path: &str) -> PluginRef {
-    PluginRef {
-        name: name.to_owned(),
-        wasm_path: Some(PathBuf::from(path)),
-        ..PluginRef::default()
     }
 }
 

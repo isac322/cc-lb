@@ -20,16 +20,14 @@ pub const COVERAGE_CHECKLIST: &[&str] = &[
     "tls",
     "body",
     "timeouts",
-    "upstreams",
-    "principals",
-    "plugins",
     "downstream_auth",
     "api_keys",
     "storage",
     "aead",
-    "signers",
     "observability",
     "admin",
+    "oauth",
+    "runtime",
     "circuit_breaker",
     "bulkhead",
     "dns",
@@ -480,9 +478,48 @@ fn draft_response(state: ConfigDraftState) -> Result<ConfigDraftResponse, Settin
 }
 
 fn deserialize_and_validate_config(value: Value) -> Result<Config, String> {
+    reject_unknown_top_level_keys(&value)?;
     let config: Config = serde_json::from_value(value).map_err(|source| source.to_string())?;
     config.validate().map_err(|source| source.to_string())?;
     Ok(config)
+}
+
+fn reject_unknown_top_level_keys(value: &Value) -> Result<(), String> {
+    let Some(object) = value.as_object() else {
+        return Err("config draft must be a JSON object".to_owned());
+    };
+    let allowed = [
+        "listener",
+        "tls",
+        "body",
+        "timeouts",
+        "downstream_auth",
+        "api_keys",
+        "storage",
+        "aead",
+        "observability",
+        "admin",
+        "oauth",
+        "runtime",
+        "circuit_breaker",
+        "bulkhead",
+        "dns",
+        "egress",
+    ];
+    let allowed: BTreeSet<&str> = allowed.into_iter().collect();
+    let unknown: Vec<&str> = object
+        .keys()
+        .map(String::as_str)
+        .filter(|key| !allowed.contains(key))
+        .collect();
+    if unknown.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "unknown top-level config keys: {}",
+            unknown.join(", ")
+        ))
+    }
 }
 
 fn history_summary(config: &Config) -> HistorySummary {

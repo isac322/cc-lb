@@ -30,6 +30,7 @@ name = "cc-lb"
 path = "src/main.rs"
 
 [dependencies]
+anyhow.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 anyhow.workspace = true

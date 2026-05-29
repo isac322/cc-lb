@@ -17,7 +17,7 @@ use crate::api_keys::{
 pub struct BuiltinAuthn {
     mode: DownstreamAuthMode,
     none_mode: Option<NoneModeConfig>,
-    key_store: Arc<KeyStore>,
+    key_store: Option<Arc<KeyStore>>,
 }
 
 #[derive(Debug, Clone)]
@@ -75,7 +75,7 @@ impl BuiltinAuthn {
     pub fn new(
         mode: DownstreamAuthMode,
         none_mode: Option<NoneModeConfig>,
-        key_store: Arc<KeyStore>,
+        key_store: Option<Arc<KeyStore>>,
     ) -> Self {
         Self {
             mode,
@@ -96,8 +96,10 @@ impl BuiltinAuthn {
         let (parsed_key_id, secret_bytes) =
             secret::parse(input).map_err(|_| BuiltinAuthError::InvalidFormat)?;
         let index_hash = secret::compute_index_hash(&secret_bytes);
-        let (principal_id, key_id_storage, record) = self
-            .key_store
+        let Some(key_store) = &self.key_store else {
+            return Err(BuiltinAuthError::NotFound);
+        };
+        let (principal_id, key_id_storage, record) = key_store
             .lookup_by_index_hash(&index_hash)
             .await
             .map_err(map_lookup_error)?

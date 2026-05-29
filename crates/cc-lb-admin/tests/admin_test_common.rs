@@ -112,6 +112,7 @@ pub fn spawn_admin_server() -> SpawnedAdminServer {
     let config = Config::default();
     let state = cc_lb_admin::AdminState {
         storage: Some(storage.clone()),
+        runtime_storage: Some(storage.clone()),
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: limit_engine(),
         lifecycle: None,

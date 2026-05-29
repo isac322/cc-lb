@@ -442,7 +442,7 @@ mod tests {
         .await
         .unwrap();
 
-        let principal = storage.get_by_name("alice").await.unwrap().unwrap();
+        let principal = PrincipalStore::get_by_name(&storage, "alice").await.unwrap().unwrap();
         assert_eq!(principal.kind, PrincipalKind::Human);
 
         fs::write(
@@ -461,7 +461,7 @@ mod tests {
         .await
         .unwrap();
 
-        let principals = storage.list(0, 100, false).await.unwrap();
+        let principals = PrincipalStore::list(&storage, 0, 100, false).await.unwrap();
         assert_eq!(
             principals
                 .iter()
@@ -498,8 +498,7 @@ plugins = ["audit"]
         .await
         .unwrap();
 
-        let principal = storage
-            .get_by_name("plugin-principal")
+        let principal = PrincipalStore::get_by_name(&storage, "plugin-principal")
             .await
             .unwrap()
             .unwrap();
@@ -579,16 +578,16 @@ plugins = ["missing-plugin"]
         storage: &Storage,
         name: &str,
     ) -> cc_lb_storage_api::principal::PrincipalRecord {
-        storage
-            .create(
-                PrincipalCreate {
+        PrincipalStore::create(
+            storage,
+            PrincipalCreate {
                     name: name.to_owned(),
                     kind: PrincipalKind::Machine,
                     allowed_models: Vec::new(),
                     default_limits: Vec::new(),
-                },
-                1_800_000_000,
-            )
+            },
+            1_800_000_000,
+        )
             .await
             .unwrap()
     }

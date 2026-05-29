@@ -31,7 +31,7 @@ async fn status_reflects_in_memory_dynamic_view_generation_and_replica_id() {
         Arc::new(BuiltinAuthn::new(
             DownstreamAuthMode::ApiKey,
             None,
-            Arc::new(KeyStore::new(storage)),
+            Some(Arc::new(KeyStore::new(storage))),
         )),
         state.dynamic_view.clone(),
         LifecycleConfig {

@@ -5,7 +5,7 @@ mod principal_view_swap {
 
     use arc_swap::ArcSwap;
     use bytes::Bytes;
-    use cc_lb_config::{Config, PrincipalSpec};
+    use cc_lb_storage_api::{PrincipalKind as DbPrincipalKind, PrincipalRecord};
     use cc_lb_core::api_keys::principal_view::{
         ObservabilityHooksCache, PrincipalView, RouterPluginCache,
     };

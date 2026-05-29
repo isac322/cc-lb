@@ -46,9 +46,10 @@ impl Fixture {
         let storage = Arc::new(Storage::open(&db_path, MASTER_KEY).expect("storage opens"));
         let aead = Arc::new(AeadService::from_master_key(MASTER_KEY));
         let config = test_config(oauth_addr);
-        let (audit_sink, audit_task) = spawn_audit_writer(Arc::clone(&storage), 64);
+        let (audit_sink, audit_task) = spawn_audit_writer(storage.clone(), 64);
         let state = AdminState {
             storage: Some(Arc::clone(&storage)),
+            runtime_storage: Some(storage.clone()),
             aead: Arc::clone(&aead),
             limit_engine: admin_test_common::limit_engine(),
             lifecycle: None,

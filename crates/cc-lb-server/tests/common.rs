@@ -168,25 +168,25 @@ cache_ttl_ceiling_secs = 300
 
 pub async fn wait_for_status(addr: SocketAddr, path: &str, status: u16) {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let mut last = "no attempts made".to_owned();
     loop {
-        match http_get(addr, path).await {
+        let last = match http_get(addr, path).await {
             Ok(response) => {
-                last = format!("status={} body={}", response.status, response.body);
+                let last = format!("status={} body={}", response.status, response.body);
                 if response.status == status {
                     return;
                 }
+                last
             }
-            Err(error) => {
-                last = format!("error={error}");
-            }
-        }
+            Err(error) => format!("error={error}"),
+        };
         if std::time::Instant::now() >= deadline {
             eprintln!(
-                "server did not become ready at http://{addr}{path}; expected status {status}; last {last}"
+                "server did not become ready at http://{addr}{path}; expected status {status}; last {}",
+                last
             );
             panic!(
-                "server did not become ready at http://{addr}{path}; expected status {status}; last {last}"
+                "server did not become ready at http://{addr}{path}; expected status {status}; last {}",
+                last
             );
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
