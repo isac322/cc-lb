@@ -63,6 +63,22 @@ pub fn validate_raw_toml(raw_toml: &str) -> Result<(), ValidationError> {
         }
     }
 
+    if let Some(none_mode) = table
+        .get("downstream_auth")
+        .and_then(|value| value.as_table())
+        .and_then(|downstream_auth| downstream_auth.get("none_mode"))
+        .and_then(|value| value.as_table())
+        && let Some(upstream_credential_ref) = none_mode
+            .get("upstream_credential_ref")
+            .and_then(|value| value.as_str())
+        && !upstream_credential_ref.is_empty()
+    {
+        return Err(ValidationError::new(
+            "downstream_auth.none_mode.upstream_credential_ref",
+            "upstream_credential_ref is deprecated and must be empty",
+        ));
+    }
+
     Ok(())
 }
 

@@ -71,3 +71,54 @@ oauth_aead_key_env = "CC_LB_TEST_MASTER_KEY_INVALID"
         }
     );
 }
+
+#[test]
+fn none_mode_rejects_non_empty_legacy_upstream_credential_ref() {
+    let (_dir, path) = common::temp_config(
+        r#"[downstream_auth]
+mode = "none"
+
+[downstream_auth.none_mode]
+principal_id = "anon"
+upstream_kind = "anthropic_key"
+upstream_credential_ref = "legacy-cred"
+
+[api_keys]
+"#,
+    );
+
+    let error = Config::load(&path).unwrap_err().to_string();
+
+    assert!(
+        error.contains(
+            "downstream_auth.none_mode.upstream_credential_ref: upstream_credential_ref is deprecated and must be empty"
+        ),
+        "{error}"
+    );
+}
+
+#[test]
+fn none_mode_allows_missing_legacy_upstream_credential_ref() {
+    let (_dir, path) = common::temp_config(
+        r#"[downstream_auth]
+mode = "none"
+
+[downstream_auth.none_mode]
+principal_id = "anon"
+upstream_kind = "anthropic_key"
+
+[api_keys]
+"#,
+    );
+
+    let config = Config::load(&path).unwrap();
+
+    assert_eq!(
+        config
+            .downstream_auth
+            .none_mode
+            .unwrap()
+            .upstream_credential_ref,
+        ""
+    );
+}

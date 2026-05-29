@@ -128,7 +128,10 @@ impl cc_lb_storage_api::upstream_rate_limit::UpstreamRateLimitStateStore for Pos
     async fn list_for_upstream_ids(
         &self,
         _upstream_ids: &[String],
-    ) -> Result<Vec<cc_lb_storage_api::upstream_rate_limit::UpstreamRateLimitObservationRecord>, cc_lb_storage_api::StorageError> {
+    ) -> Result<
+        Vec<cc_lb_storage_api::upstream_rate_limit::UpstreamRateLimitObservationRecord>,
+        cc_lb_storage_api::StorageError,
+    > {
         Ok(vec![])
     }
 }

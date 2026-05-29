@@ -235,6 +235,9 @@ impl RedbStorage {
             if let Some(allowed_models) = update.allowed_models {
                 record.allowed_models = allowed_models;
             }
+            if let Some(allowed_upstreams) = update.allowed_upstreams {
+                record.allowed_upstreams = allowed_upstreams;
+            }
             if let Some(default_limits) = update.default_limits {
                 record.default_limits = default_limits;
             }
