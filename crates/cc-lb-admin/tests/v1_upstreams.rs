@@ -266,20 +266,42 @@ async fn enable_disable_emits_audit_and_persists_state() {
     assert_eq!(body(&enabled)["enabled"], true);
     assert_eq!(body(&enabled)["revision"], 3);
 
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    let entries = storage.query_audit(Some("admin"), 0, u64::MAX, 10).unwrap();
-    assert!(entries.iter().any(|entry| {
-        entry
-            .admin_action
-            .as_deref()
-            .is_some_and(|action| action.starts_with("upstream_disable"))
-    }));
-    assert!(entries.iter().any(|entry| {
-        entry
-            .admin_action
-            .as_deref()
-            .is_some_and(|action| action.starts_with("upstream_enable"))
-    }));
+    // Poll the audit log instead of relying on a fixed sleep. The audit sink
+    // batches writes to its background writer; on slower CI runners the 250 ms
+    // window we used to assume was sometimes too short and the second of the
+    // two expected entries (`upstream_enable`) had not been flushed yet,
+    // producing a flaky assertion. Poll for both actions with a generous
+    // deadline before reporting failure.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let entries = storage.query_audit(Some("admin"), 0, u64::MAX, 10).unwrap();
+        let has_disable = entries.iter().any(|entry| {
+            entry
+                .admin_action
+                .as_deref()
+                .is_some_and(|action| action.starts_with("upstream_disable"))
+        });
+        let has_enable = entries.iter().any(|entry| {
+            entry
+                .admin_action
+                .as_deref()
+                .is_some_and(|action| action.starts_with("upstream_enable"))
+        });
+        if has_disable && has_enable {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            assert!(
+                has_disable,
+                "upstream_disable audit entry not observed within 5s"
+            );
+            assert!(
+                has_enable,
+                "upstream_enable audit entry not observed within 5s"
+            );
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
     audit_writer.abort();
 }
 
