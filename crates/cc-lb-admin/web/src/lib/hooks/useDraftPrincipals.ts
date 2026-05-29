@@ -4,7 +4,7 @@ import {
   type CreatePrincipalRequest,
   type PrincipalAllowedModelsResponse,
   type PrincipalMutationResponse,
-  type PrincipalSpec,
+  type PrincipalRuntimeSpec,
   postJson,
   putJson,
   type QuotaOverrideRequest,
@@ -19,7 +19,7 @@ export function useDraftPrincipals(mock?: boolean) {
   const createPrincipal = useCallback(
     async (
       id: string,
-      spec: PrincipalSpec,
+      spec: PrincipalRuntimeSpec,
     ): Promise<PrincipalMutationResponse> => {
       if (mock) {
         setLastDraftRevision(Date.now());
@@ -38,7 +38,7 @@ export function useDraftPrincipals(mock?: boolean) {
   const updatePrincipal = useCallback(
     async (
       id: string,
-      spec: PrincipalSpec,
+      spec: PrincipalRuntimeSpec,
     ): Promise<PrincipalMutationResponse> => {
       if (mock) {
         setLastDraftRevision(Date.now());

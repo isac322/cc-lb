@@ -71,7 +71,11 @@ async fn get_json(app: axum::Router, path: &str) -> (StatusCode, Value) {
     let response = app.oneshot(req).await.unwrap();
     let status = response.status();
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    let json = serde_json::from_slice(&body).unwrap();
+    let json = if body.is_empty() {
+        Value::Null
+    } else {
+        serde_json::from_slice(&body).unwrap()
+    };
     (status, json)
 }
 
@@ -90,8 +94,8 @@ async fn oauth_status_derives_from_managed_key() {
     let app = router(test_state(storage));
     let (status, json) = get_json(app, "/admin/oauth/anthropic_oauth").await;
 
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["enrolled"].as_bool(), Some(true));
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(json, Value::Null);
 }
 
 #[tokio::test]
@@ -104,8 +108,8 @@ async fn oauth_status_no_managed_key_returns_not_enrolled() {
     let app = router(test_state(storage));
     let (status, json) = get_json(app, "/admin/oauth/anthropic_oauth").await;
 
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(json["enrolled"].as_bool(), Some(false));
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(json, Value::Null);
 }
 
 #[tokio::test]

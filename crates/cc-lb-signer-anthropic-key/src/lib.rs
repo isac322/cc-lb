@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
 use cc_lb_plugin_api::{
-    AuthStrategy, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
+    CredentialStrategy, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError, SignerFactory,
     SigningCapability, Upstream, UpstreamError,
 };
 use cc_lb_storage_api::{AnthropicApiKeyCredential, Storage};
@@ -105,21 +105,21 @@ impl Signer for AnthropicKeySigner {
 
 #[derive(Clone)]
 pub struct AnthropicKeySignerFactory {
-    auth_strategy: AuthStrategy,
+    auth_strategy: CredentialStrategy,
     credential: AnthropicKeyCredentialSource,
 }
 
 impl AnthropicKeySignerFactory {
     pub fn new(api_key: impl Into<String>) -> Self {
         Self {
-            auth_strategy: AuthStrategy::ApiKey,
+            auth_strategy: CredentialStrategy::ApiKey,
             credential: AnthropicKeyCredentialSource::Static(SecretString::new(
                 api_key.into().into_boxed_str(),
             )),
         }
     }
 
-    pub fn with_strategy(auth_strategy: AuthStrategy, api_key: impl Into<String>) -> Self {
+    pub fn with_strategy(auth_strategy: CredentialStrategy, api_key: impl Into<String>) -> Self {
         Self {
             auth_strategy,
             credential: AnthropicKeyCredentialSource::Static(SecretString::new(
@@ -134,7 +134,7 @@ impl AnthropicKeySignerFactory {
         aead: Arc<AeadService>,
     ) -> Self {
         Self {
-            auth_strategy: AuthStrategy::ApiKey,
+            auth_strategy: CredentialStrategy::ApiKey,
             credential: AnthropicKeyCredentialSource::Storage {
                 storage_key: storage_key.into(),
                 storage,
@@ -158,7 +158,7 @@ impl fmt::Debug for AnthropicKeySignerFactory {
 impl SignerFactory for AnthropicKeySignerFactory {
     async fn build(&self, upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
         let _ = upstream;
-        if self.auth_strategy != AuthStrategy::ApiKey {
+        if self.auth_strategy != CredentialStrategy::ApiKey {
             return Err(SignerError::WrongStrategy {
                 strategy: self.auth_strategy.clone(),
             });

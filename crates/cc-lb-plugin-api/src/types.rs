@@ -55,7 +55,7 @@ pub enum Upstream {
 /// Credential strategy expected by a selected upstream.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum AuthStrategy {
+pub enum CredentialStrategy {
     /// Anthropic-style `x-api-key` signing.
     ApiKey,
     /// Anthropic-style OAuth bearer signing.
@@ -451,9 +451,9 @@ mod tests {
         assert_eq!(principal_kinds.len(), 5);
 
         let strategies = [
-            AuthStrategy::ApiKey,
-            AuthStrategy::OAuth,
-            AuthStrategy::InternalForwarded,
+            CredentialStrategy::ApiKey,
+            CredentialStrategy::OAuth,
+            CredentialStrategy::InternalForwarded,
         ];
         assert_eq!(strategies.len(), 3);
     }

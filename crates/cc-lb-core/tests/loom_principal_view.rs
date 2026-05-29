@@ -1,6 +1,7 @@
 #[cfg(loom)]
 mod principal_view_swap {
     use std::collections::HashMap;
+    use std::time::Duration;
     use std::sync::Arc as StdArc;
 
     use arc_swap::ArcSwap;
@@ -78,16 +79,21 @@ mod principal_view_swap {
         });
     }
 
-    // TODO(Task-35-followup): replace TOML config consumption with DB store read
     fn view_for_generation(generation: u8) -> StdArc<PrincipalView> {
-        let mut config = Config::default();
-        config.principals.insert(
-            PRINCIPAL_ID.to_owned(),
-            PrincipalSpec {
-                allowed_models: vec!["claude-*".to_owned()],
-                ..PrincipalSpec::default()
-            },
-        );
+        let principals = vec![PrincipalRecord {
+            id: uuid::Uuid::new_v4(),
+            name: PRINCIPAL_ID.to_owned(),
+            kind: DbPrincipalKind::Machine,
+            allowed_models: vec!["claude-*".to_owned()],
+            default_limits: Vec::new(),
+            enabled: true,
+            last_apply_error: None,
+            last_apply_at_unix_secs: None,
+            deleted_at_unix_secs: None,
+            revision: 1,
+            created_at_unix_secs: Duration::ZERO.as_secs(),
+            updated_at_unix_secs: Duration::ZERO.as_secs(),
+        }];
 
         let mut principal_chains = HashMap::new();
         principal_chains.insert(
@@ -98,8 +104,7 @@ mod principal_view_swap {
             ),
         );
 
-        PrincipalView::from_config(&config, principal_chains)
-            .expect("test config creates a principal view")
+        StdArc::new(PrincipalView::from_db(&principals, principal_chains))
     }
 
     fn principal() -> Principal {

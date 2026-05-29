@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    AuthStrategy, ObserveEvent, Principal, PrincipalKind, PrincipalQuotas, RequestContext, Upstream,
+    CredentialStrategy, ObserveEvent, Principal, PrincipalKind, PrincipalQuotas, RequestContext, Upstream,
 };
 use http::{HeaderMap, Method, StatusCode};
 
@@ -29,7 +29,7 @@ fn upstream_variants_and_principal_serde_compile() {
 
 #[test]
 fn remaining_public_types_compile() {
-    let _strategy = AuthStrategy::ApiKey;
+    let _strategy = CredentialStrategy::ApiKey;
     let ctx = RequestContext {
         request_id: "req-1".to_owned(),
         downstream_headers: HeaderMap::new(),

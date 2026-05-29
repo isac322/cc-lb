@@ -120,5 +120,5 @@ async fn saving_new_draft_invalidates_last_validated_revision() {
     assert_eq!(json["revision"], 2);
     assert_eq!(json["last_validated_revision"], serde_json::Value::Null);
     assert_eq!(json["last_validation_error"], serde_json::Value::Null);
-    assert_eq!(json["draft"]["quotas"]["default_requests_per_window"], 200);
+    assert_eq!(json["draft"]["timeouts"]["idle_secs"], 200);
 }

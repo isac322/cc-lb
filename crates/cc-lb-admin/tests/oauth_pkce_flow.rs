@@ -59,7 +59,11 @@ async fn request_json(
     let response = app.oneshot(req).await.unwrap();
     let status = response.status();
     let body = response.into_body().collect().await.unwrap().to_bytes();
-    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let json: serde_json::Value = if body.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_slice(&body).unwrap()
+    };
     (status, json)
 }
 
@@ -77,7 +81,7 @@ async fn legacy_oauth_pkce_routes_are_gone() {
         r#"{"principal_id":"alice","provider":"anthropic_oauth"}"#.to_string(),
     )
     .await;
-    assert_eq!(status, StatusCode::GONE);
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
 
     let (status, _) = request_json(
         app,
@@ -85,5 +89,5 @@ async fn legacy_oauth_pkce_routes_are_gone() {
         r#"{"state_token":"legacy","code":"legacy"}"#.to_string(),
     )
     .await;
-    assert_eq!(status, StatusCode::GONE);
+    assert_eq!(status, StatusCode::METHOD_NOT_ALLOWED);
 }

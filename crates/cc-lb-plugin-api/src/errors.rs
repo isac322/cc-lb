@@ -2,7 +2,7 @@
 
 use thiserror::Error;
 
-use crate::types::AuthStrategy;
+use crate::types::CredentialStrategy;
 
 /// Routing failures returned by [`crate::RouterPlugin`].
 #[derive(Debug, Error)]
@@ -88,7 +88,7 @@ pub enum SignerError {
     #[error("wrong signer strategy: {strategy:?}")]
     WrongStrategy {
         /// Selected auth strategy.
-        strategy: AuthStrategy,
+        strategy: CredentialStrategy,
     },
 }
 

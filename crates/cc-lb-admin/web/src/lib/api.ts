@@ -391,7 +391,7 @@ export interface QuotasConfig {
   default_output_tokens: number;
 }
 
-export interface PrincipalSpec {
+export interface PrincipalRuntimeSpec {
   quotas?: QuotasConfig;
   disabled?: boolean;
   allowed_models: string[];
@@ -400,11 +400,11 @@ export interface PrincipalSpec {
 
 export interface CreatePrincipalRequest {
   id: string;
-  spec: PrincipalSpec;
+  spec: PrincipalRuntimeSpec;
 }
 
 export interface UpdatePrincipalRequest {
-  spec: PrincipalSpec;
+  spec: PrincipalRuntimeSpec;
 }
 
 export interface AllowedModelsRequest {

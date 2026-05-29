@@ -29,7 +29,7 @@ pub use traits::{
     SignerFactory, UpstreamDialect,
 };
 pub use types::{
-    AuthStrategy, ObserveEvent, PluginManifest, Principal, PrincipalKind, PrincipalQuotas,
+    CredentialStrategy, ObserveEvent, PluginManifest, Principal, PrincipalKind, PrincipalQuotas,
     RequestContext, RetryDecision, RouteDecision, ShapedRequest, ShapedRequestBuilder,
     SignedRequest, SigningCapability, Upstream, shape_request, sign_request,
 };

@@ -21,56 +21,72 @@ test.describe('Principal Management', () => {
 
   test('should create a new principal', async ({ page }) => {
     await page.getByRole('button', { name: '+ New principal' }).click();
-    await page.getByLabel('Name').fill('alpha');
-    await page.getByLabel('Kind').selectOption('machine');
-    await page.getByLabel('Allowed Models (comma separated)').fill('claude-3-*');
-    await page.getByRole('button', { name: 'Save' }).click();
+    await page.locator('input[type="text"]').first().fill('alpha');
+    await page.getByPlaceholder('e.g. claude-3-5-sonnet').fill('claude-3-*');
+    await page.getByRole('button', { name: 'Add' }).click();
+    await page.getByRole('button', { name: 'Save to Draft' }).click();
 
+    await page.getByRole('link', { name: /Review & apply/ }).click();
+    await page.getByRole('button', { name: 'Validate' }).click();
+    await page.getByRole('button', { name: 'Apply' }).click();
+    await page.getByRole('button', { name: 'Confirm Apply' }).click();
+
+    await page.goto('/management');
     await expect(page.getByText('alpha', { exact: true })).toBeVisible();
   });
 
   test('should edit allowed models inline', async ({ page }) => {
     const row = page.locator('tr', { hasText: 'alpha' });
-    const modelsCell = row.locator('td').nth(3); // ID, Name, Kind, Allowed Models
-    await modelsCell.hover();
-    await modelsCell.click();
+    await row.getByRole('button', { name: 'Edit' }).click();
     
-    const input = page.getByRole('textbox');
-    await input.fill('claude-3-*, gpt-4');
-    await input.press('Enter');
+    await page.getByPlaceholder('e.g. claude-3-5-sonnet').fill('gpt-4');
+    await page.getByRole('button', { name: 'Add' }).click();
+    await page.getByRole('button', { name: 'Save to Draft' }).click();
 
-    await expect(row.getByText('2 models')).toBeVisible();
+    await page.getByRole('link', { name: /Review & apply/ }).click();
+    await page.getByRole('button', { name: 'Validate' }).click();
+    await page.getByRole('button', { name: 'Apply' }).click();
+    await page.getByRole('button', { name: 'Confirm Apply' }).click();
+
+    await page.goto('/management');
+    const updatedRow = page.locator('tr', { hasText: 'alpha' });
+    await expect(updatedRow.getByText('2 models')).toBeVisible();
   });
 
   test('should edit principal via dialog', async ({ page }) => {
     const row = page.locator('tr', { hasText: 'alpha' });
     await row.getByRole('button', { name: 'Edit' }).click();
     
-    await page.getByLabel('Name').fill('alpha-updated');
-    await page.getByRole('button', { name: 'Save' }).click();
+    await page.locator('input[placeholder="Default"]').first().fill('500');
+    await page.getByRole('button', { name: 'Apply Override' }).click();
 
-    await expect(page.getByText('alpha-updated', { exact: true })).toBeVisible();
+    await expect(page.getByText('Live override applied')).toBeVisible();
+    await page.getByRole('button', { name: 'Cancel' }).click();
   });
 
   test('QA scenario: proxy routing with allowed models', async ({ page }) => {
-    // Intercept the create response to get the ID
     const responsePromise = page.waitForResponse(response => 
-      response.url().includes('/admin/v1/principals') && response.request().method() === 'POST'
+      response.url().includes('/admin/principals') && response.request().method() === 'POST'
     );
 
     await page.getByRole('button', { name: '+ New principal' }).click();
-    await page.getByLabel('Name').fill('qa-principal');
-    await page.getByLabel('Kind').selectOption('machine');
-    await page.getByLabel('Allowed Models (comma separated)').fill('claude-3-*');
-    await page.getByRole('button', { name: 'Save' }).click();
+    await page.locator('input[type="text"]').first().fill('qa-principal');
+    await page.getByPlaceholder('e.g. claude-3-5-sonnet').fill('claude-3-*');
+    await page.getByRole('button', { name: 'Add' }).click();
+    await page.getByRole('button', { name: 'Save to Draft' }).click();
 
     const response = await responsePromise;
     const body = await response.json();
-    const principalId = body.id;
+    const principalId = body.principal_id;
 
     expect(principalId).toBeTruthy();
 
-    // Wait for the principal to be visible in the list
+    await page.getByRole('link', { name: /Review & apply/ }).click();
+    await page.getByRole('button', { name: 'Validate' }).click();
+    await page.getByRole('button', { name: 'Apply' }).click();
+    await page.getByRole('button', { name: 'Confirm Apply' }).click();
+
+    await page.goto('/management');
     await expect(page.getByText('qa-principal', { exact: true })).toBeVisible();
 
     // Hit the proxy

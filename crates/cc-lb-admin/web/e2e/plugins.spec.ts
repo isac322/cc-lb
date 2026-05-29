@@ -43,7 +43,7 @@ test.describe('Plugin Registry', () => {
     await page.locator('select').first().selectOption({ index: 1 });
 
     // Click Add Plugin in the Router chain
-    await page.locator('h3:has-text("router Chain")').locator('..').getByRole('button', { name: 'Add Plugin' }).click();
+    await page.locator('.space-y-4').filter({ has: page.locator('h3:has-text("router Chain")') }).getByRole('button', { name: 'Add Plugin' }).click();
 
     // Select the uploaded plugin
     await page.locator('select').nth(1).selectOption({ index: 1 });
@@ -52,7 +52,7 @@ test.describe('Plugin Registry', () => {
     await page.getByRole('button', { name: 'Add', exact: true }).click();
 
     // Verify it appears in the list
-    await expect(page.locator('h3:has-text("router Chain")').locator('..').getByText('extism_echo_plugin')).toBeVisible();
+    await expect(page.locator('.space-y-4').filter({ has: page.locator('h3:has-text("router Chain")') }).getByText('extism_echo_plugin')).toBeVisible();
   });
 
   test('drag-drop reorder', async ({ page }) => {
@@ -60,12 +60,12 @@ test.describe('Plugin Registry', () => {
     await page.locator('select').first().selectOption({ index: 1 });
 
     // Add a second plugin to reorder
-    await page.locator('h3:has-text("router Chain")').locator('..').getByRole('button', { name: 'Add Plugin' }).click();
+    await page.locator('.space-y-4').filter({ has: page.locator('h3:has-text("router Chain")') }).getByRole('button', { name: 'Add Plugin' }).click();
     await page.locator('select').nth(1).selectOption({ index: 1 });
     await page.getByRole('button', { name: 'Add', exact: true }).click();
 
     // Wait for both to be visible
-    await expect(page.locator('h3:has-text("router Chain")').locator('..').getByText('extism_echo_plugin')).toHaveCount(2);
+    await expect(page.locator('.space-y-4').filter({ has: page.locator('h3:has-text("router Chain")') }).getByText('extism_echo_plugin')).toHaveCount(2);
 
     // Drag and drop is tricky in Playwright, but we can simulate it or just verify the UI elements exist
     // For a real drag and drop:
@@ -98,7 +98,7 @@ test.describe('Plugin Registry', () => {
     await page.locator('select').first().selectOption({ index: 1 });
 
     // Delete all entries
-    const deleteButtons = page.locator('h3:has-text("router Chain")').locator('..').locator('button[title="Remove from chain"]');
+    const deleteButtons = page.locator('.space-y-4').filter({ has: page.locator('h3:has-text("router Chain")') }).locator('button[title="Remove from chain"]');
     const count = await deleteButtons.count();
     
     for (let i = 0; i < count; i++) {
