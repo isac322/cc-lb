@@ -145,18 +145,8 @@ async fn unchanged_tick_emits_unchanged_metric_and_does_not_rebuild() {
     let generation = holder.load().generation;
     let before = labeled_counter_value(&metrics, "cclb_reconcile_total", "outcome", "unchanged");
     let cancel = CancellationToken::new();
-    let task =
-        tokio::spawn(reconciler(stores, holder.clone(), runtime, cancel.clone(), dir.path()).run());
-
-    advance_until(|| {
-        labeled_counter_value(&metrics, "cclb_reconcile_total", "outcome", "unchanged") > before
-    })
-    .await;
-    cancel.cancel();
-    tokio::time::timeout(Duration::from_secs(1), task)
-        .await
-        .expect("task exits")
-        .expect("task join");
+    let reconciler = reconciler(stores, holder.clone(), runtime, cancel, dir.path());
+    reconciler.reconcile_once().await.expect("reconcile tick");
 
     assert_eq!(holder.load().generation, generation);
     let after = labeled_counter_value(&metrics, "cclb_reconcile_total", "outcome", "unchanged");
