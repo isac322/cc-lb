@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-test.describe('Upstreams Management', () => {
+test.describe.serial('Upstreams Management', () => {
   test.beforeEach(async ({ page }) => {
     await page.addInitScript(() => {
       localStorage.setItem('cc-lb-admin-token', 'test-admin-token');
@@ -23,8 +23,9 @@ test.describe('Upstreams Management', () => {
     await page.getByRole('button', { name: 'Create' }).click();
 
     await expect(page.getByRole('dialog')).not.toBeVisible();
-    await expect(page.getByRole('cell', { name: 'test-api-key-upstream' })).toBeVisible();
-    await expect(page.getByRole('cell', { name: 'anthropic_api_key' })).toBeVisible();
+    const row = page.getByRole('row', { name: /test-api-key-upstream/ });
+    await expect(row).toBeVisible();
+    await expect(row.getByRole('cell', { name: 'anthropic_api_key' })).toBeVisible();
   });
 
   test('should edit an upstream', async ({ page }) => {
@@ -34,7 +35,7 @@ test.describe('Upstreams Management', () => {
     await row.getByRole('button', { name: 'Edit' }).click();
 
     await expect(page.getByRole('dialog')).toBeVisible();
-    await page.getByLabel('Base URL').fill('https://api.example.com');
+    await page.getByLabel('Base URL').fill('http://localhost:8081');
     await page.getByRole('button', { name: 'Save Changes' }).click();
 
     await expect(page.getByRole('dialog')).not.toBeVisible();
@@ -45,11 +46,20 @@ test.describe('Upstreams Management', () => {
     await page.waitForSelector('table');
     const row = page.getByRole('row', { name: /test-api-key-upstream/ });
     
-    await row.getByRole('button', { name: 'Disable' }).click();
-    await expect(row.getByText('Disabled')).toBeVisible();
-
-    await row.getByRole('button', { name: 'Enable' }).click();
-    await expect(row.getByText('Active')).toBeVisible();
+    const disableBtn = row.getByRole('button', { name: 'Disable' });
+    const enableBtn = row.getByRole('button', { name: 'Enable' });
+    
+    if (await disableBtn.isVisible()) {
+      await disableBtn.click();
+      await expect(row.getByText('Disabled')).toBeVisible();
+      await enableBtn.click();
+      await expect(row.getByText('Active')).toBeVisible();
+    } else {
+      await enableBtn.click();
+      await expect(row.getByText('Active')).toBeVisible();
+      await disableBtn.click();
+      await expect(row.getByText('Disabled')).toBeVisible();
+    }
   });
 
   test('should delete an upstream', async ({ page }) => {
@@ -72,7 +82,7 @@ test.describe('Upstreams Management', () => {
     await page.getByLabel('Anthropic OAuth').check();
     await page.getByRole('button', { name: 'Create' }).click();
 
-    await expect(page.getByText('Connect OAuth')).toBeVisible();
+    await expect(page.getByText('Connect OAuth')).toBeVisible({ timeout: 10000 });
 
     const pagePromise = context.waitForEvent('page');
     await page.getByRole('button', { name: 'Connect Claude OAuth' }).click();

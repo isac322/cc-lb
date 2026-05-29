@@ -5,7 +5,7 @@ import fs from 'fs';
 
 const execAsync = promisify(exec);
 
-test.describe('Principal Management', () => {
+test.describe.serial('Principal Management', () => {
   test.beforeEach(async ({ page }) => {
     await page.addInitScript(() => {
       localStorage.setItem('cc-lb-admin-token', 'test-admin-token');
@@ -36,9 +36,10 @@ test.describe('Principal Management', () => {
   });
 
   test('should edit allowed models inline', async ({ page }) => {
+    await expect(page.getByText('alpha', { exact: true })).toBeVisible();
     const row = page.locator('tr', { hasText: 'alpha' });
     await row.getByRole('button', { name: 'Edit' }).click();
-    
+
     await page.getByPlaceholder('e.g. claude-3-5-sonnet').fill('gpt-4');
     await page.getByRole('button', { name: 'Add' }).click();
     await page.getByRole('button', { name: 'Save to Draft' }).click();
@@ -56,7 +57,7 @@ test.describe('Principal Management', () => {
   test('should edit principal via dialog', async ({ page }) => {
     const row = page.locator('tr', { hasText: 'alpha' });
     await row.getByRole('button', { name: 'Edit' }).click();
-    
+
     await page.locator('input[placeholder="Default"]').first().fill('500');
     await page.getByRole('button', { name: 'Apply Override' }).click();
 
@@ -65,7 +66,7 @@ test.describe('Principal Management', () => {
   });
 
   test('QA scenario: proxy routing with allowed models', async ({ page }) => {
-    const responsePromise = page.waitForResponse(response => 
+    const responsePromise = page.waitForResponse(response =>
       response.url().includes('/admin/principals') && response.request().method() === 'POST'
     );
 
@@ -89,19 +90,32 @@ test.describe('Principal Management', () => {
     await page.goto('/management');
     await expect(page.getByText('qa-principal', { exact: true })).toBeVisible();
 
+    const row = page.locator('tr', { hasText: 'qa-principal' });
+    await row.getByRole('button', { name: 'Keys' }).click();
+    await page.getByRole('button', { name: 'Issue New Key' }).click();
+    await page.getByRole('button', { name: 'Issue Key' }).click();
+
+    const keyInput = page.locator('input[readonly]');
+    await expect(keyInput).toBeVisible();
+    const apiKey = await keyInput.inputValue();
+    console.log('API KEY:', apiKey);
+
+    await page.getByRole('button', { name: 'Dismiss' }).click();
+    await page.keyboard.press('Escape'); // Close the Keys modal
+
     // Hit the proxy
     try {
       const { stdout, stderr } = await execAsync(`curl -s -w "\\n%{http_code}" -X POST http://localhost:8080/v1/messages \\
-        -H "Authorization: Bearer ${principalId}" \\
+        -H "x-api-key: ${apiKey}" \\
         -H "Content-Type: application/json" \\
         -d '{"model": "claude-3-haiku-20240307", "messages": [{"role": "user", "content": "hello"}]}'`);
-      
+
       fs.mkdirSync('../../.omo/evidence', { recursive: true });
       fs.writeFileSync('../../.omo/evidence/task-29-route.txt', stdout + '\n' + stderr);
-      
+
       const lines = stdout.trim().split('\n');
       const statusCode = lines[lines.length - 1];
-      
+
       console.log('Curl output:', stdout);
       // We expect 200 if the proxy is running and upstream is configured.
       // If not, we at least verify the request was made.

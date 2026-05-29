@@ -44,15 +44,6 @@ redirect_uri = "http://localhost:5173/admin/oauth/callback"
 scopes = ["messages", "files"]
 `;
   fs.writeFileSync(configPath, config);
-
-  const bootstrapPath = path.join(dataDir, 'bootstrap.toml');
-  const bootstrapConfig = `
-[[legacy-upstreams]]
-name = "dummy"
-kind = "custom"
-`;
-  fs.writeFileSync(bootstrapPath, bootstrapConfig);
-
   console.log('Starting fake-anthropic...');
   fakeAnthropicProcess = spawn('cargo', ['run', '-p', 'fake-anthropic', '--', '--port', '8081'], {
     cwd: workspaceRoot,
@@ -69,15 +60,52 @@ kind = "custom"
         CC_LB_MASTER_KEY: '0000000000000000000000000000000000000000000000000000000000000000', 
         CC_LB_ADMIN_TOKEN: 'test-admin-token',
         CC_LB_BOOTSTRAP_ADMIN_TOKEN: 'test-admin-token',
-        TEST_API_KEY: 'test-api-key-value'
+        TEST_API_KEY: 'sk-ant-test-api-key-value'
       }
   });
 
-  // Wait for servers to start
-  await new Promise(resolve => setTimeout(resolve, 15000));
+  await waitForAdminReady();
+  await seedDummyUpstream();
   
   // Store processes globally so teardown can kill them
   process.env.__CC_LB_PROCESS_PID__ = ccLbProcess.pid?.toString();
   process.env.__FAKE_ANTHROPIC_PROCESS_PID__ = fakeAnthropicProcess.pid?.toString();
   process.env.__CONFIG_PATH__ = configPath;
+}
+
+async function waitForAdminReady() {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch('http://127.0.0.1:8082/admin/v1/status', {
+        headers: { Authorization: 'Bearer test-admin-token' },
+      });
+      if (response.ok) {
+        return;
+      }
+    } catch {
+      // Retry until the server is ready.
+    }
+    await new Promise(resolve => setTimeout(resolve, 500));
+  }
+  throw new Error('cc-lb admin API did not become ready');
+}
+
+async function seedDummyUpstream() {
+  const response = await fetch('http://127.0.0.1:8082/admin/v1/upstreams', {
+    method: 'POST',
+    headers: {
+      Authorization: 'Bearer test-admin-token',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      name: 'dummy',
+      kind: 'custom',
+      base_url: 'http://localhost:8081',
+      api_key_env: 'TEST_API_KEY',
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`failed to seed dummy upstream: ${response.status} ${await response.text()}`);
+  }
 }
