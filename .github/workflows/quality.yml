@@ -36,7 +36,7 @@ jobs:
       - run: bash scripts/lint-audit-redaction.sh
 
   cargo-deny:
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -46,7 +46,7 @@ jobs:
       - run: cargo deny check
 
   cargo-llvm-cov:
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
