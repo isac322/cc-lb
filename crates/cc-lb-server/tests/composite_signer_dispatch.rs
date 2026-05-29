@@ -61,7 +61,6 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
             Some(NoneModeConfig {
                 principal_id: "oauth-principal".to_owned(),
                 upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
-                upstream_credential_ref: "oauth-target".to_owned(),
             }),
             None,
         )),

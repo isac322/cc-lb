@@ -184,7 +184,6 @@ fn none_mode_authn(
             Some(NoneModeConfig {
                 principal_id: principal_id.to_owned(),
                 upstream_kind: NoneModeUpstreamKind::AnthropicKey,
-                upstream_credential_ref: "test-upstream".to_owned(),
             }),
             Some(Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(
                 storage,

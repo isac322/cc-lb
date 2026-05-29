@@ -264,7 +264,6 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
             Some(NoneModeConfig {
                 principal_id: "oauth-principal".to_owned(),
                 upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
-                upstream_credential_ref: "oauth-target".to_owned(),
             }),
             None,
         )),

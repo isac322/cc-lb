@@ -288,7 +288,6 @@ pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError
     config.downstream_auth.none_mode = Some(cc_lb_config::NoneModeConfig {
         principal_id: "test-principal".to_owned(),
         upstream_kind: cc_lb_config::NoneModeUpstreamKind::AnthropicKey,
-        upstream_credential_ref: "test-cred".to_owned(),
     });
     std::mem::forget(dir);
     build_app_with_storage(config, None, managed_store, storage, aead).await

@@ -305,7 +305,6 @@ mod tests {
             Some(NoneModeConfig {
                 principal_id: "principal-none".to_owned(),
                 upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
-                upstream_credential_ref: "oauth-ref".to_owned(),
             }),
             Some(Arc::new(KeyStore::new(store))),
         );

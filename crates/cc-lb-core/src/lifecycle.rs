@@ -14,7 +14,7 @@ use cc_lb_plugin_api::{
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_api::{
-    Storage, UpstreamRecord,
+    RateLimitKind, Storage, UpstreamRateLimitObservationRecord, UpstreamRecord,
     types::{RequestEvent, StoredApiKeyRecord},
     upstream::UpstreamKind as StorageUpstreamKind,
 };
@@ -39,7 +39,9 @@ use crate::dynamic_view::{
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
 use crate::hop_by_hop::strip_hop_by_hop;
+use crate::rate_limit_headers::{AnthropicRateLimitKind, parse_anthropic_rate_limit_headers};
 use crate::sse_relay;
+use crate::upstream_rate_limit_events::UpstreamRateLimitSink;
 
 pub type Body = AxumBody;
 
@@ -251,6 +253,7 @@ pub struct Lifecycle {
     limit_subject_provider: Option<Arc<dyn LimitSubjectProvider>>,
     audit_sink: Option<Arc<AuditWriterSink>>,
     request_event_storage: Option<Arc<dyn Storage>>,
+    upstream_rate_limit_sink: Option<UpstreamRateLimitSink>,
 }
 
 impl Lifecycle {
@@ -280,6 +283,7 @@ impl Lifecycle {
             limit_subject_provider: None,
             audit_sink: None,
             request_event_storage: None,
+            upstream_rate_limit_sink: None,
         }
     }
 
@@ -296,6 +300,7 @@ impl Lifecycle {
             limit_subject_provider: None,
             audit_sink: None,
             request_event_storage: None,
+            upstream_rate_limit_sink: None,
         }
     }
 
@@ -323,6 +328,11 @@ impl Lifecycle {
 
     pub fn with_request_event_storage(mut self, storage: Arc<dyn Storage>) -> Self {
         self.request_event_storage = Some(storage);
+        self
+    }
+
+    pub fn with_upstream_rate_limit_sink(mut self, sink: UpstreamRateLimitSink) -> Self {
+        self.upstream_rate_limit_sink = Some(sink);
         self
     }
 
@@ -507,10 +517,8 @@ impl Lifecycle {
             }
         };
 
-        let resolved_upstream_id = match route
-            .upstream_id
-            .or_else(|| candidates.first().map(|candidate| candidate.upstream_id))
-        {
+        let fallback_upstream_id = candidates.first().map(|candidate| candidate.upstream_id);
+        let resolved_upstream_id = match route.upstream_id.or(fallback_upstream_id) {
             Some(upstream_id) if candidates.iter().any(|c| c.upstream_id == upstream_id) => {
                 upstream_id
             }
@@ -718,6 +726,14 @@ impl Lifecycle {
                 );
                 return Ok(response);
             }
+        }
+
+        if response.status().is_success() || response.status() == StatusCode::TOO_MANY_REQUESTS {
+            self.enqueue_upstream_rate_limit_observations(
+                response.headers(),
+                resolved_upstream_id,
+                unix_now_secs(),
+            );
         }
 
         if response.status().is_client_error() || response.status().is_server_error() {
@@ -960,6 +976,20 @@ impl Lifecycle {
         );
     }
 
+    fn enqueue_upstream_rate_limit_observations(
+        &self,
+        headers: &HeaderMap,
+        upstream_id: Uuid,
+        observed_at: u64,
+    ) {
+        let Some(sink) = &self.upstream_rate_limit_sink else {
+            return;
+        };
+        for record in observe_rate_limits(headers, upstream_id, observed_at) {
+            let _ = sink.enqueue(record);
+        }
+    }
+
     fn parse(&self, req: Request<Bytes>) -> Result<RequestContext, Box<Response<Body>>> {
         let (mut parts, body) = req.into_parts();
         let path = parts.uri.path().to_owned();
@@ -1092,6 +1122,34 @@ impl Lifecycle {
             });
         };
         Response::from_parts(parts, Body::from_stream(stream))
+    }
+}
+
+pub fn observe_rate_limits(
+    headers: &HeaderMap,
+    upstream_id: Uuid,
+    observed_at: u64,
+) -> Vec<UpstreamRateLimitObservationRecord> {
+    parse_anthropic_rate_limit_headers(headers)
+        .into_iter()
+        .map(|snapshot| UpstreamRateLimitObservationRecord {
+            upstream_id,
+            window: snapshot.window,
+            kind: rate_limit_kind(snapshot.kind),
+            limit: snapshot.limit,
+            remaining: snapshot.remaining,
+            reset: snapshot.reset,
+            observed_at_unix_secs: observed_at,
+        })
+        .collect()
+}
+
+fn rate_limit_kind(kind: AnthropicRateLimitKind) -> RateLimitKind {
+    match kind {
+        AnthropicRateLimitKind::Requests => RateLimitKind::Requests,
+        AnthropicRateLimitKind::Tokens => RateLimitKind::Tokens,
+        AnthropicRateLimitKind::InputTokens => RateLimitKind::InputTokens,
+        AnthropicRateLimitKind::OutputTokens => RateLimitKind::OutputTokens,
     }
 }
 

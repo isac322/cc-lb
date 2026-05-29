@@ -78,7 +78,6 @@ impl TestAuthn {
                 Some(NoneModeConfig {
                     principal_id: "principal-test".to_owned(),
                     upstream_kind: NoneModeUpstreamKind::AnthropicKey,
-                    upstream_credential_ref: "test-upstream".to_owned(),
                 }),
                 Some(Arc::new(KeyStore::new(Arc::new(managed_key_store)))),
             )),

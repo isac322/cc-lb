@@ -63,23 +63,36 @@ pub fn validate_raw_toml(raw_toml: &str) -> Result<(), ValidationError> {
         }
     }
 
-    if let Some(none_mode) = table
-        .get("downstream_auth")
-        .and_then(|value| value.as_table())
-        .and_then(|downstream_auth| downstream_auth.get("none_mode"))
-        .and_then(|value| value.as_table())
-        && let Some(upstream_credential_ref) = none_mode
-            .get("upstream_credential_ref")
-            .and_then(|value| value.as_str())
-        && !upstream_credential_ref.is_empty()
-    {
+    if let Some(field) = legacy_none_mode_upstream_credential_ref_field(&table) {
         return Err(ValidationError::new(
-            "downstream_auth.none_mode.upstream_credential_ref",
-            "upstream_credential_ref is deprecated and must be empty",
+            field,
+            "upstream_credential_ref was removed; use principal.allowed_upstreams and router selection",
         ));
     }
 
     Ok(())
+}
+
+fn legacy_none_mode_upstream_credential_ref_field(table: &toml::Table) -> Option<&'static str> {
+    if table
+        .get("downstream_auth")
+        .and_then(|value| value.as_table())
+        .and_then(|downstream_auth| downstream_auth.get("none_mode"))
+        .and_then(|value| value.as_table())
+        .is_some_and(|none_mode| none_mode.contains_key("upstream_credential_ref"))
+    {
+        return Some("downstream_auth.none_mode.upstream_credential_ref");
+    }
+
+    if table
+        .get("none_mode")
+        .and_then(|value| value.as_table())
+        .is_some_and(|none_mode| none_mode.contains_key("upstream_credential_ref"))
+    {
+        return Some("none_mode.upstream_credential_ref");
+    }
+
+    None
 }
 
 pub fn migrate_legacy_storage_toml(raw_toml: &str) -> Result<String, ValidationError> {
