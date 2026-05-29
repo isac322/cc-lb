@@ -8,7 +8,7 @@ on:
 jobs:
   rss-soak:
     if: github.ref == 'refs/heads/main'
-    runs-on: oracle4
+    runs-on: oracle4-cc-lb
     continue-on-error: true
     steps:
       - uses: actions/checkout@v6

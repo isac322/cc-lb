@@ -22,7 +22,7 @@ on:
 jobs:
   postgres-build-matrix:
     name: Build ${{ matrix.build-variant }}
-    runs-on: oracle4
+    runs-on: oracle4-cc-lb
 
     strategy:
       matrix:
@@ -92,7 +92,7 @@ jobs:
 
   postgres-conformance:
     name: Postgres conformance
-    runs-on: oracle4
+    runs-on: oracle4-cc-lb
 
     services:
       postgres:
