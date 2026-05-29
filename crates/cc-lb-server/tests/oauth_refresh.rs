@@ -126,7 +126,7 @@ impl Fixture {
 }
 
 #[tokio::test]
-async fn happy_refresh_persists_new_tokens_against_fake_anthropic() {
+async fn oauth_refresh_against_fake_anthropic() {
     let fixture = Fixture::new().await;
     let upstream_id = fixture
         .create_oauth_upstream("happy", now_secs() + 60)

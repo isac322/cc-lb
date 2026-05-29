@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use cc_lb_config::{Config, ConfigError, Limit as ConfigLimit, LimitKind as ConfigLimitKind};
 use cc_lb_plugin_api::{ObservabilityHook, RouterPlugin};
 use cc_lb_storage_api::{PrincipalKind as DbPrincipalKind, PrincipalRecord};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -46,84 +45,6 @@ pub struct PrincipalSpecCached {
 }
 
 impl PrincipalView {
-    pub fn from_config(
-        config: &Config,
-        mut principal_chains: HashMap<String, (RouterPluginCache, ObservabilityHooksCache)>,
-    ) -> Result<Arc<PrincipalView>, ConfigError> {
-        let mut specs = config
-            .principals
-            .iter()
-            .map(|(principal_id, principal)| -> Result<_, ConfigError> {
-                let mut exact = HashSet::new();
-                let mut builder = GlobSetBuilder::new();
-
-                for model in &principal.allowed_models {
-                    if is_glob_pattern(model) {
-                        builder.add(Glob::new(model).map_err(|source| {
-                            invalid_allowed_models_glob(principal_id, model, source)
-                        })?);
-                    } else {
-                        exact.insert(model.clone());
-                    }
-                }
-
-                let allowed_models = builder.build().map_err(|source| {
-                    invalid_allowed_models_glob(principal_id, "<compiled glob set>", source)
-                })?;
-
-                let (router_plugin, observability_hooks) = principal_chains
-                    .remove(principal_id)
-                    .unwrap_or((RouterPluginCache::Inherit, ObservabilityHooksCache::Inherit));
-
-                let cached = PrincipalSpecCached {
-                    id: principal_id.clone(),
-                    principal_type: principal.principal_type.clone().into(),
-                    allowed_models,
-                    allowed_models_exact: exact,
-                    default_limits: principal
-                        .default_limits
-                        .iter()
-                        .cloned()
-                        .map(Into::into)
-                        .collect(),
-                    enabled: principal.enabled,
-                    router_plugin,
-                    observability_hooks,
-                };
-
-                Ok((principal_id.clone(), cached))
-            })
-            .collect::<Result<HashMap<_, _>, ConfigError>>()?;
-
-        if matches!(
-            config.downstream_auth.mode,
-            cc_lb_config::DownstreamAuthMode::None
-        ) && let Some(none_mode) = &config.downstream_auth.none_mode
-            && !specs.contains_key(&none_mode.principal_id)
-        {
-            let (router_plugin, observability_hooks) = principal_chains
-                .remove(&none_mode.principal_id)
-                .unwrap_or((RouterPluginCache::Inherit, ObservabilityHooksCache::Inherit));
-            specs.insert(
-                none_mode.principal_id.clone(),
-                PrincipalSpecCached {
-                    id: none_mode.principal_id.clone(),
-                    principal_type: PrincipalType::Machine,
-                    allowed_models: GlobSetBuilder::new()
-                        .build()
-                        .expect("empty allowed-model glob set builds"),
-                    allowed_models_exact: HashSet::new(),
-                    default_limits: Vec::new(),
-                    enabled: true,
-                    router_plugin,
-                    observability_hooks,
-                },
-            );
-        }
-
-        Ok(Arc::new(PrincipalView { specs }))
-    }
-
     pub fn from_db(
         principals: &[PrincipalRecord],
         mut principal_chains: HashMap<String, PrincipalRoutingArtifacts>,
@@ -259,15 +180,6 @@ impl PrincipalSpecCached {
     }
 }
 
-impl From<ConfigLimit> for Limit {
-    fn from(value: ConfigLimit) -> Self {
-        Self {
-            kind: value.kind.into(),
-            window: value.window,
-            cap_micros: value.cap_micros,
-        }
-    }
-}
 
 impl From<cc_lb_storage_api::Limit> for Limit {
     fn from(value: cc_lb_storage_api::Limit) -> Self {
@@ -279,18 +191,6 @@ impl From<cc_lb_storage_api::Limit> for Limit {
     }
 }
 
-impl From<ConfigLimitKind> for LimitKind {
-    fn from(value: ConfigLimitKind) -> Self {
-        match value {
-            ConfigLimitKind::Requests => Self::Requests,
-            ConfigLimitKind::InputTokens => Self::InputTokens,
-            ConfigLimitKind::OutputTokens => Self::OutputTokens,
-            ConfigLimitKind::TotalTokens => Self::TotalTokens,
-            ConfigLimitKind::CostUsd => Self::CostUsd,
-            ConfigLimitKind::Concurrent => Self::Concurrent,
-        }
-    }
-}
 
 impl From<DbPrincipalKind> for PrincipalType {
     fn from(value: DbPrincipalKind) -> Self {
@@ -314,30 +214,11 @@ impl From<cc_lb_storage_api::LimitKind> for LimitKind {
     }
 }
 
-impl From<cc_lb_config::PrincipalType> for PrincipalType {
-    fn from(value: cc_lb_config::PrincipalType) -> Self {
-        match value {
-            cc_lb_config::PrincipalType::Human => Self::Human,
-            cc_lb_config::PrincipalType::Machine => Self::Machine,
-        }
-    }
-}
 
 fn is_glob_pattern(model: &str) -> bool {
     model.chars().any(|ch| matches!(ch, '*' | '?' | '[' | ']'))
 }
 
-fn invalid_allowed_models_glob(
-    principal_id: &str,
-    pattern: &str,
-    source: globset::Error,
-) -> ConfigError {
-    ConfigError::InvalidPrincipalAllowedModelsGlob {
-        principal_id: principal_id.to_owned(),
-        pattern: pattern.to_owned(),
-        message: source.to_string(),
-    }
-}
 
 #[cfg(test)]
 mod tests {

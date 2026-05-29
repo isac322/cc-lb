@@ -5,7 +5,7 @@ metrics_addr = "127.0.0.1:8890"
 
 [storage]
 type = "redb"
-path = "${data_dir}/cc-lb.redb"
+path = "redb.db"
 
 [aead]
 key_env = "CC_LB_MASTER_KEY"

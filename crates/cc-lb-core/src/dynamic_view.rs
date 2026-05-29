@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use arc_swap::ArcSwap;
 use cc_lb_plugin_api::ApiKeyAwareSignerFactory;
@@ -184,7 +183,6 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use bytes::Bytes;
-    use cc_lb_config::Config;
     use cc_lb_plugin_api::{
         ObservabilityError, ObserveEvent, Principal, RequestContext, RouteDecision, RouteError,
         SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, Upstream,
@@ -262,8 +260,7 @@ mod tests {
     }
 
     fn test_view(previous_generation: u64) -> Arc<DynamicView> {
-        let principal_view = PrincipalView::from_config(&Config::default(), HashMap::new())
-            .expect("empty principal view builds");
+        let principal_view = Arc::new(PrincipalView::from_db(&[], std::collections::HashMap::new()));
         DynamicViewBuilder::new(previous_generation)
             .signer_factory(Arc::new(TestSignerFactory))
             .global_router(Arc::new(TestRouter))

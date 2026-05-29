@@ -14,6 +14,7 @@ use cc_lb_storage_api::principal::Limit;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use super::add_dynamic_rebind_headers;
 use crate::AdminState;
 
 const DEFAULT_LIMIT: usize = 100;
@@ -127,7 +128,10 @@ async fn create_principal(
             let mut headers = HeaderMap::new();
             insert_header(&mut headers, header::LOCATION, &location);
             insert_header(&mut headers, header::ETAG, &etag(record.revision));
-            (StatusCode::CREATED, headers, Json(summary_response(record))).into_response()
+            let mut response =
+                (StatusCode::CREATED, headers, Json(summary_response(record))).into_response();
+            add_dynamic_rebind_headers(&mut response, &state).await;
+            response
         }
         Err(error) => storage_error(error),
     }
@@ -251,7 +255,9 @@ async fn set_enabled(
                     fields_changed: vec!["enabled"],
                 },
             );
-            respond_with_etag(record)
+            let mut response = respond_with_etag(record);
+            add_dynamic_rebind_headers(&mut response, &state).await;
+            response
         }
         Ok(None) => error_response(StatusCode::NOT_FOUND, "unknown_principal"),
         Err(error) => storage_mutation_error(error),
@@ -303,7 +309,9 @@ async fn delete_principal(
                     principal_id: record.id.to_string(),
                 },
             );
-            StatusCode::NO_CONTENT.into_response()
+            let mut response = StatusCode::NO_CONTENT.into_response();
+            add_dynamic_rebind_headers(&mut response, &state).await;
+            response
         }
         Ok(None) => error_response(StatusCode::NOT_FOUND, "unknown_principal"),
         Err(error) => storage_mutation_error(error),
@@ -352,7 +360,9 @@ async fn update_principal_record(
                     fields_changed,
                 },
             );
-            respond_with_etag(record)
+            let mut response = respond_with_etag(record);
+            add_dynamic_rebind_headers(&mut response, &state).await;
+            response
         }
         Ok(None) => error_response(StatusCode::NOT_FOUND, "unknown_principal"),
         Err(error) => storage_mutation_error(error),

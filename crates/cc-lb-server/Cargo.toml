@@ -32,6 +32,7 @@ path = "src/main.rs"
 [dependencies]
 async-stream.workspace = true
 async-trait.workspace = true
+anyhow.workspace = true
 arc-swap.workspace = true
 axum.workspace = true
 bytes.workspace = true

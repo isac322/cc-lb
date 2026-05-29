@@ -63,13 +63,14 @@ kind = "custom"
   ccLbProcess = spawn('cargo', ['run', '-p', 'cc-lb-server', '--', 'serve', '--config', configPath], {
     cwd: workspaceRoot,
     stdio: 'inherit',
-    env: { 
-      ...process.env, 
-      RUST_LOG: 'info', 
-      CC_LB_MASTER_KEY: '0000000000000000000000000000000000000000000000000000000000000000', 
-      CC_LB_ADMIN_TOKEN: 'test-admin-token',
-      TEST_API_KEY: 'test-api-key-value'
-    }
+      env: { 
+        ...process.env, 
+        RUST_LOG: 'info', 
+        CC_LB_MASTER_KEY: '0000000000000000000000000000000000000000000000000000000000000000', 
+        CC_LB_ADMIN_TOKEN: 'test-admin-token',
+        CC_LB_BOOTSTRAP_ADMIN_TOKEN: 'test-admin-token',
+        TEST_API_KEY: 'test-api-key-value'
+      }
   });
 
   // Wait for servers to start

@@ -24,6 +24,7 @@ use tokio::sync::Mutex;
 use tower::ServiceBuilder;
 use uuid::Uuid;
 
+use super::add_dynamic_rebind_headers;
 use crate::AdminState;
 
 const WASM_MAGIC: &[u8; 4] = b"\0asm";
@@ -111,12 +112,14 @@ async fn upload_wasm(
                     format!("/admin/v1/plugins/registry/{}", response.id),
                 );
             }
-            builder
+            let mut response = builder
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&response).unwrap_or_default(),
                 ))
-                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+                .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            add_dynamic_rebind_headers(&mut response, &state).await;
+            response
         }
         Err(error) => error.into_response(),
     }

@@ -6,10 +6,10 @@ export default async function globalTeardown() {
   const configPath = process.env.__CONFIG_PATH__;
 
   if (ccLbPid) {
-    try { process.kill(parseInt(ccLbPid)); } catch (e) {}
+    try { process.kill(parseInt(ccLbPid)); } catch (err) { console.warn('teardown step failed:', err); }
   }
   if (fakeAnthropicPid) {
-    try { process.kill(parseInt(fakeAnthropicPid)); } catch (e) {}
+    try { process.kill(parseInt(fakeAnthropicPid)); } catch (err) { console.warn('teardown step failed:', err); }
   }
   if (configPath && fs.existsSync(configPath)) {
     fs.unlinkSync(configPath);

@@ -12,7 +12,7 @@ dto-roundtrip = []
 async-trait = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
-cc-lb-aead = { path = "../cc-lb-aead" }
+cc-lb-aead = { version = "0.1.0", path = "../cc-lb-aead" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

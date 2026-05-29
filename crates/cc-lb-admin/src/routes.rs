@@ -4,18 +4,14 @@ use axum::{
     http::{StatusCode, header},
     middleware,
     response::IntoResponse,
-    routing::{delete, get, post, put},
+    routing::{delete, get, post},
 };
 use cc_lb_storage_api::{Storage, StorageError};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::{
-    AdminState,
-    auth::require_admin_auth,
-    principals::{principal_key_usage, principal_limits, principal_usage},
-};
+use crate::{AdminState, auth::require_admin_auth};
 
 #[derive(RustEmbed)]
 #[folder = "web/dist/"]
@@ -23,46 +19,10 @@ struct Assets;
 
 pub fn build_router(state: AdminState) -> Router {
     let protected_routes = Router::new()
-        .route("/admin/principals", get(legacy_gone).post(legacy_gone))
-        .route("/admin/principals/{id}", put(legacy_gone))
-        .route("/admin/principals/{id}/disable", post(legacy_gone))
-        .route("/admin/principals/{id}/enable", post(legacy_gone))
-        .route("/admin/principals/{id}/allowed_models", put(legacy_gone))
-        .route("/admin/principals/{id}/usage", get(principal_usage))
-        .route("/admin/principals/{id}/limits", get(principal_limits))
-        .route(
-            "/admin/principals/{id}/keys",
-            get(legacy_gone).post(legacy_gone),
-        )
-        .route(
-            "/admin/principals/{id}/keys/{key_id}",
-            get(legacy_gone).patch(legacy_gone),
-        )
-        .route(
-            "/admin/principals/{id}/keys/{key_id}/revoke",
-            post(legacy_gone),
-        )
-        .route(
-            "/admin/principals/{id}/keys/{key_id}/disable",
-            post(legacy_gone),
-        )
-        .route(
-            "/admin/principals/{id}/keys/{key_id}/enable",
-            post(legacy_gone),
-        )
-        .route(
-            "/admin/principals/{id}/keys/{key_id}/usage",
-            get(principal_key_usage),
-        )
         .route("/admin/audit", get(query_audit))
         .route("/admin/status", get(crate::status::handler))
-        .route("/admin/upstreams", get(legacy_gone))
-        .route("/admin/upstreams/{name}/drain", post(legacy_gone))
         .route("/admin/killswitch", post(set_killswitch))
         .route("/admin/killswitch", delete(clear_killswitch))
-        .route("/admin/oauth/{id}", get(crate::oauth::oauth_status))
-        .route("/admin/oauth/start", post(legacy_oauth_gone))
-        .route("/admin/oauth/complete", post(legacy_oauth_gone))
         .route("/admin/config/current", get(get_config))
         .route("/admin/config/schema", get(get_config_schema))
         .route(
@@ -91,14 +51,6 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/{*file}", get(serve_asset))
         .route("/admin/health", get(health))
         .with_state(state)
-}
-
-async fn legacy_oauth_gone() -> impl IntoResponse {
-    legacy_gone().await
-}
-
-async fn legacy_gone() -> impl IntoResponse {
-    (StatusCode::GONE, Json(json!({ "error": "moved_to_v1" })))
 }
 
 async fn serve_index() -> impl IntoResponse {

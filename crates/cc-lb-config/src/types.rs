@@ -327,15 +327,8 @@ pub struct PrincipalSpec {
     pub allowed_models: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub credentials_ref: Option<String>,
-    /// Per-principal router plugin override.
-    /// - `None`: inherit the global `PluginsConfig.router_plugin` (default behaviour).
-    /// - `Some(PluginRef)`: override the global router for this principal.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub router_plugin: Option<PluginRef>,
-    /// Per-principal observability hooks override.
-    /// - `None`: inherit `PluginsConfig.observability_hooks` (default behaviour).
-    /// - `Some(vec![])`: explicit empty — emit no observability events for this principal.
-    /// - `Some(vec![...])`: replace the global hook chain with this list (no concat/merge).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observability_hooks: Option<Vec<PluginRef>>,
 }
@@ -517,35 +510,6 @@ pub struct OAuthConfig {
     pub anthropic: Option<AnthropicOAuthConfig>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-pub struct PostgresPoolConfig {
-    #[serde(default = "default_max_connections")]
-    pub max_connections: u32,
-    #[serde(default)]
-    pub min_connections: u32,
-    #[serde(default = "default_acquire_timeout_secs")]
-    pub acquire_timeout_secs: u64,
-    #[serde(default = "default_idle_timeout_secs")]
-    pub idle_timeout_secs: u64,
-    #[serde(default = "default_statement_timeout_secs")]
-    pub statement_timeout_secs: u64,
-    #[serde(default = "default_sslmode")]
-    pub sslmode: String,
-}
-
-impl Default for PostgresPoolConfig {
-    fn default() -> Self {
-        Self {
-            max_connections: default_max_connections(),
-            min_connections: 0,
-            acquire_timeout_secs: default_acquire_timeout_secs(),
-            idle_timeout_secs: default_idle_timeout_secs(),
-            statement_timeout_secs: default_statement_timeout_secs(),
-            sslmode: default_sslmode(),
-        }
-    }
-}
-
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct SignersConfig {
@@ -571,6 +535,35 @@ impl Default for AnthropicOAuthSignerConfig {
             client_id: String::new(),
             redirect_uri: default_anthropic_oauth_redirect_uri(),
             scopes: default_anthropic_oauth_scopes(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct PostgresPoolConfig {
+    #[serde(default = "default_max_connections")]
+    pub max_connections: u32,
+    #[serde(default)]
+    pub min_connections: u32,
+    #[serde(default = "default_acquire_timeout_secs")]
+    pub acquire_timeout_secs: u64,
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+    #[serde(default = "default_statement_timeout_secs")]
+    pub statement_timeout_secs: u64,
+    #[serde(default = "default_sslmode")]
+    pub sslmode: String,
+}
+
+impl Default for PostgresPoolConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: default_max_connections(),
+            min_connections: 0,
+            acquire_timeout_secs: default_acquire_timeout_secs(),
+            idle_timeout_secs: default_idle_timeout_secs(),
+            statement_timeout_secs: default_statement_timeout_secs(),
+            sslmode: default_sslmode(),
         }
     }
 }

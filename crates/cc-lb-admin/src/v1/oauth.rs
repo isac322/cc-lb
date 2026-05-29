@@ -21,6 +21,7 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use super::add_dynamic_rebind_headers;
 use crate::AdminState;
 use crate::oauth_pkce::{
     HyperOAuthHttpClient, PkceHandshakeState, complete_pkce_flow, start_pkce_flow,
@@ -269,12 +270,14 @@ async fn complete_oauth(
         200,
     );
 
-    Json(CompleteResponse {
+    let mut response = Json(CompleteResponse {
         upstream_id: updated.id,
         expires_at_unix_secs: bundle.expires_at_unix_secs,
         access_token_fingerprint,
     })
-    .into_response()
+    .into_response();
+    add_dynamic_rebind_headers(&mut response, &state).await;
+    response
 }
 
 fn pkce_flows() -> &'static PkceFlows {

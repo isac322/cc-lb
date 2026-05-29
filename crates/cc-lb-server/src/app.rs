@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use async_trait::async_trait;
 use axum::Json;
 use axum::Router;
 use axum::body::Body;
@@ -24,8 +25,8 @@ use cc_lb_config::{Limit, LimitKind, PrincipalSpec, PrincipalType};
 use cc_lb_core::BreakerState;
 use cc_lb_core::{
     BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
-    CircuitBreakerDispatch, DynamicViewBuilder, DynamicViewHolder, HopByHopStripLayer, Lifecycle,
-    LifecycleConfig, UpstreamDispatch,
+    CircuitBreakerDispatch, DynamicView, DynamicViewBuilder, DynamicViewHolder, HopByHopStripLayer,
+    Lifecycle, LifecycleConfig, UpstreamDispatch,
     api_keys::{
         builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
         limit_engine::LimitEngine, principal_view::PrincipalView,
@@ -61,7 +62,7 @@ use crate::replica;
 use crate::signal;
 use crate::storage_factory;
 use crate::tls::{ReloadableListener, TlsState};
-use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig};
+use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig, DynamicViewRebinder};
 
 pub const PROXY_FILES_ROUTE_COLLECTION: &str = "/v1/files";
 pub const PROXY_FILES_ROUTE_ITEM: &str = "/v1/files/{id}";
@@ -648,13 +649,23 @@ async fn build_app_with_storage_inner(
         Some((_, tls)) if tls.reload_on_sighup => tls_state.clone(),
         _ => None,
     };
+    let admin_rebinder: Arc<dyn DynamicViewRebinder> = Arc::new(ServerDynamicViewRebinder {
+        stores: stores.clone(),
+        oauth_cfg: Arc::new(oauth_anthropic.clone()),
+        runtime: runtime.clone(),
+        aead: aead.clone(),
+        lazy_refresher: lazy_refresher.clone(),
+        data_dir: data_dir.clone(),
+    });
     let config_watcher = config_path.map(|path| {
-        Arc::new(ConfigWatcher::new_with_principal_view(
+        let watcher = Arc::new(ConfigWatcher::new_with_principal_view(
             path,
             config.clone(),
             Arc::clone(&runtime),
             Some(dynamic_view.clone()),
-        ))
+        ));
+        watcher.set_dynamic_view_rebinder(admin_rebinder.clone());
+        watcher
     });
     let signals = signal::install(
         drain_controller.clone(),
@@ -698,6 +709,7 @@ async fn build_app_with_storage_inner(
         None => Arc::new(InMemoryCurrentConfig::new(
             config.clone(),
             dynamic_view.clone(),
+            Some(admin_rebinder.clone()),
         )),
     };
     let admin_state = AdminState {
@@ -735,6 +747,34 @@ async fn build_app_with_storage_inner(
 }
 
 #[allow(clippy::too_many_arguments)]
+struct ServerDynamicViewRebinder {
+    stores: Arc<DynamicStores>,
+    oauth_cfg: Arc<cc_lb_config::AnthropicOAuthConfig>,
+    runtime: Arc<ExtismRuntime>,
+    aead: Arc<AeadService>,
+    lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
+    data_dir: PathBuf,
+}
+
+#[async_trait]
+impl DynamicViewRebinder for ServerDynamicViewRebinder {
+    async fn rebuild_dynamic_view(
+        &self,
+        current_generation: u64,
+    ) -> anyhow::Result<Arc<DynamicView>> {
+        Ok(build_dynamic_view(
+            &self.stores,
+            &self.oauth_cfg,
+            self.aead.clone(),
+            self.lazy_refresher.clone(),
+            current_generation,
+            &self.runtime,
+            &self.data_dir,
+        )
+        .await?)
+    }
+}
+
 fn spawn_reconciler(
     stores: Arc<DynamicStores>,
     holder: Arc<DynamicViewHolder>,
@@ -836,16 +876,22 @@ struct InMemoryCurrentConfig {
     current: ArcSwap<Config>,
     draft: Mutex<Option<Config>>,
     dynamic_view: Arc<DynamicViewHolder>,
+    dynamic_view_rebinder: Option<Arc<dyn DynamicViewRebinder>>,
 }
 
 impl InMemoryCurrentConfig {
-    fn new(config: Config, dynamic_view: Arc<DynamicViewHolder>) -> Self {
+    fn new(
+        config: Config,
+        dynamic_view: Arc<DynamicViewHolder>,
+        dynamic_view_rebinder: Option<Arc<dyn DynamicViewRebinder>>,
+    ) -> Self {
         let process_start_config = Arc::new(config.clone());
         Self {
             process_start_config,
             current: ArcSwap::from_pointee(config),
             draft: Mutex::new(None),
             dynamic_view,
+            dynamic_view_rebinder,
         }
     }
 }
@@ -857,6 +903,10 @@ impl CurrentConfig for InMemoryCurrentConfig {
 
     fn restart_required_changes(&self) -> Vec<cc_lb_config::RestartRequiredField> {
         summarize_restart_required(&self.process_start_config, &self.current_config())
+    }
+
+    fn dynamic_view_rebinder(&self) -> Option<Arc<dyn DynamicViewRebinder>> {
+        self.dynamic_view_rebinder.clone()
     }
 
     fn put_draft_config(&self, config: Config) -> Result<(), ConfigDraftError> {

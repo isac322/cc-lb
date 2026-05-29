@@ -196,7 +196,7 @@ async fn send(app: axum::Router, request: Request<Body>) -> TestResponse {
     let status = response.status();
     let headers = response.headers().clone();
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let json = serde_json::from_slice(&bytes).unwrap_or_else(|_| Value::Null);
+    let json = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
     if !status.is_success() {
         eprintln!("status={status} body={}", String::from_utf8_lossy(&bytes));
     }

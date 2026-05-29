@@ -16,6 +16,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use url::Url;
 
+use super::add_dynamic_rebind_headers;
 use crate::AdminState;
 
 const DEFAULT_LIMIT: usize = 100;
@@ -182,6 +183,7 @@ async fn create_upstream(
             }
         })?,
     );
+    add_dynamic_rebind_headers(&mut response, &state).await;
     Ok(response)
 }
 
@@ -269,7 +271,9 @@ async fn update_upstream(
                     fields_changed,
                 },
             );
-            Ok(Json(upstream_response(&updated)).into_response())
+            let mut response = Json(upstream_response(&updated)).into_response();
+            add_dynamic_rebind_headers(&mut response, &state).await;
+            Ok(response)
         }
         Err(StorageError::Conflict { message }) => {
             stale_or_conflict(&state, &id, expected_revision, message).await
@@ -323,7 +327,9 @@ async fn delete_upstream(
                     upstream_id: current.id.to_string(),
                 },
             );
-            Ok(StatusCode::NO_CONTENT.into_response())
+            let mut response = StatusCode::NO_CONTENT.into_response();
+            add_dynamic_rebind_headers(&mut response, &state).await;
+            Ok(response)
         }
         Err(StorageError::Conflict { message }) => {
             stale_or_conflict(&state, &id, expected_revision, message).await
@@ -361,7 +367,9 @@ async fn set_enabled(
                 }
             };
             enqueue_upstream_audit(&state, &updated, payload);
-            Ok(Json(upstream_response(&updated)).into_response())
+            let mut response = Json(upstream_response(&updated)).into_response();
+            add_dynamic_rebind_headers(&mut response, &state).await;
+            Ok(response)
         }
         Err(StorageError::Conflict { message }) => {
             stale_or_conflict(&state, &id, expected_revision, message).await

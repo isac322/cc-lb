@@ -14,6 +14,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
+use super::add_dynamic_rebind_headers;
 use crate::AdminState;
 
 const DEFAULT_LIMIT: usize = 100;
@@ -203,7 +204,11 @@ async fn patch_registry(
         .update_registry_label(id, expected_revision, body.label)
         .await
     {
-        Ok(entry) => registry_with_etag(storage, entry).await,
+        Ok(entry) => {
+            let mut response = registry_with_etag(storage, entry).await;
+            add_dynamic_rebind_headers(&mut response, &state).await;
+            response
+        }
         Err(error) => storage_mutation_error(error),
     }
 }
@@ -259,7 +264,9 @@ async fn delete_registry(
                     sha256: hex_sha256(deleted.sha256),
                 },
             );
-            StatusCode::NO_CONTENT.into_response()
+            let mut response = StatusCode::NO_CONTENT.into_response();
+            add_dynamic_rebind_headers(&mut response, &state).await;
+            response
         }
         Ok(None) => error(StatusCode::NOT_FOUND, "unknown_registry_entry"),
         Err(error) => storage_mutation_error(error),
@@ -320,7 +327,9 @@ async fn insert_chain(
                 &format!("/admin/v1/plugin-chain-entries/{}", entry.id),
             );
             insert_header(&mut headers, header::ETAG, &etag(entry.revision));
-            (StatusCode::CREATED, headers, Json(entry)).into_response()
+            let mut response = (StatusCode::CREATED, headers, Json(entry)).into_response();
+            add_dynamic_rebind_headers(&mut response, &state).await;
+            response
         }
         Err(error) => storage_error(error),
     }
@@ -358,7 +367,9 @@ async fn update_chain(
     {
         Ok(Some(entry)) => {
             emit_chain_audit(&state, entry.principal_id, entry.slot);
-            chain_with_etag(entry)
+            let mut response = chain_with_etag(entry);
+            add_dynamic_rebind_headers(&mut response, &state).await;
+            response
         }
         Ok(None) => error(StatusCode::NOT_FOUND, "unknown_plugin_chain_entry"),
         Err(error) => storage_mutation_error(error),
@@ -393,7 +404,9 @@ async fn reorder_chain(
     match storage.reorder_chain(principal_id, slot, new_orders).await {
         Ok(entries) => {
             emit_chain_audit(&state, principal_id, slot);
-            Json(ChainListResponse { entries }).into_response()
+            let mut response = Json(ChainListResponse { entries }).into_response();
+            add_dynamic_rebind_headers(&mut response, &state).await;
+            response
         }
         Err(error) => storage_mutation_error(error),
     }
@@ -408,7 +421,11 @@ async fn rebalance_chain(
         return storage_unavailable();
     };
     match storage.rebalance_chain(principal_id, query.slot.0).await {
-        Ok(entries) => Json(ChainListResponse { entries }).into_response(),
+        Ok(entries) => {
+            let mut response = Json(ChainListResponse { entries }).into_response();
+            add_dynamic_rebind_headers(&mut response, &state).await;
+            response
+        }
         Err(error) => storage_error(error),
     }
 }
@@ -437,7 +454,9 @@ async fn delete_chain(
     match storage.delete_chain_entry(id).await {
         Ok(true) => {
             emit_chain_audit(&state, entry.principal_id, entry.slot);
-            StatusCode::NO_CONTENT.into_response()
+            let mut response = StatusCode::NO_CONTENT.into_response();
+            add_dynamic_rebind_headers(&mut response, &state).await;
+            response
         }
         Ok(false) => error(StatusCode::NOT_FOUND, "unknown_plugin_chain_entry"),
         Err(error) => storage_error(error),

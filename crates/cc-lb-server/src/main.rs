@@ -2,7 +2,7 @@
 
 use std::process::ExitCode;
 
-use cc_lb_server::app::ServeError;
+use cc_lb_server::app::{BuildError, ServeError};
 use cc_lb_server::cli::{Cli, Command, ConfigCommand};
 use cc_lb_server::{run_serve, validate};
 use clap::FromArgMatches;
@@ -33,7 +33,7 @@ fn main() -> ExitCode {
         }
         Err(RunError::Serve(error)) => {
             eprintln!("{error}");
-            ExitCode::FAILURE
+            serve_error_exit_code(&error)
         }
         Err(RunError::Cli(error)) => {
             eprintln!("{error}");
@@ -47,6 +47,15 @@ fn main() -> ExitCode {
             eprintln!("{error}");
             ExitCode::FAILURE
         }
+    }
+}
+
+fn serve_error_exit_code(error: &ServeError) -> ExitCode {
+    match error {
+        ServeError::Build(BuildError::Storage(
+            cc_lb_storage_redb::StorageError::BackendKindMismatch { .. },
+        )) => ExitCode::from(2),
+        _ => ExitCode::FAILURE,
     }
 }
 

@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use arc_swap::ArcSwap;
-use cc_lb_admin::{LastReloadStatus, ReloadOutcome};
+use cc_lb_admin::{DynamicViewRebinder, LastReloadStatus, ReloadOutcome};
 use cc_lb_config::{Config, ConfigError, RestartRequiredField, StorageConfig};
 use cc_lb_core::DynamicViewHolder;
 use notify::{Event, RecursiveMode, Watcher};
@@ -23,6 +23,7 @@ pub struct ConfigWatcher {
     reloads_attempted: AtomicUsize,
     last_reload_status: Arc<ArcSwap<Option<LastReloadStatus>>>,
     dynamic_view: Option<Arc<DynamicViewHolder>>,
+    dynamic_view_rebinder: Mutex<Option<Arc<dyn DynamicViewRebinder>>>,
 }
 
 impl ConfigWatcher {
@@ -50,6 +51,7 @@ impl ConfigWatcher {
             reloads_attempted: AtomicUsize::new(0),
             last_reload_status: Arc::new(ArcSwap::from(Arc::new(None))),
             dynamic_view,
+            dynamic_view_rebinder: Mutex::new(None),
         }
     }
 
@@ -63,6 +65,12 @@ impl ConfigWatcher {
 
     pub fn subscribe(&self) -> broadcast::Receiver<Arc<Config>> {
         self.reload_tx.subscribe()
+    }
+
+    pub fn set_dynamic_view_rebinder(&self, rebinder: Arc<dyn DynamicViewRebinder>) {
+        if let Ok(mut current) = self.dynamic_view_rebinder.lock() {
+            *current = Some(rebinder);
+        }
     }
 
     pub fn reload_attempts(&self) -> usize {
@@ -229,6 +237,10 @@ impl cc_lb_admin::CurrentConfig for ConfigWatcher {
 
     fn restart_required_changes(&self) -> Vec<RestartRequiredField> {
         summarize_restart_required(&self.process_start_config, &self.current_config())
+    }
+
+    fn dynamic_view_rebinder(&self) -> Option<Arc<dyn DynamicViewRebinder>> {
+        self.dynamic_view_rebinder.lock().ok()?.clone()
     }
 }
 

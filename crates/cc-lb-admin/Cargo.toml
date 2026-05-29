@@ -12,6 +12,7 @@ redb = []
 postgres = []
 
 [dependencies]
+anyhow.workspace = true
 async-trait.workspace = true
 async-stream.workspace = true
 arc-swap.workspace = true
