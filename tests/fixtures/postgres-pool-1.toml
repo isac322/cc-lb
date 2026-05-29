@@ -26,8 +26,6 @@ statement_timeout_secs = 25
 [aead]
 key_env = "CC_LB_MASTER_KEY"
 
-[signers.anthropic_oauth]
-client_id = "pool-exhaustion-test-client"
 
 [observability]
 tracing_level = "info"
