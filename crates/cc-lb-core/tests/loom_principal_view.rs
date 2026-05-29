@@ -12,7 +12,7 @@ mod principal_view_swap {
     use cc_lb_plugin_api::{
         DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal,
         PrincipalKind, RequestContext, RouteDecision, RouteError, RouterPlugin, ShapedRequest,
-        ShapedRequestBuilder, Upstream, UpstreamDialect,
+        ShapedRequestBuilder, Upstream, UpstreamCandidate, UpstreamDialect,
     };
     use cc_lb_storage_api::{PrincipalKind as DbPrincipalKind, PrincipalRecord};
     use http::{HeaderMap, Method, StatusCode};
@@ -53,7 +53,7 @@ mod principal_view_swap {
                     assert!(StdArc::strong_count(&hooks[0]) > 0);
 
                     let route = router
-                        .route(&ctx, &principal)
+                        .route(&ctx, &principal, &[])
                         .expect("stub router always returns a route");
                     loom::thread::yield_now();
 
@@ -142,6 +142,7 @@ mod principal_view_swap {
             &self,
             _ctx: &RequestContext,
             principal: &Principal,
+            _candidates: &[UpstreamCandidate],
         ) -> Result<RouteDecision, RouteError> {
             assert_eq!(principal.id, PRINCIPAL_ID);
             assert!(matches!(self.generation, 1 | 2));

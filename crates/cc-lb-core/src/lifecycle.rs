@@ -9,8 +9,8 @@ use axum::body::Body as AxumBody;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
-    RequestContext, RetryDecision, RouterPlugin, SignedRequest, Upstream, UpstreamError,
-    shape_request, sign_request,
+    RequestContext, RetryDecision, RouterPlugin, SignedRequest, Upstream, UpstreamCandidate,
+    UpstreamError, shape_request, sign_request,
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_api::{
@@ -436,7 +436,19 @@ impl Lifecycle {
             },
         );
 
-        let route = match router.route(&ctx, &principal) {
+        let mut candidates: Vec<UpstreamCandidate> = view
+            .upstream_status_snapshot
+            .entries
+            .keys()
+            .filter_map(|upstream_id_str| {
+                Uuid::parse_str(upstream_id_str)
+                    .ok()
+                    .map(|upstream_id| UpstreamCandidate { upstream_id })
+            })
+            .collect();
+        candidates.sort_by(|a, b| a.upstream_id.cmp(&b.upstream_id));
+
+        let route = match router.route(&ctx, &principal, &candidates) {
             Ok(route) => route,
             Err(source) => {
                 observe_error(hooks, "route_not_configured", &source.to_string(), "router");

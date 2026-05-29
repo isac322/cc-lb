@@ -8,6 +8,7 @@ use bytes::Bytes;
 use http::{HeaderMap, Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use url::Url;
+use uuid::Uuid;
 
 use crate::errors::{DialectError, SignerError};
 use crate::traits::{Signer, UpstreamDialect};
@@ -50,6 +51,17 @@ pub enum Upstream {
         /// Base URL for the custom Anthropic-compatible gateway.
         base_url: Url,
     },
+}
+
+/// Available upstream candidate for routing decisions.
+///
+/// The router receives a list of available upstream candidates sorted by
+/// `upstream_id` in ascending order (Uuid byte order). This stable ordering
+/// allows plugins to implement deterministic routing algorithms.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpstreamCandidate {
+    /// Stable upstream identifier.
+    pub upstream_id: Uuid,
 }
 
 /// Credential strategy expected by a selected upstream.

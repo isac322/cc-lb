@@ -16,7 +16,7 @@ fn instantiate_router_and_dialect_wrappers() {
         .instantiate_router(&fixture.manifest)
         .expect("router instantiates");
     let route = router
-        .route(&common::ctx(), &common::principal())
+        .route(&common::ctx(), &common::principal(), &[])
         .expect("route succeeds");
     match route.upstream {
         Upstream::CustomAnthropicSpec { ref base_url } => {

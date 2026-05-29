@@ -12,15 +12,21 @@ use crate::errors::{
 use crate::types::{
     ObserveEvent, PluginManifest, Principal, RequestContext, RetryDecision, RouteDecision,
     ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, Upstream,
+    UpstreamCandidate,
 };
 
 /// Router plugin boundary.
 pub trait RouterPlugin: Send + Sync {
     /// Selects the upstream and dialect for an authenticated request.
+    ///
+    /// The `candidates` parameter provides the list of available upstreams that can be
+    /// selected. Candidates are sorted by `upstream_id` ascending (Uuid byte order) to enable
+    /// deterministic routing algorithms.
     fn route(
         &self,
         ctx: &RequestContext,
         principal: &Principal,
+        candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError>;
 }
 

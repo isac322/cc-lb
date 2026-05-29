@@ -15,7 +15,7 @@ use cc_lb_core::{
 };
 use cc_lb_plugin_api::{
     ObservabilityHook, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
-    SignedRequest, SignerFactory, Upstream,
+    SignedRequest, SignerFactory, Upstream, UpstreamCandidate,
 };
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tracing_subscriber::fmt::MakeWriter;
@@ -123,6 +123,7 @@ impl RouterPlugin for NoopRouter {
         &self,
         _ctx: &RequestContext,
         _principal: &Principal,
+        _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
         Err(RouteError::NoRoute {
             reason: "noop test router".to_owned(),
