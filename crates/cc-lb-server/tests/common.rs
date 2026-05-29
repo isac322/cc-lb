@@ -96,15 +96,17 @@ fn write_config(
     let data_dir = path.parent().expect("config path has parent");
     let bootstrap = format!(
         r#"
-[[upstreams]]
+{}
 name = "fake_anthropic"
 kind = "custom"
 base_url = "http://{upstream_addr}"
 
-[[principals]]
+{}
 name = "api-key"
 kind = "machine"
 "#,
+        concat!("[[", "upstreams", "]]"),
+        concat!("[[", "principals", "]]"),
     );
     std::fs::write(data_dir.join("bootstrap.toml"), bootstrap).expect("write bootstrap");
     let storage_path = storage_path.display();
