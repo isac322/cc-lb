@@ -87,7 +87,7 @@ async fn lifecycle_updates_dynamic_view_cache_when_headers_are_observed() {
         .snapshots
         .get(&default_upstream_id())
         .expect("cache contains selected upstream");
-    assert_eq!(cache.updated_at_unix_secs > 0, true);
+    assert!(cache.updated_at_unix_secs > 0);
     assert!(snapshots.iter().any(|snapshot| {
         snapshot.kind == RateLimitKind::Requests && snapshot.remaining == Some(321)
     }));

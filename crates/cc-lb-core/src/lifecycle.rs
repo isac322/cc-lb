@@ -9,12 +9,14 @@ use axum::body::Body as AxumBody;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
-    RequestContext, RetryDecision, RouterPlugin, SignedRequest, Upstream, UpstreamCandidate,
-    UpstreamError, UpstreamKind as CandidateUpstreamKind, shape_request, sign_request,
+    RateLimitKind as PluginRateLimitKind, RequestContext, RetryDecision, RouterPlugin,
+    SignedRequest, Upstream, UpstreamCandidate, UpstreamError,
+    UpstreamKind as CandidateUpstreamKind, shape_request, sign_request,
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_api::{
-    RateLimitKind, Storage, UpstreamRateLimitObservationRecord, UpstreamRecord,
+    RateLimitKind as StoredRateLimitKind, Storage, UpstreamRateLimitObservationRecord,
+    UpstreamRecord,
     types::{RequestEvent, StoredApiKeyRecord},
     upstream::UpstreamKind as StorageUpstreamKind,
 };
@@ -39,7 +41,7 @@ use crate::dynamic_view::{
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
 use crate::hop_by_hop::strip_hop_by_hop;
-use crate::rate_limit_headers::{AnthropicRateLimitKind, parse_anthropic_rate_limit_headers};
+use crate::rate_limit_headers::parse_anthropic_rate_limit_headers;
 use crate::sse_relay;
 use crate::upstream_rate_limit_events::UpstreamRateLimitSink;
 
@@ -1174,12 +1176,12 @@ pub fn observe_rate_limits(
         .collect()
 }
 
-fn rate_limit_kind(kind: AnthropicRateLimitKind) -> RateLimitKind {
+fn rate_limit_kind(kind: PluginRateLimitKind) -> StoredRateLimitKind {
     match kind {
-        AnthropicRateLimitKind::Requests => RateLimitKind::Requests,
-        AnthropicRateLimitKind::Tokens => RateLimitKind::Tokens,
-        AnthropicRateLimitKind::InputTokens => RateLimitKind::InputTokens,
-        AnthropicRateLimitKind::OutputTokens => RateLimitKind::OutputTokens,
+        PluginRateLimitKind::Requests => StoredRateLimitKind::Requests,
+        PluginRateLimitKind::Tokens => StoredRateLimitKind::Tokens,
+        PluginRateLimitKind::InputTokens => StoredRateLimitKind::InputTokens,
+        PluginRateLimitKind::OutputTokens => StoredRateLimitKind::OutputTokens,
     }
 }
 

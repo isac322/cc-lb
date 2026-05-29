@@ -57,8 +57,10 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
     let managed_store: Arc<dyn ManagedKeyStore> =
         Arc::new(RedbManagedKeyStore::new(storage_arc.clone()));
     let storage: Arc<dyn StorageTrait> = storage_arc.clone();
-    let mut config = Config::default();
-    config.storage = cc_lb_config::StorageConfig::Redb { path: storage_path };
+    let mut config = Config {
+        storage: cc_lb_config::StorageConfig::Redb { path: storage_path },
+        ..Default::default()
+    };
     config.runtime.data_dir = Some(dir.path().to_path_buf());
     config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
     config.downstream_auth.mode = DownstreamAuthMode::None;

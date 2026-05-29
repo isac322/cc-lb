@@ -250,7 +250,6 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         Some(NoneModeConfig {
             principal_id: "anon".to_owned(),
             upstream_kind: NoneModeUpstreamKind::AnthropicKey,
-            upstream_credential_ref: "anthropic-wiremock".to_owned(),
         }),
         none_storage_path.clone(),
         litellm.uri(),
