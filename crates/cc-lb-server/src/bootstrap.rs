@@ -9,6 +9,7 @@ use cc_lb_storage_api::sparse_order;
 use cc_lb_storage_api::upstream::UpstreamCreate;
 use cc_lb_storage_api::{PluginRegistryStore, PrincipalStore, StorageResult, UpstreamStore};
 use serde::{Deserialize, Serialize};
+use url::Url;
 use serde_json::Value;
 use thiserror::Error;
 use uuid::Uuid;
@@ -59,6 +60,8 @@ pub struct BootstrapSpec {
 pub struct BootstrapUpstream {
     pub name: String,
     pub kind: String,
+    #[serde(default)]
+    pub base_url: Option<Url>,
     #[serde(default)]
     pub api_key_env: Option<String>,
 }
@@ -150,7 +153,7 @@ pub async fn apply_bootstrap(
             let create_input = UpstreamCreate {
                 name: upstream.name,
                 kind: parse_upstream_kind(&upstream.kind),
-                base_url: None,
+                base_url: upstream.base_url,
                 api_key_ciphertext: None,
             };
 
