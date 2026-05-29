@@ -57,7 +57,7 @@ case "$client" in
   *) fail "unsupported client: $client" ;;
 esac
 case "$upstream" in
-  anthropic-direct|bedrock-runtime|bedrock-mantle|vertex|custom) ;;
+  anthropic-direct|custom) ;;
   *) fail "unsupported upstream: $upstream" ;;
 esac
 
@@ -66,12 +66,7 @@ expected_file="$SCRIPT_DIR/expected/$client-$upstream.txt"
 expected=$(tr -d '\r\n' < "$expected_file")
 [ -n "$expected" ] || fail "empty expected substring: $expected_file"
 
-case "$upstream" in
-  anthropic-direct|custom) fake_package=fake-anthropic ;;
-  bedrock-runtime) fake_package=fake-bedrock-runtime ;;
-  bedrock-mantle) fake_package=fake-bedrock-mantle ;;
-  vertex) fake_package=fake-vertex ;;
-esac
+fake_package=fake-anthropic
 
 . "$SCRIPT_DIR/install.sh"
 
