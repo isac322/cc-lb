@@ -12,21 +12,24 @@ use cc_lb_core::api_keys::principal_view::{
     ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView, RouterPluginCache,
 };
 use cc_lb_core::{
-    ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamStatusEntry,
-    UpstreamStatusSnapshot, make_default_dispatcher,
+    ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamRateLimitCache,
+    UpstreamStatusEntry, UpstreamStatusSnapshot, make_default_dispatcher,
 };
 use cc_lb_dialect_anthropic::{AnthropicDirectDialect, CustomAnthropicSpecDialect};
 use cc_lb_plugin_api::{
-    PluginManifest, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, Signer,
-    SignerError, SignerFactory, Upstream, UpstreamCandidate, UpstreamDialect,
+    PluginManifest, Principal, RateLimitObservation, RequestContext, RouteDecision, RouteError,
+    RouterPlugin, Signer, SignerError, SignerFactory, Upstream, UpstreamCandidate, UpstreamDialect,
 };
 use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    AuditStore, PluginRegistryStore, PluginSlot, PrincipalRecord, PrincipalStore, StorageError,
-    StorageResult, UpstreamRecord, UpstreamStore,
+    AuditStore, PluginRegistryStore, PluginSlot, PrincipalRecord, PrincipalStore, RateLimitKind,
+    StorageError, StorageResult, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
+    UpstreamRecord, UpstreamStore,
 };
+use parking_lot::RwLock;
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::reconcile::collect_revision_hash;
 
@@ -34,6 +37,7 @@ pub struct Stores {
     pub upstreams: Arc<dyn UpstreamStore>,
     pub principals: Arc<dyn PrincipalStore>,
     pub plugin_registry: Arc<dyn PluginRegistryStore>,
+    pub upstream_rate_limits: Arc<dyn UpstreamRateLimitStateStore>,
     pub audit: Option<Arc<dyn AuditStore>>,
 }
 
@@ -109,6 +113,15 @@ pub async fn build_dynamic_view(
     data_dir: &Path,
 ) -> Result<Arc<DynamicView>, RebindError> {
     let upstreams = list_upstreams(stores).await?;
+    let all_upstream_ids = upstreams.iter().map(|upstream| upstream.id).collect::<Vec<_>>();
+    let upstream_rate_limit_records = stores
+        .upstream_rate_limits
+        .list_for_upstream_ids(&all_upstream_ids)
+        .await?;
+    let upstream_rate_limit_cache = Arc::new(RwLock::new(UpstreamRateLimitCache {
+        snapshots: group_rate_limit_observations(upstream_rate_limit_records),
+        updated_at_unix_secs: unix_now_secs(),
+    }));
     let principals = list_principals(stores).await?;
     let mut staged = Vec::new();
     let principal_chains =
@@ -141,8 +154,41 @@ pub async fn build_dynamic_view(
         .error_normalizer(Arc::new(ErrorNormalizer::new()))
         .principal_view(principal_view)
         .upstream_status_snapshot(snapshot)
+        .upstream_rate_limit_cache(upstream_rate_limit_cache)
         .upstream_records(upstreams.clone())
         .build())
+}
+
+fn group_rate_limit_observations(
+    records: Vec<UpstreamRateLimitObservationRecord>,
+) -> HashMap<Uuid, Vec<RateLimitObservation>> {
+    let mut snapshots: HashMap<Uuid, Vec<RateLimitObservation>> = HashMap::new();
+    for record in records {
+        snapshots
+            .entry(record.upstream_id)
+            .or_default()
+            .push(rate_limit_observation(record));
+    }
+    snapshots
+}
+
+fn rate_limit_observation(record: UpstreamRateLimitObservationRecord) -> RateLimitObservation {
+    RateLimitObservation {
+        kind: rate_limit_kind(record.kind),
+        window: record.window,
+        limit: record.limit,
+        remaining: record.remaining,
+        reset: record.reset,
+    }
+}
+
+fn rate_limit_kind(kind: RateLimitKind) -> cc_lb_plugin_api::RateLimitKind {
+    match kind {
+        RateLimitKind::Requests => cc_lb_plugin_api::RateLimitKind::Requests,
+        RateLimitKind::Tokens => cc_lb_plugin_api::RateLimitKind::Tokens,
+        RateLimitKind::InputTokens => cc_lb_plugin_api::RateLimitKind::InputTokens,
+        RateLimitKind::OutputTokens => cc_lb_plugin_api::RateLimitKind::OutputTokens,
+    }
 }
 
 async fn list_upstreams(stores: &Stores) -> StorageResult<Vec<UpstreamRecord>> {

@@ -198,6 +198,7 @@ async fn fixture() -> Fixture {
         upstreams: storage.clone(),
         principals: storage.clone(),
         plugin_registry: storage.clone(),
+        upstream_rate_limits: storage.clone(),
         audit: None,
     });
     let oauth = Arc::new(AnthropicOAuthConfig::default());
@@ -316,6 +317,7 @@ async fn cancel_during_rebuild_graceful() {
         )),
         principals: fixture.storage.clone(),
         plugin_registry: fixture.storage.clone(),
+        upstream_rate_limits: fixture.storage.clone(),
         audit: None,
     });
     let task = spawn_listener(&fixture, notifier.clone(), cancel.clone(), stores).await;
@@ -342,6 +344,7 @@ async fn rebuild_failure_does_not_swap_view() {
         upstreams: Arc::new(ControlledUpstreamStore::failing(fixture.storage.clone())),
         principals: fixture.storage.clone(),
         plugin_registry: fixture.storage.clone(),
+        upstream_rate_limits: fixture.storage.clone(),
         audit: None,
     });
     let task = spawn_listener(&fixture, notifier.clone(), cancel.clone(), stores).await;

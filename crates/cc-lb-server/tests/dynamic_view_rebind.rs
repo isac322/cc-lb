@@ -21,7 +21,8 @@ fn stores(storage: Arc<Storage>) -> Stores {
     Stores {
         upstreams: storage.clone(),
         principals: storage.clone(),
-        plugin_registry: storage,
+        plugin_registry: storage.clone(),
+        upstream_rate_limits: storage,
         audit: None,
     }
 }

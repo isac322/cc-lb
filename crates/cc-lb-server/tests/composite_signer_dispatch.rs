@@ -105,6 +105,7 @@ impl Fixture {
             }),
             principals: storage.clone(),
             plugin_registry: storage.clone(),
+            upstream_rate_limits: storage.clone(),
             audit: Some(storage.clone()),
         });
         let aead = Arc::new(AeadService::from_master_key([33; 32]));

@@ -77,21 +77,37 @@ pub fn build_candidates(
         return Vec::new();
     };
 
-    let mut candidates: Vec<UpstreamCandidate> = view
-        .upstreams_snapshot()
-        .iter()
-        .filter(|upstream| upstream.enabled)
-        .filter(|upstream| upstream.deleted_at_unix_secs.is_none())
-        .filter(|upstream| request_kind.matches_upstream(upstream.kind))
-        .filter(|upstream| allowed_upstreams.is_empty() || allowed_upstreams.contains(&upstream.id))
-        .map(|upstream| UpstreamCandidate {
-            upstream_id: upstream.id,
-            name: upstream.name.clone(),
-            kind: upstream_kind_for_candidate(upstream.kind),
-            observed_rate_limits: Vec::new(),
-            observed_at_unix_secs: 0,
-        })
-        .collect();
+    let mut candidates: Vec<UpstreamCandidate> = {
+        let rate_limit_cache = view.upstream_rate_limit_cache.read();
+        view.upstreams_snapshot()
+            .iter()
+            .filter(|upstream| upstream.enabled)
+            .filter(|upstream| upstream.deleted_at_unix_secs.is_none())
+            .filter(|upstream| request_kind.matches_upstream(upstream.kind))
+            .filter(|upstream| {
+                allowed_upstreams.is_empty() || allowed_upstreams.contains(&upstream.id)
+            })
+            .map(|upstream| {
+                let observed_rate_limits = rate_limit_cache
+                    .snapshots
+                    .get(&upstream.id)
+                    .cloned()
+                    .unwrap_or_default();
+                let observed_at_unix_secs = if observed_rate_limits.is_empty() {
+                    0
+                } else {
+                    rate_limit_cache.updated_at_unix_secs
+                };
+                UpstreamCandidate {
+                    upstream_id: upstream.id,
+                    name: upstream.name.clone(),
+                    kind: upstream_kind_for_candidate(upstream.kind),
+                    observed_rate_limits,
+                    observed_at_unix_secs,
+                }
+            })
+            .collect()
+    };
     candidates.sort_unstable_by_key(|c| c.upstream_id);
     candidates
 }
@@ -729,7 +745,8 @@ impl Lifecycle {
         }
 
         if response.status().is_success() || response.status() == StatusCode::TOO_MANY_REQUESTS {
-            self.enqueue_upstream_rate_limit_observations(
+            self.record_upstream_rate_limit_observations(
+                &view,
                 response.headers(),
                 resolved_upstream_id,
                 unix_now_secs(),
@@ -976,17 +993,30 @@ impl Lifecycle {
         );
     }
 
-    fn enqueue_upstream_rate_limit_observations(
+    fn record_upstream_rate_limit_observations(
         &self,
+        view: &DynamicView,
         headers: &HeaderMap,
         upstream_id: Uuid,
         observed_at: u64,
     ) {
-        let Some(sink) = &self.upstream_rate_limit_sink else {
+        let records = observe_rate_limits(headers, upstream_id, observed_at);
+        if records.is_empty() {
             return;
-        };
-        for record in observe_rate_limits(headers, upstream_id, observed_at) {
-            let _ = sink.enqueue(record);
+        }
+
+        {
+            let mut cache = view.upstream_rate_limit_cache.write();
+            for record in records.iter().cloned() {
+                cache.upsert_record(record);
+            }
+            cache.updated_at_unix_secs = observed_at;
+        }
+
+        if let Some(sink) = &self.upstream_rate_limit_sink {
+            for record in records {
+                let _ = sink.enqueue(record);
+            }
         }
     }
 

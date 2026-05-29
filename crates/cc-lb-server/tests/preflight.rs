@@ -194,6 +194,7 @@ impl Fixture {
             upstreams,
             principals,
             plugin_registry,
+            upstream_rate_limits: storage.clone(),
             audit: None,
         };
         Self {

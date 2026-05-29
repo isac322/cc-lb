@@ -575,6 +575,7 @@ async fn build_app_with_storage_inner(
         upstreams: storage_for_dynamic.clone(),
         principals: storage_for_dynamic.clone(),
         plugin_registry: storage_for_dynamic.clone(),
+        upstream_rate_limits: storage_for_dynamic.clone(),
         audit: Some(storage_for_dynamic.clone()),
     });
     let lifecycle_config = LifecycleConfig {
