@@ -346,6 +346,7 @@ fn auth_failure(state: &AppState, headers: &HeaderMap) -> Option<Response> {
 
     if header_matches(headers, "x-api-key", "")
         || header_starts_with(headers, "x-api-key", "sk-ant-")
+        || header_starts_with(headers, "x-api-key", "sk-cclb-")
     {
         state.record_auth("x-api-key:accepted");
         return None;

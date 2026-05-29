@@ -126,6 +126,9 @@ fn config_reload_accepts_plugin_unrelated_change_and_records_success() {
         status.config_path.as_deref(),
         Some(config_path.to_str().unwrap())
     );
-    assert!(matches!(status.outcome, cc_lb_admin::ReloadOutcome::Success));
+    assert!(matches!(
+        status.outcome,
+        cc_lb_admin::ReloadOutcome::Success
+    ));
     assert!(!logs.contains("configuration reload failed"));
 }

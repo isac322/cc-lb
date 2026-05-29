@@ -34,7 +34,13 @@ key_env = "CC_LB_AEAD_KEY"
         .output()
         .unwrap();
 
-    assert_eq!(output.status.code(), Some(2), "status={:?} stderr={}", output.status, String::from_utf8_lossy(&output.stderr));
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "status={:?} stderr={}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr)
+    );
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stderr.contains("AEAD") || stderr.contains("master key"),

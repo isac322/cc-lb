@@ -57,7 +57,10 @@ fn config_reload_is_storage_driven_and_keeps_runtime_view() {
         status.config_path.as_deref(),
         Some(config_path.to_str().unwrap())
     );
-    assert!(matches!(status.outcome, cc_lb_admin::ReloadOutcome::Success));
+    assert!(matches!(
+        status.outcome,
+        cc_lb_admin::ReloadOutcome::Success
+    ));
     let mut post_reload_keys = runtime.registered_slot_keys();
     post_reload_keys.sort();
     assert_eq!(post_reload_keys, pre_reload_keys);

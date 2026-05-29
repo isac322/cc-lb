@@ -260,7 +260,10 @@ mod tests {
     }
 
     fn test_view(previous_generation: u64) -> Arc<DynamicView> {
-        let principal_view = Arc::new(PrincipalView::from_db(&[], std::collections::HashMap::new()));
+        let principal_view = Arc::new(PrincipalView::from_db(
+            &[],
+            std::collections::HashMap::new(),
+        ));
         DynamicViewBuilder::new(previous_generation)
             .signer_factory(Arc::new(TestSignerFactory))
             .global_router(Arc::new(TestRouter))

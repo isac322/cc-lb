@@ -83,6 +83,7 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
     let fake_config = AppConfig {
         slow_mode_bps,
         files_cap_bytes: 104_857_600,
+        tokens_expire_in: 3600,
     };
     let fake =
         tokio::spawn(
@@ -484,13 +485,13 @@ async fn plain_get(addr: SocketAddr, path: &str) -> std::io::Result<PlainRespons
 async fn plain_post_json(
     addr: SocketAddr,
     path: &str,
-    body: &str,
+    request_body: &str,
 ) -> std::io::Result<PlainResponse> {
     let mut stream = TcpStream::connect(addr).await?;
     let request = format!(
         "POST {path} HTTP/1.1\r\nHost: {addr}\r\nAuthorization: Bearer admin-token\r\ncontent-type: application/json\r\ncontent-length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
+        request_body.len(),
+        request_body
     );
     stream.write_all(request.as_bytes()).await?;
     let mut bytes = Vec::new();
@@ -555,7 +556,7 @@ fn write_config(
     proxy_addr: SocketAddr,
     admin_addr: SocketAddr,
     metrics_addr: SocketAddr,
-    upstream_addr: SocketAddr,
+    _upstream_addr: SocketAddr,
     cert_path: &Path,
     key_path: &Path,
 ) {

@@ -48,11 +48,8 @@ fn boot_and_measure(
         let mut staged = Vec::<StagedSlot>::with_capacity(EXPECTED_SLOT_COUNT);
         for principal_index in 0..PRINCIPAL_COUNT {
             let principal = format!("principal_{principal_index:03}");
-            let (_router, router_staged) = runtime.instantiate_router_for(
-                &principal,
-                "router",
-                &router_manifest,
-            )?;
+            let (_router, router_staged) =
+                runtime.instantiate_router_for(&principal, "router", &router_manifest)?;
             staged.push(router_staged);
             let (_observe_a, observe_a_staged) = runtime.instantiate_observability_for(
                 &principal,

@@ -2,7 +2,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    CredentialStrategy, ObserveEvent, Principal, PrincipalKind, PrincipalQuotas, RequestContext, Upstream,
+    CredentialStrategy, ObserveEvent, Principal, PrincipalKind, PrincipalQuotas, RequestContext,
+    Upstream,
 };
 use http::{HeaderMap, Method, StatusCode};
 

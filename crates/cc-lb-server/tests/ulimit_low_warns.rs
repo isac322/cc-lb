@@ -45,7 +45,11 @@ async fn low_ulimit_preflight_still_succeeds() {
         .await
         .unwrap();
 
-    assert!(report.warnings.is_empty(), "unexpected warnings: {:?}", report.warnings);
+    assert!(
+        report.warnings.is_empty(),
+        "unexpected warnings: {:?}",
+        report.warnings
+    );
 
     drop(guard);
 }

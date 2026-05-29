@@ -9,9 +9,9 @@ use cc_lb_storage_api::sparse_order;
 use cc_lb_storage_api::upstream::UpstreamCreate;
 use cc_lb_storage_api::{PluginRegistryStore, PrincipalStore, StorageResult, UpstreamStore};
 use serde::{Deserialize, Serialize};
-use url::Url;
 use serde_json::Value;
 use thiserror::Error;
+use url::Url;
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -430,7 +430,10 @@ mod tests {
         let (dir, storage) = fixture();
         fs::write(
             dir.path().join("bootstrap.toml"),
-            format!("{}\nname = \"alice\"\nkind = \"human\"\n", ["[[", "principals", "]]"].concat()),
+            format!(
+                "{}\nname = \"alice\"\nkind = \"human\"\n",
+                ["[[", "principals", "]]"].concat()
+            ),
         )
         .unwrap();
 
@@ -445,12 +448,18 @@ mod tests {
         .await
         .unwrap();
 
-        let principal = PrincipalStore::get_by_name(&storage, "alice").await.unwrap().unwrap();
+        let principal = PrincipalStore::get_by_name(&storage, "alice")
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(principal.kind, PrincipalKind::Human);
 
         fs::write(
             dir.path().join("bootstrap.toml"),
-            format!("{}\nname = \"alice\"\nkind = \"human\"\n", ["[[", "principals", "]]"].concat()),
+            format!(
+                "{}\nname = \"alice\"\nkind = \"human\"\n",
+                ["[[", "principals", "]]"].concat()
+            ),
         )
         .unwrap();
         apply_bootstrap(
@@ -584,15 +593,15 @@ plugins = ["missing-plugin"]
         PrincipalStore::create(
             storage,
             PrincipalCreate {
-                    name: name.to_owned(),
-                    kind: PrincipalKind::Machine,
-                    allowed_models: Vec::new(),
-                    default_limits: Vec::new(),
+                name: name.to_owned(),
+                kind: PrincipalKind::Machine,
+                allowed_models: Vec::new(),
+                default_limits: Vec::new(),
             },
             1_800_000_000,
         )
-            .await
-            .unwrap()
+        .await
+        .unwrap()
     }
 
     async fn seed_registry(storage: &Storage, name: &str) -> WasmRegistryEntry {

@@ -1,12 +1,11 @@
 #[cfg(loom)]
 mod principal_view_swap {
     use std::collections::HashMap;
-    use std::time::Duration;
     use std::sync::Arc as StdArc;
+    use std::time::Duration;
 
     use arc_swap::ArcSwap;
     use bytes::Bytes;
-    use cc_lb_storage_api::{PrincipalKind as DbPrincipalKind, PrincipalRecord};
     use cc_lb_core::api_keys::principal_view::{
         ObservabilityHooksCache, PrincipalView, RouterPluginCache,
     };
@@ -15,6 +14,7 @@ mod principal_view_swap {
         PrincipalKind, RequestContext, RouteDecision, RouteError, RouterPlugin, ShapedRequest,
         ShapedRequestBuilder, Upstream, UpstreamDialect,
     };
+    use cc_lb_storage_api::{PrincipalKind as DbPrincipalKind, PrincipalRecord};
     use http::{HeaderMap, Method, StatusCode};
     use loom::sync::Arc;
 

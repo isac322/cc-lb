@@ -31,6 +31,7 @@ pub type PrincipalRoutingArtifacts = (RouterPluginCache, ObservabilityHooksCache
 #[derive(Debug)]
 pub struct PrincipalView {
     specs: HashMap<String, PrincipalSpecCached>,
+    name_aliases: HashMap<String, String>,
 }
 
 pub struct PrincipalSpecCached {
@@ -49,6 +50,7 @@ impl PrincipalView {
         principals: &[PrincipalRecord],
         mut principal_chains: HashMap<String, PrincipalRoutingArtifacts>,
     ) -> Self {
+        let mut name_aliases = HashMap::new();
         let specs = principals
             .iter()
             .filter(|principal| principal.deleted_at_unix_secs.is_none())
@@ -76,12 +78,14 @@ impl PrincipalView {
                         .build()
                         .unwrap_or_else(|_| unreachable!("empty glob set builds"))
                 });
+                let principal_id = principal.name.clone();
+                name_aliases.insert(principal.id.to_string(), principal_id.clone());
                 let (router_plugin, observability_hooks) = principal_chains
-                    .remove(&principal.name)
+                    .remove(&principal_id)
                     .unwrap_or((RouterPluginCache::Inherit, ObservabilityHooksCache::Inherit));
 
                 let cached = PrincipalSpecCached {
-                    id: principal.name.clone(),
+                    id: principal_id.clone(),
                     principal_type: principal.kind.into(),
                     allowed_models,
                     allowed_models_exact: exact,
@@ -96,15 +100,22 @@ impl PrincipalView {
                     observability_hooks,
                 };
 
-                (principal.name.clone(), cached)
+                (principal_id, cached)
             })
             .collect();
 
-        Self { specs }
+        Self {
+            specs,
+            name_aliases,
+        }
     }
 
     pub fn get(&self, principal_id: &str) -> Option<&PrincipalSpecCached> {
-        self.specs.get(principal_id)
+        self.specs.get(principal_id).or_else(|| {
+            self.name_aliases
+                .get(principal_id)
+                .and_then(|canonical_id| self.specs.get(canonical_id))
+        })
     }
 
     pub fn is_model_allowed(&self, principal_id: &str, model: &str) -> bool {
@@ -180,7 +191,6 @@ impl PrincipalSpecCached {
     }
 }
 
-
 impl From<cc_lb_storage_api::Limit> for Limit {
     fn from(value: cc_lb_storage_api::Limit) -> Self {
         Self {
@@ -190,7 +200,6 @@ impl From<cc_lb_storage_api::Limit> for Limit {
         }
     }
 }
-
 
 impl From<DbPrincipalKind> for PrincipalType {
     fn from(value: DbPrincipalKind) -> Self {
@@ -214,11 +223,9 @@ impl From<cc_lb_storage_api::LimitKind> for LimitKind {
     }
 }
 
-
 fn is_glob_pattern(model: &str) -> bool {
     model.chars().any(|ch| matches!(ch, '*' | '?' | '[' | ']'))
 }
-
 
 #[cfg(test)]
 mod tests {
