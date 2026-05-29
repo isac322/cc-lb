@@ -17,8 +17,7 @@ use crate::api_keys::{
 pub struct BuiltinAuthn {
     mode: DownstreamAuthMode,
     none_mode: Option<NoneModeConfig>,
-    key_store: Arc<KeyStore>,
-    principal_view: Arc<arc_swap::ArcSwap<PrincipalView>>,
+    key_store: Option<Arc<KeyStore>>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,19 +75,13 @@ impl BuiltinAuthn {
     pub fn new(
         mode: DownstreamAuthMode,
         none_mode: Option<NoneModeConfig>,
-        key_store: Arc<KeyStore>,
-        principal_view: Arc<arc_swap::ArcSwap<PrincipalView>>,
+        key_store: Option<Arc<KeyStore>>,
     ) -> Self {
         Self {
             mode,
             none_mode,
             key_store,
-            principal_view,
         }
-    }
-
-    pub(crate) fn principal_view_cell(&self) -> Arc<arc_swap::ArcSwap<PrincipalView>> {
-        self.principal_view.clone()
     }
 
     pub async fn authenticate(
@@ -103,8 +96,10 @@ impl BuiltinAuthn {
         let (parsed_key_id, secret_bytes) =
             secret::parse(input).map_err(|_| BuiltinAuthError::InvalidFormat)?;
         let index_hash = secret::compute_index_hash(&secret_bytes);
-        let (principal_id, key_id_storage, record) = self
-            .key_store
+        let Some(key_store) = &self.key_store else {
+            return Err(BuiltinAuthError::NotFound);
+        };
+        let (principal_id, key_id_storage, record) = key_store
             .lookup_by_index_hash(&index_hash)
             .await
             .map_err(map_lookup_error)?
@@ -207,7 +202,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
-    use cc_lb_config::{Config, PrincipalSpec, PrincipalType};
     use cc_lb_storage_api::{
         ManagedKeyStore, StorageResult,
         types::{ApiKeyMutation, IssueParams, PrincipalKindLite},
@@ -221,18 +215,18 @@ mod tests {
         let generated = secret::generate_new();
         let record = active_record(&generated);
         let (authn, store) = api_key_authn(
-            LookupAction::Return(Some((
+            LookupAction::Return(Box::new(Some((
                 "principal-1".to_owned(),
                 generated.key_id.clone(),
                 record.clone(),
-            ))),
+            )))),
             true,
         );
 
         let success = authn
             .authenticate(
                 &headers(generated.plaintext.expose()),
-                &authn.principal_view_cell().load(),
+                &principal_view(true),
             )
             .await
             .expect("generated key authenticates");
@@ -261,7 +255,7 @@ mod tests {
             authn
                 .authenticate(
                     &headers(generated.plaintext.expose()),
-                    &authn.principal_view_cell().load(),
+                    &principal_view(true),
                 )
                 .await,
         );
@@ -279,7 +273,7 @@ mod tests {
             authn
                 .authenticate(
                     &headers(generated.plaintext.expose()),
-                    &authn.principal_view_cell().load(),
+                    &principal_view(true),
                 )
                 .await,
         );
@@ -291,13 +285,13 @@ mod tests {
     #[tokio::test]
     async fn missing_lookup_stays_401_not_found() {
         let generated = secret::generate_new();
-        let (authn, _store) = api_key_authn(LookupAction::Return(None), true);
+        let (authn, _store) = api_key_authn(LookupAction::Return(Box::new(None)), true);
 
         let error = authn_error(
             authn
                 .authenticate(
                     &headers(generated.plaintext.expose()),
-                    &authn.principal_view_cell().load(),
+                    &principal_view(true),
                 )
                 .await,
         );
@@ -308,7 +302,9 @@ mod tests {
 
     #[tokio::test]
     async fn authenticate_none_mode_is_async() {
-        let store = Arc::new(StubManagedKeyStore::new(LookupAction::Return(None)));
+        let store = Arc::new(StubManagedKeyStore::new(LookupAction::Return(Box::new(
+            None,
+        ))));
         let authn = BuiltinAuthn::new(
             DownstreamAuthMode::None,
             Some(NoneModeConfig {
@@ -316,8 +312,7 @@ mod tests {
                 upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
                 upstream_credential_ref: "oauth-ref".to_owned(),
             }),
-            Arc::new(KeyStore::new(store)),
-            principal_view(true),
+            Some(Arc::new(KeyStore::new(store))),
         );
 
         let success = authn
@@ -341,42 +336,25 @@ mod tests {
 
     fn api_key_authn(
         lookup: LookupAction,
-        principal_enabled: bool,
+        _principal_enabled: bool,
     ) -> (BuiltinAuthn, Arc<StubManagedKeyStore>) {
         let store = Arc::new(StubManagedKeyStore::new(lookup));
         let authn = BuiltinAuthn::new(
             DownstreamAuthMode::ApiKey,
             None,
-            Arc::new(KeyStore::new(store.clone())),
-            principal_view(principal_enabled),
+            Some(Arc::new(KeyStore::new(store.clone()))),
         );
         (authn, store)
     }
 
-    fn principal_view(enabled: bool) -> Arc<arc_swap::ArcSwap<PrincipalView>> {
-        let mut principals = HashMap::new();
-        principals.insert(
-            "principal-1".to_owned(),
-            PrincipalSpec {
-                principal_type: PrincipalType::Machine,
-                default_limits: Vec::new(),
-                enabled,
-                allowed_models: Vec::new(),
-                credentials_ref: None,
-                router_plugin: None,
-                observability_hooks: None,
-            },
-        );
-        Arc::new(arc_swap::ArcSwap::from(
-            PrincipalView::from_config(
-                &Config {
-                    principals,
-                    ..Config::default()
-                },
-                HashMap::new(),
-            )
-            .expect("principal view builds"),
-        ))
+    fn principal_view(enabled: bool) -> PrincipalView {
+        PrincipalView::for_tests(
+            "principal-1",
+            enabled,
+            Vec::new(),
+            Vec::new(),
+            HashMap::new(),
+        )
     }
 
     fn headers(api_key: &str) -> HeaderMap {
@@ -405,7 +383,7 @@ mod tests {
     }
 
     enum LookupAction {
-        Return(Option<(String, String, StoredApiKeyRecord)>),
+        Return(Box<Option<(String, String, StoredApiKeyRecord)>>),
         Unavailable,
         Transient,
     }
@@ -455,7 +433,7 @@ mod tests {
                 .take()
                 .expect("lookup action is configured")
             {
-                LookupAction::Return(result) => Ok(result),
+                LookupAction::Return(result) => Ok(*result),
                 LookupAction::Unavailable => Err(StorageError::Unavailable {
                     message: "database temporarily unavailable".to_owned(),
                 }),

@@ -1,13 +1,14 @@
-use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
+use std::fs;
 use std::io;
 use std::net::SocketAddr;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+use async_trait::async_trait;
 use axum::Json;
 use axum::Router;
 use axum::body::Body;
@@ -18,47 +19,48 @@ use axum::http::{HeaderName, Request, Response, StatusCode};
 use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, ConfigError, DownstreamAuthMode, PluginRef, TlsConfig};
-#[cfg(feature = "postgres")]
-use cc_lb_config::{Limit, LimitKind, PrincipalSpec, PrincipalType};
+use cc_lb_config::{Config, DownstreamAuthMode, TlsConfig};
 use cc_lb_core::BreakerState;
 use cc_lb_core::{
     BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
-    CircuitBreakerDispatch, ErrorNormalizer, HopByHopStripLayer, Lifecycle, LifecycleConfig,
-    UpstreamDispatch, UpstreamKind,
+    CircuitBreakerDispatch, DynamicView, DynamicViewBuilder, DynamicViewHolder, HopByHopStripLayer,
+    Lifecycle, LifecycleConfig, UpstreamDispatch,
     api_keys::{
-        builtin_authn::BuiltinAuthn,
-        concurrent_guard::KeyConcurrencyManager,
-        key_store::KeyStore,
-        limit_engine::LimitEngine,
-        principal_view::{ObservabilityHooksCache, PrincipalView, RouterPluginCache},
+        builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
+        limit_engine::LimitEngine, principal_view::PrincipalView,
     },
     make_default_dispatcher, spawn_audit_writer,
     usage_pruner::UsagePruner,
 };
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
-use cc_lb_plugin_api::{ObservabilityHook, PluginManifest, RouterPlugin, RuntimeError};
-use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
-use cc_lb_storage_api::{ManagedKeyStore, Storage};
+use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_storage_api::{ManagedKeyStore, RuntimeChangeNotifier, Storage};
 use http_body_util::BodyExt;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::{JoinError, JoinHandle};
+use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 
+use crate::bootstrap;
 use crate::build_meta::BuildMeta;
-use crate::builtins::{
-    self, BuiltinError, BuiltinRouter, CompositeSignerFactory, NoopObservabilityHook,
-};
+use crate::builtins::NoopObservabilityHook;
 use crate::drain::DrainController;
-use crate::preflight::{self, PreflightOptions};
-use crate::reload::ConfigWatcher;
+use crate::dynamic_view_builder::{
+    Stores as DynamicStores, build_dynamic_view, ensure_wasm_cache_dirs,
+};
+use crate::notify_listener::{NotifyListener, NotifyListenerParams};
+use crate::preflight;
+use crate::reconcile::Reconciler;
+use crate::refresh::{LazyRefresher, OAuthRefresher};
+use crate::reload::{ConfigWatcher, summarize_restart_required};
+use crate::replica;
 use crate::signal;
 use crate::storage_factory;
 use crate::tls::{ReloadableListener, TlsState};
-use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig};
+use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig, DynamicViewRebinder};
 
 pub const PROXY_FILES_ROUTE_COLLECTION: &str = "/v1/files";
 pub const PROXY_FILES_ROUTE_ITEM: &str = "/v1/files/{id}";
@@ -69,50 +71,15 @@ pub const PROXY_FILES_ROUTE_PATHS: &[&str] = &[
     PROXY_FILES_ROUTE_ITEM_CONTENT,
 ];
 
-#[allow(clippy::type_complexity)]
-pub(crate) fn build_global_chain(
-    config: &Config,
-    runtime: &ExtismRuntime,
-    staged: &mut Vec<StagedSlot>,
-) -> Result<(Arc<dyn RouterPlugin>, Vec<Arc<dyn ObservabilityHook>>), GlobalChainError> {
-    let global_router: Arc<dyn RouterPlugin> = match &config.plugins.router_plugin {
-        Some(plugin) => {
-            let manifest = manifest_from_plugin(plugin)?;
-            let (handle, slot) = runtime.instantiate_router_global(&plugin.name, &manifest)?;
-            staged.push(slot);
-            handle
-        }
-        None => Arc::new(BuiltinRouter::new(config)?),
-    };
-
-    let mut global_observability_hooks =
-        Vec::with_capacity(config.plugins.observability_hooks.len());
-    for plugin in &config.plugins.observability_hooks {
-        let manifest = manifest_from_plugin(plugin)?;
-        let (handle, slot) = runtime.instantiate_observability_global(&plugin.name, &manifest)?;
-        staged.push(slot);
-        global_observability_hooks.push(handle);
-    }
-
-    Ok((global_router, global_observability_hooks))
-}
-
-#[derive(Debug, Error)]
-pub enum GlobalChainError {
-    #[error(transparent)]
-    Builtin(#[from] BuiltinError),
-    #[error(transparent)]
-    Runtime(#[from] RuntimeError),
-    #[error(transparent)]
-    Config(#[from] ConfigError),
-}
-
 pub struct App {
     pub router: Router,
     pub admin_router: Router,
     pub proxy_addr: SocketAddr,
     pub admin_addr: SocketAddr,
     pub reload_task: Option<JoinHandle<()>>,
+    notify_cancel: Option<CancellationToken>,
+    notifier_task: Option<JoinHandle<()>>,
+    notify_listener_task: Option<JoinHandle<()>>,
     audit_writer_task: Option<JoinHandle<()>>,
     signals: signal::SignalHandle,
     drain_controller: DrainController,
@@ -129,6 +96,39 @@ pub enum ServeError {
     Observability(#[from] cc_lb_observability::InitError),
     #[error(transparent)]
     Build(#[from] BuildError),
+}
+
+#[derive(Debug, Error)]
+pub enum BuildError {
+    #[error(transparent)]
+    Io(#[from] io::Error),
+    #[error(transparent)]
+    Config(#[from] cc_lb_config::ConfigError),
+    #[error(transparent)]
+    Preflight(#[from] crate::preflight::PreflightError),
+    #[error(transparent)]
+    Observability(#[from] cc_lb_observability::InitError),
+    #[error(transparent)]
+    Storage(#[from] cc_lb_storage_redb::StorageError),
+    #[error(transparent)]
+    StorageApi(#[from] cc_lb_storage_api::StorageError),
+    #[error(transparent)]
+    StorageFactory(#[from] crate::storage_factory::StorageFactoryError),
+    #[cfg(feature = "postgres")]
+    #[error("storage connection failed: {message}")]
+    StorageConnect { message: String },
+    #[error(transparent)]
+    Bootstrap(#[from] crate::bootstrap::BootstrapError),
+    #[error(transparent)]
+    Tls(#[from] crate::tls::TlsError),
+    #[error(transparent)]
+    Rebind(#[from] crate::dynamic_view_builder::RebindError),
+    #[error("storage is required")]
+    StorageRequired,
+    #[error("storage master key env {env} is missing")]
+    StorageKeyMissing { env: String },
+    #[error("storage master key must be 32 bytes encoded as 64 hex characters")]
+    InvalidStorageKey,
 }
 
 impl App {
@@ -151,6 +151,9 @@ impl App {
             proxy_addr,
             admin_addr,
             reload_task,
+            notify_cancel,
+            notifier_task,
+            notify_listener_task,
             audit_writer_task,
             signals,
             drain_controller: _,
@@ -196,6 +199,15 @@ impl App {
         if let Some(task) = reload_task {
             task.abort();
         }
+        if let Some(cancel) = notify_cancel {
+            cancel.cancel();
+        }
+        if let Some(task) = notifier_task {
+            let _ = task.await;
+        }
+        if let Some(task) = notify_listener_task {
+            let _ = task.await;
+        }
         let _ = admin_stop_tx.send(true);
         let _ = admin.await;
         if let Some(task) = audit_writer_task {
@@ -206,24 +218,54 @@ impl App {
     }
 }
 
-pub async fn run_serve(config_path: &Path) -> Result<(), ServeError> {
+pub async fn run_serve(
+    config_path: &Path,
+    data_dir: Option<&Path>,
+    strict_preflight: bool,
+) -> Result<(), ServeError> {
     let mut config = Config::load(config_path)?;
-    let report = preflight::run(&config, PreflightOptions { skip_bind: false }).await?;
-    print_preflight_report(&report);
+    if let Some(data_dir) = data_dir {
+        config.runtime.data_dir = Some(data_dir.to_path_buf());
+    }
     cc_lb_observability::install_panic_hook(cc_lb_observability::RedactionPolicy::new(
         config.observability.user_prompt_redaction,
     ));
     let _guard = init_observability(&mut config)?;
-    let app = build_app_with_path(config, Some(config_path)).await?;
+    let app = build_app_with_path_inner(
+        config,
+        Some(config_path),
+        Some(StartupPreflight { strict_preflight }),
+    )
+    .await?;
     app.start().await?;
     Ok(())
 }
 
 fn print_preflight_report(report: &preflight::PreflightReport) {
-    tracing::info!("preflight: ok");
+    println!("preflight: ok");
+    println!("preflight: upstream_count: {}", report.upstream_count);
+    println!("preflight: upstream_warnings: {}", report.upstream_warnings);
+    println!("preflight: principal_count: {}", report.principal_count);
+    println!(
+        "preflight: principal_disabled_count: {}",
+        report.principal_disabled_count
+    );
+    println!(
+        "preflight: plugin_chain_entry_count: {}",
+        report.plugin_chain_entry_count
+    );
+    println!(
+        "preflight: plugin_blob_missing_count: {}",
+        report.plugin_blob_missing_count
+    );
     for warning in &report.warnings {
-        tracing::info!("preflight: warning: {warning}");
+        println!("preflight: warning: {warning}");
     }
+}
+
+#[derive(Clone, Copy)]
+struct StartupPreflight {
+    strict_preflight: bool,
 }
 
 pub async fn build_app(config: Config) -> Result<App, BuildError> {
@@ -249,7 +291,7 @@ pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError
         upstream_credential_ref: "test-cred".to_owned(),
     });
     std::mem::forget(dir);
-    build_app_with_storage(config, None, managed_store, storage, aead)
+    build_app_with_storage(config, None, managed_store, storage, aead).await
 }
 
 #[cfg(feature = "postgres")]
@@ -315,6 +357,7 @@ pub async fn build_app_for_testing_postgres(database_url: &str) -> Result<App, B
         .map_err(|e| BuildError::StorageConnect {
             message: e.to_string(),
         })?;
+    seed_app_testing_storage(init_storage.as_ref(), None).await?;
 
     sqlx::query("TRUNCATE managed_api_key_index_v1, managed_api_keys_v1")
         .execute(&pool)
@@ -331,7 +374,60 @@ pub async fn build_app_for_testing_postgres(database_url: &str) -> Result<App, B
     let key = [0u8; 32];
     let aead = Arc::new(AeadService::from_master_key(key));
     let config = build_app_for_testing_postgres_config(database_url);
-    build_app_with_storage(config, None, managed_store, init_storage, aead)
+    build_app_with_storage(config, None, managed_store, init_storage, aead).await
+}
+
+#[cfg(feature = "postgres")]
+pub async fn seed_app_testing_storage(
+    storage: &dyn Storage,
+    upstream_base_url: Option<url::Url>,
+) -> Result<(), BuildError> {
+    use cc_lb_storage_api::principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind};
+    use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind};
+    use cc_lb_storage_api::{PrincipalStore, StorageError, UpstreamStore};
+
+    let now = unix_now_secs();
+    match PrincipalStore::get_by_name(storage, "test-principal").await? {
+        Some(_) => {}
+        None => {
+            PrincipalStore::create(
+                storage,
+                PrincipalCreate {
+                    name: "test-principal".to_owned(),
+                    kind: PrincipalKind::Machine,
+                    default_limits: vec![Limit {
+                        kind: LimitKind::Requests,
+                        window_secs: 60,
+                        cap_micros: 1_000_000,
+                    }],
+                    allowed_models: vec!["*".to_owned()],
+                },
+                now,
+            )
+            .await?;
+        }
+    }
+
+    if UpstreamStore::get_by_name(storage, "test-upstream")
+        .await?
+        .is_none()
+    {
+        match UpstreamStore::create(
+            storage,
+            UpstreamCreate {
+                name: "test-upstream".to_owned(),
+                kind: UpstreamKind::Custom,
+                base_url: upstream_base_url,
+                api_key_ciphertext: None,
+            },
+        )
+        .await
+        {
+            Ok(_) | Err(StorageError::Conflict { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 #[cfg(feature = "postgres")]
@@ -346,33 +442,6 @@ fn build_app_for_testing_postgres_config(database_url: &str) -> Config {
         ..Config::default()
     };
     config.admin.token = Some(TEST_ADMIN_TOKEN.to_owned());
-    config.principals.insert(
-        "test-principal".to_owned(),
-        PrincipalSpec {
-            principal_type: PrincipalType::Machine,
-            default_limits: vec![Limit {
-                kind: LimitKind::Requests,
-                window: Duration::from_secs(60),
-                cap_micros: 1_000_000,
-            }],
-            enabled: true,
-            allowed_models: vec!["*".to_owned()],
-            credentials_ref: None,
-            router_plugin: None,
-            observability_hooks: None,
-        },
-    );
-    config.upstreams.insert(
-        "test-upstream".to_owned(),
-        cc_lb_config::UpstreamSpec {
-            kind: cc_lb_config::UpstreamKind::AnthropicDirect,
-            base_url: None,
-            region: None,
-            project: None,
-            auth_strategy: cc_lb_config::AuthStrategy::ApiKey,
-            credentials_ref: None,
-        },
-    );
     config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
     config.downstream_auth.mode = DownstreamAuthMode::ApiKey;
     config.downstream_auth.none_mode = None;
@@ -383,17 +452,72 @@ pub async fn build_app_with_path(
     config: Config,
     config_path: Option<&Path>,
 ) -> Result<App, BuildError> {
-    config.validate()?;
-    let (managed_store, storage, aead) = open_storage(&config).await?;
-    build_app_with_storage(config, config_path, managed_store, storage, aead)
+    build_app_with_path_inner(config, config_path, None).await
 }
 
-pub fn build_app_with_storage(
+async fn build_app_with_path_inner(
+    config: Config,
+    config_path: Option<&Path>,
+    startup_preflight: Option<StartupPreflight>,
+) -> Result<App, BuildError> {
+    config.validate()?;
+    let (managed_store, storage, aead) = open_storage(&config).await?;
+    build_app_with_storage_inner(
+        config,
+        config_path,
+        managed_store,
+        storage,
+        aead,
+        startup_preflight,
+    )
+    .await
+}
+
+pub fn resolve_data_dir(
+    cli: Option<&Path>,
+    config_value: Option<&Path>,
+    env_var: &str,
+) -> Result<PathBuf, BuildError> {
+    let data_dir = if let Ok(env_path) = std::env::var(env_var) {
+        PathBuf::from(env_path)
+    } else if let Some(cli_path) = cli {
+        cli_path.to_path_buf()
+    } else if let Some(config_path) = config_value {
+        config_path.to_path_buf()
+    } else {
+        PathBuf::from("./data")
+    };
+
+    if !data_dir.exists() {
+        fs::create_dir_all(&data_dir)?;
+        #[cfg(unix)]
+        {
+            use std::fs::Permissions;
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&data_dir, Permissions::from_mode(0o700))?;
+        }
+    }
+
+    Ok(data_dir)
+}
+
+pub async fn build_app_with_storage(
     config: Config,
     config_path: Option<&Path>,
     managed_store: Arc<dyn ManagedKeyStore>,
     storage: Arc<dyn Storage>,
     aead: Arc<AeadService>,
+) -> Result<App, BuildError> {
+    build_app_with_storage_inner(config, config_path, managed_store, storage, aead, None).await
+}
+
+async fn build_app_with_storage_inner(
+    config: Config,
+    config_path: Option<&Path>,
+    managed_store: Arc<dyn ManagedKeyStore>,
+    storage: Arc<dyn Storage>,
+    aead: Arc<AeadService>,
+    startup_preflight: Option<StartupPreflight>,
 ) -> Result<App, BuildError> {
     let key_store = Arc::new(KeyStore::new(managed_store));
     let price_catalog = cc_lb_pricing::global_catalog().clone();
@@ -403,83 +527,139 @@ pub fn build_app_with_storage(
     let (sink, audit_writer_task) = spawn_audit_writer(storage.clone(), 1024);
     let audit_sink = Some(Arc::new(sink));
     let runtime = Arc::new(ExtismRuntime::new());
-    let signer_factory_for_lifecycle = Arc::new(CompositeSignerFactory::new(
+    let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
+    let storage_for_dynamic = storage.clone();
+    let env_token = std::env::var("CC_LB_BOOTSTRAP_ADMIN_TOKEN").ok();
+    bootstrap::apply_bootstrap(
         &config,
-        storage.clone(),
-        aead.clone(),
-    ));
+        storage.as_ref(),
+        storage.as_ref(),
+        storage.as_ref(),
+        env_token,
+        &data_dir,
+    )
+    .await?;
+    ensure_wasm_cache_dirs(&data_dir)?;
 
-    let mut all_staged = Vec::new();
-    let (global_router, global_observability_hooks) =
-        build_global_chain(&config, &runtime, &mut all_staged)?;
-
-    let mut principal_chains: HashMap<String, (RouterPluginCache, ObservabilityHooksCache)> =
-        HashMap::new();
-    for (principal_id, spec) in &config.principals {
-        let router_cache = match &spec.router_plugin {
-            Some(plugin) => {
-                let manifest = manifest_from_plugin(plugin)?;
-                let (handle, slot) =
-                    runtime.instantiate_router_for(principal_id, &plugin.name, &manifest)?;
-                all_staged.push(slot);
-                RouterPluginCache::Explicit(handle)
-            }
-            None => RouterPluginCache::Inherit,
-        };
-        let hooks_cache = match &spec.observability_hooks {
-            Some(plugins) => {
-                let mut handles = Vec::with_capacity(plugins.len());
-                for plugin in plugins {
-                    let manifest = manifest_from_plugin(plugin)?;
-                    let (handle, slot) = runtime.instantiate_observability_for(
-                        principal_id,
-                        &plugin.name,
-                        &manifest,
-                    )?;
-                    all_staged.push(slot);
-                    handles.push(handle);
-                }
-                ObservabilityHooksCache::Explicit(handles)
-            }
-            None => ObservabilityHooksCache::Inherit,
-        };
-        principal_chains.insert(principal_id.clone(), (router_cache, hooks_cache));
-    }
-
-    let view = PrincipalView::from_config(&config, principal_chains)?;
-    runtime.commit_staged(all_staged)?;
-
-    let principal_view = Arc::new(ArcSwap::from(view));
     let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
-    let limit_engine = LimitEngine::new(concurrent_mgr, principal_view.clone());
+    let limit_engine = LimitEngine::new(concurrent_mgr);
     limit_engine.startup_replay(storage.clone());
     let builtin_authn = Arc::new(BuiltinAuthn::new(
         config.downstream_auth.mode.clone(),
         config.downstream_auth.none_mode.clone(),
-        key_store.clone(),
-        principal_view.clone(),
+        Some(key_store.clone()),
     ));
 
-    let error_normalizer = Arc::new(error_normalizer(&config)?);
-    let (dispatcher, breaker_registry) = dispatcher(&config);
-    let mut lifecycle = Lifecycle::new(
-        builtin_authn.clone(),
-        signer_factory_for_lifecycle,
-        global_router,
-        dispatcher,
-        global_observability_hooks,
-        LifecycleConfig {
-            messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
-            files_body_cap_bytes: cap_to_usize(config.body.files_cap_bytes),
-        },
+    let (_dispatcher, breaker_registry) = dispatcher(&config);
+
+    let replica_identity = {
+        match replica::load_or_create_replica_id(&data_dir) {
+            Ok(id) => {
+                let started_at_unix_secs = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs();
+                Some(cc_lb_core::ReplicaIdentity {
+                    id,
+                    started_at_unix_secs,
+                })
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to load or create replica ID; proceeding without it");
+                None
+            }
+        }
+    };
+
+    let stores = Arc::new(DynamicStores {
+        upstreams: storage_for_dynamic.clone(),
+        principals: storage_for_dynamic.clone(),
+        plugin_registry: storage_for_dynamic.clone(),
+        audit: Some(storage_for_dynamic.clone()),
+    });
+    let lifecycle_config = LifecycleConfig {
+        messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
+        files_body_cap_bytes: cap_to_usize(config.body.files_cap_bytes),
+        replica_identity,
+    };
+    if let Some(startup_preflight) = startup_preflight {
+        let report = preflight::run_preflight(&stores, &lifecycle_config, &data_dir).await?;
+        print_preflight_report(&report);
+        if startup_preflight.strict_preflight && !report.warnings.is_empty() {
+            eprintln!(
+                "preflight: strict mode failed with {} warning(s)",
+                report.warnings.len()
+            );
+            std::process::exit(1);
+        }
+    }
+    let oauth_anthropic = config.oauth.anthropic.clone().unwrap_or_default();
+    let oauth_cfg = Arc::new(oauth_anthropic.clone());
+    let refresh_cancel = CancellationToken::new();
+    let lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>> =
+        lifecycle_config.replica_identity.as_ref().map(|identity| {
+            let refresher = LazyRefresher::new(
+                stores.clone(),
+                aead.clone(),
+                oauth_cfg.clone(),
+                identity.id,
+                refresh_cancel.clone(),
+            );
+            Arc::new(refresher) as Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>
+        });
+    let initial_view = build_dynamic_view(
+        &stores,
+        &oauth_anthropic,
+        aead.clone(),
+        lazy_refresher.clone(),
+        0,
+        &runtime,
+        &data_dir,
     )
-    .with_error_normalizer(error_normalizer);
+    .await?;
+    let dynamic_view_holder = Arc::new(DynamicViewHolder::new(initial_view));
+    let notify_cancel = CancellationToken::new();
+    let notifier: Arc<dyn RuntimeChangeNotifier> = storage_for_dynamic.clone();
+    let notifier_task = {
+        let notifier = Arc::clone(&notifier);
+        let cancel = notify_cancel.clone();
+        Some(tokio::spawn(async move {
+            if let Err(error) = notifier.run(cancel).await {
+                tracing::error!(error = %error, "runtime change notifier task failed");
+            }
+        }))
+    };
+    let notify_listener = Arc::new(NotifyListener::new(NotifyListenerParams {
+        notifier,
+        cancel: notify_cancel.clone(),
+        holder: Arc::clone(&dynamic_view_holder),
+        stores: Arc::clone(&stores),
+        oauth_cfg: Arc::new(oauth_anthropic.clone()),
+        runtime: Arc::clone(&runtime),
+        aead: aead.clone(),
+        data_dir: data_dir.clone(),
+        lazy_refresher: lazy_refresher.clone(),
+    }));
+    let notify_listener_task = Some(tokio::spawn(async move {
+        notify_listener.run().await;
+    }));
+    let replica_id = lifecycle_config
+        .replica_identity
+        .as_ref()
+        .map(|identity| identity.id);
+
+    let mut lifecycle = Lifecycle::new_with_dynamic_view(
+        builtin_authn.clone(),
+        dynamic_view_holder,
+        lifecycle_config,
+    );
     if let Some(audit_sink) = audit_sink.clone() {
         lifecycle = lifecycle.with_audit_sink(audit_sink);
     }
     lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), builtin_authn.clone());
     lifecycle = lifecycle.with_request_event_storage(storage.clone());
     let lifecycle = Arc::new(lifecycle);
+    let dynamic_view = lifecycle.dynamic_view();
 
     let start_time = std::time::Instant::now();
     let drain_controller = DrainController::new();
@@ -488,19 +668,51 @@ pub fn build_app_with_storage(
         Some((_, tls)) if tls.reload_on_sighup => tls_state.clone(),
         _ => None,
     };
+    let admin_rebinder: Arc<dyn DynamicViewRebinder> = Arc::new(ServerDynamicViewRebinder {
+        stores: stores.clone(),
+        oauth_cfg: Arc::new(oauth_anthropic.clone()),
+        runtime: runtime.clone(),
+        aead: aead.clone(),
+        lazy_refresher: lazy_refresher.clone(),
+        data_dir: data_dir.clone(),
+    });
     let config_watcher = config_path.map(|path| {
-        Arc::new(ConfigWatcher::new_with_principal_view(
+        let watcher = Arc::new(ConfigWatcher::new_with_principal_view(
             path,
             config.clone(),
             Arc::clone(&runtime),
-            Some(principal_view.clone()),
-        ))
+            Some(dynamic_view.clone()),
+        ));
+        watcher.set_dynamic_view_rebinder(admin_rebinder.clone());
+        watcher
     });
     let signals = signal::install(
         drain_controller.clone(),
         Duration::from_secs(config.timeouts.drain_secs),
         sighup_handler(reload_tls_state, config_watcher.clone()),
     );
+    let reconcile_cancel = CancellationToken::new();
+    spawn_reconciler(ReconcilerParams {
+        stores: stores.clone(),
+        holder: dynamic_view.clone(),
+        oauth_cfg: Arc::new(oauth_anthropic),
+        runtime: runtime.clone(),
+        aead: aead.clone(),
+        lazy_refresher: lazy_refresher.clone(),
+        cancel: reconcile_cancel.clone(),
+        data_dir: data_dir.clone(),
+    });
+    spawn_reconcile_shutdown(signals.subscribe(), reconcile_cancel);
+    if let Some(replica_id) = replica_id {
+        spawn_oauth_refresher(
+            stores.clone(),
+            aead.clone(),
+            oauth_cfg,
+            replica_id,
+            refresh_cancel.clone(),
+        );
+        spawn_reconcile_shutdown(signals.subscribe(), refresh_cancel);
+    }
     let state = ProxyState {
         lifecycle: lifecycle.clone(),
         breaker_registry,
@@ -509,11 +721,13 @@ pub fn build_app_with_storage(
         key_store: Some(key_store.clone()),
         builtin_authn: Some(builtin_authn.clone()),
     };
+
     let admin_config: Arc<dyn CurrentConfig> = match &config_watcher {
         Some(watcher) => watcher.clone(),
         None => Arc::new(InMemoryCurrentConfig::new(
             config.clone(),
-            principal_view.clone(),
+            dynamic_view.clone(),
+            Some(admin_rebinder.clone()),
         )),
     };
     let admin_state = AdminState {
@@ -523,7 +737,7 @@ pub fn build_app_with_storage(
         limit_engine: limit_engine.clone(),
         lifecycle: Some(lifecycle.clone()),
         audit_sink: audit_sink.clone(),
-        principal_view: principal_view.clone(),
+        dynamic_view: dynamic_view.clone(),
         config: admin_config,
         admin_token: config
             .admin
@@ -540,6 +754,9 @@ pub fn build_app_with_storage(
         proxy_addr: config.listener.proxy_addr,
         admin_addr: config.listener.admin_addr,
         reload_task,
+        notify_cancel: Some(notify_cancel),
+        notifier_task,
+        notify_listener_task,
         audit_writer_task: Some(audit_writer_task),
         signals,
         drain_controller,
@@ -547,18 +764,158 @@ pub fn build_app_with_storage(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
+struct ServerDynamicViewRebinder {
+    stores: Arc<DynamicStores>,
+    oauth_cfg: Arc<cc_lb_config::AnthropicOAuthConfig>,
+    runtime: Arc<ExtismRuntime>,
+    aead: Arc<AeadService>,
+    lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
+    data_dir: PathBuf,
+}
+
+#[async_trait]
+impl DynamicViewRebinder for ServerDynamicViewRebinder {
+    async fn rebuild_dynamic_view(
+        &self,
+        current_generation: u64,
+    ) -> anyhow::Result<Arc<DynamicView>> {
+        Ok(build_dynamic_view(
+            &self.stores,
+            &self.oauth_cfg,
+            self.aead.clone(),
+            self.lazy_refresher.clone(),
+            current_generation,
+            &self.runtime,
+            &self.data_dir,
+        )
+        .await?)
+    }
+}
+
+struct ReconcilerParams {
+    stores: Arc<DynamicStores>,
+    holder: Arc<DynamicViewHolder>,
+    oauth_cfg: Arc<cc_lb_config::AnthropicOAuthConfig>,
+    runtime: Arc<ExtismRuntime>,
+    aead: Arc<AeadService>,
+    lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
+    cancel: CancellationToken,
+    data_dir: PathBuf,
+}
+
+fn spawn_reconciler(params: ReconcilerParams) {
+    let reconciler = Arc::new(Reconciler::new(
+        params.stores,
+        params.holder,
+        params.oauth_cfg,
+        params.runtime,
+        params.aead,
+        params.lazy_refresher,
+        params.cancel,
+        params.data_dir,
+    ));
+    tokio::spawn(reconciler.run());
+}
+
+fn spawn_oauth_refresher(
+    stores: Arc<DynamicStores>,
+    aead: Arc<AeadService>,
+    oauth_cfg: Arc<cc_lb_config::AnthropicOAuthConfig>,
+    replica_id: uuid::Uuid,
+    cancel: CancellationToken,
+) {
+    let refresher = OAuthRefresher::new(stores, aead, oauth_cfg, replica_id, cancel);
+    tokio::spawn(Arc::new(refresher).run());
+}
+
+fn spawn_reconcile_shutdown(shutdown: watch::Receiver<bool>, cancel: CancellationToken) {
+    tokio::spawn(async move {
+        signal::wait_for_shutdown(shutdown).await;
+        cancel.cancel();
+    });
+}
+
+fn cap_to_usize(value: u64) -> usize {
+    usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+#[cfg(feature = "postgres")]
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn build_tls_state(config: &Config) -> Result<Option<Arc<TlsState>>, BuildError> {
+    let Some((_label, tls_config)) = active_tls_config(config) else {
+        return Ok(None);
+    };
+    let Some(cert_path) = tls_config.cert_path.as_ref() else {
+        return Ok(None);
+    };
+    let Some(key_path) = tls_config.key_path.as_ref() else {
+        return Ok(None);
+    };
+    Ok(Some(Arc::new(TlsState::from_paths(cert_path, key_path)?)))
+}
+
+fn active_tls_config(config: &Config) -> Option<(&'static str, &TlsConfig)> {
+    config
+        .listener
+        .tls
+        .as_ref()
+        .map(|tls| ("listener", tls))
+        .or_else(|| config.tls.as_ref().map(|tls| ("legacy", tls)))
+}
+
+fn sighup_handler(
+    tls_state: Option<Arc<TlsState>>,
+    config_watcher: Option<Arc<ConfigWatcher>>,
+) -> Option<signal::SighupHandler> {
+    if tls_state.is_none() && config_watcher.is_none() {
+        return None;
+    }
+    Some(Arc::new(move || {
+        if let Some(tls_state) = &tls_state
+            && let Err(error) = tls_state.reload()
+        {
+            tracing::warn!(error = %error, "TLS reload failed");
+        }
+        if let Some(config_watcher) = &config_watcher
+            && let Err(error) = config_watcher.reload_now()
+        {
+            tracing::warn!(error = %error, "configuration reload failed");
+        }
+    }))
+}
+
+fn spawn_reload_watcher(config_watcher: Arc<ConfigWatcher>) -> JoinHandle<()> {
+    config_watcher.spawn_file_watcher()
+}
+
 struct InMemoryCurrentConfig {
+    process_start_config: Arc<Config>,
     current: ArcSwap<Config>,
     draft: Mutex<Option<Config>>,
-    principal_view: Arc<ArcSwap<PrincipalView>>,
+    dynamic_view: Arc<DynamicViewHolder>,
+    dynamic_view_rebinder: Option<Arc<dyn DynamicViewRebinder>>,
 }
 
 impl InMemoryCurrentConfig {
-    fn new(config: Config, principal_view: Arc<ArcSwap<PrincipalView>>) -> Self {
+    fn new(
+        config: Config,
+        dynamic_view: Arc<DynamicViewHolder>,
+        dynamic_view_rebinder: Option<Arc<dyn DynamicViewRebinder>>,
+    ) -> Self {
+        let process_start_config = Arc::new(config.clone());
         Self {
+            process_start_config,
             current: ArcSwap::from_pointee(config),
             draft: Mutex::new(None),
-            principal_view,
+            dynamic_view,
+            dynamic_view_rebinder,
         }
     }
 }
@@ -566,6 +923,14 @@ impl InMemoryCurrentConfig {
 impl CurrentConfig for InMemoryCurrentConfig {
     fn current_config(&self) -> Arc<Config> {
         self.current.load_full()
+    }
+
+    fn restart_required_changes(&self) -> Vec<cc_lb_config::RestartRequiredField> {
+        summarize_restart_required(&self.process_start_config, &self.current_config())
+    }
+
+    fn dynamic_view_rebinder(&self) -> Option<Arc<dyn DynamicViewRebinder>> {
+        self.dynamic_view_rebinder.clone()
     }
 
     fn put_draft_config(&self, config: Config) -> Result<(), ConfigDraftError> {
@@ -590,9 +955,16 @@ impl CurrentConfig for InMemoryCurrentConfig {
         config
             .validate()
             .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
-        let principal_view = PrincipalView::from_config(&config, std::collections::HashMap::new())
-            .map_err(|error| ConfigDraftError::Invalid(error.to_string()))?;
-        self.principal_view.store(principal_view);
+        let principal_view = Arc::new(PrincipalView::from_db(
+            &[],
+            std::collections::HashMap::new(),
+        ));
+        let current_view = self.dynamic_view.load();
+        self.dynamic_view.store(
+            DynamicViewBuilder::from_view(&current_view)
+                .principal_view(principal_view)
+                .build(),
+        );
         let config = Arc::new(config);
         self.current.store(config.clone());
         Ok(config)
@@ -900,167 +1272,4 @@ fn dispatcher(config: &Config) -> (Arc<dyn UpstreamDispatch>, Arc<BreakerRegistr
         )),
         breaker_registry,
     )
-}
-
-fn error_normalizer(config: &Config) -> Result<ErrorNormalizer, BuildError> {
-    let mut normalizer = ErrorNormalizer::new();
-    for spec in config.upstreams.values() {
-        let upstream = builtins::upstream_from_spec(spec)?;
-        let kind = UpstreamKind::from(&upstream);
-        normalizer.register_dialect(kind, builtins::dialect_for_spec(spec)?);
-    }
-    Ok(normalizer)
-}
-
-pub(crate) fn manifest_from_plugin(plugin: &PluginRef) -> Result<PluginManifest, ConfigError> {
-    let artifact = plugin
-        .wasm_path
-        .as_ref()
-        .ok_or_else(|| {
-            ConfigError::Validation(cc_lb_config::ValidationError {
-                field: format!("plugins.{}.wasm_path", plugin.name),
-                message: "missing plugin wasm path".to_owned(),
-            })
-        })?
-        .display()
-        .to_string();
-    let mut metadata = BTreeMap::new();
-    metadata.insert(
-        "observe_batch_count".to_owned(),
-        serde_json::Value::from(plugin.batched_events_per_flush),
-    );
-    metadata.insert(
-        "observe_flush_ms".to_owned(),
-        serde_json::Value::from(plugin.batched_flush_ms),
-    );
-    Ok(PluginManifest {
-        name: plugin.name.clone(),
-        artifact,
-        config: plugin.config.clone(),
-        metadata,
-    })
-}
-
-fn build_tls_state(config: &Config) -> Result<Option<Arc<TlsState>>, BuildError> {
-    let Some((prefix, tls)) = active_tls_config(config) else {
-        return Ok(None);
-    };
-
-    let cert_path = tls
-        .cert_path
-        .as_deref()
-        .ok_or_else(|| BuildError::InvalidTlsConfig {
-            field: format!("{prefix}.cert_path"),
-            message: "missing TLS certificate path".to_owned(),
-        })?;
-    let key_path = tls
-        .key_path
-        .as_deref()
-        .ok_or_else(|| BuildError::InvalidTlsConfig {
-            field: format!("{prefix}.key_path"),
-            message: "missing TLS key path".to_owned(),
-        })?;
-
-    Ok(Some(Arc::new(TlsState::from_paths(cert_path, key_path)?)))
-}
-
-fn active_tls_config(config: &Config) -> Option<(&'static str, &TlsConfig)> {
-    if let Some(tls) = &config.listener.tls {
-        Some(("listener.tls", tls))
-    } else {
-        config.tls.as_ref().map(|tls| ("tls", tls))
-    }
-}
-
-fn spawn_reload_watcher(config_watcher: Arc<ConfigWatcher>) -> JoinHandle<()> {
-    tokio::spawn(async move {
-        config_watcher.watch_file_changes().await;
-    })
-}
-
-fn sighup_handler(
-    tls_state: Option<Arc<TlsState>>,
-    config_watcher: Option<Arc<ConfigWatcher>>,
-) -> Option<signal::SighupHandler> {
-    if tls_state.is_none() && config_watcher.is_none() {
-        return None;
-    }
-
-    Some(Arc::new(move || {
-        if let Some(tls_state) = &tls_state {
-            match tls_state.reload() {
-                Ok(()) => tracing::info!("TLS certificate reload accepted"),
-                Err(source) => tracing::warn!(error = %source, "TLS certificate reload failed"),
-            }
-        }
-        if let Some(config_watcher) = &config_watcher {
-            let _result = config_watcher.reload_now();
-        }
-    }))
-}
-
-fn cap_to_usize(value: u64) -> usize {
-    match usize::try_from(value) {
-        Ok(value) => value,
-        Err(_) => usize::MAX,
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum BuildError {
-    #[error(transparent)]
-    Config(#[from] cc_lb_config::ConfigError),
-    #[error(transparent)]
-    Builtin(#[from] crate::builtins::BuiltinError),
-    #[error(transparent)]
-    Runtime(#[from] cc_lb_plugin_api::RuntimeError),
-    #[error(transparent)]
-    Observability(#[from] cc_lb_observability::InitError),
-    #[error(transparent)]
-    Storage(#[from] cc_lb_storage_redb::StorageError),
-    #[error(transparent)]
-    StorageFactory(#[from] crate::storage_factory::StorageFactoryError),
-    #[error(transparent)]
-    Io(#[from] std::io::Error),
-    #[error(transparent)]
-    Tls(#[from] crate::tls::TlsError),
-    #[error("missing storage key env {env}")]
-    StorageKeyMissing { env: String },
-    #[error("storage key must be 64 hexadecimal characters")]
-    InvalidStorageKey,
-    #[error("invalid plugin {name}: {reason}")]
-    InvalidPlugin { name: String, reason: String },
-    #[error("{field}: {message}")]
-    InvalidTlsConfig { field: String, message: String },
-    #[error("storage connection failed: {message}")]
-    StorageConnect { message: String },
-}
-
-#[cfg(all(test, feature = "postgres"))]
-mod tests {
-    use cc_lb_config::DownstreamAuthMode;
-
-    use super::{build_app_for_testing_postgres, build_app_for_testing_postgres_config};
-
-    #[tokio::test]
-    async fn build_app_for_testing_postgres_smoke() -> Result<(), Box<dyn std::error::Error>> {
-        let url = match std::env::var("CI_POSTGRES_URL") {
-            Ok(u) => u,
-            Err(_) => return Ok(()),
-        };
-        let config = build_app_for_testing_postgres_config(&url);
-        assert_eq!(config.downstream_auth.mode, DownstreamAuthMode::ApiKey);
-        let _app = build_app_for_testing_postgres(&url).await?;
-        Ok(())
-    }
-}
-
-impl From<GlobalChainError> for BuildError {
-    fn from(error: GlobalChainError) -> Self {
-        match error {
-            GlobalChainError::Builtin(source) => Self::Builtin(source),
-            GlobalChainError::Runtime(source) => Self::Runtime(source),
-            GlobalChainError::Config(source) => Self::Config(source),
-        }
-    }
 }

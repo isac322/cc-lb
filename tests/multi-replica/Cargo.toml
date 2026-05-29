@@ -1,0 +1,11 @@
+[package]
+name = "tests-multi-replica"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[[test]]
+name = "multi_replica_notify_and_failover"
+path = "tests/multi_replica_notify_and_failover.rs"

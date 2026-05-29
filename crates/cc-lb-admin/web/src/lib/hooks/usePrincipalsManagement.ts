@@ -1,18 +1,18 @@
 import { useCallback, useEffect, useState } from 'react';
-import { getJson, type PrincipalSpec } from '../api';
+import { getJson, type PrincipalRuntimeSpec } from '../api';
 
-export interface PrincipalWithId extends PrincipalSpec {
+export interface PrincipalWithId extends PrincipalRuntimeSpec {
   id: string;
 }
 
 export function usePrincipalsManagement(mock?: boolean) {
-  const [principals, setPrincipals] = useState<PrincipalWithId[]>([]);
+  const [principalList, setPrincipalList] = useState<PrincipalWithId[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState<Error | null>(null);
 
   const fetchPrincipals = useCallback(async () => {
     if (mock) {
-      setPrincipals([
+      setPrincipalList([
         {
           id: 'alice',
           disabled: false,
@@ -44,23 +44,18 @@ export function usePrincipalsManagement(mock?: boolean) {
       setIsLoading(true);
       setError(null);
 
-      const [current, draftRes] = await Promise.all([
-        getJson<Record<string, unknown>>('/admin/config/current'),
-        getJson<Record<string, unknown>>('/admin/config/draft'),
-      ]);
+      const response = await getJson<{
+        principals: Array<
+          PrincipalRuntimeSpec & { id: string; enabled?: boolean }
+        >;
+      }>('/admin/v1/principals');
 
-      const config = (draftRes.draft as Record<string, unknown>) || current;
-      const principalsMap =
-        (config.principals as Record<string, unknown>) || {};
+      const list = response.principals.map((principal) => ({
+        ...principal,
+        disabled: principal.enabled === false,
+      }));
 
-      const list = Object.entries(principalsMap).map(
-        ([id, spec]: [string, unknown]) => ({
-          id,
-          ...(spec as PrincipalSpec),
-        }),
-      );
-
-      setPrincipals(list);
+      setPrincipalList(list);
     } catch (err) {
       setError(err instanceof Error ? err : new Error(String(err)));
     } finally {
@@ -72,5 +67,10 @@ export function usePrincipalsManagement(mock?: boolean) {
     fetchPrincipals();
   }, [fetchPrincipals]);
 
-  return { principals, refresh: fetchPrincipals, isLoading, error };
+  return {
+    principals: principalList,
+    refresh: fetchPrincipals,
+    isLoading,
+    error,
+  };
 }

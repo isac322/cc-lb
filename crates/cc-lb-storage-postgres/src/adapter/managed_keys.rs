@@ -3,8 +3,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    ApiKeyMutation, IssueParams, KeyStatus, Limit, ManagedKeyStore, PrincipalKindLite,
-    StorageError, StorageResult, StoredApiKeyRecord, UpstreamKind, validate_identifier,
+    ManagedKeyStore, StorageError, StorageResult,
+    types::{
+        ApiKeyMutation, IssueParams, KeyStatus, Limit, PrincipalKindLite, StoredApiKeyRecord,
+        UpstreamKind,
+    },
+    validate_identifier,
 };
 use serde_json::Value;
 use sqlx::{PgPool, Row, postgres::PgRow};
@@ -540,7 +544,7 @@ fn now_unix_secs() -> u64 {
 mod tests {
     use std::{error::Error, str::FromStr, sync::Arc};
 
-    use cc_lb_storage_api::{LimitKind, ManagedKeyStore};
+    use cc_lb_storage_api::{ManagedKeyStore, types::LimitKind};
     use sqlx::{
         AssertSqlSafe,
         postgres::{PgConnectOptions, PgPoolOptions},

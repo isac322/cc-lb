@@ -31,7 +31,7 @@ export function usePrincipalUsage(
       try {
         setIsLoading(true);
         const res = await getJson<DashboardUsageResponse>(
-          `/admin/principals/${principalId}/usage?range=${range}`,
+          `/admin/v1/principals/${principalId}/usage?range=${range}`,
           { signal: controller.signal },
         );
         setData(res);

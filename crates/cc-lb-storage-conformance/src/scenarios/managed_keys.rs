@@ -5,8 +5,10 @@ use std::{collections::HashSet, future::Future, sync::Arc};
 use anyhow::{Result, ensure};
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind, ManagedKeyStore, PrincipalKindLite,
-    StorageError, UpstreamKind,
+    ManagedKeyStore, StorageError,
+    types::{
+        ApiKeyMutation, IssueParams, KeyStatus, Limit, LimitKind, PrincipalKindLite, UpstreamKind,
+    },
 };
 use futures::future::try_join_all;
 

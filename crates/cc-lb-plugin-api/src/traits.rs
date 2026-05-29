@@ -60,6 +60,22 @@ pub trait SignerFactory: Send + Sync {
     async fn build(&self, upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError>;
 }
 
+/// Factory extension that can bind a downstream API key before signer construction.
+pub trait ApiKeyAwareSignerFactory: Send + Sync {
+    /// Returns a signer factory using the supplied downstream API key.
+    fn with_api_key(&self, api_key: String) -> Arc<dyn SignerFactory>;
+
+    /// Returns a signer factory using the authenticated upstream credential reference.
+    fn with_auth_context(
+        &self,
+        api_key: String,
+        _upstream_kind: &'static str,
+        _upstream_credential_ref: String,
+    ) -> Arc<dyn SignerFactory> {
+        self.with_api_key(api_key)
+    }
+}
+
 /// Non-blocking observability hook boundary.
 pub trait ObservabilityHook: Send + Sync {
     /// Observes a lifecycle event.

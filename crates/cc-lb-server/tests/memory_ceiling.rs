@@ -1,16 +1,11 @@
-mod reload_common;
-
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::PathBuf;
 
-use arc_swap::ArcSwap;
-use cc_lb_core::api_keys::principal_view::PrincipalView;
-use cc_lb_runtime_extism::ExtismRuntime;
-use cc_lb_server::reload::ConfigWatcher;
+use cc_lb_plugin_api::PluginManifest;
+use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
+use serde_json::json;
 
 const PRINCIPAL_COUNT: usize = 200;
 const PLUGINS_PER_PRINCIPAL: usize = 3;
@@ -21,15 +16,8 @@ const RSS_DELTA_CEILING_KIB: u64 = 512 * 1024;
 fn per_principal_plugin_slots_stay_under_memory_ceiling() -> Result<(), Box<dyn std::error::Error>>
 {
     let fixture = StubWasms::new()?;
-    let baseline_dir = tempfile::tempdir()?;
-    let baseline_path = baseline_dir.path().join("cc-lb-baseline.toml");
-    write_config(&baseline_path, &fixture, false)?;
-    let (_baseline_runtime, baseline_rss_kib) = boot_and_measure(&baseline_path)?;
-
-    let loaded_dir = tempfile::tempdir()?;
-    let loaded_path = loaded_dir.path().join("cc-lb-loaded.toml");
-    write_config(&loaded_path, &fixture, true)?;
-    let (runtime, loaded_rss_kib) = boot_and_measure(&loaded_path)?;
+    let (_baseline_runtime, baseline_rss_kib) = boot_and_measure(&fixture, false)?;
+    let (runtime, loaded_rss_kib) = boot_and_measure(&fixture, true)?;
 
     let slot_count = runtime.registered_slot_keys().len();
     assert_eq!(slot_count, EXPECTED_SLOT_COUNT);
@@ -50,21 +38,34 @@ fn per_principal_plugin_slots_stay_under_memory_ceiling() -> Result<(), Box<dyn 
 }
 
 fn boot_and_measure(
-    config_path: &Path,
-) -> Result<(Arc<ExtismRuntime>, u64), Box<dyn std::error::Error>> {
-    let config = reload_common::load_config(config_path);
-    let runtime = Arc::new(ExtismRuntime::new());
-    let principal_view = Arc::new(ArcSwap::from(PrincipalView::from_config(
-        &config,
-        HashMap::new(),
-    )?));
-    let watcher = ConfigWatcher::new_with_principal_view(
-        config_path,
-        config,
-        runtime.clone(),
-        Some(principal_view),
-    );
-    watcher.reload_now()?;
+    fixture: &StubWasms,
+    include_plugins: bool,
+) -> Result<(ExtismRuntime, u64), Box<dyn std::error::Error>> {
+    let runtime = ExtismRuntime::new();
+    if include_plugins {
+        let router_manifest = fixture.router_manifest();
+        let observe_manifest = fixture.observe_manifest();
+        let mut staged = Vec::<StagedSlot>::with_capacity(EXPECTED_SLOT_COUNT);
+        for principal_index in 0..PRINCIPAL_COUNT {
+            let principal = format!("principal_{principal_index:03}");
+            let (_router, router_staged) =
+                runtime.instantiate_router_for(&principal, "router", &router_manifest)?;
+            staged.push(router_staged);
+            let (_observe_a, observe_a_staged) = runtime.instantiate_observability_for(
+                &principal,
+                "observe-a",
+                &observe_manifest,
+            )?;
+            staged.push(observe_a_staged);
+            let (_observe_b, observe_b_staged) = runtime.instantiate_observability_for(
+                &principal,
+                "observe-b",
+                &observe_manifest,
+            )?;
+            staged.push(observe_b_staged);
+        }
+        runtime.commit_staged(staged)?;
+    }
     Ok((runtime, vmrss_kib()?))
 }
 
@@ -87,52 +88,24 @@ impl StubWasms {
             observe_path,
         })
     }
-}
 
-fn write_config(path: &Path, fixture: &StubWasms, include_plugins: bool) -> io::Result<()> {
-    let proxy_addr: SocketAddr = "127.0.0.1:18080".parse().expect("proxy addr parses");
-    let mut config = format!(
-        r#"[listener]
-proxy_addr = "{proxy_addr}"
-admin_addr = "127.0.0.1:19090"
-metrics_addr = "127.0.0.1:19091"
-
-[body]
-messages_cap_bytes = 1048576
-files_cap_bytes = 1048576
-
-"#
-    );
-
-    let router_path = reload_common::toml_path(&fixture.router_path);
-    let observe_path = reload_common::toml_path(&fixture.observe_path);
-    for principal_index in 0..PRINCIPAL_COUNT {
-        config.push_str(&format!(
-            r#"[principals.principal_{principal_index:03}]
-allowed_models = ["*"]
-
-"#
-        ));
-        if include_plugins {
-            config.push_str(&format!(
-                r#"[principals.principal_{principal_index:03}.router_plugin]
-name = "router"
-wasm_path = "{router_path}"
-
-[[principals.principal_{principal_index:03}.observability_hooks]]
-name = "observe-a"
-wasm_path = "{observe_path}"
-
-[[principals.principal_{principal_index:03}.observability_hooks]]
-name = "observe-b"
-wasm_path = "{observe_path}"
-
-"#
-            ));
+    fn router_manifest(&self) -> PluginManifest {
+        PluginManifest {
+            name: "router".to_owned(),
+            artifact: self.router_path.to_string_lossy().into_owned(),
+            config: json!({}),
+            metadata: BTreeMap::new(),
         }
     }
 
-    fs::write(path, config)
+    fn observe_manifest(&self) -> PluginManifest {
+        PluginManifest {
+            name: "observe".to_owned(),
+            artifact: self.observe_path.to_string_lossy().into_owned(),
+            config: json!({}),
+            metadata: BTreeMap::new(),
+        }
+    }
 }
 
 fn vmrss_kib() -> io::Result<u64> {

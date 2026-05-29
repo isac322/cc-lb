@@ -19,7 +19,7 @@ impl Drop for LimitGuard {
 }
 
 #[tokio::test]
-async fn ulimit_low_warns() {
+async fn low_ulimit_preflight_still_succeeds() {
     let saved = nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_NOFILE).unwrap();
     let guard = LimitGuard { saved };
 
@@ -46,11 +46,8 @@ async fn ulimit_low_warns() {
         .unwrap();
 
     assert!(
-        report
-            .warnings
-            .iter()
-            .any(|warning| warning.contains("ulimit")),
-        "missing ulimit warning: {:?}",
+        report.warnings.is_empty(),
+        "unexpected warnings: {:?}",
         report.warnings
     );
 

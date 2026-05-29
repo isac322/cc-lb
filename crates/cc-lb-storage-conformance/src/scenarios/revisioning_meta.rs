@@ -165,7 +165,7 @@ where
         ConfigStore::append_config_history(
             storage.as_ref(),
             7,
-            "[upstreams.primary]".to_owned(),
+            "[legacy-upstreams.primary]".to_owned(),
             1_800_000_007,
             summary.clone(),
         )
@@ -173,7 +173,7 @@ where
         ConfigStore::append_config_history(
             storage.as_ref(),
             3,
-            "[principals.local]".to_owned(),
+            "[legacy-principals.local]".to_owned(),
             1_800_000_003,
             history_summary(3),
         )
@@ -183,7 +183,7 @@ where
             .await?
             .expect("revision 7 should be present");
         assert_eq!(entry.revision, 7);
-        assert_eq!(entry.config_toml, "[upstreams.primary]");
+        assert_eq!(entry.config_toml, "[legacy-upstreams.primary]");
         assert_eq!(entry.applied_at_unix_secs, 1_800_000_007);
         assert_eq!(entry.summary, summary);
         assert!(

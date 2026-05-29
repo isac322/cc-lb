@@ -19,7 +19,7 @@ use cc_lb_storage_api::{
     ApiKeyStore, AuditEntry, AuditStore, BackendKind, ConfigDraftState, ConfigStore, HistoryEntry,
     HistorySummary, LimitStateStore, MetaStore, OAuthCredentialStore, OAuthCredentials,
     PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, QuotaStore, RequestEvent,
-    RequestEventStore, Storage, StorageError, StorageResult, UsageRollup, UsageRollupResolution,
+    RequestEventStore, StorageError, StorageResult, UsageRollup, UsageRollupResolution,
     UsageRollupRun, UsageRollupStore,
 };
 use http::header::USER_AGENT;
@@ -98,7 +98,7 @@ pub struct MemoryStorage {
 }
 
 pub struct TestStorage {
-    pub storage: Arc<dyn Storage>,
+    pub storage: Arc<dyn OAuthCredentialStore>,
     pub aead: Arc<AeadService>,
 }
 
@@ -141,13 +141,13 @@ impl TestStorage {
 
 pub fn storage() -> TestStorage {
     let storage = Arc::new(MemoryStorage::default());
-    let storage: Arc<dyn Storage> = storage;
+    let storage: Arc<dyn OAuthCredentialStore> = storage;
     let aead = Arc::new(AeadService::from_master_key([0x42; 32]));
     TestStorage { storage, aead }
 }
 
 pub fn signer(
-    storage: Arc<dyn Storage>,
+    storage: Arc<dyn OAuthCredentialStore>,
     aead: Arc<AeadService>,
     http: Arc<dyn OAuthHttpClient>,
 ) -> AnthropicOAuthSigner {

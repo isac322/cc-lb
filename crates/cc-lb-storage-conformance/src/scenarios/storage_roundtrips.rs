@@ -42,6 +42,7 @@ macro_rules! assert_byte_identical {
 pub async fn run_all<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,
+    B::Storage: cc_lb_storage_api::Storage,
 {
     audit_store_roundtrip(Arc::clone(&backend)).await?;
     request_event_store_roundtrip(Arc::clone(&backend)).await?;
@@ -55,6 +56,7 @@ where
 pub async fn audit_store_roundtrip<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,
+    B::Storage: cc_lb_storage_api::Storage,
 {
     let mut fixture = ConformanceFixture::new(backend).await?;
     let result: Result<()> = async {
@@ -79,6 +81,7 @@ where
 pub async fn request_event_store_roundtrip<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,
+    B::Storage: cc_lb_storage_api::Storage,
 {
     let mut fixture = ConformanceFixture::new(backend).await?;
     let result: Result<()> = async {
@@ -103,6 +106,7 @@ where
 pub async fn limit_state_store_roundtrip<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,
+    B::Storage: cc_lb_storage_api::Storage,
 {
     let mut fixture = ConformanceFixture::new(backend).await?;
     let result: Result<()> = async {
@@ -153,6 +157,7 @@ where
 pub async fn config_store_roundtrip<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,
+    B::Storage: cc_lb_storage_api::Storage,
 {
     let mut fixture = ConformanceFixture::new(backend).await?;
     let result: Result<()> = async {
@@ -183,7 +188,7 @@ where
 
         let history = HistoryEntry {
             revision,
-            config_toml: "[upstreams.primary]\nkind = \"anthropic_direct\"\n".to_owned(),
+            config_toml: "[oauth.anthropic]\nclient_id = \"test-client\"\n".to_owned(),
             applied_at_unix_secs: 1_800_400_010,
             summary: HistorySummary {
                 upstreams: 1,
@@ -225,6 +230,7 @@ where
 pub async fn oauth_credential_store_roundtrip<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,
+    B::Storage: cc_lb_storage_api::Storage,
 {
     let mut fixture = ConformanceFixture::new(backend).await?;
     let result: Result<()> = async {

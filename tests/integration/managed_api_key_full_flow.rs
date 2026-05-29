@@ -1,19 +1,36 @@
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use http::{HeaderMap, StatusCode};
+
 use cc_lb_config::{
-    AuthStrategy, Config, DownstreamAuthMode, Limit, LimitKind, NoneModeConfig,
-    NoneModeUpstreamKind, PrincipalSpec, PrincipalType, StorageConfig, UpstreamKind, UpstreamSpec,
+    Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, StorageConfig,
 };
-use cc_lb_pricing::{UpstreamKind as PricingUpstreamKind, global_catalog};
+use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
+use cc_lb_pricing::{
+    CatalogSnapshot, CatalogStatus, Pricing, UpstreamKind as PricingUpstreamKind, UsdPerMillion,
+    global_catalog,
+};
 use cc_lb_server::{BuildError, build_app, signal::SignalHandle};
-use reqwest::{Client, StatusCode};
+use cc_lb_storage_api::{
+    principal::{
+        Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalCreate, PrincipalKind,
+        PrincipalStore,
+    },
+    types::{
+        Limit as KeyLimit, LimitKind as KeyLimitKind, PrincipalKindLite,
+        UpstreamKind as KeyUpstreamKind,
+    },
+    upstream::{UpstreamCreate, UpstreamKind, UpstreamStore},
+};
+use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
 use serde_json::{Value, json};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 use tokio::task::JoinHandle;
-use tokio::time::{Instant, sleep, timeout};
+use tokio::time::{Instant, sleep};
 use url::Url;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
@@ -32,7 +49,7 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         std::env::set_var("CC_LB_ADMIN_TOKEN", ADMIN_TOKEN);
     }
 
-    let client = Client::builder().timeout(Duration::from_secs(10)).build()?;
+    let client = TestClient::new(Duration::from_secs(10));
     let litellm = MockServer::start().await;
     let usage_tokens = Arc::new(AtomicU64::new(20));
     let upstream = MockServer::start().await;
@@ -56,8 +73,8 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         None,
         storage_path.clone(),
         litellm.uri(),
-        upstream.uri(),
     );
+    let (plaintext_key, key_id) = seed_runtime_state(&storage_path, upstream.uri(), "u1").await?;
     let server = StartedServer::start(initial_config.clone()).await?;
     wait_for_price_catalog().await?;
     append_step(
@@ -65,60 +82,10 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         "setup complete: tempdir storage, wiremock LiteLLM/upstream, build_app server started",
     )?;
 
-    let mut draft_config = initial_config.clone();
-    draft_config
-        .principals
-        .insert("u1".to_owned(), managed_principal());
-    let draft_response = client
-        .put(format!("{}/admin/config/draft", server.admin_url))
-        .bearer_auth(ADMIN_TOKEN)
-        .json(&serde_json::json!({
-            "draft": serde_json::to_value(&draft_config)?,
-            "expected_revision": 0,
-        }))
-        .send()
-        .await?;
-    assert_eq!(
-        draft_response.status(),
-        StatusCode::OK,
-        "draft response: {}",
-        draft_response.text().await?
-    );
-    let apply_response = client
-        .post(format!("{}/admin/config/apply", server.admin_url))
-        .bearer_auth(ADMIN_TOKEN)
-        .send()
-        .await?;
-    assert_eq!(
-        apply_response.status(),
-        StatusCode::OK,
-        "apply response: {}",
-        apply_response.text().await?
-    );
-    append_step(2, "principal u1 created through admin config draft/apply")?;
-
-    let issue_response = client
-        .post(format!("{}/admin/principals/u1/keys", server.admin_url))
-        .bearer_auth(ADMIN_TOKEN)
-        .json(&json!({
-            "upstream_kind": "anthropic_key",
-            "upstream_credential_ref": "k1",
-            "label": "prod"
-        }))
-        .send()
-        .await?;
-    assert_eq!(
-        issue_response.status(),
-        StatusCode::CREATED,
-        "issue response: {}",
-        issue_response.text().await?
-    );
-    let issued: Value = issue_response.json().await?;
-    let plaintext_key = issued["plaintext_key"]
-        .as_str()
-        .expect("plaintext key")
-        .to_owned();
-    let key_id = issued["key_id"].as_str().expect("key id").to_owned();
+    append_step(
+        2,
+        "principal u1, upstream, and API key seeded through runtime storage",
+    )?;
     append_step(3, &format!("issued key {key_id} for principal u1"))?;
 
     let happy = send_message(&client, &server.proxy_url, Some(&plaintext_key)).await?;
@@ -149,9 +116,8 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
     let usage = wait_for_usage(&client, &server.admin_url, &key_id).await?;
     append_step(
         5,
-        "usage endpoint observed at least one request event for issued key",
+        "usage rollup observed at least one request event for issued key",
     )?;
-
     let first_series = usage["series"]
         .as_array()
         .unwrap()
@@ -162,7 +128,7 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
     assert!(first_series["request_count"].as_u64().unwrap_or(0) > 0);
     append_step(
         6,
-        "usage series has positive request_count and cost_usd_micros",
+        "usage rollup has positive request_count and virtual_cost_micros",
     )?;
 
     usage_tokens.store(10_000, Ordering::SeqCst);
@@ -190,12 +156,15 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     let disable_response = client
-        .post(format!(
-            "{}/admin/principals/u1/keys/{key_id}/disable",
-            server.admin_url
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .send()
+        .request(
+            "POST",
+            &format!(
+                "{}/admin/principals/u1/keys/{key_id}/disable",
+                server.admin_url
+            ),
+            &[("authorization", &format!("Bearer {ADMIN_TOKEN}"))],
+            &[],
+        )
         .await?;
     assert_eq!(
         disable_response.status(),
@@ -213,12 +182,15 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
     append_step(8, "disabled key rejects /v1/messages with 403")?;
 
     let enable_response = client
-        .post(format!(
-            "{}/admin/principals/u1/keys/{key_id}/enable",
-            server.admin_url
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .send()
+        .request(
+            "POST",
+            &format!(
+                "{}/admin/principals/u1/keys/{key_id}/enable",
+                server.admin_url
+            ),
+            &[("authorization", &format!("Bearer {ADMIN_TOKEN}"))],
+            &[],
+        )
         .await?;
     assert_eq!(
         enable_response.status(),
@@ -227,12 +199,12 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         enable_response.text().await?
     );
     let key_response = client
-        .get(format!(
-            "{}/admin/principals/u1/keys/{key_id}",
-            server.admin_url
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .send()
+        .request(
+            "GET",
+            &format!("{}/admin/principals/u1/keys/{key_id}", server.admin_url),
+            &[("authorization", &format!("Bearer {ADMIN_TOKEN}"))],
+            &[],
+        )
         .await?;
     assert_eq!(
         key_response.status(),
@@ -245,12 +217,15 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
     append_step(9, "enabled key reports Active through GET key endpoint")?;
 
     let revoke_response = client
-        .post(format!(
-            "{}/admin/principals/u1/keys/{key_id}/revoke",
-            server.admin_url
-        ))
-        .bearer_auth(ADMIN_TOKEN)
-        .send()
+        .request(
+            "POST",
+            &format!(
+                "{}/admin/principals/u1/keys/{key_id}/revoke",
+                server.admin_url
+            ),
+            &[("authorization", &format!("Bearer {ADMIN_TOKEN}"))],
+            &[],
+        )
         .await?;
     assert_eq!(
         revoke_response.status(),
@@ -266,7 +241,6 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         revoked.text().await?
     );
     append_step(10, "revoked key rejects /v1/messages with 401")?;
-
     server.shutdown().await;
 
     usage_tokens.store(20, Ordering::SeqCst);
@@ -276,12 +250,12 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         Some(NoneModeConfig {
             principal_id: "anon".to_owned(),
             upstream_kind: NoneModeUpstreamKind::AnthropicKey,
-            upstream_credential_ref: "k1".to_owned(),
+            upstream_credential_ref: "anthropic-wiremock".to_owned(),
         }),
         none_storage_path.clone(),
         litellm.uri(),
-        upstream.uri(),
     );
+    seed_runtime_state(&none_storage_path, upstream.uri(), "anon").await?;
     let none_server = StartedServer::start(none_config).await?;
     let none_response = send_message(&client, &none_server.proxy_url, None).await?;
     assert_eq!(
@@ -325,6 +299,166 @@ impl Respond for UsageResponder {
     }
 }
 
+struct TestClient {
+    timeout: Duration,
+}
+
+struct TestResponse {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Vec<u8>,
+}
+
+impl TestClient {
+    fn new(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+
+    async fn get_status(&self, url: &str) -> std::io::Result<StatusCode> {
+        self.request("GET", url, &[], &[])
+            .await
+            .map(|response| response.status)
+    }
+
+    async fn request(
+        &self,
+        method: &str,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> std::io::Result<TestResponse> {
+        tokio::time::timeout(self.timeout, raw_http(method, url, headers, body))
+            .await
+            .map_err(|_| std::io::Error::new(std::io::ErrorKind::TimedOut, "request timed out"))?
+    }
+}
+
+impl TestResponse {
+    fn status(&self) -> StatusCode {
+        self.status
+    }
+
+    fn headers(&self) -> &HeaderMap {
+        &self.headers
+    }
+
+    async fn text(&self) -> Result<String, std::string::FromUtf8Error> {
+        String::from_utf8(self.body.clone())
+    }
+
+    async fn json(&self) -> serde_json::Result<Value> {
+        serde_json::from_slice(&self.body)
+    }
+}
+
+async fn raw_http(
+    method: &str,
+    url: &str,
+    headers: &[(&str, &str)],
+    body: &[u8],
+) -> std::io::Result<TestResponse> {
+    let url = Url::parse(url).expect("test url");
+    let host = url.host_str().expect("test url host");
+    let port = url.port_or_known_default().expect("test url port");
+    let mut target = url.path().to_owned();
+    if let Some(query) = url.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    let authority = if url.port().is_some() {
+        format!("{host}:{port}")
+    } else {
+        host.to_owned()
+    };
+    let mut request = format!(
+        "{method} {target} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    for (name, value) in headers {
+        request.push_str(name);
+        request.push_str(": ");
+        request.push_str(value);
+        request.push_str("\r\n");
+    }
+    request.push_str("\r\n");
+
+    let mut stream = TcpStream::connect((host, port)).await?;
+    stream.write_all(request.as_bytes()).await?;
+    stream.write_all(body).await?;
+    let mut bytes = Vec::new();
+    stream.read_to_end(&mut bytes).await?;
+    parse_raw_response(&bytes)
+}
+
+fn parse_raw_response(bytes: &[u8]) -> std::io::Result<TestResponse> {
+    let header_end = bytes
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing headers"))?;
+    let head = String::from_utf8_lossy(&bytes[..header_end]);
+    let mut lines = head.split("\r\n");
+    let status_line = lines
+        .next()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "missing status"))?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|code| code.parse::<u16>().ok())
+        .and_then(|code| StatusCode::from_u16(code).ok())
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid status"))?;
+    let mut headers = HeaderMap::new();
+    for line in lines {
+        if let Some((name, value)) = line.split_once(':') {
+            let name = http::header::HeaderName::from_bytes(name.trim().as_bytes())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            let value = http::HeaderValue::from_str(value.trim())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+            headers.insert(name, value);
+        }
+    }
+    let body = &bytes[header_end + 4..];
+    let body = if headers
+        .get(http::header::TRANSFER_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("chunked"))
+    {
+        decode_chunked(body)?
+    } else {
+        body.to_vec()
+    };
+    Ok(TestResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
+fn decode_chunked(mut bytes: &[u8]) -> std::io::Result<Vec<u8>> {
+    let mut decoded = Vec::new();
+    loop {
+        let line_end = bytes
+            .windows(2)
+            .position(|window| window == b"\r\n")
+            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidData, "chunk size"))?;
+        let size_text = std::str::from_utf8(&bytes[..line_end])
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        let size = usize::from_str_radix(size_text.trim(), 16)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+        bytes = &bytes[line_end + 2..];
+        if size == 0 {
+            return Ok(decoded);
+        }
+        if bytes.len() < size + 2 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "chunk body",
+            ));
+        }
+        decoded.extend_from_slice(&bytes[..size]);
+        bytes = &bytes[size + 2..];
+    }
+}
+
 struct StartedServer {
     proxy_url: String,
     admin_url: String,
@@ -350,19 +484,17 @@ impl StartedServer {
     }
 
     async fn wait_ready(&self) -> Result<(), Box<dyn std::error::Error>> {
-        let client = Client::builder().timeout(Duration::from_secs(1)).build()?;
+        let client = TestClient::new(Duration::from_secs(1));
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             let proxy_ok = client
-                .get(format!("{}/healthz", self.proxy_url))
-                .send()
+                .get_status(&format!("{}/healthz", self.proxy_url))
                 .await
-                .is_ok_and(|response| response.status() == StatusCode::OK);
+                .is_ok_and(|status| status == StatusCode::OK);
             let admin_ok = client
-                .get(format!("{}/admin/health", self.admin_url))
-                .send()
+                .get_status(&format!("{}/admin/health", self.admin_url))
                 .await
-                .is_ok_and(|response| response.status() == StatusCode::OK);
+                .is_ok_and(|status| status == StatusCode::OK);
             if proxy_ok && admin_ok {
                 return Ok(());
             }
@@ -376,7 +508,8 @@ impl StartedServer {
     async fn shutdown(mut self) {
         self.signal.start_shutdown();
         if let Some(task) = self.task.take() {
-            let _ = timeout(Duration::from_secs(5), task).await;
+            task.abort();
+            let _ = task.await;
         }
     }
 }
@@ -391,37 +524,39 @@ impl Drop for StartedServer {
 }
 
 async fn send_message(
-    client: &Client,
+    client: &TestClient,
     proxy_url: &str,
     key: Option<&str>,
-) -> Result<reqwest::Response, reqwest::Error> {
-    let mut request = client
-        .post(format!("{proxy_url}/v1/messages"))
-        .header("content-type", "application/json")
-        .json(&json!({
-            "model": MODEL,
-            "max_tokens": 100,
-            "messages": [{"role": "user", "content": "hi"}]
-        }));
+) -> Result<TestResponse, Box<dyn std::error::Error>> {
+    let body = serde_json::to_vec(&json!({
+        "model": MODEL,
+        "max_tokens": 100,
+        "messages": [{"role": "user", "content": "hi"}]
+    }))?;
+    let mut headers = vec![("content-type", "application/json")];
     if let Some(key) = key {
-        request = request.header("x-api-key", key);
+        headers.push(("x-api-key", key));
     }
-    request.send().await
+    client
+        .request("POST", &format!("{proxy_url}/v1/messages"), &headers, &body)
+        .await
+        .map_err(Into::into)
 }
 
 async fn wait_for_usage(
-    client: &Client,
+    client: &TestClient,
     admin_url: &str,
     key_id: &str,
 ) -> Result<Value, Box<dyn std::error::Error>> {
     let deadline = Instant::now() + Duration::from_secs(65);
     loop {
         let response = client
-            .get(format!(
-                "{admin_url}/admin/principals/u1/keys/{key_id}/usage?range=1h&step=1h"
-            ))
-            .bearer_auth(ADMIN_TOKEN)
-            .send()
+            .request(
+                "GET",
+                &format!("{admin_url}/admin/principals/u1/keys/{key_id}/usage?range=1h&step=1h"),
+                &[("authorization", &format!("Bearer {ADMIN_TOKEN}"))],
+                &[],
+            )
             .await?;
         assert_eq!(
             response.status(),
@@ -447,6 +582,7 @@ async fn wait_for_usage(
 }
 
 async fn wait_for_price_catalog() -> Result<(), Box<dyn std::error::Error>> {
+    seed_price_catalog();
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         if global_catalog()
@@ -460,6 +596,26 @@ async fn wait_for_price_catalog() -> Result<(), Box<dyn std::error::Error>> {
         }
         sleep(Duration::from_millis(100)).await;
     }
+}
+
+fn seed_price_catalog() {
+    let mut models = std::collections::HashMap::new();
+    models.insert(
+        MODEL.to_owned(),
+        Pricing {
+            model: MODEL.to_owned(),
+            input_per_million_usd: UsdPerMillion::from_whole_usd(3),
+            output_per_million_usd: UsdPerMillion::from_whole_usd(15),
+        },
+    );
+    global_catalog().install_snapshot(CatalogSnapshot {
+        fetched_at_ms: now_secs() * 1000,
+        models,
+        raw_json: serde_json::to_vec(&price_catalog_fixture()).expect("price fixture serializes"),
+        cache_creation_per_million_usd: std::collections::HashMap::new(),
+        cache_read_per_million_usd: std::collections::HashMap::new(),
+        status: CatalogStatus::Ok,
+    });
 }
 
 fn append_step(step: u8, message: &str) -> std::io::Result<()> {
@@ -495,32 +651,70 @@ fn price_catalog_fixture() -> Value {
     })
 }
 
-fn managed_principal() -> PrincipalSpec {
-    PrincipalSpec {
-        principal_type: PrincipalType::Machine,
-        default_limits: vec![
-            Limit {
-                kind: LimitKind::CostUsd,
-                window: Duration::from_secs(60 * 60),
-                cap_micros: 1_000_000,
+async fn seed_runtime_state(
+    redb_path: &std::path::Path,
+    upstream_url: String,
+    principal_name: &str,
+) -> Result<(String, String), Box<dyn std::error::Error>> {
+    let storage = Arc::new(Storage::open(redb_path, [0x11; 32])?);
+    UpstreamStore::create(
+        storage.as_ref(),
+        UpstreamCreate {
+            name: "anthropic-wiremock".to_owned(),
+            kind: UpstreamKind::Custom,
+            base_url: Some(Url::parse(&upstream_url)?),
+            api_key_ciphertext: None,
+        },
+    )
+    .await?;
+    PrincipalStore::create(
+        storage.as_ref(),
+        PrincipalCreate {
+            name: principal_name.to_owned(),
+            kind: PrincipalKind::Machine,
+            allowed_models: vec!["claude-3-5-sonnet-*".to_owned()],
+            default_limits: vec![
+                PrincipalLimit {
+                    kind: PrincipalLimitKind::CostUsd,
+                    window_secs: 60 * 60,
+                    cap_micros: 1_000_000,
+                },
+                PrincipalLimit {
+                    kind: PrincipalLimitKind::Requests,
+                    window_secs: 60 * 60,
+                    cap_micros: 1_000,
+                },
+                PrincipalLimit {
+                    kind: PrincipalLimitKind::TotalTokens,
+                    window_secs: 60 * 60,
+                    cap_micros: 1_000_000,
+                },
+            ],
+        },
+        now_secs(),
+    )
+    .await?;
+    let managed_keys = Arc::new(RedbManagedKeyStore::new(storage));
+    let (_record, plaintext) = KeyStore::new(managed_keys)
+        .create(
+            principal_name,
+            CreateParams {
+                upstream_kind: KeyUpstreamKind::AnthropicKey,
+                upstream_credential_ref: "anthropic-wiremock".to_owned(),
+                label: "prod".to_owned(),
+                description: None,
+                expires_at_unix_secs: None,
+                limit_overrides: vec![KeyLimit {
+                    kind: KeyLimitKind::CostUsd,
+                    window_secs: 60 * 60,
+                    cap_micros: 1_000_000,
+                }],
+                principal_kind: PrincipalKindLite::Machine,
             },
-            Limit {
-                kind: LimitKind::Requests,
-                window: Duration::from_secs(60 * 60),
-                cap_micros: 1_000,
-            },
-            Limit {
-                kind: LimitKind::TotalTokens,
-                window: Duration::from_secs(60 * 60),
-                cap_micros: 1_000_000,
-            },
-        ],
-        enabled: true,
-        allowed_models: vec!["claude-3-5-sonnet-*".to_owned()],
-        credentials_ref: None,
-        router_plugin: None,
-        observability_hooks: None,
-    }
+        )
+        .await?;
+    let (key_id, _) = cc_lb_core::api_keys::secret::parse(plaintext.expose())?;
+    Ok((plaintext.expose().to_owned(), key_id))
 }
 
 fn base_config(
@@ -528,14 +722,12 @@ fn base_config(
     none_mode: Option<NoneModeConfig>,
     redb_path: std::path::PathBuf,
     litellm_url: String,
-    upstream_url: String,
 ) -> Config {
     let mut config = Config::default();
     config.listener.proxy_addr = free_addr();
     config.listener.admin_addr = free_addr();
     config.listener.metrics_addr = free_addr();
     config.timeouts.upstream_total_secs = 10;
-    config.upstreams = upstreams(upstream_url);
     config.downstream_auth.mode = mode;
     config.downstream_auth.none_mode = none_mode;
     config.storage = StorageConfig::Redb { path: redb_path };
@@ -547,22 +739,6 @@ fn base_config(
         .keep()
         .join("prices.json");
     config
-}
-
-fn upstreams(upstream_url: String) -> HashMap<String, UpstreamSpec> {
-    let mut upstreams = HashMap::new();
-    upstreams.insert(
-        "anthropic-wiremock".to_owned(),
-        UpstreamSpec {
-            kind: UpstreamKind::Custom,
-            base_url: Some(Url::parse(&upstream_url).expect("upstream url")),
-            region: None,
-            project: None,
-            auth_strategy: AuthStrategy::ApiKey,
-            credentials_ref: None,
-        },
-    );
-    upstreams
 }
 
 fn free_addr() -> SocketAddr {

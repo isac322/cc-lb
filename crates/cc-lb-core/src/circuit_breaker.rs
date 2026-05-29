@@ -336,6 +336,22 @@ impl BreakerRegistry {
             .get(upstream_name)
             .map(|breaker| Arc::clone(breaker.value()))
     }
+
+    pub fn evict(&self, upstream_name: &str) -> bool {
+        self.map.remove(upstream_name).is_some()
+    }
+
+    pub async fn drain(&self, upstream_name: &str, grace: Duration) -> bool {
+        let removed = self.evict(upstream_name);
+        tokio::time::sleep(grace).await;
+        removed
+    }
+
+    pub fn names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.map.iter().map(|entry| entry.key().clone()).collect();
+        names.sort();
+        names
+    }
 }
 
 pub struct CircuitBreakerDispatch {
@@ -398,4 +414,80 @@ fn register_circuit_breaker_metrics() {
             "Circuit breaker state by upstream: 0 closed, 1 half-open, 2 open."
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn evict_removes_entry() {
+        let registry = BreakerRegistry::new();
+        let _breaker = registry.breaker("test-upstream", BreakerConfig::default());
+        assert!(registry.get("test-upstream").is_some());
+
+        let removed = registry.evict("test-upstream");
+        assert!(removed);
+        assert!(registry.get("test-upstream").is_none());
+    }
+
+    #[test]
+    fn evict_missing_returns_false() {
+        let registry = BreakerRegistry::new();
+        let removed = registry.evict("nonexistent-upstream");
+        assert!(!removed);
+    }
+
+    #[tokio::test]
+    async fn drain_after_grace_period() {
+        let registry = BreakerRegistry::new();
+        let _breaker = registry.breaker("test-upstream", BreakerConfig::default());
+        assert!(registry.get("test-upstream").is_some());
+
+        let start = std::time::Instant::now();
+        let grace = Duration::from_millis(50);
+        let removed = registry.drain("test-upstream", grace).await;
+
+        let elapsed = start.elapsed();
+        assert!(removed);
+        assert!(registry.get("test-upstream").is_none());
+        assert!(elapsed >= grace);
+    }
+
+    #[tokio::test]
+    async fn concurrent_evict_and_breaker_creation_safe() {
+        let registry = Arc::new(BreakerRegistry::new());
+        let mut handles = vec![];
+
+        for i in 0..5 {
+            let reg_clone = Arc::clone(&registry);
+            let handle = tokio::spawn(async move {
+                let upstream_name = format!("upstream-{}", i);
+                let _breaker = reg_clone.breaker(&upstream_name, BreakerConfig::default());
+                tokio::time::sleep(Duration::from_millis(1)).await;
+                reg_clone.evict(&upstream_name)
+            });
+            handles.push(handle);
+        }
+
+        for i in 0..5 {
+            let reg_clone = Arc::clone(&registry);
+            let handle = tokio::spawn(async move {
+                let upstream_name = format!("upstream-{}", i);
+                tokio::time::sleep(Duration::from_millis(2)).await;
+                let _breaker = reg_clone.breaker(&upstream_name, BreakerConfig::default());
+                true
+            });
+            handles.push(handle);
+        }
+
+        for handle in handles {
+            let result = handle.await;
+            assert!(result.is_ok());
+        }
+
+        let names = registry.names();
+        assert_eq!(names.len(), 5);
+        assert!(names.iter().all(|n| n.starts_with("upstream-")));
+    }
 }

@@ -13,6 +13,8 @@ struct Args {
     slow_mode_bps: u64,
     #[arg(long, default_value_t = 104_857_600)]
     files_cap_bytes: usize,
+    #[arg(long, default_value_t = 3600)]
+    tokens_expire_in: u64,
 }
 
 #[tokio::main]
@@ -22,14 +24,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     eprintln!("fake-anthropic listening on http://{addr}");
 
-    axum::serve(
-        listener,
-        app(AppConfig {
-            slow_mode_bps: args.slow_mode_bps,
-            files_cap_bytes: args.files_cap_bytes,
-        }),
-    )
-    .await?;
+    let app = app(AppConfig {
+        slow_mode_bps: args.slow_mode_bps,
+        files_cap_bytes: args.files_cap_bytes,
+        tokens_expire_in: args.tokens_expire_in,
+    });
+    axum::serve(listener, app).await?;
 
     Ok(())
 }

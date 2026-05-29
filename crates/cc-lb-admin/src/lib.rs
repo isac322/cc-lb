@@ -1,26 +1,34 @@
 pub mod auth;
 mod credential_crypto;
 pub mod management;
-pub mod oauth;
 mod oauth_pkce;
 pub mod principals;
 pub mod routes;
 pub mod settings;
 pub mod status;
+pub mod v1;
 
-use arc_swap::ArcSwap;
 use std::sync::Arc;
 
+use async_trait::async_trait;
 use axum::Router;
 use cc_lb_aead::AeadService;
-use cc_lb_config::Config;
+use cc_lb_config::{Config, RestartRequiredField};
 use serde::Serialize;
 
 use cc_lb_core::{
-    AuditWriterSink, Lifecycle,
-    api_keys::{key_store::KeyStore, limit_engine::LimitEngine, principal_view::PrincipalView},
+    AuditWriterSink, DynamicView, DynamicViewHolder, Lifecycle,
+    api_keys::{key_store::KeyStore, limit_engine::LimitEngine},
 };
 use cc_lb_storage_api::Storage;
+
+#[async_trait]
+pub trait DynamicViewRebinder: Send + Sync {
+    async fn rebuild_dynamic_view(
+        &self,
+        current_generation: u64,
+    ) -> anyhow::Result<Arc<DynamicView>>;
+}
 
 #[derive(Clone)]
 pub struct AdminState {
@@ -30,7 +38,7 @@ pub struct AdminState {
     pub limit_engine: Arc<LimitEngine>,
     pub lifecycle: Option<Arc<Lifecycle>>,
     pub audit_sink: Option<Arc<AuditWriterSink>>,
-    pub principal_view: Arc<ArcSwap<PrincipalView>>,
+    pub dynamic_view: Arc<DynamicViewHolder>,
     pub config: Arc<dyn CurrentConfig>,
     pub admin_token: Option<String>,
     pub start_time: std::time::Instant,
@@ -66,6 +74,10 @@ pub enum ReloadOutcome {
 pub trait CurrentConfig: Send + Sync {
     fn current_config(&self) -> Arc<Config>;
 
+    fn restart_required_changes(&self) -> Vec<RestartRequiredField> {
+        Vec::new()
+    }
+
     fn last_reload_status(&self) -> Option<LastReloadStatus> {
         None
     }
@@ -76,6 +88,10 @@ pub trait CurrentConfig: Send + Sync {
 
     fn apply_draft_config(&self) -> Result<Arc<Config>, ConfigDraftError> {
         Err(ConfigDraftError::Unavailable)
+    }
+
+    fn dynamic_view_rebinder(&self) -> Option<Arc<dyn DynamicViewRebinder>> {
+        None
     }
 }
 

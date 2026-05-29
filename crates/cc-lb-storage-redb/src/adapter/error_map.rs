@@ -43,8 +43,40 @@ pub(crate) fn map_redb_err(error: StorageError) -> ApiStorageError {
         StorageError::StaleDraftRevision { current } => ApiStorageError::Conflict {
             message: format!("stale redb config draft revision; current revision is {current}"),
         },
+        StorageError::UpstreamConflict(message) => ApiStorageError::Conflict { message },
+        StorageError::UpstreamNotFound => ApiStorageError::Conflict {
+            message: "redb upstream not found".to_owned(),
+        },
         StorageError::ConfigRevisionOverflow => ApiStorageError::Fatal {
             message: "redb config draft revision overflow".to_owned(),
+        },
+        StorageError::StalePrincipalRevision { current } => ApiStorageError::Conflict {
+            message: format!("stale redb principal revision; current revision is {current}"),
+        },
+        StorageError::PrincipalRevisionOverflow => ApiStorageError::Fatal {
+            message: "redb principal revision overflow".to_owned(),
+        },
+        StorageError::PrincipalNameConflict { name } => ApiStorageError::Conflict {
+            message: format!("redb principal name already exists: {name}"),
+        },
+        StorageError::PrincipalReferencedByAudit { id } => ApiStorageError::Conflict {
+            message: format!("redb principal {id} is referenced by audit entries"),
+        },
+        StorageError::PluginRegistryConflict { message } => ApiStorageError::Conflict { message },
+        StorageError::StalePluginRegistryRevision { current } => ApiStorageError::Conflict {
+            message: format!("stale redb plugin registry revision; current revision is {current}"),
+        },
+        StorageError::PluginRegistryRevisionOverflow => ApiStorageError::Fatal {
+            message: "redb plugin registry revision overflow".to_owned(),
+        },
+        StorageError::StalePluginChainRevision { current } => ApiStorageError::Conflict {
+            message: format!("stale redb plugin chain revision; current revision is {current}"),
+        },
+        StorageError::PluginChainRevisionOverflow => ApiStorageError::Fatal {
+            message: "redb plugin chain revision overflow".to_owned(),
+        },
+        StorageError::PluginRegistryReferenced { id } => ApiStorageError::Conflict {
+            message: format!("redb plugin registry row {id} is referenced by plugin chain"),
         },
         StorageError::InvalidRequestEventKey => ApiStorageError::Corrupted {
             message: "redb invalid request event key".to_owned(),

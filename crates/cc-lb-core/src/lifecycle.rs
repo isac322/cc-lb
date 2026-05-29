@@ -8,9 +8,9 @@ use async_trait::async_trait;
 use axum::body::Body as AxumBody;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    ObservabilityHook, ObserveEvent, Principal, PrincipalKind, RequestContext, RetryDecision,
-    RouterPlugin, SignedRequest, SignerFactory, Upstream, UpstreamError, shape_request,
-    sign_request,
+    ApiKeyAwareSignerFactory, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
+    RequestContext, RetryDecision, RouterPlugin, SignedRequest, Upstream, UpstreamError,
+    shape_request, sign_request,
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_api::{
@@ -25,12 +25,14 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use serde_json::{Value, json};
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, BuiltinAuthn};
 use crate::api_keys::limit_engine::{LimitEngine, RejectReason, Reservation as LimitReservation};
 use crate::api_keys::principal_view::PrincipalView;
 use crate::api_keys::types::LimitKind;
 use crate::audit_writer::{AuditEntry, AuditWriterSink};
+use crate::dynamic_view::{DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot};
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
 use crate::hop_by_hop::strip_hop_by_hop;
@@ -44,9 +46,16 @@ const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Debug)]
+pub struct ReplicaIdentity {
+    pub id: Uuid,
+    pub started_at_unix_secs: u64,
+}
+
+#[derive(Clone, Debug)]
 pub struct LifecycleConfig {
     pub messages_body_cap_bytes: usize,
     pub files_body_cap_bytes: usize,
+    pub replica_identity: Option<ReplicaIdentity>,
 }
 
 impl Default for LifecycleConfig {
@@ -54,6 +63,7 @@ impl Default for LifecycleConfig {
         Self {
             messages_body_cap_bytes: DEFAULT_MESSAGES_CAP_BYTES,
             files_body_cap_bytes: DEFAULT_FILES_CAP_BYTES,
+            replica_identity: None,
         }
     }
 }
@@ -89,10 +99,6 @@ pub trait LimitSubjectProvider: Send + Sync {
         principal: &Principal,
         authn_success: &AuthnSuccess,
     ) -> Option<LimitSubject>;
-}
-
-pub trait ApiKeyAwareSignerFactory: Send + Sync {
-    fn with_api_key(&self, api_key: String) -> Arc<dyn SignerFactory>;
 }
 
 #[derive(Clone, Debug)]
@@ -190,12 +196,7 @@ impl UpstreamDispatch for HyperDispatcher {
 
 pub struct Lifecycle {
     authn: Arc<BuiltinAuthn>,
-    principal_view: Arc<arc_swap::ArcSwap<PrincipalView>>,
-    signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
-    global_router: Arc<dyn RouterPlugin>,
-    dispatcher: Arc<dyn UpstreamDispatch>,
-    global_observability_hooks: Arc<[Arc<dyn ObservabilityHook>]>,
-    error_normalizer: Arc<ErrorNormalizer>,
+    dynamic_view: Arc<DynamicViewHolder>,
     config: LifecycleConfig,
     limit_engine: Option<Arc<LimitEngine>>,
     limit_subject_provider: Option<Arc<dyn LimitSubjectProvider>>,
@@ -206,20 +207,25 @@ pub struct Lifecycle {
 impl Lifecycle {
     pub fn new(
         authn: Arc<BuiltinAuthn>,
+        principal_view: Arc<PrincipalView>,
         signer_factory: Arc<dyn ApiKeyAwareSignerFactory>,
         global_router: Arc<dyn RouterPlugin>,
         dispatcher: Arc<dyn UpstreamDispatch>,
         global_observability_hooks: Vec<Arc<dyn ObservabilityHook>>,
         config: LifecycleConfig,
     ) -> Self {
+        let dynamic_view = DynamicViewBuilder::new(0)
+            .signer_factory(signer_factory)
+            .global_router(global_router)
+            .dispatcher(dispatcher)
+            .global_observability_hooks(global_observability_hooks)
+            .error_normalizer(Arc::new(ErrorNormalizer::new()))
+            .principal_view(principal_view)
+            .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
+            .build();
         Self {
-            principal_view: authn.principal_view_cell(),
             authn,
-            signer_factory,
-            global_router,
-            dispatcher,
-            global_observability_hooks: Arc::from(global_observability_hooks),
-            error_normalizer: Arc::new(ErrorNormalizer::new()),
+            dynamic_view: Arc::new(DynamicViewHolder::new(dynamic_view)),
             config,
             limit_engine: None,
             limit_subject_provider: None,
@@ -228,9 +234,37 @@ impl Lifecycle {
         }
     }
 
-    pub fn with_error_normalizer(mut self, error_normalizer: Arc<ErrorNormalizer>) -> Self {
-        self.error_normalizer = error_normalizer;
+    pub fn new_with_dynamic_view(
+        authn: Arc<BuiltinAuthn>,
+        dynamic_view: Arc<DynamicViewHolder>,
+        config: LifecycleConfig,
+    ) -> Self {
+        Self {
+            authn,
+            dynamic_view,
+            config,
+            limit_engine: None,
+            limit_subject_provider: None,
+            audit_sink: None,
+            request_event_storage: None,
+        }
+    }
+
+    pub fn with_error_normalizer(self, error_normalizer: Arc<ErrorNormalizer>) -> Self {
+        let current = self.dynamic_view.load();
+        let next = DynamicViewBuilder::from_view(&current)
+            .error_normalizer(error_normalizer)
+            .build();
+        self.dynamic_view.store(next);
         self
+    }
+
+    pub fn dynamic_view(&self) -> Arc<DynamicViewHolder> {
+        Arc::clone(&self.dynamic_view)
+    }
+
+    pub fn replica_identity(&self) -> Option<ReplicaIdentity> {
+        self.config.replica_identity.clone()
     }
 
     pub fn with_audit_sink(mut self, audit_sink: Arc<AuditWriterSink>) -> Self {
@@ -305,7 +339,8 @@ impl Lifecycle {
 
     #[allow(clippy::explicit_auto_deref)]
     pub async fn handle(&self, req: Request<Bytes>) -> Result<Response<Body>, ProxyError> {
-        let view = self.principal_view.load_full();
+        let view = self.dynamic_view.load();
+        let principal_view = Arc::clone(&view.principal_view);
         let started = Instant::now();
         let parsed = self.parse(req);
         let ctx = match parsed {
@@ -315,7 +350,7 @@ impl Lifecycle {
 
         // Pre-authn observe: global hooks only (no principal context). Silent no-op when global is empty.
         observe_many(
-            &self.global_observability_hooks,
+            &view.global_observability_hooks,
             ObserveEvent::RequestStarted {
                 request_id: ctx.request_id.clone(),
                 downstream_user_agent: header_to_string(&ctx.downstream_headers, "user-agent"),
@@ -331,14 +366,14 @@ impl Lifecycle {
         } else {
             match self
                 .authn
-                .authenticate(&ctx.downstream_headers, &view)
+                .authenticate(&ctx.downstream_headers, &principal_view)
                 .await
             {
                 Ok(success) => success,
                 Err(source) => {
                     record_key_auth_failure_metric(&source);
                     observe_error(
-                        &self.global_observability_hooks,
+                        &view.global_observability_hooks,
                         "authentication_error",
                         &source.to_string(),
                         "authn",
@@ -358,16 +393,16 @@ impl Lifecycle {
                             &source.to_string(),
                         ),
                     };
-                    observe_finished(&self.global_observability_hooks, status, started);
+                    observe_finished(&view.global_observability_hooks, status, started);
                     return Ok(response);
                 }
             }
         };
         let principal_id = success.principal_id.clone();
-        let Some(cached) = view.get(&principal_id) else {
+        let Some(cached) = principal_view.get(&principal_id) else {
             tracing::error!(%principal_id, "authenticated principal missing from principal view");
             observe_error(
-                &self.global_observability_hooks,
+                &view.global_observability_hooks,
                 "principal_missing",
                 "authenticated principal is unavailable",
                 "authn",
@@ -378,14 +413,14 @@ impl Lifecycle {
                 "authenticated principal is unavailable",
             );
             observe_finished(
-                &self.global_observability_hooks,
+                &view.global_observability_hooks,
                 StatusCode::INTERNAL_SERVER_ERROR,
                 started,
             );
             return Ok(response);
         };
-        let router = cached.resolved_router(&self.global_router);
-        let hooks = cached.resolved_hooks(&self.global_observability_hooks);
+        let router = cached.resolved_router(&view.global_router);
+        let hooks = cached.resolved_hooks(&view.global_observability_hooks);
         let stream_hooks = StreamHooks::new(hooks);
         let principal = Principal {
             id: principal_id,
@@ -430,7 +465,7 @@ impl Lifecycle {
         );
 
         let mut active_limit = match self
-            .reserve_limit(&view, &ctx, &principal, &route, &success)
+            .reserve_limit(&principal_view, &ctx, &principal, &route, &success)
             .await
         {
             Ok(active_limit) => active_limit,
@@ -446,9 +481,11 @@ impl Lifecycle {
             }
         };
 
-        let signer_factory = self
-            .signer_factory
-            .with_api_key(success.api_key.clone().unwrap_or_default());
+        let signer_factory = view.signer_factory.with_auth_context(
+            success.api_key.clone().unwrap_or_default(),
+            authn_upstream_kind_label(success.upstream_kind),
+            success.upstream_credential_ref.clone(),
+        );
         let signer = match signer_factory.build(&route.upstream).await {
             Ok(signer) => signer,
             Err(source) => {
@@ -476,7 +513,14 @@ impl Lifecycle {
         };
 
         let mut response = match self
-            .attempt(hooks, &ctx, &principal, &route, signer.clone())
+            .attempt(
+                view.dispatcher.as_ref(),
+                hooks,
+                &ctx,
+                &principal,
+                &route,
+                signer.clone(),
+            )
             .await
         {
             Ok(response) => response,
@@ -502,7 +546,14 @@ impl Lifecycle {
             };
             if let RetryDecision::Refresh { new_signer } = signer.on_unauthorized(&err).await {
                 response = match self
-                    .attempt(hooks, &ctx, &principal, &route, new_signer)
+                    .attempt(
+                        view.dispatcher.as_ref(),
+                        hooks,
+                        &ctx,
+                        &principal,
+                        &route,
+                        new_signer,
+                    )
                     .await
                 {
                     Ok(response) => response,
@@ -524,7 +575,7 @@ impl Lifecycle {
                     unauthorized,
                     &route.upstream,
                     route.dialect.as_ref(),
-                    self.error_normalizer.as_ref(),
+                    view.error_normalizer.as_ref(),
                 );
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
                 record_api_key_request_metric(&metric_context, response.status());
@@ -545,7 +596,7 @@ impl Lifecycle {
                 collected,
                 &route.upstream,
                 route.dialect.as_ref(),
-                self.error_normalizer.as_ref(),
+                view.error_normalizer.as_ref(),
             );
             self.attach_limit_headers(&mut response, active_limit.as_ref());
             record_api_key_request_metric(&metric_context, response.status());
@@ -811,6 +862,7 @@ impl Lifecycle {
 
     async fn attempt(
         &self,
+        dispatcher: &dyn UpstreamDispatch,
         hooks: &[Arc<dyn ObservabilityHook>],
         ctx: &RequestContext,
         principal: &Principal,
@@ -836,7 +888,7 @@ impl Lifecycle {
                     "failed to sign upstream request",
                 ))
             })?;
-        self.dispatcher.dispatch(signed).await.map_err(|source| {
+        dispatcher.dispatch(signed).await.map_err(|source| {
             observe_error(
                 hooks,
                 "upstream_dispatch_error",
@@ -1532,6 +1584,13 @@ fn pricing_upstream_kind(upstream: &Upstream) -> Option<cc_lb_pricing::UpstreamK
         Upstream::AnthropicDirect | Upstream::CustomAnthropicSpec { .. } => {
             Some(cc_lb_pricing::UpstreamKind::AnthropicKey)
         }
+    }
+}
+
+fn authn_upstream_kind_label(kind: cc_lb_storage_api::types::UpstreamKind) -> &'static str {
+    match kind {
+        cc_lb_storage_api::types::UpstreamKind::AnthropicKey => "anthropic_key",
+        cc_lb_storage_api::types::UpstreamKind::AnthropicOAuth => "anthropic_oauth",
     }
 }
 

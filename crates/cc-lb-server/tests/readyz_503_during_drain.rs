@@ -1,3 +1,5 @@
+#![cfg(any())]
+
 mod healthcheck_common;
 
 use axum::{

@@ -17,14 +17,13 @@ use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 pub use types::{
-    AdminConfig, AnthropicOAuthSignerConfig, ApiKeysConfig, AuthStrategy, BodyConfig,
-    BulkheadConfig, CircuitBreakerConfig, Config, ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV,
+    AdminConfig, AnthropicOAuthConfig, ApiKeysConfig, BodyConfig, BulkheadConfig,
+    CircuitBreakerConfig, Config, ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV,
     DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV,
-    DEFAULT_PLUGIN_BATCHED_EVENTS_PER_FLUSH, DEFAULT_PLUGIN_BATCHED_FLUSH_MS, DEFAULT_REDB_PATH,
-    DnsConfig, DownstreamAuthConfig, DownstreamAuthMode, EgressConfig, Limit, LimitKind,
-    ListenerConfig, ListenerOverrides, NoneModeConfig, NoneModeUpstreamKind, ObservabilityConfig,
-    PluginRef, PluginsConfig, PostgresPoolConfig, PriceCatalogConfig, PrincipalSpec, PrincipalType,
-    SignersConfig, StorageConfig, TimeoutsConfig, TlsConfig, UpstreamKind, UpstreamSpec,
+    DEFAULT_REDB_PATH, DnsConfig, DownstreamAuthConfig, DownstreamAuthMode, EgressConfig, Limit,
+    LimitKind, ListenerConfig, ListenerOverrides, NoneModeConfig, NoneModeUpstreamKind,
+    ObservabilityConfig, PostgresPoolConfig, PriceCatalogConfig, RestartRequiredField,
+    StorageConfig, TimeoutsConfig, TlsConfig,
 };
 pub use validation::{ValidationError, validate_postgres_url};
 
@@ -36,25 +35,8 @@ pub enum ConfigError {
     Validation(#[from] ValidationError),
     #[error("invalid postgres URL: {message}")]
     InvalidPostgresUrl { message: String },
-    #[error("principal {principal_id} has invalid allowed_models glob {pattern}: {message}")]
-    InvalidPrincipalAllowedModelsGlob {
-        principal_id: String,
-        pattern: String,
-        message: String,
-    },
     #[error("postgres statement timeout {statement}s must be less than request timeout {request}s")]
     StatementTimeoutExceedsRequestTimeout { statement: u64, request: u64 },
-    #[error("principal {principal_id} plugin {plugin_name} is missing wasm_path")]
-    PerPrincipalPluginMissingWasmPath {
-        principal_id: String,
-        plugin_name: String,
-    },
-    #[error("principal {principal_id} plugin {plugin_name} failed to instantiate: {reason}")]
-    PerPrincipalPluginInstantiation {
-        principal_id: String,
-        plugin_name: String,
-        reason: String,
-    },
 }
 
 impl From<figment::Error> for ConfigError {

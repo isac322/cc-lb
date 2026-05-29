@@ -14,6 +14,7 @@ use serde_json::{Value, json};
 use tokio::time::sleep;
 
 use crate::modes::FakeMode;
+use crate::oauth::{OAuthState, authorize, refresh_history, token};
 use crate::sse::streaming_response;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -22,6 +23,7 @@ static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 pub struct AppConfig {
     pub slow_mode_bps: u64,
     pub files_cap_bytes: usize,
+    pub tokens_expire_in: u64,
 }
 
 impl Default for AppConfig {
@@ -29,13 +31,15 @@ impl Default for AppConfig {
         Self {
             slow_mode_bps: 1024,
             files_cap_bytes: 104_857_600,
+            tokens_expire_in: 3600,
         }
     }
 }
 
 #[derive(Debug)]
 pub struct AppState {
-    config: AppConfig,
+    pub(crate) config: AppConfig,
+    pub(crate) oauth: OAuthState,
     request_counts: Mutex<BTreeMap<&'static str, u64>>,
     last_x_api_key: Mutex<Option<String>>,
     last_selected_headers: Mutex<BTreeMap<&'static str, Option<String>>>,
@@ -45,6 +49,7 @@ impl AppState {
     fn new(config: AppConfig) -> Self {
         Self {
             config,
+            oauth: OAuthState::default(),
             request_counts: Mutex::new(BTreeMap::new()),
             last_x_api_key: Mutex::new(None),
             last_selected_headers: Mutex::new(BTreeMap::from([
@@ -93,6 +98,10 @@ pub fn app(config: AppConfig) -> Router {
     Router::new()
         .route("/v1/messages", post(messages))
         .route("/v1/messages/count_tokens", post(count_tokens))
+        .route("/oauth/authorize", get(authorize))
+        .route("/oauth/token", post(token))
+        .route("/v1/oauth/token", post(token))
+        .route("/__refresh_history", get(refresh_history))
         .route("/__last_request", get(last_request))
         .route("/v1/models", get(list_models))
         .route("/v1/models/{id}", get(get_model))
@@ -337,6 +346,7 @@ fn auth_failure(state: &AppState, headers: &HeaderMap) -> Option<Response> {
 
     if header_matches(headers, "x-api-key", "")
         || header_starts_with(headers, "x-api-key", "sk-ant-")
+        || header_starts_with(headers, "x-api-key", "sk-cclb-")
     {
         state.record_auth("x-api-key:accepted");
         return None;

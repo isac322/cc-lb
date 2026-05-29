@@ -443,11 +443,22 @@ async fn single_request(
 
 fn status_code(bytes: &[u8]) -> Result<u16> {
     let text = String::from_utf8_lossy(bytes);
-    text.lines()
-        .next()
-        .and_then(|line| line.split_whitespace().nth(1))
-        .and_then(|code| code.parse::<u16>().ok())
-        .ok_or_else(|| anyhow!("missing HTTP status line"))
+    for line in text.lines().take(8).map(str::trim) {
+        if line.is_empty() {
+            continue;
+        }
+        if line.starts_with("HTTP/") {
+            return line
+                .split_whitespace()
+                .nth(1)
+                .and_then(|code| code.parse::<u16>().ok())
+                .ok_or_else(|| anyhow!("invalid HTTP status line: {line}"));
+        }
+    }
+    Err(anyhow!(
+        "missing HTTP status line: {}",
+        preview_response(bytes)
+    ))
 }
 
 fn count_sse_events(bytes: &[u8]) -> usize {
@@ -602,4 +613,32 @@ fn write_json<T: serde::Serialize>(path: &Path, value: &T) -> Result<()> {
     }
     let text = serde_json::to_string_pretty(value).context("serialize JSON")?;
     fs::write(path, format!("{text}\n")).with_context(|| format!("write {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn status_code_accepts_leading_blank_lines() {
+        assert_eq!(
+            status_code(
+                b"
+HTTP/1.1 200 OK
+
+{}"
+            )
+            .unwrap(),
+            200
+        );
+    }
+
+    #[test]
+    fn status_code_reports_body_when_status_line_missing() {
+        let error = status_code(br#"{"error":"body only"}"#)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("missing HTTP status line"));
+        assert!(error.contains("body only"));
+    }
 }

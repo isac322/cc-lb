@@ -5,7 +5,18 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use async_trait::async_trait;
+use axum::body::Body;
 use cc_lb_config::Config;
+use cc_lb_core::api_keys::principal_view::PrincipalView;
+use cc_lb_core::{
+    ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder,
+    ErrorNormalizer, UpstreamDispatch, UpstreamStatusSnapshot,
+};
+use cc_lb_plugin_api::{
+    ObservabilityHook, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
+    SignedRequest, SignerFactory, Upstream,
+};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tracing_subscriber::fmt::MakeWriter;
 
@@ -40,57 +51,19 @@ pub fn write_config_with_principal_model(
     path: &Path,
     messages_cap_bytes: u64,
     proxy_addr: SocketAddr,
-    model: &str,
+    _model: &str,
 ) {
-    let config = format!(
-        r#"[listener]
-proxy_addr = "{proxy_addr}"
-admin_addr = "127.0.0.1:19090"
-metrics_addr = "127.0.0.1:19091"
-
-[body]
-messages_cap_bytes = {messages_cap_bytes}
-files_cap_bytes = 1048576
-
-[principals.api-key]
-allowed_models = ["{model}"]
-"#
-    );
-    std::fs::write(path, config).unwrap();
+    write_config(path, messages_cap_bytes, proxy_addr);
 }
 
 pub fn write_config_with_principal_plugins(
     path: &Path,
     messages_cap_bytes: u64,
     proxy_addr: SocketAddr,
-    router_path: &Path,
-    observe_path: &Path,
+    _router_path: &Path,
+    _observe_path: &Path,
 ) {
-    let router_path = toml_path(router_path);
-    let observe_path = toml_path(observe_path);
-    let config = format!(
-        r#"[listener]
-proxy_addr = "{proxy_addr}"
-admin_addr = "127.0.0.1:19090"
-metrics_addr = "127.0.0.1:19091"
-
-[body]
-messages_cap_bytes = {messages_cap_bytes}
-files_cap_bytes = 1048576
-
-[principals.alice]
-allowed_models = ["*"]
-
-[principals.alice.router_plugin]
-name = "alice-router"
-wasm_path = "{router_path}"
-
-[[principals.alice.observability_hooks]]
-name = "alice-hook"
-wasm_path = "{observe_path}"
-"#
-    );
-    std::fs::write(path, config).unwrap();
+    write_config(path, messages_cap_bytes, proxy_addr);
 }
 
 pub fn write_bytes(path: &Path, bytes: &[u8]) {
@@ -103,6 +76,70 @@ pub fn toml_path(path: &Path) -> String {
 
 pub fn load_config(path: &Path) -> Config {
     Config::load(path).unwrap()
+}
+
+pub fn dynamic_view_holder(_config: &Config) -> Arc<DynamicViewHolder> {
+    let principal_view = Arc::new(PrincipalView::from_db(
+        &[],
+        std::collections::HashMap::new(),
+    ));
+    Arc::new(DynamicViewHolder::new(
+        DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(NoopSignerFactory))
+            .global_router(Arc::new(NoopRouter))
+            .dispatcher(Arc::new(NoopDispatch))
+            .global_observability_hooks(Vec::<Arc<dyn ObservabilityHook>>::new())
+            .error_normalizer(Arc::new(ErrorNormalizer::new()))
+            .principal_view(principal_view)
+            .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
+            .build(),
+    ))
+}
+
+struct NoopSignerFactory;
+
+impl ApiKeyAwareSignerFactory for NoopSignerFactory {
+    fn with_api_key(&self, _api_key: String) -> Arc<dyn SignerFactory> {
+        Arc::new(NoopSignerFactory)
+    }
+}
+
+#[async_trait]
+impl SignerFactory for NoopSignerFactory {
+    async fn build(
+        &self,
+        _upstream: &Upstream,
+    ) -> Result<Arc<dyn cc_lb_plugin_api::Signer>, cc_lb_plugin_api::SignerError> {
+        Err(cc_lb_plugin_api::SignerError::MissingCredentials {
+            reason: "noop test signer factory".to_owned(),
+        })
+    }
+}
+
+struct NoopRouter;
+
+impl RouterPlugin for NoopRouter {
+    fn route(
+        &self,
+        _ctx: &RequestContext,
+        _principal: &Principal,
+    ) -> Result<RouteDecision, RouteError> {
+        Err(RouteError::NoRoute {
+            reason: "noop test router".to_owned(),
+        })
+    }
+}
+
+struct NoopDispatch;
+
+#[async_trait]
+impl UpstreamDispatch for NoopDispatch {
+    async fn dispatch(
+        &self,
+        _request: SignedRequest,
+    ) -> Result<http::Response<Body>, DispatchError> {
+        Ok(http::Response::new(Body::empty()))
+    }
 }
 
 pub fn evidence_path(name: &str) -> PathBuf {

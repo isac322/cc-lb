@@ -21,7 +21,7 @@ use crate::service::AeadService;
 /// - Decryption fails if AAD does not match.
 /// - Plaintext is never cached or exposed through Debug output.
 /// - Ciphertext tampering is detected by authenticated encryption.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AeadEncryptedField<T: Serialize + for<'de> Deserialize<'de>> {
     ciphertext: Vec<u8>,
     _phantom: PhantomData<T>,
@@ -79,7 +79,7 @@ impl<T: Serialize + for<'de> Deserialize<'de>> AeadEncryptedField<T> {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn from_ciphertext(ciphertext: Vec<u8>) -> Self {
+    pub fn from_ciphertext(ciphertext: Vec<u8>) -> Self {
         Self {
             ciphertext,
             _phantom: PhantomData,
@@ -230,7 +230,7 @@ mod tests {
         let json = serde_json::to_string(&encrypted).expect("serialize to json");
         assert!(json.contains('"')); // JSON string quotes
         // Base64 is human-readable within the JSON
-        assert!(json.chars().all(|c| c.is_ascii()));
+        assert!(json.is_ascii());
 
         // Deserialize back
         let decrypted_field: AeadEncryptedField<OAuthTokenBundle> =

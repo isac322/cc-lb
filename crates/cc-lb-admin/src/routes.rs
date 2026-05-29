@@ -4,7 +4,7 @@ use axum::{
     http::{StatusCode, header},
     middleware,
     response::IntoResponse,
-    routing::{delete, get, post, put},
+    routing::{delete, get, post},
 };
 use cc_lb_storage_api::{Storage, StorageError};
 use rust_embed::RustEmbed;
@@ -14,7 +14,6 @@ use serde_json::{Value, json};
 use crate::{
     AdminState,
     auth::require_admin_auth,
-    management,
     principals::{principal_key_usage, principal_limits, principal_usage},
 };
 
@@ -24,38 +23,20 @@ struct Assets;
 
 pub fn build_router(state: AdminState) -> Router {
     let protected_routes = Router::new()
-        .route(
-            "/admin/principals",
-            get(list_principals).post(create_principal),
-        )
-        .route("/admin/principals/{id}", put(update_principal))
-        .route("/admin/principals/{id}/disable", post(disable_principal))
-        .route("/admin/principals/{id}/enable", post(enable_principal))
-        .route(
-            "/admin/principals/{id}/allowed_models",
-            put(update_principal_allowed_models),
-        )
         .route("/admin/principals/{id}/usage", get(principal_usage))
         .route("/admin/principals/{id}/limits", get(principal_limits))
-        .route(
-            "/admin/principals/{id}/keys",
-            get(list_principal_keys).post(issue_principal_key),
-        )
-        .route(
-            "/admin/principals/{id}/keys/{key_id}",
-            get(get_principal_key).patch(update_principal_key),
-        )
+        .route("/admin/principals/{id}/keys/{key_id}", get(get_api_key))
         .route(
             "/admin/principals/{id}/keys/{key_id}/revoke",
-            post(revoke_principal_key),
+            post(revoke_api_key),
         )
         .route(
             "/admin/principals/{id}/keys/{key_id}/disable",
-            post(disable_principal_key),
+            post(disable_api_key),
         )
         .route(
             "/admin/principals/{id}/keys/{key_id}/enable",
-            post(enable_principal_key),
+            post(enable_api_key),
         )
         .route(
             "/admin/principals/{id}/keys/{key_id}/usage",
@@ -63,13 +44,8 @@ pub fn build_router(state: AdminState) -> Router {
         )
         .route("/admin/audit", get(query_audit))
         .route("/admin/status", get(crate::status::handler))
-        .route("/admin/upstreams", get(list_upstreams))
-        .route("/admin/upstreams/{name}/drain", post(drain_upstream))
         .route("/admin/killswitch", post(set_killswitch))
         .route("/admin/killswitch", delete(clear_killswitch))
-        .route("/admin/oauth/{id}", get(crate::oauth::oauth_status))
-        .route("/admin/oauth/start", post(crate::oauth::start_oauth))
-        .route("/admin/oauth/complete", post(crate::oauth::complete_oauth))
         .route("/admin/config/current", get(get_config))
         .route("/admin/config/schema", get(get_config_schema))
         .route(
@@ -81,17 +57,95 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/admin/config/history", get(get_config_history))
         .route("/admin/config/diff", get(get_config_diff))
         .route("/admin/config/reload", post(reload_config))
+        .merge(crate::v1::plugins::router())
+        .merge(crate::v1::plugins_wasm::router())
+        .merge(crate::v1::oauth::router())
+        .merge(crate::v1::principals::router())
+        .merge(crate::v1::keys::router())
+        .merge(crate::v1::status::router())
+        .merge(crate::v1::upstreams::router())
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_admin_auth,
         ));
 
     Router::new()
+        .merge(protected_routes)
         .route("/", get(serve_index))
         .route("/{*file}", get(serve_asset))
         .route("/admin/health", get(health))
-        .merge(protected_routes)
         .with_state(state)
+}
+
+async fn get_api_key(
+    State(state): State<AdminState>,
+    Path((principal_id, key_id)): Path<(String, String)>,
+) -> Result<Json<Value>, StatusCode> {
+    let key_store = state
+        .key_store
+        .as_ref()
+        .ok_or(StatusCode::NOT_IMPLEMENTED)?;
+    let record = key_store
+        .get(&principal_id, &key_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    Ok(Json(json!({
+        "id": key_id,
+        "principal_id": principal_id,
+        "label": record.label,
+        "status": record.status,
+        "last_4": record.last_4,
+        "expires_at_unix_secs": record.expires_at_unix_secs,
+    })))
+}
+
+async fn disable_api_key(
+    State(state): State<AdminState>,
+    Path((principal_id, key_id)): Path<(String, String)>,
+) -> Result<Json<Value>, StatusCode> {
+    mutate_api_key(&state, &principal_id, &key_id, false).await
+}
+
+async fn enable_api_key(
+    State(state): State<AdminState>,
+    Path((principal_id, key_id)): Path<(String, String)>,
+) -> Result<Json<Value>, StatusCode> {
+    mutate_api_key(&state, &principal_id, &key_id, true).await
+}
+
+async fn revoke_api_key(
+    State(state): State<AdminState>,
+    Path((principal_id, key_id)): Path<(String, String)>,
+) -> Result<Json<Value>, StatusCode> {
+    let key_store = state
+        .key_store
+        .as_ref()
+        .ok_or(StatusCode::NOT_IMPLEMENTED)?;
+    key_store
+        .revoke(&principal_id, &key_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "status": "ok" })))
+}
+
+async fn mutate_api_key(
+    state: &AdminState,
+    principal_id: &str,
+    key_id: &str,
+    enable: bool,
+) -> Result<Json<Value>, StatusCode> {
+    let key_store = state
+        .key_store
+        .as_ref()
+        .ok_or(StatusCode::NOT_IMPLEMENTED)?;
+    let result = if enable {
+        key_store.enable(principal_id, key_id).await
+    } else {
+        key_store.disable(principal_id, key_id).await
+    };
+    result.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(json!({ "status": "ok" })))
 }
 
 async fn serve_index() -> impl IntoResponse {
@@ -121,18 +175,6 @@ async fn health(State(state): State<AdminState>) -> Json<Value> {
     }))
 }
 
-async fn list_principals(State(state): State<AdminState>) -> Result<Json<Value>, StatusCode> {
-    let config = state.config.current_config();
-    let mut principals = Vec::new();
-    for (id, spec) in &config.principals {
-        principals.push(json!({
-            "id": id,
-            "allowed_models": spec.allowed_models,
-        }));
-    }
-    Ok(Json(json!({ "principals": principals })))
-}
-
 #[derive(Deserialize)]
 struct AuditQuery {
     principal_id: Option<String>,
@@ -159,25 +201,6 @@ async fn query_audit(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(json!({ "entries": entries })))
-}
-
-async fn list_upstreams(State(state): State<AdminState>) -> Result<Json<Value>, StatusCode> {
-    let config = state.config.current_config();
-    let mut upstreams = Vec::new();
-    for (name, spec) in &config.upstreams {
-        upstreams.push(json!({
-            "name": name,
-            "kind": spec.kind,
-        }));
-    }
-    Ok(Json(json!({ "upstreams": upstreams })))
-}
-
-async fn drain_upstream(
-    State(_state): State<AdminState>,
-    Path(name): Path<String>,
-) -> Result<Json<Value>, StatusCode> {
-    Ok(Json(json!({ "status": "ok", "drained": name })))
 }
 
 async fn set_killswitch(State(state): State<AdminState>) -> Result<Json<Value>, StatusCode> {
@@ -241,9 +264,8 @@ async fn put_config_draft(
 
 async fn apply_config_draft(State(state): State<AdminState>) -> axum::response::Response {
     match state.config.apply_draft_config() {
-        Ok(config) => Json(json!({
+        Ok(_config) => Json(json!({
             "status": "applied",
-            "principal_count": config.principals.len(),
         }))
         .into_response(),
         Err(error) => config_draft_error_response(error),
@@ -442,132 +464,4 @@ async fn reload_config(State(_state): State<AdminState>) -> Result<Json<Value>, 
         }
     }
     Ok(Json(json!({ "status": "ok", "reloading": true })))
-}
-
-async fn create_principal(
-    State(state): State<AdminState>,
-    Json(request): Json<management::CreatePrincipalRequest>,
-) -> axum::response::Response {
-    match management::create_principal(&state, request, unix_now_secs()).await {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => management_error_response(error),
-    }
-}
-
-async fn update_principal(
-    State(state): State<AdminState>,
-    Path(id): Path<String>,
-    Json(request): Json<management::UpdatePrincipalRequest>,
-) -> axum::response::Response {
-    match management::update_principal(&state, id, request, unix_now_secs()).await {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => management_error_response(error),
-    }
-}
-
-async fn disable_principal(
-    State(state): State<AdminState>,
-    Path(id): Path<String>,
-) -> axum::response::Response {
-    match management::set_principal_disabled(&state, id, true, unix_now_secs()).await {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => management_error_response(error),
-    }
-}
-
-async fn enable_principal(
-    State(state): State<AdminState>,
-    Path(id): Path<String>,
-) -> axum::response::Response {
-    match management::set_principal_disabled(&state, id, false, unix_now_secs()).await {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => management_error_response(error),
-    }
-}
-
-async fn update_principal_allowed_models(
-    State(state): State<AdminState>,
-    Path(id): Path<String>,
-    Json(request): Json<management::AllowedModelsRequest>,
-) -> axum::response::Response {
-    match management::update_allowed_models(&state, id, request, unix_now_secs()).await {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => management_error_response(error),
-    }
-}
-
-async fn issue_principal_key(
-    State(state): State<AdminState>,
-    Path(id): Path<String>,
-    Json(request): Json<management::IssueKeyRequest>,
-) -> axum::response::Response {
-    match management::issue_principal_key(&state, id, request).await {
-        Ok(response) => (StatusCode::CREATED, Json(response)).into_response(),
-        Err(error) => management_error_response(error),
-    }
-}
-
-async fn list_principal_keys(
-    State(state): State<AdminState>,
-    Path(id): Path<String>,
-) -> axum::response::Response {
-    match management::list_principal_keys(&state, id).await {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => management_error_response(error),
-    }
-}
-
-async fn get_principal_key(
-    State(state): State<AdminState>,
-    Path((id, key_id)): Path<(String, String)>,
-) -> axum::response::Response {
-    match management::get_principal_key(&state, id, key_id).await {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => management_error_response(error),
-    }
-}
-
-async fn update_principal_key(
-    State(state): State<AdminState>,
-    Path((id, key_id)): Path<(String, String)>,
-    Json(request): Json<management::UpdateKeyRequest>,
-) -> axum::response::Response {
-    match management::update_principal_key(&state, id, key_id, request).await {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => management_error_response(error),
-    }
-}
-
-async fn revoke_principal_key(
-    State(state): State<AdminState>,
-    Path((id, key_id)): Path<(String, String)>,
-) -> axum::response::Response {
-    match management::revoke_principal_key(&state, id, key_id).await {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => management_error_response(error),
-    }
-}
-
-async fn disable_principal_key(
-    State(state): State<AdminState>,
-    Path((id, key_id)): Path<(String, String)>,
-) -> axum::response::Response {
-    match management::disable_principal_key(&state, id, key_id).await {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => management_error_response(error),
-    }
-}
-
-async fn enable_principal_key(
-    State(state): State<AdminState>,
-    Path((id, key_id)): Path<(String, String)>,
-) -> axum::response::Response {
-    match management::enable_principal_key(&state, id, key_id).await {
-        Ok(response) => Json(response).into_response(),
-        Err(error) => management_error_response(error),
-    }
-}
-
-fn management_error_response(error: management::ManagementError) -> axum::response::Response {
-    error.into_response()
 }

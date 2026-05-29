@@ -3,11 +3,8 @@ mod common;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use arc_swap::ArcSwap;
 use bytes::Bytes;
-use cc_lb_config::{
-    Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind, PrincipalSpec, PrincipalType,
-};
+use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
 use cc_lb_core::api_keys::builtin_authn::{BuiltinAuthError, BuiltinAuthn};
 use cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_core::api_keys::key_store::KeyStore;
@@ -34,8 +31,9 @@ fn builtin_authn_accepts_bound_principal_view() -> Result<(), Box<dyn std::error
     let authn = BuiltinAuthn::new(
         DownstreamAuthMode::ApiKey,
         None,
-        Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(storage)))),
-        Arc::new(ArcSwap::from(view.clone())),
+        Some(Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(
+            storage,
+        ))))),
     );
 
     let error = tokio::runtime::Builder::new_current_thread()
@@ -50,10 +48,7 @@ fn builtin_authn_accepts_bound_principal_view() -> Result<(), Box<dyn std::error
 #[test]
 fn limit_engine_reserve_accepts_bound_principal_view() {
     let view = principal_view("principal-a", None);
-    let engine = LimitEngine::new(
-        Arc::new(KeyConcurrencyManager::new()),
-        Arc::new(ArcSwap::from(view.clone())),
-    );
+    let engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()));
     let record = StoredApiKeyRecord {
         key_hash_b64: "key-a".to_owned(),
         status: KeyStatus::Active,
@@ -100,6 +95,7 @@ async fn lifecycle_per_principal_dispatch_hits_correct_router_and_hook()
     let authn = none_mode_authn("principal-a", view.clone(), state.clone())?;
     let lifecycle = Lifecycle::new(
         authn.authn.clone(),
+        view,
         Arc::new(authn),
         global_router,
         Arc::new(MockDispatch {
@@ -150,35 +146,22 @@ async fn lifecycle_per_principal_dispatch_hits_correct_router_and_hook()
     Ok(())
 }
 
+// TODO(Task-35-followup): replace TOML config consumption with DB store read
 fn principal_view(
     principal_id: &str,
     chain: Option<(RouterPluginCache, ObservabilityHooksCache)>,
 ) -> Arc<PrincipalView> {
-    let mut principals = HashMap::new();
-    principals.insert(
-        principal_id.to_owned(),
-        PrincipalSpec {
-            principal_type: PrincipalType::Machine,
-            default_limits: Vec::new(),
-            enabled: true,
-            allowed_models: vec!["*".to_owned()],
-            credentials_ref: None,
-            router_plugin: None,
-            observability_hooks: None,
-        },
-    );
     let mut chains = HashMap::new();
     if let Some(chain) = chain {
         chains.insert(principal_id.to_owned(), chain);
     }
-    PrincipalView::from_config(
-        &Config {
-            principals,
-            ..Config::default()
-        },
+    Arc::new(PrincipalView::for_tests(
+        principal_id,
+        true,
+        vec!["*".to_owned()],
+        Vec::new(),
         chains,
-    )
-    .expect("principal view builds")
+    ))
 }
 
 fn none_mode_authn(
@@ -195,9 +178,11 @@ fn none_mode_authn(
                 upstream_kind: NoneModeUpstreamKind::AnthropicKey,
                 upstream_credential_ref: "test-upstream".to_owned(),
             }),
-            Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(storage)))),
-            Arc::new(ArcSwap::from(view)),
+            Some(Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(
+                storage,
+            ))))),
         )),
+        principal_view: view,
         state,
         refresh_allowed: true,
     })

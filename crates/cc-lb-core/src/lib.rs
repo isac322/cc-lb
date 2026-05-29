@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 
 pub mod api_keys;
+pub mod audit_payload;
 #[cfg(not(loom))]
 pub mod audit_writer;
 #[cfg(not(loom))]
@@ -16,6 +17,8 @@ mod dns_cache;
 #[cfg(not(loom))]
 mod drain;
 #[cfg(not(loom))]
+mod dynamic_view;
+#[cfg(not(loom))]
 mod error_format;
 #[cfg(not(loom))]
 mod error_normalizer;
@@ -29,6 +32,7 @@ mod sse_error_frame;
 mod sse_relay;
 #[cfg(not(loom))]
 pub mod usage_pruner;
+pub use audit_payload::AuditPayload;
 #[cfg(not(loom))]
 pub use audit_writer::{AuditDropped, AuditEntry, AuditWriterSink, spawn_audit_writer};
 #[cfg(not(loom))]
@@ -36,6 +40,8 @@ pub use bulkhead::{
     Bulkhead, BulkheadConfig, BulkheadDispatch, BulkheadError, BulkheadRegistry, ExecuteError,
     make_default_dispatcher, make_http_dispatcher_with_connector,
 };
+#[cfg(not(loom))]
+pub use cc_lb_plugin_api::ApiKeyAwareSignerFactory;
 #[cfg(not(loom))]
 pub use circuit_breaker::{
     BreakerConfig, BreakerError, BreakerRegistry, BreakerState, CircuitBreaker,
@@ -56,6 +62,11 @@ pub use dns_cache::{
 #[cfg(not(loom))]
 pub use drain::{DrainController, proxy_drain_middleware};
 #[cfg(not(loom))]
+pub use dynamic_view::{
+    ApplyStatus, DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusEntry,
+    UpstreamStatusSnapshot,
+};
+#[cfg(not(loom))]
 pub use error_format::{anthropic_error_body, anthropic_error_response};
 #[cfg(not(loom))]
 pub use error_normalizer::{ErrorNormalizer, NormalizerError, UpstreamKind};
@@ -63,8 +74,8 @@ pub use error_normalizer::{ErrorNormalizer, NormalizerError, UpstreamKind};
 pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop};
 #[cfg(not(loom))]
 pub use lifecycle::{
-    ApiKeyAwareSignerFactory, Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig,
-    LimitSubject, LimitSubjectProvider, ProxyError, UpstreamDispatch,
+    Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig, LimitSubject,
+    LimitSubjectProvider, ProxyError, ReplicaIdentity, UpstreamDispatch,
 };
 #[cfg(not(loom))]
 pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};

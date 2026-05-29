@@ -47,7 +47,7 @@ export function usePrincipalKeys(principalId: string, mock?: boolean) {
       setIsLoading(true);
       setError(null);
       const res = await getJson<{ keys: ApiKeyRecord[] }>(
-        `/admin/principals/${principalId}/keys`,
+        `/admin/v1/principals/${principalId}/keys`,
       );
       setKeys(res.keys);
     } catch (err) {
@@ -81,7 +81,7 @@ export function usePrincipalKeys(principalId: string, mock?: boolean) {
       return newKey;
     }
     const res = await postJson<IssueKeyResponse, { label?: string }>(
-      `/admin/principals/${principalId}/keys`,
+      `/admin/v1/principals/${principalId}/keys`,
       { label },
     );
     await fetchKeys();
@@ -104,7 +104,7 @@ export function usePrincipalKeys(principalId: string, mock?: boolean) {
       return res;
     }
     const res = await postJson<RevokeKeyResponse, Record<string, never>>(
-      `/admin/principals/${principalId}/keys/${keyId}/revoke`,
+      `/admin/v1/principals/${principalId}/keys/${keyId}/revoke`,
       {},
     );
     await fetchKeys();

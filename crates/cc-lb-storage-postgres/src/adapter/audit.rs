@@ -73,7 +73,7 @@ impl AuditStore for PostgresStorage {
         );
         query_builder.push_values(rows.iter(), |mut values, row| {
             values
-                .push_bind(row.ts.clone())
+                .push_bind(row.ts)
                 .push_bind(row.request_id)
                 .push_bind(row.principal_id)
                 .push_bind(row.route)
