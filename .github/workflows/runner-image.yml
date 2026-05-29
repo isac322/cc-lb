@@ -1,0 +1,81 @@
+name: runner-image
+
+on:
+  push:
+    branches:
+      - master
+    paths:
+      - '.github/runner-image/**'
+      - '.github/workflows/runner-image.yml'
+  pull_request:
+    paths:
+      - '.github/runner-image/**'
+      - '.github/workflows/runner-image.yml'
+  workflow_dispatch:
+    inputs:
+      base_tag:
+        description: 'Tag of ghcr.io/falcondev-oss/actions-runner to base on'
+        required: false
+        default: 'latest'
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  IMAGE_NAME: ghcr.io/${{ github.repository_owner }}/actions-runner
+
+jobs:
+  build:
+    name: Build & push runner image (arm64)
+    # Bootstrap on GitHub-hosted amd64: we are building the very image future
+    # self-hosted arm64 runners will run on, so they cannot build themselves.
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up QEMU (arm64 emulation on amd64 host)
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix=sha-,format=short
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      # Single-platform arm64 build. Buildx still wraps the result in a
+      # manifest list whose only entry is linux/arm64, so an amd64 client
+      # pulling this image fails fast with:
+      #   "no matching manifest for linux/amd64 in the manifest list entries"
+      # rather than silently pulling a non-runnable image.
+      - name: Build and push (linux/arm64 only)
+        uses: docker/build-push-action@v6
+        with:
+          context: .github/runner-image
+          platforms: linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          build-args: |
+            BASE_TAG=${{ inputs.base_tag || 'latest' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
