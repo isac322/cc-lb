@@ -12,7 +12,8 @@ env:
 jobs:
   verify:
     runs-on: oracle4-cc-lb
-    container: messense/rust-musl-cross:x86_64-musl
+    container:
+      image: messense/rust-musl-cross:${{ runner.arch == 'X64' && 'x86_64-musl' || 'aarch64-musl' }}
     env:
       RUSTUP_TOOLCHAIN: stable
     steps:
@@ -23,6 +24,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-          key: musl-x86_64-musl
+          key: musl-${{ runner.arch }}
       - name: Verify musl static binary
         run: bash tests/musl-static/verify.sh
