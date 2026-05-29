@@ -4,11 +4,16 @@ use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
+use cc_lb_storage_api::{
+    PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamKind, UpstreamStore,
+};
+use cc_lb_storage_redb::Storage;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
+use url::Url;
 
 pub struct TestProcess {
     child: Child,
@@ -44,13 +49,8 @@ pub async fn spawn_test_server() -> TestServer {
     let metrics_addr = free_addr();
     let config_dir = tempfile::tempdir().expect("temp config dir");
     let config_path = config_dir.path().join("cc-lb.toml");
-    write_config(
-        &config_path,
-        proxy_addr,
-        admin_addr,
-        metrics_addr,
-        fake_addr,
-    );
+    write_config(&config_path, proxy_addr, admin_addr, metrics_addr);
+    seed_storage(&config_path.with_file_name("cc-lb.redb"), fake_addr).await;
 
     let child = Command::new(env!("CARGO_BIN_EXE_cc-lb"))
         .arg("serve")
@@ -90,25 +90,9 @@ fn write_config(
     proxy_addr: SocketAddr,
     admin_addr: SocketAddr,
     metrics_addr: SocketAddr,
-    upstream_addr: SocketAddr,
 ) {
     let storage_path = path.with_file_name("cc-lb.redb");
     let data_dir = path.parent().expect("config path has parent");
-    let bootstrap = format!(
-        r#"
-{}
-name = "fake_anthropic"
-kind = "custom"
-base_url = "http://{upstream_addr}"
-
-{}
-name = "api-key"
-kind = "machine"
-"#,
-        concat!("[[", "upstreams", "]]"),
-        concat!("[[", "principals", "]]"),
-    );
-    std::fs::write(data_dir.join("bootstrap.toml"), bootstrap).expect("write bootstrap");
     let storage_path = storage_path.display();
     let data_dir = data_dir.display();
     let config = format!(
@@ -173,6 +157,35 @@ cache_ttl_ceiling_secs = 300
 "#
     );
     std::fs::write(path, config).expect("write config");
+}
+
+async fn seed_storage(storage_path: &Path, upstream_addr: SocketAddr) {
+    let storage = Storage::open(storage_path, [0; 32]).expect("test storage opens");
+    UpstreamStore::create(
+        &storage,
+        UpstreamCreate {
+            name: "fake_anthropic".to_owned(),
+            kind: UpstreamKind::Custom,
+            base_url: Some(
+                Url::parse(&format!("http://{upstream_addr}")).expect("fake upstream URL parses"),
+            ),
+            api_key_ciphertext: None,
+        },
+    )
+    .await
+    .expect("seed upstream");
+    PrincipalStore::create(
+        &storage,
+        PrincipalCreate {
+            name: "api-key".to_owned(),
+            kind: PrincipalKind::Machine,
+            allowed_models: Vec::new(),
+            default_limits: Vec::new(),
+        },
+        1,
+    )
+    .await
+    .expect("seed principal");
 }
 
 pub async fn wait_for_status(addr: SocketAddr, path: &str, status: u16) {
