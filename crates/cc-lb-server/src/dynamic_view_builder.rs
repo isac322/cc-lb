@@ -113,7 +113,10 @@ pub async fn build_dynamic_view(
     data_dir: &Path,
 ) -> Result<Arc<DynamicView>, RebindError> {
     let upstreams = list_upstreams(stores).await?;
-    let all_upstream_ids = upstreams.iter().map(|upstream| upstream.id).collect::<Vec<_>>();
+    let all_upstream_ids = upstreams
+        .iter()
+        .map(|upstream| upstream.id)
+        .collect::<Vec<_>>();
     let upstream_rate_limit_records = stores
         .upstream_rate_limits
         .list_for_upstream_ids(&all_upstream_ids)

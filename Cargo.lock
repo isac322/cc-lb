@@ -788,6 +788,7 @@ dependencies = [
  "nix",
  "notify",
  "oauth2",
+ "parking_lot",
  "rand 0.10.1",
  "redb",
  "rustls",

@@ -68,8 +68,8 @@ pub use dns_cache::{
 pub use drain::{DrainController, proxy_drain_middleware};
 #[cfg(not(loom))]
 pub use dynamic_view::{
-    ApplyStatus, DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusEntry,
-    UpstreamRateLimitCache, UpstreamStatusSnapshot,
+    ApplyStatus, DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamRateLimitCache,
+    UpstreamStatusEntry, UpstreamStatusSnapshot,
 };
 #[cfg(not(loom))]
 pub use error_format::{anthropic_error_body, anthropic_error_response};

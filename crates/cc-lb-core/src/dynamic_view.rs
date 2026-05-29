@@ -229,10 +229,7 @@ impl DynamicViewBuilder {
         self
     }
 
-    pub fn upstream_rate_limit_cache(
-        mut self,
-        cache: Arc<RwLock<UpstreamRateLimitCache>>,
-    ) -> Self {
+    pub fn upstream_rate_limit_cache(mut self, cache: Arc<RwLock<UpstreamRateLimitCache>>) -> Self {
         self.upstream_rate_limit_cache = Some(cache);
         self
     }
