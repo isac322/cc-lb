@@ -20,9 +20,12 @@ export function usePrincipalDirectory(mock?: boolean) {
     async function fetchDirectory() {
       try {
         setIsLoading(true);
-        const res = await getJson<PrincipalListResponse>('/admin/v1/principals', {
-          signal: controller.signal,
-        });
+        const res = await getJson<PrincipalListResponse>(
+          '/admin/v1/principals',
+          {
+            signal: controller.signal,
+          },
+        );
         setData(res);
         setError(null);
       } catch (err) {

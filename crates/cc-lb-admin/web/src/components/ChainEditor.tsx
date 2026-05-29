@@ -340,9 +340,9 @@ function ChainList({ principalId, slot, registryEntries }: ChainListProps) {
 
 export function ChainEditor() {
   const [principalId, setPrincipalId] = useState('');
-  const [principalList, setPrincipalList] = useState<{ id: string; name: string }[]>(
-    [],
-  );
+  const [principalList, setPrincipalList] = useState<
+    { id: string; name: string }[]
+  >([]);
   const [registryEntries, setRegistryEntries] = useState<
     RegistryEntryResponse[]
   >([]);

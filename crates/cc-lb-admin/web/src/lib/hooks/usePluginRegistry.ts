@@ -44,8 +44,11 @@ export function useUploadWasm() {
         if (body && typeof body === 'object' && 'message' in body) {
           message = String((body as Record<string, unknown>).message);
         }
-      } catch {
-        // ignore
+      } catch (err) {
+        console.warn(
+          'plugin registry upload error response parse failed:',
+          err,
+        );
       }
       if (res.status === 401) {
         code = 'unauthorized';

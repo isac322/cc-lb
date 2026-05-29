@@ -49,7 +49,7 @@ async function fetchWithAuth(
           } else if ('error' in b) {
             code = String(b.error);
           }
-          
+
           if ('message' in b) {
             message = String(b.message);
           } else if ('detail' in b) {

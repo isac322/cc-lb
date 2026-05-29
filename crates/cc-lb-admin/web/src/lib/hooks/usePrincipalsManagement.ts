@@ -65,5 +65,10 @@ export function usePrincipalsManagement(mock?: boolean) {
     fetchPrincipals();
   }, [fetchPrincipals]);
 
-  return { principals: principalList, refresh: fetchPrincipals, isLoading, error };
+  return {
+    principals: principalList,
+    refresh: fetchPrincipals,
+    isLoading,
+    error,
+  };
 }
