@@ -12,10 +12,12 @@ pub mod managed_keys;
 pub mod meta;
 pub mod notifier;
 pub mod oauth_credentials;
+pub mod plugin_registry;
 pub mod principals;
 pub mod quota;
 pub mod request_events;
 pub mod retry;
+pub mod upstreams;
 pub mod usage_rollups;
 
 #[derive(Debug, Clone)]

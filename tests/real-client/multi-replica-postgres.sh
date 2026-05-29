@@ -410,6 +410,10 @@ PY
   code_param=$(extract_query_param "$redirect" code)
   code=$(request_with_retry POST "http://127.0.0.1:$ADMIN_A_PORT/admin/v1/upstreams/$upstream_id/oauth/complete" \
     "{\"state_token\":\"$state_token\",\"code\":\"$code_param\"}" "$complete_json") || true
+  if [ "$code" != "200" ]; then
+    printf '%s\n' "--- oauth complete response ---" >&2
+    cat "$complete_json" >&2 || true
+  fi
   assert_status_200 "$code" "oauth complete"
 }
 

@@ -1,8 +1,9 @@
 use async_trait::async_trait;
 use cc_lb_aead::EncryptedOAuthTokens;
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    StorageError, StorageResult, UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStore,
-    UpstreamUpdate, validate_identifier,
+    StorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,
+    validate_identifier,
 };
 use chrono::{DateTime, Utc};
 use sqlx::{Postgres, Row, Transaction};

@@ -20,8 +20,6 @@ use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DownstreamAuthMode, TlsConfig};
-#[cfg(feature = "postgres")]
-use cc_lb_config::{Limit, LimitKind, PrincipalSpec, PrincipalType};
 use cc_lb_core::BreakerState;
 use cc_lb_core::{
     BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
@@ -113,7 +111,12 @@ pub enum BuildError {
     #[error(transparent)]
     Storage(#[from] cc_lb_storage_redb::StorageError),
     #[error(transparent)]
+    StorageApi(#[from] cc_lb_storage_api::StorageError),
+    #[error(transparent)]
     StorageFactory(#[from] crate::storage_factory::StorageFactoryError),
+    #[cfg(feature = "postgres")]
+    #[error("storage connection failed: {message}")]
+    StorageConnect { message: String },
     #[error(transparent)]
     Bootstrap(#[from] crate::bootstrap::BootstrapError),
     #[error(transparent)]
@@ -354,6 +357,7 @@ pub async fn build_app_for_testing_postgres(database_url: &str) -> Result<App, B
         .map_err(|e| BuildError::StorageConnect {
             message: e.to_string(),
         })?;
+    seed_app_testing_storage(init_storage.as_ref(), None).await?;
 
     sqlx::query("TRUNCATE managed_api_key_index_v1, managed_api_keys_v1")
         .execute(&pool)
@@ -374,6 +378,59 @@ pub async fn build_app_for_testing_postgres(database_url: &str) -> Result<App, B
 }
 
 #[cfg(feature = "postgres")]
+pub async fn seed_app_testing_storage(
+    storage: &dyn Storage,
+    upstream_base_url: Option<url::Url>,
+) -> Result<(), BuildError> {
+    use cc_lb_storage_api::principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind};
+    use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind};
+    use cc_lb_storage_api::{PrincipalStore, StorageError, UpstreamStore};
+
+    let now = unix_now_secs();
+    match PrincipalStore::get_by_name(storage, "test-principal").await? {
+        Some(_) => {}
+        None => {
+            PrincipalStore::create(
+                storage,
+                PrincipalCreate {
+                    name: "test-principal".to_owned(),
+                    kind: PrincipalKind::Machine,
+                    default_limits: vec![Limit {
+                        kind: LimitKind::Requests,
+                        window_secs: 60,
+                        cap_micros: 1_000_000,
+                    }],
+                    allowed_models: vec!["*".to_owned()],
+                },
+                now,
+            )
+            .await?;
+        }
+    }
+
+    if UpstreamStore::get_by_name(storage, "test-upstream")
+        .await?
+        .is_none()
+    {
+        match UpstreamStore::create(
+            storage,
+            UpstreamCreate {
+                name: "test-upstream".to_owned(),
+                kind: UpstreamKind::Custom,
+                base_url: upstream_base_url,
+                api_key_ciphertext: None,
+            },
+        )
+        .await
+        {
+            Ok(_) | Err(StorageError::Conflict { .. }) => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
 fn build_app_for_testing_postgres_config(database_url: &str) -> Config {
     const TEST_ADMIN_TOKEN: &str = "test-token";
 
@@ -385,33 +442,6 @@ fn build_app_for_testing_postgres_config(database_url: &str) -> Config {
         ..Config::default()
     };
     config.admin.token = Some(TEST_ADMIN_TOKEN.to_owned());
-    config.principals.insert(
-        "test-principal".to_owned(),
-        PrincipalSpec {
-            principal_type: PrincipalType::Machine,
-            default_limits: vec![Limit {
-                kind: LimitKind::Requests,
-                window: Duration::from_secs(60),
-                cap_micros: 1_000_000,
-            }],
-            enabled: true,
-            allowed_models: vec!["*".to_owned()],
-            credentials_ref: None,
-            router_plugin: None,
-            observability_hooks: None,
-        },
-    );
-    config.upstreams.insert(
-        "test-upstream".to_owned(),
-        cc_lb_config::UpstreamSpec {
-            kind: cc_lb_config::UpstreamKind::AnthropicDirect,
-            base_url: None,
-            region: None,
-            project: None,
-            auth_strategy: cc_lb_config::AuthStrategy::ApiKey,
-            credentials_ref: None,
-        },
-    );
     config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
     config.downstream_auth.mode = DownstreamAuthMode::ApiKey;
     config.downstream_auth.none_mode = None;
@@ -808,6 +838,14 @@ fn spawn_reconcile_shutdown(shutdown: watch::Receiver<bool>, cancel: Cancellatio
 
 fn cap_to_usize(value: u64) -> usize {
     usize::try_from(value).unwrap_or(usize::MAX)
+}
+
+#[cfg(feature = "postgres")]
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn build_tls_state(config: &Config) -> Result<Option<Arc<TlsState>>, BuildError> {

@@ -13,11 +13,10 @@ use axum::http::{Request, Response, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::any;
 use cc_lb_aead::AeadService;
-use cc_lb_config::{
-    AuthStrategy, Config, DownstreamAuthMode, Limit, LimitKind, PostgresPoolConfig, PrincipalSpec,
-    PrincipalType, StorageConfig, UpstreamKind, UpstreamSpec,
+use cc_lb_config::{Config, DownstreamAuthMode, PostgresPoolConfig, StorageConfig};
+use cc_lb_server::app::{
+    App, build_app_for_testing_postgres, build_app_with_storage, seed_app_testing_storage,
 };
-use cc_lb_server::app::{App, build_app_for_testing_postgres, build_app_with_storage};
 use cc_lb_storage_api::{BackendKind, ManagedKeyStore, Storage as StorageTrait};
 use cc_lb_storage_postgres::adapter::retry::RetryPolicy;
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage};
@@ -205,16 +204,23 @@ async fn build_api_key_app_for_testing_postgres(
         .connect(database_url)
         .await?;
     let managed_store: Arc<dyn ManagedKeyStore> = Arc::new(PostgresManagedKeyStore::new(
-        pool,
+        pool.clone(),
         Arc::new(RetryPolicy::default()),
     ));
+    let storage: Arc<dyn StorageTrait> = Arc::new(PostgresStorage::new(pool.clone()));
+    seed_app_testing_storage(
+        storage.as_ref(),
+        Some(Url::parse(&format!("http://{}", upstream.addr))?),
+    )
+    .await?;
     let app = build_app_with_storage(
-        test_config(database_url, upstream.addr)?,
+        test_config(database_url),
         None,
         managed_store,
-        None,
+        storage,
         Arc::new(AeadService::from_master_key([0; 32])),
-    )?;
+    )
+    .await?;
 
     Ok((app, upstream))
 }
@@ -233,7 +239,7 @@ async fn reset_managed_key_tables(database_url: &str) -> TestResult<()> {
     Ok(())
 }
 
-fn test_config(database_url: &str, upstream_addr: SocketAddr) -> TestResult<Config> {
+fn test_config(database_url: &str) -> Config {
     let mut config = Config::default();
     config.storage = StorageConfig::Postgres {
         url: database_url.to_owned(),
@@ -242,34 +248,7 @@ fn test_config(database_url: &str, upstream_addr: SocketAddr) -> TestResult<Conf
     config.admin.token = Some(ADMIN_TOKEN.to_owned());
     config.downstream_auth.mode = DownstreamAuthMode::ApiKey;
     config.downstream_auth.none_mode = None;
-    config.principals.insert(
-        PRINCIPAL_ID.to_owned(),
-        PrincipalSpec {
-            principal_type: PrincipalType::Machine,
-            default_limits: vec![Limit {
-                kind: LimitKind::Requests,
-                window: Duration::from_secs(60),
-                cap_micros: 1_000,
-            }],
-            enabled: true,
-            allowed_models: vec!["*".to_owned()],
-            credentials_ref: None,
-            router_plugin: None,
-            observability_hooks: None,
-        },
-    );
-    config.upstreams.insert(
-        "test-upstream".to_owned(),
-        UpstreamSpec {
-            kind: UpstreamKind::Custom,
-            base_url: Some(Url::parse(&format!("http://{upstream_addr}"))?),
-            region: None,
-            project: None,
-            auth_strategy: AuthStrategy::ApiKey,
-            credentials_ref: None,
-        },
-    );
-    Ok(config)
+    config
 }
 
 struct RunningUpstream {
