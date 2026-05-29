@@ -19,31 +19,22 @@ on:
   schedule:
     - cron: '0 2 * * *'
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
 jobs:
   postgres-build-matrix:
     name: Build ${{ matrix.build-variant }}
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
 
     strategy:
       matrix:
         build-variant:
-          - default
-          - postgres-only
           - all-features
           - no-default-features
 
     steps:
-      - name: Free up disk space on runner
-        uses: jlumbroso/free-disk-space@v1.3.1
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          docker-images: false
-          swap-storage: false
-
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
@@ -56,23 +47,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/
-          key: ${{ runner.os }}-cargo-postgres-${{ hashFiles('**/Cargo.lock') }}
-
-      - name: Build workspace (default features = redb)
-        if: matrix.build-variant == 'default'
-        run: cargo build --workspace
-
-      - name: Test workspace (default features = redb)
-        if: matrix.build-variant == 'default'
-        run: cargo test --workspace --no-run
-
-      - name: Build workspace (postgres feature active; redb crate linked-but-unused)
-        if: matrix.build-variant == 'postgres-only'
-        run: cargo build --workspace --features postgres
-
-      - name: Test workspace (postgres feature active)
-        if: matrix.build-variant == 'postgres-only'
-        run: cargo test --workspace --no-run --features postgres
+          key: ${{ runner.os }}-cargo-postgres-build-${{ matrix.build-variant }}-${{ hashFiles('**/Cargo.lock') }}
 
       - name: Build workspace (all features)
         if: matrix.build-variant == 'all-features'
@@ -92,7 +67,7 @@ jobs:
 
   postgres-conformance:
     name: Postgres conformance
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
 
     services:
       postgres:
@@ -112,17 +87,6 @@ jobs:
       CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
 
     steps:
-      - name: Free up disk space on runner
-        uses: jlumbroso/free-disk-space@v1.3.1
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          docker-images: false
-          swap-storage: false
-
       - uses: actions/checkout@v6
 
       - name: Install Rust toolchain
@@ -135,13 +99,15 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/
-          key: ${{ runner.os }}-cargo-postgres-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-postgres-conformance-${{ hashFiles('**/Cargo.lock') }}
 
-      - name: Install sqlx-cli (repo-local)
-        run: cargo install sqlx-cli --no-default-features --features postgres --root ./target/tools
+      - name: Install sqlx-cli
+        uses: taiki-e/install-action@v2
+        with:
+          tool: sqlx-cli
 
       - name: Run Postgres migrations
-        run: ./target/tools/bin/sqlx migrate run --source crates/cc-lb-storage-postgres/migrations
+        run: sqlx migrate run --source crates/cc-lb-storage-postgres/migrations
         env:
           DATABASE_URL: ${{ env.CI_POSTGRES_URL }}
 

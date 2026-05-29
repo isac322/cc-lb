@@ -2,20 +2,40 @@ name: musl-static
 
 on:
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
   push:
+    branches:
+      - master
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
 
 env:
   CC_LB_ADMIN_SKIP_SPA: "1"
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
     container: messense/rust-musl-cross:x86_64-musl
     env:
       RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
+      # The base image already ships a working rustup + stable toolchain. Re-running
+      # dtolnay/rust-toolchain on top of it tries to re-install components and dies
+      # on a missing 'share/doc/clippy/README.md' file. Trust the image's toolchain.
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
