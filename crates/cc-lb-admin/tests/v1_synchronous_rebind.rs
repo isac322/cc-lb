@@ -125,7 +125,10 @@ struct NoopDispatch;
 
 #[async_trait]
 impl UpstreamDispatch for NoopDispatch {
-    async fn dispatch(&self, _request: SignedRequest) -> Result<http::Response<Body>, DispatchError> {
+    async fn dispatch(
+        &self,
+        _request: SignedRequest,
+    ) -> Result<http::Response<Body>, DispatchError> {
         Ok(http::Response::new(Body::empty()))
     }
 }
@@ -133,9 +136,8 @@ impl UpstreamDispatch for NoopDispatch {
 #[tokio::test]
 async fn create_upstream_rebinds_dynamic_view_before_response_returns() {
     let dir = tempfile::tempdir().expect("temp admin dir");
-    let storage = Arc::new(
-        Storage::open(&dir.path().join("admin.redb"), [9; 32]).expect("admin redb opens"),
-    );
+    let storage =
+        Arc::new(Storage::open(&dir.path().join("admin.redb"), [9; 32]).expect("admin redb opens"));
     let config = Config::default();
     let holder = admin_test_common::dynamic_view_holder(&config);
     let rebinder = Arc::new(SnapshotRebinder {

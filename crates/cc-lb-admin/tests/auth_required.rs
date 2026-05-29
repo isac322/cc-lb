@@ -44,6 +44,37 @@ async fn test_auth_required() {
         ("/admin/oauth/complete", "POST"),
         ("/admin/config/current", "GET"),
         ("/admin/config/reload", "POST"),
+        ("/admin/v1/status", "GET"),
+        ("/admin/v1/upstreams", "GET"),
+        ("/admin/v1/upstreams", "POST"),
+        (
+            "/admin/v1/upstreams/00000000-0000-0000-0000-000000000001",
+            "GET",
+        ),
+        (
+            "/admin/v1/upstreams/00000000-0000-0000-0000-000000000001/enable",
+            "POST",
+        ),
+        (
+            "/admin/v1/upstreams/00000000-0000-0000-0000-000000000001/oauth/start",
+            "POST",
+        ),
+        ("/admin/v1/principals", "GET"),
+        ("/admin/v1/principals", "POST"),
+        (
+            "/admin/v1/principals/00000000-0000-0000-0000-000000000001",
+            "GET",
+        ),
+        (
+            "/admin/v1/principals/00000000-0000-0000-0000-000000000001/disable",
+            "POST",
+        ),
+        (
+            "/admin/v1/principals/00000000-0000-0000-0000-000000000001/plugin-chain",
+            "GET",
+        ),
+        ("/admin/v1/plugins/registry", "GET"),
+        ("/admin/v1/plugins/registry", "POST"),
     ];
 
     for (path, method) in endpoints {

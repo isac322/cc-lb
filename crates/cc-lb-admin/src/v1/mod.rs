@@ -3,6 +3,7 @@ use axum::{
     response::Response,
 };
 
+pub mod keys;
 pub mod oauth;
 pub mod plugins;
 pub mod plugins_wasm;
