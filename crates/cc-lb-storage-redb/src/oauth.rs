@@ -163,7 +163,6 @@ impl Storage {
             verify_hash: params.verify_hash,
             secret_salt: params.secret_salt,
             upstream_kind: params.upstream_kind,
-            upstream_credential_ref: params.upstream_credential_ref,
             limit_overrides: params.limit_overrides,
             status: KeyStatus::Active,
             expires_at_unix_secs: params.expires_at_unix_secs,

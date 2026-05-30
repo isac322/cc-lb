@@ -15,6 +15,7 @@ fn sample_principals(enabled: bool) -> Vec<PrincipalRecord> {
             "claude-3-5-sonnet-20241022".to_owned(),
             "claude-3-5-sonnet-*".to_owned(),
         ],
+        allowed_upstreams: vec![],
         default_limits: vec![Limit {
             kind: LimitKind::Requests,
             window_secs: Duration::from_secs(60).as_secs(),

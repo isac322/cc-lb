@@ -14,14 +14,16 @@ use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
 use cc_lb_core::api_keys::key_store::KeyStore;
 use cc_lb_core::api_keys::principal_view::PrincipalView;
 use cc_lb_core::{
-    ApiKeyAwareSignerFactory, DispatchError, Lifecycle, LifecycleConfig, UpstreamDispatch,
+    ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder,
+    ErrorNormalizer, Lifecycle, LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_plugin_api::{
     DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
     RequestContext, RetryDecision, RouteDecision, RouteError, RouterPlugin, ShapedRequest,
     ShapedRequestBuilder, SignedRequest, Signer, SignerError, SignerFactory, SigningCapability,
-    Upstream, UpstreamDialect, sign_request,
+    Upstream, UpstreamCandidate, UpstreamDialect, sign_request,
 };
+use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
@@ -76,7 +78,6 @@ impl TestAuthn {
                 Some(NoneModeConfig {
                     principal_id: "principal-test".to_owned(),
                     upstream_kind: NoneModeUpstreamKind::AnthropicKey,
-                    upstream_credential_ref: "test-upstream".to_owned(),
                 }),
                 Some(Arc::new(KeyStore::new(Arc::new(managed_key_store)))),
             )),
@@ -98,7 +99,11 @@ fn default_principal_view() -> Arc<PrincipalView> {
 }
 
 impl ApiKeyAwareSignerFactory for TestAuthn {
-    fn with_api_key(&self, _api_key: String) -> Arc<dyn SignerFactory> {
+    fn with_router_choice(
+        &self,
+        _api_key: String,
+        _router_chosen_upstream_name: String,
+    ) -> Arc<dyn SignerFactory> {
         Arc::new(TestSignerFactory {
             state: self.state.clone(),
             refresh_allowed: self.refresh_allowed,
@@ -116,8 +121,10 @@ impl RouterPlugin for TestRouter {
         &self,
         _ctx: &RequestContext,
         _principal: &Principal,
+        _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
         Ok(RouteDecision {
+            upstream_id: None,
             upstream: Upstream::CustomAnthropicSpec {
                 base_url: self.base_url.clone(),
             },
@@ -288,15 +295,41 @@ pub fn lifecycle_with_parts(
     global_observability_hooks: Vec<Arc<dyn ObservabilityHook>>,
     config: LifecycleConfig,
 ) -> Lifecycle {
-    Lifecycle::new(
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .global_router(global_router)
+        .dispatcher(dispatcher)
+        .global_observability_hooks(global_observability_hooks)
+        .error_normalizer(Arc::new(ErrorNormalizer::new()))
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(vec![default_upstream_record()])
+        .build();
+    Lifecycle::new_with_dynamic_view(
         authn.authn.clone(),
-        authn.principal_view.clone(),
-        Arc::new(authn),
-        global_router,
-        dispatcher,
-        global_observability_hooks,
+        Arc::new(DynamicViewHolder::new(view)),
         config,
     )
+}
+
+fn default_upstream_record() -> UpstreamRecord {
+    UpstreamRecord {
+        id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
+            .expect("default upstream id parses"),
+        name: "test-upstream".to_owned(),
+        kind: StorageUpstreamKind::Custom,
+        base_url: Some(Url::parse("http://upstream.local/").expect("test URL parses")),
+        enabled: true,
+        oauth_credentials: None,
+        api_key_ciphertext: None,
+        refresh_lease_holder: None,
+        refresh_lease_until_unix_secs: None,
+        last_apply_error: None,
+        last_apply_at_unix_secs: None,
+        deleted_at_unix_secs: None,
+        revision: 1,
+        created_at_unix_secs: 0,
+        updated_at_unix_secs: 0,
+    }
 }
 
 pub fn messages_request(body: Bytes) -> Request<Bytes> {

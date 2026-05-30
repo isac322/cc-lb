@@ -24,12 +24,12 @@ use cc_lb_core::BreakerState;
 use cc_lb_core::{
     BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
     CircuitBreakerDispatch, DynamicView, DynamicViewBuilder, DynamicViewHolder, HopByHopStripLayer,
-    Lifecycle, LifecycleConfig, UpstreamDispatch,
+    Lifecycle, LifecycleConfig, UpstreamDispatch, UpstreamRateLimitSink,
     api_keys::{
         builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
         limit_engine::LimitEngine, principal_view::PrincipalView,
     },
-    make_default_dispatcher, spawn_audit_writer,
+    make_default_dispatcher, spawn_audit_writer, start_upstream_rate_limit_writer,
     usage_pruner::UsagePruner,
 };
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
@@ -81,6 +81,7 @@ pub struct App {
     notifier_task: Option<JoinHandle<()>>,
     notify_listener_task: Option<JoinHandle<()>>,
     audit_writer_task: Option<JoinHandle<()>>,
+    upstream_rate_limit_writer_task: Option<JoinHandle<()>>,
     signals: signal::SignalHandle,
     drain_controller: DrainController,
     tls_state: Option<Arc<TlsState>>,
@@ -155,6 +156,7 @@ impl App {
             notifier_task,
             notify_listener_task,
             audit_writer_task,
+            upstream_rate_limit_writer_task,
             signals,
             drain_controller: _,
             tls_state,
@@ -211,6 +213,9 @@ impl App {
         let _ = admin_stop_tx.send(true);
         let _ = admin.await;
         if let Some(task) = audit_writer_task {
+            let _ = task.await;
+        }
+        if let Some(task) = upstream_rate_limit_writer_task {
             let _ = task.await;
         }
         proxy_result?;
@@ -288,7 +293,6 @@ pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError
     config.downstream_auth.none_mode = Some(cc_lb_config::NoneModeConfig {
         principal_id: "test-principal".to_owned(),
         upstream_kind: cc_lb_config::NoneModeUpstreamKind::AnthropicKey,
-        upstream_credential_ref: "test-cred".to_owned(),
     });
     std::mem::forget(dir);
     build_app_with_storage(config, None, managed_store, storage, aead).await
@@ -401,6 +405,7 @@ pub async fn seed_app_testing_storage(
                         cap_micros: 1_000_000,
                     }],
                     allowed_models: vec!["*".to_owned()],
+                    allowed_upstreams: vec![],
                 },
                 now,
             )
@@ -526,6 +531,9 @@ async fn build_app_with_storage_inner(
     let _usage_pruner_task = tokio::spawn(pruner.start_daemon());
     let (sink, audit_writer_task) = spawn_audit_writer(storage.clone(), 1024);
     let audit_sink = Some(Arc::new(sink));
+    let (upstream_rate_limit_sink, upstream_rate_limit_receiver) = UpstreamRateLimitSink::new();
+    let upstream_rate_limit_writer_task =
+        start_upstream_rate_limit_writer(storage.clone(), upstream_rate_limit_receiver);
     let runtime = Arc::new(ExtismRuntime::new());
     let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
     let storage_for_dynamic = storage.clone();
@@ -575,6 +583,7 @@ async fn build_app_with_storage_inner(
         upstreams: storage_for_dynamic.clone(),
         principals: storage_for_dynamic.clone(),
         plugin_registry: storage_for_dynamic.clone(),
+        upstream_rate_limits: storage_for_dynamic.clone(),
         audit: Some(storage_for_dynamic.clone()),
     });
     let lifecycle_config = LifecycleConfig {
@@ -658,6 +667,7 @@ async fn build_app_with_storage_inner(
     }
     lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), builtin_authn.clone());
     lifecycle = lifecycle.with_request_event_storage(storage.clone());
+    lifecycle = lifecycle.with_upstream_rate_limit_sink(upstream_rate_limit_sink);
     let lifecycle = Arc::new(lifecycle);
     let dynamic_view = lifecycle.dynamic_view();
 
@@ -758,6 +768,7 @@ async fn build_app_with_storage_inner(
         notifier_task,
         notify_listener_task,
         audit_writer_task: Some(audit_writer_task),
+        upstream_rate_limit_writer_task: Some(upstream_rate_limit_writer_task),
         signals,
         drain_controller,
         tls_state,

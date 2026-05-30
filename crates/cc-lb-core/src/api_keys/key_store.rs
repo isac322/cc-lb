@@ -21,7 +21,6 @@ pub struct KeyStore {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CreateParams {
     pub upstream_kind: UpstreamKind,
-    pub upstream_credential_ref: String,
     pub label: String,
     pub description: Option<String>,
     pub expires_at_unix_secs: Option<u64>,
@@ -63,7 +62,6 @@ impl KeyStore {
             label: params.label,
             description: params.description,
             upstream_kind: params.upstream_kind,
-            upstream_credential_ref: params.upstream_credential_ref,
             expires_at_unix_secs: params.expires_at_unix_secs,
             limit_overrides: params.limit_overrides,
             secret_salt,
@@ -307,7 +305,6 @@ mod tests {
     fn create_params(label: &str) -> CreateParams {
         CreateParams {
             upstream_kind: UpstreamKind::AnthropicKey,
-            upstream_credential_ref: "anthropic-prod".to_owned(),
             label: label.to_owned(),
             description: Some("test key".to_owned()),
             expires_at_unix_secs: Some(1_800_000_000),

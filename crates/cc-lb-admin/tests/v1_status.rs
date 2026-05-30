@@ -229,6 +229,7 @@ async fn seed_principal(storage: &cc_lb_storage_redb::Storage, name: &str) -> Uu
             name: name.to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: vec!["claude-3-*".to_owned()],
+            allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
         },
         1_800_000_000,

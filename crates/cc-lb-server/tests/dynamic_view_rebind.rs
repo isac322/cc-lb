@@ -21,7 +21,8 @@ fn stores(storage: Arc<Storage>) -> Stores {
     Stores {
         upstreams: storage.clone(),
         principals: storage.clone(),
-        plugin_registry: storage,
+        plugin_registry: storage.clone(),
+        upstream_rate_limits: storage,
         audit: None,
     }
 }
@@ -39,6 +40,7 @@ async fn create_principal(storage: &Storage, name: &str) -> cc_lb_storage_api::P
             name: name.to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: Vec::new(),
+            allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
         },
         1,
@@ -147,6 +149,13 @@ async fn corrupt_oauth_upstream_is_error_while_other_upstreams_stay_active() {
 
     let view = build(&stores, 10, &runtime, dir.path()).await;
     assert_eq!(view.generation, 11);
+    let mut upstream_names = view
+        .upstreams_snapshot()
+        .iter()
+        .map(|record| record.name.as_str())
+        .collect::<Vec<_>>();
+    upstream_names.sort_unstable();
+    assert_eq!(upstream_names, ["corrupt", "healthy"]);
 
     let healthy = view
         .upstream_status_snapshot

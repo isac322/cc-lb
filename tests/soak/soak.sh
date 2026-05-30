@@ -156,7 +156,6 @@ mode = "none"
 [downstream_auth.none_mode]
 principal_id = "api-key"
 upstream_kind = "anthropic_key"
-upstream_credential_ref = "fake_anthropic"
 
 
 [storage]

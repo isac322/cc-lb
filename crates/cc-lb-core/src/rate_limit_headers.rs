@@ -1,28 +1,11 @@
 use std::collections::BTreeMap;
 
-use cc_lb_plugin_api::Principal;
+use cc_lb_plugin_api::{Principal, RateLimitKind, RateLimitObservation};
 use http::HeaderMap;
 use serde_json::Value;
 
 const HEADER_PREFIX: &str = "anthropic-ratelimit-";
 const DEFAULT_WINDOW: &str = "default";
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
-pub(crate) enum AnthropicRateLimitKind {
-    Requests,
-    Tokens,
-    InputTokens,
-    OutputTokens,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AnthropicRateLimitSnapshot {
-    pub kind: AnthropicRateLimitKind,
-    pub window: String,
-    pub limit: Option<u64>,
-    pub remaining: Option<u64>,
-    pub reset: Option<String>,
-}
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum LimitIdentity {
@@ -46,16 +29,12 @@ struct PartialSnapshot {
 }
 
 impl PartialSnapshot {
-    fn into_snapshot(
-        self,
-        kind: AnthropicRateLimitKind,
-        window: String,
-    ) -> Option<AnthropicRateLimitSnapshot> {
+    fn into_snapshot(self, kind: RateLimitKind, window: String) -> Option<RateLimitObservation> {
         if self.limit.is_none() && self.remaining.is_none() && self.reset.is_none() {
             return None;
         }
 
-        Some(AnthropicRateLimitSnapshot {
+        Some(RateLimitObservation {
             kind,
             window,
             limit: self.limit,
@@ -65,10 +44,8 @@ impl PartialSnapshot {
     }
 }
 
-pub(crate) fn parse_anthropic_rate_limit_headers(
-    headers: &HeaderMap,
-) -> Vec<AnthropicRateLimitSnapshot> {
-    let mut snapshots = BTreeMap::<(AnthropicRateLimitKind, String), PartialSnapshot>::new();
+pub fn parse_anthropic_rate_limit_headers(headers: &HeaderMap) -> Vec<RateLimitObservation> {
+    let mut snapshots = BTreeMap::<(u8, String), (RateLimitKind, PartialSnapshot)>::new();
 
     for (name, value) in headers {
         let Some((kind, field, window)) = parse_header_name(name.as_str()) else {
@@ -77,7 +54,10 @@ pub(crate) fn parse_anthropic_rate_limit_headers(
         let Ok(value) = value.to_str() else {
             continue;
         };
-        let snapshot = snapshots.entry((kind, window)).or_default();
+        let snapshot = &mut snapshots
+            .entry((rate_limit_kind_order(kind), window))
+            .or_insert_with(|| (kind, PartialSnapshot::default()))
+            .1;
         match field {
             RateLimitField::Limit => {
                 if let Some(parsed) = parse_u64(value) {
@@ -99,7 +79,7 @@ pub(crate) fn parse_anthropic_rate_limit_headers(
 
     snapshots
         .into_iter()
-        .filter_map(|((kind, window), snapshot)| snapshot.into_snapshot(kind, window))
+        .filter_map(|((_order, window), (kind, snapshot))| snapshot.into_snapshot(kind, window))
         .collect()
 }
 
@@ -135,7 +115,7 @@ pub(crate) fn derive_limit_identity(principal: &Principal, headers: &HeaderMap) 
     LimitIdentity::Unobserved
 }
 
-fn parse_header_name(name: &str) -> Option<(AnthropicRateLimitKind, RateLimitField, String)> {
+fn parse_header_name(name: &str) -> Option<(RateLimitKind, RateLimitField, String)> {
     let suffix = name.strip_prefix(HEADER_PREFIX)?;
     let parts = suffix
         .split('-')
@@ -169,21 +149,28 @@ fn parse_field(part: &str) -> Option<RateLimitField> {
 
 fn parse_kind_and_pre_field_window<'a>(
     parts: &'a [&'a str],
-) -> Option<(AnthropicRateLimitKind, &'a [&'a str])> {
+) -> Option<(RateLimitKind, &'a [&'a str])> {
     match parts {
         ["requests", window @ ..] | ["request", window @ ..] => {
-            Some((AnthropicRateLimitKind::Requests, window))
+            Some((RateLimitKind::Requests, window))
         }
-        ["tokens", window @ ..] | ["token", window @ ..] => {
-            Some((AnthropicRateLimitKind::Tokens, window))
-        }
+        ["tokens", window @ ..] | ["token", window @ ..] => Some((RateLimitKind::Tokens, window)),
         ["input", "tokens", window @ ..] | ["input", "token", window @ ..] => {
-            Some((AnthropicRateLimitKind::InputTokens, window))
+            Some((RateLimitKind::InputTokens, window))
         }
         ["output", "tokens", window @ ..] | ["output", "token", window @ ..] => {
-            Some((AnthropicRateLimitKind::OutputTokens, window))
+            Some((RateLimitKind::OutputTokens, window))
         }
         _ => None,
+    }
+}
+
+fn rate_limit_kind_order(kind: RateLimitKind) -> u8 {
+    match kind {
+        RateLimitKind::Requests => 0,
+        RateLimitKind::Tokens => 1,
+        RateLimitKind::InputTokens => 2,
+        RateLimitKind::OutputTokens => 3,
     }
 }
 
@@ -224,7 +211,7 @@ fn claim_string(claims: &serde_json::Map<String, Value>, key: &str) -> Option<St
 
 #[cfg(test)]
 mod tests {
-    use cc_lb_plugin_api::{Principal, PrincipalKind};
+    use cc_lb_plugin_api::{Principal, PrincipalKind, RateLimitKind, RateLimitObservation};
     use http::header::{HeaderName, HeaderValue};
     use serde_json::json;
 
@@ -246,8 +233,8 @@ mod tests {
         assert_eq!(snapshots.len(), 2);
         assert_eq!(
             snapshots[0],
-            AnthropicRateLimitSnapshot {
-                kind: AnthropicRateLimitKind::Requests,
+            RateLimitObservation {
+                kind: RateLimitKind::Requests,
                 window: "default".to_owned(),
                 limit: Some(1000),
                 remaining: Some(997),
@@ -256,8 +243,8 @@ mod tests {
         );
         assert_eq!(
             snapshots[1],
-            AnthropicRateLimitSnapshot {
-                kind: AnthropicRateLimitKind::Tokens,
+            RateLimitObservation {
+                kind: RateLimitKind::Tokens,
                 window: "default".to_owned(),
                 limit: Some(100000),
                 remaining: Some(99990),
@@ -280,11 +267,11 @@ mod tests {
         let snapshots = parse_anthropic_rate_limit_headers(&headers);
 
         assert_eq!(snapshots.len(), 2);
-        assert_eq!(snapshots[0].kind, AnthropicRateLimitKind::Requests);
+        assert_eq!(snapshots[0].kind, RateLimitKind::Requests);
         assert_eq!(snapshots[0].window, "5h");
         assert_eq!(snapshots[0].limit, Some(5000));
         assert_eq!(snapshots[0].remaining, Some(4999));
-        assert_eq!(snapshots[1].kind, AnthropicRateLimitKind::Tokens);
+        assert_eq!(snapshots[1].kind, RateLimitKind::Tokens);
         assert_eq!(snapshots[1].window, "weekly");
         assert_eq!(snapshots[1].reset.as_deref(), Some("2026-05-27T00:00:00Z"));
     }
@@ -320,10 +307,10 @@ mod tests {
         let snapshots = parse_anthropic_rate_limit_headers(&headers);
 
         assert_eq!(snapshots.len(), 2);
-        assert_eq!(snapshots[0].kind, AnthropicRateLimitKind::InputTokens);
+        assert_eq!(snapshots[0].kind, RateLimitKind::InputTokens);
         assert_eq!(snapshots[0].limit, Some(25000));
         assert_eq!(snapshots[0].remaining, Some(24000));
-        assert_eq!(snapshots[1].kind, AnthropicRateLimitKind::OutputTokens);
+        assert_eq!(snapshots[1].kind, RateLimitKind::OutputTokens);
         assert_eq!(snapshots[1].window, "weekly");
         assert_eq!(snapshots[1].limit, Some(75000));
     }

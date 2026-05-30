@@ -12,21 +12,24 @@ use cc_lb_core::api_keys::principal_view::{
     ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView, RouterPluginCache,
 };
 use cc_lb_core::{
-    ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamStatusEntry,
-    UpstreamStatusSnapshot, make_default_dispatcher,
+    ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamRateLimitCache,
+    UpstreamStatusEntry, UpstreamStatusSnapshot, make_default_dispatcher,
 };
 use cc_lb_dialect_anthropic::{AnthropicDirectDialect, CustomAnthropicSpecDialect};
 use cc_lb_plugin_api::{
-    PluginManifest, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, Signer,
-    SignerError, SignerFactory, Upstream, UpstreamDialect,
+    PluginManifest, Principal, RateLimitObservation, RequestContext, RouteDecision, RouteError,
+    RouterPlugin, Signer, SignerError, SignerFactory, Upstream, UpstreamCandidate, UpstreamDialect,
 };
 use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    AuditStore, PluginRegistryStore, PluginSlot, PrincipalRecord, PrincipalStore, StorageError,
-    StorageResult, UpstreamRecord, UpstreamStore,
+    AuditStore, PluginRegistryStore, PluginSlot, PrincipalRecord, PrincipalStore, RateLimitKind,
+    StorageError, StorageResult, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
+    UpstreamRecord, UpstreamStore,
 };
+use parking_lot::RwLock;
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::reconcile::collect_revision_hash;
 
@@ -34,6 +37,7 @@ pub struct Stores {
     pub upstreams: Arc<dyn UpstreamStore>,
     pub principals: Arc<dyn PrincipalStore>,
     pub plugin_registry: Arc<dyn PluginRegistryStore>,
+    pub upstream_rate_limits: Arc<dyn UpstreamRateLimitStateStore>,
     pub audit: Option<Arc<dyn AuditStore>>,
 }
 
@@ -109,6 +113,18 @@ pub async fn build_dynamic_view(
     data_dir: &Path,
 ) -> Result<Arc<DynamicView>, RebindError> {
     let upstreams = list_upstreams(stores).await?;
+    let all_upstream_ids = upstreams
+        .iter()
+        .map(|upstream| upstream.id)
+        .collect::<Vec<_>>();
+    let upstream_rate_limit_records = stores
+        .upstream_rate_limits
+        .list_for_upstream_ids(&all_upstream_ids)
+        .await?;
+    let upstream_rate_limit_cache = Arc::new(RwLock::new(UpstreamRateLimitCache {
+        snapshots: group_rate_limit_observations(upstream_rate_limit_records),
+        updated_at_unix_secs: unix_now_secs(),
+    }));
     let principals = list_principals(stores).await?;
     let mut staged = Vec::new();
     let principal_chains =
@@ -119,7 +135,7 @@ pub async fn build_dynamic_view(
     let revision_hash = collect_revision_hash(stores).await?;
     let global_router = Arc::new(DbRouter::new(routes));
     let signer_factory = Arc::new(DbCompositeSignerFactory::new(
-        upstreams,
+        upstreams.clone(),
         stores.upstreams.clone(),
         aead,
         lazy_refresher,
@@ -141,7 +157,41 @@ pub async fn build_dynamic_view(
         .error_normalizer(Arc::new(ErrorNormalizer::new()))
         .principal_view(principal_view)
         .upstream_status_snapshot(snapshot)
+        .upstream_rate_limit_cache(upstream_rate_limit_cache)
+        .upstream_records(upstreams.clone())
         .build())
+}
+
+fn group_rate_limit_observations(
+    records: Vec<UpstreamRateLimitObservationRecord>,
+) -> HashMap<Uuid, Vec<RateLimitObservation>> {
+    let mut snapshots: HashMap<Uuid, Vec<RateLimitObservation>> = HashMap::new();
+    for record in records {
+        snapshots
+            .entry(record.upstream_id)
+            .or_default()
+            .push(rate_limit_observation(record));
+    }
+    snapshots
+}
+
+fn rate_limit_observation(record: UpstreamRateLimitObservationRecord) -> RateLimitObservation {
+    RateLimitObservation {
+        kind: rate_limit_kind(record.kind),
+        window: record.window,
+        limit: record.limit,
+        remaining: record.remaining,
+        reset: record.reset,
+    }
+}
+
+fn rate_limit_kind(kind: RateLimitKind) -> cc_lb_plugin_api::RateLimitKind {
+    match kind {
+        RateLimitKind::Requests => cc_lb_plugin_api::RateLimitKind::Requests,
+        RateLimitKind::Tokens => cc_lb_plugin_api::RateLimitKind::Tokens,
+        RateLimitKind::InputTokens => cc_lb_plugin_api::RateLimitKind::InputTokens,
+        RateLimitKind::OutputTokens => cc_lb_plugin_api::RateLimitKind::OutputTokens,
+    }
 }
 
 async fn list_upstreams(stores: &Stores) -> StorageResult<Vec<UpstreamRecord>> {
@@ -414,12 +464,14 @@ impl RouterPlugin for DbRouter {
         &self,
         _ctx: &RequestContext,
         _principal: &Principal,
+        _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
         let route = self.routes.first().ok_or_else(|| RouteError::NoRoute {
             reason: "no active upstreams in dynamic view".to_owned(),
         })?;
         tracing::debug!(upstream = route.name.as_str(), "dynamic route selected");
         Ok(RouteDecision {
+            upstream_id: None,
             upstream: route.upstream.clone(),
             dialect: route.dialect.clone(),
         })
@@ -433,8 +485,7 @@ struct DbCompositeSignerFactory {
     aead: Arc<AeadService>,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     downstream_api_key: Option<String>,
-    auth_upstream_kind: Option<&'static str>,
-    auth_upstream_credential_ref: Option<String>,
+    router_chosen_upstream_name: Option<String>,
 }
 
 impl DbCompositeSignerFactory {
@@ -450,28 +501,14 @@ impl DbCompositeSignerFactory {
             aead,
             lazy_refresher,
             downstream_api_key: None,
-            auth_upstream_kind: None,
-            auth_upstream_credential_ref: None,
+            router_chosen_upstream_name: None,
         }
     }
 
-    fn with_downstream_api_key(&self, api_key: String) -> Self {
-        Self {
-            upstreams: self.upstreams.clone(),
-            upstream_store: self.upstream_store.clone(),
-            aead: self.aead.clone(),
-            lazy_refresher: self.lazy_refresher.clone(),
-            downstream_api_key: Some(api_key),
-            auth_upstream_kind: self.auth_upstream_kind,
-            auth_upstream_credential_ref: self.auth_upstream_credential_ref.clone(),
-        }
-    }
-
-    fn with_selected_upstream(
+    fn with_router_choice_state(
         &self,
         api_key: String,
-        upstream_kind: &'static str,
-        upstream_credential_ref: String,
+        router_chosen_upstream_name: String,
     ) -> Self {
         Self {
             upstreams: self.upstreams.clone(),
@@ -479,24 +516,18 @@ impl DbCompositeSignerFactory {
             aead: self.aead.clone(),
             lazy_refresher: self.lazy_refresher.clone(),
             downstream_api_key: Some(api_key),
-            auth_upstream_kind: Some(upstream_kind),
-            auth_upstream_credential_ref: Some(upstream_credential_ref),
+            router_chosen_upstream_name: Some(router_chosen_upstream_name),
         }
     }
 }
 
 impl cc_lb_core::ApiKeyAwareSignerFactory for DbCompositeSignerFactory {
-    fn with_api_key(&self, api_key: String) -> Arc<dyn SignerFactory> {
-        Arc::new(self.with_downstream_api_key(api_key))
-    }
-
-    fn with_auth_context(
+    fn with_router_choice(
         &self,
         api_key: String,
-        upstream_kind: &'static str,
-        upstream_credential_ref: String,
+        router_chosen_upstream_name: String,
     ) -> Arc<dyn SignerFactory> {
-        Arc::new(self.with_selected_upstream(api_key, upstream_kind, upstream_credential_ref))
+        Arc::new(self.with_router_choice_state(api_key, router_chosen_upstream_name))
     }
 }
 
@@ -550,17 +581,9 @@ impl DbCompositeSignerFactory {
             return false;
         }
 
-        let Some(auth_kind) = self.auth_upstream_kind else {
-            return true;
-        };
-        let Some(auth_ref) = self.auth_upstream_credential_ref.as_deref() else {
-            return true;
-        };
-        if auth_ref.is_empty() {
-            return true;
-        }
-
-        upstream_kind_matches_auth(candidate.kind, auth_kind) && candidate.name == auth_ref
+        self.router_chosen_upstream_name
+            .as_deref()
+            .is_some_and(|router_choice| candidate.name == router_choice)
     }
 }
 
@@ -571,15 +594,6 @@ fn upstream_matches(record: &UpstreamRecord, upstream: &Upstream) -> bool {
             UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth,
             Upstream::AnthropicDirect
         ) | (UpstreamKind::Custom, Upstream::CustomAnthropicSpec { .. })
-    )
-}
-
-fn upstream_kind_matches_auth(kind: UpstreamKind, auth_kind: &str) -> bool {
-    matches!(
-        (kind, auth_kind),
-        (UpstreamKind::AnthropicApiKey, "anthropic_key")
-            | (UpstreamKind::Custom, "anthropic_key")
-            | (UpstreamKind::AnthropicOauth, "anthropic_oauth")
     )
 }
 

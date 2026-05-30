@@ -13,8 +13,9 @@ use cc_lb_server::reconcile::Reconciler;
 use cc_lb_storage_api::{
     PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore,
     PluginSlot, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate,
-    StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate, WasmBlob,
-    WasmRegistryEntry, WasmRegistryEntryInput,
+    StorageResult, UpstreamCreate, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
+    UpstreamRecord, UpstreamStore, UpstreamUpdate, WasmBlob, WasmRegistryEntry,
+    WasmRegistryEntryInput,
 };
 
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -58,7 +59,8 @@ fn stores(storage: Arc<Storage>) -> Arc<Stores> {
     Arc::new(Stores {
         upstreams: storage.clone(),
         principals: storage.clone(),
-        plugin_registry: storage,
+        plugin_registry: storage.clone(),
+        upstream_rate_limits: storage,
         audit: None,
     })
 }
@@ -70,6 +72,7 @@ async fn create_principal(storage: &Storage, name: &str) -> PrincipalRecord {
             name: name.to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: Vec::new(),
+            allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
         },
         1,
@@ -189,6 +192,7 @@ async fn cancel_during_tick_is_graceful() {
         upstreams: blocking_store.clone(),
         principals: Arc::new(EmptyPrincipalStore),
         plugin_registry: Arc::new(EmptyPluginRegistryStore),
+        upstream_rate_limits: Arc::new(EmptyRateLimitStore),
         audit: None,
     });
     let (_dir, storage) = storage_fixture();
@@ -322,6 +326,25 @@ impl UpstreamStore for BlockingUpstreamStore {
 
     async fn hard_delete(&self, _id: Uuid) -> StorageResult<()> {
         unimplemented!()
+    }
+}
+
+struct EmptyRateLimitStore;
+
+#[async_trait]
+impl UpstreamRateLimitStateStore for EmptyRateLimitStore {
+    async fn put_observation(
+        &self,
+        _record: &UpstreamRateLimitObservationRecord,
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn list_for_upstream_ids(
+        &self,
+        _upstream_ids: &[Uuid],
+    ) -> StorageResult<Vec<UpstreamRateLimitObservationRecord>> {
+        Ok(Vec::new())
     }
 }
 

@@ -5,14 +5,22 @@ on:
     - cron: "41 4 * * 1"
   workflow_dispatch:
 
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   rss-soak:
-    if: github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/master'
+    runs-on: oracle4-cc-lb
     continue-on-error: true
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+          key: soak-rss
       - name: Run 24h RSS soak
         run: bash tests/soak/soak.sh 24h
       - name: Upload soak CSV
