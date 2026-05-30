@@ -1,5 +1,5 @@
 name: Setup Rust cache
-description: Restore Cargo caches and enable shared sccache compiler artifacts.
+description: Restore Cargo caches and enable persisted sccache compiler artifacts.
 
 inputs:
   rust-cache-key:
@@ -19,13 +19,14 @@ runs:
       uses: mozilla-actions/sccache-action@v0.0.10
       continue-on-error: true
 
-    - name: Configure sccache GitHub backend
+    - name: Restore sccache directory
       if: steps.sccache-setup.outcome == 'success'
-      uses: actions/github-script@v8
+      uses: actions/cache@v5
       with:
-        script: |
-          core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
-          core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+        path: .sccache
+        key: sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
+        restore-keys: |
+          sccache-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Export Rust compiler cache env
       if: steps.sccache-setup.outcome == 'success'
@@ -33,7 +34,7 @@ runs:
       run: |
         echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
-        echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+        echo "SCCACHE_DIR=$GITHUB_WORKSPACE/.sccache" >> "$GITHUB_ENV"
 
     - uses: Swatinem/rust-cache@v2
       with:

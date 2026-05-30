@@ -43,6 +43,7 @@ jobs:
       # install the pinned 1.95.0 toolchain as a fresh, separate directory and
       # promote it to default, leaving the broken stable untouched.
       - name: Install pinned Rust toolchain from rust-toolchain.toml
+        shell: bash
         run: |
           set -euo pipefail
           channel=$(grep -E '^channel = ' rust-toolchain.toml | sed 's/.*"\(.*\)".*/\1/')
