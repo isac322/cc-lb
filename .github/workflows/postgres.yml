@@ -66,6 +66,15 @@ jobs:
         if: matrix.build-variant == 'no-default-features'
         run: cargo test --workspace --no-run --no-default-features
 
+      - name: Show sccache stats
+        if: always()
+        run: |
+          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+            "$SCCACHE_PATH" --show-stats
+          elif command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats
+          fi
+
   postgres-conformance:
     name: Postgres conformance
     runs-on: oracle4-cc-lb
@@ -138,3 +147,12 @@ jobs:
 
       - name: E2E smoke - cc-lb binary against postgres backend
         run: ./tests/real-client/postgres-smoke.sh
+
+      - name: Show sccache stats
+        if: always()
+        run: |
+          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+            "$SCCACHE_PATH" --show-stats
+          elif command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats
+          fi

@@ -47,6 +47,14 @@ jobs:
         run: tests/real-client/install.sh
       - name: Run real-client matrix
         run: tests/real-client/matrix.sh
+      - name: Show sccache stats
+        if: always()
+        run: |
+          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+            "$SCCACHE_PATH" --show-stats
+          elif command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats
+          fi
       - name: Upload real-client evidence
         if: always()
         uses: actions/upload-artifact@v7
