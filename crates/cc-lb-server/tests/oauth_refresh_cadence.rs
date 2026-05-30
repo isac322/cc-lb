@@ -249,6 +249,7 @@ impl Fixture {
                 upstreams,
                 principals: self.storage.clone(),
                 plugin_registry: self.storage.clone(),
+                upstream_rate_limits: self.storage.clone(),
                 audit: Some(self.storage.clone()),
             }),
             self.aead.clone(),
