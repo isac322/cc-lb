@@ -115,17 +115,6 @@ PY
 }
 
 seed_runtime() {
-  principal_code=$(curl -sS -o "$TMP_DIR/admin-principal.json" -w '%{http_code}' -X POST \
-    -H 'Authorization: Bearer test' \
-    -H 'content-type: application/json' \
-    --data '{"name":"api-key","kind":"machine","allowed_models":["*"]}' \
-    "http://127.0.0.1:$admin_port/admin/v1/principals") || principal_code=000
-  if [ "$principal_code" != "201" ] && [ "$principal_code" != "409" ]; then
-    echo "FAIL: create principal expected 201 or 409, got $principal_code" >&2
-    cat "$TMP_DIR/admin-principal.json" >&2 || true
-    exit 1
-  fi
-
   upstream_body=$(printf '{"name":"real_client","kind":"custom","base_url":"http://127.0.0.1:%s"}' "$fake_port")
   upstream_code=$(curl -sS -o "$TMP_DIR/admin-upstream.json" -w '%{http_code}' -X POST \
     -H 'Authorization: Bearer test' \
@@ -137,7 +126,42 @@ seed_runtime() {
     cat "$TMP_DIR/admin-upstream.json" >&2 || true
     exit 1
   fi
+  upstream_id=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('id',''))" "$TMP_DIR/admin-upstream.json")
+  if [ -z "$upstream_id" ]; then
+    upstream_id=$(curl -sS -H 'Authorization: Bearer test' "http://127.0.0.1:$admin_port/admin/v1/upstreams" \
+      | python3 -c "import json,sys; print(next((u['id'] for u in json.load(sys.stdin).get('upstreams',[]) if u.get('name')=='real_client'),''))")
+  fi
+  if [ -z "$upstream_id" ]; then
+    echo "FAIL: could not resolve real_client upstream id" >&2
+    exit 1
+  fi
+
+  principal_body=$(printf '{"name":"api-key","kind":"machine","allowed_models":["*"],"allowed_upstreams":["%s"]}' "$upstream_id")
+  principal_code=$(curl -sS -o "$TMP_DIR/admin-principal.json" -w '%{http_code}' -X POST \
+    -H 'Authorization: Bearer test' \
+    -H 'content-type: application/json' \
+    --data "$principal_body" \
+    "http://127.0.0.1:$admin_port/admin/v1/principals") || principal_code=000
+  if [ "$principal_code" != "201" ] && [ "$principal_code" != "409" ]; then
+    echo "FAIL: create principal expected 201 or 409, got $principal_code" >&2
+    cat "$TMP_DIR/admin-principal.json" >&2 || true
+    exit 1
+  fi
 }
+
+# Verify psql is available and reset prior-test runtime state before spawning
+# cc-lb. The postgres-conformance CI job runs Postgres-gated cc-lb-server tests
+# (e.g. managed_key_multi_instance) before this smoke step; they seed
+# principals_v1 + upstreams_v1 via seed_app_testing_storage and leave the rows
+# behind. cc-lb's dynamic routing then picks the stale `test-upstream` (with
+# a dead base_url) over the smoke's freshly seeded `real_client`, yielding 502.
+psql --version >/dev/null 2>&1 || {
+  echo "FAIL: psql not installed in runner image; this script depends on it" >&2
+  exit 1
+}
+echo "===> step 0: reset dynamic runtime tables in public schema"
+psql "$CI_POSTGRES_URL" -c "TRUNCATE principals_v1, upstreams_v1, managed_api_keys_v1, managed_api_key_index_v1, oauth_credentials_v1 RESTART IDENTITY CASCADE" > /dev/null
+psql "$CI_POSTGRES_URL" -c "DELETE FROM meta WHERE key = 'backend_kind'" > /dev/null
 
 echo "===> step 1: spawn fake-anthropic on :$fake_port"
 cargo run -q -p fake-anthropic -- --port "$fake_port" > "$TMP_DIR/fake.log" 2>&1 &

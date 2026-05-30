@@ -391,26 +391,31 @@ pub async fn seed_app_testing_storage(
     use cc_lb_storage_api::{PrincipalStore, StorageError, UpstreamStore};
 
     let now = unix_now_secs();
-    match PrincipalStore::get_by_name(storage, "test-principal").await? {
-        Some(_) => {}
-        None => {
-            PrincipalStore::create(
-                storage,
-                PrincipalCreate {
-                    name: "test-principal".to_owned(),
-                    kind: PrincipalKind::Machine,
-                    default_limits: vec![Limit {
-                        kind: LimitKind::Requests,
-                        window_secs: 60,
-                        cap_micros: 1_000_000,
-                    }],
-                    allowed_models: vec!["*".to_owned()],
-                    allowed_upstreams: vec![],
-                },
-                now,
-            )
-            .await?;
-        }
+    // NOTE [Priority-3 footgun]: postgres-conformance's managed_key_multi_instance
+    // spawns two cc-lb instances against the same database; both call this seed
+    // helper, race on get_by_name, and one then loses the create with a Conflict
+    // on principals_v1_name_active_uniq. Treat Conflict as success (same pattern
+    // the upstream block below uses) so the test's `concurrent_cross_instance_issue`
+    // scenario stops flaking.
+    match PrincipalStore::create(
+        storage,
+        PrincipalCreate {
+            name: "test-principal".to_owned(),
+            kind: PrincipalKind::Machine,
+            default_limits: vec![Limit {
+                kind: LimitKind::Requests,
+                window_secs: 60,
+                cap_micros: 1_000_000,
+            }],
+            allowed_models: vec!["*".to_owned()],
+            allowed_upstreams: vec![],
+        },
+        now,
+    )
+    .await
+    {
+        Ok(_) | Err(StorageError::Conflict { .. }) => {}
+        Err(error) => return Err(error.into()),
     }
 
     if UpstreamStore::get_by_name(storage, "test-upstream")

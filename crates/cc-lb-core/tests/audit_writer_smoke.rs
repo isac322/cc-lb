@@ -16,8 +16,22 @@ async fn flush_100() -> Result<(), Box<dyn std::error::Error>> {
             .expect("enqueue succeeds");
     }
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
-    assert_eq!(storage.count_audit_entries()?, 100);
+    // NOTE [Priority-3 footgun]: spawn_audit_writer is a bounded-channel background
+    // task. The original flat 2s sleep was enough for plain debug builds but raced
+    // on CI under cargo-llvm-cov instrumentation (slower redb writes) - only ~31 of
+    // 100 entries had flushed when the assertion fired. Poll up to 10s for the full
+    // count before asserting; the drop(sink) below still proves drain-on-shutdown.
+    const BUDGET: Duration = Duration::from_secs(10);
+    const INTERVAL: Duration = Duration::from_millis(25);
+    let deadline = std::time::Instant::now() + BUDGET;
+    let final_count = loop {
+        let count = storage.count_audit_entries()?;
+        if count == 100 || std::time::Instant::now() >= deadline {
+            break count;
+        }
+        tokio::time::sleep(INTERVAL).await;
+    };
+    assert_eq!(final_count, 100);
 
     drop(sink);
     join.await?;

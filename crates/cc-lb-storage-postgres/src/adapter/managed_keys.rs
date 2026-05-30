@@ -552,6 +552,7 @@ mod tests {
     const MIGRATIONS: &[&str] = &[
         include_str!("../../migrations/0013_managed_api_keys.sql"),
         include_str!("../../migrations/0014_managed_api_key_index.sql"),
+        include_str!("../../migrations/0020_drop_per_key_pin.sql"),
     ];
 
     type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
