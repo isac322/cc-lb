@@ -42,9 +42,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
+      - uses: ./.github/actions/setup-rust-cache
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   nextest:
@@ -57,9 +55,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install WASI target for pinned toolchain
         run: rustup target add wasm32-wasip1
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
+      - uses: ./.github/actions/setup-rust-cache
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest

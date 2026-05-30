@@ -68,9 +68,8 @@ jobs:
       # tests/oauth_refresh_cadence-* binary into target/llvm-cov-target/
       # debug/deps/ and cargo invokes it on restore against a source tree
       # that never contained that file.
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust-cache
         with:
-          cache-on-failure: true
           cache-targets: false
 
       - name: Run tests with coverage instrumentation
