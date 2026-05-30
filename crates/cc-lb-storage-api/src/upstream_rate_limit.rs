@@ -4,30 +4,9 @@ use uuid::Uuid;
 
 use crate::StorageResult;
 
-/// Stub RateLimitKind enum for Wave 1 development.
-/// Will be replaced with cc_lb_plugin_api::RateLimitKind once Task 1 is merged.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum RateLimitKind {
-    /// Request rate limit.
-    Requests,
-    Tokens,
-    /// Input token rate limit.
-    InputTokens,
-    /// Output token rate limit.
-    OutputTokens,
-}
-
-impl RateLimitKind {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Requests => "requests",
-            Self::Tokens => "tokens",
-            Self::InputTokens => "input_tokens",
-            Self::OutputTokens => "output_tokens",
-        }
-    }
-}
+/// Re-export of [`cc_lb_plugin_api::RateLimitKind`] so that storage-layer code
+/// and plugin-facing code share a single canonical enum (no stub, no mapping).
+pub use cc_lb_plugin_api::RateLimitKind;
 
 /// Observation record for upstream rate limit state.
 ///
@@ -38,7 +17,7 @@ pub struct UpstreamRateLimitObservationRecord {
     /// Upstream identifier.
     pub upstream_id: Uuid,
     pub window: String,
-    /// Rate limit kind (requests, input tokens, output tokens).
+    /// Rate limit kind (requests, tokens, input tokens, output tokens).
     pub kind: RateLimitKind,
     pub limit: Option<u64>,
     /// Remaining quota reported by upstream.

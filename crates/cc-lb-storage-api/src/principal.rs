@@ -36,6 +36,7 @@ pub struct PrincipalRecord {
     pub name: String,
     pub kind: PrincipalKind,
     pub allowed_models: Vec<String>,
+    #[serde(default)]
     pub allowed_upstreams: Vec<Uuid>,
     pub default_limits: Vec<Limit>,
     pub enabled: bool,
@@ -52,6 +53,7 @@ pub struct PrincipalCreate {
     pub name: String,
     pub kind: PrincipalKind,
     pub allowed_models: Vec<String>,
+    #[serde(default)]
     pub allowed_upstreams: Vec<Uuid>,
     pub default_limits: Vec<Limit>,
 }

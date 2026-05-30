@@ -6,10 +6,10 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    DialectError, Principal, RateLimitKind, RateLimitObservation, RequestContext, RetryDecision,
-    RouteDecision, RouteError, RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest,
-    Signer, SignerError, SignerFactory, SigningCapability, Upstream, UpstreamCandidate,
-    UpstreamDialect, UpstreamError, UpstreamKind,
+    DialectError, Principal, RateLimitObservation, RequestContext, RetryDecision, RouteDecision,
+    RouteError, RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer,
+    SignerError, SignerFactory, SigningCapability, Upstream, UpstreamCandidate, UpstreamDialect,
+    UpstreamError,
 };
 use http::header::{HeaderName, HeaderValue};
 use http::{HeaderMap, Method, StatusCode};
@@ -319,28 +319,6 @@ impl From<&UpstreamCandidate> for CandidateWire {
     }
 }
 
-#[allow(dead_code)]
-fn candidates_from_wire(candidates: &[CandidateWire]) -> Vec<UpstreamCandidate> {
-    candidates.iter().map(UpstreamCandidate::from).collect()
-}
-
-impl From<&CandidateWire> for UpstreamCandidate {
-    fn from(candidate: &CandidateWire) -> Self {
-        Self {
-            upstream_id: Uuid::parse_str(&candidate.upstream_id)
-                .expect("candidate wire upstream_id is a UUID"),
-            name: candidate.name.clone(),
-            kind: upstream_kind_from_wire(&candidate.kind),
-            observed_rate_limits: candidate
-                .observed_rate_limits
-                .iter()
-                .map(RateLimitObservation::from)
-                .collect(),
-            observed_at_unix_secs: candidate.observed_at_unix_secs,
-        }
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub(crate) struct RateLimitObservationWire {
     kind: String,
@@ -354,18 +332,6 @@ impl From<&RateLimitObservation> for RateLimitObservationWire {
     fn from(observation: &RateLimitObservation) -> Self {
         Self {
             kind: observation.kind.as_str().to_owned(),
-            window: observation.window.clone(),
-            limit: observation.limit,
-            remaining: observation.remaining,
-            reset: observation.reset.clone(),
-        }
-    }
-}
-
-impl From<&RateLimitObservationWire> for RateLimitObservation {
-    fn from(observation: &RateLimitObservationWire) -> Self {
-        Self {
-            kind: rate_limit_kind_from_wire(&observation.kind),
             window: observation.window.clone(),
             limit: observation.limit,
             remaining: observation.remaining,
@@ -513,25 +479,6 @@ fn headers_from_wire(headers: Vec<HeaderWire>) -> Result<HeaderMap, WireError> {
         out.append(name, value);
     }
     Ok(out)
-}
-
-fn upstream_kind_from_wire(kind: &str) -> UpstreamKind {
-    match kind {
-        "anthropic_api_key" => UpstreamKind::AnthropicApiKey,
-        "anthropic_oauth" => UpstreamKind::AnthropicOauth,
-        "custom" => UpstreamKind::Custom,
-        other => panic!("unknown candidate upstream kind: {other}"),
-    }
-}
-
-fn rate_limit_kind_from_wire(kind: &str) -> RateLimitKind {
-    match kind {
-        "requests" => RateLimitKind::Requests,
-        "tokens" => RateLimitKind::Tokens,
-        "input_tokens" => RateLimitKind::InputTokens,
-        "output_tokens" => RateLimitKind::OutputTokens,
-        other => panic!("unknown rate limit kind: {other}"),
-    }
 }
 
 pub(crate) fn parse_versioned<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, WireError> {

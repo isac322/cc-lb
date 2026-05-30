@@ -3,9 +3,7 @@ use std::{collections::HashMap, sync::Arc};
 use arc_swap::ArcSwap;
 use cc_lb_plugin_api::{ApiKeyAwareSignerFactory, RateLimitObservation};
 use cc_lb_plugin_api::{ObservabilityHook, RouterPlugin};
-use cc_lb_storage_api::{
-    RateLimitKind as StoredRateLimitKind, UpstreamRateLimitObservationRecord, UpstreamRecord,
-};
+use cc_lb_storage_api::{UpstreamRateLimitObservationRecord, UpstreamRecord};
 use parking_lot::RwLock;
 use uuid::Uuid;
 
@@ -74,20 +72,11 @@ fn rate_limit_observation_from_record(
     record: UpstreamRateLimitObservationRecord,
 ) -> RateLimitObservation {
     RateLimitObservation {
-        kind: rate_limit_kind_from_storage(record.kind),
+        kind: record.kind,
         window: record.window,
         limit: record.limit,
         remaining: record.remaining,
         reset: record.reset,
-    }
-}
-
-fn rate_limit_kind_from_storage(kind: StoredRateLimitKind) -> cc_lb_plugin_api::RateLimitKind {
-    match kind {
-        StoredRateLimitKind::Requests => cc_lb_plugin_api::RateLimitKind::Requests,
-        StoredRateLimitKind::Tokens => cc_lb_plugin_api::RateLimitKind::Tokens,
-        StoredRateLimitKind::InputTokens => cc_lb_plugin_api::RateLimitKind::InputTokens,
-        StoredRateLimitKind::OutputTokens => cc_lb_plugin_api::RateLimitKind::OutputTokens,
     }
 }
 

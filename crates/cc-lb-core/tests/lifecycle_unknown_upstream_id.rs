@@ -36,7 +36,10 @@ async fn unknown_router_upstream_id_is_rejected_before_signing_or_dispatch() {
     let (status, _headers, body) = collect_body(response).await;
 
     assert_eq!(status, StatusCode::BAD_GATEWAY);
-    assert!(String::from_utf8_lossy(&body).contains("no upstream route is configured"));
+    assert!(
+        String::from_utf8_lossy(&body)
+            .contains("router selected an upstream outside the candidate set")
+    );
     assert!(
         state
             .router_choice_names

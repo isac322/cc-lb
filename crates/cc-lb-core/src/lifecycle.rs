@@ -9,14 +9,12 @@ use axum::body::Body as AxumBody;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
-    RateLimitKind as PluginRateLimitKind, RequestContext, RetryDecision, RouterPlugin,
-    SignedRequest, Upstream, UpstreamCandidate, UpstreamError,
-    UpstreamKind as CandidateUpstreamKind, shape_request, sign_request,
+    RequestContext, RetryDecision, RouterPlugin, SignedRequest, Upstream, UpstreamCandidate,
+    UpstreamError, UpstreamKind as CandidateUpstreamKind, shape_request, sign_request,
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_api::{
-    RateLimitKind as StoredRateLimitKind, Storage, UpstreamRateLimitObservationRecord,
-    UpstreamRecord,
+    Storage, UpstreamRateLimitObservationRecord, UpstreamRecord,
     types::{RequestEvent, StoredApiKeyRecord},
     upstream::UpstreamKind as StorageUpstreamKind,
 };
@@ -550,7 +548,7 @@ impl Lifecycle {
                 let response = anthropic_error_response(
                     StatusCode::BAD_GATEWAY,
                     "route_not_configured",
-                    "no upstream route is configured for this request",
+                    "router selected an upstream outside the candidate set",
                 );
                 observe_finished_for_principal(
                     hooks,
@@ -1167,22 +1165,13 @@ pub fn observe_rate_limits(
         .map(|snapshot| UpstreamRateLimitObservationRecord {
             upstream_id,
             window: snapshot.window,
-            kind: rate_limit_kind(snapshot.kind),
+            kind: snapshot.kind,
             limit: snapshot.limit,
             remaining: snapshot.remaining,
             reset: snapshot.reset,
             observed_at_unix_secs: observed_at,
         })
         .collect()
-}
-
-fn rate_limit_kind(kind: PluginRateLimitKind) -> StoredRateLimitKind {
-    match kind {
-        PluginRateLimitKind::Requests => StoredRateLimitKind::Requests,
-        PluginRateLimitKind::Tokens => StoredRateLimitKind::Tokens,
-        PluginRateLimitKind::InputTokens => StoredRateLimitKind::InputTokens,
-        PluginRateLimitKind::OutputTokens => StoredRateLimitKind::OutputTokens,
-    }
 }
 
 #[derive(Clone)]
