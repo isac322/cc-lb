@@ -592,7 +592,7 @@ log_redaction = true</code></pre><button class="copy">복사</button></div>
 # POST /admin/v1/principals/{principal_id}/plugin-chain 으로 업로드한 플러그인 연결</code></pre><button class="copy">복사</button></div>
 
     <h4>라운드 로빈 라우터 플러그인 구현</h4>
-    <p>라운드 로빈 라우터 플러그인의 전체 구현 코드는 <a href="../plugins/router/round-robin/src/lib.rs">plugins/router/round-robin/src/lib.rs</a>에서 확인할 수 있습니다. 이 플러그인은 thread-local 카운터를 사용해서 들어오는 요청을 사용 가능한 upstream 후보들에게 순서대로 분산합니다.</p>
+    <p>라운드 로빈 라우터 플러그인의 전체 구현 코드는 <a href="../plugins/router/round-robin/src/lib.rs">plugins/router/round-robin/src/lib.rs</a>에서 확인할 수 있습니다. 이 플러그인은 <code>AtomicUsize</code> 기반 원자 카운터를 사용해서 들어오는 요청을 사용 가능한 upstream 후보들에게 순서대로 분산합니다. 후보 풀은 <code>principal.allowed_upstreams</code>로 정의되며 (빈 배열이면 모든 enabled upstream), 라우터는 그 안에서만 선택합니다.</p>
 
     <h4>빌드 + 등록</h4>
     <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 1. WASM 타겟 추가 및 플러그인 빌드
@@ -602,14 +602,14 @@ cargo build --manifest-path plugins/router/round-robin/Cargo.toml --target wasm3
 # 2. 빌드된 WASM 플러그인을 cc-lb 관리자 API를 통해 업로드
 curl -X POST http://127.0.0.1:9090/admin/v1/plugins/wasm \
   -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
-  -F &quot;name=cc-lb-plugin-router-round-robin&quot; \
+  -F &quot;name=cc-lb-router-round-robin&quot; \
   -F &quot;original_filename=cc_lb_router_round_robin.wasm&quot; \
   -F &quot;bytes=@plugins/router/round-robin/target/wasm32-wasip1/release/cc_lb_router_round_robin.wasm&quot;</code></pre><button class="copy">복사</button></div>
 
     <h4>확인</h4>
     <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 1. 업로드된 플러그인이 정상적으로 등록되었는지 확인
 curl -s http://127.0.0.1:9090/admin/v1/plugins/wasm \
-  -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; | grep cc_lb_plugin_router_round_robin.wasm
+  -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; | grep cc_lb_router_round_robin.wasm
 
 # 2. 서로 다른 요청을 여러 번 호출하여 라운드 로빈 분산 확인
 curl -s http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: keyA&quot; ...

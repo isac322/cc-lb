@@ -35,13 +35,13 @@ plugins/
 All plugin crates follow the naming pattern:
 
 ```
-cc-lb-plugin-<category>-<name>
+cc-lb-<category>-<name>
 ```
 
 **Examples:**
-- `cc-lb-plugin-router-round-robin` (in `plugins/router/round-robin/`)
-- `cc-lb-plugin-dialect-openai-compat` (in `plugins/dialect/openai-compat/`)
-- `cc-lb-plugin-signer-jwt-bearer` (in `plugins/signer/jwt-bearer/`)
+- `cc-lb-router-round-robin` (in `plugins/router/round-robin/`)
+- `cc-lb-dialect-openai-compat` (in `plugins/dialect/openai-compat/`)
+- `cc-lb-signer-jwt-bearer` (in `plugins/signer/jwt-bearer/`)
 
 ## Building Plugins
 
@@ -52,7 +52,7 @@ cd plugins/router/round-robin
 cargo build --target wasm32-wasip1 --release
 ```
 
-The compiled WASM module will be available at `target/wasm32-wasip1/release/cc_lb_plugin_router_round_robin.wasm`.
+The compiled WASM module will be available at `target/wasm32-wasip1/release/cc_lb_router_round_robin.wasm`.
 
 ## Reference
 
