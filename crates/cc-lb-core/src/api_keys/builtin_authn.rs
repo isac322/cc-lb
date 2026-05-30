@@ -25,7 +25,6 @@ pub struct AuthnSuccess {
     pub principal_id: String,
     pub key_id: String,
     pub upstream_kind: UpstreamKind,
-    pub upstream_credential_ref: String,
     pub record: StoredApiKeyRecord,
     pub last_4: String,
     pub api_key: Option<String>,
@@ -136,7 +135,6 @@ impl BuiltinAuthn {
             principal_id,
             key_id: key_id_storage,
             upstream_kind: record.upstream_kind,
-            upstream_credential_ref: record.upstream_credential_ref.clone(),
             record: record.clone(),
             last_4: record.last_4.clone(),
             api_key: Some(input.to_owned()),
@@ -152,7 +150,6 @@ impl BuiltinAuthn {
         let record = StoredApiKeyRecord {
             status: KeyStatus::Active,
             upstream_kind: map_none_mode_upstream_kind(none_mode.upstream_kind.clone()),
-            upstream_credential_ref: none_mode.upstream_credential_ref.clone(),
             verify_hash: [0; 32],
             secret_salt: [0; 16],
             last_4: String::new(),
@@ -169,7 +166,6 @@ impl BuiltinAuthn {
             principal_id: none_mode.principal_id.clone(),
             key_id: "none-mode".to_owned(),
             upstream_kind: record.upstream_kind,
-            upstream_credential_ref: record.upstream_credential_ref.clone(),
             record,
             last_4: String::new(),
             api_key,
@@ -234,7 +230,6 @@ mod tests {
         assert_eq!(success.principal_id, "principal-1");
         assert_eq!(success.key_id, generated.key_id);
         assert_eq!(success.upstream_kind, UpstreamKind::AnthropicKey);
-        assert_eq!(success.upstream_credential_ref, "anthropic-prod");
         assert_eq!(success.last_4, generated.last_4);
         assert_eq!(
             success.api_key.as_deref(),
@@ -310,7 +305,6 @@ mod tests {
             Some(NoneModeConfig {
                 principal_id: "principal-none".to_owned(),
                 upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
-                upstream_credential_ref: "oauth-ref".to_owned(),
             }),
             Some(Arc::new(KeyStore::new(store))),
         );
@@ -323,7 +317,6 @@ mod tests {
         assert_eq!(success.principal_id, "principal-none");
         assert_eq!(success.key_id, "none-mode");
         assert_eq!(success.upstream_kind, UpstreamKind::AnthropicOAuth);
-        assert_eq!(success.upstream_credential_ref, "oauth-ref");
         assert_eq!(success.api_key.as_deref(), Some("passthrough-key"));
     }
 
@@ -372,7 +365,6 @@ mod tests {
             verify_hash: generated.verify_hash,
             secret_salt: generated.secret_salt,
             upstream_kind: UpstreamKind::AnthropicKey,
-            upstream_credential_ref: "anthropic-prod".to_owned(),
             status: KeyStatus::Active,
             expires_at_unix_secs: Some(4_102_444_800),
             last_4: generated.last_4.clone(),
@@ -382,6 +374,7 @@ mod tests {
         }
     }
 
+    #[allow(clippy::large_enum_variant)]
     enum LookupAction {
         Return(Box<Option<(String, String, StoredApiKeyRecord)>>),
         Unavailable,

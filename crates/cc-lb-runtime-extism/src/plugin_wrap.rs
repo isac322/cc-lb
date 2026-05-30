@@ -6,15 +6,17 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    DialectError, Principal, RequestContext, RetryDecision, RouteDecision, RouteError,
-    RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError,
-    SignerFactory, SigningCapability, Upstream, UpstreamDialect, UpstreamError,
+    DialectError, Principal, RateLimitObservation, RequestContext, RetryDecision, RouteDecision,
+    RouteError, RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer,
+    SignerError, SignerFactory, SigningCapability, Upstream, UpstreamCandidate, UpstreamDialect,
+    UpstreamError,
 };
 use http::header::{HeaderName, HeaderValue};
 use http::{HeaderMap, Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use url::Url;
+use uuid::Uuid;
 
 use crate::{PluginCallError, PluginSlot};
 
@@ -34,6 +36,7 @@ impl RouterPlugin for ExtismRouterPlugin {
         &self,
         ctx: &RequestContext,
         principal: &Principal,
+        candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
         let response = self
             .slot
@@ -43,6 +46,7 @@ impl RouterPlugin for ExtismRouterPlugin {
                     "_version": 1,
                     "request": RequestContextWire::from(ctx),
                     "principal": principal,
+                    "candidates": candidates_to_wire(candidates),
                 }),
             )
             .map_err(route_runtime_error)?;
@@ -51,6 +55,7 @@ impl RouterPlugin for ExtismRouterPlugin {
             PluginBinding::SelfPlugin => Arc::new(ExtismDialectPlugin::new(self.slot.clone())),
         };
         Ok(RouteDecision {
+            upstream_id: response.upstream_id,
             upstream: response.upstream,
             dialect,
         })
@@ -285,6 +290,56 @@ impl From<&RequestContext> for RequestContextWire {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct CandidateWire {
+    upstream_id: String,
+    name: String,
+    kind: String,
+    observed_rate_limits: Vec<RateLimitObservationWire>,
+    observed_at_unix_secs: u64,
+}
+
+fn candidates_to_wire(candidates: &[UpstreamCandidate]) -> Vec<CandidateWire> {
+    candidates.iter().map(CandidateWire::from).collect()
+}
+
+impl From<&UpstreamCandidate> for CandidateWire {
+    fn from(candidate: &UpstreamCandidate) -> Self {
+        Self {
+            upstream_id: candidate.upstream_id.to_string(),
+            name: candidate.name.clone(),
+            kind: candidate.kind.as_str().to_owned(),
+            observed_rate_limits: candidate
+                .observed_rate_limits
+                .iter()
+                .map(RateLimitObservationWire::from)
+                .collect(),
+            observed_at_unix_secs: candidate.observed_at_unix_secs,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub(crate) struct RateLimitObservationWire {
+    kind: String,
+    window: String,
+    limit: Option<u64>,
+    remaining: Option<u64>,
+    reset: Option<String>,
+}
+
+impl From<&RateLimitObservation> for RateLimitObservationWire {
+    fn from(observation: &RateLimitObservation) -> Self {
+        Self {
+            kind: observation.kind.as_str().to_owned(),
+            window: observation.window.clone(),
+            limit: observation.limit,
+            remaining: observation.remaining,
+            reset: observation.reset.clone(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize)]
 struct ShapedRequestWire {
     url: String,
@@ -315,6 +370,8 @@ struct RouteResponse {
     upstream: Upstream,
     #[serde(default)]
     dialect: Option<PluginBinding>,
+    #[serde(default)]
+    upstream_id: Option<Uuid>,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]

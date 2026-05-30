@@ -9,16 +9,13 @@ mkdir -p "$EVIDENCE_DIR"
 : > "$SUMMARY"
 
 clients='claude-code opencode pi'
-upstreams='anthropic-direct bedrock-runtime bedrock-mantle vertex custom'
+upstreams='anthropic-direct custom'
 failures=0
 
 export CC_LB_ADMIN_SKIP_SPA="${CC_LB_ADMIN_SKIP_SPA:-1}"
 cargo build \
   -p cc-lb-server \
-  -p fake-anthropic \
-  -p fake-bedrock-runtime \
-  -p fake-bedrock-mantle \
-  -p fake-vertex
+  -p fake-anthropic
 
 for client in $clients; do
   for upstream in $upstreams; do

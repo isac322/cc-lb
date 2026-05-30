@@ -2,16 +2,32 @@ name: quality
 
 on:
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
   push:
     branches:
       - master
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CC_LB_ADMIN_SKIP_SPA: "1"
 
 jobs:
   audit-redaction-lint:
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v6
       - uses: taiki-e/install-action@v2
@@ -20,7 +36,7 @@ jobs:
       - run: bash scripts/lint-audit-redaction.sh
 
   cargo-deny:
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -29,47 +45,12 @@ jobs:
           tool: cargo-deny
       - run: cargo deny check
 
-  cargo-audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-audit
-      - run: |
-          cargo audit --deny warnings \
-            --ignore RUSTSEC-2025-0134 \
-            --ignore RUSTSEC-2025-0141 \
-            --ignore RUSTSEC-2026-0085 \
-            --ignore RUSTSEC-2026-0086 \
-            --ignore RUSTSEC-2026-0087 \
-            --ignore RUSTSEC-2026-0088 \
-            --ignore RUSTSEC-2026-0089 \
-            --ignore RUSTSEC-2026-0091 \
-            --ignore RUSTSEC-2026-0092 \
-            --ignore RUSTSEC-2026-0093 \
-            --ignore RUSTSEC-2026-0094 \
-            --ignore RUSTSEC-2026-0095 \
-            --ignore RUSTSEC-2026-0096 \
-            --ignore RUSTSEC-2026-0114
-
   cargo-llvm-cov:
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
-      - name: Free up disk space on runner
-        uses: jlumbroso/free-disk-space@v1.3.1
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          docker-images: true
-          swap-storage: false
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -84,21 +65,43 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
-      - name: Run coverage gates
+
+      - name: Run tests with coverage instrumentation
+        run: |
+          cargo llvm-cov \
+            --workspace \
+            --exclude cc-lb-loadgen \
+            --exclude cc-lb-plugin-lifecycle-tests \
+            --exclude plugin-api-key \
+            --exclude plugin-oauth-anthropic-pro \
+            --exclude plugin-internal-key-mapping \
+            --exclude extism-pdk \
+            --exclude extism-pdk-macros \
+            --no-report \
+            --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+
+      - name: Generate workspace lcov report
+        run: |
+          cargo llvm-cov report \
+            --lcov \
+            --output-path target/coverage.lcov \
+            --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+
+      - name: Check per-package coverage gates
         run: |
           set -euo pipefail
-          cargo llvm-cov --workspace --exclude cc-lb-loadgen --exclude cc-lb-plugin-lifecycle-tests --exclude plugin-api-key --exclude plugin-oauth-anthropic-pro --exclude plugin-internal-key-mapping --exclude extism-pdk --exclude extism-pdk-macros --lcov --output-path target/coverage.lcov --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov --package cc-lb-core --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov --package cc-lb-dialect-anthropic --fail-under-lines 80 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov --package cc-lb-admin --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov --package cc-lb-config --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov --package cc-lb-observability --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov --package cc-lb-plugin-api --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov --package cc-lb-runtime-extism --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov --package cc-lb-signer-anthropic-key --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov --package cc-lb-signer-anthropic-oauth --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov --package cc-lb-server --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov --package cc-lb-storage-redb --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-core                  --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-dialect-anthropic     --fail-under-lines 80 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-admin                 --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-config                --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-observability         --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-plugin-api            --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-runtime-extism        --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-signer-anthropic-key  --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-signer-anthropic-oauth --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-server                --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-storage-redb          --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@v7

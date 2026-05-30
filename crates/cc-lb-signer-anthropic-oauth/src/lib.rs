@@ -558,8 +558,14 @@ impl fmt::Debug for AnthropicOAuthSignerFactory {
 }
 
 impl ApiKeyAwareSignerFactory for AnthropicOAuthSignerFactory {
-    fn with_api_key(&self, _api_key: String) -> Arc<dyn SignerFactory> {
-        Arc::new(self.clone())
+    fn with_router_choice(
+        &self,
+        _api_key: String,
+        router_chosen_upstream_name: String,
+    ) -> Arc<dyn SignerFactory> {
+        let mut factory = self.clone();
+        factory.upstream_name = Some(router_chosen_upstream_name);
+        Arc::new(factory)
     }
 }
 

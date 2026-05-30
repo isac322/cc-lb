@@ -93,7 +93,6 @@ mode = "none"
 [downstream_auth.none_mode]
 principal_id = "alice"
 upstream_kind = "anthropic_key"
-upstream_credential_ref = "test-upstream"
 "#
     );
     std::fs::write(path, config).unwrap();

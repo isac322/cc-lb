@@ -31,6 +31,7 @@ async fn seed_admin_if_absent(store: &dyn PrincipalStore, _token: &str) -> Stora
         name: "admin".to_owned(),
         kind: PrincipalKind::Admin,
         allowed_models: vec![],
+        allowed_upstreams: vec![],
         default_limits: vec![],
     };
 
@@ -194,6 +195,7 @@ async fn apply_principal(
         name: principal.name,
         kind: parse_principal_kind(principal.kind.as_deref()),
         allowed_models: Vec::new(),
+        allowed_upstreams: Vec::new(),
         default_limits: Vec::new(),
     };
     principal_store
@@ -593,6 +595,7 @@ plugins = ["missing-plugin"]
                 name: name.to_owned(),
                 kind: PrincipalKind::Machine,
                 allowed_models: Vec::new(),
+                allowed_upstreams: Vec::new(),
                 default_limits: Vec::new(),
             },
             1_800_000_000,

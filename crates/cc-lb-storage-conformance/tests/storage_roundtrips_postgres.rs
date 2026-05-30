@@ -1,6 +1,7 @@
 #![cfg(feature = "postgres")]
 
 use std::{
+    future::Future,
     str::FromStr,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -8,7 +9,10 @@ use std::{
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{BackendKind, MetaStore};
-use cc_lb_storage_conformance::{harness::ConformanceBackend, scenarios::storage_roundtrips};
+use cc_lb_storage_conformance::{
+    harness::ConformanceBackend,
+    scenarios::{principal_store, storage_roundtrips, upstream_rate_limit_store},
+};
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{
     AssertSqlSafe, PgPool,
@@ -92,10 +96,55 @@ fn storage_roundtrips_postgres() {
     run_postgres_scenario("storage_roundtrips", storage_roundtrips::run_all);
 }
 
+#[test]
+#[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
+fn principal_allowed_upstreams_roundtrip_postgres() {
+    run_postgres_scenario(
+        "principal_allowed_upstreams_roundtrip",
+        principal_store::principal_allowed_upstreams_roundtrip,
+    );
+}
+
+#[test]
+#[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
+fn upstream_rate_limit_put_then_list_for_upstream_ids_roundtrip_postgres() {
+    run_postgres_scenario(
+        "upstream_rate_limit_put_then_list_for_upstream_ids_roundtrip",
+        upstream_rate_limit_store::put_then_list_for_upstream_ids_roundtrip,
+    );
+}
+
+#[test]
+#[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
+fn upstream_rate_limit_latest_write_wins_within_same_key_postgres() {
+    run_postgres_scenario(
+        "upstream_rate_limit_latest_write_wins_within_same_key",
+        upstream_rate_limit_store::latest_write_wins_within_same_key,
+    );
+}
+
+#[test]
+#[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
+fn upstream_rate_limit_latest_write_wins_within_same_key_forward_postgres() {
+    run_postgres_scenario(
+        "upstream_rate_limit_latest_write_wins_within_same_key_forward",
+        upstream_rate_limit_store::latest_write_wins_within_same_key_forward,
+    );
+}
+
+#[test]
+#[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
+fn upstream_rate_limit_empty_list_for_unknown_id_postgres() {
+    run_postgres_scenario(
+        "upstream_rate_limit_empty_list_for_unknown_id",
+        upstream_rate_limit_store::empty_list_for_unknown_id,
+    );
+}
+
 fn run_postgres_scenario<F, Fut>(name: &str, scenario: F)
 where
     F: FnOnce(Arc<PostgresConformanceBackend>) -> Fut,
-    Fut: std::future::Future<Output = anyhow::Result<()>>,
+    Fut: Future<Output = anyhow::Result<()>>,
 {
     let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
         eprintln!("skip: CI_POSTGRES_URL not set");

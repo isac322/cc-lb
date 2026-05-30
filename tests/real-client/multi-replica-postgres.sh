@@ -264,7 +264,6 @@ mode = "none"
 [downstream_auth.none_mode]
 principal_id = "$PRINCIPAL_NAME"
 upstream_kind = "anthropic_o_auth"
-upstream_credential_ref = "$UPSTREAM_NAME"
 
 [storage]
 kind = "postgres"

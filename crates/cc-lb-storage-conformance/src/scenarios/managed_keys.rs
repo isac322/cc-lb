@@ -378,7 +378,6 @@ fn issue_params(seed: u8) -> IssueParams {
         } else {
             UpstreamKind::AnthropicKey
         },
-        upstream_credential_ref: format!("upstream-{seed}"),
         expires_at_unix_secs: Some(1_900_000_000 + u64::from(seed)),
         limit_overrides: vec![
             Limit {
@@ -416,7 +415,6 @@ fn expected_record(
         verify_hash: params.verify_hash,
         secret_salt: params.secret_salt,
         upstream_kind: params.upstream_kind,
-        upstream_credential_ref: params.upstream_credential_ref.clone(),
         limit_overrides: params.limit_overrides.clone(),
         status: KeyStatus::Active,
         expires_at_unix_secs: params.expires_at_unix_secs,

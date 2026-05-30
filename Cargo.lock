@@ -674,6 +674,7 @@ dependencies = [
  "serde_json",
  "thiserror 2.0.18",
  "url",
+ "uuid",
 ]
 
 [[package]]
@@ -746,6 +747,7 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+ "uuid",
  "wat",
 ]
 
@@ -786,6 +788,7 @@ dependencies = [
  "nix",
  "notify",
  "oauth2",
+ "parking_lot",
  "rand 0.10.1",
  "redb",
  "rustls",
@@ -862,6 +865,7 @@ dependencies = [
  "async-trait",
  "bytes",
  "cc-lb-aead",
+ "cc-lb-plugin-api",
  "cc-lb-storage-redb",
  "chrono",
  "serde",

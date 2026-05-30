@@ -1,6 +1,6 @@
 # Real Client Versions
 
-Pinned versions are installed by `tests/real-client/install.sh` with `npm install --prefix target/test-bins/<client> <pkg>@<exact-version>`.
+Pinned versions are installed by `tests/real-client/install.sh`. The script prefers `bun add` when available and falls back to `npm install` (both run with `cwd = target/test-bins/<client>`), so the resulting `node_modules/.bin/<binary>` layout is identical either way.
 
 | Client | npm package | Binary | Pinned version | Confirmation command | Output |
 | --- | --- | --- | --- | --- | --- |

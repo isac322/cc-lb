@@ -8,7 +8,8 @@ use cc_lb_plugin_api::{
     Principal, PrincipalKind, RequestContext, ShapedRequest, SignerError, SignerFactory, Upstream,
     UpstreamDialect, shape_request, sign_request,
 };
-use cc_lb_server::dynamic_view_builder::Stores;
+use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{UpstreamCreate, UpstreamStore};
@@ -48,6 +49,7 @@ impl Fixture {
             upstreams: storage.clone(),
             principals: storage.clone(),
             plugin_registry: storage.clone(),
+            upstream_rate_limits: storage.clone(),
             audit: Some(storage.clone()),
         });
         let aead = Arc::new(AeadService::from_master_key([32; 32]));
@@ -70,6 +72,18 @@ impl Fixture {
     }
 
     async fn create_oauth_upstream(&self, name: &str) -> Uuid {
+        self.create_oauth_upstream_with_access_token(
+            name,
+            "sk-ant-oat01-test-access-token-123456789",
+        )
+        .await
+    }
+
+    async fn create_oauth_upstream_with_access_token(
+        &self,
+        name: &str,
+        access_token: &str,
+    ) -> Uuid {
         let record = self
             .storage
             .create(UpstreamCreate {
@@ -84,8 +98,8 @@ impl Fixture {
             &self.aead,
             record.id,
             &OAuthTokenBundle {
-                access_token: "sk-ant-oat01-test-access-token-123456789".to_owned(),
-                refresh_token: "sk-ant-ort01-test-refresh-token-123456789".to_owned(),
+                access_token: access_token.to_owned(),
+                refresh_token: format!("sk-ant-ort01-{name}-refresh-token-123456789"),
                 expires_at_unix_secs: now_secs() + 3600,
                 scopes: vec!["messages".to_owned()],
             },
@@ -185,6 +199,85 @@ async fn apikey_upstream_routes_to_key_signer() {
         auth_header.to_str().expect("header to str"),
         "sk-ant-test-api-key-12345"
     );
+}
+
+#[tokio::test]
+async fn router_choice_selects_matching_oauth_upstream() {
+    let _ = prometheus();
+    let fixture = Fixture::new().await;
+    fixture
+        .create_oauth_upstream_with_access_token("oauth-alice", "sk-ant-oat01-alice-token")
+        .await;
+    fixture
+        .create_oauth_upstream_with_access_token("oauth-bob", "sk-ant-oat01-bob-token")
+        .await;
+    let runtime = ExtismRuntime::new();
+    let view = build_dynamic_view(
+        fixture._stores.as_ref(),
+        fixture._oauth_cfg.as_ref(),
+        fixture.aead.clone(),
+        None,
+        0,
+        &runtime,
+        fixture._dir.path(),
+    )
+    .await
+    .expect("dynamic view builds");
+
+    let signer_factory = view
+        .signer_factory
+        .with_router_choice("sk-ant-downstream".to_owned(), "oauth-bob".to_owned());
+    let signer = signer_factory
+        .build(&Upstream::AnthropicDirect)
+        .await
+        .expect("signer built for router choice");
+    let signed = sign_request(signer.as_ref(), shaped_request())
+        .await
+        .expect("signed request");
+
+    let auth_header = signed
+        .headers()
+        .get("authorization")
+        .expect("authorization header present");
+    assert_eq!(
+        auth_header.to_str().expect("header to str"),
+        "Bearer sk-ant-oat01-bob-token"
+    );
+}
+
+#[tokio::test]
+async fn empty_router_choice_errors() {
+    let fixture = Fixture::new().await;
+    fixture.create_oauth_upstream("oauth-only").await;
+    let runtime = ExtismRuntime::new();
+    let view = build_dynamic_view(
+        fixture._stores.as_ref(),
+        fixture._oauth_cfg.as_ref(),
+        fixture.aead.clone(),
+        None,
+        0,
+        &runtime,
+        fixture._dir.path(),
+    )
+    .await
+    .expect("dynamic view builds");
+
+    let signer_factory = view
+        .signer_factory
+        .with_router_choice("sk-ant-downstream".to_owned(), String::new());
+    let result = signer_factory.build(&Upstream::AnthropicDirect).await;
+
+    match result {
+        Err(SignerError::MissingCredentials { reason }) => {
+            assert!(
+                reason.contains("upstream not present"),
+                "error message should indicate no matching router choice: {}",
+                reason
+            );
+        }
+        Ok(_) => panic!("expected MissingCredentials error, got Ok"),
+        Err(other) => panic!("expected MissingCredentials error, got: {:?}", other),
+    }
 }
 
 #[tokio::test]

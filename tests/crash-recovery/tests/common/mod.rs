@@ -716,7 +716,6 @@ fn audit_entry(iteration: usize, index: usize, pending: bool) -> AuditEntry {
 fn create_params(iteration: usize, label: &str) -> CreateParams {
     CreateParams {
         upstream_kind: UpstreamKind::AnthropicKey,
-        upstream_credential_ref: format!("task-30-upstream-{iteration}"),
         label: label.to_owned(),
         description: Some(format!("task-30 crash recovery iteration {iteration}")),
         expires_at_unix_secs: None,

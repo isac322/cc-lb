@@ -201,7 +201,6 @@ pub enum NoneModeUpstreamKind {
 pub struct NoneModeConfig {
     pub principal_id: String,
     pub upstream_kind: NoneModeUpstreamKind,
-    pub upstream_credential_ref: String,
 }
 
 impl Default for NoneModeConfig {
@@ -209,7 +208,6 @@ impl Default for NoneModeConfig {
         Self {
             principal_id: String::new(),
             upstream_kind: NoneModeUpstreamKind::AnthropicKey,
-            upstream_credential_ref: String::new(),
         }
     }
 }
@@ -734,7 +732,6 @@ mode = "none"
 [downstream_auth.none_mode]
 principal_id = "anon"
 upstream_kind = "anthropic_key"
-upstream_credential_ref = "cred-1"
 
 [api_keys]
 "#,
@@ -745,7 +742,6 @@ upstream_credential_ref = "cred-1"
         let none_mode = config.downstream_auth.none_mode.expect("none mode config");
         assert_eq!(none_mode.principal_id, "anon");
         assert_eq!(none_mode.upstream_kind, NoneModeUpstreamKind::AnthropicKey);
-        assert_eq!(none_mode.upstream_credential_ref, "cred-1");
     }
 
     #[test]
@@ -777,7 +773,6 @@ mode = "api_key"
 [downstream_auth.none_mode]
 principal_id = "anon"
 upstream_kind = "anthropic_key"
-upstream_credential_ref = "cred-1"
 
 [api_keys]
 "#,

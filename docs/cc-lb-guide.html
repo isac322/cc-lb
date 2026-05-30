@@ -578,70 +578,45 @@ log_redaction = true</code></pre><button class="copy">복사</button></div>
     </ul>
 
     <h4>현실 (꼭 읽기)</h4>
-    <div class="callout warn">
-      <span class="label">중요</span>
-      <b>cc-lb의 빌트인 라우터는 첫 upstream만 사용합니다.</b> <code>/admin/v1/upstreams</code>로 upstream 두 개를 등록해도 별도 라우터가 없으면 빌트인 path는 기본 upstream으로 갑니다. <b>round-robin / weighted / least-conn은 router plugin (Extism Wasm)으로 직접 구현해야 합니다.</b> 이건 의도된 설계입니다 — 분산 정책은 비즈니스 요구에 따라 달라서 코어에 박지 않았습니다.
+    <div class="callout info">
+      <span class="label">안내</span>
+      <b>cc-lb는 WASM 플러그인을 사용해서 동적 라우팅을 처리합니다.</b> 라우터 플러그인을 지정하지 않으면 첫 번째 upstream으로 요청이 갑니다. 하지만 제공되는 라우터 플러그인을 등록하면 여러 upstream으로 요청을 균등하게 나눌 수 있습니다. 비즈니스 요구사항에 맞춰 가중치 기반이나 최소 연결 수 기반의 커스텀 라우터도 직접 작성해서 적용할 수 있습니다.
     </div>
 
-    <h4>대안 4가지</h4>
-    <ol>
-      <li>
-        <b>Principal 별로 다른 upstream 매핑</b> (router plugin 필요, 가장 단순)
-        <p>각 클라이언트가 다른 <code>x-api-key</code>를 들고 와서, 그 키를 보고 어느 upstream으로 보낼지 결정. 예: <code>plugin-internal-key-mapping</code>이 이 패턴.</p>
-      </li>
-      <li>
-        <b>커스텀 router plugin (round-robin)</b>
-        <p><code>examples/plugin-api-key/</code> 구조를 베이스로 router trait 구현. 약 100줄 Rust → <code>wasm32-wasip1</code> 빌드 → <code>/admin/v1/plugins/wasm</code> 업로드 후 <code>/admin/v1/principals/{principal_id}/plugin-chain</code>에 등록.</p>
-      </li>
-      <li>
-        <b>클라이언트 측 키 순환</b>
-        <p>cc-lb 앞에 nginx <code>upstream { server cc-lb-a; server cc-lb-b; }</code> 같이 두고 각 cc-lb 인스턴스마다 다른 키. cc-lb는 손 안 댐.</p>
-      </li>
-      <li>
-        <b>외부 HAProxy/Envoy</b>
-        <p>cc-lb 인스턴스 여러 개 띄우고 그 앞에 L7 LB. 관찰/감사는 cc-lb가, 분산은 외부 LB가 담당하는 분리 구조.</p>
-      </li>
-    </ol>
+    <h4>추천 해결책: WASM 라우터 플러그인 사용</h4>
+    <p>가장 권장하는 방법은 <code>cc-lb-router-round-robin</code> WASM 플러그인을 사용하는 것입니다. 이 플러그인은 등록된 upstream 후보 목록을 받아 라운드 로빈 방식으로 요청을 분산합니다. WASM 플러그인을 사용하면 프록시 코어를 수정하지 않고도 안전하고 격리된 환경에서 라우팅 로직을 실행할 수 있습니다.</p>
 
-    <h4>1번 (principal 별 매핑) 최소 config 발췌</h4>
-    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code># Create anthropic_pool_a and anthropic_pool_b with POST /admin/v1/upstreams.
-# Upload auth/router Wasm files with POST /admin/v1/plugins/wasm.
-# Attach them with POST /admin/v1/principals/{principal_id}/plugin-chain.
-# my_router.wasm: principal.id 보고 upstream 이름 반환</code></pre><button class="copy">복사</button></div>
+    <h4>라우터 플러그인 설정 예시</h4>
+    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code># POST /admin/v1/upstreams 로 여러 upstream 등록 (예: anthropic_pool_a, anthropic_pool_b)
+# POST /admin/v1/plugins/wasm 으로 cc_lb_router_round_robin.wasm 업로드
+# POST /admin/v1/principals/{principal_id}/plugin-chain 으로 업로드한 플러그인 연결</code></pre><button class="copy">복사</button></div>
 
-    <h4>2번 (custom router plugin) 스켈레톤</h4>
-    <p><code>examples/plugin-api-key/src/lib.rs</code>를 복사한 뒤 trait만 router 쪽으로 교체:</p>
-    <div class="codewrap"><span class="lang">rust</span><pre class="has-lang"><code>use extism_pdk::*;
-use serde::{Deserialize, Serialize};
-
-#[derive(Deserialize)]
-struct RouteInput { _version: u32, principal_id: String, /* ... */ }
-
-#[derive(Serialize)]
-struct RouteOutput { _version: u32, upstream: String }
-
-#[plugin_fn]
-pub fn route(Json(input): Json&lt;RouteInput&gt;) -&gt; FnResult&lt;Json&lt;RouteOutput&gt;&gt; {
-    // 간단한 round-robin: principal hash 기반
-    let pools = [&quot;anthropic_pool_a&quot;, &quot;anthropic_pool_b&quot;];
-    let idx = (input.principal_id.bytes().sum::&lt;u8&gt;() as usize) % pools.len();
-    Ok(Json(RouteOutput { _version: 1, upstream: pools[idx].into() }))
-}</code></pre><button class="copy">복사</button></div>
+    <h4>라운드 로빈 라우터 플러그인 구현</h4>
+    <p>라운드 로빈 라우터 플러그인의 전체 구현 코드는 <a href="../plugins/router/round-robin/src/lib.rs">plugins/router/round-robin/src/lib.rs</a>에서 확인할 수 있습니다. 이 플러그인은 <code>AtomicUsize</code> 기반 원자 카운터를 사용해서 들어오는 요청을 사용 가능한 upstream 후보들에게 순서대로 분산합니다. 후보 풀은 <code>principal.allowed_upstreams</code>로 정의되며 (빈 배열이면 모든 enabled upstream), 라우터는 그 안에서만 선택합니다.</p>
 
     <h4>빌드 + 등록</h4>
-    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>rustup target add wasm32-wasip1
-cargo build --target wasm32-wasip1 --release -p my-router
-cp target/wasm32-wasip1/release/my_router.wasm ./plugins/
-# 그 후 /admin/v1/plugins/wasm 업로드와 /admin/v1/principals/{principal_id}/plugin-chain 연결</code></pre><button class="copy">복사</button></div>
+    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 1. WASM 타겟 추가 및 플러그인 빌드
+rustup target add wasm32-wasip1
+cargo build --manifest-path plugins/router/round-robin/Cargo.toml --target wasm32-wasip1 --release
+
+# 2. 빌드된 WASM 플러그인을 cc-lb 관리자 API를 통해 업로드
+curl -X POST http://127.0.0.1:9090/admin/v1/plugins/wasm \
+  -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
+  -F &quot;name=cc-lb-router-round-robin&quot; \
+  -F &quot;original_filename=cc_lb_router_round_robin.wasm&quot; \
+  -F &quot;bytes=@plugins/router/round-robin/target/wasm32-wasip1/release/cc_lb_router_round_robin.wasm&quot;</code></pre><button class="copy">복사</button></div>
 
     <h4>확인</h4>
-    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 다른 키로 두 번 호출
+    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 1. 업로드된 플러그인이 정상적으로 등록되었는지 확인
+curl -s http://127.0.0.1:9090/admin/v1/plugins/wasm \
+  -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; | grep cc_lb_router_round_robin.wasm
+
+# 2. 서로 다른 요청을 여러 번 호출하여 라운드 로빈 분산 확인
 curl -s http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: keyA&quot; ...
 curl -s http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: keyB&quot; ...
 
-# 메트릭에서 upstream 별로 분산됐는지 확인
-curl -s http://127.0.0.1:9091/metrics | grep cc_lb_requests_total
-# upstream=&quot;anthropic_pool_a&quot; 와 upstream=&quot;anthropic_pool_b&quot; 둘 다 카운트 증가</code></pre><button class="copy">복사</button></div>
+# 3. 메트릭에서 각 upstream 별로 요청이 분산되었는지 확인
+curl -s http://127.0.0.1:9091/metrics | grep cc_lb_requests_total</code></pre><button class="copy">복사</button></div>
 
     <h2 id="uc-mix-provider">Use Case ③ · Anthropic + Bedrock + Vertex 혼합</h2>
 

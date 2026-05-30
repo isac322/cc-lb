@@ -53,9 +53,13 @@ pub const CONFIG_HISTORY_V1: TableDefinition<u64, &[u8]> =
 pub const PRINCIPALS_V2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("principals_v2");
 pub const PRINCIPALS_V2_BY_NAME: TableDefinition<&str, &[u8]> =
     TableDefinition::new("principals_v2_by_name");
+pub const PRINCIPAL_ALLOWED_UPSTREAMS_V1: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("principal_allowed_upstreams_v1");
 pub const UPSTREAMS_V2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("upstreams_v2");
 pub const UPSTREAMS_V2_BY_NAME: TableDefinition<&str, &[u8]> =
     TableDefinition::new("upstreams_v2_by_name");
+pub const UPSTREAM_RATE_LIMIT_STATE_V1: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("upstream_rate_limit_state_v1");
 pub const WASM_BLOBS_V2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("wasm_blobs_v2");
 pub const WASM_REGISTRY_V2: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("wasm_registry_v2");

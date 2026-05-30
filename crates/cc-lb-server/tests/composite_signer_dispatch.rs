@@ -34,14 +34,16 @@ use url::Url;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn oauth_auth_ref_dispatches_to_matching_oauth_upstream_not_first_anthropic_direct() {
+async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic_direct() {
     let fixture = Fixture::new().await;
-    fixture.create_principal("oauth-principal").await;
     let target_id = fixture
         .create_oauth_upstream("oauth-target", now_secs() + 3600, true)
         .await;
     fixture
         .create_missing_oauth_upstream_before(target_id)
+        .await;
+    fixture
+        .create_principal("oauth-principal", vec![target_id])
         .await;
     let runtime = ExtismRuntime::new();
     let view = build_dynamic_view(
@@ -61,7 +63,6 @@ async fn oauth_auth_ref_dispatches_to_matching_oauth_upstream_not_first_anthropi
             Some(NoneModeConfig {
                 principal_id: "oauth-principal".to_owned(),
                 upstream_kind: NoneModeUpstreamKind::AnthropicOAuth,
-                upstream_credential_ref: "oauth-target".to_owned(),
             }),
             None,
         )),
@@ -106,6 +107,7 @@ impl Fixture {
             }),
             principals: storage.clone(),
             plugin_registry: storage.clone(),
+            upstream_rate_limits: storage.clone(),
             audit: Some(storage.clone()),
         });
         let aead = Arc::new(AeadService::from_master_key([33; 32]));
@@ -127,13 +129,14 @@ impl Fixture {
         }
     }
 
-    async fn create_principal(&self, name: &str) {
+    async fn create_principal(&self, name: &str, allowed_upstreams: Vec<Uuid>) {
         PrincipalStore::create(
             self.storage.as_ref(),
             PrincipalCreate {
                 name: name.to_owned(),
                 kind: PrincipalKind::Machine,
                 allowed_models: Vec::new(),
+                allowed_upstreams,
                 default_limits: Vec::new(),
             },
             now_secs(),
