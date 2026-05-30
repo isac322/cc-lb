@@ -31,7 +31,7 @@ jobs:
     container:
       image: messense/rust-musl-cross:aarch64-musl
     env:
-      RUSTUP_TOOLCHAIN: stable
+      RUSTUP_TOOLCHAIN: 1.95.0
     steps:
       - uses: actions/checkout@v6
       # The messense/rust-musl-cross image ships rustc 1.94.0 but the workspace
