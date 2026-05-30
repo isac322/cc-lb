@@ -42,9 +42,7 @@ jobs:
           path: target/test-bins
           key: real-client-test-bins-${{ runner.os }}-${{ hashFiles('tests/real-client/install.sh') }}
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          cache-on-failure: true
+      - uses: ./.github/actions/setup-rust-cache
       - name: Install pinned real clients
         run: tests/real-client/install.sh
       - name: Run real-client matrix

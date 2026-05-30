@@ -53,9 +53,8 @@ jobs:
             --target "$target"
           rustup default "$channel"
           rustc --version
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust-cache
         with:
-          cache-on-failure: true
-          key: musl-${{ runner.arch }}
+          rust-cache-key: musl-${{ runner.arch }}
       - name: Verify musl static binary
         run: bash tests/musl-static/verify.sh

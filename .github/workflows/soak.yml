@@ -17,10 +17,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust-cache
         with:
-          cache-on-failure: true
-          key: soak-rss
+          rust-cache-key: soak-rss
       - name: Run 24h RSS soak
         run: bash tests/soak/soak.sh 24h
       - name: Upload soak CSV
