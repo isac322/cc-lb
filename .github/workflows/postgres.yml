@@ -40,14 +40,16 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
-        uses: actions/cache@v5
+      # Swatinem instead of actions/cache: the raw ~12 GB target/ tarball restore
+      # took 6+ min on the ARC self-hosted pod and reliably triggered a runner
+      # shutdown signal mid-restore (pod scale-down), cancelling every later step.
+      # Swatinem prunes intermediate artifacts so the cache is typically ~1-3 GB,
+      # restores in seconds, and lets cargo resume rather than build from scratch
+      # (which itself takes ~20 min and overruns ARC's scale-down window).
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-postgres-build-${{ matrix.build-variant }}-${{ hashFiles('**/Cargo.lock') }}
+          cache-on-failure: true
+          key: postgres-build-${{ matrix.build-variant }}
 
       - name: Build workspace (all features)
         if: matrix.build-variant == 'all-features'
@@ -92,14 +94,13 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      - name: Cache cargo registry
-        uses: actions/cache@v5
+      # Swatinem instead of actions/cache: see postgres-build-matrix above for
+      # the ARC pod scale-down rationale. postgres-conformance is the slowest
+      # job (~35-45 min) so saving even a few minutes of restore matters.
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target/
-          key: ${{ runner.os }}-cargo-postgres-conformance-${{ hashFiles('**/Cargo.lock') }}
+          cache-on-failure: true
+          key: postgres-conformance
 
       - name: Install sqlx-cli
         uses: taiki-e/install-action@v2
@@ -125,6 +126,17 @@ jobs:
       - name: Run cc-lb-server DB unreachable chaos test (ignored)
         run: cargo test -p cc-lb-server --features postgres,redb --test db_unreachable_503 -- --ignored
         continue-on-error: true
+
+      # Fallback in case the ARC pod has not yet picked up the cc-lb-actions-runner
+      # image revision that bakes postgresql-client in. The smoke script hard-requires
+      # psql; this keeps the workflow robust against stale pod image caches.
+      - name: Ensure psql is available
+        run: |
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          psql --version
 
       - name: E2E smoke - cc-lb binary against postgres backend
         run: ./tests/real-client/postgres-smoke.sh

@@ -62,9 +62,16 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov
+      # Registry-only: target/ must not be shared across branches. The
+      # Swatinem cache key hashes Cargo.lock/Cargo.toml but not the test
+      # file set, so a branch like oauth-refresh-cadence-tuning leaks its
+      # tests/oauth_refresh_cadence-* binary into target/llvm-cov-target/
+      # debug/deps/ and cargo invokes it on restore against a source tree
+      # that never contained that file.
       - uses: Swatinem/rust-cache@v2
         with:
           cache-on-failure: true
+          cache-targets: false
 
       - name: Run tests with coverage instrumentation
         run: |
