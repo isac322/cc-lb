@@ -362,7 +362,14 @@ async fn advance_eleven_minutes() {
 }
 
 async fn wait_for_claim(claim_calls: &AtomicUsize) {
-    for _ in 0..1000 {
+    // NOTE [Priority-3 footgun]: under #[tokio::test(start_paused = true)] the only
+    // way to give the spawned refresher task progress is `yield_now`. 1000 yields
+    // was enough locally but flaked on ARC self-hosted CI where the runtime gets
+    // 2 worker threads competing with other parallel test binaries; the refresher
+    // sometimes had not yet reached `claim_refresh_lease` by the deadline. 100k
+    // yields cap real-time at ~tens-of-ms (each yield is sub-microsecond) so the
+    // poll still bounds aggressively while tolerating CI scheduling jitter.
+    for _ in 0..100_000 {
         if claim_calls.load(Ordering::SeqCst) > 0 {
             return;
         }
