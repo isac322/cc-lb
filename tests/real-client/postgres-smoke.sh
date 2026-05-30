@@ -55,6 +55,7 @@ mode = "none"
 [downstream_auth.none_mode]
 principal_id = "api-key"
 upstream_kind = "anthropic_key"
+upstream_credential_ref = "real_client"
 
 [storage]
 kind = "postgres"
@@ -138,6 +139,20 @@ seed_runtime() {
     exit 1
   fi
 }
+
+# Verify psql is available and reset prior-test runtime state before spawning
+# cc-lb. The postgres-conformance CI job runs Postgres-gated cc-lb-server tests
+# (e.g. managed_key_multi_instance) before this smoke step; they seed
+# principals_v1 + upstreams_v1 via seed_app_testing_storage and leave the rows
+# behind. cc-lb's dynamic routing then picks the stale `test-upstream` (with
+# a dead base_url) over the smoke's freshly seeded `real_client`, yielding 502.
+psql --version >/dev/null 2>&1 || {
+  echo "FAIL: psql not installed in runner image; this script depends on it" >&2
+  exit 1
+}
+echo "===> step 0: reset dynamic runtime tables in public schema"
+psql "$CI_POSTGRES_URL" -c "TRUNCATE principals_v1, upstreams_v1, managed_api_keys_v1, managed_api_key_index_v1, oauth_credentials_v1 RESTART IDENTITY CASCADE" > /dev/null
+psql "$CI_POSTGRES_URL" -c "DELETE FROM meta WHERE key = 'backend_kind'" > /dev/null
 
 echo "===> step 1: spawn fake-anthropic on :$fake_port"
 cargo run -q -p fake-anthropic -- --port "$fake_port" > "$TMP_DIR/fake.log" 2>&1 &
