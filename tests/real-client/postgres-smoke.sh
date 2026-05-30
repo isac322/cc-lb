@@ -55,7 +55,6 @@ mode = "none"
 [downstream_auth.none_mode]
 principal_id = "api-key"
 upstream_kind = "anthropic_key"
-upstream_credential_ref = "real_client"
 
 [storage]
 kind = "postgres"
@@ -116,17 +115,6 @@ PY
 }
 
 seed_runtime() {
-  principal_code=$(curl -sS -o "$TMP_DIR/admin-principal.json" -w '%{http_code}' -X POST \
-    -H 'Authorization: Bearer test' \
-    -H 'content-type: application/json' \
-    --data '{"name":"api-key","kind":"machine","allowed_models":["*"]}' \
-    "http://127.0.0.1:$admin_port/admin/v1/principals") || principal_code=000
-  if [ "$principal_code" != "201" ] && [ "$principal_code" != "409" ]; then
-    echo "FAIL: create principal expected 201 or 409, got $principal_code" >&2
-    cat "$TMP_DIR/admin-principal.json" >&2 || true
-    exit 1
-  fi
-
   upstream_body=$(printf '{"name":"real_client","kind":"custom","base_url":"http://127.0.0.1:%s"}' "$fake_port")
   upstream_code=$(curl -sS -o "$TMP_DIR/admin-upstream.json" -w '%{http_code}' -X POST \
     -H 'Authorization: Bearer test' \
@@ -136,6 +124,27 @@ seed_runtime() {
   if [ "$upstream_code" != "201" ] && [ "$upstream_code" != "409" ]; then
     echo "FAIL: create upstream expected 201 or 409, got $upstream_code" >&2
     cat "$TMP_DIR/admin-upstream.json" >&2 || true
+    exit 1
+  fi
+  upstream_id=$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('id',''))" "$TMP_DIR/admin-upstream.json")
+  if [ -z "$upstream_id" ]; then
+    upstream_id=$(curl -sS -H 'Authorization: Bearer test' "http://127.0.0.1:$admin_port/admin/v1/upstreams" \
+      | python3 -c "import json,sys; print(next((u['id'] for u in json.load(sys.stdin).get('upstreams',[]) if u.get('name')=='real_client'),''))")
+  fi
+  if [ -z "$upstream_id" ]; then
+    echo "FAIL: could not resolve real_client upstream id" >&2
+    exit 1
+  fi
+
+  principal_body=$(printf '{"name":"api-key","kind":"machine","allowed_models":["*"],"allowed_upstreams":["%s"]}' "$upstream_id")
+  principal_code=$(curl -sS -o "$TMP_DIR/admin-principal.json" -w '%{http_code}' -X POST \
+    -H 'Authorization: Bearer test' \
+    -H 'content-type: application/json' \
+    --data "$principal_body" \
+    "http://127.0.0.1:$admin_port/admin/v1/principals") || principal_code=000
+  if [ "$principal_code" != "201" ] && [ "$principal_code" != "409" ]; then
+    echo "FAIL: create principal expected 201 or 409, got $principal_code" >&2
+    cat "$TMP_DIR/admin-principal.json" >&2 || true
     exit 1
   fi
 }
