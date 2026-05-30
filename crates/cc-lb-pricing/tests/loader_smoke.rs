@@ -45,9 +45,7 @@ async fn fetch_install_persist() -> Result<(), Box<dyn std::error::Error>> {
     // up to a few hundred ms; poll the disk snapshot for up to 5 s real time
     // before failing instead of asserting once and racing the writer.
     let persist_deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while storage.get_price_snapshot()?.is_none()
-        && std::time::Instant::now() < persist_deadline
-    {
+    while storage.get_price_snapshot()?.is_none() && std::time::Instant::now() < persist_deadline {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert!(storage.get_price_snapshot()?.is_some());
