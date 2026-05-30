@@ -326,6 +326,7 @@ async fn seed_principal(storage: &cc_lb_storage_redb::RedbStorage, name: &str) -
                 name: name.to_owned(),
                 kind: PrincipalKind::Machine,
                 allowed_models: Vec::new(),
+                allowed_upstreams: Vec::new(),
                 default_limits: Vec::new(),
             },
             1_800_000_000,

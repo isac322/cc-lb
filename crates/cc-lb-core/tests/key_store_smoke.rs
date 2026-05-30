@@ -141,7 +141,6 @@ fn new_store() -> Result<(tempfile::TempDir, KeyStore), Box<dyn std::error::Erro
 fn create_params(label: &str) -> CreateParams {
     CreateParams {
         upstream_kind: UpstreamKind::AnthropicKey,
-        upstream_credential_ref: "anthropic-prod".to_owned(),
         label: label.to_owned(),
         description: Some("test key".to_owned()),
         expires_at_unix_secs: Some(1_800_000_000),

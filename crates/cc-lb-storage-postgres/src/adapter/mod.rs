@@ -17,6 +17,7 @@ pub mod principals;
 pub mod quota;
 pub mod request_events;
 pub mod retry;
+pub mod upstream_rate_limit;
 pub mod upstreams;
 pub mod usage_rollups;
 

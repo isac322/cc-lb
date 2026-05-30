@@ -72,7 +72,6 @@ async fn issue_key(
 
     let params = CreateParams {
         upstream_kind: UpstreamKind::AnthropicKey,
-        upstream_credential_ref: String::new(),
         label: body.label.unwrap_or_default(),
         description: None,
         expires_at_unix_secs: None,

@@ -243,7 +243,6 @@ async fn issue_key(app: &App) -> TestResult<IssuedKey> {
         Some(json!({
             "label": "live storage key",
             "upstream_kind": "anthropic_key",
-            "upstream_credential_ref": "test-upstream",
         })),
     )
     .await?;

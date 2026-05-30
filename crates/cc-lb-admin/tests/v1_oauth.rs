@@ -374,13 +374,35 @@ async fn json_response(response: axum::response::Response) -> (StatusCode, Value
 }
 
 async fn audit_actions(storage: &Storage) -> Vec<String> {
-    tokio::time::sleep(Duration::from_millis(250)).await;
-    storage
-        .query_audit(None, 0, u64::MAX, 100)
-        .expect("query audit")
-        .into_iter()
-        .filter_map(|entry| entry.admin_action)
-        .collect()
+    // NOTE [Priority-3 footgun]: cc-lb's audit pipeline is a spawned background writer
+    // (spawn_audit_writer + bounded mpsc). The previous flat 250ms sleep was enough for
+    // nextest's plain debug binaries but raced on CI under cargo-llvm-cov instrumented
+    // binaries (slower runtime) - the `upstream_oauth_complete` row was occasionally
+    // not yet flushed when the assertion fired. Both callers of this helper assert
+    // after the oauth_complete handler returned 200, so polling until that entry is
+    // present is the correct readiness gate; the fingerprint is embedded in the same
+    // row, so its assertion in the second caller is satisfied transitively.
+    const BUDGET: Duration = Duration::from_secs(2);
+    const INTERVAL: Duration = Duration::from_millis(25);
+    let deadline = std::time::Instant::now() + BUDGET;
+    loop {
+        let entries: Vec<String> = storage
+            .query_audit(None, 0, u64::MAX, 100)
+            .expect("query audit")
+            .into_iter()
+            .filter_map(|entry| entry.admin_action)
+            .collect();
+        if entries
+            .iter()
+            .any(|e| e.contains("upstream_oauth_complete"))
+        {
+            return entries;
+        }
+        if std::time::Instant::now() >= deadline {
+            return entries;
+        }
+        tokio::time::sleep(INTERVAL).await;
+    }
 }
 
 fn fingerprint(access_token: &str) -> String {

@@ -111,6 +111,59 @@ async fn update_correct_if_match_bumps_revision() {
 }
 
 #[tokio::test]
+async fn allowed_upstreams_round_trips_through_create_patch_and_get() {
+    let server = admin_test_common::spawn_admin_server();
+    let first_upstream = "11111111-1111-1111-1111-111111111111";
+    let second_upstream = "22222222-2222-2222-2222-222222222222";
+    let (_, headers, created) = server
+        .client
+        .post_json(
+            "/admin/v1/principals",
+            json!({
+                "name": "alpha",
+                "kind": "machine",
+                "allowed_models": [],
+                "allowed_upstreams": [first_upstream],
+                "default_limits": []
+            }),
+        )
+        .await;
+    let id = created_id(&created);
+    let etag = server.client.header_str(&headers, header::ETAG.as_str());
+
+    let (status, _, body) = server
+        .client
+        .get(&format!("/admin/v1/principals/{id}"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["allowed_upstreams"], json!([first_upstream]));
+
+    let (status, headers, body) = server
+        .client
+        .json(
+            "PATCH",
+            &format!("/admin/v1/principals/{id}"),
+            Some(json!({ "allowed_upstreams": [second_upstream] })),
+            &[(header::IF_MATCH.as_str(), etag)],
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["allowed_upstreams"], json!([second_upstream]));
+    assert_eq!(body["revision"], 1);
+
+    let (status, _, body) = server
+        .client
+        .get(&format!("/admin/v1/principals/{id}"))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["allowed_upstreams"], json!([second_upstream]));
+    assert_eq!(
+        server.client.header_str(&headers, header::ETAG.as_str()),
+        "W/\"1\""
+    );
+}
+
+#[tokio::test]
 async fn update_stale_if_match_returns_409_with_current_revision() {
     let server = admin_test_common::spawn_admin_server();
     let (_, headers, created) = create_principal(&server.client, "alpha").await;

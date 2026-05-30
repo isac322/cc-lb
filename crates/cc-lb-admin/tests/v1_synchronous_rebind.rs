@@ -15,7 +15,7 @@ use cc_lb_core::{
 };
 use cc_lb_plugin_api::{
     Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, SignedRequest,
-    SignerFactory, Upstream,
+    SignerFactory, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::UpstreamStore;
 use cc_lb_storage_redb::Storage;
@@ -90,7 +90,11 @@ impl DynamicViewRebinder for SnapshotRebinder {
 struct NoopSignerFactory;
 
 impl ApiKeyAwareSignerFactory for NoopSignerFactory {
-    fn with_api_key(&self, _api_key: String) -> Arc<dyn SignerFactory> {
+    fn with_router_choice(
+        &self,
+        _api_key: String,
+        _router_chosen_upstream_name: String,
+    ) -> Arc<dyn SignerFactory> {
         Arc::new(NoopSignerFactory)
     }
 }
@@ -114,6 +118,7 @@ impl RouterPlugin for NoopRouter {
         &self,
         _ctx: &RequestContext,
         _principal: &Principal,
+        _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
         Err(RouteError::NoRoute {
             reason: "noop test router".to_owned(),

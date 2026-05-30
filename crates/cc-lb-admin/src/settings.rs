@@ -163,6 +163,7 @@ pub fn current_config_response(
 
 pub fn schema_response() -> Result<ConfigSchemaResponse, SettingsError> {
     let mut schema = serde_json::to_value(schemars::schema_for!(cc_lb_config::Config))?;
+    crate::management::extend_config_schema(&mut schema);
     strip_schema_defaults(&mut schema);
     Ok(ConfigSchemaResponse {
         schema,

@@ -112,6 +112,31 @@ pub fn route_response() -> String {
     .to_string()
 }
 
+pub fn route_response_with_upstream_id(upstream_id: &str) -> String {
+    json!({
+        "_version": 1,
+        "upstream": {
+            "kind": "custom_anthropic_spec",
+            "base_url": "http://upstream.test/"
+        },
+        "dialect": {"kind": "self"},
+        "upstream_id": upstream_id
+    })
+    .to_string()
+}
+
+pub fn route_response_with_base_url(base_url: &str) -> String {
+    json!({
+        "_version": 1,
+        "upstream": {
+            "kind": "custom_anthropic_spec",
+            "base_url": base_url
+        },
+        "dialect": {"kind": "self"}
+    })
+    .to_string()
+}
+
 pub fn shape_response() -> String {
     json!({
         "_version": 1,
@@ -152,6 +177,58 @@ pub fn module_with_functions(outputs: &[(&str, &str)]) -> String {
         ));
     }
     module(&format!("{helpers}\n{funcs}"))
+}
+
+pub fn route_module_requiring_input_markers(
+    markers: &[&[u8]],
+    success_output: &str,
+    failure_output: &str,
+) -> String {
+    let mut contains_helpers = String::new();
+    for (index, marker) in markers.iter().enumerate() {
+        contains_helpers.push_str(&contains_helper(index, marker));
+    }
+
+    let mut marker_checks = String::new();
+    for index in 0..markers.len() {
+        marker_checks.push_str(&format!(
+            r#"
+  (if (i32.eqz (call $contains_{index}))
+    (then
+      (local.set $out (call $failure_out))
+      (local.set $out_len (i64.const {failure_len}))))
+"#,
+            failure_len = failure_output.len()
+        ));
+    }
+
+    let helpers = format!(
+        "{}{}{}",
+        bytes_helper("success_out", success_output.as_bytes()),
+        bytes_helper("failure_out", failure_output.as_bytes()),
+        contains_helpers
+    );
+
+    module_with_extra_env_imports(
+        r#"
+  (import "extism:host/env" "input_length" (func $input_length (result i64)))
+  (import "extism:host/env" "input_load_u8" (func $input_load_u8 (param i64) (result i32)))
+"#,
+        &format!(
+            r#"
+{helpers}
+(func (export "route") (result i32)
+  (local $out i64)
+  (local $out_len i64)
+  (local.set $out (call $success_out))
+  (local.set $out_len (i64.const {success_len}))
+{marker_checks}
+  (call $output_set (local.get $out) (local.get $out_len))
+  (i32.const 0))
+"#,
+            success_len = success_output.len()
+        ),
+    )
 }
 
 pub fn host_log_module(output: &str) -> String {
@@ -330,6 +407,10 @@ pub fn panic_module() -> String {
 }
 
 fn module(functions: &str) -> String {
+    module_with_extra_env_imports("", functions)
+}
+
+fn module_with_extra_env_imports(extra_imports: &str, functions: &str) -> String {
     format!(
         r#"
 (module
@@ -337,12 +418,46 @@ fn module(functions: &str) -> String {
   (import "extism:host/env" "store_u8" (func $store_u8 (param i64 i32)))
   (import "extism:host/env" "output_set" (func $output_set (param i64 i64)))
   (import "extism:host/env" "length" (func $length (param i64) (result i64)))
+  {extra_imports}
   (import "extism:host/user" "cc_lb_log" (func $cc_lb_log (param i64 i64)))
   (import "extism:host/user" "cc_lb_storage_get" (func $cc_lb_storage_get (param i64) (result i64)))
   (import "extism:host/user" "cc_lb_storage_put" (func $cc_lb_storage_put (param i64 i64)))
   {functions}
 )
 "#
+    )
+}
+
+fn contains_helper(index: usize, marker: &[u8]) -> String {
+    let mut comparisons = String::new();
+    for (offset, byte) in marker.iter().enumerate() {
+        comparisons.push_str(&format!(
+            r#"
+      (if (i32.ne (call $input_load_u8 (i64.add (local.get $i) (i64.const {offset}))) (i32.const {byte}))
+        (then (local.set $matched (i32.const 0))))
+"#
+        ));
+    }
+
+    format!(
+        r#"
+(func $contains_{index} (result i32)
+  (local $input_len i64)
+  (local $i i64)
+  (local $matched i32)
+  (local.set $input_len (call $input_length))
+  (if (i64.lt_u (local.get $input_len) (i64.const {marker_len}))
+    (then (return (i32.const 0))))
+  (loop $scan
+    (local.set $matched (i32.const 1))
+{comparisons}
+    (if (local.get $matched)
+      (then (return (i32.const 1))))
+    (local.set $i (i64.add (local.get $i) (i64.const 1)))
+    (br_if $scan (i64.le_u (i64.add (local.get $i) (i64.const {marker_len})) (local.get $input_len))))
+  (i32.const 0))
+"#,
+        marker_len = marker.len()
     )
 }
 

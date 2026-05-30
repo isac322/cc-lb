@@ -1,8 +1,11 @@
 use std::{collections::HashMap, sync::Arc};
 
 use arc_swap::ArcSwap;
-use cc_lb_plugin_api::ApiKeyAwareSignerFactory;
+use cc_lb_plugin_api::{ApiKeyAwareSignerFactory, RateLimitObservation};
 use cc_lb_plugin_api::{ObservabilityHook, RouterPlugin};
+use cc_lb_storage_api::{UpstreamRateLimitObservationRecord, UpstreamRecord};
+use parking_lot::RwLock;
+use uuid::Uuid;
 
 use crate::api_keys::principal_view::PrincipalView;
 use crate::error_normalizer::ErrorNormalizer;
@@ -17,7 +20,64 @@ pub struct DynamicView {
     pub error_normalizer: Arc<ErrorNormalizer>,
     pub principal_view: Arc<PrincipalView>,
     pub upstream_status_snapshot: Arc<UpstreamStatusSnapshot>,
+    pub upstream_rate_limit_cache: Arc<RwLock<UpstreamRateLimitCache>>,
     pub generation: u64,
+    upstream_records: Vec<UpstreamRecord>,
+}
+
+impl DynamicView {
+    pub fn upstreams_snapshot(&self) -> &[UpstreamRecord] {
+        &self.upstream_records
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UpstreamRateLimitCache {
+    pub snapshots: HashMap<Uuid, Vec<RateLimitObservation>>,
+    pub updated_at_unix_secs: u64,
+}
+
+impl UpstreamRateLimitCache {
+    pub fn from_records(
+        records: impl IntoIterator<Item = UpstreamRateLimitObservationRecord>,
+        updated_at_unix_secs: u64,
+    ) -> Self {
+        let mut cache = Self {
+            snapshots: HashMap::new(),
+            updated_at_unix_secs,
+        };
+        for record in records {
+            cache.upsert_record(record);
+        }
+        cache.updated_at_unix_secs = updated_at_unix_secs;
+        cache
+    }
+
+    pub fn upsert_record(&mut self, record: UpstreamRateLimitObservationRecord) {
+        let upstream_id = record.upstream_id;
+        let observed_at_unix_secs = record.observed_at_unix_secs;
+        let observation = rate_limit_observation_from_record(record);
+        let snapshots = self.snapshots.entry(upstream_id).or_default();
+        match snapshots.iter_mut().find(|snapshot| {
+            snapshot.kind == observation.kind && snapshot.window == observation.window
+        }) {
+            Some(snapshot) => *snapshot = observation,
+            None => snapshots.push(observation),
+        }
+        self.updated_at_unix_secs = observed_at_unix_secs;
+    }
+}
+
+fn rate_limit_observation_from_record(
+    record: UpstreamRateLimitObservationRecord,
+) -> RateLimitObservation {
+    RateLimitObservation {
+        kind: record.kind,
+        window: record.window,
+        limit: record.limit,
+        remaining: record.remaining,
+        reset: record.reset,
+    }
 }
 
 pub struct DynamicViewHolder {
@@ -74,6 +134,8 @@ pub struct DynamicViewBuilder {
     error_normalizer: Option<Arc<ErrorNormalizer>>,
     principal_view: Option<Arc<PrincipalView>>,
     upstream_status_snapshot: Option<Arc<UpstreamStatusSnapshot>>,
+    upstream_rate_limit_cache: Option<Arc<RwLock<UpstreamRateLimitCache>>>,
+    upstream_records: Vec<UpstreamRecord>,
 }
 
 impl DynamicViewBuilder {
@@ -87,6 +149,8 @@ impl DynamicViewBuilder {
             error_normalizer: None,
             principal_view: None,
             upstream_status_snapshot: None,
+            upstream_rate_limit_cache: None,
+            upstream_records: Vec::new(),
         }
     }
 
@@ -100,6 +164,8 @@ impl DynamicViewBuilder {
             error_normalizer: Some(Arc::clone(&view.error_normalizer)),
             principal_view: Some(Arc::clone(&view.principal_view)),
             upstream_status_snapshot: Some(Arc::clone(&view.upstream_status_snapshot)),
+            upstream_rate_limit_cache: Some(Arc::clone(&view.upstream_rate_limit_cache)),
+            upstream_records: view.upstreams_snapshot().to_vec(),
         }
     }
 
@@ -152,6 +218,16 @@ impl DynamicViewBuilder {
         self
     }
 
+    pub fn upstream_rate_limit_cache(mut self, cache: Arc<RwLock<UpstreamRateLimitCache>>) -> Self {
+        self.upstream_rate_limit_cache = Some(cache);
+        self
+    }
+
+    pub fn upstream_records(mut self, records: Vec<UpstreamRecord>) -> Self {
+        self.upstream_records = records;
+        self
+    }
+
     pub fn build(self) -> Arc<DynamicView> {
         Arc::new(DynamicView {
             signer_factory: self
@@ -173,7 +249,11 @@ impl DynamicViewBuilder {
                 .principal_view
                 .expect("DynamicViewBuilder requires principal_view"),
             upstream_status_snapshot: self.upstream_status_snapshot.unwrap_or_default(),
+            upstream_rate_limit_cache: self
+                .upstream_rate_limit_cache
+                .unwrap_or_else(|| Arc::new(RwLock::new(UpstreamRateLimitCache::default()))),
             generation: self.previous_generation.saturating_add(1),
+            upstream_records: self.upstream_records,
         })
     }
 }
@@ -186,14 +266,18 @@ mod tests {
     use cc_lb_plugin_api::{
         ObservabilityError, ObserveEvent, Principal, RequestContext, RouteDecision, RouteError,
         SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, Upstream,
-        UpstreamError,
+        UpstreamCandidate, UpstreamError,
     };
     use http::{Response, StatusCode};
 
     struct TestSignerFactory;
 
     impl ApiKeyAwareSignerFactory for TestSignerFactory {
-        fn with_api_key(&self, _api_key: String) -> Arc<dyn SignerFactory> {
+        fn with_router_choice(
+            &self,
+            _api_key: String,
+            _router_chosen_upstream_name: String,
+        ) -> Arc<dyn SignerFactory> {
             Arc::new(TestSignerFactory)
         }
     }
@@ -229,6 +313,7 @@ mod tests {
             &self,
             _ctx: &RequestContext,
             _principal: &Principal,
+            _candidates: &[UpstreamCandidate],
         ) -> Result<RouteDecision, RouteError> {
             Err(RouteError::NoRoute {
                 reason: "test router has no route".to_owned(),
@@ -325,5 +410,11 @@ mod tests {
     fn builder_increments_generation() {
         let view = test_view(41);
         assert_eq!(view.generation, 42);
+    }
+
+    #[test]
+    fn upstreams_snapshot_defaults_empty() {
+        let view = test_view(0);
+        assert!(view.upstreams_snapshot().is_empty());
     }
 }

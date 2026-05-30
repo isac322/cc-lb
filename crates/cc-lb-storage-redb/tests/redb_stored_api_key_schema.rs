@@ -20,7 +20,6 @@ fn redb_stored_api_key_schema_roundtrip_preserves_new_fields()
         label: "managed key".to_owned(),
         description: Some("support key".to_owned()),
         upstream_kind: UpstreamKind::AnthropicKey,
-        upstream_credential_ref: "anthropic-prod".to_owned(),
         expires_at_unix_secs: Some(1_765_000_000),
         limit_overrides: vec![Limit {
             kind: LimitKind::Requests,
@@ -42,10 +41,6 @@ fn redb_stored_api_key_schema_roundtrip_preserves_new_fields()
     assert_eq!(record.label, params.label);
     assert_eq!(record.description, params.description);
     assert_eq!(record.upstream_kind, params.upstream_kind);
-    assert_eq!(
-        record.upstream_credential_ref,
-        params.upstream_credential_ref
-    );
     assert_eq!(record.limit_overrides, params.limit_overrides);
     assert_eq!(record.status, KeyStatus::Active);
     assert_eq!(record.expires_at_unix_secs, params.expires_at_unix_secs);
@@ -127,7 +122,6 @@ fn redb_stored_api_key_update_transitions_status() -> Result<(), Box<dyn std::er
         label: "managed key".to_owned(),
         description: Some("original".to_owned()),
         upstream_kind: UpstreamKind::AnthropicOAuth,
-        upstream_credential_ref: "oauth-cred".to_owned(),
         expires_at_unix_secs: Some(1_765_123_456),
         limit_overrides: vec![Limit {
             kind: LimitKind::OutputTokens,

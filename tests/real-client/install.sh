@@ -25,18 +25,32 @@ install_client() {
   fi
 
   printf 'installing %s from %s@%s into %s\n' "$client" "$package" "$version" "$client_dir"
-  if npm install --prefix "$client_dir" "$package@$version"; then
+  local installer
+  local rc
+  if command -v bun >/dev/null 2>&1 && bun --version >/dev/null 2>&1; then
+    installer=bun
+    (cd "$client_dir" && bun add "$package@$version")
+    rc=$?
+  elif command -v npm >/dev/null 2>&1 && npm --version >/dev/null 2>&1; then
+    installer=npm
+    (cd "$client_dir" && npm install "$package@$version")
+    rc=$?
+  else
+    printf 'SKIP %s reason: neither bun nor npm is available to install %s@%s\n' "$client" "$package" "$version" > "$status_file"
+    return 0
+  fi
+  if [ "$rc" -eq 0 ]; then
     if [ -x "$bin_path" ]; then
-      printf 'PASS %s %s@%s binary=%s\n' "$client" "$package" "$version" "$bin_path" > "$status_file"
+      printf 'PASS %s %s@%s binary=%s installer=%s\n' "$client" "$package" "$version" "$bin_path" "$installer" > "$status_file"
       printf -v "$env_name" '%s' "$bin_path"
       export "$env_name"
       return 0
     fi
-    printf 'SKIP %s reason: expected binary missing after npm install: %s\n' "$client" "$bin_path" > "$status_file"
+    printf 'SKIP %s reason: expected binary missing after %s install: %s\n' "$client" "$installer" "$bin_path" > "$status_file"
     return 0
   fi
 
-  printf 'SKIP %s reason: npm install failed for %s@%s\n' "$client" "$package" "$version" > "$status_file"
+  printf 'SKIP %s reason: %s install failed for %s@%s\n' "$client" "$installer" "$package" "$version" > "$status_file"
   return 0
 }
 

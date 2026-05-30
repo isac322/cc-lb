@@ -292,7 +292,6 @@ async fn issue_key(app: &App) -> TestResult<String> {
                     json!({
                         "label": "db unreachable chaos key",
                         "upstream_kind": "anthropic_key",
-                        "upstream_credential_ref": "test-upstream",
                     })
                     .to_string(),
                 ))?,
