@@ -77,15 +77,22 @@ fn child_writer(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn wait_for_database_bytes(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let deadline = Instant::now() + Duration::from_secs(2);
+    // NOTE [Priority-3 footgun]: returning the moment metadata().len() > 0 races
+    // the child's first commit - on CI under load the file can have just the
+    // header (a few dozen bytes) but no completed transaction, so the parent
+    // reopen sees `Io(Kind(InvalidData))`. Wait until the file has at least one
+    // ~4 KiB redb page so we are guaranteed the child has committed something
+    // recoverable before the parent SIGKILLs and reopens.
+    const READY_BYTES: u64 = 4096;
+    let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         if std::fs::metadata(path)
-            .map(|metadata| metadata.len() > 0)
+            .map(|metadata| metadata.len() >= READY_BYTES)
             .unwrap_or(false)
         {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(10));
     }
-    Err("child did not create redb file before timeout".into())
+    Err("child did not grow redb file past first commit before timeout".into())
 }
