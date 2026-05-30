@@ -249,6 +249,7 @@ impl Fixture {
                 upstreams,
                 principals: self.storage.clone(),
                 plugin_registry: self.storage.clone(),
+                upstream_rate_limits: self.storage.clone(),
                 audit: Some(self.storage.clone()),
             }),
             self.aead.clone(),
@@ -361,7 +362,14 @@ async fn advance_eleven_minutes() {
 }
 
 async fn wait_for_claim(claim_calls: &AtomicUsize) {
-    for _ in 0..1000 {
+    // NOTE [Priority-3 footgun]: under #[tokio::test(start_paused = true)] the only
+    // way to give the spawned refresher task progress is `yield_now`. 1000 yields
+    // was enough locally but flaked on ARC self-hosted CI where the runtime gets
+    // 2 worker threads competing with other parallel test binaries; the refresher
+    // sometimes had not yet reached `claim_refresh_lease` by the deadline. 100k
+    // yields cap real-time at ~tens-of-ms (each yield is sub-microsecond) so the
+    // poll still bounds aggressively while tolerating CI scheduling jitter.
+    for _ in 0..100_000 {
         if claim_calls.load(Ordering::SeqCst) > 0 {
             return;
         }
@@ -375,8 +383,13 @@ async fn wait_for_ciphertext_change(
     upstream_id: Uuid,
     before: &EncryptedOAuthTokens,
 ) -> UpstreamRecord {
+    // NOTE [Priority-3 footgun]: each iteration does a storage read so we can't
+    // just brute-force more yields like wait_for_claim does. Cap by wall-clock
+    // real time (std::time::Instant is NOT affected by tokio's start_paused) at
+    // 30 s so the helper still bounds aggressively under the CI scheduler.
     let mut last_record = None;
-    for _ in 0..1000 {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    while std::time::Instant::now() < deadline {
         let record = upstream_record(fixture, upstream_id).await;
         if record
             .oauth_credentials

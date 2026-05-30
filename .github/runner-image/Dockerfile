@@ -23,7 +23,12 @@ USER root
 # Deliberately NOT installed (keep workflows portable):
 #   rustup / rust toolchain     -> managed by dtolnay/rust-toolchain action
 #   gcc                         -> clang replaces it (CC=clang below)
-#   project-specific libs (libpq-dev, postgresql-client, node, python, ...)
+#   project-specific libs (libpq-dev, node, python, ...)
+#
+# `postgresql-client` (psql) is intentionally included: the postgres-conformance
+# workflow's E2E smoke step shells out to `psql` against the service container
+# for direct meta-table assertions. Without it the script silently falls back
+# to empty values (psql 127 -> `|| echo ""`) and step 4 misreports the failure.
 RUN set -eux; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -38,10 +43,12 @@ RUN set -eux; \
       make \
       xz-utils \
       zstd \
+      postgresql-client \
     ; \
     rm -rf /var/lib/apt/lists/*; \
     clang --version; \
-    mold --version
+    mold --version; \
+    psql --version
 
 # Make clang the default C/C++ compiler for cc-rs and similar Rust build scripts.
 ENV CC=clang \
