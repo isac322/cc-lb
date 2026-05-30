@@ -53,6 +53,7 @@ fn killed_writer_leaves_database_reopenable() -> Result<(), Box<dyn std::error::
 }
 
 fn child_writer(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let ready_path = ready_marker_path(path);
     let storage = Storage::open(path, [23; 32])?;
     for index in 0..10_000 {
         storage.append_audit(&AuditEntry {
@@ -69,6 +70,16 @@ fn child_writer(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
             agent_label: Some("crash-child".to_owned()),
             ..Default::default()
         })?;
+        // NOTE [Priority-3 footgun]: signal the parent ONLY after a handful of
+        // commits have actually fsync'd. File size alone (the previous gate)
+        // races under cargo-llvm-cov instrumentation - redb allocates the file
+        // before the first commit is durable, so the parent SIGKILL caught the
+        // child mid-write and reopen failed with Io(Kind(InvalidData)). Touching
+        // the sentinel only after >=100 appends guarantees the on-disk b-tree
+        // has at least one fully-committed revision the parent can recover.
+        if index == 100 {
+            std::fs::File::create(&ready_path)?;
+        }
         if index % 64 == 0 {
             thread::sleep(Duration::from_millis(1));
         }
@@ -76,23 +87,20 @@ fn child_writer(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+fn ready_marker_path(path: &Path) -> std::path::PathBuf {
+    let mut marker = path.as_os_str().to_owned();
+    marker.push(".ready");
+    marker.into()
+}
+
 fn wait_for_database_bytes(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    // NOTE [Priority-3 footgun]: returning the moment metadata().len() > 0 races
-    // the child's first commit - on CI under load the file can have just the
-    // header (a few dozen bytes) but no completed transaction, so the parent
-    // reopen sees `Io(Kind(InvalidData))`. Wait until the file has at least one
-    // ~4 KiB redb page so we are guaranteed the child has committed something
-    // recoverable before the parent SIGKILLs and reopens.
-    const READY_BYTES: u64 = 4096;
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let marker = ready_marker_path(path);
+    let deadline = Instant::now() + Duration::from_secs(10);
     while Instant::now() < deadline {
-        if std::fs::metadata(path)
-            .map(|metadata| metadata.len() >= READY_BYTES)
-            .unwrap_or(false)
-        {
+        if marker.exists() {
             return Ok(());
         }
         thread::sleep(Duration::from_millis(10));
     }
-    Err("child did not grow redb file past first commit before timeout".into())
+    Err("child did not publish the ready sentinel before timeout".into())
 }
