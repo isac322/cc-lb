@@ -39,6 +39,17 @@ async fn fetch_install_persist() -> Result<(), Box<dyn std::error::Error>> {
     let handle = loader.start_daemon();
     assert!(LiteLlmLoader::wait_for_first_snapshot(&catalog, Duration::from_secs(5)).await);
     assert!(catalog.lookup("claude-3-5-sonnet-20241022", None).is_some());
+    // NOTE [Priority-3 footgun]: wait_for_first_snapshot fires when the in-memory
+    // PriceCatalog is populated, but the redb write happens on a separate
+    // background hop. Under cargo-llvm-cov instrumentation the persist lags by
+    // up to a few hundred ms; poll the disk snapshot for up to 5 s real time
+    // before failing instead of asserting once and racing the writer.
+    let persist_deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while storage.get_price_snapshot()?.is_none()
+        && std::time::Instant::now() < persist_deadline
+    {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
     assert!(storage.get_price_snapshot()?.is_some());
     server.verify().await;
 
