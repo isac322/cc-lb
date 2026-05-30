@@ -230,9 +230,10 @@ if ! wait_port "$admin_port" cc-lb-admin; then
   fail "cc-lb-admin did not start"
 fi
 
-# The test config sets downstream_auth.mode = "none" with
-# upstream_credential_ref = "real_client" / principal_id = "api-key", both of
-# which must exist in the dynamic store before cc-lb can route the request.
+# The test config sets downstream_auth.mode = "none" with principal_id =
+# "api-key" and upstream_kind = "anthropic_key". The principal and the
+# routing-target upstream named "real_client" must exist in the dynamic
+# store before cc-lb can route the request.
 # Master b82e211 (feat: runtime-dynamic-mgmt) replaced the previous
 # [upstreams.*] / [principals.*] TOML blocks with admin-API registration, so
 # every test harness must seed them at startup.
