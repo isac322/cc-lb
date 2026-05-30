@@ -127,5 +127,16 @@ jobs:
         run: cargo test -p cc-lb-server --features postgres,redb --test db_unreachable_503 -- --ignored
         continue-on-error: true
 
+      # Fallback in case the ARC pod has not yet picked up the cc-lb-actions-runner
+      # image revision that bakes postgresql-client in. The smoke script hard-requires
+      # psql; this keeps the workflow robust against stale pod image caches.
+      - name: Ensure psql is available
+        run: |
+          if ! command -v psql >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends postgresql-client
+          fi
+          psql --version
+
       - name: E2E smoke - cc-lb binary against postgres backend
         run: ./tests/real-client/postgres-smoke.sh
