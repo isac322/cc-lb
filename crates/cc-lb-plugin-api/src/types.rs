@@ -8,6 +8,7 @@ use bytes::Bytes;
 use http::{HeaderMap, Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use url::Url;
+use uuid::Uuid;
 
 use crate::errors::{DialectError, SignerError};
 use crate::traits::{Signer, UpstreamDialect};
@@ -50,6 +51,89 @@ pub enum Upstream {
         /// Base URL for the custom Anthropic-compatible gateway.
         base_url: Url,
     },
+}
+
+/// Upstream record kind exposed to router plugins for candidate selection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamKind {
+    /// Anthropic API-key upstream.
+    AnthropicApiKey,
+    /// Anthropic OAuth upstream.
+    AnthropicOauth,
+    /// Custom Anthropic-compatible upstream.
+    Custom,
+}
+
+impl UpstreamKind {
+    /// Returns the stable snake_case wire name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::AnthropicApiKey => "anthropic_api_key",
+            Self::AnthropicOauth => "anthropic_oauth",
+            Self::Custom => "custom",
+        }
+    }
+}
+
+/// Upstream rate-limit metric kind observed from upstream responses.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RateLimitKind {
+    /// Request-count rate limit.
+    Requests,
+    /// Aggregate token rate limit.
+    Tokens,
+    /// Input-token rate limit.
+    InputTokens,
+    /// Output-token rate limit.
+    OutputTokens,
+}
+
+impl RateLimitKind {
+    /// Returns the stable snake_case wire name.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Requests => "requests",
+            Self::Tokens => "tokens",
+            Self::InputTokens => "input_tokens",
+            Self::OutputTokens => "output_tokens",
+        }
+    }
+}
+
+/// Latest upstream rate-limit observation exposed to router plugins.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct RateLimitObservation {
+    /// Observed rate-limit kind.
+    pub kind: RateLimitKind,
+    /// Provider-defined rate-limit window label.
+    pub window: String,
+    /// Optional maximum quota for the window.
+    pub limit: Option<u64>,
+    /// Optional remaining quota for the window.
+    pub remaining: Option<u64>,
+    /// Optional provider reset timestamp or duration string.
+    pub reset: Option<String>,
+}
+
+/// Available upstream candidate for routing decisions.
+///
+/// The router receives a list of available upstream candidates sorted by
+/// `upstream_id` in ascending order (Uuid byte order). This stable ordering
+/// allows plugins to implement deterministic routing algorithms.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct UpstreamCandidate {
+    /// Stable upstream identifier.
+    pub upstream_id: Uuid,
+    /// Operator-facing upstream name.
+    pub name: String,
+    /// Upstream kind used to select compatible routing strategies.
+    pub kind: UpstreamKind,
+    /// Latest rate-limit observations for this candidate.
+    pub observed_rate_limits: Vec<RateLimitObservation>,
+    /// Unix timestamp in seconds for the candidate observation snapshot.
+    pub observed_at_unix_secs: u64,
 }
 
 /// Credential strategy expected by a selected upstream.
@@ -248,6 +332,8 @@ pub async fn sign_request(
 
 /// Router output selecting both an upstream and its dialect boundary object.
 pub struct RouteDecision {
+    /// Stable upstream identifier selected by the router, when provided by the plugin.
+    pub upstream_id: Option<Uuid>,
     /// Upstream selected for the request.
     pub upstream: Upstream,
     /// Dialect plugin that shapes the request for the selected upstream.

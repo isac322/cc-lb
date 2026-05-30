@@ -1,15 +1,19 @@
 #![cfg(feature = "dto-roundtrip")]
 
+use cc_lb_storage_api::principal::{Limit, LimitKind};
+use cc_lb_storage_api::types::{Limit as TypesLimit, LimitKind as TypesLimitKind};
 use cc_lb_storage_api::{
     AnthropicApiKeyCredential, ApiKeyRecord, AuditEntry, BackendKind, BucketKind, ConfigDraftState,
-    HistoryEntry, HistorySummary, IssuedKey, KeyStatus, Limit, LimitKind, OAuthCredentials,
-    PrincipalKindLite, PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState,
-    RequestEvent, RequestEventUpstream, StorageError, StoredApiKeyRecord, StoredHistoryEntry,
-    UpstreamKind, UsageRollup, UsageRollupKey, UsageRollupResolution, UsageRollupRun,
+    HistoryEntry, HistorySummary, IssuedKey, KeyStatus, OAuthCredentials, PrincipalCreate,
+    PrincipalKind, PrincipalKindLite, PrincipalLimitIdentityKind, PrincipalLimitKind,
+    PrincipalLimitState, RequestEvent, RequestEventUpstream, StorageError, StoredApiKeyRecord,
+    StoredHistoryEntry, UpstreamKind, UsageRollup, UsageRollupKey, UsageRollupResolution,
+    UsageRollupRun,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use serde_json::json;
+use uuid::Uuid;
 
 #[test]
 fn retryable_classification_matches_storage_error_intent() {
@@ -96,8 +100,8 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         upstream: "anthropic_direct".to_owned(),
         model: Some("claude-3-5-sonnet".to_owned()),
         status: 200,
-        input_tokens: 120,
-        output_tokens: 45,
+        input_tokens: Some(120),
+        output_tokens: Some(45),
         duration_ms: 873,
         agent_label: Some("billing-agent".to_owned()),
         kind: Some("request_completed".to_owned()),
@@ -105,6 +109,7 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
             "nested": { "cache": true },
             "tags": ["t6", "dto"]
         })),
+        ..Default::default()
     });
 
     assert_json_roundtrip(RequestEvent {
@@ -230,9 +235,8 @@ backend = 'redb'"
         verify_hash: [1; 32],
         secret_salt: [2; 16],
         upstream_kind: UpstreamKind::AnthropicKey,
-        upstream_credential_ref: "anthropic-prod".to_owned(),
-        limit_overrides: vec![Limit {
-            kind: LimitKind::Requests,
+        limit_overrides: vec![TypesLimit {
+            kind: TypesLimitKind::Requests,
             window_secs: 60,
             cap_micros: 100,
         }],
@@ -245,6 +249,18 @@ backend = 'redb'"
     });
 
     assert_json_roundtrip(BucketKind::OutputTokens);
+
+    assert_json_roundtrip(PrincipalCreate {
+        name: "test-principal".to_owned(),
+        kind: PrincipalKind::Machine,
+        allowed_models: vec!["claude-3-5-sonnet".to_owned()],
+        allowed_upstreams: vec![Uuid::new_v4()],
+        default_limits: vec![Limit {
+            kind: LimitKind::Requests,
+            window_secs: 60,
+            cap_micros: 1000,
+        }],
+    });
 }
 
 fn assert_json_roundtrip<T>(value: T)

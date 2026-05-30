@@ -10,5 +10,6 @@ pub(crate) mod principals;
 pub(crate) mod quota;
 pub(crate) mod request_events;
 pub(crate) mod storage_impl;
+pub(crate) mod upstream_rate_limit;
 pub(crate) mod upstreams;
 pub(crate) mod usage_rollups;

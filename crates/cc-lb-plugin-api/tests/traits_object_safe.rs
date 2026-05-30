@@ -6,7 +6,7 @@ use cc_lb_plugin_api::{
     DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, PluginManifest,
     PluginRuntime, Principal, RequestContext, RetryDecision, RouteDecision, RouteError,
     RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError,
-    SignerFactory, SigningCapability, Upstream, UpstreamDialect,
+    SignerFactory, SigningCapability, Upstream, UpstreamCandidate, UpstreamDialect,
 };
 use http::{HeaderMap, Method, StatusCode};
 
@@ -22,8 +22,10 @@ impl RouterPlugin for DummyRouter {
         &self,
         _ctx: &RequestContext,
         _principal: &Principal,
+        _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
         Ok(RouteDecision {
+            upstream_id: None,
             upstream: Upstream::AnthropicDirect,
             dialect: Arc::new(DummyDialect),
         })

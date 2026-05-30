@@ -2,14 +2,32 @@ name: ci
 
 on:
   push:
+    branches:
+      - master
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
   pull_request:
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+      - 'LICENSE'
+      - '.gitignore'
+      - '.editorconfig'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CC_LB_ADMIN_SKIP_SPA: "1"
 
 jobs:
   fmt:
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -18,7 +36,7 @@ jobs:
       - run: cargo fmt --check
 
   clippy:
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -30,21 +48,11 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   nextest:
-    runs-on: ubuntu-latest
+    runs-on: oracle4-cc-lb
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
-      - name: Free up disk space on runner
-        uses: jlumbroso/free-disk-space@v1.3.1
-        with:
-          tool-cache: false
-          android: true
-          dotnet: true
-          haskell: true
-          large-packages: false
-          docker-images: true
-          swap-storage: false
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
       - name: Install WASI target for pinned toolchain

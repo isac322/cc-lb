@@ -371,10 +371,6 @@
           "type": "string",
           "default": ""
         },
-        "upstream_credential_ref": {
-          "type": "string",
-          "default": ""
-        },
         "upstream_kind": {
           "$ref": "#/$defs/NoneModeUpstreamKind",
           "default": "anthropic_key"

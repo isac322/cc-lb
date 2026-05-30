@@ -7,7 +7,9 @@ use redb::{ReadableDatabase, ReadableTable};
 use uuid::Uuid;
 
 use crate::error_map::{map_join_err, map_redb_err};
-use crate::{PRINCIPALS_V2, PRINCIPALS_V2_BY_NAME, RedbStorage, StorageError};
+use crate::{
+    PRINCIPAL_ALLOWED_UPSTREAMS_V1, PRINCIPALS_V2, PRINCIPALS_V2_BY_NAME, RedbStorage, StorageError,
+};
 
 #[async_trait]
 impl PrincipalStore for RedbStorage {
@@ -146,6 +148,7 @@ impl RedbStorage {
             name: input.name,
             kind: input.kind,
             allowed_models: input.allowed_models,
+            allowed_upstreams: input.allowed_upstreams,
             default_limits: input.default_limits,
             enabled: true,
             last_apply_error: None,
@@ -170,6 +173,7 @@ impl RedbStorage {
             let mut name_index = write_txn.open_table(PRINCIPALS_V2_BY_NAME)?;
             name_index.insert(record.name.as_str(), record.id.as_bytes().as_slice())?;
         }
+        write_principal_allowed_upstreams(&write_txn, record.id, &record.allowed_upstreams)?;
         write_txn.commit()?;
         Ok(record)
     }
@@ -177,9 +181,14 @@ impl RedbStorage {
     fn get_principal_by_id(&self, id: Uuid) -> Result<Option<PrincipalRecord>, StorageError> {
         let read_txn = self.db.begin_read()?;
         let principals = read_txn.open_table(PRINCIPALS_V2)?;
+        let allowed_upstreams = read_txn.open_table(PRINCIPAL_ALLOWED_UPSTREAMS_V1)?;
         principals
             .get(id.as_bytes().as_slice())?
-            .map(|stored| serde_json::from_slice(stored.value()).map_err(StorageError::from))
+            .map(|stored| {
+                let mut record: PrincipalRecord = serde_json::from_slice(stored.value())?;
+                populate_principal_allowed_upstreams(&allowed_upstreams, &mut record)?;
+                Ok(record)
+            })
             .transpose()
     }
 
@@ -191,9 +200,14 @@ impl RedbStorage {
         };
         let id = uuid_from_bytes(id.value())?;
         let principals = read_txn.open_table(PRINCIPALS_V2)?;
+        let allowed_upstreams = read_txn.open_table(PRINCIPAL_ALLOWED_UPSTREAMS_V1)?;
         principals
             .get(id.as_bytes().as_slice())?
-            .map(|stored| serde_json::from_slice(stored.value()).map_err(StorageError::from))
+            .map(|stored| {
+                let mut record: PrincipalRecord = serde_json::from_slice(stored.value())?;
+                populate_principal_allowed_upstreams(&allowed_upstreams, &mut record)?;
+                Ok(record)
+            })
             .transpose()
     }
 
@@ -208,10 +222,12 @@ impl RedbStorage {
         }
         let read_txn = self.db.begin_read()?;
         let principals = read_txn.open_table(PRINCIPALS_V2)?;
+        let allowed_upstreams = read_txn.open_table(PRINCIPAL_ALLOWED_UPSTREAMS_V1)?;
         let mut records = Vec::new();
         for row in principals.iter()? {
             let (_, value) = row?;
-            let record: PrincipalRecord = serde_json::from_slice(value.value())?;
+            let mut record: PrincipalRecord = serde_json::from_slice(value.value())?;
+            populate_principal_allowed_upstreams(&allowed_upstreams, &mut record)?;
             if include_deleted || record.deleted_at_unix_secs.is_none() {
                 records.push(record);
             }
@@ -227,14 +243,24 @@ impl RedbStorage {
         update: PrincipalUpdate,
         now_unix_secs: u64,
     ) -> Result<Option<PrincipalRecord>, StorageError> {
-        self.mutate_principal(id, expected_revision, |record| {
-            if let Some(name) = update.name {
+        let PrincipalUpdate {
+            name,
+            allowed_models,
+            allowed_upstreams,
+            default_limits,
+        } = update;
+        let allowed_upstreams_update = allowed_upstreams.clone();
+        self.mutate_principal(id, expected_revision, allowed_upstreams_update, |record| {
+            if let Some(name) = name {
                 record.name = name;
             }
-            if let Some(allowed_models) = update.allowed_models {
+            if let Some(allowed_models) = allowed_models {
                 record.allowed_models = allowed_models;
             }
-            if let Some(default_limits) = update.default_limits {
+            if let Some(allowed_upstreams) = allowed_upstreams {
+                record.allowed_upstreams = allowed_upstreams;
+            }
+            if let Some(default_limits) = default_limits {
                 record.default_limits = default_limits;
             }
             record.updated_at_unix_secs = now_unix_secs;
@@ -249,7 +275,7 @@ impl RedbStorage {
         enabled: bool,
         now_unix_secs: u64,
     ) -> Result<Option<PrincipalRecord>, StorageError> {
-        self.mutate_principal(id, expected_revision, |record| {
+        self.mutate_principal(id, expected_revision, None, |record| {
             record.enabled = enabled;
             record.updated_at_unix_secs = now_unix_secs;
             Ok(())
@@ -262,7 +288,7 @@ impl RedbStorage {
         expected_revision: u64,
         now_unix_secs: u64,
     ) -> Result<Option<PrincipalRecord>, StorageError> {
-        self.mutate_principal(id, expected_revision, |record| {
+        self.mutate_principal(id, expected_revision, None, |record| {
             record.deleted_at_unix_secs = Some(now_unix_secs);
             record.updated_at_unix_secs = now_unix_secs;
             Ok(())
@@ -292,6 +318,10 @@ impl RedbStorage {
             let mut name_index = write_txn.open_table(PRINCIPALS_V2_BY_NAME)?;
             name_index.remove(record.name.as_str())?;
         }
+        {
+            let mut allowed_upstreams = write_txn.open_table(PRINCIPAL_ALLOWED_UPSTREAMS_V1)?;
+            allowed_upstreams.remove(id.as_bytes().as_slice())?;
+        }
         write_txn.commit()?;
         Ok(true)
     }
@@ -303,7 +333,7 @@ impl RedbStorage {
         error: Option<String>,
         applied_at_unix_secs: u64,
     ) -> Result<Option<PrincipalRecord>, StorageError> {
-        self.mutate_principal(id, expected_revision, |record| {
+        self.mutate_principal(id, expected_revision, None, |record| {
             record.last_apply_error = error;
             record.last_apply_at_unix_secs = Some(applied_at_unix_secs);
             record.updated_at_unix_secs = applied_at_unix_secs;
@@ -315,6 +345,7 @@ impl RedbStorage {
         &self,
         id: Uuid,
         expected_revision: u64,
+        allowed_upstreams_update: Option<Vec<Uuid>>,
         mutate: F,
     ) -> Result<Option<PrincipalRecord>, StorageError>
     where
@@ -328,6 +359,10 @@ impl RedbStorage {
             };
             serde_json::from_slice::<PrincipalRecord>(stored.value())?
         };
+        {
+            let allowed_upstreams = write_txn.open_table(PRINCIPAL_ALLOWED_UPSTREAMS_V1)?;
+            populate_principal_allowed_upstreams(&allowed_upstreams, &mut record)?;
+        }
         if record.revision != expected_revision {
             return Err(StorageError::StalePrincipalRevision {
                 current: record.revision,
@@ -355,9 +390,33 @@ impl RedbStorage {
             name_index.remove(old_name.as_str())?;
             name_index.insert(record.name.as_str(), id.as_bytes().as_slice())?;
         }
+        if let Some(allowed_upstreams) = allowed_upstreams_update.as_ref() {
+            write_principal_allowed_upstreams(&write_txn, id, allowed_upstreams)?;
+        }
         write_txn.commit()?;
         Ok(Some(record))
     }
+}
+
+fn populate_principal_allowed_upstreams(
+    table: &impl ReadableTable<&'static [u8], &'static [u8]>,
+    record: &mut PrincipalRecord,
+) -> Result<(), StorageError> {
+    if let Some(stored) = table.get(record.id.as_bytes().as_slice())? {
+        record.allowed_upstreams = serde_json::from_slice(stored.value())?;
+    }
+    Ok(())
+}
+
+fn write_principal_allowed_upstreams(
+    write_txn: &redb::WriteTransaction,
+    principal_id: Uuid,
+    allowed_upstreams: &[Uuid],
+) -> Result<(), StorageError> {
+    let mut table = write_txn.open_table(PRINCIPAL_ALLOWED_UPSTREAMS_V1)?;
+    let payload = serde_json::to_vec(allowed_upstreams)?;
+    table.insert(principal_id.as_bytes().as_slice(), payload.as_slice())?;
+    Ok(())
 }
 
 fn uuid_from_bytes(bytes: &[u8]) -> Result<Uuid, StorageError> {

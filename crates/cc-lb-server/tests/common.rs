@@ -124,7 +124,6 @@ mode = "none"
 [downstream_auth.none_mode]
 principal_id = "api-key"
 upstream_kind = "anthropic_key"
-upstream_credential_ref = "fake_anthropic"
 
 [storage]
 kind = "redb"
@@ -182,6 +181,7 @@ async fn seed_storage(storage_path: &Path, upstream_addr: SocketAddr) {
             name: "api-key".to_owned(),
             kind: PrincipalKind::Machine,
             allowed_models: Vec::new(),
+            allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
         },
         1,

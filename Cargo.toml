@@ -16,7 +16,7 @@ members = [
     "tests/multi-replica",
     "tests/real-client",
 ]
-exclude = ["fuzz"]
+exclude = ["fuzz", "plugins/router/round-robin"]
 resolver = "2"
 
 [workspace.package]

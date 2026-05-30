@@ -53,7 +53,6 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
             verify_hash: params.verify_hash,
             secret_salt: params.secret_salt,
             upstream_kind: params.upstream_kind,
-            upstream_credential_ref: params.upstream_credential_ref,
             limit_overrides: params.limit_overrides,
             status: KeyStatus::Active,
             expires_at_unix_secs: params.expires_at_unix_secs,
@@ -118,7 +117,7 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
         let row = retry::with_retry(&self.retry_policy, || async {
             sqlx::query(
                 "SELECT k.principal_id, k.key_id, k.label, k.issued_at_unix_secs, k.revoked_at_unix_secs, \
-                 k.key_hash_b64, k.verify_hash, k.secret_salt, k.upstream_kind, k.upstream_credential_ref, \
+                 k.key_hash_b64, k.verify_hash, k.secret_salt, k.upstream_kind, \
                  k.limit_overrides, k.status, k.expires_at_unix_secs, k.last_4, k.description, \
                  k.principal_kind, k.index_hash \
                  FROM managed_api_keys_v1 k \
@@ -261,19 +260,19 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
 }
 
 const SELECT_BY_KEY_SQL: &str = "SELECT principal_id, key_id, label, issued_at_unix_secs, revoked_at_unix_secs, \
-     key_hash_b64, verify_hash, secret_salt, upstream_kind, upstream_credential_ref, \
+     key_hash_b64, verify_hash, secret_salt, upstream_kind, \
      limit_overrides, status, expires_at_unix_secs, last_4, description, principal_kind, \
      index_hash FROM managed_api_keys_v1 WHERE principal_id = $1 AND key_id = $2";
 const SELECT_BY_KEY_FOR_UPDATE_SQL: &str = "SELECT principal_id, key_id, label, issued_at_unix_secs, revoked_at_unix_secs, \
-     key_hash_b64, verify_hash, secret_salt, upstream_kind, upstream_credential_ref, \
+     key_hash_b64, verify_hash, secret_salt, upstream_kind, \
      limit_overrides, status, expires_at_unix_secs, last_4, description, principal_kind, \
      index_hash FROM managed_api_keys_v1 WHERE principal_id = $1 AND key_id = $2 FOR UPDATE";
 const SELECT_BY_PRINCIPAL_SQL: &str = "SELECT principal_id, key_id, label, issued_at_unix_secs, revoked_at_unix_secs, \
-     key_hash_b64, verify_hash, secret_salt, upstream_kind, upstream_credential_ref, \
+     key_hash_b64, verify_hash, secret_salt, upstream_kind, \
      limit_overrides, status, expires_at_unix_secs, last_4, description, principal_kind, \
      index_hash FROM managed_api_keys_v1 WHERE principal_id = $1 ORDER BY key_id ASC";
 const SELECT_ALL_SQL: &str = "SELECT principal_id, key_id, label, issued_at_unix_secs, revoked_at_unix_secs, \
-     key_hash_b64, verify_hash, secret_salt, upstream_kind, upstream_credential_ref, \
+     key_hash_b64, verify_hash, secret_salt, upstream_kind, \
      limit_overrides, status, expires_at_unix_secs, last_4, description, principal_kind, \
      index_hash FROM managed_api_keys_v1 ORDER BY principal_id ASC, key_id ASC";
 
@@ -286,10 +285,10 @@ async fn insert_record(
     sqlx::query(
         "INSERT INTO managed_api_keys_v1 \
          (principal_id, key_id, label, issued_at_unix_secs, revoked_at_unix_secs, key_hash_b64, \
-          verify_hash, secret_salt, upstream_kind, upstream_credential_ref, limit_overrides, \
+          verify_hash, secret_salt, upstream_kind, limit_overrides, \
           status, expires_at_unix_secs, last_4, description, principal_kind, index_hash, \
           created_at, updated_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NOW(), NOW())",
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, NOW(), NOW())",
     )
     .bind(principal_id)
     .bind(key_id)
@@ -303,7 +302,6 @@ async fn insert_record(
     .bind(record.verify_hash.as_slice())
     .bind(record.secret_salt.as_slice())
     .bind(upstream_kind_as_str(record.upstream_kind))
-    .bind(&record.upstream_credential_ref)
     .bind(serde_json::to_value(&record.limit_overrides).map_err(|error| sqlx::Error::Encode(Box::new(error)))?)
     .bind(key_status_as_str(record.status))
     .bind(option_u64_to_i64_sqlx(
@@ -329,9 +327,9 @@ async fn update_record(
     sqlx::query(
         "UPDATE managed_api_keys_v1 SET \
          label = $3, revoked_at_unix_secs = $4, key_hash_b64 = $5, verify_hash = $6, \
-         secret_salt = $7, upstream_kind = $8, upstream_credential_ref = $9, \
-         limit_overrides = $10, status = $11, expires_at_unix_secs = $12, last_4 = $13, \
-         description = $14, principal_kind = $15, index_hash = $16, updated_at = NOW() \
+         secret_salt = $7, upstream_kind = $8, limit_overrides = $9, status = $10, \
+         expires_at_unix_secs = $11, last_4 = $12, description = $13, principal_kind = $14, \
+         index_hash = $15, updated_at = NOW() \
          WHERE principal_id = $1 AND key_id = $2",
     )
     .bind(principal_id)
@@ -345,7 +343,6 @@ async fn update_record(
     .bind(record.verify_hash.as_slice())
     .bind(record.secret_salt.as_slice())
     .bind(upstream_kind_as_str(record.upstream_kind))
-    .bind(&record.upstream_credential_ref)
     .bind(
         serde_json::to_value(&record.limit_overrides)
             .map_err(|error| sqlx::Error::Encode(Box::new(error)))?,
@@ -398,7 +395,6 @@ fn row_to_record_inner(row: PgRow) -> Result<StoredApiKeyRecord, sqlx::Error> {
         verify_hash,
         secret_salt,
         upstream_kind: parse_upstream_kind(&row.try_get::<String, _>("upstream_kind")?)?,
-        upstream_credential_ref: row.try_get("upstream_credential_ref")?,
         limit_overrides,
         status: parse_key_status(&row.try_get::<String, _>("status")?)?,
         expires_at_unix_secs: expires_at_unix_secs
@@ -741,7 +737,6 @@ mod tests {
             label: format!("label-{seed}"),
             description: Some(format!("description-{seed}")),
             upstream_kind: UpstreamKind::AnthropicKey,
-            upstream_credential_ref: format!("upstream-{seed}"),
             expires_at_unix_secs: Some(1_800_000_000 + u64::from(seed)),
             limit_overrides: vec![Limit {
                 kind: LimitKind::Requests,

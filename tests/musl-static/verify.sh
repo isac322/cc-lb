@@ -1,8 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+target="${1:-}"
+if [[ -z "$target" ]]; then
+    case "$(uname -m)" in
+        x86_64)  target="x86_64-unknown-linux-musl" ;;
+        aarch64) target="aarch64-unknown-linux-musl" ;;
+        *)
+            printf 'ERROR: unsupported host arch %s; pass target triple as first argument.\n' "$(uname -m)" >&2
+            exit 1
+            ;;
+    esac
+fi
+
 root_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-binary_path="$root_dir/target/x86_64-unknown-linux-musl/release/cc-lb"
+binary_path="$root_dir/target/$target/release/cc-lb"
 evidence_dir="$root_dir/.omo/evidence"
 verify_log="$evidence_dir/task-50-musl-verify.log"
 file_ldd_log="$evidence_dir/task-50-file-ldd.txt"
@@ -53,10 +65,10 @@ capture_step() {
     return "$status"
 }
 
-if ! run_step "build" cargo build --release --target x86_64-unknown-linux-musl -p cc-lb-server; then
+if ! run_step "build" cargo build --release --target "$target" -p cc-lb-server; then
     build_failed=1
     if grep -q "can't find crate for \`core\`" "$verify_log" || grep -q "can't find crate for \`std\`" "$verify_log"; then
-        printf 'ERROR: x86_64-unknown-linux-musl std/core is missing locally. Use the musl container workflow or install the target in a local Rust toolchain.\n' | tee -a "$verify_log" >&2
+        printf 'ERROR: %s std/core is missing locally. Use the musl container workflow or install the target in a local Rust toolchain.\n' "$target" | tee -a "$verify_log" >&2
     fi
     if [[ -x "$binary_path" ]]; then
         build_reused_existing=1

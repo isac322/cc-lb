@@ -27,9 +27,14 @@ mod hop_by_hop;
 #[cfg(not(loom))]
 mod lifecycle;
 #[cfg(not(loom))]
+#[allow(dead_code)]
+mod rate_limit_headers;
+#[cfg(not(loom))]
 mod sse_error_frame;
 #[cfg(not(loom))]
 mod sse_relay;
+#[cfg(not(loom))]
+pub mod upstream_rate_limit_events;
 #[cfg(not(loom))]
 pub mod usage_pruner;
 pub use audit_payload::AuditPayload;
@@ -63,8 +68,8 @@ pub use dns_cache::{
 pub use drain::{DrainController, proxy_drain_middleware};
 #[cfg(not(loom))]
 pub use dynamic_view::{
-    ApplyStatus, DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusEntry,
-    UpstreamStatusSnapshot,
+    ApplyStatus, DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamRateLimitCache,
+    UpstreamStatusEntry, UpstreamStatusSnapshot,
 };
 #[cfg(not(loom))]
 pub use error_format::{anthropic_error_body, anthropic_error_response};
@@ -75,9 +80,14 @@ pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop}
 #[cfg(not(loom))]
 pub use lifecycle::{
     Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig, LimitSubject,
-    LimitSubjectProvider, ProxyError, ReplicaIdentity, UpstreamDispatch,
+    LimitSubjectProvider, ProxyError, ReplicaIdentity, RequestKind, UpstreamDispatch,
+    build_candidates, observe_rate_limits,
 };
 #[cfg(not(loom))]
 pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};
 #[cfg(not(loom))]
 pub use sse_relay::{RelayError, SseBatchConfig, SseRelay, StreamingUsage};
+#[cfg(not(loom))]
+pub use upstream_rate_limit_events::{
+    UpstreamRateLimitEnqueueError, UpstreamRateLimitSink, start_upstream_rate_limit_writer,
+};
