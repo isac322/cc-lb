@@ -929,9 +929,8 @@ impl Lifecycle {
         }
         let body = Bytes::from(body_buf);
         let body_collect_ms = duration_to_ms(body_collect_started.elapsed());
-        let first_body_chunk_ms = first_body_chunk_at.map(|t| {
-            duration_to_ms(t.saturating_duration_since(body_collect_started))
-        });
+        let first_body_chunk_ms = first_body_chunk_at
+            .map(|t| duration_to_ms(t.saturating_duration_since(body_collect_started)));
         tracing::info!(
             request_id = %event_ctx.request_id,
             status = status.as_u16(),
@@ -1246,15 +1245,13 @@ impl Lifecycle {
                                 accumulate_sse_usage(&raw, &mut usage);
                                 sse_event_count = sse_event_count.saturating_add(1);
                                 match sse_event_name(&raw) {
-                                    Some(b"message_start") => {
-                                        if message_start_at.is_none() {
-                                            message_start_at = Some(now);
-                                        }
+                                    Some(b"message_start") if message_start_at.is_none() => {
+                                        message_start_at = Some(now);
                                     }
-                                    Some(b"content_block_start") => {
-                                        if content_block_start_at.is_none() {
-                                            content_block_start_at = Some(now);
-                                        }
+                                    Some(b"content_block_start")
+                                        if content_block_start_at.is_none() =>
+                                    {
+                                        content_block_start_at = Some(now);
                                     }
                                     Some(b"content_block_delta") => {
                                         if first_content_delta_at.is_none() {
@@ -1404,7 +1401,7 @@ impl Lifecycle {
     }
 }
 
-fn sse_event_name<'a>(raw_event: &'a [u8]) -> Option<&'a [u8]> {
+fn sse_event_name(raw_event: &[u8]) -> Option<&[u8]> {
     raw_event
         .split(|b| *b == b'\n')
         .filter_map(|line| line.strip_prefix(b"event:"))

@@ -529,3 +529,9 @@ pub struct ApiKeyMutation {
     pub limit_overrides: Option<Vec<Limit>>,
     pub status: Option<KeyStatus>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PriceCatalogSnapshotRecord {
+    pub json_bytes: Vec<u8>,
+    pub fetched_at_ms: u64,
+}

@@ -6,6 +6,7 @@ pub(crate) mod meta;
 pub(crate) mod notifier;
 pub(crate) mod oauth_apikey;
 pub(crate) mod plugin_registry;
+pub(crate) mod price_catalog;
 pub(crate) mod principals;
 pub(crate) mod quota;
 pub(crate) mod request_events;

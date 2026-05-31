@@ -695,6 +695,7 @@ version = "0.1.0"
 dependencies = [
  "arc-swap",
  "bytes",
+ "cc-lb-storage-api",
  "cc-lb-storage-redb",
  "futures-lite",
  "http",

@@ -1007,18 +1007,25 @@ fn spawn_price_catalog_loader(
     storage: Arc<dyn Storage>,
     price_catalog: Arc<cc_lb_pricing::PriceCatalog>,
 ) {
-    let _storage = storage;
-    let _price_catalog_config = &config.api_keys.price_catalog;
-
-    // Built-in Claude pricing fallback while the litellm HTTP loader is stubbed (Task 35 followup).
+    // Fallback so cost works immediately and survives LiteLLM fetch failures.
     price_catalog.install_snapshot(claude_default_snapshot());
-    tracing::info!(
-        models = ?claude_default_snapshot()
-            .models
-            .keys()
-            .collect::<Vec<_>>(),
-        "installed builtin Claude pricing snapshot (litellm HTTP loader still stubbed)",
+
+    let cfg = &config.api_keys.price_catalog;
+    let storage_cache: Arc<dyn cc_lb_storage_api::PriceCatalogCache> = storage;
+    let loader = cc_lb_pricing::LiteLlmLoader::new(
+        price_catalog,
+        storage_cache,
+        cfg.url.clone(),
+        cfg.refresh_interval,
+        cfg.cache_path.clone(),
     );
+    tracing::info!(
+        url = %cfg.url,
+        refresh_interval_secs = cfg.refresh_interval.as_secs(),
+        cache_path = %cfg.cache_path.display(),
+        "starting LiteLLM price catalog loader",
+    );
+    let _handle = loader.start_daemon();
 }
 
 fn claude_default_snapshot() -> cc_lb_pricing::CatalogSnapshot {
@@ -1031,7 +1038,13 @@ fn claude_default_snapshot() -> cc_lb_pricing::CatalogSnapshot {
     #[allow(clippy::type_complexity)]
     let raw: &[(&str, u64, u64, u64, u64)] = &[
         // model name, input, output, cache_creation_5m, cache_read
-        ("claude-opus-4-5", 15_000_000, 75_000_000, 18_750_000, 1_500_000),
+        (
+            "claude-opus-4-5",
+            15_000_000,
+            75_000_000,
+            18_750_000,
+            1_500_000,
+        ),
         (
             "claude-opus-4-5-20251101",
             15_000_000,
@@ -1039,7 +1052,13 @@ fn claude_default_snapshot() -> cc_lb_pricing::CatalogSnapshot {
             18_750_000,
             1_500_000,
         ),
-        ("claude-sonnet-4-5", 3_000_000, 15_000_000, 3_750_000, 300_000),
+        (
+            "claude-sonnet-4-5",
+            3_000_000,
+            15_000_000,
+            3_750_000,
+            300_000,
+        ),
         (
             "claude-sonnet-4-5-20250929",
             3_000_000,
@@ -1069,7 +1088,10 @@ fn claude_default_snapshot() -> cc_lb_pricing::CatalogSnapshot {
                 output_per_million_usd: UsdPerMillion::from_micros_usd(*output),
             },
         );
-        cache_creation.insert((*name).to_owned(), UsdPerMillion::from_micros_usd(*creation));
+        cache_creation.insert(
+            (*name).to_owned(),
+            UsdPerMillion::from_micros_usd(*creation),
+        );
         cache_read.insert((*name).to_owned(), UsdPerMillion::from_micros_usd(*read));
     }
 
