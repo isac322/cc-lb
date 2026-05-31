@@ -26,8 +26,8 @@ use crate::plugin_wrap::{ExtismDialectPlugin, ExtismRouterPlugin, ExtismSignerFa
 use crate::sse_batch::ExtismObservabilityHook;
 
 const DEFAULT_MEMORY_MAX_PAGES: u32 = 32;
-const DEFAULT_FUEL_MAX: u64 = 10_000_000;
-const DEFAULT_MAX_CALL_DURATION_MS: u64 = 1_000;
+const DEFAULT_FUEL_MAX: u64 = 1_000_000_000;
+const DEFAULT_MAX_CALL_DURATION_MS: u64 = 5_000;
 const DEFAULT_STORAGE_QUOTA_BYTES: usize = 1024 * 1024;
 const DEFAULT_OBSERVE_BATCH_COUNT: usize = 32;
 const DEFAULT_OBSERVE_FLUSH_MS: u64 = 100;
@@ -301,6 +301,28 @@ impl ExtismRuntime {
         manifest: &PluginManifest,
     ) -> Result<(Arc<dyn ObservabilityHook>, StagedSlot), RuntimeError> {
         self.instantiate_observability_for(GLOBAL_PRINCIPAL, plugin_name, manifest)
+    }
+
+    pub fn instantiate_dialect_for_upstream(
+        &self,
+        upstream_id: &str,
+        plugin_name: &str,
+        manifest: &PluginManifest,
+    ) -> Result<(Arc<dyn UpstreamDialect>, StagedSlot), RuntimeError> {
+        let scope = format!("upstream:{upstream_id}");
+        let (slot, staged) = self.stage_slot(&scope, plugin_name, manifest, "shape")?;
+        Ok((Arc::new(ExtismDialectPlugin::new(slot)), staged))
+    }
+
+    pub fn instantiate_dialect_for_principal(
+        &self,
+        principal_id: &str,
+        plugin_name: &str,
+        manifest: &PluginManifest,
+    ) -> Result<(Arc<dyn UpstreamDialect>, StagedSlot), RuntimeError> {
+        let scope = format!("principal:{principal_id}");
+        let (slot, staged) = self.stage_slot(&scope, plugin_name, manifest, "shape")?;
+        Ok((Arc::new(ExtismDialectPlugin::new(slot)), staged))
     }
 
     pub fn commit_staged(&self, staged: Vec<StagedSlot>) -> Result<(), RuntimeError> {

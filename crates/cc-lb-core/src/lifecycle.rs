@@ -605,10 +605,11 @@ impl Lifecycle {
                 return Ok(response);
             }
         };
+        let dialect = cached.resolved_dialect(&route.dialect).clone();
         let route = cc_lb_plugin_api::RouteDecision {
             upstream_id: Some(resolved_upstream_id),
             upstream: route_upstream,
-            dialect: route.dialect,
+            dialect,
         };
         let metric_context = ApiKeyMetricContext::new(&success, &route.upstream, &ctx.body_bytes);
 
@@ -1061,6 +1062,7 @@ impl Lifecycle {
     ) -> Result<Response<Body>, Box<Response<Body>>> {
         let shaped = shape_request(route.dialect.as_ref(), ctx, &route.upstream, principal)
             .map_err(|source| {
+                tracing::error!(%source, "shape_request failed");
                 observe_error(hooks, "shape_error", &source.to_string(), "dialect");
                 Box::new(anthropic_error_response(
                     StatusCode::BAD_GATEWAY,
@@ -1071,6 +1073,7 @@ impl Lifecycle {
         let signed = sign_request(signer.as_ref(), shaped)
             .await
             .map_err(|source| {
+                tracing::error!(%source, "sign_request failed");
                 observe_error(hooks, "signing_error", &source.to_string(), "signer");
                 Box::new(anthropic_error_response(
                     StatusCode::BAD_GATEWAY,
@@ -1078,6 +1081,19 @@ impl Lifecycle {
                     "failed to sign upstream request",
                 ))
             })?;
+        let signed_header_names: Vec<String> = signed
+            .headers()
+            .keys()
+            .map(|k| k.as_str().to_owned())
+            .collect();
+        tracing::info!(
+            url = %signed.url(),
+            method = %signed.method(),
+            header_count = signed.headers().len(),
+            headers = ?signed_header_names,
+            body_bytes = signed.body().len(),
+            "about to dispatch signed request"
+        );
         dispatcher.dispatch(signed).await.map_err(|source| {
             observe_error(
                 hooks,

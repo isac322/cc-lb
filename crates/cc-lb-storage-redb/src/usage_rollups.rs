@@ -89,7 +89,11 @@ impl Storage {
 
     pub fn query_usage_rollups(&self) -> Result<Vec<UsageRollup>, StorageError> {
         let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(USAGE_ROLLUPS_V1)?;
+        let table = match read_txn.open_table(USAGE_ROLLUPS_V1) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
         let mut rollups = Vec::new();
         for row in table.iter()? {
             let (_, value) = row?;
@@ -105,7 +109,11 @@ impl Storage {
         window_end_unix_secs: u64,
     ) -> Result<Vec<UsageRollup>, StorageError> {
         let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(USAGE_ROLLUPS_V1)?;
+        let table = match read_txn.open_table(USAGE_ROLLUPS_V1) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
         let mut rollups = Vec::new();
         for row in table.iter()? {
             let (_, value) = row?;

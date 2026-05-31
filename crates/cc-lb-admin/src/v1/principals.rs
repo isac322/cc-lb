@@ -289,7 +289,11 @@ async fn delete_principal(
     };
 
     let mut references = Vec::new();
-    for slot in [PluginSlot::Router, PluginSlot::ObservabilityHook] {
+    for slot in [
+        PluginSlot::Router,
+        PluginSlot::ObservabilityHook,
+        PluginSlot::Shape,
+    ] {
         match storage.list_chain_for_principal(id, slot).await {
             Ok(entries) => references.extend(entries.into_iter().map(|entry| ReferenceResponse {
                 kind: "plugin_chain",

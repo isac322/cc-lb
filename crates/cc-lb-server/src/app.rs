@@ -429,6 +429,7 @@ pub async fn seed_app_testing_storage(
                 kind: UpstreamKind::Custom,
                 base_url: upstream_base_url,
                 api_key_ciphertext: None,
+                shape_plugin: None,
             },
         )
         .await

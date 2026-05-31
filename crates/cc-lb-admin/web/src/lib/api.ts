@@ -308,7 +308,7 @@ export interface RecentEventsPayload {
 }
 
 export function useDashboardConnection() {
-  const [state, setState] = useState<ConnectionState>('disconnected');
+  const [state, setState] = useState<ConnectionState>('reconnecting');
 
   useEffect(() => {
     let closeStream: (() => void) | null = null;

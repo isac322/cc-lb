@@ -332,6 +332,7 @@ fn row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<UpstreamRecord> {
             row.try_get("deleted_at").map_err(map_sqlx_error)?,
             "deleted_at",
         )?,
+        shape_plugin: None,
         revision: i64_to_u64(
             row.try_get("revision").map_err(map_sqlx_error)?,
             "upstream revision",

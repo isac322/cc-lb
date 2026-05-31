@@ -91,6 +91,7 @@ impl Fixture {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: None,
                 api_key_ciphertext: None,
+                shape_plugin: None,
             })
             .await
             .expect("upstream created");
@@ -119,6 +120,7 @@ impl Fixture {
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: None,
                 api_key_ciphertext: Some(b"test-key-ciphertext".to_vec()),
+                shape_plugin: None,
             })
             .await
             .expect("upstream created");
@@ -133,6 +135,7 @@ impl Fixture {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: None,
                 api_key_ciphertext: None,
+                shape_plugin: None,
             })
             .await
             .expect("upstream created");
