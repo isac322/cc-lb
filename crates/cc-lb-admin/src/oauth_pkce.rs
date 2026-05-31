@@ -232,7 +232,7 @@ impl OAuthHttpClient for HyperOAuthHttpClient {
             }
         })?;
         let http_request = Request::post(request.endpoint.as_str())
-            .header(CONTENT_TYPE, "application/json")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
             .header(CONTENT_LENGTH, content_length)
             .body(Full::new(Bytes::from(body)))
             .map_err(|source| OAuthHttpError::RequestBuild {
@@ -338,16 +338,14 @@ fn form_body(
     state_token: &str,
     redirect_uri: &Url,
 ) -> SecretString {
-    let body = serde_json::json!({
-        "grant_type": "authorization_code",
-        "code": auth_code,
-        "state": state_token,
-        "code_verifier": code_verifier,
-        "redirect_uri": redirect_uri.as_str(),
-        "client_id": client_id,
-    })
-    .to_string();
-    SecretString::new(body.into_boxed_str())
+    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+    serializer.append_pair("grant_type", "authorization_code");
+    serializer.append_pair("code", auth_code);
+    serializer.append_pair("state", state_token);
+    serializer.append_pair("code_verifier", code_verifier);
+    serializer.append_pair("redirect_uri", redirect_uri.as_str());
+    serializer.append_pair("client_id", client_id);
+    SecretString::new(serializer.finish().into_boxed_str())
 }
 
 fn now_epoch_secs() -> u64 {
