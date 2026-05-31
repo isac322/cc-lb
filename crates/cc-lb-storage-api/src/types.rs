@@ -90,6 +90,48 @@ pub struct RequestEvent {
     /// body.collect() time after headers (response body download).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_body_ms: Option<u64>,
+    /// Non-stream: time from headers to first body byte. Stream: time from relay start to first chunk.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_body_chunk_ms: Option<u64>,
+    /// Non-stream: number of body chunks; stream: number of stream frames received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_chunk_count: Option<u64>,
+    /// Response body byte count (non-stream collect or stream total bytes relayed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_bytes: Option<u64>,
+    /// SSE only: time from relay start to `event: message_start`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_message_start_ms: Option<u64>,
+    /// SSE only: time from relay start to first `event: content_block_start`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_content_block_start_ms: Option<u64>,
+    /// SSE only: time from relay start to first `event: content_block_delta` (= TTFT).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_first_content_delta_ms: Option<u64>,
+    /// SSE only: time from relay start to last `event: content_block_delta`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_last_content_delta_ms: Option<u64>,
+    /// SSE only: time from relay start to `event: message_stop`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_message_stop_ms: Option<u64>,
+    /// SSE only: time from relay start to last byte received.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_last_chunk_ms: Option<u64>,
+    /// SSE only: total relay duration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stream_total_ms: Option<u64>,
+    /// SSE only: total parsed SSE events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sse_event_count: Option<u64>,
+    /// SSE only: count of `content_block_delta` events (≈ token chunks).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_delta_count: Option<u64>,
+    /// SSE only: count of `ping` keepalive events.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ping_count: Option<u64>,
+    /// SSE only: (last_content_delta − first_content_delta) / (content_delta_count − 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inter_token_avg_ms: Option<u64>,
     pub error_code: Option<String>,
 }
 
@@ -486,4 +528,10 @@ pub struct ApiKeyMutation {
     pub expires_at_unix_secs: Option<Option<u64>>,
     pub limit_overrides: Option<Vec<Limit>>,
     pub status: Option<KeyStatus>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PriceCatalogSnapshotRecord {
+    pub json_bytes: Vec<u8>,
+    pub fetched_at_ms: u64,
 }

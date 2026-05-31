@@ -17,13 +17,15 @@ use tokio::task::JoinHandle;
 use tokio::time::{self, Instant, MissedTickBehavior};
 use tracing::{error, info, warn};
 
+use cc_lb_storage_api::{PriceCatalogCache, PriceCatalogSnapshotRecord};
+
 use crate::{CatalogSnapshot, CatalogStatus, PriceCatalog, Pricing, UsdPerMillion};
 
 type HttpClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>;
 
 pub struct LiteLlmLoader {
     catalog: Arc<PriceCatalog>,
-    storage: Arc<cc_lb_storage_redb::Storage>,
+    storage: Arc<dyn PriceCatalogCache>,
     url: String,
     refresh_interval: Duration,
     cache_path: PathBuf,
@@ -69,7 +71,7 @@ fn build_http_client() -> HttpClient {
 impl LiteLlmLoader {
     pub fn new(
         catalog: Arc<PriceCatalog>,
-        storage: Arc<cc_lb_storage_redb::Storage>,
+        storage: Arc<dyn PriceCatalogCache>,
         url: String,
         refresh_interval: Duration,
         cache_path: PathBuf,
@@ -186,22 +188,37 @@ impl LiteLlmLoader {
                 );
             }
             Ok(None) => {
-                self.catalog
-                    .install_snapshot(CatalogSnapshot::empty_cost_disabled());
-                error!(
-                    last_error = ?last_error,
-                    "litellm price catalog unavailable; cost pricing disabled"
-                );
+                if matches!(self.catalog.status(), CatalogStatus::Ok) {
+                    warn!(
+                        last_error = ?last_error,
+                        "litellm price catalog unavailable; keeping pre-installed fallback snapshot"
+                    );
+                } else {
+                    self.catalog
+                        .install_snapshot(CatalogSnapshot::empty_cost_disabled());
+                    error!(
+                        last_error = ?last_error,
+                        "litellm price catalog unavailable; cost pricing disabled"
+                    );
+                }
             }
             Err(error) => {
                 self.record_failure(&error);
-                self.catalog
-                    .install_snapshot(CatalogSnapshot::empty_cost_disabled());
-                error!(
-                    error = %error,
-                    last_error = ?last_error,
-                    "litellm price catalog cache fallback failed; cost pricing disabled"
-                );
+                if matches!(self.catalog.status(), CatalogStatus::Ok) {
+                    warn!(
+                        error = %error,
+                        last_error = ?last_error,
+                        "litellm price catalog cache fallback failed; keeping pre-installed fallback snapshot"
+                    );
+                } else {
+                    self.catalog
+                        .install_snapshot(CatalogSnapshot::empty_cost_disabled());
+                    error!(
+                        error = %error,
+                        last_error = ?last_error,
+                        "litellm price catalog cache fallback failed; cost pricing disabled"
+                    );
+                }
             }
         }
     }
@@ -402,22 +419,22 @@ fn record_missing_catalog_field(model: &str, field: &'static str) {
 }
 
 async fn put_storage_snapshot(
-    storage: Arc<cc_lb_storage_redb::Storage>,
+    storage: Arc<dyn PriceCatalogCache>,
     bytes: Vec<u8>,
     fetched_at_ms: u64,
 ) -> Result<(), LoaderError> {
-    tokio::task::spawn_blocking(move || storage.put_price_snapshot(&bytes, fetched_at_ms))
+    storage
+        .put_price_snapshot(&bytes, fetched_at_ms)
         .await
-        .map_err(|error| LoaderError::Storage(error.to_string()))?
         .map_err(|error| LoaderError::Storage(error.to_string()))
 }
 
 async fn get_storage_snapshot(
-    storage: Arc<cc_lb_storage_redb::Storage>,
-) -> Result<Option<cc_lb_storage_redb::PriceSnapshot>, LoaderError> {
-    tokio::task::spawn_blocking(move || storage.get_price_snapshot())
+    storage: Arc<dyn PriceCatalogCache>,
+) -> Result<Option<PriceCatalogSnapshotRecord>, LoaderError> {
+    storage
+        .get_price_snapshot()
         .await
-        .map_err(|error| LoaderError::Storage(error.to_string()))?
         .map_err(|error| LoaderError::Storage(error.to_string()))
 }
 

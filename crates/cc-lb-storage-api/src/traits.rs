@@ -278,6 +278,15 @@ pub trait MetaStore: Send + Sync {
 }
 
 #[async_trait]
+pub trait PriceCatalogCache: Send + Sync {
+    async fn put_price_snapshot(&self, json_bytes: &[u8], fetched_at_ms: u64) -> StorageResult<()>;
+
+    async fn get_price_snapshot(
+        &self,
+    ) -> StorageResult<Option<crate::types::PriceCatalogSnapshotRecord>>;
+}
+
+#[async_trait]
 pub trait Storage:
     AuditStore
     + crate::plugin_registry::PluginRegistryStore
@@ -290,6 +299,7 @@ pub trait Storage:
     + UsageRollupStore
     + OAuthCredentialStore
     + ApiKeyStore
+    + PriceCatalogCache
     + ConfigStore
     + MetaStore
     + RuntimeChangeNotifier
@@ -311,6 +321,7 @@ impl<T> Storage for T where
         + UsageRollupStore
         + OAuthCredentialStore
         + ApiKeyStore
+        + PriceCatalogCache
         + ConfigStore
         + MetaStore
         + RuntimeChangeNotifier
