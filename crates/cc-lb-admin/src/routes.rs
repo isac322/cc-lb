@@ -25,6 +25,8 @@ pub fn build_router(state: AdminState) -> Router {
     let protected_routes = Router::new()
         .route("/admin/principals/{id}/usage", get(principal_usage))
         .route("/admin/principals/{id}/limits", get(principal_limits))
+        .route("/admin/v1/principals/{id}/usage", get(principal_usage))
+        .route("/admin/v1/principals/{id}/limits", get(principal_limits))
         .route("/admin/principals/{id}/keys/{key_id}", get(get_api_key))
         .route(
             "/admin/principals/{id}/keys/{key_id}/revoke",
@@ -57,6 +59,10 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/admin/config/history", get(get_config_history))
         .route("/admin/config/diff", get(get_config_diff))
         .route("/admin/config/reload", post(reload_config))
+        .route("/admin/plugins", get(crate::status::handler))
+        .merge(crate::dashboard_routes::router())
+        .merge(crate::events_routes::router())
+        .merge(crate::credentials::router())
         .merge(crate::v1::plugins::router())
         .merge(crate::v1::plugins_wasm::router())
         .merge(crate::v1::oauth::router())
@@ -153,11 +159,19 @@ async fn serve_index() -> impl IntoResponse {
 }
 
 async fn serve_asset(Path(file): Path<String>) -> impl IntoResponse {
-    match Assets::get(&file) {
-        Some(content) => {
-            let mime = mime_guess::from_path(&file).first_or_octet_stream();
-            ([(header::CONTENT_TYPE, mime.as_ref())], content.data).into_response()
-        }
+    if let Some(content) = Assets::get(&file) {
+        let mime = mime_guess::from_path(&file).first_or_octet_stream();
+        return ([(header::CONTENT_TYPE, mime.as_ref())], content.data).into_response();
+    }
+    if file.starts_with("admin/") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match Assets::get("index.html") {
+        Some(content) => (
+            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
+            content.data,
+        )
+            .into_response(),
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }

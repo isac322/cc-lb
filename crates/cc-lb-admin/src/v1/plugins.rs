@@ -492,7 +492,11 @@ async fn registry_references(
         }
         offset += principals.len();
         for principal in principals {
-            for slot in [PluginSlot::Router, PluginSlot::ObservabilityHook] {
+            for slot in [
+                PluginSlot::Router,
+                PluginSlot::ObservabilityHook,
+                PluginSlot::Shape,
+            ] {
                 let entries = storage.list_chain_for_principal(principal.id, slot).await?;
                 references.extend(entries.into_iter().filter_map(|entry| {
                     (entry.wasm_registry_id == registry_id).then(|| ReferenceResponse {
@@ -512,7 +516,11 @@ async fn infer_reorder_slot(
     principal_id: Uuid,
     entries: &[ReorderEntry],
 ) -> Result<PluginSlot, axum::response::Response> {
-    for slot in [PluginSlot::Router, PluginSlot::ObservabilityHook] {
+    for slot in [
+        PluginSlot::Router,
+        PluginSlot::ObservabilityHook,
+        PluginSlot::Shape,
+    ] {
         let chain = storage
             .list_chain_for_principal(principal_id, slot)
             .await
@@ -538,7 +546,11 @@ async fn find_chain_entry(storage: &dyn Storage, id: Uuid) -> Option<PluginChain
         }
         offset += principals.len();
         for principal in principals {
-            for slot in [PluginSlot::Router, PluginSlot::ObservabilityHook] {
+            for slot in [
+                PluginSlot::Router,
+                PluginSlot::ObservabilityHook,
+                PluginSlot::Shape,
+            ] {
                 let entries = storage
                     .list_chain_for_principal(principal.id, slot)
                     .await
@@ -649,6 +661,7 @@ fn parse_slot(value: &str) -> Option<PluginSlot> {
     match value {
         "Router" | "router" => Some(PluginSlot::Router),
         "ObservabilityHook" | "observability_hook" => Some(PluginSlot::ObservabilityHook),
+        "Shape" | "shape" => Some(PluginSlot::Shape),
         _ => None,
     }
 }

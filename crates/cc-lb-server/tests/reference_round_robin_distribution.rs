@@ -519,6 +519,7 @@ async fn seed_oauth_upstreams(
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: Some(Url::parse(&format!("http://{name}.invalid"))?),
                 api_key_ciphertext: None,
+                shape_plugin: None,
             },
         )
         .await?;

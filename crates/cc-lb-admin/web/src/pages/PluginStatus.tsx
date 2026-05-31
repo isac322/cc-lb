@@ -17,7 +17,7 @@ export default function PluginStatus() {
     return <ErrorState message={error.message} onRetry={refresh} />;
   }
 
-  const slots = ['authn', 'router', 'observability', 'dialect', 'signer'];
+  const slots = ['authn', 'router', 'observability', 'dialect', 'signer', 'shape'];
   const groupedPlugins = slots.reduce(
     (acc, slot) => {
       acc[slot] = plugins.filter((p) => p.slot === slot);

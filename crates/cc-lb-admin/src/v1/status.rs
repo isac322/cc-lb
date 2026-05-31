@@ -120,6 +120,8 @@ struct ExportPrincipalChains {
     router: Vec<ExportChainEntry>,
     #[serde(rename = "ObservabilityHook")]
     observability_hook: Vec<ExportChainEntry>,
+    #[serde(rename = "Shape", skip_serializing_if = "Vec::is_empty", default)]
+    shape: Vec<ExportChainEntry>,
 }
 
 #[derive(Debug, Serialize)]
@@ -294,7 +296,10 @@ async fn plugin_chain_summary(
         let hooks = storage
             .list_chain_for_principal(principal.id, PluginSlot::ObservabilityHook)
             .await?;
-        let count = router.len() + hooks.len();
+        let shape = storage
+            .list_chain_for_principal(principal.id, PluginSlot::Shape)
+            .await?;
+        let count = router.len() + hooks.len() + shape.len();
         if count > 0 {
             summary.principal_count_with_chain += 1;
             summary.total_entries += count;
@@ -316,7 +321,10 @@ async fn export_chains(
         let observability_hook = storage
             .list_chain_for_principal(principal.id, PluginSlot::ObservabilityHook)
             .await?;
-        if router.is_empty() && observability_hook.is_empty() {
+        let shape = storage
+            .list_chain_for_principal(principal.id, PluginSlot::Shape)
+            .await?;
+        if router.is_empty() && observability_hook.is_empty() && shape.is_empty() {
             continue;
         }
         chains.insert(
@@ -324,6 +332,7 @@ async fn export_chains(
             ExportPrincipalChains {
                 router: export_chain_entries(router, registry_by_id),
                 observability_hook: export_chain_entries(observability_hook, registry_by_id),
+                shape: export_chain_entries(shape, registry_by_id),
             },
         );
     }

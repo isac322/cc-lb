@@ -38,6 +38,7 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
             kind: UpstreamKind::Custom,
             base_url: Some(Url::parse(&format!("http://{}", upstream_server.addr))?),
             api_key_ciphertext: None,
+            shape_plugin: None,
         },
     )
     .await?;

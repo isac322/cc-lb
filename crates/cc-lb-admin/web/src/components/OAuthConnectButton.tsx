@@ -1,11 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
-import {
-  useGet,
-  useOAuthComplete,
-  useOAuthStart,
-} from '../lib/hooks/useUpstreams';
+import { useState } from 'react';
+import { useOAuthComplete, useOAuthStart } from '../lib/hooks/useUpstreams';
 import { Button } from './primitives/Button';
-import { Modal } from './primitives/Modal';
 
 interface OAuthConnectButtonProps {
   upstreamId: string;
@@ -15,83 +10,48 @@ interface OAuthConnectButtonProps {
 
 export function OAuthConnectButton({
   upstreamId,
-  initialRevision,
   onSuccess,
 }: OAuthConnectButtonProps) {
-  const [isPolling, setIsPolling] = useState(false);
-  const [showFallback, setShowFallback] = useState(false);
   const [stateToken, setStateToken] = useState<string | null>(null);
   const [manualCode, setManualCode] = useState('');
   const [error, setError] = useState<string | null>(null);
+  const [isStarting, setIsStarting] = useState(false);
   const [isCompleting, setIsCompleting] = useState(false);
 
   const startOAuth = useOAuthStart();
-  const getUpstream = useGet();
   const completeOAuth = useOAuthComplete();
-  const abortControllerRef = useRef<AbortController | null>(null);
 
   const handleStart = async () => {
+    setError(null);
+    setIsStarting(true);
+    const popup = window.open('about:blank', '_blank');
     try {
-      setError(null);
       const res = await startOAuth(upstreamId);
       setStateToken(res.state_token);
-      window.open(res.authorize_url, '_blank');
-      setIsPolling(true);
+      if (popup && !popup.closed) {
+        popup.location.href = res.authorize_url;
+      } else {
+        window.location.assign(res.authorize_url);
+      }
     } catch (err) {
+      if (popup && !popup.closed) popup.close();
       setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setIsStarting(false);
     }
   };
 
-  useEffect(() => {
-    if (!isPolling) return;
-
-    const controller = new AbortController();
-    abortControllerRef.current = controller;
-    const startTime = Date.now();
-    const timeout = 5 * 60 * 1000; // 5 minutes
-
-    const poll = async () => {
-      if (controller.signal.aborted) return;
-
-      if (Date.now() - startTime > timeout) {
-        setIsPolling(false);
-        setShowFallback(true);
-        return;
-      }
-
-      try {
-        const upstream = await getUpstream(upstreamId);
-        // We check if revision has increased, which indicates the OAuth flow completed
-        // and updated the upstream record.
-        if (upstream.revision > initialRevision) {
-          setIsPolling(false);
-          onSuccess();
-          return;
-        }
-      } catch (err) {
-        console.error('Polling error:', err);
-      }
-
-      setTimeout(poll, 2000);
-    };
-
-    poll();
-
-    return () => {
-      controller.abort();
-    };
-  }, [isPolling, upstreamId, initialRevision, getUpstream, onSuccess]);
-
-  const handleManualComplete = async () => {
+  const handleComplete = async () => {
     if (!stateToken || !manualCode) return;
     setIsCompleting(true);
     setError(null);
     try {
+      // Anthropic shows the code as `<code>#<state>`; keep only the code part.
+      const code = manualCode.trim().split('#')[0].split('&')[0].trim();
       await completeOAuth(upstreamId, {
         state_token: stateToken,
-        code: manualCode,
+        code,
       });
-      setShowFallback(false);
       onSuccess();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -100,64 +60,70 @@ export function OAuthConnectButton({
     }
   };
 
-  return (
-    <>
-      <Button variant="primary" onClick={handleStart} disabled={isPolling}>
-        {isPolling ? 'Waiting for authorization...' : 'Connect Claude OAuth'}
-      </Button>
+  if (!stateToken) {
+    return (
+      <div className="flex flex-col items-center gap-3 w-full">
+        <Button
+          variant="primary"
+          onClick={handleStart}
+          disabled={isStarting}
+          className="w-full"
+        >
+          {isStarting ? 'Opening Claude...' : 'Connect Claude OAuth'}
+        </Button>
+        {error && (
+          <div className="text-red-400 text-sm text-center w-full">{error}</div>
+        )}
+      </div>
+    );
+  }
 
-      {isPolling && (
+  return (
+    <div className="flex flex-col gap-3 w-full">
+      <ol className="text-sm text-graphite-300 space-y-1 list-decimal list-inside">
+        <li>Authorize cc-lb in the new tab that just opened.</li>
+        <li>
+          On the resulting page, copy the authorization{' '}
+          <span className="font-mono text-graphite-200">code</span>.
+        </li>
+        <li>Paste it below and click Complete.</li>
+      </ol>
+      <div className="space-y-2">
+        <label className="text-sm font-medium text-graphite-200">
+          Authorization Code
+        </label>
+        <input
+          type="text"
+          autoComplete="off"
+          spellCheck={false}
+          className="w-full bg-graphite-900 border border-graphite-700 rounded px-3 py-2 text-sm text-graphite-100 focus:outline-none focus:border-cyan-500"
+          value={manualCode}
+          onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
+            setManualCode(e.target.value)
+          }
+          placeholder="Paste code here..."
+        />
+      </div>
+      {error && <div className="text-red-400 text-sm">{error}</div>}
+      <div className="flex justify-end gap-2">
         <Button
           variant="secondary"
-          className="ml-2"
           onClick={() => {
-            setIsPolling(false);
-            abortControllerRef.current?.abort();
-            setShowFallback(true);
+            setStateToken(null);
+            setManualCode('');
+            setError(null);
           }}
         >
-          I just authorized
+          Restart
         </Button>
-      )}
-
-      <Modal
-        isOpen={showFallback}
-        onClose={() => setShowFallback(false)}
-        title="Manual OAuth Completion"
-      >
-        <div className="space-y-4 py-4">
-          <p className="text-sm text-graphite-300">
-            If the automatic redirect didn't work, please paste the
-            authorization code here.
-          </p>
-          <div className="space-y-2">
-            <label className="text-sm font-medium text-graphite-200">
-              Authorization Code
-            </label>
-            <input
-              className="w-full bg-graphite-900 border border-graphite-700 rounded px-3 py-2 text-sm text-graphite-100 focus:outline-none focus:border-cyan-500"
-              value={manualCode}
-              onChange={(e: React.ChangeEvent<HTMLInputElement>) =>
-                setManualCode(e.target.value)
-              }
-              placeholder="Paste code here..."
-            />
-          </div>
-          {error && <div className="text-red-400 text-sm">{error}</div>}
-        </div>
-        <div className="flex justify-end gap-2 mt-4">
-          <Button variant="secondary" onClick={() => setShowFallback(false)}>
-            Cancel
-          </Button>
-          <Button
-            variant="primary"
-            onClick={handleManualComplete}
-            disabled={!manualCode || isCompleting}
-          >
-            {isCompleting ? 'Completing...' : 'Complete'}
-          </Button>
-        </div>
-      </Modal>
-    </>
+        <Button
+          variant="primary"
+          onClick={handleComplete}
+          disabled={!manualCode.trim() || isCompleting}
+        >
+          {isCompleting ? 'Completing...' : 'Complete'}
+        </Button>
+      </div>
+    </div>
   );
 }

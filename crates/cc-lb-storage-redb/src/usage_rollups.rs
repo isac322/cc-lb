@@ -20,11 +20,23 @@ struct UsageRollupDelta {
     request_count: u64,
     input_tokens: u64,
     output_tokens: u64,
+    cache_creation_input_tokens: u64,
+    cache_read_input_tokens: u64,
     error_count: u64,
     latency_count: u64,
     latency_ms_sum: u64,
     latency_ms_min: Option<u64>,
     latency_ms_max: Option<u64>,
+    proxy_setup_ms_count: u64,
+    proxy_setup_ms_sum: u64,
+    shape_ms_count: u64,
+    shape_ms_sum: u64,
+    sign_ms_count: u64,
+    sign_ms_sum: u64,
+    upstream_ttfb_ms_count: u64,
+    upstream_ttfb_ms_sum: u64,
+    upstream_body_ms_count: u64,
+    upstream_body_ms_sum: u64,
     virtual_cost_micros: u64,
 }
 
@@ -89,7 +101,11 @@ impl Storage {
 
     pub fn query_usage_rollups(&self) -> Result<Vec<UsageRollup>, StorageError> {
         let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(USAGE_ROLLUPS_V1)?;
+        let table = match read_txn.open_table(USAGE_ROLLUPS_V1) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
         let mut rollups = Vec::new();
         for row in table.iter()? {
             let (_, value) = row?;
@@ -105,7 +121,11 @@ impl Storage {
         window_end_unix_secs: u64,
     ) -> Result<Vec<UsageRollup>, StorageError> {
         let read_txn = self.db.begin_read()?;
-        let table = read_txn.open_table(USAGE_ROLLUPS_V1)?;
+        let table = match read_txn.open_table(USAGE_ROLLUPS_V1) {
+            Ok(table) => table,
+            Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
+            Err(error) => return Err(error.into()),
+        };
         let mut rollups = Vec::new();
         for row in table.iter()? {
             let (_, value) = row?;
@@ -150,11 +170,23 @@ fn empty_usage_rollup(key: &UsageRollupKey) -> UsageRollup {
         request_count: 0,
         input_tokens: 0,
         output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
         error_count: 0,
         latency_count: 0,
         latency_ms_sum: 0,
         latency_ms_min: None,
         latency_ms_max: None,
+        proxy_setup_ms_count: 0,
+        proxy_setup_ms_sum: 0,
+        shape_ms_count: 0,
+        shape_ms_sum: 0,
+        sign_ms_count: 0,
+        sign_ms_sum: 0,
+        upstream_ttfb_ms_count: 0,
+        upstream_ttfb_ms_sum: 0,
+        upstream_body_ms_count: 0,
+        upstream_body_ms_sum: 0,
         virtual_cost_micros: 0,
     }
 }
@@ -163,11 +195,23 @@ fn apply_delta(rollup: &mut UsageRollup, delta: UsageRollupDelta) {
     rollup.request_count += delta.request_count;
     rollup.input_tokens += delta.input_tokens;
     rollup.output_tokens += delta.output_tokens;
+    rollup.cache_creation_input_tokens += delta.cache_creation_input_tokens;
+    rollup.cache_read_input_tokens += delta.cache_read_input_tokens;
     rollup.error_count += delta.error_count;
     rollup.latency_count += delta.latency_count;
     rollup.latency_ms_sum += delta.latency_ms_sum;
     rollup.latency_ms_min = min_option(rollup.latency_ms_min, delta.latency_ms_min);
     rollup.latency_ms_max = max_option(rollup.latency_ms_max, delta.latency_ms_max);
+    rollup.proxy_setup_ms_count += delta.proxy_setup_ms_count;
+    rollup.proxy_setup_ms_sum += delta.proxy_setup_ms_sum;
+    rollup.shape_ms_count += delta.shape_ms_count;
+    rollup.shape_ms_sum += delta.shape_ms_sum;
+    rollup.sign_ms_count += delta.sign_ms_count;
+    rollup.sign_ms_sum += delta.sign_ms_sum;
+    rollup.upstream_ttfb_ms_count += delta.upstream_ttfb_ms_count;
+    rollup.upstream_ttfb_ms_sum += delta.upstream_ttfb_ms_sum;
+    rollup.upstream_body_ms_count += delta.upstream_body_ms_count;
+    rollup.upstream_body_ms_sum += delta.upstream_body_ms_sum;
     rollup.virtual_cost_micros += delta.virtual_cost_micros;
 }
 
@@ -179,7 +223,7 @@ fn usage_rollup_key_from_event(
         resolution,
         bucket_start: bucket_start(resolution, event_ts_ms(event) / 1000),
         principal: normalize_dimension(event.principal_id.as_deref()),
-        upstream: UNKNOWN_DIMENSION.to_owned(),
+        upstream: normalize_dimension(event.upstream_name.as_deref()),
         model: normalize_dimension(event.model.as_deref()),
     }
 }
@@ -187,9 +231,10 @@ fn usage_rollup_key_from_event(
 impl UsageRollupDelta {
     fn add_event(&mut self, event: &RequestEvent) {
         self.request_count += 1;
-        self.input_tokens += event.input_tokens.unwrap_or(0)
-            + event.cache_creation_input_tokens.unwrap_or(0)
-            + event.cache_read_input_tokens.unwrap_or(0);
+        // cache_* are tracked as separate dimensions so cache hit rate isn't double-counted.
+        self.input_tokens += event.input_tokens.unwrap_or(0);
+        self.cache_creation_input_tokens += event.cache_creation_input_tokens.unwrap_or(0);
+        self.cache_read_input_tokens += event.cache_read_input_tokens.unwrap_or(0);
         self.output_tokens += event.output_tokens.unwrap_or(0);
         if event.status >= 400 {
             self.error_count += 1;
@@ -198,6 +243,26 @@ impl UsageRollupDelta {
         self.latency_ms_sum += event.duration_ms;
         self.latency_ms_min = min_option(self.latency_ms_min, Some(event.duration_ms));
         self.latency_ms_max = max_option(self.latency_ms_max, Some(event.duration_ms));
+        if let Some(value) = event.proxy_setup_ms {
+            self.proxy_setup_ms_count += 1;
+            self.proxy_setup_ms_sum += value;
+        }
+        if let Some(value) = event.shape_ms {
+            self.shape_ms_count += 1;
+            self.shape_ms_sum += value;
+        }
+        if let Some(value) = event.sign_ms {
+            self.sign_ms_count += 1;
+            self.sign_ms_sum += value;
+        }
+        if let Some(value) = event.upstream_ttfb_ms {
+            self.upstream_ttfb_ms_count += 1;
+            self.upstream_ttfb_ms_sum += value;
+        }
+        if let Some(value) = event.upstream_body_ms {
+            self.upstream_body_ms_count += 1;
+            self.upstream_body_ms_sum += value;
+        }
         self.virtual_cost_micros += event.cost_usd_micros.unwrap_or(0).max(0) as u64;
     }
 }

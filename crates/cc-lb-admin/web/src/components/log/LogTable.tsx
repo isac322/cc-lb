@@ -3,6 +3,17 @@ import type { RequestEvent } from '../../lib/api';
 import { StatusChip } from '../primitives/StatusChip';
 import { LogRowDetail } from './LogRowDetail';
 
+export function eventTimestampMs(event: RequestEvent): number {
+  if (event.ts_ms && event.ts_ms > 0) return event.ts_ms;
+  if (event.ts && event.ts > 0) return event.ts * 1000;
+  return Date.now();
+}
+
+export function eventKey(event: RequestEvent, index: number): string {
+  if (event.request_id) return event.request_id;
+  return `${event.ts_ms ?? event.ts ?? 0}-${index}`;
+}
+
 interface LogTableProps {
   events: RequestEvent[];
 }
@@ -72,9 +83,11 @@ export function LogTable({ events }: LogTableProps) {
       </div>
       <div ref={containerRef} className="flex-1 overflow-auto relative">
         <div style={{ height: totalHeight, position: 'relative' }}>
-          {visibleEvents.map(({ event, index }) => (
+          {visibleEvents.map(({ event, index }) => {
+            const key = eventKey(event, index);
+            return (
             <div
-              key={event.request_id}
+              key={key}
               style={{
                 position: 'absolute',
                 top: index * ROW_HEIGHT,
@@ -86,16 +99,14 @@ export function LogTable({ events }: LogTableProps) {
               <div
                 className="flex items-center px-4 h-full cursor-pointer"
                 onClick={() =>
-                  setExpandedId(
-                    expandedId === event.request_id ? null : event.request_id,
-                  )
+                  setExpandedId(expandedId === key ? null : key)
                 }
               >
                 <div className="w-24 shrink-0 text-xs text-graphite-300 truncate pr-2">
-                  {new Date(event.ts).toLocaleTimeString()}
+                  {new Date(eventTimestampMs(event)).toLocaleTimeString()}
                 </div>
                 <div className="w-40 shrink-0 text-xs font-mono text-graphite-400 truncate pr-2">
-                  {event.request_id}
+                  {event.request_id || '-'}
                 </div>
                 <div className="w-24 shrink-0 text-xs text-graphite-300 truncate pr-2">
                   {event.principal_id || '-'}
@@ -104,7 +115,7 @@ export function LogTable({ events }: LogTableProps) {
                   {event.model || '-'}
                 </div>
                 <div className="w-32 shrink-0 text-xs text-graphite-300 truncate pr-2">
-                  {event.upstream || '-'}
+                  {event.upstream_name || event.upstream || '-'}
                 </div>
                 <div className="w-20 shrink-0">
                   <StatusChip
@@ -130,17 +141,23 @@ export function LogTable({ events }: LogTableProps) {
                 </div>
               </div>
             </div>
-          ))}
+          );
+          })}
         </div>
       </div>
-      {expandedId && (
-        <div className="border-t border-graphite-700 bg-graphite-800 p-4 max-h-64 overflow-auto shrink-0">
-          <LogRowDetail
-            event={events.find((e) => e.request_id === expandedId)!}
-            onClose={() => setExpandedId(null)}
-          />
-        </div>
-      )}
+      {expandedId &&
+        (() => {
+          const idx = events.findIndex((e, i) => eventKey(e, i) === expandedId);
+          if (idx === -1) return null;
+          return (
+            <div className="border-t border-graphite-700 bg-graphite-800 p-4 overflow-auto shrink-0">
+              <LogRowDetail
+                event={events[idx]}
+                onClose={() => setExpandedId(null)}
+              />
+            </div>
+          );
+        })()}
     </div>
   );
 }

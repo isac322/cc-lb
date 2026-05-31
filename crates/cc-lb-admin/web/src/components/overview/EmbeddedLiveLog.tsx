@@ -1,6 +1,7 @@
 import { Link } from 'react-router';
 import { formatDuration } from '../../lib/format';
 import { useLiveEvents } from '../../lib/hooks/useLiveEvents';
+import { eventTimestampMs } from '../log/LogTable';
 import { Card } from '../primitives/Card';
 
 export function EmbeddedLiveLog() {
@@ -55,7 +56,7 @@ export function EmbeddedLiveLog() {
               </tr>
             ) : (
               events.map((ev) => {
-                const date = new Date(ev.ts);
+                const date = new Date(eventTimestampMs(ev));
                 const timeStr = date.toLocaleTimeString([], {
                   hour12: false,
                   hour: '2-digit',

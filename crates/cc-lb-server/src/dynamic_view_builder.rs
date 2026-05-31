@@ -9,7 +9,8 @@ use async_trait::async_trait;
 use cc_lb_aead::AeadService;
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_core::api_keys::principal_view::{
-    ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView, RouterPluginCache,
+    DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
+    RouterPluginCache,
 };
 use cc_lb_core::{
     ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamRateLimitCache,
@@ -131,7 +132,16 @@ pub async fn build_dynamic_view(
         build_principal_chains(stores, runtime, data_dir, &principals, &mut staged).await?;
     let principal_view = Arc::new(PrincipalView::from_db(&principals, principal_chains));
     let now = unix_now_secs();
-    let (routes, statuses) = apply_upstreams(stores, &upstreams, oauth_anthropic, now).await?;
+    let (routes, statuses) = apply_upstreams(
+        stores,
+        &upstreams,
+        oauth_anthropic,
+        runtime,
+        data_dir,
+        &mut staged,
+        now,
+    )
+    .await?;
     let revision_hash = collect_revision_hash(stores).await?;
     let global_router = Arc::new(DbRouter::new(routes));
     let signer_factory = Arc::new(DbCompositeSignerFactory::new(
@@ -243,6 +253,10 @@ async fn build_principal_chains(
             .plugin_registry
             .list_chain_for_principal(principal.id, PluginSlot::ObservabilityHook)
             .await?;
+        let shape_entries = stores
+            .plugin_registry
+            .list_chain_for_principal(principal.id, PluginSlot::Shape)
+            .await?;
 
         let router = if let Some(entry) = router_entries.into_iter().min_by_key(|entry| entry.order)
         {
@@ -263,10 +277,22 @@ async fn build_principal_chains(
                 config: entry.config,
                 metadata: Default::default(),
             };
-            let (handle, slot) =
-                runtime.instantiate_router_for(&principal.name, &manifest.name, &manifest)?;
-            staged.push(slot);
-            RouterPluginCache::Explicit(handle)
+            match runtime.instantiate_router_for(&principal.name, &manifest.name, &manifest) {
+                Ok((handle, slot)) => {
+                    staged.push(slot);
+                    RouterPluginCache::Explicit(handle)
+                }
+                Err(error) => {
+                    tracing::error!(
+                        principal = %principal.name,
+                        plugin = %manifest.name,
+                        chain_entry_id = %entry.id,
+                        %error,
+                        "skipping router chain entry: instantiation failed; principal falls back to global router",
+                    );
+                    RouterPluginCache::Inherit
+                }
+            }
         } else {
             RouterPluginCache::Inherit
         };
@@ -292,20 +318,73 @@ async fn build_principal_chains(
                 config: entry.config,
                 metadata: Default::default(),
             };
-            let (handle, slot) = runtime.instantiate_observability_for(
-                &principal.name,
-                &manifest.name,
-                &manifest,
-            )?;
-            staged.push(slot);
-            hooks.push(handle);
+            match runtime.instantiate_observability_for(&principal.name, &manifest.name, &manifest)
+            {
+                Ok((handle, slot)) => {
+                    staged.push(slot);
+                    hooks.push(handle);
+                }
+                Err(error) => {
+                    tracing::error!(
+                        principal = %principal.name,
+                        plugin = %manifest.name,
+                        chain_entry_id = %entry.id,
+                        %error,
+                        "skipping observability_hook chain entry: instantiation failed",
+                    );
+                }
+            }
         }
         let hooks = if hooks.is_empty() {
             ObservabilityHooksCache::Inherit
         } else {
             ObservabilityHooksCache::Explicit(hooks)
         };
-        chains.insert(principal.name.clone(), (router, hooks));
+
+        let dialect = if let Some(entry) = shape_entries.into_iter().min_by_key(|entry| entry.order)
+        {
+            let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
+                io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
+            })?;
+            let registry_entry = stores
+                .plugin_registry
+                .get_registry_entry_by_sha(registry_entry.sha256)
+                .await?
+                .ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::NotFound, "plugin registry sha not found")
+                })?;
+            let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
+            let manifest = PluginManifest {
+                name: registry_entry.name,
+                artifact: wasm_path.to_string_lossy().into_owned(),
+                config: entry.config,
+                metadata: Default::default(),
+            };
+            match runtime.instantiate_dialect_for_principal(
+                &principal.name,
+                &manifest.name,
+                &manifest,
+            ) {
+                Ok((handle, slot)) => {
+                    staged.push(slot);
+                    DialectCache::Explicit(handle)
+                }
+                Err(error) => {
+                    tracing::error!(
+                        principal = %principal.name,
+                        plugin = %manifest.name,
+                        chain_entry_id = %entry.id,
+                        %error,
+                        "skipping shape chain entry: instantiation failed; principal falls back to route dialect",
+                    );
+                    DialectCache::Inherit
+                }
+            }
+        } else {
+            DialectCache::Inherit
+        };
+
+        chains.insert(principal.name.clone(), (router, hooks, dialect));
     }
     Ok(chains)
 }
@@ -347,6 +426,9 @@ async fn apply_upstreams(
     stores: &Stores,
     upstreams: &[UpstreamRecord],
     _oauth_anthropic: &AnthropicOAuthConfig,
+    runtime: &ExtismRuntime,
+    data_dir: &Path,
+    staged: &mut Vec<StagedSlot>,
     now: u64,
 ) -> StorageResult<(Vec<DbRoute>, HashMap<String, UpstreamStatusEntry>)> {
     let mut routes = Vec::new();
@@ -368,22 +450,8 @@ async fn apply_upstreams(
             continue;
         }
 
-        match validate_upstream(upstream) {
-            Ok(route) => {
-                stores
-                    .upstreams
-                    .set_last_apply_error(upstream.id, None)
-                    .await?;
-                routes.push(route);
-                statuses.insert(
-                    upstream.name.clone(),
-                    UpstreamStatusEntry {
-                        status: ApplyStatus::Active,
-                        last_apply_error: None,
-                        last_apply_at_unix_secs: now,
-                    },
-                );
-            }
+        let mut route = match validate_upstream(upstream) {
+            Ok(route) => route,
             Err(message) => {
                 stores
                     .upstreams
@@ -397,10 +465,76 @@ async fn apply_upstreams(
                         last_apply_at_unix_secs: now,
                     },
                 );
+                continue;
+            }
+        };
+
+        if let Some(shape_binding) = upstream.shape_plugin.as_ref() {
+            match apply_shape_plugin(stores, runtime, data_dir, upstream.id, shape_binding).await {
+                Ok((dialect, shape_staged)) => {
+                    route.dialect = dialect;
+                    staged.push(shape_staged);
+                }
+                Err(message) => {
+                    stores
+                        .upstreams
+                        .set_last_apply_error(upstream.id, Some(message.clone()))
+                        .await?;
+                    statuses.insert(
+                        upstream.name.clone(),
+                        UpstreamStatusEntry {
+                            status: ApplyStatus::Error,
+                            last_apply_error: Some(message),
+                            last_apply_at_unix_secs: now,
+                        },
+                    );
+                    continue;
+                }
             }
         }
+
+        stores
+            .upstreams
+            .set_last_apply_error(upstream.id, None)
+            .await?;
+        routes.push(route);
+        statuses.insert(
+            upstream.name.clone(),
+            UpstreamStatusEntry {
+                status: ApplyStatus::Active,
+                last_apply_error: None,
+                last_apply_at_unix_secs: now,
+            },
+        );
     }
     Ok((routes, statuses))
+}
+
+async fn apply_shape_plugin(
+    stores: &Stores,
+    runtime: &ExtismRuntime,
+    data_dir: &Path,
+    upstream_id: Uuid,
+    binding: &cc_lb_storage_api::UpstreamShapePluginRef,
+) -> Result<(Arc<dyn UpstreamDialect>, StagedSlot), String> {
+    let registry_entry = stores
+        .plugin_registry
+        .get_registry_entry_by_id(binding.registry_id)
+        .await
+        .map_err(|error| format!("shape plugin lookup failed: {error}"))?
+        .ok_or_else(|| "shape plugin registry entry not found".to_owned())?;
+    let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256)
+        .await
+        .map_err(|error| format!("shape plugin wasm materialize failed: {error}"))?;
+    let manifest = PluginManifest {
+        name: registry_entry.name.clone(),
+        artifact: wasm_path.to_string_lossy().into_owned(),
+        config: binding.config.clone(),
+        metadata: Default::default(),
+    };
+    runtime
+        .instantiate_dialect_for_upstream(&upstream_id.to_string(), &registry_entry.name, &manifest)
+        .map_err(|error| format!("shape plugin dialect instantiation failed: {error}"))
 }
 
 fn validate_upstream(upstream: &UpstreamRecord) -> Result<DbRoute, String> {

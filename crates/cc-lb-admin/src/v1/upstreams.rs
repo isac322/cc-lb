@@ -10,7 +10,7 @@ use axum::{
 };
 use cc_lb_aead::AeadEncryptedField;
 use cc_lb_core::{AuditEntry, AuditPayload};
-use cc_lb_storage_api::upstream::UpstreamKind;
+use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamShapePluginRef};
 use cc_lb_storage_api::{
     PluginSlot, PrincipalStore, Storage, StorageError, UpstreamCreate, UpstreamRecord,
     UpstreamStore, UpstreamUpdate,
@@ -50,6 +50,8 @@ struct UpstreamCreateBody {
     base_url: Option<Url>,
     #[serde(default)]
     api_key_env: Option<String>,
+    #[serde(default)]
+    shape_plugin: Option<UpstreamShapePluginRef>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +62,17 @@ struct UpstreamUpdateBody {
     base_url: Option<Url>,
     #[serde(default)]
     api_key_env: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_optional_shape_plugin")]
+    shape_plugin: Option<Option<UpstreamShapePluginRef>>,
+}
+
+fn deserialize_optional_shape_plugin<'de, D>(
+    deserializer: D,
+) -> Result<Option<Option<UpstreamShapePluginRef>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<UpstreamShapePluginRef>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -75,6 +88,8 @@ struct UpstreamResponse {
     kind: UpstreamKind,
     enabled: bool,
     revision: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    shape_plugin: Option<UpstreamShapePluginRef>,
 }
 
 #[derive(Debug, Serialize)]
@@ -164,6 +179,7 @@ async fn create_upstream(
             kind,
             base_url: body.base_url,
             api_key_ciphertext,
+            shape_plugin: body.shape_plugin,
         },
     )
     .await?;
@@ -261,6 +277,7 @@ async fn update_upstream(
             name: body.name,
             base_url: body.base_url,
             api_key_ciphertext,
+            shape_plugin: body.shape_plugin,
         },
     )
     .await
@@ -423,6 +440,7 @@ fn upstream_response(record: &UpstreamRecord) -> UpstreamResponse {
         kind: record.kind,
         enabled: record.enabled,
         revision: record.revision,
+        shape_plugin: record.shape_plugin.clone(),
     }
 }
 
@@ -576,9 +594,13 @@ async fn upstream_references(
             let hook_entries = storage
                 .list_chain_for_principal(principal.id, PluginSlot::ObservabilityHook)
                 .await?;
+            let shape_entries = storage
+                .list_chain_for_principal(principal.id, PluginSlot::Shape)
+                .await?;
             if router_entries
                 .iter()
                 .chain(hook_entries.iter())
+                .chain(shape_entries.iter())
                 .any(|entry| config_references_upstream(&entry.config, &upstream.name))
             {
                 references.push(ReferenceResponse {
