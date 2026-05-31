@@ -29,9 +29,9 @@ jobs:
   verify:
     runs-on: oracle4-cc-lb
     container:
-      image: messense/rust-musl-cross:${{ runner.arch == 'X64' && 'x86_64-musl' || 'aarch64-musl' }}
+      image: messense/rust-musl-cross:aarch64-musl
     env:
-      RUSTUP_TOOLCHAIN: stable
+      RUSTUP_TOOLCHAIN: 1.95.0
     steps:
       - uses: actions/checkout@v6
       # The messense/rust-musl-cross image ships rustc 1.94.0 but the workspace
@@ -43,19 +43,27 @@ jobs:
       # install the pinned 1.95.0 toolchain as a fresh, separate directory and
       # promote it to default, leaving the broken stable untouched.
       - name: Install pinned Rust toolchain from rust-toolchain.toml
+        shell: bash
         run: |
           set -euo pipefail
           channel=$(grep -E '^channel = ' rust-toolchain.toml | sed 's/.*"\(.*\)".*/\1/')
-          target=${{ runner.arch == 'X64' && 'x86_64-unknown-linux-musl' || 'aarch64-unknown-linux-musl' }}
+          target=aarch64-unknown-linux-musl
           rustup toolchain install "$channel" --no-self-update \
             --component rustc,cargo,clippy,rustfmt \
             --profile minimal \
             --target "$target"
           rustup default "$channel"
           rustc --version
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust-cache
         with:
-          cache-on-failure: true
-          key: musl-${{ runner.arch }}
+          rust-cache-key: musl-aarch64
       - name: Verify musl static binary
         run: bash tests/musl-static/verify.sh
+      - name: Show sccache stats
+        if: always()
+        run: |
+          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+            "$SCCACHE_PATH" --show-stats
+          elif command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats
+          fi
