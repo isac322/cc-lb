@@ -10,7 +10,7 @@ use cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_core::api_keys::key_store::KeyStore;
 use cc_lb_core::api_keys::limit_engine::LimitEngine;
 use cc_lb_core::api_keys::principal_view::{
-    ObservabilityHooksCache, PrincipalView, RouterPluginCache,
+    DialectCache, ObservabilityHooksCache, PrincipalView, RouterPluginCache,
 };
 use cc_lb_core::{
     DynamicViewBuilder, DynamicViewHolder, ErrorNormalizer, Lifecycle, LifecycleConfig,
@@ -160,8 +160,11 @@ fn principal_view(
     chain: Option<(RouterPluginCache, ObservabilityHooksCache)>,
 ) -> Arc<PrincipalView> {
     let mut chains = HashMap::new();
-    if let Some(chain) = chain {
-        chains.insert(principal_id.to_owned(), chain);
+    if let Some((router, obs)) = chain {
+        chains.insert(
+            principal_id.to_owned(),
+            (router, obs, DialectCache::Inherit),
+        );
     }
     Arc::new(PrincipalView::for_tests(
         principal_id,
@@ -221,6 +224,7 @@ fn test_upstream_record() -> UpstreamRecord {
         last_apply_error: None,
         last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
+        shape_plugin: None,
         revision: 1,
         created_at_unix_secs: 0,
         updated_at_unix_secs: 0,

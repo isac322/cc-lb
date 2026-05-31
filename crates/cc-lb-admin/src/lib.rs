@@ -1,5 +1,10 @@
 pub mod auth;
 mod credential_crypto;
+pub mod credentials;
+pub mod dashboard;
+pub mod dashboard_routes;
+pub mod events;
+pub mod events_routes;
 pub mod management;
 mod oauth_pkce;
 pub mod principals;

@@ -382,7 +382,7 @@ export function ChainEditor() {
       </div>
 
       {principalId && (
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-8">
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-8">
           <ChainList
             principalId={principalId}
             slot="router"
@@ -391,6 +391,11 @@ export function ChainEditor() {
           <ChainList
             principalId={principalId}
             slot="observability_hook"
+            registryEntries={registryEntries}
+          />
+          <ChainList
+            principalId={principalId}
+            slot="shape"
             registryEntries={registryEntries}
           />
         </div>

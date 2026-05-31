@@ -153,6 +153,7 @@ impl Fixture {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: Some(Url::parse(&self.fake_base).expect("fake url")),
                 api_key_ciphertext: None,
+                shape_plugin: None,
             },
         )
         .await

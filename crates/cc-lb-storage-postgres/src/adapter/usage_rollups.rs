@@ -368,6 +368,9 @@ fn row_to_usage_rollup(row: PgRow) -> StorageResult<UsageRollup> {
         request_count: i64_to_u64(request_count, "rollup request_count")?,
         input_tokens: i64_to_u64(input_tokens, "rollup input_tokens")?,
         output_tokens: i64_to_u64(output_tokens, "rollup output_tokens")?,
+        // TODO(postgres-0022): cache + latency breakdown columns not yet migrated.
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
         error_count: i64_to_u64(error_count, "rollup error_count")?,
         latency_count: i64_to_u64(latency_count, "rollup latency_count")?,
         latency_ms_sum: i64_to_u64(latency_ms_sum, "rollup latency_ms_sum")?,
@@ -377,6 +380,16 @@ fn row_to_usage_rollup(row: PgRow) -> StorageResult<UsageRollup> {
         latency_ms_max: latency_ms_max
             .map(|value| i64_to_u64(value, "rollup latency_ms_max"))
             .transpose()?,
+        proxy_setup_ms_count: 0,
+        proxy_setup_ms_sum: 0,
+        shape_ms_count: 0,
+        shape_ms_sum: 0,
+        sign_ms_count: 0,
+        sign_ms_sum: 0,
+        upstream_ttfb_ms_count: 0,
+        upstream_ttfb_ms_sum: 0,
+        upstream_body_ms_count: 0,
+        upstream_body_ms_sum: 0,
         virtual_cost_micros: i64_to_u64(virtual_cost_micros, "rollup virtual_cost_micros")?,
     })
 }

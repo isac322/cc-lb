@@ -13,10 +13,20 @@ export function Modal({
 }) {
   const modalRef = useRef<HTMLDivElement>(null);
   const previousFocusRef = useRef<HTMLElement | null>(null);
+  const onCloseRef = useRef(onClose);
+
+  // Read latest onClose via ref so the effect below depends only on isOpen;
+  // including onClose in deps re-runs cleanup on every parent render and
+  // steals focus from inputs (dismissing the mobile keyboard mid-typing).
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
 
   useEffect(() => {
+    if (!isOpen) return;
+
     const handleEscape = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose();
+      if (e.key === 'Escape') onCloseRef.current();
     };
 
     const handleTab = (e: KeyboardEvent) => {
@@ -41,27 +51,27 @@ export function Modal({
       }
     };
 
-    if (isOpen) {
-      previousFocusRef.current = document.activeElement as HTMLElement;
-      document.addEventListener('keydown', handleEscape);
-      document.addEventListener('keydown', handleTab);
-      document.body.style.overflow = 'hidden';
+    previousFocusRef.current = document.activeElement as HTMLElement;
+    document.addEventListener('keydown', handleEscape);
+    document.addEventListener('keydown', handleTab);
+    document.body.style.overflow = 'hidden';
 
-      setTimeout(() => {
-        if (modalRef.current) {
-          const focusableElements =
-            modalRef.current.querySelectorAll<HTMLElement>(
-              'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
-            );
-          if (focusableElements.length > 0) {
-            focusableElements[0].focus();
-          } else {
-            modalRef.current.focus();
-          }
+    const focusTimer = setTimeout(() => {
+      if (modalRef.current) {
+        const focusableElements =
+          modalRef.current.querySelectorAll<HTMLElement>(
+            'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])',
+          );
+        if (focusableElements.length > 0) {
+          focusableElements[0].focus();
+        } else {
+          modalRef.current.focus();
         }
-      }, 10);
-    }
+      }
+    }, 10);
+
     return () => {
+      clearTimeout(focusTimer);
       document.removeEventListener('keydown', handleEscape);
       document.removeEventListener('keydown', handleTab);
       document.body.style.overflow = 'unset';
@@ -69,7 +79,7 @@ export function Modal({
         previousFocusRef.current.focus();
       }
     };
-  }, [isOpen, onClose]);
+  }, [isOpen]);
 
   if (!isOpen) return null;
 

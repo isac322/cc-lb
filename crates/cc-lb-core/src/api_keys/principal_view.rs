@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use cc_lb_plugin_api::{ObservabilityHook, RouterPlugin};
+use cc_lb_plugin_api::{ObservabilityHook, RouterPlugin, UpstreamDialect};
 use cc_lb_storage_api::principal::{Limit as DbLimit, LimitKind as DbLimitKind};
 use cc_lb_storage_api::{PrincipalKind as DbPrincipalKind, PrincipalRecord};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -28,7 +28,13 @@ pub enum ObservabilityHooksCache {
     Explicit(Vec<Arc<dyn ObservabilityHook>>),
 }
 
-pub type PrincipalRoutingArtifacts = (RouterPluginCache, ObservabilityHooksCache);
+#[derive(Clone)]
+pub enum DialectCache {
+    Inherit,
+    Explicit(Arc<dyn UpstreamDialect>),
+}
+
+pub type PrincipalRoutingArtifacts = (RouterPluginCache, ObservabilityHooksCache, DialectCache);
 
 #[derive(Debug)]
 pub struct PrincipalView {
@@ -46,6 +52,7 @@ pub struct PrincipalSpecCached {
     enabled: bool,
     router_plugin: RouterPluginCache,
     observability_hooks: ObservabilityHooksCache,
+    dialect: DialectCache,
 }
 
 impl PrincipalView {
@@ -71,9 +78,11 @@ impl PrincipalView {
             created_at_unix_secs: 0,
             updated_at_unix_secs: 0,
         };
-        principal_chains
-            .entry(principal_id.to_owned())
-            .or_insert((RouterPluginCache::Inherit, ObservabilityHooksCache::Inherit));
+        principal_chains.entry(principal_id.to_owned()).or_insert((
+            RouterPluginCache::Inherit,
+            ObservabilityHooksCache::Inherit,
+            DialectCache::Inherit,
+        ));
         Self::from_db(&[principal], principal_chains)
     }
 
@@ -111,9 +120,12 @@ impl PrincipalView {
                 });
                 let principal_id = principal.name.clone();
                 name_aliases.insert(principal.id.to_string(), principal_id.clone());
-                let (router_plugin, observability_hooks) = principal_chains
-                    .remove(&principal_id)
-                    .unwrap_or((RouterPluginCache::Inherit, ObservabilityHooksCache::Inherit));
+                let (router_plugin, observability_hooks, dialect) =
+                    principal_chains.remove(&principal_id).unwrap_or((
+                        RouterPluginCache::Inherit,
+                        ObservabilityHooksCache::Inherit,
+                        DialectCache::Inherit,
+                    ));
 
                 let cached = PrincipalSpecCached {
                     id: principal_id.clone(),
@@ -130,6 +142,7 @@ impl PrincipalView {
                     enabled: principal.enabled,
                     router_plugin,
                     observability_hooks,
+                    dialect,
                 };
 
                 (principal_id, cached)
@@ -230,6 +243,16 @@ impl PrincipalSpecCached {
             ObservabilityHooksCache::Explicit(hooks) => hooks.as_slice(),
         }
     }
+
+    pub fn resolved_dialect<'a>(
+        &'a self,
+        fallback: &'a Arc<dyn UpstreamDialect>,
+    ) -> &'a Arc<dyn UpstreamDialect> {
+        match &self.dialect {
+            DialectCache::Inherit => fallback,
+            DialectCache::Explicit(handle) => handle,
+        }
+    }
 }
 
 impl From<DbLimit> for Limit {
@@ -306,6 +329,7 @@ mod tests {
             enabled: true,
             router_plugin: router,
             observability_hooks: hooks,
+            dialect: DialectCache::Inherit,
         }
     }
 

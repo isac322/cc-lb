@@ -165,16 +165,10 @@ impl UpstreamStore for RedbStorage {
 
     async fn soft_delete(&self, id: Uuid, expected_revision: u64) -> StorageResult<()> {
         let storage = self.clone();
-        tokio::task::spawn_blocking(move || {
-            mutate_revision_sync(&storage, id, Some(expected_revision), |record| {
-                record.deleted_at_unix_secs = Some(now_unix_secs());
-                Ok(())
-            })
-            .map(|_| ())
-        })
-        .await
-        .map_err(map_join_err)?
-        .map_err(map_redb_err)
+        tokio::task::spawn_blocking(move || soft_delete_sync(&storage, id, expected_revision))
+            .await
+            .map_err(map_join_err)?
+            .map_err(map_redb_err)
     }
 
     async fn hard_delete(&self, id: Uuid) -> StorageResult<()> {
@@ -204,6 +198,7 @@ fn create_sync(
         last_apply_error: None,
         last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
+        shape_plugin: create.shape_plugin,
         revision: 1,
         created_at_unix_secs: now,
         updated_at_unix_secs: now,
@@ -294,6 +289,9 @@ fn update_sync(
         }
         if update.api_key_ciphertext.is_some() {
             record.api_key_ciphertext = update.api_key_ciphertext;
+        }
+        if let Some(shape_plugin) = update.shape_plugin {
+            record.shape_plugin = shape_plugin;
         }
         Ok(())
     })
@@ -415,6 +413,40 @@ fn hard_delete_sync(storage: &RedbStorage, id: Uuid) -> Result<(), crate::Storag
         by_id.remove(id.as_bytes().as_slice())?;
         let mut by_name = write_txn.open_table(UPSTREAMS_V2_BY_NAME)?;
         by_name.remove(record.name.as_str())?;
+    }
+    write_txn.commit()?;
+    Ok(())
+}
+
+fn soft_delete_sync(
+    storage: &RedbStorage,
+    id: Uuid,
+    expected_revision: u64,
+) -> Result<(), crate::StorageError> {
+    let write_txn = storage.db.begin_write()?;
+    {
+        let mut by_id = write_txn.open_table(UPSTREAMS_V2)?;
+        let stored = by_id
+            .get(id.as_bytes().as_slice())?
+            .ok_or(crate::StorageError::UpstreamNotFound)?
+            .value()
+            .to_vec();
+        let mut record: UpstreamRecord = serde_json::from_slice(&stored)?;
+        if record.revision != expected_revision {
+            return Err(crate::StorageError::UpstreamConflict(
+                "stale upstream revision".to_owned(),
+            ));
+        }
+        let name = record.name.clone();
+        record.deleted_at_unix_secs = Some(now_unix_secs());
+        record.revision = record.revision.saturating_add(1);
+        record.updated_at_unix_secs = now_unix_secs();
+        by_id.insert(
+            id.as_bytes().as_slice(),
+            serde_json::to_vec(&record)?.as_slice(),
+        )?;
+        let mut by_name = write_txn.open_table(UPSTREAMS_V2_BY_NAME)?;
+        by_name.remove(name.as_str())?;
     }
     write_txn.commit()?;
     Ok(())

@@ -106,6 +106,7 @@ pub(crate) fn start_pkce_flow(
 pub(crate) async fn complete_pkce_flow(
     handshake: PkceHandshake,
     auth_code: String,
+    state_token: String,
     http: Arc<dyn OAuthHttpClient>,
 ) -> Result<OAuthCredentials, OAuthTokenError> {
     exchange_pkce_code(
@@ -113,6 +114,7 @@ pub(crate) async fn complete_pkce_flow(
         handshake.token_endpoint.url(),
         handshake.client_id.as_str(),
         &auth_code,
+        &state_token,
         &handshake.verifier,
         &handshake.redirect_uri,
         now_epoch_secs(),
@@ -258,11 +260,13 @@ impl OAuthHttpClient for HyperOAuthHttpClient {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn exchange_pkce_code(
     http: &dyn OAuthHttpClient,
     token_url: &Url,
     client_id: &str,
     auth_code: &str,
+    state_token: &str,
     code_verifier: &SecretString,
     redirect_uri: &Url,
     now_epoch_secs: u64,
@@ -271,6 +275,7 @@ async fn exchange_pkce_code(
         client_id,
         code_verifier.expose_secret(),
         auth_code,
+        state_token,
         redirect_uri,
     );
     let response = http
@@ -284,6 +289,11 @@ async fn exchange_pkce_code(
         })?;
 
     if !response.status.is_success() {
+        tracing::warn!(
+            status = %response.status,
+            body = %String::from_utf8_lossy(&response.body),
+            "anthropic token endpoint rejected oauth exchange"
+        );
         return Err(OAuthTokenError::TokenEndpoint {
             status: response.status,
         });
@@ -325,11 +335,13 @@ fn form_body(
     client_id: &str,
     code_verifier: &str,
     auth_code: &str,
+    state_token: &str,
     redirect_uri: &Url,
 ) -> SecretString {
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     serializer.append_pair("grant_type", "authorization_code");
     serializer.append_pair("code", auth_code);
+    serializer.append_pair("state", state_token);
     serializer.append_pair("code_verifier", code_verifier);
     serializer.append_pair("redirect_uri", redirect_uri.as_str());
     serializer.append_pair("client_id", client_id);
