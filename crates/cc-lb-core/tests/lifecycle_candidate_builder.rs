@@ -177,6 +177,7 @@ fn upstream(
         last_apply_error: None,
         last_apply_at_unix_secs: None,
         deleted_at_unix_secs,
+        shape_plugin: None,
         revision: 1,
         created_at_unix_secs: 0,
         updated_at_unix_secs: 0,

@@ -47,6 +47,7 @@ pub struct WasmRegistryEntry {
 pub enum PluginSlot {
     Router,
     ObservabilityHook,
+    Shape,
 }
 
 impl PluginSlot {
@@ -54,6 +55,7 @@ impl PluginSlot {
         match self {
             Self::Router => "router",
             Self::ObservabilityHook => "observability_hook",
+            Self::Shape => "shape",
         }
     }
 
@@ -61,6 +63,7 @@ impl PluginSlot {
         match value {
             "router" => Some(Self::Router),
             "observability_hook" => Some(Self::ObservabilityHook),
+            "shape" => Some(Self::Shape),
             _ => None,
         }
     }

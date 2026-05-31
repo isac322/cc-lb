@@ -41,6 +41,7 @@ impl UpstreamStore for MemoryUpstreamStore {
             revision: 1,
             created_at_unix_secs: now,
             updated_at_unix_secs: now,
+            shape_plugin: None,
         };
         records.push(record.clone());
         Ok(record)
@@ -266,6 +267,7 @@ async fn create_default(store: &MemoryUpstreamStore, name: &str) -> UpstreamReco
             kind: UpstreamKind::AnthropicOauth,
             base_url: Some(Url::parse("https://api.anthropic.com").unwrap()),
             api_key_ciphertext: None,
+            shape_plugin: None,
         })
         .await
         .unwrap()
@@ -555,6 +557,7 @@ scenario!(
                 kind: UpstreamKind::Custom,
                 base_url: None,
                 api_key_ciphertext: None,
+                shape_plugin: None,
             })
             .await
             .unwrap_err();

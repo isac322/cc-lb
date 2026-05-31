@@ -1,43 +1,44 @@
-mod admin_test_common;
+mod config_admin_common;
 
-use std::sync::Arc;
-
-use axum::{
-    body::Body,
-    http::{Request, StatusCode},
-};
-use cc_lb_admin::{AdminState, router};
+use axum::http::StatusCode;
 use cc_lb_config::Config;
-use tower::ServiceExt;
+use config_admin_common::{app, authed_bytes, authed_json, temp_storage, test_state};
 
-fn test_state() -> AdminState {
-    let config = Config::default();
-    AdminState {
-        storage: None,
-        key_store: None,
-        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: admin_test_common::limit_engine(),
-        lifecycle: None,
-        audit_sink: None,
-        dynamic_view: admin_test_common::dynamic_view_holder(&config),
-        config: Arc::new(config),
-        admin_token: Some("test-token".to_owned()),
-        start_time: std::time::Instant::now(),
-    }
+#[tokio::test]
+async fn events_recent_returns_empty_with_no_traffic() {
+    let (_dir, storage) = temp_storage();
+    let state = test_state(Config::default(), Some(storage));
+
+    let (status, _, body, _) = authed_json(app(state), "GET", "/admin/events/recent", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let events = body["events"].as_array().expect("events array");
+    assert_eq!(events.len(), 0);
+    assert_eq!(body["count"], 0);
 }
 
 #[tokio::test]
-async fn events_recent_current_admin_health_smoke() {
-    let response = router(test_state())
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/admin/health")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+async fn events_recent_accepts_limit_param() {
+    let (_dir, storage) = temp_storage();
+    let state = test_state(Config::default(), Some(storage));
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let (status, _, body, _) =
+        authed_json(app(state), "GET", "/admin/events/recent?limit=10", None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["limit"], 10);
+}
+
+#[tokio::test]
+async fn events_recent_rejects_invalid_limit() {
+    let (_dir, storage) = temp_storage();
+    let state = test_state(Config::default(), Some(storage));
+    let (status, _, _) =
+        authed_bytes(app(state), "GET", "/admin/events/recent?limit=abc", None).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn events_recent_503_when_storage_missing() {
+    let state = config_admin_common::test_state_without_storage();
+    let (status, _, _) = authed_bytes(app(state), "GET", "/admin/events/recent", None).await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }

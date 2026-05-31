@@ -80,6 +80,7 @@ impl Fixture {
                 kind,
                 base_url: None,
                 api_key_ciphertext: None,
+                shape_plugin: None,
             })
             .await
             .expect("create upstream")

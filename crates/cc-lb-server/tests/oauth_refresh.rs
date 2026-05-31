@@ -113,6 +113,7 @@ impl Fixture {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url,
                 api_key_ciphertext: None,
+                shape_plugin: None,
             })
             .await
             .expect("upstream created");
@@ -312,6 +313,7 @@ async fn failed_refresh_holds_lease_for_full_ttl_acting_as_backoff() {
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
+            shape_plugin: None,
         })
         .await
         .expect("upstream created");
@@ -403,6 +405,7 @@ async fn metric_counter_increments_per_outcome() {
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
+            shape_plugin: None,
         })
         .await
         .expect("upstream created");
@@ -448,6 +451,7 @@ async fn audit_redaction_clean_no_token_literals_in_audit_db() {
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
+            shape_plugin: None,
         })
         .await
         .expect("upstream created");

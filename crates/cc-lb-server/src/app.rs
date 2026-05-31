@@ -31,6 +31,7 @@ use cc_lb_core::{
     },
     make_default_dispatcher, spawn_audit_writer, start_upstream_rate_limit_writer,
     usage_pruner::UsagePruner,
+    usage_rollup_job::UsageRollupJob,
 };
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_runtime_extism::ExtismRuntime;
@@ -429,6 +430,7 @@ pub async fn seed_app_testing_storage(
                 kind: UpstreamKind::Custom,
                 base_url: upstream_base_url,
                 api_key_ciphertext: None,
+                shape_plugin: None,
             },
         )
         .await
@@ -534,6 +536,7 @@ async fn build_app_with_storage_inner(
     spawn_price_catalog_loader(&config, storage.clone(), price_catalog.clone());
     let pruner = UsagePruner::new(storage.clone(), config.api_keys.usage_retention_days);
     let _usage_pruner_task = tokio::spawn(pruner.start_daemon());
+    let _usage_rollup_task = UsageRollupJob::new(storage.clone()).start_daemon();
     let (sink, audit_writer_task) = spawn_audit_writer(storage.clone(), 1024);
     let audit_sink = Some(Arc::new(sink));
     let (upstream_rate_limit_sink, upstream_rate_limit_receiver) = UpstreamRateLimitSink::new();

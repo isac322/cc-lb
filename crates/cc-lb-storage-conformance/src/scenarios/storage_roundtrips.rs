@@ -344,6 +344,7 @@ fn request_events() -> Vec<RequestEvent> {
             cost_usd_micros: Some(7),
             duration_ms: 89,
             error_code: None,
+            ..Default::default()
         },
         RequestEvent {
             ts: 1_800_300_101,
