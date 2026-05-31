@@ -68,9 +68,8 @@ jobs:
       # tests/oauth_refresh_cadence-* binary into target/llvm-cov-target/
       # debug/deps/ and cargo invokes it on restore against a source tree
       # that never contained that file.
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust-cache
         with:
-          cache-on-failure: true
           cache-targets: false
 
       - name: Run tests with coverage instrumentation
@@ -108,6 +107,15 @@ jobs:
           cargo llvm-cov report --package cc-lb-signer-anthropic-oauth --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov report --package cc-lb-server                --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov report --package cc-lb-storage-redb          --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+
+      - name: Show sccache stats
+        if: always()
+        run: |
+          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+            "$SCCACHE_PATH" --show-stats
+          elif command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats
+          fi
 
       - name: Upload coverage report
         if: always()

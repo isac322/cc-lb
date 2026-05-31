@@ -46,10 +46,9 @@ jobs:
       # Swatinem prunes intermediate artifacts so the cache is typically ~1-3 GB,
       # restores in seconds, and lets cargo resume rather than build from scratch
       # (which itself takes ~20 min and overruns ARC's scale-down window).
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust-cache
         with:
-          cache-on-failure: true
-          key: postgres-build-${{ matrix.build-variant }}
+          rust-cache-key: postgres-build-${{ matrix.build-variant }}
 
       - name: Build workspace (all features)
         if: matrix.build-variant == 'all-features'
@@ -66,6 +65,15 @@ jobs:
       - name: Test workspace (no default features)
         if: matrix.build-variant == 'no-default-features'
         run: cargo test --workspace --no-run --no-default-features
+
+      - name: Show sccache stats
+        if: always()
+        run: |
+          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+            "$SCCACHE_PATH" --show-stats
+          elif command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats
+          fi
 
   postgres-conformance:
     name: Postgres conformance
@@ -97,10 +105,9 @@ jobs:
       # Swatinem instead of actions/cache: see postgres-build-matrix above for
       # the ARC pod scale-down rationale. postgres-conformance is the slowest
       # job (~35-45 min) so saving even a few minutes of restore matters.
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust-cache
         with:
-          cache-on-failure: true
-          key: postgres-conformance
+          rust-cache-key: postgres-conformance
 
       - name: Install sqlx-cli
         uses: taiki-e/install-action@v2
@@ -140,3 +147,12 @@ jobs:
 
       - name: E2E smoke - cc-lb binary against postgres backend
         run: ./tests/real-client/postgres-smoke.sh
+
+      - name: Show sccache stats
+        if: always()
+        run: |
+          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+            "$SCCACHE_PATH" --show-stats
+          elif command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats
+          fi

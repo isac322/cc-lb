@@ -87,9 +87,7 @@ if ! capture_step "$file_ldd_log" overwrite file file "$binary_path"; then
     file_failed=1
 fi
 
-if ! capture_step "$file_ldd_log" append ldd ldd "$binary_path"; then
-    ldd_failed=1
-fi
+capture_step "$file_ldd_log" append ldd ldd "$binary_path" || true
 
 if ! grep -Eq 'static|not a dynamic executable|statically linked' "$file_ldd_log"; then
     printf 'ERROR: binary is not static according to file/ldd.\n' | tee -a "$verify_log" >&2

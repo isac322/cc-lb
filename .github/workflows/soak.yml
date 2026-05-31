@@ -17,12 +17,19 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: ./.github/actions/setup-rust-cache
         with:
-          cache-on-failure: true
-          key: soak-rss
+          rust-cache-key: soak-rss
       - name: Run 24h RSS soak
         run: bash tests/soak/soak.sh 24h
+      - name: Show sccache stats
+        if: always()
+        run: |
+          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+            "$SCCACHE_PATH" --show-stats
+          elif command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats
+          fi
       - name: Upload soak CSV
         if: always()
         uses: actions/upload-artifact@v7
