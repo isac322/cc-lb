@@ -27,8 +27,18 @@ jobs:
   postgres-build-matrix:
     name: Build ${{ matrix.build-variant }}
     runs-on: oracle4-cc-lb
+    # Explicit job-level cap. The historical SIGINT-at-~13min pattern from ARC
+    # pod scale-down is shorter than this, so this won't preempt a working
+    # build; it just ensures a hung job is recorded as `timed_out` (clear ops
+    # signal) instead of running indefinitely.
+    timeout-minutes: 25
 
     strategy:
+      # Each matrix variant tests a distinct feature combination; failure in
+      # one tells us nothing about the other. Without this, the
+      # no-default-features cell's SIGINT-at-~13min was cancelling the
+      # all-features cell as collateral damage and hiding its real signal.
+      fail-fast: false
       matrix:
         build-variant:
           - all-features
@@ -50,17 +60,23 @@ jobs:
         with:
           rust-cache-key: postgres-build-${{ matrix.build-variant }}
 
-      - name: Build workspace (all features)
+      # Two-step compile pattern (warm-up + gate) for ARC scale-down resilience:
+      # the warm-up trails `|| true` so a mid-compile SIGINT doesn't fail the
+      # job; the follow-up gate step picks up from whatever target/ artifacts
+      # the warm-up managed to produce (cargo is incremental), so it finishes
+      # well inside the scale-down window even if the warm-up was killed. If
+      # the warm-up completes, the gate step is essentially a no-op.
+      - name: Warm cache (all features)
         if: matrix.build-variant == 'all-features'
-        run: cargo build --workspace --all-features
+        run: cargo build --workspace --all-features --tests || true
 
       - name: Test workspace (all features)
         if: matrix.build-variant == 'all-features'
         run: cargo test --workspace --no-run --all-features
 
-      - name: Build workspace (no default features)
+      - name: Warm cache (no default features)
         if: matrix.build-variant == 'no-default-features'
-        run: cargo build --workspace --no-default-features
+        run: cargo build --workspace --no-default-features --tests || true
 
       - name: Test workspace (no default features)
         if: matrix.build-variant == 'no-default-features'
