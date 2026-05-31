@@ -33,7 +33,7 @@ impl Storage {
         let table = read_txn.open_table(REQUEST_EVENTS_V1)?;
         let mut events = Vec::new();
 
-        for row in table.iter()?.rev() {
+        for row in table.iter()? {
             let (_, value) = row?;
             let event: RequestEvent = serde_json::from_slice(value.value())?;
             let event_ts_ms = event_ts_ms(&event);
