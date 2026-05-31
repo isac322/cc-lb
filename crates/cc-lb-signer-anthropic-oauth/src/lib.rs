@@ -25,6 +25,7 @@ use url::Url;
 use uuid::Uuid;
 
 const OAUTH_EXPIRY_SKEW_SECS: u64 = 30;
+const ANTHROPIC_OAUTH_BETA: &str = "oauth-2025-04-20";
 
 pub use http_client::{
     HyperOAuthHttpClient, OAuthHttpClient, OAuthHttpError, OAuthTokenRequest, OAuthTokenResponse,
@@ -440,7 +441,13 @@ impl Signer for AnthropicOAuthSigner {
         let creds = self.credentials_for_signing().await?;
         let access_token = SecretString::new(creds.access_token.into_boxed_str());
         let header_value = bearer_header_value(access_token.expose_secret())?;
-        shaped.headers_mut().insert(AUTHORIZATION, header_value);
+        let headers = shaped.headers_mut();
+        headers.remove("x-api-key");
+        headers.insert(AUTHORIZATION, header_value);
+        headers.insert(
+            "anthropic-beta",
+            HeaderValue::from_static(ANTHROPIC_OAUTH_BETA),
+        );
         self.remember_signed_access_token(access_token.expose_secret())
             .await;
         Ok(SignedRequest::from_shaped(shaped, capability))
@@ -609,7 +616,13 @@ impl Signer for PersistedAnthropicOAuthSigner {
             });
         }
         let header_value = bearer_header_value(self.access_token.expose_secret())?;
-        shaped.headers_mut().insert(AUTHORIZATION, header_value);
+        let headers = shaped.headers_mut();
+        headers.remove("x-api-key");
+        headers.insert(AUTHORIZATION, header_value);
+        headers.insert(
+            "anthropic-beta",
+            HeaderValue::from_static(ANTHROPIC_OAUTH_BETA),
+        );
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
 
@@ -728,6 +741,7 @@ mod tests {
                 last_apply_error: None,
                 last_apply_at_unix_secs: None,
                 deleted_at_unix_secs: None,
+                shape_plugin: create.shape_plugin,
                 revision: 1,
                 created_at_unix_secs: now,
                 updated_at_unix_secs: now,
@@ -1021,6 +1035,7 @@ mod tests {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: None,
                 api_key_ciphertext: None,
+                shape_plugin: None,
             })
             .await
             .unwrap()

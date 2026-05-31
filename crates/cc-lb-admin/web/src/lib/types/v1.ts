@@ -73,7 +73,7 @@ export interface PrincipalListResponse {
   principals: PrincipalResponse[];
 }
 
-export type PluginSlot = 'router' | 'observability_hook';
+export type PluginSlot = 'router' | 'observability_hook' | 'shape';
 
 export interface PatchRegistryBody {
   label?: string;

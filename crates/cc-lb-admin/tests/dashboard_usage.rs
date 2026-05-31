@@ -1,43 +1,66 @@
-mod admin_test_common;
+mod config_admin_common;
 
-use std::sync::Arc;
-
-use axum::{
-    body::Body,
-    http::{Request, StatusCode},
-};
-use cc_lb_admin::{AdminState, router};
+use axum::http::StatusCode;
 use cc_lb_config::Config;
-use tower::ServiceExt;
+use config_admin_common::{app, authed_bytes, authed_json, temp_storage, test_state};
 
-fn test_state() -> AdminState {
-    let config = Config::default();
-    AdminState {
-        storage: None,
-        key_store: None,
-        aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
-        limit_engine: admin_test_common::limit_engine(),
-        lifecycle: None,
-        audit_sink: None,
-        dynamic_view: admin_test_common::dynamic_view_holder(&config),
-        config: Arc::new(config),
-        admin_token: Some("test-token".to_owned()),
-        start_time: std::time::Instant::now(),
-    }
+#[tokio::test]
+async fn usage_returns_200_grouped_by_model() {
+    let (_dir, storage) = temp_storage();
+    let state = test_state(Config::default(), Some(storage));
+
+    let (status, _, body, _) = authed_json(
+        app(state),
+        "GET",
+        "/admin/usage?range=1h&group_by=model",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["range"], "1h");
+    assert_eq!(body["group_by"], "model");
 }
 
 #[tokio::test]
-async fn dashboard_usage_current_admin_health_smoke() {
-    let response = router(test_state())
-        .oneshot(
-            Request::builder()
-                .method("GET")
-                .uri("/admin/health")
-                .body(Body::empty())
-                .unwrap(),
-        )
-        .await
-        .unwrap();
+async fn usage_returns_200_grouped_by_principal() {
+    let (_dir, storage) = temp_storage();
+    let state = test_state(Config::default(), Some(storage));
 
-    assert_eq!(response.status(), StatusCode::OK);
+    let (status, _, body, _) = authed_json(
+        app(state),
+        "GET",
+        "/admin/usage?range=1h&group_by=principal",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["group_by"], "principal");
+}
+
+#[tokio::test]
+async fn usage_rejects_invalid_group_by() {
+    let (_dir, storage) = temp_storage();
+    let state = test_state(Config::default(), Some(storage));
+
+    let (status, _, _) = authed_bytes(
+        app(state),
+        "GET",
+        "/admin/usage?range=1h&group_by=bogus",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn usage_503_when_storage_missing() {
+    let state = config_admin_common::test_state_without_storage();
+    let (status, _, _) = authed_bytes(
+        app(state),
+        "GET",
+        "/admin/usage?range=1h&group_by=model",
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
 }

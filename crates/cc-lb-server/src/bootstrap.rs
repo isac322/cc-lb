@@ -153,6 +153,7 @@ pub async fn apply_bootstrap(
                 kind: parse_upstream_kind(&upstream.kind),
                 base_url: upstream.base_url,
                 api_key_ciphertext: None,
+                shape_plugin: None,
             };
 
             upstream_store
@@ -397,6 +398,7 @@ fn parse_plugin_slot(slot: &str) -> Option<PluginSlot> {
     match slot {
         "Router" | "router" => Some(PluginSlot::Router),
         "ObservabilityHook" | "observability_hook" => Some(PluginSlot::ObservabilityHook),
+        "Shape" | "shape" => Some(PluginSlot::Shape),
         _ => None,
     }
 }

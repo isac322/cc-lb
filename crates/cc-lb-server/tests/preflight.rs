@@ -246,6 +246,7 @@ async fn seed_upstream(storage: &Storage, name: &str, kind: UpstreamKind, base_u
             kind,
             base_url: base_url.map(|value| value.parse().unwrap()),
             api_key_ciphertext: Some(vec![1, 2, 3]),
+            shape_plugin: None,
         },
     )
     .await

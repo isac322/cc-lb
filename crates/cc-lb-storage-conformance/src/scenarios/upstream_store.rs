@@ -414,6 +414,7 @@ scenario!(validate_identifier_rejects_bad_name, |store| async move {
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
+            shape_plugin: None,
         })
         .await
         .expect_err("reserved prefix should fail");
@@ -444,6 +445,7 @@ async fn create_named(store: &dyn UpstreamStore, name: &str) -> Result<UpstreamR
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
+            shape_plugin: None,
         })
         .await?)
 }

@@ -37,6 +37,7 @@ mod sse_relay;
 pub mod upstream_rate_limit_events;
 #[cfg(not(loom))]
 pub mod usage_pruner;
+pub mod usage_rollup_job;
 pub use audit_payload::AuditPayload;
 #[cfg(not(loom))]
 pub use audit_writer::{AuditDropped, AuditEntry, AuditWriterSink, spawn_audit_writer};
