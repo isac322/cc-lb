@@ -61,6 +61,8 @@ pub struct RequestEvent {
     pub key_id: Option<String>,
     pub principal_kind: Option<String>,
     pub upstream: Option<RequestEventUpstream>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_name: Option<String>,
     pub model: Option<String>,
     pub status: u16,
     pub input_tokens: Option<u64>,
@@ -72,6 +74,22 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd_micros: Option<i64>,
     pub duration_ms: u64,
+    /// handle entry → attempt() entry (auth + route + ctx).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub proxy_setup_ms: Option<u64>,
+    /// shape_request execution (dialect + wasm shape plugin).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape_ms: Option<u64>,
+    /// sign_request execution (signer + OAuth refresh).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sign_ms: Option<u64>,
+    /// dispatcher.dispatch() resolves when response HEADERS arrive (true TTFB).
+    /// Includes TCP/TLS connect, request send, network RTT, upstream processing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_ttfb_ms: Option<u64>,
+    /// body.collect() time after headers (response body download).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_body_ms: Option<u64>,
     pub error_code: Option<String>,
 }
 
@@ -223,11 +241,35 @@ pub struct UsageRollup {
     pub request_count: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    #[serde(default)]
+    pub cache_creation_input_tokens: u64,
+    #[serde(default)]
+    pub cache_read_input_tokens: u64,
     pub error_count: u64,
     pub latency_count: u64,
     pub latency_ms_sum: u64,
     pub latency_ms_min: Option<u64>,
     pub latency_ms_max: Option<u64>,
+    #[serde(default)]
+    pub proxy_setup_ms_count: u64,
+    #[serde(default)]
+    pub proxy_setup_ms_sum: u64,
+    #[serde(default)]
+    pub shape_ms_count: u64,
+    #[serde(default)]
+    pub shape_ms_sum: u64,
+    #[serde(default)]
+    pub sign_ms_count: u64,
+    #[serde(default)]
+    pub sign_ms_sum: u64,
+    #[serde(default)]
+    pub upstream_ttfb_ms_count: u64,
+    #[serde(default)]
+    pub upstream_ttfb_ms_sum: u64,
+    #[serde(default)]
+    pub upstream_body_ms_count: u64,
+    #[serde(default)]
+    pub upstream_body_ms_sum: u64,
     pub virtual_cost_micros: u64,
 }
 

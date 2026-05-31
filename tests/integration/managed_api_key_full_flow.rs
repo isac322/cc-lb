@@ -663,6 +663,7 @@ async fn seed_runtime_state(
             kind: UpstreamKind::Custom,
             base_url: Some(Url::parse(&upstream_url)?),
             api_key_ciphertext: None,
+            shape_plugin: None,
         },
     )
     .await?;

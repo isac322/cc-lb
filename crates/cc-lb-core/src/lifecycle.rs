@@ -605,10 +605,11 @@ impl Lifecycle {
                 return Ok(response);
             }
         };
+        let dialect = cached.resolved_dialect(&route.dialect).clone();
         let route = cc_lb_plugin_api::RouteDecision {
             upstream_id: Some(resolved_upstream_id),
             upstream: route_upstream,
-            dialect: route.dialect,
+            dialect,
         };
         let metric_context = ApiKeyMetricContext::new(&success, &route.upstream, &ctx.body_bytes);
 
@@ -638,7 +639,7 @@ impl Lifecycle {
 
         let signer_factory = view.signer_factory.with_router_choice(
             success.api_key.clone().unwrap_or_default(),
-            router_chosen_upstream_name,
+            router_chosen_upstream_name.clone(),
         );
         let signer = match signer_factory.build(&route.upstream).await {
             Ok(signer) => signer,
@@ -666,6 +667,9 @@ impl Lifecycle {
             }
         };
 
+        let dispatch_started = Instant::now();
+        let proxy_setup_ms = duration_to_ms(dispatch_started.saturating_duration_since(started));
+        let mut attempt_timings = AttemptTimings::default();
         let mut response = match self
             .attempt(
                 view.dispatcher.as_ref(),
@@ -674,6 +678,7 @@ impl Lifecycle {
                 &principal,
                 &route,
                 signer.clone(),
+                &mut attempt_timings,
             )
             .await
         {
@@ -699,6 +704,8 @@ impl Lifecycle {
                 body: Some(unauthorized.body.clone()),
             };
             if let RetryDecision::Refresh { new_signer } = signer.on_unauthorized(&err).await {
+                // Reset stage timings; the retry's timings are the ones the operator cares about.
+                attempt_timings = AttemptTimings::default();
                 response = match self
                     .attempt(
                         view.dispatcher.as_ref(),
@@ -707,6 +714,7 @@ impl Lifecycle {
                         &principal,
                         &route,
                         new_signer,
+                        &mut attempt_timings,
                     )
                     .await
                 {
@@ -784,6 +792,13 @@ impl Lifecycle {
                 status,
                 hooks,
                 stream_hooks,
+                RequestEventContext {
+                    request_id: ctx.request_id.clone(),
+                    upstream_name: Some(router_chosen_upstream_name.clone()),
+                    principal_kind: Some(principal_kind_as_str(&principal.kind).to_owned()),
+                    proxy_setup_ms: Some(proxy_setup_ms),
+                    stage_timings: attempt_timings,
+                },
             )
             .await;
         observe_finished_for_principal(hooks, status, started, &principal, &ctx.body_bytes);
@@ -871,6 +886,7 @@ impl Lifecycle {
         status: StatusCode,
         hooks: &[Arc<dyn ObservabilityHook>],
         stream_hooks: StreamHooks,
+        event_ctx: RequestEventContext,
     ) -> Response<Body> {
         let mut active_limit = active_limit;
         if active_limit
@@ -890,10 +906,23 @@ impl Lifecycle {
         }
 
         let (mut parts, body) = response.into_parts();
+        let body_collect_started = Instant::now();
         let body = match body.collect().await {
             Ok(collected) => collected.to_bytes(),
             Err(_source) => Bytes::new(),
         };
+        let body_collect_ms = duration_to_ms(body_collect_started.elapsed());
+        tracing::info!(
+            request_id = %event_ctx.request_id,
+            status = status.as_u16(),
+            proxy_setup_ms = event_ctx.proxy_setup_ms,
+            shape_ms = ?event_ctx.stage_timings.shape_ms,
+            sign_ms = ?event_ctx.stage_timings.sign_ms,
+            upstream_ttfb_ms = ?event_ctx.stage_timings.upstream_ttfb_ms,
+            upstream_body_ms = body_collect_ms,
+            total_ms = duration_to_ms(duration),
+            "request latency breakdown"
+        );
         let usage = usage_from_json_body(&body);
         if usage.present {
             observe_many(
@@ -934,17 +963,28 @@ impl Lifecycle {
         if let (Some(storage), Some(active_limit)) =
             (self.request_event_storage.as_ref(), active_limit.as_ref())
         {
+            let now_ms = unix_now_ms();
+            let total_ms = duration_to_ms(duration);
             let event = RequestEvent {
-                ts_ms: Some(unix_now_ms()),
+                ts: now_ms / 1_000,
+                ts_ms: Some(now_ms),
+                request_id: event_ctx.request_id.clone(),
                 principal_id: Some(active_limit.subject.principal_id.clone()),
                 key_id: Some(active_limit.subject.key_id.clone()),
+                principal_kind: event_ctx.principal_kind.clone(),
+                upstream_name: event_ctx.upstream_name.clone(),
                 model: Some(active_limit.request.model.clone()),
                 input_tokens: Some(usage.input_tokens),
                 output_tokens: Some(usage.output_tokens),
                 cache_creation_input_tokens: Some(usage.cache_creation_input_tokens),
                 cache_read_input_tokens: Some(usage.cache_read_input_tokens),
                 cost_usd_micros: Some(cost_micros as i64),
-                duration_ms: duration_to_ms(duration),
+                duration_ms: total_ms,
+                proxy_setup_ms: event_ctx.proxy_setup_ms,
+                shape_ms: event_ctx.stage_timings.shape_ms,
+                sign_ms: event_ctx.stage_timings.sign_ms,
+                upstream_ttfb_ms: event_ctx.stage_timings.upstream_ttfb_ms,
+                upstream_body_ms: Some(body_collect_ms),
                 status: status.as_u16(),
                 ..Default::default()
             };
@@ -1050,6 +1090,7 @@ impl Lifecycle {
         })
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn attempt(
         &self,
         dispatcher: &dyn UpstreamDispatch,
@@ -1058,9 +1099,12 @@ impl Lifecycle {
         principal: &Principal,
         route: &cc_lb_plugin_api::RouteDecision,
         signer: Arc<dyn cc_lb_plugin_api::Signer>,
+        timings: &mut AttemptTimings,
     ) -> Result<Response<Body>, Box<Response<Body>>> {
+        let shape_start = Instant::now();
         let shaped = shape_request(route.dialect.as_ref(), ctx, &route.upstream, principal)
             .map_err(|source| {
+                tracing::error!(%source, "shape_request failed");
                 observe_error(hooks, "shape_error", &source.to_string(), "dialect");
                 Box::new(anthropic_error_response(
                     StatusCode::BAD_GATEWAY,
@@ -1068,9 +1112,13 @@ impl Lifecycle {
                     "failed to shape upstream request",
                 ))
             })?;
+        timings.shape_ms = Some(duration_to_ms(shape_start.elapsed()));
+
+        let sign_start = Instant::now();
         let signed = sign_request(signer.as_ref(), shaped)
             .await
             .map_err(|source| {
+                tracing::error!(%source, "sign_request failed");
                 observe_error(hooks, "signing_error", &source.to_string(), "signer");
                 Box::new(anthropic_error_response(
                     StatusCode::BAD_GATEWAY,
@@ -1078,7 +1126,24 @@ impl Lifecycle {
                     "failed to sign upstream request",
                 ))
             })?;
-        dispatcher.dispatch(signed).await.map_err(|source| {
+        timings.sign_ms = Some(duration_to_ms(sign_start.elapsed()));
+
+        let signed_header_names: Vec<String> = signed
+            .headers()
+            .keys()
+            .map(|k| k.as_str().to_owned())
+            .collect();
+        tracing::info!(
+            url = %signed.url(),
+            method = %signed.method(),
+            header_count = signed.headers().len(),
+            headers = ?signed_header_names,
+            body_bytes = signed.body().len(),
+            "about to dispatch signed request"
+        );
+
+        let dispatch_start = Instant::now();
+        let response = dispatcher.dispatch(signed).await.map_err(|source| {
             observe_error(
                 hooks,
                 "upstream_dispatch_error",
@@ -1102,7 +1167,10 @@ impl Lifecycle {
                     "upstream request failed",
                 )),
             }
-        })
+        })?;
+        // hyper dispatch().await resolves at response HEADERS, not full body, so this is real TTFB.
+        timings.upstream_ttfb_ms = Some(duration_to_ms(dispatch_start.elapsed()));
+        Ok(response)
     }
 
     fn relay_response(
@@ -1365,6 +1433,31 @@ struct ActiveLimit {
     request: LimitRequest,
     upstream_kind: Option<cc_lb_pricing::UpstreamKind>,
     reservation: Option<LimitReservation>,
+}
+
+struct RequestEventContext {
+    request_id: String,
+    upstream_name: Option<String>,
+    principal_kind: Option<String>,
+    proxy_setup_ms: Option<u64>,
+    stage_timings: AttemptTimings,
+}
+
+#[derive(Clone, Copy, Default)]
+struct AttemptTimings {
+    shape_ms: Option<u64>,
+    sign_ms: Option<u64>,
+    upstream_ttfb_ms: Option<u64>,
+}
+
+fn principal_kind_as_str(kind: &PrincipalKind) -> &'static str {
+    match kind {
+        PrincipalKind::ApiKey => "api_key",
+        PrincipalKind::OAuthSubject => "oauth_subject",
+        PrincipalKind::InternalKey => "internal_key",
+        PrincipalKind::WorkloadIdentity => "workload_identity",
+        PrincipalKind::SubscriptionBearer => "subscription_bearer",
+    }
 }
 
 #[derive(Default)]

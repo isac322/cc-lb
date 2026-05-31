@@ -408,11 +408,17 @@ pub struct AnthropicOAuthConfig {
 impl Default for AnthropicOAuthConfig {
     fn default() -> Self {
         Self {
-            client_id: String::new(),
-            auth_url: Url::parse("http://localhost/authorize").expect("valid url"),
-            token_url: Url::parse("http://localhost/token").expect("valid url"),
-            redirect_uri: Url::parse("http://localhost/callback").expect("valid url"),
-            scopes: Vec::new(),
+            client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e".to_owned(),
+            auth_url: Url::parse("https://claude.ai/oauth/authorize").expect("valid url"),
+            token_url: Url::parse("https://console.anthropic.com/v1/oauth/token")
+                .expect("valid url"),
+            redirect_uri: Url::parse("https://console.anthropic.com/oauth/code/callback")
+                .expect("valid url"),
+            scopes: vec![
+                "org:create_api_key".to_owned(),
+                "user:profile".to_owned(),
+                "user:inference".to_owned(),
+            ],
         }
     }
 }

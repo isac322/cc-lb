@@ -60,6 +60,7 @@ async fn create_api_key_upstream(
             kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
             api_key_ciphertext: Some(vec![1, 2, 3]),
+            shape_plugin: None,
         },
     )
     .await
@@ -134,6 +135,7 @@ async fn corrupt_oauth_upstream_is_error_while_other_upstreams_stay_active() {
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
+            shape_plugin: None,
         },
     )
     .await

@@ -52,10 +52,17 @@ pub struct SummaryTotals {
     pub request_count: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
     pub error_count: u64,
     pub error_rate: f64,
     pub virtual_cost_micros: u64,
     pub avg_latency_ms: f64,
+    pub avg_proxy_setup_ms: f64,
+    pub avg_shape_ms: f64,
+    pub avg_sign_ms: f64,
+    pub avg_upstream_ttfb_ms: f64,
+    pub avg_upstream_body_ms: f64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -69,10 +76,24 @@ pub struct UsageBucket {
     pub request_count: u64,
     pub input_tokens: u64,
     pub output_tokens: u64,
+    pub cache_creation_input_tokens: u64,
+    pub cache_read_input_tokens: u64,
     pub error_count: u64,
     pub virtual_cost_micros: u64,
     pub latency_ms_sum: u64,
     pub latency_count: u64,
+    pub latency_ms_min: Option<u64>,
+    pub latency_ms_max: Option<u64>,
+    pub proxy_setup_ms_sum: u64,
+    pub proxy_setup_ms_count: u64,
+    pub shape_ms_sum: u64,
+    pub shape_ms_count: u64,
+    pub sign_ms_sum: u64,
+    pub sign_ms_count: u64,
+    pub upstream_ttfb_ms_sum: u64,
+    pub upstream_ttfb_ms_count: u64,
+    pub upstream_body_ms_sum: u64,
+    pub upstream_body_ms_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -322,19 +343,37 @@ fn zero_filled_buckets(
     let mut buckets = Vec::new();
     let mut bucket_start_unix_secs = window_start_unix_secs;
     while bucket_start_unix_secs < window_end_unix_secs {
-        buckets.push(UsageBucket {
-            bucket_start_unix_secs,
-            request_count: 0,
-            input_tokens: 0,
-            output_tokens: 0,
-            error_count: 0,
-            virtual_cost_micros: 0,
-            latency_ms_sum: 0,
-            latency_count: 0,
-        });
+        buckets.push(empty_bucket(bucket_start_unix_secs));
         bucket_start_unix_secs += width;
     }
     buckets
+}
+
+pub(crate) fn empty_bucket(bucket_start_unix_secs: u64) -> UsageBucket {
+    UsageBucket {
+        bucket_start_unix_secs,
+        request_count: 0,
+        input_tokens: 0,
+        output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
+        error_count: 0,
+        virtual_cost_micros: 0,
+        latency_ms_sum: 0,
+        latency_count: 0,
+        latency_ms_min: None,
+        latency_ms_max: None,
+        proxy_setup_ms_sum: 0,
+        proxy_setup_ms_count: 0,
+        shape_ms_sum: 0,
+        shape_ms_count: 0,
+        sign_ms_sum: 0,
+        sign_ms_count: 0,
+        upstream_ttfb_ms_sum: 0,
+        upstream_ttfb_ms_count: 0,
+        upstream_body_ms_sum: 0,
+        upstream_body_ms_count: 0,
+    }
 }
 
 fn add_rollup_to_buckets(
@@ -358,35 +397,93 @@ fn add_rollup_to_buckets(
     bucket.request_count += rollup.request_count;
     bucket.input_tokens += rollup.input_tokens;
     bucket.output_tokens += rollup.output_tokens;
+    bucket.cache_creation_input_tokens += rollup.cache_creation_input_tokens;
+    bucket.cache_read_input_tokens += rollup.cache_read_input_tokens;
     bucket.error_count += rollup.error_count;
     bucket.virtual_cost_micros += rollup.virtual_cost_micros;
     bucket.latency_ms_sum += rollup.latency_ms_sum;
     bucket.latency_count += rollup.latency_count;
+    bucket.latency_ms_min = min_option(bucket.latency_ms_min, rollup.latency_ms_min);
+    bucket.latency_ms_max = max_option(bucket.latency_ms_max, rollup.latency_ms_max);
+    bucket.proxy_setup_ms_sum += rollup.proxy_setup_ms_sum;
+    bucket.proxy_setup_ms_count += rollup.proxy_setup_ms_count;
+    bucket.shape_ms_sum += rollup.shape_ms_sum;
+    bucket.shape_ms_count += rollup.shape_ms_count;
+    bucket.sign_ms_sum += rollup.sign_ms_sum;
+    bucket.sign_ms_count += rollup.sign_ms_count;
+    bucket.upstream_ttfb_ms_sum += rollup.upstream_ttfb_ms_sum;
+    bucket.upstream_ttfb_ms_count += rollup.upstream_ttfb_ms_count;
+    bucket.upstream_body_ms_sum += rollup.upstream_body_ms_sum;
+    bucket.upstream_body_ms_count += rollup.upstream_body_ms_count;
+}
+
+fn min_option(current: Option<u64>, next: Option<u64>) -> Option<u64> {
+    match (current, next) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
+}
+
+fn max_option(current: Option<u64>, next: Option<u64>) -> Option<u64> {
+    match (current, next) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    }
 }
 
 fn summary_totals(buckets: &[UsageBucket]) -> SummaryTotals {
     let mut request_count = 0;
     let mut input_tokens = 0;
     let mut output_tokens = 0;
+    let mut cache_creation_input_tokens = 0;
+    let mut cache_read_input_tokens = 0;
     let mut error_count = 0;
     let mut virtual_cost_micros = 0;
     let mut latency_ms_sum = 0;
     let mut latency_count = 0;
+    let mut proxy_setup_ms_sum = 0;
+    let mut proxy_setup_ms_count = 0;
+    let mut shape_ms_sum = 0;
+    let mut shape_ms_count = 0;
+    let mut sign_ms_sum = 0;
+    let mut sign_ms_count = 0;
+    let mut upstream_ttfb_ms_sum = 0;
+    let mut upstream_ttfb_ms_count = 0;
+    let mut upstream_body_ms_sum = 0;
+    let mut upstream_body_ms_count = 0;
 
     for bucket in buckets {
         request_count += bucket.request_count;
         input_tokens += bucket.input_tokens;
         output_tokens += bucket.output_tokens;
+        cache_creation_input_tokens += bucket.cache_creation_input_tokens;
+        cache_read_input_tokens += bucket.cache_read_input_tokens;
         error_count += bucket.error_count;
         virtual_cost_micros += bucket.virtual_cost_micros;
         latency_ms_sum += bucket.latency_ms_sum;
         latency_count += bucket.latency_count;
+        proxy_setup_ms_sum += bucket.proxy_setup_ms_sum;
+        proxy_setup_ms_count += bucket.proxy_setup_ms_count;
+        shape_ms_sum += bucket.shape_ms_sum;
+        shape_ms_count += bucket.shape_ms_count;
+        sign_ms_sum += bucket.sign_ms_sum;
+        sign_ms_count += bucket.sign_ms_count;
+        upstream_ttfb_ms_sum += bucket.upstream_ttfb_ms_sum;
+        upstream_ttfb_ms_count += bucket.upstream_ttfb_ms_count;
+        upstream_body_ms_sum += bucket.upstream_body_ms_sum;
+        upstream_body_ms_count += bucket.upstream_body_ms_count;
     }
 
     SummaryTotals {
         request_count,
         input_tokens,
         output_tokens,
+        cache_creation_input_tokens,
+        cache_read_input_tokens,
         error_count,
         error_rate: if request_count == 0 {
             0.0
@@ -394,11 +491,20 @@ fn summary_totals(buckets: &[UsageBucket]) -> SummaryTotals {
             error_count as f64 / request_count as f64
         },
         virtual_cost_micros,
-        avg_latency_ms: if latency_count == 0 {
-            0.0
-        } else {
-            latency_ms_sum as f64 / latency_count as f64
-        },
+        avg_latency_ms: safe_avg(latency_ms_sum, latency_count),
+        avg_proxy_setup_ms: safe_avg(proxy_setup_ms_sum, proxy_setup_ms_count),
+        avg_shape_ms: safe_avg(shape_ms_sum, shape_ms_count),
+        avg_sign_ms: safe_avg(sign_ms_sum, sign_ms_count),
+        avg_upstream_ttfb_ms: safe_avg(upstream_ttfb_ms_sum, upstream_ttfb_ms_count),
+        avg_upstream_body_ms: safe_avg(upstream_body_ms_sum, upstream_body_ms_count),
+    }
+}
+
+fn safe_avg(sum: u64, count: u64) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        sum as f64 / count as f64
     }
 }
 

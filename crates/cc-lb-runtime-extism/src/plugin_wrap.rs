@@ -101,7 +101,7 @@ impl UpstreamDialect for ExtismDialectPlugin {
                 reason: format!("plugin returned invalid method: {source}"),
             }
         })?;
-        let headers = headers_from_wire(response.headers).map_err(|source| {
+        let mut headers = headers_from_wire(response.headers).map_err(|source| {
             DialectError::UnsupportedRequest {
                 reason: source.to_string(),
             }
@@ -111,6 +111,9 @@ impl UpstreamDialect for ExtismDialectPlugin {
                 reason: format!("plugin returned invalid body_base64: {source}"),
             }
         })?;
+        // Body may have been mutated by the plugin; drop stale Content-Length
+        // so hyper recomputes it from the actual body bytes.
+        headers.remove(http::header::CONTENT_LENGTH);
         Ok(builder.shaped_request(url, method, headers, Bytes::from(body)))
     }
 
@@ -279,9 +282,13 @@ pub(crate) struct RequestContextWire {
 
 impl From<&RequestContext> for RequestContextWire {
     fn from(ctx: &RequestContext) -> Self {
+        let mut headers = ctx.downstream_headers.clone();
+        headers.remove(http::header::HOST);
+        headers.remove(http::header::AUTHORIZATION);
+        headers.remove("x-api-key");
         Self {
             request_id: ctx.request_id.clone(),
-            headers: headers_to_wire(&ctx.downstream_headers),
+            headers: headers_to_wire(&headers),
             method: ctx.method.as_str().to_owned(),
             path: ctx.path.clone(),
             query: ctx.query.clone(),
@@ -483,11 +490,10 @@ fn headers_from_wire(headers: Vec<HeaderWire>) -> Result<HeaderMap, WireError> {
 
 pub(crate) fn parse_versioned<T: for<'de> Deserialize<'de>>(value: Value) -> Result<T, WireError> {
     match value.get("_version").and_then(Value::as_u64) {
-        Some(1) => {
+        Some(1) | None => {
             serde_json::from_value(value).map_err(|source| WireError::Deserialize { source })
         }
         Some(version) => Err(WireError::UnsupportedVersion { version }),
-        None => Err(WireError::MissingVersion),
     }
 }
 
@@ -499,7 +505,6 @@ pub(crate) enum WireError {
     UnsupportedVersion {
         version: u64,
     },
-    MissingVersion,
     InvalidHeaderName {
         name: String,
         source: http::header::InvalidHeaderName,
@@ -521,7 +526,6 @@ impl fmt::Display for WireError {
             Self::UnsupportedVersion { version } => {
                 write!(f, "unsupported plugin envelope version: {version}")
             }
-            Self::MissingVersion => write!(f, "missing plugin envelope _version"),
             Self::InvalidHeaderName { name, source } => {
                 write!(f, "invalid header name {name}: {source}")
             }

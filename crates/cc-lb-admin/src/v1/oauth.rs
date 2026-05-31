@@ -12,6 +12,7 @@ use axum::{
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cc_lb_aead::OAuthTokenBundle;
+use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{Storage, StorageError, UpstreamStore};
@@ -19,6 +20,7 @@ use oauth2::{AuthUrl, ClientId, TokenUrl};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use url::Url;
 use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
@@ -99,12 +101,13 @@ async fn start_oauth(
     }
 
     let config = state.config.current_config();
-    let Some(oauth) = config.oauth.anthropic.as_ref() else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "oauth_not_configured" })),
-        )
-            .into_response();
+    let claude_default;
+    let oauth = match config.oauth.anthropic.as_ref() {
+        Some(oauth) => oauth,
+        None => {
+            claude_default = claude_code_default_oauth();
+            &claude_default
+        }
     };
     let authorize_endpoint = match AuthUrl::new(oauth.auth_url.to_string()) {
         Ok(url) => url,
@@ -172,16 +175,30 @@ async fn complete_oauth(
 ) -> Response {
     let decoded = match decode_state(&payload.state_token) {
         Ok(decoded) => decoded,
-        Err(_) => return invalid_state_response(),
+        Err(_) => {
+            tracing::warn!(%upstream_id, "oauth complete: state token failed base64/json decode");
+            return invalid_state_response();
+        }
     };
     if decoded.upstream_id != upstream_id {
+        tracing::warn!(
+            %upstream_id,
+            state_upstream_id = %decoded.upstream_id,
+            "oauth complete: decoded state upstream_id mismatches path"
+        );
         return invalid_state_response();
     }
     let in_flight = match pkce_flows().lock() {
-        Ok(mut flows) => flows.remove(&payload.state_token),
+        Ok(flows) => flows.get(&payload.state_token).cloned(),
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
     let Some(in_flight) = in_flight else {
+        let size = pkce_flows().lock().map(|flows| flows.len()).unwrap_or(0);
+        tracing::warn!(
+            %upstream_id,
+            pkce_flows_size = size,
+            "oauth complete: state token not in pkce flow store (process restart or already consumed)"
+        );
         return invalid_state_response();
     };
     if in_flight.upstream_id != upstream_id {
@@ -211,12 +228,14 @@ async fn complete_oauth(
     let credentials = match complete_pkce_flow(
         handshake,
         payload.code,
+        payload.state_token.clone(),
         Arc::new(HyperOAuthHttpClient::new()),
     )
     .await
     {
         Ok(credentials) => credentials,
-        Err(_) => {
+        Err(error) => {
+            tracing::warn!(%upstream_id, %error, "oauth complete: token exchange rejected by provider");
             return (
                 StatusCode::BAD_REQUEST,
                 Json(json!({ "error": "invalid_grant" })),
@@ -224,6 +243,10 @@ async fn complete_oauth(
                 .into_response();
         }
     };
+
+    if let Ok(mut flows) = pkce_flows().lock() {
+        flows.remove(&payload.state_token);
+    }
 
     let access_token_fingerprint = access_token_fingerprint(&credentials.access_token);
     let bundle = OAuthTokenBundle {
@@ -375,4 +398,19 @@ fn now_unix_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn claude_code_default_oauth() -> AnthropicOAuthConfig {
+    AnthropicOAuthConfig {
+        client_id: "9d1c250a-e61b-44d9-88ed-5944d1962f5e".to_owned(),
+        auth_url: Url::parse("https://claude.ai/oauth/authorize").expect("valid url"),
+        token_url: Url::parse("https://console.anthropic.com/v1/oauth/token").expect("valid url"),
+        redirect_uri: Url::parse("https://console.anthropic.com/oauth/code/callback")
+            .expect("valid url"),
+        scopes: vec![
+            "org:create_api_key".to_owned(),
+            "user:profile".to_owned(),
+            "user:inference".to_owned(),
+        ],
+    }
 }

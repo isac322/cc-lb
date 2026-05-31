@@ -239,10 +239,17 @@ export interface SummaryTotals {
   request_count: number;
   input_tokens: number;
   output_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
   error_count: number;
   error_rate: number;
   virtual_cost_micros: number;
   avg_latency_ms: number;
+  avg_proxy_setup_ms: number;
+  avg_shape_ms: number;
+  avg_sign_ms: number;
+  avg_upstream_ttfb_ms: number;
+  avg_upstream_body_ms: number;
 }
 
 export interface UsageBucket {
@@ -250,10 +257,24 @@ export interface UsageBucket {
   request_count: number;
   input_tokens: number;
   output_tokens: number;
+  cache_creation_input_tokens: number;
+  cache_read_input_tokens: number;
   error_count: number;
   virtual_cost_micros: number;
   latency_ms_sum: number;
   latency_count: number;
+  latency_ms_min?: number;
+  latency_ms_max?: number;
+  proxy_setup_ms_sum: number;
+  proxy_setup_ms_count: number;
+  shape_ms_sum: number;
+  shape_ms_count: number;
+  sign_ms_sum: number;
+  sign_ms_count: number;
+  upstream_ttfb_ms_sum: number;
+  upstream_ttfb_ms_count: number;
+  upstream_body_ms_sum: number;
+  upstream_body_ms_count: number;
 }
 
 export interface Sparkline {
@@ -288,15 +309,26 @@ export interface DashboardUsageResponse {
 
 export interface RequestEvent {
   ts: number;
+  ts_ms?: number;
   request_id: string;
   principal_id?: string;
+  key_id?: string;
   principal_kind?: string;
   upstream?: string;
+  upstream_name?: string;
   model?: string;
   status: number;
   input_tokens?: number;
   output_tokens?: number;
+  cache_creation_input_tokens?: number;
+  cache_read_input_tokens?: number;
+  cost_usd_micros?: number;
   duration_ms: number;
+  proxy_setup_ms?: number;
+  shape_ms?: number;
+  sign_ms?: number;
+  upstream_ttfb_ms?: number;
+  upstream_body_ms?: number;
   error_code?: string;
 }
 
@@ -308,7 +340,7 @@ export interface RecentEventsPayload {
 }
 
 export function useDashboardConnection() {
-  const [state, setState] = useState<ConnectionState>('disconnected');
+  const [state, setState] = useState<ConnectionState>('reconnecting');
 
   useEffect(() => {
     let closeStream: (() => void) | null = null;
