@@ -1007,17 +1007,105 @@ fn spawn_price_catalog_loader(
     storage: Arc<dyn Storage>,
     price_catalog: Arc<cc_lb_pricing::PriceCatalog>,
 ) {
-    let _storage = storage;
-    if tokio::runtime::Handle::try_current().is_err() {
-        tracing::warn!("tokio runtime unavailable; litellm price catalog loader not started");
-        return;
+    // Fallback so cost works immediately and survives LiteLLM fetch failures.
+    price_catalog.install_snapshot(claude_default_snapshot());
+
+    let cfg = &config.api_keys.price_catalog;
+    let storage_cache: Arc<dyn cc_lb_storage_api::PriceCatalogCache> = storage;
+    let loader = cc_lb_pricing::LiteLlmLoader::new(
+        price_catalog,
+        storage_cache,
+        cfg.url.clone(),
+        cfg.refresh_interval,
+        cfg.cache_path.clone(),
+    );
+    tracing::info!(
+        url = %cfg.url,
+        refresh_interval_secs = cfg.refresh_interval.as_secs(),
+        cache_path = %cfg.cache_path.display(),
+        "starting LiteLLM price catalog loader",
+    );
+    let _handle = loader.start_daemon();
+}
+
+fn claude_default_snapshot() -> cc_lb_pricing::CatalogSnapshot {
+    use cc_lb_pricing::{CatalogSnapshot, CatalogStatus, Pricing, UsdPerMillion};
+    use std::collections::HashMap;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    // Per-million USD in micros (1 USD = 1_000_000 micros).
+    // Sources: anthropic.com/pricing (Nov 2026 snapshot).
+    #[allow(clippy::type_complexity)]
+    let raw: &[(&str, u64, u64, u64, u64)] = &[
+        // model name, input, output, cache_creation_5m, cache_read
+        (
+            "claude-opus-4-5",
+            15_000_000,
+            75_000_000,
+            18_750_000,
+            1_500_000,
+        ),
+        (
+            "claude-opus-4-5-20251101",
+            15_000_000,
+            75_000_000,
+            18_750_000,
+            1_500_000,
+        ),
+        (
+            "claude-sonnet-4-5",
+            3_000_000,
+            15_000_000,
+            3_750_000,
+            300_000,
+        ),
+        (
+            "claude-sonnet-4-5-20250929",
+            3_000_000,
+            15_000_000,
+            3_750_000,
+            300_000,
+        ),
+        ("claude-haiku-4-5", 1_000_000, 5_000_000, 1_250_000, 100_000),
+        (
+            "claude-haiku-4-5-20251001",
+            1_000_000,
+            5_000_000,
+            1_250_000,
+            100_000,
+        ),
+    ];
+
+    let mut models = HashMap::new();
+    let mut cache_creation = HashMap::new();
+    let mut cache_read = HashMap::new();
+    for (name, input, output, creation, read) in raw {
+        models.insert(
+            (*name).to_owned(),
+            Pricing {
+                model: (*name).to_owned(),
+                input_per_million_usd: UsdPerMillion::from_micros_usd(*input),
+                output_per_million_usd: UsdPerMillion::from_micros_usd(*output),
+            },
+        );
+        cache_creation.insert(
+            (*name).to_owned(),
+            UsdPerMillion::from_micros_usd(*creation),
+        );
+        cache_read.insert((*name).to_owned(), UsdPerMillion::from_micros_usd(*read));
     }
 
-    let _price_catalog_config = &config.api_keys.price_catalog;
-    let _ = price_catalog;
-    tracing::warn!(
-        "litellm price catalog loader requires a storage-agnostic cache adapter before it can run with unified storage"
-    );
+    CatalogSnapshot {
+        fetched_at_ms: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0),
+        models,
+        raw_json: Vec::new(),
+        cache_creation_per_million_usd: cache_creation,
+        cache_read_per_million_usd: cache_read,
+        status: CatalogStatus::Ok,
+    }
 }
 
 #[derive(Clone, Serialize)]

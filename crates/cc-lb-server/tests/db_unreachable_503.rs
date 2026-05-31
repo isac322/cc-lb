@@ -239,6 +239,7 @@ async fn reset_managed_key_tables(database_url: &str) -> TestResult<()> {
     Ok(())
 }
 
+#[allow(clippy::field_reassign_with_default)]
 fn test_config(database_url: &str) -> Config {
     let mut config = Config::default();
     config.storage = StorageConfig::Postgres {

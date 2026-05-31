@@ -38,6 +38,10 @@ impl UsdPerMillion {
         Self(whole_usd * 1_000_000)
     }
 
+    pub const fn from_micros_usd(micros_usd: u64) -> Self {
+        Self(micros_usd)
+    }
+
     pub const fn as_micros_usd(self) -> u64 {
         self.0
     }

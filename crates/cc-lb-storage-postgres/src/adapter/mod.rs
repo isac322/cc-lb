@@ -13,6 +13,7 @@ pub mod meta;
 pub mod notifier;
 pub mod oauth_credentials;
 pub mod plugin_registry;
+pub mod price_catalog;
 pub mod principals;
 pub mod quota;
 pub mod request_events;

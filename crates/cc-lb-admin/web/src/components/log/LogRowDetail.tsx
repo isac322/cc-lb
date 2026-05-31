@@ -1,4 +1,5 @@
 import type { RequestEvent } from '../../lib/api';
+import { formatNumber } from '../../lib/format';
 import { Button } from '../primitives/Button';
 import { eventTimestampMs } from './LogTable';
 
@@ -39,17 +40,25 @@ export function LogRowDetail({
       <div className="grid grid-cols-5 gap-x-4 gap-y-2 text-xs mt-4 pt-3 border-t border-graphite-700/40">
         <Field
           label="Input"
-          value={event.input_tokens !== undefined ? String(event.input_tokens) : '-'}
+          value={
+            event.input_tokens !== undefined
+              ? formatNumber(event.input_tokens)
+              : '-'
+          }
         />
         <Field
           label="Output"
-          value={event.output_tokens !== undefined ? String(event.output_tokens) : '-'}
+          value={
+            event.output_tokens !== undefined
+              ? formatNumber(event.output_tokens)
+              : '-'
+          }
         />
         <Field
           label="Cache Creation"
           value={
             event.cache_creation_input_tokens !== undefined
-              ? String(event.cache_creation_input_tokens)
+              ? formatNumber(event.cache_creation_input_tokens)
               : '-'
           }
         />
@@ -57,7 +66,7 @@ export function LogRowDetail({
           label="Cache Read"
           value={
             event.cache_read_input_tokens !== undefined
-              ? String(event.cache_read_input_tokens)
+              ? formatNumber(event.cache_read_input_tokens)
               : '-'
           }
         />
@@ -109,19 +118,19 @@ function LatencyBreakdown({ event }: { event: RequestEvent }) {
     {
       label: 'Proxy Setup',
       ms: event.proxy_setup_ms ?? 0,
-      color: 'bg-emerald-600',
+      color: 'bg-slate-400',
     },
-    { label: 'Shape', ms: event.shape_ms ?? 0, color: 'bg-cyan-600' },
-    { label: 'Sign', ms: event.sign_ms ?? 0, color: 'bg-sky-600' },
+    { label: 'Shape', ms: event.shape_ms ?? 0, color: 'bg-teal-500' },
+    { label: 'Sign', ms: event.sign_ms ?? 0, color: 'bg-indigo-500' },
     {
       label: 'Upstream TTFB',
       ms: event.upstream_ttfb_ms ?? 0,
-      color: 'bg-purple-600',
+      color: 'bg-amber-500',
     },
     {
       label: 'Upstream Body',
       ms: event.upstream_body_ms ?? 0,
-      color: 'bg-fuchsia-600',
+      color: 'bg-rose-500',
     },
   ];
   const measured = stages.reduce((acc, s) => acc + s.ms, 0);
@@ -142,9 +151,9 @@ function LatencyBreakdown({ event }: { event: RequestEvent }) {
                 key={s.label}
                 className={`${s.color} flex items-center justify-center text-[9px] text-graphite-50 font-mono overflow-hidden`}
                 style={{ width: `${pct}%` }}
-                title={`${s.label}: ${s.ms}ms (${pct.toFixed(1)}%)`}
+                title={`${s.label}: ${formatNumber(s.ms)}ms (${pct.toFixed(1)}%)`}
               >
-                {pct > 12 ? `${s.ms}ms` : ''}
+                {pct > 12 ? `${formatNumber(s.ms)}ms` : ''}
               </div>
             );
           })}
@@ -157,7 +166,7 @@ function LatencyBreakdown({ event }: { event: RequestEvent }) {
           )}
         </div>
         <div className="text-[10px] text-graphite-300 font-mono w-12 shrink-0 text-right">
-          {total}ms
+          {formatNumber(total)}ms
         </div>
       </div>
       <div className="grid grid-cols-5 gap-x-4 gap-y-1 text-xs">
@@ -165,7 +174,7 @@ function LatencyBreakdown({ event }: { event: RequestEvent }) {
           <Field
             key={s.label}
             label={s.label}
-            value={`${s.ms}ms`}
+            value={`${formatNumber(s.ms)}ms`}
           />
         ))}
       </div>

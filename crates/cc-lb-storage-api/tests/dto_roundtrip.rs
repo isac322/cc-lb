@@ -1,14 +1,14 @@
 #![cfg(feature = "dto-roundtrip")]
 
 use cc_lb_storage_api::principal::{Limit, LimitKind};
+use cc_lb_storage_api::types::UpstreamKind;
 use cc_lb_storage_api::types::{Limit as TypesLimit, LimitKind as TypesLimitKind};
 use cc_lb_storage_api::{
     AnthropicApiKeyCredential, ApiKeyRecord, AuditEntry, BackendKind, BucketKind, ConfigDraftState,
     HistoryEntry, HistorySummary, IssuedKey, KeyStatus, OAuthCredentials, PrincipalCreate,
     PrincipalKind, PrincipalKindLite, PrincipalLimitIdentityKind, PrincipalLimitKind,
     PrincipalLimitState, RequestEvent, RequestEventUpstream, StorageError, StoredApiKeyRecord,
-    StoredHistoryEntry, UpstreamKind, UsageRollup, UsageRollupKey, UsageRollupResolution,
-    UsageRollupRun,
+    StoredHistoryEntry, UsageRollup, UsageRollupKey, UsageRollupResolution, UsageRollupRun,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -194,11 +194,23 @@ backend = 'redb'"
         request_count: 4,
         input_tokens: 500,
         output_tokens: 240,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
         error_count: 1,
         latency_count: 4,
         latency_ms_sum: 1_000,
         latency_ms_min: Some(100),
         latency_ms_max: Some(450),
+        proxy_setup_ms_count: 0,
+        proxy_setup_ms_sum: 0,
+        shape_ms_count: 0,
+        shape_ms_sum: 0,
+        sign_ms_count: 0,
+        sign_ms_sum: 0,
+        upstream_ttfb_ms_count: 0,
+        upstream_ttfb_ms_sum: 0,
+        upstream_body_ms_count: 0,
+        upstream_body_ms_sum: 0,
         virtual_cost_micros: 123_456,
     });
     assert_json_roundtrip(UsageRollupRun {

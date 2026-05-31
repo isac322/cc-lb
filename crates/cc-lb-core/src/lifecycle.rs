@@ -900,18 +900,37 @@ impl Lifecycle {
                 response_status,
                 Instant::now() - duration,
                 stream_hooks,
+                active_limit.take(),
+                metric_context.clone(),
+                event_ctx.clone(),
             );
-            self.attach_limit_headers(&mut response, active_limit.as_ref());
+            self.attach_limit_headers(&mut response, None);
             return response;
         }
 
-        let (mut parts, body) = response.into_parts();
+        let (mut parts, mut body) = response.into_parts();
         let body_collect_started = Instant::now();
-        let body = match body.collect().await {
-            Ok(collected) => collected.to_bytes(),
-            Err(_source) => Bytes::new(),
-        };
+        let mut first_body_chunk_at: Option<Instant> = None;
+        let mut body_buf: Vec<u8> = Vec::new();
+        let mut body_chunk_count: u64 = 0;
+        while let Some(frame) = body.frame().await {
+            match frame {
+                Ok(frame) => {
+                    if let Ok(data) = frame.into_data() {
+                        if first_body_chunk_at.is_none() {
+                            first_body_chunk_at = Some(Instant::now());
+                        }
+                        body_chunk_count = body_chunk_count.saturating_add(1);
+                        body_buf.extend_from_slice(&data);
+                    }
+                }
+                Err(_source) => break,
+            }
+        }
+        let body = Bytes::from(body_buf);
         let body_collect_ms = duration_to_ms(body_collect_started.elapsed());
+        let first_body_chunk_ms = first_body_chunk_at
+            .map(|t| duration_to_ms(t.saturating_duration_since(body_collect_started)));
         tracing::info!(
             request_id = %event_ctx.request_id,
             status = status.as_u16(),
@@ -919,7 +938,10 @@ impl Lifecycle {
             shape_ms = ?event_ctx.stage_timings.shape_ms,
             sign_ms = ?event_ctx.stage_timings.sign_ms,
             upstream_ttfb_ms = ?event_ctx.stage_timings.upstream_ttfb_ms,
+            first_body_chunk_ms = ?first_body_chunk_ms,
             upstream_body_ms = body_collect_ms,
+            body_chunk_count = body_chunk_count,
+            body_bytes = body.len(),
             total_ms = duration_to_ms(duration),
             "request latency breakdown"
         );
@@ -985,6 +1007,9 @@ impl Lifecycle {
                 sign_ms: event_ctx.stage_timings.sign_ms,
                 upstream_ttfb_ms: event_ctx.stage_timings.upstream_ttfb_ms,
                 upstream_body_ms: Some(body_collect_ms),
+                first_body_chunk_ms,
+                body_chunk_count: Some(body_chunk_count),
+                body_bytes: Some(body.len() as u64),
                 status: status.as_u16(),
                 ..Default::default()
             };
@@ -1173,27 +1198,76 @@ impl Lifecycle {
         Ok(response)
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn relay_response(
         &self,
         response: Response<Body>,
         status: StatusCode,
         started: Instant,
         hooks: StreamHooks,
+        active_limit: Option<ActiveLimit>,
+        metric_context: ApiKeyMetricContext,
+        event_ctx: RequestEventContext,
     ) -> Response<Body> {
         let (mut parts, mut body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
+        let relay_start = Instant::now();
+        let storage = self.request_event_storage.clone();
+        let limit_engine = self.limit_engine.clone();
         let stream = async_stream::stream! {
             let mut batch_index = 0_u64;
             let mut buffer: Vec<u8> = Vec::new();
             let mut usage = UsageCounts::default();
+            let mut first_chunk_at: Option<Instant> = None;
+            let mut last_chunk_at: Option<Instant> = None;
+            let mut message_start_at: Option<Instant> = None;
+            let mut content_block_start_at: Option<Instant> = None;
+            let mut first_content_delta_at: Option<Instant> = None;
+            let mut last_content_delta_at: Option<Instant> = None;
+            let mut message_stop_at: Option<Instant> = None;
+            let mut sse_event_count: u64 = 0;
+            let mut content_delta_count: u64 = 0;
+            let mut ping_count: u64 = 0;
+            let mut total_bytes: u64 = 0;
             while let Some(frame) = body.frame().await {
                 match frame {
                     Ok(frame) => {
                         if let Ok(data) = frame.into_data() {
+                            let now = Instant::now();
+                            if first_chunk_at.is_none() {
+                                first_chunk_at = Some(now);
+                            }
+                            last_chunk_at = Some(now);
+                            total_bytes = total_bytes.saturating_add(data.len() as u64);
                             buffer.extend_from_slice(&data);
                             while let Some(end) = sse_relay::find_sse_event_end(&buffer) {
                                 let raw = buffer.drain(..end).collect::<Vec<u8>>();
                                 accumulate_sse_usage(&raw, &mut usage);
+                                sse_event_count = sse_event_count.saturating_add(1);
+                                match sse_event_name(&raw) {
+                                    Some(b"message_start") if message_start_at.is_none() => {
+                                        message_start_at = Some(now);
+                                    }
+                                    Some(b"content_block_start")
+                                        if content_block_start_at.is_none() =>
+                                    {
+                                        content_block_start_at = Some(now);
+                                    }
+                                    Some(b"content_block_delta") => {
+                                        if first_content_delta_at.is_none() {
+                                            first_content_delta_at = Some(now);
+                                        }
+                                        last_content_delta_at = Some(now);
+                                        content_delta_count = content_delta_count.saturating_add(1);
+                                    }
+                                    Some(b"message_stop") => {
+                                        message_stop_at = Some(now);
+                                    }
+                                    Some(b"ping") => {
+                                        ping_count = ping_count.saturating_add(1);
+                                    }
+                                    _ => {}
+                                }
                             }
                             observe_many(hooks.as_slice(), ObserveEvent::Chunk {
                                 batch_index,
@@ -1212,15 +1286,127 @@ impl Lifecycle {
             } else {
                 (None, None)
             };
+            let elapsed_ms = |to: Option<Instant>| {
+                to.map(|t| duration_to_ms(t.saturating_duration_since(relay_start)))
+            };
+            let stream_total_ms = duration_to_ms(relay_start.elapsed());
+            let inter_token_avg_ms = match (first_content_delta_at, last_content_delta_at) {
+                (Some(first), Some(last)) if content_delta_count > 1 => {
+                    let span = last.saturating_duration_since(first);
+                    Some(duration_to_ms(span) / (content_delta_count - 1))
+                }
+                _ => None,
+            };
+            tracing::info!(
+                status = status.as_u16(),
+                stream_first_chunk_ms = ?elapsed_ms(first_chunk_at),
+                stream_message_start_ms = ?elapsed_ms(message_start_at),
+                stream_content_block_start_ms = ?elapsed_ms(content_block_start_at),
+                stream_first_content_delta_ms = ?elapsed_ms(first_content_delta_at),
+                stream_last_content_delta_ms = ?elapsed_ms(last_content_delta_at),
+                stream_message_stop_ms = ?elapsed_ms(message_stop_at),
+                stream_last_chunk_ms = ?elapsed_ms(last_chunk_at),
+                stream_total_ms = stream_total_ms,
+                sse_event_count = sse_event_count,
+                content_delta_count = content_delta_count,
+                ping_count = ping_count,
+                inter_token_avg_ms = ?inter_token_avg_ms,
+                total_bytes = total_bytes,
+                "stream latency breakdown"
+            );
+            let total_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+            if let Some(mut active_limit) = active_limit {
+                let cost_micros = if usage.present {
+                    let cost_model = active_limit.request.model.as_str();
+                    let pricing_upstream_kind = active_limit
+                        .upstream_kind
+                        .or(metric_context.pricing_upstream_kind);
+                    let cost = virtual_cost_micros_full(
+                        cost_model,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        usage.cache_creation_input_tokens,
+                        usage.cache_read_input_tokens,
+                        pricing_upstream_kind,
+                    )
+                    .micros_usd
+                    .unwrap_or(0);
+                    record_api_key_usage_metrics(&metric_context, &usage, cost);
+                    cost
+                } else {
+                    0
+                };
+                if let Some(storage) = storage.as_ref() {
+                    let now_ms = unix_now_ms();
+                    let event = RequestEvent {
+                        ts: now_ms / 1_000,
+                        ts_ms: Some(now_ms),
+                        request_id: event_ctx.request_id.clone(),
+                        principal_id: Some(active_limit.subject.principal_id.clone()),
+                        key_id: Some(active_limit.subject.key_id.clone()),
+                        principal_kind: event_ctx.principal_kind.clone(),
+                        upstream_name: event_ctx.upstream_name.clone(),
+                        model: Some(active_limit.request.model.clone()),
+                        input_tokens: Some(usage.input_tokens),
+                        output_tokens: Some(usage.output_tokens),
+                        cache_creation_input_tokens: Some(usage.cache_creation_input_tokens),
+                        cache_read_input_tokens: Some(usage.cache_read_input_tokens),
+                        cost_usd_micros: Some(cost_micros as i64),
+                        duration_ms: total_duration_ms,
+                        proxy_setup_ms: event_ctx.proxy_setup_ms,
+                        shape_ms: event_ctx.stage_timings.shape_ms,
+                        sign_ms: event_ctx.stage_timings.sign_ms,
+                        upstream_ttfb_ms: event_ctx.stage_timings.upstream_ttfb_ms,
+                        upstream_body_ms: Some(stream_total_ms),
+                        first_body_chunk_ms: elapsed_ms(first_chunk_at),
+                        body_chunk_count: Some(batch_index),
+                        body_bytes: Some(total_bytes),
+                        stream_message_start_ms: elapsed_ms(message_start_at),
+                        stream_content_block_start_ms: elapsed_ms(content_block_start_at),
+                        stream_first_content_delta_ms: elapsed_ms(first_content_delta_at),
+                        stream_last_content_delta_ms: elapsed_ms(last_content_delta_at),
+                        stream_message_stop_ms: elapsed_ms(message_stop_at),
+                        stream_last_chunk_ms: elapsed_ms(last_chunk_at),
+                        stream_total_ms: Some(stream_total_ms),
+                        sse_event_count: Some(sse_event_count),
+                        content_delta_count: Some(content_delta_count),
+                        ping_count: Some(ping_count),
+                        inter_token_avg_ms,
+                        status: status.as_u16(),
+                        ..Default::default()
+                    };
+                    if let Err(error) = storage.append_request_event(&event).await {
+                        tracing::warn!(%error, "failed to append streaming request event");
+                    }
+                }
+                if let (Some(limit_engine), Some(reservation)) =
+                    (limit_engine.as_ref(), active_limit.reservation.take())
+                {
+                    limit_engine.reconcile(
+                        reservation,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        cost_micros as i64,
+                    );
+                }
+            }
             observe_many(hooks.as_slice(), ObserveEvent::RequestFinished {
                 status,
                 input_tokens,
                 output_tokens,
-                duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                duration_ms: total_duration_ms,
             });
         };
         Response::from_parts(parts, Body::from_stream(stream))
     }
+}
+
+fn sse_event_name(raw_event: &[u8]) -> Option<&[u8]> {
+    raw_event
+        .split(|b| *b == b'\n')
+        .filter_map(|line| line.strip_prefix(b"event:"))
+        .map(|name| name.trim_ascii())
+        .next()
 }
 
 pub fn observe_rate_limits(
@@ -1435,6 +1621,7 @@ struct ActiveLimit {
     reservation: Option<LimitReservation>,
 }
 
+#[derive(Clone)]
 struct RequestEventContext {
     request_id: String,
     upstream_name: Option<String>,
@@ -1469,6 +1656,7 @@ struct UsageCounts {
     cache_read_input_tokens: u64,
 }
 
+#[derive(Clone)]
 struct ApiKeyMetricContext {
     key_id: String,
     principal_id: String,
