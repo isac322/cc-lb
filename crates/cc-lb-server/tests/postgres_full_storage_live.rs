@@ -227,6 +227,7 @@ async fn build_postgres_app(
     .await?)
 }
 
+#[allow(clippy::field_reassign_with_default)]
 fn test_config(database_url: &str, upstream_addr: SocketAddr) -> TestResult<Config> {
     let mut config = Config::default();
     config.storage = StorageConfig::Postgres {

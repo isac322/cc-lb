@@ -329,6 +329,20 @@ export interface RequestEvent {
   sign_ms?: number;
   upstream_ttfb_ms?: number;
   upstream_body_ms?: number;
+  first_body_chunk_ms?: number;
+  body_chunk_count?: number;
+  body_bytes?: number;
+  stream_message_start_ms?: number;
+  stream_content_block_start_ms?: number;
+  stream_first_content_delta_ms?: number;
+  stream_last_content_delta_ms?: number;
+  stream_message_stop_ms?: number;
+  stream_last_chunk_ms?: number;
+  stream_total_ms?: number;
+  sse_event_count?: number;
+  content_delta_count?: number;
+  ping_count?: number;
+  inter_token_avg_ms?: number;
   error_code?: string;
 }
 
