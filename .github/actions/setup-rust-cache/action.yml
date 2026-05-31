@@ -1,0 +1,45 @@
+name: Setup Rust cache
+description: Restore Cargo caches and enable persisted sccache compiler artifacts.
+
+inputs:
+  rust-cache-key:
+    description: Extra key segment for Swatinem/rust-cache.
+    required: false
+    default: ""
+  cache-targets:
+    description: Whether Swatinem/rust-cache should restore/save target directories.
+    required: false
+    default: "true"
+
+runs:
+  using: composite
+  steps:
+    - name: Run sccache-cache
+      id: sccache-setup
+      uses: mozilla-actions/sccache-action@v0.0.10
+      continue-on-error: true
+
+    - name: Restore sccache directory
+      if: steps.sccache-setup.outcome == 'success'
+      uses: actions/cache@v5
+      with:
+        path: .sccache
+        key: sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-
+          sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
+          sccache-${{ runner.os }}-${{ runner.arch }}-
+
+    - name: Export Rust compiler cache env
+      if: steps.sccache-setup.outcome == 'success'
+      shell: bash
+      run: |
+        echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_DIR=$GITHUB_WORKSPACE/.sccache" >> "$GITHUB_ENV"
+
+    - uses: Swatinem/rust-cache@v2
+      with:
+        cache-on-failure: true
+        cache-targets: ${{ inputs.cache-targets }}
+        key: ${{ inputs.rust-cache-key }}
