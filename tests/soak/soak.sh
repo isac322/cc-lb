@@ -255,7 +255,7 @@ seed_runtime
 printf 'unix_time,rss_kib\n' > "$CSV_PATH"
 sample_rss
 
-cargo run --release -q -p cc-lb-loadgen --bin cc-lb-loadgen -- \
+"$ROOT_DIR/target/release/cc-lb-loadgen" \
   --mode non-streaming \
   --direct-url "http://127.0.0.1:$fake_port/v1/messages" \
   --proxy-url "http://127.0.0.1:$proxy_port/v1/messages" \
