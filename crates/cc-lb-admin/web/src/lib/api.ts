@@ -1,4 +1,3 @@
-import { useEffect, useState } from 'react';
 import { getAdminToken } from './auth';
 
 export class ApiError extends Error {
@@ -353,56 +352,7 @@ export interface RecentEventsPayload {
   limit: number;
 }
 
-export function useDashboardConnection() {
-  const [state, setState] = useState<ConnectionState>('reconnecting');
-
-  useEffect(() => {
-    let closeStream: (() => void) | null = null;
-    let retryTimeout: ReturnType<typeof setTimeout>;
-
-    function connect() {
-      closeStream = streamEventsFetch('/admin/events/stream', {
-        onConnect: () => setState('live'),
-        onEvent: () => {},
-        onError: (err) => {
-          if (err instanceof ApiError && err.status === 401) {
-            setState('auth_required');
-          } else {
-            setState('reconnecting');
-            retryTimeout = setTimeout(connect, 5000);
-          }
-        },
-      });
-    }
-
-    // Initial health check
-    getJson('/admin/health')
-      .then(() => {
-        connect();
-      })
-      .catch((err) => {
-        if (err instanceof ApiError && err.status === 401) {
-          setState('auth_required');
-        } else {
-          setState('disconnected');
-          retryTimeout = setTimeout(connect, 5000);
-        }
-      });
-
-    return () => {
-      if (closeStream) closeStream();
-      clearTimeout(retryTimeout);
-    };
-  }, []);
-
-  return state;
-}
-
-export interface PrincipalListResponse {
-  principals: { id: string }[];
-}
-
-export interface PrincipalLimitSnapshot {
+interface PrincipalLimitSnapshot {
   kind: 'requests' | 'tokens' | 'input_tokens' | 'output_tokens';
   limit: number | null;
   remaining: number | null;
@@ -412,12 +362,12 @@ export interface PrincipalLimitSnapshot {
   observed: boolean;
 }
 
-export interface PrincipalLimitWindow {
+interface PrincipalLimitWindow {
   window: string;
   snapshots: PrincipalLimitSnapshot[];
 }
 
-export interface PrincipalLimitIdentity {
+interface PrincipalLimitIdentity {
   identity_kind: 'account' | 'credential' | 'unobserved';
   identity_value: string | null;
   account_observed: boolean;
@@ -430,56 +380,7 @@ export interface PrincipalLimitsResponse {
   identities: PrincipalLimitIdentity[];
 }
 
-export interface QuotasConfig {
-  default_window_secs: number;
-  default_requests_per_window: number;
-  default_input_tokens: number;
-  default_output_tokens: number;
-}
-
-export interface PrincipalRuntimeSpec {
-  quotas?: QuotasConfig;
-  disabled?: boolean;
-  allowed_models: string[];
-  credentials_ref?: string;
-}
-
-export interface CreatePrincipalRequest {
-  id: string;
-  spec: PrincipalRuntimeSpec;
-}
-
-export interface UpdatePrincipalRequest {
-  spec: PrincipalRuntimeSpec;
-}
-
-export interface AllowedModelsRequest {
-  allowed_models: string[];
-}
-
-export interface IssueKeyRequest {
-  label?: string;
-}
-
-export interface PrincipalMutationResponse {
-  revision: number;
-  principal_id: string;
-}
-
-export interface PrincipalAllowedModelsResponse {
-  revision: number;
-  principal_id: string;
-  allowed_models: string[];
-}
-
-export interface IssueKeyResponse {
-  principal_id: string;
-  key_id: string;
-  plaintext_key: string;
-  issued_at_unix_secs: number;
-}
-
-export interface ApiKeyRecord {
+interface ApiKeyRecord {
   key_id: string;
   label: string | null;
   issued_at_unix_secs: number;
@@ -490,12 +391,7 @@ export interface KeyListResponse {
   keys: ApiKeyRecord[];
 }
 
-export interface RevokeKeyResponse {
-  key_id: string;
-  revoked_at_unix_secs: number;
-}
-
-export interface CredentialEntry {
+interface CredentialEntry {
   principal_id: string;
   provider: string;
   kind: string;
@@ -511,29 +407,6 @@ export interface CredentialsResponse {
   observed: boolean;
 }
 
-export interface RotateCredentialResponse {
-  principal_id: string;
-  provider: string;
-  kind: string;
-  new_key_id: string;
-  revoked_key_id: string | null;
-  plaintext_key: string;
-  issued_at_unix_secs: number;
-}
-
-export interface RevokeCredentialResponse {
-  principal_id: string;
-  provider: string;
-  kind: string;
-  revoked_keys: string[];
-}
-
-export interface QuotaOverrideRequest {
-  requests_per_window?: number;
-  input_tokens_per_window?: number;
-  output_tokens_per_window?: number;
-}
-
 export interface ConfigSchemaResponse {
   schema: Record<string, unknown>;
   coverage_checklist: string[];
@@ -547,50 +420,14 @@ export interface ConfigDraftResponse {
   saved_at_unix_secs: number | null;
 }
 
-export interface PutConfigDraftRequest {
-  draft: Record<string, unknown>;
-  expected_revision: number;
-}
-
-export interface PutConfigDraftResponse {
-  revision: number;
-  saved_at_unix_secs: number;
-}
-
-export interface ValidateConfigDraftRequest {
-  expected_revision: number;
-}
-
-export interface ValidateConfigDraftResponse {
-  valid: boolean;
-  revision: number;
-  error?: string;
-}
-
-export interface ApplyConfigRequest {
-  expected_revision: number;
-}
-
-export interface ApplyConfigResponse {
-  applied_revision: number;
-  applied_at_unix_secs: number;
-}
-
-export interface RestartRequiredField {
-  field: string;
-  current: string;
-  new: string;
-  reason: string;
-}
-
-export interface HistorySummary {
+interface HistorySummary {
   upstreams: number;
   principals: number;
   plugin_count: number;
   tls_enabled: boolean;
 }
 
-export interface ConfigHistoryItem {
+interface ConfigHistoryItem {
   revision: number;
   applied_at_unix_secs: number;
   config_summary: HistorySummary;
@@ -600,49 +437,7 @@ export interface ConfigHistoryResponse {
   history: ConfigHistoryItem[];
 }
 
-export interface ConfigDiffItem {
-  path: string;
-  from: unknown;
-  to: unknown;
-}
-
-export interface ConfigDiffResponse {
-  from: number;
-  to: number;
-  diff: ConfigDiffItem[];
-  truncated_changes_count?: number;
-}
-
-export interface BreakerHealth {
-  state: string;
-  failure_count: number;
-  half_open_in_flight: number;
-  observed: boolean;
-}
-
-export interface BulkheadHealth {
-  max_conns: number;
-  available_permits: number;
-  observed: boolean;
-}
-
-export interface DrainHealth {
-  draining: boolean;
-  in_flight: number;
-}
-
-export interface UpstreamHealthResponse {
-  name: string;
-  kind: string;
-  breaker: BreakerHealth;
-  bulkhead: BulkheadHealth;
-  drain: DrainHealth;
-  killswitch: boolean;
-  last_probe_unix_secs: number | null;
-  error_count_recent: number;
-}
-
-export interface PluginStatusEntry {
+interface PluginStatusEntry {
   slot: string;
   name: string;
   wasm_path: string;
@@ -659,7 +454,7 @@ export interface PluginsStatusResponse {
   plugins: PluginStatusEntry[];
 }
 
-export interface OAuthCredentialStatus {
+interface OAuthCredentialStatus {
   principal_id: string;
   provider: string;
   has_credentials: boolean;
@@ -675,7 +470,7 @@ export interface OAuthStatusResponse {
   observed: boolean;
 }
 
-export interface AuditEntry {
+interface AuditEntry {
   ts: number;
   request_id: string;
   principal_id: string;
@@ -695,6 +490,4 @@ export interface AuditQueryResponse {
   entries: AuditEntry[];
 }
 
-export interface UpstreamListResponse {
-  upstreams: { name: string; kind: string }[];
-}
+
