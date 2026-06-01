@@ -240,9 +240,11 @@ async fn complete_oauth(
             );
         }
     };
+    // Anthropic's callback shows `<code>#<state>`; users may also paste the full callback URL.
+    let code = normalize_oauth_code(&payload.code);
     let credentials = match complete_pkce_flow(
         handshake,
-        payload.code,
+        code,
         payload.state_token.clone(),
         Arc::new(HyperOAuthHttpClient::new()),
     )
@@ -460,6 +462,16 @@ fn now_unix_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn normalize_oauth_code(input: &str) -> String {
+    let trimmed = input.trim();
+    if let Ok(url) = Url::parse(trimmed) {
+        if let Some((_, value)) = url.query_pairs().find(|(k, _)| k == "code") {
+            return value.into_owned();
+        }
+    }
+    trimmed.split('#').next().unwrap_or(trimmed).to_string()
 }
 
 fn claude_code_default_oauth() -> AnthropicOAuthConfig {
