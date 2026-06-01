@@ -13,6 +13,11 @@ fn bad_postgres_url_fatal() {
 kind = "postgres"
 url = "postgres://user:secret@127.0.0.2:65499/testdb"
 
+[listener]
+proxy_addr = "127.0.0.1:0"
+admin_addr = "127.0.0.1:0"
+metrics_addr = "127.0.0.1:0"
+
 [storage.pool]
 acquire_timeout_secs = 3
 

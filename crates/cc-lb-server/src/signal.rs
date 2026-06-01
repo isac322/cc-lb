@@ -71,7 +71,7 @@ async fn run_shutdown(
         let force_closed = drain.mark_force_closed();
         tracing::warn!(
             force_closed,
-            "graceful drain deadline elapsed; force closing in-flight requests"
+            "graceful drain deadline elapsed with proxy request handlers still in flight"
         );
     }
 
