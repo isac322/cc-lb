@@ -44,16 +44,6 @@ jobs:
         with:
           rust-cache-key: postgres-storage-stress
 
-      - name: Install sqlx-cli
-        uses: taiki-e/install-action@v2
-        with:
-          tool: sqlx-cli
-
-      - name: Run Postgres migrations
-        run: sqlx migrate run --source crates/cc-lb-storage-postgres/migrations
-        env:
-          DATABASE_URL: ${{ env.CI_POSTGRES_URL }}
-
       - name: Run Postgres storage stress tests
         run: |
           cargo test -p cc-lb-storage-postgres --features postgres \
