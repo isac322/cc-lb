@@ -92,6 +92,12 @@ pub(crate) fn start_pkce_flow(
         &redirect_uri,
         &challenge,
     );
+    tracing::info!(
+        verifier_len = verifier.secret().len(),
+        verifier_first6 = %verifier.secret().chars().take(6).collect::<String>(),
+        challenge_in_url = %challenge.as_str(),
+        "oauth start: generated PKCE verifier+challenge"
+    );
 
     PkceHandshake {
         authorize_url,
@@ -287,15 +293,24 @@ async fn exchange_pkce_code(
         state_token,
         redirect_uri,
     );
+    let verifier_str = code_verifier.expose_secret();
+    let verifier_challenge = {
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(verifier_str.as_bytes()))
+    };
     tracing::info!(
         token_url = %token_url,
         client_id = %client_id,
         redirect_uri = %redirect_uri,
         code_len = auth_code.len(),
         code_first8 = %auth_code.chars().take(8).collect::<String>(),
-        code_last4 = %auth_code.chars().rev().take(4).collect::<String>().chars().rev().collect::<String>(),
         code_has_hash = auth_code.contains('#'),
         state_len = state_token.len(),
+        verifier_len = verifier_str.len(),
+        verifier_first6 = %verifier_str.chars().take(6).collect::<String>(),
+        verifier_sha256_challenge = %verifier_challenge,
         "oauth complete: posting token exchange to anthropic"
     );
     let response = http
