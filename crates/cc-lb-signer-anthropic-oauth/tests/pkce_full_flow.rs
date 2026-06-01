@@ -34,7 +34,7 @@ async fn pkce_start_and_complete_flow() {
     assert_eq!(creds.refresh_token, "refresh-pkce");
     assert_eq!(http.call_count(), 1);
     let body = http.bodies().pop().expect("request body recorded");
-    assert!(body.contains("grant_type=authorization_code"));
-    assert!(body.contains("code=auth-code"));
-    assert!(body.contains("code_verifier="));
+    assert!(body.contains(r#""grant_type":"authorization_code""#));
+    assert!(body.contains(r#""code":"auth-code""#));
+    assert!(body.contains(r#""code_verifier":"#));
 }

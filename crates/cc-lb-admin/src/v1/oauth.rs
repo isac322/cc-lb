@@ -26,7 +26,7 @@ use uuid::Uuid;
 use super::add_dynamic_rebind_headers;
 use crate::AdminState;
 use crate::oauth_pkce::{
-    HyperOAuthHttpClient, PkceHandshakeState, complete_pkce_flow, start_pkce_flow,
+    HyperOAuthHttpClient, OAuthTokenError, PkceHandshakeState, complete_pkce_flow, start_pkce_flow,
 };
 
 type PkceFlows = Arc<Mutex<HashMap<String, InFlightPkce>>>;
@@ -45,10 +45,14 @@ pub fn router() -> Router<AdminState> {
 #[derive(Deserialize)]
 struct StartRequest {}
 
+// `revision` is echoed so the frontend can refresh its cached `If-Match`
+// before a cancel-cleanup DELETE. start_oauth does not currently mutate
+// the upstream, but the contract stays correct if it ever does.
 #[derive(Serialize)]
 struct StartResponse {
     authorize_url: String,
     state_token: String,
+    revision: u64,
 }
 
 #[derive(Deserialize)]
@@ -99,6 +103,7 @@ async fn start_oauth(
         )
             .into_response();
     }
+    let upstream_revision = upstream.revision;
 
     let config = state.config.current_config();
     let claude_default;
@@ -164,6 +169,7 @@ async fn start_oauth(
     Json(StartResponse {
         authorize_url: handshake_state.authorize_url.to_string(),
         state_token,
+        revision: upstream_revision,
     })
     .into_response()
 }
@@ -177,7 +183,7 @@ async fn complete_oauth(
         Ok(decoded) => decoded,
         Err(_) => {
             tracing::warn!(%upstream_id, "oauth complete: state token failed base64/json decode");
-            return invalid_state_response();
+            return invalid_state_response("state token could not be decoded");
         }
     };
     if decoded.upstream_id != upstream_id {
@@ -186,7 +192,7 @@ async fn complete_oauth(
             state_upstream_id = %decoded.upstream_id,
             "oauth complete: decoded state upstream_id mismatches path"
         );
-        return invalid_state_response();
+        return invalid_state_response("state token does not match this upstream");
     }
     let in_flight = match pkce_flows().lock() {
         Ok(flows) => flows.get(&payload.state_token).cloned(),
@@ -199,10 +205,12 @@ async fn complete_oauth(
             pkce_flows_size = size,
             "oauth complete: state token not in pkce flow store (process restart or already consumed)"
         );
-        return invalid_state_response();
+        return invalid_state_response(
+            "state token expired or already used — restart the OAuth flow",
+        );
     };
     if in_flight.upstream_id != upstream_id {
-        return invalid_state_response();
+        return invalid_state_response("state token does not match this upstream");
     }
 
     let Some(storage) = state.storage.as_ref() else {
@@ -216,18 +224,27 @@ async fn complete_oauth(
     if current.kind != UpstreamKind::AnthropicOauth {
         return (
             StatusCode::BAD_REQUEST,
-            Json(json!({ "error": "wrong_kind" })),
+            Json(json!({
+                "error": "wrong_kind",
+                "detail": "this upstream is not configured for Anthropic OAuth",
+            })),
         )
             .into_response();
     }
 
     let handshake = match in_flight.handshake.into_handshake() {
         Ok(handshake) => handshake,
-        Err(_) => return invalid_state_response(),
+        Err(_) => {
+            return invalid_state_response(
+                "stored PKCE handshake is corrupted — restart the OAuth flow",
+            );
+        }
     };
+    // Anthropic's callback shows `<code>#<state>`; users may also paste the full callback URL.
+    let code = normalize_oauth_code(&payload.code);
     let credentials = match complete_pkce_flow(
         handshake,
-        payload.code,
+        code,
         payload.state_token.clone(),
         Arc::new(HyperOAuthHttpClient::new()),
     )
@@ -236,11 +253,7 @@ async fn complete_oauth(
         Ok(credentials) => credentials,
         Err(error) => {
             tracing::warn!(%upstream_id, %error, "oauth complete: token exchange rejected by provider");
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json!({ "error": "invalid_grant" })),
-            )
-                .into_response();
+            return token_exchange_error_response(error);
         }
     };
 
@@ -320,12 +333,63 @@ fn decode_state(value: &str) -> Result<StateToken, ()> {
     serde_json::from_slice(&bytes).map_err(|_| ())
 }
 
-fn invalid_state_response() -> Response {
+fn invalid_state_response(detail: &str) -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(json!({ "error": "invalid_state" })),
+        Json(json!({ "error": "invalid_state", "detail": detail })),
     )
         .into_response()
+}
+
+fn token_exchange_error_response(error: OAuthTokenError) -> Response {
+    match error {
+        OAuthTokenError::TokenEndpoint {
+            status,
+            code,
+            description,
+        } => {
+            // Pass through Anthropic's structured OAuth2 error code when present,
+            // otherwise default to `invalid_grant` (the most common cause: expired
+            // or already-used authorization code, PKCE mismatch).
+            let error_code = code.clone().unwrap_or_else(|| "invalid_grant".to_owned());
+            let detail = match description.as_deref() {
+                Some(desc) => {
+                    format!("Anthropic rejected the authorization code ({status}): {desc}")
+                }
+                None => match code.as_deref() {
+                    Some(c) => {
+                        format!("Anthropic rejected the authorization code ({status}, {c})")
+                    }
+                    None => format!("Anthropic rejected the authorization code (HTTP {status})"),
+                },
+            };
+            (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": error_code,
+                    "detail": detail,
+                    "provider_status": status.as_u16(),
+                })),
+            )
+                .into_response()
+        }
+        OAuthTokenError::Http { reason } => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": "token_endpoint_unreachable",
+                "detail": format!("Failed to reach Anthropic token endpoint: {reason}"),
+            })),
+        )
+            .into_response(),
+        OAuthTokenError::Json { reason } => (
+            StatusCode::BAD_GATEWAY,
+            Json(json!({
+                "error": "invalid_token_response",
+                "detail": format!("Anthropic returned an unparseable token response: {reason}"),
+            })),
+        )
+            .into_response(),
+    }
 }
 
 fn storage_error_response(error: &StorageError) -> Response {
@@ -398,6 +462,16 @@ fn now_unix_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn normalize_oauth_code(input: &str) -> String {
+    let trimmed = input.trim();
+    if let Ok(url) = Url::parse(trimmed)
+        && let Some((_, value)) = url.query_pairs().find(|(k, _)| k == "code")
+    {
+        return value.into_owned();
+    }
+    trimmed.split('#').next().unwrap_or(trimmed).to_string()
 }
 
 fn claude_code_default_oauth() -> AnthropicOAuthConfig {

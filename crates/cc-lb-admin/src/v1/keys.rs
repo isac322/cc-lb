@@ -44,6 +44,7 @@ struct ApiKeyRecord {
     label: Option<String>,
     issued_at_unix_secs: u64,
     revoked_at_unix_secs: Option<u64>,
+    last_4: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -137,6 +138,7 @@ async fn list_keys(
                     },
                     issued_at_unix_secs: r.issued_at_unix_secs,
                     revoked_at_unix_secs: r.revoked_at_unix_secs,
+                    last_4: r.last_4,
                 });
             }
             Json(KeyListResponse { keys }).into_response()
