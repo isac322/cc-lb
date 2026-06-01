@@ -74,6 +74,20 @@ pub struct UsageRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::{Serialize, de::DeserializeOwned};
+
+    fn bincode_roundtrip<T>(value: &T) -> T
+    where
+        T: Serialize + DeserializeOwned,
+    {
+        let encoded = bincode::serde::encode_to_vec(value, bincode::config::standard())
+            .expect("encode value");
+        let (decoded, consumed) =
+            bincode::serde::decode_from_slice::<T, _>(&encoded, bincode::config::standard())
+                .expect("decode value");
+        assert_eq!(consumed, encoded.len());
+        decoded
+    }
 
     #[test]
     fn limit_bincode_roundtrip() {
@@ -83,8 +97,7 @@ mod tests {
             cap_micros: 123,
         };
 
-        let encoded = bincode::serialize(&value).expect("encode limit");
-        let decoded: Limit = bincode::deserialize(&encoded).expect("decode limit");
+        let decoded: Limit = bincode_roundtrip(&value);
 
         assert_eq!(decoded, value);
     }
@@ -93,8 +106,7 @@ mod tests {
     fn upstream_kind_bincode_roundtrip() {
         let value = UpstreamKind::AnthropicOAuth;
 
-        let encoded = bincode::serialize(&value).expect("encode upstream kind");
-        let decoded: UpstreamKind = bincode::deserialize(&encoded).expect("decode upstream kind");
+        let decoded: UpstreamKind = bincode_roundtrip(&value);
 
         assert_eq!(decoded, value);
     }
@@ -103,8 +115,7 @@ mod tests {
     fn key_status_bincode_roundtrip() {
         let value = KeyStatus::Disabled;
 
-        let encoded = bincode::serialize(&value).expect("encode key status");
-        let decoded: KeyStatus = bincode::deserialize(&encoded).expect("decode key status");
+        let decoded: KeyStatus = bincode_roundtrip(&value);
 
         assert_eq!(decoded, value);
     }
