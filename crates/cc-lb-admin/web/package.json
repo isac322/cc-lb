@@ -19,7 +19,7 @@
     "@fontsource-variable/geist-mono": "5.2.8",
     "@radix-ui/react-popover": "^1.1.15",
     "date-fns": "^4.3.0",
-    "lucide-react": "1.16.0",
+    "lucide-react": "1.17.0",
     "react": "19.2.6",
     "react-dom": "19.2.6",
     "react-router": "7.15.1",
