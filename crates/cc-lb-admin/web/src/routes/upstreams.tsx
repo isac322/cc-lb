@@ -26,6 +26,7 @@ import {
   useOAuthComplete,
   useOAuthStart,
   useOAuthStatus,
+  useStatus,
   useRecentEvents,
   useToggleUpstream,
   useUpdateUpstream,
@@ -50,6 +51,15 @@ function UpstreamsPage() {
   const upstreams = useUpstreams();
   // /admin/usage groups series by upstream.name (not id); join below by name.
   const usage = useUsage('1h', 'minute', 'upstream');
+  // /admin/v1/status reports per-upstream runtime state incl. OAuth binding.
+  const status = useStatus();
+  const statusByUpstreamId = useMemo(() => {
+    const m = new Map<string, { status: string; last_apply_error: string | null }>();
+    for (const u of status.data?.upstreams ?? []) {
+      m.set(u.id, { status: u.status, last_apply_error: u.last_apply_error });
+    }
+    return m;
+  }, [status.data]);
   const [createOpen, setCreateOpen] = useState(false);
   // While an OAuth upstream is created but its /oauth/complete hasn't succeeded
   // yet, the row exists in the DB (we need its id for /oauth/start) but should
@@ -97,6 +107,14 @@ function UpstreamsPage() {
           ) : visibleUpstreams.length ? (
             visibleUpstreams.map((u) => {
               const sparkData = sparkByName.get(u.name) ?? EMPTY_SPARK;
+              const runtimeStatus = statusByUpstreamId.get(u.id);
+              const dotTone = !u.enabled
+                ? 'neutral'
+                : runtimeStatus?.status === 'error'
+                  ? 'danger'
+                  : runtimeStatus?.status === 'active'
+                    ? 'ok'
+                    : 'neutral';
               return (
                 <button
                   key={u.id}
@@ -108,10 +126,11 @@ function UpstreamsPage() {
                       ? 'border-accent/40 bg-accent/5 text-text'
                       : 'border-subtle hover:bg-overlay-3 text-text',
                   )}
+                  title={runtimeStatus?.last_apply_error ?? undefined}
                 >
                   <div className="flex items-center justify-between gap-2 mb-1.5">
                     <div className="flex items-center gap-2 min-w-0">
-                      <span className={cx('status-dot', u.enabled ? 'ok' : 'neutral')} />
+                      <span className={cx('status-dot', dotTone)} />
                       <span className="font-medium text-sm truncate">{u.name}</span>
                     </div>
                     <Badge tone="mono">{u.kind}</Badge>
@@ -184,6 +203,11 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
   const oauthStart = useOAuthStart();
   const oauthComplete = useOAuthComplete();
   const oauthStatusQ = useOAuthStatus();
+  const statusQ = useStatus();
+  const upstreamRuntimeStatus = useMemo(
+    () => statusQ.data?.upstreams.find((u) => u.id === upstream.id) ?? null,
+    [statusQ.data, upstream.id],
+  );
   const [editOpen, setEditOpen] = useState(false);
   const [oauthOpen, setOauthOpen] = useState(false);
   const [oauthState, setOauthState] = useState<{ authorize_url?: string; state_token?: string; code?: string }>({});
@@ -267,15 +291,26 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
         </Card>
 
         {upstream.kind === 'anthropic_oauth' ? (() => {
-          const entry = (oauthStatusQ.data?.credentials ?? []).find(
+          const principalEntry = (oauthStatusQ.data?.credentials ?? []).find(
             (c) => c.principal_id === upstream.id,
           );
-          const badge = entry ? oauthBadge(entry) : null;
+          const runtimeStatus = upstreamRuntimeStatus?.status;
+          const runtimeError = upstreamRuntimeStatus?.last_apply_error ?? null;
+          const hasBoundToken = runtimeStatus === 'active';
+          const badge: OAuthBadge = !upstreamRuntimeStatus
+            ? { tone: 'neutral', label: 'Unknown' }
+            : runtimeStatus === 'error'
+              ? { tone: 'danger', label: 'No credentials' }
+              : hasBoundToken
+                ? principalEntry
+                  ? oauthBadge(principalEntry)
+                  : { tone: 'ok', label: 'Connected' }
+                : { tone: 'neutral', label: 'Pending' };
           return (
             <Card>
               <CardHeader
                 title="OAuth Status"
-                subtitle="Live state from /admin/oauth/status"
+                subtitle={hasBoundToken ? 'Bound on this upstream' : runtimeError ?? 'Not connected'}
                 action={
                   <Button
                     size="sm"
@@ -289,48 +324,56 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
                       });
                     }}
                   >
-                    Connect via OAuth
+                    {hasBoundToken ? 'Reconnect via OAuth' : 'Connect via OAuth'}
                   </Button>
                 }
               />
               <CardBody className="text-sm">
-                {oauthStatusQ.isLoading ? (
+                {statusQ.isLoading ? (
                   <Skeleton className="h-12" />
-                ) : !entry || !badge ? (
+                ) : !hasBoundToken ? (
                   <div className="flex flex-wrap items-center gap-3">
-                    <StatusBadge tone="neutral" label="No credentials" />
+                    <StatusBadge tone={badge.tone} label={badge.label} />
                     <p className="text-xs text-text-faint">
-                      Run "Connect via OAuth" to authorize this upstream.
+                      {runtimeError ?? 'Run "Connect via OAuth" to authorize this upstream.'}
                     </p>
                   </div>
                 ) : (
                   <div className="space-y-3">
                     <div className="flex flex-wrap items-center gap-2">
                       <StatusBadge tone={badge.tone} label={badge.label} />
-                      <span className="text-[11px] text-text-faint font-mono">backend status: {entry.status}</span>
+                      <span className="text-[11px] text-text-faint font-mono">runtime: {runtimeStatus}</span>
                     </div>
-                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                      <div>
-                        <div className="text-[11px] text-text-faint uppercase tracking-wider">Expires</div>
-                        <div className="font-mono mt-0.5">{fmtTsUtc(entry.expires_at_unix_secs)}</div>
-                      </div>
-                      <div>
-                        <div className="text-[11px] text-text-faint uppercase tracking-wider">Refresh token</div>
-                        <div className="mt-0.5">
-                          {entry.refresh_token_present ? 'present' : <span className="text-amber-400">missing</span>}
+                    {principalEntry ? (
+                      <>
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                          <div>
+                            <div className="text-[11px] text-text-faint uppercase tracking-wider">Expires</div>
+                            <div className="font-mono mt-0.5">{fmtTsUtc(principalEntry.expires_at_unix_secs)}</div>
+                          </div>
+                          <div>
+                            <div className="text-[11px] text-text-faint uppercase tracking-wider">Refresh token</div>
+                            <div className="mt-0.5">
+                              {principalEntry.refresh_token_present ? 'present' : <span className="text-amber-400">missing</span>}
+                            </div>
+                          </div>
+                          <div>
+                            <div className="text-[11px] text-text-faint uppercase tracking-wider">Last update</div>
+                            <div className="font-mono mt-0.5">{fmtTsUtc(principalEntry.last_updated_unix_secs)}</div>
+                          </div>
                         </div>
-                      </div>
-                      <div>
-                        <div className="text-[11px] text-text-faint uppercase tracking-wider">Last update</div>
-                        <div className="font-mono mt-0.5">{fmtTsUtc(entry.last_updated_unix_secs)}</div>
-                      </div>
-                    </div>
-                    {entry.scopes.length ? (
-                      <div>
-                        <div className="text-[11px] text-text-faint uppercase tracking-wider">Scopes</div>
-                        <div className="font-mono mt-0.5 break-all text-xs">{entry.scopes.join(', ')}</div>
-                      </div>
-                    ) : null}
+                        {principalEntry.scopes.length ? (
+                          <div>
+                            <div className="text-[11px] text-text-faint uppercase tracking-wider">Scopes</div>
+                            <div className="font-mono mt-0.5 break-all text-xs">{principalEntry.scopes.join(', ')}</div>
+                          </div>
+                        ) : null}
+                      </>
+                    ) : (
+                      <p className="text-xs text-text-faint">
+                        Token is bound on the upstream record. Per-token expiry and scope details are not surfaced on this endpoint yet.
+                      </p>
+                    )}
                   </div>
                 )}
               </CardBody>
