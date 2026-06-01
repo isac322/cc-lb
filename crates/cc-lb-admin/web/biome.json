@@ -1,5 +1,5 @@
 {
-  "$schema": "https://biomejs.dev/schemas/2.4.15/schema.json",
+  "$schema": "https://biomejs.dev/schemas/2.4.16/schema.json",
   "files": {
     "ignoreUnknown": true,
     "includes": [
@@ -11,7 +11,8 @@
       "package.json",
       "tsconfig.json",
       "tsconfig.app.json",
-      "tsconfig.node.json"
+      "tsconfig.node.json",
+      "!src/routeTree.gen.ts"
     ]
   },
   "formatter": {
