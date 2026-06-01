@@ -131,8 +131,9 @@ fn authorize_url(
 ) -> Url {
     {
         let mut query = endpoint.query_pairs_mut();
-        query.append_pair("response_type", "code");
+        query.append_pair("code", "true");
         query.append_pair("client_id", client_id.as_str());
+        query.append_pair("response_type", "code");
         query.append_pair("redirect_uri", redirect_uri.as_str());
         query.append_pair("code_challenge", challenge.as_str());
         query.append_pair("code_challenge_method", challenge.method().as_str());
@@ -285,6 +286,17 @@ async fn exchange_pkce_code(
         auth_code,
         state_token,
         redirect_uri,
+    );
+    tracing::info!(
+        token_url = %token_url,
+        client_id = %client_id,
+        redirect_uri = %redirect_uri,
+        code_len = auth_code.len(),
+        code_first8 = %auth_code.chars().take(8).collect::<String>(),
+        code_last4 = %auth_code.chars().rev().take(4).collect::<String>().chars().rev().collect::<String>(),
+        code_has_hash = auth_code.contains('#'),
+        state_len = state_token.len(),
+        "oauth complete: posting token exchange to anthropic"
     );
     let response = http
         .post_token(OAuthTokenRequest {
