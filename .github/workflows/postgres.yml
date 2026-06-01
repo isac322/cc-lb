@@ -63,6 +63,7 @@ jobs:
           rust-cache-key: postgres-integration
 
       - name: Check workspace feature combinations
+        if: github.event_name != 'pull_request'
         run: |
           cargo check --workspace --all-features
           cargo check --workspace --no-default-features
