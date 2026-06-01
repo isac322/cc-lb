@@ -1,13 +1,14 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
+import { Filter, RefreshCw, X } from 'lucide-react';
 import { useState } from 'react';
 import { z } from 'zod';
-import { Filter, RefreshCw, X } from 'lucide-react';
 import {
   Badge,
   Button,
   Card,
   CardBody,
   CardHeader,
+  cx,
   EmptyState,
   Field,
   INPUT_CLASS,
@@ -15,10 +16,9 @@ import {
   PageContainer,
   Section,
   Skeleton,
-  cx,
 } from '../components/ui/primitives';
-import { useAudit, usePrincipals, useUpstreams } from '../lib/queries';
 import { eventTime } from '../lib/api';
+import { useAudit, usePrincipals, useUpstreams } from '../lib/queries';
 
 const auditSearchSchema = z.object({
   principal_id: z.string().optional(),
@@ -70,7 +70,11 @@ function AuditPage() {
         subtitle={`${rows.length} entries · ${activeFilterCount ? `${activeFilterCount} filter${activeFilterCount > 1 ? 's' : ''} active` : 'unfiltered'}`}
         action={
           <div className="flex items-center gap-2">
-            <Button size="sm" iconLeft={<RefreshCw className="w-3 h-3" />} onClick={() => audit.refetch()}>
+            <Button
+              size="sm"
+              iconLeft={<RefreshCw className="w-3 h-3" />}
+              onClick={() => audit.refetch()}
+            >
               Refresh
             </Button>
           </div>
@@ -80,7 +84,7 @@ function AuditPage() {
           <div className="p-3 border-b border-subtle flex flex-wrap gap-3 items-end">
             <Field label="Principal">
               <select
-                className={INPUT_CLASS + ' w-44'}
+                className={`${INPUT_CLASS} w-44`}
                 value={filters.principal_id ?? ''}
                 onChange={(e) => setFilter('principal_id', e.target.value)}
               >
@@ -94,7 +98,7 @@ function AuditPage() {
             </Field>
             <Field label="Upstream">
               <select
-                className={INPUT_CLASS + ' w-44'}
+                className={`${INPUT_CLASS} w-44`}
                 value={filters.upstream ?? ''}
                 onChange={(e) => setFilter('upstream', e.target.value)}
               >
@@ -108,7 +112,7 @@ function AuditPage() {
             </Field>
             <Field label="Route">
               <input
-                className={INPUT_CLASS + ' w-44 font-mono'}
+                className={`${INPUT_CLASS} w-44 font-mono`}
                 value={filters.route ?? ''}
                 onChange={(e) => setFilter('route', e.target.value)}
                 placeholder="/v1/messages"
@@ -116,7 +120,7 @@ function AuditPage() {
             </Field>
             <Field label="Status">
               <select
-                className={INPUT_CLASS + ' w-32'}
+                className={`${INPUT_CLASS} w-32`}
                 value={filters.status_class ?? ''}
                 onChange={(e) => setFilter('status_class', e.target.value)}
               >
@@ -127,13 +131,20 @@ function AuditPage() {
               </select>
             </Field>
             {activeFilterCount ? (
-              <Button size="sm" iconLeft={<X className="w-3 h-3" />} onClick={() => navigate({ search: {} })}>
+              <Button
+                size="sm"
+                iconLeft={<X className="w-3 h-3" />}
+                onClick={() => navigate({ search: {} })}
+              >
                 Clear
               </Button>
             ) : null}
           </div>
 
-          <div className="overflow-x-auto" style={{ maxHeight: 'calc(100vh - 280px)' }}>
+          <div
+            className="overflow-x-auto"
+            style={{ maxHeight: 'calc(100vh - 280px)' }}
+          >
             <table className="min-w-[1080px] w-full font-mono text-xs">
               <thead className="bg-panel-strong border-b border-subtle sticky top-0 z-10 backdrop-blur-md">
                 <tr className="text-text-faint text-[10px] uppercase tracking-wider">
@@ -165,23 +176,42 @@ function AuditPage() {
                       onClick={() => setSelected(e)}
                     >
                       <td className="px-3 py-2 text-text-faint whitespace-nowrap">
-                        {eventTime(e)?.toISOString().replace('T', ' ').slice(0, 19) ?? '—'} UTC
+                        {eventTime(e)
+                          ?.toISOString()
+                          .replace('T', ' ')
+                          .slice(0, 19) ?? '—'}{' '}
+                        UTC
                       </td>
-                      <td className="px-3 py-2 truncate max-w-[160px]">{e.principal_id ?? '—'}</td>
-                      <td className="px-3 py-2 text-text-muted">{e.route ?? '—'}</td>
-                      <td className="px-3 py-2 truncate max-w-[180px]">{e.upstream ?? '—'}</td>
-                      <td className="px-3 py-2 text-text-muted truncate max-w-[200px]">{e.model ?? '—'}</td>
+                      <td className="px-3 py-2 truncate max-w-[160px]">
+                        {e.principal_id ?? '—'}
+                      </td>
+                      <td className="px-3 py-2 text-text-muted">
+                        {e.route ?? '—'}
+                      </td>
+                      <td className="px-3 py-2 truncate max-w-[180px]">
+                        {e.upstream ?? '—'}
+                      </td>
+                      <td className="px-3 py-2 text-text-muted truncate max-w-[200px]">
+                        {e.model ?? '—'}
+                      </td>
                       <td
                         className={cx(
                           'px-3 py-2 text-right tabular-nums',
-                          e.status >= 500 ? 'text-red-400' : e.status >= 400 ? 'text-amber-400' : 'text-green-400',
+                          e.status >= 500
+                            ? 'text-red-400'
+                            : e.status >= 400
+                              ? 'text-amber-400'
+                              : 'text-green-400',
                         )}
                       >
                         {e.status}
                       </td>
-                      <td className="px-3 py-2 text-right tabular-nums">{e.duration_ms ?? 0}ms</td>
+                      <td className="px-3 py-2 text-right tabular-nums">
+                        {e.duration_ms ?? 0}ms
+                      </td>
                       <td className="px-3 py-2 text-right tabular-nums text-text-faint">
-                        {(e.bytes_in ?? 0).toLocaleString()} / {(e.bytes_out ?? 0).toLocaleString()}
+                        {(e.bytes_in ?? 0).toLocaleString()} /{' '}
+                        {(e.bytes_out ?? 0).toLocaleString()}
                       </td>
                       <td className="px-3 py-2 text-right">
                         <Badge tone="neutral">view</Badge>
@@ -194,7 +224,17 @@ function AuditPage() {
                       <EmptyState
                         title="No audit entries"
                         description="No entries match the current filters."
-                        action={activeFilterCount ? <Button onClick={() => navigate({ search: {} })} variant="primary" iconLeft={<Filter className="w-3 h-3" />}>Clear filters</Button> : undefined}
+                        action={
+                          activeFilterCount ? (
+                            <Button
+                              onClick={() => navigate({ search: {} })}
+                              variant="primary"
+                              iconLeft={<Filter className="w-3 h-3" />}
+                            >
+                              Clear filters
+                            </Button>
+                          ) : undefined
+                        }
                       />
                     </td>
                   </tr>
@@ -207,7 +247,9 @@ function AuditPage() {
 
       <Modal
         open={!!selected}
-        onOpenChange={(o) => { if (!o) setSelected(null); }}
+        onOpenChange={(o) => {
+          if (!o) setSelected(null);
+        }}
         title={selected ? `Audit entry ${selected.request_id}` : ''}
         size="lg"
         footer={<Button onClick={() => setSelected(null)}>Close</Button>}
@@ -217,18 +259,30 @@ function AuditPage() {
             <Card>
               <CardHeader title="Summary" />
               <CardBody className="space-y-2">
-                <Row label="Timestamp" value={eventTime(selected)?.toISOString() ?? '—'} />
+                <Row
+                  label="Timestamp"
+                  value={eventTime(selected)?.toISOString() ?? '—'}
+                />
                 <Row label="Principal" value={selected.principal_id ?? '—'} />
                 <Row label="Route" value={selected.route ?? '—'} />
                 <Row label="Upstream" value={selected.upstream ?? '—'} />
                 <Row label="Model" value={selected.model ?? '—'} />
                 <Row label="Status" value={String(selected.status)} />
-                <Row label="Duration" value={`${selected.duration_ms ?? 0} ms`} />
-                <Row label="Bytes (in/out)" value={`${(selected.bytes_in ?? 0).toLocaleString()} / ${(selected.bytes_out ?? 0).toLocaleString()}`} />
+                <Row
+                  label="Duration"
+                  value={`${selected.duration_ms ?? 0} ms`}
+                />
+                <Row
+                  label="Bytes (in/out)"
+                  value={`${(selected.bytes_in ?? 0).toLocaleString()} / ${(selected.bytes_out ?? 0).toLocaleString()}`}
+                />
               </CardBody>
             </Card>
             <Card>
-              <CardHeader title="Raw payload" subtitle="Redacted keys are pre-stripped server-side" />
+              <CardHeader
+                title="Raw payload"
+                subtitle="Redacted keys are pre-stripped server-side"
+              />
               <CardBody>
                 <pre className="overflow-x-auto text-[11px] leading-relaxed">
                   {JSON.stringify(selected, null, 2)}
