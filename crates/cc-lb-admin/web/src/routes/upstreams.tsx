@@ -84,6 +84,14 @@ function UpstreamsPage() {
   const selected = visibleUpstreams.find((u) => u.id === selectedId) ?? null;
   const select = (id: string | undefined) => navigate({ search: id ? { selectedId: id } : {} });
 
+  useEffect(() => {
+    if (!upstreams.isLoading && !selected && visibleUpstreams.length > 0) {
+      if (window.matchMedia('(min-width: 768px)').matches) {
+        navigate({ search: { selectedId: visibleUpstreams[0].id }, replace: true });
+      }
+    }
+  }, [upstreams.isLoading, selected, visibleUpstreams, navigate]);
+
   return (
     <div className="h-[calc(100vh-3rem)] flex">
       {/* List pane */}

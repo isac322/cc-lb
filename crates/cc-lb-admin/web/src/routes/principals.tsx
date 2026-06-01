@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { z } from 'zod';
 import { toast } from 'sonner';
 import {
@@ -81,6 +81,14 @@ function PrincipalsPage() {
 
   const selected = principals.data?.principals.find((p) => p.id === selectedId) ?? null;
   const select = (id: string | undefined) => navigate({ search: id ? { selectedId: id } : {} });
+
+  useEffect(() => {
+    if (!principals.isLoading && !selected && principals.data?.principals && principals.data.principals.length > 0) {
+      if (window.matchMedia('(min-width: 768px)').matches) {
+        navigate({ search: { selectedId: principals.data.principals[0].id }, replace: true });
+      }
+    }
+  }, [principals.isLoading, selected, principals.data?.principals, navigate]);
 
   return (
     <div className="h-[calc(100vh-3rem)] flex">
