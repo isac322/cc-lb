@@ -13,8 +13,7 @@ on:
       - 'crates/cc-lb-config/**'
       - 'crates/cc-lb-server/**'
       - 'tests/fixtures/postgres-pool-1.toml'
-      - 'tests/real-client/postgres-smoke.sh'
-      - '.github/workflows/postgres.yml'
+      - '.github/workflows/postgres*.yml'
   push:
     branches:
       - master
@@ -25,10 +24,7 @@ on:
       - 'crates/cc-lb-config/**'
       - 'crates/cc-lb-server/**'
       - 'tests/fixtures/postgres-pool-1.toml'
-      - 'tests/real-client/postgres-smoke.sh'
-      - '.github/workflows/postgres.yml'
-  schedule:
-    - cron: '0 2 * * *'
+      - '.github/workflows/postgres*.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -37,7 +33,6 @@ concurrency:
 jobs:
   postgres-feature-build:
     name: Feature build ${{ matrix.build-variant }}
-    if: github.event_name != 'schedule'
     runs-on: oracle4-cc-lb
 
     strategy:
@@ -89,7 +84,6 @@ jobs:
 
   postgres-feature-tests:
     name: Postgres feature tests (no DB)
-    if: github.event_name != 'schedule'
     runs-on: oracle4-cc-lb
 
     steps:
@@ -123,7 +117,6 @@ jobs:
 
   postgres-storage-integration:
     name: Postgres storage integration
-    if: github.event_name != 'schedule'
     runs-on: oracle4-cc-lb
 
     services:
@@ -149,9 +142,6 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # Swatinem instead of actions/cache: see postgres-feature-build above for
-      # the ARC pod scale-down rationale. Keep this PR lane to lightweight
-      # storage conformance only; stress and binary E2E run on the schedule.
       - uses: ./.github/actions/setup-rust-cache
         with:
           rust-cache-key: postgres-storage-integration
@@ -185,7 +175,6 @@ jobs:
 
   postgres-server-integration:
     name: Postgres server integration
-    if: github.event_name != 'schedule'
     runs-on: oracle4-cc-lb
 
     services:
@@ -227,142 +216,6 @@ jobs:
 
       - name: Run cc-lb-server Postgres integration tests
         run: cargo test -p cc-lb-server --features postgres,redb --test managed_key_multi_instance
-
-      - name: Show sccache stats
-        if: always()
-        run: |
-          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
-            "$SCCACHE_PATH" --show-stats
-          elif command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats
-          fi
-
-  postgres-storage-stress:
-    name: Postgres storage stress (scheduled)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: oracle4-cc-lb
-
-    services:
-      postgres:
-        image: postgres:18
-        env:
-          POSTGRES_PASSWORD: testpw
-          POSTGRES_DB: cc_lb_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 3s
-          --health-retries 10
-
-    env:
-      CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-rust-cache
-        with:
-          rust-cache-key: postgres-storage-stress
-
-      - name: Install sqlx-cli
-        uses: taiki-e/install-action@v2
-        with:
-          tool: sqlx-cli
-
-      - name: Run Postgres migrations
-        run: sqlx migrate run --source crates/cc-lb-storage-postgres/migrations
-        env:
-          DATABASE_URL: ${{ env.CI_POSTGRES_URL }}
-
-      - name: Run Postgres storage stress tests
-        run: |
-          cargo test -p cc-lb-storage-postgres --features postgres \
-            --test crash_recovery \
-            --test multi_instance_quota \
-            -- --test-threads=1
-
-      - name: Show sccache stats
-        if: always()
-        run: |
-          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
-            "$SCCACHE_PATH" --show-stats
-          elif command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats
-          fi
-
-  postgres-e2e:
-    name: Postgres E2E and chaos (scheduled)
-    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
-    runs-on: oracle4-cc-lb
-
-    env:
-      DOCKER_HOST: tcp://localhost:2375
-      CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - uses: ./.github/actions/setup-rust-cache
-        with:
-          rust-cache-key: postgres-e2e
-
-      - name: Start named Postgres container
-        run: |
-          docker rm -f cc-lb-postgres >/dev/null 2>&1 || true
-          docker run -d \
-            --name cc-lb-postgres \
-            -e POSTGRES_PASSWORD=testpw \
-            -e POSTGRES_DB=cc_lb_test \
-            -p 5432:5432 \
-            postgres:18
-          for _ in $(seq 1 30); do
-            if docker exec cc-lb-postgres pg_isready -U postgres -d cc_lb_test; then
-              exit 0
-            fi
-            sleep 2
-          done
-          docker logs cc-lb-postgres
-          exit 1
-
-      - name: Install sqlx-cli
-        uses: taiki-e/install-action@v2
-        with:
-          tool: sqlx-cli
-
-      - name: Run Postgres migrations
-        run: sqlx migrate run --source crates/cc-lb-storage-postgres/migrations
-        env:
-          DATABASE_URL: ${{ env.CI_POSTGRES_URL }}
-
-      - name: Run cc-lb-server DB unreachable chaos test (ignored)
-        run: cargo test -p cc-lb-server --features postgres,redb --test db_unreachable_503 -- --ignored
-        continue-on-error: true
-
-      # Fallback in case the ARC pod has not yet picked up the cc-lb-actions-runner
-      # image revision that bakes postgresql-client in. The smoke script hard-requires
-      # psql; this keeps the workflow robust against stale pod image caches.
-      - name: Ensure psql is available
-        run: |
-          if ! command -v psql >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends postgresql-client
-          fi
-          psql --version
-
-      - name: E2E smoke - cc-lb binary against postgres backend
-        run: ./tests/real-client/postgres-smoke.sh
-
-      - name: Stop named Postgres container
-        if: always()
-        run: docker rm -f cc-lb-postgres >/dev/null 2>&1 || true
 
       - name: Show sccache stats
         if: always()
