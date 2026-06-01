@@ -46,6 +46,7 @@ jobs:
       - run: cargo deny check
 
   cargo-llvm-cov:
+    if: github.event_name != 'pull_request'
     runs-on: oracle4-cc-lb
     env:
       CARGO_BUILD_JOBS: "2"

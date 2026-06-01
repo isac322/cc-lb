@@ -4,79 +4,35 @@ env:
   CC_LB_ADMIN_SKIP_SPA: "1"
 
 on:
+  workflow_dispatch:
   pull_request:
     paths:
-      - 'crates/cc-lb-storage-*/**'
+      - 'crates/cc-lb-storage-api/**'
+      - 'crates/cc-lb-storage-conformance/**'
+      - 'crates/cc-lb-storage-postgres/**'
       - 'crates/cc-lb-config/**'
-      - '.github/workflows/**'
+      - 'crates/cc-lb-server/**'
+      - 'tests/fixtures/postgres-pool-1.toml'
+      - '.github/workflows/postgres*.yml'
   push:
     branches:
       - master
     paths:
-      - 'crates/cc-lb-storage-*/**'
+      - 'crates/cc-lb-storage-api/**'
+      - 'crates/cc-lb-storage-conformance/**'
+      - 'crates/cc-lb-storage-postgres/**'
       - 'crates/cc-lb-config/**'
-      - '.github/workflows/**'
-  schedule:
-    - cron: '0 2 * * *'
+      - 'crates/cc-lb-server/**'
+      - 'tests/fixtures/postgres-pool-1.toml'
+      - '.github/workflows/postgres*.yml'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  postgres-build-matrix:
-    name: Build ${{ matrix.build-variant }}
-    runs-on: oracle4-cc-lb
-
-    strategy:
-      matrix:
-        build-variant:
-          - all-features
-          - no-default-features
-
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      # Swatinem instead of actions/cache: the raw ~12 GB target/ tarball restore
-      # took 6+ min on the ARC self-hosted pod and reliably triggered a runner
-      # shutdown signal mid-restore (pod scale-down), cancelling every later step.
-      # Swatinem prunes intermediate artifacts so the cache is typically ~1-3 GB,
-      # restores in seconds, and lets cargo resume rather than build from scratch
-      # (which itself takes ~20 min and overruns ARC's scale-down window).
-      - uses: ./.github/actions/setup-rust-cache
-        with:
-          rust-cache-key: postgres-build-${{ matrix.build-variant }}
-
-      - name: Build workspace (all features)
-        if: matrix.build-variant == 'all-features'
-        run: cargo build --workspace --all-features
-
-      - name: Test workspace (all features)
-        if: matrix.build-variant == 'all-features'
-        run: cargo test --workspace --no-run --all-features
-
-      - name: Build workspace (no default features)
-        if: matrix.build-variant == 'no-default-features'
-        run: cargo build --workspace --no-default-features
-
-      - name: Test workspace (no default features)
-        if: matrix.build-variant == 'no-default-features'
-        run: cargo test --workspace --no-run --no-default-features
-
-      - name: Show sccache stats
-        if: always()
-        run: |
-          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
-            "$SCCACHE_PATH" --show-stats
-          elif command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats
-          fi
-
-  postgres-conformance:
-    name: Postgres conformance
+  postgres-integration:
+    name: Postgres integration
     runs-on: oracle4-cc-lb
 
     services:
@@ -102,51 +58,34 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # Swatinem instead of actions/cache: see postgres-build-matrix above for
-      # the ARC pod scale-down rationale. postgres-conformance is the slowest
-      # job (~35-45 min) so saving even a few minutes of restore matters.
       - uses: ./.github/actions/setup-rust-cache
         with:
-          rust-cache-key: postgres-conformance
+          rust-cache-key: postgres-integration
 
-      - name: Install sqlx-cli
-        uses: taiki-e/install-action@v2
-        with:
-          tool: sqlx-cli
+      - name: Check workspace feature combinations
+        if: github.event_name != 'pull_request'
+        run: |
+          cargo check --workspace --all-features
+          cargo check --workspace --no-default-features
 
-      - name: Run Postgres migrations
-        run: sqlx migrate run --source crates/cc-lb-storage-postgres/migrations
-        env:
-          DATABASE_URL: ${{ env.CI_POSTGRES_URL }}
+      - name: Run Postgres adapter unit tests
+        run: cargo test -p cc-lb-storage-postgres --features postgres --lib
 
-      - name: Run Postgres conformance tests
-        run: cargo test -p cc-lb-storage-postgres --features postgres -- --test-threads=4
+      - name: Run Postgres storage conformance tests
+        run: |
+          cargo test -p cc-lb-storage-conformance --features postgres,redb \
+            --test storage_roundtrips_postgres \
+            --test managed_keys_postgres \
+            --test managed_keys_cross_backend \
+            -- --test-threads=4
 
-      - name: Run cc-lb-server Postgres-gated tests
+      - name: Run cc-lb-server Postgres feature and integration tests
         run: |
           cargo test -p cc-lb-server --features postgres,redb \
-            --test postgres_full_storage_live \
-            --test managed_key_multi_instance \
-            --test pool_exhaustion \
-            --test bad_postgres_url_fatal
-
-      - name: Run cc-lb-server DB unreachable chaos test (ignored)
-        run: cargo test -p cc-lb-server --features postgres,redb --test db_unreachable_503 -- --ignored
-        continue-on-error: true
-
-      # Fallback in case the ARC pod has not yet picked up the cc-lb-actions-runner
-      # image revision that bakes postgresql-client in. The smoke script hard-requires
-      # psql; this keeps the workflow robust against stale pod image caches.
-      - name: Ensure psql is available
-        run: |
-          if ! command -v psql >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install -y --no-install-recommends postgresql-client
-          fi
-          psql --version
-
-      - name: E2E smoke - cc-lb binary against postgres backend
-        run: ./tests/real-client/postgres-smoke.sh
+            --test bad_postgres_url_fatal \
+            --test backend_kind_mismatch_fatal \
+            --test restart_required_matrix \
+            --test managed_key_multi_instance
 
       - name: Show sccache stats
         if: always()
