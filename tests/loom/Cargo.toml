@@ -25,4 +25,4 @@ globset.workspace = true
 metrics.workspace = true
 serde = { workspace = true, features = ["derive"] }
 parking_lot = "0.12"
-bincode = "1"
+bincode = "2"
