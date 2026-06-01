@@ -1,6 +1,8 @@
 import { clearAdminToken, getAdminToken } from './auth';
 
 const AUTH_REQUIRED_EVENT = 'cclb:auth-required';
+const SSE_RECONNECT_BASE_MS = 1_000;
+const SSE_RECONNECT_MAX_MS = 15_000;
 
 function notifyAuthRequired(): void {
   clearAdminToken();
@@ -28,7 +30,10 @@ export class ApiError extends Error {
   }
 }
 
-export function buildHeaders(base: HeadersInit | undefined, ifMatch: number | undefined): Headers {
+export function buildHeaders(
+  base: HeadersInit | undefined,
+  ifMatch: number | undefined,
+): Headers {
   const h = new Headers(base);
   if (ifMatch !== undefined) {
     h.set('If-Match', `W/"${ifMatch}"`);
@@ -216,74 +221,106 @@ export function streamEventsFetch(
 
   let isClosed = false;
 
-  async function connect() {
-    try {
-      const token = getAdminToken();
-      const headers = new Headers();
-      if (token) {
-        headers.set('Authorization', `Bearer ${token}`);
+  const reconnectDelay = (attempt: number) =>
+    Math.min(SSE_RECONNECT_BASE_MS * 2 ** attempt, SSE_RECONNECT_MAX_MS);
+
+  const wait = (ms: number) =>
+    new Promise<void>((resolve) => {
+      if (signal.aborted) {
+        resolve();
+        return;
       }
-      headers.set('Accept', 'text/event-stream');
-
-      const res = await fetch(path, { headers, signal });
-      if (!res.ok) {
-        if (res.status === 401) {
-          notifyAuthRequired();
-          throw new ApiError(401, 'unauthorized', null, 'Unauthorized');
-        }
-        throw new Error(`HTTP ${res.status}`);
+      const timeoutId = setTimeout(done, ms);
+      function done() {
+        clearTimeout(timeoutId);
+        signal.removeEventListener('abort', done);
+        resolve();
       }
+      signal.addEventListener('abort', done, { once: true });
+    });
 
-      options.onConnect();
+  async function connectOnce() {
+    const token = getAdminToken();
+    const headers = new Headers();
+    if (token) {
+      headers.set('Authorization', `Bearer ${token}`);
+    }
+    headers.set('Accept', 'text/event-stream');
 
-      if (!res.body) throw new Error('No response body');
+    const res = await fetch(path, { headers, signal });
+    if (!res.ok) {
+      if (res.status === 401) {
+        notifyAuthRequired();
+        throw new ApiError(401, 'unauthorized', null, 'Unauthorized');
+      }
+      throw new Error(`HTTP ${res.status}`);
+    }
 
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
+    options.onConnect();
 
-      while (!isClosed) {
-        const { done, value } = await reader.read();
-        if (done) break;
+    if (!res.body) throw new Error('No response body');
 
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n\n');
-        buffer = lines.pop() || '';
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
 
-        for (const block of lines) {
-          if (!block.trim()) continue;
-          const lines = block.split('\n');
-          let eventType = 'message';
-          let data = '';
-          let id = '';
+    while (!isClosed) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-          for (const line of lines) {
-            if (line.startsWith('event:')) {
-              eventType = line.slice(6).trim();
-            } else if (line.startsWith('data:')) {
-              data += `${line.slice(5).trim()}\n`;
-            } else if (line.startsWith('id:')) {
-              id = line.slice(3).trim();
-            }
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split('\n\n');
+      buffer = lines.pop() || '';
+
+      for (const block of lines) {
+        if (!block.trim()) continue;
+        const lines = block.split('\n');
+        let eventType = 'message';
+        let data = '';
+        let id = '';
+
+        for (const line of lines) {
+          if (line.startsWith('event:')) {
+            eventType = line.slice(6).trim();
+          } else if (line.startsWith('data:')) {
+            data += `${line.slice(5).trim()}\n`;
+          } else if (line.startsWith('id:')) {
+            id = line.slice(3).trim();
           }
+        }
 
-          if (data) {
-            options.onEvent(
-              new MessageEvent(eventType, {
-                data: data.trim(),
-                lastEventId: id,
-              }),
-            );
-          }
+        if (data) {
+          options.onEvent(
+            new MessageEvent(eventType, {
+              data: data.trim(),
+              lastEventId: id,
+            }),
+          );
         }
       }
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') return;
-      options.onError(err instanceof Error ? err : new Error(String(err)));
     }
   }
 
-  connect();
+  async function connect() {
+    let reconnectAttempt = 0;
+    while (!isClosed && !signal.aborted) {
+      try {
+        await connectOnce();
+        if (isClosed || signal.aborted) return;
+        reconnectAttempt = 0;
+        options.onError(new Error('SSE stream closed'));
+      } catch (err) {
+        if (err instanceof Error && err.name === 'AbortError') return;
+        const error = err instanceof Error ? err : new Error(String(err));
+        options.onError(error);
+        if (error instanceof ApiError && error.status === 401) return;
+      }
+      await wait(reconnectDelay(reconnectAttempt));
+      reconnectAttempt += 1;
+    }
+  }
+
+  void connect();
 
   return () => {
     isClosed = true;
@@ -554,5 +591,3 @@ interface AuditEntry {
 export interface AuditQueryResponse {
   entries: AuditEntry[];
 }
-
-
