@@ -63,6 +63,8 @@ use crate::storage_factory;
 use crate::tls::{ReloadableListener, TlsState};
 use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig, DynamicViewRebinder};
 
+const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_millis(500);
+
 pub const PROXY_FILES_ROUTE_COLLECTION: &str = "/v1/files";
 pub const PROXY_FILES_ROUTE_ITEM: &str = "/v1/files/{id}";
 pub const PROXY_FILES_ROUTE_ITEM_CONTENT: &str = "/v1/files/{id}/content";
@@ -206,18 +208,18 @@ impl App {
             cancel.cancel();
         }
         if let Some(task) = notifier_task {
-            let _ = task.await;
+            await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
         }
         if let Some(task) = notify_listener_task {
-            let _ = task.await;
+            await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
         }
         let _ = admin_stop_tx.send(true);
-        let _ = admin.await;
+        await_or_abort(admin, SHUTDOWN_TASK_TIMEOUT).await;
         if let Some(task) = audit_writer_task {
-            let _ = task.await;
+            await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
         }
         if let Some(task) = upstream_rate_limit_writer_task {
-            let _ = task.await;
+            await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
         }
         proxy_result?;
         Ok(())
@@ -1288,6 +1290,13 @@ fn server_join_result(result: Result<Result<(), io::Error>, JoinError>) -> Resul
         Ok(Err(source)) => Err(BuildError::from(source)),
         Err(source) if source.is_cancelled() => Ok(()),
         Err(source) => Err(BuildError::from(io::Error::other(source.to_string()))),
+    }
+}
+
+async fn await_or_abort<T>(mut task: JoinHandle<T>, timeout: Duration) {
+    if tokio::time::timeout(timeout, &mut task).await.is_err() {
+        task.abort();
+        let _ = task.await;
     }
 }
 
