@@ -7,9 +7,7 @@ use axum::extract::State;
 use axum::http::header::{HeaderValue, RETRY_AFTER};
 use axum::http::{Request, Response, StatusCode};
 use axum::middleware::Next;
-use bytes::Bytes;
-use http_body_util::BodyExt;
-use tokio::sync::{Notify, watch};
+use tokio::sync::Notify;
 
 #[derive(Clone)]
 pub struct DrainController {
@@ -21,7 +19,6 @@ struct DrainState {
     force_marked: AtomicBool,
     in_flight: AtomicUsize,
     force_closed_total: AtomicU64,
-    force_close: watch::Sender<bool>,
     drained: Notify,
 }
 
@@ -33,14 +30,12 @@ impl Default for DrainController {
 
 impl DrainController {
     pub fn new() -> Self {
-        let (force_close, _) = watch::channel(false);
         Self {
             inner: Arc::new(DrainState {
                 drain_started: AtomicBool::new(false),
                 force_marked: AtomicBool::new(false),
                 in_flight: AtomicUsize::new(0),
                 force_closed_total: AtomicU64::new(0),
-                force_close,
                 drained: Notify::new(),
             }),
         }
@@ -87,7 +82,6 @@ impl DrainController {
             .force_closed_total
             .fetch_add(increment, Ordering::AcqRel);
         metrics::counter!("cc_lb_drain_force_closed_total").increment(increment);
-        let _ = self.inner.force_close.send(true);
         self.inner.drained.notify_waiters();
         remaining
     }
@@ -97,7 +91,6 @@ impl DrainController {
         metrics::gauge!("cc_lb_drain_in_progress").set(if draining { 1.0 } else { 0.0 });
         if !draining {
             self.inner.force_marked.store(false, Ordering::Release);
-            let _ = self.inner.force_close.send(false);
         }
         self.inner.drained.notify_waiters();
     }
@@ -132,10 +125,6 @@ impl DrainController {
             self.inner.drained.notify_waiters();
         }
     }
-
-    fn force_close_receiver(&self) -> watch::Receiver<bool> {
-        self.inner.force_close.subscribe()
-    }
 }
 
 pub async fn proxy_drain_middleware(
@@ -148,7 +137,8 @@ pub async fn proxy_drain_middleware(
     };
 
     let response = next.run(request).await;
-    guard_response(response, guard)
+    drop(guard);
+    response
 }
 
 fn draining_response() -> Response<Body> {
@@ -160,44 +150,6 @@ fn draining_response() -> Response<Body> {
     response
 }
 
-fn guard_response(response: Response<Body>, guard: InFlightGuard) -> Response<Body> {
-    let (parts, mut body) = response.into_parts();
-    let mut force_close = guard.controller.force_close_receiver();
-    let stream = async_stream::stream! {
-        let _guard = guard;
-        loop {
-            if *force_close.borrow() {
-                break;
-            }
-
-            tokio::select! {
-                changed = force_close.changed() => {
-                    if changed.is_err() || *force_close.borrow() {
-                        break;
-                    }
-                }
-                frame = body.frame() => {
-                    let Some(frame) = frame else {
-                        break;
-                    };
-                    match frame {
-                        Ok(frame) => {
-                            if let Ok(data) = frame.into_data() {
-                                yield Ok::<Bytes, axum::Error>(data);
-                            }
-                        }
-                        Err(source) => {
-                            yield Err::<Bytes, axum::Error>(source);
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-    };
-    Response::from_parts(parts, Body::from_stream(stream))
-}
-
 struct InFlightGuard {
     controller: DrainController,
 }
@@ -205,5 +157,96 @@ struct InFlightGuard {
 impl Drop for InFlightGuard {
     fn drop(&mut self) {
         self.controller.release_one();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+    use std::time::Duration;
+
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use axum::middleware;
+    use axum::response::Response;
+    use axum::routing::get;
+    use bytes::Bytes;
+    use tokio::sync::Notify;
+    use tower::ServiceExt;
+
+    use super::{DrainController, proxy_drain_middleware};
+
+    #[tokio::test]
+    async fn response_body_stream_does_not_hold_in_flight() {
+        let controller = DrainController::new();
+        let app = Router::new()
+            .route("/", get(streaming_response))
+            .route_layer(middleware::from_fn_with_state(
+                controller.clone(),
+                proxy_drain_middleware,
+            ));
+
+        let response = app
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(controller.in_flight(), 0);
+        assert!(!controller.await_drained(Duration::from_millis(1)).await);
+
+        drop(response);
+    }
+
+    #[tokio::test]
+    async fn request_processing_still_holds_in_flight() {
+        let controller = DrainController::new();
+        let entered = std::sync::Arc::new(Notify::new());
+        let release = std::sync::Arc::new(Notify::new());
+        let route_entered = entered.clone();
+        let route_release = release.clone();
+        let app = Router::new()
+            .route(
+                "/",
+                get(move || {
+                    let entered = route_entered.clone();
+                    let release = route_release.clone();
+                    async move {
+                        entered.notify_one();
+                        release.notified().await;
+                        "ok"
+                    }
+                }),
+            )
+            .route_layer(middleware::from_fn_with_state(
+                controller.clone(),
+                proxy_drain_middleware,
+            ));
+
+        let request = tokio::spawn(async move {
+            app.oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+                .await
+                .unwrap()
+        });
+
+        entered.notified().await;
+        assert_eq!(controller.in_flight(), 1);
+
+        controller.trigger();
+        assert!(controller.await_drained(Duration::from_millis(1)).await);
+
+        release.notify_one();
+        let response = request.await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(controller.in_flight(), 0);
+    }
+
+    async fn streaming_response() -> Response {
+        let stream = async_stream::stream! {
+            yield Ok::<Bytes, Infallible>(Bytes::from_static(b"data: hello\n\n"));
+            std::future::pending::<()>().await;
+        };
+        Response::new(Body::from_stream(stream))
     }
 }
