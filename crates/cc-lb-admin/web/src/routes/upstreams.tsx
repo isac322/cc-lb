@@ -2,7 +2,7 @@ import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { useState } from 'react';
 import { z } from 'zod';
 import { toast } from 'sonner';
-import { ChevronLeft, KeyRound, Pencil, Plus, ShieldCheck, Trash2 } from 'lucide-react';
+import { ChevronLeft, ExternalLink, KeyRound, Pencil, Plus, ShieldCheck, Trash2 } from 'lucide-react';
 import {
   Badge,
   Button,
@@ -273,7 +273,18 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
             <Button
               variant="primary"
               onClick={() => {
-                update.mutate({ id: upstream.id, body: { name, base_url: baseUrl } }, { onSuccess: () => { toast.success('Upstream updated'); setEditOpen(false); } });
+                const trimmedName = name.trim();
+                const trimmedBase = baseUrl.trim();
+                update.mutate(
+                  {
+                    id: upstream.id,
+                    body: {
+                      name: trimmedName,
+                      base_url: trimmedBase === '' ? null : trimmedBase,
+                    },
+                  },
+                  { onSuccess: () => { toast.success('Upstream updated'); setEditOpen(false); } },
+                );
               }}
             >
               Save
@@ -312,8 +323,26 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
         }
       >
         <div className="space-y-3">
+          <p className="text-xs text-text-faint">
+            1. Open the authorization URL below. 2. Approve access. 3. Copy the returned code and paste it here.
+          </p>
           <Field label="Authorize URL">
             <code className="block p-2 text-xs font-mono bg-overlay-2 border border-subtle rounded-sm break-all select-all">{oauthState.authorize_url ?? ''}</code>
+            <div className="mt-2">
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={!oauthState.authorize_url}
+                iconLeft={<ExternalLink className="w-3 h-3" />}
+                onClick={() => {
+                  if (oauthState.authorize_url) {
+                    window.open(oauthState.authorize_url, '_blank', 'noopener,noreferrer');
+                  }
+                }}
+              >
+                Open authorization URL
+              </Button>
+            </div>
           </Field>
           <Field label="State Token">
             <code className="block p-2 text-xs font-mono bg-overlay-2 border border-subtle rounded-sm break-all select-all">{oauthState.state_token ?? ''}</code>
@@ -349,8 +378,17 @@ function CreateUpstreamModal({ open, onOpenChange }: { open: boolean; onOpenChan
             variant="primary"
             disabled={!name.trim()}
             onClick={() => {
+              const trimmedName = name.trim();
+              const trimmedBase = baseUrl.trim();
+              const trimmedEnv = apiKeyEnv.trim();
               create.mutate(
-                { name, kind, base_url: baseUrl, api_key_env: kind === 'anthropic_api_key' ? apiKeyEnv : null },
+                {
+                  name: trimmedName,
+                  kind,
+                  base_url: trimmedBase === '' ? null : trimmedBase,
+                  api_key_env:
+                    kind === 'anthropic_api_key' && trimmedEnv !== '' ? trimmedEnv : null,
+                },
                 { onSuccess: () => { toast.success('Upstream created'); onOpenChange(false); reset(); } },
               );
             }}

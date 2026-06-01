@@ -226,7 +226,7 @@ export function useConfigHistory() {
 export function useCreateUpstream() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { name: string; kind: string; base_url?: string; api_key_env?: string | null }) =>
+    mutationFn: (body: { name: string; kind: string; base_url?: string | null; api_key_env?: string | null }) =>
       postJson<Upstream, typeof body>('/admin/v1/upstreams', body),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.upstreams }),
   });

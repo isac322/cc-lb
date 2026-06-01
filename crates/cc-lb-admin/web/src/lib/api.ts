@@ -1,4 +1,13 @@
-import { getAdminToken } from './auth';
+import { clearAdminToken, getAdminToken } from './auth';
+
+const AUTH_REQUIRED_EVENT = 'cclb:auth-required';
+
+function notifyAuthRequired(): void {
+  clearAdminToken();
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent(AUTH_REQUIRED_EVENT));
+  }
+}
 
 export class ApiError extends Error {
   status: number;
@@ -60,6 +69,7 @@ async function fetchWithAuth(
       }
       if (res.status === 401) {
         code = 'unauthorized';
+        notifyAuthRequired();
       }
       throw new ApiError(res.status, code, body, message);
     }
@@ -166,6 +176,7 @@ export function streamEventsFetch(
       const res = await fetch(path, { headers, signal });
       if (!res.ok) {
         if (res.status === 401) {
+          notifyAuthRequired();
           throw new ApiError(401, 'unauthorized', null, 'Unauthorized');
         }
         throw new Error(`HTTP ${res.status}`);
