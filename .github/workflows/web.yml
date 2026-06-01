@@ -1,0 +1,46 @@
+name: web
+
+on:
+  pull_request:
+    paths:
+      - 'crates/cc-lb-admin/web/**'
+      - '.github/workflows/web.yml'
+  push:
+    branches:
+      - master
+    paths:
+      - 'crates/cc-lb-admin/web/**'
+      - '.github/workflows/web.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bun-checks:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/cc-lb-admin/web
+    steps:
+      - uses: actions/checkout@v6
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.3.14
+      - name: Cache Bun install store
+        uses: actions/cache@v5
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('crates/cc-lb-admin/web/bun.lock') }}
+          restore-keys: |
+            bun-${{ runner.os }}-
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Lint
+        run: bun run lint
+      - name: Typecheck
+        run: bun run typecheck
+      - name: Build
+        run: bun run build
+      - name: Unit tests
+        run: bunx --bun vitest run --passWithNoTests
