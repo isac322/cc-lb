@@ -60,27 +60,23 @@ jobs:
         with:
           rust-cache-key: postgres-build-${{ matrix.build-variant }}
 
-      # Two-step compile pattern (warm-up + gate) for ARC scale-down resilience:
-      # the warm-up trails `|| true` so a mid-compile SIGINT doesn't fail the
-      # job; the follow-up gate step picks up from whatever target/ artifacts
-      # the warm-up managed to produce (cargo is incremental), so it finishes
-      # well inside the scale-down window even if the warm-up was killed. If
-      # the warm-up completes, the gate step is essentially a no-op.
-      - name: Warm cache (all features)
+      # `cargo check` instead of `cargo build` / `cargo test --no-run`: the
+      # purpose of this job is a compile-time gate against feature-gated code
+      # drift, not artifact production. `check` skips codegen and finishes
+      # 3-5x faster, comfortably inside ARC's pod scale-down window.
+      # `--tests` extends the frontend check to test crates so accidental
+      # cross-feature references in #[cfg(test)] code are also caught.
+      # Earlier `cargo build ... || true` warm-ups did not survive runner
+      # shutdown because SIGTERM hits the whole process group, killing bash
+      # before `|| true` is evaluated; reducing wall time is the only
+      # reliable mitigation short of cluster-side scale-down config changes.
+      - name: Check workspace (all features)
         if: matrix.build-variant == 'all-features'
-        run: cargo build --workspace --all-features --tests || true
+        run: cargo check --workspace --all-features --tests
 
-      - name: Test workspace (all features)
-        if: matrix.build-variant == 'all-features'
-        run: cargo test --workspace --no-run --all-features
-
-      - name: Warm cache (no default features)
+      - name: Check workspace (no default features)
         if: matrix.build-variant == 'no-default-features'
-        run: cargo build --workspace --no-default-features --tests || true
-
-      - name: Test workspace (no default features)
-        if: matrix.build-variant == 'no-default-features'
-        run: cargo test --workspace --no-run --no-default-features
+        run: cargo check --workspace --no-default-features --tests
 
       - name: Show sccache stats
         if: always()
