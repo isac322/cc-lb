@@ -1,8 +1,8 @@
-import { Lock } from 'lucide-react';
-import { type ReactNode, useEffect, useState } from 'react';
+import { useEffect, useState, type FormEvent, type ReactNode } from 'react';
 import { toast } from 'sonner';
+import { Lock } from 'lucide-react';
+import { Button, Card, Field, INPUT_CLASS, cx } from './ui/primitives';
 import { AUTH_TOKEN_KEY, getAdminToken, setAdminToken } from '../lib/auth';
-import { Button, Card, cx, Field, INPUT_CLASS } from './ui/primitives';
 
 const AUTH_REQUIRED_EVENT = 'cclb:auth-required';
 
@@ -32,7 +32,8 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
     return <>{children}</>;
   }
 
-  function submitToken() {
+  function handleSubmit(e: FormEvent<HTMLFormElement>) {
+    e.preventDefault();
     const trimmed = value.trim();
     if (!trimmed) {
       toast.error('Token cannot be empty');
@@ -55,24 +56,12 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
           <div className="flex flex-col gap-2 mb-5">
             <div className="flex items-center gap-2 text-text-faint">
               <Lock className="w-3.5 h-3.5" />
-              <span className="text-[11px] uppercase tracking-wider font-mono">
-                cc-lb admin
-              </span>
+              <span className="text-[11px] uppercase tracking-wider font-mono">cc-lb admin</span>
             </div>
-            <h1 className="text-base font-medium text-text leading-tight">
-              Admin token required
-            </h1>
-            <p className="text-xs text-text-faint">
-              Paste the admin Bearer token to continue.
-            </p>
+            <h1 className="text-base font-medium text-text leading-tight">Admin token required</h1>
+            <p className="text-xs text-text-faint">Paste the admin Bearer token to continue.</p>
           </div>
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              submitToken();
-            }}
-            className="flex flex-col gap-4"
-          >
+          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
             <Field label="Bearer token">
               <input
                 type="password"

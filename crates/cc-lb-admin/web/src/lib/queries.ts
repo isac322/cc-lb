@@ -5,6 +5,12 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { toast } from 'sonner';
 import {
   ApiError,
+  deleteJson,
+  fetchWithAuth,
+  getJson,
+  patchJson,
+  postJson,
+  putJson,
   type AuditQueryResponse,
   type ConfigDraftResponse,
   type ConfigHistoryResponse,
@@ -12,16 +18,10 @@ import {
   type CredentialsResponse,
   type DashboardSummaryResponse,
   type DashboardUsageResponse,
-  deleteJson,
-  fetchWithAuth,
-  getJson,
   type KeyListResponse,
   type OAuthStatusResponse,
   type PluginsStatusResponse,
   type PrincipalLimitsResponse,
-  patchJson,
-  postJson,
-  putJson,
   type RecentEventsPayload,
 } from './api';
 
@@ -39,15 +39,9 @@ export interface Upstream {
   api_key_env?: string | null;
   shape_plugin?: { wasm_registry_id: string } | null;
 }
-interface UpstreamListResp {
-  upstreams: Upstream[];
-}
+interface UpstreamListResp { upstreams: Upstream[] }
 
-interface PrincipalDefaultLimit {
-  model: string;
-  rpm: number;
-  tpm: number;
-}
+interface PrincipalDefaultLimit { model: string; rpm: number; tpm: number }
 export interface Principal {
   id: string;
   name: string;
@@ -58,9 +52,7 @@ export interface Principal {
   allowed_upstreams: string[];
   default_limits: PrincipalDefaultLimit[];
 }
-interface PrincipalListResp {
-  principals: Principal[];
-}
+interface PrincipalListResp { principals: Principal[] }
 
 export interface PluginEntry {
   id: string;
@@ -73,9 +65,7 @@ export interface PluginEntry {
   revision: number;
   uploaded_at_unix_secs: number;
 }
-interface PluginListResp {
-  entries: PluginEntry[];
-}
+interface PluginListResp { entries: PluginEntry[] }
 
 export type ChainSlot = 'router' | 'observability_hook' | 'shape';
 export interface PluginChainEntry {
@@ -90,9 +80,7 @@ export interface PluginChainEntry {
   batched_flush_ms: number;
   revision: number;
 }
-interface PluginChainResp {
-  entries: PluginChainEntry[];
-}
+interface PluginChainResp { entries: PluginChainEntry[] }
 
 interface StatusUpstream {
   id: string;
@@ -108,28 +96,11 @@ interface StatusResponse {
   build: { rust_version: string; profile: string; target: string };
   generation: number;
   upstreams: StatusUpstream[];
-  principals: {
-    id: string;
-    name: string;
-    enabled: boolean;
-    last_apply_error: string | null;
-  }[];
-  plugin_chain_summary: {
-    principal_count_with_chain: number;
-    total_entries: number;
-  };
+  principals: { id: string; name: string; enabled: boolean; last_apply_error: string | null }[];
+  plugin_chain_summary: { principal_count_with_chain: number; total_entries: number };
   killswitch: boolean;
-  last_reload_status: {
-    ok: boolean;
-    applied_revision: number;
-    applied_at_unix_secs: number;
-  } | null;
-  restart_required_changes: {
-    field: string;
-    current: string;
-    new: string;
-    reason: string;
-  }[];
+  last_reload_status: { ok: boolean; applied_revision: number; applied_at_unix_secs: number } | null;
+  restart_required_changes: { field: string; current: string; new: string; reason: string }[];
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -139,23 +110,18 @@ export const qk = {
   health: ['health'] as const,
   status: ['status'] as const,
   summary: (range: string) => ['summary', range] as const,
-  usage: (range: string, step: string, group: string) =>
-    ['usage', range, step, group] as const,
+  usage: (range: string, step: string, group: string) => ['usage', range, step, group] as const,
   upstreams: ['upstreams'] as const,
   upstream: (id: string) => ['upstream', id] as const,
   principals: ['principals'] as const,
   principal: (id: string) => ['principal', id] as const,
-  principalUsage: (id: string, range: string, step: string) =>
-    ['principal-usage', id, range, step] as const,
+  principalUsage: (id: string, range: string, step: string) => ['principal-usage', id, range, step] as const,
   principalLimits: (id: string) => ['principal-limits', id] as const,
   principalKeys: (id: string) => ['principal-keys', id] as const,
   pluginRegistry: ['plugins', 'registry'] as const,
-  pluginChain: (pid: string, slot?: ChainSlot) =>
-    ['plugin-chain', pid, slot ?? 'all'] as const,
-  events: (filters: Record<string, string | undefined>) =>
-    ['events', filters] as const,
-  audit: (filters: Record<string, string | undefined>) =>
-    ['audit', filters] as const,
+  pluginChain: (pid: string, slot?: ChainSlot) => ['plugin-chain', pid, slot ?? 'all'] as const,
+  events: (filters: Record<string, string | undefined>) => ['events', filters] as const,
+  audit: (filters: Record<string, string | undefined>) => ['audit', filters] as const,
   credentials: ['credentials'] as const,
   oauthStatus: ['oauth-status'] as const,
   pluginStatus: ['plugins', 'status'] as const,
@@ -163,74 +129,38 @@ export const qk = {
   configSchema: ['config', 'schema'] as const,
   configDraft: ['config', 'draft'] as const,
   configHistory: ['config', 'history'] as const,
-  configDiff: (from: number, to: number) =>
-    ['config', 'diff', from, to] as const,
+  configDiff: (from: number, to: number) => ['config', 'diff', from, to] as const,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Read hooks
 
 export function useHealth() {
-  return useQuery({
-    queryKey: qk.health,
-    queryFn: () =>
-      getJson<{
-        status: string;
-        version: string;
-        git_sha: string;
-        uptime_secs: number;
-      }>('/admin/health'),
-    refetchInterval: 15_000,
-  });
+  return useQuery({ queryKey: qk.health, queryFn: () => getJson<{ status: string; version: string; git_sha: string; uptime_secs: number }>('/admin/health'), refetchInterval: 15_000 });
 }
 export function useStatus() {
-  return useQuery({
-    queryKey: qk.status,
-    queryFn: () => getJson<StatusResponse>('/admin/v1/status'),
-    refetchInterval: 15_000,
-  });
+  return useQuery({ queryKey: qk.status, queryFn: () => getJson<StatusResponse>('/admin/v1/status'), refetchInterval: 15_000 });
 }
 export function useSummary(range: string) {
-  return useQuery({
-    queryKey: qk.summary(range),
-    queryFn: () =>
-      getJson<DashboardSummaryResponse>(
-        `/admin/dashboard/summary?range=${encodeURIComponent(range)}`,
-      ),
-    refetchInterval: 30_000,
-  });
+  return useQuery({ queryKey: qk.summary(range), queryFn: () => getJson<DashboardSummaryResponse>(`/admin/dashboard/summary?range=${encodeURIComponent(range)}`), refetchInterval: 30_000 });
 }
-export function useUsage(
-  range: string,
-  step: string,
-  group: 'none' | 'model' | 'principal' | 'upstream',
-) {
+export function useUsage(range: string, step: string, group: 'none' | 'model' | 'principal' | 'upstream') {
   return useQuery({
     queryKey: qk.usage(range, step, group),
-    queryFn: () =>
-      getJson<DashboardUsageResponse>(
-        `/admin/usage?range=${encodeURIComponent(range)}&step=${encodeURIComponent(step)}&group_by=${encodeURIComponent(group)}`,
-      ),
+    queryFn: () => getJson<DashboardUsageResponse>(`/admin/usage?range=${encodeURIComponent(range)}&step=${encodeURIComponent(step)}&group_by=${encodeURIComponent(group)}`),
     refetchInterval: 30_000,
   });
 }
 export function useUpstreams() {
-  return useQuery({
-    queryKey: qk.upstreams,
-    queryFn: () => getJson<UpstreamListResp>('/admin/v1/upstreams'),
-  });
+  return useQuery({ queryKey: qk.upstreams, queryFn: () => getJson<UpstreamListResp>('/admin/v1/upstreams') });
 }
 export function usePrincipals() {
-  return useQuery({
-    queryKey: qk.principals,
-    queryFn: () => getJson<PrincipalListResp>('/admin/v1/principals'),
-  });
+  return useQuery({ queryKey: qk.principals, queryFn: () => getJson<PrincipalListResp>('/admin/v1/principals') });
 }
 export function usePrincipalLimits(id: string | null) {
   return useQuery({
     queryKey: qk.principalLimits(id ?? ''),
-    queryFn: () =>
-      getJson<PrincipalLimitsResponse>(`/admin/v1/principals/${id}/limits`),
+    queryFn: () => getJson<PrincipalLimitsResponse>(`/admin/v1/principals/${id}/limits`),
     enabled: !!id,
   });
 }
@@ -242,19 +172,14 @@ export function usePrincipalKeys(id: string | null) {
   });
 }
 export function usePluginRegistry() {
-  return useQuery({
-    queryKey: qk.pluginRegistry,
-    queryFn: () => getJson<PluginListResp>('/admin/v1/plugins/registry'),
-  });
+  return useQuery({ queryKey: qk.pluginRegistry, queryFn: () => getJson<PluginListResp>('/admin/v1/plugins/registry') });
 }
 export function usePluginChain(principalId: string | null, slot?: ChainSlot) {
   return useQuery({
     queryKey: qk.pluginChain(principalId ?? '', slot),
     queryFn: () => {
       const q = slot ? `?slot=${slot}` : '';
-      return getJson<PluginChainResp>(
-        `/admin/v1/principals/${principalId}/plugin-chain${q}`,
-      );
+      return getJson<PluginChainResp>(`/admin/v1/principals/${principalId}/plugin-chain${q}`);
     },
     enabled: !!principalId,
   });
@@ -264,8 +189,7 @@ export function useRecentEvents(filters: Record<string, string | undefined>) {
   for (const [k, v] of Object.entries(filters)) if (v) params.set(k, v);
   return useQuery({
     queryKey: qk.events(filters),
-    queryFn: () =>
-      getJson<RecentEventsPayload>(`/admin/events/recent?${params.toString()}`),
+    queryFn: () => getJson<RecentEventsPayload>(`/admin/events/recent?${params.toString()}`),
     refetchInterval: 10_000,
   });
 }
@@ -274,53 +198,29 @@ export function useAudit(filters: Record<string, string | undefined>) {
   for (const [k, v] of Object.entries(filters)) if (v) params.set(k, v);
   return useQuery({
     queryKey: qk.audit(filters),
-    queryFn: () =>
-      getJson<AuditQueryResponse>(`/admin/audit?${params.toString()}`),
+    queryFn: () => getJson<AuditQueryResponse>(`/admin/audit?${params.toString()}`),
   });
 }
 export function useCredentials() {
-  return useQuery({
-    queryKey: qk.credentials,
-    queryFn: () => getJson<CredentialsResponse>('/admin/credentials'),
-  });
+  return useQuery({ queryKey: qk.credentials, queryFn: () => getJson<CredentialsResponse>('/admin/credentials') });
 }
 export function useOAuthStatus() {
-  return useQuery({
-    queryKey: qk.oauthStatus,
-    queryFn: () => getJson<OAuthStatusResponse>('/admin/oauth/status'),
-  });
+  return useQuery({ queryKey: qk.oauthStatus, queryFn: () => getJson<OAuthStatusResponse>('/admin/oauth/status') });
 }
 export function usePluginStatus() {
-  return useQuery({
-    queryKey: qk.pluginStatus,
-    queryFn: () => getJson<PluginsStatusResponse>('/admin/status'),
-    refetchInterval: 15_000,
-  });
+  return useQuery({ queryKey: qk.pluginStatus, queryFn: () => getJson<PluginsStatusResponse>('/admin/status'), refetchInterval: 15_000 });
 }
 export function useConfigCurrent() {
-  return useQuery({
-    queryKey: qk.configCurrent,
-    queryFn: () => getJson<Record<string, unknown>>('/admin/config/current'),
-  });
+  return useQuery({ queryKey: qk.configCurrent, queryFn: () => getJson<Record<string, unknown>>('/admin/config/current') });
 }
 export function useConfigSchema() {
-  return useQuery({
-    queryKey: qk.configSchema,
-    queryFn: () => getJson<ConfigSchemaResponse>('/admin/config/schema'),
-  });
+  return useQuery({ queryKey: qk.configSchema, queryFn: () => getJson<ConfigSchemaResponse>('/admin/config/schema') });
 }
 export function useConfigDraft() {
-  return useQuery({
-    queryKey: qk.configDraft,
-    queryFn: () => getJson<ConfigDraftResponse>('/admin/config/draft'),
-  });
+  return useQuery({ queryKey: qk.configDraft, queryFn: () => getJson<ConfigDraftResponse>('/admin/config/draft') });
 }
 export function useConfigHistory() {
-  return useQuery({
-    queryKey: qk.configHistory,
-    queryFn: () =>
-      getJson<ConfigHistoryResponse>('/admin/config/history?limit=20'),
-  });
+  return useQuery({ queryKey: qk.configHistory, queryFn: () => getJson<ConfigHistoryResponse>('/admin/config/history?limit=20') });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -352,15 +252,7 @@ export function useDeleteUpstream() {
 export function useToggleUpstream() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      id,
-      enabled,
-      revision,
-    }: {
-      id: string;
-      enabled: boolean;
-      revision: number;
-    }) =>
+    mutationFn: ({ id, enabled, revision }: { id: string; enabled: boolean; revision: number }) =>
       postJson<Upstream, Record<string, never>>(
         `/admin/v1/upstreams/${id}/${enabled ? 'enable' : 'disable'}`,
         {},
@@ -382,20 +274,8 @@ export interface UpdateUpstreamRequest {
 export function useUpdateUpstream() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      id,
-      body,
-      revision,
-    }: {
-      id: string;
-      body: UpdateUpstreamRequest;
-      revision: number;
-    }) =>
-      putJson<Upstream, UpdateUpstreamRequest>(
-        `/admin/v1/upstreams/${id}`,
-        body,
-        { ifMatch: revision },
-      ),
+    mutationFn: ({ id, body, revision }: { id: string; body: UpdateUpstreamRequest; revision: number }) =>
+      putJson<Upstream, UpdateUpstreamRequest>(`/admin/v1/upstreams/${id}`, body, { ifMatch: revision }),
     onSuccess: (_d, vars) => {
       qc.invalidateQueries({ queryKey: qk.upstreams });
       qc.invalidateQueries({ queryKey: qk.upstream(vars.id) });
@@ -414,23 +294,8 @@ export function useOAuthStart() {
 export function useOAuthComplete() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      id,
-      state_token,
-      code,
-    }: {
-      id: string;
-      state_token: string;
-      code: string;
-    }) =>
-      postJson<
-        {
-          upstream_id: string;
-          expires_at_unix_secs: number;
-          access_token_fingerprint: string;
-        },
-        { state_token: string; code: string }
-      >(`/admin/v1/upstreams/${id}/oauth/complete`, { state_token, code }),
+    mutationFn: ({ id, state_token, code }: { id: string; state_token: string; code: string }) =>
+      postJson<{ upstream_id: string; expires_at_unix_secs: number; access_token_fingerprint: string }, { state_token: string; code: string }>(`/admin/v1/upstreams/${id}/oauth/complete`, { state_token, code }),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.upstreams }),
     onError: (error) => {
       const message =
@@ -446,13 +311,8 @@ export function useOAuthComplete() {
 export function useCreatePrincipal() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: {
-      name: string;
-      kind: string;
-      allowed_models?: string[];
-      allowed_upstreams?: string[];
-      default_limits?: PrincipalDefaultLimit[];
-    }) => postJson<Principal, typeof body>('/admin/v1/principals', body),
+    mutationFn: (body: { name: string; kind: string; allowed_models?: string[]; allowed_upstreams?: string[]; default_limits?: PrincipalDefaultLimit[] }) =>
+      postJson<Principal, typeof body>('/admin/v1/principals', body),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.principals }),
   });
 }
@@ -467,15 +327,7 @@ export function useDeletePrincipal() {
 export function useTogglePrincipal() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      id,
-      enabled,
-      revision,
-    }: {
-      id: string;
-      enabled: boolean;
-      revision: number;
-    }) =>
+    mutationFn: ({ id, enabled, revision }: { id: string; enabled: boolean; revision: number }) =>
       postJson<Principal, Record<string, never>>(
         `/admin/v1/principals/${id}/${enabled ? 'enable' : 'disable'}`,
         {},
@@ -487,19 +339,8 @@ export function useTogglePrincipal() {
 export function useSetAllowedModels() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      id,
-      models,
-      expected_revision,
-    }: {
-      id: string;
-      models: string[];
-      expected_revision: number;
-    }) =>
-      putJson<Principal, { models: string[]; expected_revision: number }>(
-        `/admin/v1/principals/${id}/allowed_models`,
-        { models, expected_revision },
-      ),
+    mutationFn: ({ id, models, expected_revision }: { id: string; models: string[]; expected_revision: number }) =>
+      putJson<Principal, { models: string[]; expected_revision: number }>(`/admin/v1/principals/${id}/allowed_models`, { models, expected_revision }),
     onSuccess: (_d, vars) => {
       qc.invalidateQueries({ queryKey: qk.principal(vars.id) });
       qc.invalidateQueries({ queryKey: qk.principals });
@@ -510,12 +351,8 @@ export function useIssueKey() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, label }: { id: string; label?: string }) =>
-      postJson<{ key_id: string; plaintext_key: string }, { label?: string }>(
-        `/admin/v1/principals/${id}/keys`,
-        { label },
-      ),
-    onSuccess: (_d, vars) =>
-      qc.invalidateQueries({ queryKey: qk.principalKeys(vars.id) }),
+      postJson<{ key_id: string; plaintext_key: string }, { label?: string }>(`/admin/v1/principals/${id}/keys`, { label }),
+    onSuccess: (_d, vars) => qc.invalidateQueries({ queryKey: qk.principalKeys(vars.id) }),
   });
 }
 export function useRevokeKey() {
@@ -523,8 +360,7 @@ export function useRevokeKey() {
   return useMutation({
     mutationFn: ({ id, key_id }: { id: string; key_id: string }) =>
       postJson(`/admin/v1/principals/${id}/keys/${key_id}/revoke`, {}),
-    onSuccess: (_d, vars) =>
-      qc.invalidateQueries({ queryKey: qk.principalKeys(vars.id) }),
+    onSuccess: (_d, vars) => qc.invalidateQueries({ queryKey: qk.principalKeys(vars.id) }),
   });
 }
 export interface UploadWasmResponse {
@@ -564,15 +400,7 @@ export function useDeletePlugin() {
 export function usePatchPlugin() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      id,
-      label,
-      revision,
-    }: {
-      id: string;
-      label: string | null;
-      revision: number;
-    }) =>
+    mutationFn: ({ id, label, revision }: { id: string; label: string | null; revision: number }) =>
       patchJson<PluginEntry, { label: string | null }>(
         `/admin/v1/plugins/registry/${id}`,
         { label },
@@ -584,52 +412,24 @@ export function usePatchPlugin() {
 export function useGcPlugins() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: () =>
-      postJson<{ removed: string[]; count: number }, Record<string, never>>(
-        '/admin/v1/plugins/wasm/gc',
-        {},
-      ),
+    mutationFn: () => postJson<{ removed: string[]; count: number }, Record<string, never>>('/admin/v1/plugins/wasm/gc', {}),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.pluginRegistry }),
   });
 }
 export function useInsertChainEntry() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      pid,
-      body,
-    }: {
-      pid: string;
-      body: {
-        slot: ChainSlot;
-        wasm_registry_id: string;
-        config?: unknown;
-        sse_per_event?: boolean;
-        batched_events_per_flush?: number;
-        batched_flush_ms?: number;
-      };
-    }) =>
-      postJson<PluginChainEntry, typeof body>(
-        `/admin/v1/principals/${pid}/plugin-chain`,
-        body,
-      ),
-    onSuccess: (_d, vars) =>
-      qc.invalidateQueries({ queryKey: ['plugin-chain', vars.pid] }),
+    mutationFn: ({ pid, body }: { pid: string; body: { slot: ChainSlot; wasm_registry_id: string; config?: unknown; sse_per_event?: boolean; batched_events_per_flush?: number; batched_flush_ms?: number } }) =>
+      postJson<PluginChainEntry, typeof body>(`/admin/v1/principals/${pid}/plugin-chain`, body),
+    onSuccess: (_d, vars) => qc.invalidateQueries({ queryKey: ['plugin-chain', vars.pid] }),
   });
 }
 export function useReorderChain() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      pid,
-      entries,
-    }: {
-      pid: string;
-      entries: { id: string; order: number; expected_revision: number }[];
-    }) =>
+    mutationFn: ({ pid, entries }: { pid: string; entries: { id: string; order: number; expected_revision: number }[] }) =>
       postJson(`/admin/v1/principals/${pid}/plugin-chain/reorder`, { entries }),
-    onSuccess: (_d, vars) =>
-      qc.invalidateQueries({ queryKey: ['plugin-chain', vars.pid] }),
+    onSuccess: (_d, vars) => qc.invalidateQueries({ queryKey: ['plugin-chain', vars.pid] }),
   });
 }
 export function useDeleteChainEntry() {
@@ -644,12 +444,7 @@ export function useKillswitch() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (enable: boolean) =>
-      enable
-        ? postJson<
-            { status: string; killswitch: boolean },
-            Record<string, never>
-          >('/admin/killswitch', {})
-        : deleteJson('/admin/killswitch'),
+      enable ? postJson<{ status: string; killswitch: boolean }, Record<string, never>>('/admin/killswitch', {}) : deleteJson('/admin/killswitch'),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.status }),
   });
 }
@@ -657,10 +452,7 @@ export function useApplyConfig() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: (expected_revision: number) =>
-      postJson<
-        { applied_revision: number; applied_at_unix_secs: number },
-        { expected_revision: number }
-      >('/admin/config/apply', { expected_revision }),
+      postJson<{ applied_revision: number; applied_at_unix_secs: number }, { expected_revision: number }>('/admin/config/apply', { expected_revision }),
     onSuccess: () => {
       qc.invalidateQueries({ queryKey: qk.configDraft });
       qc.invalidateQueries({ queryKey: qk.configHistory });
@@ -671,35 +463,17 @@ export function useApplyConfig() {
 export function useValidateConfig() {
   return useMutation({
     mutationFn: (expected_revision: number) =>
-      postJson<
-        { valid: boolean; revision: number; error?: string },
-        { expected_revision: number }
-      >('/admin/config/draft/validate', { expected_revision }),
+      postJson<{ valid: boolean; revision: number; error?: string }, { expected_revision: number }>('/admin/config/draft/validate', { expected_revision }),
   });
 }
 export function useSaveDraft() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({
-      draft,
-      expected_revision,
-    }: {
-      draft: Record<string, unknown>;
-      expected_revision: number;
-    }) =>
-      putJson<
-        { revision: number; saved_at_unix_secs: number },
-        { draft: Record<string, unknown>; expected_revision: number }
-      >('/admin/config/draft', { draft, expected_revision }),
+    mutationFn: ({ draft, expected_revision }: { draft: Record<string, unknown>; expected_revision: number }) =>
+      putJson<{ revision: number; saved_at_unix_secs: number }, { draft: Record<string, unknown>; expected_revision: number }>('/admin/config/draft', { draft, expected_revision }),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.configDraft }),
   });
 }
 export function useReloadConfig() {
-  return useMutation({
-    mutationFn: () =>
-      postJson<{ status: string; reloading: boolean }, Record<string, never>>(
-        '/admin/config/reload',
-        {},
-      ),
-  });
+  return useMutation({ mutationFn: () => postJson<{ status: string; reloading: boolean }, Record<string, never>>('/admin/config/reload', {}) });
 }

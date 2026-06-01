@@ -1,6 +1,6 @@
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu';
 import { Monitor, Moon, Sun } from 'lucide-react';
-import { type Theme, useTheme } from '../lib/theme';
+import { useTheme, type Theme } from '../lib/theme';
 import { cx } from './ui/primitives';
 
 const OPTIONS: { id: Theme; label: string; Icon: typeof Sun }[] = [
@@ -11,8 +11,7 @@ const OPTIONS: { id: Theme; label: string; Icon: typeof Sun }[] = [
 
 export function ThemeToggle() {
   const { theme, effective, setTheme } = useTheme();
-  const ActiveIcon =
-    theme === 'system' ? Monitor : theme === 'light' ? Sun : Moon;
+  const ActiveIcon = theme === 'system' ? Monitor : theme === 'light' ? Sun : Moon;
 
   return (
     <DropdownMenu.Root>
@@ -44,9 +43,7 @@ export function ThemeToggle() {
             >
               <Icon className="w-3.5 h-3.5" />
               <span className="flex-1">{label}</span>
-              {theme === id ? (
-                <span className="text-[10px] text-text-faint">·</span>
-              ) : null}
+              {theme === id ? <span className="text-[10px] text-text-faint">·</span> : null}
             </DropdownMenu.Item>
           ))}
         </DropdownMenu.Content>
