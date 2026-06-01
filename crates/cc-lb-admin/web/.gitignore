@@ -1,7 +1,12 @@
 node_modules
 dist
+dist/
 dist-ssr
 *.local
 .env.local
 .env.*.local
 *.tsbuildinfo
+*.log
+mockup/_shots/
+_shots/
+shots/

@@ -92,6 +92,12 @@ pub(crate) fn start_pkce_flow(
         &redirect_uri,
         &challenge,
     );
+    tracing::info!(
+        verifier_len = verifier.secret().len(),
+        verifier_first6 = %verifier.secret().chars().take(6).collect::<String>(),
+        challenge_in_url = %challenge.as_str(),
+        "oauth start: generated PKCE verifier+challenge"
+    );
 
     PkceHandshake {
         authorize_url,
@@ -131,8 +137,9 @@ fn authorize_url(
 ) -> Url {
     {
         let mut query = endpoint.query_pairs_mut();
-        query.append_pair("response_type", "code");
+        query.append_pair("code", "true");
         query.append_pair("client_id", client_id.as_str());
+        query.append_pair("response_type", "code");
         query.append_pair("redirect_uri", redirect_uri.as_str());
         query.append_pair("code_challenge", challenge.as_str());
         query.append_pair("code_challenge_method", challenge.method().as_str());
@@ -167,8 +174,16 @@ pub(crate) struct OAuthTokenResponse {
 
 #[derive(Debug, Error)]
 pub(crate) enum OAuthTokenError {
-    #[error("oauth token endpoint returned status {status}")]
-    TokenEndpoint { status: StatusCode },
+    #[error(
+        "oauth token endpoint returned status {status}{}{}",
+        .code.as_deref().map(|c| format!(" ({c})")).unwrap_or_default(),
+        .description.as_deref().map(|d| format!(": {d}")).unwrap_or_default()
+    )]
+    TokenEndpoint {
+        status: StatusCode,
+        code: Option<String>,
+        description: Option<String>,
+    },
     #[error("oauth token endpoint request failed: {reason}")]
     Http { reason: String },
     #[error("oauth token response json failed: {reason}")]
@@ -232,7 +247,7 @@ impl OAuthHttpClient for HyperOAuthHttpClient {
             }
         })?;
         let http_request = Request::post(request.endpoint.as_str())
-            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(CONTENT_TYPE, "application/json")
             .header(CONTENT_LENGTH, content_length)
             .body(Full::new(Bytes::from(body)))
             .map_err(|source| OAuthHttpError::RequestBuild {
@@ -278,6 +293,26 @@ async fn exchange_pkce_code(
         state_token,
         redirect_uri,
     );
+    let verifier_str = code_verifier.expose_secret();
+    let verifier_challenge = {
+        use base64::Engine;
+        use sha2::{Digest, Sha256};
+        base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(Sha256::digest(verifier_str.as_bytes()))
+    };
+    tracing::info!(
+        token_url = %token_url,
+        client_id = %client_id,
+        redirect_uri = %redirect_uri,
+        code_len = auth_code.len(),
+        code_first8 = %auth_code.chars().take(8).collect::<String>(),
+        code_has_hash = auth_code.contains('#'),
+        state_len = state_token.len(),
+        verifier_len = verifier_str.len(),
+        verifier_first6 = %verifier_str.chars().take(6).collect::<String>(),
+        verifier_sha256_challenge = %verifier_challenge,
+        "oauth complete: posting token exchange to anthropic"
+    );
     let response = http
         .post_token(OAuthTokenRequest {
             endpoint: token_url.clone(),
@@ -294,12 +329,29 @@ async fn exchange_pkce_code(
             body = %String::from_utf8_lossy(&response.body),
             "anthropic token endpoint rejected oauth exchange"
         );
+        let (code, description) = parse_oauth_error_body(&response.body);
         return Err(OAuthTokenError::TokenEndpoint {
             status: response.status,
+            code,
+            description,
         });
     }
 
     parse_token_response(response.body, now_epoch_secs)
+}
+
+fn parse_oauth_error_body(body: &[u8]) -> (Option<String>, Option<String>) {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        error: Option<String>,
+        error_description: Option<String>,
+        message: Option<String>,
+    }
+    let Ok(parsed) = serde_json::from_slice::<ErrorBody>(body) else {
+        return (None, None);
+    };
+    let description = parsed.error_description.or(parsed.message);
+    (parsed.error, description)
 }
 
 fn parse_token_response(
@@ -338,14 +390,15 @@ fn form_body(
     state_token: &str,
     redirect_uri: &Url,
 ) -> SecretString {
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    serializer.append_pair("grant_type", "authorization_code");
-    serializer.append_pair("code", auth_code);
-    serializer.append_pair("state", state_token);
-    serializer.append_pair("code_verifier", code_verifier);
-    serializer.append_pair("redirect_uri", redirect_uri.as_str());
-    serializer.append_pair("client_id", client_id);
-    SecretString::new(serializer.finish().into_boxed_str())
+    let payload = serde_json::json!({
+        "grant_type": "authorization_code",
+        "code": auth_code,
+        "redirect_uri": redirect_uri.as_str(),
+        "client_id": client_id,
+        "code_verifier": code_verifier,
+        "state": state_token,
+    });
+    SecretString::new(payload.to_string().into_boxed_str())
 }
 
 fn now_epoch_secs() -> u64 {
