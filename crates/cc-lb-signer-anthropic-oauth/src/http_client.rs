@@ -95,7 +95,7 @@ impl OAuthHttpClient for HyperOAuthHttpClient {
             }
         })?;
         let http_request = Request::post(request.endpoint.as_str())
-            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .header(CONTENT_TYPE, "application/json")
             .header(CONTENT_LENGTH, content_length)
             .body(Full::new(Bytes::from(body)))
             .map_err(|source| OAuthHttpError::RequestBuild {

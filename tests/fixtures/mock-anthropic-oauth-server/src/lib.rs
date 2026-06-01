@@ -3,8 +3,9 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-use axum::extract::{Form, Query, State};
-use axum::http::{HeaderMap, HeaderValue, StatusCode};
+use axum::body::Bytes;
+use axum::extract::{Query, State};
+use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
@@ -90,7 +91,27 @@ struct TokenForm {
     refresh_token: Option<String>,
 }
 
-async fn token(State(state): State<AppState>, Form(form): Form<TokenForm>) -> Response {
+async fn token(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    let is_json = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            s.trim()
+                .to_ascii_lowercase()
+                .starts_with("application/json")
+        })
+        .unwrap_or(false);
+    let form: TokenForm = if is_json {
+        match serde_json::from_slice(&body) {
+            Ok(f) => f,
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "invalid_request"),
+        }
+    } else {
+        match serde_urlencoded::from_bytes(&body) {
+            Ok(f) => f,
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "invalid_request"),
+        }
+    };
     let _client_id = &form.client_id;
     match form.grant_type.as_str() {
         "authorization_code" => exchange_code(state, form),
