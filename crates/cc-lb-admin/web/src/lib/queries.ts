@@ -224,11 +224,18 @@ export function useConfigHistory() {
 // ─────────────────────────────────────────────────────────────────────────────
 // Mutations
 
+export interface CreateUpstreamRequest {
+  name: string;
+  kind: string;
+  base_url?: string | null;
+  api_key_env?: string | null;
+  api_key_value?: string | null;
+}
 export function useCreateUpstream() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { name: string; kind: string; base_url?: string | null; api_key_env?: string | null }) =>
-      postJson<Upstream, typeof body>('/admin/v1/upstreams', body),
+    mutationFn: (body: CreateUpstreamRequest) =>
+      postJson<Upstream, CreateUpstreamRequest>('/admin/v1/upstreams', body),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.upstreams }),
   });
 }
@@ -255,11 +262,18 @@ export function useToggleUpstream() {
     },
   });
 }
+export interface UpdateUpstreamRequest {
+  name?: string | null;
+  base_url?: string | null;
+  api_key_env?: string | null;
+  api_key_value?: string | null;
+  shape_plugin?: { wasm_registry_id: string } | null;
+}
 export function useUpdateUpstream() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, body, revision }: { id: string; body: Partial<Upstream>; revision: number }) =>
-      putJson<Upstream, Partial<Upstream>>(`/admin/v1/upstreams/${id}`, body, { ifMatch: revision }),
+    mutationFn: ({ id, body, revision }: { id: string; body: UpdateUpstreamRequest; revision: number }) =>
+      putJson<Upstream, UpdateUpstreamRequest>(`/admin/v1/upstreams/${id}`, body, { ifMatch: revision }),
     onSuccess: (_d, vars) => {
       qc.invalidateQueries({ queryKey: qk.upstreams });
       qc.invalidateQueries({ queryKey: qk.upstream(vars.id) });

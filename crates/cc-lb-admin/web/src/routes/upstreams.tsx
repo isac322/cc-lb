@@ -27,6 +27,7 @@ import {
   useToggleUpstream,
   useUpdateUpstream,
   useUpstreams,
+  useUsage,
   type Upstream,
 } from '../lib/queries';
 import { eventTime } from '../lib/api';
@@ -38,26 +39,23 @@ export const Route = createFileRoute('/upstreams')({
   component: UpstreamsPage,
 });
 
-function spark(seed: string): number[] {
-  let s = 0x811c9dc5;
-  for (let i = 0; i < seed.length; i++) {
-    s ^= seed.charCodeAt(i);
-    s = Math.imul(s, 0x01000193) >>> 0;
-  }
-  return Array.from({ length: 24 }).map((_, i) => {
-    s = Math.imul(s ^ (s >>> 13), 0x5bd1e995) >>> 0;
-    const phase = ((s >>> 0) % 1000) / 1000;
-    const wave = Math.sin(i * 0.6 + phase * Math.PI * 2);
-    const noise = (((s >>> 7) % 30) - 15) / 100;
-    return Math.max(8, Math.min(100, 50 + wave * 35 + noise * 30));
-  });
-}
+const EMPTY_SPARK: number[] = Array.from({ length: 24 }, () => 0);
 
 function UpstreamsPage() {
   const { selectedId } = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
   const upstreams = useUpstreams();
+  // /admin/usage groups series by upstream.name (not id); join below by name.
+  const usage = useUsage('1h', 'minute', 'upstream');
   const [createOpen, setCreateOpen] = useState(false);
+
+  const sparkByName = useMemo(() => {
+    const map = new Map<string, number[]>();
+    for (const s of usage.data?.series ?? []) {
+      map.set(s.key, s.buckets.map((b) => b.request_count));
+    }
+    return map;
+  }, [usage.data]);
 
   const selected = upstreams.data?.upstreams.find((u) => u.id === selectedId) ?? null;
   const select = (id: string | undefined) => navigate({ search: id ? { selectedId: id } : {} });
@@ -84,35 +82,38 @@ function UpstreamsPage() {
           {upstreams.isLoading ? (
             Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-20" />)
           ) : upstreams.data?.upstreams.length ? (
-            upstreams.data.upstreams.map((u) => (
-              <button
-                key={u.id}
-                type="button"
-                onClick={() => select(u.id)}
-                className={cx(
-                  'w-full text-left p-3 rounded-sm border transition-colors',
-                  u.id === selectedId
-                    ? 'border-accent/40 bg-accent/5 text-text'
-                    : 'border-subtle hover:bg-overlay-3 text-text',
-                )}
-              >
-                <div className="flex items-center justify-between gap-2 mb-1.5">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className={cx('status-dot', u.enabled ? 'ok' : 'neutral')} />
-                    <span className="font-medium text-sm truncate">{u.name}</span>
+            upstreams.data.upstreams.map((u) => {
+              const sparkData = sparkByName.get(u.name) ?? EMPTY_SPARK;
+              return (
+                <button
+                  key={u.id}
+                  type="button"
+                  onClick={() => select(u.id)}
+                  className={cx(
+                    'w-full text-left p-3 rounded-sm border transition-colors',
+                    u.id === selectedId
+                      ? 'border-accent/40 bg-accent/5 text-text'
+                      : 'border-subtle hover:bg-overlay-3 text-text',
+                  )}
+                >
+                  <div className="flex items-center justify-between gap-2 mb-1.5">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <span className={cx('status-dot', u.enabled ? 'ok' : 'neutral')} />
+                      <span className="font-medium text-sm truncate">{u.name}</span>
+                    </div>
+                    <Badge tone="mono">{u.kind}</Badge>
                   </div>
-                  <Badge tone="mono">{u.kind}</Badge>
-                </div>
-                <div className="flex items-center gap-3 mt-2 pb-1">
-                  <div className="flex-1 min-w-0" style={{ minHeight: 32 }}>
-                    <Sparkline data={spark(u.id)} color={u.enabled ? 'var(--color-accent)' : 'var(--color-text-faint)'} />
+                  <div className="flex items-center gap-3 mt-2 pb-1">
+                    <div className="flex-1 min-w-0" style={{ minHeight: 32 }}>
+                      <Sparkline data={sparkData} color={u.enabled ? 'var(--color-accent)' : 'var(--color-text-faint)'} />
+                    </div>
+                    <div className="text-right text-[11px] text-text-faint shrink-0">
+                      <div className="font-mono tabular-nums">rev {u.revision}</div>
+                    </div>
                   </div>
-                  <div className="text-right text-[11px] text-text-faint shrink-0">
-                    <div className="font-mono tabular-nums">rev {u.revision}</div>
-                  </div>
-                </div>
-              </button>
-            ))
+                </button>
+              );
+            })
           ) : (
             <EmptyState title="No upstreams" description="Create your first upstream to start routing traffic." action={<Button variant="primary" onClick={() => setCreateOpen(true)}>New upstream</Button>} />
           )}
@@ -146,6 +147,19 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
   const [oauthState, setOauthState] = useState<{ authorize_url?: string; state_token?: string; code?: string }>({});
   const [name, setName] = useState(upstream.name);
   const [baseUrl, setBaseUrl] = useState(upstream.base_url ?? '');
+  const [editApiKeyValue, setEditApiKeyValue] = useState('');
+  const [editApiKeyEnv, setEditApiKeyEnv] = useState(upstream.api_key_env ?? '');
+  const [editUseEnvVar, setEditUseEnvVar] = useState(false);
+
+  useEffect(() => {
+    if (editOpen) {
+      setName(upstream.name);
+      setBaseUrl(upstream.base_url ?? '');
+      setEditApiKeyValue('');
+      setEditApiKeyEnv(upstream.api_key_env ?? '');
+      setEditUseEnvVar(false);
+    }
+  }, [editOpen, upstream]);
 
   // The backend `/admin/events/recent?upstream=` param only accepts the
   // RequestEventUpstream class enum (`anthropic_direct` / `custom_anthropic_spec`),
@@ -285,12 +299,19 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
               onClick={() => {
                 const trimmedName = name.trim();
                 const trimmedBase = baseUrl.trim();
+                const trimmedKeyValue = editApiKeyValue.trim();
+                const trimmedKeyEnv = editApiKeyEnv.trim();
+                const isApiKey = upstream.kind === 'anthropic_api_key';
                 update.mutate(
                   {
                     id: upstream.id,
                     body: {
                       name: trimmedName,
                       base_url: trimmedBase === '' ? null : trimmedBase,
+                      api_key_value:
+                        isApiKey && !editUseEnvVar && trimmedKeyValue !== '' ? trimmedKeyValue : null,
+                      api_key_env:
+                        isApiKey && editUseEnvVar && trimmedKeyEnv !== '' ? trimmedKeyEnv : null,
                     },
                     revision: upstream.revision,
                   },
@@ -306,6 +327,44 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
         <div className="space-y-3">
           <Field label="Name" required><input className={INPUT_CLASS} value={name} onChange={(e) => setName(e.target.value)} /></Field>
           <Field label="Base URL"><input className={INPUT_CLASS} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} /></Field>
+          {upstream.kind === 'anthropic_api_key' ? (
+            editUseEnvVar ? (
+              <Field label="API Key Env Var" hint="Name of an env var on the server holding the new API key. Leave unchanged to keep the existing credential.">
+                <input
+                  className={INPUT_CLASS + ' font-mono'}
+                  value={editApiKeyEnv}
+                  onChange={(e) => setEditApiKeyEnv(e.target.value)}
+                  placeholder="ANTHROPIC_API_KEY"
+                />
+                <button
+                  type="button"
+                  className="mt-1 text-[11px] text-text-faint hover:text-text underline underline-offset-2"
+                  onClick={() => setEditUseEnvVar(false)}
+                >
+                  Paste new API key instead
+                </button>
+              </Field>
+            ) : (
+              <Field label="Rotate API Key" hint="Paste a new API key to replace the stored one. Leave blank to keep the existing credential.">
+                <input
+                  type="password"
+                  autoComplete="off"
+                  spellCheck={false}
+                  className={INPUT_CLASS + ' font-mono'}
+                  value={editApiKeyValue}
+                  onChange={(e) => setEditApiKeyValue(e.target.value)}
+                  placeholder="sk-ant-..."
+                />
+                <button
+                  type="button"
+                  className="mt-1 text-[11px] text-text-faint hover:text-text underline underline-offset-2"
+                  onClick={() => setEditUseEnvVar(true)}
+                >
+                  Use env var instead
+                </button>
+              </Field>
+            )
+          ) : null}
         </div>
       </Modal>
 
@@ -367,80 +426,240 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
   );
 }
 
+// Invariant: `succeeded` MUST be set before any onOpenChange(false) on a
+// successful path, otherwise handleOpenChange will treat the close as a
+// cancel and delete the freshly-created upstream.
 function CreateUpstreamModal({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
   const create = useCreateUpstream();
+  const del = useDeleteUpstream();
+  const oauthStart = useOAuthStart();
+  const oauthComplete = useOAuthComplete();
+  const [step, setStep] = useState<'configure' | 'authorize'>('configure');
   const [name, setName] = useState('');
   const [kind, setKind] = useState<'anthropic_api_key' | 'anthropic_oauth' | 'custom'>('anthropic_api_key');
   const [baseUrl, setBaseUrl] = useState('https://api.anthropic.com');
+  const [apiKeyValue, setApiKeyValue] = useState('');
   const [apiKeyEnv, setApiKeyEnv] = useState('ANTHROPIC_API_KEY');
+  const [useEnvVar, setUseEnvVar] = useState(false);
+  const [created, setCreated] = useState<{ id: string; revision: number } | null>(null);
+  const [authState, setAuthState] = useState<{ authorize_url: string; state_token: string } | null>(null);
+  const [code, setCode] = useState('');
+  const [succeeded, setSucceeded] = useState(false);
 
-  // Only reset to defaults when the modal transitions to closed. Submit
-  // failures keep the dialog open, so the user's typed values are preserved.
   useEffect(() => {
     if (!open) {
+      setStep('configure');
       setName('');
       setKind('anthropic_api_key');
       setBaseUrl('https://api.anthropic.com');
+      setApiKeyValue('');
       setApiKeyEnv('ANTHROPIC_API_KEY');
+      setUseEnvVar(false);
+      setCreated(null);
+      setAuthState(null);
+      setCode('');
+      setSucceeded(false);
     }
   }, [open]);
+
+  const handleOpenChange = (next: boolean) => {
+    if (!next && created && !succeeded) {
+      del.mutate(
+        { id: created.id, revision: created.revision },
+        { onSuccess: () => toast.info('Upstream creation cancelled') },
+      );
+    }
+    onOpenChange(next);
+  };
+
+  const submitConfigure = () => {
+    const trimmedName = name.trim();
+    const trimmedBase = baseUrl.trim();
+    const trimmedEnv = apiKeyEnv.trim();
+    const trimmedValue = apiKeyValue.trim();
+    const isApiKey = kind === 'anthropic_api_key';
+    create.mutate(
+      {
+        name: trimmedName,
+        kind,
+        base_url: trimmedBase === '' ? null : trimmedBase,
+        api_key_value:
+          isApiKey && !useEnvVar && trimmedValue !== '' ? trimmedValue : null,
+        api_key_env:
+          isApiKey && useEnvVar && trimmedEnv !== '' ? trimmedEnv : null,
+      },
+      {
+        onSuccess: (upstream) => {
+          if (kind !== 'anthropic_oauth') {
+            setSucceeded(true);
+            toast.success('Upstream created');
+            onOpenChange(false);
+            return;
+          }
+          setCreated({ id: upstream.id, revision: upstream.revision });
+          oauthStart.mutate(upstream.id, {
+            onSuccess: (res) => {
+              setAuthState({ authorize_url: res.authorize_url, state_token: res.state_token });
+              setStep('authorize');
+            },
+          });
+        },
+      },
+    );
+  };
+
+  const submitAuthorize = () => {
+    if (!created || !authState || !code.trim()) return;
+    oauthComplete.mutate(
+      { id: created.id, state_token: authState.state_token, code: code.trim() },
+      {
+        onSuccess: () => {
+          setSucceeded(true);
+          toast.success('OAuth connected');
+          onOpenChange(false);
+        },
+      },
+    );
+  };
 
   return (
     <Modal
       open={open}
-      onOpenChange={onOpenChange}
-      title="New upstream"
-      description="Register an Anthropic API key, OAuth principal, or custom backend."
+      onOpenChange={handleOpenChange}
+      title={step === 'configure' ? 'New upstream' : 'Authorize OAuth'}
+      description={
+        step === 'configure'
+          ? 'Register an Anthropic API key, OAuth principal, or custom backend.'
+          : 'Open the authorize URL, then paste the returned code below.'
+      }
+      size={step === 'authorize' ? 'lg' : undefined}
       footer={
-        <>
-          <Button onClick={() => onOpenChange(false)}>Cancel</Button>
-          <Button
-            variant="primary"
-            disabled={!name.trim()}
-            onClick={() => {
-              const trimmedName = name.trim();
-              const trimmedBase = baseUrl.trim();
-              const trimmedEnv = apiKeyEnv.trim();
-              create.mutate(
-                {
-                  name: trimmedName,
-                  kind,
-                  base_url: trimmedBase === '' ? null : trimmedBase,
-                  api_key_env:
-                    kind === 'anthropic_api_key' && trimmedEnv !== '' ? trimmedEnv : null,
-                },
-                { onSuccess: () => { toast.success('Upstream created'); onOpenChange(false); } },
-              );
-            }}
-          >
-            Create
-          </Button>
-        </>
+        step === 'configure' ? (
+          <>
+            <Button onClick={() => handleOpenChange(false)}>Cancel</Button>
+            <Button
+              variant="primary"
+              disabled={
+                !name.trim() ||
+                create.isPending ||
+                oauthStart.isPending ||
+                (kind === 'anthropic_api_key' &&
+                  (useEnvVar ? !apiKeyEnv.trim() : !apiKeyValue.trim()))
+              }
+              onClick={submitConfigure}
+            >
+              {kind === 'anthropic_oauth' ? 'Create & Authorize' : 'Create'}
+            </Button>
+          </>
+        ) : (
+          <>
+            <Button onClick={() => handleOpenChange(false)}>Cancel</Button>
+            <Button
+              variant="primary"
+              disabled={!code.trim() || !authState?.state_token || oauthComplete.isPending}
+              onClick={submitAuthorize}
+            >
+              Complete
+            </Button>
+          </>
+        )
       }
     >
-      <div className="space-y-3">
-        <Field label="Name" required hint="A unique label, e.g. anthropic-prod">
-          <input className={INPUT_CLASS} value={name} onChange={(e) => setName(e.target.value)} placeholder="anthropic-prod" />
-        </Field>
-        <Field label="Kind" required>
-          <select className={INPUT_CLASS} value={kind} onChange={(e) => setKind(e.target.value as typeof kind)}>
-            <option value="anthropic_api_key">Anthropic API Key</option>
-            <option value="anthropic_oauth">Anthropic OAuth</option>
-            <option value="custom">Custom backend</option>
-          </select>
-        </Field>
-        <Field label="Base URL">
-          <input className={INPUT_CLASS} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
-        </Field>
-        {kind === 'anthropic_api_key' ? (
-          <Field label="API Key Env Var" hint="Name of env var holding the API key" required>
-            <input className={INPUT_CLASS + ' font-mono'} value={apiKeyEnv} onChange={(e) => setApiKeyEnv(e.target.value)} />
+      {step === 'configure' ? (
+        <div className="space-y-3">
+          <Field label="Name" required hint="A unique label, e.g. anthropic-prod">
+            <input className={INPUT_CLASS} value={name} onChange={(e) => setName(e.target.value)} placeholder="anthropic-prod" />
           </Field>
-        ) : null}
-        {kind === 'anthropic_oauth' ? (
-          <p className="text-xs text-text-faint">After creation, open the upstream and click <span className="font-mono">Connect via OAuth</span> to begin the PKCE flow.</p>
-        ) : null}
-      </div>
+          <Field label="Kind" required>
+            <select className={INPUT_CLASS} value={kind} onChange={(e) => setKind(e.target.value as typeof kind)}>
+              <option value="anthropic_api_key">Anthropic API Key</option>
+              <option value="anthropic_oauth">Anthropic OAuth</option>
+              <option value="custom">Custom backend</option>
+            </select>
+          </Field>
+          <Field label="Base URL">
+            <input className={INPUT_CLASS} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+          </Field>
+          {kind === 'anthropic_api_key' ? (
+            useEnvVar ? (
+              <Field label="API Key Env Var" hint="Name of an env var on the server holding the API key" required>
+                <input
+                  className={INPUT_CLASS + ' font-mono'}
+                  value={apiKeyEnv}
+                  onChange={(e) => setApiKeyEnv(e.target.value)}
+                  placeholder="ANTHROPIC_API_KEY"
+                />
+                <button
+                  type="button"
+                  className="mt-1 text-[11px] text-text-faint hover:text-text underline underline-offset-2"
+                  onClick={() => setUseEnvVar(false)}
+                >
+                  Paste API key instead
+                </button>
+              </Field>
+            ) : (
+              <Field label="API Key" hint="Pasted plaintext is encrypted at rest" required>
+                <input
+                  type="password"
+                  autoComplete="off"
+                  spellCheck={false}
+                  className={INPUT_CLASS + ' font-mono'}
+                  value={apiKeyValue}
+                  onChange={(e) => setApiKeyValue(e.target.value)}
+                  placeholder="sk-ant-..."
+                />
+                <button
+                  type="button"
+                  className="mt-1 text-[11px] text-text-faint hover:text-text underline underline-offset-2"
+                  onClick={() => setUseEnvVar(true)}
+                >
+                  Use env var instead
+                </button>
+              </Field>
+            )
+          ) : null}
+          {kind === 'anthropic_oauth' ? (
+            <p className="text-xs text-text-faint">
+              The dialog will advance to the authorization step after creation. Closing it before you paste the code removes the upstream.
+            </p>
+          ) : null}
+        </div>
+      ) : (
+        <div className="space-y-3">
+          <p className="text-xs text-text-faint">
+            1. Open the authorization URL below. 2. Approve access. 3. Copy the returned code and paste it here.
+          </p>
+          <Field label="Authorize URL">
+            <code className="block p-2 text-xs font-mono bg-overlay-2 border border-subtle rounded-sm break-all select-all">{authState?.authorize_url ?? ''}</code>
+            <div className="mt-2">
+              <Button
+                size="sm"
+                variant="primary"
+                disabled={!authState?.authorize_url}
+                iconLeft={<ExternalLink className="w-3 h-3" />}
+                onClick={() => {
+                  if (authState?.authorize_url) {
+                    window.open(authState.authorize_url, '_blank', 'noopener,noreferrer');
+                  }
+                }}
+              >
+                Open authorization URL
+              </Button>
+            </div>
+          </Field>
+          <Field label="State Token">
+            <code className="block p-2 text-xs font-mono bg-overlay-2 border border-subtle rounded-sm break-all select-all">{authState?.state_token ?? ''}</code>
+          </Field>
+          <Field label="Authorization Code" required>
+            <input
+              className={INPUT_CLASS + ' font-mono'}
+              value={code}
+              onChange={(e) => setCode(e.target.value)}
+              placeholder="paste code…"
+            />
+          </Field>
+        </div>
+      )}
     </Modal>
   );
 }
