@@ -33,6 +33,7 @@ import {
   useStatus,
   useValidateConfig,
 } from '../lib/queries';
+import { downloadJson, eventTime } from '../lib/api';
 
 export const Route = createFileRoute('/settings')({
   component: SettingsPage,
@@ -125,6 +126,20 @@ function ConfigDraftSection() {
   const reload = useReloadConfig();
   const [text, setText] = useState('');
 
+  const draftRevision = draft.data?.revision ?? null;
+  const lastValidatedRevision = draft.data?.last_validated_revision ?? null;
+  const lastValidationError = draft.data?.last_validation_error ?? null;
+  const canApply =
+    lastValidatedRevision != null &&
+    lastValidationError == null &&
+    draftRevision != null &&
+    lastValidatedRevision === draftRevision;
+  const lastValidatedLabel = lastValidationError
+    ? `error @ rev ${lastValidatedRevision ?? '—'}`
+    : lastValidatedRevision != null
+    ? `rev ${lastValidatedRevision}`
+    : '—';
+
   return (
     <Section title="Configuration Draft" subtitle="Edit → validate → apply pipeline">
       <Card>
@@ -134,16 +149,16 @@ function ConfigDraftSection() {
               onClick={() => {
                 try {
                   const parsed = JSON.parse(text);
-                  save.mutate({ draft: parsed, expected_revision: draft.data?.revision ?? 0 }, { onSuccess: () => toast.success('Draft saved') });
+                  save.mutate({ draft: parsed, expected_revision: draftRevision ?? 0 }, { onSuccess: () => toast.success('Draft saved') });
                 } catch { toast.error('Draft is not valid JSON'); }
               }}>Save</Button>
             <Button size="sm" iconLeft={<CheckCircle2 className="w-3 h-3" />}
-              onClick={() => validate.mutate(draft.data?.revision ?? 0, { onSuccess: (r) => toast.success(r.valid ? 'Draft valid' : `Invalid: ${r.error}`) })}>
+              onClick={() => validate.mutate(draftRevision ?? 0, { onSuccess: (r) => toast.success(r.valid ? 'Draft valid' : `Invalid: ${r.error}`) })}>
               Validate
             </Button>
             <Button size="sm" variant="primary" iconLeft={<PlayCircle className="w-3 h-3" />}
-              disabled={!draft.data?.last_validated_revision}
-              onClick={() => apply.mutate(draft.data?.last_validated_revision ?? 0, { onSuccess: (r) => toast.success(`Applied revision ${r.applied_revision}`) })}>
+              disabled={!canApply}
+              onClick={() => apply.mutate(lastValidatedRevision ?? 0, { onSuccess: (r) => toast.success(`Applied revision ${r.applied_revision}`) })}>
               Apply
             </Button>
             <Button size="sm" iconLeft={<RefreshCw className="w-3 h-3" />}
@@ -154,8 +169,8 @@ function ConfigDraftSection() {
         } />
         <CardBody className="space-y-3">
           <div className="text-xs text-text-faint flex flex-wrap gap-4">
-            <span>Revision: <span className="font-mono">{draft.data?.revision ?? '—'}</span></span>
-            <span>Last validated: <span className="font-mono">{draft.data?.last_validated_revision ?? '—'}</span></span>
+            <span>Revision: <span className="font-mono">{draftRevision ?? '—'}</span></span>
+            <span>Last validated: <span className={cx('font-mono', lastValidationError ? 'text-red-400' : undefined)}>{lastValidatedLabel}</span></span>
             <span>Saved at: <span className="font-mono">{draft.data?.saved_at_unix_secs ? new Date(draft.data.saved_at_unix_secs * 1000).toISOString().slice(0, 19).replace('T', ' ') : '—'}</span></span>
           </div>
           <textarea
@@ -239,7 +254,7 @@ function AuditSection() {
               <tbody>
                 {audit.data.entries.map((e) => (
                   <tr key={e.request_id} className="border-b border-subtle/40 hover:bg-overlay-1">
-                    <td className="px-4 py-2 text-text-muted whitespace-nowrap">{new Date(e.ts * 1000).toISOString().slice(11, 19)} UTC</td>
+                    <td className="px-4 py-2 text-text-muted whitespace-nowrap">{eventTime(e)?.toISOString().slice(11, 19) ?? '—'} UTC</td>
                     <td className="px-4 py-2">{e.principal_id}</td>
                     <td className="px-4 py-2">{e.route}</td>
                     <td className="px-4 py-2">{e.upstream}</td>
@@ -328,16 +343,10 @@ function Row({ label, value }: { label: string; value: React.ReactNode }) {
 
 async function downloadExport() {
   try {
-    const res = await fetch('/admin/v1/export');
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const json = await res.json();
-    const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `cc-lb-export-${new Date().toISOString().slice(0, 16)}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
+    await downloadJson(
+      '/admin/v1/export',
+      `cc-lb-export-${new Date().toISOString().slice(0, 16)}.json`,
+    );
     toast.success('Export downloaded');
   } catch (e) {
     toast.error(`Export failed: ${String(e)}`);

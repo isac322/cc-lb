@@ -28,7 +28,15 @@ export class ApiError extends Error {
   }
 }
 
-async function fetchWithAuth(
+export function buildHeaders(base: HeadersInit | undefined, ifMatch: number | undefined): Headers {
+  const h = new Headers(base);
+  if (ifMatch !== undefined) {
+    h.set('If-Match', `W/"${ifMatch}"`);
+  }
+  return h;
+}
+
+export async function fetchWithAuth(
   path: string,
   options: RequestInit = {},
 ): Promise<Response> {
@@ -94,38 +102,53 @@ export async function getJson<T>(
 export async function postJson<T, B>(
   path: string,
   body: B,
-  options?: { signal?: AbortSignal; headers?: HeadersInit },
+  options?: { signal?: AbortSignal; headers?: HeadersInit; ifMatch?: number },
 ): Promise<T> {
+  const headers = buildHeaders(
+    { 'Content-Type': 'application/json', ...options?.headers },
+    options?.ifMatch,
+  );
   const res = await fetchWithAuth(path, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    headers,
     body: JSON.stringify(body),
     signal: options?.signal,
   });
+  if (res.status === 204) {
+    return {} as T;
+  }
   return res.json();
 }
 
 export async function putJson<T, B>(
   path: string,
   body: B,
-  options?: { signal?: AbortSignal; headers?: HeadersInit },
+  options?: { signal?: AbortSignal; headers?: HeadersInit; ifMatch?: number },
 ): Promise<T> {
+  const headers = buildHeaders(
+    { 'Content-Type': 'application/json', ...options?.headers },
+    options?.ifMatch,
+  );
   const res = await fetchWithAuth(path, {
     method: 'PUT',
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    headers,
     body: JSON.stringify(body),
     signal: options?.signal,
   });
+  if (res.status === 204) {
+    return {} as T;
+  }
   return res.json();
 }
 
 export async function deleteJson<T>(
   path: string,
-  options?: { signal?: AbortSignal; headers?: HeadersInit },
+  options?: { signal?: AbortSignal; headers?: HeadersInit; ifMatch?: number },
 ): Promise<T> {
+  const headers = buildHeaders(options?.headers, options?.ifMatch);
   const res = await fetchWithAuth(path, {
     method: 'DELETE',
-    headers: options?.headers,
+    headers,
     signal: options?.signal,
   });
   if (res.status === 204) {
@@ -137,15 +160,44 @@ export async function deleteJson<T>(
 export async function patchJson<T, B>(
   path: string,
   body: B,
-  options?: { signal?: AbortSignal; headers?: HeadersInit },
+  options?: { signal?: AbortSignal; headers?: HeadersInit; ifMatch?: number },
 ): Promise<T> {
+  const headers = buildHeaders(
+    { 'Content-Type': 'application/json', ...options?.headers },
+    options?.ifMatch,
+  );
   const res = await fetchWithAuth(path, {
     method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', ...options?.headers },
+    headers,
     body: JSON.stringify(body),
     signal: options?.signal,
   });
+  if (res.status === 204) {
+    return {} as T;
+  }
   return res.json();
+}
+
+export function eventTime(e: {
+  ts?: number | null;
+  ts_ms?: number | null;
+}): Date | null {
+  const ms = e.ts_ms ?? (e.ts != null ? e.ts * 1000 : null);
+  return ms != null && Number.isFinite(ms) ? new Date(ms) : null;
+}
+
+export async function downloadJson(
+  path: string,
+  filename: string,
+): Promise<void> {
+  const res = await fetchWithAuth(path, { method: 'GET' });
+  const blob = await res.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
 }
 
 export function streamEventsFetch(
@@ -318,8 +370,8 @@ export interface DashboardUsageResponse {
 }
 
 export interface RequestEvent {
-  ts: number;
-  ts_ms?: number;
+  ts: number | null;
+  ts_ms?: number | null;
   request_id: string;
   principal_id?: string;
   key_id?: string;
@@ -482,7 +534,8 @@ export interface OAuthStatusResponse {
 }
 
 interface AuditEntry {
-  ts: number;
+  ts: number | null;
+  ts_ms?: number | null;
   request_id: string;
   principal_id: string;
   route: string;

@@ -134,9 +134,17 @@ function RegistryTab() {
   const fileRef = useRef<HTMLInputElement>(null);
 
   const handleFile = (file: File | null | undefined) => {
-    if (!file) return;
-    upload.mutate(file, { onSuccess: () => toast.success(`Uploaded ${file.name}`), onError: (e) => toast.error(`Upload failed: ${String(e)}`) });
+    if (!file || upload.isPending) return;
+    upload.mutate(file, {
+      onSuccess: (data) => {
+        const suffix = data.idempotent ? ' (already in registry)' : '';
+        toast.success(`Uploaded ${data.original_filename}${suffix}`);
+      },
+      onError: (e) => toast.error(e instanceof Error ? e.message : String(e)),
+    });
   };
+
+  const uploading = upload.isPending;
 
   return (
     <div className="space-y-6 mt-6">
@@ -145,13 +153,17 @@ function RegistryTab() {
           <Button size="sm" onClick={() => gc.mutate(undefined, { onSuccess: (r) => toast.success(`GC removed ${r.count} orphans`) })}>GC orphans</Button>
         } />
         <div
-          className="m-4 mt-0 p-8 border border-dashed border-subtle rounded-sm flex flex-col items-center justify-center text-center cursor-pointer hover:border-accent/40 transition-colors"
-          onClick={() => fileRef.current?.click()}
+          aria-busy={uploading}
+          className={cx(
+            'm-4 mt-0 p-8 border border-dashed border-subtle rounded-sm flex flex-col items-center justify-center text-center transition-colors',
+            uploading ? 'cursor-wait opacity-70 border-accent/40' : 'cursor-pointer hover:border-accent/40',
+          )}
+          onClick={() => { if (!uploading) fileRef.current?.click(); }}
           onDragOver={(e) => { e.preventDefault(); }}
-          onDrop={(e) => { e.preventDefault(); handleFile(e.dataTransfer.files?.[0]); }}
+          onDrop={(e) => { e.preventDefault(); if (!uploading) handleFile(e.dataTransfer.files?.[0]); }}
         >
-          <UploadCloud className="w-8 h-8 text-text-faint mb-2" />
-          <div className="text-sm">Upload .wasm</div>
+          <UploadCloud className={cx('w-8 h-8 mb-2', uploading ? 'text-accent animate-pulse' : 'text-text-faint')} />
+          <div className="text-sm">{uploading ? 'Uploading…' : 'Upload .wasm'}</div>
           <div className="text-[11px] text-text-faint mt-1">Drag and drop or click to browse. Max 32 MiB.</div>
           <input
             id="btn-upload-wasm"
@@ -159,7 +171,8 @@ function RegistryTab() {
             type="file"
             accept=".wasm"
             className="hidden"
-            onChange={(e) => handleFile(e.target.files?.[0])}
+            disabled={uploading}
+            onChange={(e) => { handleFile(e.target.files?.[0]); e.target.value = ''; }}
           />
         </div>
       </Card>
@@ -212,7 +225,7 @@ function RegistryTab() {
                       onClick={() => {
                         if (p.refcount > 0) return;
                         if (confirm(`Delete ${p.name}?`)) {
-                          del.mutate(p.id, { onSuccess: () => toast.success('Plugin deleted'), onError: (e) => toast.error(String(e)) });
+                          del.mutate({ id: p.id, revision: p.revision }, { onSuccess: () => toast.success('Plugin deleted'), onError: (e) => toast.error(String(e)) });
                         }
                       }}
                     >

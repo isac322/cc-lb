@@ -23,6 +23,7 @@ import {
   cx,
 } from '../components/ui/primitives';
 import { useRecentEvents, useSummary, useUsage, useUpstreams, usePrincipals } from '../lib/queries';
+import { eventTime } from '../lib/api';
 import { useTheme } from '../lib/theme';
 
 export const Route = createFileRoute('/')({
@@ -341,7 +342,7 @@ function OverviewPage() {
                   ) : events.data?.events.length ? (
                     events.data.events.map((e) => (
                       <tr key={e.request_id} className="border-b border-subtle/40 hover:bg-overlay-1">
-                        <td className="px-3 py-2 text-text-faint whitespace-nowrap">{new Date(e.ts * 1000).toISOString().slice(11, 19)} UTC</td>
+                        <td className="px-3 py-2 text-text-faint whitespace-nowrap">{eventTime(e)?.toISOString().slice(11, 19) ?? '—'} UTC</td>
                         <td className="px-3 py-2 whitespace-nowrap">{e.principal_id ?? '—'}</td>
                         <td className="px-3 py-2 whitespace-nowrap">{e.upstream ?? '—'}</td>
                         <td className="px-3 py-2 text-text-faint truncate max-w-[260px]">{e.model ?? '—'}</td>

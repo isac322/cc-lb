@@ -10,6 +10,12 @@ function isSilencedError(error: unknown): boolean {
 
 function messageOf(error: unknown): string {
   if (error instanceof ApiError) {
+    if (
+      error.status === 428 ||
+      (error.status === 409 && error.code === 'stale_revision')
+    ) {
+      return 'Concurrent update detected — please retry';
+    }
     return error.message || `Request failed (${error.status})`;
   }
   if (error instanceof Error) {

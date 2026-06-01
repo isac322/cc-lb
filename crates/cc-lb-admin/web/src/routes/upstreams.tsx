@@ -1,5 +1,5 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
-import { useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { z } from 'zod';
 import { toast } from 'sonner';
 import { ChevronLeft, ExternalLink, KeyRound, Pencil, Plus, ShieldCheck, Trash2 } from 'lucide-react';
@@ -29,6 +29,7 @@ import {
   useUpstreams,
   type Upstream,
 } from '../lib/queries';
+import { eventTime } from '../lib/api';
 
 const upstreamSearchSchema = z.object({ selectedId: z.string().optional() });
 
@@ -146,7 +147,16 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
   const [name, setName] = useState(upstream.name);
   const [baseUrl, setBaseUrl] = useState(upstream.base_url ?? '');
 
-  const recent = useRecentEvents({ upstream: upstream.name, limit: '5' });
+  // The backend `/admin/events/recent?upstream=` param only accepts the
+  // RequestEventUpstream class enum (`anthropic_direct` / `custom_anthropic_spec`),
+  // not an upstream display name or id. Passing the name returns 400
+  // `invalid_upstream`, so we fetch unfiltered and narrow client-side by
+  // `upstream_name`.
+  const recent = useRecentEvents({ limit: '50' });
+  const recentForUpstream = useMemo(
+    () => (recent.data?.events ?? []).filter((e) => e.upstream_name === upstream.name).slice(0, 5),
+    [recent.data, upstream.name],
+  );
 
   return (
     <>
@@ -166,7 +176,7 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
           <Button size="sm" iconLeft={<Pencil className="w-3 h-3" />} onClick={() => setEditOpen(true)}>Edit</Button>
           <Button
             size="sm"
-            onClick={() => toggle.mutate({ id: upstream.id, enabled: !upstream.enabled }, { onSuccess: () => toast.success(upstream.enabled ? 'Upstream disabled' : 'Upstream enabled') })}
+            onClick={() => toggle.mutate({ id: upstream.id, enabled: !upstream.enabled, revision: upstream.revision }, { onSuccess: () => toast.success(upstream.enabled ? 'Upstream disabled' : 'Upstream enabled') })}
           >
             {upstream.enabled ? 'Disable' : 'Enable'}
           </Button>
@@ -176,7 +186,7 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
             iconLeft={<Trash2 className="w-3 h-3" />}
             onClick={() => {
               if (confirm(`Delete ${upstream.name}? This cannot be undone.`)) {
-                del.mutate(upstream.id, { onSuccess: () => { toast.success('Upstream deleted'); onBack(); } });
+                del.mutate({ id: upstream.id, revision: upstream.revision }, { onSuccess: () => { toast.success('Upstream deleted'); onBack(); } });
               }
             }}
           >
@@ -244,10 +254,10 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
                 </tr>
               </thead>
               <tbody>
-                {recent.data?.events.length ? (
-                  recent.data.events.map((e) => (
+                {recentForUpstream.length ? (
+                  recentForUpstream.map((e) => (
                     <tr key={e.request_id} className="border-b border-subtle/40 hover:bg-overlay-1">
-                      <td className="px-3 py-2 text-text-faint whitespace-nowrap">{new Date(e.ts * 1000).toISOString().slice(11, 19)} UTC</td>
+                      <td className="px-3 py-2 text-text-faint whitespace-nowrap">{eventTime(e)?.toISOString().slice(11, 19) ?? '—'} UTC</td>
                       <td className="px-3 py-2">{e.principal_id ?? '—'}</td>
                       <td className="px-3 py-2 text-text-faint truncate max-w-[200px]">{e.model ?? '—'}</td>
                       <td className={cx('px-3 py-2 text-right', e.status >= 500 ? 'text-red-400' : e.status >= 400 ? 'text-amber-400' : 'text-green-400')}>{e.status}</td>
@@ -282,6 +292,7 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
                       name: trimmedName,
                       base_url: trimmedBase === '' ? null : trimmedBase,
                     },
+                    revision: upstream.revision,
                   },
                   { onSuccess: () => { toast.success('Upstream updated'); setEditOpen(false); } },
                 );
@@ -363,12 +374,21 @@ function CreateUpstreamModal({ open, onOpenChange }: { open: boolean; onOpenChan
   const [baseUrl, setBaseUrl] = useState('https://api.anthropic.com');
   const [apiKeyEnv, setApiKeyEnv] = useState('ANTHROPIC_API_KEY');
 
-  const reset = () => { setName(''); setKind('anthropic_api_key'); setBaseUrl('https://api.anthropic.com'); setApiKeyEnv('ANTHROPIC_API_KEY'); };
+  // Only reset to defaults when the modal transitions to closed. Submit
+  // failures keep the dialog open, so the user's typed values are preserved.
+  useEffect(() => {
+    if (!open) {
+      setName('');
+      setKind('anthropic_api_key');
+      setBaseUrl('https://api.anthropic.com');
+      setApiKeyEnv('ANTHROPIC_API_KEY');
+    }
+  }, [open]);
 
   return (
     <Modal
       open={open}
-      onOpenChange={(o) => { onOpenChange(o); if (!o) reset(); }}
+      onOpenChange={onOpenChange}
       title="New upstream"
       description="Register an Anthropic API key, OAuth principal, or custom backend."
       footer={
@@ -389,7 +409,7 @@ function CreateUpstreamModal({ open, onOpenChange }: { open: boolean; onOpenChan
                   api_key_env:
                     kind === 'anthropic_api_key' && trimmedEnv !== '' ? trimmedEnv : null,
                 },
-                { onSuccess: () => { toast.success('Upstream created'); onOpenChange(false); reset(); } },
+                { onSuccess: () => { toast.success('Upstream created'); onOpenChange(false); } },
               );
             }}
           >

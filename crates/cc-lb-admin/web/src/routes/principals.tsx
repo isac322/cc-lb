@@ -157,12 +157,12 @@ function PrincipalDetail({ principal, onBack }: { principal: Principal; onBack: 
           <div className="text-xs text-text-faint font-mono mt-0.5">ID {principal.id} · rev {principal.revision}</div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
-          <Button size="sm" onClick={() => toggle.mutate({ id: principal.id, enabled: !principal.enabled }, { onSuccess: () => toast.success(principal.enabled ? 'Principal disabled' : 'Principal enabled') })}>
+          <Button size="sm" onClick={() => toggle.mutate({ id: principal.id, enabled: !principal.enabled, revision: principal.revision }, { onSuccess: () => toast.success(principal.enabled ? 'Principal disabled' : 'Principal enabled') })}>
             {principal.enabled ? 'Disable' : 'Enable'}
           </Button>
           <Button size="sm" variant="danger" iconLeft={<Trash2 className="w-3 h-3" />} onClick={() => {
             if (confirm(`Delete ${principal.name}?`)) {
-              del.mutate(principal.id, { onSuccess: () => { toast.success('Principal deleted'); onBack(); } });
+              del.mutate({ id: principal.id, revision: principal.revision }, { onSuccess: () => { toast.success('Principal deleted'); onBack(); } });
             }
           }}>Delete</Button>
         </div>
@@ -325,7 +325,17 @@ function SlotEditor({ principalId, slot, label, desc }: { principalId: string; s
               {entries.map((e) => {
                 const reg = registry.data?.entries.find((r) => r.id === e.wasm_registry_id);
                 return (
-                  <SortableChainItem key={e.id} id={e.id} order={e.order} name={reg?.name ?? e.wasm_registry_id} onDelete={() => del.mutate(e.id, { onSuccess: () => toast.success('Plugin removed from chain') })} />
+                  <SortableChainItem
+                    key={e.id}
+                    id={e.id}
+                    order={e.order}
+                    name={reg?.name ?? e.wasm_registry_id}
+                    onDelete={() => {
+                      if (confirm(`Remove ${reg?.name ?? e.wasm_registry_id} from this chain?`)) {
+                        del.mutate({ id: e.id, revision: e.revision }, { onSuccess: () => toast.success('Plugin removed from chain') });
+                      }
+                    }}
+                  />
                 );
               })}
             </ul>

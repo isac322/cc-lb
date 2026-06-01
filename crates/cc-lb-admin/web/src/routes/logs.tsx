@@ -14,7 +14,7 @@ import {
   cx,
 } from '../components/ui/primitives';
 import { useRecentEvents, usePrincipals, useUpstreams } from '../lib/queries';
-import { streamEventsFetch, type RequestEvent } from '../lib/api';
+import { eventTime, streamEventsFetch, type RequestEvent } from '../lib/api';
 
 const logsSearchSchema = z.object({
   principal_id: z.string().optional(),
@@ -170,7 +170,7 @@ function LogsPage() {
                   >
                     <td className="px-3 py-2 text-text-faint whitespace-nowrap">
                       <span className={cx('status-dot mr-2', e.status >= 500 ? 'danger' : e.status >= 400 ? 'warn' : 'ok')} />
-                      {new Date(e.ts * 1000).toISOString().slice(11, 19)} UTC
+                      {eventTime(e)?.toISOString().slice(11, 19) ?? '—'} UTC
                     </td>
                     <td className="px-3 py-2 truncate max-w-[160px]">{e.principal_id ?? '—'}</td>
                     <td className="px-3 py-2 truncate max-w-[180px]">{e.upstream ?? '—'}</td>
@@ -207,7 +207,7 @@ function LogsPage() {
                   </button>
                 </div>
                 <div className="flex-1 overflow-y-auto p-4 space-y-4 text-xs font-mono">
-                  <Row label="Timestamp" value={new Date(selected.ts * 1000).toISOString()} />
+                  <Row label="Timestamp" value={eventTime(selected)?.toISOString() ?? '—'} />
                   <Row label="Status" value={String(selected.status)} />
                   <Row label="Model" value={selected.model ?? '—'} />
                   <Row label="Tokens (in/out)" value={`${selected.input_tokens ?? 0} / ${selected.output_tokens ?? 0}`} />

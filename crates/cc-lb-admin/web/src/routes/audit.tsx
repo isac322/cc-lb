@@ -18,6 +18,7 @@ import {
   cx,
 } from '../components/ui/primitives';
 import { useAudit, usePrincipals, useUpstreams } from '../lib/queries';
+import { eventTime } from '../lib/api';
 
 const auditSearchSchema = z.object({
   principal_id: z.string().optional(),
@@ -33,7 +34,8 @@ export const Route = createFileRoute('/audit')({
 
 interface AuditEntryLike {
   request_id: string;
-  ts: number;
+  ts?: number | null;
+  ts_ms?: number | null;
   principal_id?: string | null;
   route?: string | null;
   upstream?: string | null;
@@ -163,7 +165,7 @@ function AuditPage() {
                       onClick={() => setSelected(e)}
                     >
                       <td className="px-3 py-2 text-text-faint whitespace-nowrap">
-                        {new Date(e.ts * 1000).toISOString().replace('T', ' ').slice(0, 19)} UTC
+                        {eventTime(e)?.toISOString().replace('T', ' ').slice(0, 19) ?? '—'} UTC
                       </td>
                       <td className="px-3 py-2 truncate max-w-[160px]">{e.principal_id ?? '—'}</td>
                       <td className="px-3 py-2 text-text-muted">{e.route ?? '—'}</td>
@@ -215,7 +217,7 @@ function AuditPage() {
             <Card>
               <CardHeader title="Summary" />
               <CardBody className="space-y-2">
-                <Row label="Timestamp" value={new Date(selected.ts * 1000).toISOString()} />
+                <Row label="Timestamp" value={eventTime(selected)?.toISOString() ?? '—'} />
                 <Row label="Principal" value={selected.principal_id ?? '—'} />
                 <Row label="Route" value={selected.route ?? '—'} />
                 <Row label="Upstream" value={selected.upstream ?? '—'} />

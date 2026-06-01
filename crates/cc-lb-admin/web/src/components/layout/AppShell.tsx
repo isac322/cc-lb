@@ -62,6 +62,7 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
   }, []);
 
   const connection = health.isLoading ? 'connecting' : health.isError ? 'down' : 'live';
+  const version = health.data?.version ?? null;
 
   return (
     <div className="min-h-screen flex bg-bg text-text">
@@ -110,6 +111,7 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
           onToggleSidebar={() => setCollapsed((c) => !c)}
           onCommandPalette={onCommandPalette}
           connection={connection}
+          version={version}
         />
         {/* Content renders into normal flow — body scrolls naturally on overflow */}
         <div>{children}</div>
@@ -165,12 +167,15 @@ function Topbar({
   onToggleSidebar,
   onCommandPalette,
   connection,
+  version,
 }: {
   onMobileMenu: () => void;
   onToggleSidebar: () => void;
   onCommandPalette: () => void;
   connection: 'live' | 'connecting' | 'down';
+  version: string | null;
 }) {
+  const liveLabel = version ? `cc-lb · v${version}` : 'cc-lb · live';
   return (
     <header className="h-12 shrink-0 flex items-center justify-between px-3 md:px-5 border-b border-subtle bg-bg sticky top-0 z-30">
       <div className="flex items-center gap-2 min-w-0">
@@ -217,7 +222,7 @@ function Topbar({
         <div className="flex items-center gap-2 text-[11px] text-text-faint">
           <span className={cx('status-dot', connection === 'live' ? 'live' : connection === 'down' ? 'danger' : 'neutral')} />
           <span className="hidden sm:inline">
-            {connection === 'live' ? 'mock-server@8001' : connection === 'down' ? 'disconnected' : 'connecting…'}
+            {connection === 'live' ? liveLabel : connection === 'down' ? 'disconnected' : 'connecting…'}
           </span>
         </div>
       </div>

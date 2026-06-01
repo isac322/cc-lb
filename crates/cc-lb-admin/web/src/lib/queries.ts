@@ -4,6 +4,7 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import {
   deleteJson,
+  fetchWithAuth,
   getJson,
   patchJson,
   postJson,
@@ -234,15 +235,20 @@ export function useCreateUpstream() {
 export function useDeleteUpstream() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => deleteJson(`/admin/v1/upstreams/${id}`),
+    mutationFn: ({ id, revision }: { id: string; revision: number }) =>
+      deleteJson(`/admin/v1/upstreams/${id}`, { ifMatch: revision }),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.upstreams }),
   });
 }
 export function useToggleUpstream() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
-      postJson<Upstream, Record<string, never>>(`/admin/v1/upstreams/${id}/${enabled ? 'enable' : 'disable'}`, {}),
+    mutationFn: ({ id, enabled, revision }: { id: string; enabled: boolean; revision: number }) =>
+      postJson<Upstream, Record<string, never>>(
+        `/admin/v1/upstreams/${id}/${enabled ? 'enable' : 'disable'}`,
+        {},
+        { ifMatch: revision },
+      ),
     onSuccess: (_d, vars) => {
       qc.invalidateQueries({ queryKey: qk.upstreams });
       qc.invalidateQueries({ queryKey: qk.upstream(vars.id) });
@@ -252,8 +258,8 @@ export function useToggleUpstream() {
 export function useUpdateUpstream() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, body }: { id: string; body: Partial<Upstream> }) =>
-      putJson<Upstream, Partial<Upstream>>(`/admin/v1/upstreams/${id}`, body),
+    mutationFn: ({ id, body, revision }: { id: string; body: Partial<Upstream>; revision: number }) =>
+      putJson<Upstream, Partial<Upstream>>(`/admin/v1/upstreams/${id}`, body, { ifMatch: revision }),
     onSuccess: (_d, vars) => {
       qc.invalidateQueries({ queryKey: qk.upstreams });
       qc.invalidateQueries({ queryKey: qk.upstream(vars.id) });
@@ -284,15 +290,20 @@ export function useCreatePrincipal() {
 export function useDeletePrincipal() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => deleteJson(`/admin/v1/principals/${id}`),
+    mutationFn: ({ id, revision }: { id: string; revision: number }) =>
+      deleteJson(`/admin/v1/principals/${id}`, { ifMatch: revision }),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.principals }),
   });
 }
 export function useTogglePrincipal() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
-      postJson<Principal, Record<string, never>>(`/admin/v1/principals/${id}/${enabled ? 'enable' : 'disable'}`, {}),
+    mutationFn: ({ id, enabled, revision }: { id: string; enabled: boolean; revision: number }) =>
+      postJson<Principal, Record<string, never>>(
+        `/admin/v1/principals/${id}/${enabled ? 'enable' : 'disable'}`,
+        {},
+        { ifMatch: revision },
+      ),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.principals }),
   });
 }
@@ -323,17 +334,28 @@ export function useRevokeKey() {
     onSuccess: (_d, vars) => qc.invalidateQueries({ queryKey: qk.principalKeys(vars.id) }),
   });
 }
+export interface UploadWasmResponse {
+  id: string;
+  sha256_hex: string;
+  size_bytes: number;
+  original_filename: string;
+  revision: number;
+  idempotent: boolean;
+}
 export function useUploadWasm() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: async (file: File) => {
+    mutationFn: async (file: File): Promise<UploadWasmResponse> => {
       const form = new FormData();
-      form.append('bytes', file);
+      // Do NOT set Content-Type: the browser must inject the multipart boundary.
       form.append('name', file.name.replace(/\.wasm$/, ''));
       form.append('original_filename', file.name);
-      const res = await fetch('/admin/v1/plugins/wasm', { method: 'POST', body: form });
-      if (!res.ok) throw new Error(`upload failed: ${res.status}`);
-      return res.json() as Promise<{ id: string; sha256_hex: string; size_bytes: number; revision: number; idempotent: boolean }>;
+      form.append('bytes', file);
+      const res = await fetchWithAuth('/admin/v1/plugins/wasm', {
+        method: 'POST',
+        body: form,
+      });
+      return res.json() as Promise<UploadWasmResponse>;
     },
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.pluginRegistry }),
   });
@@ -341,15 +363,20 @@ export function useUploadWasm() {
 export function useDeletePlugin() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => deleteJson(`/admin/v1/plugins/registry/${id}`),
+    mutationFn: ({ id, revision }: { id: string; revision: number }) =>
+      deleteJson(`/admin/v1/plugins/registry/${id}`, { ifMatch: revision }),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.pluginRegistry }),
   });
 }
 export function usePatchPlugin() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, label }: { id: string; label: string | null }) =>
-      patchJson<PluginEntry, { label: string | null }>(`/admin/v1/plugins/registry/${id}`, { label }),
+    mutationFn: ({ id, label, revision }: { id: string; label: string | null; revision: number }) =>
+      patchJson<PluginEntry, { label: string | null }>(
+        `/admin/v1/plugins/registry/${id}`,
+        { label },
+        { ifMatch: revision },
+      ),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.pluginRegistry }),
   });
 }
@@ -379,7 +406,8 @@ export function useReorderChain() {
 export function useDeleteChainEntry() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (id: string) => deleteJson(`/admin/v1/plugin-chain-entries/${id}`),
+    mutationFn: ({ id, revision }: { id: string; revision: number }) =>
+      deleteJson(`/admin/v1/plugin-chain-entries/${id}`, { ifMatch: revision }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['plugin-chain'] }),
   });
 }

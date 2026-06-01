@@ -33,7 +33,7 @@ function App() {
   return (
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
-      <Toaster theme={effective} position="bottom-right" closeButton richColors={false} />
+      <Toaster theme={effective} position="bottom-right" closeButton richColors={false} duration={4000} />
     </QueryClientProvider>
   );
 }
