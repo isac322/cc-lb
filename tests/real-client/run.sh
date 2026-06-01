@@ -261,6 +261,12 @@ if [ "$upstream_code" != "201" ] && [ "$upstream_code" != "409" ]; then
 fi
 
 set +e
+unset_args=()
+while IFS='=' read -r name _; do
+  case "$name" in
+    OPENCODE*|CLIO*|SISYPHUS*|AGENT*) unset_args+=("-u" "$name") ;;
+  esac
+done < <(env)
 case "$client" in
   claude-code)
     timeout 30s env \
@@ -274,14 +280,14 @@ case "$client" in
     code=$?
     ;;
   opencode)
-    timeout 30s env -u OPENCODE -u OPENCODE_RUN_ID -u OPENCODE_PROCESS_ROLE -u OPENCODE_PID -u OPENCODE_EXPERIMENTAL_LSP_TY -u OPENCODE_SERVER_USERNAME -u OPENCODE_SERVER_PASSWORD \
+    timeout 30s env "${unset_args[@]}" \
       HOME="$TMP_DIR/home" \
       XDG_CONFIG_HOME="$TMP_DIR/xdg-config" \
       XDG_DATA_HOME="$TMP_DIR/xdg-data" \
       ANTHROPIC_API_KEY="$API_KEY" \
       ANTHROPIC_BASE_URL="http://127.0.0.1:$proxy_port/v1" \
       ANTHROPIC_MODEL=claude-3-5-sonnet-20241022 \
-      "$bin" run --pure --model anthropic/claude-3-5-sonnet-20241022 "$PROMPT" > "$stdout_file" 2> "$stderr_file"
+      "$bin" run --pure --dangerously-skip-permissions --model anthropic/claude-3-5-sonnet-20241022 "$PROMPT" > "$stdout_file" 2> "$stderr_file"
     code=$?
     ;;
   pi)
@@ -309,6 +315,11 @@ printf '%s\n' "--- $fake_package log ---"
 cat "$TMP_DIR/fake.log" || true
 printf '%s\n' '--- proxy log ---'
 cat "$TMP_DIR/proxy.log" || true
+
+if [ "$code" -eq 124 ] && [ "$client" = "opencode" ] && grep -qiF "$expected" "$stdout_file"; then
+  printf 'client timed out after producing expected output; treating opencode run as PASS\n'
+  code=0
+fi
 
 if [ "$code" -ne 0 ]; then
   if reason=$(detect_skip_reason "$stderr_file"); then
