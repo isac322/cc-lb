@@ -190,19 +190,19 @@ fn parse_token_response(
 }
 
 fn form_body(client_id: &str, token: &str, pkce: Option<(&str, &Url)>) -> SecretString {
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    match pkce {
-        Some((auth_code, redirect_uri)) => {
-            serializer.append_pair("grant_type", "authorization_code");
-            serializer.append_pair("code", auth_code);
-            serializer.append_pair("code_verifier", token);
-            serializer.append_pair("redirect_uri", redirect_uri.as_str());
-        }
-        None => {
-            serializer.append_pair("grant_type", "refresh_token");
-            serializer.append_pair("refresh_token", token);
-        }
-    }
-    serializer.append_pair("client_id", client_id);
-    SecretString::new(serializer.finish().into_boxed_str())
+    let payload = match pkce {
+        Some((auth_code, redirect_uri)) => serde_json::json!({
+            "grant_type": "authorization_code",
+            "code": auth_code,
+            "code_verifier": token,
+            "redirect_uri": redirect_uri.as_str(),
+            "client_id": client_id,
+        }),
+        None => serde_json::json!({
+            "grant_type": "refresh_token",
+            "refresh_token": token,
+            "client_id": client_id,
+        }),
+    };
+    SecretString::new(payload.to_string().into_boxed_str())
 }

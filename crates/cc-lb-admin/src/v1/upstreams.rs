@@ -51,6 +51,8 @@ struct UpstreamCreateBody {
     #[serde(default)]
     api_key_env: Option<String>,
     #[serde(default)]
+    api_key_value: Option<String>,
+    #[serde(default)]
     shape_plugin: Option<UpstreamShapePluginRef>,
 }
 
@@ -62,6 +64,8 @@ struct UpstreamUpdateBody {
     base_url: Option<Url>,
     #[serde(default)]
     api_key_env: Option<String>,
+    #[serde(default)]
+    api_key_value: Option<String>,
     #[serde(default, deserialize_with = "deserialize_optional_shape_plugin")]
     shape_plugin: Option<Option<UpstreamShapePluginRef>>,
 }
@@ -479,28 +483,53 @@ fn api_key_ciphertext_for_create(
     state: &AdminState,
     body: &UpstreamCreateBody,
 ) -> Result<Option<Vec<u8>>, UpstreamError> {
+    let plaintext = body
+        .api_key_value
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let env_name = body
+        .api_key_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
     match body.kind {
-        UpstreamKind::AnthropicApiKey => {
-            let env_name =
-                body.api_key_env
-                    .as_deref()
-                    .ok_or_else(|| UpstreamError::BadRequest {
-                        error: "missing_api_key_env",
-                        detail: "anthropic_api_key upstreams require api_key_env".to_owned(),
-                    })?;
-            encrypt_env_value(state, env_name, body.name.as_bytes()).map(Some)
-        }
+        UpstreamKind::AnthropicApiKey => match (plaintext, env_name) {
+            (Some(_), Some(_)) => Err(UpstreamError::BadRequest {
+                error: "conflicting_api_key",
+                detail: "provide either api_key_value or api_key_env, not both".to_owned(),
+            }),
+            (Some(value), None) => {
+                encrypt_plaintext_value(state, value, body.name.as_bytes()).map(Some)
+            }
+            (None, Some(env)) => encrypt_env_value(state, env, body.name.as_bytes()).map(Some),
+            (None, None) => Err(UpstreamError::BadRequest {
+                error: "missing_api_key",
+                detail: "anthropic_api_key upstreams require api_key_value or api_key_env"
+                    .to_owned(),
+            }),
+        },
         UpstreamKind::AnthropicOauth => {
-            if body.api_key_env.is_some() {
+            if plaintext.is_some() || env_name.is_some() {
                 return Err(UpstreamError::BadRequest {
-                    error: "unexpected_api_key_env",
-                    detail: "anthropic_oauth upstreams do not accept credentials at create time"
+                    error: "unexpected_api_key",
+                    detail: "anthropic_oauth upstreams do not accept api_key_value or api_key_env"
                         .to_owned(),
                 });
             }
             Ok(None)
         }
-        UpstreamKind::Custom => Ok(None),
+        UpstreamKind::Custom => {
+            if plaintext.is_some() || env_name.is_some() {
+                return Err(UpstreamError::BadRequest {
+                    error: "unexpected_api_key",
+                    detail: "custom upstreams do not accept api_key_value or api_key_env"
+                        .to_owned(),
+                });
+            }
+            Ok(None)
+        }
     }
 }
 
@@ -509,10 +538,42 @@ fn api_key_ciphertext_for_update(
     current: &UpstreamRecord,
     body: &UpstreamUpdateBody,
 ) -> Result<Option<Vec<u8>>, UpstreamError> {
-    body.api_key_env
+    let plaintext = body
+        .api_key_value
         .as_deref()
-        .map(|env_name| encrypt_env_value(state, env_name, current.id.as_bytes()))
-        .transpose()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let env_name = body
+        .api_key_env
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+
+    match (plaintext, env_name) {
+        (Some(_), Some(_)) => Err(UpstreamError::BadRequest {
+            error: "conflicting_api_key",
+            detail: "provide either api_key_value or api_key_env, not both".to_owned(),
+        }),
+        (None, None) => Ok(None),
+        (value_opt, env_opt) => {
+            if !matches!(current.kind, UpstreamKind::AnthropicApiKey) {
+                return Err(UpstreamError::BadRequest {
+                    error: "unexpected_api_key",
+                    detail: format!(
+                        "{} upstreams do not accept api_key_value or api_key_env",
+                        current.kind.as_str()
+                    ),
+                });
+            }
+            if let Some(value) = value_opt {
+                encrypt_plaintext_value(state, value, current.id.as_bytes()).map(Some)
+            } else if let Some(env) = env_opt {
+                encrypt_env_value(state, env, current.id.as_bytes()).map(Some)
+            } else {
+                Ok(None)
+            }
+        }
+    }
 }
 
 fn encrypt_env_value(
@@ -524,6 +585,15 @@ fn encrypt_env_value(
         error: "missing_api_key_env_value",
         detail: format!("{env_name}: {error}"),
     })?;
+    encrypt_plaintext_value(state, &value, aad)
+}
+
+fn encrypt_plaintext_value(
+    state: &AdminState,
+    plaintext: &str,
+    aad: &[u8],
+) -> Result<Vec<u8>, UpstreamError> {
+    let value = plaintext.to_owned();
     let encrypted = AeadEncryptedField::<String>::encrypt(state.aead.as_ref(), &value, aad)
         .map_err(|error| UpstreamError::BadRequest {
             error: "credential_encryption_failed",
@@ -540,7 +610,7 @@ fn changed_fields(body: &UpstreamUpdateBody) -> Vec<&'static str> {
     if body.base_url.is_some() {
         fields.push("base_url");
     }
-    if body.api_key_env.is_some() {
+    if body.api_key_env.is_some() || body.api_key_value.is_some() {
         fields.push("api_key_ciphertext");
     }
     fields

@@ -3,7 +3,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Json;
-use axum::extract::{Form, Query, State};
+use axum::body::Bytes;
+use axum::extract::{Query, State};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use base64::Engine;
@@ -102,7 +103,31 @@ pub struct TokenForm {
     refresh_token: Option<String>,
 }
 
-pub async fn token(State(state): State<Arc<AppState>>, Form(form): Form<TokenForm>) -> Response {
+pub async fn token(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let is_json = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| {
+            s.trim()
+                .to_ascii_lowercase()
+                .starts_with("application/json")
+        })
+        .unwrap_or(false);
+    let form: TokenForm = if is_json {
+        match serde_json::from_slice(&body) {
+            Ok(f) => f,
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "invalid_request"),
+        }
+    } else {
+        match serde_urlencoded::from_bytes(&body) {
+            Ok(f) => f,
+            Err(_) => return json_error(StatusCode::BAD_REQUEST, "invalid_request"),
+        }
+    };
     let _client_id = &form.client_id;
     match form.grant_type.as_str() {
         "authorization_code" => exchange_code(state, form),
