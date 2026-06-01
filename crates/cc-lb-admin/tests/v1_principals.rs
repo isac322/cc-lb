@@ -1,5 +1,7 @@
 mod admin_test_common;
 
+use std::time::{Duration, Instant};
+
 use axum::http::{StatusCode, header};
 use cc_lb_storage_api::{
     PluginChainEntryInput, PluginRegistryStore, PluginSlot, WasmBlob, WasmRegistryEntryInput,
@@ -246,20 +248,23 @@ async fn enable_disable_persists_and_audits() {
     assert_eq!(body["enabled"], true);
     assert_eq!(body["revision"], 2);
 
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
-    let entries = server
-        .storage
-        .query_audit(Some(&id), 0, u64::MAX, 20)
-        .unwrap();
-    let actions = entries
-        .iter()
-        .filter_map(|entry| entry.admin_action.as_deref())
-        .collect::<Vec<_>>();
-    assert!(
-        actions
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut saw_enabled_audit = false;
+    while Instant::now() < deadline {
+        let entries = server
+            .storage
+            .query_audit(Some(&id), 0, u64::MAX, 20)
+            .unwrap();
+        saw_enabled_audit = entries
             .iter()
-            .any(|action| action.contains("principal_update") && action.contains("enabled"))
-    );
+            .filter_map(|entry| entry.admin_action.as_deref())
+            .any(|action| action.contains("principal_update") && action.contains("enabled"));
+        if saw_enabled_audit {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    assert!(saw_enabled_audit);
 }
 
 #[tokio::test]
