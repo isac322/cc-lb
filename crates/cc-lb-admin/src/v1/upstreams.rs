@@ -506,18 +506,16 @@ fn api_key_ciphertext_for_create(
             (None, Some(env)) => encrypt_env_value(state, env, body.name.as_bytes()).map(Some),
             (None, None) => Err(UpstreamError::BadRequest {
                 error: "missing_api_key",
-                detail:
-                    "anthropic_api_key upstreams require api_key_value or api_key_env"
-                        .to_owned(),
+                detail: "anthropic_api_key upstreams require api_key_value or api_key_env"
+                    .to_owned(),
             }),
         },
         UpstreamKind::AnthropicOauth => {
             if plaintext.is_some() || env_name.is_some() {
                 return Err(UpstreamError::BadRequest {
                     error: "unexpected_api_key",
-                    detail:
-                        "anthropic_oauth upstreams do not accept api_key_value or api_key_env"
-                            .to_owned(),
+                    detail: "anthropic_oauth upstreams do not accept api_key_value or api_key_env"
+                        .to_owned(),
                 });
             }
             Ok(None)

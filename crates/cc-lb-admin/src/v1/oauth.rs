@@ -466,10 +466,10 @@ fn now_unix_secs() -> u64 {
 
 fn normalize_oauth_code(input: &str) -> String {
     let trimmed = input.trim();
-    if let Ok(url) = Url::parse(trimmed) {
-        if let Some((_, value)) = url.query_pairs().find(|(k, _)| k == "code") {
-            return value.into_owned();
-        }
+    if let Ok(url) = Url::parse(trimmed)
+        && let Some((_, value)) = url.query_pairs().find(|(k, _)| k == "code")
+    {
+        return value.into_owned();
     }
     trimmed.split('#').next().unwrap_or(trimmed).to_string()
 }
