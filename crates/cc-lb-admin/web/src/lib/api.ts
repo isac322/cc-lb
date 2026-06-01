@@ -1,3 +1,4 @@
+import { createEventSource, type EventSourceClient } from 'eventsource-client';
 import { clearAdminToken, getAdminToken } from './auth';
 
 const AUTH_REQUIRED_EVENT = 'cclb:auth-required';
@@ -28,7 +29,10 @@ export class ApiError extends Error {
   }
 }
 
-export function buildHeaders(base: HeadersInit | undefined, ifMatch: number | undefined): Headers {
+export function buildHeaders(
+  base: HeadersInit | undefined,
+  ifMatch: number | undefined,
+): Headers {
   const h = new Headers(base);
   if (ifMatch !== undefined) {
     h.set('If-Match', `W/"${ifMatch}"`);
@@ -203,99 +207,74 @@ export async function downloadJson(
 export function streamEventsFetch(
   path: string,
   options: {
-    onEvent: (ev: MessageEvent) => void;
+    onEvent: (data: string) => void;
     onError: (err: Error) => void;
     onConnect: () => void;
     signal?: AbortSignal;
   },
 ): () => void {
-  const controller = new AbortController();
-  const signal = options.signal
-    ? AbortSignal.any([controller.signal, options.signal])
-    : controller.signal;
-
   let isClosed = false;
+  let client: EventSourceClient | null = null;
 
-  async function connect() {
-    try {
-      const token = getAdminToken();
-      const headers = new Headers();
-      if (token) {
-        headers.set('Authorization', `Bearer ${token}`);
+  const token = getAdminToken();
+  const headers: Record<string, string> = token
+    ? { Authorization: `Bearer ${token}` }
+    : {};
+
+  const closeForAuthFailure = () => {
+    notifyAuthRequired();
+    isClosed = true;
+    client?.close();
+  };
+
+  client = createEventSource({
+    url: path,
+    headers,
+    fetch: async (url, init) => {
+      if (isClosed) {
+        throw new DOMException('SSE stream closed', 'AbortError');
       }
-      headers.set('Accept', 'text/event-stream');
-
-      const res = await fetch(path, { headers, signal });
+      const res = await fetch(url, init as RequestInit);
+      if (res.status === 401) {
+        const error = new ApiError(401, 'unauthorized', null, 'Unauthorized');
+        closeForAuthFailure();
+        options.onError(error);
+        throw error;
+      }
       if (!res.ok) {
-        if (res.status === 401) {
-          notifyAuthRequired();
-          throw new ApiError(401, 'unauthorized', null, 'Unauthorized');
-        }
         throw new Error(`HTTP ${res.status}`);
       }
-
-      options.onConnect();
-
-      if (!res.body) throw new Error('No response body');
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-
-      while (!isClosed) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n\n');
-        buffer = lines.pop() || '';
-
-        for (const block of lines) {
-          if (!block.trim()) continue;
-          const lines = block.split('\n');
-          let eventType = 'message';
-          let data = '';
-          let id = '';
-
-          for (const line of lines) {
-            if (line.startsWith('event:')) {
-              eventType = line.slice(6).trim();
-            } else if (line.startsWith('data:')) {
-              data += `${line.slice(5).trim()}\n`;
-            } else if (line.startsWith('id:')) {
-              id = line.slice(3).trim();
-            }
-          }
-
-          if (data) {
-            options.onEvent(
-              new MessageEvent(eventType, {
-                data: data.trim(),
-                lastEventId: id,
-              }),
-            );
-          }
-        }
+      return res;
+    },
+    onConnect: options.onConnect,
+    onScheduleReconnect: () => {
+      if (!isClosed) {
+        options.onError(new Error('SSE stream reconnecting'));
       }
-    } catch (err) {
-      if (err instanceof Error && err.name === 'AbortError') return;
-      options.onError(err instanceof Error ? err : new Error(String(err)));
-    }
-  }
+    },
+    onMessage(ev) {
+      options.onEvent(ev.data);
+    },
+  });
 
-  connect();
+  options.signal?.addEventListener(
+    'abort',
+    () => {
+      isClosed = true;
+      client?.close();
+    },
+    { once: true },
+  );
+  if (options.signal?.aborted) {
+    isClosed = true;
+    client.close();
+  }
 
   return () => {
     isClosed = true;
-    controller.abort();
+    client?.close();
   };
 }
-
-export type ConnectionState =
-  | 'live'
-  | 'reconnecting'
-  | 'auth_required'
-  | 'disconnected';
 
 export interface SummaryTotals {
   request_count: number;
@@ -554,5 +533,3 @@ interface AuditEntry {
 export interface AuditQueryResponse {
   entries: AuditEntry[];
 }
-
-
