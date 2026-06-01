@@ -78,7 +78,7 @@ tracing.workspace = true
 url.workspace = true
 uuid = { workspace = true, features = ["v4", "serde"] }
 xxhash-rust.workspace = true
-toml = "1.1.2"
+toml.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
