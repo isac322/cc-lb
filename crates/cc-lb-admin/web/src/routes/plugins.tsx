@@ -7,6 +7,7 @@ import {
   Button,
   Card,
   CardHeader,
+  ConfirmDialog,
   Hint,
   PageContainer,
   Section,
@@ -132,6 +133,7 @@ function RegistryTab() {
   const del = useDeletePlugin();
   const gc = useGcPlugins();
   const fileRef = useRef<HTMLInputElement>(null);
+  const [pendingDelete, setPendingDelete] = useState<{ id: string; revision: number; name: string } | null>(null);
 
   const handleFile = (file: File | null | undefined) => {
     if (!file || upload.isPending) return;
@@ -224,9 +226,7 @@ function RegistryTab() {
                       )}
                       onClick={() => {
                         if (p.refcount > 0) return;
-                        if (confirm(`Delete ${p.name}?`)) {
-                          del.mutate({ id: p.id, revision: p.revision }, { onSuccess: () => toast.success('Plugin deleted'), onError: (e) => toast.error(String(e)) });
-                        }
+                        setPendingDelete({ id: p.id, revision: p.revision, name: p.name });
                       }}
                     >
                       <Trash2 className="w-3.5 h-3.5" />
@@ -240,6 +240,20 @@ function RegistryTab() {
           </table>
         </div>
       </Card>
+
+      <ConfirmDialog
+        open={pendingDelete !== null}
+        onOpenChange={(o) => { if (!o) setPendingDelete(null); }}
+        title="Delete Wasm plugin?"
+        description={pendingDelete ? <><span className="font-mono">{pendingDelete.name}</span> will be removed from the registry. This cannot be undone.</> : null}
+        confirmLabel="Delete"
+        destructive
+        onConfirm={() => {
+          if (!pendingDelete) return;
+          del.mutate({ id: pendingDelete.id, revision: pendingDelete.revision }, { onSuccess: () => toast.success('Plugin deleted'), onError: (e) => toast.error(String(e)) });
+          setPendingDelete(null);
+        }}
+      />
     </div>
   );
 }

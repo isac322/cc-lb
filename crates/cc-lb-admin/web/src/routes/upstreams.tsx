@@ -11,6 +11,7 @@ import {
   CardBody,
   CardHeader,
   EmptyState,
+  ConfirmDialog,
   Field,
   INPUT_CLASS,
   Modal,
@@ -216,6 +217,7 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
   const [editApiKeyValue, setEditApiKeyValue] = useState('');
   const [editApiKeyEnv, setEditApiKeyEnv] = useState(upstream.api_key_env ?? '');
   const [editUseEnvVar, setEditUseEnvVar] = useState(false);
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
 
   useEffect(() => {
     if (editOpen) {
@@ -264,11 +266,7 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
             size="sm"
             variant="danger"
             iconLeft={<Trash2 className="w-3 h-3" />}
-            onClick={() => {
-              if (confirm(`Delete ${upstream.name}? This cannot be undone.`)) {
-                del.mutate({ id: upstream.id, revision: upstream.revision }, { onSuccess: () => { toast.success('Upstream deleted'); onBack(); } });
-              }
-            }}
+            onClick={() => setConfirmDeleteOpen(true)}
           >
             Delete
           </Button>
@@ -549,6 +547,16 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
           </Field>
         </div>
       </Modal>
+
+      <ConfirmDialog
+        open={confirmDeleteOpen}
+        onOpenChange={setConfirmDeleteOpen}
+        title="Delete upstream?"
+        description={<><span className="font-mono">{upstream.name}</span> will be permanently removed. This cannot be undone.</>}
+        confirmLabel="Delete"
+        destructive
+        onConfirm={() => del.mutate({ id: upstream.id, revision: upstream.revision }, { onSuccess: () => { toast.success('Upstream deleted'); onBack(); } })}
+      />
     </>
   );
 }

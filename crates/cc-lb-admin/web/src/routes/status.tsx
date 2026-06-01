@@ -1,4 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router';
+import { useState } from 'react';
 import { toast } from 'sonner';
 import { AlertTriangle, Power, ShieldCheck } from 'lucide-react';
 import {
@@ -7,6 +8,7 @@ import {
   Card,
   CardBody,
   CardHeader,
+  ConfirmDialog,
   EmptyState,
   PageContainer,
   Section,
@@ -24,6 +26,7 @@ function StatusPage() {
   const creds = useCredentials();
   const oauth = useOAuthStatus();
   const kill = useKillswitch();
+  const [confirmEngageOpen, setConfirmEngageOpen] = useState(false);
 
   return (
     <PageContainer>
@@ -79,9 +82,11 @@ function StatusPage() {
                 variant={status.data?.killswitch ? 'secondary' : 'danger'}
                 iconLeft={<Power className="w-3 h-3" />}
                 onClick={() => {
-                  const next = !status.data?.killswitch;
-                  if (next && !confirm('Enable killswitch? All proxy traffic will stop.')) return;
-                  kill.mutate(next, { onSuccess: () => toast.success(next ? 'Killswitch engaged' : 'Killswitch disengaged') });
+                  if (status.data?.killswitch) {
+                    kill.mutate(false, { onSuccess: () => toast.success('Killswitch disengaged') });
+                  } else {
+                    setConfirmEngageOpen(true);
+                  }
                 }}
               >
                 {status.data?.killswitch ? 'Disengage' : 'Engage killswitch'}
@@ -137,8 +142,18 @@ function StatusPage() {
               </Card>
             ))}
           </div>
-        ) : <EmptyState title="No OAuth tokens" />}
+         ) : <EmptyState title="No OAuth tokens" />}
       </Section>
+
+      <ConfirmDialog
+        open={confirmEngageOpen}
+        onOpenChange={setConfirmEngageOpen}
+        title="Engage killswitch?"
+        description="All proxy traffic will stop immediately. Inbound requests will be rejected until the killswitch is disengaged."
+        confirmLabel="Engage killswitch"
+        destructive
+        onConfirm={() => kill.mutate(true, { onSuccess: () => toast.success('Killswitch engaged') })}
+      />
     </PageContainer>
   );
 }

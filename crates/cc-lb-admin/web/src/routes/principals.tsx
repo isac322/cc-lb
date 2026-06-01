@@ -32,6 +32,7 @@ import {
   Card,
   CardBody,
   CardHeader,
+  ConfirmDialog,
   EmptyState,
   Field,
   INPUT_CLASS,
@@ -142,6 +143,7 @@ function PrincipalsPage() {
 function PrincipalDetail({ principal, onBack }: { principal: Principal; onBack: () => void }) {
   const toggle = useTogglePrincipal();
   const del = useDeletePrincipal();
+  const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   return (
     <>
       <header className="px-4 md:px-6 py-4 border-b border-subtle flex items-start justify-between gap-3 flex-wrap shrink-0">
@@ -160,13 +162,18 @@ function PrincipalDetail({ principal, onBack }: { principal: Principal; onBack: 
           <Button size="sm" onClick={() => toggle.mutate({ id: principal.id, enabled: !principal.enabled, revision: principal.revision }, { onSuccess: () => toast.success(principal.enabled ? 'Principal disabled' : 'Principal enabled') })}>
             {principal.enabled ? 'Disable' : 'Enable'}
           </Button>
-          <Button size="sm" variant="danger" iconLeft={<Trash2 className="w-3 h-3" />} onClick={() => {
-            if (confirm(`Delete ${principal.name}?`)) {
-              del.mutate({ id: principal.id, revision: principal.revision }, { onSuccess: () => { toast.success('Principal deleted'); onBack(); } });
-            }
-          }}>Delete</Button>
+          <Button size="sm" variant="danger" iconLeft={<Trash2 className="w-3 h-3" />} onClick={() => setConfirmDeleteOpen(true)}>Delete</Button>
         </div>
       </header>
+      <ConfirmDialog
+        open={confirmDeleteOpen}
+        onOpenChange={setConfirmDeleteOpen}
+        title="Delete principal?"
+        description={<><span className="font-mono">{principal.name}</span> and all its API keys / plugin chain entries will be permanently removed.</>}
+        confirmLabel="Delete"
+        destructive
+        onConfirm={() => del.mutate({ id: principal.id, revision: principal.revision }, { onSuccess: () => { toast.success('Principal deleted'); onBack(); } })}
+      />
 
       <div className="flex-1 overflow-y-auto p-4 md:p-6 space-y-6">
         <AllowedModelsCard principal={principal} />
@@ -289,6 +296,7 @@ function SlotEditor({ principalId, slot, label, desc }: { principalId: string; s
   const del = useDeleteChainEntry();
   const [addOpen, setAddOpen] = useState(false);
   const [selectedPluginId, setSelectedPluginId] = useState<string>('');
+  const [pendingRemove, setPendingRemove] = useState<{ id: string; revision: number; name: string } | null>(null);
 
   const sensors = useSensors(useSensor(PointerSensor), useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }));
 
@@ -330,11 +338,7 @@ function SlotEditor({ principalId, slot, label, desc }: { principalId: string; s
                     id={e.id}
                     order={e.order}
                     name={reg?.name ?? e.wasm_registry_id}
-                    onDelete={() => {
-                      if (confirm(`Remove ${reg?.name ?? e.wasm_registry_id} from this chain?`)) {
-                        del.mutate({ id: e.id, revision: e.revision }, { onSuccess: () => toast.success('Plugin removed from chain') });
-                      }
-                    }}
+                    onDelete={() => setPendingRemove({ id: e.id, revision: e.revision, name: reg?.name ?? e.wasm_registry_id })}
                   />
                 );
               })}
@@ -367,6 +371,20 @@ function SlotEditor({ principalId, slot, label, desc }: { principalId: string; s
           </select>
         </Field>
       </Modal>
+
+      <ConfirmDialog
+        open={pendingRemove !== null}
+        onOpenChange={(o) => { if (!o) setPendingRemove(null); }}
+        title="Remove plugin from chain?"
+        description={pendingRemove ? <><span className="font-mono">{pendingRemove.name}</span> will be removed from the {label} chain. You can re-add it later.</> : null}
+        confirmLabel="Remove"
+        destructive
+        onConfirm={() => {
+          if (!pendingRemove) return;
+          del.mutate({ id: pendingRemove.id, revision: pendingRemove.revision }, { onSuccess: () => toast.success('Plugin removed from chain') });
+          setPendingRemove(null);
+        }}
+      />
     </div>
   );
 }
@@ -395,6 +413,7 @@ function ApiKeysCard({ principal }: { principal: Principal }) {
   const [issueOpen, setIssueOpen] = useState(false);
   const [label, setLabel] = useState('');
   const [issued, setIssued] = useState<{ plaintext_key: string; key_id: string } | null>(null);
+  const [pendingRevoke, setPendingRevoke] = useState<{ key_id: string; label: string } | null>(null);
 
   return (
     <Card>
@@ -419,13 +438,13 @@ function ApiKeysCard({ principal }: { principal: Principal }) {
                 <tr key={k.key_id} className="border-b border-subtle/40">
                   <td className="px-4 py-2">{k.label ?? '—'}</td>
                   <td className="px-4 py-2">{k.key_id}</td>
-                  <td className="px-4 py-2">···{(k as { last_4?: string }).last_4 ?? '????'}</td>
+                  <td className="px-4 py-2 text-text-faint">{k.last_4 ? `···${k.last_4}` : '—'}</td>
                   <td className="px-4 py-2">{new Date(k.issued_at_unix_secs * 1000).toISOString().slice(0, 10)}</td>
                   <td className="px-4 py-2">{k.revoked_at_unix_secs ? <StatusBadge tone="danger" label="Revoked" /> : <StatusBadge tone="ok" label="Active" />}</td>
                   <td className="px-4 py-2 text-right">
                     {!k.revoked_at_unix_secs ? (
                       <button type="button" className="text-text-faint hover:text-red-400" aria-label="Revoke key"
-                        onClick={() => { if (confirm(`Revoke ${k.label ?? k.key_id}?`)) revoke.mutate({ id: principal.id, key_id: k.key_id }, { onSuccess: () => toast.success('Key revoked') }); }}>
+                        onClick={() => setPendingRevoke({ key_id: k.key_id, label: k.label ?? k.key_id })}>
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
                     ) : null}
@@ -462,6 +481,20 @@ function ApiKeysCard({ principal }: { principal: Principal }) {
           </Field>
         )}
       </Modal>
+
+      <ConfirmDialog
+        open={pendingRevoke !== null}
+        onOpenChange={(o) => { if (!o) setPendingRevoke(null); }}
+        title="Revoke API key?"
+        description={pendingRevoke ? <>Key <span className="font-mono">{pendingRevoke.label}</span> will stop authenticating new requests immediately.</> : null}
+        confirmLabel="Revoke"
+        destructive
+        onConfirm={() => {
+          if (!pendingRevoke) return;
+          revoke.mutate({ id: principal.id, key_id: pendingRevoke.key_id }, { onSuccess: () => toast.success('Key revoked') });
+          setPendingRevoke(null);
+        }}
+      />
     </Card>
   );
 }

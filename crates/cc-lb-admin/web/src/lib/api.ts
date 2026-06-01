@@ -448,6 +448,7 @@ interface ApiKeyRecord {
   label: string | null;
   issued_at_unix_secs: number;
   revoked_at_unix_secs: number | null;
+  last_4: string;
 }
 
 export interface KeyListResponse {
