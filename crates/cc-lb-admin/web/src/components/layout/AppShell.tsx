@@ -1,4 +1,3 @@
-import { useEffect, useState, type ReactNode } from 'react';
 import * as Dialog from '@radix-ui/react-dialog';
 import { Link } from '@tanstack/react-router';
 import {
@@ -15,9 +14,10 @@ import {
   Users,
   X,
 } from 'lucide-react';
+import { type ReactNode, useEffect, useState } from 'react';
 import { useHealth } from '../../lib/queries';
-import { cx } from '../ui/primitives';
 import { ThemeToggle } from '../ThemeToggle';
+import { cx } from '../ui/primitives';
 
 const NAV = [
   { path: '/', label: 'Overview', Icon: LayoutDashboard },
@@ -61,7 +61,11 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
     return () => window.removeEventListener('keydown', handler);
   }, []);
 
-  const connection = health.isLoading ? 'connecting' : health.isError ? 'down' : 'live';
+  const connection = health.isLoading
+    ? 'connecting'
+    : health.isError
+      ? 'down'
+      : 'live';
   const version = health.data?.version ?? null;
 
   return (
@@ -92,20 +96,27 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
             <div className="flex items-center justify-between px-4 border-b border-subtle">
               <SidebarBrand collapsed={false} />
               <Dialog.Close asChild>
-                <button type="button" aria-label="Close menu" className="text-text-muted hover:text-text">
+                <button
+                  type="button"
+                  aria-label="Close menu"
+                  className="text-text-muted hover:text-text"
+                >
                   <X className="w-4 h-4" />
                 </button>
               </Dialog.Close>
             </div>
-            <div className="overflow-y-auto min-h-0">
-              <SidebarNav collapsed={false} onNavigate={() => setMobileOpen(false)} />
+            <div className="overflow-y-auto min-h-0 pb-8">
+              <SidebarNav
+                collapsed={false}
+                onNavigate={() => setMobileOpen(false)}
+              />
             </div>
             <SidebarFooter collapsed={false} />
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
 
-      <main className="flex-1 flex flex-col min-w-0 bg-bg">
+      <main className="flex-1 flex flex-col min-w-0 bg-bg min-h-screen">
         <Topbar
           onMobileMenu={() => setMobileOpen(true)}
           onToggleSidebar={() => setCollapsed((c) => !c)}
@@ -114,7 +125,7 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
           version={version}
         />
         {/* Content renders into normal flow — body scrolls naturally on overflow */}
-        <div>{children}</div>
+        <div className="flex-1 flex flex-col">{children}</div>
       </main>
     </div>
   );
@@ -122,16 +133,31 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
 
 function SidebarBrand({ collapsed }: { collapsed: boolean }) {
   return (
-    <div className={cx('flex items-center gap-2.5 px-3 h-12 border-b border-subtle shrink-0', collapsed ? 'justify-center' : '')}>
-      <div className="w-6 h-6 bg-accent text-[color:var(--color-bg)] flex items-center justify-center font-bold text-[11px] rounded-sm">CC</div>
-      {!collapsed ? <span className="font-medium text-sm tracking-wide">cc-lb</span> : null}
+    <div
+      className={cx(
+        'flex items-center gap-2.5 px-3 h-12 border-b border-subtle shrink-0',
+        collapsed ? 'justify-center' : '',
+      )}
+    >
+      <div className="w-6 h-6 bg-accent text-[color:var(--color-bg)] flex items-center justify-center font-bold text-[11px] rounded-sm">
+        CC
+      </div>
+      {!collapsed ? (
+        <span className="font-medium text-sm tracking-wide">cc-lb</span>
+      ) : null}
     </div>
   );
 }
 
-function SidebarNav({ collapsed, onNavigate }: { collapsed: boolean; onNavigate: () => void }) {
+function SidebarNav({
+  collapsed,
+  onNavigate,
+}: {
+  collapsed: boolean;
+  onNavigate: () => void;
+}) {
   return (
-    <nav className="flex-1 py-3 px-2 space-y-0.5 overflow-y-auto">
+    <nav className="flex-1 pt-3 pb-8 px-2 space-y-0.5 overflow-y-auto">
       {NAV.map(({ path, label, Icon }) => (
         <Link
           key={path}
@@ -145,7 +171,11 @@ function SidebarNav({ collapsed, onNavigate }: { collapsed: boolean; onNavigate:
           activeProps={{ className: 'bg-overlay-6 text-text' }}
         >
           <Icon className="w-4 h-4 shrink-0" aria-hidden="true" />
-          {!collapsed ? <span className="truncate">{label}</span> : <span className="sr-only">{label}</span>}
+          {!collapsed ? (
+            <span className="truncate">{label}</span>
+          ) : (
+            <span className="sr-only">{label}</span>
+          )}
         </Link>
       ))}
     </nav>
@@ -154,7 +184,12 @@ function SidebarNav({ collapsed, onNavigate }: { collapsed: boolean; onNavigate:
 
 function SidebarFooter({ collapsed }: { collapsed: boolean }) {
   return (
-    <div className={cx('border-t border-subtle px-3 py-3', collapsed ? 'text-center' : '')}>
+    <div
+      className={cx(
+        'border-t border-subtle px-3 py-3',
+        collapsed ? 'text-center' : '',
+      )}
+    >
       <div className="text-[10px] uppercase tracking-wider text-text-faint">
         {collapsed ? 'v' : 'cc-lb admin · v1.4.0'}
       </div>
@@ -208,7 +243,9 @@ function Topbar({
           className="hidden sm:flex items-center gap-2 h-8 px-2.5 text-xs text-text-muted bg-overlay-2 border border-subtle rounded-sm hover:text-text hover:border-[color:var(--color-border-strong)]"
         >
           <span>Search...</span>
-          <kbd className="font-mono text-[10px] px-1 bg-overlay-3 border border-subtle rounded-sm">⌘K</kbd>
+          <kbd className="font-mono text-[10px] px-1 bg-overlay-3 border border-subtle rounded-sm">
+            ⌘K
+          </kbd>
         </button>
         <button
           type="button"
@@ -220,9 +257,22 @@ function Topbar({
         </button>
         <ThemeToggle />
         <div className="flex items-center gap-2 text-[11px] text-text-faint">
-          <span className={cx('status-dot', connection === 'live' ? 'live' : connection === 'down' ? 'danger' : 'neutral')} />
+          <span
+            className={cx(
+              'status-dot',
+              connection === 'live'
+                ? 'live'
+                : connection === 'down'
+                  ? 'danger'
+                  : 'neutral',
+            )}
+          />
           <span className="hidden sm:inline">
-            {connection === 'live' ? liveLabel : connection === 'down' ? 'disconnected' : 'connecting…'}
+            {connection === 'live'
+              ? liveLabel
+              : connection === 'down'
+                ? 'disconnected'
+                : 'connecting…'}
           </span>
         </div>
       </div>
