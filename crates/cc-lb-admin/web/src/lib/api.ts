@@ -1,8 +1,7 @@
+import { createEventSource, type EventSourceClient } from 'eventsource-client';
 import { clearAdminToken, getAdminToken } from './auth';
 
 const AUTH_REQUIRED_EVENT = 'cclb:auth-required';
-const SSE_RECONNECT_BASE_MS = 1_000;
-const SSE_RECONNECT_MAX_MS = 15_000;
 
 function notifyAuthRequired(): void {
   clearAdminToken();
@@ -208,131 +207,74 @@ export async function downloadJson(
 export function streamEventsFetch(
   path: string,
   options: {
-    onEvent: (ev: MessageEvent) => void;
+    onEvent: (data: string) => void;
     onError: (err: Error) => void;
     onConnect: () => void;
     signal?: AbortSignal;
   },
 ): () => void {
-  const controller = new AbortController();
-  const signal = options.signal
-    ? AbortSignal.any([controller.signal, options.signal])
-    : controller.signal;
-
   let isClosed = false;
+  let client: EventSourceClient | null = null;
 
-  const reconnectDelay = (attempt: number) =>
-    Math.min(SSE_RECONNECT_BASE_MS * 2 ** attempt, SSE_RECONNECT_MAX_MS);
+  const token = getAdminToken();
+  const headers: Record<string, string> = token
+    ? { Authorization: `Bearer ${token}` }
+    : {};
 
-  const wait = (ms: number) =>
-    new Promise<void>((resolve) => {
-      if (signal.aborted) {
-        resolve();
-        return;
+  const closeForAuthFailure = () => {
+    notifyAuthRequired();
+    isClosed = true;
+    client?.close();
+  };
+
+  client = createEventSource({
+    url: path,
+    headers,
+    fetch: async (url, init) => {
+      if (isClosed) {
+        throw new DOMException('SSE stream closed', 'AbortError');
       }
-      const timeoutId = setTimeout(done, ms);
-      function done() {
-        clearTimeout(timeoutId);
-        signal.removeEventListener('abort', done);
-        resolve();
-      }
-      signal.addEventListener('abort', done, { once: true });
-    });
-
-  async function connectOnce() {
-    const token = getAdminToken();
-    const headers = new Headers();
-    if (token) {
-      headers.set('Authorization', `Bearer ${token}`);
-    }
-    headers.set('Accept', 'text/event-stream');
-
-    const res = await fetch(path, { headers, signal });
-    if (!res.ok) {
+      const res = await fetch(url, init as RequestInit);
       if (res.status === 401) {
-        notifyAuthRequired();
-        throw new ApiError(401, 'unauthorized', null, 'Unauthorized');
-      }
-      throw new Error(`HTTP ${res.status}`);
-    }
-
-    options.onConnect();
-
-    if (!res.body) throw new Error('No response body');
-
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = '';
-
-    while (!isClosed) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buffer += decoder.decode(value, { stream: true });
-      const lines = buffer.split('\n\n');
-      buffer = lines.pop() || '';
-
-      for (const block of lines) {
-        if (!block.trim()) continue;
-        const lines = block.split('\n');
-        let eventType = 'message';
-        let data = '';
-        let id = '';
-
-        for (const line of lines) {
-          if (line.startsWith('event:')) {
-            eventType = line.slice(6).trim();
-          } else if (line.startsWith('data:')) {
-            data += `${line.slice(5).trim()}\n`;
-          } else if (line.startsWith('id:')) {
-            id = line.slice(3).trim();
-          }
-        }
-
-        if (data) {
-          options.onEvent(
-            new MessageEvent(eventType, {
-              data: data.trim(),
-              lastEventId: id,
-            }),
-          );
-        }
-      }
-    }
-  }
-
-  async function connect() {
-    let reconnectAttempt = 0;
-    while (!isClosed && !signal.aborted) {
-      try {
-        await connectOnce();
-        if (isClosed || signal.aborted) return;
-        reconnectAttempt = 0;
-        options.onError(new Error('SSE stream closed'));
-      } catch (err) {
-        if (err instanceof Error && err.name === 'AbortError') return;
-        const error = err instanceof Error ? err : new Error(String(err));
+        const error = new ApiError(401, 'unauthorized', null, 'Unauthorized');
+        closeForAuthFailure();
         options.onError(error);
-        if (error instanceof ApiError && error.status === 401) return;
+        throw error;
       }
-      await wait(reconnectDelay(reconnectAttempt));
-      reconnectAttempt += 1;
-    }
-  }
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
+      }
+      return res;
+    },
+    onConnect: options.onConnect,
+    onScheduleReconnect: () => {
+      if (!isClosed) {
+        options.onError(new Error('SSE stream reconnecting'));
+      }
+    },
+    onMessage(ev) {
+      options.onEvent(ev.data);
+    },
+  });
 
-  void connect();
+  options.signal?.addEventListener(
+    'abort',
+    () => {
+      isClosed = true;
+      client?.close();
+    },
+    { once: true },
+  );
+  if (options.signal?.aborted) {
+    isClosed = true;
+    client.close();
+  }
 
   return () => {
     isClosed = true;
-    controller.abort();
+    client?.close();
   };
 }
-
-export type ConnectionState =
-  | 'live'
-  | 'reconnecting'
-  | 'auth_required'
-  | 'disconnected';
 
 export interface SummaryTotals {
   request_count: number;
