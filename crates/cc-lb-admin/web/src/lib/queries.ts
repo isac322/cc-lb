@@ -2,7 +2,9 @@
 // Source-of-truth: .omo/plans/cc-lb-dashboard-overhaul.md (API SURFACE section).
 
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { toast } from 'sonner';
 import {
+  ApiError,
   deleteJson,
   fetchWithAuth,
   getJson,
@@ -282,7 +284,11 @@ export function useUpdateUpstream() {
 }
 export function useOAuthStart() {
   return useMutation({
-    mutationFn: (id: string) => postJson<{ authorize_url: string; state_token: string }, Record<string, never>>(`/admin/v1/upstreams/${id}/oauth/start`, {}),
+    mutationFn: (id: string) =>
+      postJson<
+        { authorize_url: string; state_token: string; revision: number },
+        Record<string, never>
+      >(`/admin/v1/upstreams/${id}/oauth/start`, {}),
   });
 }
 export function useOAuthComplete() {
@@ -291,6 +297,15 @@ export function useOAuthComplete() {
     mutationFn: ({ id, state_token, code }: { id: string; state_token: string; code: string }) =>
       postJson<{ upstream_id: string; expires_at_unix_secs: number; access_token_fingerprint: string }, { state_token: string; code: string }>(`/admin/v1/upstreams/${id}/oauth/complete`, { state_token, code }),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.upstreams }),
+    onError: (error) => {
+      const message =
+        error instanceof ApiError
+          ? error.message || `Request failed (${error.status})`
+          : error instanceof Error
+            ? error.message
+            : String(error);
+      toast.error(`OAuth verification failed: ${message}`);
+    },
   });
 }
 export function useCreatePrincipal() {

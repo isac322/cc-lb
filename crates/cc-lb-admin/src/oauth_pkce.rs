@@ -167,8 +167,16 @@ pub(crate) struct OAuthTokenResponse {
 
 #[derive(Debug, Error)]
 pub(crate) enum OAuthTokenError {
-    #[error("oauth token endpoint returned status {status}")]
-    TokenEndpoint { status: StatusCode },
+    #[error(
+        "oauth token endpoint returned status {status}{}{}",
+        .code.as_deref().map(|c| format!(" ({c})")).unwrap_or_default(),
+        .description.as_deref().map(|d| format!(": {d}")).unwrap_or_default()
+    )]
+    TokenEndpoint {
+        status: StatusCode,
+        code: Option<String>,
+        description: Option<String>,
+    },
     #[error("oauth token endpoint request failed: {reason}")]
     Http { reason: String },
     #[error("oauth token response json failed: {reason}")]
@@ -294,12 +302,29 @@ async fn exchange_pkce_code(
             body = %String::from_utf8_lossy(&response.body),
             "anthropic token endpoint rejected oauth exchange"
         );
+        let (code, description) = parse_oauth_error_body(&response.body);
         return Err(OAuthTokenError::TokenEndpoint {
             status: response.status,
+            code,
+            description,
         });
     }
 
     parse_token_response(response.body, now_epoch_secs)
+}
+
+fn parse_oauth_error_body(body: &[u8]) -> (Option<String>, Option<String>) {
+    #[derive(Deserialize)]
+    struct ErrorBody {
+        error: Option<String>,
+        error_description: Option<String>,
+        message: Option<String>,
+    }
+    let Ok(parsed) = serde_json::from_slice::<ErrorBody>(body) else {
+        return (None, None);
+    };
+    let description = parsed.error_description.or(parsed.message);
+    (parsed.error, description)
 }
 
 fn parse_token_response(

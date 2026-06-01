@@ -1,8 +1,9 @@
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
+import { useQueryClient } from '@tanstack/react-query';
 import { useEffect, useMemo, useState } from 'react';
 import { z } from 'zod';
 import { toast } from 'sonner';
-import { ChevronLeft, ExternalLink, KeyRound, Pencil, Plus, ShieldCheck, Trash2 } from 'lucide-react';
+import { ChevronLeft, ExternalLink, KeyRound, Pencil, Plus, Trash2 } from 'lucide-react';
 import {
   Badge,
   Button,
@@ -19,10 +20,12 @@ import {
   cx,
 } from '../components/ui/primitives';
 import {
+  qk,
   useCreateUpstream,
   useDeleteUpstream,
   useOAuthComplete,
   useOAuthStart,
+  useOAuthStatus,
   useRecentEvents,
   useToggleUpstream,
   useUpdateUpstream,
@@ -30,7 +33,7 @@ import {
   useUsage,
   type Upstream,
 } from '../lib/queries';
-import { eventTime } from '../lib/api';
+import { ApiError, deleteJson, eventTime, getJson } from '../lib/api';
 
 const upstreamSearchSchema = z.object({ selectedId: z.string().optional() });
 
@@ -48,6 +51,11 @@ function UpstreamsPage() {
   // /admin/usage groups series by upstream.name (not id); join below by name.
   const usage = useUsage('1h', 'minute', 'upstream');
   const [createOpen, setCreateOpen] = useState(false);
+  // While an OAuth upstream is created but its /oauth/complete hasn't succeeded
+  // yet, the row exists in the DB (we need its id for /oauth/start) but should
+  // be hidden from the list. CreateUpstreamModal calls the setter on POST
+  // success and clears it on completion/cancel.
+  const [pendingCreatedId, setPendingCreatedId] = useState<string | null>(null);
 
   const sparkByName = useMemo(() => {
     const map = new Map<string, number[]>();
@@ -57,7 +65,12 @@ function UpstreamsPage() {
     return map;
   }, [usage.data]);
 
-  const selected = upstreams.data?.upstreams.find((u) => u.id === selectedId) ?? null;
+  const visibleUpstreams = useMemo(
+    () => (upstreams.data?.upstreams ?? []).filter((u) => u.id !== pendingCreatedId),
+    [upstreams.data, pendingCreatedId],
+  );
+
+  const selected = visibleUpstreams.find((u) => u.id === selectedId) ?? null;
   const select = (id: string | undefined) => navigate({ search: id ? { selectedId: id } : {} });
 
   return (
@@ -72,7 +85,7 @@ function UpstreamsPage() {
         <div className="h-12 px-4 flex items-center justify-between border-b border-subtle shrink-0">
           <div>
             <h1 className="text-sm font-medium">Upstreams</h1>
-            <p className="text-[11px] text-text-faint">{upstreams.data?.upstreams.length ?? 0} total</p>
+            <p className="text-[11px] text-text-faint">{visibleUpstreams.length} total</p>
           </div>
           <Button id="btn-new-upstream" size="sm" variant="primary" iconLeft={<Plus className="w-3 h-3" />} onClick={() => setCreateOpen(true)}>
             New
@@ -81,8 +94,8 @@ function UpstreamsPage() {
         <div className="flex-1 overflow-y-auto p-2 space-y-1">
           {upstreams.isLoading ? (
             Array.from({ length: 3 }).map((_, i) => <Skeleton key={i} className="h-20" />)
-          ) : upstreams.data?.upstreams.length ? (
-            upstreams.data.upstreams.map((u) => {
+          ) : visibleUpstreams.length ? (
+            visibleUpstreams.map((u) => {
               const sparkData = sparkByName.get(u.name) ?? EMPTY_SPARK;
               return (
                 <button
@@ -131,9 +144,37 @@ function UpstreamsPage() {
         )}
       </section>
 
-      <CreateUpstreamModal open={createOpen} onOpenChange={setCreateOpen} />
+      <CreateUpstreamModal
+        open={createOpen}
+        onOpenChange={setCreateOpen}
+        onPendingCreatedIdChange={setPendingCreatedId}
+      />
     </div>
   );
+}
+
+// Mirrors credentials.tsx fmtRelExpiry "warn" window; never synthesize success.
+const OAUTH_EXPIRING_SOON_SECS = 600;
+
+type OAuthBadge = { tone: 'ok' | 'warn' | 'danger' | 'neutral'; label: string };
+
+function oauthBadge(entry: {
+  status: string;
+  expires_at_unix_secs: number | null;
+}): OAuthBadge {
+  if (entry.status === 'corrupted') return { tone: 'danger', label: 'Refresh failed' };
+  if (entry.status === 'missing') return { tone: 'neutral', label: 'No credentials' };
+  const exp = entry.expires_at_unix_secs;
+  if (exp == null) return { tone: 'neutral', label: 'Unknown' };
+  const now = Math.floor(Date.now() / 1000);
+  if (exp <= now) return { tone: 'danger', label: 'Expired' };
+  if (exp - now < OAUTH_EXPIRING_SOON_SECS) return { tone: 'warn', label: 'Expiring soon' };
+  return { tone: 'ok', label: 'Active' };
+}
+
+function fmtTsUtc(secs: number | null | undefined): string {
+  if (!secs) return '—';
+  return new Date(secs * 1000).toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
 }
 
 function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => void }) {
@@ -142,6 +183,7 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
   const update = useUpdateUpstream();
   const oauthStart = useOAuthStart();
   const oauthComplete = useOAuthComplete();
+  const oauthStatusQ = useOAuthStatus();
   const [editOpen, setEditOpen] = useState(false);
   const [oauthOpen, setOauthOpen] = useState(false);
   const [oauthState, setOauthState] = useState<{ authorize_url?: string; state_token?: string; code?: string }>({});
@@ -224,35 +266,77 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
           </CardBody>
         </Card>
 
-        {upstream.kind === 'anthropic_oauth' ? (
-          <Card>
-            <CardHeader
-              title="OAuth Status"
-              subtitle="Mock fingerprint + force refresh"
-              action={
-                <Button
-                  size="sm"
-                  iconLeft={<KeyRound className="w-3 h-3" />}
-                  onClick={() => {
-                    oauthStart.mutate(upstream.id, {
-                      onSuccess: (res) => {
-                        setOauthState({ authorize_url: res.authorize_url, state_token: res.state_token, code: '' });
-                        setOauthOpen(true);
-                      },
-                    });
-                  }}
-                >
-                  Connect via OAuth
-                </Button>
-              }
-            />
-            <CardBody className="grid grid-cols-1 md:grid-cols-3 gap-4 text-sm">
-              <div><div className="text-[11px] text-text-faint uppercase tracking-wider">Fingerprint</div><div className="font-mono mt-0.5">a1b2c3d4 <ShieldCheck className="w-3 h-3 inline ml-1 text-[color:var(--color-ok)]" /></div></div>
-              <div><div className="text-[11px] text-text-faint uppercase tracking-wider">Expires</div><div className="font-mono mt-0.5">{new Date(Date.now() + 3600 * 8 * 1000).toISOString().replace('T', ' ').slice(0, 19)}</div></div>
-              <div><div className="text-[11px] text-text-faint uppercase tracking-wider">Last Refresh</div><div className="mt-0.5">Success</div></div>
-            </CardBody>
-          </Card>
-        ) : null}
+        {upstream.kind === 'anthropic_oauth' ? (() => {
+          const entry = (oauthStatusQ.data?.credentials ?? []).find(
+            (c) => c.principal_id === upstream.id,
+          );
+          const badge = entry ? oauthBadge(entry) : null;
+          return (
+            <Card>
+              <CardHeader
+                title="OAuth Status"
+                subtitle="Live state from /admin/oauth/status"
+                action={
+                  <Button
+                    size="sm"
+                    iconLeft={<KeyRound className="w-3 h-3" />}
+                    onClick={() => {
+                      oauthStart.mutate(upstream.id, {
+                        onSuccess: (res) => {
+                          setOauthState({ authorize_url: res.authorize_url, state_token: res.state_token, code: '' });
+                          setOauthOpen(true);
+                        },
+                      });
+                    }}
+                  >
+                    Connect via OAuth
+                  </Button>
+                }
+              />
+              <CardBody className="text-sm">
+                {oauthStatusQ.isLoading ? (
+                  <Skeleton className="h-12" />
+                ) : !entry || !badge ? (
+                  <div className="flex flex-wrap items-center gap-3">
+                    <StatusBadge tone="neutral" label="No credentials" />
+                    <p className="text-xs text-text-faint">
+                      Run "Connect via OAuth" to authorize this upstream.
+                    </p>
+                  </div>
+                ) : (
+                  <div className="space-y-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <StatusBadge tone={badge.tone} label={badge.label} />
+                      <span className="text-[11px] text-text-faint font-mono">backend status: {entry.status}</span>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                      <div>
+                        <div className="text-[11px] text-text-faint uppercase tracking-wider">Expires</div>
+                        <div className="font-mono mt-0.5">{fmtTsUtc(entry.expires_at_unix_secs)}</div>
+                      </div>
+                      <div>
+                        <div className="text-[11px] text-text-faint uppercase tracking-wider">Refresh token</div>
+                        <div className="mt-0.5">
+                          {entry.refresh_token_present ? 'present' : <span className="text-amber-400">missing</span>}
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[11px] text-text-faint uppercase tracking-wider">Last update</div>
+                        <div className="font-mono mt-0.5">{fmtTsUtc(entry.last_updated_unix_secs)}</div>
+                      </div>
+                    </div>
+                    {entry.scopes.length ? (
+                      <div>
+                        <div className="text-[11px] text-text-faint uppercase tracking-wider">Scopes</div>
+                        <div className="font-mono mt-0.5 break-all text-xs">{entry.scopes.join(', ')}</div>
+                      </div>
+                    ) : null}
+                  </div>
+                )}
+              </CardBody>
+            </Card>
+          );
+        })() : null}
 
         <Card>
           <CardHeader title="Recent Requests" subtitle={`Last 5 against ${upstream.name}`} />
@@ -429,11 +513,19 @@ function DetailView({ upstream, onBack }: { upstream: Upstream; onBack: () => vo
 // Invariant: `succeeded` MUST be set before any onOpenChange(false) on a
 // successful path, otherwise handleOpenChange will treat the close as a
 // cancel and delete the freshly-created upstream.
-function CreateUpstreamModal({ open, onOpenChange }: { open: boolean; onOpenChange: (open: boolean) => void }) {
+function CreateUpstreamModal({
+  open,
+  onOpenChange,
+  onPendingCreatedIdChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onPendingCreatedIdChange: (id: string | null) => void;
+}) {
   const create = useCreateUpstream();
-  const del = useDeleteUpstream();
   const oauthStart = useOAuthStart();
   const oauthComplete = useOAuthComplete();
+  const qc = useQueryClient();
   const [step, setStep] = useState<'configure' | 'authorize'>('configure');
   const [name, setName] = useState('');
   const [kind, setKind] = useState<'anthropic_api_key' | 'anthropic_oauth' | 'custom'>('anthropic_api_key');
@@ -459,15 +551,57 @@ function CreateUpstreamModal({ open, onOpenChange }: { open: boolean; onOpenChan
       setAuthState(null);
       setCode('');
       setSucceeded(false);
+      onPendingCreatedIdChange(null);
     }
-  }, [open]);
+  }, [open, onPendingCreatedIdChange]);
+
+  // Bypasses useDeleteUpstream so the global 409 toast stays quiet, and
+  // refetches the current revision once on 409/428 before retrying. 404
+  // on either step is treated as success (already deleted).
+  const cleanupCreatedUpstream = async (id: string, revision: number) => {
+    const tryDelete = (rev: number) =>
+      deleteJson(`/admin/v1/upstreams/${id}`, { ifMatch: rev });
+    try {
+      await tryDelete(revision);
+    } catch (err) {
+      if (!(err instanceof ApiError)) throw err;
+      if (err.status === 404) return;
+      if (err.status !== 409 && err.status !== 428) throw err;
+      const current = await getJson<Upstream>(`/admin/v1/upstreams/${id}`).catch(
+        (e) => {
+          if (e instanceof ApiError && e.status === 404) return null;
+          throw e;
+        },
+      );
+      if (!current) return;
+      try {
+        await tryDelete(current.revision);
+      } catch (retryErr) {
+        if (retryErr instanceof ApiError && retryErr.status === 404) return;
+        throw retryErr;
+      }
+    }
+  };
 
   const handleOpenChange = (next: boolean) => {
     if (!next && created && !succeeded) {
-      del.mutate(
-        { id: created.id, revision: created.revision },
-        { onSuccess: () => toast.info('Upstream creation cancelled') },
-      );
+      const { id, revision } = created;
+      cleanupCreatedUpstream(id, revision)
+        .then(() => {
+          toast.info('Upstream creation cancelled');
+        })
+        .catch((err) => {
+          const message =
+            err instanceof ApiError
+              ? err.message || `Request failed (${err.status})`
+              : err instanceof Error
+                ? err.message
+                : String(err);
+          toast.error(`Failed to clean up unfinished upstream: ${message}`);
+        })
+        .finally(() => {
+          qc.invalidateQueries({ queryKey: qk.upstreams });
+        });
     }
     onOpenChange(next);
   };
@@ -497,8 +631,10 @@ function CreateUpstreamModal({ open, onOpenChange }: { open: boolean; onOpenChan
             return;
           }
           setCreated({ id: upstream.id, revision: upstream.revision });
+          onPendingCreatedIdChange(upstream.id);
           oauthStart.mutate(upstream.id, {
             onSuccess: (res) => {
+              setCreated({ id: upstream.id, revision: res.revision });
               setAuthState({ authorize_url: res.authorize_url, state_token: res.state_token });
               setStep('authorize');
             },
