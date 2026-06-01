@@ -17,7 +17,7 @@ import {
   cx,
 } from '../components/ui/primitives';
 import { useRecentEvents, usePrincipals, useUpstreams } from '../lib/queries';
-import { eventTime, streamEventsFetch, type RequestEvent } from '../lib/api';
+import { ApiError, eventTime, streamEventsFetch, type RequestEvent } from '../lib/api';
 
 const logsSearchSchema = z.object({
   principal_id: z.string().optional(),
@@ -82,7 +82,7 @@ function LogsPage() {
   const [tailing, setTailing] = useState(false);
   const [liveRows, setLiveRows] = useState<RequestEvent[]>([]);
   const [selected, setSelected] = useState<RequestEvent | null>(null);
-  const [tailStatus, setTailStatus] = useState<'idle' | 'connecting' | 'live' | 'down'>('idle');
+  const [tailStatus, setTailStatus] = useState<'idle' | 'connecting' | 'live' | 'reconnecting' | 'down'>('idle');
 
   const principalNameById = useMemo(() => {
     const m = new Map<string, string>();
@@ -96,13 +96,20 @@ function LogsPage() {
     setTailStatus('connecting');
     const close = streamEventsFetch('/admin/events/stream', {
       onConnect: () => setTailStatus('live'),
-      onEvent: (ev) => {
+      onEvent: (data) => {
         try {
-          const parsed = JSON.parse(ev.data) as RequestEvent;
+          const parsed = JSON.parse(data) as RequestEvent;
           setLiveRows((prev) => [parsed, ...prev].slice(0, 200));
         } catch {/* ignore: malformed SSE chunk */}
       },
-      onError: () => { setTailStatus('down'); setTailing(false); },
+      onError: (err) => {
+        if (err instanceof ApiError && err.status === 401) {
+          setTailStatus('down');
+          setTailing(false);
+          return;
+        }
+        setTailStatus('reconnecting');
+      },
     });
     return () => close();
   }, [tailing]);
