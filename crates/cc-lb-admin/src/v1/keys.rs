@@ -45,6 +45,8 @@ struct ApiKeyRecord {
     issued_at_unix_secs: u64,
     revoked_at_unix_secs: Option<u64>,
     last_4: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    last_used_at_unix_secs: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,6 +119,42 @@ async fn list_keys(
 
     match key_store.list_by_principal(&id).await {
         Ok(records) => {
+            // Build key_id -> max(ts) map from recent request events.
+            // Window: last 30 days, capped to 5000 events. Best-effort.
+            let last_used_map: std::collections::HashMap<String, u64> = if let Some(storage) =
+                state.storage.as_ref()
+            {
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as u64)
+                    .unwrap_or(0);
+                let since_ms = now_ms.saturating_sub(30 * 24 * 60 * 60 * 1000);
+                match storage.query_request_events(since_ms, now_ms, 5000).await {
+                    Ok(events) => {
+                        let mut map: std::collections::HashMap<String, u64> =
+                            std::collections::HashMap::new();
+                        for ev in events {
+                            if let Some(kid) = ev.key_id.as_ref() {
+                                if kid.is_empty() {
+                                    continue;
+                                }
+                                let entry = map.entry(kid.clone()).or_insert(0);
+                                if ev.ts > *entry {
+                                    *entry = ev.ts;
+                                }
+                            }
+                        }
+                        map
+                    }
+                    Err(err) => {
+                        tracing::warn!(%err, "list_keys: query_request_events failed; last_used unavailable");
+                        std::collections::HashMap::new()
+                    }
+                }
+            } else {
+                std::collections::HashMap::new()
+            };
+
             let mut keys = Vec::new();
             for r in records {
                 let key_id = if r.index_hash == [0; 32] {
@@ -129,6 +167,11 @@ async fn list_keys(
                         .map(|(_, key_id, _)| key_id)
                         .unwrap_or_default()
                 };
+                let last_used_at_unix_secs = if key_id.is_empty() {
+                    None
+                } else {
+                    last_used_map.get(&key_id).copied()
+                };
                 keys.push(ApiKeyRecord {
                     key_id,
                     label: if r.label.is_empty() {
@@ -139,6 +182,7 @@ async fn list_keys(
                     issued_at_unix_secs: r.issued_at_unix_secs,
                     revoked_at_unix_secs: r.revoked_at_unix_secs,
                     last_4: r.last_4,
+                    last_used_at_unix_secs,
                 });
             }
             Json(KeyListResponse { keys }).into_response()

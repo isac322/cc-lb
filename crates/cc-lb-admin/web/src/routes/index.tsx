@@ -1,5 +1,6 @@
-import { createFileRoute } from '@tanstack/react-router';
-import { useMemo, useState } from 'react';
+import { createFileRoute, useNavigate } from '@tanstack/react-router';
+import { ArrowUpRight } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Area,
   AreaChart,
@@ -10,20 +11,27 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { ArrowUpRight } from 'lucide-react';
 import {
   Card,
   CardBody,
   CardHeader,
+  cx,
   EmptyState,
   KpiTile,
   PageContainer,
   Section,
-  SkeletonRow,
-  cx,
 } from '../components/ui/primitives';
-import { useRecentEvents, useSummary, useUsage, useUpstreams, usePrincipals } from '../lib/queries';
-import { eventTime } from '../lib/api';
+import { RequestEventsTable } from '../components/ui/RequestEventsTable';
+import { eventTime, type RequestEvent, streamEventsFetch } from '../lib/api';
+import {
+  usePrincipalNameMap,
+  usePrincipals,
+  useRecentEventsInfinite,
+  useSummary,
+  useUpstreamNameMap,
+  useUpstreams,
+  useUsage,
+} from '../lib/queries';
 import { useTheme } from '../lib/theme';
 
 export const Route = createFileRoute('/')({
@@ -41,7 +49,16 @@ const GROUPS = [
 ] as const;
 type Group = (typeof GROUPS)[number]['id'];
 
-const COLORS = ['#00d4ff', '#a78bfa', '#34d399', '#fbbf24', '#f472b6', '#60a5fa', '#fb923c', '#22d3ee'];
+const COLORS = [
+  '#00d4ff',
+  '#a78bfa',
+  '#34d399',
+  '#fbbf24',
+  '#f472b6',
+  '#60a5fa',
+  '#fb923c',
+  '#22d3ee',
+];
 
 function fmtCount(n: number | undefined | null): string {
   if (n == null) return '0';
@@ -64,6 +81,7 @@ function fmtPct(n: number, d: number): string {
 }
 
 function OverviewPage() {
+  const navigate = useNavigate({ from: Route.fullPath });
   const { effective } = useTheme();
   const isLight = effective === 'light';
   const tooltipBg = isLight ? '#fafafa' : '#0a0a0a';
@@ -72,16 +90,88 @@ function OverviewPage() {
   const tooltipMuted = isLight ? '#4b5563' : '#9ca3af';
   const [range, setRange] = useState<Range>('1h');
   const [group, setGroup] = useState<Group>('none');
-  const stepFor = (r: Range) => (r === '7d' || r === '24h' ? 'hour' : 'minute');
+  const stepFor = useCallback(
+    (r: Range) => (r === '7d' || r === '24h' ? 'hour' : 'minute'),
+    [],
+  );
 
   const summary = useSummary(range);
   const usage = useUsage(range, stepFor(range), group);
-  const events = useRecentEvents({ limit: '5' });
+  const principalUsage = useUsage(range, stepFor(range), 'principal');
+  const events = useRecentEventsInfinite({});
   const upstreams = useUpstreams();
   const principals = usePrincipals();
+  const principalNameMap = usePrincipalNameMap();
+  const upstreamNameMap = useUpstreamNameMap();
+
+  const [liveEvents, setLiveEvents] = useState<RequestEvent[]>([]);
+  const [streamStatus, setStreamStatus] = useState<
+    'idle' | 'connecting' | 'live' | 'down'
+  >('idle');
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const sentinelRef = useRef<HTMLTableRowElement>(null);
+
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el || !events.hasNextPage || events.isFetchingNextPage) return;
+    const obs = new IntersectionObserver(
+      (entries) =>
+        entries.forEach((e) => {
+          if (e.isIntersecting) events.fetchNextPage();
+        }),
+      { root: scrollContainerRef.current, threshold: 0.1 },
+    );
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [events.hasNextPage, events.isFetchingNextPage, events.fetchNextPage]);
+
+  useEffect(() => {
+    setStreamStatus('connecting');
+    const close = streamEventsFetch('/admin/events/stream', {
+      onConnect: () => setStreamStatus('live'),
+      onEvent: (data) => {
+        try {
+          const parsed = JSON.parse(data) as RequestEvent;
+          setLiveEvents((prev) => [parsed, ...prev].slice(0, 50));
+        } catch {}
+      },
+      onError: () => setStreamStatus('down'),
+    });
+    return () => close();
+  }, []);
+
+  const recentRows = useMemo(() => {
+    const historical = events.data?.pages.flatMap((p) => p.events) ?? [];
+    const seen = new Set<string>();
+    const out: RequestEvent[] = [];
+    for (const ev of liveEvents) {
+      if (!seen.has(ev.request_id)) {
+        seen.add(ev.request_id);
+        out.push(ev);
+      }
+    }
+    for (const ev of historical) {
+      if (!seen.has(ev.request_id)) {
+        seen.add(ev.request_id);
+        out.push(ev);
+      }
+    }
+    return out.sort(
+      (a, b) => (eventTime(b)?.getTime() ?? 0) - (eventTime(a)?.getTime() ?? 0),
+    );
+  }, [liveEvents, events.data]);
+
+  const recentLiveIds = useMemo(
+    () => new Set(liveEvents.slice(0, 20).map((e) => e.request_id)),
+    [liveEvents],
+  );
 
   const chartData = useMemo(() => {
-    if (!usage.data) return { keys: [] as string[], rows: [] as Record<string, number | string>[] };
+    if (!usage.data)
+      return {
+        keys: [] as string[],
+        rows: [] as Record<string, number | string>[],
+      };
     const series = usage.data.series;
     if (!series.length) return { keys: [], rows: [] };
     const keys = series.map((s) => s.key);
@@ -90,23 +180,49 @@ function OverviewPage() {
     for (let i = 0; i < length; i++) {
       const ts = series[0]!.buckets[i]!.bucket_start_unix_secs;
       const date = new Date(ts * 1000);
-      const label = stepFor(range) === 'minute' ? date.toTimeString().slice(0, 5) : `${date.getUTCMonth() + 1}/${date.getUTCDate()} ${date.getUTCHours()}h`;
+      const label =
+        stepFor(range) === 'minute'
+          ? date.toTimeString().slice(0, 5)
+          : `${date.getMonth() + 1}/${date.getDate()} ${date.getHours()}h`;
       const row: Record<string, number | string> = { ts: label };
       for (const s of series) row[s.key] = s.buckets[i]?.request_count ?? 0;
       rows.push(row);
     }
     return { keys, rows };
-  }, [usage.data, range]);
+  }, [usage.data, range, stepFor]);
 
   const totals = summary.data?.totals;
   const topPrincipals = useMemo(() => {
-    if (!principals.data) return [] as { name: string; cost: number }[];
-    return [...principals.data.principals]
-      .filter((p) => p.enabled)
-      .map((p) => ({ name: p.name, cost: Math.floor((p.id.length * 13 + Date.now() % 1000) * 100) / 100 }))
-      .sort((a, b) => b.cost - a.cost)
+    const series = principalUsage.data?.series ?? [];
+    const nameById = new Map(
+      principals.data?.principals.map((p) => [p.id, p.name]) ?? [],
+    );
+    const byId = new Map<
+      string,
+      { id: string; name: string; cost_micros: number }
+    >();
+    for (const s of series) {
+      if (!s.key) continue;
+      const cost = s.buckets.reduce(
+        (acc, b) => acc + (b.virtual_cost_micros ?? 0),
+        0,
+      );
+      if (cost <= 0) continue;
+      const existing = byId.get(s.key);
+      if (existing) {
+        existing.cost_micros += cost;
+      } else {
+        byId.set(s.key, {
+          id: s.key,
+          name: nameById.get(s.key) ?? s.key,
+          cost_micros: cost,
+        });
+      }
+    }
+    return Array.from(byId.values())
+      .sort((a, b) => b.cost_micros - a.cost_micros)
       .slice(0, 5);
-  }, [principals.data]);
+  }, [principalUsage.data, principals.data]);
 
   return (
     <PageContainer>
@@ -126,7 +242,9 @@ function OverviewPage() {
         />
         <KpiTile
           label="Error Rate"
-          value={totals ? fmtPct(totals.error_count, totals.request_count) : '0.00%'}
+          value={
+            totals ? fmtPct(totals.error_count, totals.request_count) : '0.00%'
+          }
           delta={{ value: '0%', direction: 'flat', isPositive: null }}
         />
         <KpiTile
@@ -152,7 +270,11 @@ function OverviewPage() {
         <Card className="xl:col-span-2 flex flex-col min-h-[360px]">
           <CardHeader
             title="Request Volume"
-            subtitle={group === 'none' ? `Total requests over ${range}` : `Stacked by ${group} over ${range}`}
+            subtitle={
+              group === 'none'
+                ? `Total requests over ${range}`
+                : `Stacked by ${group} over ${range}`
+            }
             action={
               <div className="flex flex-col sm:flex-row sm:items-center gap-2 w-full sm:w-auto min-w-0">
                 <div className="flex flex-wrap bg-overlay-2 border border-subtle rounded-sm p-0.5 max-w-full">
@@ -163,7 +285,9 @@ function OverviewPage() {
                       onClick={() => setRange(r)}
                       className={cx(
                         'px-2.5 h-7 text-xs rounded-sm transition-colors',
-                        r === range ? 'bg-overlay-6 text-text' : 'text-text-faint hover:text-text',
+                        r === range
+                          ? 'bg-overlay-6 text-text'
+                          : 'text-text-faint hover:text-text',
                       )}
                     >
                       {r}
@@ -178,7 +302,9 @@ function OverviewPage() {
                       onClick={() => setGroup(g.id)}
                       className={cx(
                         'px-2.5 h-7 text-xs rounded-sm transition-colors whitespace-nowrap',
-                        g.id === group ? 'bg-overlay-6 text-text' : 'text-text-faint hover:text-text',
+                        g.id === group
+                          ? 'bg-overlay-6 text-text'
+                          : 'text-text-faint hover:text-text',
                       )}
                     >
                       {g.label}
@@ -191,30 +317,58 @@ function OverviewPage() {
           <CardBody className="flex-1 p-3 pt-1">
             <div className="w-full h-[300px]" style={{ minWidth: 0 }}>
               {usage.isLoading ? (
-                <div className="h-full flex items-center justify-center text-text-faint text-sm">Loading…</div>
+                <div className="h-full flex items-center justify-center text-text-faint text-sm">
+                  Loading…
+                </div>
               ) : !chartData.rows.length ? (
                 <EmptyState title="No data in range" />
               ) : (
                 <ResponsiveContainer width="100%" height={300} debounce={150}>
-                  <AreaChart data={chartData.rows} margin={{ top: 8, right: 24, bottom: 4, left: 0 }}>
+                  <AreaChart
+                    data={chartData.rows}
+                    margin={{ top: 8, right: 24, bottom: 4, left: 0 }}
+                  >
                     <defs>
                       {chartData.keys.map((k, i) => (
-                        <linearGradient key={k} id={`area-${i}`} x1="0" y1="0" x2="0" y2="1">
-                          <stop offset="0%" stopColor={COLORS[i % COLORS.length]} stopOpacity={0.5} />
-                          <stop offset="100%" stopColor={COLORS[i % COLORS.length]} stopOpacity={0} />
+                        <linearGradient
+                          key={k}
+                          id={`area-${i}`}
+                          x1="0"
+                          y1="0"
+                          x2="0"
+                          y2="1"
+                        >
+                          <stop
+                            offset="0%"
+                            stopColor={COLORS[i % COLORS.length]}
+                            stopOpacity={0.5}
+                          />
+                          <stop
+                            offset="100%"
+                            stopColor={COLORS[i % COLORS.length]}
+                            stopOpacity={0}
+                          />
                         </linearGradient>
                       ))}
                     </defs>
                     <CartesianGrid stroke="var(--color-border)" />
                     <XAxis
                       dataKey="ts"
-                      tick={{ fill: 'var(--color-text-faint)', fontSize: 10, fontFamily: 'Geist Mono' }}
+                      tick={{
+                        fill: 'var(--color-text-faint)',
+                        fontSize: 10,
+                        fontFamily: 'Geist Mono',
+                      }}
                       axisLine={false}
                       tickLine={false}
                       minTickGap={40}
                     />
                     <YAxis
-                      tick={{ fill: 'var(--color-text-faint)', fontSize: 10, fontFamily: 'Geist Mono' }}
+                      tick={{
+                        fill: 'var(--color-text-faint)',
+                        fontSize: 10,
+                        fontFamily: 'Geist Mono',
+                      }}
                       axisLine={false}
                       tickLine={false}
                       width={36}
@@ -222,9 +376,13 @@ function OverviewPage() {
                       allowDataOverflow={false}
                     />
                     <Tooltip
-                      cursor={{ stroke: 'var(--color-accent)', strokeWidth: 1, strokeOpacity: 0.3 }}
+                      cursor={{
+                        stroke: 'var(--color-accent)',
+                        strokeWidth: 1,
+                        strokeOpacity: 0.3,
+                      }}
                       content={({ active, payload, label }) => {
-                        if (!active || !payload || !payload.length) return null;
+                        if (!active || !payload?.length) return null;
                         return (
                           <div
                             style={{
@@ -239,11 +397,37 @@ function OverviewPage() {
                               minWidth: 80,
                             }}
                           >
-                            <div style={{ color: tooltipMuted, marginBottom: 4 }}>{label}</div>
+                            <div
+                              style={{ color: tooltipMuted, marginBottom: 4 }}
+                            >
+                              {label}
+                            </div>
                             {payload.map((p, i) => (
-                              <div key={i} style={{ color: tooltipText, padding: '1px 0', display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                                <span style={{ color: typeof p.color === 'string' ? p.color : tooltipText }}>{p.name}</span>
-                                <span style={{ fontVariantNumeric: 'tabular-nums' }}>{p.value as number}</span>
+                              <div
+                                key={i}
+                                style={{
+                                  color: tooltipText,
+                                  padding: '1px 0',
+                                  display: 'flex',
+                                  justifyContent: 'space-between',
+                                  gap: 8,
+                                }}
+                              >
+                                <span
+                                  style={{
+                                    color:
+                                      typeof p.color === 'string'
+                                        ? p.color
+                                        : tooltipText,
+                                  }}
+                                >
+                                  {p.name}
+                                </span>
+                                <span
+                                  style={{ fontVariantNumeric: 'tabular-nums' }}
+                                >
+                                  {p.value as number}
+                                </span>
                               </div>
                             ))}
                           </div>
@@ -251,7 +435,13 @@ function OverviewPage() {
                       }}
                     />
                     {chartData.keys.length > 1 ? (
-                      <Legend wrapperStyle={{ fontSize: 11, fontFamily: 'Geist Mono', color: 'var(--color-text-muted)' }} />
+                      <Legend
+                        wrapperStyle={{
+                          fontSize: 11,
+                          fontFamily: 'Geist Mono',
+                          color: 'var(--color-text-muted)',
+                        }}
+                      />
                     ) : null}
                     {chartData.keys.map((k, i) => (
                       <Area
@@ -274,15 +464,26 @@ function OverviewPage() {
 
         <div className="flex flex-col gap-4">
           <Card>
-            <CardHeader title="Upstreams" subtitle={`${upstreams.data?.upstreams.length ?? 0} total`} />
+            <CardHeader
+              title="Upstreams"
+              subtitle={`${upstreams.data?.upstreams.length ?? 0} total`}
+            />
             <CardBody className="space-y-2">
               {upstreams.isLoading ? (
                 <div className="text-xs text-text-faint">Loading…</div>
               ) : (
                 upstreams.data?.upstreams.slice(0, 5).map((u) => (
-                  <div key={u.id} className="flex items-center justify-between text-xs">
+                  <div
+                    key={u.id}
+                    className="flex items-center justify-between text-xs"
+                  >
                     <div className="flex items-center gap-2 min-w-0">
-                      <span className={cx('status-dot', u.enabled ? 'ok' : 'neutral')} />
+                      <span
+                        className={cx(
+                          'status-dot',
+                          u.enabled ? 'ok' : 'neutral',
+                        )}
+                      />
                       <span className="font-mono truncate">{u.name}</span>
                     </div>
                     <span className="text-text-faint">{u.kind}</span>
@@ -293,17 +494,34 @@ function OverviewPage() {
           </Card>
 
           <Card>
-            <CardHeader title="Top Principals" subtitle="By cost (mock)" />
+            <CardHeader
+              title="Top Principals"
+              subtitle={`By cost · ${range}`}
+            />
             <CardBody className="space-y-2">
-              {topPrincipals.length ? (
+              {principalUsage.isLoading ? (
+                <div className="text-xs text-text-faint">Loading…</div>
+              ) : topPrincipals.length ? (
                 topPrincipals.map((p) => (
-                  <div key={p.name} className="flex items-center justify-between text-xs">
-                    <span className="truncate">{p.name}</span>
-                    <span className="font-mono text-text-faint tabular-nums">${p.cost.toFixed(2)}</span>
+                  <div
+                    key={p.id}
+                    className="flex items-center justify-between text-xs"
+                  >
+                    <span className="truncate">
+                      <span>{p.name}</span>
+                      {p.name === p.id && (
+                        <span className="ml-1 text-[10px] font-mono text-text-faint">
+                          ({p.id.slice(0, 8)}…)
+                        </span>
+                      )}
+                    </span>
+                    <span className="font-mono text-text-faint tabular-nums">
+                      {fmtUsd(p.cost_micros)}
+                    </span>
                   </div>
                 ))
               ) : (
-                <div className="text-xs text-text-faint">No active principals</div>
+                <div className="text-xs text-text-faint">No usage in range</div>
               )}
             </CardBody>
           </Card>
@@ -313,51 +531,48 @@ function OverviewPage() {
       {/* Live preview */}
       <Section
         title="Recent Requests"
-        subtitle="Live preview — full view on Logs page"
+        subtitle={
+          <span className="flex items-center gap-2">
+            <span>
+              Live preview — full view on Logs page
+              {streamStatus === 'live' ? ' · streaming' : ''}
+            </span>
+            <span
+              className={cx(
+                'status-dot',
+                streamStatus === 'live' ? 'live' : 'neutral',
+              )}
+            />
+          </span>
+        }
         action={
-          <a href="/logs" className="text-xs text-accent hover:underline inline-flex items-center gap-1">
+          <a
+            href="/logs"
+            className="text-xs text-accent hover:underline inline-flex items-center gap-1"
+          >
             See all <ArrowUpRight className="w-3 h-3" />
           </a>
         }
       >
         <Card className="min-w-0">
-          <div className="relative">
-            <div className="overflow-x-auto scroll-fade-right">
-              <table className="min-w-[820px] w-full font-mono text-xs">
-                <thead className="bg-overlay-1 border-b border-subtle">
-                  <tr className="text-text-faint text-[10px] uppercase tracking-wider">
-                    <th className="text-left px-3 py-2 whitespace-nowrap">Timestamp</th>
-                    <th className="text-left px-3 py-2 whitespace-nowrap">Principal</th>
-                    <th className="text-left px-3 py-2 whitespace-nowrap">Upstream</th>
-                    <th className="text-left px-3 py-2 whitespace-nowrap">Model</th>
-                    <th className="text-right px-3 py-2 whitespace-nowrap">Status</th>
-                    <th className="text-right px-3 py-2 whitespace-nowrap">Latency</th>
-                    <th className="text-right px-3 py-2 whitespace-nowrap">Tokens I/O</th>
-                    <th className="text-right px-3 py-2 whitespace-nowrap">Cost</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {events.isLoading ? (
-                    Array.from({ length: 5 }).map((_, i) => <SkeletonRow key={i} cols={8} />)
-                  ) : events.data?.events.length ? (
-                    events.data.events.map((e) => (
-                      <tr key={e.request_id} className="border-b border-subtle/40 hover:bg-overlay-1">
-                        <td className="px-3 py-2 text-text-faint whitespace-nowrap">{eventTime(e)?.toISOString().slice(11, 19) ?? '—'} UTC</td>
-                        <td className="px-3 py-2 whitespace-nowrap">{e.principal_id ?? '—'}</td>
-                        <td className="px-3 py-2 whitespace-nowrap">{e.upstream ?? '—'}</td>
-                        <td className="px-3 py-2 text-text-faint truncate max-w-[260px]">{e.model ?? '—'}</td>
-                        <td className={cx('px-3 py-2 text-right tabular-nums whitespace-nowrap', e.status >= 500 ? 'text-red-400' : e.status >= 400 ? 'text-amber-400' : 'text-green-400')}>{e.status}</td>
-                        <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">{e.duration_ms}ms</td>
-                        <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">{e.input_tokens ?? 0} / {e.output_tokens ?? 0}</td>
-                        <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">{fmtUsd(e.cost_usd_micros)}</td>
-                      </tr>
-                    ))
-                  ) : (
-                    <tr><td colSpan={8} className="px-3 py-8 text-center text-text-faint text-xs">No recent requests</td></tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+          <div
+            className="overflow-auto max-h-[50vh] scroll-fade-right"
+            ref={scrollContainerRef}
+          >
+            <RequestEventsTable
+              events={recentRows}
+              principalNameMap={principalNameMap}
+              upstreamNameMap={upstreamNameMap}
+              loading={events.isLoading}
+              liveFlashIds={recentLiveIds}
+              onRowClick={() => navigate({ to: '/logs' })}
+              columns={{ cache: false, cost: true, tokens: true }}
+              sentinelRef={sentinelRef}
+              loadingMore={events.isFetchingNextPage}
+              hasMore={events.hasNextPage}
+              minWidthClass="min-w-[820px]"
+              emptyTitle="No recent requests"
+            />
           </div>
         </Card>
       </Section>

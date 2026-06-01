@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 export type Theme = 'dark' | 'light' | 'system';
 
@@ -7,7 +7,8 @@ const STORAGE_KEY = 'cclb.theme';
 function readStoredTheme(): Theme {
   if (typeof window === 'undefined') return 'dark';
   const stored = window.localStorage.getItem(STORAGE_KEY);
-  if (stored === 'dark' || stored === 'light' || stored === 'system') return stored;
+  if (stored === 'dark' || stored === 'light' || stored === 'system')
+    return stored;
   return 'system';
 }
 
@@ -19,7 +20,9 @@ function applyTheme(theme: Theme) {
 function resolveEffectiveTheme(theme: Theme): 'dark' | 'light' {
   if (theme === 'system') {
     if (typeof window === 'undefined') return 'dark';
-    return window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+    return window.matchMedia('(prefers-color-scheme: light)').matches
+      ? 'light'
+      : 'dark';
   }
   return theme;
 }
@@ -31,7 +34,9 @@ export function initTheme() {
 
 export function useTheme() {
   const [theme, setThemeState] = useState<Theme>(() => readStoredTheme());
-  const [effective, setEffective] = useState<'dark' | 'light'>(() => resolveEffectiveTheme(readStoredTheme()));
+  const [effective, setEffective] = useState<'dark' | 'light'>(() =>
+    resolveEffectiveTheme(readStoredTheme()),
+  );
 
   const setTheme = useCallback((next: Theme) => {
     setThemeState(next);
