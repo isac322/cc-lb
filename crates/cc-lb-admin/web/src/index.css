@@ -29,6 +29,7 @@
     --color-panel-strong: rgba(255, 255, 255, 0.04);
     --color-border: rgba(255, 255, 255, 0.08);
     --color-border-strong: rgba(255, 255, 255, 0.14);
+    --color-border-row: rgba(255, 255, 255, 0.04);
     --color-text: #ededed;
     --color-text-muted: #9ca3af;
     --color-text-faint: #6b7280;
@@ -62,6 +63,7 @@
     --color-panel-strong: rgba(0, 0, 0, 0.04);
     --color-border: rgba(0, 0, 0, 0.10);
     --color-border-strong: rgba(0, 0, 0, 0.18);
+    --color-border-row: rgba(0, 0, 0, 0.05);
     --color-text: #0a0a0a;
     --color-text-muted: #4b5563;
     --color-text-faint: #6b7280;
@@ -96,6 +98,7 @@
       --color-panel-strong: rgba(0, 0, 0, 0.04);
       --color-border: rgba(0, 0, 0, 0.10);
       --color-border-strong: rgba(0, 0, 0, 0.18);
+      --color-border-row: rgba(0, 0, 0, 0.05);
       --color-text: #0a0a0a;
       --color-text-muted: #4b5563;
       --color-text-faint: #6b7280;
@@ -141,6 +144,29 @@
     background-color: var(--color-accent-dim);
     color: var(--color-text);
   }
+  /* Interactive cursors */
+  button:not(:disabled),
+  [role="button"]:not([aria-disabled="true"]),
+  summary,
+  label[for] {
+    cursor: pointer;
+  }
+  button:disabled,
+  [role="button"][aria-disabled="true"] {
+    cursor: not-allowed;
+  }
+  select:not(:disabled) {
+    cursor: pointer;
+  }
+  a[href] {
+    cursor: pointer;
+  }
+  .drag-handle {
+    cursor: grab;
+  }
+  .drag-handle:active {
+    cursor: grabbing;
+  }
 }
 
 @layer utilities {
@@ -156,8 +182,15 @@
     backdrop-filter: blur(12px);
     border: 1px solid var(--color-border-strong);
   }
+  .table-header {
+    background-color: var(--color-panel-strong);
+    -webkit-backdrop-filter: blur(12px);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid var(--color-border-strong);
+  }
   .border-subtle { border-color: var(--color-border); }
   .border-subtle-strong { border-color: var(--color-border-strong); }
+  .border-row { border-color: var(--color-border-row); }
   .bg-bg { background-color: var(--color-bg); }
   .bg-bg-sub { background-color: var(--color-bg-sub); }
   .bg-overlay-1 { background-color: var(--color-overlay-1); }
