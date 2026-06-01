@@ -138,7 +138,7 @@ const METRIC_DEFINITIONS: [MetricDefinition; 31] = [
     MetricDefinition {
         name: "cc_lb_drain_force_closed_total",
         kind: MetricKind::Counter,
-        description: "In-flight proxy requests force-closed after the drain deadline.",
+        description: "Proxy request handlers still in flight when the drain deadline elapsed.",
     },
     MetricDefinition {
         name: "cc_lb_config_reload_total",
@@ -293,7 +293,7 @@ pub fn register_metrics() {
     metrics::describe_counter!(
         "cc_lb_drain_force_closed_total",
         Unit::Count,
-        "In-flight proxy requests force-closed after the drain deadline."
+        "Proxy request handlers still in flight when the drain deadline elapsed."
     );
     metrics::describe_counter!(
         "cc_lb_config_reload_total",

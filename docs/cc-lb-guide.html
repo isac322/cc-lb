@@ -501,9 +501,9 @@ ANTHROPIC_BASE_URL=http://127.0.0.1:8080 \
 
       <li>
         <h3>종료</h3>
-        <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># in-flight 요청 wait + force-close까지 graceful drain
+        <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 처리 중인 proxy 요청 wait + 종료
 kill -TERM $(pgrep -f &#39;[c]c-lb serve&#39;)</code></pre><button class="copy">복사</button></div>
-        <p><code>SIGTERM</code>은 <code>drain_secs</code>만큼 in-flight 요청을 기다린 뒤 종료합니다. <code>SIGINT</code>(<kbd>Ctrl-C</kbd>)는 즉시 종료입니다.</p>
+        <p><code>SIGTERM</code>은 <code>drain_secs</code>만큼 아직 응답을 만들고 있는 proxy 요청을 기다린 뒤 종료합니다. 이미 시작된 SSE 응답 body는 drain 대기 대상이 아니며, 클라이언트가 재연결해야 합니다. <code>SIGINT</code>(<kbd>Ctrl-C</kbd>)는 즉시 종료입니다.</p>
       </li>
     </ol>
 
@@ -878,8 +878,8 @@ kill -HUP $(pgrep -x cc-lb)
     <h4>Graceful drain</h4>
     <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>kill -TERM $(pgrep -x cc-lb)
 # 1. proxy listener는 새 요청 503 + Retry-After: 60 반환
-# 2. in-flight 요청은 timeouts.drain_secs 까지 대기
-# 3. 그 이후엔 force-close
+# 2. 응답 생성 중인 proxy 요청은 timeouts.drain_secs 까지 대기
+# 3. 이미 열린 SSE body stream은 기다리지 않음 (클라이언트 재연결 필요)
 # 4. admin/metrics 리스너는 drain 중에도 살아있음 (메트릭 계속 scrape 가능)</code></pre><button class="copy">복사</button></div>
 
     <h4>systemd unit 예시</h4>
@@ -937,7 +937,7 @@ WantedBy=multi-user.target</code></pre><button class="copy">복사</button></div
     <h4>신호</h4>
     <table>
       <tr><th>신호</th><th>동작</th></tr>
-      <tr><td><code>SIGTERM</code></td><td>Graceful drain (drain_secs 후 force-close)</td></tr>
+      <tr><td><code>SIGTERM</code></td><td>Graceful drain (응답 생성 중인 proxy 요청만 drain_secs까지 대기, SSE body stream은 클라이언트 재연결)</td></tr>
       <tr><td><code>SIGHUP</code></td><td>TLS reload → config reload (atomic ArcSwap, 실패시 이전 상태)</td></tr>
       <tr><td><code>SIGINT</code> (Ctrl-C)</td><td>즉시 종료 (drain 안 함)</td></tr>
     </table>
