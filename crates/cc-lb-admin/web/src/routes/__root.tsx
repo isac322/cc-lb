@@ -1,13 +1,15 @@
-import { Outlet, createRootRouteWithContext } from '@tanstack/react-router';
-import { useState } from 'react';
 import type { QueryClient } from '@tanstack/react-query';
-import { AppShell } from '../components/layout/AppShell';
-import { CommandPalette } from '../components/CommandPalette';
+import { createRootRouteWithContext, Outlet } from '@tanstack/react-router';
+import { useState } from 'react';
 import { AuthRequiredGate } from '../components/AuthRequiredGate';
+import { CommandPalette } from '../components/CommandPalette';
+import { AppShell } from '../components/layout/AppShell';
 
-export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()({
-  component: RootLayout,
-});
+export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
+  {
+    component: RootLayout,
+  },
+);
 
 function RootLayout() {
   const [paletteOpen, setPaletteOpen] = useState(false);

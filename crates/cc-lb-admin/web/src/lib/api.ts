@@ -428,6 +428,7 @@ interface ApiKeyRecord {
   issued_at_unix_secs: number;
   revoked_at_unix_secs: number | null;
   last_4: string;
+  last_used_at_unix_secs?: number | null;
 }
 
 export interface KeyListResponse {
@@ -526,6 +527,8 @@ interface AuditEntry {
   output_tokens: number;
   duration_ms: number;
   agent_label: string | null;
+  actor: string | null;
+  admin_action: string | null;
   kind?: string;
   payload?: Record<string, unknown>;
 }
