@@ -1,6 +1,4 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { useState } from 'react';
-import { toast } from 'sonner';
 import {
   AlertTriangle,
   CheckCircle2,
@@ -9,18 +7,21 @@ import {
   RefreshCw,
   Save,
 } from 'lucide-react';
+import { useState } from 'react';
+import { toast } from 'sonner';
 import {
   Button,
   Card,
   CardBody,
   CardHeader,
+  cx,
   Modal,
   PageContainer,
   Section,
   Skeleton,
   StatusBadge,
-  cx,
 } from '../components/ui/primitives';
+import { downloadJson, eventTime } from '../lib/api';
 import {
   useApplyConfig,
   useAudit,
@@ -33,7 +34,6 @@ import {
   useStatus,
   useValidateConfig,
 } from '../lib/queries';
-import { downloadJson, eventTime } from '../lib/api';
 
 export const Route = createFileRoute('/settings')({
   component: SettingsPage,
@@ -47,12 +47,22 @@ function SettingsPage() {
     <PageContainer>
       <header>
         <h1 className="text-lg font-medium">Settings</h1>
-        <p className="text-xs text-text-faint mt-1">Admin self-service, configuration draft pipeline, audit log, and exports.</p>
+        <p className="text-xs text-text-faint mt-1">
+          Admin self-service, configuration draft pipeline, audit log, and
+          exports.
+        </p>
       </header>
 
       {/* Version card */}
       <Card>
-        <CardHeader title="Version" subtitle={status.data ? `cc-lb ${status.data.version} · ${status.data.git_sha} · uptime ${Math.floor(status.data.uptime_secs / 60)}m` : '—'} />
+        <CardHeader
+          title="Version"
+          subtitle={
+            status.data
+              ? `cc-lb ${status.data.version} · ${status.data.git_sha} · uptime ${Math.floor(status.data.uptime_secs / 60)}m`
+              : '—'
+          }
+        />
         <CardBody className="space-y-3 text-xs">
           <div className="grid grid-cols-3 gap-3">
             <Row label="Rust" value={status.data?.build.rust_version ?? '—'} />
@@ -60,15 +70,22 @@ function SettingsPage() {
             <Row label="Generation" value={status.data?.generation ?? '—'} />
           </div>
           <div className="pt-2 border-t border-subtle/40">
-            <div className="text-text-faint text-[10px] uppercase tracking-wider mb-0.5">Build target</div>
-            <div className="font-mono break-all">{status.data?.build.target ?? '—'}</div>
+            <div className="text-text-faint text-[10px] uppercase tracking-wider mb-0.5">
+              Build target
+            </div>
+            <div className="font-mono break-all">
+              {status.data?.build.target ?? '—'}
+            </div>
           </div>
         </CardBody>
       </Card>
 
       {/* Token rotation */}
       <Card>
-        <CardHeader title="Admin Token" subtitle="Rotate the primary bearer token. All current admin sessions will be invalidated." />
+        <CardHeader
+          title="Admin Token"
+          subtitle="Rotate the primary bearer token. All current admin sessions will be invalidated."
+        />
         <CardBody>
           <Button
             id="btn-rotate-token"
@@ -96,20 +113,42 @@ function SettingsPage() {
 
       {/* Export */}
       <Card>
-        <CardHeader title="Configuration Export" subtitle="Download a JSON snapshot of all upstreams, principals, plugins, and chains." />
+        <CardHeader
+          title="Configuration Export"
+          subtitle="Download a JSON snapshot of all upstreams, principals, plugins, and chains."
+        />
         <CardBody>
-          <Button iconLeft={<Download className="w-4 h-4" />} onClick={() => downloadExport()}>
+          <Button
+            iconLeft={<Download className="w-4 h-4" />}
+            onClick={() => downloadExport()}
+          >
             Download export.json
           </Button>
         </CardBody>
       </Card>
 
-      <Modal open={rotateOpen} onOpenChange={setRotateOpen} title="Rotate admin token?" footer={<>
-        <Button onClick={() => setRotateOpen(false)}>Cancel</Button>
-        <Button variant="danger" onClick={() => { toast.success('Token rotation queued (mock)'); setRotateOpen(false); }}>Confirm rotate</Button>
-      </>}>
+      <Modal
+        open={rotateOpen}
+        onOpenChange={setRotateOpen}
+        title="Rotate admin token?"
+        footer={
+          <>
+            <Button onClick={() => setRotateOpen(false)}>Cancel</Button>
+            <Button
+              variant="danger"
+              onClick={() => {
+                toast.success('Token rotation queued (mock)');
+                setRotateOpen(false);
+              }}
+            >
+              Confirm rotate
+            </Button>
+          </>
+        }
+      >
         <p className="text-sm text-text-muted">
-          Rotation invalidates the current admin token. You will need the new token to access this dashboard.
+          Rotation invalidates the current admin token. You will need the new
+          token to access this dashboard.
         </p>
       </Modal>
     </PageContainer>
@@ -137,54 +176,129 @@ function ConfigDraftSection() {
   const lastValidatedLabel = lastValidationError
     ? `error @ rev ${lastValidatedRevision ?? '—'}`
     : lastValidatedRevision != null
-    ? `rev ${lastValidatedRevision}`
-    : '—';
+      ? `rev ${lastValidatedRevision}`
+      : '—';
 
   return (
-    <Section title="Configuration Draft" subtitle="Edit → validate → apply pipeline">
+    <Section
+      title="Configuration Draft"
+      subtitle="Edit → validate → apply pipeline"
+    >
       <Card>
-        <CardHeader title="Draft" action={
-          <div className="flex items-center gap-2">
-            <Button size="sm" iconLeft={<Save className="w-3 h-3" />} disabled={!text}
-              onClick={() => {
-                try {
-                  const parsed = JSON.parse(text);
-                  save.mutate({ draft: parsed, expected_revision: draftRevision ?? 0 }, { onSuccess: () => toast.success('Draft saved') });
-                } catch { toast.error('Draft is not valid JSON'); }
-              }}>Save</Button>
-            <Button size="sm" iconLeft={<CheckCircle2 className="w-3 h-3" />}
-              onClick={() => validate.mutate(draftRevision ?? 0, { onSuccess: (r) => toast.success(r.valid ? 'Draft valid' : `Invalid: ${r.error}`) })}>
-              Validate
-            </Button>
-            <Button size="sm" variant="primary" iconLeft={<PlayCircle className="w-3 h-3" />}
-              disabled={!canApply}
-              onClick={() => apply.mutate(lastValidatedRevision ?? 0, { onSuccess: (r) => toast.success(`Applied revision ${r.applied_revision}`) })}>
-              Apply
-            </Button>
-            <Button size="sm" iconLeft={<RefreshCw className="w-3 h-3" />}
-              onClick={() => reload.mutate(undefined, { onSuccess: () => toast.success('Reload triggered') })}>
-              Reload
-            </Button>
-          </div>
-        } />
+        <CardHeader
+          title="Draft"
+          action={
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                iconLeft={<Save className="w-3 h-3" />}
+                disabled={!text}
+                onClick={() => {
+                  try {
+                    const parsed = JSON.parse(text);
+                    save.mutate(
+                      { draft: parsed, expected_revision: draftRevision ?? 0 },
+                      { onSuccess: () => toast.success('Draft saved') },
+                    );
+                  } catch {
+                    toast.error('Draft is not valid JSON');
+                  }
+                }}
+              >
+                Save
+              </Button>
+              <Button
+                size="sm"
+                iconLeft={<CheckCircle2 className="w-3 h-3" />}
+                onClick={() =>
+                  validate.mutate(draftRevision ?? 0, {
+                    onSuccess: (r) =>
+                      toast.success(
+                        r.valid ? 'Draft valid' : `Invalid: ${r.error}`,
+                      ),
+                  })
+                }
+              >
+                Validate
+              </Button>
+              <Button
+                size="sm"
+                variant="primary"
+                iconLeft={<PlayCircle className="w-3 h-3" />}
+                disabled={!canApply}
+                onClick={() =>
+                  apply.mutate(lastValidatedRevision ?? 0, {
+                    onSuccess: (r) =>
+                      toast.success(`Applied revision ${r.applied_revision}`),
+                  })
+                }
+              >
+                Apply
+              </Button>
+              <Button
+                size="sm"
+                iconLeft={<RefreshCw className="w-3 h-3" />}
+                onClick={() =>
+                  reload.mutate(undefined, {
+                    onSuccess: () => toast.success('Reload triggered'),
+                  })
+                }
+              >
+                Reload
+              </Button>
+            </div>
+          }
+        />
         <CardBody className="space-y-3">
           <div className="text-xs text-text-faint flex flex-wrap gap-4">
-            <span>Revision: <span className="font-mono">{draftRevision ?? '—'}</span></span>
-            <span>Last validated: <span className={cx('font-mono', lastValidationError ? 'text-red-400' : undefined)}>{lastValidatedLabel}</span></span>
-            <span>Saved at: <span className="font-mono">{draft.data?.saved_at_unix_secs ? new Date(draft.data.saved_at_unix_secs * 1000).toISOString().slice(0, 19).replace('T', ' ') : '—'}</span></span>
+            <span>
+              Revision:{' '}
+              <span className="font-mono">{draftRevision ?? '—'}</span>
+            </span>
+            <span>
+              Last validated:{' '}
+              <span
+                className={cx(
+                  'font-mono',
+                  lastValidationError ? 'text-red-400' : undefined,
+                )}
+              >
+                {lastValidatedLabel}
+              </span>
+            </span>
+            <span>
+              Saved at:{' '}
+              <span className="font-mono">
+                {draft.data?.saved_at_unix_secs
+                  ? new Date(draft.data.saved_at_unix_secs * 1000)
+                      .toISOString()
+                      .slice(0, 19)
+                      .replace('T', ' ')
+                  : '—'}
+              </span>
+            </span>
           </div>
           <textarea
             className="w-full min-h-[260px] p-3 text-xs font-mono bg-panel-strong border border-subtle rounded-sm placeholder:text-text-faint focus:border-accent focus:outline-none"
             style={{ lineHeight: 1.5 }}
             value={text}
             onChange={(e) => setText(e.target.value)}
-            placeholder={current.data ? JSON.stringify(current.data, null, 2) : 'JSON config draft…'}
+            placeholder={
+              current.data
+                ? JSON.stringify(current.data, null, 2)
+                : 'JSON config draft…'
+            }
           />
           {schema.data ? (
             <details className="text-xs">
-              <summary className="cursor-pointer text-text-faint">Coverage checklist ({schema.data.coverage_checklist.length} fields)</summary>
+              <summary className="cursor-pointer text-text-faint">
+                Coverage checklist ({schema.data.coverage_checklist.length}{' '}
+                fields)
+              </summary>
               <ul className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-1 font-mono">
-                {schema.data.coverage_checklist.map((f) => <li key={f}>· {f}</li>)}
+                {schema.data.coverage_checklist.map((f) => (
+                  <li key={f}>· {f}</li>
+                ))}
               </ul>
             </details>
           ) : null}
@@ -200,7 +314,11 @@ function ConfigHistorySection() {
     <Section title="Configuration History" subtitle="Last 20 applied revisions">
       <Card>
         <div className="overflow-x-auto">
-          {history.isLoading ? <CardBody><Skeleton className="h-12" /></CardBody> : history.data?.history.length ? (
+          {history.isLoading ? (
+            <CardBody>
+              <Skeleton className="h-12" />
+            </CardBody>
+          ) : history.data?.history.length ? (
             <table className="min-w-[640px] w-full font-mono text-xs">
               <thead className="bg-panel-strong border-b border-subtle">
                 <tr className="text-text-faint text-[10px] uppercase tracking-wider">
@@ -216,16 +334,36 @@ function ConfigHistorySection() {
                 {history.data.history.map((h) => (
                   <tr key={h.revision} className="border-b border-subtle/40">
                     <td className="px-4 py-2 text-right">{h.revision}</td>
-                    <td className="px-4 py-2">{new Date(h.applied_at_unix_secs * 1000).toISOString().replace('T', ' ').slice(0, 19)}</td>
-                    <td className="px-4 py-2 text-right tabular-nums">{h.config_summary.upstreams}</td>
-                    <td className="px-4 py-2 text-right tabular-nums">{h.config_summary.principals}</td>
-                    <td className="px-4 py-2 text-right tabular-nums">{h.config_summary.plugin_count}</td>
-                    <td className="px-4 py-2 text-center"><StatusBadge tone={h.config_summary.tls_enabled ? 'ok' : 'neutral'} label={h.config_summary.tls_enabled ? 'on' : 'off'} /></td>
+                    <td className="px-4 py-2">
+                      {new Date(h.applied_at_unix_secs * 1000)
+                        .toISOString()
+                        .replace('T', ' ')
+                        .slice(0, 19)}
+                    </td>
+                    <td className="px-4 py-2 text-right tabular-nums">
+                      {h.config_summary.upstreams}
+                    </td>
+                    <td className="px-4 py-2 text-right tabular-nums">
+                      {h.config_summary.principals}
+                    </td>
+                    <td className="px-4 py-2 text-right tabular-nums">
+                      {h.config_summary.plugin_count}
+                    </td>
+                    <td className="px-4 py-2 text-center">
+                      <StatusBadge
+                        tone={h.config_summary.tls_enabled ? 'ok' : 'neutral'}
+                        label={h.config_summary.tls_enabled ? 'on' : 'off'}
+                      />
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          ) : <CardBody><p className="text-xs text-text-faint">No history available.</p></CardBody>}
+          ) : (
+            <CardBody>
+              <p className="text-xs text-text-faint">No history available.</p>
+            </CardBody>
+          )}
         </div>
       </Card>
     </Section>
@@ -238,7 +376,11 @@ function AuditSection() {
     <Section title="Audit Log" subtitle="Last 20 audit entries">
       <Card>
         <div className="overflow-x-auto">
-          {audit.isLoading ? <CardBody><Skeleton className="h-12" /></CardBody> : audit.data?.entries.length ? (
+          {audit.isLoading ? (
+            <CardBody>
+              <Skeleton className="h-12" />
+            </CardBody>
+          ) : audit.data?.entries.length ? (
             <table className="min-w-[800px] w-full font-mono text-xs">
               <thead className="bg-overlay-1 border-b border-subtle">
                 <tr className="text-text-faint text-[10px] uppercase tracking-wider">
@@ -253,19 +395,43 @@ function AuditSection() {
               </thead>
               <tbody>
                 {audit.data.entries.map((e) => (
-                  <tr key={e.request_id} className="border-b border-subtle/40 hover:bg-overlay-1">
-                    <td className="px-4 py-2 text-text-muted whitespace-nowrap">{eventTime(e)?.toISOString().slice(11, 19) ?? '—'} UTC</td>
+                  <tr
+                    key={e.request_id}
+                    className="border-b border-subtle/40 hover:bg-overlay-1"
+                  >
+                    <td className="px-4 py-2 text-text-muted whitespace-nowrap">
+                      {eventTime(e)?.toISOString().slice(11, 19) ?? '—'} UTC
+                    </td>
                     <td className="px-4 py-2">{e.principal_id}</td>
                     <td className="px-4 py-2">{e.route}</td>
                     <td className="px-4 py-2">{e.upstream}</td>
-                    <td className="px-4 py-2 text-text-faint truncate max-w-[200px]">{e.model ?? '—'}</td>
-                    <td className={cx('px-4 py-2 text-right', e.status >= 500 ? 'text-red-400' : e.status >= 400 ? 'text-amber-400' : 'text-green-400')}>{e.status}</td>
-                    <td className="px-4 py-2 text-right tabular-nums">{e.duration_ms}ms</td>
+                    <td className="px-4 py-2 text-text-faint truncate max-w-[200px]">
+                      {e.model ?? '—'}
+                    </td>
+                    <td
+                      className={cx(
+                        'px-4 py-2 text-right',
+                        e.status >= 500
+                          ? 'text-red-400'
+                          : e.status >= 400
+                            ? 'text-amber-400'
+                            : 'text-green-400',
+                      )}
+                    >
+                      {e.status}
+                    </td>
+                    <td className="px-4 py-2 text-right tabular-nums">
+                      {e.duration_ms}ms
+                    </td>
                   </tr>
                 ))}
               </tbody>
             </table>
-          ) : <CardBody><p className="text-xs text-text-faint">No audit entries.</p></CardBody>}
+          ) : (
+            <CardBody>
+              <p className="text-xs text-text-faint">No audit entries.</p>
+            </CardBody>
+          )}
         </div>
       </Card>
     </Section>
@@ -273,9 +439,18 @@ function AuditSection() {
 }
 
 const RESTART_MATRIX: { field: string; reason: string }[] = [
-  { field: 'listener.proxy_addr', reason: 'Socket bindings are fixed at process start' },
-  { field: 'listener.admin_addr', reason: 'Socket bindings are fixed at process start' },
-  { field: 'listener.metrics_addr', reason: 'Socket bindings are fixed at process start' },
+  {
+    field: 'listener.proxy_addr',
+    reason: 'Socket bindings are fixed at process start',
+  },
+  {
+    field: 'listener.admin_addr',
+    reason: 'Socket bindings are fixed at process start',
+  },
+  {
+    field: 'listener.metrics_addr',
+    reason: 'Socket bindings are fixed at process start',
+  },
   { field: 'listener.tls.cert_path', reason: 'Listener TLS certificate' },
   { field: 'listener.tls.key_path', reason: 'Listener TLS key' },
   { field: 'tls.cert_path', reason: 'TLS certificate' },
@@ -309,11 +484,15 @@ function RestartRequiredMatrix() {
             </thead>
             <tbody>
               <tr className="border-b border-subtle/40 bg-[color:var(--color-ok)]/[0.06]">
-                <td className="px-4 py-2">upstreams · principals · plugin chains</td>
+                <td className="px-4 py-2">
+                  upstreams · principals · plugin chains
+                </td>
                 <td className="px-4 py-2 text-center">
                   <StatusBadge tone="ok" label="Yes" />
                 </td>
-                <td className="px-4 py-2 text-text-muted">Fully dynamic via admin DB; no restart required.</td>
+                <td className="px-4 py-2 text-text-muted">
+                  Fully dynamic via admin DB; no restart required.
+                </td>
               </tr>
               {RESTART_MATRIX.map((r) => (
                 <tr key={r.field} className="border-b border-subtle/40">
