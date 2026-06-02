@@ -4,7 +4,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use cc_lb_plugin_wire::augmented_metadata::{AugmentedMetadata, AugmentedMetadataError};
 use cc_lb_plugin_wire::handshake::{CanonicalError, HandshakeAccept, HandshakeOffer};
 use cc_lb_plugin_wire::limits::SKIP_HANDSHAKE_IF_FRESH_TTL_SECS;
-use cc_lb_plugin_wire::self_check::{SelfCheckResponse, SelfCheckStatus};
+use cc_lb_plugin_wire::self_check::SelfCheckResponse;
 use cc_lb_storage_api::{
     PluginBlobRepo, PluginRegistryRecord, PluginRegistryRepo, PluginRegistryStatus, RepoError,
 };
@@ -280,11 +280,6 @@ impl PluginRegistry {
             .execute_handshake(wasm_bytes, &self.host_offer)?;
         let handshake_completed_at = unix_now()?;
         let self_check = self.lifecycle.execute_self_check(wasm_bytes)?;
-        if self_check.status != SelfCheckStatus::Success {
-            return Err(RegistryError::SelfCheckFailed {
-                failures: self_check.failures.len(),
-            });
-        }
 
         let augmented_metadata = AugmentedMetadata::from_handshake_and_self_check(
             identity.clone(),
@@ -356,8 +351,6 @@ pub enum RegistryError {
     Handshake(#[from] HandshakeExecutionError),
     #[error("self-check verification failed: {0}")]
     SelfCheck(#[from] SelfCheckExecutionError),
-    #[error("self-check returned failure status with {failures} failure(s)")]
-    SelfCheckFailed { failures: usize },
     #[error("augmented metadata validation failed: {0}")]
     Metadata(#[from] AugmentedMetadataError),
     #[error("plugin registry repository failed: {source}")]

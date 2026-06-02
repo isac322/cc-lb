@@ -145,7 +145,9 @@ async fn self_check_failure_status_rejects_registration() {
         .expect_err("failure status rejects registration");
 
     match error {
-        RegistryError::SelfCheckFailed { failures } => assert_eq!(failures, 1),
+        RegistryError::SelfCheck(SelfCheckExecutionError::FailureStatus { failures }) => {
+            assert_eq!(failures, 1)
+        }
         other => panic!("expected registry self-check failure, got {other:?}"),
     }
     assert_eq!(repos.registry.upserts.load(Ordering::SeqCst), 0);

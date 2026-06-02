@@ -283,7 +283,6 @@ fn registry_error_response(error: RegistryError) -> Response {
         RegistryError::Identity(_)
         | RegistryError::Handshake(_)
         | RegistryError::SelfCheck(_)
-        | RegistryError::SelfCheckFailed { .. }
         | RegistryError::Metadata(_)
         | RegistryError::BlobSha256Mismatch { .. } => StatusCode::BAD_REQUEST,
         RegistryError::BlobMissing { .. } => StatusCode::NOT_FOUND,

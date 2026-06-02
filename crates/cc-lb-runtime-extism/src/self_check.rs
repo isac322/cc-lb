@@ -100,7 +100,10 @@ fn validate_status_failures(response: &SelfCheckResponse) -> Result<(), SelfChec
         SelfCheckStatus::Failure if response.failures.is_empty() => {
             Err(SelfCheckExecutionError::FailureWithoutFailures)
         }
-        SelfCheckStatus::Success | SelfCheckStatus::Failure => Ok(()),
+        SelfCheckStatus::Failure => Err(SelfCheckExecutionError::FailureStatus {
+            failures: response.failures.len(),
+        }),
+        SelfCheckStatus::Success => Ok(()),
     }
 }
 
@@ -124,6 +127,8 @@ pub enum SelfCheckExecutionError {
     SuccessWithFailures { count: usize },
     #[error("self-check failure response did not include failures")]
     FailureWithoutFailures,
+    #[error("self-check reported failure status with {failures} failure(s)")]
+    FailureStatus { failures: usize },
     #[error("self-check timestamp generation failed: {reason}")]
     Clock { reason: String },
 }
@@ -146,16 +151,18 @@ mod tests {
     }
 
     #[test]
-    fn execute_self_check_accepts_failure_response_with_failures() {
+    fn execute_self_check_rejects_failure_status() {
         let wasm = self_check_module(
             r#"{"status":"failure","failures":[{"stage":"wire_function_test","message":"bad wire shape"}],"completed_at":1}"#,
             false,
         );
 
-        let response = execute_self_check(&wasm).expect("failure response is valid output");
+        let err = execute_self_check(&wasm).expect_err("failure status rejected at executor level");
 
-        assert_eq!(response.status, SelfCheckStatus::Failure);
-        assert_eq!(response.failures.len(), 1);
+        match err {
+            SelfCheckExecutionError::FailureStatus { failures } => assert_eq!(failures, 1),
+            other => panic!("expected failure status rejection, got {other:?}"),
+        }
     }
 
     #[test]
