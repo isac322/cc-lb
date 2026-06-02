@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -24,6 +24,7 @@ use tower::ServiceBuilder;
 use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
+use super::wasm_cache::{data_dir, wasm_cache_path};
 use crate::AdminState;
 
 const WASM_MAGIC: &[u8; 4] = b"\0asm";
@@ -307,7 +308,7 @@ async fn gc_wasm(State(state): State<AdminState>) -> Response {
         let sha_hex = hex_sha256(sha);
         match storage.decrement_blob_refcount_or_delete(sha).await {
             Ok(true) => {
-                let cache_path = wasm_cache_path(&data_dir(&state), &sha_hex);
+                let cache_path = wasm_cache_path(&state, &sha_hex);
                 match tokio::fs::remove_file(&cache_path).await {
                     Ok(()) => {}
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -447,27 +448,6 @@ async fn set_file_mode(path: &Path) -> io::Result<()> {
         tokio::fs::set_permissions(path, permissions).await?;
     }
     Ok(())
-}
-
-fn data_dir(state: &AdminState) -> PathBuf {
-    if let Ok(path) = std::env::var("CC_LB_DATA_DIR") {
-        return PathBuf::from(path);
-    }
-    state
-        .config
-        .current_config()
-        .runtime
-        .data_dir
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("./data"))
-}
-
-fn wasm_cache_path(data_dir: &Path, sha256_hex: &str) -> PathBuf {
-    data_dir
-        .join("plugins")
-        .join("wasm")
-        .join("cache")
-        .join(format!("{sha256_hex}.wasm"))
 }
 
 fn storage_response(error: StorageError) -> Response {
