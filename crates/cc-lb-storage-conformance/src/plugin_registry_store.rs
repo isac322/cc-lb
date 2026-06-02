@@ -61,6 +61,7 @@ where
     reorder_chain_rejects_final_chain_gap_on_storage(storage).await?;
     update_chain_entry_rejects_no_op_on_storage(storage).await?;
     upload_returns_existed_flag_on_storage(storage).await?;
+    same_sha_metadata_mismatch_conflicts_on_storage(storage).await?;
     validate_identifier_rejects_bad_name(storage).await?;
     fk_on_delete_restrict(storage).await?;
     Ok(())
@@ -477,14 +478,12 @@ async fn list_orphan_blobs_returns_blobs_without_registry_on_storage<
     );
 
     let orphan_blob = blob(24, b"manual-orphan".to_vec());
-    if insert_orphan_blob_if_exposed(storage, &orphan_blob)? {
+    if insert_orphan_blob_if_exposed(storage, &orphan_blob).await? {
         let orphaned = storage.list_orphan_blobs().await?;
         ensure!(
             orphaned.contains(&orphan_blob.sha256),
             "unregistered blob rows are reported as orphans"
         );
-    } else {
-        // TODO::W3b postgres needs a conformance fixture hook for direct blob-row injection.
     }
     Ok(())
 }
@@ -614,9 +613,7 @@ async fn persist_wasm_upload_heals_missing_blob_on_storage<S: PluginRegistryStor
         .persist_wasm_upload(wasm.clone(), input.clone())
         .await?;
 
-    if !delete_blob_row_if_exposed(storage, created.sha256)? {
-        // TODO::W3b postgres needs a direct fixture hook; current public chain-delete path
-        // can still expose the zombie-registry bug because postgres deletes the blob row.
+    if !delete_blob_row_if_exposed(storage, created.sha256).await? {
         let chain_entry = storage
             .insert_chain_entry(chain(Uuid::new_v4(), created.id, sparse_order::STEP))
             .await?;
@@ -828,7 +825,35 @@ async fn upload_returns_existed_flag_on_storage<S: PluginRegistryStore>(storage:
     Ok(())
 }
 
-fn insert_orphan_blob_if_exposed<S: PluginRegistryStore + 'static>(
+plugin_registry_scenario!(
+    same_sha_metadata_mismatch_conflicts,
+    same_sha_metadata_mismatch_conflicts_on_storage
+);
+
+async fn same_sha_metadata_mismatch_conflicts_on_storage<S: PluginRegistryStore>(
+    storage: &S,
+) -> Result<()> {
+    let wasm = blob(36, b"same-sha-metadata".to_vec());
+    storage
+        .persist_wasm_upload(wasm.clone(), entry("plugin-same-sha-a"))
+        .await?;
+
+    let err = storage
+        .persist_wasm_upload(wasm, entry("plugin-same-sha-b"))
+        .await
+        .expect_err("same sha with a different name conflicts");
+    ensure!(
+        matches!(
+            err,
+            StorageError::Conflict { ref message }
+                if message == "sha256 already registered for a different wasm entry"
+        ),
+        "same sha metadata mismatch returns the strict conflict"
+    );
+    Ok(())
+}
+
+async fn insert_orphan_blob_if_exposed<S: PluginRegistryStore + 'static>(
     storage: &S,
     blob: &WasmBlob,
 ) -> Result<bool> {
@@ -851,11 +876,25 @@ fn insert_orphan_blob_if_exposed<S: PluginRegistryStore + 'static>(
             return Ok(true);
         }
     }
+    #[cfg(feature = "postgres")]
+    {
+        if let Some(postgres) =
+            (storage as &dyn Any).downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
+        {
+            sqlx::query("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, refcount, created_at) VALUES ($1, $2, $3, NOW(), 0, NOW()) ON CONFLICT (sha256) DO NOTHING")
+                .bind(blob.sha256.as_slice())
+                .bind(blob.bytes.as_slice())
+                .bind(i64::try_from(blob.size_bytes)?)
+                .execute(postgres.pool())
+                .await?;
+            return Ok(true);
+        }
+    }
     let _ = (storage, blob);
     Ok(false)
 }
 
-fn delete_blob_row_if_exposed<S: PluginRegistryStore + 'static>(
+async fn delete_blob_row_if_exposed<S: PluginRegistryStore + 'static>(
     storage: &S,
     sha256: [u8; 32],
 ) -> Result<bool> {
@@ -870,6 +909,18 @@ fn delete_blob_row_if_exposed<S: PluginRegistryStore + 'static>(
             }
             write_txn.commit()?;
             return Ok(true);
+        }
+    }
+    #[cfg(feature = "postgres")]
+    {
+        if let Some(postgres) =
+            (storage as &dyn Any).downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
+        {
+            let result = sqlx::query("DELETE FROM wasm_blobs_v2 WHERE sha256 = $1")
+                .bind(sha256.as_slice())
+                .execute(postgres.pool())
+                .await?;
+            return Ok(result.rows_affected() > 0);
         }
     }
     let _ = (storage, sha256);

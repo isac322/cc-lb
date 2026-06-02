@@ -138,6 +138,10 @@ plugin_registry_redb_test!(
     plugin_registry_upload_returns_existed_flag_redb,
     upload_returns_existed_flag
 );
+plugin_registry_redb_test!(
+    plugin_registry_same_sha_metadata_mismatch_conflicts_redb,
+    same_sha_metadata_mismatch_conflicts
+);
 
 fn run_redb_scenario<F, Fut>(name: &str, scenario: F)
 where

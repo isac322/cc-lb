@@ -8,7 +8,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_storage_api::{
+    BackendKind, MetaStore, PluginRegistryStore, WasmBlob, WasmRegistryEntryInput,
+};
 use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
     scenarios::{
@@ -104,6 +106,35 @@ fn plugin_registry_store_postgres() {
 }
 
 #[test]
+fn plugin_registry_list_orphan_blobs_returns_blobs_without_registry_postgres() {
+    run_postgres_scenario(
+        "list_orphan_blobs_returns_blobs_without_registry",
+        plugin_registry_store::list_orphan_blobs_returns_blobs_without_registry,
+    );
+}
+
+#[test]
+fn plugin_registry_same_sha_metadata_mismatch_conflicts_postgres() {
+    run_postgres_scenario(
+        "same_sha_metadata_mismatch_conflicts",
+        plugin_registry_store::same_sha_metadata_mismatch_conflicts,
+    );
+}
+
+#[test]
+fn plugin_registry_concurrent_upload_returns_existed_once_postgres() {
+    let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
+        eprintln!("skip: CI_POSTGRES_URL not set");
+        return;
+    };
+
+    Runtime::new()
+        .expect("tokio runtime")
+        .block_on(concurrent_upload_returns_existed_once(url))
+        .unwrap_or_else(|error| panic!("concurrent_upload_returns_existed_once postgres: {error}"));
+}
+
+#[test]
 #[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
 fn principal_allowed_upstreams_roundtrip_postgres() {
     run_postgres_scenario(
@@ -162,6 +193,58 @@ where
         .expect("tokio runtime")
         .block_on(scenario(Arc::new(PostgresConformanceBackend { url })))
         .unwrap_or_else(|error| panic!("{name} postgres: {error}"));
+}
+
+async fn concurrent_upload_returns_existed_once(url: String) -> anyhow::Result<()> {
+    let backend = PostgresConformanceBackend { url };
+    let fixture = backend.create_fixture().await?;
+    let result = concurrent_upload_returns_existed_once_on_fixture(&backend, &fixture).await;
+    let teardown = backend.teardown(fixture).await;
+    result?;
+    teardown?;
+    Ok(())
+}
+
+async fn concurrent_upload_returns_existed_once_on_fixture(
+    backend: &PostgresConformanceBackend,
+    fixture: &PostgresFixture,
+) -> anyhow::Result<()> {
+    let first_storage = backend.open(fixture).await?;
+    let second_storage = backend.open(fixture).await?;
+    let blob = WasmBlob {
+        sha256: [42; 32],
+        bytes: b"concurrent-upload".to_vec(),
+        size_bytes: b"concurrent-upload".len() as u64,
+        parse_validated_at_unix_secs: 1_800_000_000,
+    };
+    let input = WasmRegistryEntryInput {
+        name: "plugin-concurrent-upload".to_owned(),
+        original_filename: "plugin-concurrent-upload.wasm".to_owned(),
+        label: None,
+        uploaded_at_unix_secs: 1_800_000_100,
+        uploaded_by_admin_id: uuid::Uuid::new_v4(),
+    };
+
+    let first_blob = blob.clone();
+    let first_input = input.clone();
+    let first = tokio::spawn(async move {
+        first_storage
+            .persist_wasm_upload(first_blob, first_input)
+            .await
+    });
+    let second = tokio::spawn(async move { second_storage.persist_wasm_upload(blob, input).await });
+
+    let mut existed = Vec::new();
+    for result in [first.await?, second.await?] {
+        let (_entry, did_exist) = result?;
+        existed.push(did_exist);
+    }
+    existed.sort();
+    anyhow::ensure!(
+        existed == [false, true],
+        "exactly one upload reports existed"
+    );
+    Ok(())
 }
 
 fn schema_name() -> String {
