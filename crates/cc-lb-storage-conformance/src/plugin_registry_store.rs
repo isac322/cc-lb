@@ -43,7 +43,7 @@ pub async fn registry_label_update_with_correct_revision_bumps_and_persists<
 >(
     storage: &S,
 ) -> Result<()> {
-    let created = storage
+    let (created, _) = storage
         .persist_wasm_upload(blob(31, b"label".to_vec()), entry("plugin-label-update"))
         .await?;
     let updated = storage
@@ -64,7 +64,7 @@ pub async fn registry_label_update_with_correct_revision_bumps_and_persists<
 pub async fn registry_label_update_with_stale_revision_conflicts<S: PluginRegistryStore>(
     storage: &S,
 ) -> Result<()> {
-    let created = storage
+    let (created, _) = storage
         .persist_wasm_upload(
             blob(32, b"stale-label".to_vec()),
             entry("plugin-label-stale"),
@@ -85,7 +85,7 @@ pub async fn persist_wasm_upload_creates_blob_and_registry<S: PluginRegistryStor
     storage: &S,
 ) -> Result<()> {
     let blob = blob(1, b"wasm-a".to_vec());
-    let entry = storage
+    let (entry, _) = storage
         .persist_wasm_upload(blob.clone(), entry("plugin-a"))
         .await?;
     ensure!(
@@ -103,10 +103,10 @@ pub async fn persist_wasm_upload_idempotent_on_same_entry_input<S: PluginRegistr
     storage: &S,
 ) -> Result<()> {
     let input = entry("plugin-idempotent");
-    let first = storage
+    let (first, _) = storage
         .persist_wasm_upload(blob(2, b"same".to_vec()), input.clone())
         .await?;
-    let second = storage
+    let (second, _) = storage
         .persist_wasm_upload(blob(2, b"same".to_vec()), input)
         .await?;
     ensure!(
@@ -159,7 +159,7 @@ pub async fn persist_wasm_upload_rejects_oversize<S: PluginRegistryStore>(
 pub async fn persist_wasm_upload_records_parse_validated_at<S: PluginRegistryStore>(
     storage: &S,
 ) -> Result<()> {
-    let uploaded = storage
+    let (uploaded, _) = storage
         .persist_wasm_upload(blob(6, b"valid".to_vec()), entry("plugin-validated"))
         .await?;
     ensure!(uploaded.uploaded_at_unix_secs > 0, "uploaded time recorded");
@@ -194,7 +194,7 @@ pub async fn registry_list_paginates<S: PluginRegistryStore>(storage: &S) -> Res
 pub async fn get_registry_entry_by_sha_returns_entry<S: PluginRegistryStore>(
     storage: &S,
 ) -> Result<()> {
-    let created = storage
+    let (created, _) = storage
         .persist_wasm_upload(blob(10, b"sha".to_vec()), entry("plugin-sha"))
         .await?;
     ensure!(
@@ -360,8 +360,11 @@ pub async fn delete_chain_entry_decrements_refcount<S: PluginRegistryStore>(
 ) -> Result<()> {
     let created = one_chain(storage, 19, "plugin-delete").await?;
     ensure!(
-        storage.delete_chain_entry(created.id).await?,
-        "delete returns true"
+        storage
+            .delete_chain_entry(created.id, created.revision)
+            .await?
+            .is_some(),
+        "delete returns entry"
     );
     Ok(())
 }
@@ -370,8 +373,8 @@ pub async fn delete_chain_entry_missing_is_false<S: PluginRegistryStore>(
     storage: &S,
 ) -> Result<()> {
     ensure!(
-        !storage.delete_chain_entry(Uuid::new_v4()).await?,
-        "missing delete false"
+        storage.delete_chain_entry(Uuid::new_v4(), 0).await?.is_none(),
+        "missing delete none"
     );
     Ok(())
 }
@@ -389,7 +392,7 @@ pub async fn decrement_blob_refcount_or_delete_missing_is_false<S: PluginRegistr
 pub async fn list_orphan_blobs_returns_zero_refcount_sha<S: PluginRegistryStore>(
     storage: &S,
 ) -> Result<()> {
-    let created = storage
+    let (created, _) = storage
         .persist_wasm_upload(blob(23, b"orphan".to_vec()), entry("plugin-orphan"))
         .await?;
     let orphaned = storage.list_orphan_blobs().await?;
@@ -436,7 +439,7 @@ async fn principal_and_plugin<S: PluginRegistryStore>(
     seed: u8,
     name: &str,
 ) -> Result<(Uuid, cc_lb_storage_api::WasmRegistryEntry)> {
-    let plugin = storage
+    let (plugin, _) = storage
         .persist_wasm_upload(blob(seed, vec![seed]), entry(name))
         .await?;
     Ok((Uuid::new_v4(), plugin))

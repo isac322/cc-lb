@@ -451,14 +451,14 @@ async fn delete_chain(
         )
             .into_response();
     }
-    match storage.delete_chain_entry(id).await {
-        Ok(true) => {
+    match storage.delete_chain_entry(id, expected_revision).await {
+        Ok(Some(_)) => {
             emit_chain_audit(&state, entry.principal_id, entry.slot);
             let mut response = StatusCode::NO_CONTENT.into_response();
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
         }
-        Ok(false) => error(StatusCode::NOT_FOUND, "unknown_plugin_chain_entry"),
+        Ok(None) => error(StatusCode::NOT_FOUND, "unknown_plugin_chain_entry"),
         Err(error) => storage_error(error),
     }
 }

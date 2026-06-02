@@ -194,7 +194,7 @@ async fn upload_wasm_inner(
         uploaded_at_unix_secs: unix_now_secs(),
         uploaded_by_admin_id: admin_id,
     };
-    let entry = storage
+    let (entry, _existed) = storage
         .persist_wasm_upload(blob, entry_input)
         .await
         .map_err(storage_response)?;

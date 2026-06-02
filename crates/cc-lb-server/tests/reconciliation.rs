@@ -422,7 +422,7 @@ impl PluginRegistryStore for EmptyPluginRegistryStore {
         &self,
         _blob: WasmBlob,
         _entry: WasmRegistryEntryInput,
-    ) -> StorageResult<WasmRegistryEntry> {
+    ) -> StorageResult<(WasmRegistryEntry, bool)> {
         unimplemented!()
     }
     async fn get_blob_bytes(&self, _sha256: [u8; 32]) -> StorageResult<Option<Vec<u8>>> {
@@ -503,7 +503,11 @@ impl PluginRegistryStore for EmptyPluginRegistryStore {
     ) -> StorageResult<Vec<PluginChainEntry>> {
         unimplemented!()
     }
-    async fn delete_chain_entry(&self, _id: Uuid) -> StorageResult<bool> {
+    async fn delete_chain_entry(
+        &self,
+        _id: Uuid,
+        _expected_revision: u64,
+    ) -> StorageResult<Option<PluginChainEntry>> {
         unimplemented!()
     }
     async fn rebalance_chain(

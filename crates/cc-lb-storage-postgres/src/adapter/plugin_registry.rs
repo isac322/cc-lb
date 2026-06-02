@@ -23,7 +23,8 @@ impl PluginRegistryStore for PostgresStorage {
         &self,
         blob: WasmBlob,
         input: WasmRegistryEntryInput,
-    ) -> StorageResult<WasmRegistryEntry> {
+    ) -> StorageResult<(WasmRegistryEntry, bool)> {
+        // TODO: Oracle Medium 11 — wire in W3b.
         validate_identifier("plugin.name", &input.name)?;
         if blob.size_bytes > MAX_WASM_BLOB_BYTES || blob.bytes.len() as u64 > MAX_WASM_BLOB_BYTES {
             return Err(StorageError::InvalidInput {
@@ -39,7 +40,7 @@ impl PluginRegistryStore for PostgresStorage {
                 && existing.uploaded_by_admin_id == input.uploaded_by_admin_id
             {
                 tx.commit().await.map_err(map_sqlx_error)?;
-                return Ok(existing);
+                return Ok((existing, false));
             }
             return Err(conflict(
                 "sha256 already registered for a different wasm entry",
@@ -66,7 +67,7 @@ impl PluginRegistryStore for PostgresStorage {
             .await
             .map_err(map_sqlx_error)?;
         tx.commit().await.map_err(map_sqlx_error)?;
-        registry_from_row(row)
+        registry_from_row(row).map(|entry| (entry, false))
     }
 
     async fn get_blob_bytes(&self, sha256: [u8; 32]) -> StorageResult<Option<Vec<u8>>> {
@@ -299,10 +300,16 @@ impl PluginRegistryStore for PostgresStorage {
         self.list_chain_for_principal(principal_id, slot).await
     }
 
-    async fn delete_chain_entry(&self, id: Uuid) -> StorageResult<bool> {
+    async fn delete_chain_entry(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+    ) -> StorageResult<Option<PluginChainEntry>> {
+        // TODO: Oracle High 3 — wire in W3b.
+        let _ = expected_revision;
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let Some(entry) = self.get_chain_in_tx(&mut tx, id).await? else {
-            return Ok(false);
+            return Ok(None);
         };
         let sha =
             sqlx::query_scalar::<_, Vec<u8>>("SELECT sha256 FROM wasm_registry_v2 WHERE id = $1")
@@ -322,7 +329,7 @@ impl PluginRegistryStore for PostgresStorage {
             .await
             .map_err(map_sqlx_error)?;
         tx.commit().await.map_err(map_sqlx_error)?;
-        Ok(true)
+        Ok(Some(entry))
     }
 
     async fn rebalance_chain(
