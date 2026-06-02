@@ -10,12 +10,10 @@ pub mod self_check;
 mod sse_batch;
 
 use std::collections::HashMap;
-use std::fmt;
 use std::fs;
-use std::panic::{self, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use cc_lb_plugin_api::{
@@ -24,7 +22,6 @@ use cc_lb_plugin_api::{
 };
 use extism::{Manifest, Plugin, PluginBuilder, Wasm};
 use serde_json::Value;
-use tokio::sync::oneshot;
 
 use crate::host_functions::{HostFunctionContext, HostState};
 use crate::plugin_wrap::{ExtismDialectPlugin, ExtismRouterPlugin, ExtismSignerFactory};
@@ -486,137 +483,10 @@ impl PluginSlot {
             })?;
         Ok(plugin.function_exists(hook))
     }
-
-    pub(crate) async fn call_value_async(
-        &self,
-        hook: &'static str,
-        input: Value,
-    ) -> Result<Value, PluginCallError> {
-        let input = serde_json::to_string(&input).map_err(|source| PluginCallError::Serialize {
-            reason: source.to_string(),
-        })?;
-        let cell = self.current.load_full();
-        let limits = self
-            .entry
-            .read()
-            .map_err(|_| PluginCallError::Runtime {
-                reason: "plugin entry lock poisoned".to_owned(),
-            })?
-            .limits
-            .clone();
-        let started = Instant::now();
-        let result = call_plugin_with_timeout(cell, hook, input, limits.max_call_duration).await;
-        let elapsed = started.elapsed().as_secs_f64();
-        metrics::histogram!(
-            "cc_lb_extism_call_duration_seconds",
-            "plugin" => self.name.clone(),
-            "hook" => hook.to_owned(),
-        )
-        .record(elapsed);
-        let output = result?;
-        serde_json::from_str(&output).map_err(|source| PluginCallError::Deserialize {
-            reason: source.to_string(),
-        })
-    }
-
-    pub(crate) fn call_value_sync(
-        self: &Arc<Self>,
-        hook: &'static str,
-        input: Value,
-    ) -> Result<Value, PluginCallError> {
-        let slot = self.clone();
-        let thread = std::thread::Builder::new()
-            .name(format!("cc-lb-extism-{hook}"))
-            .spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread()
-                    .enable_time()
-                    .build()
-                    .map_err(|source| PluginCallError::Runtime {
-                        reason: source.to_string(),
-                    })?;
-                runtime.block_on(slot.call_value_async(hook, input))
-            })
-            .map_err(|source| PluginCallError::Runtime {
-                reason: source.to_string(),
-            })?;
-        thread.join().map_err(|_| PluginCallError::Panic { hook })?
-    }
 }
 
 pub(crate) struct PluginCell {
     plugin: Mutex<Plugin>,
-}
-
-#[derive(Debug)]
-pub(crate) enum PluginCallError {
-    Serialize { reason: String },
-    Deserialize { reason: String },
-    Runtime { reason: String },
-    Plugin { reason: String },
-    Timeout { hook: &'static str },
-    Panic { hook: &'static str },
-}
-
-impl fmt::Display for PluginCallError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Serialize { reason } => {
-                write!(f, "plugin request serialization failed: {reason}")
-            }
-            Self::Deserialize { reason } => {
-                write!(f, "plugin response deserialization failed: {reason}")
-            }
-            Self::Runtime { reason } => write!(f, "plugin runtime failed: {reason}"),
-            Self::Plugin { reason } => write!(f, "plugin call failed: {reason}"),
-            Self::Timeout { hook } => write!(f, "plugin hook timed out: {hook}"),
-            Self::Panic { hook } => write!(f, "plugin hook panicked: {hook}"),
-        }
-    }
-}
-
-impl std::error::Error for PluginCallError {}
-
-async fn call_plugin_with_timeout(
-    cell: Arc<PluginCell>,
-    hook: &'static str,
-    input: String,
-    timeout_duration: Duration,
-) -> Result<String, PluginCallError> {
-    let (cancel_tx, cancel_rx) = oneshot::channel();
-    let task = tokio::task::spawn_blocking(move || {
-        let mut plugin = cell.plugin.lock().map_err(|_| PluginCallError::Runtime {
-            reason: "plugin lock poisoned".to_owned(),
-        })?;
-        let _ = cancel_tx.send(plugin.cancel_handle());
-        let call = panic::catch_unwind(AssertUnwindSafe(|| {
-            plugin.call::<&str, String>(hook, input.as_str())
-        }));
-        match call {
-            Ok(Ok(output)) => Ok(output),
-            Ok(Err(source)) => Err(PluginCallError::Plugin {
-                reason: source.to_string(),
-            }),
-            Err(_) => Err(PluginCallError::Panic { hook }),
-        }
-    });
-
-    let cancel_handle = tokio::time::timeout(Duration::from_millis(25), cancel_rx)
-        .await
-        .ok()
-        .and_then(Result::ok);
-
-    match tokio::time::timeout(timeout_duration, task).await {
-        Ok(Ok(result)) => result,
-        Ok(Err(source)) => Err(PluginCallError::Runtime {
-            reason: source.to_string(),
-        }),
-        Err(_) => {
-            if let Some(cancel_handle) = cancel_handle {
-                let _ = cancel_handle.cancel();
-            }
-            Err(PluginCallError::Timeout { hook })
-        }
-    }
 }
 
 fn build_plugin_cell(
