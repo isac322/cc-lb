@@ -885,6 +885,7 @@ dependencies = [
  "bytes",
  "cc-lb-aead",
  "cc-lb-plugin-api",
+ "cc-lb-plugin-wire",
  "cc-lb-storage-redb",
  "chrono",
  "serde",

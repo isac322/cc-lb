@@ -1,9 +1,10 @@
 #![forbid(unsafe_code)]
 
 pub mod handshake;
-pub mod identity;
 mod host_functions;
+pub mod identity;
 mod plugin_wrap;
+pub mod self_check;
 mod sse_batch;
 
 use std::collections::HashMap;

@@ -1,4 +1,4 @@
-use cc_lb_plugin_wire::identity::{IdentityError, PluginIdentity, CC_LB_PLUGIN_SECTION_NAME};
+use cc_lb_plugin_wire::identity::{CC_LB_PLUGIN_SECTION_NAME, IdentityError, PluginIdentity};
 use cc_lb_plugin_wire::limits;
 use serde_json::Value;
 use thiserror::Error;
