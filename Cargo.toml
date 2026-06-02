@@ -5,6 +5,8 @@ members = [
     "benches/extism_sse_overhead",
     "tests/fixtures/fake-anthropic",
     "tests/fixtures/extism-echo-plugin",
+    "tests/fixtures/plugin-handshake-spike",
+    "tests/fixtures/plugin-handshake-spike/host_check",
     "tests/fixtures/mock-anthropic-oauth-server",
     "tests/load",
     "tests/loom",
