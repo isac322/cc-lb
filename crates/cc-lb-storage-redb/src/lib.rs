@@ -160,6 +160,8 @@ pub enum StorageError {
     },
     #[error("invalid backend kind {0}")]
     InvalidBackendKind(String),
+    #[error("invalid input: {field} {reason}")]
+    InvalidInput { field: String, reason: String },
 }
 
 impl From<redb::DatabaseError> for StorageError {

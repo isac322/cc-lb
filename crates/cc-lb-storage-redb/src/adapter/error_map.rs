@@ -103,6 +103,7 @@ pub(crate) fn map_redb_err(error: StorageError) -> ApiStorageError {
         StorageError::InvalidBackendKind(kind) => ApiStorageError::Corrupted {
             message: format!("redb invalid backend kind {kind}"),
         },
+        StorageError::InvalidInput { field, reason } => ApiStorageError::InvalidInput { field, reason },
     }
 }
 

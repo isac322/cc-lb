@@ -545,6 +545,16 @@ impl RedbStorage {
         expected_revision: u64,
         update: PluginChainEntryUpdate,
     ) -> Result<Option<PluginChainEntry>, StorageError> {
+        if update.config.is_none()
+            && update.sse_per_event.is_none()
+            && update.batched_events_per_flush.is_none()
+            && update.batched_flush_ms.is_none()
+        {
+            return Err(StorageError::InvalidInput {
+                field: "plugin_chain_update".to_owned(),
+                reason: "empty_update".to_owned(),
+            });
+        }
         let write_txn = self.db.begin_write()?;
         let Some(mut entry) = chain_by_id(&write_txn, id)? else {
             return Ok(None);
