@@ -330,3 +330,68 @@ fn ensure_tables(storage: &RedbStorage) -> Result<(), StorageError> {
     write_txn.commit()?;
     Ok(())
 }
+
+#[async_trait]
+impl PluginRegistryRepo for RedbStorage {
+    async fn upsert_record(&self, record: &PluginRegistryRecord) -> Result<(), RepoError> {
+        RedbPluginRegistryRepo::new(self.clone()).map_err(map_redb_err)?.upsert_record(record).await
+    }
+
+    async fn get_by_sha256(
+        &self,
+        sha256: &[u8; 32],
+    ) -> Result<Option<PluginRegistryRecord>, RepoError> {
+        RedbPluginRegistryRepo::new(self.clone()).map_err(map_redb_err)?.get_by_sha256(sha256).await
+    }
+
+    async fn list_active(&self) -> Result<Vec<PluginRegistryRecord>, RepoError> {
+        RedbPluginRegistryRepo::new(self.clone()).map_err(map_redb_err)?.list_active().await
+    }
+
+    async fn set_status(
+        &self,
+        sha256: &[u8; 32],
+        status: PluginRegistryStatus,
+    ) -> Result<(), RepoError> {
+        RedbPluginRegistryRepo::new(self.clone()).map_err(map_redb_err)?.set_status(sha256, status).await
+    }
+
+    async fn delete_by_sha256(&self, sha256: &[u8; 32]) -> Result<(), RepoError> {
+        RedbPluginRegistryRepo::new(self.clone()).map_err(map_redb_err)?.delete_by_sha256(sha256).await
+    }
+
+    async fn count(&self) -> Result<usize, RepoError> {
+        RedbPluginRegistryRepo::new(self.clone()).map_err(map_redb_err)?.count().await
+    }
+
+    async fn get_shutdown_marker(&self) -> Result<Option<i64>, RepoError> {
+        RedbPluginRegistryRepo::new(self.clone()).map_err(map_redb_err)?.get_shutdown_marker().await
+    }
+
+    async fn set_shutdown_marker(&self, unix_secs: i64) -> Result<(), RepoError> {
+        RedbPluginRegistryRepo::new(self.clone()).map_err(map_redb_err)?.set_shutdown_marker(unix_secs).await
+    }
+
+    async fn clear_shutdown_marker(&self) -> Result<(), RepoError> {
+        RedbPluginRegistryRepo::new(self.clone()).map_err(map_redb_err)?.clear_shutdown_marker().await
+    }
+}
+
+#[async_trait]
+impl PluginBlobRepo for RedbStorage {
+    async fn put_blob(&self, sha256: &[u8; 32], bytes: &[u8]) -> Result<(), RepoError> {
+        RedbPluginBlobRepo::new(self.clone()).map_err(map_redb_err)?.put_blob(sha256, bytes).await
+    }
+
+    async fn get_blob(&self, sha256: &[u8; 32]) -> Result<Option<Vec<u8>>, RepoError> {
+        RedbPluginBlobRepo::new(self.clone()).map_err(map_redb_err)?.get_blob(sha256).await
+    }
+
+    async fn delete_blob(&self, sha256: &[u8; 32]) -> Result<(), RepoError> {
+        RedbPluginBlobRepo::new(self.clone()).map_err(map_redb_err)?.delete_blob(sha256).await
+    }
+
+    async fn list_blob_keys(&self) -> Result<Vec<[u8; 32]>, RepoError> {
+        RedbPluginBlobRepo::new(self.clone()).map_err(map_redb_err)?.list_blob_keys().await
+    }
+}
