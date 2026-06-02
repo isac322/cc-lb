@@ -60,6 +60,8 @@ Include:
 
 For long or multi-agent work, save this in a durable file such as `.omo/plans/frontend-checklist.md` or `/tmp/<project>-frontend-checklist.md`. For small work, a concise todo/checklist in the working notes is enough, but it must still exist.
 
+In multi-turn sessions where requirements evolve across many messages, periodically re-audit by scanning the entire session history from the first message, consolidating every explicit and implicit requirement into a single master checklist, and verifying the current codebase against it. Do not declare the task complete until every item is verified as active and non-regressed.
+
 ## Decide the proportional workflow
 
 Choose the smallest workflow that still proves the user-facing result.
@@ -111,11 +113,14 @@ Every delegated prompt should include context, goal, downstream use, request, ex
    - avoid native `confirm()` in polished dashboards when a proper dialog is expected;
    - use accessible modals/dialogs with title, body, destructive/non-destructive variants, keyboard behavior, and focus handling;
    - use real backend status/error truth instead of fake green/default success;
-   - use semantic tokens/classes and remove hardcoded light/dark remnants when theme is affected.
+   - use semantic tokens/classes and remove hardcoded light/dark remnants when theme is affected;
+   - write all hardcoded user-facing strings in the project's chosen language. Locale-aware dynamic formatting (e.g., `Intl.RelativeTimeFormat` outputting localized text) and native locale labels in selectors (e.g., `한국어 (ko-KR)`) are exempt.
 
 ## Browser QA loop
 
 Run browser QA after every meaningful UI/UX implementation batch. Build/typecheck is only a gate to QA, not proof of UI correctness.
+
+For fast feedback during visual tuning, iterate by injecting CSS/DOM changes directly in the live browser via the browser automation tool. Once values are decided, commit them to source, perform a full build and restart, and re-verify in a fresh browser session to confirm the persisted state matches the iteration. Do not return before verifying the persisted state.
 
 1. Launch the matching surface:
    - production-like service when the user cares about real behavior;
