@@ -617,17 +617,6 @@ async fn begin_repeatable_read(
     Ok(tx)
 }
 
-async fn begin_repeatable_read(
-    pool: &sqlx::PgPool,
-) -> StorageResult<sqlx::Transaction<'_, sqlx::Postgres>> {
-    let mut tx = pool.begin().await.map_err(map_sqlx_error)?;
-    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
-    Ok(tx)
-}
-
 async fn decrement_blob_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     sha256: [u8; 32],
