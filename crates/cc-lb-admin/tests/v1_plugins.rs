@@ -404,6 +404,31 @@ async fn chain_reorder_then_needs_rebalance_returns_409() {
 }
 
 #[tokio::test]
+async fn reorder_invalid_order_after_stage_returns_409() {
+    let (_dir, storage) = temp_storage();
+    let principal_id = seed_principal(&storage, "principal-reorder-invalid-order").await;
+    let entry = seed_registry(&storage, 21, "plugin-reorder-invalid-order").await;
+    let first = seed_chain(&storage, principal_id, entry.id, 100).await;
+    let second = seed_chain(&storage, principal_id, entry.id, 200).await;
+    seed_chain(&storage, principal_id, entry.id, 300).await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body, _) = authed_json(
+        app,
+        "POST",
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain/reorder"),
+        Some(json!({ "entries": [
+            { "id": first.id, "order": 100, "expected_revision": first.revision },
+            { "id": second.id, "order": 299, "expected_revision": second.revision }
+        ] })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "invalid_order");
+}
+
+#[tokio::test]
 async fn chain_rebalance_evens_spacing_and_returns_new_orders() {
     let (_dir, storage) = temp_storage();
     let principal_id = seed_principal(&storage, "principal-rebalance").await;
