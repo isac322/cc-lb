@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+pub mod handshake;
+pub mod identity;
 mod host_functions;
 mod plugin_wrap;
 mod sse_batch;

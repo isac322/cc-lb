@@ -752,6 +752,7 @@ dependencies = [
  "base64",
  "bytes",
  "cc-lb-plugin-api",
+ "cc-lb-plugin-wire",
  "extism",
  "http",
  "metrics",
@@ -760,10 +761,12 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "url",
  "uuid",
+ "wasmparser 0.243.0",
  "wat",
 ]
 
