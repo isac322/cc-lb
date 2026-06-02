@@ -33,6 +33,10 @@ pub enum StorageError {
     Aead(String),
     #[error("invalid input: {field} {reason}")]
     InvalidInput { field: String, reason: String },
+    #[error("plugin registry row is referenced by plugin chain: {id}")]
+    PluginRegistryReferenced { id: String },
+    #[error("stale plugin registry revision; current revision is {current}")]
+    StalePluginRegistryRevision { current: u64 },
 }
 
 impl StorageError {

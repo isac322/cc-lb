@@ -161,21 +161,44 @@ impl PluginRegistryStore for PostgresStorage {
         id: Uuid,
         expected_revision: u64,
     ) -> StorageResult<Option<WasmRegistryEntry>> {
-        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let row = sqlx::query("SELECT r.*, b.refcount FROM wasm_registry_v2 r JOIN wasm_blobs_v2 b ON b.sha256 = r.sha256 WHERE r.id = $1")
+        let mut tx = begin_repeatable_read(&self.pool).await?;
+        let row = sqlx::query("SELECT r.*, COALESCE((SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id), 0)::BIGINT AS refcount FROM wasm_registry_v2 r WHERE r.id = $1 FOR UPDATE")
             .bind(id).fetch_optional(&mut *tx).await.map_err(map_sqlx_error)?;
         let Some(row) = row else {
+            tx.commit().await.map_err(map_sqlx_error)?;
             return Ok(None);
         };
         let entry = registry_from_row(row)?;
         if entry.revision != expected_revision {
-            return Err(conflict(format!(
-                "stale plugin registry revision; current revision is {}",
-                entry.revision
-            )));
+            return Err(StorageError::StalePluginRegistryRevision {
+                current: entry.revision,
+            });
         }
-        sqlx::query("DELETE FROM wasm_registry_v2 WHERE id = $1")
+        if let Some(chain_id) = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM plugin_chains_v2 WHERE wasm_registry_id = $1 LIMIT 1",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?
+        {
+            return Err(StorageError::PluginRegistryReferenced {
+                id: chain_id.to_string(),
+            });
+        }
+        let result = sqlx::query("DELETE FROM wasm_registry_v2 WHERE id = $1 AND revision = $2")
             .bind(id)
+            .bind(u64_to_i64(expected_revision, "wasm_registry.revision")?)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        if result.rows_affected() == 0 {
+            return Err(StorageError::StalePluginRegistryRevision {
+                current: entry.revision,
+            });
+        }
+        sqlx::query("DELETE FROM wasm_blobs_v2 WHERE sha256 = $1")
+            .bind(entry.sha256.as_slice())
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
@@ -392,6 +415,17 @@ impl PostgresStorage {
             .map_err(map_sqlx_error)?;
         Ok(())
     }
+}
+
+async fn begin_repeatable_read(
+    pool: &sqlx::PgPool,
+) -> StorageResult<sqlx::Transaction<'_, sqlx::Postgres>> {
+    let mut tx = pool.begin().await.map_err(map_sqlx_error)?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    Ok(tx)
 }
 
 async fn decrement_blob_in_tx(
