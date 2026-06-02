@@ -6,10 +6,14 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-serde = { version = "1", default-features = false, features = ["alloc"] }
+serde = { version = "1", default-features = false, features = ["alloc", "derive"] }
 serde_json = { version = "1", default-features = false, features = ["alloc"] }
 uuid = { version = "1", default-features = false, features = ["serde"] }
 thiserror = { version = "2", default-features = false }
+sha2 = { version = "0.11", default-features = false }
+
+[dev-dependencies]
+proptest.workspace = true
 
 [lib]
 crate-type = ["rlib"]

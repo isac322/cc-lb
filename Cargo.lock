@@ -655,6 +655,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-lb-pdk"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-plugin-wire",
+ "extism-pdk",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn",
+]
+
+[[package]]
 name = "cc-lb-plugin-api"
 version = "0.1.0"
 dependencies = [
@@ -684,8 +696,10 @@ dependencies = [
 name = "cc-lb-plugin-wire"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "serde",
  "serde_json",
+ "sha2 0.11.0",
  "thiserror 2.0.18",
  "uuid",
 ]
