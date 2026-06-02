@@ -328,23 +328,33 @@ impl PluginRegistryStore for PostgresStorage {
         id: Uuid,
         expected_revision: u64,
     ) -> StorageResult<Option<PluginChainEntry>> {
-        // TODO: Oracle High 3 — wire in W3b.
-        let _ = expected_revision;
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let Some(entry) = self.get_chain_in_tx(&mut tx, id).await? else {
+            tx.commit().await.map_err(map_sqlx_error)?;
             return Ok(None);
         };
+        if entry.revision != expected_revision {
+            return Err(StorageError::StalePluginChainRevision {
+                current: entry.revision,
+            });
+        }
         let sha =
             sqlx::query_scalar::<_, Vec<u8>>("SELECT sha256 FROM wasm_registry_v2 WHERE id = $1")
                 .bind(entry.wasm_registry_id)
                 .fetch_one(&mut *tx)
                 .await
                 .map_err(map_sqlx_error)?;
-        sqlx::query("DELETE FROM plugin_chains_v2 WHERE id = $1")
+        let result = sqlx::query("DELETE FROM plugin_chains_v2 WHERE id = $1 AND revision = $2")
             .bind(id)
+            .bind(u64_to_i64(expected_revision, "plugin_chain.revision")?)
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
+        if result.rows_affected() == 0 {
+            return Err(StorageError::StalePluginChainRevision {
+                current: entry.revision,
+            });
+        }
         decrement_blob_in_tx(&mut tx, sha_to_array(&sha)?).await?;
         sqlx::query("SELECT pg_notify('cclb_plugin_chain_changed', $1)")
             .bind(entry.principal_id.to_string())
@@ -399,7 +409,7 @@ impl PostgresStorage {
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         id: Uuid,
     ) -> StorageResult<Option<PluginChainEntry>> {
-        let row = sqlx::query("SELECT * FROM plugin_chains_v2 WHERE id = $1")
+        let row = sqlx::query("SELECT * FROM plugin_chains_v2 WHERE id = $1 FOR UPDATE")
             .bind(id)
             .fetch_optional(&mut **tx)
             .await
@@ -441,19 +451,14 @@ async fn decrement_blob_in_tx(
     let Some(refcount) = refcount else {
         return Ok(false);
     };
-    if refcount <= 1 {
-        sqlx::query("DELETE FROM wasm_blobs_v2 WHERE sha256 = $1")
-            .bind(sha256.as_slice())
-            .execute(&mut **tx)
-            .await
-            .map_err(map_sqlx_error)?;
-    } else {
-        sqlx::query("UPDATE wasm_blobs_v2 SET refcount = refcount - 1 WHERE sha256 = $1")
-            .bind(sha256.as_slice())
-            .execute(&mut **tx)
-            .await
-            .map_err(map_sqlx_error)?;
+    if refcount == 0 {
+        return Ok(false);
     }
+    sqlx::query("UPDATE wasm_blobs_v2 SET refcount = GREATEST(refcount - 1, 0) WHERE sha256 = $1")
+        .bind(sha256.as_slice())
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
     Ok(true)
 }
 
