@@ -439,6 +439,7 @@ impl RedbStorage {
             drop(blobs);
             let mut registry = write_txn.open_table(WASM_REGISTRY_V2)?;
             registry.remove(id.as_bytes().as_slice())?;
+            blobs.remove(entry.sha256.as_slice())?;
             entry
         };
         write_txn.commit()?;
