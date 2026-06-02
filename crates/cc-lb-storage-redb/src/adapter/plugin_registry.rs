@@ -425,28 +425,29 @@ impl RedbStorage {
     ) -> Result<Option<WasmRegistryEntry>, StorageError> {
         let write_txn = self.db.begin_write()?;
         let deleted = {
-            let mut registry = write_txn.open_table(WASM_REGISTRY_V2)?;
-            let mut blobs = write_txn.open_table(WASM_BLOBS_V2)?;
-            let mut entry = {
-                let Some(value) = registry.get(id.as_bytes().as_slice())? else {
-                    return Ok(None);
-                };
-                serde_json::from_slice::<WasmRegistryEntry>(value.value())?
+            let registry = write_txn.open_table(WASM_REGISTRY_V2)?;
+            let Some(value) = registry.get(id.as_bytes().as_slice())? else {
+                return Ok(None);
             };
+            let mut entry: WasmRegistryEntry = serde_json::from_slice(value.value())?;
+            drop(value);
+            drop(registry);
             if entry.revision != expected_revision {
                 return Err(StorageError::StalePluginRegistryRevision {
                     current: entry.revision,
                 });
             }
-            let refcount = blob_refcount_from_write(&blobs, entry.sha256)?;
-            if refcount > 0 {
+            if registry_is_referenced_by_chain(&write_txn, id)? {
                 return Err(StorageError::PluginRegistryReferenced {
-                    id: entry.id.to_string(),
+                    id: id.to_string(),
                 });
             }
-            entry.refcount = refcount;
-            registry.remove(id.as_bytes().as_slice())?;
+            let mut blobs = write_txn.open_table(WASM_BLOBS_V2)?;
+            entry.refcount = blob_refcount_from_write(&blobs, entry.sha256)?;
             blobs.remove(entry.sha256.as_slice())?;
+            drop(blobs);
+            let mut registry = write_txn.open_table(WASM_REGISTRY_V2)?;
+            registry.remove(id.as_bytes().as_slice())?;
             entry
         };
         write_txn.commit()?;
@@ -709,6 +710,21 @@ fn registry_by_sha_read(
         }
     }
     Ok(None)
+}
+
+fn registry_is_referenced_by_chain(
+    write_txn: &redb::WriteTransaction,
+    registry_id: Uuid,
+) -> Result<bool, StorageError> {
+    let chains = write_txn.open_table(PLUGIN_CHAINS_V2)?;
+    for row in chains.iter()? {
+        let (_, value) = row?;
+        let entry: PluginChainEntry = serde_json::from_slice(value.value())?;
+        if entry.wasm_registry_id == registry_id {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn registry_by_id(
