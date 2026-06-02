@@ -1,3 +1,5 @@
+use std::io;
+
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -15,6 +17,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
+use super::wasm_cache::wasm_cache_path;
 use crate::AdminState;
 
 const DEFAULT_LIMIT: usize = 100;
@@ -117,13 +120,6 @@ struct ChainListResponse {
     entries: Vec<PluginChainEntry>,
 }
 
-#[derive(Debug, Serialize)]
-struct ReferenceResponse {
-    kind: &'static str,
-    id: String,
-    principal_id: String,
-}
-
 #[derive(Debug, Clone, Copy)]
 struct SlotParam(PluginSlot);
 
@@ -224,40 +220,9 @@ async fn delete_registry(
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
-    let entry = match storage.get_registry_entry_by_id(id).await {
-        Ok(Some(entry)) => entry,
-        Ok(None) => return error(StatusCode::NOT_FOUND, "unknown_registry_entry"),
-        Err(error) => return storage_error(error),
-    };
-    if entry.revision != expected_revision {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({ "error": "stale_revision", "current_revision": entry.revision })),
-        )
-            .into_response();
-    }
-    match registry_references(storage, id).await {
-        Ok(references) if !references.is_empty() => {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({
-                    "error": "referenced_by",
-                    "references": references,
-                })),
-            )
-                .into_response();
-        }
-        Ok(_) => {}
-        Err(error) => return storage_error(error),
-    }
     match storage.delete_registry_entry(id, expected_revision).await {
         Ok(Some(deleted)) => {
-            if let Err(error) = storage
-                .decrement_blob_refcount_or_delete(deleted.sha256)
-                .await
-            {
-                return storage_error(error);
-            }
+            remove_wasm_cache_file(&state, deleted.sha256).await;
             emit_audit(
                 &state,
                 AuditPayload::PluginRegistryDelete {
@@ -269,6 +234,17 @@ async fn delete_registry(
             response
         }
         Ok(None) => error(StatusCode::NOT_FOUND, "unknown_registry_entry"),
+        Err(StorageError::PluginRegistryReferenced { id }) => plugin_registry_referenced(id),
+        Err(StorageError::StalePluginRegistryRevision { current }) => stale_revision(current),
+        Err(StorageError::Conflict { message }) => {
+            if let Some(id) = plugin_registry_referenced_id(&message) {
+                plugin_registry_referenced(id)
+            } else if let Some(current) = stale_plugin_registry_revision(&message) {
+                stale_revision(current)
+            } else {
+                storage_mutation_error(StorageError::Conflict { message })
+            }
+        }
         Err(error) => storage_mutation_error(error),
     }
 }
@@ -477,38 +453,6 @@ async fn all_registry_entries(
         all.extend(page);
     }
     Ok(all)
-}
-
-async fn registry_references(
-    storage: &dyn Storage,
-    registry_id: Uuid,
-) -> Result<Vec<ReferenceResponse>, StorageError> {
-    let mut references = Vec::new();
-    let mut offset = 0;
-    loop {
-        let principals = PrincipalStore::list(storage, offset, DEFAULT_LIMIT, false).await?;
-        if principals.is_empty() {
-            break;
-        }
-        offset += principals.len();
-        for principal in principals {
-            for slot in [
-                PluginSlot::Router,
-                PluginSlot::ObservabilityHook,
-                PluginSlot::Shape,
-            ] {
-                let entries = storage.list_chain_for_principal(principal.id, slot).await?;
-                references.extend(entries.into_iter().filter_map(|entry| {
-                    (entry.wasm_registry_id == registry_id).then(|| ReferenceResponse {
-                        kind: "plugin_chain",
-                        id: entry.id.to_string(),
-                        principal_id: principal.id.to_string(),
-                    })
-                }));
-            }
-        }
-    }
-    Ok(references)
 }
 
 async fn infer_reorder_slot(
@@ -723,6 +667,46 @@ fn storage_mutation_error(error: StorageError) -> axum::response::Response {
         return needs_rebalance();
     }
     storage_error(error)
+}
+
+async fn remove_wasm_cache_file(state: &AdminState, sha256: [u8; 32]) {
+    let sha256_hex = hex_sha256(sha256);
+    let cache_path = wasm_cache_path(state, &sha256_hex);
+    match tokio::fs::remove_file(&cache_path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(%error, path = %cache_path.display(), sha256 = %sha256_hex, "failed to remove wasm cache file after registry delete")
+        }
+    }
+}
+
+fn plugin_registry_referenced(id: String) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({ "error": "plugin_registry_referenced", "id": id })),
+    )
+        .into_response()
+}
+
+fn stale_revision(current: u64) -> axum::response::Response {
+    (
+        StatusCode::PRECONDITION_FAILED,
+        Json(json!({ "error": "stale_revision", "current": current })),
+    )
+        .into_response()
+}
+
+fn plugin_registry_referenced_id(message: &str) -> Option<String> {
+    let (_, tail) = message.split_once("plugin registry row ")?;
+    let (id, _) = tail.split_once(" is referenced by plugin chain")?;
+    Some(id.to_owned())
+}
+
+fn stale_plugin_registry_revision(message: &str) -> Option<u64> {
+    message
+        .contains("plugin registry revision")
+        .then(|| current_revision_from_message(message))?
 }
 
 fn current_revision_from_message(message: &str) -> Option<u64> {

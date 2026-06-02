@@ -89,10 +89,17 @@ async fn registry_patch_label_stale_if_match_returns_409() {
 }
 
 #[tokio::test]
-async fn registry_delete_when_unreferenced_decrements_blob_refcount() {
-    let (_dir, storage) = temp_storage();
+async fn registry_delete_when_unreferenced_deletes_blob_and_cache_file() {
+    let (dir, storage) = temp_storage();
     let entry = seed_registry(&storage, 6, "plugin-delete-registry").await;
-    let app = app(test_state(Config::default(), Some(storage.clone())));
+    let data_dir = dir.path().join("data");
+    let cache_dir = data_dir.join("plugins/wasm/cache");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let cache_path = cache_dir.join(format!("{}.wasm", hex_sha256(entry.sha256)));
+    std::fs::write(&cache_path, b"cached wasm").unwrap();
+    let mut config = Config::default();
+    config.runtime.data_dir = Some(data_dir);
+    let app = app(test_state(config, Some(storage.clone())));
 
     let (status, _, _) = request_bytes(
         app,
@@ -111,6 +118,7 @@ async fn registry_delete_when_unreferenced_decrements_blob_refcount() {
             .unwrap()
             .is_none()
     );
+    assert!(!cache_path.exists());
 }
 
 #[tokio::test]
@@ -119,7 +127,7 @@ async fn registry_delete_cascade_blocks_when_chain_references_it() {
     let principal_id = seed_principal(&storage, "principal-cascade").await;
     let entry = seed_registry(&storage, 7, "plugin-cascade").await;
     seed_chain(&storage, principal_id, entry.id, sparse_order::STEP).await;
-    let app = app(test_state(Config::default(), Some(storage)));
+    let app = app(test_state(Config::default(), Some(storage.clone())));
 
     let (status, _, body) = request_json(
         app,
@@ -131,11 +139,28 @@ async fn registry_delete_cascade_blocks_when_chain_references_it() {
     .await;
 
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"], "referenced_by");
-    assert_eq!(
-        body["references"][0]["principal_id"],
-        principal_id.to_string()
-    );
+    assert_eq!(body["error"], "plugin_registry_referenced");
+    assert_eq!(body["id"], entry.id.to_string());
+    assert!(storage.get_blob_bytes(entry.sha256).await.unwrap().is_some());
+}
+
+#[tokio::test]
+async fn registry_delete_stale_if_match_returns_412_with_current_revision() {
+    let (_dir, storage) = temp_storage();
+    let entry = seed_registry(&storage, 14, "plugin-delete-stale").await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body) = request_json(
+        app,
+        "DELETE",
+        &format!("/admin/v1/plugins/registry/{}", entry.id),
+        None,
+        Some("W/\"99\""),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(body, json!({ "error": "stale_revision", "current": 0 }));
 }
 
 #[tokio::test]
@@ -381,4 +406,8 @@ async fn seed_chain(
         })
         .await
         .unwrap()
+}
+
+fn hex_sha256(sha256: [u8; 32]) -> String {
+    sha256.iter().map(|byte| format!("{byte:02x}")).collect()
 }
