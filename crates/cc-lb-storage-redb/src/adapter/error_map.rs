@@ -59,6 +59,7 @@ pub(crate) fn map_redb_err(error: StorageError) -> ApiStorageError {
         StorageError::PrincipalNameConflict { name } => ApiStorageError::Conflict {
             message: format!("redb principal name already exists: {name}"),
         },
+        StorageError::PrincipalNotFound { id } => ApiStorageError::PrincipalNotFound { id },
         StorageError::PrincipalReferencedByAudit { id } => ApiStorageError::Conflict {
             message: format!("redb principal {id} is referenced by audit entries"),
         },

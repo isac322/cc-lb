@@ -137,6 +137,8 @@ pub enum StorageError {
     PrincipalRevisionOverflow,
     #[error("principal name already exists: {name}")]
     PrincipalNameConflict { name: String },
+    #[error("principal not found: {id}")]
+    PrincipalNotFound { id: String },
     #[error("principal is referenced by audit entries: {id}")]
     PrincipalReferencedByAudit { id: String },
     #[error("plugin registry conflict: {message}")]

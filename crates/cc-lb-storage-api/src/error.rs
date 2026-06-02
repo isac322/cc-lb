@@ -37,6 +37,8 @@ pub enum StorageError {
     PluginRegistryReferenced { id: String },
     #[error("stale plugin registry revision; current revision is {current}")]
     StalePluginRegistryRevision { current: u64 },
+    #[error("principal not found: {id}")]
+    PrincipalNotFound { id: String },
 }
 
 impl StorageError {

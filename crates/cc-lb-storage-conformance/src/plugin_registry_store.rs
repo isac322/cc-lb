@@ -2,18 +2,21 @@ use std::{any::Any, sync::Arc};
 
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
-    PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, StorageError,
-    WasmBlob, WasmRegistryEntryInput, sparse_order,
+    PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, PrincipalStore,
+    StorageError, WasmBlob, WasmRegistryEntryInput, sparse_order,
+    principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind},
 };
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::harness::{ConformanceBackend, with_conformance_fixture};
 
+const BASE_TS: u64 = 1_900_000_000;
+
 pub async fn run_all<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,
-    B::Storage: PluginRegistryStore,
+    B::Storage: PluginRegistryStore + PrincipalStore,
 {
     with_conformance_fixture(backend, |storage| async move {
         run_all_on_storage(storage.as_ref()).await
@@ -23,7 +26,7 @@ where
 
 pub async fn run_all_on_storage<S>(storage: &S) -> Result<()>
 where
-    S: PluginRegistryStore + 'static,
+    S: PluginRegistryStore + PrincipalStore + 'static,
 {
     persist_wasm_upload_creates_blob_and_registry(storage).await?;
     persist_wasm_upload_idempotent_on_same_entry_input(storage).await?;
@@ -67,7 +70,7 @@ macro_rules! plugin_registry_scenario {
         pub async fn $name<B>(backend: Arc<B>) -> Result<()>
         where
             B: ConformanceBackend,
-            B::Storage: PluginRegistryStore,
+            B::Storage: PluginRegistryStore + PrincipalStore,
         {
             with_conformance_fixture(
                 backend,
@@ -248,7 +251,7 @@ pub async fn get_registry_entry_by_sha_returns_entry<S: PluginRegistryStore>(
     Ok(())
 }
 
-pub async fn chain_insert_preserves_sparse_order<S: PluginRegistryStore>(
+pub async fn chain_insert_preserves_sparse_order<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
 ) -> Result<()> {
     let (principal, plugin) = principal_and_plugin(storage, 11, "plugin-chain-order").await?;
@@ -265,7 +268,7 @@ pub async fn chain_insert_preserves_sparse_order<S: PluginRegistryStore>(
     Ok(())
 }
 
-pub async fn list_chain_for_principal_returns_ordered<S: PluginRegistryStore>(
+pub async fn list_chain_for_principal_returns_ordered<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
 ) -> Result<()> {
     let (principal, plugin) = principal_and_plugin(storage, 22, "plugin-chain-list").await?;
@@ -283,7 +286,7 @@ pub async fn list_chain_for_principal_returns_ordered<S: PluginRegistryStore>(
     Ok(())
 }
 
-pub async fn refcount_increment_on_chain_insert<S: PluginRegistryStore>(storage: &S) -> Result<()> {
+pub async fn refcount_increment_on_chain_insert<S: PluginRegistryStore + PrincipalStore>(storage: &S) -> Result<()> {
     let (principal, plugin) = principal_and_plugin(storage, 12, "plugin-ref-inc").await?;
     storage
         .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
@@ -299,7 +302,7 @@ pub async fn refcount_increment_on_chain_insert<S: PluginRegistryStore>(storage:
     Ok(())
 }
 
-pub async fn update_chain_entry_bumps_revision<S: PluginRegistryStore>(storage: &S) -> Result<()> {
+pub async fn update_chain_entry_bumps_revision<S: PluginRegistryStore + PrincipalStore>(storage: &S) -> Result<()> {
     let created = one_chain(storage, 13, "plugin-update").await?;
     let updated = storage
         .update_chain_entry(
@@ -316,7 +319,7 @@ pub async fn update_chain_entry_bumps_revision<S: PluginRegistryStore>(storage: 
     Ok(())
 }
 
-pub async fn update_chain_entry_stale_revision_conflicts<S: PluginRegistryStore>(
+pub async fn update_chain_entry_stale_revision_conflicts<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
 ) -> Result<()> {
     let created = one_chain(storage, 14, "plugin-stale").await?;
@@ -335,7 +338,7 @@ pub async fn update_chain_entry_stale_revision_conflicts<S: PluginRegistryStore>
     Ok(())
 }
 
-pub async fn reorder_chain_valid_orders<S: PluginRegistryStore>(storage: &S) -> Result<()> {
+pub async fn reorder_chain_valid_orders<S: PluginRegistryStore + PrincipalStore>(storage: &S) -> Result<()> {
     let first = one_chain(storage, 15, "plugin-reorder").await?;
     let reordered = storage
         .reorder_chain(
@@ -351,7 +354,7 @@ pub async fn reorder_chain_valid_orders<S: PluginRegistryStore>(storage: &S) -> 
     Ok(())
 }
 
-pub async fn reorder_chain_needs_rebalance_conflicts<S: PluginRegistryStore>(
+pub async fn reorder_chain_needs_rebalance_conflicts<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
 ) -> Result<()> {
     let first = one_chain(storage, 16, "plugin-tight").await?;
@@ -370,7 +373,7 @@ pub async fn reorder_chain_needs_rebalance_conflicts<S: PluginRegistryStore>(
     Ok(())
 }
 
-pub async fn rebalance_chain_evenly_spaces<S: PluginRegistryStore>(storage: &S) -> Result<()> {
+pub async fn rebalance_chain_evenly_spaces<S: PluginRegistryStore + PrincipalStore>(storage: &S) -> Result<()> {
     let first = one_chain(storage, 17, "plugin-rebalance").await?;
     let rebalanced = storage
         .rebalance_chain(first.principal_id, first.slot)
@@ -382,7 +385,7 @@ pub async fn rebalance_chain_evenly_spaces<S: PluginRegistryStore>(storage: &S) 
     Ok(())
 }
 
-pub async fn sparse_order_between_integration<S: PluginRegistryStore>(storage: &S) -> Result<()> {
+pub async fn sparse_order_between_integration<S: PluginRegistryStore + PrincipalStore>(storage: &S) -> Result<()> {
     let (principal, plugin) = principal_and_plugin(storage, 18, "plugin-between").await?;
     let created = storage
         .insert_chain_entry(chain(
@@ -395,7 +398,7 @@ pub async fn sparse_order_between_integration<S: PluginRegistryStore>(storage: &
     Ok(())
 }
 
-pub async fn delete_chain_entry_decrements_refcount<S: PluginRegistryStore>(
+pub async fn delete_chain_entry_decrements_refcount<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
 ) -> Result<()> {
     let created = one_chain(storage, 19, "plugin-delete").await?;
@@ -439,7 +442,7 @@ plugin_registry_scenario!(
 );
 
 async fn list_orphan_blobs_returns_blobs_without_registry_on_storage<
-    S: PluginRegistryStore + 'static,
+    S: PluginRegistryStore + PrincipalStore + 'static,
 >(
     storage: &S,
 ) -> Result<()> {
@@ -479,7 +482,7 @@ plugin_registry_scenario!(
     chain_delete_keeps_blob_for_reinsert_on_storage
 );
 
-async fn chain_delete_keeps_blob_for_reinsert_on_storage<S: PluginRegistryStore>(
+async fn chain_delete_keeps_blob_for_reinsert_on_storage<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
 ) -> Result<()> {
     // NOTE: Phase-3 is currently green on redb; W3a revision hardening still applies.
@@ -513,7 +516,7 @@ plugin_registry_scenario!(
     delete_registry_rejects_while_chain_refed_on_storage
 );
 
-async fn delete_registry_rejects_while_chain_refed_on_storage<S: PluginRegistryStore>(
+async fn delete_registry_rejects_while_chain_refed_on_storage<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
 ) -> Result<()> {
     // NOTE: Phase-3 partially green; W3a hardening still needed for chain-scan/atomicity.
@@ -632,7 +635,7 @@ plugin_registry_scenario!(
 );
 
 async fn decrement_blob_refcount_or_delete_skips_registry_backed_on_storage<
-    S: PluginRegistryStore,
+    S: PluginRegistryStore + PrincipalStore,
 >(
     storage: &S,
 ) -> Result<()> {
@@ -696,7 +699,7 @@ plugin_registry_scenario!(
     reorder_chain_rejects_final_chain_gap_on_storage
 );
 
-async fn reorder_chain_rejects_final_chain_gap_on_storage<S: PluginRegistryStore>(
+async fn reorder_chain_rejects_final_chain_gap_on_storage<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
 ) -> Result<()> {
     let (principal, plugin) = principal_and_plugin(storage, 33, "plugin-final-gap").await?;
@@ -732,7 +735,7 @@ plugin_registry_scenario!(
     update_chain_entry_rejects_no_op_on_storage
 );
 
-async fn update_chain_entry_rejects_no_op_on_storage<S: PluginRegistryStore>(
+async fn update_chain_entry_rejects_no_op_on_storage<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
 ) -> Result<()> {
     let created = one_chain(storage, 34, "plugin-no-op").await?;
@@ -852,7 +855,7 @@ pub async fn validate_identifier_rejects_bad_name<S: PluginRegistryStore>(
     Ok(())
 }
 
-pub async fn fk_on_delete_restrict<S: PluginRegistryStore>(storage: &S) -> Result<()> {
+pub async fn fk_on_delete_restrict<S: PluginRegistryStore + PrincipalStore>(storage: &S) -> Result<()> {
     let created = one_chain(storage, 21, "plugin-fk").await?;
     ensure!(
         storage.get_blob_bytes([21; 32]).await?.is_some(),
@@ -869,18 +872,19 @@ pub async fn fk_on_delete_restrict<S: PluginRegistryStore>(storage: &S) -> Resul
     Ok(())
 }
 
-async fn principal_and_plugin<S: PluginRegistryStore>(
+async fn principal_and_plugin<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
     seed: u8,
     name: &str,
 ) -> Result<(Uuid, cc_lb_storage_api::WasmRegistryEntry)> {
+    let principal = PrincipalStore::create(storage, principal_create(seed), BASE_TS + seed as u64).await?;
     let (plugin, _) = storage
         .persist_wasm_upload(blob(seed, vec![seed]), entry(name))
         .await?;
-    Ok((Uuid::new_v4(), plugin))
+    Ok((principal.id, plugin))
 }
 
-async fn one_chain<S: PluginRegistryStore>(
+async fn one_chain<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
     seed: u8,
     name: &str,
@@ -889,6 +893,21 @@ async fn one_chain<S: PluginRegistryStore>(
     Ok(storage
         .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
         .await?)
+}
+
+
+fn principal_create(seed: u8) -> PrincipalCreate {
+    PrincipalCreate {
+        name: format!("plugin-principal-{seed:04}"),
+        kind: PrincipalKind::Machine,
+        allowed_models: vec!["claude-sonnet-*".to_owned()],
+        allowed_upstreams: vec![],
+        default_limits: vec![Limit {
+            kind: LimitKind::Requests,
+            window_secs: 60,
+            cap_micros: 100,
+        }],
+    }
 }
 
 fn blob(seed: u8, bytes: Vec<u8>) -> WasmBlob {

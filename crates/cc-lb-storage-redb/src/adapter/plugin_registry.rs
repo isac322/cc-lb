@@ -10,7 +10,10 @@ use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{PLUGIN_CHAINS_V2, RedbStorage, StorageError, WASM_BLOBS_V2, WASM_REGISTRY_V2};
+use crate::{
+    PLUGIN_CHAINS_V2, PRINCIPALS_V2, RedbStorage, StorageError, WASM_BLOBS_V2,
+    WASM_REGISTRY_V2,
+};
 
 use crate::error_map::{map_join_err, map_redb_err};
 
@@ -498,6 +501,11 @@ impl RedbStorage {
         input: PluginChainEntryInput,
     ) -> Result<PluginChainEntry, StorageError> {
         let write_txn = self.db.begin_write()?;
+        if !principal_exists(&write_txn, input.principal_id)? {
+            return Err(StorageError::PrincipalNotFound {
+                id: input.principal_id.to_string(),
+            });
+        }
         let registry = registry_by_id(&write_txn, input.wasm_registry_id)?.ok_or_else(|| {
             StorageError::PluginRegistryConflict {
                 message: "unknown plugin registry entry".to_owned(),
@@ -728,6 +736,14 @@ fn registry_is_referenced_by_chain(
         }
     }
     Ok(false)
+}
+
+fn principal_exists(
+    write_txn: &redb::WriteTransaction,
+    principal_id: Uuid,
+) -> Result<bool, StorageError> {
+    let principals = write_txn.open_table(PRINCIPALS_V2)?;
+    Ok(principals.get(principal_id.as_bytes().as_slice())?.is_some())
 }
 
 fn registry_by_id(
