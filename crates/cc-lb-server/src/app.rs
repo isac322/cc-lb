@@ -1,9 +1,10 @@
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,7 +36,10 @@ use cc_lb_core::{
 };
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_runtime_extism::ExtismRuntime;
-use cc_lb_storage_api::{ManagedKeyStore, RuntimeChangeNotifier, Storage};
+use cc_lb_runtime_extism::registry::PluginRegistry;
+use cc_lb_storage_api::{
+    ManagedKeyStore, PluginBlobRepo, PluginRegistryRepo, RuntimeChangeNotifier, Storage,
+};
 use http_body_util::BodyExt;
 use serde::Serialize;
 use thiserror::Error;
@@ -59,6 +63,9 @@ use crate::refresh::{LazyRefresher, OAuthRefresher};
 use crate::reload::{ConfigWatcher, summarize_restart_required};
 use crate::replica;
 use crate::signal;
+use crate::startup_handshake::{
+    StartupHandshakeOpts, StartupHandshakeReport, run_startup_handshake,
+};
 use crate::state_machine::{ServerState, ServerStateHandle};
 use crate::storage_factory;
 use crate::tls::{ReloadableListener, TlsState};
@@ -129,6 +136,8 @@ pub enum BuildError {
     Tls(#[from] crate::tls::TlsError),
     #[error(transparent)]
     Rebind(#[from] crate::dynamic_view_builder::RebindError),
+    #[error("startup plugin re-handshake failed: {0}")]
+    StartupHandshake(String),
     #[error("storage is required")]
     StorageRequired,
     #[error("storage master key env {env} is missing")]
@@ -302,7 +311,22 @@ pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError
         upstream_kind: cc_lb_config::NoneModeUpstreamKind::AnthropicKey,
     });
     std::mem::forget(dir);
-    build_app_with_storage(config, None, managed_store, storage, aead).await
+    let plugin_registry_repo = Arc::new(cc_lb_storage_redb::RedbPluginRegistryRepo::new(
+        storage_arc.as_ref().clone(),
+    )?) as Arc<dyn PluginRegistryRepo>;
+    let plugin_blob_repo = Arc::new(cc_lb_storage_redb::RedbPluginBlobRepo::new(
+        storage_arc.as_ref().clone(),
+    )?) as Arc<dyn PluginBlobRepo>;
+    build_app_with_storage_inner(
+        config,
+        None,
+        managed_store,
+        storage,
+        aead,
+        Some((plugin_registry_repo, plugin_blob_repo)),
+        None,
+    )
+    .await
 }
 
 #[cfg(feature = "postgres")]
@@ -479,13 +503,15 @@ async fn build_app_with_path_inner(
     startup_preflight: Option<StartupPreflight>,
 ) -> Result<App, BuildError> {
     config.validate()?;
-    let (managed_store, storage, aead) = open_storage(&config).await?;
+    let (managed_store, storage, aead, plugin_registry_repo, plugin_blob_repo) =
+        open_storage(&config).await?;
     build_app_with_storage_inner(
         config,
         config_path,
         managed_store,
         storage,
         aead,
+        Some((plugin_registry_repo, plugin_blob_repo)),
         startup_preflight,
     )
     .await
@@ -526,7 +552,16 @@ pub async fn build_app_with_storage(
     storage: Arc<dyn Storage>,
     aead: Arc<AeadService>,
 ) -> Result<App, BuildError> {
-    build_app_with_storage_inner(config, config_path, managed_store, storage, aead, None).await
+    build_app_with_storage_inner(
+        config,
+        config_path,
+        managed_store,
+        storage,
+        aead,
+        None,
+        None,
+    )
+    .await
 }
 
 async fn build_app_with_storage_inner(
@@ -535,6 +570,7 @@ async fn build_app_with_storage_inner(
     managed_store: Arc<dyn ManagedKeyStore>,
     storage: Arc<dyn Storage>,
     aead: Arc<AeadService>,
+    plugin_repos: Option<(Arc<dyn PluginRegistryRepo>, Arc<dyn PluginBlobRepo>)>,
     startup_preflight: Option<StartupPreflight>,
 ) -> Result<App, BuildError> {
     let server_state = Arc::new(ServerStateHandle::new_starting());
@@ -616,6 +652,43 @@ async fn build_app_with_storage_inner(
             );
             std::process::exit(1);
         }
+    }
+    let (plugin_registry_repo, plugin_blob_repo) = match plugin_repos {
+        Some(repos) => repos,
+        None => (
+            storage.clone() as Arc<dyn PluginRegistryRepo>,
+            storage.clone() as Arc<dyn PluginBlobRepo>,
+        ),
+    };
+    let (startup_shutdown, startup_shutdown_triggered, startup_shutdown_task) =
+        spawn_startup_shutdown_signal();
+    let startup_registry = PluginRegistry::new(
+        plugin_registry_repo.clone(),
+        plugin_blob_repo,
+        cc_lb_runtime_extism::handshake::build_offer(&BTreeSet::new()),
+    )
+    .map_err(|error| BuildError::StartupHandshake(error.to_string()))?;
+    let startup_report = run_startup_handshake(
+        &startup_registry,
+        plugin_registry_repo.as_ref(),
+        StartupHandshakeOpts::default(),
+        startup_shutdown,
+    )
+    .await;
+    startup_shutdown_task.abort();
+    let _ = startup_shutdown_task.await;
+    log_startup_handshake_report(&startup_report);
+    if startup_shutdown_triggered.load(Ordering::SeqCst) {
+        return Err(BuildError::StartupHandshake(
+            "startup interrupted by shutdown signal".to_owned(),
+        ));
+    }
+    if let Some((_, error)) = startup_report
+        .errors
+        .iter()
+        .find(|(sha256, _)| *sha256 == [0; 32])
+    {
+        return Err(BuildError::StartupHandshake(error.to_string()));
     }
     let oauth_anthropic = config.oauth.anthropic.clone().unwrap_or_default();
     let oauth_cfg = Arc::new(oauth_anthropic.clone());
@@ -820,6 +893,67 @@ impl DynamicViewRebinder for ServerDynamicViewRebinder {
         )
         .await?)
     }
+}
+
+fn log_startup_handshake_report(report: &StartupHandshakeReport) {
+    tracing::info!(
+        processed = report.processed,
+        skipped_fresh = report.skipped_fresh,
+        re_handshaked = report.re_handshaked,
+        disabled = report.disabled,
+        errors = report.errors.len(),
+        "startup plugin re-handshake completed",
+    );
+    for (sha256, error) in &report.errors {
+        if *sha256 == [0; 32] {
+            continue;
+        }
+        tracing::warn!(
+            sha256 = %hex_sha256_bytes(sha256),
+            error = %error,
+            "startup plugin re-handshake disabled or skipped a plugin",
+        );
+    }
+}
+
+fn spawn_startup_shutdown_signal() -> (watch::Receiver<bool>, Arc<AtomicBool>, JoinHandle<()>) {
+    let (tx, rx) = watch::channel(false);
+    let triggered = Arc::new(AtomicBool::new(false));
+    let task_triggered = triggered.clone();
+    let task = tokio::spawn(async move {
+        wait_for_startup_shutdown_signal().await;
+        task_triggered.store(true, Ordering::SeqCst);
+        let _ = tx.send(true);
+    });
+    (rx, triggered, task)
+}
+
+#[cfg(unix)]
+async fn wait_for_startup_shutdown_signal() {
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(mut sigterm) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = sigterm.recv() => {},
+            }
+        }
+        Err(_) => {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_startup_shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+fn hex_sha256_bytes(sha256: &[u8; 32]) -> String {
+    let mut output = String::with_capacity(64);
+    for byte in sha256 {
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
 }
 
 struct ReconcilerParams {
@@ -1344,9 +1478,15 @@ fn init_observability(config: &mut Config) -> Result<TracingGuard, BuildError> {
     .map_err(BuildError::from)
 }
 
-pub async fn open_storage(
-    config: &Config,
-) -> Result<(Arc<dyn ManagedKeyStore>, Arc<dyn Storage>, Arc<AeadService>), BuildError> {
+type OpenStorageParts = (
+    Arc<dyn ManagedKeyStore>,
+    Arc<dyn Storage>,
+    Arc<AeadService>,
+    Arc<dyn PluginRegistryRepo>,
+    Arc<dyn PluginBlobRepo>,
+);
+
+pub async fn open_storage(config: &Config) -> Result<OpenStorageParts, BuildError> {
     let key_hex =
         std::env::var(&config.aead.key_env).map_err(|_| BuildError::StorageKeyMissing {
             env: config.aead.key_env.clone(),
@@ -1354,7 +1494,13 @@ pub async fn open_storage(
     let key = decode_hex_key(&key_hex)?;
     let aead = Arc::new(AeadService::from_master_key(key));
     let opened = storage_factory::open_storage(&config.storage, aead.clone(), key).await?;
-    Ok((opened.managed_key_store, opened.storage, aead))
+    Ok((
+        opened.managed_key_store,
+        opened.storage,
+        aead,
+        opened.plugin_registry_repo,
+        opened.plugin_blob_repo,
+    ))
 }
 
 fn decode_hex_key(value: &str) -> Result<[u8; 32], BuildError> {

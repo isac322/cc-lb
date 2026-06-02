@@ -1,4 +1,4 @@
-use cc_lb_plugin_wire::identity::{PluginIdentity, CC_LB_PLUGIN_MAGIC, CC_LB_PLUGIN_SECTION_NAME};
+use cc_lb_plugin_wire::identity::{CC_LB_PLUGIN_MAGIC, CC_LB_PLUGIN_SECTION_NAME, PluginIdentity};
 use proc_macro2::{Span, TokenStream};
 use quote::quote;
 use syn::{LitByteStr, LitStr};
@@ -36,7 +36,7 @@ mod tests {
     use super::*;
     use crate::parse::{HandlerDescriptor, PluginDescriptor};
     use quote::ToTokens;
-    use syn::{parse_quote, Expr, ExprLit, ExprUnary, ItemStatic, Lit};
+    use syn::{Expr, ExprLit, ExprUnary, ItemStatic, Lit, parse_quote};
 
     #[test]
     fn generated_static_uses_used_link_section_and_byte_array() {
@@ -75,9 +75,11 @@ mod tests {
 
         assert_eq!(identity.magic.len(), 8);
         assert_eq!(identity.magic, CC_LB_PLUGIN_MAGIC);
-        assert!(!payload
-            .windows(b"cc-lb-plugin".len())
-            .any(|window| window == b"cc-lb-plugin"));
+        assert!(
+            !payload
+                .windows(b"cc-lb-plugin".len())
+                .any(|window| window == b"cc-lb-plugin")
+        );
     }
 
     fn static_payload(item: &ItemStatic) -> Vec<u8> {

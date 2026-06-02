@@ -77,7 +77,7 @@ pub(crate) fn emit_handshake_export(plugin: &PluginDescriptor) -> TokenStream {
 mod tests {
     use super::*;
     use crate::parse::{HandlerDescriptor, PluginDescriptor};
-    use syn::{parse_quote, ItemFn};
+    use syn::{ItemFn, parse_quote};
 
     #[test]
     fn emits_extism_plugin_fn_named_cc_lb_handshake() {

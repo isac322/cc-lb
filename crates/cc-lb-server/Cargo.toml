@@ -43,6 +43,7 @@ cc-lb-core = { path = "../cc-lb-core" }
 cc-lb-dialect-anthropic = { path = "../cc-lb-dialect-anthropic" }
 cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
+cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire" }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-runtime-extism = { path = "../cc-lb-runtime-extism" }
 cc-lb-signer-anthropic-key = { path = "../cc-lb-signer-anthropic-key" }

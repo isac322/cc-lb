@@ -283,18 +283,24 @@ fn parse_status(value: &str) -> Result<PluginRegistryStatus, RepoError> {
 #[async_trait]
 impl PluginRegistryRepo for PostgresStorage {
     async fn upsert_record(&self, record: &PluginRegistryRecord) -> Result<(), RepoError> {
-        PostgresPluginRegistryRepo::from_storage(self).upsert_record(record).await
+        PostgresPluginRegistryRepo::from_storage(self)
+            .upsert_record(record)
+            .await
     }
 
     async fn get_by_sha256(
         &self,
         sha256: &[u8; 32],
     ) -> Result<Option<PluginRegistryRecord>, RepoError> {
-        PostgresPluginRegistryRepo::from_storage(self).get_by_sha256(sha256).await
+        PostgresPluginRegistryRepo::from_storage(self)
+            .get_by_sha256(sha256)
+            .await
     }
 
     async fn list_active(&self) -> Result<Vec<PluginRegistryRecord>, RepoError> {
-        PostgresPluginRegistryRepo::from_storage(self).list_active().await
+        PostgresPluginRegistryRepo::from_storage(self)
+            .list_active()
+            .await
     }
 
     async fn set_status(
@@ -302,11 +308,15 @@ impl PluginRegistryRepo for PostgresStorage {
         sha256: &[u8; 32],
         status: PluginRegistryStatus,
     ) -> Result<(), RepoError> {
-        PostgresPluginRegistryRepo::from_storage(self).set_status(sha256, status).await
+        PostgresPluginRegistryRepo::from_storage(self)
+            .set_status(sha256, status)
+            .await
     }
 
     async fn delete_by_sha256(&self, sha256: &[u8; 32]) -> Result<(), RepoError> {
-        PostgresPluginRegistryRepo::from_storage(self).delete_by_sha256(sha256).await
+        PostgresPluginRegistryRepo::from_storage(self)
+            .delete_by_sha256(sha256)
+            .await
     }
 
     async fn count(&self) -> Result<usize, RepoError> {
@@ -314,33 +324,47 @@ impl PluginRegistryRepo for PostgresStorage {
     }
 
     async fn get_shutdown_marker(&self) -> Result<Option<i64>, RepoError> {
-        PostgresPluginRegistryRepo::from_storage(self).get_shutdown_marker().await
+        PostgresPluginRegistryRepo::from_storage(self)
+            .get_shutdown_marker()
+            .await
     }
 
     async fn set_shutdown_marker(&self, unix_secs: i64) -> Result<(), RepoError> {
-        PostgresPluginRegistryRepo::from_storage(self).set_shutdown_marker(unix_secs).await
+        PostgresPluginRegistryRepo::from_storage(self)
+            .set_shutdown_marker(unix_secs)
+            .await
     }
 
     async fn clear_shutdown_marker(&self) -> Result<(), RepoError> {
-        PostgresPluginRegistryRepo::from_storage(self).clear_shutdown_marker().await
+        PostgresPluginRegistryRepo::from_storage(self)
+            .clear_shutdown_marker()
+            .await
     }
 }
 
 #[async_trait]
 impl PluginBlobRepo for PostgresStorage {
     async fn put_blob(&self, sha256: &[u8; 32], bytes: &[u8]) -> Result<(), RepoError> {
-        PostgresPluginBlobRepo::from_storage(self).put_blob(sha256, bytes).await
+        PostgresPluginBlobRepo::from_storage(self)
+            .put_blob(sha256, bytes)
+            .await
     }
 
     async fn get_blob(&self, sha256: &[u8; 32]) -> Result<Option<Vec<u8>>, RepoError> {
-        PostgresPluginBlobRepo::from_storage(self).get_blob(sha256).await
+        PostgresPluginBlobRepo::from_storage(self)
+            .get_blob(sha256)
+            .await
     }
 
     async fn delete_blob(&self, sha256: &[u8; 32]) -> Result<(), RepoError> {
-        PostgresPluginBlobRepo::from_storage(self).delete_blob(sha256).await
+        PostgresPluginBlobRepo::from_storage(self)
+            .delete_blob(sha256)
+            .await
     }
 
     async fn list_blob_keys(&self) -> Result<Vec<[u8; 32]>, RepoError> {
-        PostgresPluginBlobRepo::from_storage(self).list_blob_keys().await
+        PostgresPluginBlobRepo::from_storage(self)
+            .list_blob_keys()
+            .await
     }
 }

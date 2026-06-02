@@ -6,11 +6,16 @@ use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::StorageConfig;
-use cc_lb_storage_api::{BackendKind, ManagedKeyStore, Storage, StorageError, StorageResult};
+use cc_lb_storage_api::{
+    BackendKind, ManagedKeyStore, PluginBlobRepo, PluginRegistryRepo, Storage, StorageError,
+    StorageResult,
+};
 
 pub struct OpenedStorage {
     pub storage: Arc<dyn Storage>,
     pub managed_key_store: Arc<dyn ManagedKeyStore>,
+    pub plugin_registry_repo: Arc<dyn PluginRegistryRepo>,
+    pub plugin_blob_repo: Arc<dyn PluginBlobRepo>,
 }
 
 impl OpenedStorage {
@@ -126,9 +131,19 @@ async fn open_redb(
     let managed_key_store = Arc::new(cc_lb_storage_redb::RedbManagedKeyStore::new(
         storage.clone(),
     ));
+    let plugin_registry_repo = Arc::new(
+        cc_lb_storage_redb::RedbPluginRegistryRepo::new(storage.as_ref().clone())
+            .map_err(map_redb_open_error)?,
+    ) as Arc<dyn PluginRegistryRepo>;
+    let plugin_blob_repo = Arc::new(
+        cc_lb_storage_redb::RedbPluginBlobRepo::new(storage.as_ref().clone())
+            .map_err(map_redb_open_error)?,
+    ) as Arc<dyn PluginBlobRepo>;
     Ok(OpenedStorage {
         storage: storage as Arc<dyn Storage>,
         managed_key_store,
+        plugin_registry_repo,
+        plugin_blob_repo,
     })
 }
 
@@ -229,6 +244,12 @@ async fn open_postgres(
             message: host_only(url) + ": " + &error.to_string(),
         })?;
 
+    let plugin_registry_repo = Arc::new(cc_lb_storage_postgres::PostgresPluginRegistryRepo::new(
+        pool.clone(),
+    )) as Arc<dyn PluginRegistryRepo>;
+    let plugin_blob_repo = Arc::new(cc_lb_storage_postgres::PostgresPluginBlobRepo::new(
+        pool.clone(),
+    )) as Arc<dyn PluginBlobRepo>;
     let storage = cc_lb_storage_postgres::PostgresStorage::new(pool.clone());
     let storage: Arc<dyn Storage> = Arc::new(storage);
     storage
@@ -242,6 +263,8 @@ async fn open_postgres(
     Ok(OpenedStorage {
         storage,
         managed_key_store,
+        plugin_registry_repo,
+        plugin_blob_repo,
     })
 }
 

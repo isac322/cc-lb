@@ -61,7 +61,7 @@ fn emit_version_arm(
 mod tests {
     use super::*;
     use crate::parse::HandlerDescriptor;
-    use syn::{parse_quote, Ident, ItemFn};
+    use syn::{Ident, ItemFn, parse_quote};
 
     #[test]
     fn emits_extism_plugin_fn_named_after_handler_export() {

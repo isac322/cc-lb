@@ -8,11 +8,11 @@ use thiserror::Error;
 
 pub mod canonical;
 
-pub use canonical::{CanonicalError, CanonicalOffer, canonicalize, host_offer_hash};
 use crate::limits::{
-    CAPABILITIES_MAX_COUNT, FUNCTION_VERSIONS_KEYS_MAX, FUNCTION_VERSIONS_PER_FN_MAX,
-    VERSION_MAX, VERSION_MIN,
+    CAPABILITIES_MAX_COUNT, FUNCTION_VERSIONS_KEYS_MAX, FUNCTION_VERSIONS_PER_FN_MAX, VERSION_MAX,
+    VERSION_MIN,
 };
+pub use canonical::{CanonicalError, CanonicalOffer, canonicalize, host_offer_hash};
 
 pub const HANDSHAKE_SCHEMA_VERSION_V1: u32 = 1;
 
@@ -76,7 +76,9 @@ pub enum HandshakeError {
     #[error("chosen for unknown function: '{function}' not in host offer")]
     ChosenForUnknownFunction { function: String },
 
-    #[error("downgrade attempt detected: function '{function}' chosen version {chosen} but max intersection is {max_intersection}")]
+    #[error(
+        "downgrade attempt detected: function '{function}' chosen version {chosen} but max intersection is {max_intersection}"
+    )]
     DowngradeAttempt {
         function: String,
         chosen: u32,
@@ -239,10 +241,7 @@ mod tests {
     fn function_count_exceeds_limit() {
         let mut functions = BTreeMap::new();
         for i in 0..=FUNCTION_VERSIONS_KEYS_MAX {
-            functions.insert(
-                alloc::format!("fn{}", i),
-                vec![1],
-            );
+            functions.insert(alloc::format!("fn{}", i), vec![1]);
         }
 
         let offer = HandshakeOffer {
@@ -514,8 +513,7 @@ mod tests {
         };
 
         let json = serde_json::to_vec(&original).expect("serialize");
-        let deserialized: HandshakeOffer =
-            serde_json::from_slice(&json).expect("deserialize");
+        let deserialized: HandshakeOffer = serde_json::from_slice(&json).expect("deserialize");
 
         assert_eq!(original, deserialized);
     }
@@ -546,8 +544,7 @@ mod tests {
         };
 
         let json = serde_json::to_vec(&original).expect("serialize");
-        let deserialized: HandshakeAccept =
-            serde_json::from_slice(&json).expect("deserialize");
+        let deserialized: HandshakeAccept = serde_json::from_slice(&json).expect("deserialize");
 
         assert_eq!(original, deserialized);
     }

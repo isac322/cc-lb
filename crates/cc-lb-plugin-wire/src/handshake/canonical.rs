@@ -54,8 +54,8 @@ pub fn canonicalize(offer: &HandshakeOfferRaw) -> CanonicalOffer {
 
 pub fn host_offer_hash(offer: &HandshakeOfferRaw) -> Result<[u8; 32], CanonicalError> {
     let canonical = canonicalize(offer);
-    let bytes = serde_json::to_vec(&canonical)
-        .map_err(|e| CanonicalError::Serialize(e.to_string()))?;
+    let bytes =
+        serde_json::to_vec(&canonical).map_err(|e| CanonicalError::Serialize(e.to_string()))?;
     Ok(Sha256::digest(bytes).into())
 }
 

@@ -790,6 +790,7 @@ dependencies = [
  "cc-lb-dialect-anthropic",
  "cc-lb-observability",
  "cc-lb-plugin-api",
+ "cc-lb-plugin-wire",
  "cc-lb-pricing",
  "cc-lb-runtime-extism",
  "cc-lb-signer-anthropic-key",

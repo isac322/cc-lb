@@ -19,9 +19,21 @@ use crate::self_check::{SelfCheckExecutionError, execute_self_check};
 pub struct PluginRegistry {
     registry_repo: Arc<dyn PluginRegistryRepo>,
     blob_repo: Arc<dyn PluginBlobRepo>,
-    in_process_cache: DashMap<[u8; 32], AugmentedMetadata>,
+    in_process_cache: Arc<DashMap<[u8; 32], AugmentedMetadata>>,
     host_offer: HandshakeOffer,
     host_offer_hash: [u8; 32],
+}
+
+impl Clone for PluginRegistry {
+    fn clone(&self) -> Self {
+        Self {
+            registry_repo: self.registry_repo.clone(),
+            blob_repo: self.blob_repo.clone(),
+            in_process_cache: self.in_process_cache.clone(),
+            host_offer: self.host_offer.clone(),
+            host_offer_hash: self.host_offer_hash,
+        }
+    }
 }
 
 impl PluginRegistry {
@@ -35,7 +47,7 @@ impl PluginRegistry {
         Ok(Self {
             registry_repo,
             blob_repo,
-            in_process_cache: DashMap::new(),
+            in_process_cache: Arc::new(DashMap::new()),
             host_offer,
             host_offer_hash,
         })
@@ -141,6 +153,11 @@ impl PluginRegistry {
         self.in_process_cache
             .get(sha256)
             .map(|metadata| metadata.clone())
+    }
+
+    pub fn load_record_into_cache(&self, record: &PluginRegistryRecord) {
+        self.in_process_cache
+            .insert(record.sha256, record.augmented_metadata.clone());
     }
 
     async fn get_existing_record(

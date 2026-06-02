@@ -109,7 +109,7 @@ fn wire_function_type(name: &str) -> Option<TokenStream> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use syn::{parse_quote, Ident};
+    use syn::{Ident, parse_quote};
 
     fn descriptor() -> PluginDescriptor {
         PluginDescriptor {
