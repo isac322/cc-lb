@@ -1,7 +1,7 @@
 //! cc-lb-pdk: Procedural macros for Extism plugins with custom section and handshake generation.
 //!
-//! This crate provides `#[plugin]` and `#[handler]` macros that wrap extism-pdk functions
-//! to automatically generate custom section metadata and cc-lb handshake protocol support.
+//! This crate provides `#[plugin]` and `#[handler]` macros that generate Extism-compatible
+//! guest exports, custom section metadata, and cc-lb handshake protocol support.
 //!
 //! The `#[plugin]` macro parses plugin metadata and emits the generated cc-lb exports.
 

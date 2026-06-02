@@ -4,6 +4,7 @@ members = [
     "crates/cc-lb-plugin-wire",
     "crates/cc-lb-*",
     "benches/extism_sse_overhead",
+    "plugins/router/round-robin",
     "tests/fixtures/fake-anthropic",
     "tests/fixtures/extism-echo-plugin",
     "tests/fixtures/plugin-handshake-spike",
@@ -19,7 +20,7 @@ members = [
     "tests/multi-replica",
     "tests/real-client",
 ]
-exclude = ["fuzz", "plugins/router/round-robin"]
+exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]

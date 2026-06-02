@@ -243,6 +243,8 @@ pub async fn run_serve(
     config_path: &Path,
     data_dir: Option<&Path>,
     strict_preflight: bool,
+    skip_handshake_if_fresh: bool,
+    force_handshake: bool,
 ) -> Result<(), ServeError> {
     let mut config = Config::load(config_path)?;
     if let Some(data_dir) = data_dir {
@@ -256,6 +258,7 @@ pub async fn run_serve(
         config,
         Some(config_path),
         Some(StartupPreflight { strict_preflight }),
+        startup_handshake_opts_from_flags(skip_handshake_if_fresh, force_handshake),
     )
     .await?;
     app.start().await?;
@@ -287,6 +290,17 @@ fn print_preflight_report(report: &preflight::PreflightReport) {
 #[derive(Clone, Copy)]
 struct StartupPreflight {
     strict_preflight: bool,
+}
+
+fn startup_handshake_opts_from_flags(
+    skip_handshake_if_fresh: bool,
+    force_handshake: bool,
+) -> StartupHandshakeOpts {
+    StartupHandshakeOpts {
+        skip_if_fresh: skip_handshake_if_fresh,
+        force: force_handshake,
+        ..StartupHandshakeOpts::default()
+    }
 }
 
 pub async fn build_app(config: Config) -> Result<App, BuildError> {
@@ -325,6 +339,7 @@ pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError
         aead,
         Some((plugin_registry_repo, plugin_blob_repo)),
         None,
+        StartupHandshakeOpts::default(),
     )
     .await
 }
@@ -494,13 +509,14 @@ pub async fn build_app_with_path(
     config: Config,
     config_path: Option<&Path>,
 ) -> Result<App, BuildError> {
-    build_app_with_path_inner(config, config_path, None).await
+    build_app_with_path_inner(config, config_path, None, StartupHandshakeOpts::default()).await
 }
 
 async fn build_app_with_path_inner(
     config: Config,
     config_path: Option<&Path>,
     startup_preflight: Option<StartupPreflight>,
+    startup_handshake_opts: StartupHandshakeOpts,
 ) -> Result<App, BuildError> {
     config.validate()?;
     let (managed_store, storage, aead, plugin_registry_repo, plugin_blob_repo) =
@@ -513,6 +529,7 @@ async fn build_app_with_path_inner(
         aead,
         Some((plugin_registry_repo, plugin_blob_repo)),
         startup_preflight,
+        startup_handshake_opts,
     )
     .await
 }
@@ -560,6 +577,7 @@ pub async fn build_app_with_storage(
         aead,
         None,
         None,
+        StartupHandshakeOpts::default(),
     )
     .await
 }
@@ -572,6 +590,7 @@ async fn build_app_with_storage_inner(
     aead: Arc<AeadService>,
     plugin_repos: Option<(Arc<dyn PluginRegistryRepo>, Arc<dyn PluginBlobRepo>)>,
     startup_preflight: Option<StartupPreflight>,
+    startup_handshake_opts: StartupHandshakeOpts,
 ) -> Result<App, BuildError> {
     let server_state = Arc::new(ServerStateHandle::new_starting());
     let key_store = Arc::new(KeyStore::new(managed_store));
@@ -662,16 +681,16 @@ async fn build_app_with_storage_inner(
     };
     let (startup_shutdown, startup_shutdown_triggered, startup_shutdown_task) =
         spawn_startup_shutdown_signal();
-    let startup_registry = PluginRegistry::new(
+    let plugin_registry = PluginRegistry::new(
         plugin_registry_repo.clone(),
-        plugin_blob_repo,
+        plugin_blob_repo.clone(),
         cc_lb_runtime_extism::handshake::build_offer(&BTreeSet::new()),
     )
     .map_err(|error| BuildError::StartupHandshake(error.to_string()))?;
     let startup_report = run_startup_handshake(
-        &startup_registry,
+        &plugin_registry,
         plugin_registry_repo.as_ref(),
-        StartupHandshakeOpts::default(),
+        startup_handshake_opts,
         startup_shutdown,
     )
     .await;
@@ -850,7 +869,7 @@ async fn build_app_with_storage_inner(
 
     Ok(App {
         router: app_router(state, config.timeouts.upstream_total_secs),
-        admin_router: admin_router(admin_state, server_state.clone()),
+        admin_router: admin_router(admin_state, server_state.clone(), plugin_registry),
         proxy_addr: config.listener.proxy_addr,
         admin_addr: config.listener.admin_addr,
         reload_task,
@@ -1268,8 +1287,15 @@ struct AdminServerStateBody {
     state: ServerState,
 }
 
-fn admin_router(admin_state: AdminState, server_state: Arc<ServerStateHandle>) -> Router {
-    cc_lb_admin::router(admin_state).merge(server_state_router(server_state))
+fn admin_router(
+    admin_state: AdminState,
+    server_state: Arc<ServerStateHandle>,
+    plugin_registry: PluginRegistry,
+) -> Router {
+    let admin_token = admin_state.admin_token.clone();
+    cc_lb_admin::router(admin_state)
+        .merge(crate::admin_plugins::router(admin_token, plugin_registry))
+        .merge(server_state_router(server_state))
 }
 
 fn server_state_router(server_state: Arc<ServerStateHandle>) -> Router {

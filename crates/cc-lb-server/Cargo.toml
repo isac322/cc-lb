@@ -34,7 +34,7 @@ anyhow.workspace = true
 async-stream.workspace = true
 async-trait.workspace = true
 arc-swap.workspace = true
-axum.workspace = true
+axum = { workspace = true, features = ["multipart"] }
 bytes.workspace = true
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-admin = { version = "0.1.0", path = "../cc-lb-admin" }

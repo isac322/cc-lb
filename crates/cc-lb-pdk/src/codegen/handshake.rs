@@ -26,49 +26,53 @@ pub(crate) fn emit_handshake_export(plugin: &PluginDescriptor) -> TokenStream {
     });
 
     quote! {
-        #[extism_pdk::plugin_fn]
-        pub fn cc_lb_handshake(input: ::std::string::String) -> extism_pdk::FnResult<::std::string::String> {
-            use ::std::collections::{BTreeMap, BTreeSet};
+        #[unsafe(no_mangle)]
+        pub extern "C" fn cc_lb_handshake() -> i32 {
+            cc_lb_plugin_wire::guest::run_string_export(|input| -> ::std::result::Result<::std::string::String, ::std::string::String> {
+                use ::std::collections::{BTreeMap, BTreeSet};
 
-            let offer: cc_lb_plugin_wire::handshake::HandshakeOffer = serde_json::from_str(&input)?;
-            offer.validate()?;
+                let offer: cc_lb_plugin_wire::handshake::HandshakeOffer = cc_lb_plugin_wire::serde_json::from_str(&input)
+                    .map_err(|error| error.to_string())?;
+                offer.validate().map_err(|error| error.to_string())?;
 
-            let mut plugin_supported: BTreeMap<::std::string::String, ::std::vec::Vec<u32>> = BTreeMap::new();
-            #(#supported_entries)*
+                let mut plugin_supported: BTreeMap<::std::string::String, ::std::vec::Vec<u32>> = BTreeMap::new();
+                #(#supported_entries)*
 
-            let mut implemented_functions: BTreeSet<::std::string::String> = BTreeSet::new();
-            #(#implemented_entries)*
+                let mut implemented_functions: BTreeSet<::std::string::String> = BTreeSet::new();
+                #(#implemented_entries)*
 
-            let mut required_capabilities: BTreeSet<::std::string::String> = BTreeSet::new();
-            #(#required_capabilities)*
+                let mut required_capabilities: BTreeSet<::std::string::String> = BTreeSet::new();
+                #(#required_capabilities)*
 
-            let mut chosen_versions: BTreeMap<::std::string::String, u32> = BTreeMap::new();
-            for (function, supported_versions) in &plugin_supported {
-                let Some(offered_versions) = offer.function_versions.get(function) else {
-                    continue;
+                let mut chosen_versions: BTreeMap<::std::string::String, u32> = BTreeMap::new();
+                for (function, supported_versions) in &plugin_supported {
+                    let Some(offered_versions) = offer.function_versions.get(function) else {
+                        continue;
+                    };
+                    let Some(chosen) = offered_versions
+                        .iter()
+                        .filter(|version| supported_versions.contains(version))
+                        .max()
+                        .copied()
+                    else {
+                        continue;
+                    };
+                    chosen_versions.insert(function.clone(), chosen);
+                }
+
+                let accept = cc_lb_plugin_wire::handshake::HandshakeAccept {
+                    handshake_schema_version: offer.handshake_schema_version,
+                    envelope_version: offer.envelope_version,
+                    chosen_versions,
+                    plugin_supported,
+                    implemented_functions,
+                    required_capabilities,
                 };
-                let Some(chosen) = offered_versions
-                    .iter()
-                    .filter(|version| supported_versions.contains(version))
-                    .max()
-                    .copied()
-                else {
-                    continue;
-                };
-                chosen_versions.insert(function.clone(), chosen);
-            }
+                accept.validate_against_offer(&offer).map_err(|error| error.to_string())?;
 
-            let accept = cc_lb_plugin_wire::handshake::HandshakeAccept {
-                handshake_schema_version: offer.handshake_schema_version,
-                envelope_version: offer.envelope_version,
-                chosen_versions,
-                plugin_supported,
-                implemented_functions,
-                required_capabilities,
-            };
-            accept.validate_against_offer(&offer)?;
-
-            Ok(serde_json::to_string(&accept)?)
+                cc_lb_plugin_wire::serde_json::to_string(&accept)
+                    .map_err(|error| error.to_string())
+            })
         }
     }
 }
@@ -77,19 +81,22 @@ pub(crate) fn emit_handshake_export(plugin: &PluginDescriptor) -> TokenStream {
 mod tests {
     use super::*;
     use crate::parse::{HandlerDescriptor, PluginDescriptor};
+    use quote::ToTokens;
     use syn::{ItemFn, parse_quote};
 
     #[test]
-    fn emits_extism_plugin_fn_named_cc_lb_handshake() {
+    fn emits_raw_extism_export_named_cc_lb_handshake() {
         let generated = emit_handshake_export(&plugin_descriptor());
         let item: ItemFn = syn::parse2(generated).expect("generated handshake export parses");
 
         assert_eq!(item.sig.ident, "cc_lb_handshake");
+        assert!(item.sig.abi.is_some());
+        assert!(item.sig.inputs.is_empty());
+        assert_eq!(item.sig.output.to_token_stream().to_string(), "-> i32");
         assert!(item.attrs.iter().any(|attr| {
-            attr.path()
-                .segments
-                .last()
-                .is_some_and(|segment| segment.ident == "plugin_fn")
+            attr.to_token_stream()
+                .to_string()
+                .contains("unsafe (no_mangle)")
         }));
     }
 
@@ -107,12 +114,12 @@ mod tests {
     fn generated_export_negotiates_highest_common_version_and_validates_accept() {
         let generated = emit_handshake_export(&plugin_descriptor()).to_string();
 
-        assert!(generated.contains("serde_json :: from_str"));
+        assert!(generated.contains("cc_lb_plugin_wire :: serde_json :: from_str"));
         assert!(generated.contains("offer . validate"));
         assert!(generated.contains("function_versions . get"));
         assert!(generated.contains("max"));
         assert!(generated.contains("validate_against_offer"));
-        assert!(generated.contains("serde_json :: to_string"));
+        assert!(generated.contains("cc_lb_plugin_wire :: serde_json :: to_string"));
     }
 
     #[test]
@@ -123,6 +130,14 @@ mod tests {
         assert!(generated.contains("shape"));
         assert!(generated.contains("streaming"));
         assert!(generated.contains("storage"));
+    }
+
+    #[test]
+    fn generated_code_uses_wire_guest_helpers_not_direct_extism_pdk() {
+        let generated = emit_handshake_export(&plugin_descriptor()).to_string();
+
+        assert!(generated.contains("cc_lb_plugin_wire :: guest :: run_string_export"));
+        assert!(!generated.contains("extism_pdk"));
     }
 
     fn plugin_descriptor() -> PluginDescriptor {

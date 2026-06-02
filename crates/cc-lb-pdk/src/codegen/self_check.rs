@@ -7,35 +7,39 @@ pub(crate) fn emit_self_check_export(plugin: &PluginDescriptor) -> TokenStream {
     let handler_checks = plugin.handlers.iter().map(emit_handler_check);
 
     quote! {
-        #[extism_pdk::plugin_fn]
-        pub fn cc_lb_self_check(input: String) -> extism_pdk::FnResult<String> {
-            let req: cc_lb_plugin_wire::self_check::SelfCheckRequest = serde_json::from_str(&input)?;
-            req.validate()?;
+        #[unsafe(no_mangle)]
+        pub extern "C" fn cc_lb_self_check() -> i32 {
+            cc_lb_plugin_wire::guest::run_string_export(|input| -> ::std::result::Result<::std::string::String, ::std::string::String> {
+                let req: cc_lb_plugin_wire::self_check::SelfCheckRequest = cc_lb_plugin_wire::serde_json::from_str(&input)
+                    .map_err(|error| error.to_string())?;
+                req.validate().map_err(|error| error.to_string())?;
 
-            let mut failures: Vec<cc_lb_plugin_wire::self_check::SelfCheckFailure> = Vec::new();
+                let mut failures: ::std::vec::Vec<cc_lb_plugin_wire::self_check::SelfCheckFailure> = ::std::vec::Vec::new();
 
-            #(#handler_checks)*
+                #(#handler_checks)*
 
-            let response = cc_lb_plugin_wire::self_check::SelfCheckResponse {
-                status: if failures.is_empty() {
-                    cc_lb_plugin_wire::self_check::SelfCheckStatus::Success
-                } else {
-                    cc_lb_plugin_wire::self_check::SelfCheckStatus::Failure
-                },
-                failures,
-                completed_at: req.initiated_at,
-            };
-            response.validate()?;
+                let response = cc_lb_plugin_wire::self_check::SelfCheckResponse {
+                    status: if failures.is_empty() {
+                        cc_lb_plugin_wire::self_check::SelfCheckStatus::Success
+                    } else {
+                        cc_lb_plugin_wire::self_check::SelfCheckStatus::Failure
+                    },
+                    failures,
+                    completed_at: req.initiated_at,
+                };
+                response.validate().map_err(|error| error.to_string())?;
 
-            let serialized = serde_json::to_string(&response)?;
-            if serialized.as_bytes().len() > cc_lb_plugin_wire::limits::SELF_CHECK_OUTPUT_MAX_BYTES {
-                return Err(extism_pdk::Error::msg(format!(
-                    "cc_lb_self_check response exceeded {} bytes",
-                    cc_lb_plugin_wire::limits::SELF_CHECK_OUTPUT_MAX_BYTES,
-                )).into());
-            }
+                let serialized = cc_lb_plugin_wire::serde_json::to_string(&response)
+                    .map_err(|error| error.to_string())?;
+                if serialized.as_bytes().len() > cc_lb_plugin_wire::limits::SELF_CHECK_OUTPUT_MAX_BYTES {
+                    return Err(::std::format!(
+                        "cc_lb_self_check response exceeded {} bytes",
+                        cc_lb_plugin_wire::limits::SELF_CHECK_OUTPUT_MAX_BYTES,
+                    ));
+                }
 
-            Ok(serialized)
+                Ok(serialized)
+            })
         }
     }
 }
@@ -53,26 +57,26 @@ fn emit_handler_check(handler: &HandlerDescriptor) -> TokenStream {
     let checks = handler.versions.iter().map(|version| {
         let label = format!("{}@{}", handler.name, version);
         quote! {
-            if let Err(message) = (|| -> Result<(), String> {
+            if let Err(message) = (|| -> ::std::result::Result<(), ::std::string::String> {
                 let sample = <#wire_function as cc_lb_plugin_wire::wire_function::WireFunction>::dry_run_request();
-                let bytes = serde_json::to_vec(&sample)
-                    .map_err(|error| format!("{} request serialize failed: {}", #label, error))?;
-                let decoded: #request_type = serde_json::from_slice(&bytes)
-                    .map_err(|error| format!("{} request deserialize failed: {}", #label, error))?;
-                let bytes = serde_json::to_vec(&decoded)
-                    .map_err(|error| format!("{} request reserialize failed: {}", #label, error))?;
-                let _: <#wire_function as cc_lb_plugin_wire::wire_function::WireFunction>::Request = serde_json::from_slice(&bytes)
-                    .map_err(|error| format!("{} request wire decode failed: {}", #label, error))?;
+                let bytes = cc_lb_plugin_wire::serde_json::to_vec(&sample)
+                    .map_err(|error| ::std::format!("{} request serialize failed: {}", #label, error))?;
+                let decoded: #request_type = cc_lb_plugin_wire::serde_json::from_slice(&bytes)
+                    .map_err(|error| ::std::format!("{} request deserialize failed: {}", #label, error))?;
+                let bytes = cc_lb_plugin_wire::serde_json::to_vec(&decoded)
+                    .map_err(|error| ::std::format!("{} request reserialize failed: {}", #label, error))?;
+                let _: <#wire_function as cc_lb_plugin_wire::wire_function::WireFunction>::Request = cc_lb_plugin_wire::serde_json::from_slice(&bytes)
+                    .map_err(|error| ::std::format!("{} request wire decode failed: {}", #label, error))?;
 
                 let sample = <#wire_function as cc_lb_plugin_wire::wire_function::WireFunction>::dry_run_response();
-                let bytes = serde_json::to_vec(&sample)
-                    .map_err(|error| format!("{} response serialize failed: {}", #label, error))?;
-                let decoded: #response_type = serde_json::from_slice(&bytes)
-                    .map_err(|error| format!("{} response deserialize failed: {}", #label, error))?;
-                let bytes = serde_json::to_vec(&decoded)
-                    .map_err(|error| format!("{} response reserialize failed: {}", #label, error))?;
-                let _: <#wire_function as cc_lb_plugin_wire::wire_function::WireFunction>::Response = serde_json::from_slice(&bytes)
-                    .map_err(|error| format!("{} response wire decode failed: {}", #label, error))?;
+                let bytes = cc_lb_plugin_wire::serde_json::to_vec(&sample)
+                    .map_err(|error| ::std::format!("{} response serialize failed: {}", #label, error))?;
+                let decoded: #response_type = cc_lb_plugin_wire::serde_json::from_slice(&bytes)
+                    .map_err(|error| ::std::format!("{} response deserialize failed: {}", #label, error))?;
+                let bytes = cc_lb_plugin_wire::serde_json::to_vec(&decoded)
+                    .map_err(|error| ::std::format!("{} response reserialize failed: {}", #label, error))?;
+                let _: <#wire_function as cc_lb_plugin_wire::wire_function::WireFunction>::Response = cc_lb_plugin_wire::serde_json::from_slice(&bytes)
+                    .map_err(|error| ::std::format!("{} response wire decode failed: {}", #label, error))?;
 
                 Ok(())
             })() {
@@ -109,7 +113,8 @@ fn wire_function_type(name: &str) -> Option<TokenStream> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use syn::{Ident, parse_quote};
+    use quote::ToTokens;
+    use syn::{Ident, ItemFn, parse_quote};
 
     fn descriptor() -> PluginDescriptor {
         PluginDescriptor {
@@ -128,12 +133,23 @@ mod tests {
 
     #[test]
     fn emits_self_check() {
-        let tokens = emit_self_check_export(&descriptor()).to_string();
+        let generated = emit_self_check_export(&descriptor());
+        let item: ItemFn = syn::parse2(generated).expect("generated self-check export parses");
 
-        assert!(tokens.contains("pub fn cc_lb_self_check"));
-        assert!(tokens.contains("extism_pdk :: plugin_fn"));
-        assert!(tokens.contains("SelfCheckRequest"));
-        assert!(tokens.contains("SelfCheckResponse"));
+        assert_eq!(item.sig.ident, "cc_lb_self_check");
+        assert!(item.sig.abi.is_some());
+        assert!(item.sig.inputs.is_empty());
+        assert_eq!(item.sig.output.to_token_stream().to_string(), "-> i32");
+        assert!(
+            item.to_token_stream()
+                .to_string()
+                .contains("SelfCheckRequest")
+        );
+        assert!(
+            item.to_token_stream()
+                .to_string()
+                .contains("SelfCheckResponse")
+        );
     }
 
     #[test]
@@ -166,6 +182,14 @@ mod tests {
         let second = emit_self_check_export(&descriptor()).to_string();
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn generated_code_uses_wire_guest_helpers_not_direct_extism_pdk() {
+        let tokens = emit_self_check_export(&descriptor()).to_string();
+
+        assert!(tokens.contains("cc_lb_plugin_wire :: guest :: run_string_export"));
+        assert!(!tokens.contains("extism_pdk"));
     }
 
     #[test]

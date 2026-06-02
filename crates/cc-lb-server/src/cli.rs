@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -29,11 +29,38 @@ pub enum Command {
         data_dir: Option<PathBuf>,
         #[arg(long)]
         strict_preflight: bool,
+        #[arg(long, default_value_t = true, action = ArgAction::Set)]
+        skip_handshake_if_fresh: bool,
+        #[arg(long, default_value_t = false)]
+        force_handshake: bool,
     },
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skip_if_fresh_default_true() {
+        let cli =
+            Cli::try_parse_from(["cc-lb", "serve", "--config", "cc-lb.toml"]).expect("cli parses");
+
+        let Some(Command::Serve {
+            skip_handshake_if_fresh,
+            force_handshake,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected serve command");
+        };
+
+        assert!(skip_handshake_if_fresh);
+        assert!(!force_handshake);
+    }
 }
 
 #[derive(Debug, Subcommand)]

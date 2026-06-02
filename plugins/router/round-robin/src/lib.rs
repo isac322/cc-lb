@@ -1,6 +1,7 @@
-use extism_pdk::*;
-use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use cc_lb_plugin_wire::v1::{
+    common::{DialectBinding, UpstreamWire},
+    route::RouteResponse,
+};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
@@ -13,146 +14,73 @@ pub fn select_candidate_index(counter: &AtomicUsize, candidate_count: usize) -> 
     Some(current % candidate_count)
 }
 
-fn route_decision_no_choice() -> Value {
-    json!({
-        "_version": 1,
-        "upstream_id": Value::Null,
-        "dialect": {"kind": "self"},
-        "upstream": {"kind": "anthropic_direct"}
-    })
+fn route_response(upstream_id: Option<String>) -> RouteResponse {
+    RouteResponse {
+        upstream_id,
+        dialect: DialectBinding::SelfReferenced,
+        upstream: UpstreamWire::AnthropicDirect,
+    }
 }
 
-fn route_decision(input: &Value) -> Value {
-    let candidates = match input.get("candidates").and_then(|c| c.as_array()) {
-        Some(c) => c,
-        None => return route_decision_no_choice(),
+#[cc_lb_pdk::plugin(name = "round-robin", version = "0.1.0")]
+mod plugin {
+    use super::{COUNTER, route_response, select_candidate_index};
+    use cc_lb_plugin_wire::v1::{
+        common::UpstreamWire,
+        normalize_error::{NormalizeErrorRequest, NormalizeErrorResponse},
+        route::{RouteRequest, RouteResponse},
+        shape::{ShapeRequest, ShapeResponse},
     };
-    let Some(idx) = select_candidate_index(&COUNTER, candidates.len()) else {
-        return route_decision_no_choice();
-    };
-    let selected_upstream_id = candidates
-        .get(idx)
-        .and_then(|candidate| candidate.get("upstream_id"))
-        .cloned()
-        .unwrap_or(Value::Null);
-    json!({
-        "_version": 1,
-        "upstream_id": selected_upstream_id,
-        "dialect": {"kind": "self"},
-        "upstream": {"kind": "anthropic_direct"}
-    })
-}
+    use std::convert::Infallible;
 
-#[plugin_fn]
-pub fn route(Json(input): Json<Value>) -> FnResult<Json<Value>> {
-    Ok(Json(route_decision(&input)))
-}
+    #[cc_lb_pdk::handler(name = "route", versions = [1])]
+    pub(super) fn route_handler(request: RouteRequest) -> Result<RouteResponse, Infallible> {
+        let upstream_id = select_candidate_index(&COUNTER, request.candidates.len())
+            .map(|idx| request.candidates[idx].upstream_id.clone());
 
-#[derive(Clone, Debug, Deserialize)]
-#[allow(dead_code)]
-struct ShapeInput {
-    #[serde(default)]
-    _version: u32,
-    request: RequestWire,
-    upstream: UpstreamWire,
-    #[serde(default)]
-    principal: Option<PrincipalWire>,
-}
+        Ok(route_response(upstream_id))
+    }
 
-#[derive(Clone, Debug, Deserialize)]
-#[allow(dead_code)]
-struct RequestWire {
-    #[serde(default)]
-    request_id: String,
-    #[serde(default)]
-    headers: Vec<HeaderWire>,
-    method: String,
-    path: String,
-    query: Option<String>,
-    body_base64: String,
-}
+    #[cc_lb_pdk::handler(name = "shape", versions = [1])]
+    pub(super) fn shape_handler(request: ShapeRequest) -> Result<ShapeResponse, Infallible> {
+        let base_url = match &request.upstream {
+            UpstreamWire::AnthropicDirect => "https://api.anthropic.com".to_string(),
+            UpstreamWire::CustomAnthropicSpec { base_url } => base_url.clone(),
+        };
+        let query_part = request
+            .request
+            .query
+            .as_ref()
+            .map(|query| format!("?{}", query))
+            .unwrap_or_default();
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct HeaderWire {
-    name: String,
-    value_base64: String,
-}
+        Ok(ShapeResponse {
+            url: format!("{}{}{}", base_url, request.request.path, query_part),
+            method: request.request.method,
+            headers: request.request.headers,
+            body_base64: request.request.body_base64,
+        })
+    }
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(tag = "kind")]
-#[serde(rename_all = "snake_case")]
-enum UpstreamWire {
-    AnthropicDirect,
-    CustomAnthropicSpec { base_url: String },
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[allow(dead_code)]
-struct PrincipalWire {
-    #[serde(default)]
-    id: String,
-    #[serde(default)]
-    kind: String,
-    #[serde(default)]
-    claims: serde_json::Map<String, Value>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize)]
-struct ShapeResponse {
-    #[serde(default)]
-    _version: u32,
-    url: String,
-    method: String,
-    #[serde(default)]
-    headers: Vec<HeaderWire>,
-    body_base64: String,
-}
-
-fn shape_response(input: &str) -> Result<ShapeResponse, serde_json::Error> {
-    let shape_input: ShapeInput = serde_json::from_str(input)?;
-    let base_url = match &shape_input.upstream {
-        UpstreamWire::AnthropicDirect => "https://api.anthropic.com".to_string(),
-        UpstreamWire::CustomAnthropicSpec { base_url } => base_url.clone(),
-    };
-    let query_part = shape_input
-        .request
-        .query
-        .as_ref()
-        .map(|q| format!("?{}", q))
-        .unwrap_or_default();
-    let url = format!("{}{}{}", base_url, shape_input.request.path, query_part);
-    Ok(ShapeResponse {
-        _version: 1,
-        url,
-        method: shape_input.request.method,
-        headers: shape_input.request.headers,
-        body_base64: shape_input.request.body_base64,
-    })
-}
-
-#[plugin_fn]
-pub fn shape(input: String) -> FnResult<String> {
-    let response = shape_response(&input)?;
-    Ok(serde_json::to_string(&response)?)
-}
-
-fn normalize_error_response() -> Value {
-    json!({
-        "_version": 1,
-        "body_base64": Value::Null,
-    })
-}
-
-#[plugin_fn]
-pub fn normalize_error(_input: String) -> FnResult<String> {
-    Ok(normalize_error_response().to_string())
+    #[cc_lb_pdk::handler(name = "normalize_error", versions = [1])]
+    pub(super) fn normalize_error_handler(
+        _request: NormalizeErrorRequest,
+    ) -> Result<NormalizeErrorResponse, Infallible> {
+        Ok(NormalizeErrorResponse { body_base64: None })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::atomic::AtomicUsize;
+    use cc_lb_plugin_wire::v1::{
+        common::{CandidateWire, HeaderWire, Principal, RequestWire, UpstreamWire},
+        normalize_error::NormalizeErrorRequest,
+        route::RouteRequest,
+        shape::ShapeRequest,
+    };
     use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
     use std::thread;
 
     #[test]
@@ -198,21 +126,54 @@ mod tests {
     }
 
     #[test]
+    fn route_handler_cycles_candidate_upstream_ids() {
+        COUNTER.store(0, Ordering::Relaxed);
+
+        let first =
+            plugin::route_handler(route_request(vec![candidate("up-1"), candidate("up-2")]))
+                .expect("route ok");
+        let second =
+            plugin::route_handler(route_request(vec![candidate("up-1"), candidate("up-2")]))
+                .expect("route ok");
+
+        assert_eq!(first.upstream_id.as_deref(), Some("up-1"));
+        assert_eq!(second.upstream_id.as_deref(), Some("up-2"));
+        assert_eq!(first.dialect, DialectBinding::SelfReferenced);
+        assert_eq!(first.upstream, UpstreamWire::AnthropicDirect);
+    }
+
+    #[test]
+    fn route_handler_no_candidates_returns_no_choice() {
+        COUNTER.store(0, Ordering::Relaxed);
+
+        let response = plugin::route_handler(route_request(Vec::new())).expect("route ok");
+
+        assert_eq!(response.upstream_id, None);
+        assert_eq!(response.dialect, DialectBinding::SelfReferenced);
+        assert_eq!(response.upstream, UpstreamWire::AnthropicDirect);
+        assert_eq!(COUNTER.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
     fn shape_url_for_anthropic_direct_uses_canonical_base() {
-        let input = json!({
-            "_version": 1,
-            "request": {
-                "request_id": "req-123",
-                "headers": [],
-                "method": "POST",
-                "path": "/v1/messages",
-                "query": "stream=true",
-                "body_base64": "e30="
+        let response = plugin::shape_handler(ShapeRequest {
+            request: RequestWire {
+                request_id: "req-123".to_string(),
+                headers: Vec::new(),
+                method: "POST".to_string(),
+                path: "/v1/messages".to_string(),
+                query: Some("stream=true".to_string()),
+                body_base64: "e30=".to_string(),
             },
-            "upstream": {"kind": "anthropic_direct"},
-            "principal": {"id": "user-1", "kind": "api_key", "claims": {}}
-        });
-        let response = shape_response(&input.to_string()).expect("shape ok");
+            upstream: UpstreamWire::AnthropicDirect,
+            principal: Principal {
+                id: "user-1".to_string(),
+                kind: "api_key".to_string(),
+                claims: Default::default(),
+            },
+        })
+        .expect("shape ok");
+
         assert_eq!(
             response.url,
             "https://api.anthropic.com/v1/messages?stream=true"
@@ -222,20 +183,29 @@ mod tests {
 
     #[test]
     fn shape_url_for_custom_uses_base_url() {
-        let input = json!({
-            "_version": 1,
-            "request": {
-                "request_id": "req-456",
-                "headers": [{"name": "content-type", "value_base64": "YXBwbGljYXRpb24vanNvbg=="}],
-                "method": "POST",
-                "path": "/v1/messages",
-                "query": null,
-                "body_base64": "eyJtb2RlbCI6ImNsYXVkZS0zIn0="
+        let response = plugin::shape_handler(ShapeRequest {
+            request: RequestWire {
+                request_id: "req-456".to_string(),
+                headers: vec![HeaderWire {
+                    name: "content-type".to_string(),
+                    value_base64: "YXBwbGljYXRpb24vanNvbg==".to_string(),
+                }],
+                method: "POST".to_string(),
+                path: "/v1/messages".to_string(),
+                query: None,
+                body_base64: "eyJtb2RlbCI6ImNsYXVkZS0zIn0=".to_string(),
             },
-            "upstream": {"kind": "custom_anthropic_spec", "base_url": "https://gateway.example.com"},
-            "principal": {"id": "user-2", "kind": "oauth_subject", "claims": {}}
-        });
-        let response = shape_response(&input.to_string()).expect("shape ok");
+            upstream: UpstreamWire::CustomAnthropicSpec {
+                base_url: "https://gateway.example.com".to_string(),
+            },
+            principal: Principal {
+                id: "user-2".to_string(),
+                kind: "oauth_subject".to_string(),
+                claims: Default::default(),
+            },
+        })
+        .expect("shape ok");
+
         assert_eq!(response.url, "https://gateway.example.com/v1/messages");
         assert_eq!(response.method, "POST");
         assert_eq!(response.headers.len(), 1);
@@ -243,9 +213,36 @@ mod tests {
     }
 
     #[test]
-    fn normalize_error_returns_versioned_null_body() {
-        let value = normalize_error_response();
-        assert_eq!(value["_version"], json!(1));
-        assert_eq!(value["body_base64"], Value::Null);
+    fn normalize_error_returns_null_body() {
+        let response = plugin::normalize_error_handler(NormalizeErrorRequest {
+            status: 500,
+            body_base64: "ignored".to_string(),
+        })
+        .expect("normalize ok");
+
+        assert_eq!(response.body_base64, None);
+    }
+
+    fn route_request(candidates: Vec<CandidateWire>) -> RouteRequest {
+        RouteRequest {
+            request_id: "req-route".to_string(),
+            headers: Vec::new(),
+            method: "POST".to_string(),
+            path: "/v1/messages".to_string(),
+            query: None,
+            body_base64: "e30=".to_string(),
+            principal: Principal::dry_run_sample(),
+            candidates,
+        }
+    }
+
+    fn candidate(upstream_id: &str) -> CandidateWire {
+        CandidateWire {
+            upstream_id: upstream_id.to_string(),
+            name: upstream_id.to_string(),
+            kind: "anthropic_api_key".to_string(),
+            observed_rate_limits: Vec::new(),
+            observed_at_unix_secs: 0,
+        }
     }
 }

@@ -473,6 +473,36 @@ pub mod tests {
         assert_eq!(repos.registry.active_count().await, 0);
     }
 
+    #[tokio::test]
+    async fn force_overrides_skip() {
+        let repos = Repos::default();
+        let registry = registry(repos.registry.clone(), repos.blobs.clone(), BTreeSet::new());
+        let wasm = plugin_wasm("test-plugin", "1.0.0");
+        registry
+            .register_plugin(&wasm)
+            .await
+            .expect("register succeeds");
+        repos.blobs.gets.store(0, Ordering::SeqCst);
+        let (_tx, shutdown) = watch::channel(false);
+
+        let report = run_startup_handshake(
+            &registry,
+            repos.registry.as_ref(),
+            StartupHandshakeOpts {
+                skip_if_fresh: true,
+                force: true,
+                ..StartupHandshakeOpts::default()
+            },
+            shutdown,
+        )
+        .await;
+
+        assert_eq!(report.processed, 1);
+        assert_eq!(report.skipped_fresh, 0);
+        assert_eq!(report.re_handshaked, 1);
+        assert_eq!(repos.blobs.gets.load(Ordering::SeqCst), 1);
+    }
+
     async fn seed_plugins(registry: &PluginRegistry, count: usize) {
         for index in 0..count {
             let wasm = plugin_wasm(&format!("test-plugin-{index}"), "1.0.0");

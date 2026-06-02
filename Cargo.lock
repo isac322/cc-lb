@@ -659,7 +659,6 @@ name = "cc-lb-pdk"
 version = "0.1.0"
 dependencies = [
  "cc-lb-plugin-wire",
- "extism-pdk",
  "proc-macro2",
  "quote",
  "serde_json",
@@ -741,6 +740,14 @@ dependencies = [
  "http-body-util",
  "proptest",
  "tokio",
+]
+
+[[package]]
+name = "cc-lb-router-round-robin"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-pdk",
+ "cc-lb-plugin-wire",
 ]
 
 [[package]]

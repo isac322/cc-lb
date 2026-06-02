@@ -131,6 +131,36 @@ impl PluginRegistry {
         Ok(record)
     }
 
+    pub async fn delete_plugin(&self, sha256: &[u8; 32]) -> Result<(), RegistryError> {
+        self.registry_repo
+            .delete_by_sha256(sha256)
+            .await
+            .map_err(|source| RegistryError::RegistryRepo { source })?;
+        self.blob_repo
+            .delete_blob(sha256)
+            .await
+            .map_err(|source| RegistryError::BlobRepo { source })?;
+        self.in_process_cache.remove(sha256);
+        Ok(())
+    }
+
+    pub async fn list_active(&self) -> Result<Vec<PluginRegistryRecord>, RegistryError> {
+        self.registry_repo
+            .list_active()
+            .await
+            .map_err(|source| RegistryError::RegistryRepo { source })
+    }
+
+    pub async fn get_by_sha256(
+        &self,
+        sha256: &[u8; 32],
+    ) -> Result<Option<PluginRegistryRecord>, RegistryError> {
+        self.registry_repo
+            .get_by_sha256(sha256)
+            .await
+            .map_err(|source| RegistryError::RegistryRepo { source })
+    }
+
     pub async fn load_from_db_at_startup(&self) -> Result<usize, RegistryError> {
         let records = self
             .registry_repo
@@ -164,10 +194,7 @@ impl PluginRegistry {
         &self,
         sha256: &[u8; 32],
     ) -> Result<Option<PluginRegistryRecord>, RegistryError> {
-        self.registry_repo
-            .get_by_sha256(sha256)
-            .await
-            .map_err(|source| RegistryError::RegistryRepo { source })
+        self.get_by_sha256(sha256).await
     }
 
     async fn verify_and_build_record(
