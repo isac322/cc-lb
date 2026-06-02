@@ -2,8 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    MAX_WASM_BLOB_BYTES, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
-    PluginRegistryStore, PluginSlot, StorageError, StorageResult, WasmBlob, WasmBlobRecord,
+    MAX_WASM_BLOB_BYTES, PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput,
+    PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, StorageError, StorageResult, WasmBlob,
+    WasmBlobRecord,
     WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
 };
 use chrono::{DateTime, Utc};
@@ -366,7 +367,7 @@ impl PluginRegistryStore for PostgresStorage {
         let mut seen_ids = HashSet::with_capacity(new_orders.len());
         for (id, order, expected_revision) in &new_orders {
             if !seen_ids.insert(*id) {
-                return Err(StorageError::PluginChainConflict {
+                return Err(StorageError::Conflict {
                     message: "duplicate_plugin_chain_entry".to_owned(),
                 });
             }
@@ -376,13 +377,13 @@ impl PluginRegistryStore for PostgresStorage {
                 .await
                 .map_err(map_sqlx_error)?;
             let Some(row) = row else {
-                return Err(StorageError::PluginChainConflict {
+                return Err(StorageError::Conflict {
                     message: "unknown plugin chain entry".to_owned(),
                 });
             };
             let entry = chain_from_row(row)?;
             if entry.principal_id != principal_id || entry.slot != slot {
-                return Err(StorageError::PluginChainConflict {
+                return Err(StorageError::Conflict {
                     message: "plugin chain entry is not in requested chain".to_owned(),
                 });
             }
@@ -417,7 +418,7 @@ impl PluginRegistryStore for PostgresStorage {
             .any(|pair| pair[1].order.checked_sub(pair[0].order).unwrap_or(i64::MAX) < 2)
         {
             return Err(StorageError::PluginChainConflict {
-                message: "invalid_order_gap_below_2".to_owned(),
+                reason: PluginChainConflictReason::InvalidOrderGap,
             });
         }
         if !staged_ids.is_empty() {
@@ -431,7 +432,7 @@ impl PluginRegistryStore for PostgresStorage {
                 .await
                 .map_err(map_sqlx_error)?;
             if result.rows_affected() != staged_ids.len() as u64 {
-                return Err(StorageError::PluginChainConflict {
+                return Err(StorageError::Conflict {
                     message: "stale or missing plugin chain revision".to_owned(),
                 });
             }

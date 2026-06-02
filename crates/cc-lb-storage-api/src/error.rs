@@ -1,8 +1,21 @@
-use std::error::Error;
+use std::{error::Error, fmt};
 
 use thiserror::Error;
 
 use crate::BackendKind;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginChainConflictReason {
+    InvalidOrderGap,
+}
+
+impl fmt::Display for PluginChainConflictReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidOrderGap => formatter.write_str("invalid_order_gap"),
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -41,8 +54,8 @@ pub enum StorageError {
     StalePluginRegistryRevision { current: u64 },
     #[error("stale plugin chain revision; current revision is {current}")]
     StalePluginChainRevision { current: u64 },
-    #[error("plugin chain conflict: {message}")]
-    PluginChainConflict { message: String },
+    #[error("plugin chain conflict: {reason}")]
+    PluginChainConflict { reason: PluginChainConflictReason },
     #[error("principal not found: {id}")]
     PrincipalNotFound { id: String },
 }

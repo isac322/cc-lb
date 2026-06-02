@@ -9,8 +9,8 @@ use axum::{
 };
 use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_storage_api::{
-    PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginSlot, Storage,
-    StorageError, WasmRegistryEntry, sparse_order,
+    PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
+    PluginSlot, Storage, StorageError, WasmRegistryEntry, sparse_order,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -22,7 +22,6 @@ use crate::AdminState;
 
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 1000;
-const PLUGIN_CHAIN_ORDER_GAPS_NEED_REBALANCE: &str = "plugin chain order gaps need rebalance";
 
 pub fn router() -> Router<AdminState> {
     Router::new()
@@ -305,12 +304,9 @@ async fn insert_chain(
             response
         }
         Err(StorageError::PrincipalNotFound { id }) => unknown_principal(id),
-        Err(StorageError::PluginChainConflict { message }) if invalid_order_message(&message) => {
-            invalid_order(message)
-        }
-        Err(StorageError::Conflict { message }) if invalid_order_message(&message) => {
-            invalid_order(message)
-        }
+        Err(StorageError::PluginChainConflict {
+            reason: PluginChainConflictReason::InvalidOrderGap,
+        }) => invalid_order(),
         Err(error) => storage_error(error),
     }
 }
@@ -378,12 +374,9 @@ async fn reorder_chain(
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
         }
-        Err(StorageError::PluginChainConflict { message }) if invalid_order_message(&message) => {
-            invalid_order(message)
-        }
-        Err(StorageError::Conflict { message }) if invalid_order_message(&message) => {
-            invalid_order(message)
-        }
+        Err(StorageError::PluginChainConflict {
+            reason: PluginChainConflictReason::InvalidOrderGap,
+        }) => invalid_order(),
         Err(error) => storage_mutation_error(error),
     }
 }
@@ -635,12 +628,9 @@ fn storage_mutation_error(error: StorageError) -> axum::response::Response {
         StorageError::StalePluginRegistryRevision { current }
         | StorageError::StalePluginChainRevision { current } => stale_revision(current),
         StorageError::PluginRegistryReferenced { id } => plugin_registry_referenced(id),
-        StorageError::PluginChainConflict { message } if invalid_order_message(&message) => {
-            invalid_order(message)
-        }
-        StorageError::Conflict { message } if message == PLUGIN_CHAIN_ORDER_GAPS_NEED_REBALANCE => {
-            invalid_order(message)
-        }
+        StorageError::PluginChainConflict {
+            reason: PluginChainConflictReason::InvalidOrderGap,
+        } => invalid_order(),
         error => storage_error(error),
     }
 }
@@ -681,21 +671,8 @@ fn unknown_principal(id: String) -> axum::response::Response {
         .into_response()
 }
 
-fn invalid_order(detail: String) -> axum::response::Response {
-    (
-        StatusCode::CONFLICT,
-        Json(json!({ "error": "invalid_order", "detail": detail })),
-    )
-        .into_response()
-}
-
-fn invalid_order_message(message: &str) -> bool {
-    matches!(
-        message,
-        "invalid_order_gap_below_2"
-            | "invalid_order_duplicate"
-            | PLUGIN_CHAIN_ORDER_GAPS_NEED_REBALANCE
-    )
+fn invalid_order() -> axum::response::Response {
+    (StatusCode::CONFLICT, Json(json!({ "error": "invalid_order" }))).into_response()
 }
 
 fn storage_error(storage_error: StorageError) -> axum::response::Response {

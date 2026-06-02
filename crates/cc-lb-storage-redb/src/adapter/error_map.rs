@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use cc_lb_storage_api::StorageError as ApiStorageError;
+use cc_lb_storage_api::{PluginChainConflictReason, StorageError as ApiStorageError};
 
 use crate::{CURRENT_SCHEMA_VERSION, StorageError};
 
@@ -66,8 +66,8 @@ pub(crate) fn map_redb_err(error: StorageError) -> ApiStorageError {
         StorageError::PluginRegistryConflict { message }
             if is_plugin_chain_order_conflict(&message) =>
         {
-            ApiStorageError::Conflict {
-                message: "plugin chain order gaps need rebalance".to_owned(),
+            ApiStorageError::PluginChainConflict {
+                reason: PluginChainConflictReason::InvalidOrderGap,
             }
         }
         StorageError::PluginRegistryConflict { message } => ApiStorageError::Conflict { message },

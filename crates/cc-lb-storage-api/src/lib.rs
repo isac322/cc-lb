@@ -11,7 +11,7 @@ pub mod upstream;
 pub mod upstream_rate_limit;
 pub mod validation;
 
-pub use error::{StorageError, StorageResult};
+pub use error::{PluginChainConflictReason, StorageError, StorageResult};
 pub use plugin_registry::*;
 pub use principal::*;
 pub use runtime_change_notifier::*;

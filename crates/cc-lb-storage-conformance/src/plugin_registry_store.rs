@@ -2,8 +2,8 @@ use std::{any::Any, sync::Arc};
 
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
-    PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, PrincipalStore,
-    StorageError, WasmBlob, WasmRegistryEntryInput,
+    PluginChainConflictReason, PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore,
+    PluginSlot, PrincipalStore, StorageError, WasmBlob, WasmRegistryEntryInput,
     principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind},
     sparse_order,
 };
@@ -737,10 +737,14 @@ async fn reorder_chain_rejects_final_chain_gap_on_storage<
         )
         .await
         .expect_err("final chain with pairwise gap below 2 is invalid");
-    let message = err.to_string();
     ensure!(
-        message.contains("gap") || message.contains("invalid_order"),
-        "final chain gap conflict mentions gap or invalid_order"
+        matches!(
+            err,
+            StorageError::PluginChainConflict {
+                reason: PluginChainConflictReason::InvalidOrderGap
+            }
+        ),
+        "final chain gap conflict returns typed InvalidOrderGap reason"
     );
     Ok(())
 }
