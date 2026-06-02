@@ -34,27 +34,27 @@ impl PluginRegistryStore for PostgresStorage {
             });
         }
         let mut tx = begin_repeatable_read(&self.pool).await?;
-        if let Some(existing) = self.registry_by_sha_in_tx(&mut tx, blob.sha256).await? {
-            insert_missing_blob_in_tx(&mut tx, &blob, existing.id).await?;
-            tx.commit().await.map_err(map_sqlx_error)?;
-            return Ok((existing, true));
-        }
         let id = Uuid::new_v4();
         let uploaded_at =
             unix_secs_to_datetime(input.uploaded_at_unix_secs, "wasm_registry.uploaded_at")?;
         insert_blob_in_tx(&mut tx, &blob, 0).await?;
-        sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, revision) VALUES ($1, $2, $3, $4, $5, $6, $7, 0)")
-            .bind(id).bind(blob.sha256.as_slice()).bind(input.name).bind(input.original_filename).bind(input.label).bind(uploaded_at).bind(input.uploaded_by_admin_id)
-            .execute(&mut *tx).await.map_err(map_sqlx_error)?;
-        let row = sqlx::query("SELECT r.*, COALESCE((SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id), 0)::BIGINT AS refcount FROM wasm_registry_v2 r WHERE r.id = $1")
-            .bind(id).fetch_one(&mut *tx).await.map_err(map_sqlx_error)?;
-        sqlx::query("SELECT pg_notify('cclb_plugin_changed', $1)")
-            .bind(id.to_string())
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
+        let inserted_registry =
+            insert_registry_in_tx(&mut tx, id, blob.sha256, &input, uploaded_at).await?;
+        let entry = self
+            .registry_by_sha_in_tx(&mut tx, blob.sha256)
+            .await?
+            .ok_or_else(|| StorageError::Fatal {
+                message: "wasm registry row missing after upload".to_owned(),
+            })?;
+        if inserted_registry {
+            sqlx::query("SELECT pg_notify('cclb_plugin_changed', $1)")
+                .bind(entry.id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+        }
         tx.commit().await.map_err(map_sqlx_error)?;
-        registry_from_row(row).map(|entry| (entry, false))
+        Ok((entry, !inserted_registry))
     }
 
     async fn get_blob_bytes(&self, sha256: [u8; 32]) -> StorageResult<Option<Vec<u8>>> {
@@ -210,23 +210,21 @@ impl PluginRegistryStore for PostgresStorage {
         input: PluginChainEntryInput,
     ) -> StorageResult<PluginChainEntry> {
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let sha: Vec<u8> = sqlx::query_scalar(
-            "SELECT sha256 FROM wasm_registry_v2 WHERE id = $1 FOR UPDATE",
-        )
-        .bind(input.wasm_registry_id)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?
-        .ok_or_else(|| StorageError::PluginRegistryConflict {
-            message: "unknown plugin registry entry".to_owned(),
-        })?;
-        let blob_refcount: Option<i64> = sqlx::query_scalar(
-            "SELECT refcount FROM wasm_blobs_v2 WHERE sha256 = $1 FOR UPDATE",
-        )
-        .bind(&sha)
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
+        let sha: Vec<u8> =
+            sqlx::query_scalar("SELECT sha256 FROM wasm_registry_v2 WHERE id = $1 FOR UPDATE")
+                .bind(input.wasm_registry_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?
+                .ok_or_else(|| StorageError::PluginRegistryConflict {
+                    message: "unknown plugin registry entry".to_owned(),
+                })?;
+        let blob_refcount: Option<i64> =
+            sqlx::query_scalar("SELECT refcount FROM wasm_blobs_v2 WHERE sha256 = $1 FOR UPDATE")
+                .bind(&sha)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
         if blob_refcount.is_none() {
             return Err(StorageError::PluginRegistryConflict {
                 message: "missing wasm blob".to_owned(),
@@ -382,13 +380,10 @@ impl PluginRegistryStore for PostgresStorage {
             }
         }
         entries.sort_by_key(|entry| (entry.order, entry.id));
-        if entries.windows(2).any(|pair| {
-            pair[1]
-                .order
-                .checked_sub(pair[0].order)
-                .unwrap_or(i64::MAX)
-                < 2
-        }) {
+        if entries
+            .windows(2)
+            .any(|pair| pair[1].order.checked_sub(pair[0].order).unwrap_or(i64::MAX) < 2)
+        {
             return Err(StorageError::PluginChainConflict {
                 message: "invalid_order_gap_below_2".to_owned(),
             });
@@ -514,29 +509,6 @@ impl PostgresStorage {
     }
 }
 
-async fn insert_missing_blob_in_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    blob: &WasmBlob,
-    registry_id: Uuid,
-) -> StorageResult<()> {
-    let exists: Option<i64> =
-        sqlx::query_scalar("SELECT 1 FROM wasm_blobs_v2 WHERE sha256 = $1 FOR UPDATE")
-            .bind(blob.sha256.as_slice())
-            .fetch_optional(&mut **tx)
-            .await
-            .map_err(map_sqlx_error)?;
-    if exists.is_some() {
-        return Ok(());
-    }
-    let refcount: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM plugin_chains_v2 WHERE wasm_registry_id = $1")
-            .bind(registry_id)
-            .fetch_one(&mut **tx)
-            .await
-            .map_err(map_sqlx_error)?;
-    insert_blob_in_tx(tx, blob, refcount).await
-}
-
 async fn insert_blob_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     blob: &WasmBlob,
@@ -546,7 +518,7 @@ async fn insert_blob_in_tx(
         blob.parse_validated_at_unix_secs,
         "wasm_blob.parse_validated_at",
     )?;
-    sqlx::query("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, refcount, created_at) VALUES ($1, $2, $3, $4, $5, NOW())")
+    sqlx::query("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, refcount, created_at) VALUES ($1, $2, $3, $4, $5, NOW()) ON CONFLICT (sha256) DO NOTHING")
         .bind(blob.sha256.as_slice())
         .bind(blob.bytes.as_slice())
         .bind(u64_to_i64(blob.size_bytes, "wasm_blob.size_bytes")?)
@@ -556,6 +528,27 @@ async fn insert_blob_in_tx(
         .await
         .map_err(map_sqlx_error)?;
     Ok(())
+}
+
+async fn insert_registry_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    id: Uuid,
+    sha256: [u8; 32],
+    input: &WasmRegistryEntryInput,
+    uploaded_at: DateTime<Utc>,
+) -> StorageResult<bool> {
+    let result = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, revision) VALUES ($1, $2, $3, $4, $5, $6, $7, 0) ON CONFLICT (sha256) DO NOTHING")
+        .bind(id)
+        .bind(sha256.as_slice())
+        .bind(&input.name)
+        .bind(&input.original_filename)
+        .bind(&input.label)
+        .bind(uploaded_at)
+        .bind(input.uploaded_by_admin_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    Ok(result.rows_affected() == 1)
 }
 
 async fn begin_repeatable_read(
