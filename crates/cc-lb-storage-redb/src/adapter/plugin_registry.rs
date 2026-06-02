@@ -225,7 +225,6 @@ impl RedbStorage {
             if existing.name == input.name
                 && existing.original_filename == input.original_filename
                 && existing.label == input.label
-                && existing.uploaded_by_admin_id == input.uploaded_by_admin_id
             {
                 self_heal_blob_if_missing(&write_txn, &blob, existing.id)?;
                 write_txn.commit()?;
