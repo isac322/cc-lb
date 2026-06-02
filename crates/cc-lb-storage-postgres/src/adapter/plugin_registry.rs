@@ -292,32 +292,48 @@ impl PluginRegistryStore for PostgresStorage {
         expected_revision: u64,
         update: PluginChainEntryUpdate,
     ) -> StorageResult<Option<PluginChainEntry>> {
-        let Some(mut current) = self.get_chain(id).await? else {
+        if update.config.is_none()
+            && update.sse_per_event.is_none()
+            && update.batched_events_per_flush.is_none()
+            && update.batched_flush_ms.is_none()
+        {
+            return Err(StorageError::InvalidInput {
+                field: "plugin_chain.update".to_owned(),
+                reason: "empty_update".to_owned(),
+            });
+        }
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let Some(mut current) = self.get_chain_in_tx(&mut tx, id).await? else {
+            tx.commit().await.map_err(map_sqlx_error)?;
             return Ok(None);
         };
         if current.revision != expected_revision {
-            return Err(conflict(format!(
-                "stale plugin chain revision; current revision is {}",
-                current.revision
-            )));
+            return Err(StorageError::StalePluginChainRevision {
+                current: current.revision,
+            });
         }
-        if let Some(v) = update.config {
-            current.config = v;
+        if let Some(value) = update.config {
+            current.config = value;
         }
-        if let Some(v) = update.sse_per_event {
-            current.sse_per_event = v;
+        if let Some(value) = update.sse_per_event {
+            current.sse_per_event = value;
         }
-        if let Some(v) = update.batched_events_per_flush {
-            current.batched_events_per_flush = v;
+        if let Some(value) = update.batched_events_per_flush {
+            current.batched_events_per_flush = value;
         }
-        if let Some(v) = update.batched_flush_ms {
-            current.batched_flush_ms = v;
+        if let Some(value) = update.batched_flush_ms {
+            current.batched_flush_ms = value;
         }
         let row = sqlx::query("UPDATE plugin_chains_v2 SET config=$3, sse_per_event=$4, batched_events_per_flush=$5, batched_flush_ms=$6, revision=revision+1 WHERE id=$1 AND revision=$2 RETURNING *")
             .bind(id).bind(u64_to_i64(expected_revision, "plugin_chain.revision")?).bind(current.config).bind(current.sse_per_event).bind(i32::try_from(current.batched_events_per_flush).map_err(|_| StorageError::Fatal { message: "batched_events_per_flush exceeds i32".to_owned() })?).bind(u64_to_i64(current.batched_flush_ms, "plugin_chain.batched_flush_ms")?)
-            .fetch_one(&self.pool).await.map_err(map_sqlx_error)?;
+            .fetch_one(&mut *tx).await.map_err(map_sqlx_error)?;
         let entry = chain_from_row(row)?;
-        self.notify_chain(entry.principal_id).await?;
+        sqlx::query("SELECT pg_notify('cclb_plugin_chain_changed', $1)")
+            .bind(entry.principal_id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
         Ok(Some(entry))
     }
 
@@ -495,15 +511,6 @@ impl PostgresStorage {
         row.map(registry_from_row).transpose()
     }
 
-    async fn get_chain(&self, id: Uuid) -> StorageResult<Option<PluginChainEntry>> {
-        let row = sqlx::query("SELECT * FROM plugin_chains_v2 WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?;
-        row.map(chain_from_row).transpose()
-    }
-
     async fn get_chain_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -515,15 +522,6 @@ impl PostgresStorage {
             .await
             .map_err(map_sqlx_error)?;
         row.map(chain_from_row).transpose()
-    }
-
-    async fn notify_chain(&self, principal_id: Uuid) -> StorageResult<()> {
-        sqlx::query("SELECT pg_notify('cclb_plugin_chain_changed', $1)")
-            .bind(principal_id.to_string())
-            .execute(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?;
-        Ok(())
     }
 }
 
