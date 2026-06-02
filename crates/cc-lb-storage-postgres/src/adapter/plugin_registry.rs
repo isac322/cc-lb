@@ -98,7 +98,7 @@ impl PluginRegistryStore for PostgresStorage {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let rows = sqlx::query("SELECT r.*, b.refcount FROM wasm_registry_v2 r JOIN wasm_blobs_v2 b ON b.sha256 = r.sha256 WHERE ($1::uuid IS NULL OR r.id > $1) ORDER BY r.id ASC LIMIT $2")
+        let rows = sqlx::query("SELECT r.*, COALESCE((SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id), 0)::BIGINT AS refcount FROM wasm_registry_v2 r WHERE ($1::uuid IS NULL OR r.id > $1) ORDER BY r.id ASC LIMIT $2")
             .bind(after).bind(u64_to_i64(limit as u64, "plugin_registry.limit")?).fetch_all(&self.pool).await.map_err(map_sqlx_error)?;
         rows.into_iter().map(registry_from_row).collect()
     }
@@ -107,13 +107,13 @@ impl PluginRegistryStore for PostgresStorage {
         &self,
         sha256: [u8; 32],
     ) -> StorageResult<Option<WasmRegistryEntry>> {
-        let row = sqlx::query("SELECT r.*, b.refcount FROM wasm_registry_v2 r JOIN wasm_blobs_v2 b ON b.sha256 = r.sha256 WHERE r.sha256 = $1")
+        let row = sqlx::query("SELECT r.*, COALESCE((SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id), 0)::BIGINT AS refcount FROM wasm_registry_v2 r WHERE r.sha256 = $1")
             .bind(sha256.as_slice()).fetch_optional(&self.pool).await.map_err(map_sqlx_error)?;
         row.map(registry_from_row).transpose()
     }
 
     async fn get_registry_entry_by_id(&self, id: Uuid) -> StorageResult<Option<WasmRegistryEntry>> {
-        let row = sqlx::query("SELECT r.*, b.refcount FROM wasm_registry_v2 r JOIN wasm_blobs_v2 b ON b.sha256 = r.sha256 WHERE r.id = $1")
+        let row = sqlx::query("SELECT r.*, COALESCE((SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id), 0)::BIGINT AS refcount FROM wasm_registry_v2 r WHERE r.id = $1")
             .bind(id).fetch_optional(&self.pool).await.map_err(map_sqlx_error)?;
         row.map(registry_from_row).transpose()
     }
