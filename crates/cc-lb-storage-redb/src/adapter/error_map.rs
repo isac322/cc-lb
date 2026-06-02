@@ -70,6 +70,9 @@ pub(crate) fn map_redb_err(error: StorageError) -> ApiStorageError {
                 reason: PluginChainConflictReason::InvalidOrderGap,
             }
         }
+        StorageError::PluginChainConflict { reason } => {
+            ApiStorageError::PluginChainConflict { reason }
+        }
         StorageError::PluginRegistryConflict { message } => ApiStorageError::Conflict { message },
         StorageError::StalePluginRegistryRevision { current } => {
             ApiStorageError::StalePluginRegistryRevision { current }

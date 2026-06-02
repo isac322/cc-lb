@@ -1,18 +1,21 @@
 use std::{error::Error, fmt};
 
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::BackendKind;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginChainConflictReason {
     InvalidOrderGap,
+    SlotIsSingleton { existing_entry_id: Uuid },
 }
 
 impl fmt::Display for PluginChainConflictReason {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidOrderGap => formatter.write_str("invalid_order_gap"),
+            Self::SlotIsSingleton { .. } => formatter.write_str("slot_is_singleton"),
         }
     }
 }

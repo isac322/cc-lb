@@ -41,6 +41,9 @@ where
     registry_label_update_with_stale_revision_conflicts(storage).await?;
     chain_insert_preserves_sparse_order(storage).await?;
     list_chain_for_principal_returns_ordered(storage).await?;
+    insert_chain_entry_rejects_duplicate_for_router_slot_on_storage(storage).await?;
+    insert_chain_entry_rejects_duplicate_for_shape_slot_on_storage(storage).await?;
+    insert_chain_entry_allows_multi_for_observability_hook_on_storage(storage).await?;
     refcount_increment_on_chain_insert(storage).await?;
     update_chain_entry_bumps_revision(storage).await?;
     update_chain_entry_stale_revision_conflicts(storage).await?;
@@ -258,13 +261,23 @@ pub async fn chain_insert_preserves_sparse_order<S: PluginRegistryStore + Princi
 ) -> Result<()> {
     let (principal, plugin) = principal_and_plugin(storage, 11, "plugin-chain-order").await?;
     storage
-        .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP * 2))
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::ObservabilityHook,
+            plugin.id,
+            sparse_order::STEP * 2,
+        ))
         .await?;
     storage
-        .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::ObservabilityHook,
+            plugin.id,
+            sparse_order::STEP,
+        ))
         .await?;
     let listed = storage
-        .list_chain_for_principal(principal, PluginSlot::Router)
+        .list_chain_for_principal(principal, PluginSlot::ObservabilityHook)
         .await?;
     ensure!(listed[0].order < listed[1].order, "chain list is ordered");
     Ok(())
@@ -275,16 +288,143 @@ pub async fn list_chain_for_principal_returns_ordered<S: PluginRegistryStore + P
 ) -> Result<()> {
     let (principal, plugin) = principal_and_plugin(storage, 22, "plugin-chain-list").await?;
     storage
-        .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP * 2))
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::ObservabilityHook,
+            plugin.id,
+            sparse_order::STEP * 2,
+        ))
         .await?;
     storage
-        .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::ObservabilityHook,
+            plugin.id,
+            sparse_order::STEP,
+        ))
         .await?;
     let listed = storage
-        .list_chain_for_principal(principal, PluginSlot::Router)
+        .list_chain_for_principal(principal, PluginSlot::ObservabilityHook)
         .await?;
     ensure!(listed.len() == 2, "chain list includes both entries");
     ensure!(listed[0].order < listed[1].order, "chain list is ordered");
+    Ok(())
+}
+
+plugin_registry_scenario!(
+    insert_chain_entry_rejects_duplicate_for_router_slot,
+    insert_chain_entry_rejects_duplicate_for_router_slot_on_storage
+);
+
+async fn insert_chain_entry_rejects_duplicate_for_router_slot_on_storage<
+    S: PluginRegistryStore + PrincipalStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let (principal, plugin) = principal_and_plugin(storage, 37, "plugin-router-singleton").await?;
+    let first = storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::Router,
+            plugin.id,
+            sparse_order::STEP,
+        ))
+        .await?;
+    let err = storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::Router,
+            plugin.id,
+            sparse_order::STEP * 2,
+        ))
+        .await
+        .expect_err("duplicate router slot insert conflicts");
+    ensure!(
+        matches!(
+            err,
+            StorageError::PluginChainConflict {
+                reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id }
+            } if existing_entry_id == first.id
+        ),
+        "duplicate router slot returns typed singleton conflict"
+    );
+    Ok(())
+}
+
+plugin_registry_scenario!(
+    insert_chain_entry_rejects_duplicate_for_shape_slot,
+    insert_chain_entry_rejects_duplicate_for_shape_slot_on_storage
+);
+
+async fn insert_chain_entry_rejects_duplicate_for_shape_slot_on_storage<
+    S: PluginRegistryStore + PrincipalStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let (principal, plugin) = principal_and_plugin(storage, 38, "plugin-shape-singleton").await?;
+    let first = storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::Shape,
+            plugin.id,
+            sparse_order::STEP,
+        ))
+        .await?;
+    let err = storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::Shape,
+            plugin.id,
+            sparse_order::STEP * 2,
+        ))
+        .await
+        .expect_err("duplicate shape slot insert conflicts");
+    ensure!(
+        matches!(
+            err,
+            StorageError::PluginChainConflict {
+                reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id }
+            } if existing_entry_id == first.id
+        ),
+        "duplicate shape slot returns typed singleton conflict"
+    );
+    Ok(())
+}
+
+plugin_registry_scenario!(
+    insert_chain_entry_allows_multi_for_observability_hook,
+    insert_chain_entry_allows_multi_for_observability_hook_on_storage
+);
+
+async fn insert_chain_entry_allows_multi_for_observability_hook_on_storage<
+    S: PluginRegistryStore + PrincipalStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let (principal, plugin) = principal_and_plugin(storage, 39, "plugin-hook-multi").await?;
+    storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::ObservabilityHook,
+            plugin.id,
+            sparse_order::STEP,
+        ))
+        .await?;
+    storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::ObservabilityHook,
+            plugin.id,
+            sparse_order::STEP * 2,
+        ))
+        .await?;
+    let listed = storage
+        .list_chain_for_principal(principal, PluginSlot::ObservabilityHook)
+        .await?;
+    ensure!(
+        listed.len() == 2,
+        "observability hook allows multiple entries"
+    );
     Ok(())
 }
 
@@ -720,19 +860,34 @@ async fn reorder_chain_rejects_final_chain_gap_on_storage<
 ) -> Result<()> {
     let (principal, plugin) = principal_and_plugin(storage, 33, "plugin-final-gap").await?;
     let first = storage
-        .insert_chain_entry(chain(principal, plugin.id, 100))
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::ObservabilityHook,
+            plugin.id,
+            100,
+        ))
         .await?;
     let second = storage
-        .insert_chain_entry(chain(principal, plugin.id, 200))
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::ObservabilityHook,
+            plugin.id,
+            200,
+        ))
         .await?;
     storage
-        .insert_chain_entry(chain(principal, plugin.id, 300))
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::ObservabilityHook,
+            plugin.id,
+            300,
+        ))
         .await?;
 
     let err = storage
         .reorder_chain(
             principal,
-            PluginSlot::Router,
+            PluginSlot::ObservabilityHook,
             vec![(second.id, first.order - 1, second.revision)],
         )
         .await
@@ -1022,9 +1177,18 @@ fn entry(name: &str) -> WasmRegistryEntryInput {
 }
 
 fn chain(principal_id: Uuid, wasm_registry_id: Uuid, order: i64) -> PluginChainEntryInput {
+    chain_with_slot(principal_id, PluginSlot::Router, wasm_registry_id, order)
+}
+
+fn chain_with_slot(
+    principal_id: Uuid,
+    slot: PluginSlot,
+    wasm_registry_id: Uuid,
+    order: i64,
+) -> PluginChainEntryInput {
     PluginChainEntryInput {
         principal_id,
-        slot: PluginSlot::Router,
+        slot,
         order,
         wasm_registry_id,
         config: json!({}),

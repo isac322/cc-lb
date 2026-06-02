@@ -183,14 +183,14 @@ async fn chain_insert_position_last_uses_next_after() {
         app.clone(),
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
-        Some(json!({ "slot": "Router", "wasm_registry_id": entry.id })),
+        Some(json!({ "slot": "ObservabilityHook", "wasm_registry_id": entry.id })),
     )
     .await;
     let (_, _, second, _) = authed_json(
         app,
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
-        Some(json!({ "slot": "Router", "wasm_registry_id": entry.id, "position": "last" })),
+        Some(json!({ "slot": "ObservabilityHook", "wasm_registry_id": entry.id, "position": "last" })),
     )
     .await;
 
@@ -203,8 +203,22 @@ async fn chain_insert_position_before_uses_sparse_between() {
     let (_dir, storage) = temp_storage();
     let principal_id = seed_principal(&storage, "principal-before").await;
     let entry = seed_registry(&storage, 9, "plugin-before").await;
-    let first = seed_chain(&storage, principal_id, entry.id, 1000).await;
-    let second = seed_chain(&storage, principal_id, entry.id, 2000).await;
+    let first = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        1000,
+    )
+    .await;
+    let second = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        2000,
+    )
+    .await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (_, _, inserted, _) = authed_json(
@@ -212,7 +226,7 @@ async fn chain_insert_position_before_uses_sparse_between() {
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
         Some(json!({
-            "slot": "Router",
+            "slot": "ObservabilityHook",
             "wasm_registry_id": entry.id,
             "position": { "before": second.id }
         })),
@@ -228,7 +242,14 @@ async fn chain_insert_position_first_uses_min_minus_step() {
     let (_dir, storage) = temp_storage();
     let principal_id = seed_principal(&storage, "principal-first").await;
     let entry = seed_registry(&storage, 10, "plugin-first").await;
-    seed_chain(&storage, principal_id, entry.id, 2000).await;
+    seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        2000,
+    )
+    .await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (_, _, inserted, _) = authed_json(
@@ -236,7 +257,7 @@ async fn chain_insert_position_first_uses_min_minus_step() {
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
         Some(json!({
-            "slot": "Router",
+            "slot": "ObservabilityHook",
             "wasm_registry_id": entry.id,
             "position": "first"
         })),
@@ -264,6 +285,62 @@ async fn chain_insert_unknown_principal_returns_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "unknown_principal");
     assert_eq!(body["id"], unknown_principal.to_string());
+}
+
+#[tokio::test]
+async fn insert_chain_duplicate_router_returns_409_slot_singleton() {
+    let (_dir, storage) = temp_storage();
+    let principal_id = seed_principal(&storage, "principal-router-singleton").await;
+    let entry = seed_registry(&storage, 22, "plugin-router-singleton").await;
+    let first = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::Router,
+        entry.id,
+        sparse_order::STEP,
+    )
+    .await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body, _) = authed_json(
+        app,
+        "POST",
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
+        Some(json!({ "slot": "Router", "wasm_registry_id": entry.id, "position": "last" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "slot_singleton");
+    assert_eq!(body["existing_entry_id"], first.id.to_string());
+}
+
+#[tokio::test]
+async fn insert_chain_duplicate_shape_returns_409_slot_singleton() {
+    let (_dir, storage) = temp_storage();
+    let principal_id = seed_principal(&storage, "principal-shape-singleton").await;
+    let entry = seed_registry(&storage, 23, "plugin-shape-singleton").await;
+    let first = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::Shape,
+        entry.id,
+        sparse_order::STEP,
+    )
+    .await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body, _) = authed_json(
+        app,
+        "POST",
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
+        Some(json!({ "slot": "Shape", "wasm_registry_id": entry.id, "position": "last" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "slot_singleton");
+    assert_eq!(body["existing_entry_id"], first.id.to_string());
 }
 
 #[tokio::test]
@@ -384,8 +461,22 @@ async fn chain_reorder_then_needs_rebalance_returns_409() {
     let (_dir, storage) = temp_storage();
     let principal_id = seed_principal(&storage, "principal-reorder").await;
     let entry = seed_registry(&storage, 12, "plugin-reorder").await;
-    let first = seed_chain(&storage, principal_id, entry.id, 1000).await;
-    let second = seed_chain(&storage, principal_id, entry.id, 2000).await;
+    let first = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        1000,
+    )
+    .await;
+    let second = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        2000,
+    )
+    .await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (status, _, body, _) = authed_json(
@@ -408,9 +499,30 @@ async fn reorder_invalid_order_after_stage_returns_409() {
     let (_dir, storage) = temp_storage();
     let principal_id = seed_principal(&storage, "principal-reorder-invalid-order").await;
     let entry = seed_registry(&storage, 21, "plugin-reorder-invalid-order").await;
-    let first = seed_chain(&storage, principal_id, entry.id, 100).await;
-    let second = seed_chain(&storage, principal_id, entry.id, 200).await;
-    seed_chain(&storage, principal_id, entry.id, 300).await;
+    let first = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        100,
+    )
+    .await;
+    let second = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        200,
+    )
+    .await;
+    seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        300,
+    )
+    .await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (status, _, body, _) = authed_json(
@@ -433,14 +545,30 @@ async fn chain_rebalance_evens_spacing_and_returns_new_orders() {
     let (_dir, storage) = temp_storage();
     let principal_id = seed_principal(&storage, "principal-rebalance").await;
     let entry = seed_registry(&storage, 13, "plugin-rebalance").await;
-    seed_chain(&storage, principal_id, entry.id, 1000).await;
-    seed_chain(&storage, principal_id, entry.id, 1001).await;
+    seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        1000,
+    )
+    .await;
+    seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        1001,
+    )
+    .await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (status, _, body, _) = authed_json(
         app,
         "POST",
-        &format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=Router"),
+        &format!(
+            "/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=ObservabilityHook"
+        ),
         None,
     )
     .await;
@@ -456,8 +584,22 @@ async fn chain_rebalance_emits_chain_audit() {
     let (audit_sink, audit_writer) = spawn_audit_writer(storage.clone(), 64);
     let principal_id = seed_principal(&storage, "principal-rebalance-audit").await;
     let entry = seed_registry(&storage, 20, "plugin-rebalance-audit").await;
-    seed_chain(&storage, principal_id, entry.id, 1000).await;
-    seed_chain(&storage, principal_id, entry.id, 1001).await;
+    seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        1000,
+    )
+    .await;
+    seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        1001,
+    )
+    .await;
     let mut state = test_state(Config::default(), Some(storage.clone()));
     state.audit_sink = Some(Arc::new(audit_sink));
     let app = app(state);
@@ -465,7 +607,9 @@ async fn chain_rebalance_emits_chain_audit() {
     let (status, _, _, _) = authed_json(
         app,
         "POST",
-        &format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=Router"),
+        &format!(
+            "/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=ObservabilityHook"
+        ),
         None,
     )
     .await;
@@ -479,7 +623,7 @@ async fn chain_rebalance_emits_chain_audit() {
             .iter()
             .any(|entry| {
                 entry.admin_action.as_deref().is_some_and(|action| {
-                    action == format!("plugin_chain_update(principal={principal_id}, slots=router)")
+                    action == format!("plugin_chain_update(principal={principal_id}, slots=observability_hook)")
                 })
             });
         if saw_audit {
@@ -582,10 +726,27 @@ async fn seed_chain(
     wasm_registry_id: Uuid,
     order: i64,
 ) -> cc_lb_storage_api::PluginChainEntry {
+    seed_chain_with_slot(
+        storage,
+        principal_id,
+        PluginSlot::Router,
+        wasm_registry_id,
+        order,
+    )
+    .await
+}
+
+async fn seed_chain_with_slot(
+    storage: &cc_lb_storage_redb::RedbStorage,
+    principal_id: Uuid,
+    slot: PluginSlot,
+    wasm_registry_id: Uuid,
+    order: i64,
+) -> cc_lb_storage_api::PluginChainEntry {
     storage
         .insert_chain_entry(PluginChainEntryInput {
             principal_id,
-            slot: PluginSlot::Router,
+            slot,
             order,
             wasm_registry_id,
             config: json!({}),

@@ -4,8 +4,7 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{
     MAX_WASM_BLOB_BYTES, PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput,
     PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, StorageError, StorageResult, WasmBlob,
-    WasmBlobRecord,
-    WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
+    WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -272,6 +271,20 @@ impl PluginRegistryStore for PostgresStorage {
         if principal_exists.is_none() {
             return Err(StorageError::PrincipalNotFound {
                 id: input.principal_id.to_string(),
+            });
+        }
+        if is_singleton_slot(input.slot)
+            && let Some(existing_entry_id) = sqlx::query_scalar::<_, Uuid>(
+                "SELECT id FROM plugin_chains_v2 WHERE principal_id = $1 AND slot = $2 ORDER BY id ASC LIMIT 1",
+            )
+            .bind(input.principal_id)
+            .bind(input.slot.as_str())
+            .fetch_optional(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?
+        {
+            return Err(StorageError::PluginChainConflict {
+                reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id },
             });
         }
         sqlx::query("UPDATE wasm_blobs_v2 SET refcount = refcount + 1 WHERE sha256 = $1")
@@ -646,6 +659,10 @@ fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEn
     existing.name == input.name
         && existing.original_filename == input.original_filename
         && existing.label == input.label
+}
+
+fn is_singleton_slot(slot: PluginSlot) -> bool {
+    matches!(slot, PluginSlot::Router | PluginSlot::Shape)
 }
 
 fn chain_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PluginChainEntry> {

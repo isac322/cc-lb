@@ -307,6 +307,9 @@ async fn insert_chain(
         Err(StorageError::PluginChainConflict {
             reason: PluginChainConflictReason::InvalidOrderGap,
         }) => invalid_order(),
+        Err(StorageError::PluginChainConflict {
+            reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id },
+        }) => slot_singleton(existing_entry_id),
         Err(error) => storage_error(error),
     }
 }
@@ -631,6 +634,9 @@ fn storage_mutation_error(error: StorageError) -> axum::response::Response {
         StorageError::PluginChainConflict {
             reason: PluginChainConflictReason::InvalidOrderGap,
         } => invalid_order(),
+        StorageError::PluginChainConflict {
+            reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id },
+        } => slot_singleton(existing_entry_id),
         error => storage_error(error),
     }
 }
@@ -672,7 +678,22 @@ fn unknown_principal(id: String) -> axum::response::Response {
 }
 
 fn invalid_order() -> axum::response::Response {
-    (StatusCode::CONFLICT, Json(json!({ "error": "invalid_order" }))).into_response()
+    (
+        StatusCode::CONFLICT,
+        Json(json!({ "error": "invalid_order" })),
+    )
+        .into_response()
+}
+
+fn slot_singleton(existing_entry_id: Uuid) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": "slot_singleton",
+            "existing_entry_id": existing_entry_id.to_string()
+        })),
+    )
+        .into_response()
 }
 
 fn storage_error(storage_error: StorageError) -> axum::response::Response {

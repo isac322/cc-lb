@@ -143,6 +143,10 @@ pub enum StorageError {
     PrincipalReferencedByAudit { id: String },
     #[error("plugin registry conflict: {message}")]
     PluginRegistryConflict { message: String },
+    #[error("plugin chain conflict: {reason}")]
+    PluginChainConflict {
+        reason: cc_lb_storage_api::PluginChainConflictReason,
+    },
     #[error("stale plugin registry revision; current revision is {current}")]
     StalePluginRegistryRevision { current: u64 },
     #[error("plugin registry revision overflow")]

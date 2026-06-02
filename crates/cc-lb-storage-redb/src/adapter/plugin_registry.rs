@@ -2,17 +2,17 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    MAX_WASM_BLOB_BYTES, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
-    PluginRegistryStore, PluginSlot, StorageError as ApiStorageError, StorageResult, WasmBlob,
-    WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
+    MAX_WASM_BLOB_BYTES, PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput,
+    PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, StorageError as ApiStorageError,
+    StorageResult, WasmBlob, WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput,
+    sparse_order, validate_identifier,
 };
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    PLUGIN_CHAINS_V2, PRINCIPALS_V2, RedbStorage, StorageError, WASM_BLOBS_V2,
-    WASM_REGISTRY_V2,
+    PLUGIN_CHAINS_V2, PRINCIPALS_V2, RedbStorage, StorageError, WASM_BLOBS_V2, WASM_REGISTRY_V2,
 };
 
 use crate::error_map::{map_join_err, map_redb_err};
@@ -431,9 +431,7 @@ impl RedbStorage {
                 });
             }
             if registry_is_referenced_by_chain(&write_txn, id)? {
-                return Err(StorageError::PluginRegistryReferenced {
-                    id: id.to_string(),
-                });
+                return Err(StorageError::PluginRegistryReferenced { id: id.to_string() });
             }
             let mut blobs = write_txn.open_table(WASM_BLOBS_V2)?;
             entry.refcount = blob_refcount_from_write(&blobs, entry.sha256)?;
@@ -494,6 +492,14 @@ impl RedbStorage {
         if !principal_exists(&write_txn, input.principal_id)? {
             return Err(StorageError::PrincipalNotFound {
                 id: input.principal_id.to_string(),
+            });
+        }
+        if is_singleton_slot(input.slot)
+            && let Some(existing_entry_id) =
+                existing_chain_entry_for_slot(&write_txn, input.principal_id, input.slot)?
+        {
+            return Err(StorageError::PluginChainConflict {
+                reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id },
             });
         }
         let registry = registry_by_id(&write_txn, input.wasm_registry_id)?.ok_or_else(|| {
@@ -743,7 +749,29 @@ fn principal_exists(
     principal_id: Uuid,
 ) -> Result<bool, StorageError> {
     let principals = write_txn.open_table(PRINCIPALS_V2)?;
-    Ok(principals.get(principal_id.as_bytes().as_slice())?.is_some())
+    Ok(principals
+        .get(principal_id.as_bytes().as_slice())?
+        .is_some())
+}
+
+fn is_singleton_slot(slot: PluginSlot) -> bool {
+    matches!(slot, PluginSlot::Router | PluginSlot::Shape)
+}
+
+fn existing_chain_entry_for_slot(
+    write_txn: &redb::WriteTransaction,
+    principal_id: Uuid,
+    slot: PluginSlot,
+) -> Result<Option<Uuid>, StorageError> {
+    let chains = write_txn.open_table(PLUGIN_CHAINS_V2)?;
+    for row in chains.iter()? {
+        let (_, value) = row?;
+        let entry: PluginChainEntry = serde_json::from_slice(value.value())?;
+        if entry.principal_id == principal_id && entry.slot == slot {
+            return Ok(Some(entry.id));
+        }
+    }
+    Ok(None)
 }
 
 fn registry_by_id(
@@ -870,7 +898,10 @@ fn self_heal_blob_if_missing(
         refcount,
     };
     let mut blobs = write_txn.open_table(WASM_BLOBS_V2)?;
-    blobs.insert(blob.sha256.as_slice(), serde_json::to_vec(&stored)?.as_slice())?;
+    blobs.insert(
+        blob.sha256.as_slice(),
+        serde_json::to_vec(&stored)?.as_slice(),
+    )?;
     Ok(())
 }
 

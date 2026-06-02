@@ -122,6 +122,30 @@ fn plugin_registry_same_sha_metadata_mismatch_conflicts_postgres() {
 }
 
 #[test]
+fn plugin_registry_insert_chain_entry_rejects_duplicate_for_router_slot_postgres() {
+    run_postgres_scenario(
+        "insert_chain_entry_rejects_duplicate_for_router_slot",
+        plugin_registry_store::insert_chain_entry_rejects_duplicate_for_router_slot,
+    );
+}
+
+#[test]
+fn plugin_registry_insert_chain_entry_rejects_duplicate_for_shape_slot_postgres() {
+    run_postgres_scenario(
+        "insert_chain_entry_rejects_duplicate_for_shape_slot",
+        plugin_registry_store::insert_chain_entry_rejects_duplicate_for_shape_slot,
+    );
+}
+
+#[test]
+fn plugin_registry_insert_chain_entry_allows_multi_for_observability_hook_postgres() {
+    run_postgres_scenario(
+        "insert_chain_entry_allows_multi_for_observability_hook",
+        plugin_registry_store::insert_chain_entry_allows_multi_for_observability_hook,
+    );
+}
+
+#[test]
 fn plugin_registry_concurrent_upload_returns_existed_once_postgres() {
     let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
         eprintln!("skip: CI_POSTGRES_URL not set");
