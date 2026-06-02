@@ -238,6 +238,26 @@ async fn chain_insert_position_first_uses_min_minus_step() {
 }
 
 #[tokio::test]
+async fn chain_insert_unknown_principal_returns_400() {
+    let (_dir, storage) = temp_storage();
+    let entry = seed_registry(&storage, 19, "plugin-unknown-principal").await;
+    let unknown_principal = Uuid::new_v4();
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body, _) = authed_json(
+        app,
+        "POST",
+        &format!("/admin/v1/principals/{unknown_principal}/plugin-chain"),
+        Some(json!({ "slot": "Router", "wasm_registry_id": entry.id })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "unknown_principal");
+    assert_eq!(body["id"], unknown_principal.to_string());
+}
+
+#[tokio::test]
 async fn chain_update_empty_body_rejected_400() {
     let (_dir, storage) = temp_storage();
     let principal_id = seed_principal(&storage, "principal-empty-update").await;

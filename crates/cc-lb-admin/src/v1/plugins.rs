@@ -312,6 +312,13 @@ async fn insert_chain(
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
         }
+        Err(StorageError::PrincipalNotFound { id }) => unknown_principal(id),
+        Err(StorageError::PluginChainConflict { message }) if invalid_order_message(&message) => {
+            invalid_order(message)
+        }
+        Err(StorageError::Conflict { message }) if invalid_order_message(&message) => {
+            invalid_order(message)
+        }
         Err(error) => storage_error(error),
     }
 }
@@ -682,6 +689,26 @@ fn stale_revision(current: u64) -> axum::response::Response {
         Json(json!({ "error": "stale_revision", "current": current })),
     )
         .into_response()
+}
+
+fn unknown_principal(id: String) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": "unknown_principal", "id": id })),
+    )
+        .into_response()
+}
+
+fn invalid_order(detail: String) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({ "error": "invalid_order", "detail": detail })),
+    )
+        .into_response()
+}
+
+fn invalid_order_message(message: &str) -> bool {
+    message.contains("invalid_order")
 }
 
 fn plugin_registry_referenced_id(message: &str) -> Option<String> {
