@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     MAX_WASM_BLOB_BYTES, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
@@ -299,19 +301,19 @@ impl RedbStorage {
     fn list_orphan_blobs_sync(&self) -> Result<Vec<[u8; 32]>, StorageError> {
         let read_txn = self.db.begin_read()?;
         let blobs = read_txn.open_table(WASM_BLOBS_V2)?;
-        let mut orphaned = Vec::new();
+        let registry = read_txn.open_table(WASM_REGISTRY_V2)?;
+        let mut blob_shas = HashSet::new();
         for row in blobs.iter()? {
-            let (key, value) = row?;
-            let blob: StoredWasmBlob = serde_json::from_slice(value.value())?;
-            if blob.refcount == 0 {
-                let sha = <[u8; 32]>::try_from(key.value()).map_err(|_| {
-                    StorageError::PluginRegistryConflict {
-                        message: "wasm blob sha256 key must be 32 bytes".to_owned(),
-                    }
-                })?;
-                orphaned.push(sha);
-            }
+            let (key, _) = row?;
+            let sha = sha_from_key(key.value())?;
+            blob_shas.insert(sha);
         }
+        for row in registry.iter()? {
+            let (_, value) = row?;
+            let entry: WasmRegistryEntry = serde_json::from_slice(value.value())?;
+            blob_shas.remove(&entry.sha256);
+        }
+        let mut orphaned = blob_shas.into_iter().collect::<Vec<_>>();
         orphaned.sort();
         Ok(orphaned)
     }
@@ -684,6 +686,12 @@ fn scan_registry_for_upload(
         }
     }
     Ok((sha_match, name_conflict))
+}
+
+fn sha_from_key(key: &[u8]) -> Result<[u8; 32], StorageError> {
+    <[u8; 32]>::try_from(key).map_err(|_| StorageError::PluginRegistryConflict {
+        message: "wasm blob sha256 key must be 32 bytes".to_owned(),
+    })
 }
 
 fn registry_by_sha_read(
