@@ -46,6 +46,11 @@ impl PluginRegistryStore for PostgresStorage {
             .ok_or_else(|| StorageError::Fatal {
                 message: "wasm registry row missing after upload".to_owned(),
             })?;
+        if !inserted_registry && !same_wasm_entry_metadata(&entry, &input) {
+            return Err(StorageError::Conflict {
+                message: "sha256 already registered for a different wasm entry".to_owned(),
+            });
+        }
         if inserted_registry {
             sqlx::query("SELECT pg_notify('cclb_plugin_changed', $1)")
                 .bind(entry.id.to_string())
@@ -607,6 +612,12 @@ fn registry_from_row(row: sqlx::postgres::PgRow) -> StorageResult<WasmRegistryEn
             "wasm_registry.revision",
         )?,
     })
+}
+
+fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEntryInput) -> bool {
+    existing.name == input.name
+        && existing.original_filename == input.original_filename
+        && existing.label == input.label
 }
 
 fn chain_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PluginChainEntry> {

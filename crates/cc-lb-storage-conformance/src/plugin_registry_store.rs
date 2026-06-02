@@ -3,8 +3,9 @@ use std::{any::Any, sync::Arc};
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
     PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, PrincipalStore,
-    StorageError, WasmBlob, WasmRegistryEntryInput, sparse_order,
+    StorageError, WasmBlob, WasmRegistryEntryInput,
     principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind},
+    sparse_order,
 };
 use serde_json::json;
 use uuid::Uuid;
@@ -286,7 +287,9 @@ pub async fn list_chain_for_principal_returns_ordered<S: PluginRegistryStore + P
     Ok(())
 }
 
-pub async fn refcount_increment_on_chain_insert<S: PluginRegistryStore + PrincipalStore>(storage: &S) -> Result<()> {
+pub async fn refcount_increment_on_chain_insert<S: PluginRegistryStore + PrincipalStore>(
+    storage: &S,
+) -> Result<()> {
     let (principal, plugin) = principal_and_plugin(storage, 12, "plugin-ref-inc").await?;
     storage
         .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
@@ -302,7 +305,9 @@ pub async fn refcount_increment_on_chain_insert<S: PluginRegistryStore + Princip
     Ok(())
 }
 
-pub async fn update_chain_entry_bumps_revision<S: PluginRegistryStore + PrincipalStore>(storage: &S) -> Result<()> {
+pub async fn update_chain_entry_bumps_revision<S: PluginRegistryStore + PrincipalStore>(
+    storage: &S,
+) -> Result<()> {
     let created = one_chain(storage, 13, "plugin-update").await?;
     let updated = storage
         .update_chain_entry(
@@ -319,7 +324,9 @@ pub async fn update_chain_entry_bumps_revision<S: PluginRegistryStore + Principa
     Ok(())
 }
 
-pub async fn update_chain_entry_stale_revision_conflicts<S: PluginRegistryStore + PrincipalStore>(
+pub async fn update_chain_entry_stale_revision_conflicts<
+    S: PluginRegistryStore + PrincipalStore,
+>(
     storage: &S,
 ) -> Result<()> {
     let created = one_chain(storage, 14, "plugin-stale").await?;
@@ -338,7 +345,9 @@ pub async fn update_chain_entry_stale_revision_conflicts<S: PluginRegistryStore 
     Ok(())
 }
 
-pub async fn reorder_chain_valid_orders<S: PluginRegistryStore + PrincipalStore>(storage: &S) -> Result<()> {
+pub async fn reorder_chain_valid_orders<S: PluginRegistryStore + PrincipalStore>(
+    storage: &S,
+) -> Result<()> {
     let first = one_chain(storage, 15, "plugin-reorder").await?;
     let reordered = storage
         .reorder_chain(
@@ -373,7 +382,9 @@ pub async fn reorder_chain_needs_rebalance_conflicts<S: PluginRegistryStore + Pr
     Ok(())
 }
 
-pub async fn rebalance_chain_evenly_spaces<S: PluginRegistryStore + PrincipalStore>(storage: &S) -> Result<()> {
+pub async fn rebalance_chain_evenly_spaces<S: PluginRegistryStore + PrincipalStore>(
+    storage: &S,
+) -> Result<()> {
     let first = one_chain(storage, 17, "plugin-rebalance").await?;
     let rebalanced = storage
         .rebalance_chain(first.principal_id, first.slot)
@@ -385,7 +396,9 @@ pub async fn rebalance_chain_evenly_spaces<S: PluginRegistryStore + PrincipalSto
     Ok(())
 }
 
-pub async fn sparse_order_between_integration<S: PluginRegistryStore + PrincipalStore>(storage: &S) -> Result<()> {
+pub async fn sparse_order_between_integration<S: PluginRegistryStore + PrincipalStore>(
+    storage: &S,
+) -> Result<()> {
     let (principal, plugin) = principal_and_plugin(storage, 18, "plugin-between").await?;
     let created = storage
         .insert_chain_entry(chain(
@@ -482,7 +495,9 @@ plugin_registry_scenario!(
     chain_delete_keeps_blob_for_reinsert_on_storage
 );
 
-async fn chain_delete_keeps_blob_for_reinsert_on_storage<S: PluginRegistryStore + PrincipalStore>(
+async fn chain_delete_keeps_blob_for_reinsert_on_storage<
+    S: PluginRegistryStore + PrincipalStore,
+>(
     storage: &S,
 ) -> Result<()> {
     // NOTE: Phase-3 is currently green on redb; W3a revision hardening still applies.
@@ -516,7 +531,9 @@ plugin_registry_scenario!(
     delete_registry_rejects_while_chain_refed_on_storage
 );
 
-async fn delete_registry_rejects_while_chain_refed_on_storage<S: PluginRegistryStore + PrincipalStore>(
+async fn delete_registry_rejects_while_chain_refed_on_storage<
+    S: PluginRegistryStore + PrincipalStore,
+>(
     storage: &S,
 ) -> Result<()> {
     // NOTE: Phase-3 partially green; W3a hardening still needed for chain-scan/atomicity.
@@ -699,7 +716,9 @@ plugin_registry_scenario!(
     reorder_chain_rejects_final_chain_gap_on_storage
 );
 
-async fn reorder_chain_rejects_final_chain_gap_on_storage<S: PluginRegistryStore + PrincipalStore>(
+async fn reorder_chain_rejects_final_chain_gap_on_storage<
+    S: PluginRegistryStore + PrincipalStore,
+>(
     storage: &S,
 ) -> Result<()> {
     let (principal, plugin) = principal_and_plugin(storage, 33, "plugin-final-gap").await?;
@@ -790,6 +809,22 @@ async fn upload_returns_existed_flag_on_storage<S: PluginRegistryStore>(storage:
         second.uploaded_at_unix_secs == uploaded_at,
         "second upload preserves original uploaded_at"
     );
+
+    let err = storage
+        .persist_wasm_upload(
+            blob(35, b"upload-existed".to_vec()),
+            entry("plugin-upload-renamed"),
+        )
+        .await
+        .expect_err("same sha with different metadata conflicts");
+    ensure!(
+        matches!(
+            err,
+            StorageError::Conflict { ref message }
+                if message == "sha256 already registered for a different wasm entry"
+        ),
+        "same sha with different metadata returns the strict conflict"
+    );
     Ok(())
 }
 
@@ -855,7 +890,9 @@ pub async fn validate_identifier_rejects_bad_name<S: PluginRegistryStore>(
     Ok(())
 }
 
-pub async fn fk_on_delete_restrict<S: PluginRegistryStore + PrincipalStore>(storage: &S) -> Result<()> {
+pub async fn fk_on_delete_restrict<S: PluginRegistryStore + PrincipalStore>(
+    storage: &S,
+) -> Result<()> {
     let created = one_chain(storage, 21, "plugin-fk").await?;
     ensure!(
         storage.get_blob_bytes([21; 32]).await?.is_some(),
@@ -877,7 +914,8 @@ async fn principal_and_plugin<S: PluginRegistryStore + PrincipalStore>(
     seed: u8,
     name: &str,
 ) -> Result<(Uuid, cc_lb_storage_api::WasmRegistryEntry)> {
-    let principal = PrincipalStore::create(storage, principal_create(seed), BASE_TS + seed as u64).await?;
+    let principal =
+        PrincipalStore::create(storage, principal_create(seed), BASE_TS + seed as u64).await?;
     let (plugin, _) = storage
         .persist_wasm_upload(blob(seed, vec![seed]), entry(name))
         .await?;
@@ -894,7 +932,6 @@ async fn one_chain<S: PluginRegistryStore + PrincipalStore>(
         .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
         .await?)
 }
-
 
 fn principal_create(seed: u8) -> PrincipalCreate {
     PrincipalCreate {
