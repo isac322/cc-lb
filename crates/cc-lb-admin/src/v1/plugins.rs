@@ -22,6 +22,7 @@ use crate::AdminState;
 
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 1000;
+const PLUGIN_CHAIN_ORDER_GAPS_NEED_REBALANCE: &str = "plugin chain order gaps need rebalance";
 
 pub fn router() -> Router<AdminState> {
     Router::new()
@@ -241,15 +242,6 @@ async fn delete_registry(
         Ok(None) => error(StatusCode::NOT_FOUND, "unknown_registry_entry"),
         Err(StorageError::PluginRegistryReferenced { id }) => plugin_registry_referenced(id),
         Err(StorageError::StalePluginRegistryRevision { current }) => stale_revision(current),
-        Err(StorageError::Conflict { message }) => {
-            if let Some(id) = plugin_registry_referenced_id(&message) {
-                plugin_registry_referenced(id)
-            } else if let Some(current) = stale_plugin_registry_revision(&message) {
-                stale_revision(current)
-            } else {
-                storage_mutation_error(StorageError::Conflict { message })
-            }
-        }
         Err(error) => storage_mutation_error(error),
     }
 }
@@ -350,13 +342,6 @@ async fn update_chain(
             error(StatusCode::BAD_REQUEST, "empty_update")
         }
         Err(StorageError::StalePluginChainRevision { current }) => stale_revision(current),
-        Err(StorageError::Conflict { message }) => {
-            if let Some(current) = stale_plugin_chain_revision(&message) {
-                stale_revision(current)
-            } else {
-                storage_mutation_error(StorageError::Conflict { message })
-            }
-        }
         Err(error) => storage_mutation_error(error),
     }
 }
@@ -446,13 +431,6 @@ async fn delete_chain(
         }
         Ok(None) => error(StatusCode::NOT_FOUND, "unknown_plugin_chain_entry"),
         Err(StorageError::StalePluginChainRevision { current }) => stale_revision(current),
-        Err(StorageError::Conflict { message }) => {
-            if let Some(current) = stale_plugin_chain_revision(&message) {
-                stale_revision(current)
-            } else {
-                storage_error(StorageError::Conflict { message })
-            }
-        }
         Err(error) => storage_error(error),
     }
 }
@@ -653,21 +631,18 @@ fn needs_rebalance() -> axum::response::Response {
 }
 
 fn storage_mutation_error(error: StorageError) -> axum::response::Response {
-    if let StorageError::Conflict { message } = &error
-        && let Some(current_revision) = current_revision_from_message(message)
-    {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({ "error": "stale_revision", "current_revision": current_revision })),
-        )
-            .into_response();
+    match error {
+        StorageError::StalePluginRegistryRevision { current }
+        | StorageError::StalePluginChainRevision { current } => stale_revision(current),
+        StorageError::PluginRegistryReferenced { id } => plugin_registry_referenced(id),
+        StorageError::PluginChainConflict { message } if invalid_order_message(&message) => {
+            invalid_order(message)
+        }
+        StorageError::Conflict { message } if message == PLUGIN_CHAIN_ORDER_GAPS_NEED_REBALANCE => {
+            invalid_order(message)
+        }
+        error => storage_error(error),
     }
-    if let StorageError::Conflict { message } = &error
-        && message.contains("rebalance")
-    {
-        return needs_rebalance();
-    }
-    storage_error(error)
 }
 
 async fn remove_wasm_cache_file(state: &AdminState, sha256: [u8; 32]) {
@@ -715,37 +690,12 @@ fn invalid_order(detail: String) -> axum::response::Response {
 }
 
 fn invalid_order_message(message: &str) -> bool {
-    message.contains("invalid_order") || message.contains("gap")
-}
-
-fn plugin_registry_referenced_id(message: &str) -> Option<String> {
-    let (_, tail) = message.split_once("plugin registry row ")?;
-    let (id, _) = tail.split_once(" is referenced by plugin chain")?;
-    Some(id.to_owned())
-}
-
-fn stale_plugin_registry_revision(message: &str) -> Option<u64> {
-    message
-        .contains("plugin registry revision")
-        .then(|| current_revision_from_message(message))?
-}
-
-fn stale_plugin_chain_revision(message: &str) -> Option<u64> {
-    message
-        .contains("plugin chain revision")
-        .then(|| current_revision_from_message(message))?
-}
-
-fn current_revision_from_message(message: &str) -> Option<u64> {
-    let digits = message
-        .chars()
-        .rev()
-        .take_while(|character| character.is_ascii_digit())
-        .collect::<String>();
-    if digits.is_empty() {
-        return None;
-    }
-    digits.chars().rev().collect::<String>().parse().ok()
+    matches!(
+        message,
+        "invalid_order_gap_below_2"
+            | "invalid_order_duplicate"
+            | PLUGIN_CHAIN_ORDER_GAPS_NEED_REBALANCE
+    )
 }
 
 fn storage_error(storage_error: StorageError) -> axum::response::Response {

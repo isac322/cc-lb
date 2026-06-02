@@ -87,8 +87,8 @@ async fn registry_patch_label_stale_if_match_returns_409() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"], "stale_revision");
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(body, json!({ "error": "stale_revision", "current": 0 }));
 }
 
 #[tokio::test]
@@ -144,7 +144,13 @@ async fn registry_delete_cascade_blocks_when_chain_references_it() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"], "plugin_registry_referenced");
     assert_eq!(body["id"], entry.id.to_string());
-    assert!(storage.get_blob_bytes(entry.sha256).await.unwrap().is_some());
+    assert!(
+        storage
+            .get_blob_bytes(entry.sha256)
+            .await
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[tokio::test]
@@ -448,9 +454,7 @@ async fn chain_rebalance_emits_chain_audit() {
             .iter()
             .any(|entry| {
                 entry.admin_action.as_deref().is_some_and(|action| {
-                    action == format!(
-                        "plugin_chain_update(principal={principal_id}, slots=router)"
-                    )
+                    action == format!("plugin_chain_update(principal={principal_id}, slots=router)")
                 })
             });
         if saw_audit {
