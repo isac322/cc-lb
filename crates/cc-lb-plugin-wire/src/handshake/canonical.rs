@@ -1,6 +1,7 @@
 extern crate alloc;
 
-use alloc::{collections::BTreeMap, collections::BTreeSet, string::String, vec::Vec};
+use alloc::string::{String, ToString};
+use alloc::{collections::BTreeMap, collections::BTreeSet, vec::Vec};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -16,10 +17,10 @@ pub struct CanonicalOffer {
     pub host_capabilities: BTreeSet<String>,
 }
 
-#[derive(Debug, Error)]
+#[derive(Clone, Debug, Error)]
 pub enum CanonicalError {
     #[error("failed to serialize canonical handshake offer: {0}")]
-    Serialize(#[from] serde_json::Error),
+    Serialize(String),
 }
 
 pub fn canonicalize(offer: &HandshakeOfferRaw) -> CanonicalOffer {
@@ -53,7 +54,8 @@ pub fn canonicalize(offer: &HandshakeOfferRaw) -> CanonicalOffer {
 
 pub fn host_offer_hash(offer: &HandshakeOfferRaw) -> Result<[u8; 32], CanonicalError> {
     let canonical = canonicalize(offer);
-    let bytes = serde_json::to_vec(&canonical)?;
+    let bytes = serde_json::to_vec(&canonical)
+        .map_err(|e| CanonicalError::Serialize(e.to_string()))?;
     Ok(Sha256::digest(bytes).into())
 }
 
