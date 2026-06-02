@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/cc-lb-pricing",
+    "crates/cc-lb-plugin-wire",
     "crates/cc-lb-*",
     "benches/extism_sse_overhead",
     "tests/fixtures/fake-anthropic",
