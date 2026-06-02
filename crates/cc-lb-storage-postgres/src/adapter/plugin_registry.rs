@@ -223,12 +223,39 @@ impl PluginRegistryStore for PostgresStorage {
         input: PluginChainEntryInput,
     ) -> StorageResult<PluginChainEntry> {
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let sha: Vec<u8> = sqlx::query_scalar("SELECT sha256 FROM wasm_registry_v2 WHERE id = $1")
-            .bind(input.wasm_registry_id)
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?
-            .ok_or_else(|| conflict("unknown plugin registry entry"))?;
+        let sha: Vec<u8> = sqlx::query_scalar(
+            "SELECT sha256 FROM wasm_registry_v2 WHERE id = $1 FOR UPDATE",
+        )
+        .bind(input.wasm_registry_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?
+        .ok_or_else(|| StorageError::PluginRegistryConflict {
+            message: "unknown plugin registry entry".to_owned(),
+        })?;
+        let blob_refcount: Option<i64> = sqlx::query_scalar(
+            "SELECT refcount FROM wasm_blobs_v2 WHERE sha256 = $1 FOR UPDATE",
+        )
+        .bind(&sha)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        if blob_refcount.is_none() {
+            return Err(StorageError::PluginRegistryConflict {
+                message: "missing wasm blob".to_owned(),
+            });
+        }
+        let principal_exists: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM principals_v1 WHERE id = $1")
+                .bind(input.principal_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+        if principal_exists.is_none() {
+            return Err(StorageError::PrincipalNotFound {
+                id: input.principal_id.to_string(),
+            });
+        }
         sqlx::query("UPDATE wasm_blobs_v2 SET refcount = refcount + 1 WHERE sha256 = $1")
             .bind(&sha)
             .execute(&mut *tx)
