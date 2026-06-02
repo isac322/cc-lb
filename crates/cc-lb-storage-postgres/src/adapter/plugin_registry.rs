@@ -1,3 +1,5 @@
+use std::collections::{HashMap, HashSet};
+
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     MAX_WASM_BLOB_BYTES, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
@@ -325,29 +327,100 @@ impl PluginRegistryStore for PostgresStorage {
         slot: PluginSlot,
         new_orders: Vec<(Uuid, i64, u64)>,
     ) -> StorageResult<Vec<PluginChainEntry>> {
-        if sparse_order::needs_rebalance(
-            &new_orders
-                .iter()
-                .map(|(_, order, _)| *order)
-                .collect::<Vec<_>>(),
-        ) {
-            return Err(conflict("plugin chain order gaps need rebalance"));
-        }
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        for (id, order, expected_revision) in new_orders {
-            let result = sqlx::query("UPDATE plugin_chains_v2 SET order_value=$5, revision=revision+1 WHERE id=$1 AND principal_id=$2 AND slot=$3 AND revision=$4")
-                .bind(id).bind(principal_id).bind(slot.as_str()).bind(u64_to_i64(expected_revision, "plugin_chain.revision")?).bind(order).execute(&mut *tx).await.map_err(map_sqlx_error)?;
-            if result.rows_affected() == 0 {
-                return Err(conflict("stale or missing plugin chain revision"));
+        let mut staged_orders = HashMap::with_capacity(new_orders.len());
+        let mut staged_ids = Vec::with_capacity(new_orders.len());
+        let mut staged_order_values = Vec::with_capacity(new_orders.len());
+        let mut staged_revisions = Vec::with_capacity(new_orders.len());
+        let mut seen_ids = HashSet::with_capacity(new_orders.len());
+        for (id, order, expected_revision) in &new_orders {
+            if !seen_ids.insert(*id) {
+                return Err(StorageError::PluginChainConflict {
+                    message: "duplicate_plugin_chain_entry".to_owned(),
+                });
+            }
+            let row = sqlx::query("SELECT * FROM plugin_chains_v2 WHERE id = $1 FOR UPDATE")
+                .bind(*id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+            let Some(row) = row else {
+                return Err(StorageError::PluginChainConflict {
+                    message: "unknown plugin chain entry".to_owned(),
+                });
+            };
+            let entry = chain_from_row(row)?;
+            if entry.principal_id != principal_id || entry.slot != slot {
+                return Err(StorageError::PluginChainConflict {
+                    message: "plugin chain entry is not in requested chain".to_owned(),
+                });
+            }
+            if entry.revision != *expected_revision {
+                return Err(StorageError::StalePluginChainRevision {
+                    current: entry.revision,
+                });
+            }
+            staged_orders.insert(*id, *order);
+            staged_ids.push(*id);
+            staged_order_values.push(*order);
+            staged_revisions.push(u64_to_i64(*expected_revision, "plugin_chain.revision")?);
+        }
+        let rows = sqlx::query("SELECT * FROM plugin_chains_v2 WHERE principal_id = $1 AND slot = $2 ORDER BY order_value ASC, id ASC FOR UPDATE")
+            .bind(principal_id)
+            .bind(slot.as_str())
+            .fetch_all(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        let mut entries = rows
+            .into_iter()
+            .map(chain_from_row)
+            .collect::<StorageResult<Vec<_>>>()?;
+        for entry in &mut entries {
+            if let Some(order) = staged_orders.get(&entry.id) {
+                entry.order = *order;
             }
         }
-        sqlx::query("SELECT pg_notify('cclb_plugin_chain_changed', $1)")
-            .bind(principal_id.to_string())
-            .execute(&mut *tx)
+        entries.sort_by_key(|entry| (entry.order, entry.id));
+        if entries.windows(2).any(|pair| {
+            pair[1]
+                .order
+                .checked_sub(pair[0].order)
+                .unwrap_or(i64::MAX)
+                < 2
+        }) {
+            return Err(StorageError::PluginChainConflict {
+                message: "invalid_order_gap_below_2".to_owned(),
+            });
+        }
+        if !staged_ids.is_empty() {
+            let result = sqlx::query("UPDATE plugin_chains_v2 AS existing SET order_value = staged.order_value, revision = existing.revision + 1 FROM (SELECT * FROM UNNEST($1::uuid[], $2::bigint[], $3::bigint[]) AS staged(id, order_value, revision)) AS staged WHERE existing.id = staged.id AND existing.principal_id = $4 AND existing.slot = $5 AND existing.revision = staged.revision")
+                .bind(&staged_ids)
+                .bind(&staged_order_values)
+                .bind(&staged_revisions)
+                .bind(principal_id)
+                .bind(slot.as_str())
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+            if result.rows_affected() != staged_ids.len() as u64 {
+                return Err(StorageError::PluginChainConflict {
+                    message: "stale or missing plugin chain revision".to_owned(),
+                });
+            }
+            sqlx::query("SELECT pg_notify('cclb_plugin_chain_changed', $1)")
+                .bind(principal_id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+        }
+        let rows = sqlx::query("SELECT * FROM plugin_chains_v2 WHERE principal_id = $1 AND slot = $2 ORDER BY order_value ASC, id ASC")
+            .bind(principal_id)
+            .bind(slot.as_str())
+            .fetch_all(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
         tx.commit().await.map_err(map_sqlx_error)?;
-        self.list_chain_for_principal(principal_id, slot).await
+        rows.into_iter().map(chain_from_row).collect()
     }
 
     async fn delete_chain_entry(

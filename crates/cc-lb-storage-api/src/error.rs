@@ -41,6 +41,8 @@ pub enum StorageError {
     StalePluginRegistryRevision { current: u64 },
     #[error("stale plugin chain revision; current revision is {current}")]
     StalePluginChainRevision { current: u64 },
+    #[error("plugin chain conflict: {message}")]
+    PluginChainConflict { message: String },
     #[error("principal not found: {id}")]
     PrincipalNotFound { id: String },
 }
