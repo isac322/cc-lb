@@ -62,6 +62,7 @@ fn stores(storage: Arc<Storage>) -> Arc<Stores> {
         plugin_registry: storage.clone(),
         upstream_rate_limits: storage,
         audit: None,
+        plugin_registry_repo: None,
     })
 }
 
@@ -280,6 +281,7 @@ async fn cancel_during_tick_is_graceful() {
         plugin_registry: Arc::new(EmptyPluginRegistryStore),
         upstream_rate_limits: Arc::new(EmptyRateLimitStore),
         audit: None,
+        plugin_registry_repo: None,
     });
     let (_dir, storage) = storage_fixture();
     let runtime = Arc::new(ExtismRuntime::new());

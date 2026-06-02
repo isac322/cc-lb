@@ -650,12 +650,20 @@ async fn build_app_with_storage_inner(
         }
     };
 
+    let (plugin_registry_repo, plugin_blob_repo) = match plugin_repos {
+        Some(repos) => repos,
+        None => (
+            storage.clone() as Arc<dyn PluginRegistryRepo>,
+            storage.clone() as Arc<dyn PluginBlobRepo>,
+        ),
+    };
     let stores = Arc::new(DynamicStores {
         upstreams: storage_for_dynamic.clone(),
         principals: storage_for_dynamic.clone(),
         plugin_registry: storage_for_dynamic.clone(),
         upstream_rate_limits: storage_for_dynamic.clone(),
         audit: Some(storage_for_dynamic.clone()),
+        plugin_registry_repo: Some(plugin_registry_repo.clone()),
     });
     let lifecycle_config = LifecycleConfig {
         messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
@@ -673,13 +681,6 @@ async fn build_app_with_storage_inner(
             std::process::exit(1);
         }
     }
-    let (plugin_registry_repo, plugin_blob_repo) = match plugin_repos {
-        Some(repos) => repos,
-        None => (
-            storage.clone() as Arc<dyn PluginRegistryRepo>,
-            storage.clone() as Arc<dyn PluginBlobRepo>,
-        ),
-    };
     let (startup_shutdown, startup_shutdown_triggered, startup_shutdown_task) =
         spawn_startup_shutdown_signal();
     let plugin_registry = PluginRegistry::new(

@@ -109,6 +109,7 @@ impl Fixture {
             plugin_registry: storage.clone(),
             upstream_rate_limits: storage.clone(),
             audit: Some(storage.clone()),
+            plugin_registry_repo: None,
         });
         let aead = Arc::new(AeadService::from_master_key([33; 32]));
         let fake_base = format!("http://{fake_addr}");
