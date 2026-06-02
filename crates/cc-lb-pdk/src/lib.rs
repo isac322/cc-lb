@@ -3,7 +3,7 @@
 //! This crate provides `#[plugin]` and `#[handler]` macros that wrap extism-pdk functions
 //! to automatically generate custom section metadata and cc-lb handshake protocol support.
 //!
-//! T10 implements robust parsing only. T11-T14 will add code generation.
+//! The `#[plugin]` macro parses plugin metadata and emits the generated cc-lb exports.
 
 extern crate proc_macro;
 
@@ -11,13 +11,14 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::{ItemFn, ItemMod};
 
+mod codegen;
 mod parse;
 mod runtime;
 
 /// `#[plugin]` macro for marking a cc-lb plugin module.
 ///
-/// T10: Parses plugin metadata and discovers `#[handler(...)]` functions, then returns the
-/// decorated module unchanged. T11-T14 will use the parsed descriptor for code generation.
+/// Parses plugin metadata and discovers `#[handler(...)]` functions, then emits generated
+/// metadata, handshake, self-check, and handler wrapper exports from the parsed descriptor.
 #[proc_macro_attribute]
 pub fn plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
     let args = match syn::parse::<parse::PluginArgs>(attr) {
@@ -36,17 +37,38 @@ pub fn plugin(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     };
 
-    if let Err(error) = parse::parse_plugin_descriptor(&args, &input) {
-        let error = parse::compile_error(error);
-        return quote! {
-            #input
-            #error
+    let descriptor = match parse::parse_plugin_descriptor(&args, &input) {
+        Ok(descriptor) => descriptor,
+        Err(error) => {
+            let error = parse::compile_error(error);
+            return quote! {
+                #input
+                #error
+            }
+            .into();
         }
-        .into();
+    };
+
+    let custom_section = codegen::emit_custom_section(&descriptor);
+    let handshake_export = codegen::emit_handshake_export(&descriptor);
+    let self_check_export = codegen::emit_self_check_export(&descriptor);
+    let mut output = input;
+
+    if let Some((_, items)) = &mut output.content {
+        items.push(syn::Item::Verbatim(self_check_export));
+        items.extend(
+            descriptor
+                .handlers
+                .iter()
+                .map(codegen::emit_handler_wrapper)
+                .map(syn::Item::Verbatim),
+        );
     }
 
     quote! {
-        #input
+        #output
+        #custom_section
+        #handshake_export
     }
     .into()
 }

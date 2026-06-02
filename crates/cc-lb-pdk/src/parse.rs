@@ -6,8 +6,8 @@ use quote::ToTokens;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::{
-    Attribute, Error, FnArg, GenericArgument, Ident, Item, ItemFn, ItemMod, LitInt, LitStr,
-    PathArguments, Result, ReturnType, Token, Type, bracketed,
+    bracketed, Attribute, Error, FnArg, GenericArgument, Ident, Item, ItemFn, ItemMod, LitInt,
+    LitStr, PathArguments, Result, ReturnType, Token, Type,
 };
 
 use cc_lb_plugin_wire::limits::{
