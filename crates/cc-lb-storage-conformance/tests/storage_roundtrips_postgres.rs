@@ -22,7 +22,7 @@ use sqlx::{
     AssertSqlSafe, PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
 };
-use tokio::runtime::Runtime;
+use tokio::{runtime::Runtime, sync::Barrier};
 
 struct PostgresConformanceBackend {
     url: String,
@@ -225,20 +225,35 @@ async fn concurrent_upload_returns_existed_once_on_fixture(
         uploaded_by_admin_id: uuid::Uuid::new_v4(),
     };
 
+    let barrier = Arc::new(Barrier::new(2));
+    let first_barrier = barrier.clone();
+    let second_barrier = barrier.clone();
     let first_blob = blob.clone();
     let first_input = input.clone();
     let first = tokio::spawn(async move {
+        first_barrier.wait().await;
         first_storage
             .persist_wasm_upload(first_blob, first_input)
             .await
     });
-    let second = tokio::spawn(async move { second_storage.persist_wasm_upload(blob, input).await });
+    let second = tokio::spawn(async move {
+        second_barrier.wait().await;
+        second_storage.persist_wasm_upload(blob, input).await
+    });
 
-    let mut existed = Vec::new();
-    for result in [first.await?, second.await?] {
-        let (_entry, did_exist) = result?;
-        existed.push(did_exist);
-    }
+    let results = [first.await??, second.await??];
+    anyhow::ensure!(
+        results[0].0.id == results[1].0.id,
+        "concurrent uploads return the same registry id"
+    );
+    anyhow::ensure!(
+        results[0].0.sha256 == results[1].0.sha256,
+        "concurrent uploads return the same sha"
+    );
+    let mut existed = results
+        .iter()
+        .map(|(_entry, did_exist)| *did_exist)
+        .collect::<Vec<_>>();
     existed.sort();
     anyhow::ensure!(
         existed == [false, true],
