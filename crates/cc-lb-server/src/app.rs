@@ -59,6 +59,7 @@ use crate::refresh::{LazyRefresher, OAuthRefresher};
 use crate::reload::{ConfigWatcher, summarize_restart_required};
 use crate::replica;
 use crate::signal;
+use crate::state_machine::{ServerState, ServerStateHandle};
 use crate::storage_factory;
 use crate::tls::{ReloadableListener, TlsState};
 use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig, DynamicViewRebinder};
@@ -88,6 +89,7 @@ pub struct App {
     signals: signal::SignalHandle,
     drain_controller: DrainController,
     tls_state: Option<Arc<TlsState>>,
+    server_state: Arc<ServerStateHandle>,
 }
 
 #[derive(Debug, Error)]
@@ -163,7 +165,9 @@ impl App {
             signals,
             drain_controller: _,
             tls_state,
+            server_state,
         } = self;
+        server_state.wait_for_ready().await;
         let proxy_listener = TcpListener::bind(proxy_addr).await?;
         let admin_listener = TcpListener::bind(admin_addr).await?;
 
@@ -533,6 +537,7 @@ async fn build_app_with_storage_inner(
     aead: Arc<AeadService>,
     startup_preflight: Option<StartupPreflight>,
 ) -> Result<App, BuildError> {
+    let server_state = Arc::new(ServerStateHandle::new_starting());
     let key_store = Arc::new(KeyStore::new(managed_store));
     let price_catalog = cc_lb_pricing::global_catalog().clone();
     spawn_price_catalog_loader(&config, storage.clone(), price_catalog.clone());
@@ -768,9 +773,11 @@ async fn build_app_with_storage_inner(
     };
     let reload_task = config_watcher.clone().map(spawn_reload_watcher);
 
+    server_state.transition_to_ready();
+
     Ok(App {
         router: app_router(state, config.timeouts.upstream_total_secs),
-        admin_router: cc_lb_admin::router(admin_state),
+        admin_router: admin_router(admin_state, server_state.clone()),
         proxy_addr: config.listener.proxy_addr,
         admin_addr: config.listener.admin_addr,
         reload_task,
@@ -782,6 +789,7 @@ async fn build_app_with_storage_inner(
         signals,
         drain_controller,
         tls_state,
+        server_state,
     })
 }
 
@@ -1121,6 +1129,29 @@ struct HealthBody {
     reason: Option<String>,
 }
 
+#[derive(Clone, Serialize)]
+struct AdminServerStateBody {
+    state: ServerState,
+}
+
+fn admin_router(admin_state: AdminState, server_state: Arc<ServerStateHandle>) -> Router {
+    cc_lb_admin::router(admin_state).merge(server_state_router(server_state))
+}
+
+fn server_state_router(server_state: Arc<ServerStateHandle>) -> Router {
+    Router::new()
+        .route("/admin/health/state", get(admin_server_state))
+        .with_state(server_state)
+}
+
+async fn admin_server_state(
+    State(server_state): State<Arc<ServerStateHandle>>,
+) -> Json<AdminServerStateBody> {
+    Json(AdminServerStateBody {
+        state: server_state.current(),
+    })
+}
+
 fn app_router(state: ProxyState, timeout_secs: u64) -> Router {
     health_router(state.clone()).merge(proxy_router(state, timeout_secs))
 }
@@ -1388,4 +1419,47 @@ fn dispatcher(config: &Config) -> (Arc<dyn UpstreamDispatch>, Arc<BreakerRegistr
         )),
         breaker_registry,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn admin_health_state_reports_current_state() {
+        let state = Arc::new(ServerStateHandle::new_starting());
+        let router = server_state_router(state.clone());
+
+        assert_admin_state(router.clone(), "starting").await;
+        state.transition_to_ready();
+        assert_admin_state(router, "ready").await;
+    }
+
+    async fn assert_admin_state(router: Router, expected: &str) {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/health/state")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("admin health state request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body should collect")
+            .to_bytes();
+        let payload: Value = serde_json::from_slice(&body).expect("body should be json");
+        assert_eq!(payload.get("state").and_then(Value::as_str), Some(expected));
+    }
 }

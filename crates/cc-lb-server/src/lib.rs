@@ -21,6 +21,7 @@ pub mod reload;
 pub mod replica;
 pub(crate) mod revision_hash;
 pub mod signal;
+pub mod state_machine;
 pub mod storage_factory;
 pub mod tls;
 pub mod validate;
