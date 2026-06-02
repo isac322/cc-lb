@@ -431,7 +431,9 @@ impl RedbStorage {
                 });
             }
             if registry_is_referenced_by_chain(&write_txn, id)? {
-                return Err(StorageError::PluginRegistryReferenced { id: id.to_string() });
+                return Err(StorageError::PluginRegistryReferenced {
+                    id: id.to_string(),
+                });
             }
             let mut blobs = write_txn.open_table(WASM_BLOBS_V2)?;
             entry.refcount = blob_refcount_from_write(&blobs, entry.sha256)?;
@@ -439,7 +441,6 @@ impl RedbStorage {
             drop(blobs);
             let mut registry = write_txn.open_table(WASM_REGISTRY_V2)?;
             registry.remove(id.as_bytes().as_slice())?;
-            blobs.remove(entry.sha256.as_slice())?;
             entry
         };
         write_txn.commit()?;
