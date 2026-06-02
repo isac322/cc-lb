@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 
+pub mod dispatch;
 pub mod handshake;
 mod host_functions;
 pub mod identity;
