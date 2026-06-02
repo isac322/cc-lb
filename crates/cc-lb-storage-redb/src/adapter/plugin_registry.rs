@@ -178,15 +178,6 @@ impl PluginRegistryStore for RedbStorage {
         slot: PluginSlot,
         new_orders: Vec<(Uuid, i64, u64)>,
     ) -> StorageResult<Vec<PluginChainEntry>> {
-        let orders = new_orders
-            .iter()
-            .map(|(_, order, _)| *order)
-            .collect::<Vec<_>>();
-        if sparse_order::needs_rebalance(&orders) {
-            return Err(ApiStorageError::Conflict {
-                message: "plugin chain order gaps need rebalance".to_owned(),
-            });
-        }
         let storage = self.clone();
         tokio::task::spawn_blocking(move || {
             storage.reorder_chain_sync(principal_id, slot, new_orders)
@@ -591,17 +582,13 @@ impl RedbStorage {
         new_orders: Vec<(Uuid, i64, u64)>,
     ) -> Result<Vec<PluginChainEntry>, StorageError> {
         let write_txn = self.db.begin_write()?;
+        let mut entries = chain_for_principal_from_write(&write_txn, principal_id, slot)?;
         for (id, order, expected_revision) in new_orders {
-            let Some(mut entry) = chain_by_id(&write_txn, id)? else {
+            let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) else {
                 return Err(StorageError::PluginRegistryConflict {
                     message: "unknown plugin chain entry".to_owned(),
                 });
             };
-            if entry.principal_id != principal_id || entry.slot != slot {
-                return Err(StorageError::PluginRegistryConflict {
-                    message: "plugin chain entry is not in requested chain".to_owned(),
-                });
-            }
             if entry.revision != expected_revision {
                 return Err(StorageError::StalePluginChainRevision {
                     current: entry.revision,
@@ -612,10 +599,14 @@ impl RedbStorage {
                 .revision
                 .checked_add(1)
                 .ok_or(StorageError::PluginChainRevisionOverflow)?;
-            put_chain(&write_txn, &entry)?;
+        }
+        validate_chain_orders(&entries)?;
+        for entry in &entries {
+            put_chain(&write_txn, entry)?;
         }
         write_txn.commit()?;
-        self.list_chain_for_principal_sync(principal_id, slot)
+        entries.sort_by_key(|entry| (entry.order, entry.id));
+        Ok(entries)
     }
 
     fn delete_chain_entry_sync(
@@ -755,6 +746,44 @@ fn registry_by_id(
         .get(id.as_bytes().as_slice())?
         .map(|value| serde_json::from_slice(value.value()).map_err(StorageError::from))
         .transpose()
+}
+
+fn chain_for_principal_from_write(
+    write_txn: &redb::WriteTransaction,
+    principal_id: Uuid,
+    slot: PluginSlot,
+) -> Result<Vec<PluginChainEntry>, StorageError> {
+    let chains = write_txn.open_table(PLUGIN_CHAINS_V2)?;
+    let mut entries = Vec::new();
+    for row in chains.iter()? {
+        let (_, value) = row?;
+        let entry: PluginChainEntry = serde_json::from_slice(value.value())?;
+        if entry.principal_id == principal_id && entry.slot == slot {
+            entries.push(entry);
+        }
+    }
+    Ok(entries)
+}
+
+fn validate_chain_orders(entries: &[PluginChainEntry]) -> Result<(), StorageError> {
+    let mut ordered = entries.to_vec();
+    ordered.sort_by_key(|entry| (entry.order, entry.id));
+    let mut seen = HashSet::new();
+    for entry in &ordered {
+        if !seen.insert(entry.order) {
+            return Err(StorageError::PluginRegistryConflict {
+                message: "invalid_order_duplicate".to_owned(),
+            });
+        }
+    }
+    for pair in ordered.windows(2) {
+        if pair[1].order - pair[0].order < 2 {
+            return Err(StorageError::PluginRegistryConflict {
+                message: "invalid_order_gap_below_2".to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn chain_by_id(
