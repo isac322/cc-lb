@@ -882,6 +882,7 @@ dependencies = [
  "cc-lb-storage-redb",
  "chrono",
  "futures",
+ "redb",
  "serde_json",
  "sqlx",
  "tempfile",

@@ -9,8 +9,7 @@ pub mod crash_recovery;
 pub mod managed_keys;
 #[cfg(any())]
 pub mod multi_instance;
-#[cfg(any())]
-pub mod plugin_registry_store;
+pub use crate::plugin_registry_store;
 #[cfg(any())]
 pub mod pool_exhaustion;
 pub mod principal_store;

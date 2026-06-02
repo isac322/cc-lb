@@ -6,7 +6,9 @@ use async_trait::async_trait;
 use cc_lb_storage_api::BackendKind;
 use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
-    scenarios::{principal_store, storage_roundtrips, upstream_rate_limit_store},
+    scenarios::{
+        plugin_registry_store, principal_store, storage_roundtrips, upstream_rate_limit_store,
+    },
 };
 use cc_lb_storage_redb::RedbStorage;
 use tokio::runtime::Runtime;
@@ -86,6 +88,56 @@ fn upstream_rate_limit_empty_list_for_unknown_id_redb() {
         upstream_rate_limit_store::empty_list_for_unknown_id,
     );
 }
+
+macro_rules! plugin_registry_redb_test {
+    ($test_name:ident, $scenario:ident) => {
+        #[test]
+        fn $test_name() {
+            run_redb_scenario(stringify!($scenario), plugin_registry_store::$scenario);
+        }
+    };
+}
+
+plugin_registry_redb_test!(
+    plugin_registry_list_orphan_blobs_returns_blobs_without_registry_redb,
+    list_orphan_blobs_returns_blobs_without_registry
+);
+plugin_registry_redb_test!(
+    plugin_registry_chain_delete_keeps_blob_for_reinsert_redb,
+    chain_delete_keeps_blob_for_reinsert
+);
+plugin_registry_redb_test!(
+    plugin_registry_delete_registry_rejects_while_chain_refed_redb,
+    delete_registry_rejects_while_chain_refed
+);
+plugin_registry_redb_test!(
+    plugin_registry_delete_registry_removes_blob_atomically_redb,
+    delete_registry_removes_blob_atomically
+);
+plugin_registry_redb_test!(
+    plugin_registry_persist_wasm_upload_heals_missing_blob_redb,
+    persist_wasm_upload_heals_missing_blob
+);
+plugin_registry_redb_test!(
+    plugin_registry_decrement_blob_refcount_or_delete_skips_registry_backed_redb,
+    decrement_blob_refcount_or_delete_skips_registry_backed
+);
+plugin_registry_redb_test!(
+    plugin_registry_insert_chain_entry_rejects_unknown_principal_redb,
+    insert_chain_entry_rejects_unknown_principal
+);
+plugin_registry_redb_test!(
+    plugin_registry_reorder_chain_rejects_final_chain_gap_redb,
+    reorder_chain_rejects_final_chain_gap
+);
+plugin_registry_redb_test!(
+    plugin_registry_update_chain_entry_rejects_no_op_redb,
+    update_chain_entry_rejects_no_op
+);
+plugin_registry_redb_test!(
+    plugin_registry_upload_returns_existed_flag_redb,
+    upload_returns_existed_flag
+);
 
 fn run_redb_scenario<F, Fut>(name: &str, scenario: F)
 where

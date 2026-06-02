@@ -11,7 +11,9 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
-    scenarios::{principal_store, storage_roundtrips, upstream_rate_limit_store},
+    scenarios::{
+        plugin_registry_store, principal_store, storage_roundtrips, upstream_rate_limit_store,
+    },
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{
@@ -94,6 +96,11 @@ impl ConformanceBackend for PostgresConformanceBackend {
 #[test]
 fn storage_roundtrips_postgres() {
     run_postgres_scenario("storage_roundtrips", storage_roundtrips::run_all);
+}
+
+#[test]
+fn plugin_registry_store_postgres() {
+    run_postgres_scenario("plugin_registry_store", plugin_registry_store::run_all);
 }
 
 #[test]
