@@ -33,25 +33,52 @@ impl PluginRegistryStore for PostgresStorage {
                 reason: format!("blob exceeds 32 MiB: {} bytes", blob.size_bytes),
             });
         }
-        let mut tx = begin_repeatable_read(&self.pool).await?;
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let id = Uuid::new_v4();
         let uploaded_at =
             unix_secs_to_datetime(input.uploaded_at_unix_secs, "wasm_registry.uploaded_at")?;
-        insert_blob_in_tx(&mut tx, &blob, 0).await?;
+        let blob_was_inserted = insert_blob_in_tx(&mut tx, &blob, 0).await?;
         let inserted_registry =
             insert_registry_in_tx(&mut tx, id, blob.sha256, &input, uploaded_at).await?;
-        let entry = self
-            .registry_by_sha_in_tx(&mut tx, blob.sha256)
-            .await?
-            .ok_or_else(|| StorageError::Fatal {
-                message: "wasm registry row missing after upload".to_owned(),
-            })?;
-        if !inserted_registry && !same_wasm_entry_metadata(&entry, &input) {
-            return Err(StorageError::Conflict {
-                message: "sha256 already registered for a different wasm entry".to_owned(),
-            });
-        }
-        if inserted_registry {
+        let (entry, existed) = match (inserted_registry, blob_was_inserted) {
+            // Fresh registry row. The blob may be new, or it may be an orphan blob
+            // row that is now gaining its registry owner; both are new uploads.
+            (Some(entry), true) | (Some(entry), false) => (entry, false),
+            // Registry row already existed while the blob row was missing. The blob
+            // INSERT healed the zombie state, and the existing registry row is safe
+            // to return because the FK now has its target row again.
+            (None, true) => {
+                let entry = self
+                    .registry_by_sha_in_tx(&mut tx, blob.sha256)
+                    .await?
+                    .ok_or_else(|| StorageError::Fatal {
+                        message: "wasm registry row missing after upload".to_owned(),
+                    })?;
+                if !same_wasm_entry_metadata(&entry, &input) {
+                    return Err(StorageError::Conflict {
+                        message: "sha256 already registered for a different wasm entry".to_owned(),
+                    });
+                }
+                (entry, true)
+            }
+            // Registry and blob both already existed. Under READ COMMITTED, this
+            // SELECT sees the row that ON CONFLICT waited on before DO NOTHING.
+            (None, false) => {
+                let entry = self
+                    .registry_by_sha_in_tx(&mut tx, blob.sha256)
+                    .await?
+                    .ok_or_else(|| StorageError::Fatal {
+                        message: "wasm registry row missing after upload".to_owned(),
+                    })?;
+                if !same_wasm_entry_metadata(&entry, &input) {
+                    return Err(StorageError::Conflict {
+                        message: "sha256 already registered for a different wasm entry".to_owned(),
+                    });
+                }
+                (entry, true)
+            }
+        };
+        if !existed {
             sqlx::query("SELECT pg_notify('cclb_plugin_changed', $1)")
                 .bind(entry.id.to_string())
                 .execute(&mut *tx)
@@ -59,7 +86,7 @@ impl PluginRegistryStore for PostgresStorage {
                 .map_err(map_sqlx_error)?;
         }
         tx.commit().await.map_err(map_sqlx_error)?;
-        Ok((entry, !inserted_registry))
+        Ok((entry, existed))
     }
 
     async fn get_blob_bytes(&self, sha256: [u8; 32]) -> StorageResult<Option<Vec<u8>>> {
@@ -518,21 +545,21 @@ async fn insert_blob_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     blob: &WasmBlob,
     refcount: i64,
-) -> StorageResult<()> {
+) -> StorageResult<bool> {
     let validated_at = unix_secs_to_datetime(
         blob.parse_validated_at_unix_secs,
         "wasm_blob.parse_validated_at",
     )?;
-    sqlx::query("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, refcount, created_at) VALUES ($1, $2, $3, $4, $5, NOW()) ON CONFLICT (sha256) DO NOTHING")
+    let inserted = sqlx::query_scalar::<_, Vec<u8>>("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, refcount, created_at) VALUES ($1, $2, $3, $4, $5, NOW()) ON CONFLICT (sha256) DO NOTHING RETURNING sha256")
         .bind(blob.sha256.as_slice())
         .bind(blob.bytes.as_slice())
         .bind(u64_to_i64(blob.size_bytes, "wasm_blob.size_bytes")?)
         .bind(validated_at)
         .bind(refcount)
-        .execute(&mut **tx)
+        .fetch_optional(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;
-    Ok(())
+    Ok(inserted.is_some())
 }
 
 async fn insert_registry_in_tx(
@@ -541,8 +568,8 @@ async fn insert_registry_in_tx(
     sha256: [u8; 32],
     input: &WasmRegistryEntryInput,
     uploaded_at: DateTime<Utc>,
-) -> StorageResult<bool> {
-    let result = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, revision) VALUES ($1, $2, $3, $4, $5, $6, $7, 0) ON CONFLICT (sha256) DO NOTHING")
+) -> StorageResult<Option<WasmRegistryEntry>> {
+    let row = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, revision) VALUES ($1, $2, $3, $4, $5, $6, $7, 0) ON CONFLICT (sha256) DO NOTHING RETURNING id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, 0::BIGINT AS refcount, revision")
         .bind(id)
         .bind(sha256.as_slice())
         .bind(&input.name)
@@ -550,10 +577,10 @@ async fn insert_registry_in_tx(
         .bind(&input.label)
         .bind(uploaded_at)
         .bind(input.uploaded_by_admin_id)
-        .execute(&mut **tx)
+        .fetch_optional(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;
-    Ok(result.rows_affected() == 1)
+    row.map(registry_from_row).transpose()
 }
 
 async fn begin_repeatable_read(
