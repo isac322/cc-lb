@@ -4,6 +4,7 @@ pub mod handshake;
 mod host_functions;
 pub mod identity;
 mod plugin_wrap;
+pub mod registry;
 pub mod self_check;
 mod sse_batch;
 

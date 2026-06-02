@@ -12,7 +12,9 @@ async-trait.workspace = true
 base64.workspace = true
 bytes.workspace = true
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
+cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire" }
+dashmap.workspace = true
 extism.workspace = true
 http.workspace = true
 metrics.workspace = true
