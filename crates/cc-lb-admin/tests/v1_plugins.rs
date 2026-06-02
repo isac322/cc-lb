@@ -259,6 +259,77 @@ async fn chain_update_immutable_fields_rejected_400() {
 }
 
 #[tokio::test]
+async fn chain_delete_forwards_if_match_to_storage_and_returns_204() {
+    let (_dir, storage) = temp_storage();
+    let principal_id = seed_principal(&storage, "principal-delete-chain").await;
+    let entry = seed_registry(&storage, 15, "plugin-delete-chain").await;
+    let chain = seed_chain(&storage, principal_id, entry.id, 1000).await;
+    let app = app(test_state(Config::default(), Some(storage.clone())));
+
+    let (status, headers, bytes) = request_bytes(
+        app,
+        "DELETE",
+        &format!("/admin/v1/plugin-chain-entries/{}", chain.id),
+        None,
+        Some("W/\"0\""),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(headers.get("etag").is_none());
+    assert!(bytes.is_empty());
+    assert!(
+        storage
+            .list_chain_for_principal(principal_id, PluginSlot::Router)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn chain_delete_stale_if_match_returns_412_with_current_revision() {
+    let (_dir, storage) = temp_storage();
+    let principal_id = seed_principal(&storage, "principal-delete-stale").await;
+    let entry = seed_registry(&storage, 16, "plugin-delete-stale").await;
+    let chain = seed_chain(&storage, principal_id, entry.id, 1000).await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body) = request_json(
+        app,
+        "DELETE",
+        &format!("/admin/v1/plugin-chain-entries/{}", chain.id),
+        None,
+        Some("W/\"99\""),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(body, json!({ "error": "stale_revision", "current": 0 }));
+}
+
+#[tokio::test]
+async fn chain_delete_malformed_if_match_returns_400() {
+    let (_dir, storage) = temp_storage();
+    let principal_id = seed_principal(&storage, "principal-delete-malformed").await;
+    let entry = seed_registry(&storage, 17, "plugin-delete-malformed").await;
+    let chain = seed_chain(&storage, principal_id, entry.id, 1000).await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body) = request_json(
+        app,
+        "DELETE",
+        &format!("/admin/v1/plugin-chain-entries/{}", chain.id),
+        None,
+        Some("not-a-revision"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_if_match");
+}
+
+#[tokio::test]
 async fn chain_reorder_then_needs_rebalance_returns_409() {
     let (_dir, storage) = temp_storage();
     let principal_id = seed_principal(&storage, "principal-reorder").await;

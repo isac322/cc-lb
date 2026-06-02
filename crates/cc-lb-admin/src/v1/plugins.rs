@@ -9,8 +9,8 @@ use axum::{
 };
 use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_storage_api::{
-    PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginSlot, PrincipalStore,
-    Storage, StorageError, WasmRegistryEntry, sparse_order,
+    PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginSlot, Storage,
+    StorageError, WasmRegistryEntry, sparse_order,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -95,6 +95,11 @@ struct ReorderEntry {
     id: Uuid,
     order: i64,
     expected_revision: u64,
+}
+
+enum IfMatchError {
+    Missing,
+    Malformed,
 }
 
 #[derive(Debug, Serialize)]
@@ -411,30 +416,32 @@ async fn delete_chain(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    let Some(expected_revision) = if_match_revision(&headers) else {
-        return error(StatusCode::PRECONDITION_REQUIRED, "if_match_required");
+    let expected_revision = match required_if_match_revision(&headers) {
+        Ok(revision) => revision,
+        Err(IfMatchError::Missing) => {
+            return error(StatusCode::PRECONDITION_REQUIRED, "if_match_required");
+        }
+        Err(IfMatchError::Malformed) => return error(StatusCode::BAD_REQUEST, "invalid_if_match"),
     };
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
-    let Some(entry) = find_chain_entry(storage, id).await else {
-        return error(StatusCode::NOT_FOUND, "unknown_plugin_chain_entry");
-    };
-    if entry.revision != expected_revision {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({ "error": "stale_revision", "current_revision": entry.revision })),
-        )
-            .into_response();
-    }
     match storage.delete_chain_entry(id, expected_revision).await {
-        Ok(Some(_)) => {
+        Ok(Some(entry)) => {
             emit_chain_audit(&state, entry.principal_id, entry.slot);
             let mut response = StatusCode::NO_CONTENT.into_response();
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
         }
         Ok(None) => error(StatusCode::NOT_FOUND, "unknown_plugin_chain_entry"),
+        Err(StorageError::StalePluginChainRevision { current }) => stale_revision(current),
+        Err(StorageError::Conflict { message }) => {
+            if let Some(current) = stale_plugin_chain_revision(&message) {
+                stale_revision(current)
+            } else {
+                storage_error(StorageError::Conflict { message })
+            }
+        }
         Err(error) => storage_error(error),
     }
 }
@@ -477,34 +484,6 @@ async fn infer_reorder_slot(
         }
     }
     Err(error(StatusCode::BAD_REQUEST, "entry_not_in_chain"))
-}
-
-async fn find_chain_entry(storage: &dyn Storage, id: Uuid) -> Option<PluginChainEntry> {
-    let mut offset = 0;
-    loop {
-        let principals = PrincipalStore::list(storage, offset, DEFAULT_LIMIT, false)
-            .await
-            .ok()?;
-        if principals.is_empty() {
-            return None;
-        }
-        offset += principals.len();
-        for principal in principals {
-            for slot in [
-                PluginSlot::Router,
-                PluginSlot::ObservabilityHook,
-                PluginSlot::Shape,
-            ] {
-                let entries = storage
-                    .list_chain_for_principal(principal.id, slot)
-                    .await
-                    .ok()?;
-                if let Some(entry) = entries.into_iter().find(|entry| entry.id == id) {
-                    return Some(entry);
-                }
-            }
-        }
-    }
 }
 
 fn compute_order(
@@ -615,6 +594,17 @@ fn if_match_revision(headers: &HeaderMap) -> Option<u64> {
     parse_revision(value)
 }
 
+fn required_if_match_revision(headers: &HeaderMap) -> Result<u64, IfMatchError> {
+    let Some(value) = headers.get(header::IF_MATCH) else {
+        return Err(IfMatchError::Missing);
+    };
+    value
+        .to_str()
+        .ok()
+        .and_then(parse_revision)
+        .ok_or(IfMatchError::Malformed)
+}
+
 fn parse_revision(value: &str) -> Option<u64> {
     let trimmed = value.trim();
     if let Some(inner) = trimmed
@@ -706,6 +696,12 @@ fn plugin_registry_referenced_id(message: &str) -> Option<String> {
 fn stale_plugin_registry_revision(message: &str) -> Option<u64> {
     message
         .contains("plugin registry revision")
+        .then(|| current_revision_from_message(message))?
+}
+
+fn stale_plugin_chain_revision(message: &str) -> Option<u64> {
+    message
+        .contains("plugin chain revision")
         .then(|| current_revision_from_message(message))?
 }
 
