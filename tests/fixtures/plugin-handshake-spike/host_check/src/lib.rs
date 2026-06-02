@@ -67,6 +67,7 @@ mod tests {
             .join("../../../../target/wasm32-unknown-unknown/release/plugin_handshake_spike.wasm")
     }
 
+    #[allow(clippy::collapsible_if)]
     fn custom_section_payload(wasm: &[u8]) -> Option<&[u8]> {
         for payload in Parser::new(0).parse_all(wasm) {
             let payload = payload.expect("wasm payload parses");

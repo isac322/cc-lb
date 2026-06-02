@@ -70,6 +70,7 @@ enum RecordOutcome {
     },
 }
 
+#[allow(clippy::manual_clamp)]
 pub async fn run_startup_handshake(
     registry: &PluginRegistry,
     repo: &dyn PluginRegistryRepo,

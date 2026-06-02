@@ -216,6 +216,19 @@ impl Storage {
         })
     }
 
+    pub fn open_in_memory(master_key: [u8; 32]) -> Result<Self, StorageError> {
+        let db = Arc::new(
+            Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?,
+        );
+        migration::initialize_schema(&db)?;
+
+        Ok(Self {
+            db,
+            master_key,
+            noop_change_tx: adapter::notifier::noop_change_sender(),
+        })
+    }
+
     pub fn begin_read(&self) -> Result<redb::ReadTransaction, StorageError> {
         Ok(self.db.begin_read()?)
     }

@@ -12,7 +12,7 @@ use cc_lb_plugin_wire::v1::{
     build_signer::BuildSignerFn, normalize_error::NormalizeErrorFn, observe::ObserveFn,
     on_unauthorized::OnUnauthorizedFn, route::RouteFn, shape::ShapeFn, sign::SignFn,
 };
-use cc_lb_plugin_wire::wire_function::WireFunction;
+use cc_lb_plugin_wire::wire_function::{WireFunction, all_wire_functions};
 use extism::{Manifest, PluginBuilder, Wasm};
 use thiserror::Error;
 
@@ -38,6 +38,7 @@ pub fn execute_handshake(
     offer: &HandshakeOffer,
 ) -> Result<HandshakeAccept, HandshakeExecutionError> {
     offer.validate()?;
+    metrics::counter!("cc_lb_plugin_handshake_total").increment(1);
 
     let manifest = Manifest::new([Wasm::data(plugin_bytes.to_vec())])
         .with_timeout(Duration::from_millis(HANDSHAKE_WALL_MS))
@@ -61,9 +62,7 @@ pub fn execute_handshake(
         })?;
     let response = plugin
         .call::<&str, String>(HANDSHAKE_EXPORT, request.as_str())
-        .map_err(|source| HandshakeExecutionError::Call {
-            reason: source.to_string(),
-        })?;
+        .map_err(|source| classify_call_error(source.to_string()))?;
 
     if response.len() > HANDSHAKE_OUTPUT_MAX_BYTES {
         return Err(HandshakeExecutionError::OutputTooLarge {
@@ -82,6 +81,19 @@ pub fn execute_handshake(
     cross_check_implemented_exports(&plugin, &accept)?;
 
     Ok(accept)
+}
+
+fn classify_call_error(reason: String) -> HandshakeExecutionError {
+    let lower = reason.to_ascii_lowercase();
+    if lower.contains("timeout")
+        || lower.contains("timed out")
+        || lower.contains("deadline")
+        || lower.contains("fuel")
+    {
+        HandshakeExecutionError::Timeout
+    } else {
+        HandshakeExecutionError::Call { reason }
+    }
 }
 
 fn wire_function_versions() -> [(&'static str, &'static [u32]); 7] {
@@ -183,8 +195,15 @@ fn cross_check_implemented_exports(
 ) -> Result<(), HandshakeExecutionError> {
     for function in &accept.implemented_functions {
         if !plugin.function_exists(function) {
-            return Err(HandshakeExecutionError::ImplementedFunctionMissingExport {
+            return Err(HandshakeExecutionError::DeclaredFunctionMissing {
                 function: function.clone(),
+            });
+        }
+    }
+    for function in all_wire_functions() {
+        if plugin.function_exists(function) && !accept.implemented_functions.contains(*function) {
+            return Err(HandshakeExecutionError::UndeclaredExport {
+                function: (*function).to_owned(),
             });
         }
     }
@@ -203,6 +222,8 @@ pub enum HandshakeExecutionError {
     SerializeOffer { reason: String },
     #[error("handshake call failed: {reason}")]
     Call { reason: String },
+    #[error("handshake call exceeded timeout/fuel budget")]
+    Timeout,
     #[error("handshake output size {bytes} exceeds maximum {max}")]
     OutputTooLarge { bytes: usize, max: usize },
     #[error("handshake accept decode failed: {reason}")]
@@ -226,8 +247,10 @@ pub enum HandshakeExecutionError {
     ChosenFunctionNotImplemented { function: String },
     #[error("chosen version {version} for function {function} not listed as plugin-supported")]
     ChosenVersionNotSupported { function: String, version: u32 },
-    #[error("implemented function missing wasm export: {function}")]
-    ImplementedFunctionMissingExport { function: String },
+    #[error("declared function missing wasm export: {function}")]
+    DeclaredFunctionMissing { function: String },
+    #[error("undeclared wire function export present: {function}")]
+    UndeclaredExport { function: String },
 }
 
 #[cfg(test)]
@@ -297,7 +320,7 @@ mod tests {
         let err = execute_handshake(&wasm, &offer).expect_err("missing export rejected");
 
         match err {
-            HandshakeExecutionError::ImplementedFunctionMissingExport { function } => {
+            HandshakeExecutionError::DeclaredFunctionMissing { function } => {
                 assert_eq!(function, "route");
             }
             other => panic!("expected missing export, got {other:?}"),

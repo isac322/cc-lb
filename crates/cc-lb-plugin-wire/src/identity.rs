@@ -72,10 +72,9 @@ impl PluginIdentity {
             return Err(IdentityError::PluginNameInvalid);
         }
 
-        let is_valid_name = name_bytes[0] >= b'a'
-            && name_bytes[0] <= b'z'
+        let is_valid_name = name_bytes[0].is_ascii_lowercase()
             && name_bytes.iter().all(|&b| {
-                (b >= b'a' && b <= b'z') || (b >= b'0' && b <= b'9') || b == b'_' || b == b'-'
+                b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-'
             });
 
         if !is_valid_name {
@@ -87,7 +86,7 @@ impl PluginIdentity {
             return Err(IdentityError::PluginVersionEmpty);
         }
 
-        if self.plugin_version.as_bytes().len() > 32 {
+        if self.plugin_version.len() > 32 {
             return Err(IdentityError::PluginVersionTooLong);
         }
 

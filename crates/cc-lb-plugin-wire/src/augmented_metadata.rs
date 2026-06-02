@@ -374,7 +374,7 @@ mod tests {
         assert!(metadata.is_ok());
         let m = metadata.unwrap();
         assert_eq!(m.handshake_completed_at, 1000);
-        assert_eq!(m.self_check_passed, true);
+        assert!(m.self_check_passed);
         assert_eq!(m.expires_at, 1000 + 3600);
     }
 

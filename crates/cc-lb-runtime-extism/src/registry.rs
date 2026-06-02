@@ -2,9 +2,9 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cc_lb_plugin_wire::augmented_metadata::{AugmentedMetadata, AugmentedMetadataError};
-use cc_lb_plugin_wire::handshake::{CanonicalError, HandshakeOffer};
+use cc_lb_plugin_wire::handshake::{CanonicalError, HandshakeAccept, HandshakeOffer};
 use cc_lb_plugin_wire::limits::SKIP_HANDSHAKE_IF_FRESH_TTL_SECS;
-use cc_lb_plugin_wire::self_check::SelfCheckStatus;
+use cc_lb_plugin_wire::self_check::{SelfCheckResponse, SelfCheckStatus};
 use cc_lb_storage_api::{
     PluginBlobRepo, PluginRegistryRecord, PluginRegistryRepo, PluginRegistryStatus, RepoError,
 };
@@ -19,9 +19,43 @@ use crate::self_check::{SelfCheckExecutionError, execute_self_check};
 pub struct PluginRegistry {
     registry_repo: Arc<dyn PluginRegistryRepo>,
     blob_repo: Arc<dyn PluginBlobRepo>,
-    in_process_cache: Arc<DashMap<[u8; 32], AugmentedMetadata>>,
+    in_process_cache: Arc<DashMap<[u8; 32], Arc<AugmentedMetadata>>>,
     host_offer: HandshakeOffer,
     host_offer_hash: [u8; 32],
+    lifecycle: Arc<dyn RegistryLifecycle>,
+}
+
+#[doc(hidden)]
+pub trait RegistryLifecycle: Send + Sync {
+    fn execute_handshake(
+        &self,
+        plugin_bytes: &[u8],
+        offer: &HandshakeOffer,
+    ) -> Result<HandshakeAccept, HandshakeExecutionError>;
+
+    fn execute_self_check(
+        &self,
+        plugin_bytes: &[u8],
+    ) -> Result<SelfCheckResponse, SelfCheckExecutionError>;
+}
+
+struct ExtismRegistryLifecycle;
+
+impl RegistryLifecycle for ExtismRegistryLifecycle {
+    fn execute_handshake(
+        &self,
+        plugin_bytes: &[u8],
+        offer: &HandshakeOffer,
+    ) -> Result<HandshakeAccept, HandshakeExecutionError> {
+        execute_handshake(plugin_bytes, offer)
+    }
+
+    fn execute_self_check(
+        &self,
+        plugin_bytes: &[u8],
+    ) -> Result<SelfCheckResponse, SelfCheckExecutionError> {
+        execute_self_check(plugin_bytes)
+    }
 }
 
 impl Clone for PluginRegistry {
@@ -32,6 +66,7 @@ impl Clone for PluginRegistry {
             in_process_cache: self.in_process_cache.clone(),
             host_offer: self.host_offer.clone(),
             host_offer_hash: self.host_offer_hash,
+            lifecycle: self.lifecycle.clone(),
         }
     }
 }
@@ -42,6 +77,21 @@ impl PluginRegistry {
         blob_repo: Arc<dyn PluginBlobRepo>,
         host_offer: HandshakeOffer,
     ) -> Result<Self, RegistryError> {
+        Self::new_with_lifecycle(
+            registry_repo,
+            blob_repo,
+            host_offer,
+            Arc::new(ExtismRegistryLifecycle),
+        )
+    }
+
+    #[doc(hidden)]
+    pub fn new_with_lifecycle(
+        registry_repo: Arc<dyn PluginRegistryRepo>,
+        blob_repo: Arc<dyn PluginBlobRepo>,
+        host_offer: HandshakeOffer,
+        lifecycle: Arc<dyn RegistryLifecycle>,
+    ) -> Result<Self, RegistryError> {
         host_offer.validate()?;
         let host_offer_hash = host_offer.canonical_hash()?;
         Ok(Self {
@@ -50,6 +100,7 @@ impl PluginRegistry {
             in_process_cache: Arc::new(DashMap::new()),
             host_offer,
             host_offer_hash,
+            lifecycle,
         })
     }
 
@@ -69,8 +120,7 @@ impl PluginRegistry {
             if existing.status == PluginRegistryStatus::Active
                 && existing.host_offer_hash == self.host_offer_hash
             {
-                self.in_process_cache
-                    .insert(sha256, existing.augmented_metadata.clone());
+                self.get_or_insert_cached_metadata(sha256, existing.augmented_metadata.clone());
                 return Ok(existing);
             }
         }
@@ -84,8 +134,7 @@ impl PluginRegistry {
             .upsert_record(&record)
             .await
             .map_err(|source| RegistryError::RegistryRepo { source })?;
-        self.in_process_cache
-            .insert(sha256, record.augmented_metadata.clone());
+        self.replace_cached_metadata(sha256, record.augmented_metadata.clone());
         Ok(record)
     }
 
@@ -126,8 +175,7 @@ impl PluginRegistry {
             .upsert_record(&record)
             .await
             .map_err(|source| RegistryError::RegistryRepo { source })?;
-        self.in_process_cache
-            .insert(*requested_sha256, record.augmented_metadata.clone());
+        self.replace_cached_metadata(*requested_sha256, record.augmented_metadata.clone());
         Ok(record)
     }
 
@@ -172,22 +220,46 @@ impl PluginRegistry {
             if record.host_offer_hash != self.host_offer_hash {
                 continue;
             }
-            self.in_process_cache
-                .insert(record.sha256, record.augmented_metadata);
+            self.replace_cached_metadata(record.sha256, record.augmented_metadata);
             loaded += 1;
         }
         Ok(loaded)
     }
 
-    pub fn get_metadata(&self, sha256: &[u8; 32]) -> Option<AugmentedMetadata> {
+    pub fn get_metadata(&self, sha256: &[u8; 32]) -> Option<Arc<AugmentedMetadata>> {
         self.in_process_cache
             .get(sha256)
-            .map(|metadata| metadata.clone())
+            .map(|metadata| Arc::clone(metadata.value()))
     }
 
     pub fn load_record_into_cache(&self, record: &PluginRegistryRecord) {
-        self.in_process_cache
-            .insert(record.sha256, record.augmented_metadata.clone());
+        self.replace_cached_metadata(record.sha256, record.augmented_metadata.clone());
+    }
+
+    #[allow(clippy::collapsible_if)]
+    fn get_or_insert_cached_metadata(
+        &self,
+        sha256: [u8; 32],
+        metadata: AugmentedMetadata,
+    ) -> Arc<AugmentedMetadata> {
+        if let Some(existing) = self.in_process_cache.get(&sha256) {
+            if existing.value().as_ref() == &metadata {
+                return Arc::clone(existing.value());
+            }
+        }
+        let metadata = Arc::new(metadata);
+        self.in_process_cache.insert(sha256, Arc::clone(&metadata));
+        metadata
+    }
+
+    fn replace_cached_metadata(
+        &self,
+        sha256: [u8; 32],
+        metadata: AugmentedMetadata,
+    ) -> Arc<AugmentedMetadata> {
+        let metadata = Arc::new(metadata);
+        self.in_process_cache.insert(sha256, Arc::clone(&metadata));
+        metadata
     }
 
     async fn get_existing_record(
@@ -203,9 +275,11 @@ impl PluginRegistry {
         wasm_bytes: &[u8],
     ) -> Result<PluginRegistryRecord, RegistryError> {
         let identity = read_identity(wasm_bytes)?;
-        let accept = execute_handshake(wasm_bytes, &self.host_offer)?;
+        let accept = self
+            .lifecycle
+            .execute_handshake(wasm_bytes, &self.host_offer)?;
         let handshake_completed_at = unix_now()?;
-        let self_check = execute_self_check(wasm_bytes)?;
+        let self_check = self.lifecycle.execute_self_check(wasm_bytes)?;
         if self_check.status != SelfCheckStatus::Success {
             return Err(RegistryError::SelfCheckFailed {
                 failures: self_check.failures.len(),

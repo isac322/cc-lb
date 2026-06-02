@@ -114,7 +114,7 @@ impl HandshakeOffer {
             }
 
             for &version in versions {
-                if version < VERSION_MIN || version > VERSION_MAX {
+                if !(VERSION_MIN..=VERSION_MAX).contains(&version) {
                     return Err(HandshakeError::VersionOutOfRange {
                         version,
                         min: VERSION_MIN,
@@ -153,6 +153,7 @@ impl HandshakeOffer {
 }
 
 impl HandshakeAccept {
+    #[allow(clippy::collapsible_if)]
     pub fn validate_against_offer(&self, offer: &HandshakeOffer) -> Result<(), HandshakeError> {
         if self.handshake_schema_version != offer.handshake_schema_version {
             return Err(HandshakeError::HandshakeSchemaVersionMismatch {

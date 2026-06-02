@@ -441,6 +441,7 @@ fn record_with_metadata(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn metadata_from_parts(
     plugin_name: &str,
     plugin_version: &str,

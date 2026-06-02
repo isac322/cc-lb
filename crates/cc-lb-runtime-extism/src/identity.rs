@@ -1,6 +1,7 @@
-use cc_lb_plugin_wire::identity::{CC_LB_PLUGIN_SECTION_NAME, IdentityError, PluginIdentity};
+use cc_lb_plugin_wire::identity::{
+    CC_LB_PLUGIN_MAGIC, CC_LB_PLUGIN_SECTION_NAME, IdentityError, PluginIdentity,
+};
 use cc_lb_plugin_wire::limits;
-use serde_json::Value;
 use thiserror::Error;
 use wasmparser::{Parser, Payload};
 
@@ -16,59 +17,53 @@ pub fn read_identity(wasm_bytes: &[u8]) -> Result<PluginIdentity, IdentityReadEr
             continue;
         }
         if identity.is_some() {
-            return Err(IdentityReadError::DuplicateSection);
+            return Err(IdentityReadError::DuplicateCustomSection);
         }
         identity = Some(read_section_payload(section.data())?);
     }
 
-    identity.ok_or(IdentityReadError::MissingSection)
+    identity.ok_or(IdentityReadError::MissingCustomSection)
 }
 
 fn read_section_payload(data: &[u8]) -> Result<PluginIdentity, IdentityReadError> {
     if data.len() > limits::CUSTOM_SECTION_MAX_SIZE {
-        return Err(IdentityReadError::SectionTooLarge {
-            actual: data.len(),
-            max: limits::CUSTOM_SECTION_MAX_SIZE,
-        });
+        return Err(IdentityReadError::SectionTooLarge { size: data.len() });
     }
 
-    let value: Value = serde_json::from_slice(data)?;
-    let actual = value.as_object().map_or(0, |object| object.len());
-    if actual != limits::CUSTOM_SECTION_FIELD_COUNT {
-        return Err(IdentityReadError::UnexpectedFieldCount {
-            actual,
-            expected: limits::CUSTOM_SECTION_FIELD_COUNT,
-        });
-    }
-
-    let identity: PluginIdentity = serde_json::from_value(value)?;
-    identity.validate()?;
+    let identity: PluginIdentity = serde_json::from_slice(data)?;
+    identity.validate().map_err(|error| match error {
+        IdentityError::MagicMismatch => IdentityReadError::MagicMismatch {
+            expected: CC_LB_PLUGIN_MAGIC,
+            found: identity.magic,
+        },
+        error => IdentityReadError::Validation(error),
+    })?;
     Ok(identity)
 }
 
 #[derive(Debug, Error)]
 pub enum IdentityReadError {
     #[error("invalid wasm: {0}")]
-    InvalidWasm(#[from] wasmparser::BinaryReaderError),
+    WasmParseError(#[from] wasmparser::BinaryReaderError),
     #[error("missing {CC_LB_PLUGIN_SECTION_NAME} custom section")]
-    MissingSection,
+    MissingCustomSection,
     #[error("duplicate {CC_LB_PLUGIN_SECTION_NAME} custom section")]
-    DuplicateSection,
-    #[error("{CC_LB_PLUGIN_SECTION_NAME} custom section is {actual} bytes, max {max}")]
-    SectionTooLarge { actual: usize, max: usize },
-    #[error("invalid {CC_LB_PLUGIN_SECTION_NAME} JSON: {0}")]
-    InvalidJson(#[from] serde_json::Error),
-    #[error("{CC_LB_PLUGIN_SECTION_NAME} custom section has {actual} fields, expected {expected}")]
-    UnexpectedFieldCount { actual: usize, expected: usize },
+    DuplicateCustomSection,
+    #[error("{CC_LB_PLUGIN_SECTION_NAME} custom section is {size} bytes, max {max}", max = limits::CUSTOM_SECTION_MAX_SIZE)]
+    SectionTooLarge { size: usize },
+    #[error("magic mismatch in {CC_LB_PLUGIN_SECTION_NAME} custom section")]
+    MagicMismatch { expected: [u8; 8], found: [u8; 8] },
+    #[error("malformed {CC_LB_PLUGIN_SECTION_NAME} payload: {0}")]
+    MalformedPayload(#[from] serde_json::Error),
     #[error("invalid plugin identity: {0}")]
-    InvalidIdentity(#[from] IdentityError),
+    Validation(IdentityError),
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use cc_lb_plugin_wire::{identity::CC_LB_PLUGIN_MAGIC, limits};
-    use serde_json::json;
+    use serde_json::{Value, json};
 
     #[test]
     fn reads_identity_from_custom_section() {
@@ -91,7 +86,7 @@ mod tests {
 
         let error = read_identity(&wasm).expect_err("identity section is required");
 
-        assert!(matches!(error, IdentityReadError::MissingSection));
+        assert!(matches!(error, IdentityReadError::MissingCustomSection));
     }
 
     #[test]
@@ -104,7 +99,7 @@ mod tests {
 
         let error = read_identity(&wasm).expect_err("duplicate section is rejected");
 
-        assert!(matches!(error, IdentityReadError::DuplicateSection));
+        assert!(matches!(error, IdentityReadError::DuplicateCustomSection));
     }
 
     #[test]
@@ -117,9 +112,8 @@ mod tests {
         assert!(matches!(
             error,
             IdentityReadError::SectionTooLarge {
-                actual,
-                max: limits::CUSTOM_SECTION_MAX_SIZE,
-            } if actual == limits::CUSTOM_SECTION_MAX_SIZE + 1
+                size,
+            } if size == limits::CUSTOM_SECTION_MAX_SIZE + 1
         ));
     }
 
@@ -130,10 +124,13 @@ mod tests {
 
         let error = read_identity(&wasm).expect_err("bad magic is rejected");
 
-        assert!(matches!(
-            error,
-            IdentityReadError::InvalidIdentity(IdentityError::MagicMismatch)
-        ));
+        match error {
+            IdentityReadError::MagicMismatch { expected, found } => {
+                assert_eq!(expected, CC_LB_PLUGIN_MAGIC);
+                assert_eq!(found, [0; 8]);
+            }
+            other => panic!("expected magic mismatch, got {other:?}"),
+        }
     }
 
     #[test]
@@ -143,7 +140,7 @@ mod tests {
 
         let error = read_identity(&wasm).expect_err("4-byte magic is rejected");
 
-        assert!(matches!(error, IdentityReadError::InvalidJson(_)));
+        assert!(matches!(error, IdentityReadError::MalformedPayload(_)));
     }
 
     #[test]
@@ -160,20 +157,14 @@ mod tests {
 
         let error = read_identity(&wasm).expect_err("extra field is rejected");
 
-        assert!(matches!(
-            error,
-            IdentityReadError::UnexpectedFieldCount {
-                actual: 5,
-                expected: limits::CUSTOM_SECTION_FIELD_COUNT,
-            }
-        ));
+        assert!(matches!(error, IdentityReadError::MalformedPayload(_)));
     }
 
     #[test]
     fn rejects_invalid_wasm_bytes() {
         let error = read_identity(b"not wasm").expect_err("invalid wasm is rejected");
 
-        assert!(matches!(error, IdentityReadError::InvalidWasm(_)));
+        assert!(matches!(error, IdentityReadError::WasmParseError(_)));
     }
 
     fn valid_identity_payload() -> String {

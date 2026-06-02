@@ -336,7 +336,7 @@ fn required_field<T>(slot: Option<T>, input: ParseStream<'_>, message: &str) -> 
 }
 
 fn validate_plugin_name(lit: &LitStr, name: &str) -> Result<()> {
-    if name.as_bytes().len() > PLUGIN_NAME_MAX_BYTES || !matches_plugin_name(name) {
+    if name.len() > PLUGIN_NAME_MAX_BYTES || !matches_plugin_name(name) {
         return Err(Error::new_spanned(
             lit,
             format!(
@@ -351,7 +351,7 @@ fn validate_plugin_version(lit: &LitStr, version: &str) -> Result<()> {
     if version.is_empty() {
         return Err(Error::new_spanned(lit, "plugin version must not be empty"));
     }
-    if version.as_bytes().len() > PLUGIN_VERSION_MAX_BYTES {
+    if version.len() > PLUGIN_VERSION_MAX_BYTES {
         return Err(Error::new_spanned(
             lit,
             format!("plugin version must be at most {PLUGIN_VERSION_MAX_BYTES} bytes"),
@@ -366,7 +366,7 @@ fn validate_required_capabilities(requires: &[LitStr]) -> Result<Vec<String>> {
 
     for lit in requires {
         let value = lit.value();
-        if value.as_bytes().len() > CAPABILITY_NAME_MAX_BYTES || !matches_capability_name(&value) {
+        if value.len() > CAPABILITY_NAME_MAX_BYTES || !matches_capability_name(&value) {
             return Err(Error::new_spanned(
                 lit,
                 format!(

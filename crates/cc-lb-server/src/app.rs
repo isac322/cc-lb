@@ -582,6 +582,7 @@ pub async fn build_app_with_storage(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_app_with_storage_inner(
     config: Config,
     config_path: Option<&Path>,
