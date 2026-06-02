@@ -238,10 +238,10 @@ async fn chain_insert_position_first_uses_min_minus_step() {
 }
 
 #[tokio::test]
-async fn chain_update_immutable_fields_rejected_400() {
+async fn chain_update_empty_body_rejected_400() {
     let (_dir, storage) = temp_storage();
-    let principal_id = seed_principal(&storage, "principal-immutable").await;
-    let entry = seed_registry(&storage, 11, "plugin-immutable").await;
+    let principal_id = seed_principal(&storage, "principal-empty-update").await;
+    let entry = seed_registry(&storage, 11, "plugin-empty-update").await;
     let chain = seed_chain(&storage, principal_id, entry.id, 1000).await;
     let app = app(test_state(Config::default(), Some(storage)));
 
@@ -249,13 +249,34 @@ async fn chain_update_immutable_fields_rejected_400() {
         app,
         "PUT",
         &format!("/admin/v1/plugin-chain-entries/{}", chain.id),
-        Some(json!({ "slot": "ObservabilityHook" })),
+        Some(json!({})),
         Some("W/\"0\""),
     )
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["error"], "immutable_field");
+    assert_eq!(body["error"], "empty_update");
+}
+
+#[tokio::test]
+async fn chain_update_stale_if_match_returns_412_with_current_revision() {
+    let (_dir, storage) = temp_storage();
+    let principal_id = seed_principal(&storage, "principal-update-stale").await;
+    let entry = seed_registry(&storage, 18, "plugin-update-stale").await;
+    let chain = seed_chain(&storage, principal_id, entry.id, 1000).await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body) = request_json(
+        app,
+        "PUT",
+        &format!("/admin/v1/plugin-chain-entries/{}", chain.id),
+        Some(json!({ "sse_per_event": true })),
+        Some("W/\"99\""),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(body, json!({ "error": "stale_revision", "current": 0 }));
 }
 
 #[tokio::test]

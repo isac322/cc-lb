@@ -320,24 +320,10 @@ async fn update_chain(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    Json(update): Json<PluginChainEntryUpdate>,
 ) -> axum::response::Response {
     let Some(expected_revision) = if_match_revision(&headers) else {
         return error(StatusCode::PRECONDITION_REQUIRED, "if_match_required");
-    };
-    for field in ["slot", "wasm_registry_id", "order", "principal_id"] {
-        if body.get(field).is_some() {
-            return error(StatusCode::BAD_REQUEST, "immutable_field");
-        }
-    }
-    let update = PluginChainEntryUpdate {
-        config: body.get("config").cloned(),
-        sse_per_event: body.get("sse_per_event").and_then(Value::as_bool),
-        batched_events_per_flush: body
-            .get("batched_events_per_flush")
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok()),
-        batched_flush_ms: body.get("batched_flush_ms").and_then(Value::as_u64),
     };
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
@@ -353,6 +339,17 @@ async fn update_chain(
             response
         }
         Ok(None) => error(StatusCode::NOT_FOUND, "unknown_plugin_chain_entry"),
+        Err(StorageError::InvalidInput { reason, .. }) if reason.contains("empty_update") => {
+            error(StatusCode::BAD_REQUEST, "empty_update")
+        }
+        Err(StorageError::StalePluginChainRevision { current }) => stale_revision(current),
+        Err(StorageError::Conflict { message }) => {
+            if let Some(current) = stale_plugin_chain_revision(&message) {
+                stale_revision(current)
+            } else {
+                storage_mutation_error(StorageError::Conflict { message })
+            }
+        }
         Err(error) => storage_mutation_error(error),
     }
 }
