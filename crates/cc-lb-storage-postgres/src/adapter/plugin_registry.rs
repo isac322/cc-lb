@@ -95,7 +95,7 @@ impl PluginRegistryStore for PostgresStorage {
 
     async fn list_orphan_blobs(&self) -> StorageResult<Vec<[u8; 32]>> {
         let rows = sqlx::query_scalar::<_, Vec<u8>>(
-            "SELECT sha256 FROM wasm_blobs_v2 WHERE refcount = 0 ORDER BY sha256 ASC",
+            "SELECT sha256 FROM wasm_blobs_v2 WHERE sha256 NOT IN (SELECT sha256 FROM wasm_registry_v2) ORDER BY sha256 ASC",
         )
         .fetch_all(&self.pool)
         .await
