@@ -13,7 +13,7 @@ use axum::routing::post;
 use axum::{Json, Router};
 use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_storage_api::{
-    MAX_WASM_BLOB_BYTES, StorageError, WasmBlob, WasmRegistryEntry, WasmRegistryEntryInput,
+    MAX_WASM_BLOB_BYTES, StorageError, WasmBlob, WasmRegistryEntryInput,
 };
 use extism::{Manifest, Plugin, Wasm};
 use serde::Serialize;
@@ -113,6 +113,7 @@ async fn upload_wasm(
                 );
             }
             let mut response = builder
+                .header("X-Idempotent", response.idempotent.to_string())
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&response).unwrap_or_default(),
@@ -178,10 +179,6 @@ async fn upload_wasm_inner(
     })?;
     let sha256_hex = hex_sha256(sha256);
     let admin_id = admin_id_from_headers(headers);
-    let existed = storage
-        .get_registry_entry_by_sha(sha256)
-        .await
-        .map_err(storage_response)?;
     let blob = WasmBlob {
         sha256,
         size_bytes: bytes.len() as u64,
@@ -195,7 +192,7 @@ async fn upload_wasm_inner(
         uploaded_at_unix_secs: unix_now_secs(),
         uploaded_by_admin_id: admin_id,
     };
-    let (entry, _existed) = storage
+    let (entry, existed) = storage
         .persist_wasm_upload(blob, entry_input)
         .await
         .map_err(storage_response)?;
@@ -210,9 +207,7 @@ async fn upload_wasm_inner(
             )
         })?;
     enqueue_upload_audit(state, &sha256_hex, bytes.len() as u64, &original_filename);
-    let idempotent = existed
-        .as_ref()
-        .is_some_and(|existing| same_registry_entry(existing, &entry));
+    let idempotent = existed;
     let status = if idempotent {
         StatusCode::OK
     } else {
@@ -501,15 +496,6 @@ fn enqueue_upload_audit(
     entry.status = 201;
     entry.actor = Some("admin".to_owned());
     let _ = audit_sink.try_enqueue(entry);
-}
-
-fn same_registry_entry(left: &WasmRegistryEntry, right: &WasmRegistryEntry) -> bool {
-    left.id == right.id
-        && left.sha256 == right.sha256
-        && left.name == right.name
-        && left.original_filename == right.original_filename
-        && left.label == right.label
-        && left.uploaded_by_admin_id == right.uploaded_by_admin_id
 }
 
 fn admin_id_from_headers(headers: &HeaderMap) -> Uuid {
