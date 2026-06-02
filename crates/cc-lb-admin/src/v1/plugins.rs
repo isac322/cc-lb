@@ -393,6 +393,12 @@ async fn reorder_chain(
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
         }
+        Err(StorageError::PluginChainConflict { message }) if invalid_order_message(&message) => {
+            invalid_order(message)
+        }
+        Err(StorageError::Conflict { message }) if invalid_order_message(&message) => {
+            invalid_order(message)
+        }
         Err(error) => storage_mutation_error(error),
     }
 }
@@ -407,6 +413,7 @@ async fn rebalance_chain(
     };
     match storage.rebalance_chain(principal_id, query.slot.0).await {
         Ok(entries) => {
+            emit_chain_audit(&state, principal_id, query.slot.0);
             let mut response = Json(ChainListResponse { entries }).into_response();
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
@@ -708,7 +715,7 @@ fn invalid_order(detail: String) -> axum::response::Response {
 }
 
 fn invalid_order_message(message: &str) -> bool {
-    message.contains("invalid_order")
+    message.contains("invalid_order") || message.contains("gap")
 }
 
 fn plugin_registry_referenced_id(message: &str) -> Option<String> {

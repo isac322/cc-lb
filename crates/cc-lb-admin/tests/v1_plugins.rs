@@ -1,8 +1,11 @@
 mod config_admin_common;
 
+use std::sync::Arc;
+
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use cc_lb_config::Config;
+use cc_lb_core::spawn_audit_writer;
 use cc_lb_storage_api::{
     PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
     PrincipalStore, WasmBlob, WasmRegistryEntryInput, sparse_order,
@@ -414,6 +417,51 @@ async fn chain_rebalance_evens_spacing_and_returns_new_orders() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["entries"][0]["order"], 1000);
     assert_eq!(body["entries"][1]["order"], 2000);
+}
+
+#[tokio::test]
+async fn chain_rebalance_emits_chain_audit() {
+    let (_dir, storage) = temp_storage();
+    let (audit_sink, audit_writer) = spawn_audit_writer(storage.clone(), 64);
+    let principal_id = seed_principal(&storage, "principal-rebalance-audit").await;
+    let entry = seed_registry(&storage, 20, "plugin-rebalance-audit").await;
+    seed_chain(&storage, principal_id, entry.id, 1000).await;
+    seed_chain(&storage, principal_id, entry.id, 1001).await;
+    let mut state = test_state(Config::default(), Some(storage.clone()));
+    state.audit_sink = Some(Arc::new(audit_sink));
+    let app = app(state);
+
+    let (status, _, _, _) = authed_json(
+        app,
+        "POST",
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=Router"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let saw_audit = storage
+            .query_audit(None, 0, u64::MAX, 20)
+            .unwrap()
+            .iter()
+            .any(|entry| {
+                entry.admin_action.as_deref().is_some_and(|action| {
+                    action == format!(
+                        "plugin_chain_update(principal={principal_id}, slots=router)"
+                    )
+                })
+            });
+        if saw_audit {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("plugin_chain_update audit entry not observed within 5s");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    audit_writer.abort();
 }
 
 async fn request_json(
