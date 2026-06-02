@@ -8,6 +8,7 @@ mod key_index;
 pub mod managed_keys;
 mod migration;
 mod oauth;
+pub mod plugin_registry;
 pub mod price_catalog;
 mod request_events;
 mod usage_rollups;
@@ -26,6 +27,7 @@ pub use cc_lb_storage_api::types::{
     RequestEventUpstream, UsageRollup, UsageRollupResolution, UsageRollupRun,
 };
 pub use oauth::{api_key_storage_key, oauth_key};
+pub use plugin_registry::{RedbPluginBlobRepo, RedbPluginRegistryRepo};
 pub use price_catalog::PriceSnapshot;
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
@@ -65,6 +67,10 @@ pub const WASM_REGISTRY_V2: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("wasm_registry_v2");
 pub const PLUGIN_CHAINS_V2: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("plugin_chains_v2");
+pub const PLUGIN_REGISTRY: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plugin_registry");
+pub const PLUGIN_REGISTRY_MARKER: TableDefinition<&str, i64> =
+    TableDefinition::new("plugin_registry_marker");
+pub const PLUGIN_BLOBS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plugin_blobs");
 
 pub(crate) const SCHEMA_VERSION_KEY: &str = "version";
 pub(crate) const KILLSWITCH_KEY: &str = "enabled";

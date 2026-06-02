@@ -925,11 +925,13 @@ dependencies = [
 name = "cc-lb-storage-postgres"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "bytes",
  "cc-lb-aead",
  "cc-lb-pricing",
  "cc-lb-storage-api",
+ "cc-lb-storage-conformance",
  "chrono",
  "serde",
  "serde_json",
@@ -952,6 +954,7 @@ dependencies = [
  "bincode",
  "cc-lb-aead",
  "cc-lb-storage-api",
+ "cc-lb-storage-conformance",
  "chacha20poly1305",
  "redb",
  "ring",
