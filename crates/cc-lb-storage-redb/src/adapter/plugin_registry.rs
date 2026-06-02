@@ -615,12 +615,15 @@ impl RedbStorage {
         id: Uuid,
         expected_revision: u64,
     ) -> Result<Option<PluginChainEntry>, StorageError> {
-        // TODO: Oracle High 3 — revision check moves here in W3a.
-        let _ = expected_revision;
         let write_txn = self.db.begin_write()?;
         let Some(entry) = chain_by_id(&write_txn, id)? else {
             return Ok(None);
         };
+        if entry.revision != expected_revision {
+            return Err(StorageError::StalePluginChainRevision {
+                current: entry.revision,
+            });
+        }
         let registry = registry_by_id(&write_txn, entry.wasm_registry_id)?.ok_or_else(|| {
             StorageError::PluginRegistryConflict {
                 message: "missing plugin registry entry".to_owned(),
