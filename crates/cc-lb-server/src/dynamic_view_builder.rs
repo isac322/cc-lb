@@ -582,11 +582,8 @@ async fn apply_shape_plugin(
         name: registry_entry.name.clone(),
         artifact: wasm_path.to_string_lossy().into_owned(),
         config: binding.config.clone(),
-        metadata: bridged_metadata(
-            stores.plugin_registry_repo.as_ref(),
-            registry_entry.sha256,
-        )
-        .await,
+        metadata: bridged_metadata(stores.plugin_registry_repo.as_ref(), registry_entry.sha256)
+            .await,
     };
     runtime
         .instantiate_dialect_for_upstream(&upstream_id.to_string(), &registry_entry.name, &manifest)
@@ -802,4 +799,3 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
     }
     output
 }
-

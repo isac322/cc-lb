@@ -187,8 +187,8 @@ async fn end_to_end_register_then_bridge_round_trip() {
     let injected = manifest_metadata
         .get("augmented_metadata")
         .expect("PluginManifest.metadata receives the bridged key");
-    let manifest_round_trip: AugmentedMetadata = serde_json::from_value(injected.clone())
-        .expect("PluginManifest-style round-trip succeeds");
+    let manifest_round_trip: AugmentedMetadata =
+        serde_json::from_value(injected.clone()).expect("PluginManifest-style round-trip succeeds");
     assert_eq!(manifest_round_trip, *cached);
 }
 

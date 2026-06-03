@@ -73,9 +73,9 @@ impl PluginIdentity {
         }
 
         let is_valid_name = name_bytes[0].is_ascii_lowercase()
-            && name_bytes.iter().all(|&b| {
-                b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-'
-            });
+            && name_bytes
+                .iter()
+                .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_' || b == b'-');
 
         if !is_valid_name {
             return Err(IdentityError::PluginNameInvalid);

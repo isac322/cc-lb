@@ -9,12 +9,8 @@ use cc_lb_runtime_extism::handshake::{HandshakeExecutionError, build_offer};
 use cc_lb_runtime_extism::registry::{PluginRegistry, RegistryLifecycle};
 use cc_lb_runtime_extism::self_check::SelfCheckExecutionError;
 use cc_lb_server::startup_handshake::bridge_legacy_wasm_registry;
-use cc_lb_storage_api::{
-    PluginRegistryStore, WasmBlob, WasmRegistryEntryInput,
-};
-use cc_lb_storage_redb::{
-    RedbPluginBlobRepo, RedbPluginRegistryRepo, Storage as RedbStorage,
-};
+use cc_lb_storage_api::{PluginRegistryStore, WasmBlob, WasmRegistryEntryInput};
+use cc_lb_storage_redb::{RedbPluginBlobRepo, RedbPluginRegistryRepo, Storage as RedbStorage};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
@@ -83,7 +79,8 @@ fn setup() -> (
     let dir = TempDir::new().expect("tempdir");
     let storage =
         RedbStorage::open(&dir.path().join("legacy-bridge.redb"), [9; 32]).expect("redb opens");
-    let registry_repo = Arc::new(RedbPluginRegistryRepo::new(storage.clone()).expect("registry repo"));
+    let registry_repo =
+        Arc::new(RedbPluginRegistryRepo::new(storage.clone()).expect("registry repo"));
     let blob_repo = Arc::new(RedbPluginBlobRepo::new(storage.clone()).expect("blob repo"));
     let lifecycle = Arc::new(CountingLifecycle::default());
     let registry = PluginRegistry::new_with_lifecycle(
@@ -97,11 +94,7 @@ fn setup() -> (
     (dir, storage_dyn, registry, lifecycle)
 }
 
-async fn seed_legacy_upload(
-    storage: &Arc<dyn PluginRegistryStore>,
-    wasm: &[u8],
-    name: &str,
-) {
+async fn seed_legacy_upload(storage: &Arc<dyn PluginRegistryStore>, wasm: &[u8], name: &str) {
     let sha = sha256(wasm);
     let size = wasm.len() as u64;
     storage
