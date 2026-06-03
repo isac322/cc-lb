@@ -5,6 +5,7 @@
 // 1: generic fatal / unhandled error
 // 2: startup validation/preflight/storage kind fatal errors
 
+pub(crate) mod admin_plugins;
 pub mod app;
 pub mod bootstrap;
 pub mod build_meta;
@@ -21,6 +22,8 @@ pub mod reload;
 pub mod replica;
 pub(crate) mod revision_hash;
 pub mod signal;
+pub mod startup_handshake;
+pub mod state_machine;
 pub mod storage_factory;
 pub mod tls;
 pub mod validate;

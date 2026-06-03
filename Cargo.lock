@@ -655,6 +655,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-lb-pdk"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-plugin-wire",
+ "proc-macro2",
+ "quote",
+ "serde_json",
+ "syn",
+]
+
+[[package]]
 name = "cc-lb-plugin-api"
 version = "0.1.0"
 dependencies = [
@@ -678,6 +689,18 @@ dependencies = [
  "http",
  "serde_json",
  "tokio",
+]
+
+[[package]]
+name = "cc-lb-plugin-wire"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "thiserror 2.0.18",
+ "uuid",
 ]
 
 [[package]]
@@ -720,6 +743,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-lb-router-round-robin"
+version = "0.1.0"
+dependencies = [
+ "cc-lb-pdk",
+ "cc-lb-plugin-wire",
+]
+
+[[package]]
 name = "cc-lb-runtime-extism"
 version = "0.1.0"
 dependencies = [
@@ -728,6 +759,9 @@ dependencies = [
  "base64",
  "bytes",
  "cc-lb-plugin-api",
+ "cc-lb-plugin-wire",
+ "cc-lb-storage-api",
+ "dashmap",
  "extism",
  "http",
  "metrics",
@@ -736,10 +770,12 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "url",
  "uuid",
+ "wasmparser 0.243.0",
  "wat",
 ]
 
@@ -761,6 +797,7 @@ dependencies = [
  "cc-lb-dialect-anthropic",
  "cc-lb-observability",
  "cc-lb-plugin-api",
+ "cc-lb-plugin-wire",
  "cc-lb-pricing",
  "cc-lb-runtime-extism",
  "cc-lb-signer-anthropic-key",
@@ -858,6 +895,7 @@ dependencies = [
  "bytes",
  "cc-lb-aead",
  "cc-lb-plugin-api",
+ "cc-lb-plugin-wire",
  "cc-lb-storage-redb",
  "chrono",
  "serde",
@@ -882,6 +920,7 @@ dependencies = [
  "cc-lb-storage-redb",
  "chrono",
  "futures",
+ "proptest",
  "redb",
  "serde_json",
  "sqlx",
@@ -896,11 +935,13 @@ dependencies = [
 name = "cc-lb-storage-postgres"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "async-trait",
  "bytes",
  "cc-lb-aead",
  "cc-lb-pricing",
  "cc-lb-storage-api",
+ "cc-lb-storage-conformance",
  "chrono",
  "serde",
  "serde_json",
@@ -923,6 +964,7 @@ dependencies = [
  "bincode",
  "cc-lb-aead",
  "cc-lb-storage-api",
+ "cc-lb-storage-conformance",
  "chacha20poly1305",
  "redb",
  "ring",
@@ -3514,6 +3556,22 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51bae2ac328883f7acdfea3d66a7c35751187f870bc81f94563733a154d7a670"
 dependencies = [
  "plotters-backend",
+]
+
+[[package]]
+name = "plugin-handshake-spike"
+version = "0.1.0"
+dependencies = [
+ "extism-pdk",
+]
+
+[[package]]
+name = "plugin-handshake-spike-host-check"
+version = "0.1.0"
+dependencies = [
+ "extism",
+ "serde_json",
+ "wasmparser 0.243.0",
 ]
 
 [[package]]
