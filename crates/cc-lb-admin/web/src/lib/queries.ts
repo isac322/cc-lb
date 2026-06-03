@@ -10,6 +10,7 @@ import {
 import { useMemo } from 'react';
 import { toast } from 'sonner';
 import {
+  type AnalysisResponse,
   ApiError,
   type AuditQueryResponse,
   type ConfigDraftResponse,
@@ -22,6 +23,7 @@ import {
   fetchWithAuth,
   getJson,
   type KeyListResponse,
+  type LatestResponse,
   type OAuthStatusResponse,
   type PluginsStatusResponse,
   type PrincipalLimitsResponse,
@@ -29,6 +31,7 @@ import {
   postJson,
   putJson,
   type RecentEventsPayload,
+  type SeriesResponse,
 } from './api';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -171,6 +174,12 @@ export const qk = {
   configHistory: ['config', 'history'] as const,
   configDiff: (from: number, to: number) =>
     ['config', 'diff', from, to] as const,
+  subscriptionQuotaLatest: (params: Record<string, any>) =>
+    ['subscription-quota', 'latest', params] as const,
+  subscriptionQuotaSeries: (params: Record<string, any>) =>
+    ['subscription-quota', 'series', params] as const,
+  subscriptionQuotaAnalysis: (params: Record<string, any>) =>
+    ['subscription-quota', 'analysis', params] as const,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -371,6 +380,86 @@ export function useConfigHistory() {
     queryKey: qk.configHistory,
     queryFn: () =>
       getJson<ConfigHistoryResponse>('/admin/config/history?limit=20'),
+  });
+}
+
+export function useSubscriptionQuotaLatest(params: {
+  upstreamIds?: string;
+  windows?: string;
+  source?: string;
+  maxStalenessSecs?: number;
+}) {
+  const searchParams = new URLSearchParams();
+  if (params.upstreamIds) searchParams.set('upstream_ids', params.upstreamIds);
+  if (params.windows) searchParams.set('windows', params.windows);
+  if (params.source) searchParams.set('source', params.source);
+  if (params.maxStalenessSecs !== undefined)
+    searchParams.set('max_staleness_secs', String(params.maxStalenessSecs));
+
+  return useQuery({
+    queryKey: qk.subscriptionQuotaLatest(params),
+    queryFn: () =>
+      getJson<LatestResponse>(
+        `/admin/v1/subscription-quotas/latest?${searchParams.toString()}`,
+      ),
+    refetchInterval: 30_000,
+  });
+}
+
+export function useSubscriptionQuotaSeries(params: {
+  upstreamIds?: string;
+  windows?: string;
+  source?: string;
+  sinceUnixSecs: number;
+  untilUnixSecs: number;
+  bucketSecs?: number;
+  maxPointsPerSeries?: number;
+}) {
+  const searchParams = new URLSearchParams();
+  if (params.upstreamIds) searchParams.set('upstream_ids', params.upstreamIds);
+  if (params.windows) searchParams.set('windows', params.windows);
+  if (params.source) searchParams.set('source', params.source);
+  searchParams.set('since_unix_secs', String(params.sinceUnixSecs));
+  searchParams.set('until_unix_secs', String(params.untilUnixSecs));
+  if (params.bucketSecs !== undefined)
+    searchParams.set('bucket_secs', String(params.bucketSecs));
+  if (params.maxPointsPerSeries !== undefined)
+    searchParams.set(
+      'max_points_per_series',
+      String(params.maxPointsPerSeries),
+    );
+
+  return useQuery({
+    queryKey: qk.subscriptionQuotaSeries(params),
+    queryFn: () =>
+      getJson<SeriesResponse>(
+        `/admin/v1/subscription-quotas/series?${searchParams.toString()}`,
+      ),
+    refetchInterval: 60_000,
+  });
+}
+
+export function useSubscriptionQuotaAnalysis(params: {
+  upstreamIds?: string;
+  windows?: string;
+  source?: string;
+  sinceUnixSecs: number;
+  untilUnixSecs: number;
+}) {
+  const searchParams = new URLSearchParams();
+  if (params.upstreamIds) searchParams.set('upstream_ids', params.upstreamIds);
+  if (params.windows) searchParams.set('windows', params.windows);
+  if (params.source) searchParams.set('source', params.source);
+  searchParams.set('since_unix_secs', String(params.sinceUnixSecs));
+  searchParams.set('until_unix_secs', String(params.untilUnixSecs));
+
+  return useQuery({
+    queryKey: qk.subscriptionQuotaAnalysis(params),
+    queryFn: () =>
+      getJson<AnalysisResponse>(
+        `/admin/v1/subscription-quotas/analysis?${searchParams.toString()}`,
+      ),
+    refetchInterval: 120_000,
   });
 }
 
