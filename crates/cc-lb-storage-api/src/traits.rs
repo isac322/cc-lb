@@ -303,6 +303,8 @@ pub trait Storage:
     + ConfigStore
     + MetaStore
     + RuntimeChangeNotifier
+    + crate::PluginRegistryRepo
+    + crate::PluginBlobRepo
     + Send
     + Sync
     + 'static
@@ -322,6 +324,14 @@ impl<T> Storage for T where
         + OAuthCredentialStore
         + ApiKeyStore
         + PriceCatalogCache
+        + ConfigStore
+        + MetaStore
+        + RuntimeChangeNotifier
+        + crate::PluginRegistryRepo
+        + crate::PluginBlobRepo
+        + Send
+        + Sync
+        + 'static
         + ConfigStore
         + MetaStore
         + RuntimeChangeNotifier

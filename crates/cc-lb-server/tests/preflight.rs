@@ -196,6 +196,7 @@ impl Fixture {
             plugin_registry,
             upstream_rate_limits: storage.clone(),
             audit: None,
+            plugin_registry_repo: None,
         };
         Self {
             _db_dir: db_dir,

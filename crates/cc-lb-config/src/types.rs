@@ -435,6 +435,25 @@ pub struct OAuthConfig {
 pub struct RuntimeConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data_dir: Option<PathBuf>,
+    pub startup_handshake: StartupHandshakeConfig,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct StartupHandshakeConfig {
+    #[serde(default = "default_true")]
+    pub skip_if_fresh: bool,
+    #[serde(default)]
+    pub force: bool,
+}
+
+impl Default for StartupHandshakeConfig {
+    fn default() -> Self {
+        Self {
+            skip_if_fresh: true,
+            force: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

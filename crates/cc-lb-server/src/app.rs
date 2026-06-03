@@ -1,9 +1,10 @@
+use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::fs;
 use std::io;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -35,7 +36,10 @@ use cc_lb_core::{
 };
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_runtime_extism::ExtismRuntime;
-use cc_lb_storage_api::{ManagedKeyStore, RuntimeChangeNotifier, Storage};
+use cc_lb_runtime_extism::registry::PluginRegistry;
+use cc_lb_storage_api::{
+    ManagedKeyStore, PluginBlobRepo, PluginRegistryRepo, RuntimeChangeNotifier, Storage,
+};
 use http_body_util::BodyExt;
 use serde::Serialize;
 use thiserror::Error;
@@ -59,6 +63,11 @@ use crate::refresh::{LazyRefresher, OAuthRefresher};
 use crate::reload::{ConfigWatcher, summarize_restart_required};
 use crate::replica;
 use crate::signal;
+use crate::startup_handshake::{
+    LegacyBridgeReport, StartupHandshakeOpts, StartupHandshakeReport, bridge_legacy_wasm_registry,
+    run_startup_handshake,
+};
+use crate::state_machine::{ServerState, ServerStateHandle};
 use crate::storage_factory;
 use crate::tls::{ReloadableListener, TlsState};
 use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig, DynamicViewRebinder};
@@ -88,6 +97,7 @@ pub struct App {
     signals: signal::SignalHandle,
     drain_controller: DrainController,
     tls_state: Option<Arc<TlsState>>,
+    server_state: Arc<ServerStateHandle>,
 }
 
 #[derive(Debug, Error)]
@@ -127,6 +137,8 @@ pub enum BuildError {
     Tls(#[from] crate::tls::TlsError),
     #[error(transparent)]
     Rebind(#[from] crate::dynamic_view_builder::RebindError),
+    #[error("startup plugin re-handshake failed: {0}")]
+    StartupHandshake(String),
     #[error("storage is required")]
     StorageRequired,
     #[error("storage master key env {env} is missing")]
@@ -163,7 +175,9 @@ impl App {
             signals,
             drain_controller: _,
             tls_state,
+            server_state,
         } = self;
+        server_state.wait_for_ready().await;
         let proxy_listener = TcpListener::bind(proxy_addr).await?;
         let admin_listener = TcpListener::bind(admin_addr).await?;
 
@@ -230,6 +244,8 @@ pub async fn run_serve(
     config_path: &Path,
     data_dir: Option<&Path>,
     strict_preflight: bool,
+    skip_handshake_if_fresh: Option<bool>,
+    force_handshake: Option<bool>,
 ) -> Result<(), ServeError> {
     let mut config = Config::load(config_path)?;
     if let Some(data_dir) = data_dir {
@@ -239,10 +255,16 @@ pub async fn run_serve(
         config.observability.user_prompt_redaction,
     ));
     let _guard = init_observability(&mut config)?;
+    let startup_opts = startup_handshake_opts_from_flags(
+        skip_handshake_if_fresh,
+        force_handshake,
+        &config.runtime.startup_handshake,
+    );
     let app = build_app_with_path_inner(
         config,
         Some(config_path),
         Some(StartupPreflight { strict_preflight }),
+        startup_opts,
     )
     .await?;
     app.start().await?;
@@ -276,6 +298,18 @@ struct StartupPreflight {
     strict_preflight: bool,
 }
 
+fn startup_handshake_opts_from_flags(
+    skip_handshake_if_fresh: Option<bool>,
+    force_handshake: Option<bool>,
+    config: &cc_lb_config::StartupHandshakeConfig,
+) -> StartupHandshakeOpts {
+    StartupHandshakeOpts {
+        skip_if_fresh: skip_handshake_if_fresh.unwrap_or(config.skip_if_fresh),
+        force: force_handshake.unwrap_or(config.force),
+        ..StartupHandshakeOpts::default()
+    }
+}
+
 pub async fn build_app(config: Config) -> Result<App, BuildError> {
     build_app_with_path(config, None).await
 }
@@ -298,7 +332,23 @@ pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError
         upstream_kind: cc_lb_config::NoneModeUpstreamKind::AnthropicKey,
     });
     std::mem::forget(dir);
-    build_app_with_storage(config, None, managed_store, storage, aead).await
+    let plugin_registry_repo = Arc::new(cc_lb_storage_redb::RedbPluginRegistryRepo::new(
+        storage_arc.as_ref().clone(),
+    )?) as Arc<dyn PluginRegistryRepo>;
+    let plugin_blob_repo = Arc::new(cc_lb_storage_redb::RedbPluginBlobRepo::new(
+        storage_arc.as_ref().clone(),
+    )?) as Arc<dyn PluginBlobRepo>;
+    build_app_with_storage_inner(
+        config,
+        None,
+        managed_store,
+        storage,
+        aead,
+        Some((plugin_registry_repo, plugin_blob_repo)),
+        None,
+        StartupHandshakeOpts::default(),
+    )
+    .await
 }
 
 #[cfg(feature = "postgres")]
@@ -466,23 +516,27 @@ pub async fn build_app_with_path(
     config: Config,
     config_path: Option<&Path>,
 ) -> Result<App, BuildError> {
-    build_app_with_path_inner(config, config_path, None).await
+    build_app_with_path_inner(config, config_path, None, StartupHandshakeOpts::default()).await
 }
 
 async fn build_app_with_path_inner(
     config: Config,
     config_path: Option<&Path>,
     startup_preflight: Option<StartupPreflight>,
+    startup_handshake_opts: StartupHandshakeOpts,
 ) -> Result<App, BuildError> {
     config.validate()?;
-    let (managed_store, storage, aead) = open_storage(&config).await?;
+    let (managed_store, storage, aead, plugin_registry_repo, plugin_blob_repo) =
+        open_storage(&config).await?;
     build_app_with_storage_inner(
         config,
         config_path,
         managed_store,
         storage,
         aead,
+        Some((plugin_registry_repo, plugin_blob_repo)),
         startup_preflight,
+        startup_handshake_opts,
     )
     .await
 }
@@ -522,17 +576,31 @@ pub async fn build_app_with_storage(
     storage: Arc<dyn Storage>,
     aead: Arc<AeadService>,
 ) -> Result<App, BuildError> {
-    build_app_with_storage_inner(config, config_path, managed_store, storage, aead, None).await
+    build_app_with_storage_inner(
+        config,
+        config_path,
+        managed_store,
+        storage,
+        aead,
+        None,
+        None,
+        StartupHandshakeOpts::default(),
+    )
+    .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn build_app_with_storage_inner(
     config: Config,
     config_path: Option<&Path>,
     managed_store: Arc<dyn ManagedKeyStore>,
     storage: Arc<dyn Storage>,
     aead: Arc<AeadService>,
+    plugin_repos: Option<(Arc<dyn PluginRegistryRepo>, Arc<dyn PluginBlobRepo>)>,
     startup_preflight: Option<StartupPreflight>,
+    startup_handshake_opts: StartupHandshakeOpts,
 ) -> Result<App, BuildError> {
+    let server_state = Arc::new(ServerStateHandle::new_starting());
     let key_store = Arc::new(KeyStore::new(managed_store));
     let price_catalog = cc_lb_pricing::global_catalog().clone();
     spawn_price_catalog_loader(&config, storage.clone(), price_catalog.clone());
@@ -589,12 +657,20 @@ async fn build_app_with_storage_inner(
         }
     };
 
+    let (plugin_registry_repo, plugin_blob_repo) = match plugin_repos {
+        Some(repos) => repos,
+        None => (
+            storage.clone() as Arc<dyn PluginRegistryRepo>,
+            storage.clone() as Arc<dyn PluginBlobRepo>,
+        ),
+    };
     let stores = Arc::new(DynamicStores {
         upstreams: storage_for_dynamic.clone(),
         principals: storage_for_dynamic.clone(),
         plugin_registry: storage_for_dynamic.clone(),
         upstream_rate_limits: storage_for_dynamic.clone(),
         audit: Some(storage_for_dynamic.clone()),
+        plugin_registry_repo: Some(plugin_registry_repo.clone()),
     });
     let lifecycle_config = LifecycleConfig {
         messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
@@ -612,6 +688,39 @@ async fn build_app_with_storage_inner(
             std::process::exit(1);
         }
     }
+    let (startup_shutdown, startup_shutdown_triggered, startup_shutdown_task) =
+        spawn_startup_shutdown_signal();
+    let plugin_registry = PluginRegistry::new(
+        plugin_registry_repo.clone(),
+        plugin_blob_repo.clone(),
+        cc_lb_runtime_extism::handshake::build_offer(&BTreeSet::new()),
+    )
+    .map_err(|error| BuildError::StartupHandshake(error.to_string()))?;
+    let startup_report = run_startup_handshake(
+        &plugin_registry,
+        plugin_registry_repo.as_ref(),
+        startup_handshake_opts,
+        startup_shutdown,
+    )
+    .await;
+    startup_shutdown_task.abort();
+    let _ = startup_shutdown_task.await;
+    log_startup_handshake_report(&startup_report);
+    if startup_shutdown_triggered.load(Ordering::SeqCst) {
+        return Err(BuildError::StartupHandshake(
+            "startup interrupted by shutdown signal".to_owned(),
+        ));
+    }
+    if let Some((_, error)) = startup_report
+        .errors
+        .iter()
+        .find(|(sha256, _)| *sha256 == [0; 32])
+    {
+        return Err(BuildError::StartupHandshake(error.to_string()));
+    }
+    let legacy_bridge_report =
+        bridge_legacy_wasm_registry(&plugin_registry, storage_for_dynamic.as_ref()).await;
+    log_legacy_bridge_report(&legacy_bridge_report);
     let oauth_anthropic = config.oauth.anthropic.clone().unwrap_or_default();
     let oauth_cfg = Arc::new(oauth_anthropic.clone());
     let refresh_cancel = CancellationToken::new();
@@ -768,9 +877,11 @@ async fn build_app_with_storage_inner(
     };
     let reload_task = config_watcher.clone().map(spawn_reload_watcher);
 
+    server_state.transition_to_ready();
+
     Ok(App {
         router: app_router(state, config.timeouts.upstream_total_secs),
-        admin_router: cc_lb_admin::router(admin_state),
+        admin_router: admin_router(admin_state, server_state.clone(), plugin_registry),
         proxy_addr: config.listener.proxy_addr,
         admin_addr: config.listener.admin_addr,
         reload_task,
@@ -782,6 +893,7 @@ async fn build_app_with_storage_inner(
         signals,
         drain_controller,
         tls_state,
+        server_state,
     })
 }
 
@@ -812,6 +924,85 @@ impl DynamicViewRebinder for ServerDynamicViewRebinder {
         )
         .await?)
     }
+}
+
+fn log_startup_handshake_report(report: &StartupHandshakeReport) {
+    tracing::info!(
+        processed = report.processed,
+        skipped_fresh = report.skipped_fresh,
+        re_handshaked = report.re_handshaked,
+        disabled = report.disabled,
+        errors = report.errors.len(),
+        "startup plugin re-handshake completed",
+    );
+    for (sha256, error) in &report.errors {
+        if *sha256 == [0; 32] {
+            continue;
+        }
+        tracing::warn!(
+            sha256 = %hex_sha256_bytes(sha256),
+            error = %error,
+            "startup plugin re-handshake disabled or skipped a plugin",
+        );
+    }
+}
+
+fn log_legacy_bridge_report(report: &LegacyBridgeReport) {
+    tracing::info!(
+        scanned = report.scanned,
+        already_present = report.already_present,
+        bridged = report.bridged,
+        orphan = report.orphan,
+        failed = report.failed.len(),
+        "startup legacy wasm registry bridge completed",
+    );
+    for (sha256, error) in &report.failed {
+        tracing::warn!(
+            sha256 = %hex_sha256_bytes(sha256),
+            error = %error,
+            "legacy wasm bridge skipped a plugin",
+        );
+    }
+}
+
+fn spawn_startup_shutdown_signal() -> (watch::Receiver<bool>, Arc<AtomicBool>, JoinHandle<()>) {
+    let (tx, rx) = watch::channel(false);
+    let triggered = Arc::new(AtomicBool::new(false));
+    let task_triggered = triggered.clone();
+    let task = tokio::spawn(async move {
+        wait_for_startup_shutdown_signal().await;
+        task_triggered.store(true, Ordering::SeqCst);
+        let _ = tx.send(true);
+    });
+    (rx, triggered, task)
+}
+
+#[cfg(unix)]
+async fn wait_for_startup_shutdown_signal() {
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(mut sigterm) => {
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => {},
+                _ = sigterm.recv() => {},
+            }
+        }
+        Err(_) => {
+            let _ = tokio::signal::ctrl_c().await;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn wait_for_startup_shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
+}
+
+fn hex_sha256_bytes(sha256: &[u8; 32]) -> String {
+    let mut output = String::with_capacity(64);
+    for byte in sha256 {
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
 }
 
 struct ReconcilerParams {
@@ -1121,6 +1312,36 @@ struct HealthBody {
     reason: Option<String>,
 }
 
+#[derive(Clone, Serialize)]
+struct AdminServerStateBody {
+    state: ServerState,
+}
+
+fn admin_router(
+    admin_state: AdminState,
+    server_state: Arc<ServerStateHandle>,
+    plugin_registry: PluginRegistry,
+) -> Router {
+    let admin_token = admin_state.admin_token.clone();
+    cc_lb_admin::router(admin_state)
+        .merge(crate::admin_plugins::router(admin_token, plugin_registry))
+        .merge(server_state_router(server_state))
+}
+
+fn server_state_router(server_state: Arc<ServerStateHandle>) -> Router {
+    Router::new()
+        .route("/admin/health/state", get(admin_server_state))
+        .with_state(server_state)
+}
+
+async fn admin_server_state(
+    State(server_state): State<Arc<ServerStateHandle>>,
+) -> Json<AdminServerStateBody> {
+    Json(AdminServerStateBody {
+        state: server_state.current(),
+    })
+}
+
 fn app_router(state: ProxyState, timeout_secs: u64) -> Router {
     health_router(state.clone()).merge(proxy_router(state, timeout_secs))
 }
@@ -1313,9 +1534,15 @@ fn init_observability(config: &mut Config) -> Result<TracingGuard, BuildError> {
     .map_err(BuildError::from)
 }
 
-pub async fn open_storage(
-    config: &Config,
-) -> Result<(Arc<dyn ManagedKeyStore>, Arc<dyn Storage>, Arc<AeadService>), BuildError> {
+type OpenStorageParts = (
+    Arc<dyn ManagedKeyStore>,
+    Arc<dyn Storage>,
+    Arc<AeadService>,
+    Arc<dyn PluginRegistryRepo>,
+    Arc<dyn PluginBlobRepo>,
+);
+
+pub async fn open_storage(config: &Config) -> Result<OpenStorageParts, BuildError> {
     let key_hex =
         std::env::var(&config.aead.key_env).map_err(|_| BuildError::StorageKeyMissing {
             env: config.aead.key_env.clone(),
@@ -1323,7 +1550,13 @@ pub async fn open_storage(
     let key = decode_hex_key(&key_hex)?;
     let aead = Arc::new(AeadService::from_master_key(key));
     let opened = storage_factory::open_storage(&config.storage, aead.clone(), key).await?;
-    Ok((opened.managed_key_store, opened.storage, aead))
+    Ok((
+        opened.managed_key_store,
+        opened.storage,
+        aead,
+        opened.plugin_registry_repo,
+        opened.plugin_blob_repo,
+    ))
 }
 
 fn decode_hex_key(value: &str) -> Result<[u8; 32], BuildError> {
@@ -1388,4 +1621,77 @@ fn dispatcher(config: &Config) -> (Arc<dyn UpstreamDispatch>, Arc<BreakerRegistr
         )),
         breaker_registry,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use http_body_util::BodyExt;
+    use serde_json::Value;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn admin_health_state_reports_current_state() {
+        let state = Arc::new(ServerStateHandle::new_starting());
+        let router = server_state_router(state.clone());
+
+        assert_admin_state(router.clone(), "starting").await;
+        state.transition_to_ready();
+        assert_admin_state(router, "ready").await;
+    }
+
+    #[test]
+    fn omitted_cli_uses_config_defaults_for_startup_handshake() {
+        let cfg = cc_lb_config::StartupHandshakeConfig::default();
+        let opts = startup_handshake_opts_from_flags(None, None, &cfg);
+        assert!(opts.skip_if_fresh);
+        assert!(!opts.force);
+    }
+
+    #[test]
+    fn config_can_disable_skip_if_fresh() {
+        let cfg = cc_lb_config::StartupHandshakeConfig {
+            skip_if_fresh: false,
+            force: true,
+        };
+        let opts = startup_handshake_opts_from_flags(None, None, &cfg);
+        assert!(!opts.skip_if_fresh);
+        assert!(opts.force);
+    }
+
+    #[test]
+    fn cli_overrides_config_for_startup_handshake() {
+        let cfg = cc_lb_config::StartupHandshakeConfig {
+            skip_if_fresh: false,
+            force: true,
+        };
+        let opts = startup_handshake_opts_from_flags(Some(true), Some(false), &cfg);
+        assert!(opts.skip_if_fresh);
+        assert!(!opts.force);
+    }
+
+    async fn assert_admin_state(router: Router, expected: &str) {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .uri("/admin/health/state")
+                    .body(Body::empty())
+                    .expect("request should build"),
+            )
+            .await
+            .expect("admin health state request should succeed");
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body should collect")
+            .to_bytes();
+        let payload: Value = serde_json::from_slice(&body).expect("body should be json");
+        assert_eq!(payload.get("state").and_then(Value::as_str), Some(expected));
+    }
 }

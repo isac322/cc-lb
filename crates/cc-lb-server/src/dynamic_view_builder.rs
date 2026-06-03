@@ -24,9 +24,9 @@ use cc_lb_plugin_api::{
 use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    AuditStore, PluginRegistryStore, PluginSlot, PrincipalRecord, PrincipalStore, RateLimitKind,
-    StorageError, StorageResult, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
-    UpstreamRecord, UpstreamStore,
+    AuditStore, PluginRegistryRepo, PluginRegistryStore, PluginSlot, PrincipalRecord,
+    PrincipalStore, RateLimitKind, StorageError, StorageResult, UpstreamRateLimitObservationRecord,
+    UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
 };
 use parking_lot::RwLock;
 use thiserror::Error;
@@ -40,6 +40,11 @@ pub struct Stores {
     pub plugin_registry: Arc<dyn PluginRegistryStore>,
     pub upstream_rate_limits: Arc<dyn UpstreamRateLimitStateStore>,
     pub audit: Option<Arc<dyn AuditStore>>,
+    /// T43 bridge: when `Some` and a `PluginRegistryRecord` exists for the
+    /// same SHA-256 as the `WasmRegistryEntry`, the bridge injects
+    /// `augmented_metadata` into `PluginManifest.metadata["augmented_metadata"]`.
+    /// Otherwise dispatch falls back to `legacy_dispatch_metadata` in `plugin_wrap`.
+    pub plugin_registry_repo: Option<Arc<dyn PluginRegistryRepo>>,
 }
 
 #[derive(Debug, Error)]
@@ -50,6 +55,41 @@ pub enum RebindError {
     Io(#[from] io::Error),
     #[error(transparent)]
     Plugin(#[from] cc_lb_plugin_api::RuntimeError),
+}
+
+pub async fn bridged_metadata(
+    repo: Option<&Arc<dyn PluginRegistryRepo>>,
+    sha256: [u8; 32],
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let mut metadata = std::collections::BTreeMap::new();
+    let Some(repo) = repo else {
+        return metadata;
+    };
+    let record = match repo.get_by_sha256(&sha256).await {
+        Ok(Some(record)) => record,
+        Ok(None) => return metadata,
+        Err(error) => {
+            tracing::warn!(
+                sha256 = %hex_sha256(sha256),
+                %error,
+                "PluginRegistry lookup failed; falling back to legacy dispatch metadata",
+            );
+            return metadata;
+        }
+    };
+    match serde_json::to_value(&record.augmented_metadata) {
+        Ok(value) => {
+            metadata.insert("augmented_metadata".to_owned(), value);
+        }
+        Err(error) => {
+            tracing::warn!(
+                sha256 = %hex_sha256(sha256),
+                %error,
+                "augmented_metadata serialization failed; falling back to legacy dispatch metadata",
+            );
+        }
+    }
+    metadata
 }
 
 pub fn ensure_wasm_cache_dirs(data_dir: &Path) -> io::Result<()> {
@@ -275,7 +315,11 @@ async fn build_principal_chains(
                 name: registry_entry.name,
                 artifact: wasm_path.to_string_lossy().into_owned(),
                 config: entry.config,
-                metadata: Default::default(),
+                metadata: bridged_metadata(
+                    stores.plugin_registry_repo.as_ref(),
+                    registry_entry.sha256,
+                )
+                .await,
             };
             match runtime.instantiate_router_for(&principal.name, &manifest.name, &manifest) {
                 Ok((handle, slot)) => {
@@ -316,7 +360,11 @@ async fn build_principal_chains(
                 name: registry_entry.name,
                 artifact: wasm_path.to_string_lossy().into_owned(),
                 config: entry.config,
-                metadata: Default::default(),
+                metadata: bridged_metadata(
+                    stores.plugin_registry_repo.as_ref(),
+                    registry_entry.sha256,
+                )
+                .await,
             };
             match runtime.instantiate_observability_for(&principal.name, &manifest.name, &manifest)
             {
@@ -358,7 +406,11 @@ async fn build_principal_chains(
                 name: registry_entry.name,
                 artifact: wasm_path.to_string_lossy().into_owned(),
                 config: entry.config,
-                metadata: Default::default(),
+                metadata: bridged_metadata(
+                    stores.plugin_registry_repo.as_ref(),
+                    registry_entry.sha256,
+                )
+                .await,
             };
             match runtime.instantiate_dialect_for_principal(
                 &principal.name,
@@ -530,7 +582,8 @@ async fn apply_shape_plugin(
         name: registry_entry.name.clone(),
         artifact: wasm_path.to_string_lossy().into_owned(),
         config: binding.config.clone(),
-        metadata: Default::default(),
+        metadata: bridged_metadata(stores.plugin_registry_repo.as_ref(), registry_entry.sha256)
+            .await,
     };
     runtime
         .instantiate_dialect_for_upstream(&upstream_id.to_string(), &registry_entry.name, &manifest)
