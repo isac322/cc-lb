@@ -7,7 +7,8 @@ use cc_lb_storage_api::BackendKind;
 use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
     scenarios::{
-        plugin_registry_store, principal_store, storage_roundtrips, upstream_rate_limit_store,
+        anthropic_compatibility_kv_store, plugin_registry_store, principal_store,
+        storage_roundtrips, upstream_rate_limit_store, upstream_subscription_quota_store,
     },
 };
 use cc_lb_storage_redb::RedbStorage;
@@ -88,6 +89,108 @@ fn upstream_rate_limit_empty_list_for_unknown_id_redb() {
         upstream_rate_limit_store::empty_list_for_unknown_id,
     );
 }
+
+macro_rules! anthropic_compatibility_kv_redb_test {
+    ($test_name:ident, $scenario:ident) => {
+        #[test]
+        fn $test_name() {
+            run_redb_scenario(
+                stringify!($scenario),
+                anthropic_compatibility_kv_store::$scenario,
+            );
+        }
+    };
+}
+
+anthropic_compatibility_kv_redb_test!(
+    anthropic_compatibility_kv_put_then_get_roundtrip_redb,
+    put_then_get_roundtrip
+);
+anthropic_compatibility_kv_redb_test!(
+    anthropic_compatibility_kv_update_replaces_value_and_clears_error_redb,
+    update_replaces_value_and_clears_error
+);
+anthropic_compatibility_kv_redb_test!(
+    anthropic_compatibility_kv_failure_preserves_last_good_value_redb,
+    failure_preserves_last_good_value
+);
+anthropic_compatibility_kv_redb_test!(
+    anthropic_compatibility_kv_failure_on_never_seen_key_is_noop_redb,
+    failure_on_never_seen_key_is_noop
+);
+anthropic_compatibility_kv_redb_test!(
+    anthropic_compatibility_kv_list_returns_keys_in_some_order_redb,
+    list_returns_keys_in_some_order
+);
+anthropic_compatibility_kv_redb_test!(
+    anthropic_compatibility_kv_older_observation_does_not_replace_newer_redb,
+    older_observation_does_not_replace_newer
+);
+
+macro_rules! upstream_subscription_quota_redb_test {
+    ($test_name:ident, $scenario:ident) => {
+        #[test]
+        fn $test_name() {
+            run_redb_scenario(
+                stringify!($scenario),
+                upstream_subscription_quota_store::$scenario,
+            );
+        }
+    };
+}
+
+upstream_subscription_quota_redb_test!(
+    upstream_subscription_quota_append_then_list_latest_roundtrip_redb,
+    append_then_list_latest_roundtrip
+);
+upstream_subscription_quota_redb_test!(
+    upstream_subscription_quota_same_millis_appends_with_different_sample_ids_dont_collide_redb,
+    same_millis_appends_with_different_sample_ids_dont_collide
+);
+upstream_subscription_quota_redb_test!(
+    upstream_subscription_quota_header_and_api_sources_coexist_in_latest_redb,
+    header_and_api_sources_coexist_in_latest
+);
+upstream_subscription_quota_redb_test!(
+    upstream_subscription_quota_latest_is_monotonic_in_millis_redb,
+    latest_is_monotonic_in_millis
+);
+upstream_subscription_quota_redb_test!(
+    upstream_subscription_quota_series_returns_buckets_with_correct_bounds_redb,
+    series_returns_buckets_with_correct_bounds
+);
+upstream_subscription_quota_redb_test!(
+    upstream_subscription_quota_series_source_merge_merged_collapses_both_sources_redb,
+    series_source_merge_merged_collapses_both_sources
+);
+upstream_subscription_quota_redb_test!(
+    upstream_subscription_quota_series_source_merge_header_filters_api_redb,
+    series_source_merge_header_filters_api
+);
+upstream_subscription_quota_redb_test!(
+    upstream_subscription_quota_series_max_points_per_series_downsamples_redb,
+    series_max_points_per_series_downsamples
+);
+upstream_subscription_quota_redb_test!(
+    upstream_subscription_quota_delete_before_removes_old_observations_redb,
+    delete_before_removes_old_observations
+);
+upstream_subscription_quota_redb_test!(
+    upstream_subscription_quota_delete_before_does_not_touch_latest_table_redb,
+    delete_before_does_not_touch_latest_table
+);
+upstream_subscription_quota_redb_test!(
+    upstream_subscription_quota_process_start_marker_persists_with_sample_kind_redb,
+    process_start_marker_persists_with_sample_kind
+);
+upstream_subscription_quota_redb_test!(
+    upstream_subscription_quota_empty_upstream_ids_returns_empty_redb,
+    empty_upstream_ids_returns_empty
+);
+upstream_subscription_quota_redb_test!(
+    upstream_subscription_quota_series_filters_observed_at_window_redb,
+    series_filters_observed_at_window
+);
 
 macro_rules! plugin_registry_redb_test {
     ($test_name:ident, $scenario:ident) => {
