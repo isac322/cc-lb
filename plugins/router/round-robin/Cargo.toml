@@ -3,6 +3,7 @@ name = "cc-lb-router-round-robin"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
+publish = false
 
 [dependencies]
 cc-lb-pdk = { path = "../../../crates/cc-lb-pdk" }
