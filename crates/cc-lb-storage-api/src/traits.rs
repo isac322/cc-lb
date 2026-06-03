@@ -1,8 +1,10 @@
 use async_trait::async_trait;
 
 use crate::{
-    BackendKind, RuntimeChangeNotifier, StorageError, StorageResult, types::*,
+    BackendKind, RuntimeChangeNotifier, StorageError, StorageResult,
+    anthropic_compatibility_kv::AnthropicCompatibilityKvStore, types::*,
     upstream_rate_limit::UpstreamRateLimitStateStore,
+    upstream_subscription_quota::UpstreamSubscriptionQuotaStore,
 };
 
 pub const CURRENT_CONTRACT_VERSION: u32 = 1;
@@ -128,6 +130,9 @@ pub trait UsageRollupStore: Send + Sync {
 
     async fn query_usage_rollups(&self) -> StorageResult<Vec<UsageRollup>>;
 
+    /// CATEGORY-3: `UsageRollup.upstream_id` is the stable cross-table identity for quota joins;
+    /// `upstream_name` is best-effort display data captured from the upstream's current name and
+    /// may drift across renames.
     async fn query_usage_rollups_in_range(
         &self,
         resolution: UsageRollupResolution,
@@ -296,6 +301,8 @@ pub trait Storage:
     + QuotaStore
     + LimitStateStore
     + UpstreamRateLimitStateStore
+    + UpstreamSubscriptionQuotaStore
+    + AnthropicCompatibilityKvStore
     + UsageRollupStore
     + OAuthCredentialStore
     + ApiKeyStore
@@ -320,6 +327,8 @@ impl<T> Storage for T where
         + QuotaStore
         + LimitStateStore
         + UpstreamRateLimitStateStore
+        + UpstreamSubscriptionQuotaStore
+        + AnthropicCompatibilityKvStore
         + UsageRollupStore
         + OAuthCredentialStore
         + ApiKeyStore

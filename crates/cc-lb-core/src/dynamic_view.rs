@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::api_keys::principal_view::PrincipalView;
 use crate::error_normalizer::ErrorNormalizer;
-use crate::lifecycle::UpstreamDispatch;
+use crate::lifecycle::{NoopSubscriptionQuotaCache, SubscriptionQuotaCacheLike, UpstreamDispatch};
 
 #[non_exhaustive]
 pub struct DynamicView {
@@ -21,6 +21,8 @@ pub struct DynamicView {
     pub principal_view: Arc<PrincipalView>,
     pub upstream_status_snapshot: Arc<UpstreamStatusSnapshot>,
     pub upstream_rate_limit_cache: Arc<RwLock<UpstreamRateLimitCache>>,
+    pub subscription_quota_cache: Arc<dyn SubscriptionQuotaCacheLike>,
+    pub subscription_quota_routing_max_staleness_secs: u64,
     pub generation: u64,
     upstream_records: Vec<UpstreamRecord>,
 }
@@ -135,6 +137,8 @@ pub struct DynamicViewBuilder {
     principal_view: Option<Arc<PrincipalView>>,
     upstream_status_snapshot: Option<Arc<UpstreamStatusSnapshot>>,
     upstream_rate_limit_cache: Option<Arc<RwLock<UpstreamRateLimitCache>>>,
+    subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
+    subscription_quota_routing_max_staleness_secs: Option<u64>,
     upstream_records: Vec<UpstreamRecord>,
 }
 
@@ -150,6 +154,8 @@ impl DynamicViewBuilder {
             principal_view: None,
             upstream_status_snapshot: None,
             upstream_rate_limit_cache: None,
+            subscription_quota_cache: None,
+            subscription_quota_routing_max_staleness_secs: None,
             upstream_records: Vec::new(),
         }
     }
@@ -165,6 +171,10 @@ impl DynamicViewBuilder {
             principal_view: Some(Arc::clone(&view.principal_view)),
             upstream_status_snapshot: Some(Arc::clone(&view.upstream_status_snapshot)),
             upstream_rate_limit_cache: Some(Arc::clone(&view.upstream_rate_limit_cache)),
+            subscription_quota_cache: Some(Arc::clone(&view.subscription_quota_cache)),
+            subscription_quota_routing_max_staleness_secs: Some(
+                view.subscription_quota_routing_max_staleness_secs,
+            ),
             upstream_records: view.upstreams_snapshot().to_vec(),
         }
     }
@@ -223,6 +233,16 @@ impl DynamicViewBuilder {
         self
     }
 
+    pub fn subscription_quota_cache(mut self, cache: Arc<dyn SubscriptionQuotaCacheLike>) -> Self {
+        self.subscription_quota_cache = Some(cache);
+        self
+    }
+
+    pub fn subscription_quota_routing_max_staleness_secs(mut self, value: u64) -> Self {
+        self.subscription_quota_routing_max_staleness_secs = Some(value);
+        self
+    }
+
     pub fn upstream_records(mut self, records: Vec<UpstreamRecord>) -> Self {
         self.upstream_records = records;
         self
@@ -252,6 +272,12 @@ impl DynamicViewBuilder {
             upstream_rate_limit_cache: self
                 .upstream_rate_limit_cache
                 .unwrap_or_else(|| Arc::new(RwLock::new(UpstreamRateLimitCache::default()))),
+            subscription_quota_cache: self
+                .subscription_quota_cache
+                .unwrap_or_else(|| Arc::new(NoopSubscriptionQuotaCache)),
+            subscription_quota_routing_max_staleness_secs: self
+                .subscription_quota_routing_max_staleness_secs
+                .unwrap_or(0),
             generation: self.previous_generation.saturating_add(1),
             upstream_records: self.upstream_records,
         })

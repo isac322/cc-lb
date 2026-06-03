@@ -6,6 +6,7 @@
 // 2: startup validation/preflight/storage kind fatal errors
 
 pub(crate) mod admin_plugins;
+pub mod anthropic_compat_poller;
 pub mod app;
 pub mod bootstrap;
 pub mod build_meta;
@@ -15,6 +16,7 @@ pub mod cli;
 pub mod drain;
 pub mod dynamic_view_builder;
 pub mod notify_listener;
+pub mod oauth_usage_poller;
 pub mod preflight;
 pub mod reconcile;
 pub mod refresh;
@@ -25,8 +27,14 @@ pub mod signal;
 pub mod startup_handshake;
 pub mod state_machine;
 pub mod storage_factory;
+pub mod subscription_quota_cache;
+pub mod subscription_quota_gc;
 pub mod tls;
 pub mod validate;
 pub mod version;
 
+pub use anthropic_compat_poller::{AnthropicCompatPoller, spawn_anthropic_compat_poller};
 pub use app::{App, BuildError, build_app, build_app_with_path, run_serve};
+pub use oauth_usage_poller::{OAuthUsagePoller, spawn_oauth_usage_poller};
+pub use subscription_quota_cache::{MergedQuotaSnapshot, MergedSource, SubscriptionQuotaCache};
+pub use subscription_quota_gc::spawn_subscription_quota_gc;

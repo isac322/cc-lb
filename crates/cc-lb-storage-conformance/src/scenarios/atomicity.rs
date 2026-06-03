@@ -4,13 +4,16 @@ use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
-    LimitStateStore, QuotaStore, RequestEventStore, UsageRollupStore,
+    LimitStateStore, QuotaStore, RequestEventStore, UpstreamCreate, UpstreamStore, UpstreamUpdate,
+    UsageRollupStore,
     types::{
         BucketKind, PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState,
         RequestEvent, RequestEventUpstream, UsageRollup, UsageRollupResolution,
     },
+    upstream::UpstreamKind,
 };
 use futures::future::try_join_all;
+use uuid::Uuid;
 
 use super::super::{ConformanceBackend, ConformanceFixture};
 
@@ -54,8 +57,14 @@ where
     scenario_result?;
     teardown_result?;
 
-    let mut fixture = ConformanceFixture::new(backend).await?;
+    let mut fixture = ConformanceFixture::new(Arc::clone(&backend)).await?;
     let scenario_result = usage_rollup_idempotent(&fixture).await;
+    let teardown_result = fixture.teardown().await;
+    scenario_result?;
+    teardown_result?;
+
+    let mut fixture = ConformanceFixture::new(backend).await?;
+    let scenario_result = usage_rollup_v2_preserves_upstream_id_across_renames(&fixture).await;
     let teardown_result = fixture.teardown().await;
     scenario_result?;
     teardown_result?;
@@ -427,6 +436,7 @@ where
             UsageRollupResolution::Minute,
             1_800_000_000,
             "usage-principal-a",
+            Uuid::nil(),
             "anthropic_direct",
             "claude-sonnet-4-5",
         )?,
@@ -447,6 +457,7 @@ where
             UsageRollupResolution::Hour,
             1_800_000_000,
             "usage-principal-a",
+            Uuid::nil(),
             "anthropic_direct",
             "claude-sonnet-4-5",
         )?,
@@ -482,6 +493,97 @@ where
     ensure!(
         storage.usage_rollup_checkpoint().await? == first_run.checkpoint,
         "stored checkpoint should match first rollup checkpoint"
+    );
+
+    Ok(())
+}
+
+pub async fn usage_rollup_v2_preserves_upstream_id_across_renames<B>(
+    fixture: &ConformanceFixture<B>,
+) -> Result<()>
+where
+    B: ConformanceBackend,
+{
+    let storage = fixture.storage();
+    let upstream = storage
+        .create(UpstreamCreate {
+            name: "alpha".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            base_url: None,
+            api_key_ciphertext: None,
+            shape_plugin: None,
+        })
+        .await?;
+    let upstream_id = upstream.id;
+
+    storage
+        .append_request_event(&request_event_with_upstream_identity(
+            1_800_010_005,
+            "usage-rename-alpha",
+            "usage-rename-principal",
+            upstream_id,
+            "alpha",
+        ))
+        .await?;
+    storage.rollup_usage_once().await?;
+
+    let updated = storage
+        .update(
+            upstream_id,
+            upstream.revision,
+            UpstreamUpdate {
+                name: Some("beta".to_owned()),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await?;
+    ensure!(
+        updated.id == upstream_id,
+        "rename must keep upstream id stable"
+    );
+
+    storage
+        .append_request_event(&request_event_with_upstream_identity(
+            1_800_010_065,
+            "usage-rename-beta",
+            "usage-rename-principal",
+            upstream_id,
+            "beta",
+        ))
+        .await?;
+    storage.rollup_usage_once().await?;
+
+    let rollups = storage.query_usage_rollups().await?;
+    let by_upstream_id = rollups
+        .iter()
+        .filter(|rollup| rollup.upstream_id == upstream_id)
+        .collect::<Vec<_>>();
+    let observed = by_upstream_id
+        .iter()
+        .map(|rollup| {
+            (
+                rollup.resolution,
+                rollup.bucket_start,
+                rollup.upstream_name.clone(),
+            )
+        })
+        .collect::<Vec<_>>();
+    ensure!(
+        by_upstream_id.len() == 3,
+        "expected two minute rows plus one merged hour row for renamed events, got {}",
+        by_upstream_id.len()
+    );
+    ensure!(
+        by_upstream_id
+            .iter()
+            .any(|rollup| rollup.bucket_start == 1_800_009_960 && rollup.upstream_name == "alpha"),
+        "alpha rollup should keep stable id with alpha display name; observed {observed:?}"
+    );
+    ensure!(
+        by_upstream_id
+            .iter()
+            .any(|rollup| rollup.bucket_start == 1_800_010_020 && rollup.upstream_name == "beta"),
+        "beta rollup should keep stable id with beta display name"
     );
 
     Ok(())
@@ -570,6 +672,7 @@ fn find_rollup<'a>(
     resolution: UsageRollupResolution,
     bucket_start: u64,
     principal: &str,
+    upstream_id: Uuid,
     upstream: &str,
     model: &str,
 ) -> Result<&'a UsageRollup> {
@@ -579,7 +682,8 @@ fn find_rollup<'a>(
             rollup.resolution == resolution
                 && rollup.bucket_start == bucket_start
                 && rollup.principal == principal
-                && rollup.upstream == upstream
+                && rollup.upstream_id == upstream_id
+                && rollup.upstream_name == upstream
                 && rollup.model == model
         })
         .ok_or_else(|| {
@@ -662,6 +766,31 @@ fn request_event(
         input_tokens,
         output_tokens,
         duration_ms,
+        error_code: None,
+        ..Default::default()
+    }
+}
+
+fn request_event_with_upstream_identity(
+    ts: u64,
+    request_id: &str,
+    principal: &str,
+    upstream_id: Uuid,
+    upstream_name: &str,
+) -> RequestEvent {
+    RequestEvent {
+        ts,
+        request_id: request_id.to_owned(),
+        principal_id: Some(principal.to_owned()),
+        principal_kind: Some("api_key".to_owned()),
+        upstream: Some(RequestEventUpstream::AnthropicDirect),
+        upstream_id: Some(upstream_id),
+        upstream_name: Some(upstream_name.to_owned()),
+        model: Some("claude-sonnet-4-5".to_owned()),
+        status: 200,
+        input_tokens: Some(1),
+        output_tokens: Some(2),
+        duration_ms: 10,
         error_code: None,
         ..Default::default()
     }

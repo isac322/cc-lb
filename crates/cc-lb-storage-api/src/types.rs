@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -61,6 +62,8 @@ pub struct RequestEvent {
     pub key_id: Option<String>,
     pub principal_kind: Option<String>,
     pub upstream: Option<RequestEventUpstream>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_id: Option<Uuid>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub upstream_name: Option<String>,
     pub model: Option<String>,
@@ -269,7 +272,8 @@ pub struct UsageRollupKey {
     pub resolution: UsageRollupResolution,
     pub bucket_start: u64,
     pub principal: String,
-    pub upstream: String,
+    pub upstream_id: Uuid,
+    pub upstream_name: String,
     pub model: String,
 }
 
@@ -278,7 +282,8 @@ pub struct UsageRollup {
     pub resolution: UsageRollupResolution,
     pub bucket_start: u64,
     pub principal: String,
-    pub upstream: String,
+    pub upstream_id: Uuid,
+    pub upstream_name: String,
     pub model: String,
     pub request_count: u64,
     pub input_tokens: u64,

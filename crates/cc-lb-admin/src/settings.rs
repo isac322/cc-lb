@@ -506,6 +506,8 @@ fn reject_unknown_top_level_keys(value: &Value) -> Result<(), String> {
         "bulkhead",
         "dns",
         "egress",
+        "anthropic_compat_poller",
+        "subscription_quota",
     ];
     let allowed: BTreeSet<&str> = allowed.into_iter().collect();
     let unknown: Vec<&str> = object

@@ -30,7 +30,7 @@ pub use oauth::{api_key_storage_key, oauth_key};
 pub use plugin_registry::{RedbPluginBlobRepo, RedbPluginRegistryRepo};
 pub use price_catalog::PriceSnapshot;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 pub const OAUTH_CREDENTIALS_V1: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("OAUTH_CREDENTIALS_V1");
@@ -41,8 +41,8 @@ pub const PRICE_CATALOG_V1: TableDefinition<&str, &[u8]> = TableDefinition::new(
 pub const AUDIT_LOG_V1: TableDefinition<&[u8], &[u8]> = TableDefinition::new("AUDIT_LOG_V1");
 pub const REQUEST_EVENTS_V1: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("REQUEST_EVENTS_V1");
-pub const USAGE_ROLLUPS_V1: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("USAGE_ROLLUPS_V1");
+pub const USAGE_ROLLUPS_V2: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("USAGE_ROLLUPS_V2");
 pub const USAGE_ROLLUP_CHECKPOINTS_V1: TableDefinition<&str, u64> =
     TableDefinition::new("USAGE_ROLLUP_CHECKPOINTS_V1");
 pub const SCHEMA_VERSION_V1: TableDefinition<&str, u32> = TableDefinition::new("SCHEMA_VERSION_V1");
@@ -62,6 +62,14 @@ pub const UPSTREAMS_V2_BY_NAME: TableDefinition<&str, &[u8]> =
     TableDefinition::new("upstreams_v2_by_name");
 pub const UPSTREAM_RATE_LIMIT_STATE_V1: TableDefinition<&str, &[u8]> =
     TableDefinition::new("upstream_rate_limit_state_v1");
+pub const ANTHROPIC_COMPATIBILITY_KV_V1: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("anthropic_compatibility_kv_v1");
+pub const UPSTREAM_SUBSCRIPTION_QUOTA_OBSERVATIONS_V1: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("upstream_subscription_quota_observations_v1");
+pub const UPSTREAM_SUBSCRIPTION_QUOTA_OBSERVATIONS_BY_TIME_V1: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("upstream_subscription_quota_observations_by_time_v1");
+pub const UPSTREAM_SUBSCRIPTION_QUOTA_LATEST_V1: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("upstream_subscription_quota_latest_v1");
 pub const WASM_BLOBS_V2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("wasm_blobs_v2");
 pub const WASM_REGISTRY_V2: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("wasm_registry_v2");

@@ -1,8 +1,8 @@
 #[cfg(any())]
 pub mod aead;
+pub mod anthropic_compatibility_kv_store;
 #[cfg(any())]
 pub mod append_ordering;
-#[cfg(any())]
 pub mod atomicity;
 #[cfg(any())]
 pub mod crash_recovery;
@@ -21,3 +21,4 @@ pub mod storage_roundtrips;
 pub mod upstream_rate_limit_store;
 #[cfg(any())]
 pub mod upstream_store;
+pub mod upstream_subscription_quota_store;

@@ -22,7 +22,9 @@ fn stores(storage: Arc<Storage>) -> Stores {
         upstreams: storage.clone(),
         principals: storage.clone(),
         plugin_registry: storage.clone(),
-        upstream_rate_limits: storage,
+        upstream_rate_limits: storage.clone(),
+        upstream_subscription_quotas: storage.clone(),
+        anthropic_compatibility_kv: storage,
         audit: None,
         plugin_registry_repo: None,
     }
@@ -82,6 +84,8 @@ async fn build(
         current_generation,
         runtime,
         data_dir,
+        Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        1800,
     )
     .await
     .expect("dynamic view builds")

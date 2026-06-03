@@ -116,6 +116,7 @@ fn route_input_includes_candidates_as_sibling_field() {
             remaining: Some(777),
             reset: Some("2026-05-29T00:00:00Z".to_owned()),
         }],
+        subscription_quotas: Vec::new(),
         observed_at_unix_secs: 1_800_000_000,
     }];
 
