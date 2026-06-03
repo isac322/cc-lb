@@ -10,6 +10,7 @@ pub mod plugins_wasm;
 pub mod principals;
 pub mod status;
 pub mod upstreams;
+mod wasm_cache;
 
 use crate::AdminState;
 

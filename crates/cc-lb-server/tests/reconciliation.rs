@@ -96,6 +96,28 @@ async fn create_upstream(storage: &Storage, name: &str) -> UpstreamRecord {
     .expect("upstream created")
 }
 
+async fn seed_registry(storage: &Storage, seed: u8, name: &str) -> WasmRegistryEntry {
+    let (entry, _) = storage
+        .persist_wasm_upload(
+            WasmBlob {
+                sha256: [seed; 32],
+                bytes: vec![seed; seed as usize],
+                size_bytes: seed as u64,
+                parse_validated_at_unix_secs: 1_800_000_000,
+            },
+            WasmRegistryEntryInput {
+                name: name.to_owned(),
+                original_filename: format!("{name}.wasm"),
+                label: None,
+                uploaded_at_unix_secs: 1_800_000_000,
+                uploaded_by_admin_id: Uuid::new_v4(),
+            },
+        )
+        .await
+        .expect("registry entry created");
+    entry
+}
+
 async fn initial_holder(
     stores: &Stores,
     runtime: &ExtismRuntime,
@@ -184,6 +206,69 @@ async fn notify_dropped_then_reconcile_catches_up_within_one_tick() {
     assert!(holder.load().generation > generation);
     let after = labeled_counter_value(&metrics, "cclb_reconcile_total", "outcome", "changed");
     assert!(after > before);
+}
+
+#[tokio::test(start_paused = true)]
+async fn reconciler_rebuilds_after_registry_entry_insert() {
+    let (dir, storage) = storage_fixture();
+    create_principal(&storage, "principal-registry-insert").await;
+    create_upstream(&storage, "upstream-registry-insert").await;
+    let stores = stores(storage.clone());
+    let runtime = Arc::new(ExtismRuntime::new());
+    let holder = initial_holder(&stores, &runtime, dir.path()).await;
+    let generation = holder.load().generation;
+
+    seed_registry(&storage, 31, "plugin-registry-insert").await;
+    let cancel = CancellationToken::new();
+    let reconciler = reconciler(stores, holder.clone(), runtime, cancel, dir.path());
+    reconciler.reconcile_once().await.expect("reconcile tick");
+
+    assert!(holder.load().generation > generation);
+}
+
+#[tokio::test(start_paused = true)]
+async fn reconciler_rebuilds_after_registry_entry_delete() {
+    let (dir, storage) = storage_fixture();
+    create_principal(&storage, "principal-registry-delete").await;
+    create_upstream(&storage, "upstream-registry-delete").await;
+    let entry = seed_registry(&storage, 32, "plugin-registry-delete").await;
+    let stores = stores(storage.clone());
+    let runtime = Arc::new(ExtismRuntime::new());
+    let holder = initial_holder(&stores, &runtime, dir.path()).await;
+    let generation = holder.load().generation;
+
+    storage
+        .delete_registry_entry(entry.id, entry.revision)
+        .await
+        .expect("registry delete")
+        .expect("registry entry deleted");
+    let cancel = CancellationToken::new();
+    let reconciler = reconciler(stores, holder.clone(), runtime, cancel, dir.path());
+    reconciler.reconcile_once().await.expect("reconcile tick");
+
+    assert!(holder.load().generation > generation);
+}
+
+#[tokio::test(start_paused = true)]
+async fn reconciler_rebuilds_after_registry_entry_update() {
+    let (dir, storage) = storage_fixture();
+    create_principal(&storage, "principal-registry-update").await;
+    create_upstream(&storage, "upstream-registry-update").await;
+    let entry = seed_registry(&storage, 33, "plugin-registry-update").await;
+    let stores = stores(storage.clone());
+    let runtime = Arc::new(ExtismRuntime::new());
+    let holder = initial_holder(&stores, &runtime, dir.path()).await;
+    let generation = holder.load().generation;
+
+    storage
+        .update_registry_label(entry.id, entry.revision, Some("Updated".to_owned()))
+        .await
+        .expect("registry label update");
+    let cancel = CancellationToken::new();
+    let reconciler = reconciler(stores, holder.clone(), runtime, cancel, dir.path());
+    reconciler.reconcile_once().await.expect("reconcile tick");
+
+    assert!(holder.load().generation > generation);
 }
 
 #[tokio::test(start_paused = true)]
@@ -422,7 +507,7 @@ impl PluginRegistryStore for EmptyPluginRegistryStore {
         &self,
         _blob: WasmBlob,
         _entry: WasmRegistryEntryInput,
-    ) -> StorageResult<WasmRegistryEntry> {
+    ) -> StorageResult<(WasmRegistryEntry, bool)> {
         unimplemented!()
     }
     async fn get_blob_bytes(&self, _sha256: [u8; 32]) -> StorageResult<Option<Vec<u8>>> {
@@ -503,7 +588,11 @@ impl PluginRegistryStore for EmptyPluginRegistryStore {
     ) -> StorageResult<Vec<PluginChainEntry>> {
         unimplemented!()
     }
-    async fn delete_chain_entry(&self, _id: Uuid) -> StorageResult<bool> {
+    async fn delete_chain_entry(
+        &self,
+        _id: Uuid,
+        _expected_revision: u64,
+    ) -> StorageResult<Option<PluginChainEntry>> {
         unimplemented!()
     }
     async fn rebalance_chain(

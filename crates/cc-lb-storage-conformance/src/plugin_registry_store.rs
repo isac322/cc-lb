@@ -1,14 +1,33 @@
+use std::{any::Any, sync::Arc};
+
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
-    PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, StorageError,
-    WasmBlob, WasmRegistryEntryInput, sparse_order,
+    PluginChainConflictReason, PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore,
+    PluginSlot, PrincipalStore, StorageError, WasmBlob, WasmRegistryEntryInput,
+    principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind},
+    sparse_order,
 };
 use serde_json::json;
 use uuid::Uuid;
 
-pub async fn run_all<S>(storage: &S) -> Result<()>
+use crate::harness::{ConformanceBackend, with_conformance_fixture};
+
+const BASE_TS: u64 = 1_900_000_000;
+
+pub async fn run_all<B>(backend: Arc<B>) -> Result<()>
 where
-    S: PluginRegistryStore,
+    B: ConformanceBackend,
+    B::Storage: PluginRegistryStore + PrincipalStore,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        run_all_on_storage(storage.as_ref()).await
+    })
+    .await
+}
+
+pub async fn run_all_on_storage<S>(storage: &S) -> Result<()>
+where
+    S: PluginRegistryStore + PrincipalStore + 'static,
 {
     persist_wasm_upload_creates_blob_and_registry(storage).await?;
     persist_wasm_upload_idempotent_on_same_entry_input(storage).await?;
@@ -22,6 +41,9 @@ where
     registry_label_update_with_stale_revision_conflicts(storage).await?;
     chain_insert_preserves_sparse_order(storage).await?;
     list_chain_for_principal_returns_ordered(storage).await?;
+    insert_chain_entry_rejects_duplicate_for_router_slot_on_storage(storage).await?;
+    insert_chain_entry_rejects_duplicate_for_shape_slot_on_storage(storage).await?;
+    insert_chain_entry_allows_multi_for_observability_hook_on_storage(storage).await?;
     refcount_increment_on_chain_insert(storage).await?;
     update_chain_entry_bumps_revision(storage).await?;
     update_chain_entry_stale_revision_conflicts(storage).await?;
@@ -32,10 +54,36 @@ where
     delete_chain_entry_decrements_refcount(storage).await?;
     delete_chain_entry_missing_is_false(storage).await?;
     decrement_blob_refcount_or_delete_missing_is_false(storage).await?;
-    list_orphan_blobs_returns_zero_refcount_sha(storage).await?;
+    list_orphan_blobs_returns_blobs_without_registry_on_storage(storage).await?;
+    chain_delete_keeps_blob_for_reinsert_on_storage(storage).await?;
+    delete_registry_rejects_while_chain_refed_on_storage(storage).await?;
+    delete_registry_removes_blob_atomically_on_storage(storage).await?;
+    persist_wasm_upload_heals_missing_blob_on_storage(storage).await?;
+    decrement_blob_refcount_or_delete_skips_registry_backed_on_storage(storage).await?;
+    insert_chain_entry_rejects_unknown_principal_on_storage(storage).await?;
+    reorder_chain_rejects_final_chain_gap_on_storage(storage).await?;
+    update_chain_entry_rejects_no_op_on_storage(storage).await?;
+    upload_returns_existed_flag_on_storage(storage).await?;
+    same_sha_metadata_mismatch_conflicts_on_storage(storage).await?;
     validate_identifier_rejects_bad_name(storage).await?;
     fk_on_delete_restrict(storage).await?;
     Ok(())
+}
+
+macro_rules! plugin_registry_scenario {
+    ($name:ident, $inner:ident) => {
+        pub async fn $name<B>(backend: Arc<B>) -> Result<()>
+        where
+            B: ConformanceBackend,
+            B::Storage: PluginRegistryStore + PrincipalStore,
+        {
+            with_conformance_fixture(
+                backend,
+                |storage| async move { $inner(storage.as_ref()).await },
+            )
+            .await
+        }
+    };
 }
 
 pub async fn registry_label_update_with_correct_revision_bumps_and_persists<
@@ -43,7 +91,7 @@ pub async fn registry_label_update_with_correct_revision_bumps_and_persists<
 >(
     storage: &S,
 ) -> Result<()> {
-    let created = storage
+    let (created, _) = storage
         .persist_wasm_upload(blob(31, b"label".to_vec()), entry("plugin-label-update"))
         .await?;
     let updated = storage
@@ -64,7 +112,7 @@ pub async fn registry_label_update_with_correct_revision_bumps_and_persists<
 pub async fn registry_label_update_with_stale_revision_conflicts<S: PluginRegistryStore>(
     storage: &S,
 ) -> Result<()> {
-    let created = storage
+    let (created, _) = storage
         .persist_wasm_upload(
             blob(32, b"stale-label".to_vec()),
             entry("plugin-label-stale"),
@@ -75,7 +123,7 @@ pub async fn registry_label_update_with_stale_revision_conflicts<S: PluginRegist
         .await
         .expect_err("stale registry label revision conflicts");
     ensure!(
-        matches!(err, StorageError::Conflict { .. }),
+        matches!(err, StorageError::StalePluginRegistryRevision { .. }),
         "stale registry label revision conflict"
     );
     Ok(())
@@ -85,7 +133,7 @@ pub async fn persist_wasm_upload_creates_blob_and_registry<S: PluginRegistryStor
     storage: &S,
 ) -> Result<()> {
     let blob = blob(1, b"wasm-a".to_vec());
-    let entry = storage
+    let (entry, _) = storage
         .persist_wasm_upload(blob.clone(), entry("plugin-a"))
         .await?;
     ensure!(
@@ -103,10 +151,10 @@ pub async fn persist_wasm_upload_idempotent_on_same_entry_input<S: PluginRegistr
     storage: &S,
 ) -> Result<()> {
     let input = entry("plugin-idempotent");
-    let first = storage
+    let (first, _) = storage
         .persist_wasm_upload(blob(2, b"same".to_vec()), input.clone())
         .await?;
-    let second = storage
+    let (second, _) = storage
         .persist_wasm_upload(blob(2, b"same".to_vec()), input)
         .await?;
     ensure!(
@@ -159,7 +207,7 @@ pub async fn persist_wasm_upload_rejects_oversize<S: PluginRegistryStore>(
 pub async fn persist_wasm_upload_records_parse_validated_at<S: PluginRegistryStore>(
     storage: &S,
 ) -> Result<()> {
-    let uploaded = storage
+    let (uploaded, _) = storage
         .persist_wasm_upload(blob(6, b"valid".to_vec()), entry("plugin-validated"))
         .await?;
     ensure!(uploaded.uploaded_at_unix_secs > 0, "uploaded time recorded");
@@ -194,7 +242,7 @@ pub async fn registry_list_paginates<S: PluginRegistryStore>(storage: &S) -> Res
 pub async fn get_registry_entry_by_sha_returns_entry<S: PluginRegistryStore>(
     storage: &S,
 ) -> Result<()> {
-    let created = storage
+    let (created, _) = storage
         .persist_wasm_upload(blob(10, b"sha".to_vec()), entry("plugin-sha"))
         .await?;
     ensure!(
@@ -208,42 +256,181 @@ pub async fn get_registry_entry_by_sha_returns_entry<S: PluginRegistryStore>(
     Ok(())
 }
 
-pub async fn chain_insert_preserves_sparse_order<S: PluginRegistryStore>(
+pub async fn chain_insert_preserves_sparse_order<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
 ) -> Result<()> {
     let (principal, plugin) = principal_and_plugin(storage, 11, "plugin-chain-order").await?;
     storage
-        .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP * 2))
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::ObservabilityHook,
+            plugin.id,
+            sparse_order::STEP * 2,
+        ))
         .await?;
     storage
-        .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::ObservabilityHook,
+            plugin.id,
+            sparse_order::STEP,
+        ))
         .await?;
     let listed = storage
-        .list_chain_for_principal(principal, PluginSlot::Router)
+        .list_chain_for_principal(principal, PluginSlot::ObservabilityHook)
         .await?;
     ensure!(listed[0].order < listed[1].order, "chain list is ordered");
     Ok(())
 }
 
-pub async fn list_chain_for_principal_returns_ordered<S: PluginRegistryStore>(
+pub async fn list_chain_for_principal_returns_ordered<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
 ) -> Result<()> {
     let (principal, plugin) = principal_and_plugin(storage, 22, "plugin-chain-list").await?;
     storage
-        .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP * 2))
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::ObservabilityHook,
+            plugin.id,
+            sparse_order::STEP * 2,
+        ))
         .await?;
     storage
-        .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::ObservabilityHook,
+            plugin.id,
+            sparse_order::STEP,
+        ))
         .await?;
     let listed = storage
-        .list_chain_for_principal(principal, PluginSlot::Router)
+        .list_chain_for_principal(principal, PluginSlot::ObservabilityHook)
         .await?;
     ensure!(listed.len() == 2, "chain list includes both entries");
     ensure!(listed[0].order < listed[1].order, "chain list is ordered");
     Ok(())
 }
 
-pub async fn refcount_increment_on_chain_insert<S: PluginRegistryStore>(storage: &S) -> Result<()> {
+plugin_registry_scenario!(
+    insert_chain_entry_rejects_duplicate_for_router_slot,
+    insert_chain_entry_rejects_duplicate_for_router_slot_on_storage
+);
+
+async fn insert_chain_entry_rejects_duplicate_for_router_slot_on_storage<
+    S: PluginRegistryStore + PrincipalStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let (principal, plugin) = principal_and_plugin(storage, 37, "plugin-router-singleton").await?;
+    let first = storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::Router,
+            plugin.id,
+            sparse_order::STEP,
+        ))
+        .await?;
+    let err = storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::Router,
+            plugin.id,
+            sparse_order::STEP * 2,
+        ))
+        .await
+        .expect_err("duplicate router slot insert conflicts");
+    ensure!(
+        matches!(
+            err,
+            StorageError::PluginChainConflict {
+                reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id }
+            } if existing_entry_id == first.id
+        ),
+        "duplicate router slot returns typed singleton conflict"
+    );
+    Ok(())
+}
+
+plugin_registry_scenario!(
+    insert_chain_entry_rejects_duplicate_for_shape_slot,
+    insert_chain_entry_rejects_duplicate_for_shape_slot_on_storage
+);
+
+async fn insert_chain_entry_rejects_duplicate_for_shape_slot_on_storage<
+    S: PluginRegistryStore + PrincipalStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let (principal, plugin) = principal_and_plugin(storage, 38, "plugin-shape-singleton").await?;
+    let first = storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::Shape,
+            plugin.id,
+            sparse_order::STEP,
+        ))
+        .await?;
+    let err = storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::Shape,
+            plugin.id,
+            sparse_order::STEP * 2,
+        ))
+        .await
+        .expect_err("duplicate shape slot insert conflicts");
+    ensure!(
+        matches!(
+            err,
+            StorageError::PluginChainConflict {
+                reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id }
+            } if existing_entry_id == first.id
+        ),
+        "duplicate shape slot returns typed singleton conflict"
+    );
+    Ok(())
+}
+
+plugin_registry_scenario!(
+    insert_chain_entry_allows_multi_for_observability_hook,
+    insert_chain_entry_allows_multi_for_observability_hook_on_storage
+);
+
+async fn insert_chain_entry_allows_multi_for_observability_hook_on_storage<
+    S: PluginRegistryStore + PrincipalStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let (principal, plugin) = principal_and_plugin(storage, 39, "plugin-hook-multi").await?;
+    storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::ObservabilityHook,
+            plugin.id,
+            sparse_order::STEP,
+        ))
+        .await?;
+    storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::ObservabilityHook,
+            plugin.id,
+            sparse_order::STEP * 2,
+        ))
+        .await?;
+    let listed = storage
+        .list_chain_for_principal(principal, PluginSlot::ObservabilityHook)
+        .await?;
+    ensure!(
+        listed.len() == 2,
+        "observability hook allows multiple entries"
+    );
+    Ok(())
+}
+
+pub async fn refcount_increment_on_chain_insert<S: PluginRegistryStore + PrincipalStore>(
+    storage: &S,
+) -> Result<()> {
     let (principal, plugin) = principal_and_plugin(storage, 12, "plugin-ref-inc").await?;
     storage
         .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
@@ -259,7 +446,9 @@ pub async fn refcount_increment_on_chain_insert<S: PluginRegistryStore>(storage:
     Ok(())
 }
 
-pub async fn update_chain_entry_bumps_revision<S: PluginRegistryStore>(storage: &S) -> Result<()> {
+pub async fn update_chain_entry_bumps_revision<S: PluginRegistryStore + PrincipalStore>(
+    storage: &S,
+) -> Result<()> {
     let created = one_chain(storage, 13, "plugin-update").await?;
     let updated = storage
         .update_chain_entry(
@@ -276,7 +465,9 @@ pub async fn update_chain_entry_bumps_revision<S: PluginRegistryStore>(storage: 
     Ok(())
 }
 
-pub async fn update_chain_entry_stale_revision_conflicts<S: PluginRegistryStore>(
+pub async fn update_chain_entry_stale_revision_conflicts<
+    S: PluginRegistryStore + PrincipalStore,
+>(
     storage: &S,
 ) -> Result<()> {
     let created = one_chain(storage, 14, "plugin-stale").await?;
@@ -284,18 +475,23 @@ pub async fn update_chain_entry_stale_revision_conflicts<S: PluginRegistryStore>
         .update_chain_entry(
             created.id,
             created.revision + 1,
-            PluginChainEntryUpdate::default(),
+            PluginChainEntryUpdate {
+                sse_per_event: Some(true),
+                ..PluginChainEntryUpdate::default()
+            },
         )
         .await
         .expect_err("stale conflicts");
     ensure!(
-        matches!(err, StorageError::Conflict { .. }),
+        matches!(err, StorageError::StalePluginChainRevision { .. }),
         "stale revision conflict"
     );
     Ok(())
 }
 
-pub async fn reorder_chain_valid_orders<S: PluginRegistryStore>(storage: &S) -> Result<()> {
+pub async fn reorder_chain_valid_orders<S: PluginRegistryStore + PrincipalStore>(
+    storage: &S,
+) -> Result<()> {
     let first = one_chain(storage, 15, "plugin-reorder").await?;
     let reordered = storage
         .reorder_chain(
@@ -311,7 +507,7 @@ pub async fn reorder_chain_valid_orders<S: PluginRegistryStore>(storage: &S) -> 
     Ok(())
 }
 
-pub async fn reorder_chain_needs_rebalance_conflicts<S: PluginRegistryStore>(
+pub async fn reorder_chain_needs_rebalance_conflicts<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
 ) -> Result<()> {
     let first = one_chain(storage, 16, "plugin-tight").await?;
@@ -330,7 +526,9 @@ pub async fn reorder_chain_needs_rebalance_conflicts<S: PluginRegistryStore>(
     Ok(())
 }
 
-pub async fn rebalance_chain_evenly_spaces<S: PluginRegistryStore>(storage: &S) -> Result<()> {
+pub async fn rebalance_chain_evenly_spaces<S: PluginRegistryStore + PrincipalStore>(
+    storage: &S,
+) -> Result<()> {
     let first = one_chain(storage, 17, "plugin-rebalance").await?;
     let rebalanced = storage
         .rebalance_chain(first.principal_id, first.slot)
@@ -342,7 +540,9 @@ pub async fn rebalance_chain_evenly_spaces<S: PluginRegistryStore>(storage: &S) 
     Ok(())
 }
 
-pub async fn sparse_order_between_integration<S: PluginRegistryStore>(storage: &S) -> Result<()> {
+pub async fn sparse_order_between_integration<S: PluginRegistryStore + PrincipalStore>(
+    storage: &S,
+) -> Result<()> {
     let (principal, plugin) = principal_and_plugin(storage, 18, "plugin-between").await?;
     let created = storage
         .insert_chain_entry(chain(
@@ -355,13 +555,16 @@ pub async fn sparse_order_between_integration<S: PluginRegistryStore>(storage: &
     Ok(())
 }
 
-pub async fn delete_chain_entry_decrements_refcount<S: PluginRegistryStore>(
+pub async fn delete_chain_entry_decrements_refcount<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
 ) -> Result<()> {
     let created = one_chain(storage, 19, "plugin-delete").await?;
     ensure!(
-        storage.delete_chain_entry(created.id).await?,
-        "delete returns true"
+        storage
+            .delete_chain_entry(created.id, created.revision)
+            .await?
+            .is_some(),
+        "delete returns entry"
     );
     Ok(())
 }
@@ -370,8 +573,11 @@ pub async fn delete_chain_entry_missing_is_false<S: PluginRegistryStore>(
     storage: &S,
 ) -> Result<()> {
     ensure!(
-        !storage.delete_chain_entry(Uuid::new_v4()).await?,
-        "missing delete false"
+        storage
+            .delete_chain_entry(Uuid::new_v4(), 0)
+            .await?
+            .is_none(),
+        "missing delete none"
     );
     Ok(())
 }
@@ -386,18 +592,512 @@ pub async fn decrement_blob_refcount_or_delete_missing_is_false<S: PluginRegistr
     Ok(())
 }
 
-pub async fn list_orphan_blobs_returns_zero_refcount_sha<S: PluginRegistryStore>(
+// RED until W3a
+plugin_registry_scenario!(
+    list_orphan_blobs_returns_blobs_without_registry,
+    list_orphan_blobs_returns_blobs_without_registry_on_storage
+);
+
+async fn list_orphan_blobs_returns_blobs_without_registry_on_storage<
+    S: PluginRegistryStore + PrincipalStore + 'static,
+>(
     storage: &S,
 ) -> Result<()> {
-    let created = storage
+    let (created, _) = storage
         .persist_wasm_upload(blob(23, b"orphan".to_vec()), entry("plugin-orphan"))
         .await?;
-    let orphaned = storage.list_orphan_blobs().await?;
     ensure!(
-        orphaned.contains(&created.sha256),
-        "fresh upload has zero chain refcount"
+        storage.list_orphan_blobs().await?.is_empty(),
+        "registry-backed blobs are not orphans"
+    );
+
+    let deleted = storage
+        .delete_registry_entry(created.id, created.revision)
+        .await?;
+    ensure!(deleted.is_some(), "registry entry deletes");
+    ensure!(
+        storage.get_blob(created.sha256).await?.is_none(),
+        "deleting an unreferenced registry entry removes its blob row"
+    );
+
+    let orphan_blob = blob(24, b"manual-orphan".to_vec());
+    if insert_orphan_blob_if_exposed(storage, &orphan_blob).await? {
+        let orphaned = storage.list_orphan_blobs().await?;
+        ensure!(
+            orphaned.contains(&orphan_blob.sha256),
+            "unregistered blob rows are reported as orphans"
+        );
+    }
+    Ok(())
+}
+
+// RED until W3a
+plugin_registry_scenario!(
+    chain_delete_keeps_blob_for_reinsert,
+    chain_delete_keeps_blob_for_reinsert_on_storage
+);
+
+async fn chain_delete_keeps_blob_for_reinsert_on_storage<
+    S: PluginRegistryStore + PrincipalStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    // NOTE: Phase-3 is currently green on redb; W3a revision hardening still applies.
+    let (principal, plugin) = principal_and_plugin(storage, 25, "plugin-chain-reinsert").await?;
+    let created = storage
+        .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
+        .await?;
+    ensure!(
+        storage.get_blob(plugin.sha256).await?.is_some(),
+        "chain insert leaves blob readable"
+    );
+
+    let deleted = storage
+        .delete_chain_entry(created.id, created.revision)
+        .await?;
+    ensure!(deleted.is_some(), "chain delete returns the deleted entry");
+    ensure!(
+        storage.get_blob(plugin.sha256).await?.is_some(),
+        "chain delete keeps registry-owned blob readable"
+    );
+
+    storage
+        .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP * 2))
+        .await?;
+    Ok(())
+}
+
+// RED until W3a
+plugin_registry_scenario!(
+    delete_registry_rejects_while_chain_refed,
+    delete_registry_rejects_while_chain_refed_on_storage
+);
+
+async fn delete_registry_rejects_while_chain_refed_on_storage<
+    S: PluginRegistryStore + PrincipalStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    // NOTE: Phase-3 partially green; W3a hardening still needed for chain-scan/atomicity.
+    let (principal, plugin) = principal_and_plugin(storage, 26, "plugin-registry-refed").await?;
+    storage
+        .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
+        .await?;
+
+    let err = storage
+        .delete_registry_entry(plugin.id, plugin.revision)
+        .await
+        .expect_err("registry delete must reject while a chain references it");
+    let message = err.to_string();
+    ensure!(
+        message.contains("referenced")
+            || message.contains("foreign key")
+            || message.contains(&plugin.id.to_string()),
+        "referenced registry delete reports the registry id or FK reference"
+    );
+    ensure!(
+        storage.get_registry_entry_by_id(plugin.id).await?.is_some(),
+        "referenced registry row remains after rejected delete"
+    );
+    ensure!(
+        storage.get_blob(plugin.sha256).await?.is_some(),
+        "referenced blob row remains after rejected registry delete"
     );
     Ok(())
+}
+
+// RED until W3a
+plugin_registry_scenario!(
+    delete_registry_removes_blob_atomically,
+    delete_registry_removes_blob_atomically_on_storage
+);
+
+async fn delete_registry_removes_blob_atomically_on_storage<S: PluginRegistryStore>(
+    storage: &S,
+) -> Result<()> {
+    // NOTE: Phase-3 partially green; W3a hardening still needed for chain-scan/atomicity.
+    let (created, _) = storage
+        .persist_wasm_upload(
+            blob(27, b"atomic-delete".to_vec()),
+            entry("plugin-atomic-delete"),
+        )
+        .await?;
+    let deleted = storage
+        .delete_registry_entry(created.id, created.revision)
+        .await?;
+    ensure!(deleted.is_some(), "registry delete returns the deleted row");
+    ensure!(
+        storage.get_blob(created.sha256).await?.is_none(),
+        "registry delete atomically removes the blob row"
+    );
+    ensure!(
+        storage
+            .get_registry_entry_by_id(created.id)
+            .await?
+            .is_none(),
+        "registry delete atomically removes the registry row"
+    );
+    Ok(())
+}
+
+// RED until W3a
+plugin_registry_scenario!(
+    persist_wasm_upload_heals_missing_blob,
+    persist_wasm_upload_heals_missing_blob_on_storage
+);
+
+async fn persist_wasm_upload_heals_missing_blob_on_storage<S: PluginRegistryStore + 'static>(
+    storage: &S,
+) -> Result<()> {
+    // NOTE: Phase-3 partially green; W3a hardening still needed for chain-scan/atomicity.
+    // Postgres enforces wasm_registry_v2.sha256 -> wasm_blobs_v2.sha256 with ON DELETE RESTRICT,
+    // which prevents the zombie state this scenario exercises. Skip on postgres.
+    #[cfg(feature = "postgres")]
+    {
+        if (storage as &dyn Any)
+            .downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
+            .is_some()
+        {
+            return Ok(());
+        }
+    }
+    let wasm = blob(28, b"heal-missing-blob".to_vec());
+    let input = entry("plugin-heal-missing-blob");
+    let (created, _) = storage
+        .persist_wasm_upload(wasm.clone(), input.clone())
+        .await?;
+
+    if !delete_blob_row_if_exposed(storage, created.sha256).await? {
+        let chain_entry = storage
+            .insert_chain_entry(chain(Uuid::new_v4(), created.id, sparse_order::STEP))
+            .await?;
+        storage
+            .delete_chain_entry(chain_entry.id, chain_entry.revision)
+            .await?;
+    }
+    ensure!(
+        storage.get_blob(created.sha256).await?.is_none(),
+        "test setup removes only the blob row"
+    );
+
+    let (healed, existed) = storage.persist_wasm_upload(wasm, input).await?;
+    ensure!(
+        existed,
+        "re-upload of a zombie registry row reports existed"
+    );
+    ensure!(
+        healed.id == created.id,
+        "healed upload returns the existing registry id"
+    );
+    ensure!(
+        storage.get_blob(created.sha256).await?.is_some(),
+        "re-upload heals the missing blob row"
+    );
+    Ok(())
+}
+
+// RED until W3a
+plugin_registry_scenario!(
+    decrement_blob_refcount_or_delete_skips_registry_backed,
+    decrement_blob_refcount_or_delete_skips_registry_backed_on_storage
+);
+
+async fn decrement_blob_refcount_or_delete_skips_registry_backed_on_storage<
+    S: PluginRegistryStore + PrincipalStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    // NOTE: Phase-3 partially green; W3a hardening still needed for chain-scan/atomicity.
+    let (principal, plugin) = principal_and_plugin(storage, 29, "plugin-skip-backed").await?;
+    let created = storage
+        .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
+        .await?;
+    storage
+        .delete_chain_entry(created.id, created.revision)
+        .await?;
+
+    let removed = storage
+        .decrement_blob_refcount_or_delete(plugin.sha256)
+        .await?;
+    ensure!(
+        !removed,
+        "registry-backed zero-refcount blob is not deleted"
+    );
+    ensure!(
+        storage.get_registry_entry_by_id(plugin.id).await?.is_some(),
+        "registry row still references the sha"
+    );
+    ensure!(
+        storage.get_blob(plugin.sha256).await?.is_some(),
+        "registry-backed blob row remains"
+    );
+    Ok(())
+}
+
+// RED until W3a
+plugin_registry_scenario!(
+    insert_chain_entry_rejects_unknown_principal,
+    insert_chain_entry_rejects_unknown_principal_on_storage
+);
+
+async fn insert_chain_entry_rejects_unknown_principal_on_storage<S: PluginRegistryStore>(
+    storage: &S,
+) -> Result<()> {
+    let (plugin, _) = storage
+        .persist_wasm_upload(
+            blob(30, b"unknown-principal".to_vec()),
+            entry("plugin-unknown-principal"),
+        )
+        .await?;
+    let err = storage
+        .insert_chain_entry(chain(Uuid::new_v4(), plugin.id, sparse_order::STEP))
+        .await
+        .expect_err("chain insert must reject an unknown principal");
+    let message = err.to_string();
+    ensure!(
+        matches!(err, StorageError::InvalidInput { .. }) || message.contains("principal"),
+        "unknown principal is reported as invalid input or conflict"
+    );
+    Ok(())
+}
+
+// RED until W3a
+plugin_registry_scenario!(
+    reorder_chain_rejects_final_chain_gap,
+    reorder_chain_rejects_final_chain_gap_on_storage
+);
+
+async fn reorder_chain_rejects_final_chain_gap_on_storage<
+    S: PluginRegistryStore + PrincipalStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let (principal, plugin) = principal_and_plugin(storage, 33, "plugin-final-gap").await?;
+    let first = storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::ObservabilityHook,
+            plugin.id,
+            100,
+        ))
+        .await?;
+    let second = storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::ObservabilityHook,
+            plugin.id,
+            200,
+        ))
+        .await?;
+    storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::ObservabilityHook,
+            plugin.id,
+            300,
+        ))
+        .await?;
+
+    let err = storage
+        .reorder_chain(
+            principal,
+            PluginSlot::ObservabilityHook,
+            vec![(second.id, first.order - 1, second.revision)],
+        )
+        .await
+        .expect_err("final chain with pairwise gap below 2 is invalid");
+    ensure!(
+        matches!(
+            err,
+            StorageError::PluginChainConflict {
+                reason: PluginChainConflictReason::InvalidOrderGap
+            }
+        ),
+        "final chain gap conflict returns typed InvalidOrderGap reason"
+    );
+    Ok(())
+}
+
+// RED until W3a
+plugin_registry_scenario!(
+    update_chain_entry_rejects_no_op,
+    update_chain_entry_rejects_no_op_on_storage
+);
+
+async fn update_chain_entry_rejects_no_op_on_storage<S: PluginRegistryStore + PrincipalStore>(
+    storage: &S,
+) -> Result<()> {
+    let created = one_chain(storage, 34, "plugin-no-op").await?;
+    let err = storage
+        .update_chain_entry(
+            created.id,
+            created.revision,
+            PluginChainEntryUpdate::default(),
+        )
+        .await
+        .expect_err("no-op chain updates are invalid");
+    ensure!(
+        matches!(err, StorageError::InvalidInput { .. }),
+        "no-op chain update reports InvalidInput"
+    );
+    let persisted = storage
+        .list_chain_for_principal(created.principal_id, created.slot)
+        .await?
+        .into_iter()
+        .find(|entry| entry.id == created.id)
+        .expect("chain entry remains after rejected no-op update");
+    ensure!(
+        persisted.revision == created.revision,
+        "rejected no-op update does not bump revision"
+    );
+    Ok(())
+}
+
+// RED until W3a
+plugin_registry_scenario!(
+    upload_returns_existed_flag,
+    upload_returns_existed_flag_on_storage
+);
+
+async fn upload_returns_existed_flag_on_storage<S: PluginRegistryStore>(storage: &S) -> Result<()> {
+    let wasm = blob(35, b"upload-existed".to_vec());
+    let (first, first_existed) = storage
+        .persist_wasm_upload(wasm.clone(), entry("plugin-upload-existed"))
+        .await?;
+    ensure!(!first_existed, "first upload reports existed=false");
+    let uploaded_at = first.uploaded_at_unix_secs;
+
+    let (second, second_existed) = storage
+        .persist_wasm_upload(wasm, entry("plugin-upload-existed"))
+        .await?;
+    ensure!(second_existed, "second upload reports existed=true");
+    ensure!(
+        second.id == first.id,
+        "second upload returns the existing id"
+    );
+    ensure!(
+        second.uploaded_at_unix_secs == uploaded_at,
+        "second upload preserves original uploaded_at"
+    );
+
+    let err = storage
+        .persist_wasm_upload(
+            blob(35, b"upload-existed".to_vec()),
+            entry("plugin-upload-renamed"),
+        )
+        .await
+        .expect_err("same sha with different metadata conflicts");
+    ensure!(
+        matches!(
+            err,
+            StorageError::Conflict { ref message }
+                if message == "sha256 already registered for a different wasm entry"
+        ),
+        "same sha with different metadata returns the strict conflict"
+    );
+    Ok(())
+}
+
+plugin_registry_scenario!(
+    same_sha_metadata_mismatch_conflicts,
+    same_sha_metadata_mismatch_conflicts_on_storage
+);
+
+async fn same_sha_metadata_mismatch_conflicts_on_storage<S: PluginRegistryStore>(
+    storage: &S,
+) -> Result<()> {
+    let wasm = blob(36, b"same-sha-metadata".to_vec());
+    storage
+        .persist_wasm_upload(wasm.clone(), entry("plugin-same-sha-a"))
+        .await?;
+
+    let err = storage
+        .persist_wasm_upload(wasm, entry("plugin-same-sha-b"))
+        .await
+        .expect_err("same sha with a different name conflicts");
+    ensure!(
+        matches!(
+            err,
+            StorageError::Conflict { ref message }
+                if message == "sha256 already registered for a different wasm entry"
+        ),
+        "same sha metadata mismatch returns the strict conflict"
+    );
+    Ok(())
+}
+
+async fn insert_orphan_blob_if_exposed<S: PluginRegistryStore + 'static>(
+    storage: &S,
+    blob: &WasmBlob,
+) -> Result<bool> {
+    #[cfg(feature = "redb")]
+    {
+        if let Some(redb) = (storage as &dyn Any).downcast_ref::<cc_lb_storage_redb::RedbStorage>()
+        {
+            let write_txn = redb.begin_write()?;
+            {
+                let mut blobs = write_txn.open_table(cc_lb_storage_redb::WASM_BLOBS_V2)?;
+                let payload = serde_json::to_vec(&json!({
+                    "bytes": blob.bytes.clone(),
+                    "size_bytes": blob.size_bytes,
+                    "parse_validated_at_unix_secs": blob.parse_validated_at_unix_secs,
+                    "refcount": 0,
+                }))?;
+                blobs.insert(blob.sha256.as_slice(), payload.as_slice())?;
+            }
+            write_txn.commit()?;
+            return Ok(true);
+        }
+    }
+    #[cfg(feature = "postgres")]
+    {
+        if let Some(postgres) =
+            (storage as &dyn Any).downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
+        {
+            sqlx::query("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, refcount, created_at) VALUES ($1, $2, $3, NOW(), 0, NOW()) ON CONFLICT (sha256) DO NOTHING")
+                .bind(blob.sha256.as_slice())
+                .bind(blob.bytes.as_slice())
+                .bind(i64::try_from(blob.size_bytes)?)
+                .execute(postgres.pool())
+                .await?;
+            return Ok(true);
+        }
+    }
+    let _ = (storage, blob);
+    Ok(false)
+}
+
+async fn delete_blob_row_if_exposed<S: PluginRegistryStore + 'static>(
+    storage: &S,
+    sha256: [u8; 32],
+) -> Result<bool> {
+    #[cfg(feature = "redb")]
+    {
+        if let Some(redb) = (storage as &dyn Any).downcast_ref::<cc_lb_storage_redb::RedbStorage>()
+        {
+            let write_txn = redb.begin_write()?;
+            {
+                let mut blobs = write_txn.open_table(cc_lb_storage_redb::WASM_BLOBS_V2)?;
+                blobs.remove(sha256.as_slice())?;
+            }
+            write_txn.commit()?;
+            return Ok(true);
+        }
+    }
+    #[cfg(feature = "postgres")]
+    {
+        if let Some(postgres) =
+            (storage as &dyn Any).downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
+        {
+            let result = sqlx::query("DELETE FROM wasm_blobs_v2 WHERE sha256 = $1")
+                .bind(sha256.as_slice())
+                .execute(postgres.pool())
+                .await?;
+            return Ok(result.rows_affected() > 0);
+        }
+    }
+    let _ = (storage, sha256);
+    Ok(false)
 }
 
 pub async fn validate_identifier_rejects_bad_name<S: PluginRegistryStore>(
@@ -414,7 +1114,9 @@ pub async fn validate_identifier_rejects_bad_name<S: PluginRegistryStore>(
     Ok(())
 }
 
-pub async fn fk_on_delete_restrict<S: PluginRegistryStore>(storage: &S) -> Result<()> {
+pub async fn fk_on_delete_restrict<S: PluginRegistryStore + PrincipalStore>(
+    storage: &S,
+) -> Result<()> {
     let created = one_chain(storage, 21, "plugin-fk").await?;
     ensure!(
         storage.get_blob_bytes([21; 32]).await?.is_some(),
@@ -431,18 +1133,20 @@ pub async fn fk_on_delete_restrict<S: PluginRegistryStore>(storage: &S) -> Resul
     Ok(())
 }
 
-async fn principal_and_plugin<S: PluginRegistryStore>(
+async fn principal_and_plugin<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
     seed: u8,
     name: &str,
 ) -> Result<(Uuid, cc_lb_storage_api::WasmRegistryEntry)> {
-    let plugin = storage
+    let principal =
+        PrincipalStore::create(storage, principal_create(seed), BASE_TS + seed as u64).await?;
+    let (plugin, _) = storage
         .persist_wasm_upload(blob(seed, vec![seed]), entry(name))
         .await?;
-    Ok((Uuid::new_v4(), plugin))
+    Ok((principal.id, plugin))
 }
 
-async fn one_chain<S: PluginRegistryStore>(
+async fn one_chain<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
     seed: u8,
     name: &str,
@@ -451,6 +1155,20 @@ async fn one_chain<S: PluginRegistryStore>(
     Ok(storage
         .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
         .await?)
+}
+
+fn principal_create(seed: u8) -> PrincipalCreate {
+    PrincipalCreate {
+        name: format!("plugin-principal-{seed:04}"),
+        kind: PrincipalKind::Machine,
+        allowed_models: vec!["claude-sonnet-*".to_owned()],
+        allowed_upstreams: vec![],
+        default_limits: vec![Limit {
+            kind: LimitKind::Requests,
+            window_secs: 60,
+            cap_micros: 100,
+        }],
+    }
 }
 
 fn blob(seed: u8, bytes: Vec<u8>) -> WasmBlob {
@@ -473,9 +1191,18 @@ fn entry(name: &str) -> WasmRegistryEntryInput {
 }
 
 fn chain(principal_id: Uuid, wasm_registry_id: Uuid, order: i64) -> PluginChainEntryInput {
+    chain_with_slot(principal_id, PluginSlot::Router, wasm_registry_id, order)
+}
+
+fn chain_with_slot(
+    principal_id: Uuid,
+    slot: PluginSlot,
+    wasm_registry_id: Uuid,
+    order: i64,
+) -> PluginChainEntryInput {
     PluginChainEntryInput {
         principal_id,
-        slot: PluginSlot::Router,
+        slot,
         order,
         wasm_registry_id,
         config: json!({}),
@@ -495,6 +1222,6 @@ mod tests {
     async fn plugin_registry_store_redb_conformance() -> Result<()> {
         let dir = tempfile::tempdir()?;
         let storage = RedbStorage::open(&dir.path().join("plugin-registry.redb"), [0; 32])?;
-        run_all(&storage).await
+        run_all_on_storage(&storage).await
     }
 }

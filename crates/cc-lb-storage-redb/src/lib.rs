@@ -137,10 +137,16 @@ pub enum StorageError {
     PrincipalRevisionOverflow,
     #[error("principal name already exists: {name}")]
     PrincipalNameConflict { name: String },
+    #[error("principal not found: {id}")]
+    PrincipalNotFound { id: String },
     #[error("principal is referenced by audit entries: {id}")]
     PrincipalReferencedByAudit { id: String },
     #[error("plugin registry conflict: {message}")]
     PluginRegistryConflict { message: String },
+    #[error("plugin chain conflict: {reason}")]
+    PluginChainConflict {
+        reason: cc_lb_storage_api::PluginChainConflictReason,
+    },
     #[error("stale plugin registry revision; current revision is {current}")]
     StalePluginRegistryRevision { current: u64 },
     #[error("plugin registry revision overflow")]
@@ -158,6 +164,8 @@ pub enum StorageError {
     },
     #[error("invalid backend kind {0}")]
     InvalidBackendKind(String),
+    #[error("invalid input: {field} {reason}")]
+    InvalidInput { field: String, reason: String },
 }
 
 impl From<redb::DatabaseError> for StorageError {
