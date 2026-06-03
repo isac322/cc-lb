@@ -54,7 +54,9 @@ fn remaining_public_types_compile() {
         status: StatusCode::OK,
         input_tokens: Some(1),
         output_tokens: Some(2),
-        duration_ms: 3,
+        cache_creation_input_tokens: Some(3),
+        cache_read_input_tokens: Some(4),
+        duration_ms: 5,
     };
     assert_eq!(
         event,
@@ -62,7 +64,9 @@ fn remaining_public_types_compile() {
             status: StatusCode::OK,
             input_tokens: Some(1),
             output_tokens: Some(2),
-            duration_ms: 3,
+            cache_creation_input_tokens: Some(3),
+            cache_read_input_tokens: Some(4),
+            duration_ms: 5,
         }
     );
 }
