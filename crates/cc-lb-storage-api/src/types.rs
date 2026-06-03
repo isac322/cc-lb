@@ -75,6 +75,22 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_state: Option<RequestCacheState>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_control_block_count: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cache_control_message_indices: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_prefix_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd_micros: Option<i64>,
     pub duration_ms: u64,
     /// handle entry → attempt() entry (auth + route + ctx).
@@ -147,6 +163,30 @@ fn is_zero(value: &u64) -> bool {
 pub enum RequestEventUpstream {
     AnthropicDirect,
     CustomAnthropicSpec,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestCacheState {
+    Hit,
+    Write,
+    Refresh,
+    Miss,
+    None,
+    Unknown,
+}
+
+impl RequestCacheState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Hit => "hit",
+            Self::Write => "write",
+            Self::Refresh => "refresh",
+            Self::Miss => "miss",
+            Self::None => "none",
+            Self::Unknown => "unknown",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

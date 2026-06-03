@@ -102,6 +102,8 @@ where
             status,
             input_tokens: None,
             output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
             duration_ms: latency.as_millis().try_into().unwrap_or(u64::MAX),
         });
     }
@@ -243,6 +245,8 @@ mod tests {
                 status: StatusCode::TOO_MANY_REQUESTS,
                 input_tokens: None,
                 output_tokens: None,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
                 duration_ms: 123,
             }]
         );
@@ -262,6 +266,8 @@ mod tests {
                 status: StatusCode::OK,
                 input_tokens: None,
                 output_tokens: None,
+                cache_creation_input_tokens: None,
+                cache_read_input_tokens: None,
                 duration_ms: u64::MAX,
             }]
         );
