@@ -7,8 +7,9 @@ use cc_lb_storage_api::{
     AnthropicApiKeyCredential, ApiKeyRecord, AuditEntry, BackendKind, BucketKind, ConfigDraftState,
     HistoryEntry, HistorySummary, IssuedKey, KeyStatus, OAuthCredentials, PrincipalCreate,
     PrincipalKind, PrincipalKindLite, PrincipalLimitIdentityKind, PrincipalLimitKind,
-    PrincipalLimitState, RequestEvent, RequestEventUpstream, StorageError, StoredApiKeyRecord,
-    StoredHistoryEntry, UsageRollup, UsageRollupKey, UsageRollupResolution, UsageRollupRun,
+    PrincipalLimitState, RequestCacheState, RequestEvent, RequestEventUpstream, StorageError,
+    StoredApiKeyRecord, StoredHistoryEntry, UsageRollup, UsageRollupKey, UsageRollupResolution,
+    UsageRollupRun,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -126,6 +127,16 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         output_tokens: Some(0),
         cache_creation_input_tokens: None,
         cache_read_input_tokens: None,
+        cache_state: Some(RequestCacheState::Miss),
+        thread_id: Some("thread-dto".to_owned()),
+        message_id: Some("msg-dto".to_owned()),
+        message_index: Some(4),
+        message_count: Some(5),
+        cache_control_block_count: Some(1),
+        cache_control_message_indices: vec![4],
+        cache_prefix_hash: Some(
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
+        ),
         cost_usd_micros: None,
         duration_ms: 42,
         error_code: Some("rate_limit".to_owned()),

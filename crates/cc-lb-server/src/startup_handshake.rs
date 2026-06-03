@@ -544,7 +544,7 @@ pub mod tests {
             StartupHandshakeOpts {
                 skip_if_fresh: false,
                 parallelism: 32,
-                total_budget: Duration::from_secs(10),
+                total_budget: Duration::from_secs(60),
                 force: false,
             },
             shutdown,

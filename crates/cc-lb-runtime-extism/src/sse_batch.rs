@@ -121,11 +121,15 @@ fn observe_event_to_wire(value: ObserveEvent) -> ObserveEventWire {
             status,
             input_tokens,
             output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
             duration_ms,
         } => ObserveEventWire::RequestFinished {
             status: status.as_u16(),
             input_tokens,
             output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
             duration_ms,
         },
         ObserveEvent::Error {

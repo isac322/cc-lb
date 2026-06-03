@@ -442,6 +442,10 @@ pub enum ObserveEvent {
         input_tokens: Option<u64>,
         /// Output token count reported by the upstream, when known.
         output_tokens: Option<u64>,
+        /// Cache write token count reported by the upstream, when known.
+        cache_creation_input_tokens: Option<u64>,
+        /// Cache read token count reported by the upstream, when known.
+        cache_read_input_tokens: Option<u64>,
         /// End-to-end request duration in milliseconds.
         duration_ms: u64,
     },
@@ -615,7 +619,9 @@ mod tests {
                 status: StatusCode::OK,
                 input_tokens: Some(4),
                 output_tokens: Some(5),
-                duration_ms: 6,
+                cache_creation_input_tokens: Some(6),
+                cache_read_input_tokens: Some(7),
+                duration_ms: 8,
             },
             ObserveEvent::Error {
                 code: "E".to_owned(),

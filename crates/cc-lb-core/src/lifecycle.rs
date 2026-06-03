@@ -17,7 +17,7 @@ use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_api::{
     Storage, SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind,
     SubscriptionQuotaSource, UpstreamRateLimitObservationRecord, UpstreamRecord,
-    types::{RequestEvent, StoredApiKeyRecord},
+    types::{RequestCacheState, RequestEvent, StoredApiKeyRecord},
     upstream::UpstreamKind as StorageUpstreamKind,
 };
 use http::header::{CONTENT_TYPE, RETRY_AFTER};
@@ -27,6 +27,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
 
@@ -862,6 +863,10 @@ impl Lifecycle {
                     principal_kind: Some(principal_kind_as_str(&principal.kind).to_owned()),
                     proxy_setup_ms: Some(proxy_setup_ms),
                     stage_timings: attempt_timings,
+                    cache_metadata: request_cache_metadata(
+                        &ctx.downstream_headers,
+                        &ctx.body_bytes,
+                    ),
                 },
             )
             .await;
@@ -1017,6 +1022,8 @@ impl Lifecycle {
                     status,
                     input_tokens: Some(usage.input_tokens),
                     output_tokens: Some(usage.output_tokens),
+                    cache_creation_input_tokens: Some(usage.cache_creation_input_tokens),
+                    cache_read_input_tokens: Some(usage.cache_read_input_tokens),
                     duration_ms: duration_to_ms(duration),
                 },
             );
@@ -1051,7 +1058,7 @@ impl Lifecycle {
         {
             let now_ms = unix_now_ms();
             let total_ms = duration_to_ms(duration);
-            let event = RequestEvent {
+            let mut event = RequestEvent {
                 ts: now_ms / 1_000,
                 ts_ms: Some(now_ms),
                 request_id: event_ctx.request_id.clone(),
@@ -1078,6 +1085,7 @@ impl Lifecycle {
                 status: status.as_u16(),
                 ..Default::default()
             };
+            event_ctx.cache_metadata.apply_to(&mut event, &usage);
             if let Err(error) = storage.append_request_event(&event).await {
                 tracing::warn!(%error, "failed to append api key request event");
             }
@@ -1425,7 +1433,7 @@ impl Lifecycle {
                 };
                 if let Some(storage) = storage.as_ref() {
                     let now_ms = unix_now_ms();
-                    let event = RequestEvent {
+                    let mut event = RequestEvent {
                         ts: now_ms / 1_000,
                         ts_ms: Some(now_ms),
                         request_id: event_ctx.request_id.clone(),
@@ -1463,6 +1471,7 @@ impl Lifecycle {
                         status: status.as_u16(),
                         ..Default::default()
                     };
+                    event_ctx.cache_metadata.apply_to(&mut event, &usage);
                     if let Err(error) = storage.append_request_event(&event).await {
                         tracing::warn!(%error, "failed to append streaming request event");
                     }
@@ -1482,6 +1491,10 @@ impl Lifecycle {
                 status,
                 input_tokens,
                 output_tokens,
+                cache_creation_input_tokens: usage
+                    .present
+                    .then_some(usage.cache_creation_input_tokens),
+                cache_read_input_tokens: usage.present.then_some(usage.cache_read_input_tokens),
                 duration_ms: total_duration_ms,
             });
         };
@@ -1579,6 +1592,8 @@ fn observe_finished(hooks: &[Arc<dyn ObservabilityHook>], status: StatusCode, st
             status,
             input_tokens: None,
             output_tokens: None,
+            cache_creation_input_tokens: None,
+            cache_read_input_tokens: None,
             duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
         },
     );
@@ -1603,12 +1618,18 @@ fn observe_finished_for_principal(
     let usage = sse_relay::usage_from_json_bytes(body);
     let input_tokens = (usage.input_tokens > 0).then_some(usage.input_tokens);
     let output_tokens = (usage.output_tokens > 0).then_some(usage.output_tokens);
+    let cache_creation_input_tokens =
+        (usage.cache_creation_input_tokens > 0).then_some(usage.cache_creation_input_tokens);
+    let cache_read_input_tokens =
+        (usage.cache_read_input_tokens > 0).then_some(usage.cache_read_input_tokens);
     observe_many(
         hooks,
         ObserveEvent::RequestFinished {
             status,
             input_tokens,
             output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
             duration_ms: started.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
         },
     );
@@ -1760,6 +1781,47 @@ struct RequestEventContext {
     principal_kind: Option<String>,
     proxy_setup_ms: Option<u64>,
     stage_timings: AttemptTimings,
+    cache_metadata: RequestCacheMetadata,
+}
+
+#[derive(Clone, Default)]
+struct RequestCacheMetadata {
+    thread_id: Option<String>,
+    message_id: Option<String>,
+    message_index: Option<u64>,
+    message_count: Option<u64>,
+    cache_control_block_count: Option<u64>,
+    cache_control_message_indices: Vec<u64>,
+    cache_prefix_hash: Option<String>,
+}
+
+impl RequestCacheMetadata {
+    fn apply_to(&self, event: &mut RequestEvent, usage: &UsageCounts) {
+        event.thread_id = self.thread_id.clone();
+        event.message_id = self.message_id.clone();
+        event.message_index = self.message_index;
+        event.message_count = self.message_count;
+        event.cache_control_block_count = self.cache_control_block_count;
+        event.cache_control_message_indices = self.cache_control_message_indices.clone();
+        event.cache_prefix_hash = self.cache_prefix_hash.clone();
+        event.cache_state = Some(self.cache_state(usage));
+    }
+
+    fn cache_state(&self, usage: &UsageCounts) -> RequestCacheState {
+        match (
+            usage.cache_read_input_tokens > 0,
+            usage.cache_creation_input_tokens > 0,
+            self.cache_control_block_count.unwrap_or(0) > 0,
+            usage.present,
+        ) {
+            (true, true, _, _) => RequestCacheState::Refresh,
+            (true, false, _, _) => RequestCacheState::Hit,
+            (false, true, _, _) => RequestCacheState::Write,
+            (false, false, true, _) => RequestCacheState::Miss,
+            (false, false, false, true) => RequestCacheState::None,
+            _ => RequestCacheState::Unknown,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default)]
@@ -1777,6 +1839,98 @@ fn principal_kind_as_str(kind: &PrincipalKind) -> &'static str {
         PrincipalKind::WorkloadIdentity => "workload_identity",
         PrincipalKind::SubscriptionBearer => "subscription_bearer",
     }
+}
+
+fn request_cache_metadata(headers: &HeaderMap, body: &Bytes) -> RequestCacheMetadata {
+    let thread_id = header_to_string(headers, "x-claude-code-session-id")
+        .or_else(|| header_to_string(headers, "x-claude-session-id"));
+    let Ok(value) = serde_json::from_slice::<Value>(body) else {
+        return RequestCacheMetadata {
+            thread_id,
+            ..Default::default()
+        };
+    };
+
+    let messages = value.get("messages").and_then(Value::as_array);
+    let message_count = messages.map(|items| items.len() as u64);
+    let message_index = message_count.and_then(|count| count.checked_sub(1));
+    let message_id = messages
+        .and_then(|items| items.last())
+        .and_then(|message| message.get("id"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+
+    let mut cache_control_block_count = cache_control_count(value.get("system"));
+    cache_control_block_count =
+        cache_control_block_count.saturating_add(cache_control_count(value.get("tools")));
+    let mut cache_control_message_indices = Vec::new();
+    if let Some(messages) = messages {
+        for (index, message) in messages.iter().enumerate() {
+            let count = cache_control_count(Some(message));
+            if count > 0 {
+                cache_control_block_count = cache_control_block_count.saturating_add(count);
+                cache_control_message_indices.push(index as u64);
+            }
+        }
+    }
+
+    let cache_prefix_hash = (cache_control_block_count > 0)
+        .then(|| cache_prefix_hash(&value, cache_control_message_indices.last().copied()));
+
+    RequestCacheMetadata {
+        thread_id,
+        message_id,
+        message_index,
+        message_count,
+        cache_control_block_count: Some(cache_control_block_count),
+        cache_control_message_indices,
+        cache_prefix_hash,
+    }
+}
+
+fn cache_control_count(value: Option<&Value>) -> u64 {
+    match value {
+        Some(Value::Object(map)) => {
+            let current = u64::from(map.contains_key("cache_control"));
+            map.values().fold(current, |total, value| {
+                total.saturating_add(cache_control_count(Some(value)))
+            })
+        }
+        Some(Value::Array(items)) => items.iter().fold(0_u64, |total, value| {
+            total.saturating_add(cache_control_count(Some(value)))
+        }),
+        _ => 0,
+    }
+}
+
+fn cache_prefix_hash(request: &Value, last_message_index: Option<u64>) -> String {
+    let mut prefix = serde_json::Map::new();
+    for key in ["model", "system", "tools"] {
+        if let Some(value) = request.get(key) {
+            prefix.insert(key.to_owned(), value.clone());
+        }
+    }
+    if let (Some(messages), Some(index)) = (
+        request.get("messages").and_then(Value::as_array),
+        last_message_index,
+    ) {
+        let end = (index as usize).saturating_add(1).min(messages.len());
+        prefix.insert(
+            "messages".to_owned(),
+            Value::Array(messages[..end].to_vec()),
+        );
+    }
+    let bytes = serde_json::to_vec(&Value::Object(prefix)).unwrap_or_default();
+    hex_sha256(&bytes)
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut output = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        let _ = write!(&mut output, "{byte:02x}");
+    }
+    output
 }
 
 #[derive(Default)]
@@ -2286,5 +2440,74 @@ mod tests {
             records[0].status,
             Some(SubscriptionQuotaStatus::AllowedWarning)
         );
+    }
+
+    #[test]
+    fn request_cache_metadata_tracks_thread_message_and_prefix_without_prompt_text() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("x-claude-code-session-id"),
+            HeaderValue::from_static("thread-123"),
+        );
+        let body = Bytes::from_static(
+            br#"{
+                "model":"claude-sonnet-4-5",
+                "system":[{"type":"text","text":"secret system","cache_control":{"type":"ephemeral"}}],
+                "messages":[
+                    {"role":"user","content":"first secret"},
+                    {"id":"msg_2","role":"user","content":[{"type":"text","text":"second secret","cache_control":{"type":"ephemeral"}}]}
+                ]
+            }"#,
+        );
+
+        let metadata = request_cache_metadata(&headers, &body);
+
+        assert_eq!(metadata.thread_id.as_deref(), Some("thread-123"));
+        assert_eq!(metadata.message_id.as_deref(), Some("msg_2"));
+        assert_eq!(metadata.message_index, Some(1));
+        assert_eq!(metadata.message_count, Some(2));
+        assert_eq!(metadata.cache_control_block_count, Some(2));
+        assert_eq!(metadata.cache_control_message_indices, vec![1]);
+        let hash = metadata.cache_prefix_hash.expect("cache prefix hash");
+        assert_eq!(hash.len(), 64);
+        assert!(!hash.contains("secret"));
+    }
+
+    #[test]
+    fn request_cache_metadata_applies_cache_state_from_usage() {
+        let metadata = RequestCacheMetadata {
+            cache_control_block_count: Some(1),
+            ..Default::default()
+        };
+        let mut event = RequestEvent::default();
+
+        metadata.apply_to(
+            &mut event,
+            &UsageCounts {
+                present: true,
+                cache_read_input_tokens: 42,
+                ..Default::default()
+            },
+        );
+        assert_eq!(event.cache_state, Some(RequestCacheState::Hit));
+
+        metadata.apply_to(
+            &mut event,
+            &UsageCounts {
+                present: true,
+                cache_creation_input_tokens: 42,
+                ..Default::default()
+            },
+        );
+        assert_eq!(event.cache_state, Some(RequestCacheState::Write));
+
+        metadata.apply_to(
+            &mut event,
+            &UsageCounts {
+                present: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(event.cache_state, Some(RequestCacheState::Miss));
     }
 }
