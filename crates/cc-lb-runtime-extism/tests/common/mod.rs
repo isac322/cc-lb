@@ -83,7 +83,7 @@ pub fn authn_response(principal_id: &str) -> String {
 
 pub fn build_signer_response() -> String {
     json!({
-        "_version": 1,
+        "_v": 1,
         "signer_state": {"key": "signed"}
     })
     .to_string()
@@ -91,7 +91,7 @@ pub fn build_signer_response() -> String {
 
 pub fn sign_response(header_value: &str) -> String {
     json!({
-        "_version": 1,
+        "_v": 1,
         "headers": [{
             "name": "x-api-key",
             "value_base64": base64(header_value.as_bytes())
@@ -102,7 +102,7 @@ pub fn sign_response(header_value: &str) -> String {
 
 pub fn route_response() -> String {
     json!({
-        "_version": 1,
+        "_v": 1,
         "upstream": {
             "kind": "custom_anthropic_spec",
             "base_url": "http://upstream.test/"
@@ -114,7 +114,7 @@ pub fn route_response() -> String {
 
 pub fn route_response_with_upstream_id(upstream_id: &str) -> String {
     json!({
-        "_version": 1,
+        "_v": 1,
         "upstream": {
             "kind": "custom_anthropic_spec",
             "base_url": "http://upstream.test/"
@@ -127,7 +127,7 @@ pub fn route_response_with_upstream_id(upstream_id: &str) -> String {
 
 pub fn route_response_with_base_url(base_url: &str) -> String {
     json!({
-        "_version": 1,
+        "_v": 1,
         "upstream": {
             "kind": "custom_anthropic_spec",
             "base_url": base_url
@@ -139,7 +139,7 @@ pub fn route_response_with_base_url(base_url: &str) -> String {
 
 pub fn shape_response() -> String {
     json!({
-        "_version": 1,
+        "_v": 1,
         "url": "http://upstream.test/v1/messages",
         "method": "POST",
         "headers": [{
@@ -152,7 +152,7 @@ pub fn shape_response() -> String {
 }
 
 pub fn observe_response() -> String {
-    json!({"_version": 1}).to_string()
+    json!({"_v": 1}).to_string()
 }
 
 pub fn module_with_authn(output: &str) -> String {

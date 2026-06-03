@@ -82,7 +82,9 @@ fn route_input_includes_candidates_as_sibling_field() {
     let failure = common::route_response_with_base_url("http://candidate-input-missing.test/");
     let upstream_id = Uuid::from_u128(0x22222222222222222222222222222222);
     let markers: Vec<Vec<u8>> = vec![
-        br#""request":{"#.to_vec(),
+        br#""request_id":"req-test""#.to_vec(),
+        br#""method":"POST""#.to_vec(),
+        br#""path":"/v1/messages""#.to_vec(),
         br#""principal":{"#.to_vec(),
         br#""candidates":[{"#.to_vec(),
         format!(r#""upstream_id":"{upstream_id}""#).into_bytes(),

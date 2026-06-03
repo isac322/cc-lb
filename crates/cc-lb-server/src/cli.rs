@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{CommandFactory, Parser, Subcommand};
+use clap::{ArgAction, CommandFactory, Parser, Subcommand};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -29,11 +29,65 @@ pub enum Command {
         data_dir: Option<PathBuf>,
         #[arg(long)]
         strict_preflight: bool,
+        #[arg(long, action = ArgAction::Set)]
+        skip_handshake_if_fresh: Option<bool>,
+        #[arg(long, action = ArgAction::Set)]
+        force_handshake: Option<bool>,
     },
     Config {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn omitted_flags_are_none_so_config_can_provide_defaults() {
+        let cli =
+            Cli::try_parse_from(["cc-lb", "serve", "--config", "cc-lb.toml"]).expect("cli parses");
+
+        let Some(Command::Serve {
+            skip_handshake_if_fresh,
+            force_handshake,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected serve command");
+        };
+
+        assert!(skip_handshake_if_fresh.is_none());
+        assert!(force_handshake.is_none());
+    }
+
+    #[test]
+    fn explicit_flags_are_propagated() {
+        let cli = Cli::try_parse_from([
+            "cc-lb",
+            "serve",
+            "--config",
+            "cc-lb.toml",
+            "--skip-handshake-if-fresh",
+            "false",
+            "--force-handshake",
+            "true",
+        ])
+        .expect("cli parses");
+
+        let Some(Command::Serve {
+            skip_handshake_if_fresh,
+            force_handshake,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected serve command");
+        };
+
+        assert_eq!(skip_handshake_if_fresh, Some(false));
+        assert_eq!(force_handshake, Some(true));
+    }
 }
 
 #[derive(Debug, Subcommand)]

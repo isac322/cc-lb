@@ -1,59 +1,38 @@
 # Plugins
 
-This directory contains WebAssembly (WASM) plugins for `cc-lb`, compiled to the `wasm32-wasip1` target. Plugins are **not** included in the default workspace build; they are built separately and loaded at runtime via the Extism plugin boundary.
+This directory contains WebAssembly plugins for cc-lb, built against the cc-lb plugin handshake protocol.
 
-## Plugin Categories
+For the full plugin author reference (PDK macros, the seven wire functions, identity / handshake / self-check contracts, registration API, lifecycle, and limits), see **[docs/plugin-author-guide.md](../docs/plugin-author-guide.md)**.
 
-Plugins are organized by trait category from the `cc-lb-plugin-api`. Each category corresponds to a distinct extension point in the load balancer:
+## Directory layout
 
-| Category | Purpose | Trait |
-|----------|---------|-------|
-| `router` | Request routing and principal selection | `cc-lb-plugin-api::traits::router::Router` |
-| `dialect` | Protocol adaptation and message transformation | `cc-lb-plugin-api::traits::dialect::Dialect` |
-| `signer` | Cryptographic signing and credential injection | `cc-lb-plugin-api::traits::signer::Signer` |
-| `observability` | Logging, tracing, and metrics collection | `cc-lb-plugin-api::traits::observability::Observability` |
-
-## Directory Structure
-
-Each plugin lives in its own crate under its category:
+Plugins are grouped by category. Each plugin is its own crate excluded from the workspace's default build; it targets `wasm32-unknown-unknown` or `wasm32-wasip1`.
 
 ```
 plugins/
 ├── router/
-│   ├── round-robin/
-│   │   ├── Cargo.toml
-│   │   └── src/
-│   └── ...
+│   └── round-robin/        # reference router implementation
 ├── dialect/
 ├── signer/
 ├── observability/
 └── README.md (this file)
 ```
 
-## Crate Naming Convention
+Plugin crate names follow `cc-lb-<category>-<name>` (for example `cc-lb-router-round-robin`).
 
-All plugin crates follow the naming pattern:
-
-```
-cc-lb-<category>-<name>
-```
-
-**Examples:**
-- `cc-lb-router-round-robin` (in `plugins/router/round-robin/`)
-- `cc-lb-dialect-openai-compat` (in `plugins/dialect/openai-compat/`)
-- `cc-lb-signer-jwt-bearer` (in `plugins/signer/jwt-bearer/`)
-
-## Building Plugins
-
-Plugins compile to the `wasm32-wasip1` target and are **excluded** from the workspace's default build. To build a specific plugin:
+## Quick build + register
 
 ```bash
-cd plugins/router/round-robin
-cargo build --target wasm32-wasip1 --release
+# Build
+rustup target add wasm32-unknown-unknown
+cargo build -p cc-lb-router-round-robin --target wasm32-unknown-unknown --release
+
+# Register against a running cc-lb
+curl -X POST http://127.0.0.1:9091/admin/plugins \
+  -H "Authorization: Bearer $CC_LB_ADMIN_TOKEN" \
+  -F bytes=@target/wasm32-unknown-unknown/release/cc_lb_router_round_robin.wasm \
+  -F name=round-robin \
+  -F original_filename=cc_lb_router_round_robin.wasm
 ```
 
-The compiled WASM module will be available at `target/wasm32-wasip1/release/cc_lb_router_round_robin.wasm`.
-
-## Reference
-
-For plugin API design and trait definitions, see the `cc-lb-plugin-api` crate (in `crates/`).
+The host validates identity, handshake, and self-check before the record is persisted. To then route traffic through the plugin, attach it to a principal's chain via the admin API documented in [docs/runtime-management.md](../docs/runtime-management.md).

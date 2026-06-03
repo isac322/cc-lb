@@ -59,7 +59,6 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/admin/config/history", get(get_config_history))
         .route("/admin/config/diff", get(get_config_diff))
         .route("/admin/config/reload", post(reload_config))
-        .route("/admin/plugins", get(crate::status::handler))
         .merge(crate::dashboard_routes::router())
         .merge(crate::events_routes::router())
         .merge(crate::credentials::router())
