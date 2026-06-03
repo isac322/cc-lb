@@ -857,6 +857,7 @@ impl Lifecycle {
                 stream_hooks,
                 RequestEventContext {
                     request_id: ctx.request_id.clone(),
+                    upstream_id: Some(resolved_upstream_id),
                     upstream_name: Some(router_chosen_upstream_name.clone()),
                     principal_kind: Some(principal_kind_as_str(&principal.kind).to_owned()),
                     proxy_setup_ms: Some(proxy_setup_ms),
@@ -1057,6 +1058,7 @@ impl Lifecycle {
                 principal_id: Some(active_limit.subject.principal_id.clone()),
                 key_id: Some(active_limit.subject.key_id.clone()),
                 principal_kind: event_ctx.principal_kind.clone(),
+                upstream_id: event_ctx.upstream_id,
                 upstream_name: event_ctx.upstream_name.clone(),
                 model: Some(active_limit.request.model.clone()),
                 input_tokens: Some(usage.input_tokens),
@@ -1430,6 +1432,7 @@ impl Lifecycle {
                         principal_id: Some(active_limit.subject.principal_id.clone()),
                         key_id: Some(active_limit.subject.key_id.clone()),
                         principal_kind: event_ctx.principal_kind.clone(),
+                        upstream_id: event_ctx.upstream_id,
                         upstream_name: event_ctx.upstream_name.clone(),
                         model: Some(active_limit.request.model.clone()),
                         input_tokens: Some(usage.input_tokens),
@@ -1752,6 +1755,7 @@ struct ActiveLimit {
 #[derive(Clone)]
 struct RequestEventContext {
     request_id: String,
+    upstream_id: Option<Uuid>,
     upstream_name: Option<String>,
     principal_kind: Option<String>,
     proxy_setup_ms: Option<u64>,

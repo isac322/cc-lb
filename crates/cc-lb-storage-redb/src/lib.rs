@@ -30,7 +30,7 @@ pub use oauth::{api_key_storage_key, oauth_key};
 pub use plugin_registry::{RedbPluginBlobRepo, RedbPluginRegistryRepo};
 pub use price_catalog::PriceSnapshot;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 pub const OAUTH_CREDENTIALS_V1: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("OAUTH_CREDENTIALS_V1");
@@ -41,8 +41,8 @@ pub const PRICE_CATALOG_V1: TableDefinition<&str, &[u8]> = TableDefinition::new(
 pub const AUDIT_LOG_V1: TableDefinition<&[u8], &[u8]> = TableDefinition::new("AUDIT_LOG_V1");
 pub const REQUEST_EVENTS_V1: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("REQUEST_EVENTS_V1");
-pub const USAGE_ROLLUPS_V1: TableDefinition<&[u8], &[u8]> =
-    TableDefinition::new("USAGE_ROLLUPS_V1");
+pub const USAGE_ROLLUPS_V2: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("USAGE_ROLLUPS_V2");
 pub const USAGE_ROLLUP_CHECKPOINTS_V1: TableDefinition<&str, u64> =
     TableDefinition::new("USAGE_ROLLUP_CHECKPOINTS_V1");
 pub const SCHEMA_VERSION_V1: TableDefinition<&str, u32> = TableDefinition::new("SCHEMA_VERSION_V1");

@@ -17,10 +17,11 @@ impl RequestEventStore for PostgresStorage {
     async fn append_request_event(&self, event: &RequestEvent) -> StorageResult<()> {
         let payload = serde_json::to_vec(event)?;
         sqlx::query(
-            "INSERT INTO request_events_v1 (ts, principal_id, payload, created_at)              VALUES ($1,$2,$3,NOW())",
+            "INSERT INTO request_events_v1 (ts, principal_id, upstream_id, payload, created_at)              VALUES ($1,$2,$3,$4,NOW())",
         )
         .bind(unix_secs_to_datetime(event.ts, "request event ts")?)
         .bind(event.principal_id.as_deref())
+        .bind(event.upstream_id)
         .bind(payload)
         .execute(&self.pool)
         .await

@@ -130,6 +130,9 @@ pub trait UsageRollupStore: Send + Sync {
 
     async fn query_usage_rollups(&self) -> StorageResult<Vec<UsageRollup>>;
 
+    /// CATEGORY-3: `UsageRollup.upstream_id` is the stable cross-table identity for quota joins;
+    /// `upstream_name` is best-effort display data captured from the upstream's current name and
+    /// may drift across renames.
     async fn query_usage_rollups_in_range(
         &self,
         resolution: UsageRollupResolution,

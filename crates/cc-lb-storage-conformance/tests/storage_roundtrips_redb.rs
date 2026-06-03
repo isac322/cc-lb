@@ -7,7 +7,7 @@ use cc_lb_storage_api::BackendKind;
 use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
     scenarios::{
-        anthropic_compatibility_kv_store, plugin_registry_store, principal_store,
+        anthropic_compatibility_kv_store, atomicity, plugin_registry_store, principal_store,
         storage_roundtrips, upstream_rate_limit_store, upstream_subscription_quota_store,
     },
 };
@@ -48,6 +48,21 @@ impl ConformanceBackend for RedbConformanceBackend {
 #[test]
 fn storage_roundtrips_redb() {
     run_redb_scenario("storage_roundtrips", storage_roundtrips::run_all);
+}
+
+#[test]
+fn usage_rollup_v2_preserves_upstream_id_across_renames_redb() {
+    run_redb_scenario(
+        "usage_rollup_v2_preserves_upstream_id_across_renames",
+        |backend| async move {
+            let mut fixture = cc_lb_storage_conformance::ConformanceFixture::new(backend).await?;
+            let result =
+                atomicity::usage_rollup_v2_preserves_upstream_id_across_renames(&fixture).await;
+            let teardown = fixture.teardown().await;
+            result?;
+            teardown
+        },
+    );
 }
 
 #[test]

@@ -1,8 +1,10 @@
+use bincode::{config, serde as bincode_serde};
 use cc_lb_storage_redb::{
-    RedbStorage, RequestEvent, USAGE_ROLLUPS_V1, UsageRollup, UsageRollupResolution,
+    RedbStorage, RequestEvent, USAGE_ROLLUPS_V2, UsageRollup, UsageRollupResolution,
 };
 use redb::{ReadableDatabase, ReadableTable};
 use serde_json::Value;
+use uuid::Uuid;
 
 #[test]
 fn fixture_events_roll_up_once_and_rerun_is_idempotent() -> Result<(), Box<dyn std::error::Error>> {
@@ -27,6 +29,7 @@ fn fixture_events_roll_up_once_and_rerun_is_idempotent() -> Result<(), Box<dyn s
             UsageRollupResolution::Minute,
             1_800_000_000,
             "principal-a",
+            Uuid::nil(),
             "unknown",
             "claude-sonnet-4-5",
         ),
@@ -48,6 +51,7 @@ fn fixture_events_roll_up_once_and_rerun_is_idempotent() -> Result<(), Box<dyn s
             UsageRollupResolution::Minute,
             1_800_000_060,
             "principal-a",
+            Uuid::nil(),
             "unknown",
             "claude-sonnet-4-5",
         ),
@@ -69,6 +73,7 @@ fn fixture_events_roll_up_once_and_rerun_is_idempotent() -> Result<(), Box<dyn s
             UsageRollupResolution::Hour,
             1_800_000_000,
             "principal-a",
+            Uuid::nil(),
             "unknown",
             "claude-sonnet-4-5",
         ),
@@ -132,6 +137,7 @@ fn known_and_unknown_model_costs_roll_up() -> Result<(), Box<dyn std::error::Err
         UsageRollupResolution::Minute,
         1_800_000_000,
         "principal-a",
+        Uuid::nil(),
         "unknown",
         "claude-sonnet-4-5",
     );
@@ -140,6 +146,7 @@ fn known_and_unknown_model_costs_roll_up() -> Result<(), Box<dyn std::error::Err
         UsageRollupResolution::Minute,
         1_800_000_000,
         "principal-a",
+        Uuid::nil(),
         "unknown",
         "unknown-model",
     );
@@ -205,7 +212,7 @@ fn usage_rollup_json_rows_exclude_payload_keys() -> Result<(), Box<dyn std::erro
 
     let db = redb::Database::create(&path)?;
     let read_txn = db.begin_read()?;
-    let table = read_txn.open_table(USAGE_ROLLUPS_V1)?;
+    let table = read_txn.open_table(USAGE_ROLLUPS_V2)?;
     let rows = table
         .iter()?
         .map(|row| {
@@ -217,7 +224,9 @@ fn usage_rollup_json_rows_exclude_payload_keys() -> Result<(), Box<dyn std::erro
 
     assert_eq!(rows.len(), 5);
     for row in rows {
-        let persisted: Value = serde_json::from_slice(&row)?;
+        let (persisted, _) =
+            bincode_serde::decode_from_slice::<UsageRollup, _>(&row, config::standard())?;
+        let persisted: Value = serde_json::to_value(persisted)?;
         assert_forbidden_keys_absent(&persisted);
     }
     Ok(())
@@ -253,6 +262,7 @@ fn find_rollup<'a>(
     resolution: UsageRollupResolution,
     bucket_start: u64,
     principal: &str,
+    upstream_id: Uuid,
     upstream: &str,
     model: &str,
 ) -> &'a UsageRollup {
@@ -262,7 +272,8 @@ fn find_rollup<'a>(
             rollup.resolution == resolution
                 && rollup.bucket_start == bucket_start
                 && rollup.principal == principal
-                && rollup.upstream == upstream
+                && rollup.upstream_id == upstream_id
+                && rollup.upstream_name == upstream
                 && rollup.model == model
         })
         .expect("expected rollup row")
