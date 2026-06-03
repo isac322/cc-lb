@@ -25,12 +25,14 @@ use cc_lb_core::BreakerState;
 use cc_lb_core::{
     BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
     CircuitBreakerDispatch, DynamicView, DynamicViewBuilder, DynamicViewHolder, HopByHopStripLayer,
-    Lifecycle, LifecycleConfig, UpstreamDispatch, UpstreamRateLimitSink,
+    Lifecycle, LifecycleConfig, SubscriptionQuotaSink, SubscriptionQuotaWriterConfig,
+    UpstreamDispatch, UpstreamRateLimitSink,
     api_keys::{
         builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
         limit_engine::LimitEngine, principal_view::PrincipalView,
     },
-    make_default_dispatcher, spawn_audit_writer, start_upstream_rate_limit_writer,
+    make_default_dispatcher, spawn_audit_writer, start_subscription_quota_writer,
+    start_upstream_rate_limit_writer,
     usage_pruner::UsagePruner,
     usage_rollup_job::UsageRollupJob,
 };
@@ -49,6 +51,7 @@ use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 
+use crate::anthropic_compat_poller::{AnthropicCompatPoller, spawn_anthropic_compat_poller};
 use crate::bootstrap;
 use crate::build_meta::BuildMeta;
 use crate::builtins::NoopObservabilityHook;
@@ -57,6 +60,7 @@ use crate::dynamic_view_builder::{
     Stores as DynamicStores, build_dynamic_view, ensure_wasm_cache_dirs,
 };
 use crate::notify_listener::{NotifyListener, NotifyListenerParams};
+use crate::oauth_usage_poller::{OAuthUsagePoller, spawn_oauth_usage_poller};
 use crate::preflight;
 use crate::reconcile::Reconciler;
 use crate::refresh::{LazyRefresher, OAuthRefresher};
@@ -69,6 +73,8 @@ use crate::startup_handshake::{
 };
 use crate::state_machine::{ServerState, ServerStateHandle};
 use crate::storage_factory;
+use crate::subscription_quota_cache::SubscriptionQuotaCache;
+use crate::subscription_quota_gc::spawn_subscription_quota_gc;
 use crate::tls::{ReloadableListener, TlsState};
 use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig, DynamicViewRebinder};
 
@@ -94,6 +100,7 @@ pub struct App {
     notify_listener_task: Option<JoinHandle<()>>,
     audit_writer_task: Option<JoinHandle<()>>,
     upstream_rate_limit_writer_task: Option<JoinHandle<()>>,
+    subscription_quota_writer_task: Option<JoinHandle<()>>,
     signals: signal::SignalHandle,
     drain_controller: DrainController,
     tls_state: Option<Arc<TlsState>>,
@@ -172,6 +179,7 @@ impl App {
             notify_listener_task,
             audit_writer_task,
             upstream_rate_limit_writer_task,
+            subscription_quota_writer_task,
             signals,
             drain_controller: _,
             tls_state,
@@ -233,6 +241,9 @@ impl App {
             await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
         }
         if let Some(task) = upstream_rate_limit_writer_task {
+            await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        }
+        if let Some(task) = subscription_quota_writer_task {
             await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
         }
         proxy_result?;
@@ -612,6 +623,22 @@ async fn build_app_with_storage_inner(
     let (upstream_rate_limit_sink, upstream_rate_limit_receiver) = UpstreamRateLimitSink::new();
     let upstream_rate_limit_writer_task =
         start_upstream_rate_limit_writer(storage.clone(), upstream_rate_limit_receiver);
+    let (subscription_quota_sink, subscription_quota_receiver) =
+        SubscriptionQuotaSink::with_capacity(
+            config.subscription_quota.writer_channel_capacity as usize,
+        );
+    let subscription_quota_cache = Arc::new(SubscriptionQuotaCache::new());
+    let subscription_quota_writer_cancel = CancellationToken::new();
+    let subscription_quota_writer_task = start_subscription_quota_writer(
+        storage.clone(),
+        subscription_quota_receiver,
+        SubscriptionQuotaWriterConfig {
+            batch_max_records: config.subscription_quota.writer_batch_max_records as usize,
+            flush_max_ms: config.subscription_quota.writer_flush_ms,
+            dedup_elapsed_override_secs: config.subscription_quota.dedup_elapsed_override_secs,
+        },
+        subscription_quota_writer_cancel.clone(),
+    );
     let runtime = Arc::new(ExtismRuntime::new());
     let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
     let storage_for_dynamic = storage.clone();
@@ -669,6 +696,8 @@ async fn build_app_with_storage_inner(
         principals: storage_for_dynamic.clone(),
         plugin_registry: storage_for_dynamic.clone(),
         upstream_rate_limits: storage_for_dynamic.clone(),
+        upstream_subscription_quotas: storage_for_dynamic.clone(),
+        anthropic_compatibility_kv: storage_for_dynamic.clone(),
         audit: Some(storage_for_dynamic.clone()),
         plugin_registry_repo: Some(plugin_registry_repo.clone()),
     });
@@ -724,16 +753,19 @@ async fn build_app_with_storage_inner(
     let oauth_anthropic = config.oauth.anthropic.clone().unwrap_or_default();
     let oauth_cfg = Arc::new(oauth_anthropic.clone());
     let refresh_cancel = CancellationToken::new();
-    let lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>> =
+    let lazy_refresher_concrete: Option<Arc<LazyRefresher>> =
         lifecycle_config.replica_identity.as_ref().map(|identity| {
-            let refresher = LazyRefresher::new(
+            Arc::new(LazyRefresher::new(
                 stores.clone(),
                 aead.clone(),
                 oauth_cfg.clone(),
                 identity.id,
                 refresh_cancel.clone(),
-            );
-            Arc::new(refresher) as Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>
+            ))
+        });
+    let lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>> =
+        lazy_refresher_concrete.as_ref().map(|refresher| {
+            refresher.clone() as Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>
         });
     let initial_view = build_dynamic_view(
         &stores,
@@ -743,6 +775,8 @@ async fn build_app_with_storage_inner(
         0,
         &runtime,
         &data_dir,
+        subscription_quota_cache.clone(),
+        config.subscription_quota.routing_max_staleness_secs,
     )
     .await?;
     let dynamic_view_holder = Arc::new(DynamicViewHolder::new(initial_view));
@@ -767,6 +801,10 @@ async fn build_app_with_storage_inner(
         aead: aead.clone(),
         data_dir: data_dir.clone(),
         lazy_refresher: lazy_refresher.clone(),
+        subscription_quota_cache: subscription_quota_cache.clone(),
+        subscription_quota_routing_max_staleness_secs: config
+            .subscription_quota
+            .routing_max_staleness_secs,
     }));
     let notify_listener_task = Some(tokio::spawn(async move {
         notify_listener.run().await;
@@ -775,6 +813,7 @@ async fn build_app_with_storage_inner(
         .replica_identity
         .as_ref()
         .map(|identity| identity.id);
+    let replica_identity_for_tasks = lifecycle_config.replica_identity.clone();
 
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
@@ -787,6 +826,8 @@ async fn build_app_with_storage_inner(
     lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), builtin_authn.clone());
     lifecycle = lifecycle.with_request_event_storage(storage.clone());
     lifecycle = lifecycle.with_upstream_rate_limit_sink(upstream_rate_limit_sink);
+    lifecycle = lifecycle.with_subscription_quota_sink(subscription_quota_sink.clone());
+    lifecycle = lifecycle.with_subscription_quota_cache(subscription_quota_cache.clone());
     let lifecycle = Arc::new(lifecycle);
     let dynamic_view = lifecycle.dynamic_view();
 
@@ -804,6 +845,10 @@ async fn build_app_with_storage_inner(
         aead: aead.clone(),
         lazy_refresher: lazy_refresher.clone(),
         data_dir: data_dir.clone(),
+        subscription_quota_cache: subscription_quota_cache.clone(),
+        subscription_quota_routing_max_staleness_secs: config
+            .subscription_quota
+            .routing_max_staleness_secs,
     });
     let config_watcher = config_path.map(|path| {
         let watcher = Arc::new(ConfigWatcher::new_with_principal_view(
@@ -820,6 +865,7 @@ async fn build_app_with_storage_inner(
         Duration::from_secs(config.timeouts.drain_secs),
         sighup_handler(reload_tls_state, config_watcher.clone()),
     );
+    spawn_reconcile_shutdown(signals.subscribe(), subscription_quota_writer_cancel);
     let reconcile_cancel = CancellationToken::new();
     spawn_reconciler(ReconcilerParams {
         stores: stores.clone(),
@@ -830,6 +876,10 @@ async fn build_app_with_storage_inner(
         lazy_refresher: lazy_refresher.clone(),
         cancel: reconcile_cancel.clone(),
         data_dir: data_dir.clone(),
+        subscription_quota_cache: subscription_quota_cache.clone(),
+        subscription_quota_routing_max_staleness_secs: config
+            .subscription_quota
+            .routing_max_staleness_secs,
     });
     spawn_reconcile_shutdown(signals.subscribe(), reconcile_cancel);
     if let Some(replica_id) = replica_id {
@@ -841,6 +891,51 @@ async fn build_app_with_storage_inner(
             refresh_cancel.clone(),
         );
         spawn_reconcile_shutdown(signals.subscribe(), refresh_cancel);
+    }
+    if config.anthropic_compat_poller.enabled {
+        let cancel = CancellationToken::new();
+        spawn_anthropic_compat_poller(
+            AnthropicCompatPoller::new(stores.clone(), config.anthropic_compat_poller.clone()),
+            cancel.clone(),
+        );
+        spawn_reconcile_shutdown(signals.subscribe(), cancel);
+    }
+    if config.oauth.usage_poller.enabled {
+        match (replica_identity_for_tasks, lazy_refresher_concrete.clone()) {
+            (Some(replica_identity), Some(lazy_refresher)) => {
+                let cancel = CancellationToken::new();
+                spawn_oauth_usage_poller(
+                    OAuthUsagePoller::new(
+                        replica_identity,
+                        stores.clone(),
+                        aead.clone(),
+                        lazy_refresher,
+                        subscription_quota_sink.clone(),
+                        subscription_quota_cache.clone(),
+                        config.oauth.usage_poller.clone(),
+                    ),
+                    cancel.clone(),
+                );
+                spawn_reconcile_shutdown(signals.subscribe(), cancel);
+            }
+            (None, _) => {
+                tracing::warn!("oauth usage poller not started: replica identity unavailable")
+            }
+            (_, None) => {
+                tracing::warn!("oauth usage poller not started: lazy refresher unavailable")
+            }
+        }
+    } else {
+        tracing::warn!("oauth usage poller not started: disabled by config");
+    }
+    if config.subscription_quota.enabled {
+        let cancel = CancellationToken::new();
+        spawn_subscription_quota_gc(
+            stores.clone(),
+            config.subscription_quota.clone(),
+            cancel.clone(),
+        );
+        spawn_reconcile_shutdown(signals.subscribe(), cancel);
     }
     let state = ProxyState {
         lifecycle: lifecycle.clone(),
@@ -890,6 +985,7 @@ async fn build_app_with_storage_inner(
         notify_listener_task,
         audit_writer_task: Some(audit_writer_task),
         upstream_rate_limit_writer_task: Some(upstream_rate_limit_writer_task),
+        subscription_quota_writer_task: Some(subscription_quota_writer_task),
         signals,
         drain_controller,
         tls_state,
@@ -905,6 +1001,8 @@ struct ServerDynamicViewRebinder {
     aead: Arc<AeadService>,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     data_dir: PathBuf,
+    subscription_quota_cache: Arc<SubscriptionQuotaCache>,
+    subscription_quota_routing_max_staleness_secs: u64,
 }
 
 #[async_trait]
@@ -921,6 +1019,8 @@ impl DynamicViewRebinder for ServerDynamicViewRebinder {
             current_generation,
             &self.runtime,
             &self.data_dir,
+            self.subscription_quota_cache.clone(),
+            self.subscription_quota_routing_max_staleness_secs,
         )
         .await?)
     }
@@ -1014,6 +1114,8 @@ struct ReconcilerParams {
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     cancel: CancellationToken,
     data_dir: PathBuf,
+    subscription_quota_cache: Arc<SubscriptionQuotaCache>,
+    subscription_quota_routing_max_staleness_secs: u64,
 }
 
 fn spawn_reconciler(params: ReconcilerParams) {
@@ -1026,6 +1128,8 @@ fn spawn_reconciler(params: ReconcilerParams) {
         params.lazy_refresher,
         params.cancel,
         params.data_dir,
+        params.subscription_quota_cache,
+        params.subscription_quota_routing_max_staleness_secs,
     ));
     tokio::spawn(reconciler.run());
 }

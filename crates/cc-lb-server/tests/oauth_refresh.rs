@@ -72,6 +72,8 @@ impl Fixture {
             principals: storage.clone(),
             plugin_registry: storage.clone(),
             upstream_rate_limits: storage.clone(),
+            upstream_subscription_quotas: storage.clone(),
+            anthropic_compatibility_kv: storage.clone(),
             audit: Some(storage.clone()),
             plugin_registry_repo: None,
         });
@@ -258,6 +260,8 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
         0,
         &runtime,
         fixture._dir.path(),
+        Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        1800,
     )
     .await
     .expect("dynamic view builds");

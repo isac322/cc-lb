@@ -15,6 +15,15 @@
         "key_env": "CC_LB_MASTER_KEY"
       }
     },
+    "anthropic_compat_poller": {
+      "$ref": "#/$defs/AnthropicCompatPollerConfig",
+      "default": {
+        "enabled": true,
+        "jitter_secs": 60,
+        "request_timeout_secs": 10,
+        "tick_interval_secs": 3600
+      }
+    },
     "api_keys": {
       "$ref": "#/$defs/ApiKeysConfig",
       "default": {
@@ -76,7 +85,28 @@
     },
     "oauth": {
       "$ref": "#/$defs/OAuthConfig",
-      "default": {}
+      "default": {
+        "usage_poller": {
+          "bootstrap_attempts": 5,
+          "bootstrap_default_interval_secs": 900,
+          "enabled": true,
+          "fallback_interval_secs": 900,
+          "history_capacity": 8,
+          "lease_ttl_secs": 90,
+          "max_interval_secs": 3600,
+          "min_interval_secs": 60,
+          "request_timeout_secs": 10,
+          "safety_divisor": 2,
+          "stagger_ms": 1500,
+          "throttle_ladder_secs": [
+            30,
+            60,
+            120,
+            240,
+            300
+          ]
+        }
+      }
     },
     "observability": {
       "$ref": "#/$defs/ObservabilityConfig",
@@ -100,6 +130,20 @@
       "default": {
         "kind": "redb",
         "path": "/var/lib/cc-lb/storage.redb"
+      }
+    },
+    "subscription_quota": {
+      "$ref": "#/$defs/SubscriptionQuotaConfig",
+      "default": {
+        "dedup_elapsed_override_secs": 30,
+        "enabled": true,
+        "gc_batch_size": 10000,
+        "gc_tick_interval_secs": 60,
+        "retention_days": 30,
+        "routing_max_staleness_secs": 1800,
+        "writer_batch_max_records": 256,
+        "writer_channel_capacity": 4096,
+        "writer_flush_ms": 100
       }
     },
     "timeouts": {
@@ -139,6 +183,33 @@
         "key_env": {
           "type": "string",
           "default": "CC_LB_MASTER_KEY"
+        }
+      }
+    },
+    "AnthropicCompatPollerConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "jitter_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 60,
+          "minimum": 0
+        },
+        "request_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 10,
+          "minimum": 0
+        },
+        "tick_interval_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 3600,
+          "minimum": 0
         }
       }
     },
@@ -402,6 +473,120 @@
               "type": "null"
             }
           ]
+        },
+        "usage_poller": {
+          "$ref": "#/$defs/OAuthUsagePollerConfig",
+          "default": {
+            "bootstrap_attempts": 5,
+            "bootstrap_default_interval_secs": 900,
+            "enabled": true,
+            "fallback_interval_secs": 900,
+            "history_capacity": 8,
+            "lease_ttl_secs": 90,
+            "max_interval_secs": 3600,
+            "min_interval_secs": 60,
+            "request_timeout_secs": 10,
+            "safety_divisor": 2,
+            "stagger_ms": 1500,
+            "throttle_ladder_secs": [
+              30,
+              60,
+              120,
+              240,
+              300
+            ]
+          }
+        }
+      }
+    },
+    "OAuthUsagePollerConfig": {
+      "type": "object",
+      "properties": {
+        "bootstrap_attempts": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 5,
+          "minimum": 0
+        },
+        "bootstrap_default_interval_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 900,
+          "minimum": 0
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "fallback_interval_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 900,
+          "minimum": 0
+        },
+        "history_capacity": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 8,
+          "minimum": 0
+        },
+        "lease_ttl_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 90,
+          "minimum": 0
+        },
+        "max_interval_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 3600,
+          "minimum": 0
+        },
+        "min_interval_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 60,
+          "minimum": 0
+        },
+        "request_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 10,
+          "minimum": 0
+        },
+        "safety_divisor": {
+          "description": "CATEGORY-3 CROSS-CRATE INVARIANT: server code converts this divisor into\na fractional safety factor as `1.0 / safety_divisor`.",
+          "type": "integer",
+          "format": "uint32",
+          "default": 2,
+          "minimum": 0
+        },
+        "stagger_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 1500,
+          "minimum": 0
+        },
+        "throttle_ladder_secs": {
+          "type": "array",
+          "default": [
+            30,
+            60,
+            120,
+            240,
+            300
+          ],
+          "items": {
+            "type": "integer",
+            "format": "uint64",
+            "minimum": 0
+          }
+        },
+        "user_agent_override": {
+          "type": [
+            "string",
+            "null"
+          ]
         }
       }
     },
@@ -568,6 +753,63 @@
           ]
         }
       ]
+    },
+    "SubscriptionQuotaConfig": {
+      "type": "object",
+      "properties": {
+        "dedup_elapsed_override_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "gc_batch_size": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 10000,
+          "minimum": 0
+        },
+        "gc_tick_interval_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 60,
+          "minimum": 0
+        },
+        "retention_days": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        },
+        "routing_max_staleness_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 1800,
+          "minimum": 0
+        },
+        "writer_batch_max_records": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 256,
+          "minimum": 0
+        },
+        "writer_channel_capacity": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 4096,
+          "minimum": 0
+        },
+        "writer_flush_ms": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 100,
+          "minimum": 0
+        }
+      }
     },
     "TimeoutsConfig": {
       "type": "object",

@@ -251,6 +251,8 @@ impl Fixture {
                 principals: self.storage.clone(),
                 plugin_registry: self.storage.clone(),
                 upstream_rate_limits: self.storage.clone(),
+                upstream_subscription_quotas: self.storage.clone(),
+                anthropic_compatibility_kv: self.storage.clone(),
                 audit: Some(self.storage.clone()),
                 plugin_registry_repo: None,
             }),

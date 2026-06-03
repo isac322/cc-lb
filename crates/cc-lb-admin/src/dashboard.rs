@@ -112,12 +112,15 @@ pub struct DashboardUsageResponse {
 #[derive(Debug, Clone, Serialize)]
 pub struct UsageSeries {
     pub key: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub upstream_name: Option<String>,
     pub buckets: Vec<UsageBucket>,
 }
 
 #[derive(Debug)]
 struct GroupAccumulator {
     total_request_count: u64,
+    upstream_name: Option<String>,
     buckets: Vec<UsageBucket>,
 }
 
@@ -523,6 +526,7 @@ pub(crate) fn build_usage_series(
         return (
             vec![UsageSeries {
                 key: "all".to_owned(),
+                upstream_name: None,
                 buckets,
             }],
             None,
@@ -531,9 +535,10 @@ pub(crate) fn build_usage_series(
 
     let mut groups: BTreeMap<String, GroupAccumulator> = BTreeMap::new();
     for rollup in rollups {
-        let key = group_key(group_by, rollup).to_owned();
+        let (key, upstream_name) = group_key(group_by, rollup);
         let entry = groups.entry(key).or_insert_with(|| GroupAccumulator {
             total_request_count: 0,
+            upstream_name,
             buckets: zero_filled_buckets(window_start_unix_secs, window_end_unix_secs, step),
         });
         entry.total_request_count += rollup.request_count;
@@ -555,6 +560,7 @@ pub(crate) fn build_usage_series(
         .take(MAX_GROUPED_SERIES)
         .map(|(key, group)| UsageSeries {
             key,
+            upstream_name: group.upstream_name,
             buckets: group.buckets,
         })
         .collect();
@@ -567,11 +573,14 @@ pub(crate) fn build_usage_series(
     (series, truncated_series_count)
 }
 
-fn group_key(group_by: UsageGroupBy, rollup: &UsageRollup) -> &str {
+fn group_key(group_by: UsageGroupBy, rollup: &UsageRollup) -> (String, Option<String>) {
     match group_by {
-        UsageGroupBy::None => "all",
-        UsageGroupBy::Model => &rollup.model,
-        UsageGroupBy::Principal => &rollup.principal,
-        UsageGroupBy::Upstream => &rollup.upstream,
+        UsageGroupBy::None => ("all".to_owned(), None),
+        UsageGroupBy::Model => (rollup.model.clone(), None),
+        UsageGroupBy::Principal => (rollup.principal.clone(), None),
+        UsageGroupBy::Upstream => (
+            rollup.upstream_id.to_string(),
+            Some(rollup.upstream_name.clone()),
+        ),
     }
 }
