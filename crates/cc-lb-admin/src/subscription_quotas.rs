@@ -395,9 +395,9 @@ async fn build_analysis_response(
     let source = parse_source_merge(query.source.as_deref())?;
     let windows = parse_windows_or_default(query.windows.as_deref())?;
     validate_time_range(query.since_unix_secs, query.until_unix_secs)?;
-    let requested_upstream_ids = parse_required_upstream_ids(query.upstream_ids.as_deref())?;
-    validate_upstream_count(requested_upstream_ids.len())?;
-    let upstreams = upstreams_for_ids(storage, &requested_upstream_ids).await?;
+    let upstreams = upstreams_for_optional_query(storage, query.upstream_ids.as_deref()).await?;
+    validate_upstream_count(upstreams.len())?;
+    let requested_upstream_ids: Vec<Uuid> = upstreams.iter().map(|u| u.id).collect();
     let upstream_names = upstream_name_map(&upstreams);
     let rollups = storage
         .query_usage_rollups_in_range(
@@ -875,18 +875,6 @@ async fn upstreams_for_optional_query(
     })
 }
 
-async fn upstreams_for_ids(
-    storage: &dyn Storage,
-    upstream_ids: &[Uuid],
-) -> Result<Vec<UpstreamRecord>, Response> {
-    let requested = upstream_ids.iter().copied().collect::<HashSet<_>>();
-    Ok(list_all_upstreams(storage)
-        .await?
-        .into_iter()
-        .filter(|upstream| requested.contains(&upstream.id))
-        .collect())
-}
-
 async fn list_all_upstreams(storage: &dyn Storage) -> Result<Vec<UpstreamRecord>, Response> {
     let mut after = None;
     let mut all = Vec::new();
@@ -1021,22 +1009,6 @@ fn parse_source_merge(raw: Option<&str>) -> Result<SubscriptionQuotaSourceMerge,
             .ok_or_else(|| bad_request("invalid_source", format!("unsupported source: {value}"))),
         None => Ok(SubscriptionQuotaSourceMerge::Merged),
     }
-}
-
-fn parse_required_upstream_ids(raw: Option<&str>) -> Result<Vec<Uuid>, Response> {
-    let Some(raw) = raw else {
-        return Err(bad_request(
-            "missing_upstream_ids",
-            "upstream_ids is required for analysis",
-        ));
-    };
-    if raw.trim().is_empty() {
-        return Err(bad_request(
-            "missing_upstream_ids",
-            "upstream_ids is required for analysis",
-        ));
-    }
-    parse_upstream_ids(raw)
 }
 
 fn parse_upstream_ids(raw: &str) -> Result<Vec<Uuid>, Response> {
