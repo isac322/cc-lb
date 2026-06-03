@@ -1,14 +1,19 @@
+use std::collections::HashSet;
+
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    MAX_WASM_BLOB_BYTES, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
-    PluginRegistryStore, PluginSlot, StorageError as ApiStorageError, StorageResult, WasmBlob,
-    WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
+    MAX_WASM_BLOB_BYTES, PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput,
+    PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, StorageError as ApiStorageError,
+    StorageResult, WasmBlob, WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput,
+    sparse_order, validate_identifier,
 };
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{PLUGIN_CHAINS_V2, RedbStorage, StorageError, WASM_BLOBS_V2, WASM_REGISTRY_V2};
+use crate::{
+    PLUGIN_CHAINS_V2, PRINCIPALS_V2, RedbStorage, StorageError, WASM_BLOBS_V2, WASM_REGISTRY_V2,
+};
 
 use crate::error_map::{map_join_err, map_redb_err};
 
@@ -26,7 +31,7 @@ impl PluginRegistryStore for RedbStorage {
         &self,
         blob: WasmBlob,
         entry: WasmRegistryEntryInput,
-    ) -> StorageResult<WasmRegistryEntry> {
+    ) -> StorageResult<(WasmRegistryEntry, bool)> {
         validate_upload(&blob, &entry)?;
         let storage = self.clone();
         tokio::task::spawn_blocking(move || storage.persist_wasm_upload_sync(blob, entry))
@@ -173,15 +178,6 @@ impl PluginRegistryStore for RedbStorage {
         slot: PluginSlot,
         new_orders: Vec<(Uuid, i64, u64)>,
     ) -> StorageResult<Vec<PluginChainEntry>> {
-        let orders = new_orders
-            .iter()
-            .map(|(_, order, _)| *order)
-            .collect::<Vec<_>>();
-        if sparse_order::needs_rebalance(&orders) {
-            return Err(ApiStorageError::Conflict {
-                message: "plugin chain order gaps need rebalance".to_owned(),
-            });
-        }
         let storage = self.clone();
         tokio::task::spawn_blocking(move || {
             storage.reorder_chain_sync(principal_id, slot, new_orders)
@@ -191,9 +187,13 @@ impl PluginRegistryStore for RedbStorage {
         .map_err(map_redb_err)
     }
 
-    async fn delete_chain_entry(&self, id: Uuid) -> StorageResult<bool> {
+    async fn delete_chain_entry(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+    ) -> StorageResult<Option<PluginChainEntry>> {
         let storage = self.clone();
-        tokio::task::spawn_blocking(move || storage.delete_chain_entry_sync(id))
+        tokio::task::spawn_blocking(move || storage.delete_chain_entry_sync(id, expected_revision))
             .await
             .map_err(map_join_err)?
             .map_err(map_redb_err)
@@ -217,7 +217,7 @@ impl RedbStorage {
         &self,
         blob: WasmBlob,
         input: WasmRegistryEntryInput,
-    ) -> Result<WasmRegistryEntry, StorageError> {
+    ) -> Result<(WasmRegistryEntry, bool), StorageError> {
         let write_txn = self.db.begin_write()?;
         let (sha_match, name_conflict) =
             scan_registry_for_upload(&write_txn, blob.sha256, &input.name)?;
@@ -225,10 +225,10 @@ impl RedbStorage {
             if existing.name == input.name
                 && existing.original_filename == input.original_filename
                 && existing.label == input.label
-                && existing.uploaded_by_admin_id == input.uploaded_by_admin_id
             {
+                self_heal_blob_if_missing(&write_txn, &blob, existing.id)?;
                 write_txn.commit()?;
-                return Ok(existing);
+                return Ok((existing, true));
             }
             return Err(StorageError::PluginRegistryConflict {
                 message: "sha256 already registered for a different wasm entry".to_owned(),
@@ -267,7 +267,7 @@ impl RedbStorage {
             registry.insert(record.id.as_bytes().as_slice(), payload.as_slice())?;
         }
         write_txn.commit()?;
-        Ok(record)
+        Ok((record, false))
     }
 
     fn get_blob_bytes_sync(&self, sha256: [u8; 32]) -> Result<Option<Vec<u8>>, StorageError> {
@@ -294,19 +294,19 @@ impl RedbStorage {
     fn list_orphan_blobs_sync(&self) -> Result<Vec<[u8; 32]>, StorageError> {
         let read_txn = self.db.begin_read()?;
         let blobs = read_txn.open_table(WASM_BLOBS_V2)?;
-        let mut orphaned = Vec::new();
+        let registry = read_txn.open_table(WASM_REGISTRY_V2)?;
+        let mut blob_shas = HashSet::new();
         for row in blobs.iter()? {
-            let (key, value) = row?;
-            let blob: StoredWasmBlob = serde_json::from_slice(value.value())?;
-            if blob.refcount == 0 {
-                let sha = <[u8; 32]>::try_from(key.value()).map_err(|_| {
-                    StorageError::PluginRegistryConflict {
-                        message: "wasm blob sha256 key must be 32 bytes".to_owned(),
-                    }
-                })?;
-                orphaned.push(sha);
-            }
+            let (key, _) = row?;
+            let sha = sha_from_key(key.value())?;
+            blob_shas.insert(sha);
         }
+        for row in registry.iter()? {
+            let (_, value) = row?;
+            let entry: WasmRegistryEntry = serde_json::from_slice(value.value())?;
+            blob_shas.remove(&entry.sha256);
+        }
+        let mut orphaned = blob_shas.into_iter().collect::<Vec<_>>();
         orphaned.sort();
         Ok(orphaned)
     }
@@ -418,20 +418,26 @@ impl RedbStorage {
     ) -> Result<Option<WasmRegistryEntry>, StorageError> {
         let write_txn = self.db.begin_write()?;
         let deleted = {
-            let mut registry = write_txn.open_table(WASM_REGISTRY_V2)?;
-            let blobs = write_txn.open_table(WASM_BLOBS_V2)?;
-            let mut entry = {
-                let Some(value) = registry.get(id.as_bytes().as_slice())? else {
-                    return Ok(None);
-                };
-                serde_json::from_slice::<WasmRegistryEntry>(value.value())?
+            let registry = write_txn.open_table(WASM_REGISTRY_V2)?;
+            let Some(value) = registry.get(id.as_bytes().as_slice())? else {
+                return Ok(None);
             };
+            let mut entry: WasmRegistryEntry = serde_json::from_slice(value.value())?;
+            drop(value);
+            drop(registry);
             if entry.revision != expected_revision {
                 return Err(StorageError::StalePluginRegistryRevision {
                     current: entry.revision,
                 });
             }
+            if registry_is_referenced_by_chain(&write_txn, id)? {
+                return Err(StorageError::PluginRegistryReferenced { id: id.to_string() });
+            }
+            let mut blobs = write_txn.open_table(WASM_BLOBS_V2)?;
             entry.refcount = blob_refcount_from_write(&blobs, entry.sha256)?;
+            blobs.remove(entry.sha256.as_slice())?;
+            drop(blobs);
+            let mut registry = write_txn.open_table(WASM_REGISTRY_V2)?;
             registry.remove(id.as_bytes().as_slice())?;
             entry
         };
@@ -444,9 +450,38 @@ impl RedbStorage {
         sha256: [u8; 32],
     ) -> Result<bool, StorageError> {
         let write_txn = self.db.begin_write()?;
-        let changed = decrement_blob(&write_txn, sha256)?;
+        let removed = {
+            let mut blobs = write_txn.open_table(WASM_BLOBS_V2)?;
+            let Some(value) = blobs.get(sha256.as_slice())? else {
+                drop(blobs);
+                write_txn.commit()?;
+                return Ok(false);
+            };
+            let blob: StoredWasmBlob = serde_json::from_slice(value.value())?;
+            drop(value);
+            if blob.refcount > 0 {
+                false
+            } else {
+                let registry = write_txn.open_table(WASM_REGISTRY_V2)?;
+                let mut referenced = false;
+                for row in registry.iter()? {
+                    let (_, value) = row?;
+                    let entry: WasmRegistryEntry = serde_json::from_slice(value.value())?;
+                    if entry.sha256 == sha256 {
+                        referenced = true;
+                        break;
+                    }
+                }
+                drop(registry);
+                if referenced {
+                    false
+                } else {
+                    blobs.remove(sha256.as_slice())?.is_some()
+                }
+            }
+        };
         write_txn.commit()?;
-        Ok(changed)
+        Ok(removed)
     }
 
     fn insert_chain_entry_sync(
@@ -454,6 +489,19 @@ impl RedbStorage {
         input: PluginChainEntryInput,
     ) -> Result<PluginChainEntry, StorageError> {
         let write_txn = self.db.begin_write()?;
+        if !principal_exists(&write_txn, input.principal_id)? {
+            return Err(StorageError::PrincipalNotFound {
+                id: input.principal_id.to_string(),
+            });
+        }
+        if is_singleton_slot(input.slot)
+            && let Some(existing_entry_id) =
+                existing_chain_entry_for_slot(&write_txn, input.principal_id, input.slot)?
+        {
+            return Err(StorageError::PluginChainConflict {
+                reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id },
+            });
+        }
         let registry = registry_by_id(&write_txn, input.wasm_registry_id)?.ok_or_else(|| {
             StorageError::PluginRegistryConflict {
                 message: "unknown plugin registry entry".to_owned(),
@@ -502,6 +550,16 @@ impl RedbStorage {
         expected_revision: u64,
         update: PluginChainEntryUpdate,
     ) -> Result<Option<PluginChainEntry>, StorageError> {
+        if update.config.is_none()
+            && update.sse_per_event.is_none()
+            && update.batched_events_per_flush.is_none()
+            && update.batched_flush_ms.is_none()
+        {
+            return Err(StorageError::InvalidInput {
+                field: "plugin_chain_update".to_owned(),
+                reason: "empty_update".to_owned(),
+            });
+        }
         let write_txn = self.db.begin_write()?;
         let Some(mut entry) = chain_by_id(&write_txn, id)? else {
             return Ok(None);
@@ -539,17 +597,13 @@ impl RedbStorage {
         new_orders: Vec<(Uuid, i64, u64)>,
     ) -> Result<Vec<PluginChainEntry>, StorageError> {
         let write_txn = self.db.begin_write()?;
+        let mut entries = chain_for_principal_from_write(&write_txn, principal_id, slot)?;
         for (id, order, expected_revision) in new_orders {
-            let Some(mut entry) = chain_by_id(&write_txn, id)? else {
+            let Some(entry) = entries.iter_mut().find(|entry| entry.id == id) else {
                 return Err(StorageError::PluginRegistryConflict {
                     message: "unknown plugin chain entry".to_owned(),
                 });
             };
-            if entry.principal_id != principal_id || entry.slot != slot {
-                return Err(StorageError::PluginRegistryConflict {
-                    message: "plugin chain entry is not in requested chain".to_owned(),
-                });
-            }
             if entry.revision != expected_revision {
                 return Err(StorageError::StalePluginChainRevision {
                     current: entry.revision,
@@ -560,17 +614,30 @@ impl RedbStorage {
                 .revision
                 .checked_add(1)
                 .ok_or(StorageError::PluginChainRevisionOverflow)?;
-            put_chain(&write_txn, &entry)?;
+        }
+        validate_chain_orders(&entries)?;
+        for entry in &entries {
+            put_chain(&write_txn, entry)?;
         }
         write_txn.commit()?;
-        self.list_chain_for_principal_sync(principal_id, slot)
+        entries.sort_by_key(|entry| (entry.order, entry.id));
+        Ok(entries)
     }
 
-    fn delete_chain_entry_sync(&self, id: Uuid) -> Result<bool, StorageError> {
+    fn delete_chain_entry_sync(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+    ) -> Result<Option<PluginChainEntry>, StorageError> {
         let write_txn = self.db.begin_write()?;
         let Some(entry) = chain_by_id(&write_txn, id)? else {
-            return Ok(false);
+            return Ok(None);
         };
+        if entry.revision != expected_revision {
+            return Err(StorageError::StalePluginChainRevision {
+                current: entry.revision,
+            });
+        }
         let registry = registry_by_id(&write_txn, entry.wasm_registry_id)?.ok_or_else(|| {
             StorageError::PluginRegistryConflict {
                 message: "missing plugin registry entry".to_owned(),
@@ -582,7 +649,7 @@ impl RedbStorage {
             chains.remove(id.as_bytes().as_slice())?;
         }
         write_txn.commit()?;
-        Ok(true)
+        Ok(Some(entry))
     }
 
     fn rebalance_chain_sync(
@@ -639,6 +706,12 @@ fn scan_registry_for_upload(
     Ok((sha_match, name_conflict))
 }
 
+fn sha_from_key(key: &[u8]) -> Result<[u8; 32], StorageError> {
+    <[u8; 32]>::try_from(key).map_err(|_| StorageError::PluginRegistryConflict {
+        message: "wasm blob sha256 key must be 32 bytes".to_owned(),
+    })
+}
+
 fn registry_by_sha_read(
     read_txn: &redb::ReadTransaction,
     sha256: [u8; 32],
@@ -656,6 +729,51 @@ fn registry_by_sha_read(
     Ok(None)
 }
 
+fn registry_is_referenced_by_chain(
+    write_txn: &redb::WriteTransaction,
+    registry_id: Uuid,
+) -> Result<bool, StorageError> {
+    let chains = write_txn.open_table(PLUGIN_CHAINS_V2)?;
+    for row in chains.iter()? {
+        let (_, value) = row?;
+        let entry: PluginChainEntry = serde_json::from_slice(value.value())?;
+        if entry.wasm_registry_id == registry_id {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn principal_exists(
+    write_txn: &redb::WriteTransaction,
+    principal_id: Uuid,
+) -> Result<bool, StorageError> {
+    let principals = write_txn.open_table(PRINCIPALS_V2)?;
+    Ok(principals
+        .get(principal_id.as_bytes().as_slice())?
+        .is_some())
+}
+
+fn is_singleton_slot(slot: PluginSlot) -> bool {
+    matches!(slot, PluginSlot::Router | PluginSlot::Shape)
+}
+
+fn existing_chain_entry_for_slot(
+    write_txn: &redb::WriteTransaction,
+    principal_id: Uuid,
+    slot: PluginSlot,
+) -> Result<Option<Uuid>, StorageError> {
+    let chains = write_txn.open_table(PLUGIN_CHAINS_V2)?;
+    for row in chains.iter()? {
+        let (_, value) = row?;
+        let entry: PluginChainEntry = serde_json::from_slice(value.value())?;
+        if entry.principal_id == principal_id && entry.slot == slot {
+            return Ok(Some(entry.id));
+        }
+    }
+    Ok(None)
+}
+
 fn registry_by_id(
     write_txn: &redb::WriteTransaction,
     id: Uuid,
@@ -665,6 +783,44 @@ fn registry_by_id(
         .get(id.as_bytes().as_slice())?
         .map(|value| serde_json::from_slice(value.value()).map_err(StorageError::from))
         .transpose()
+}
+
+fn chain_for_principal_from_write(
+    write_txn: &redb::WriteTransaction,
+    principal_id: Uuid,
+    slot: PluginSlot,
+) -> Result<Vec<PluginChainEntry>, StorageError> {
+    let chains = write_txn.open_table(PLUGIN_CHAINS_V2)?;
+    let mut entries = Vec::new();
+    for row in chains.iter()? {
+        let (_, value) = row?;
+        let entry: PluginChainEntry = serde_json::from_slice(value.value())?;
+        if entry.principal_id == principal_id && entry.slot == slot {
+            entries.push(entry);
+        }
+    }
+    Ok(entries)
+}
+
+fn validate_chain_orders(entries: &[PluginChainEntry]) -> Result<(), StorageError> {
+    let mut ordered = entries.to_vec();
+    ordered.sort_by_key(|entry| (entry.order, entry.id));
+    let mut seen = HashSet::new();
+    for entry in &ordered {
+        if !seen.insert(entry.order) {
+            return Err(StorageError::PluginRegistryConflict {
+                message: "invalid_order_duplicate".to_owned(),
+            });
+        }
+    }
+    for pair in ordered.windows(2) {
+        if pair[1].order - pair[0].order < 2 {
+            return Err(StorageError::PluginRegistryConflict {
+                message: "invalid_order_gap_below_2".to_owned(),
+            });
+        }
+    }
+    Ok(())
 }
 
 fn chain_by_id(
@@ -712,6 +868,43 @@ fn blob_refcount_from_write(
         .unwrap_or(0))
 }
 
+fn self_heal_blob_if_missing(
+    write_txn: &redb::WriteTransaction,
+    blob: &WasmBlob,
+    registry_id: Uuid,
+) -> Result<(), StorageError> {
+    {
+        let blobs = write_txn.open_table(WASM_BLOBS_V2)?;
+        if blobs.get(blob.sha256.as_slice())?.is_some() {
+            return Ok(());
+        }
+    }
+    let refcount = {
+        let chains = write_txn.open_table(PLUGIN_CHAINS_V2)?;
+        let mut count: i64 = 0;
+        for row in chains.iter()? {
+            let (_, value) = row?;
+            let entry: PluginChainEntry = serde_json::from_slice(value.value())?;
+            if entry.wasm_registry_id == registry_id {
+                count += 1;
+            }
+        }
+        count
+    };
+    let stored = StoredWasmBlob {
+        bytes: blob.bytes.clone(),
+        size_bytes: blob.size_bytes,
+        parse_validated_at_unix_secs: blob.parse_validated_at_unix_secs,
+        refcount,
+    };
+    let mut blobs = write_txn.open_table(WASM_BLOBS_V2)?;
+    blobs.insert(
+        blob.sha256.as_slice(),
+        serde_json::to_vec(&stored)?.as_slice(),
+    )?;
+    Ok(())
+}
+
 fn increment_blob(
     write_txn: &redb::WriteTransaction,
     sha256: [u8; 32],
@@ -731,6 +924,8 @@ fn increment_blob(
     Ok(())
 }
 
+// Decrement chain refcount on the blob row. Never removes the row: blob
+// lifetime is owned by the registry entry. Returns true iff refcount reached 0.
 fn decrement_blob(
     write_txn: &redb::WriteTransaction,
     sha256: [u8; 32],
@@ -742,12 +937,11 @@ fn decrement_blob(
         };
         serde_json::from_slice(value.value())?
     };
-    if blob.refcount <= 1 {
-        blobs.remove(sha256.as_slice())?;
-        return Ok(true);
+    if blob.refcount > 0 {
+        blob.refcount -= 1;
     }
-    blob.refcount -= 1;
+    let became_orphan = blob.refcount == 0;
     let payload = serde_json::to_vec(&blob)?;
     blobs.insert(sha256.as_slice(), payload.as_slice())?;
-    Ok(true)
+    Ok(became_orphan)
 }

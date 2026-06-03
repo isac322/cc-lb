@@ -1,6 +1,6 @@
 use std::collections::{HashMap, VecDeque};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -12,9 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use cc_lb_core::{AuditEntry, AuditPayload};
-use cc_lb_storage_api::{
-    MAX_WASM_BLOB_BYTES, StorageError, WasmBlob, WasmRegistryEntry, WasmRegistryEntryInput,
-};
+use cc_lb_storage_api::{MAX_WASM_BLOB_BYTES, StorageError, WasmBlob, WasmRegistryEntryInput};
 use extism::{Manifest, Plugin, Wasm};
 use serde::Serialize;
 use serde_json::json;
@@ -24,6 +22,7 @@ use tower::ServiceBuilder;
 use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
+use super::wasm_cache::{data_dir, wasm_cache_path};
 use crate::AdminState;
 
 const WASM_MAGIC: &[u8; 4] = b"\0asm";
@@ -112,6 +111,7 @@ async fn upload_wasm(
                 );
             }
             let mut response = builder
+                .header("X-Idempotent", response.idempotent.to_string())
                 .header(header::CONTENT_TYPE, "application/json")
                 .body(Body::from(
                     serde_json::to_vec(&response).unwrap_or_default(),
@@ -177,10 +177,6 @@ async fn upload_wasm_inner(
     })?;
     let sha256_hex = hex_sha256(sha256);
     let admin_id = admin_id_from_headers(headers);
-    let existed = storage
-        .get_registry_entry_by_sha(sha256)
-        .await
-        .map_err(storage_response)?;
     let blob = WasmBlob {
         sha256,
         size_bytes: bytes.len() as u64,
@@ -194,7 +190,7 @@ async fn upload_wasm_inner(
         uploaded_at_unix_secs: unix_now_secs(),
         uploaded_by_admin_id: admin_id,
     };
-    let entry = storage
+    let (entry, existed) = storage
         .persist_wasm_upload(blob, entry_input)
         .await
         .map_err(storage_response)?;
@@ -209,9 +205,7 @@ async fn upload_wasm_inner(
             )
         })?;
     enqueue_upload_audit(state, &sha256_hex, bytes.len() as u64, &original_filename);
-    let idempotent = existed
-        .as_ref()
-        .is_some_and(|existing| same_registry_entry(existing, &entry));
+    let idempotent = existed;
     let status = if idempotent {
         StatusCode::OK
     } else {
@@ -307,7 +301,7 @@ async fn gc_wasm(State(state): State<AdminState>) -> Response {
         let sha_hex = hex_sha256(sha);
         match storage.decrement_blob_refcount_or_delete(sha).await {
             Ok(true) => {
-                let cache_path = wasm_cache_path(&data_dir(&state), &sha_hex);
+                let cache_path = wasm_cache_path(&state, &sha_hex);
                 match tokio::fs::remove_file(&cache_path).await {
                     Ok(()) => {}
                     Err(error) if error.kind() == io::ErrorKind::NotFound => {}
@@ -449,27 +443,6 @@ async fn set_file_mode(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn data_dir(state: &AdminState) -> PathBuf {
-    if let Ok(path) = std::env::var("CC_LB_DATA_DIR") {
-        return PathBuf::from(path);
-    }
-    state
-        .config
-        .current_config()
-        .runtime
-        .data_dir
-        .clone()
-        .unwrap_or_else(|| PathBuf::from("./data"))
-}
-
-fn wasm_cache_path(data_dir: &Path, sha256_hex: &str) -> PathBuf {
-    data_dir
-        .join("plugins")
-        .join("wasm")
-        .join("cache")
-        .join(format!("{sha256_hex}.wasm"))
-}
-
 fn storage_response(error: StorageError) -> Response {
     match error {
         StorageError::Conflict { message } => (
@@ -521,15 +494,6 @@ fn enqueue_upload_audit(
     entry.status = 201;
     entry.actor = Some("admin".to_owned());
     let _ = audit_sink.try_enqueue(entry);
-}
-
-fn same_registry_entry(left: &WasmRegistryEntry, right: &WasmRegistryEntry) -> bool {
-    left.id == right.id
-        && left.sha256 == right.sha256
-        && left.name == right.name
-        && left.original_filename == right.original_filename
-        && left.label == right.label
-        && left.uploaded_by_admin_id == right.uploaded_by_admin_id
 }
 
 fn admin_id_from_headers(headers: &HeaderMap) -> Uuid {

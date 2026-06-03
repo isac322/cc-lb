@@ -121,6 +121,23 @@ pub(crate) async fn collect_revision_hash(stores: &Stores) -> StorageResult<u64>
         upstreams.extend(page.into_iter().map(|record| (record.id, record.revision)));
     }
 
+    let mut registry_entries = Vec::new();
+    let mut after_registry = None;
+    loop {
+        let page = stores
+            .plugin_registry
+            .list_registry(after_registry, 100)
+            .await?;
+        if page.is_empty() {
+            break;
+        }
+        after_registry = page.last().map(|entry| entry.id);
+        registry_entries.extend(
+            page.into_iter()
+                .map(|entry| (entry.id, entry.revision, entry.sha256)),
+        );
+    }
+
     let mut principals = Vec::new();
     let mut chains = Vec::new();
     let mut offset = 0;
@@ -135,11 +152,17 @@ pub(crate) async fn collect_revision_hash(stores: &Stores) -> StorageResult<u64>
             chains.extend(
                 chain_revisions(stores, principal.id, PluginSlot::ObservabilityHook).await?,
             );
+            chains.extend(chain_revisions(stores, principal.id, PluginSlot::Shape).await?);
             principals.push((principal.id, principal.revision));
         }
     }
 
-    Ok(compute_revision_hash(&upstreams, &principals, &chains))
+    Ok(compute_revision_hash(
+        &upstreams,
+        &principals,
+        &chains,
+        &registry_entries,
+    ))
 }
 
 async fn chain_revisions(
