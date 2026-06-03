@@ -386,6 +386,21 @@ function DetailView({
         return nowUnixSecs - 604800;
     }
   }, [range, nowUnixSecs]);
+  // Backend rejects (until - since) / bucket_secs > max_points_per_series * 2.
+  // Default max_points_per_series = 1000, so we target <= 500 points/series
+  // for a 2-window query.
+  const bucketSecsForRange = useMemo(() => {
+    switch (range) {
+      case '1h':
+        return 60;
+      case '6h':
+        return 60;
+      case '24h':
+        return 300;
+      case '7d':
+        return 1800;
+    }
+  }, [range]);
 
   const quotaLatest = useSubscriptionQuotaLatest({
     upstreamIds: upstream.id,
@@ -398,7 +413,7 @@ function DetailView({
     source: 'merged',
     sinceUnixSecs,
     untilUnixSecs: nowUnixSecs,
-    bucketSecs: 300,
+    bucketSecs: bucketSecsForRange,
   });
   const quotaAnalysis = useSubscriptionQuotaAnalysis({
     upstreamIds: upstream.id,
@@ -576,11 +591,17 @@ function DetailView({
                     >
                       <CartesianGrid stroke="var(--color-border)" />
                       <XAxis
-                        dataKey="ts"
+                        dataKey="unix"
                         tick={{
                           fill: 'var(--color-text-faint)',
                           fontSize: 10,
                           fontFamily: 'Geist Mono',
+                        }}
+                        tickFormatter={(val) => {
+                          const d = new Date(val * 1000);
+                          return range === '7d' || range === '24h'
+                            ? `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+                            : `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
                         }}
                         axisLine={false}
                         tickLine={false}
@@ -766,7 +787,7 @@ function DetailView({
                   </div>
                 )}
 
-                <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-3">
                   {['5h', '7d', 'overage', '7d_sonnet', '7d_opus'].map((w) => {
                     const snap = latest?.windows.find((x) => x.window === w);
                     if (!snap && w !== '5h' && w !== '7d') return null;
