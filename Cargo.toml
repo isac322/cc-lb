@@ -1,10 +1,14 @@
 [workspace]
 members = [
     "crates/cc-lb-pricing",
+    "crates/cc-lb-plugin-wire",
     "crates/cc-lb-*",
     "benches/extism_sse_overhead",
+    "plugins/router/round-robin",
     "tests/fixtures/fake-anthropic",
     "tests/fixtures/extism-echo-plugin",
+    "tests/fixtures/plugin-handshake-spike",
+    "tests/fixtures/plugin-handshake-spike/host_check",
     "tests/fixtures/mock-anthropic-oauth-server",
     "tests/load",
     "tests/loom",
@@ -16,7 +20,7 @@ members = [
     "tests/multi-replica",
     "tests/real-client",
 ]
-exclude = ["fuzz", "plugins/router/round-robin"]
+exclude = ["fuzz"]
 resolver = "2"
 
 [workspace.package]

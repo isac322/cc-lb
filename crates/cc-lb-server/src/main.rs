@@ -81,13 +81,21 @@ fn run() -> Result<(), RunError> {
             config,
             data_dir,
             strict_preflight,
+            skip_handshake_if_fresh,
+            force_handshake,
         }) => {
             let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()
                 .map_err(RunError::Runtime)?;
             runtime
-                .block_on(run_serve(&config, data_dir.as_deref(), strict_preflight))
+                .block_on(run_serve(
+                    &config,
+                    data_dir.as_deref(),
+                    strict_preflight,
+                    skip_handshake_if_fresh,
+                    force_handshake,
+                ))
                 .map_err(RunError::Serve)
         }
         Some(Command::Config {

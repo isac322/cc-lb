@@ -8,6 +8,7 @@ mod key_index;
 pub mod managed_keys;
 mod migration;
 mod oauth;
+pub mod plugin_registry;
 pub mod price_catalog;
 mod request_events;
 mod usage_rollups;
@@ -26,6 +27,7 @@ pub use cc_lb_storage_api::types::{
     RequestEventUpstream, UsageRollup, UsageRollupResolution, UsageRollupRun,
 };
 pub use oauth::{api_key_storage_key, oauth_key};
+pub use plugin_registry::{RedbPluginBlobRepo, RedbPluginRegistryRepo};
 pub use price_catalog::PriceSnapshot;
 
 pub const CURRENT_SCHEMA_VERSION: u32 = 2;
@@ -65,6 +67,10 @@ pub const WASM_REGISTRY_V2: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("wasm_registry_v2");
 pub const PLUGIN_CHAINS_V2: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("plugin_chains_v2");
+pub const PLUGIN_REGISTRY: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plugin_registry");
+pub const PLUGIN_REGISTRY_MARKER: TableDefinition<&str, i64> =
+    TableDefinition::new("plugin_registry_marker");
+pub const PLUGIN_BLOBS: TableDefinition<&[u8], &[u8]> = TableDefinition::new("plugin_blobs");
 
 pub(crate) const SCHEMA_VERSION_KEY: &str = "version";
 pub(crate) const KILLSWITCH_KEY: &str = "enabled";
@@ -201,6 +207,19 @@ impl From<redb::CommitError> for StorageError {
 impl Storage {
     pub fn open(path: &Path, master_key: [u8; 32]) -> Result<Self, StorageError> {
         let db = Arc::new(Database::create(path)?);
+        migration::initialize_schema(&db)?;
+
+        Ok(Self {
+            db,
+            master_key,
+            noop_change_tx: adapter::notifier::noop_change_sender(),
+        })
+    }
+
+    pub fn open_in_memory(master_key: [u8; 32]) -> Result<Self, StorageError> {
+        let db = Arc::new(
+            Database::builder().create_with_backend(redb::backends::InMemoryBackend::new())?,
+        );
         migration::initialize_schema(&db)?;
 
         Ok(Self {

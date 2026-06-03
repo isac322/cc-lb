@@ -104,6 +104,7 @@ impl Harness {
             plugin_registry: storage.clone(),
             upstream_rate_limits: storage.clone(),
             audit: Some(storage.clone()),
+            plugin_registry_repo: None,
         });
         let runtime = Arc::new(cc_lb_runtime_extism::ExtismRuntime::new());
         let oauth_cfg = Arc::new(AnthropicOAuthConfig::default());

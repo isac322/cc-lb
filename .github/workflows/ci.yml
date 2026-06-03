@@ -63,10 +63,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Install WASI target for pinned toolchain
         run: rustup target add wasm32-wasip1
+      - name: Install wasm32-unknown-unknown for handshake spike fixture
+        run: rustup target add wasm32-unknown-unknown
       - uses: ./.github/actions/setup-rust-cache
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
+      - name: Pre-build handshake spike wasm artifact
+        run: cargo build -p plugin-handshake-spike --target wasm32-unknown-unknown --release
       - run: cargo nextest run --workspace --exclude cc-lb-loadgen
       - name: Show sccache stats
         if: always()
