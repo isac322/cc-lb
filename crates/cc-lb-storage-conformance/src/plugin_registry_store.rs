@@ -750,6 +750,17 @@ async fn persist_wasm_upload_heals_missing_blob_on_storage<S: PluginRegistryStor
     storage: &S,
 ) -> Result<()> {
     // NOTE: Phase-3 partially green; W3a hardening still needed for chain-scan/atomicity.
+    // Postgres enforces wasm_registry_v2.sha256 -> wasm_blobs_v2.sha256 with ON DELETE RESTRICT,
+    // which prevents the zombie state this scenario exercises. Skip on postgres.
+    #[cfg(feature = "postgres")]
+    {
+        if (storage as &dyn Any)
+            .downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
+            .is_some()
+        {
+            return Ok(());
+        }
+    }
     let wasm = blob(28, b"heal-missing-blob".to_vec());
     let input = entry("plugin-heal-missing-blob");
     let (created, _) = storage
