@@ -157,13 +157,22 @@ impl PluginRegistryStore for PostgresStorage {
         label: Option<String>,
     ) -> StorageResult<WasmRegistryEntry> {
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let current_revision: Option<i64> =
+            sqlx::query_scalar("SELECT revision FROM wasm_registry_v2 WHERE id = $1 FOR UPDATE")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+        let current_revision =
+            current_revision.ok_or_else(|| conflict("unknown plugin registry entry"))?;
+        let current = i64_to_u64(current_revision, "wasm_registry.revision")?;
+        if current != expected_revision {
+            return Err(StorageError::StalePluginRegistryRevision { current });
+        }
         let row = sqlx::query("UPDATE wasm_registry_v2 SET label=$1, revision=revision+1 WHERE id=$2 AND revision=$3 RETURNING *")
             .bind(label).bind(id).bind(u64_to_i64(expected_revision, "wasm_registry.revision")?)
             .fetch_optional(&mut *tx).await.map_err(map_sqlx_error)?;
-        let row = match row {
-            Some(row) => row,
-            None => return Err(conflict("stale or missing plugin registry revision")),
-        };
+        let row = row.ok_or_else(|| conflict("updated plugin registry row disappeared"))?;
         sqlx::query("SELECT pg_notify('cclb_plugin_changed', $1)")
             .bind(id.to_string())
             .execute(&mut *tx)
