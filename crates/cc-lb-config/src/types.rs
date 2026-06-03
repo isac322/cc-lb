@@ -50,6 +50,10 @@ pub struct Config {
     pub observability: ObservabilityConfig,
     pub admin: AdminConfig,
     pub oauth: OAuthConfig,
+    #[serde(default)]
+    pub subscription_quota: SubscriptionQuotaConfig,
+    #[serde(default)]
+    pub anthropic_compat_poller: AnthropicCompatPollerConfig,
     pub runtime: RuntimeConfig,
     pub circuit_breaker: CircuitBreakerConfig,
     pub bulkhead: BulkheadConfig,
@@ -428,6 +432,124 @@ impl Default for AnthropicOAuthConfig {
 pub struct OAuthConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anthropic: Option<AnthropicOAuthConfig>,
+    #[serde(default)]
+    pub usage_poller: OAuthUsagePollerConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct SubscriptionQuotaConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_subscription_quota_retention_days")]
+    pub retention_days: u64,
+    #[serde(default = "default_subscription_quota_gc_batch_size")]
+    pub gc_batch_size: u32,
+    #[serde(default = "default_subscription_quota_gc_tick_interval_secs")]
+    pub gc_tick_interval_secs: u64,
+    #[serde(default = "default_subscription_quota_writer_batch_max_records")]
+    pub writer_batch_max_records: u32,
+    #[serde(default = "default_subscription_quota_writer_flush_ms")]
+    pub writer_flush_ms: u64,
+    #[serde(default = "default_subscription_quota_writer_channel_capacity")]
+    pub writer_channel_capacity: u32,
+    #[serde(default = "default_subscription_quota_dedup_elapsed_override_secs")]
+    pub dedup_elapsed_override_secs: u64,
+    #[serde(default = "default_subscription_quota_routing_max_staleness_secs")]
+    pub routing_max_staleness_secs: u64,
+}
+
+impl Default for SubscriptionQuotaConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            retention_days: 30,
+            gc_batch_size: 10_000,
+            gc_tick_interval_secs: 60,
+            writer_batch_max_records: 256,
+            writer_flush_ms: 100,
+            writer_channel_capacity: 4096,
+            dedup_elapsed_override_secs: 30,
+            routing_max_staleness_secs: 1800,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct OAuthUsagePollerConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_oauth_usage_poller_bootstrap_attempts")]
+    pub bootstrap_attempts: u32,
+    #[serde(default = "default_oauth_usage_poller_bootstrap_default_interval_secs")]
+    pub bootstrap_default_interval_secs: u64,
+    /// CATEGORY-3 CROSS-CRATE INVARIANT: server code converts this divisor into
+    /// a fractional safety factor as `1.0 / safety_divisor`.
+    #[serde(default = "default_oauth_usage_poller_safety_divisor")]
+    pub safety_divisor: u32,
+    #[serde(default = "default_oauth_usage_poller_min_interval_secs")]
+    pub min_interval_secs: u64,
+    #[serde(default = "default_oauth_usage_poller_max_interval_secs")]
+    pub max_interval_secs: u64,
+    #[serde(default = "default_oauth_usage_poller_fallback_interval_secs")]
+    pub fallback_interval_secs: u64,
+    #[serde(default = "default_oauth_usage_poller_history_capacity")]
+    pub history_capacity: u32,
+    #[serde(default = "default_oauth_usage_poller_throttle_ladder_secs")]
+    pub throttle_ladder_secs: Vec<u64>,
+    #[serde(default = "default_oauth_usage_poller_stagger_ms")]
+    pub stagger_ms: u64,
+    #[serde(default = "default_oauth_usage_poller_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+    #[serde(default = "default_oauth_usage_poller_lease_ttl_secs")]
+    pub lease_ttl_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent_override: Option<String>,
+}
+
+impl Default for OAuthUsagePollerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            bootstrap_attempts: 5,
+            bootstrap_default_interval_secs: 900,
+            safety_divisor: 2,
+            min_interval_secs: 60,
+            max_interval_secs: 3600,
+            fallback_interval_secs: 900,
+            history_capacity: 8,
+            throttle_ladder_secs: vec![30, 60, 120, 240, 300],
+            stagger_ms: 1500,
+            request_timeout_secs: 10,
+            lease_ttl_secs: 90,
+            user_agent_override: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct AnthropicCompatPollerConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_anthropic_compat_poller_tick_interval_secs")]
+    pub tick_interval_secs: u64,
+    #[serde(default = "default_anthropic_compat_poller_jitter_secs")]
+    pub jitter_secs: u64,
+    #[serde(default = "default_anthropic_compat_poller_request_timeout_secs")]
+    pub request_timeout_secs: u64,
+}
+
+impl Default for AnthropicCompatPollerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            tick_interval_secs: 3600,
+            jitter_secs: 60,
+            request_timeout_secs: 10,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -717,6 +839,94 @@ fn default_dns_cache_ttl_floor_secs() -> u64 {
 
 fn default_dns_cache_ttl_ceiling_secs() -> u64 {
     DnsConfig::default().cache_ttl_ceiling_secs
+}
+
+fn default_subscription_quota_retention_days() -> u64 {
+    SubscriptionQuotaConfig::default().retention_days
+}
+
+fn default_subscription_quota_gc_batch_size() -> u32 {
+    SubscriptionQuotaConfig::default().gc_batch_size
+}
+
+fn default_subscription_quota_gc_tick_interval_secs() -> u64 {
+    SubscriptionQuotaConfig::default().gc_tick_interval_secs
+}
+
+fn default_subscription_quota_writer_batch_max_records() -> u32 {
+    SubscriptionQuotaConfig::default().writer_batch_max_records
+}
+
+fn default_subscription_quota_writer_flush_ms() -> u64 {
+    SubscriptionQuotaConfig::default().writer_flush_ms
+}
+
+fn default_subscription_quota_writer_channel_capacity() -> u32 {
+    SubscriptionQuotaConfig::default().writer_channel_capacity
+}
+
+fn default_subscription_quota_dedup_elapsed_override_secs() -> u64 {
+    SubscriptionQuotaConfig::default().dedup_elapsed_override_secs
+}
+
+fn default_subscription_quota_routing_max_staleness_secs() -> u64 {
+    SubscriptionQuotaConfig::default().routing_max_staleness_secs
+}
+
+fn default_oauth_usage_poller_bootstrap_attempts() -> u32 {
+    OAuthUsagePollerConfig::default().bootstrap_attempts
+}
+
+fn default_oauth_usage_poller_bootstrap_default_interval_secs() -> u64 {
+    OAuthUsagePollerConfig::default().bootstrap_default_interval_secs
+}
+
+fn default_oauth_usage_poller_safety_divisor() -> u32 {
+    OAuthUsagePollerConfig::default().safety_divisor
+}
+
+fn default_oauth_usage_poller_min_interval_secs() -> u64 {
+    OAuthUsagePollerConfig::default().min_interval_secs
+}
+
+fn default_oauth_usage_poller_max_interval_secs() -> u64 {
+    OAuthUsagePollerConfig::default().max_interval_secs
+}
+
+fn default_oauth_usage_poller_fallback_interval_secs() -> u64 {
+    OAuthUsagePollerConfig::default().fallback_interval_secs
+}
+
+fn default_oauth_usage_poller_history_capacity() -> u32 {
+    OAuthUsagePollerConfig::default().history_capacity
+}
+
+fn default_oauth_usage_poller_throttle_ladder_secs() -> Vec<u64> {
+    OAuthUsagePollerConfig::default().throttle_ladder_secs
+}
+
+fn default_oauth_usage_poller_stagger_ms() -> u64 {
+    OAuthUsagePollerConfig::default().stagger_ms
+}
+
+fn default_oauth_usage_poller_request_timeout_secs() -> u64 {
+    OAuthUsagePollerConfig::default().request_timeout_secs
+}
+
+fn default_oauth_usage_poller_lease_ttl_secs() -> u64 {
+    OAuthUsagePollerConfig::default().lease_ttl_secs
+}
+
+fn default_anthropic_compat_poller_tick_interval_secs() -> u64 {
+    AnthropicCompatPollerConfig::default().tick_interval_secs
+}
+
+fn default_anthropic_compat_poller_jitter_secs() -> u64 {
+    AnthropicCompatPollerConfig::default().jitter_secs
+}
+
+fn default_anthropic_compat_poller_request_timeout_secs() -> u64 {
+    AnthropicCompatPollerConfig::default().request_timeout_secs
 }
 
 #[cfg(test)]

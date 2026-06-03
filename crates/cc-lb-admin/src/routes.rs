@@ -61,6 +61,7 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/admin/config/reload", post(reload_config))
         .merge(crate::dashboard_routes::router())
         .merge(crate::events_routes::router())
+        .merge(crate::subscription_quotas::router())
         .merge(crate::credentials::router())
         .merge(crate::v1::plugins::router())
         .merge(crate::v1::plugins_wasm::router())

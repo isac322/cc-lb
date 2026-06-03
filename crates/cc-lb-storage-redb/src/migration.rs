@@ -1,22 +1,29 @@
 use std::sync::Arc;
 
-use redb::{Database, ReadableDatabase, ReadableTable};
+use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 use crate::{
-    API_KEYS_V1, AUDIT_LOG_V1, CONFIG_DRAFT_V1, CONFIG_HISTORY_V1, CURRENT_SCHEMA_VERSION,
-    KEY_INDEX_BY_HASH_V1, KILLSWITCH_KEY, KILLSWITCH_V1, OAUTH_CREDENTIALS_V1, PLUGIN_CHAINS_V2,
-    PRICE_CATALOG_V1, PRINCIPAL_ALLOWED_UPSTREAMS_V1, PRINCIPALS_V2, PRINCIPALS_V2_BY_NAME,
-    REQUEST_EVENTS_V1, SCHEMA_VERSION_KEY, SCHEMA_VERSION_V1, StorageError,
-    UPSTREAM_RATE_LIMIT_STATE_V1, UPSTREAMS_V2, UPSTREAMS_V2_BY_NAME, WASM_BLOBS_V2,
-    WASM_REGISTRY_V2,
+    ANTHROPIC_COMPATIBILITY_KV_V1, API_KEYS_V1, AUDIT_LOG_V1, CONFIG_DRAFT_V1, CONFIG_HISTORY_V1,
+    CURRENT_SCHEMA_VERSION, KEY_INDEX_BY_HASH_V1, KILLSWITCH_KEY, KILLSWITCH_V1,
+    OAUTH_CREDENTIALS_V1, PLUGIN_CHAINS_V2, PRICE_CATALOG_V1, PRINCIPAL_ALLOWED_UPSTREAMS_V1,
+    PRINCIPALS_V2, PRINCIPALS_V2_BY_NAME, REQUEST_EVENTS_V1, SCHEMA_VERSION_KEY, SCHEMA_VERSION_V1,
+    StorageError, UPSTREAM_RATE_LIMIT_STATE_V1, UPSTREAM_SUBSCRIPTION_QUOTA_LATEST_V1,
+    UPSTREAM_SUBSCRIPTION_QUOTA_OBSERVATIONS_BY_TIME_V1,
+    UPSTREAM_SUBSCRIPTION_QUOTA_OBSERVATIONS_V1, UPSTREAMS_V2, UPSTREAMS_V2_BY_NAME,
+    USAGE_ROLLUP_CHECKPOINTS_V1, USAGE_ROLLUPS_V2, WASM_BLOBS_V2, WASM_REGISTRY_V2,
 };
+
+const USAGE_ROLLUPS_V1: TableDefinition<&[u8], &[u8]> = TableDefinition::new("USAGE_ROLLUPS_V1");
+const REQUEST_EVENT_CHECKPOINT_KEY: &str = "request_events_v1_high_water";
 
 pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> {
     let write_txn = db.begin_write()?;
+    let reset_usage_rollups;
     {
         let mut schema = write_txn.open_table(SCHEMA_VERSION_V1)?;
         let version = schema.get(SCHEMA_VERSION_KEY)?.map(|stored| stored.value());
 
+        reset_usage_rollups = version.is_none_or(|found| found < CURRENT_SCHEMA_VERSION);
         match version {
             Some(found) if found > CURRENT_SCHEMA_VERSION => {
                 return Err(StorageError::UnsupportedSchemaVersion {
@@ -33,6 +40,9 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
                 schema.insert(SCHEMA_VERSION_KEY, &CURRENT_SCHEMA_VERSION)?;
             }
         }
+    }
+    if reset_usage_rollups {
+        reset_usage_rollups_v1(&write_txn)?;
     }
 
     {
@@ -61,6 +71,9 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
         write_txn.open_table(REQUEST_EVENTS_V1)?;
     }
     {
+        write_txn.open_table(USAGE_ROLLUPS_V2)?;
+    }
+    {
         write_txn.open_table(CONFIG_DRAFT_V1)?;
     }
     {
@@ -85,6 +98,18 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
         write_txn.open_table(UPSTREAM_RATE_LIMIT_STATE_V1)?;
     }
     {
+        write_txn.open_table(ANTHROPIC_COMPATIBILITY_KV_V1)?;
+    }
+    {
+        write_txn.open_table(UPSTREAM_SUBSCRIPTION_QUOTA_OBSERVATIONS_V1)?;
+    }
+    {
+        write_txn.open_table(UPSTREAM_SUBSCRIPTION_QUOTA_OBSERVATIONS_BY_TIME_V1)?;
+    }
+    {
+        write_txn.open_table(UPSTREAM_SUBSCRIPTION_QUOTA_LATEST_V1)?;
+    }
+    {
         write_txn.open_table(WASM_BLOBS_V2)?;
     }
     {
@@ -95,6 +120,27 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
     }
 
     write_txn.commit()?;
+    Ok(())
+}
+
+fn reset_usage_rollups_v1(write_txn: &redb::WriteTransaction) -> Result<(), StorageError> {
+    let keys = {
+        let table = write_txn.open_table(USAGE_ROLLUPS_V1)?;
+        table
+            .iter()?
+            .map(|row| row.map(|(key, _)| key.value().to_vec()))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    {
+        let mut table = write_txn.open_table(USAGE_ROLLUPS_V1)?;
+        for key in keys {
+            table.remove(key.as_slice())?;
+        }
+    }
+    {
+        let mut checkpoints = write_txn.open_table(USAGE_ROLLUP_CHECKPOINTS_V1)?;
+        checkpoints.remove(REQUEST_EVENT_CHECKPOINT_KEY)?;
+    }
     Ok(())
 }
 

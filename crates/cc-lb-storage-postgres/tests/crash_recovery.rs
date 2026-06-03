@@ -316,6 +316,8 @@ async fn seed_request_events(storage: &PostgresStorage) -> Result<(), Box<dyn st
                 principal_id: Some("crash-recovery-principal".to_owned()),
                 principal_kind: Some("account".to_owned()),
                 upstream: Some(RequestEventUpstream::AnthropicDirect),
+                upstream_id: Some(Uuid::nil()),
+                upstream_name: Some("anthropic_direct".to_owned()),
                 model: Some("claude-sonnet-4-5".to_owned()),
                 status: 200,
                 input_tokens: Some(10 + index),
@@ -350,7 +352,8 @@ fn expected_rollups_visible(rollups: &[UsageRollup]) -> bool {
             rollups.iter().any(|rollup| {
                 rollup.resolution == resolution
                     && rollup.principal == "crash-recovery-principal"
-                    && rollup.upstream == "anthropic_direct"
+                    && rollup.upstream_id == Uuid::nil()
+                    && rollup.upstream_name == "anthropic_direct"
                     && rollup.model == "claude-sonnet-4-5"
                     && rollup.request_count == EVENTS_PER_ITERATION
                     && rollup.input_tokens == expected_input

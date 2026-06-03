@@ -536,3 +536,134 @@ interface AuditEntry {
 export interface AuditQueryResponse {
   entries: AuditEntry[];
 }
+
+export type SubscriptionQuotaWindow =
+  | '5h'
+  | '7d'
+  | '7d_sonnet'
+  | '7d_opus'
+  | 'overage'
+  | 'unified';
+export type SubscriptionQuotaDataState = 'fresh' | 'stale' | 'missing';
+export type SubscriptionQuotaSourceMerge = 'header' | 'api' | 'merged';
+
+export interface QuotaSnapshot {
+  window: SubscriptionQuotaWindow;
+  state: SubscriptionQuotaDataState;
+  source: string | null;
+  utilization: number | null;
+  status: string | null;
+  resets_at_unix_secs: number | null;
+  surpassed_threshold: boolean | null;
+  representative_claim: string | null;
+  disabled_reason: string | null;
+  extra_usage_enabled: boolean | null;
+  extra_usage_monthly_limit: number | null;
+  extra_usage_used_credits: number | null;
+  observed_at_unix_millis: number | null;
+  age_secs: number | null;
+}
+
+export interface UpstreamLatestSnapshots {
+  upstream_id: string;
+  upstream_name: string;
+  windows: QuotaSnapshot[];
+}
+
+export interface LatestResponse {
+  now_unix_secs: number;
+  max_staleness_secs: number;
+  upstreams: UpstreamLatestSnapshots[];
+}
+
+export interface SeriesBucketResponse {
+  bucket_start_unix_secs: number;
+  observed: boolean;
+  sample_count: number;
+  utilization_min: number | null;
+  utilization_avg: number | null;
+  utilization_max: number | null;
+  utilization_last: number | null;
+  status_last: string | null;
+  resets_at_unix_secs_last: number | null;
+  observed_at_unix_millis_last: number | null;
+  sources_seen: string[];
+}
+
+export interface SeriesMarkerResponse {
+  kind: string;
+  at_unix_secs?: number;
+  from_unix_secs?: number;
+  to_unix_secs?: number;
+}
+
+export interface SeriesResponseItem {
+  upstream_id: string;
+  upstream_name: string;
+  window: string;
+  buckets: SeriesBucketResponse[];
+  markers: SeriesMarkerResponse[];
+}
+
+export interface SeriesResponse {
+  since_unix_secs: number;
+  until_unix_secs: number;
+  bucket_secs: number;
+  source: string;
+  series: SeriesResponseItem[];
+}
+
+export interface BurnResponse {
+  utilization_per_second: number | null;
+  utilization_per_hour: number | null;
+  eta_to_limit_secs: number | null;
+  resets_before_limit: boolean | null;
+  confidence: string;
+  sample_count: number;
+  reason: string | null;
+}
+
+export interface ProxyBurnResponse {
+  proxy_tokens_per_second: number | null;
+  proxy_tokens_per_hour: number | null;
+  effective_limit_tokens_estimate: number | null;
+  utilization_per_hour: number | null;
+  eta_to_limit_secs: number | null;
+  resets_before_limit: boolean | null;
+  confidence: string;
+  sample_count: number;
+  reason: string | null;
+}
+
+export interface DeficitResponse {
+  projected_proxy_tokens_window: number;
+  effective_limit_tokens_estimate: number;
+  shortfall_tokens: number;
+  recommended_multiplier: number;
+  confidence: string;
+}
+
+export interface AnalysisWindowResponse {
+  window: string;
+  current_utilization: number | null;
+  resets_at_unix_secs: number | null;
+  data_state: string;
+  actual_account_burn: BurnResponse;
+  proxy_projected_burn: ProxyBurnResponse;
+  deficit: DeficitResponse | null;
+  caveats: string[];
+}
+
+export interface AnalysisUpstreamResponse {
+  upstream_id: string;
+  upstream_name: string;
+  windows: AnalysisWindowResponse[];
+}
+
+export interface AnalysisResponse {
+  since_unix_secs: number;
+  until_unix_secs: number;
+  now_unix_secs: number;
+  max_staleness_secs: number;
+  upstreams: AnalysisUpstreamResponse[];
+}

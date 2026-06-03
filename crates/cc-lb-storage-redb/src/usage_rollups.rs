@@ -1,12 +1,19 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 
-use cc_lb_storage_api::types::{
-    RequestEvent, UsageRollup, UsageRollupKey, UsageRollupResolution, UsageRollupRun,
+use bincode::{config, serde as bincode_serde};
+use cc_lb_storage_api::{
+    UpstreamRecord,
+    types::{
+        RequestEvent, RequestEventUpstream, UsageRollup, UsageRollupKey, UsageRollupResolution,
+        UsageRollupRun,
+    },
 };
 use redb::{ReadableDatabase, ReadableTable};
+use uuid::Uuid;
 
 use crate::{
-    REQUEST_EVENTS_V1, Storage, StorageError, USAGE_ROLLUP_CHECKPOINTS_V1, USAGE_ROLLUPS_V1,
+    REQUEST_EVENTS_V1, Storage, StorageError, UPSTREAMS_V2, USAGE_ROLLUP_CHECKPOINTS_V1,
+    USAGE_ROLLUPS_V2,
 };
 
 const REQUEST_EVENT_CHECKPOINT_KEY: &str = "request_events_v1_high_water";
@@ -40,6 +47,12 @@ struct UsageRollupDelta {
     virtual_cost_micros: u64,
 }
 
+#[derive(Debug, Clone)]
+struct UpstreamIdentity {
+    id: Uuid,
+    name: String,
+}
+
 impl Storage {
     pub fn rollup_usage_once(&self) -> Result<UsageRollupRun, StorageError> {
         let write_txn = self.db.begin_write()?;
@@ -54,6 +67,7 @@ impl Storage {
         let mut deltas = BTreeMap::new();
 
         {
+            let upstreams = load_upstream_identities(&write_txn)?;
             let events = write_txn.open_table(REQUEST_EVENTS_V1)?;
             for row in events.iter()? {
                 let (key, value) = row?;
@@ -62,7 +76,7 @@ impl Storage {
                     continue;
                 }
                 let event: RequestEvent = serde_json::from_slice(value.value())?;
-                add_event_deltas(&mut deltas, &event);
+                add_event_deltas(&mut deltas, &event, &upstreams);
                 processed_events += 1;
                 checkpoint = Some(checkpoint.map_or(event_key, |current| current.max(event_key)));
             }
@@ -70,15 +84,16 @@ impl Storage {
 
         let mut updated_rollups = 0;
         if !deltas.is_empty() {
-            let mut rollups = write_txn.open_table(USAGE_ROLLUPS_V1)?;
+            let mut rollups = write_txn.open_table(USAGE_ROLLUPS_V2)?;
             for (key, delta) in deltas {
                 let encoded_key = usage_rollup_key(&key);
                 let mut rollup = match rollups.get(encoded_key.as_slice())? {
-                    Some(stored) => serde_json::from_slice(stored.value())?,
+                    Some(stored) => decode_usage_rollup(stored.value())?,
                     None => empty_usage_rollup(&key),
                 };
+                rollup.upstream_name = key.upstream_name.clone();
                 apply_delta(&mut rollup, delta);
-                let payload = serde_json::to_vec(&rollup)?;
+                let payload = encode_usage_rollup(&rollup)?;
                 rollups.insert(encoded_key.as_slice(), payload.as_slice())?;
                 updated_rollups += 1;
             }
@@ -101,7 +116,7 @@ impl Storage {
 
     pub fn query_usage_rollups(&self) -> Result<Vec<UsageRollup>, StorageError> {
         let read_txn = self.db.begin_read()?;
-        let table = match read_txn.open_table(USAGE_ROLLUPS_V1) {
+        let table = match read_txn.open_table(USAGE_ROLLUPS_V2) {
             Ok(table) => table,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
@@ -109,7 +124,7 @@ impl Storage {
         let mut rollups = Vec::new();
         for row in table.iter()? {
             let (_, value) = row?;
-            rollups.push(serde_json::from_slice(value.value())?);
+            rollups.push(decode_usage_rollup(value.value())?);
         }
         Ok(rollups)
     }
@@ -121,7 +136,7 @@ impl Storage {
         window_end_unix_secs: u64,
     ) -> Result<Vec<UsageRollup>, StorageError> {
         let read_txn = self.db.begin_read()?;
-        let table = match read_txn.open_table(USAGE_ROLLUPS_V1) {
+        let table = match read_txn.open_table(USAGE_ROLLUPS_V2) {
             Ok(table) => table,
             Err(redb::TableError::TableDoesNotExist(_)) => return Ok(Vec::new()),
             Err(error) => return Err(error.into()),
@@ -129,7 +144,7 @@ impl Storage {
         let mut rollups = Vec::new();
         for row in table.iter()? {
             let (_, value) = row?;
-            let rollup: UsageRollup = serde_json::from_slice(value.value())?;
+            let rollup = decode_usage_rollup(value.value())?;
             if rollup.resolution == resolution
                 && rollup.bucket_start >= window_start_unix_secs
                 && rollup.bucket_start < window_end_unix_secs
@@ -152,11 +167,13 @@ impl Storage {
 
 pub fn usage_rollup_key(key: &UsageRollupKey) -> Vec<u8> {
     let mut encoded = Vec::new();
-    push_segment(&mut encoded, key.resolution.as_str());
+    encoded.push(resolution_code(key.resolution));
     encoded.extend_from_slice(&key.bucket_start.to_be_bytes());
-    push_segment(&mut encoded, &key.principal);
-    push_segment(&mut encoded, &key.upstream);
-    push_segment(&mut encoded, &key.model);
+    encoded.extend_from_slice(key.principal.as_bytes());
+    encoded.push(0xFF);
+    encoded.extend_from_slice(key.upstream_id.as_bytes());
+    encoded.push(0xFF);
+    encoded.extend_from_slice(key.model.as_bytes());
     encoded
 }
 
@@ -165,7 +182,8 @@ fn empty_usage_rollup(key: &UsageRollupKey) -> UsageRollup {
         resolution: key.resolution,
         bucket_start: key.bucket_start,
         principal: key.principal.clone(),
-        upstream: key.upstream.clone(),
+        upstream_id: key.upstream_id,
+        upstream_name: key.upstream_name.clone(),
         model: key.model.clone(),
         request_count: 0,
         input_tokens: 0,
@@ -218,12 +236,15 @@ fn apply_delta(rollup: &mut UsageRollup, delta: UsageRollupDelta) {
 fn usage_rollup_key_from_event(
     resolution: UsageRollupResolution,
     event: &RequestEvent,
+    upstreams: &HashMap<String, UpstreamIdentity>,
 ) -> UsageRollupKey {
+    let upstream = resolve_upstream_identity(event, upstreams);
     UsageRollupKey {
         resolution,
         bucket_start: bucket_start(resolution, event_ts_ms(event) / 1000),
         principal: normalize_dimension(event.principal_id.as_deref()),
-        upstream: normalize_dimension(event.upstream_name.as_deref()),
+        upstream_id: upstream.id,
+        upstream_name: normalize_dimension(Some(&upstream.name)),
         model: normalize_dimension(event.model.as_deref()),
     }
 }
@@ -231,7 +252,6 @@ fn usage_rollup_key_from_event(
 impl UsageRollupDelta {
     fn add_event(&mut self, event: &RequestEvent) {
         self.request_count += 1;
-        // cache_* are tracked as separate dimensions so cache hit rate isn't double-counted.
         self.input_tokens += event.input_tokens.unwrap_or(0);
         self.cache_creation_input_tokens += event.cache_creation_input_tokens.unwrap_or(0);
         self.cache_read_input_tokens += event.cache_read_input_tokens.unwrap_or(0);
@@ -267,13 +287,64 @@ impl UsageRollupDelta {
     }
 }
 
-fn add_event_deltas(deltas: &mut BTreeMap<UsageRollupKey, UsageRollupDelta>, event: &RequestEvent) {
+fn add_event_deltas(
+    deltas: &mut BTreeMap<UsageRollupKey, UsageRollupDelta>,
+    event: &RequestEvent,
+    upstreams: &HashMap<String, UpstreamIdentity>,
+) {
     for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
         deltas
-            .entry(usage_rollup_key_from_event(resolution, event))
+            .entry(usage_rollup_key_from_event(resolution, event, upstreams))
             .or_default()
             .add_event(event);
     }
+}
+
+fn load_upstream_identities(
+    tx: &redb::WriteTransaction,
+) -> Result<HashMap<String, UpstreamIdentity>, StorageError> {
+    let table = tx.open_table(UPSTREAMS_V2)?;
+    let mut upstreams = HashMap::new();
+    for row in table.iter()? {
+        let (_, value) = row?;
+        let record: UpstreamRecord = serde_json::from_slice(value.value())?;
+        if record.deleted_at_unix_secs.is_some() {
+            continue;
+        }
+        let identity = UpstreamIdentity {
+            id: record.id,
+            name: record.name,
+        };
+        upstreams.insert(identity.id.to_string(), identity.clone());
+        upstreams.insert(identity.name.clone(), identity);
+    }
+    Ok(upstreams)
+}
+
+fn resolve_upstream_identity(
+    event: &RequestEvent,
+    upstreams: &HashMap<String, UpstreamIdentity>,
+) -> UpstreamIdentity {
+    if let Some(upstream_id) = event.upstream_id {
+        if let Some(name) = event.upstream_name.clone() {
+            return UpstreamIdentity {
+                id: upstream_id,
+                name,
+            };
+        }
+        if let Some(identity) = upstreams.get(&upstream_id.to_string()) {
+            return identity.clone();
+        }
+        return UpstreamIdentity {
+            id: upstream_id,
+            name: event_upstream_name(event),
+        };
+    }
+    let name = event_upstream_name(event);
+    upstreams.get(&name).cloned().unwrap_or(UpstreamIdentity {
+        id: Uuid::nil(),
+        name,
+    })
 }
 
 fn bucket_start(resolution: UsageRollupResolution, ts: u64) -> u64 {
@@ -286,6 +357,15 @@ fn bucket_start(resolution: UsageRollupResolution, ts: u64) -> u64 {
 
 fn event_ts_ms(event: &RequestEvent) -> u64 {
     event.ts_ms.unwrap_or_else(|| event.ts.saturating_mul(1000))
+}
+
+fn event_upstream_name(event: &RequestEvent) -> String {
+    event
+        .upstream_name
+        .as_deref()
+        .map(ToOwned::to_owned)
+        .or_else(|| event.upstream.map(upstream_dimension))
+        .unwrap_or_else(|| UNKNOWN_DIMENSION.to_owned())
 }
 
 fn normalize_dimension(value: Option<&str>) -> String {
@@ -312,9 +392,28 @@ fn normalize_dimension(value: Option<&str>) -> String {
     }
 }
 
-fn push_segment(key: &mut Vec<u8>, value: &str) {
-    key.extend_from_slice(&(value.len() as u64).to_be_bytes());
-    key.extend_from_slice(value.as_bytes());
+fn upstream_dimension(upstream: RequestEventUpstream) -> String {
+    match upstream {
+        RequestEventUpstream::AnthropicDirect => "anthropic_direct",
+        RequestEventUpstream::CustomAnthropicSpec => "custom_anthropic_spec",
+    }
+    .to_owned()
+}
+
+fn resolution_code(resolution: UsageRollupResolution) -> u8 {
+    match resolution {
+        UsageRollupResolution::Minute => 0,
+        UsageRollupResolution::Hour => 1,
+    }
+}
+
+fn encode_usage_rollup(rollup: &UsageRollup) -> Result<Vec<u8>, StorageError> {
+    Ok(bincode_serde::encode_to_vec(rollup, config::standard())?)
+}
+
+fn decode_usage_rollup(value: &[u8]) -> Result<UsageRollup, StorageError> {
+    let (rollup, _) = bincode_serde::decode_from_slice(value, config::standard())?;
+    Ok(rollup)
 }
 
 fn decode_request_event_key(key: &[u8]) -> Result<u64, StorageError> {

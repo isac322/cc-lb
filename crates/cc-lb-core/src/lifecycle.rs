@@ -2,19 +2,21 @@ use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use axum::body::Body as AxumBody;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
-    RequestContext, RetryDecision, RouterPlugin, SignedRequest, Upstream, UpstreamCandidate,
-    UpstreamError, UpstreamKind as CandidateUpstreamKind, shape_request, sign_request,
+    RequestContext, RetryDecision, RouterPlugin, SignedRequest, SubscriptionQuotaCandidateSnapshot,
+    Upstream, UpstreamCandidate, UpstreamError, UpstreamKind as CandidateUpstreamKind,
+    shape_request, sign_request,
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_api::{
-    Storage, UpstreamRateLimitObservationRecord, UpstreamRecord,
+    Storage, SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaSource, UpstreamRateLimitObservationRecord, UpstreamRecord,
     types::{RequestEvent, StoredApiKeyRecord},
     upstream::UpstreamKind as StorageUpstreamKind,
 };
@@ -39,8 +41,11 @@ use crate::dynamic_view::{
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
 use crate::hop_by_hop::strip_hop_by_hop;
-use crate::rate_limit_headers::parse_anthropic_rate_limit_headers;
+use crate::rate_limit_headers::{
+    parse_anthropic_rate_limit_headers, parse_anthropic_unified_headers,
+};
 use crate::sse_relay;
+use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::upstream_rate_limit_events::UpstreamRateLimitSink;
 
 pub type Body = AxumBody;
@@ -49,6 +54,33 @@ const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
+
+pub trait SubscriptionQuotaCacheLike: Send + Sync {
+    fn upsert_observation(&self, record: &SubscriptionQuotaObservationRecord);
+
+    fn snapshot_for_upstream(
+        &self,
+        upstream_id: Uuid,
+        now_unix_millis: u64,
+        max_staleness_secs: u64,
+    ) -> Vec<SubscriptionQuotaCandidateSnapshot>;
+}
+
+#[derive(Debug, Default)]
+pub struct NoopSubscriptionQuotaCache;
+
+impl SubscriptionQuotaCacheLike for NoopSubscriptionQuotaCache {
+    fn upsert_observation(&self, _record: &SubscriptionQuotaObservationRecord) {}
+
+    fn snapshot_for_upstream(
+        &self,
+        _upstream_id: Uuid,
+        _now_unix_millis: u64,
+        _max_staleness_secs: u64,
+    ) -> Vec<SubscriptionQuotaCandidateSnapshot> {
+        Vec::new()
+    }
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequestKind {
@@ -79,6 +111,7 @@ pub fn build_candidates(
 
     let mut candidates: Vec<UpstreamCandidate> = {
         let rate_limit_cache = view.upstream_rate_limit_cache.read();
+        let now_unix_millis = unix_now_ms();
         view.upstreams_snapshot()
             .iter()
             .filter(|upstream| upstream.enabled)
@@ -103,6 +136,11 @@ pub fn build_candidates(
                     name: upstream.name.clone(),
                     kind: upstream_kind_for_candidate(upstream.kind),
                     observed_rate_limits,
+                    subscription_quotas: view.subscription_quota_cache.snapshot_for_upstream(
+                        upstream.id,
+                        now_unix_millis,
+                        view.subscription_quota_routing_max_staleness_secs,
+                    ),
                     observed_at_unix_secs,
                 }
             })
@@ -270,6 +308,8 @@ pub struct Lifecycle {
     audit_sink: Option<Arc<AuditWriterSink>>,
     request_event_storage: Option<Arc<dyn Storage>>,
     upstream_rate_limit_sink: Option<UpstreamRateLimitSink>,
+    subscription_quota_sink: Option<SubscriptionQuotaSink>,
+    subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
 }
 
 impl Lifecycle {
@@ -300,6 +340,8 @@ impl Lifecycle {
             audit_sink: None,
             request_event_storage: None,
             upstream_rate_limit_sink: None,
+            subscription_quota_sink: None,
+            subscription_quota_cache: None,
         }
     }
 
@@ -317,6 +359,8 @@ impl Lifecycle {
             audit_sink: None,
             request_event_storage: None,
             upstream_rate_limit_sink: None,
+            subscription_quota_sink: None,
+            subscription_quota_cache: None,
         }
     }
 
@@ -349,6 +393,19 @@ impl Lifecycle {
 
     pub fn with_upstream_rate_limit_sink(mut self, sink: UpstreamRateLimitSink) -> Self {
         self.upstream_rate_limit_sink = Some(sink);
+        self
+    }
+
+    pub fn with_subscription_quota_sink(mut self, sink: SubscriptionQuotaSink) -> Self {
+        self.subscription_quota_sink = Some(sink);
+        self
+    }
+
+    pub fn with_subscription_quota_cache(
+        mut self,
+        cache: Arc<dyn SubscriptionQuotaCacheLike>,
+    ) -> Self {
+        self.subscription_quota_cache = Some(cache);
         self
     }
 
@@ -753,11 +810,17 @@ impl Lifecycle {
         }
 
         if response.status().is_success() || response.status() == StatusCode::TOO_MANY_REQUESTS {
+            let observed_at = SystemTime::now();
             self.record_upstream_rate_limit_observations(
                 &view,
                 response.headers(),
                 resolved_upstream_id,
-                unix_now_secs(),
+                system_time_to_unix_secs(observed_at),
+            );
+            self.record_subscription_quota_observations(
+                response.headers(),
+                resolved_upstream_id,
+                observed_at,
             );
         }
 
@@ -794,6 +857,7 @@ impl Lifecycle {
                 stream_hooks,
                 RequestEventContext {
                     request_id: ctx.request_id.clone(),
+                    upstream_id: Some(resolved_upstream_id),
                     upstream_name: Some(router_chosen_upstream_name.clone()),
                     principal_kind: Some(principal_kind_as_str(&principal.kind).to_owned()),
                     proxy_setup_ms: Some(proxy_setup_ms),
@@ -994,6 +1058,7 @@ impl Lifecycle {
                 principal_id: Some(active_limit.subject.principal_id.clone()),
                 key_id: Some(active_limit.subject.key_id.clone()),
                 principal_kind: event_ctx.principal_kind.clone(),
+                upstream_id: event_ctx.upstream_id,
                 upstream_name: event_ctx.upstream_name.clone(),
                 model: Some(active_limit.request.model.clone()),
                 input_tokens: Some(usage.input_tokens),
@@ -1080,6 +1145,28 @@ impl Lifecycle {
 
         if let Some(sink) = &self.upstream_rate_limit_sink {
             for record in records {
+                let _ = sink.enqueue(record);
+            }
+        }
+    }
+
+    pub fn record_subscription_quota_observations(
+        &self,
+        headers: &HeaderMap,
+        upstream_id: Uuid,
+        observed_at: SystemTime,
+    ) {
+        if self.subscription_quota_sink.is_none() && self.subscription_quota_cache.is_none() {
+            return;
+        }
+        let observed_at_unix_millis = system_time_to_unix_millis(observed_at);
+        for record in
+            observe_subscription_quota_headers(headers, upstream_id, observed_at_unix_millis)
+        {
+            if let Some(cache) = &self.subscription_quota_cache {
+                cache.upsert_observation(&record);
+            }
+            if let Some(sink) = &self.subscription_quota_sink {
                 let _ = sink.enqueue(record);
             }
         }
@@ -1345,6 +1432,7 @@ impl Lifecycle {
                         principal_id: Some(active_limit.subject.principal_id.clone()),
                         key_id: Some(active_limit.subject.key_id.clone()),
                         principal_kind: event_ctx.principal_kind.clone(),
+                        upstream_id: event_ctx.upstream_id,
                         upstream_name: event_ctx.upstream_name.clone(),
                         model: Some(active_limit.request.model.clone()),
                         input_tokens: Some(usage.input_tokens),
@@ -1424,6 +1512,34 @@ pub fn observe_rate_limits(
             remaining: snapshot.remaining,
             reset: snapshot.reset,
             observed_at_unix_secs: observed_at,
+        })
+        .collect()
+}
+
+pub fn observe_subscription_quota_headers(
+    headers: &HeaderMap,
+    upstream_id: Uuid,
+    observed_at_unix_millis: u64,
+) -> Vec<SubscriptionQuotaObservationRecord> {
+    parse_anthropic_unified_headers(headers)
+        .into_iter()
+        .map(|observation| SubscriptionQuotaObservationRecord {
+            upstream_id,
+            window: observation.window,
+            source: SubscriptionQuotaSource::Header,
+            sample_kind: SubscriptionQuotaSampleKind::Sample,
+            observed_at_unix_millis,
+            sample_id: Uuid::new_v4(),
+            utilization: observation.utilization,
+            status: observation.status,
+            resets_at_unix_secs: observation.resets_at_unix_secs,
+            surpassed_threshold: observation.surpassed_threshold,
+            representative_claim: observation.representative_claim,
+            disabled_reason: observation.disabled_reason,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            ingested_at_unix_millis: observed_at_unix_millis,
         })
         .collect()
 }
@@ -1578,6 +1694,21 @@ fn unix_now_secs() -> u64 {
         .as_secs()
 }
 
+fn system_time_to_unix_secs(value: SystemTime) -> u64 {
+    value
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn system_time_to_unix_millis(value: SystemTime) -> u64 {
+    value
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
+}
+
 fn extract_model(body: &Bytes) -> Option<String> {
     serde_json::from_slice::<Value>(body)
         .ok()
@@ -1624,6 +1755,7 @@ struct ActiveLimit {
 #[derive(Clone)]
 struct RequestEventContext {
     request_id: String,
+    upstream_id: Option<Uuid>,
     upstream_name: Option<String>,
     principal_kind: Option<String>,
     proxy_setup_ms: Option<u64>,
@@ -2113,5 +2245,46 @@ fn is_sse_response(headers: &HeaderMap) -> bool {
 fn observe_many(hooks: &[Arc<dyn ObservabilityHook>], event: ObserveEvent) {
     for hook in hooks {
         let _result = hook.observe(event.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cc_lb_storage_api::{
+        SubscriptionQuotaSampleKind, SubscriptionQuotaSource, SubscriptionQuotaStatus,
+        SubscriptionQuotaWindow,
+    };
+    use http::header::{HeaderName, HeaderValue};
+
+    use super::*;
+
+    #[test]
+    fn observe_subscription_quota_headers_builds_header_sample_records() {
+        let upstream_id = Uuid::new_v4();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("anthropic-ratelimit-7d-sonnet-utilization"),
+            HeaderValue::from_static("42"),
+        );
+        headers.insert(
+            HeaderName::from_static("anthropic-ratelimit-7d-sonnet-status"),
+            HeaderValue::from_static("allowed_warning"),
+        );
+
+        let records = observe_subscription_quota_headers(&headers, upstream_id, 123_456);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].upstream_id, upstream_id);
+        assert_eq!(records[0].window, SubscriptionQuotaWindow::SevenDaySonnet);
+        assert_eq!(records[0].source, SubscriptionQuotaSource::Header);
+        assert_eq!(records[0].sample_kind, SubscriptionQuotaSampleKind::Sample);
+        assert_eq!(records[0].observed_at_unix_millis, 123_456);
+        assert_eq!(records[0].ingested_at_unix_millis, 123_456);
+        assert_ne!(records[0].sample_id, Uuid::nil());
+        assert_eq!(records[0].utilization, Some(0.42));
+        assert_eq!(
+            records[0].status,
+            Some(SubscriptionQuotaStatus::AllowedWarning)
+        );
     }
 }

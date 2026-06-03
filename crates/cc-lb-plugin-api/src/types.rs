@@ -117,12 +117,57 @@ pub struct RateLimitObservation {
     pub reset: Option<String>,
 }
 
+/// Freshness state for subscription quota data exposed to router plugins.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionQuotaDataState {
+    /// Data is inside the configured routing freshness window.
+    Fresh,
+    /// Data exists but is older than the configured routing freshness window.
+    Stale,
+    /// No usable subscription quota data exists for the candidate/window.
+    Missing,
+}
+
+/// Latest subscription quota snapshot for one candidate/window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SubscriptionQuotaCandidateSnapshot {
+    /// Subscription quota window label.
+    pub window: String,
+    /// Freshness state for this window snapshot.
+    pub state: SubscriptionQuotaDataState,
+    /// Data source label, such as header, api, or merged.
+    pub source: Option<String>,
+    /// Provider-reported utilization fraction.
+    pub utilization: Option<f64>,
+    /// Provider-reported quota status.
+    pub status: Option<String>,
+    /// Provider reset timestamp in Unix seconds.
+    pub resets_at_unix_secs: Option<u64>,
+    /// Whether the provider reported a crossed warning threshold.
+    pub surpassed_threshold: Option<bool>,
+    /// Representative claim used for provenance/debugging.
+    pub representative_claim: Option<String>,
+    /// Provider reason the quota window is disabled.
+    pub disabled_reason: Option<String>,
+    /// Whether provider extra usage is enabled.
+    pub extra_usage_enabled: Option<bool>,
+    /// Provider extra-usage monthly credit limit.
+    pub extra_usage_monthly_limit: Option<f64>,
+    /// Provider extra-usage consumed credits.
+    pub extra_usage_used_credits: Option<f64>,
+    /// Observation timestamp in Unix milliseconds.
+    pub observed_at_unix_millis: Option<u64>,
+    /// Configured maximum age before this snapshot becomes stale.
+    pub max_staleness_secs: u64,
+}
+
 /// Available upstream candidate for routing decisions.
 ///
 /// The router receives a list of available upstream candidates sorted by
 /// `upstream_id` in ascending order (Uuid byte order). This stable ordering
 /// allows plugins to implement deterministic routing algorithms.
-#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UpstreamCandidate {
     /// Stable upstream identifier.
     pub upstream_id: Uuid,
@@ -132,6 +177,9 @@ pub struct UpstreamCandidate {
     pub kind: UpstreamKind,
     /// Latest rate-limit observations for this candidate.
     pub observed_rate_limits: Vec<RateLimitObservation>,
+    /// Latest subscription quota snapshots for this candidate.
+    #[serde(default)]
+    pub subscription_quotas: Vec<SubscriptionQuotaCandidateSnapshot>,
     /// Unix timestamp in seconds for the candidate observation snapshot.
     pub observed_at_unix_secs: u64,
 }
