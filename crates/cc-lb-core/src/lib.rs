@@ -27,6 +27,8 @@ mod hop_by_hop;
 #[cfg(not(loom))]
 mod lifecycle;
 #[cfg(not(loom))]
+pub mod poll_schedule_estimator;
+#[cfg(not(loom))]
 #[allow(dead_code)]
 mod rate_limit_headers;
 #[cfg(not(loom))]
@@ -84,6 +86,8 @@ pub use lifecycle::{
     LimitSubjectProvider, ProxyError, ReplicaIdentity, RequestKind, UpstreamDispatch,
     build_candidates, observe_rate_limits,
 };
+#[cfg(not(loom))]
+pub use poll_schedule_estimator::{EstimatorConfig, PollScheduleEstimator, ThrottleObservation};
 #[cfg(not(loom))]
 pub use rate_limit_headers::{
     UnifiedQuotaObservation, normalize_utilization_fraction, parse_anthropic_unified_headers,
