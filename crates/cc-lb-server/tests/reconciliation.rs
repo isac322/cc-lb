@@ -11,11 +11,13 @@ use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::reconcile::Reconciler;
 use cc_lb_storage_api::{
-    PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore,
-    PluginSlot, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate,
-    StorageResult, UpstreamCreate, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
-    UpstreamRecord, UpstreamStore, UpstreamUpdate, WasmBlob, WasmRegistryEntry,
-    WasmRegistryEntryInput,
+    AnthropicCompatibilityKvStore, CompatibilityKvRecord, PluginChainEntry, PluginChainEntryInput,
+    PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
+    PrincipalRecord, PrincipalStore, PrincipalUpdate, StorageResult,
+    SubscriptionQuotaObservationRecord, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
+    UpstreamCreate, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
+    UpstreamRecord, UpstreamStore, UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob,
+    WasmRegistryEntry, WasmRegistryEntryInput,
 };
 
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -60,7 +62,9 @@ fn stores(storage: Arc<Storage>) -> Arc<Stores> {
         upstreams: storage.clone(),
         principals: storage.clone(),
         plugin_registry: storage.clone(),
-        upstream_rate_limits: storage,
+        upstream_rate_limits: storage.clone(),
+        upstream_subscription_quotas: storage.clone(),
+        anthropic_compatibility_kv: storage,
         audit: None,
         plugin_registry_repo: None,
     })
@@ -132,6 +136,8 @@ async fn initial_holder(
         0,
         runtime,
         data_dir,
+        Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        1800,
     )
     .await
     .expect("initial dynamic view");
@@ -154,6 +160,8 @@ fn reconciler(
         None,
         cancel,
         data_dir.to_path_buf(),
+        Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        1800,
     ))
 }
 
@@ -280,6 +288,8 @@ async fn cancel_during_tick_is_graceful() {
         principals: Arc::new(EmptyPrincipalStore),
         plugin_registry: Arc::new(EmptyPluginRegistryStore),
         upstream_rate_limits: Arc::new(EmptyRateLimitStore),
+        upstream_subscription_quotas: Arc::new(EmptySubscriptionQuotaStore),
+        anthropic_compatibility_kv: Arc::new(EmptyCompatibilityKvStore),
         audit: None,
         plugin_registry_repo: None,
     });
@@ -432,6 +442,75 @@ impl UpstreamRateLimitStateStore for EmptyRateLimitStore {
         &self,
         _upstream_ids: &[Uuid],
     ) -> StorageResult<Vec<UpstreamRateLimitObservationRecord>> {
+        Ok(Vec::new())
+    }
+}
+
+struct EmptySubscriptionQuotaStore;
+
+#[async_trait]
+impl UpstreamSubscriptionQuotaStore for EmptySubscriptionQuotaStore {
+    async fn put_subscription_quota_batch(
+        &self,
+        _records: &[SubscriptionQuotaObservationRecord],
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn list_latest_subscription_quota_for_upstreams(
+        &self,
+        _upstream_ids: &[Uuid],
+    ) -> StorageResult<Vec<SubscriptionQuotaObservationRecord>> {
+        Ok(Vec::new())
+    }
+
+    async fn list_subscription_quota_series(
+        &self,
+        _query: SubscriptionQuotaSeriesQuery,
+    ) -> StorageResult<Vec<SubscriptionQuotaSeries>> {
+        Ok(Vec::new())
+    }
+
+    async fn delete_subscription_quota_before(
+        &self,
+        _cutoff_unix_millis: u64,
+        _batch_size: u32,
+    ) -> StorageResult<u64> {
+        Ok(0)
+    }
+}
+
+struct EmptyCompatibilityKvStore;
+
+#[async_trait]
+impl AnthropicCompatibilityKvStore for EmptyCompatibilityKvStore {
+    async fn put_compatibility_kv_value(
+        &self,
+        _key: &str,
+        _value: &str,
+        _observed_at_unix_secs: u64,
+        _source_url: Option<&str>,
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn put_compatibility_kv_failure(
+        &self,
+        _key: &str,
+        _attempted_at_unix_secs: u64,
+        _error: &str,
+    ) -> StorageResult<()> {
+        Ok(())
+    }
+
+    async fn get_compatibility_kv(
+        &self,
+        _key: &str,
+    ) -> StorageResult<Option<CompatibilityKvRecord>> {
+        Ok(None)
+    }
+
+    async fn list_compatibility_kv(&self) -> StorageResult<Vec<CompatibilityKvRecord>> {
         Ok(Vec::new())
     }
 }

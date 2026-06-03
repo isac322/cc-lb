@@ -12,6 +12,7 @@ use uuid::Uuid;
 
 use crate::dynamic_view_builder::{Stores, build_dynamic_view};
 use crate::revision_hash::compute_revision_hash;
+use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
 pub struct Reconciler {
     pub stores: Arc<Stores>,
@@ -22,6 +23,8 @@ pub struct Reconciler {
     pub lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     pub cancel: CancellationToken,
     pub data_dir: PathBuf,
+    pub subscription_quota_cache: Arc<SubscriptionQuotaCache>,
+    pub subscription_quota_routing_max_staleness_secs: u64,
 }
 
 impl Reconciler {
@@ -35,6 +38,8 @@ impl Reconciler {
         lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
         cancel: CancellationToken,
         data_dir: PathBuf,
+        subscription_quota_cache: Arc<SubscriptionQuotaCache>,
+        subscription_quota_routing_max_staleness_secs: u64,
     ) -> Self {
         Self {
             stores,
@@ -45,6 +50,8 @@ impl Reconciler {
             lazy_refresher,
             cancel,
             data_dir,
+            subscription_quota_cache,
+            subscription_quota_routing_max_staleness_secs,
         }
     }
 
@@ -93,6 +100,8 @@ impl Reconciler {
             generation,
             &self.runtime,
             &self.data_dir,
+            self.subscription_quota_cache.clone(),
+            self.subscription_quota_routing_max_staleness_secs,
         )
         .await
         {

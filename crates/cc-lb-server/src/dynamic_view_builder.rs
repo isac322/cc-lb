@@ -24,21 +24,25 @@ use cc_lb_plugin_api::{
 use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    AuditStore, PluginRegistryRepo, PluginRegistryStore, PluginSlot, PrincipalRecord,
-    PrincipalStore, RateLimitKind, StorageError, StorageResult, UpstreamRateLimitObservationRecord,
-    UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
+    AnthropicCompatibilityKvStore, AuditStore, PluginRegistryRepo, PluginRegistryStore, PluginSlot,
+    PrincipalRecord, PrincipalStore, RateLimitKind, StorageError, StorageResult,
+    UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
+    UpstreamSubscriptionQuotaStore,
 };
 use parking_lot::RwLock;
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::reconcile::collect_revision_hash;
+use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
 pub struct Stores {
     pub upstreams: Arc<dyn UpstreamStore>,
     pub principals: Arc<dyn PrincipalStore>,
     pub plugin_registry: Arc<dyn PluginRegistryStore>,
     pub upstream_rate_limits: Arc<dyn UpstreamRateLimitStateStore>,
+    pub upstream_subscription_quotas: Arc<dyn UpstreamSubscriptionQuotaStore>,
+    pub anthropic_compatibility_kv: Arc<dyn AnthropicCompatibilityKvStore>,
     pub audit: Option<Arc<dyn AuditStore>>,
     /// T43 bridge: when `Some` and a `PluginRegistryRecord` exists for the
     /// same SHA-256 as the `WasmRegistryEntry`, the bridge injects
@@ -144,6 +148,7 @@ pub fn ensure_wasm_cached(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn build_dynamic_view(
     stores: &Stores,
     oauth_anthropic: &AnthropicOAuthConfig,
@@ -152,12 +157,17 @@ pub async fn build_dynamic_view(
     current_generation: u64,
     runtime: &ExtismRuntime,
     data_dir: &Path,
+    subscription_quota_cache: Arc<SubscriptionQuotaCache>,
+    subscription_quota_routing_max_staleness_secs: u64,
 ) -> Result<Arc<DynamicView>, RebindError> {
     let upstreams = list_upstreams(stores).await?;
     let all_upstream_ids = upstreams
         .iter()
         .map(|upstream| upstream.id)
         .collect::<Vec<_>>();
+    subscription_quota_cache
+        .hydrate_from_store(stores, &all_upstream_ids)
+        .await?;
     let upstream_rate_limit_records = stores
         .upstream_rate_limits
         .list_for_upstream_ids(&all_upstream_ids)
@@ -208,6 +218,10 @@ pub async fn build_dynamic_view(
         .principal_view(principal_view)
         .upstream_status_snapshot(snapshot)
         .upstream_rate_limit_cache(upstream_rate_limit_cache)
+        .subscription_quota_cache(subscription_quota_cache)
+        .subscription_quota_routing_max_staleness_secs(
+            subscription_quota_routing_max_staleness_secs,
+        )
         .upstream_records(upstreams.clone())
         .build())
 }
