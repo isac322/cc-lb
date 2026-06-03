@@ -12,9 +12,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use cc_lb_core::{AuditEntry, AuditPayload};
-use cc_lb_storage_api::{
-    MAX_WASM_BLOB_BYTES, StorageError, WasmBlob, WasmRegistryEntryInput,
-};
+use cc_lb_storage_api::{MAX_WASM_BLOB_BYTES, StorageError, WasmBlob, WasmRegistryEntryInput};
 use extism::{Manifest, Plugin, Wasm};
 use serde::Serialize;
 use serde_json::json;
