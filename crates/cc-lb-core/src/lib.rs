@@ -1,5 +1,7 @@
 #![forbid(unsafe_code)]
 
+#[cfg(not(loom))]
+pub mod anthropic_compat;
 pub mod api_keys;
 pub mod audit_payload;
 #[cfg(not(loom))]
