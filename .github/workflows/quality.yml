@@ -49,7 +49,6 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: oracle4-cc-lb
     env:
-      CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v6
