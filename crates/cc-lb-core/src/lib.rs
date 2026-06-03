@@ -87,8 +87,9 @@ pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop}
 #[cfg(not(loom))]
 pub use lifecycle::{
     Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig, LimitSubject,
-    LimitSubjectProvider, ProxyError, ReplicaIdentity, RequestKind, UpstreamDispatch,
-    build_candidates, observe_rate_limits, observe_subscription_quota_headers,
+    LimitSubjectProvider, NoopSubscriptionQuotaCache, ProxyError, ReplicaIdentity, RequestKind,
+    SubscriptionQuotaCacheLike, UpstreamDispatch, build_candidates, observe_rate_limits,
+    observe_subscription_quota_headers,
 };
 #[cfg(not(loom))]
 pub use poll_schedule_estimator::{EstimatorConfig, PollScheduleEstimator, ThrottleObservation};

@@ -9,8 +9,9 @@ use axum::body::Body as AxumBody;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
-    RequestContext, RetryDecision, RouterPlugin, SignedRequest, Upstream, UpstreamCandidate,
-    UpstreamError, UpstreamKind as CandidateUpstreamKind, shape_request, sign_request,
+    RequestContext, RetryDecision, RouterPlugin, SignedRequest, SubscriptionQuotaCandidateSnapshot,
+    Upstream, UpstreamCandidate, UpstreamError, UpstreamKind as CandidateUpstreamKind,
+    shape_request, sign_request,
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_api::{
@@ -54,6 +55,33 @@ const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
+pub trait SubscriptionQuotaCacheLike: Send + Sync {
+    fn upsert_observation(&self, record: &SubscriptionQuotaObservationRecord);
+
+    fn snapshot_for_upstream(
+        &self,
+        upstream_id: Uuid,
+        now_unix_millis: u64,
+        max_staleness_secs: u64,
+    ) -> Vec<SubscriptionQuotaCandidateSnapshot>;
+}
+
+#[derive(Debug, Default)]
+pub struct NoopSubscriptionQuotaCache;
+
+impl SubscriptionQuotaCacheLike for NoopSubscriptionQuotaCache {
+    fn upsert_observation(&self, _record: &SubscriptionQuotaObservationRecord) {}
+
+    fn snapshot_for_upstream(
+        &self,
+        _upstream_id: Uuid,
+        _now_unix_millis: u64,
+        _max_staleness_secs: u64,
+    ) -> Vec<SubscriptionQuotaCandidateSnapshot> {
+        Vec::new()
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RequestKind {
     AnthropicMessages,
@@ -83,6 +111,7 @@ pub fn build_candidates(
 
     let mut candidates: Vec<UpstreamCandidate> = {
         let rate_limit_cache = view.upstream_rate_limit_cache.read();
+        let now_unix_millis = unix_now_ms();
         view.upstreams_snapshot()
             .iter()
             .filter(|upstream| upstream.enabled)
@@ -107,7 +136,11 @@ pub fn build_candidates(
                     name: upstream.name.clone(),
                     kind: upstream_kind_for_candidate(upstream.kind),
                     observed_rate_limits,
-                    subscription_quotas: Vec::new(),
+                    subscription_quotas: view.subscription_quota_cache.snapshot_for_upstream(
+                        upstream.id,
+                        now_unix_millis,
+                        view.subscription_quota_routing_max_staleness_secs,
+                    ),
                     observed_at_unix_secs,
                 }
             })
@@ -276,6 +309,7 @@ pub struct Lifecycle {
     request_event_storage: Option<Arc<dyn Storage>>,
     upstream_rate_limit_sink: Option<UpstreamRateLimitSink>,
     subscription_quota_sink: Option<SubscriptionQuotaSink>,
+    subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
 }
 
 impl Lifecycle {
@@ -307,6 +341,7 @@ impl Lifecycle {
             request_event_storage: None,
             upstream_rate_limit_sink: None,
             subscription_quota_sink: None,
+            subscription_quota_cache: None,
         }
     }
 
@@ -325,6 +360,7 @@ impl Lifecycle {
             request_event_storage: None,
             upstream_rate_limit_sink: None,
             subscription_quota_sink: None,
+            subscription_quota_cache: None,
         }
     }
 
@@ -362,6 +398,14 @@ impl Lifecycle {
 
     pub fn with_subscription_quota_sink(mut self, sink: SubscriptionQuotaSink) -> Self {
         self.subscription_quota_sink = Some(sink);
+        self
+    }
+
+    pub fn with_subscription_quota_cache(
+        mut self,
+        cache: Arc<dyn SubscriptionQuotaCacheLike>,
+    ) -> Self {
+        self.subscription_quota_cache = Some(cache);
         self
     }
 
@@ -1110,14 +1154,19 @@ impl Lifecycle {
         upstream_id: Uuid,
         observed_at: SystemTime,
     ) {
-        let Some(sink) = &self.subscription_quota_sink else {
+        if self.subscription_quota_sink.is_none() && self.subscription_quota_cache.is_none() {
             return;
-        };
+        }
         let observed_at_unix_millis = system_time_to_unix_millis(observed_at);
         for record in
             observe_subscription_quota_headers(headers, upstream_id, observed_at_unix_millis)
         {
-            let _ = sink.enqueue(record);
+            if let Some(cache) = &self.subscription_quota_cache {
+                cache.upsert_observation(&record);
+            }
+            if let Some(sink) = &self.subscription_quota_sink {
+                let _ = sink.enqueue(record);
+            }
         }
     }
 
