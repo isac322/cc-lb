@@ -88,7 +88,12 @@
     },
     "runtime": {
       "$ref": "#/$defs/RuntimeConfig",
-      "default": {}
+      "default": {
+        "startup_handshake": {
+          "force": false,
+          "skip_if_fresh": true
+        }
+      }
     },
     "storage": {
       "$ref": "#/$defs/StorageConfig",
@@ -494,6 +499,26 @@
             "string",
             "null"
           ]
+        },
+        "startup_handshake": {
+          "$ref": "#/$defs/StartupHandshakeConfig",
+          "default": {
+            "force": false,
+            "skip_if_fresh": true
+          }
+        }
+      }
+    },
+    "StartupHandshakeConfig": {
+      "type": "object",
+      "properties": {
+        "force": {
+          "type": "boolean",
+          "default": false
+        },
+        "skip_if_fresh": {
+          "type": "boolean",
+          "default": true
         }
       }
     },

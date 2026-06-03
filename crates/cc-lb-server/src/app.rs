@@ -64,7 +64,8 @@ use crate::reload::{ConfigWatcher, summarize_restart_required};
 use crate::replica;
 use crate::signal;
 use crate::startup_handshake::{
-    StartupHandshakeOpts, StartupHandshakeReport, run_startup_handshake,
+    LegacyBridgeReport, StartupHandshakeOpts, StartupHandshakeReport, bridge_legacy_wasm_registry,
+    run_startup_handshake,
 };
 use crate::state_machine::{ServerState, ServerStateHandle};
 use crate::storage_factory;
@@ -243,8 +244,8 @@ pub async fn run_serve(
     config_path: &Path,
     data_dir: Option<&Path>,
     strict_preflight: bool,
-    skip_handshake_if_fresh: bool,
-    force_handshake: bool,
+    skip_handshake_if_fresh: Option<bool>,
+    force_handshake: Option<bool>,
 ) -> Result<(), ServeError> {
     let mut config = Config::load(config_path)?;
     if let Some(data_dir) = data_dir {
@@ -254,11 +255,16 @@ pub async fn run_serve(
         config.observability.user_prompt_redaction,
     ));
     let _guard = init_observability(&mut config)?;
+    let startup_opts = startup_handshake_opts_from_flags(
+        skip_handshake_if_fresh,
+        force_handshake,
+        &config.runtime.startup_handshake,
+    );
     let app = build_app_with_path_inner(
         config,
         Some(config_path),
         Some(StartupPreflight { strict_preflight }),
-        startup_handshake_opts_from_flags(skip_handshake_if_fresh, force_handshake),
+        startup_opts,
     )
     .await?;
     app.start().await?;
@@ -293,12 +299,13 @@ struct StartupPreflight {
 }
 
 fn startup_handshake_opts_from_flags(
-    skip_handshake_if_fresh: bool,
-    force_handshake: bool,
+    skip_handshake_if_fresh: Option<bool>,
+    force_handshake: Option<bool>,
+    config: &cc_lb_config::StartupHandshakeConfig,
 ) -> StartupHandshakeOpts {
     StartupHandshakeOpts {
-        skip_if_fresh: skip_handshake_if_fresh,
-        force: force_handshake,
+        skip_if_fresh: skip_handshake_if_fresh.unwrap_or(config.skip_if_fresh),
+        force: force_handshake.unwrap_or(config.force),
         ..StartupHandshakeOpts::default()
     }
 }
@@ -711,6 +718,9 @@ async fn build_app_with_storage_inner(
     {
         return Err(BuildError::StartupHandshake(error.to_string()));
     }
+    let legacy_bridge_report =
+        bridge_legacy_wasm_registry(&plugin_registry, storage_for_dynamic.as_ref()).await;
+    log_legacy_bridge_report(&legacy_bridge_report);
     let oauth_anthropic = config.oauth.anthropic.clone().unwrap_or_default();
     let oauth_cfg = Arc::new(oauth_anthropic.clone());
     let refresh_cancel = CancellationToken::new();
@@ -933,6 +943,24 @@ fn log_startup_handshake_report(report: &StartupHandshakeReport) {
             sha256 = %hex_sha256_bytes(sha256),
             error = %error,
             "startup plugin re-handshake disabled or skipped a plugin",
+        );
+    }
+}
+
+fn log_legacy_bridge_report(report: &LegacyBridgeReport) {
+    tracing::info!(
+        scanned = report.scanned,
+        already_present = report.already_present,
+        bridged = report.bridged,
+        orphan = report.orphan,
+        failed = report.failed.len(),
+        "startup legacy wasm registry bridge completed",
+    );
+    for (sha256, error) in &report.failed {
+        tracing::warn!(
+            sha256 = %hex_sha256_bytes(sha256),
+            error = %error,
+            "legacy wasm bridge skipped a plugin",
         );
     }
 }
@@ -1613,6 +1641,36 @@ mod tests {
         assert_admin_state(router.clone(), "starting").await;
         state.transition_to_ready();
         assert_admin_state(router, "ready").await;
+    }
+
+    #[test]
+    fn omitted_cli_uses_config_defaults_for_startup_handshake() {
+        let cfg = cc_lb_config::StartupHandshakeConfig::default();
+        let opts = startup_handshake_opts_from_flags(None, None, &cfg);
+        assert!(opts.skip_if_fresh);
+        assert!(!opts.force);
+    }
+
+    #[test]
+    fn config_can_disable_skip_if_fresh() {
+        let cfg = cc_lb_config::StartupHandshakeConfig {
+            skip_if_fresh: false,
+            force: true,
+        };
+        let opts = startup_handshake_opts_from_flags(None, None, &cfg);
+        assert!(!opts.skip_if_fresh);
+        assert!(opts.force);
+    }
+
+    #[test]
+    fn cli_overrides_config_for_startup_handshake() {
+        let cfg = cc_lb_config::StartupHandshakeConfig {
+            skip_if_fresh: false,
+            force: true,
+        };
+        let opts = startup_handshake_opts_from_flags(Some(true), Some(false), &cfg);
+        assert!(opts.skip_if_fresh);
+        assert!(!opts.force);
     }
 
     async fn assert_admin_state(router: Router, expected: &str) {

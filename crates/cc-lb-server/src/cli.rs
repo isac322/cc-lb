@@ -29,10 +29,10 @@ pub enum Command {
         data_dir: Option<PathBuf>,
         #[arg(long)]
         strict_preflight: bool,
-        #[arg(long, default_value_t = true, action = ArgAction::Set)]
-        skip_handshake_if_fresh: bool,
-        #[arg(long, default_value_t = false)]
-        force_handshake: bool,
+        #[arg(long, action = ArgAction::Set)]
+        skip_handshake_if_fresh: Option<bool>,
+        #[arg(long, action = ArgAction::Set)]
+        force_handshake: Option<bool>,
     },
     Config {
         #[command(subcommand)]
@@ -45,7 +45,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn skip_if_fresh_default_true() {
+    fn omitted_flags_are_none_so_config_can_provide_defaults() {
         let cli =
             Cli::try_parse_from(["cc-lb", "serve", "--config", "cc-lb.toml"]).expect("cli parses");
 
@@ -58,8 +58,35 @@ mod tests {
             panic!("expected serve command");
         };
 
-        assert!(skip_handshake_if_fresh);
-        assert!(!force_handshake);
+        assert!(skip_handshake_if_fresh.is_none());
+        assert!(force_handshake.is_none());
+    }
+
+    #[test]
+    fn explicit_flags_are_propagated() {
+        let cli = Cli::try_parse_from([
+            "cc-lb",
+            "serve",
+            "--config",
+            "cc-lb.toml",
+            "--skip-handshake-if-fresh",
+            "false",
+            "--force-handshake",
+            "true",
+        ])
+        .expect("cli parses");
+
+        let Some(Command::Serve {
+            skip_handshake_if_fresh,
+            force_handshake,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected serve command");
+        };
+
+        assert_eq!(skip_handshake_if_fresh, Some(false));
+        assert_eq!(force_handshake, Some(true));
     }
 }
 

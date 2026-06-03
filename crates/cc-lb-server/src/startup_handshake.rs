@@ -8,7 +8,8 @@ use cc_lb_plugin_wire::limits::{
 };
 use cc_lb_runtime_extism::registry::{PluginRegistry, RegistryError};
 use cc_lb_storage_api::{
-    PluginRegistryRecord, PluginRegistryRepo, PluginRegistryStatus, RepoError,
+    PluginRegistryRecord, PluginRegistryRepo, PluginRegistryStatus, PluginRegistryStore, RepoError,
+    WasmRegistryEntry,
 };
 use thiserror::Error;
 use tokio::sync::{Semaphore, watch};
@@ -307,6 +308,111 @@ fn hex_sha256(sha256: &[u8; 32]) -> String {
         let _ = write!(&mut output, "{byte:02x}");
     }
     output
+}
+
+const LEGACY_BRIDGE_PAGE_SIZE: usize = 64;
+
+#[derive(Debug, Default)]
+pub struct LegacyBridgeReport {
+    pub scanned: usize,
+    pub already_present: usize,
+    pub bridged: usize,
+    pub orphan: usize,
+    pub failed: Vec<([u8; 32], LegacyBridgeError)>,
+}
+
+#[derive(Debug, Error)]
+pub enum LegacyBridgeError {
+    #[error("legacy wasm store failed: {reason}")]
+    LegacyStore { reason: String },
+    #[error("plugin registry repository failed: {0}")]
+    Repo(#[from] RepoError),
+    #[error("plugin registry failed: {0}")]
+    Registry(#[from] RegistryError),
+}
+
+pub async fn bridge_legacy_wasm_registry(
+    plugin_registry: &PluginRegistry,
+    legacy_store: &dyn PluginRegistryStore,
+) -> LegacyBridgeReport {
+    let mut report = LegacyBridgeReport::default();
+    let mut cursor: Option<uuid::Uuid> = None;
+
+    loop {
+        let page = match legacy_store
+            .list_registry(cursor, LEGACY_BRIDGE_PAGE_SIZE)
+            .await
+        {
+            Ok(page) => page,
+            Err(error) => {
+                report.failed.push((
+                    [0; 32],
+                    LegacyBridgeError::LegacyStore {
+                        reason: error.to_string(),
+                    },
+                ));
+                return report;
+            }
+        };
+
+        if page.is_empty() {
+            break;
+        }
+        let last_id = page.last().map(|entry| entry.id);
+
+        for entry in page {
+            report.scanned += 1;
+            bridge_single_entry(plugin_registry, legacy_store, &entry, &mut report).await;
+        }
+
+        match last_id {
+            Some(id) => cursor = Some(id),
+            None => break,
+        }
+    }
+
+    report
+}
+
+async fn bridge_single_entry(
+    plugin_registry: &PluginRegistry,
+    legacy_store: &dyn PluginRegistryStore,
+    entry: &WasmRegistryEntry,
+    report: &mut LegacyBridgeReport,
+) {
+    match plugin_registry.get_by_sha256(&entry.sha256).await {
+        Ok(Some(_)) => {
+            report.already_present += 1;
+            return;
+        }
+        Ok(None) => {}
+        Err(error) => {
+            report.failed.push((entry.sha256, error.into()));
+            return;
+        }
+    }
+
+    let blob_bytes = match legacy_store.get_blob_bytes(entry.sha256).await {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
+            report.orphan += 1;
+            return;
+        }
+        Err(error) => {
+            report.failed.push((
+                entry.sha256,
+                LegacyBridgeError::LegacyStore {
+                    reason: error.to_string(),
+                },
+            ));
+            return;
+        }
+    };
+
+    match plugin_registry.register_plugin(&blob_bytes).await {
+        Ok(_) => report.bridged += 1,
+        Err(error) => report.failed.push((entry.sha256, error.into())),
+    }
 }
 
 #[cfg(test)]
