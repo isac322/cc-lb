@@ -1,6 +1,6 @@
 use std::error::Error;
 
-use cc_lb_storage_api::StorageError as ApiStorageError;
+use cc_lb_storage_api::{PluginChainConflictReason, StorageError as ApiStorageError};
 
 use crate::{CURRENT_SCHEMA_VERSION, StorageError};
 
@@ -59,25 +59,36 @@ pub(crate) fn map_redb_err(error: StorageError) -> ApiStorageError {
         StorageError::PrincipalNameConflict { name } => ApiStorageError::Conflict {
             message: format!("redb principal name already exists: {name}"),
         },
+        StorageError::PrincipalNotFound { id } => ApiStorageError::PrincipalNotFound { id },
         StorageError::PrincipalReferencedByAudit { id } => ApiStorageError::Conflict {
             message: format!("redb principal {id} is referenced by audit entries"),
         },
+        StorageError::PluginRegistryConflict { message }
+            if is_plugin_chain_order_conflict(&message) =>
+        {
+            ApiStorageError::PluginChainConflict {
+                reason: PluginChainConflictReason::InvalidOrderGap,
+            }
+        }
+        StorageError::PluginChainConflict { reason } => {
+            ApiStorageError::PluginChainConflict { reason }
+        }
         StorageError::PluginRegistryConflict { message } => ApiStorageError::Conflict { message },
-        StorageError::StalePluginRegistryRevision { current } => ApiStorageError::Conflict {
-            message: format!("stale redb plugin registry revision; current revision is {current}"),
-        },
+        StorageError::StalePluginRegistryRevision { current } => {
+            ApiStorageError::StalePluginRegistryRevision { current }
+        }
         StorageError::PluginRegistryRevisionOverflow => ApiStorageError::Fatal {
             message: "redb plugin registry revision overflow".to_owned(),
         },
-        StorageError::StalePluginChainRevision { current } => ApiStorageError::Conflict {
-            message: format!("stale redb plugin chain revision; current revision is {current}"),
-        },
+        StorageError::StalePluginChainRevision { current } => {
+            ApiStorageError::StalePluginChainRevision { current }
+        }
         StorageError::PluginChainRevisionOverflow => ApiStorageError::Fatal {
             message: "redb plugin chain revision overflow".to_owned(),
         },
-        StorageError::PluginRegistryReferenced { id } => ApiStorageError::Conflict {
-            message: format!("redb plugin registry row {id} is referenced by plugin chain"),
-        },
+        StorageError::PluginRegistryReferenced { id } => {
+            ApiStorageError::PluginRegistryReferenced { id }
+        }
         StorageError::InvalidRequestEventKey => ApiStorageError::Corrupted {
             message: "redb invalid request event key".to_owned(),
         },
@@ -102,7 +113,17 @@ pub(crate) fn map_redb_err(error: StorageError) -> ApiStorageError {
         StorageError::InvalidBackendKind(kind) => ApiStorageError::Corrupted {
             message: format!("redb invalid backend kind {kind}"),
         },
+        StorageError::InvalidInput { field, reason } => {
+            ApiStorageError::InvalidInput { field, reason }
+        }
     }
+}
+
+fn is_plugin_chain_order_conflict(message: &str) -> bool {
+    matches!(
+        message,
+        "invalid_order_duplicate" | "invalid_order_gap_below_2"
+    )
 }
 
 pub(crate) fn map_join_err(error: tokio::task::JoinError) -> ApiStorageError {

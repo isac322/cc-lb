@@ -1,8 +1,11 @@
 mod config_admin_common;
 
+use std::sync::Arc;
+
 use axum::body::Body;
 use axum::http::{HeaderMap, Request, StatusCode};
 use cc_lb_config::Config;
+use cc_lb_core::spawn_audit_writer;
 use cc_lb_storage_api::{
     PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
     PrincipalStore, WasmBlob, WasmRegistryEntryInput, sparse_order,
@@ -84,15 +87,22 @@ async fn registry_patch_label_stale_if_match_returns_409() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"], "stale_revision");
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(body, json!({ "error": "stale_revision", "current": 0 }));
 }
 
 #[tokio::test]
-async fn registry_delete_when_unreferenced_decrements_blob_refcount() {
-    let (_dir, storage) = temp_storage();
+async fn registry_delete_when_unreferenced_deletes_blob_and_cache_file() {
+    let (dir, storage) = temp_storage();
     let entry = seed_registry(&storage, 6, "plugin-delete-registry").await;
-    let app = app(test_state(Config::default(), Some(storage.clone())));
+    let data_dir = dir.path().join("data");
+    let cache_dir = data_dir.join("plugins/wasm/cache");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let cache_path = cache_dir.join(format!("{}.wasm", hex_sha256(entry.sha256)));
+    std::fs::write(&cache_path, b"cached wasm").unwrap();
+    let mut config = Config::default();
+    config.runtime.data_dir = Some(data_dir);
+    let app = app(test_state(config, Some(storage.clone())));
 
     let (status, _, _) = request_bytes(
         app,
@@ -111,6 +121,7 @@ async fn registry_delete_when_unreferenced_decrements_blob_refcount() {
             .unwrap()
             .is_none()
     );
+    assert!(!cache_path.exists());
 }
 
 #[tokio::test]
@@ -119,7 +130,7 @@ async fn registry_delete_cascade_blocks_when_chain_references_it() {
     let principal_id = seed_principal(&storage, "principal-cascade").await;
     let entry = seed_registry(&storage, 7, "plugin-cascade").await;
     seed_chain(&storage, principal_id, entry.id, sparse_order::STEP).await;
-    let app = app(test_state(Config::default(), Some(storage)));
+    let app = app(test_state(Config::default(), Some(storage.clone())));
 
     let (status, _, body) = request_json(
         app,
@@ -131,11 +142,34 @@ async fn registry_delete_cascade_blocks_when_chain_references_it() {
     .await;
 
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"], "referenced_by");
-    assert_eq!(
-        body["references"][0]["principal_id"],
-        principal_id.to_string()
+    assert_eq!(body["error"], "plugin_registry_referenced");
+    assert_eq!(body["id"], entry.id.to_string());
+    assert!(
+        storage
+            .get_blob_bytes(entry.sha256)
+            .await
+            .unwrap()
+            .is_some()
     );
+}
+
+#[tokio::test]
+async fn registry_delete_stale_if_match_returns_412_with_current_revision() {
+    let (_dir, storage) = temp_storage();
+    let entry = seed_registry(&storage, 14, "plugin-delete-stale").await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body) = request_json(
+        app,
+        "DELETE",
+        &format!("/admin/v1/plugins/registry/{}", entry.id),
+        None,
+        Some("W/\"99\""),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(body, json!({ "error": "stale_revision", "current": 0 }));
 }
 
 #[tokio::test]
@@ -149,14 +183,14 @@ async fn chain_insert_position_last_uses_next_after() {
         app.clone(),
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
-        Some(json!({ "slot": "Router", "wasm_registry_id": entry.id })),
+        Some(json!({ "slot": "ObservabilityHook", "wasm_registry_id": entry.id })),
     )
     .await;
     let (_, _, second, _) = authed_json(
         app,
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
-        Some(json!({ "slot": "Router", "wasm_registry_id": entry.id, "position": "last" })),
+        Some(json!({ "slot": "ObservabilityHook", "wasm_registry_id": entry.id, "position": "last" })),
     )
     .await;
 
@@ -169,8 +203,22 @@ async fn chain_insert_position_before_uses_sparse_between() {
     let (_dir, storage) = temp_storage();
     let principal_id = seed_principal(&storage, "principal-before").await;
     let entry = seed_registry(&storage, 9, "plugin-before").await;
-    let first = seed_chain(&storage, principal_id, entry.id, 1000).await;
-    let second = seed_chain(&storage, principal_id, entry.id, 2000).await;
+    let first = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        1000,
+    )
+    .await;
+    let second = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        2000,
+    )
+    .await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (_, _, inserted, _) = authed_json(
@@ -178,7 +226,7 @@ async fn chain_insert_position_before_uses_sparse_between() {
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
         Some(json!({
-            "slot": "Router",
+            "slot": "ObservabilityHook",
             "wasm_registry_id": entry.id,
             "position": { "before": second.id }
         })),
@@ -194,7 +242,14 @@ async fn chain_insert_position_first_uses_min_minus_step() {
     let (_dir, storage) = temp_storage();
     let principal_id = seed_principal(&storage, "principal-first").await;
     let entry = seed_registry(&storage, 10, "plugin-first").await;
-    seed_chain(&storage, principal_id, entry.id, 2000).await;
+    seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        2000,
+    )
+    .await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (_, _, inserted, _) = authed_json(
@@ -202,7 +257,7 @@ async fn chain_insert_position_first_uses_min_minus_step() {
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
         Some(json!({
-            "slot": "Router",
+            "slot": "ObservabilityHook",
             "wasm_registry_id": entry.id,
             "position": "first"
         })),
@@ -213,10 +268,86 @@ async fn chain_insert_position_first_uses_min_minus_step() {
 }
 
 #[tokio::test]
-async fn chain_update_immutable_fields_rejected_400() {
+async fn chain_insert_unknown_principal_returns_400() {
     let (_dir, storage) = temp_storage();
-    let principal_id = seed_principal(&storage, "principal-immutable").await;
-    let entry = seed_registry(&storage, 11, "plugin-immutable").await;
+    let entry = seed_registry(&storage, 19, "plugin-unknown-principal").await;
+    let unknown_principal = Uuid::new_v4();
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body, _) = authed_json(
+        app,
+        "POST",
+        &format!("/admin/v1/principals/{unknown_principal}/plugin-chain"),
+        Some(json!({ "slot": "Router", "wasm_registry_id": entry.id })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "unknown_principal");
+    assert_eq!(body["id"], unknown_principal.to_string());
+}
+
+#[tokio::test]
+async fn insert_chain_duplicate_router_returns_409_slot_singleton() {
+    let (_dir, storage) = temp_storage();
+    let principal_id = seed_principal(&storage, "principal-router-singleton").await;
+    let entry = seed_registry(&storage, 22, "plugin-router-singleton").await;
+    let first = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::Router,
+        entry.id,
+        sparse_order::STEP,
+    )
+    .await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body, _) = authed_json(
+        app,
+        "POST",
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
+        Some(json!({ "slot": "Router", "wasm_registry_id": entry.id, "position": "last" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "slot_singleton");
+    assert_eq!(body["existing_entry_id"], first.id.to_string());
+}
+
+#[tokio::test]
+async fn insert_chain_duplicate_shape_returns_409_slot_singleton() {
+    let (_dir, storage) = temp_storage();
+    let principal_id = seed_principal(&storage, "principal-shape-singleton").await;
+    let entry = seed_registry(&storage, 23, "plugin-shape-singleton").await;
+    let first = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::Shape,
+        entry.id,
+        sparse_order::STEP,
+    )
+    .await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body, _) = authed_json(
+        app,
+        "POST",
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
+        Some(json!({ "slot": "Shape", "wasm_registry_id": entry.id, "position": "last" })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "slot_singleton");
+    assert_eq!(body["existing_entry_id"], first.id.to_string());
+}
+
+#[tokio::test]
+async fn chain_update_empty_body_rejected_400() {
+    let (_dir, storage) = temp_storage();
+    let principal_id = seed_principal(&storage, "principal-empty-update").await;
+    let entry = seed_registry(&storage, 11, "plugin-empty-update").await;
     let chain = seed_chain(&storage, principal_id, entry.id, 1000).await;
     let app = app(test_state(Config::default(), Some(storage)));
 
@@ -224,13 +355,105 @@ async fn chain_update_immutable_fields_rejected_400() {
         app,
         "PUT",
         &format!("/admin/v1/plugin-chain-entries/{}", chain.id),
-        Some(json!({ "slot": "ObservabilityHook" })),
+        Some(json!({})),
         Some("W/\"0\""),
     )
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["error"], "immutable_field");
+    assert_eq!(body["error"], "empty_update");
+}
+
+#[tokio::test]
+async fn chain_update_stale_if_match_returns_412_with_current_revision() {
+    let (_dir, storage) = temp_storage();
+    let principal_id = seed_principal(&storage, "principal-update-stale").await;
+    let entry = seed_registry(&storage, 18, "plugin-update-stale").await;
+    let chain = seed_chain(&storage, principal_id, entry.id, 1000).await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body) = request_json(
+        app,
+        "PUT",
+        &format!("/admin/v1/plugin-chain-entries/{}", chain.id),
+        Some(json!({ "sse_per_event": true })),
+        Some("W/\"99\""),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(body, json!({ "error": "stale_revision", "current": 0 }));
+}
+
+#[tokio::test]
+async fn chain_delete_forwards_if_match_to_storage_and_returns_204() {
+    let (_dir, storage) = temp_storage();
+    let principal_id = seed_principal(&storage, "principal-delete-chain").await;
+    let entry = seed_registry(&storage, 15, "plugin-delete-chain").await;
+    let chain = seed_chain(&storage, principal_id, entry.id, 1000).await;
+    let app = app(test_state(Config::default(), Some(storage.clone())));
+
+    let (status, headers, bytes) = request_bytes(
+        app,
+        "DELETE",
+        &format!("/admin/v1/plugin-chain-entries/{}", chain.id),
+        None,
+        Some("W/\"0\""),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert!(headers.get("etag").is_none());
+    assert!(bytes.is_empty());
+    assert!(
+        storage
+            .list_chain_for_principal(principal_id, PluginSlot::Router)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn chain_delete_stale_if_match_returns_412_with_current_revision() {
+    let (_dir, storage) = temp_storage();
+    let principal_id = seed_principal(&storage, "principal-delete-stale").await;
+    let entry = seed_registry(&storage, 16, "plugin-delete-stale").await;
+    let chain = seed_chain(&storage, principal_id, entry.id, 1000).await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body) = request_json(
+        app,
+        "DELETE",
+        &format!("/admin/v1/plugin-chain-entries/{}", chain.id),
+        None,
+        Some("W/\"99\""),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::PRECONDITION_FAILED);
+    assert_eq!(body, json!({ "error": "stale_revision", "current": 0 }));
+}
+
+#[tokio::test]
+async fn chain_delete_malformed_if_match_returns_400() {
+    let (_dir, storage) = temp_storage();
+    let principal_id = seed_principal(&storage, "principal-delete-malformed").await;
+    let entry = seed_registry(&storage, 17, "plugin-delete-malformed").await;
+    let chain = seed_chain(&storage, principal_id, entry.id, 1000).await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body) = request_json(
+        app,
+        "DELETE",
+        &format!("/admin/v1/plugin-chain-entries/{}", chain.id),
+        None,
+        Some("not-a-revision"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_if_match");
 }
 
 #[tokio::test]
@@ -238,8 +461,22 @@ async fn chain_reorder_then_needs_rebalance_returns_409() {
     let (_dir, storage) = temp_storage();
     let principal_id = seed_principal(&storage, "principal-reorder").await;
     let entry = seed_registry(&storage, 12, "plugin-reorder").await;
-    let first = seed_chain(&storage, principal_id, entry.id, 1000).await;
-    let second = seed_chain(&storage, principal_id, entry.id, 2000).await;
+    let first = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        1000,
+    )
+    .await;
+    let second = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        2000,
+    )
+    .await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (status, _, body, _) = authed_json(
@@ -258,18 +495,80 @@ async fn chain_reorder_then_needs_rebalance_returns_409() {
 }
 
 #[tokio::test]
-async fn chain_rebalance_evens_spacing_and_returns_new_orders() {
+async fn reorder_invalid_order_after_stage_returns_409() {
     let (_dir, storage) = temp_storage();
-    let principal_id = seed_principal(&storage, "principal-rebalance").await;
-    let entry = seed_registry(&storage, 13, "plugin-rebalance").await;
-    seed_chain(&storage, principal_id, entry.id, 1000).await;
-    seed_chain(&storage, principal_id, entry.id, 1001).await;
+    let principal_id = seed_principal(&storage, "principal-reorder-invalid-order").await;
+    let entry = seed_registry(&storage, 21, "plugin-reorder-invalid-order").await;
+    let first = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        100,
+    )
+    .await;
+    let second = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        200,
+    )
+    .await;
+    seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        300,
+    )
+    .await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (status, _, body, _) = authed_json(
         app,
         "POST",
-        &format!("/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=Router"),
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain/reorder"),
+        Some(json!({ "entries": [
+            { "id": first.id, "order": 100, "expected_revision": first.revision },
+            { "id": second.id, "order": 299, "expected_revision": second.revision }
+        ] })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "invalid_order");
+}
+
+#[tokio::test]
+async fn chain_rebalance_evens_spacing_and_returns_new_orders() {
+    let (_dir, storage) = temp_storage();
+    let principal_id = seed_principal(&storage, "principal-rebalance").await;
+    let entry = seed_registry(&storage, 13, "plugin-rebalance").await;
+    seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        1000,
+    )
+    .await;
+    seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        1001,
+    )
+    .await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body, _) = authed_json(
+        app,
+        "POST",
+        &format!(
+            "/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=ObservabilityHook"
+        ),
         None,
     )
     .await;
@@ -277,6 +576,65 @@ async fn chain_rebalance_evens_spacing_and_returns_new_orders() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["entries"][0]["order"], 1000);
     assert_eq!(body["entries"][1]["order"], 2000);
+}
+
+#[tokio::test]
+async fn chain_rebalance_emits_chain_audit() {
+    let (_dir, storage) = temp_storage();
+    let (audit_sink, audit_writer) = spawn_audit_writer(storage.clone(), 64);
+    let principal_id = seed_principal(&storage, "principal-rebalance-audit").await;
+    let entry = seed_registry(&storage, 20, "plugin-rebalance-audit").await;
+    seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        1000,
+    )
+    .await;
+    seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        1001,
+    )
+    .await;
+    let mut state = test_state(Config::default(), Some(storage.clone()));
+    state.audit_sink = Some(Arc::new(audit_sink));
+    let app = app(state);
+
+    let (status, _, _, _) = authed_json(
+        app,
+        "POST",
+        &format!(
+            "/admin/v1/principals/{principal_id}/plugin-chain/rebalance?slot=ObservabilityHook"
+        ),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        let saw_audit = storage
+            .query_audit(None, 0, u64::MAX, 20)
+            .unwrap()
+            .iter()
+            .any(|entry| {
+                entry.admin_action.as_deref().is_some_and(|action| {
+                    action == format!("plugin_chain_update(principal={principal_id}, slots=observability_hook)")
+                })
+            });
+        if saw_audit {
+            break;
+        }
+        if std::time::Instant::now() >= deadline {
+            panic!("plugin_chain_update audit entry not observed within 5s");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    audit_writer.abort();
 }
 
 async fn request_json(
@@ -341,7 +699,7 @@ async fn seed_registry(
     seed: u8,
     name: &str,
 ) -> cc_lb_storage_api::WasmRegistryEntry {
-    storage
+    let (entry, _) = storage
         .persist_wasm_upload(
             WasmBlob {
                 sha256: [seed; 32],
@@ -358,7 +716,8 @@ async fn seed_registry(
             },
         )
         .await
-        .unwrap()
+        .unwrap();
+    entry
 }
 
 async fn seed_chain(
@@ -367,10 +726,27 @@ async fn seed_chain(
     wasm_registry_id: Uuid,
     order: i64,
 ) -> cc_lb_storage_api::PluginChainEntry {
+    seed_chain_with_slot(
+        storage,
+        principal_id,
+        PluginSlot::Router,
+        wasm_registry_id,
+        order,
+    )
+    .await
+}
+
+async fn seed_chain_with_slot(
+    storage: &cc_lb_storage_redb::RedbStorage,
+    principal_id: Uuid,
+    slot: PluginSlot,
+    wasm_registry_id: Uuid,
+    order: i64,
+) -> cc_lb_storage_api::PluginChainEntry {
     storage
         .insert_chain_entry(PluginChainEntryInput {
             principal_id,
-            slot: PluginSlot::Router,
+            slot,
             order,
             wasm_registry_id,
             config: json!({}),
@@ -380,4 +756,8 @@ async fn seed_chain(
         })
         .await
         .unwrap()
+}
+
+fn hex_sha256(sha256: [u8; 32]) -> String {
+    sha256.iter().map(|byte| format!("{byte:02x}")).collect()
 }

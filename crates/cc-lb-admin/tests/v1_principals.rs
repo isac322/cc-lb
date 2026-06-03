@@ -277,7 +277,7 @@ async fn delete_cascade_blocks_when_plugin_chain_exists_else_soft_deletes() {
         .header_str(&headers, header::ETAG.as_str())
         .to_owned();
     let principal_id = id.parse().unwrap();
-    let registry = server
+    let (registry, _) = server
         .storage
         .persist_wasm_upload(
             WasmBlob {
@@ -323,9 +323,10 @@ async fn delete_cascade_blocks_when_plugin_chain_exists_else_soft_deletes() {
     assert!(
         server
             .storage
-            .delete_chain_entry(chain_entry.id)
+            .delete_chain_entry(chain_entry.id, chain_entry.revision)
             .await
             .unwrap()
+            .is_some()
     );
     let (status, _, body) = server
         .client

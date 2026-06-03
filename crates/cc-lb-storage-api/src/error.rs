@@ -1,8 +1,24 @@
-use std::error::Error;
+use std::{error::Error, fmt};
 
 use thiserror::Error;
+use uuid::Uuid;
 
 use crate::BackendKind;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginChainConflictReason {
+    InvalidOrderGap,
+    SlotIsSingleton { existing_entry_id: Uuid },
+}
+
+impl fmt::Display for PluginChainConflictReason {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidOrderGap => formatter.write_str("invalid_order_gap"),
+            Self::SlotIsSingleton { .. } => formatter.write_str("slot_is_singleton"),
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum StorageError {
@@ -33,6 +49,18 @@ pub enum StorageError {
     Aead(String),
     #[error("invalid input: {field} {reason}")]
     InvalidInput { field: String, reason: String },
+    #[error("plugin registry conflict: {message}")]
+    PluginRegistryConflict { message: String },
+    #[error("plugin registry row is referenced by plugin chain: {id}")]
+    PluginRegistryReferenced { id: String },
+    #[error("stale plugin registry revision; current revision is {current}")]
+    StalePluginRegistryRevision { current: u64 },
+    #[error("stale plugin chain revision; current revision is {current}")]
+    StalePluginChainRevision { current: u64 },
+    #[error("plugin chain conflict: {reason}")]
+    PluginChainConflict { reason: PluginChainConflictReason },
+    #[error("principal not found: {id}")]
+    PrincipalNotFound { id: String },
 }
 
 impl StorageError {
