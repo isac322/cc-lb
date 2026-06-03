@@ -38,6 +38,8 @@ mod sse_error_frame;
 #[cfg(not(loom))]
 mod sse_relay;
 #[cfg(not(loom))]
+pub mod subscription_quota_events;
+#[cfg(not(loom))]
 pub mod upstream_rate_limit_events;
 #[cfg(not(loom))]
 pub mod usage_pruner;
@@ -86,7 +88,7 @@ pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop}
 pub use lifecycle::{
     Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig, LimitSubject,
     LimitSubjectProvider, ProxyError, ReplicaIdentity, RequestKind, UpstreamDispatch,
-    build_candidates, observe_rate_limits,
+    build_candidates, observe_rate_limits, observe_subscription_quota_headers,
 };
 #[cfg(not(loom))]
 pub use poll_schedule_estimator::{EstimatorConfig, PollScheduleEstimator, ThrottleObservation};
@@ -98,6 +100,11 @@ pub use rate_limit_headers::{
 pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};
 #[cfg(not(loom))]
 pub use sse_relay::{RelayError, SseBatchConfig, SseRelay, StreamingUsage};
+#[cfg(not(loom))]
+pub use subscription_quota_events::{
+    SubscriptionQuotaEnqueueError, SubscriptionQuotaSink, SubscriptionQuotaWriterConfig,
+    start_subscription_quota_writer,
+};
 #[cfg(not(loom))]
 pub use upstream_rate_limit_events::{
     UpstreamRateLimitEnqueueError, UpstreamRateLimitSink, start_upstream_rate_limit_writer,

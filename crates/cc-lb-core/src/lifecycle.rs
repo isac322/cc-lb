@@ -2,7 +2,7 @@ use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use axum::body::Body as AxumBody;
@@ -14,7 +14,8 @@ use cc_lb_plugin_api::{
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_api::{
-    Storage, UpstreamRateLimitObservationRecord, UpstreamRecord,
+    Storage, SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaSource, UpstreamRateLimitObservationRecord, UpstreamRecord,
     types::{RequestEvent, StoredApiKeyRecord},
     upstream::UpstreamKind as StorageUpstreamKind,
 };
@@ -39,8 +40,11 @@ use crate::dynamic_view::{
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
 use crate::hop_by_hop::strip_hop_by_hop;
-use crate::rate_limit_headers::parse_anthropic_rate_limit_headers;
+use crate::rate_limit_headers::{
+    parse_anthropic_rate_limit_headers, parse_anthropic_unified_headers,
+};
 use crate::sse_relay;
+use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::upstream_rate_limit_events::UpstreamRateLimitSink;
 
 pub type Body = AxumBody;
@@ -270,6 +274,7 @@ pub struct Lifecycle {
     audit_sink: Option<Arc<AuditWriterSink>>,
     request_event_storage: Option<Arc<dyn Storage>>,
     upstream_rate_limit_sink: Option<UpstreamRateLimitSink>,
+    subscription_quota_sink: Option<SubscriptionQuotaSink>,
 }
 
 impl Lifecycle {
@@ -300,6 +305,7 @@ impl Lifecycle {
             audit_sink: None,
             request_event_storage: None,
             upstream_rate_limit_sink: None,
+            subscription_quota_sink: None,
         }
     }
 
@@ -317,6 +323,7 @@ impl Lifecycle {
             audit_sink: None,
             request_event_storage: None,
             upstream_rate_limit_sink: None,
+            subscription_quota_sink: None,
         }
     }
 
@@ -349,6 +356,11 @@ impl Lifecycle {
 
     pub fn with_upstream_rate_limit_sink(mut self, sink: UpstreamRateLimitSink) -> Self {
         self.upstream_rate_limit_sink = Some(sink);
+        self
+    }
+
+    pub fn with_subscription_quota_sink(mut self, sink: SubscriptionQuotaSink) -> Self {
+        self.subscription_quota_sink = Some(sink);
         self
     }
 
@@ -753,11 +765,17 @@ impl Lifecycle {
         }
 
         if response.status().is_success() || response.status() == StatusCode::TOO_MANY_REQUESTS {
+            let observed_at = SystemTime::now();
             self.record_upstream_rate_limit_observations(
                 &view,
                 response.headers(),
                 resolved_upstream_id,
-                unix_now_secs(),
+                system_time_to_unix_secs(observed_at),
+            );
+            self.record_subscription_quota_observations(
+                response.headers(),
+                resolved_upstream_id,
+                observed_at,
             );
         }
 
@@ -1082,6 +1100,23 @@ impl Lifecycle {
             for record in records {
                 let _ = sink.enqueue(record);
             }
+        }
+    }
+
+    pub fn record_subscription_quota_observations(
+        &self,
+        headers: &HeaderMap,
+        upstream_id: Uuid,
+        observed_at: SystemTime,
+    ) {
+        let Some(sink) = &self.subscription_quota_sink else {
+            return;
+        };
+        let observed_at_unix_millis = system_time_to_unix_millis(observed_at);
+        for record in
+            observe_subscription_quota_headers(headers, upstream_id, observed_at_unix_millis)
+        {
+            let _ = sink.enqueue(record);
         }
     }
 
@@ -1428,6 +1463,34 @@ pub fn observe_rate_limits(
         .collect()
 }
 
+pub fn observe_subscription_quota_headers(
+    headers: &HeaderMap,
+    upstream_id: Uuid,
+    observed_at_unix_millis: u64,
+) -> Vec<SubscriptionQuotaObservationRecord> {
+    parse_anthropic_unified_headers(headers)
+        .into_iter()
+        .map(|observation| SubscriptionQuotaObservationRecord {
+            upstream_id,
+            window: observation.window,
+            source: SubscriptionQuotaSource::Header,
+            sample_kind: SubscriptionQuotaSampleKind::Sample,
+            observed_at_unix_millis,
+            sample_id: Uuid::new_v4(),
+            utilization: observation.utilization,
+            status: observation.status,
+            resets_at_unix_secs: observation.resets_at_unix_secs,
+            surpassed_threshold: observation.surpassed_threshold,
+            representative_claim: observation.representative_claim,
+            disabled_reason: observation.disabled_reason,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            ingested_at_unix_millis: observed_at_unix_millis,
+        })
+        .collect()
+}
+
 #[derive(Clone)]
 struct StreamHooks {
     hooks: Arc<[Arc<dyn ObservabilityHook>]>,
@@ -1576,6 +1639,21 @@ fn unix_now_secs() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn system_time_to_unix_secs(value: SystemTime) -> u64 {
+    value
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
+}
+
+fn system_time_to_unix_millis(value: SystemTime) -> u64 {
+    value
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u128::from(u64::MAX)) as u64
 }
 
 fn extract_model(body: &Bytes) -> Option<String> {
@@ -2113,5 +2191,46 @@ fn is_sse_response(headers: &HeaderMap) -> bool {
 fn observe_many(hooks: &[Arc<dyn ObservabilityHook>], event: ObserveEvent) {
     for hook in hooks {
         let _result = hook.observe(event.clone());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cc_lb_storage_api::{
+        SubscriptionQuotaSampleKind, SubscriptionQuotaSource, SubscriptionQuotaStatus,
+        SubscriptionQuotaWindow,
+    };
+    use http::header::{HeaderName, HeaderValue};
+
+    use super::*;
+
+    #[test]
+    fn observe_subscription_quota_headers_builds_header_sample_records() {
+        let upstream_id = Uuid::new_v4();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            HeaderName::from_static("anthropic-ratelimit-7d-sonnet-utilization"),
+            HeaderValue::from_static("42"),
+        );
+        headers.insert(
+            HeaderName::from_static("anthropic-ratelimit-7d-sonnet-status"),
+            HeaderValue::from_static("allowed_warning"),
+        );
+
+        let records = observe_subscription_quota_headers(&headers, upstream_id, 123_456);
+
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].upstream_id, upstream_id);
+        assert_eq!(records[0].window, SubscriptionQuotaWindow::SevenDaySonnet);
+        assert_eq!(records[0].source, SubscriptionQuotaSource::Header);
+        assert_eq!(records[0].sample_kind, SubscriptionQuotaSampleKind::Sample);
+        assert_eq!(records[0].observed_at_unix_millis, 123_456);
+        assert_eq!(records[0].ingested_at_unix_millis, 123_456);
+        assert_ne!(records[0].sample_id, Uuid::nil());
+        assert_eq!(records[0].utilization, Some(0.42));
+        assert_eq!(
+            records[0].status,
+            Some(SubscriptionQuotaStatus::AllowedWarning)
+        );
     }
 }
