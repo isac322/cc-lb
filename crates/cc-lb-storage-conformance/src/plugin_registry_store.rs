@@ -123,7 +123,7 @@ pub async fn registry_label_update_with_stale_revision_conflicts<S: PluginRegist
         .await
         .expect_err("stale registry label revision conflicts");
     ensure!(
-        matches!(err, StorageError::Conflict { .. }),
+        matches!(err, StorageError::StalePluginRegistryRevision { .. }),
         "stale registry label revision conflict"
     );
     Ok(())
@@ -475,12 +475,15 @@ pub async fn update_chain_entry_stale_revision_conflicts<
         .update_chain_entry(
             created.id,
             created.revision + 1,
-            PluginChainEntryUpdate::default(),
+            PluginChainEntryUpdate {
+                sse_per_event: Some(true),
+                ..PluginChainEntryUpdate::default()
+            },
         )
         .await
         .expect_err("stale conflicts");
     ensure!(
-        matches!(err, StorageError::Conflict { .. }),
+        matches!(err, StorageError::StalePluginChainRevision { .. }),
         "stale revision conflict"
     );
     Ok(())
