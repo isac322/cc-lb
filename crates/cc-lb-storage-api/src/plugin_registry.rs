@@ -109,7 +109,7 @@ pub trait PluginRegistryStore: Send + Sync {
         &self,
         blob: WasmBlob,
         entry: WasmRegistryEntryInput,
-    ) -> StorageResult<WasmRegistryEntry>;
+    ) -> StorageResult<(WasmRegistryEntry, bool)>;
 
     async fn get_blob(&self, sha256: [u8; 32]) -> StorageResult<Option<WasmBlobRecord>>;
 
@@ -170,7 +170,11 @@ pub trait PluginRegistryStore: Send + Sync {
         new_orders: Vec<(Uuid, i64, u64)>,
     ) -> StorageResult<Vec<PluginChainEntry>>;
 
-    async fn delete_chain_entry(&self, id: Uuid) -> StorageResult<bool>;
+    async fn delete_chain_entry(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+    ) -> StorageResult<Option<PluginChainEntry>>;
 
     async fn rebalance_chain(
         &self,

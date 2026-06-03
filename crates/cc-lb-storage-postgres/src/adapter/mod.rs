@@ -43,6 +43,10 @@ impl PostgresStorage {
             notifier_running: Arc::new(AtomicBool::new(false)),
         }
     }
+
+    pub fn pool(&self) -> &PgPool {
+        &self.pool
+    }
 }
 
 pub(crate) fn unix_secs_to_datetime(value: u64, field: &str) -> StorageResult<DateTime<Utc>> {

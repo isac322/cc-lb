@@ -1,3 +1,5 @@
+use std::io;
+
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -7,14 +9,15 @@ use axum::{
 };
 use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_storage_api::{
-    PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginSlot, PrincipalStore,
-    Storage, StorageError, WasmRegistryEntry, sparse_order,
+    PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
+    PluginSlot, Storage, StorageError, WasmRegistryEntry, sparse_order,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
+use super::wasm_cache::wasm_cache_path;
 use crate::AdminState;
 
 const DEFAULT_LIMIT: usize = 100;
@@ -94,6 +97,11 @@ struct ReorderEntry {
     expected_revision: u64,
 }
 
+enum IfMatchError {
+    Missing,
+    Malformed,
+}
+
 #[derive(Debug, Serialize)]
 struct RegistryListResponse {
     entries: Vec<RegistryEntryResponse>,
@@ -115,13 +123,6 @@ struct RegistryEntryResponse {
 #[derive(Debug, Serialize)]
 struct ChainListResponse {
     entries: Vec<PluginChainEntry>,
-}
-
-#[derive(Debug, Serialize)]
-struct ReferenceResponse {
-    kind: &'static str,
-    id: String,
-    principal_id: String,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -224,40 +225,9 @@ async fn delete_registry(
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
-    let entry = match storage.get_registry_entry_by_id(id).await {
-        Ok(Some(entry)) => entry,
-        Ok(None) => return error(StatusCode::NOT_FOUND, "unknown_registry_entry"),
-        Err(error) => return storage_error(error),
-    };
-    if entry.revision != expected_revision {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({ "error": "stale_revision", "current_revision": entry.revision })),
-        )
-            .into_response();
-    }
-    match registry_references(storage, id).await {
-        Ok(references) if !references.is_empty() => {
-            return (
-                StatusCode::CONFLICT,
-                Json(json!({
-                    "error": "referenced_by",
-                    "references": references,
-                })),
-            )
-                .into_response();
-        }
-        Ok(_) => {}
-        Err(error) => return storage_error(error),
-    }
     match storage.delete_registry_entry(id, expected_revision).await {
         Ok(Some(deleted)) => {
-            if let Err(error) = storage
-                .decrement_blob_refcount_or_delete(deleted.sha256)
-                .await
-            {
-                return storage_error(error);
-            }
+            remove_wasm_cache_file(&state, deleted.sha256).await;
             emit_audit(
                 &state,
                 AuditPayload::PluginRegistryDelete {
@@ -269,6 +239,8 @@ async fn delete_registry(
             response
         }
         Ok(None) => error(StatusCode::NOT_FOUND, "unknown_registry_entry"),
+        Err(StorageError::PluginRegistryReferenced { id }) => plugin_registry_referenced(id),
+        Err(StorageError::StalePluginRegistryRevision { current }) => stale_revision(current),
         Err(error) => storage_mutation_error(error),
     }
 }
@@ -331,6 +303,13 @@ async fn insert_chain(
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
         }
+        Err(StorageError::PrincipalNotFound { id }) => unknown_principal(id),
+        Err(StorageError::PluginChainConflict {
+            reason: PluginChainConflictReason::InvalidOrderGap,
+        }) => invalid_order(),
+        Err(StorageError::PluginChainConflict {
+            reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id },
+        }) => slot_singleton(existing_entry_id),
         Err(error) => storage_error(error),
     }
 }
@@ -339,24 +318,10 @@ async fn update_chain(
     State(state): State<AdminState>,
     Path(id): Path<Uuid>,
     headers: HeaderMap,
-    Json(body): Json<Value>,
+    Json(update): Json<PluginChainEntryUpdate>,
 ) -> axum::response::Response {
     let Some(expected_revision) = if_match_revision(&headers) else {
         return error(StatusCode::PRECONDITION_REQUIRED, "if_match_required");
-    };
-    for field in ["slot", "wasm_registry_id", "order", "principal_id"] {
-        if body.get(field).is_some() {
-            return error(StatusCode::BAD_REQUEST, "immutable_field");
-        }
-    }
-    let update = PluginChainEntryUpdate {
-        config: body.get("config").cloned(),
-        sse_per_event: body.get("sse_per_event").and_then(Value::as_bool),
-        batched_events_per_flush: body
-            .get("batched_events_per_flush")
-            .and_then(Value::as_u64)
-            .and_then(|value| u32::try_from(value).ok()),
-        batched_flush_ms: body.get("batched_flush_ms").and_then(Value::as_u64),
     };
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
@@ -372,6 +337,10 @@ async fn update_chain(
             response
         }
         Ok(None) => error(StatusCode::NOT_FOUND, "unknown_plugin_chain_entry"),
+        Err(StorageError::InvalidInput { reason, .. }) if reason.contains("empty_update") => {
+            error(StatusCode::BAD_REQUEST, "empty_update")
+        }
+        Err(StorageError::StalePluginChainRevision { current }) => stale_revision(current),
         Err(error) => storage_mutation_error(error),
     }
 }
@@ -408,6 +377,9 @@ async fn reorder_chain(
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
         }
+        Err(StorageError::PluginChainConflict {
+            reason: PluginChainConflictReason::InvalidOrderGap,
+        }) => invalid_order(),
         Err(error) => storage_mutation_error(error),
     }
 }
@@ -422,6 +394,7 @@ async fn rebalance_chain(
     };
     match storage.rebalance_chain(principal_id, query.slot.0).await {
         Ok(entries) => {
+            emit_chain_audit(&state, principal_id, query.slot.0);
             let mut response = Json(ChainListResponse { entries }).into_response();
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
@@ -435,30 +408,25 @@ async fn delete_chain(
     Path(id): Path<Uuid>,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    let Some(expected_revision) = if_match_revision(&headers) else {
-        return error(StatusCode::PRECONDITION_REQUIRED, "if_match_required");
+    let expected_revision = match required_if_match_revision(&headers) {
+        Ok(revision) => revision,
+        Err(IfMatchError::Missing) => {
+            return error(StatusCode::PRECONDITION_REQUIRED, "if_match_required");
+        }
+        Err(IfMatchError::Malformed) => return error(StatusCode::BAD_REQUEST, "invalid_if_match"),
     };
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
-    let Some(entry) = find_chain_entry(storage, id).await else {
-        return error(StatusCode::NOT_FOUND, "unknown_plugin_chain_entry");
-    };
-    if entry.revision != expected_revision {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({ "error": "stale_revision", "current_revision": entry.revision })),
-        )
-            .into_response();
-    }
-    match storage.delete_chain_entry(id).await {
-        Ok(true) => {
+    match storage.delete_chain_entry(id, expected_revision).await {
+        Ok(Some(entry)) => {
             emit_chain_audit(&state, entry.principal_id, entry.slot);
             let mut response = StatusCode::NO_CONTENT.into_response();
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
         }
-        Ok(false) => error(StatusCode::NOT_FOUND, "unknown_plugin_chain_entry"),
+        Ok(None) => error(StatusCode::NOT_FOUND, "unknown_plugin_chain_entry"),
+        Err(StorageError::StalePluginChainRevision { current }) => stale_revision(current),
         Err(error) => storage_error(error),
     }
 }
@@ -477,38 +445,6 @@ async fn all_registry_entries(
         all.extend(page);
     }
     Ok(all)
-}
-
-async fn registry_references(
-    storage: &dyn Storage,
-    registry_id: Uuid,
-) -> Result<Vec<ReferenceResponse>, StorageError> {
-    let mut references = Vec::new();
-    let mut offset = 0;
-    loop {
-        let principals = PrincipalStore::list(storage, offset, DEFAULT_LIMIT, false).await?;
-        if principals.is_empty() {
-            break;
-        }
-        offset += principals.len();
-        for principal in principals {
-            for slot in [
-                PluginSlot::Router,
-                PluginSlot::ObservabilityHook,
-                PluginSlot::Shape,
-            ] {
-                let entries = storage.list_chain_for_principal(principal.id, slot).await?;
-                references.extend(entries.into_iter().filter_map(|entry| {
-                    (entry.wasm_registry_id == registry_id).then(|| ReferenceResponse {
-                        kind: "plugin_chain",
-                        id: entry.id.to_string(),
-                        principal_id: principal.id.to_string(),
-                    })
-                }));
-            }
-        }
-    }
-    Ok(references)
 }
 
 async fn infer_reorder_slot(
@@ -533,34 +469,6 @@ async fn infer_reorder_slot(
         }
     }
     Err(error(StatusCode::BAD_REQUEST, "entry_not_in_chain"))
-}
-
-async fn find_chain_entry(storage: &dyn Storage, id: Uuid) -> Option<PluginChainEntry> {
-    let mut offset = 0;
-    loop {
-        let principals = PrincipalStore::list(storage, offset, DEFAULT_LIMIT, false)
-            .await
-            .ok()?;
-        if principals.is_empty() {
-            return None;
-        }
-        offset += principals.len();
-        for principal in principals {
-            for slot in [
-                PluginSlot::Router,
-                PluginSlot::ObservabilityHook,
-                PluginSlot::Shape,
-            ] {
-                let entries = storage
-                    .list_chain_for_principal(principal.id, slot)
-                    .await
-                    .ok()?;
-                if let Some(entry) = entries.into_iter().find(|entry| entry.id == id) {
-                    return Some(entry);
-                }
-            }
-        }
-    }
 }
 
 fn compute_order(
@@ -671,6 +579,17 @@ fn if_match_revision(headers: &HeaderMap) -> Option<u64> {
     parse_revision(value)
 }
 
+fn required_if_match_revision(headers: &HeaderMap) -> Result<u64, IfMatchError> {
+    let Some(value) = headers.get(header::IF_MATCH) else {
+        return Err(IfMatchError::Missing);
+    };
+    value
+        .to_str()
+        .ok()
+        .and_then(parse_revision)
+        .ok_or(IfMatchError::Malformed)
+}
+
 fn parse_revision(value: &str) -> Option<u64> {
     let trimmed = value.trim();
     if let Some(inner) = trimmed
@@ -708,33 +627,73 @@ fn needs_rebalance() -> axum::response::Response {
 }
 
 fn storage_mutation_error(error: StorageError) -> axum::response::Response {
-    if let StorageError::Conflict { message } = &error
-        && let Some(current_revision) = current_revision_from_message(message)
-    {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({ "error": "stale_revision", "current_revision": current_revision })),
-        )
-            .into_response();
+    match error {
+        StorageError::StalePluginRegistryRevision { current }
+        | StorageError::StalePluginChainRevision { current } => stale_revision(current),
+        StorageError::PluginRegistryReferenced { id } => plugin_registry_referenced(id),
+        StorageError::PluginChainConflict {
+            reason: PluginChainConflictReason::InvalidOrderGap,
+        } => invalid_order(),
+        StorageError::PluginChainConflict {
+            reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id },
+        } => slot_singleton(existing_entry_id),
+        error => storage_error(error),
     }
-    if let StorageError::Conflict { message } = &error
-        && message.contains("rebalance")
-    {
-        return needs_rebalance();
-    }
-    storage_error(error)
 }
 
-fn current_revision_from_message(message: &str) -> Option<u64> {
-    let digits = message
-        .chars()
-        .rev()
-        .take_while(|character| character.is_ascii_digit())
-        .collect::<String>();
-    if digits.is_empty() {
-        return None;
+async fn remove_wasm_cache_file(state: &AdminState, sha256: [u8; 32]) {
+    let sha256_hex = hex_sha256(sha256);
+    let cache_path = wasm_cache_path(state, &sha256_hex);
+    match tokio::fs::remove_file(&cache_path).await {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => {
+            tracing::warn!(%error, path = %cache_path.display(), sha256 = %sha256_hex, "failed to remove wasm cache file after registry delete")
+        }
     }
-    digits.chars().rev().collect::<String>().parse().ok()
+}
+
+fn plugin_registry_referenced(id: String) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({ "error": "plugin_registry_referenced", "id": id })),
+    )
+        .into_response()
+}
+
+fn stale_revision(current: u64) -> axum::response::Response {
+    (
+        StatusCode::PRECONDITION_FAILED,
+        Json(json!({ "error": "stale_revision", "current": current })),
+    )
+        .into_response()
+}
+
+fn unknown_principal(id: String) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({ "error": "unknown_principal", "id": id })),
+    )
+        .into_response()
+}
+
+fn invalid_order() -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({ "error": "invalid_order" })),
+    )
+        .into_response()
+}
+
+fn slot_singleton(existing_entry_id: Uuid) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": "slot_singleton",
+            "existing_entry_id": existing_entry_id.to_string()
+        })),
+    )
+        .into_response()
 }
 
 fn storage_error(storage_error: StorageError) -> axum::response::Response {

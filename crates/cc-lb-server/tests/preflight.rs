@@ -274,7 +274,7 @@ async fn seed_principal(
 }
 
 async fn seed_registry(storage: &Storage, seed: u8, name: &str) -> WasmRegistryEntry {
-    storage
+    let (entry, _) = storage
         .persist_wasm_upload(
             WasmBlob {
                 sha256: [seed; 32],
@@ -291,7 +291,8 @@ async fn seed_registry(storage: &Storage, seed: u8, name: &str) -> WasmRegistryE
             },
         )
         .await
-        .unwrap()
+        .unwrap();
+    entry
 }
 
 async fn seed_chain(

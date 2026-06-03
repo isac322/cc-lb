@@ -607,7 +607,7 @@ plugins = ["missing-plugin"]
     }
 
     async fn seed_registry(storage: &Storage, name: &str) -> WasmRegistryEntry {
-        storage
+        let (entry, _) = storage
             .persist_wasm_upload(
                 WasmBlob {
                     sha256: [3; 32],
@@ -624,6 +624,7 @@ plugins = ["missing-plugin"]
                 },
             )
             .await
-            .unwrap()
+            .unwrap();
+        entry
     }
 }

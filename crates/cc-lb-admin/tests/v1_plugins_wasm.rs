@@ -24,6 +24,7 @@ async fn happy_upload_returns_201_with_sha_and_cache_file_exists() {
     let response = harness.upload("echo", "echo.wasm", wasm).await;
     assert_eq!(response.status, StatusCode::CREATED);
     assert_eq!(response.json["idempotent"], false);
+    assert_eq!(response.headers.get("x-idempotent").unwrap(), "false");
     assert_eq!(response.json["size_bytes"], wasm.len() as u64);
     let sha = response.json["sha256_hex"].as_str().unwrap();
     assert_eq!(sha, hex_sha(wasm));
@@ -45,6 +46,8 @@ async fn idempotent_duplicate_upload_returns_200_same_sha() {
     let second = harness.upload("echo", "echo.wasm", wasm).await;
     assert_eq!(first.status, StatusCode::CREATED);
     assert_eq!(second.status, StatusCode::OK);
+    assert_eq!(first.headers.get("x-idempotent").unwrap(), "false");
+    assert_eq!(second.headers.get("x-idempotent").unwrap(), "true");
     assert_eq!(first.json["sha256_hex"], second.json["sha256_hex"]);
     assert_eq!(first.json["id"], second.json["id"]);
     assert_eq!(second.json["idempotent"], true);
@@ -100,7 +103,7 @@ async fn ratelimit_11th_upload_in_60s_returns_429_with_retry_after() {
 }
 
 #[tokio::test]
-async fn gc_removes_orphan_blobs_and_cache_files() {
+async fn gc_keeps_referenced_uploads_and_cache_files() {
     let harness = Harness::new();
     let wasm = fixture_wasm();
     let upload = harness.upload("echo", "echo.wasm", wasm).await;
@@ -113,9 +116,9 @@ async fn gc_removes_orphan_blobs_and_cache_files() {
     assert!(cache.exists());
     let gc = harness.post_gc().await;
     assert_eq!(gc.status, StatusCode::OK);
-    assert_eq!(gc.json["count"], 1);
-    assert_eq!(gc.json["removed"][0], sha);
-    assert!(!cache.exists());
+    assert_eq!(gc.json["count"], 0);
+    assert_eq!(gc.json["removed"].as_array().unwrap().len(), 0);
+    assert!(cache.exists());
 }
 
 #[tokio::test]

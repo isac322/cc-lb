@@ -247,7 +247,7 @@ async fn seed_registry(
     seed: u8,
     name: &str,
 ) -> cc_lb_storage_api::WasmRegistryEntry {
-    storage
+    let (entry, _) = storage
         .persist_wasm_upload(
             WasmBlob {
                 sha256: [seed; 32],
@@ -264,5 +264,6 @@ async fn seed_registry(
             },
         )
         .await
-        .unwrap()
+        .unwrap();
+    entry
 }
