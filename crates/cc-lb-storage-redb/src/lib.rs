@@ -62,6 +62,14 @@ pub const UPSTREAMS_V2_BY_NAME: TableDefinition<&str, &[u8]> =
     TableDefinition::new("upstreams_v2_by_name");
 pub const UPSTREAM_RATE_LIMIT_STATE_V1: TableDefinition<&str, &[u8]> =
     TableDefinition::new("upstream_rate_limit_state_v1");
+pub const ANTHROPIC_COMPATIBILITY_KV_V1: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("anthropic_compatibility_kv_v1");
+pub const UPSTREAM_SUBSCRIPTION_QUOTA_OBSERVATIONS_V1: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("upstream_subscription_quota_observations_v1");
+pub const UPSTREAM_SUBSCRIPTION_QUOTA_OBSERVATIONS_BY_TIME_V1: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("upstream_subscription_quota_observations_by_time_v1");
+pub const UPSTREAM_SUBSCRIPTION_QUOTA_LATEST_V1: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("upstream_subscription_quota_latest_v1");
 pub const WASM_BLOBS_V2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("wasm_blobs_v2");
 pub const WASM_REGISTRY_V2: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("wasm_registry_v2");
