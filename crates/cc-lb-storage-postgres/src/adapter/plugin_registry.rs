@@ -262,7 +262,7 @@ impl PluginRegistryStore for PostgresStorage {
                 message: "missing wasm blob".to_owned(),
             });
         }
-        let principal_exists: Option<i64> =
+        let principal_exists: Option<i32> =
             sqlx::query_scalar("SELECT 1 FROM principals_v1 WHERE id = $1")
                 .bind(input.principal_id)
                 .fetch_optional(&mut *tx)
