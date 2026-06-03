@@ -4,6 +4,7 @@ use cc_lb_storage_api::{ChangeEvent, StorageError, StorageResult};
 use chrono::{DateTime, TimeZone, Utc};
 use sqlx::PgPool;
 
+pub mod anthropic_compatibility_kv;
 pub mod api_keys;
 pub mod audit;
 pub mod config_store;
@@ -19,6 +20,7 @@ pub mod quota;
 pub mod request_events;
 pub mod retry;
 pub mod upstream_rate_limit;
+pub mod upstream_subscription_quota;
 pub mod upstreams;
 pub mod usage_rollups;
 

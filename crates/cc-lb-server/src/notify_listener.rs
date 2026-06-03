@@ -12,6 +12,7 @@ use tokio::time::sleep;
 use tokio_util::sync::CancellationToken;
 
 use crate::dynamic_view_builder::{self, Stores};
+use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
 pub struct NotifyListener {
     notifier: Arc<dyn RuntimeChangeNotifier>,
@@ -23,6 +24,8 @@ pub struct NotifyListener {
     aead: Arc<AeadService>,
     data_dir: PathBuf,
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
+    subscription_quota_cache: Arc<SubscriptionQuotaCache>,
+    subscription_quota_routing_max_staleness_secs: u64,
 }
 
 pub struct NotifyListenerParams {
@@ -35,6 +38,8 @@ pub struct NotifyListenerParams {
     pub aead: Arc<AeadService>,
     pub data_dir: PathBuf,
     pub lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
+    pub subscription_quota_cache: Arc<SubscriptionQuotaCache>,
+    pub subscription_quota_routing_max_staleness_secs: u64,
 }
 
 impl NotifyListener {
@@ -49,6 +54,9 @@ impl NotifyListener {
             aead: params.aead,
             data_dir: params.data_dir,
             lazy_refresher: params.lazy_refresher,
+            subscription_quota_cache: params.subscription_quota_cache,
+            subscription_quota_routing_max_staleness_secs: params
+                .subscription_quota_routing_max_staleness_secs,
         }
     }
 
@@ -117,6 +125,8 @@ impl NotifyListener {
             current_generation,
             &self.runtime,
             &self.data_dir,
+            self.subscription_quota_cache.clone(),
+            self.subscription_quota_routing_max_staleness_secs,
         )
         .await
         {

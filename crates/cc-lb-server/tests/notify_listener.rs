@@ -199,15 +199,27 @@ async fn fixture() -> Fixture {
         principals: storage.clone(),
         plugin_registry: storage.clone(),
         upstream_rate_limits: storage.clone(),
+        upstream_subscription_quotas: storage.clone(),
+        anthropic_compatibility_kv: storage.clone(),
         audit: None,
         plugin_registry_repo: None,
     });
     let oauth = Arc::new(AnthropicOAuthConfig::default());
     let aead = Arc::new(AeadService::from_master_key([24; 32]));
     let runtime = Arc::new(ExtismRuntime::new());
-    let initial = build_dynamic_view(&stores, &oauth, aead.clone(), None, 0, &runtime, dir.path())
-        .await
-        .expect("initial dynamic view builds");
+    let initial = build_dynamic_view(
+        &stores,
+        &oauth,
+        aead.clone(),
+        None,
+        0,
+        &runtime,
+        dir.path(),
+        Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        1800,
+    )
+    .await
+    .expect("initial dynamic view builds");
     let holder = Arc::new(DynamicViewHolder::new(initial));
     Fixture {
         _dir: dir,
@@ -236,6 +248,8 @@ async fn spawn_listener(
         aead: fixture.aead.clone(),
         data_dir: fixture._dir.path().to_path_buf(),
         lazy_refresher: None,
+        subscription_quota_cache: Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
+        subscription_quota_routing_max_staleness_secs: 1800,
     }));
     let task = tokio::spawn(async move {
         listener.run().await;
@@ -319,6 +333,8 @@ async fn cancel_during_rebuild_graceful() {
         principals: fixture.storage.clone(),
         plugin_registry: fixture.storage.clone(),
         upstream_rate_limits: fixture.storage.clone(),
+        upstream_subscription_quotas: fixture.storage.clone(),
+        anthropic_compatibility_kv: fixture.storage.clone(),
         audit: None,
         plugin_registry_repo: None,
     });
@@ -347,6 +363,8 @@ async fn rebuild_failure_does_not_swap_view() {
         principals: fixture.storage.clone(),
         plugin_registry: fixture.storage.clone(),
         upstream_rate_limits: fixture.storage.clone(),
+        upstream_subscription_quotas: fixture.storage.clone(),
+        anthropic_compatibility_kv: fixture.storage.clone(),
         audit: None,
         plugin_registry_repo: None,
     });

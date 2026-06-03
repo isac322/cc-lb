@@ -46,6 +46,7 @@ sha2 = "0.11"
 subtle = "2.6.1"
 thiserror.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "rt-multi-thread", "sync", "time"] }
+tokio-util.workspace = true
 tracing.workspace = true
 ulid = "1"
 url.workspace = true

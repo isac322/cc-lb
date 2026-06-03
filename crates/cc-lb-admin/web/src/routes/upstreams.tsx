@@ -3,12 +3,24 @@ import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import {
   ChevronLeft,
   ExternalLink,
+  Info,
   KeyRound,
   Pencil,
   Plus,
   Trash2,
 } from 'lucide-react';
 import { useEffect, useMemo, useState } from 'react';
+import {
+  Area,
+  AreaChart,
+  CartesianGrid,
+  Legend,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from 'recharts';
 import { toast } from 'sonner';
 import { z } from 'zod';
 import {
@@ -23,12 +35,14 @@ import {
   Field,
   INPUT_CLASS,
   Modal,
+  QuotaMiniChart,
+  Section,
   Skeleton,
-  Sparkline,
   StatusBadge,
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
 import { ApiError, deleteJson, eventTime, getJson } from '../lib/api';
+import { getUpstreamColor } from '../lib/colors';
 import {
   qk,
   type Upstream,
@@ -40,10 +54,12 @@ import {
   usePrincipalNameMap,
   useRecentEvents,
   useStatus,
+  useSubscriptionQuotaAnalysis,
+  useSubscriptionQuotaLatest,
+  useSubscriptionQuotaSeries,
   useToggleUpstream,
   useUpdateUpstream,
   useUpstreams,
-  useUsage,
 } from '../lib/queries';
 
 const upstreamSearchSchema = z.object({ selectedId: z.string().optional() });
@@ -53,14 +69,33 @@ export const Route = createFileRoute('/upstreams')({
   component: UpstreamsPage,
 });
 
-const EMPTY_SPARK: number[] = Array.from({ length: 24 }, () => 0);
-
 function UpstreamsPage() {
   const { selectedId } = Route.useSearch();
   const navigate = useNavigate({ from: Route.fullPath });
   const upstreams = useUpstreams();
-  // /admin/usage groups series by upstream.name (not id); join below by name.
-  const usage = useUsage('1h', 'minute', 'upstream');
+
+  const nowUnixSecs = Math.floor(Date.now() / 1000);
+  const sinceUnixSecs = nowUnixSecs - 21600; // 6h
+
+  const upstreamIds = useMemo(() => {
+    return upstreams.data?.upstreams.map((u) => u.id).join(',') ?? '';
+  }, [upstreams.data]);
+
+  const quotaSeries = useSubscriptionQuotaSeries({
+    upstreamIds,
+    windows: '5h,7d',
+    source: 'merged',
+    sinceUnixSecs,
+    untilUnixSecs: nowUnixSecs,
+    bucketSecs: 300,
+  });
+
+  const quotaLatest = useSubscriptionQuotaLatest({
+    upstreamIds,
+    windows: '5h,7d',
+    source: 'merged',
+  });
+
   // /admin/v1/status reports per-upstream runtime state incl. OAuth binding.
   const status = useStatus();
   const statusByUpstreamId = useMemo(() => {
@@ -80,16 +115,34 @@ function UpstreamsPage() {
   // success and clears it on completion/cancel.
   const [pendingCreatedId, setPendingCreatedId] = useState<string | null>(null);
 
-  const sparkByName = useMemo(() => {
-    const map = new Map<string, number[]>();
-    for (const s of usage.data?.series ?? []) {
-      map.set(
-        s.key,
-        s.buckets.map((b) => b.request_count),
-      );
+  const quotaDataById = useMemo(() => {
+    const map = new Map<
+      string,
+      { i: number; val5h: number | null; val7d: number | null }[]
+    >();
+    for (const s of quotaSeries.data?.series ?? []) {
+      const uId = s.upstream_id;
+      if (!map.has(uId)) {
+        map.set(uId, []);
+      }
+      const arr = map.get(uId)!;
+
+      for (let i = 0; i < s.buckets.length; i++) {
+        if (!arr[i]) {
+          arr[i] = { i, val5h: null, val7d: null };
+        }
+        const b = s.buckets[i]!;
+        if (s.window === '5h') {
+          arr[i]!.val5h =
+            b.utilization_last != null ? b.utilization_last * 100 : null;
+        } else if (s.window === '7d') {
+          arr[i]!.val7d =
+            b.utilization_last != null ? b.utilization_last * 100 : null;
+        }
+      }
     }
     return map;
-  }, [usage.data]);
+  }, [quotaSeries.data]);
 
   const visibleUpstreams = useMemo(
     () =>
@@ -147,7 +200,20 @@ function UpstreamsPage() {
             ))
           ) : visibleUpstreams.length ? (
             visibleUpstreams.map((u) => {
-              const sparkData = sparkByName.get(u.name) ?? EMPTY_SPARK;
+              const chartData = quotaDataById.get(u.id) ?? [];
+              const latest = quotaLatest.data?.upstreams.find(
+                (l) => l.upstream_id === u.id,
+              );
+              const w5h = latest?.windows.find((w) => w.window === '5h');
+              const w7d = latest?.windows.find((w) => w.window === '7d');
+
+              const getPctColor = (util: number | null | undefined) => {
+                if (util == null) return 'text-text-faint';
+                if (util < 0.7) return 'text-green-400';
+                if (util < 0.9) return 'text-amber-400';
+                return 'text-red-400';
+              };
+
               const runtimeStatus = statusByUpstreamId.get(u.id);
               const dotTone = !u.enabled
                 ? 'neutral'
@@ -176,17 +242,26 @@ function UpstreamsPage() {
                         {u.name}
                       </span>
                     </div>
-                    <Badge tone="mono">{u.kind}</Badge>
+                    <div className="flex items-center gap-2 text-[10px] font-mono shrink-0">
+                      <span className={getPctColor(w5h?.utilization)}>
+                        {w5h?.utilization != null
+                          ? `${(w5h.utilization * 100).toFixed(1)}%`
+                          : '—'}
+                      </span>
+                      <span className="text-text-faint">/</span>
+                      <span className={getPctColor(w7d?.utilization)}>
+                        {w7d?.utilization != null
+                          ? `${(w7d.utilization * 100).toFixed(1)}%`
+                          : '—'}
+                      </span>
+                    </div>
                   </div>
                   <div className="flex items-center gap-3 mt-2 pb-1">
                     <div className="flex-1 min-w-0" style={{ minHeight: 32 }}>
-                      <Sparkline
-                        data={sparkData}
-                        color={
-                          u.enabled
-                            ? 'var(--color-accent)'
-                            : 'var(--color-text-faint)'
-                        }
+                      <QuotaMiniChart
+                        data={chartData}
+                        color5h={getUpstreamColor(u.id).line5h}
+                        color7d={getUpstreamColor(u.id).line7d}
                       />
                     </div>
                     <div className="text-right text-[11px] text-text-faint shrink-0">
@@ -296,6 +371,79 @@ function DetailView({
   );
   const [editUseEnvVar, setEditUseEnvVar] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
+  const [range, setRange] = useState<'1h' | '6h' | '24h' | '7d'>('7d');
+
+  const nowUnixSecs = Math.floor(Date.now() / 1000);
+  const sinceUnixSecs = useMemo(() => {
+    switch (range) {
+      case '1h':
+        return nowUnixSecs - 3600;
+      case '6h':
+        return nowUnixSecs - 21600;
+      case '24h':
+        return nowUnixSecs - 86400;
+      case '7d':
+        return nowUnixSecs - 604800;
+    }
+  }, [range, nowUnixSecs]);
+
+  const quotaLatest = useSubscriptionQuotaLatest({
+    upstreamIds: upstream.id,
+    windows: '5h,7d,overage,7d_sonnet,7d_opus',
+    source: 'merged',
+  });
+  const quotaSeries = useSubscriptionQuotaSeries({
+    upstreamIds: upstream.id,
+    windows: '5h,7d',
+    source: 'merged',
+    sinceUnixSecs,
+    untilUnixSecs: nowUnixSecs,
+    bucketSecs: 300,
+  });
+  const quotaAnalysis = useSubscriptionQuotaAnalysis({
+    upstreamIds: upstream.id,
+    windows: '5h,7d',
+    source: 'merged',
+    sinceUnixSecs,
+    untilUnixSecs: nowUnixSecs,
+  });
+
+  const chartData = useMemo(() => {
+    if (!quotaSeries.data?.series.length) return { rows: [], markers: [] };
+
+    const series = quotaSeries.data.series;
+    const bucketsByTime = new Map<number, Record<string, any>>();
+    const markers: { ts: number; kind: string }[] = [];
+
+    for (const s of series) {
+      const w = s.window;
+
+      for (const b of s.buckets) {
+        const ts = b.bucket_start_unix_secs;
+        if (!bucketsByTime.has(ts)) {
+          const date = new Date(ts * 1000);
+          const label =
+            range === '7d' || range === '24h'
+              ? `${date.getMonth() + 1}/${date.getDate()} ${date.getHours()}h`
+              : date.toTimeString().slice(0, 5);
+          bucketsByTime.set(ts, { ts: label, unix: ts });
+        }
+        const row = bucketsByTime.get(ts)!;
+        row[w] = b.utilization_last != null ? b.utilization_last * 100 : null;
+      }
+
+      for (const m of s.markers) {
+        if (m.at_unix_secs) {
+          markers.push({ ts: m.at_unix_secs, kind: m.kind });
+        }
+      }
+    }
+
+    const rows = Array.from(bucketsByTime.values()).sort(
+      (a, b) => a.unix - b.unix,
+    );
+    return { rows, markers };
+  }, [quotaSeries.data, range]);
 
   useEffect(() => {
     if (editOpen) {
@@ -388,6 +536,363 @@ function DetailView({
       </header>
 
       <div className="flex-1 overflow-y-auto p-4 md:p-6 pb-8 md:pb-12 space-y-6">
+        <Section title="Subscription Quota">
+          <Card>
+            <CardHeader
+              title="Quota Forecast"
+              action={
+                <div className="flex flex-wrap bg-overlay-2 border border-subtle rounded-sm p-0.5 max-w-full">
+                  {(['1h', '6h', '24h', '7d'] as const).map((r) => (
+                    <button
+                      key={r}
+                      type="button"
+                      onClick={() => setRange(r)}
+                      className={cx(
+                        'px-2.5 h-7 text-xs rounded-sm transition-colors',
+                        r === range
+                          ? 'bg-overlay-6 text-text'
+                          : 'text-text-faint hover:text-text',
+                      )}
+                    >
+                      {r}
+                    </button>
+                  ))}
+                </div>
+              }
+            />
+            <CardBody className="p-3 pt-1">
+              <div className="w-full h-[240px]" style={{ minWidth: 0 }}>
+                {quotaSeries.isLoading ? (
+                  <div className="h-full flex items-center justify-center text-text-faint text-sm">
+                    Loading…
+                  </div>
+                ) : !chartData.rows.length ? (
+                  <EmptyState title="No data in range" />
+                ) : (
+                  <ResponsiveContainer width="100%" height={240} debounce={150}>
+                    <AreaChart
+                      data={chartData.rows}
+                      margin={{ top: 8, right: 24, bottom: 4, left: 0 }}
+                    >
+                      <CartesianGrid stroke="var(--color-border)" />
+                      <XAxis
+                        dataKey="ts"
+                        tick={{
+                          fill: 'var(--color-text-faint)',
+                          fontSize: 10,
+                          fontFamily: 'Geist Mono',
+                        }}
+                        axisLine={false}
+                        tickLine={false}
+                        minTickGap={40}
+                      />
+                      <YAxis
+                        tick={{
+                          fill: 'var(--color-text-faint)',
+                          fontSize: 10,
+                          fontFamily: 'Geist Mono',
+                        }}
+                        tickFormatter={(val) => `${val}%`}
+                        axisLine={false}
+                        tickLine={false}
+                        width={40}
+                        domain={[0, 100]}
+                        allowDataOverflow={false}
+                      />
+                      <Tooltip
+                        cursor={{
+                          stroke: 'var(--color-accent)',
+                          strokeWidth: 1,
+                          strokeOpacity: 0.3,
+                        }}
+                        content={({ active, payload, label }) => {
+                          if (!active || !payload?.length) return null;
+                          return (
+                            <div
+                              style={{
+                                background: 'var(--color-bg-sub)',
+                                border: '1px solid var(--color-border)',
+                                borderRadius: 2,
+                                color: 'var(--color-text)',
+                                fontSize: 11,
+                                fontFamily: 'Geist Mono Variable, monospace',
+                                padding: '6px 10px',
+                                boxShadow: '0 4px 12px rgba(0,0,0,0.18)',
+                                minWidth: 80,
+                              }}
+                            >
+                              <div
+                                style={{
+                                  color: 'var(--color-text-faint)',
+                                  marginBottom: 4,
+                                }}
+                              >
+                                {label}
+                              </div>
+                              {payload.map((p, i) => (
+                                <div
+                                  key={i}
+                                  style={{
+                                    color: 'var(--color-text)',
+                                    padding: '1px 0',
+                                    display: 'flex',
+                                    justifyContent: 'space-between',
+                                    gap: 8,
+                                  }}
+                                >
+                                  <span
+                                    style={{
+                                      color:
+                                        typeof p.color === 'string'
+                                          ? p.color
+                                          : 'var(--color-text)',
+                                    }}
+                                  >
+                                    {String(p.dataKey)}
+                                  </span>
+                                  <span
+                                    style={{
+                                      fontVariantNumeric: 'tabular-nums',
+                                    }}
+                                  >
+                                    {typeof p.value === 'number'
+                                      ? `${p.value.toFixed(1)}%`
+                                      : '—'}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          );
+                        }}
+                      />
+                      <Legend
+                        wrapperStyle={{
+                          fontSize: 11,
+                          fontFamily: 'Geist Mono',
+                          color: 'var(--color-text-muted)',
+                        }}
+                        content={() => (
+                          <div className="flex flex-wrap items-center justify-center gap-4 mt-2">
+                            <div className="flex items-center gap-1.5">
+                              <div
+                                className="w-3 h-0.5"
+                                style={{
+                                  backgroundColor: getUpstreamColor(upstream.id)
+                                    .line5h,
+                                }}
+                              />
+                              <span className="text-[11px] text-text-muted font-mono">
+                                5h
+                              </span>
+                            </div>
+                            <div className="flex items-center gap-1.5">
+                              <div
+                                className="w-3 h-0.5 border-t border-dashed"
+                                style={{
+                                  borderColor: getUpstreamColor(upstream.id)
+                                    .line7d,
+                                }}
+                              />
+                              <span className="text-[11px] text-text-muted font-mono">
+                                7d
+                              </span>
+                            </div>
+                          </div>
+                        )}
+                      />
+                      {chartData.markers.map((m, i) => (
+                        <ReferenceLine
+                          key={`marker-${i}`}
+                          x={chartData.rows.find((r) => r.unix === m.ts)?.ts}
+                          stroke={getUpstreamColor(upstream.id).line5h}
+                          strokeOpacity={0.5}
+                          strokeDasharray="3 3"
+                        />
+                      ))}
+                      <Area
+                        type="stepAfter"
+                        dataKey="7d"
+                        stroke={getUpstreamColor(upstream.id).line7d}
+                        strokeWidth={1.4}
+                        strokeDasharray="3 3"
+                        fill="none"
+                        isAnimationActive={false}
+                        connectNulls={false}
+                      />
+                      <Area
+                        type="stepAfter"
+                        dataKey="5h"
+                        stroke={getUpstreamColor(upstream.id).line5h}
+                        strokeWidth={1.4}
+                        fill="none"
+                        isAnimationActive={false}
+                        connectNulls={false}
+                      />
+                    </AreaChart>
+                  </ResponsiveContainer>
+                )}
+              </div>
+            </CardBody>
+          </Card>
+
+          {(() => {
+            const latest = quotaLatest.data?.upstreams[0];
+            const analysis = quotaAnalysis.data?.upstreams[0];
+            const a5h = analysis?.windows.find((w) => w.window === '5h');
+            const caveats = a5h?.caveats ?? [];
+
+            const formatEta = (secs: number | null | undefined) => {
+              if (secs == null) return '—';
+              if (secs > 86400)
+                return `${Math.floor(secs / 86400)}d ${Math.floor((secs % 86400) / 3600)}h`;
+              if (secs > 3600)
+                return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
+              return `${Math.floor(secs / 60)}m`;
+            };
+
+            return (
+              <div className="space-y-4">
+                {caveats.length > 0 && (
+                  <div className="bg-amber-500/10 border border-amber-500/20 rounded-sm p-3 text-xs text-amber-400 flex flex-col gap-1">
+                    <div className="font-medium flex items-center gap-1.5">
+                      <Info className="w-3.5 h-3.5" />
+                      Analysis Caveats
+                    </div>
+                    <ul className="list-disc list-inside opacity-90 ml-1">
+                      {caveats.map((c, i) => (
+                        <li key={i}>{c}</li>
+                      ))}
+                    </ul>
+                  </div>
+                )}
+
+                <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                  {['5h', '7d', 'overage', '7d_sonnet', '7d_opus'].map((w) => {
+                    const snap = latest?.windows.find((x) => x.window === w);
+                    if (!snap && w !== '5h' && w !== '7d') return null;
+                    return (
+                      <Card key={w}>
+                        <CardBody className="p-3 flex flex-col gap-1.5">
+                          <div className="flex items-center justify-between">
+                            <span className="text-[11px] uppercase tracking-wider text-text-faint">
+                              {w}
+                            </span>
+                            <StatusBadge
+                              tone={
+                                snap?.state === 'fresh'
+                                  ? 'ok'
+                                  : snap?.state === 'stale'
+                                    ? 'warn'
+                                    : 'neutral'
+                              }
+                              label={snap?.state ?? 'missing'}
+                            />
+                          </div>
+                          <div className="text-xl font-medium tabular-nums">
+                            {snap?.utilization != null
+                              ? `${(snap.utilization * 100).toFixed(1)}%`
+                              : '—'}
+                          </div>
+                          <div className="text-[10px] text-text-faint font-mono">
+                            {snap?.resets_at_unix_secs
+                              ? `Resets: ${new Date(snap.resets_at_unix_secs * 1000).toLocaleString()}`
+                              : 'No reset info'}
+                          </div>
+                          {w === 'overage' && snap?.extra_usage_enabled && (
+                            <div className="text-[10px] text-text-faint font-mono mt-1">
+                              Used: ${snap.extra_usage_used_credits?.toFixed(2)}{' '}
+                              / ${snap.extra_usage_monthly_limit?.toFixed(2)}
+                            </div>
+                          )}
+                        </CardBody>
+                      </Card>
+                    );
+                  })}
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <Card>
+                    <CardHeader title="Time to 5h limit" />
+                    <CardBody className="p-3 grid grid-cols-2 gap-4">
+                      <div>
+                        <div className="text-[11px] uppercase tracking-wider text-text-faint mb-1">
+                          Account-wide
+                        </div>
+                        <div className="text-lg font-medium tabular-nums">
+                          {formatEta(
+                            a5h?.actual_account_burn.eta_to_limit_secs,
+                          )}
+                        </div>
+                        <div className="text-[10px] text-text-faint mt-1">
+                          Confidence:{' '}
+                          <span className="text-text">
+                            {a5h?.actual_account_burn.confidence ?? '—'}
+                          </span>
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[11px] uppercase tracking-wider text-text-faint mb-1">
+                          This proxy
+                        </div>
+                        <div className="text-lg font-medium tabular-nums">
+                          {formatEta(
+                            a5h?.proxy_projected_burn.eta_to_limit_secs,
+                          )}
+                        </div>
+                        <div className="text-[10px] text-text-faint mt-1">
+                          Confidence:{' '}
+                          <span className="text-text">
+                            {a5h?.proxy_projected_burn.confidence ?? '—'}
+                          </span>
+                        </div>
+                      </div>
+                    </CardBody>
+                  </Card>
+
+                  <Card>
+                    <CardHeader title="Quota deficit" />
+                    <CardBody className="p-3">
+                      {a5h?.deficit ? (
+                        <div className="flex flex-col gap-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm text-text-faint">
+                              Shortfall
+                            </span>
+                            <span className="font-mono text-amber-400">
+                              {Math.round(
+                                a5h.deficit.shortfall_tokens,
+                              ).toLocaleString()}{' '}
+                              tokens
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm text-text-faint">
+                              Recommended Multiplier
+                            </span>
+                            <span className="font-mono text-amber-400">
+                              {a5h.deficit.recommended_multiplier}x
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-text-faint mt-1">
+                            Confidence:{' '}
+                            <span className="text-text">
+                              {a5h.deficit.confidence}
+                            </span>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="text-sm text-text-faint h-full flex items-center">
+                          No deficit detected or insufficient data.
+                        </div>
+                      )}
+                    </CardBody>
+                  </Card>
+                </div>
+              </div>
+            );
+          })()}
+        </Section>
+
         <Card>
           <CardHeader title="Configuration" />
           <CardBody className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">

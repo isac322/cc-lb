@@ -460,6 +460,53 @@ export function Sparkline({
   );
 }
 
+// ─── QuotaMiniChart ──────────────────────────────────────────────────────────
+export function QuotaMiniChart({
+  data,
+  color5h,
+  color7d,
+}: {
+  data: { i: number; val5h: number | null; val7d: number | null }[];
+  color5h: string;
+  color7d: string;
+}) {
+  return (
+    <div className="w-full" style={{ minWidth: 60, height: 28 }}>
+      <ResponsiveContainer
+        width="100%"
+        height="100%"
+        minWidth={60}
+        minHeight={28}
+      >
+        <AreaChart
+          data={data}
+          margin={{ top: 1, right: 0, bottom: 1, left: 0 }}
+        >
+          <Area
+            type="stepAfter"
+            dataKey="val7d"
+            stroke={color7d}
+            strokeWidth={1.4}
+            strokeDasharray="3 3"
+            fill="none"
+            isAnimationActive={false}
+            connectNulls={false}
+          />
+          <Area
+            type="stepAfter"
+            dataKey="val5h"
+            stroke={color5h}
+            strokeWidth={1.4}
+            fill="none"
+            isAnimationActive={false}
+            connectNulls={false}
+          />
+        </AreaChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
 // ─── Section (used in pages) ─────────────────────────────────────────────────
 export function Section({
   title,
