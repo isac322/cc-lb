@@ -18,6 +18,3 @@ CREATE INDEX IF NOT EXISTS request_events_v1_thread_ts ON request_events_v1 (thr
 CREATE INDEX IF NOT EXISTS request_events_v1_cache_prefix_ts ON request_events_v1 (cache_prefix_hash, ts);
 CREATE INDEX IF NOT EXISTS request_events_v1_cache_state_ts ON request_events_v1 (cache_state, ts);
 
-ALTER TABLE usage_rollups_v1
-    ADD COLUMN IF NOT EXISTS cache_creation_input_tokens BIGINT NOT NULL DEFAULT 0 CHECK (cache_creation_input_tokens >= 0),
-    ADD COLUMN IF NOT EXISTS cache_read_input_tokens BIGINT NOT NULL DEFAULT 0 CHECK (cache_read_input_tokens >= 0);
