@@ -18,7 +18,6 @@ import {
   CardHeader,
   cx,
   EmptyState,
-  Hint,
   KpiTile,
   PageContainer,
   Section,
@@ -103,6 +102,21 @@ function OverviewPage() {
         return nowUnixSecs - 604800;
     }
   }, [range, nowUnixSecs]);
+  // Backend rejects (until - since) / bucket_secs > max_points_per_series * 2.
+  // Default max_points_per_series = 1000, so we target <= 500 points/series
+  // for a 2-window query.
+  const bucketSecsForRange = useMemo(() => {
+    switch (range) {
+      case '1h':
+        return 60;
+      case '6h':
+        return 60;
+      case '24h':
+        return 300;
+      case '7d':
+        return 1800;
+    }
+  }, [range]);
 
   const quotaLatest = useSubscriptionQuotaLatest({
     windows: '5h,7d',
@@ -113,7 +127,7 @@ function OverviewPage() {
     source: 'merged',
     sinceUnixSecs,
     untilUnixSecs: nowUnixSecs,
-    bucketSecs: 300,
+    bucketSecs: bucketSecsForRange,
   });
   const quotaAnalysis = useSubscriptionQuotaAnalysis({
     windows: '5h,7d',
@@ -353,11 +367,17 @@ function OverviewPage() {
                   >
                     <CartesianGrid stroke="var(--color-border)" />
                     <XAxis
-                      dataKey="ts"
+                      dataKey="unix"
                       tick={{
                         fill: 'var(--color-text-faint)',
                         fontSize: 10,
                         fontFamily: 'Geist Mono',
+                      }}
+                      tickFormatter={(val) => {
+                        const d = new Date(val * 1000);
+                        return range === '7d' || range === '24h'
+                          ? `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+                          : `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
                       }}
                       axisLine={false}
                       tickLine={false}
@@ -594,25 +614,38 @@ function OverviewPage() {
                         {formatEta(a5h?.proxy_projected_burn.eta_to_limit_secs)}
                       </span>
                     </div>
-                    {a5h?.deficit && (
-                      <div className="flex items-center gap-1.5">
-                        <span className="text-text-faint">Need:</span>
-                        <span className="font-mono text-amber-400">
-                          {a5h.deficit.recommended_multiplier}x
-                        </span>
-                      </div>
-                    )}
-                    {a5h?.caveats.length ? (
-                      <Hint label={a5h.caveats.join(' • ')}>
-                        <div className="flex items-center gap-1 text-amber-400 cursor-help ml-auto">
-                          <Info className="w-3 h-3" />
-                          <span>Caveats</span>
-                        </div>
-                      </Hint>
-                    ) : null}
+                    <div className="flex items-center gap-1.5">
+                      <span className="text-text-faint">Need:</span>
+                      <span className="font-mono text-amber-400">
+                        {a5h?.deficit
+                          ? `${a5h.deficit.recommended_multiplier}x`
+                          : '—'}
+                      </span>
+                    </div>
                   </div>
                 );
               })}
+            </div>
+          ) : null}
+          {quotaAnalysis.data?.upstreams.some((u) =>
+            u.windows.some((w) => w.caveats.length > 0),
+          ) ? (
+            <div className="mt-3 rounded border border-amber-400/30 bg-amber-400/10 p-3 text-xs text-amber-200">
+              <div className="flex items-center gap-1.5 font-semibold mb-1">
+                <Info className="w-3 h-3" />
+                <span>Analysis Caveats</span>
+              </div>
+              <ul className="list-disc list-inside space-y-0.5">
+                {Array.from(
+                  new Set(
+                    quotaAnalysis.data.upstreams.flatMap((u) =>
+                      u.windows.flatMap((w) => w.caveats),
+                    ),
+                  ),
+                ).map((c, i) => (
+                  <li key={i}>{c}</li>
+                ))}
+              </ul>
             </div>
           ) : null}
         </Card>
