@@ -1,5 +1,6 @@
 #![allow(ambiguous_glob_reexports)]
 
+pub mod anthropic_compatibility_kv;
 pub mod error;
 pub mod plugin_registry;
 pub mod principal;
@@ -9,11 +10,13 @@ pub mod traits;
 pub mod types;
 pub mod upstream;
 pub mod upstream_rate_limit;
+pub mod upstream_subscription_quota;
 pub mod validation;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+pub use anthropic_compatibility_kv::*;
 pub use cc_lb_plugin_wire::augmented_metadata::AugmentedMetadata;
 pub use error::{PluginChainConflictReason, StorageError, StorageResult};
 pub use plugin_registry::*;
@@ -23,6 +26,7 @@ pub use traits::*;
 pub use types::*;
 pub use upstream::*;
 pub use upstream_rate_limit::*;
+pub use upstream_subscription_quota::*;
 pub use uuid::Uuid as UpstreamRecordId;
 pub use validation::validate_identifier;
 
