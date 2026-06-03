@@ -107,6 +107,7 @@ pub fn build_candidates(
                     name: upstream.name.clone(),
                     kind: upstream_kind_for_candidate(upstream.kind),
                     observed_rate_limits,
+                    subscription_quotas: Vec::new(),
                     observed_at_unix_secs,
                 }
             })
