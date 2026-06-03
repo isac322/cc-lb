@@ -17,11 +17,65 @@ impl RequestEventStore for PostgresStorage {
     async fn append_request_event(&self, event: &RequestEvent) -> StorageResult<()> {
         let payload = serde_json::to_vec(event)?;
         sqlx::query(
-            "INSERT INTO request_events_v1 (ts, principal_id, upstream_id, payload, created_at)              VALUES ($1,$2,$3,$4,NOW())",
+            "INSERT INTO request_events_v1 \
+             (ts, principal_id, upstream_id, key_id, model, upstream_name, cache_state, thread_id, message_id, \
+              message_index, message_count, cache_control_block_count, cache_prefix_hash, \
+              input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, \
+              payload, created_at) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW())",
         )
         .bind(unix_secs_to_datetime(event.ts, "request event ts")?)
         .bind(event.principal_id.as_deref())
         .bind(event.upstream_id)
+        .bind(event.key_id.as_deref())
+        .bind(event.model.as_deref())
+        .bind(event.upstream_name.as_deref())
+        .bind(event.cache_state.map(|state| state.as_str()))
+        .bind(event.thread_id.as_deref())
+        .bind(event.message_id.as_deref())
+        .bind(
+            event
+                .message_index
+                .map(|value| u64_to_i64(value, "request event message_index"))
+                .transpose()?,
+        )
+        .bind(
+            event
+                .message_count
+                .map(|value| u64_to_i64(value, "request event message_count"))
+                .transpose()?,
+        )
+        .bind(
+            event
+                .cache_control_block_count
+                .map(|value| u64_to_i64(value, "request event cache_control_block_count"))
+                .transpose()?,
+        )
+        .bind(event.cache_prefix_hash.as_deref())
+        .bind(
+            event
+                .input_tokens
+                .map(|value| u64_to_i64(value, "request event input_tokens"))
+                .transpose()?,
+        )
+        .bind(
+            event
+                .output_tokens
+                .map(|value| u64_to_i64(value, "request event output_tokens"))
+                .transpose()?,
+        )
+        .bind(
+            event
+                .cache_creation_input_tokens
+                .map(|value| u64_to_i64(value, "request event cache_creation_input_tokens"))
+                .transpose()?,
+        )
+        .bind(
+            event
+                .cache_read_input_tokens
+                .map(|value| u64_to_i64(value, "request event cache_read_input_tokens"))
+                .transpose()?,
+        )
         .bind(payload)
         .execute(&self.pool)
         .await

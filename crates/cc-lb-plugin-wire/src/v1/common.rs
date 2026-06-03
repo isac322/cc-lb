@@ -210,6 +210,8 @@ pub enum ObserveEventWire {
         status: u16,
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
+        cache_read_input_tokens: Option<u64>,
         duration_ms: u64,
     },
     Error {

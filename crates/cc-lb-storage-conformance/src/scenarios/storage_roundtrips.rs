@@ -6,7 +6,7 @@ use cc_lb_storage_api::{
     OAuthCredentialStore as _, RequestEventStore as _, StorageError,
     types::{
         AuditEntry, HistoryEntry, HistorySummary, PrincipalLimitIdentityKind, PrincipalLimitKind,
-        PrincipalLimitState, RequestEvent, RequestEventUpstream,
+        PrincipalLimitState, RequestCacheState, RequestEvent, RequestEventUpstream,
     },
 };
 use serde_json::json;
@@ -341,6 +341,16 @@ fn request_events() -> Vec<RequestEvent> {
             output_tokens: Some(34),
             cache_creation_input_tokens: Some(5),
             cache_read_input_tokens: Some(6),
+            cache_state: Some(RequestCacheState::Refresh),
+            thread_id: Some("thread-roundtrip-a".to_owned()),
+            message_id: Some("msg-roundtrip-a".to_owned()),
+            message_index: Some(2),
+            message_count: Some(3),
+            cache_control_block_count: Some(2),
+            cache_control_message_indices: vec![0, 2],
+            cache_prefix_hash: Some(
+                "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
+            ),
             cost_usd_micros: Some(7),
             duration_ms: 89,
             error_code: None,

@@ -251,12 +251,12 @@ impl RelayRuntime {
                 changed = cancel_rx.changed() => {
                     if changed.is_ok() && *cancel_rx.borrow() {
                         batcher.flush(&self.obs);
-                        self.observe_finished(client_disconnected_status(), None, None);
+                        self.observe_finished(client_disconnected_status(), None, None, None, None);
                         break;
                     }
                     if changed.is_err() {
                         batcher.flush(&self.obs);
-                        self.observe_finished(client_disconnected_status(), None, None);
+                        self.observe_finished(client_disconnected_status(), None, None, None, None);
                         break;
                     }
                 }
@@ -270,7 +270,7 @@ impl RelayRuntime {
                             if let Ok(data) = frame.into_data() {
                                 buffer.extend_from_slice(&data);
                                 if self.drain_complete_events(&mut buffer, &tx, &mut batcher, &mut deadline, &mut usage).await.is_err() {
-                                    self.observe_finished(client_disconnected_status(), None, None);
+                                    self.observe_finished(client_disconnected_status(), None, None, None, None);
                                     break;
                                 }
                             }
@@ -279,13 +279,25 @@ impl RelayRuntime {
                             batcher.flush(&self.obs);
                             let _sent = tx.send(self.error_frame_for_unknown_status(&source.to_string())).await;
                             self.observe_error("upstream_read_failed", &source.to_string());
-                            self.observe_finished(StatusCode::BAD_GATEWAY, Some(usage.input_tokens), Some(usage.output_tokens));
+                            self.observe_finished(
+                                StatusCode::BAD_GATEWAY,
+                                Some(usage.input_tokens),
+                                Some(usage.output_tokens),
+                                Some(usage.cache_creation_input_tokens),
+                                Some(usage.cache_read_input_tokens),
+                            );
                             break;
                         }
                         None => {
                             batcher.flush(&self.obs);
                             self.finish_usage(&usage).await;
-                            self.observe_finished(StatusCode::OK, Some(usage.input_tokens), Some(usage.output_tokens));
+                            self.observe_finished(
+                                StatusCode::OK,
+                                Some(usage.input_tokens),
+                                Some(usage.output_tokens),
+                                Some(usage.cache_creation_input_tokens),
+                                Some(usage.cache_read_input_tokens),
+                            );
                             break;
                         }
                     }
@@ -402,11 +414,15 @@ impl RelayRuntime {
         status: StatusCode,
         input_tokens: Option<u64>,
         output_tokens: Option<u64>,
+        cache_creation_input_tokens: Option<u64>,
+        cache_read_input_tokens: Option<u64>,
     ) {
         let _result = self.obs.observe(ObserveEvent::RequestFinished {
             status,
             input_tokens,
             output_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
             duration_ms: self
                 .started
                 .elapsed()
