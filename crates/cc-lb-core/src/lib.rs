@@ -85,6 +85,10 @@ pub use lifecycle::{
     build_candidates, observe_rate_limits,
 };
 #[cfg(not(loom))]
+pub use rate_limit_headers::{
+    UnifiedQuotaObservation, normalize_utilization_fraction, parse_anthropic_unified_headers,
+};
+#[cfg(not(loom))]
 pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};
 #[cfg(not(loom))]
 pub use sse_relay::{RelayError, SseBatchConfig, SseRelay, StreamingUsage};
