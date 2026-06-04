@@ -90,8 +90,6 @@ jobs:
       - name: Install wasm targets for pinned toolchain
         run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
       - uses: ./.github/actions/setup-rust-cache
-        with:
-          sccache-restore-prefix: nextest
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest

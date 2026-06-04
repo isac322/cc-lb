@@ -10,10 +10,6 @@ inputs:
     description: Whether Swatinem/rust-cache should restore/save target directories.
     required: false
     default: "true"
-  sccache-restore-prefix:
-    description: Optional github.job prefix to prefer before the broad sccache fallback.
-    required: false
-    default: "unused"
 
 runs:
   using: composite
@@ -31,7 +27,6 @@ runs:
         key: sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
         restore-keys: |
           sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-
-          sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ inputs.sccache-restore-prefix }}-
           sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
           sccache-${{ runner.os }}-${{ runner.arch }}-
 
