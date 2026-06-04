@@ -53,6 +53,30 @@ jobs:
             sccache --show-stats
           fi
 
+  nested-cargo-tests:
+    runs-on: oracle4-cc-lb
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install wasm target for admin plugin fixtures
+        run: rustup target add wasm32-wasip1
+      - uses: ./.github/actions/setup-rust-cache
+      - name: Run compile-fail and wasm upload tests
+        run: |
+          cargo test -p cc-lb-plugin-api external_struct_literals_are_rejected -- --nocapture
+          cargo test -p cc-lb-admin --test v1_plugins_wasm
+      - name: Show sccache stats
+        if: always()
+        run: |
+          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+            "$SCCACHE_PATH" --show-stats
+          elif command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats
+          fi
+
   nextest:
     runs-on: oracle4-cc-lb
     env:
@@ -69,33 +93,7 @@ jobs:
           tool: cargo-nextest
       - name: Pre-build handshake spike wasm artifact
         run: cargo build -p plugin-handshake-spike --target wasm32-unknown-unknown --release
-      - run: cargo nextest run --workspace --exclude cc-lb-loadgen --partition count:1/2
-      - name: Show sccache stats
-        if: always()
-        run: |
-          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
-            "$SCCACHE_PATH" --show-stats
-          elif command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats
-          fi
-
-  nextest-rest:
-    runs-on: oracle4-cc-lb
-    env:
-      CARGO_BUILD_JOBS: "2"
-      CARGO_PROFILE_TEST_DEBUG: line-tables-only
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install wasm targets for pinned toolchain
-        run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
-      - uses: ./.github/actions/setup-rust-cache
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-      - name: Pre-build handshake spike wasm artifact
-        run: cargo build -p plugin-handshake-spike --target wasm32-unknown-unknown --release
-      - run: cargo nextest run --workspace --exclude cc-lb-loadgen --partition count:2/2
+      - run: cargo nextest run --workspace --exclude cc-lb-loadgen -E 'not binary(v1_plugins_wasm) and not test(external_struct_literals_are_rejected)'
       - name: Show sccache stats
         if: always()
         run: |
