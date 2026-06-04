@@ -53,62 +53,11 @@ jobs:
             sccache --show-stats
           fi
 
-  nextest-build:
-    name: nextest build
+  nextest-partition:
+    name: nextest partition ${{ matrix.partition }}/4
     runs-on: oracle4-cc-lb
     env:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
-    steps:
-      - uses: actions/checkout@v6
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Install WASI target for pinned toolchain
-        run: rustup target add wasm32-wasip1
-      - name: Install wasm32-unknown-unknown for handshake spike fixture
-        run: rustup target add wasm32-unknown-unknown
-      - uses: ./.github/actions/setup-rust-cache
-        with:
-          rust-cache-key: nextest-build
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest
-      - name: Pre-build wasm test fixtures
-        run: |
-          cargo build -p plugin-handshake-spike --target wasm32-unknown-unknown --release
-          cargo build -p extism-echo-plugin --target wasm32-wasip1 --release
-      - name: Pack wasm test fixtures
-        run: |
-          tar -cf wasm-test-fixtures.tar \
-            target/wasm32-unknown-unknown/release/plugin_handshake_spike.wasm \
-            target/wasm32-wasip1/release/extism_echo_plugin.wasm
-      - name: Build nextest archive
-        run: cargo nextest archive --workspace --exclude cc-lb-loadgen --archive-file nextest-archive.tar.zst
-      - name: Upload nextest archive
-        uses: actions/upload-artifact@v7
-        with:
-          name: nextest-archive
-          path: nextest-archive.tar.zst
-          if-no-files-found: error
-          retention-days: 1
-      - name: Upload wasm test fixtures
-        uses: actions/upload-artifact@v7
-        with:
-          name: wasm-test-fixtures
-          path: wasm-test-fixtures.tar
-          if-no-files-found: error
-          retention-days: 1
-      - name: Show sccache stats
-        if: always()
-        run: |
-          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
-            "$SCCACHE_PATH" --show-stats
-          elif command -v sccache >/dev/null 2>&1; then
-            sccache --show-stats
-          fi
-
-  nextest-partition:
-    name: nextest partition ${{ matrix.partition }}/4
-    needs: nextest-build
-    runs-on: oracle4-cc-lb
     strategy:
       fail-fast: false
       matrix:
@@ -123,23 +72,23 @@ jobs:
       - uses: ./.github/actions/setup-rust-cache
         with:
           rust-cache-key: nextest-partition-${{ matrix.partition }}
-      - uses: actions/download-artifact@v7
-        with:
-          name: nextest-archive
-      - uses: actions/download-artifact@v7
-        with:
-          name: wasm-test-fixtures
-      - name: Unpack wasm test fixtures
-        run: tar -xf wasm-test-fixtures.tar
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - name: Run nextest partition
+      - name: Pre-build wasm test fixtures
         run: |
-          cargo nextest run \
-            --archive-file nextest-archive.tar.zst \
-            --workspace-remap "$GITHUB_WORKSPACE" \
-            --partition count:${{ matrix.partition }}/4
+          cargo build -p plugin-handshake-spike --target wasm32-unknown-unknown --release
+          cargo build -p extism-echo-plugin --target wasm32-wasip1 --release
+      - name: Run nextest partition
+        run: cargo nextest run --workspace --exclude cc-lb-loadgen --partition count:${{ matrix.partition }}/4
+      - name: Show sccache stats
+        if: always()
+        run: |
+          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+            "$SCCACHE_PATH" --show-stats
+          elif command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats
+          fi
 
   nextest:
     needs: nextest-partition
