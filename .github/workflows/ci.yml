@@ -67,9 +67,13 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - name: Pre-build handshake spike wasm artifact
-        run: cargo build -p plugin-handshake-spike --target wasm32-unknown-unknown --release
-      - run: cargo nextest run --workspace --exclude cc-lb-loadgen
+      - name: Pre-build wasm fixture artifacts
+        run: |
+          cargo build -p plugin-handshake-spike --target wasm32-unknown-unknown --release
+          cargo build -p extism-echo-plugin --target wasm32-wasip1 --release
+      - name: Run compile-fail contract test outside nextest concurrency
+        run: cargo test -p cc-lb-plugin-api --test consume_pattern external_struct_literals_are_rejected -- --exact
+      - run: cargo nextest run --workspace --exclude cc-lb-loadgen -- --skip external_struct_literals_are_rejected
       - name: Show sccache stats
         if: always()
         run: |
