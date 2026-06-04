@@ -157,7 +157,7 @@ pub fn parse_anthropic_unified_headers(headers: &HeaderMap) -> Vec<UnifiedQuotaO
         match field {
             UnifiedQuotaField::Utilization => {
                 if let Some(parsed) = parse_f64(value) {
-                    partial.utilization = Some(normalize_utilization_fraction(parsed));
+                    partial.utilization = Some(clamp_utilization_fraction(parsed));
                 }
             }
             UnifiedQuotaField::Reset => {
@@ -194,15 +194,12 @@ pub fn parse_anthropic_unified_headers(headers: &HeaderMap) -> Vec<UnifiedQuotaO
         .collect()
 }
 
-/// CATEGORY-3 ALGORITHM: Anthropic has emitted utilization as both fractions and percentages; values above 10 and at most 100 are treated as percentages, values above 1 and at most 10 are saturated to full utilization, and values at or below 1 are already fractional.
-pub fn normalize_utilization_fraction(value: f64) -> f64 {
-    if value > 10.0 && value <= 100.0 {
-        value / 100.0
-    } else if value > 1.0 {
-        1.0
-    } else {
-        value
-    }
+pub fn clamp_utilization_fraction(value: f64) -> f64 {
+    value.clamp(0.0, 1.0)
+}
+
+pub fn percent_to_utilization_fraction(value: f64) -> f64 {
+    clamp_utilization_fraction(value / 100.0)
 }
 
 pub(crate) fn derive_limit_identity(principal: &Principal, headers: &HeaderMap) -> LimitIdentity {
@@ -314,12 +311,9 @@ fn parse_reset(value: &str) -> Option<String> {
 }
 
 fn parse_unified_header_name(name: &str) -> Option<(SubscriptionQuotaWindow, UnifiedQuotaField)> {
-    let suffix = name.strip_prefix(HEADER_PREFIX)?;
-    if let Some(field) = suffix
-        .strip_prefix("unified-")
-        .and_then(parse_unified_field)
-    {
-        return Some((SubscriptionQuotaWindow::Unified, field));
+    let suffix = name.strip_prefix(HEADER_PREFIX)?.strip_prefix("unified-")?;
+    if let Some(field) = suffix.strip_prefix("5h-").and_then(parse_unified_field) {
+        return Some((SubscriptionQuotaWindow::FiveHour, field));
     }
     if let Some(field) = suffix
         .strip_prefix("7d-sonnet-")
@@ -333,9 +327,6 @@ fn parse_unified_header_name(name: &str) -> Option<(SubscriptionQuotaWindow, Uni
     {
         return Some((SubscriptionQuotaWindow::SevenDayOpus, field));
     }
-    if let Some(field) = suffix.strip_prefix("5h-").and_then(parse_unified_field) {
-        return Some((SubscriptionQuotaWindow::FiveHour, field));
-    }
     if let Some(field) = suffix.strip_prefix("7d-").and_then(parse_unified_field) {
         return Some((SubscriptionQuotaWindow::SevenDay, field));
     }
@@ -345,7 +336,7 @@ fn parse_unified_header_name(name: &str) -> Option<(SubscriptionQuotaWindow, Uni
     {
         return Some((SubscriptionQuotaWindow::Overage, field));
     }
-    None
+    parse_unified_field(suffix).map(|field| (SubscriptionQuotaWindow::Unified, field))
 }
 
 fn parse_unified_field(value: &str) -> Option<UnifiedQuotaField> {
@@ -607,7 +598,7 @@ mod tests {
     #[test]
     fn unified_five_hour_utilization_emits_five_hour_window() {
         let observations = parse_anthropic_unified_headers(&headers(&[(
-            "anthropic-ratelimit-5h-utilization",
+            "anthropic-ratelimit-unified-5h-utilization",
             "0.42",
         )]));
 
@@ -618,7 +609,7 @@ mod tests {
     #[test]
     fn unified_five_hour_status_uses_storage_status_string() {
         let observations = parse_anthropic_unified_headers(&headers(&[(
-            "anthropic-ratelimit-5h-status",
+            "anthropic-ratelimit-unified-5h-status",
             "allowed_warning",
         )]));
 
@@ -631,7 +622,7 @@ mod tests {
     #[test]
     fn unified_five_hour_reset_uses_numeric_only() {
         let observations = parse_anthropic_unified_headers(&headers(&[(
-            "anthropic-ratelimit-5h-reset",
+            "anthropic-ratelimit-unified-5h-reset",
             "1700000001",
         )]));
 
@@ -641,7 +632,7 @@ mod tests {
     #[test]
     fn unified_five_hour_surpassed_threshold_parses_bool() {
         let observations = parse_anthropic_unified_headers(&headers(&[(
-            "anthropic-ratelimit-5h-surpassed-threshold",
+            "anthropic-ratelimit-unified-5h-surpassed-threshold",
             "true",
         )]));
 
@@ -651,7 +642,7 @@ mod tests {
     #[test]
     fn unified_generic_seven_day_emits_generic_window() {
         let observations = parse_anthropic_unified_headers(&headers(&[(
-            "anthropic-ratelimit-7d-status",
+            "anthropic-ratelimit-unified-7d-status",
             "rejected",
         )]));
 
@@ -665,7 +656,7 @@ mod tests {
     #[test]
     fn unified_seven_day_sonnet_does_not_parse_as_generic_seven_day() {
         let observations = parse_anthropic_unified_headers(&headers(&[(
-            "anthropic-ratelimit-7d-sonnet-status",
+            "anthropic-ratelimit-unified-7d-sonnet-status",
             "allowed",
         )]));
 
@@ -679,7 +670,7 @@ mod tests {
     #[test]
     fn unified_seven_day_opus_emits_opus_window() {
         let observations = parse_anthropic_unified_headers(&headers(&[(
-            "anthropic-ratelimit-7d-opus-status",
+            "anthropic-ratelimit-unified-7d-opus-status",
             "allowed_warning",
         )]));
 
@@ -696,10 +687,10 @@ mod tests {
     #[test]
     fn unified_overage_status_reset_and_disabled_reason_emit_overage_window() {
         let observations = parse_anthropic_unified_headers(&headers(&[
-            ("anthropic-ratelimit-overage-status", "rejected"),
-            ("anthropic-ratelimit-overage-reset", "1700000002"),
+            ("anthropic-ratelimit-unified-overage-status", "rejected"),
+            ("anthropic-ratelimit-unified-overage-reset", "1700000002"),
             (
-                "anthropic-ratelimit-overage-disabled-reason",
+                "anthropic-ratelimit-unified-overage-disabled-reason",
                 "quota exhausted",
             ),
         ]));
@@ -720,11 +711,11 @@ mod tests {
     fn unified_all_window_prefixes_get_own_rows() {
         let observations = parse_anthropic_unified_headers(&headers(&[
             ("anthropic-ratelimit-unified-status", "allowed"),
-            ("anthropic-ratelimit-5h-status", "allowed"),
-            ("anthropic-ratelimit-7d-status", "allowed"),
-            ("anthropic-ratelimit-7d-sonnet-status", "allowed"),
-            ("anthropic-ratelimit-7d-opus-status", "allowed"),
-            ("anthropic-ratelimit-overage-status", "allowed"),
+            ("anthropic-ratelimit-unified-5h-status", "allowed"),
+            ("anthropic-ratelimit-unified-7d-status", "allowed"),
+            ("anthropic-ratelimit-unified-7d-sonnet-status", "allowed"),
+            ("anthropic-ratelimit-unified-7d-opus-status", "allowed"),
+            ("anthropic-ratelimit-unified-overage-status", "allowed"),
         ]));
 
         let windows = observations
@@ -743,8 +734,11 @@ mod tests {
     #[test]
     fn unified_malformed_reset_becomes_none_but_status_keeps_row() {
         let observations = parse_anthropic_unified_headers(&headers(&[
-            ("anthropic-ratelimit-7d-reset", "2026-05-20T00:00:00Z"),
-            ("anthropic-ratelimit-7d-status", "allowed"),
+            (
+                "anthropic-ratelimit-unified-7d-reset",
+                "2026-05-20T00:00:00Z",
+            ),
+            ("anthropic-ratelimit-unified-7d-status", "allowed"),
         ]));
 
         assert_eq!(observations.len(), 1);
@@ -758,8 +752,8 @@ mod tests {
     #[test]
     fn unified_malformed_utilization_becomes_none_but_status_keeps_row() {
         let observations = parse_anthropic_unified_headers(&headers(&[
-            ("anthropic-ratelimit-7d-sonnet-utilization", "many"),
-            ("anthropic-ratelimit-7d-sonnet-status", "allowed"),
+            ("anthropic-ratelimit-unified-7d-sonnet-utilization", "many"),
+            ("anthropic-ratelimit-unified-7d-sonnet-status", "allowed"),
         ]));
 
         assert_eq!(observations.len(), 1);
@@ -773,8 +767,11 @@ mod tests {
     #[test]
     fn unified_malformed_status_becomes_none_but_reset_keeps_row() {
         let observations = parse_anthropic_unified_headers(&headers(&[
-            ("anthropic-ratelimit-7d-opus-status", "almost_allowed"),
-            ("anthropic-ratelimit-7d-opus-reset", "1700000003"),
+            (
+                "anthropic-ratelimit-unified-7d-opus-status",
+                "almost_allowed",
+            ),
+            ("anthropic-ratelimit-unified-7d-opus-reset", "1700000003"),
         ]));
 
         assert_eq!(observations.len(), 1);
@@ -785,8 +782,8 @@ mod tests {
     #[test]
     fn unified_malformed_surpassed_threshold_becomes_none_but_status_keeps_row() {
         let observations = parse_anthropic_unified_headers(&headers(&[
-            ("anthropic-ratelimit-5h-surpassed-threshold", "yes"),
-            ("anthropic-ratelimit-5h-status", "allowed"),
+            ("anthropic-ratelimit-unified-5h-surpassed-threshold", "yes"),
+            ("anthropic-ratelimit-unified-5h-status", "allowed"),
         ]));
 
         assert_eq!(observations.len(), 1);
@@ -798,19 +795,81 @@ mod tests {
     }
 
     #[test]
-    fn utilization_percent_above_ten_divides_by_one_hundred() {
-        assert_eq!(normalize_utilization_fraction(42.0), 0.42);
+    fn live_unified_headers_extract_all_observed_windows() {
+        let observations = parse_anthropic_unified_headers(&headers(&[
+            ("anthropic-ratelimit-unified-5h-utilization", "0.10"),
+            ("anthropic-ratelimit-unified-5h-status", "allowed_warning"),
+            ("anthropic-ratelimit-unified-5h-reset", "1800000001"),
+            ("anthropic-ratelimit-unified-7d-utilization", "0.25"),
+            ("anthropic-ratelimit-unified-7d-status", "allowed"),
+            ("anthropic-ratelimit-unified-7d-reset", "1800000002"),
+            ("anthropic-ratelimit-unified-overage-status", "rejected"),
+            (
+                "anthropic-ratelimit-unified-overage-disabled-reason",
+                "quota exhausted",
+            ),
+            ("anthropic-ratelimit-unified-status", "allowed"),
+            ("anthropic-ratelimit-unified-reset", "1800000000"),
+            (
+                "anthropic-ratelimit-unified-representative-claim",
+                "org:claim",
+            ),
+            ("anthropic-ratelimit-unified-fallback-percentage", "0.5"),
+        ]));
+
+        assert_eq!(observations.len(), 4);
+        assert_eq!(observations[0].window, SubscriptionQuotaWindow::Unified);
+        assert_eq!(
+            observations[0].status,
+            Some(SubscriptionQuotaStatus::Allowed)
+        );
+        assert_eq!(observations[0].resets_at_unix_secs, Some(1_800_000_000));
+        assert_eq!(
+            observations[0].representative_claim.as_deref(),
+            Some("org:claim")
+        );
+        assert_eq!(observations[1].window, SubscriptionQuotaWindow::FiveHour);
+        assert_eq!(observations[1].utilization, Some(0.10));
+        assert_eq!(
+            observations[1].status,
+            Some(SubscriptionQuotaStatus::AllowedWarning)
+        );
+        assert_eq!(observations[1].resets_at_unix_secs, Some(1_800_000_001));
+        assert_eq!(observations[2].window, SubscriptionQuotaWindow::SevenDay);
+        assert_eq!(observations[2].utilization, Some(0.25));
+        assert_eq!(
+            observations[2].status,
+            Some(SubscriptionQuotaStatus::Allowed)
+        );
+        assert_eq!(observations[2].resets_at_unix_secs, Some(1_800_000_002));
+        assert_eq!(observations[3].window, SubscriptionQuotaWindow::Overage);
+        assert_eq!(
+            observations[3].status,
+            Some(SubscriptionQuotaStatus::Rejected)
+        );
+        assert_eq!(
+            observations[3].disabled_reason.as_deref(),
+            Some("quota exhausted")
+        );
     }
 
     #[test]
-    fn utilization_between_one_and_ten_clamps_to_one() {
-        assert_eq!(normalize_utilization_fraction(2.5), 1.0);
+    fn utilization_fraction_inputs_are_clamped() {
+        assert_eq!(clamp_utilization_fraction(0.0), 0.0);
+        assert_eq!(clamp_utilization_fraction(0.5), 0.5);
+        assert_eq!(clamp_utilization_fraction(1.0), 1.0);
+        assert_eq!(clamp_utilization_fraction(1.5), 1.0);
+        assert_eq!(clamp_utilization_fraction(-0.5), 0.0);
     }
 
     #[test]
-    fn utilization_at_or_below_one_is_preserved() {
-        assert_eq!(normalize_utilization_fraction(0.75), 0.75);
-        assert_eq!(normalize_utilization_fraction(1.0), 1.0);
+    fn utilization_percent_inputs_are_divided_and_clamped() {
+        assert_eq!(percent_to_utilization_fraction(0.0), 0.0);
+        assert_eq!(percent_to_utilization_fraction(10.0), 0.10);
+        assert_eq!(percent_to_utilization_fraction(25.0), 0.25);
+        assert_eq!(percent_to_utilization_fraction(100.0), 1.0);
+        assert_eq!(percent_to_utilization_fraction(125.0), 1.0);
+        assert_eq!(percent_to_utilization_fraction(-10.0), 0.0);
     }
 
     fn headers(pairs: &[(&str, &str)]) -> HeaderMap {
