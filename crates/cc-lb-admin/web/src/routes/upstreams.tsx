@@ -50,7 +50,6 @@ import {
   useDeleteUpstream,
   useOAuthComplete,
   useOAuthStart,
-  useOAuthStatus,
   usePrincipalNameMap,
   useRecentEvents,
   useStatus,
@@ -59,6 +58,7 @@ import {
   useSubscriptionQuotaSeries,
   useToggleUpstream,
   useUpdateUpstream,
+  useUpstreamOAuthStatus,
   useUpstreams,
 } from '../lib/queries';
 
@@ -349,7 +349,9 @@ function DetailView({
   const update = useUpdateUpstream();
   const oauthStart = useOAuthStart();
   const oauthComplete = useOAuthComplete();
-  const oauthStatusQ = useOAuthStatus();
+  const upstreamOAuthQ = useUpstreamOAuthStatus(
+    upstream.kind === 'anthropic_oauth' ? upstream.id : null,
+  );
   const statusQ = useStatus();
   const principalNameMap = usePrincipalNameMap();
   const upstreamRuntimeStatus = useMemo(
@@ -954,30 +956,22 @@ function DetailView({
 
         {upstream.kind === 'anthropic_oauth'
           ? (() => {
-              const principalEntry = (
-                oauthStatusQ.data?.credentials ?? []
-              ).find((c) => c.principal_id === upstream.id);
+              const principalEntry = upstreamOAuthQ.data?.has_credentials
+                ? upstreamOAuthQ.data
+                : null;
               const runtimeStatus = upstreamRuntimeStatus?.status;
-              const runtimeError =
-                upstreamRuntimeStatus?.last_apply_error ?? null;
-              const hasBoundToken = runtimeStatus === 'active';
-              const badge: OAuthBadge = !upstreamRuntimeStatus
-                ? { tone: 'neutral', label: 'Unknown' }
-                : runtimeStatus === 'error'
-                  ? { tone: 'danger', label: 'No credentials' }
-                  : hasBoundToken
-                    ? principalEntry
-                      ? oauthBadge(principalEntry)
-                      : { tone: 'ok', label: 'Connected' }
-                    : { tone: 'neutral', label: 'Pending' };
+              const hasBoundToken = Boolean(principalEntry);
+              const badge: OAuthBadge = upstreamOAuthQ.isLoading
+                ? { tone: 'neutral', label: 'Loading' }
+                : principalEntry
+                  ? oauthBadge(principalEntry)
+                  : { tone: 'neutral', label: 'Not connected' };
               return (
                 <Card>
                   <CardHeader
                     title="OAuth Status"
                     subtitle={
-                      hasBoundToken
-                        ? 'Bound on this upstream'
-                        : (runtimeError ?? 'Not connected')
+                      hasBoundToken ? 'Bound on this upstream' : 'Not connected'
                     }
                     action={
                       <Button
@@ -1009,8 +1003,7 @@ function DetailView({
                       <div className="flex flex-wrap items-center gap-3">
                         <StatusBadge tone={badge.tone} label={badge.label} />
                         <p className="text-xs text-text-faint">
-                          {runtimeError ??
-                            'Run "Connect via OAuth" to authorize this upstream.'}
+                          Run "Connect via OAuth" to authorize this upstream.
                         </p>
                       </div>
                     ) : (
@@ -1023,7 +1016,7 @@ function DetailView({
                         </div>
                         {principalEntry ? (
                           <>
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                               <div>
                                 <div className="text-[11px] text-text-faint uppercase tracking-wider">
                                   Expires
@@ -1055,23 +1048,6 @@ function DetailView({
                                   )}
                                 </div>
                               </div>
-                              <div>
-                                <div className="text-[11px] text-text-faint uppercase tracking-wider">
-                                  Last update
-                                </div>
-                                <div className="font-mono mt-0.5">
-                                  <RelativeTime
-                                    ts={
-                                      principalEntry.last_updated_unix_secs
-                                        ? new Date(
-                                            principalEntry.last_updated_unix_secs *
-                                              1000,
-                                          )
-                                        : null
-                                    }
-                                  />
-                                </div>
-                              </div>
                             </div>
                             {principalEntry.scopes.length ? (
                               <div>
@@ -1086,9 +1062,8 @@ function DetailView({
                           </>
                         ) : (
                           <p className="text-xs text-text-faint">
-                            Token is bound on the upstream record. Per-token
-                            expiry and scope details are not surfaced on this
-                            endpoint yet.
+                            Token is bound on the upstream but no credential
+                            details are available right now.
                           </p>
                         )}
                       </div>
