@@ -1984,33 +1984,25 @@ fn cache_prefix_hash(
     if let Some(value) = request.get("model") {
         prefix.insert("model".to_owned(), value.clone());
     }
-    if matches!(
-        source,
-        RequestCacheBreakpointSource::Tools
-            | RequestCacheBreakpointSource::System
-            | RequestCacheBreakpointSource::Message
-    ) {
-        if let Some(value) = request.get("tools") {
-            let value = if source == RequestCacheBreakpointSource::Tools {
-                truncate_value_at_path(value, &relative_cache_path(path, "tools"))
-            } else {
-                value.clone()
-            };
-            prefix.insert("tools".to_owned(), value);
-        }
+    if let Some(value) = request.get("tools") {
+        let value = if source == RequestCacheBreakpointSource::Tools {
+            truncate_value_at_path(value, &relative_cache_path(path, "tools"))
+        } else {
+            value.clone()
+        };
+        prefix.insert("tools".to_owned(), value);
     }
     if matches!(
         source,
         RequestCacheBreakpointSource::System | RequestCacheBreakpointSource::Message
-    ) {
-        if let Some(value) = request.get("system") {
-            let value = if source == RequestCacheBreakpointSource::System {
-                truncate_value_at_path(value, &relative_cache_path(path, "system"))
-            } else {
-                value.clone()
-            };
-            prefix.insert("system".to_owned(), value);
-        }
+    ) && let Some(value) = request.get("system")
+    {
+        let value = if source == RequestCacheBreakpointSource::System {
+            truncate_value_at_path(value, &relative_cache_path(path, "system"))
+        } else {
+            value.clone()
+        };
+        prefix.insert("system".to_owned(), value);
     }
     if let (Some(messages), Some(_)) = (request.get("messages"), message_index) {
         prefix.insert(

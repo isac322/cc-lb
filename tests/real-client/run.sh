@@ -286,8 +286,8 @@ case "$client" in
       XDG_DATA_HOME="$TMP_DIR/xdg-data" \
       ANTHROPIC_API_KEY="$API_KEY" \
       ANTHROPIC_BASE_URL="http://127.0.0.1:$proxy_port/v1" \
-      ANTHROPIC_MODEL=claude-3-5-sonnet-20241022 \
-      "$bin" run --pure --dangerously-skip-permissions --model anthropic/claude-3-5-sonnet-20241022 "$PROMPT" > "$stdout_file" 2> "$stderr_file"
+      ANTHROPIC_MODEL=claude-sonnet-4-5 \
+      "$bin" run --pure --dangerously-skip-permissions --model anthropic/claude-sonnet-4-5 "$PROMPT" > "$stdout_file" 2> "$stderr_file"
     code=$?
     ;;
   pi)
