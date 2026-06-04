@@ -9,7 +9,7 @@ use cc_lb_core::anthropic_compat::{
 };
 use cc_lb_core::{
     EstimatorConfig, PollScheduleEstimator, ReplicaIdentity, SubscriptionQuotaSink,
-    ThrottleObservation, normalize_utilization_fraction,
+    ThrottleObservation, percent_to_utilization_fraction,
 };
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -370,7 +370,7 @@ fn usage_to_records(
                 upstream_id,
                 window,
                 observed_at_unix_millis,
-                usage.utilization.map(normalize_utilization_fraction),
+                usage.utilization.map(percent_to_utilization_fraction),
                 usage.resets_at.and_then(resets_at_unix_secs),
                 None,
             ));
@@ -489,11 +489,15 @@ mod tests {
     #[test]
     fn percent_utilization_is_normalized() {
         let usage: UsageResponse = serde_json::from_str(
-            r#"{"seven_day_sonnet":{"utilization":42,"resets_at":1800000000}}"#,
+            r#"{"five_hour":{"utilization":10},"seven_day":{"utilization":25},"seven_day_sonnet":{"utilization":2},"seven_day_opus":{"utilization":100}}"#,
         )
         .expect("usage parses");
         let records = usage_to_records(Uuid::nil(), usage, 1000);
-        assert_eq!(records[0].utilization, Some(0.42));
-        assert_eq!(normalize_utilization_fraction(42.0), 0.42);
+        assert_eq!(records[0].utilization, Some(0.10));
+        assert_eq!(records[1].utilization, Some(0.25));
+        assert_eq!(records[2].utilization, Some(0.02));
+        assert_eq!(records[3].utilization, Some(1.0));
+        assert_eq!(percent_to_utilization_fraction(125.0), 1.0);
+        assert_eq!(percent_to_utilization_fraction(-10.0), 0.0);
     }
 }

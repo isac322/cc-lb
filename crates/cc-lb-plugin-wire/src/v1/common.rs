@@ -83,13 +83,49 @@ impl RateLimitObservationWire {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+#[serde(deny_unknown_fields)]
+pub struct SubscriptionQuotaCandidateSnapshotWire {
+    pub window: String,
+    pub source: String,
+    pub data_state: String,
+    pub utilization: Option<f64>,
+    pub status: Option<String>,
+    pub resets_at_unix_secs: Option<u64>,
+    pub surpassed_threshold: Option<bool>,
+    pub representative_claim: Option<String>,
+    pub disabled_reason: Option<String>,
+    pub observed_at_unix_millis: Option<u64>,
+    pub age_secs: Option<u64>,
+}
+
+impl SubscriptionQuotaCandidateSnapshotWire {
+    pub fn dry_run_sample() -> Self {
+        Self {
+            window: String::from("5h"),
+            source: String::from("missing"),
+            data_state: String::from("missing"),
+            utilization: None,
+            status: None,
+            resets_at_unix_secs: None,
+            surpassed_threshold: None,
+            representative_claim: None,
+            disabled_reason: None,
+            observed_at_unix_millis: None,
+            age_secs: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct CandidateWire {
     pub upstream_id: String,
     pub name: String,
     pub kind: String,
     pub observed_rate_limits: Vec<RateLimitObservationWire>,
+    pub subscription_quotas: Vec<SubscriptionQuotaCandidateSnapshotWire>,
     pub observed_at_unix_secs: u64,
 }
 
@@ -100,6 +136,7 @@ impl CandidateWire {
             name: String::from("dry-run-upstream"),
             kind: String::from("anthropic_api_key"),
             observed_rate_limits: Vec::new(),
+            subscription_quotas: Vec::new(),
             observed_at_unix_secs: 0,
         }
     }
