@@ -242,6 +242,7 @@ mod tests {
             name: upstream_id.to_string(),
             kind: "anthropic_api_key".to_string(),
             observed_rate_limits: Vec::new(),
+            subscription_quotas: Vec::new(),
             observed_at_unix_secs: 0,
         }
     }

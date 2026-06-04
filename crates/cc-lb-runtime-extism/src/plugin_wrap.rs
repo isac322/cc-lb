@@ -10,7 +10,8 @@ use bytes::Bytes;
 use cc_lb_plugin_api::{
     DialectError, Principal, RequestContext, RetryDecision, RouteDecision, RouteError,
     RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError,
-    SignerFactory, SigningCapability, Upstream, UpstreamCandidate, UpstreamDialect, UpstreamError,
+    SignerFactory, SigningCapability, SubscriptionQuotaCandidateSnapshot,
+    SubscriptionQuotaDataState, Upstream, UpstreamCandidate, UpstreamDialect, UpstreamError,
 };
 use cc_lb_plugin_wire::augmented_metadata::AugmentedMetadata;
 use cc_lb_plugin_wire::identity::{CC_LB_PLUGIN_MAGIC, PluginIdentity};
@@ -18,7 +19,8 @@ use cc_lb_plugin_wire::v1::CandidateWire;
 use cc_lb_plugin_wire::v1::build_signer::{BuildSignerFn, BuildSignerRequest};
 use cc_lb_plugin_wire::v1::common::{
     DialectBinding, HeaderWire, Principal as PrincipalWire, RateLimitObservationWire, RequestWire,
-    ShapedRequestWire, UpstreamErrorCategory, UpstreamErrorWire, UpstreamWire,
+    ShapedRequestWire, SubscriptionQuotaCandidateSnapshotWire, UpstreamErrorCategory,
+    UpstreamErrorWire, UpstreamWire,
 };
 use cc_lb_plugin_wire::v1::normalize_error::{NormalizeErrorFn, NormalizeErrorRequest};
 use cc_lb_plugin_wire::v1::observe::ObserveFn;
@@ -501,9 +503,48 @@ fn candidates_to_wire(candidates: &[UpstreamCandidate]) -> Vec<CandidateWire> {
                     reset: observation.reset.clone(),
                 })
                 .collect(),
+            subscription_quotas: candidate
+                .subscription_quotas
+                .iter()
+                .map(|snapshot| {
+                    subscription_quota_to_wire(snapshot, candidate.observed_at_unix_secs)
+                })
+                .collect(),
             observed_at_unix_secs: candidate.observed_at_unix_secs,
         })
         .collect()
+}
+
+fn subscription_quota_to_wire(
+    snapshot: &SubscriptionQuotaCandidateSnapshot,
+    observed_at_unix_secs: u64,
+) -> SubscriptionQuotaCandidateSnapshotWire {
+    SubscriptionQuotaCandidateSnapshotWire {
+        window: snapshot.window.clone(),
+        source: snapshot
+            .source
+            .clone()
+            .unwrap_or_else(|| "missing".to_owned()),
+        data_state: subscription_quota_data_state_to_wire(snapshot.state).to_owned(),
+        utilization: snapshot.utilization,
+        status: snapshot.status.clone(),
+        resets_at_unix_secs: snapshot.resets_at_unix_secs,
+        surpassed_threshold: snapshot.surpassed_threshold,
+        representative_claim: snapshot.representative_claim.clone(),
+        disabled_reason: snapshot.disabled_reason.clone(),
+        observed_at_unix_millis: snapshot.observed_at_unix_millis,
+        age_secs: snapshot
+            .observed_at_unix_millis
+            .map(|observed_at| observed_at_unix_secs.saturating_sub(observed_at / 1_000)),
+    }
+}
+
+fn subscription_quota_data_state_to_wire(state: SubscriptionQuotaDataState) -> &'static str {
+    match state {
+        SubscriptionQuotaDataState::Fresh => "fresh",
+        SubscriptionQuotaDataState::Stale => "stale",
+        SubscriptionQuotaDataState::Missing => "missing",
+    }
 }
 
 pub(crate) fn request_to_wire(ctx: &RequestContext) -> RequestWire {

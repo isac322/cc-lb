@@ -8,7 +8,7 @@ use crate::wire_function::{FallbackPolicy, WireFunction};
 
 pub use crate::v1::common::{DialectBinding, UpstreamWire as UpstreamSpec};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct RouteRequest {
     pub request_id: String,
