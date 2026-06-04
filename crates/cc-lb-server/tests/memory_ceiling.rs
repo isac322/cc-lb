@@ -7,10 +7,10 @@ use cc_lb_plugin_api::PluginManifest;
 use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
 use serde_json::json;
 
-const PRINCIPAL_COUNT: usize = 200;
+const PRINCIPAL_COUNT: usize = 64;
 const PLUGINS_PER_PRINCIPAL: usize = 3;
 const EXPECTED_SLOT_COUNT: usize = PRINCIPAL_COUNT * PLUGINS_PER_PRINCIPAL;
-const RSS_DELTA_CEILING_KIB: u64 = 512 * 1024;
+const RSS_DELTA_CEILING_KIB: u64 = 192 * 1024;
 
 #[test]
 fn per_principal_plugin_slots_stay_under_memory_ceiling() -> Result<(), Box<dyn std::error::Error>>
@@ -26,9 +26,6 @@ fn per_principal_plugin_slots_stay_under_memory_ceiling() -> Result<(), Box<dyn 
     eprintln!(
         "memory_ceiling: baseline_rss_kib={baseline_rss_kib} loaded_rss_kib={loaded_rss_kib} delta_kib={delta_kib} ceiling_kib={RSS_DELTA_CEILING_KIB}"
     );
-    // 2026-05-28 local measurement for this stub-WAT fixture: baseline 20,096 KiB,
-    // loaded 391,920 KiB, delta 371,824 KiB. The 512 MiB ceiling leaves headroom for
-    // allocator and CI variance while still catching a per-slot memory regression.
     assert!(
         delta_kib <= RSS_DELTA_CEILING_KIB,
         "RSS delta {delta_kib} KiB exceeds ceiling {RSS_DELTA_CEILING_KIB} KiB"

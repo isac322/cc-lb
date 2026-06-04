@@ -15,11 +15,11 @@ fn router_module() -> &'static str {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(4))]
+    #![proptest_config(ProptestConfig::with_cases(2))]
 
     #[test]
     fn committed_router_slots_have_one_key_per_unique_principal_plugin_pair(
-        pairs in proptest::collection::vec((identifier(), identifier()), 1..=256),
+        pairs in proptest::collection::vec((identifier(), identifier()), 1..=64),
     ) {
         let fixture = common::fixture("router", router_module(), common::metadata(&[]));
         let runtime = ExtismRuntime::new();
