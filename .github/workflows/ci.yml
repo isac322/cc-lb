@@ -57,7 +57,7 @@ jobs:
     runs-on: oracle4-cc-lb
     env:
       CARGO_BUILD_JOBS: "2"
-      CARGO_PROFILE_TEST_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -69,7 +69,35 @@ jobs:
           tool: cargo-nextest
       - name: Pre-build handshake spike wasm artifact
         run: cargo build -p plugin-handshake-spike --target wasm32-unknown-unknown --release
-      - run: cargo nextest run --workspace --exclude cc-lb-loadgen
+      - run: >-
+          cargo nextest run --workspace --exclude cc-lb-loadgen
+          -E 'not (test(per_principal_plugin_slots_stay_under_memory_ceiling) or test(committed_router_slots_have_one_key_per_unique_principal_plugin_pair))'
+      - name: Show sccache stats
+        if: always()
+        run: |
+          if [ -n "${SCCACHE_PATH:-}" ] && [ -x "$SCCACHE_PATH" ]; then
+            "$SCCACHE_PATH" --show-stats
+          elif command -v sccache >/dev/null 2>&1; then
+            sccache --show-stats
+          fi
+
+  nextest-slow:
+    runs-on: oracle4-cc-lb
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust-cache
+        with:
+          rust-cache-key: nextest-slow
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - run: >-
+          cargo nextest run -p cc-lb-server -p cc-lb-runtime-extism
+          -E 'test(per_principal_plugin_slots_stay_under_memory_ceiling) or test(committed_router_slots_have_one_key_per_unique_principal_plugin_pair)'
       - name: Show sccache stats
         if: always()
         run: |
