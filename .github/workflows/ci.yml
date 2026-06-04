@@ -53,7 +53,7 @@ jobs:
             sccache --show-stats
           fi
 
-  nextest-partition:
+  nextest:
     name: nextest partition ${{ matrix.partition }}/4
     runs-on: oracle4-cc-lb
     env:
@@ -71,7 +71,7 @@ jobs:
         run: rustup target add wasm32-unknown-unknown
       - uses: ./.github/actions/setup-rust-cache
         with:
-          rust-cache-key: nextest-partition-${{ matrix.partition }}
+          sccache-key: nextest-partition-${{ matrix.partition }}
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
@@ -88,16 +88,4 @@ jobs:
             "$SCCACHE_PATH" --show-stats
           elif command -v sccache >/dev/null 2>&1; then
             sccache --show-stats
-          fi
-
-  nextest:
-    needs: nextest-partition
-    runs-on: oracle4-cc-lb
-    if: always()
-    steps:
-      - name: Check nextest partitions
-        run: |
-          if [ "${{ needs.nextest-partition.result }}" != "success" ]; then
-            echo "nextest partition failed"
-            exit 1
           fi
