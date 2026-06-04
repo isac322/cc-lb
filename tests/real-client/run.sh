@@ -283,7 +283,10 @@ case "$client" in
     # opencode 1.15.6 dropped claude-3-5-sonnet-20241022 from its built-in
     # model whitelist; the request never reaches the proxy. fake-anthropic
     # echoes whatever model the client sends, so any current Claude name works.
-    timeout 30s env "${unset_args[@]}" \
+    # Timeout is 90s instead of the other clients' 30s because opencode's
+    # first-run db migration + agent bootstrap can push past 30s on a cold CI
+    # runner; later runs in the same job hit warm caches and finish faster.
+    timeout 90s env "${unset_args[@]}" \
       HOME="$TMP_DIR/home" \
       XDG_CONFIG_HOME="$TMP_DIR/xdg-config" \
       XDG_DATA_HOME="$TMP_DIR/xdg-data" \
