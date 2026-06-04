@@ -10,6 +10,10 @@ inputs:
     description: Whether Swatinem/rust-cache should restore/save target directories.
     required: false
     default: "true"
+  stable-build-metadata:
+    description: Whether to stabilize build metadata for better compiler cache reuse.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -39,7 +43,12 @@ runs:
         echo "SCCACHE_DIR=$GITHUB_WORKSPACE/.sccache" >> "$GITHUB_ENV"
         echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
         echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
-        echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+        if [ "${{ inputs.stable-build-metadata }}" = "true" ]; then
+          echo "GIT_SHA=0000000" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH=0" >> "$GITHUB_ENV"
+        else
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+        fi
 
     - name: Configure Extism compilation cache
       shell: bash
