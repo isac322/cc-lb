@@ -9,8 +9,8 @@ pub mod sign;
 
 pub use common::{
     CandidateWire, DialectBinding, HeaderWire, ObserveEventWire, Principal,
-    RateLimitObservationWire, RequestWire, ShapedRequestWire, UpstreamErrorCategory,
-    UpstreamErrorWire, UpstreamWire,
+    RateLimitObservationWire, RequestWire, ShapedRequestWire,
+    SubscriptionQuotaCandidateSnapshotWire, UpstreamErrorCategory, UpstreamErrorWire, UpstreamWire,
 };
 
 #[cfg(test)]
@@ -89,6 +89,7 @@ mod tests {
         round_trip(Principal::dry_run_sample());
         round_trip(RequestWire::dry_run_sample());
         round_trip(RateLimitObservationWire::dry_run_sample());
+        round_trip(SubscriptionQuotaCandidateSnapshotWire::dry_run_sample());
         round_trip(CandidateWire::dry_run_sample());
         round_trip(UpstreamWire::dry_run_sample());
         round_trip(DialectBinding::dry_run_sample());

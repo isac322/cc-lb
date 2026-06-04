@@ -95,7 +95,8 @@ pub use lifecycle::{
 pub use poll_schedule_estimator::{EstimatorConfig, PollScheduleEstimator, ThrottleObservation};
 #[cfg(not(loom))]
 pub use rate_limit_headers::{
-    UnifiedQuotaObservation, normalize_utilization_fraction, parse_anthropic_unified_headers,
+    UnifiedQuotaObservation, clamp_utilization_fraction, parse_anthropic_unified_headers,
+    percent_to_utilization_fraction,
 };
 #[cfg(not(loom))]
 pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};
