@@ -7,9 +7,9 @@ use cc_lb_storage_api::{
     AnthropicApiKeyCredential, ApiKeyRecord, AuditEntry, BackendKind, BucketKind, ConfigDraftState,
     HistoryEntry, HistorySummary, IssuedKey, KeyStatus, OAuthCredentials, PrincipalCreate,
     PrincipalKind, PrincipalKindLite, PrincipalLimitIdentityKind, PrincipalLimitKind,
-    PrincipalLimitState, RequestCacheState, RequestEvent, RequestEventUpstream, StorageError,
-    StoredApiKeyRecord, StoredHistoryEntry, UsageRollup, UsageRollupKey, UsageRollupResolution,
-    UsageRollupRun,
+    PrincipalLimitState, RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheState,
+    RequestEvent, RequestEventUpstream, StorageError, StoredApiKeyRecord, StoredHistoryEntry,
+    UsageRollup, UsageRollupKey, UsageRollupResolution, UsageRollupRun,
 };
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -134,6 +134,15 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
         message_count: Some(5),
         cache_control_block_count: Some(1),
         cache_control_message_indices: vec![4],
+        cache_breakpoints: vec![RequestCacheBreakpoint {
+            block_index: 0,
+            source: RequestCacheBreakpointSource::Message,
+            path: "messages[4].content[0]".to_owned(),
+            message_index: Some(4),
+            ttl: Some("5m".to_owned()),
+            prefix_hash: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
+                .to_owned(),
+        }],
         cache_prefix_hash: Some(
             "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),
         ),
