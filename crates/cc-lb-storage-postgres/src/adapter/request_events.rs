@@ -16,13 +16,14 @@ const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
 impl RequestEventStore for PostgresStorage {
     async fn append_request_event(&self, event: &RequestEvent) -> StorageResult<()> {
         let payload = serde_json::to_vec(event)?;
+        let cache_breakpoints = serde_json::to_value(&event.cache_breakpoints)?;
         sqlx::query(
             "INSERT INTO request_events_v1 \
              (ts, principal_id, upstream_id, key_id, model, upstream_name, cache_state, thread_id, message_id, \
-              message_index, message_count, cache_control_block_count, cache_prefix_hash, \
-              input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, \
-              payload, created_at) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,NOW())",
+              message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, \
+               input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, \
+               payload, created_at) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,NOW())",
         )
         .bind(unix_secs_to_datetime(event.ts, "request event ts")?)
         .bind(event.principal_id.as_deref())
@@ -51,6 +52,7 @@ impl RequestEventStore for PostgresStorage {
                 .map(|value| u64_to_i64(value, "request event cache_control_block_count"))
                 .transpose()?,
         )
+        .bind(cache_breakpoints)
         .bind(event.cache_prefix_hash.as_deref())
         .bind(
             event

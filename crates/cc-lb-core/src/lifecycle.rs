@@ -17,7 +17,10 @@ use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_api::{
     Storage, SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind,
     SubscriptionQuotaSource, UpstreamRateLimitObservationRecord, UpstreamRecord,
-    types::{RequestCacheState, RequestEvent, StoredApiKeyRecord},
+    types::{
+        RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheState, RequestEvent,
+        StoredApiKeyRecord,
+    },
     upstream::UpstreamKind as StorageUpstreamKind,
 };
 use http::header::{CONTENT_TYPE, RETRY_AFTER};
@@ -1792,6 +1795,7 @@ struct RequestCacheMetadata {
     message_count: Option<u64>,
     cache_control_block_count: Option<u64>,
     cache_control_message_indices: Vec<u64>,
+    cache_breakpoints: Vec<RequestCacheBreakpoint>,
     cache_prefix_hash: Option<String>,
 }
 
@@ -1803,6 +1807,7 @@ impl RequestCacheMetadata {
         event.message_count = self.message_count;
         event.cache_control_block_count = self.cache_control_block_count;
         event.cache_control_message_indices = self.cache_control_message_indices.clone();
+        event.cache_breakpoints = self.cache_breakpoints.clone();
         event.cache_prefix_hash = self.cache_prefix_hash.clone();
         event.cache_state = Some(self.cache_state(usage));
     }
@@ -1860,22 +1865,45 @@ fn request_cache_metadata(headers: &HeaderMap, body: &Bytes) -> RequestCacheMeta
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
 
-    let mut cache_control_block_count = cache_control_count(value.get("system"));
-    cache_control_block_count =
-        cache_control_block_count.saturating_add(cache_control_count(value.get("tools")));
+    let mut cache_breakpoints = Vec::new();
+    collect_cache_breakpoints(
+        &value,
+        value.get("tools"),
+        RequestCacheBreakpointSource::Tools,
+        "tools".to_owned(),
+        None,
+        &mut cache_breakpoints,
+    );
+    collect_cache_breakpoints(
+        &value,
+        value.get("system"),
+        RequestCacheBreakpointSource::System,
+        "system".to_owned(),
+        None,
+        &mut cache_breakpoints,
+    );
     let mut cache_control_message_indices = Vec::new();
     if let Some(messages) = messages {
         for (index, message) in messages.iter().enumerate() {
-            let count = cache_control_count(Some(message));
-            if count > 0 {
-                cache_control_block_count = cache_control_block_count.saturating_add(count);
+            let previous_count = cache_breakpoints.len();
+            collect_cache_breakpoints(
+                &value,
+                Some(message),
+                RequestCacheBreakpointSource::Message,
+                format!("messages[{index}]"),
+                Some(index as u64),
+                &mut cache_breakpoints,
+            );
+            if cache_breakpoints.len() > previous_count {
                 cache_control_message_indices.push(index as u64);
             }
         }
     }
 
-    let cache_prefix_hash = (cache_control_block_count > 0)
-        .then(|| cache_prefix_hash(&value, cache_control_message_indices.last().copied()));
+    let cache_control_block_count = cache_breakpoints.len() as u64;
+    let cache_prefix_hash = cache_breakpoints
+        .last()
+        .map(|breakpoint| breakpoint.prefix_hash.clone());
 
     RequestCacheMetadata {
         thread_id,
@@ -1884,44 +1912,173 @@ fn request_cache_metadata(headers: &HeaderMap, body: &Bytes) -> RequestCacheMeta
         message_count,
         cache_control_block_count: Some(cache_control_block_count),
         cache_control_message_indices,
+        cache_breakpoints,
         cache_prefix_hash,
     }
 }
 
-fn cache_control_count(value: Option<&Value>) -> u64 {
+fn collect_cache_breakpoints(
+    request: &Value,
+    value: Option<&Value>,
+    source: RequestCacheBreakpointSource,
+    path: String,
+    message_index: Option<u64>,
+    breakpoints: &mut Vec<RequestCacheBreakpoint>,
+) {
     match value {
         Some(Value::Object(map)) => {
-            let current = u64::from(map.contains_key("cache_control"));
-            map.values().fold(current, |total, value| {
-                total.saturating_add(cache_control_count(Some(value)))
-            })
+            if let Some(cache_control) = map.get("cache_control") {
+                breakpoints.push(RequestCacheBreakpoint {
+                    block_index: breakpoints.len() as u64,
+                    source,
+                    path: path.clone(),
+                    message_index,
+                    ttl: cache_control_ttl(cache_control),
+                    prefix_hash: cache_prefix_hash(request, source, &path, message_index),
+                });
+            }
+            for (key, value) in map {
+                if key != "cache_control" {
+                    collect_cache_breakpoints(
+                        request,
+                        Some(value),
+                        source,
+                        format!("{path}.{key}"),
+                        message_index,
+                        breakpoints,
+                    );
+                }
+            }
         }
-        Some(Value::Array(items)) => items.iter().fold(0_u64, |total, value| {
-            total.saturating_add(cache_control_count(Some(value)))
-        }),
-        _ => 0,
+        Some(Value::Array(items)) => {
+            for (index, value) in items.iter().enumerate() {
+                collect_cache_breakpoints(
+                    request,
+                    Some(value),
+                    source,
+                    format!("{path}[{index}]"),
+                    message_index,
+                    breakpoints,
+                );
+            }
+        }
+        _ => {}
     }
 }
 
-fn cache_prefix_hash(request: &Value, last_message_index: Option<u64>) -> String {
+fn cache_control_ttl(cache_control: &Value) -> Option<String> {
+    cache_control
+        .get("ttl")
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned)
+}
+
+fn cache_prefix_hash(
+    request: &Value,
+    source: RequestCacheBreakpointSource,
+    path: &str,
+    message_index: Option<u64>,
+) -> String {
     let mut prefix = serde_json::Map::new();
-    for key in ["model", "system", "tools"] {
-        if let Some(value) = request.get(key) {
-            prefix.insert(key.to_owned(), value.clone());
-        }
+    prefix.insert("breakpoint_path".to_owned(), Value::String(path.to_owned()));
+    if let Some(value) = request.get("model") {
+        prefix.insert("model".to_owned(), value.clone());
     }
-    if let (Some(messages), Some(index)) = (
-        request.get("messages").and_then(Value::as_array),
-        last_message_index,
-    ) {
-        let end = (index as usize).saturating_add(1).min(messages.len());
+    if let Some(value) = request.get("tools") {
+        let value = if source == RequestCacheBreakpointSource::Tools {
+            truncate_value_at_path(value, &relative_cache_path(path, "tools"))
+        } else {
+            value.clone()
+        };
+        prefix.insert("tools".to_owned(), value);
+    }
+    if matches!(
+        source,
+        RequestCacheBreakpointSource::System | RequestCacheBreakpointSource::Message
+    ) && let Some(value) = request.get("system")
+    {
+        let value = if source == RequestCacheBreakpointSource::System {
+            truncate_value_at_path(value, &relative_cache_path(path, "system"))
+        } else {
+            value.clone()
+        };
+        prefix.insert("system".to_owned(), value);
+    }
+    if let (Some(messages), Some(_)) = (request.get("messages"), message_index) {
         prefix.insert(
             "messages".to_owned(),
-            Value::Array(messages[..end].to_vec()),
+            truncate_value_at_path(messages, &relative_cache_path(path, "messages")),
         );
     }
     let bytes = serde_json::to_vec(&Value::Object(prefix)).unwrap_or_default();
     hex_sha256(&bytes)
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum CachePathSegment {
+    Key(String),
+    Index(usize),
+}
+
+fn relative_cache_path(path: &str, root: &str) -> Vec<CachePathSegment> {
+    let Some(rest) = path.strip_prefix(root) else {
+        return Vec::new();
+    };
+    parse_cache_path(rest)
+}
+
+fn parse_cache_path(path: &str) -> Vec<CachePathSegment> {
+    let bytes = path.as_bytes();
+    let mut index = 0;
+    let mut segments = Vec::new();
+    while index < bytes.len() {
+        match bytes[index] {
+            b'.' => index += 1,
+            b'[' => {
+                let start = index + 1;
+                let Some(end) = bytes[start..].iter().position(|byte| *byte == b']') else {
+                    break;
+                };
+                let end = start + end;
+                if let Ok(value) = path[start..end].parse::<usize>() {
+                    segments.push(CachePathSegment::Index(value));
+                }
+                index = end + 1;
+            }
+            _ => {
+                let start = index;
+                while index < bytes.len() && bytes[index] != b'.' && bytes[index] != b'[' {
+                    index += 1;
+                }
+                segments.push(CachePathSegment::Key(path[start..index].to_owned()));
+            }
+        }
+    }
+    segments
+}
+
+fn truncate_value_at_path(value: &Value, path: &[CachePathSegment]) -> Value {
+    let Some((first, rest)) = path.split_first() else {
+        return value.clone();
+    };
+    match (value, first) {
+        (Value::Array(items), CachePathSegment::Index(index)) => {
+            let end = index.saturating_add(1).min(items.len());
+            let mut truncated = items[..end].to_vec();
+            if let Some(last) = truncated.last_mut() {
+                *last = truncate_value_at_path(last, rest);
+            }
+            Value::Array(truncated)
+        }
+        (Value::Object(map), CachePathSegment::Key(key)) => {
+            let mut truncated = map.clone();
+            if let Some(child) = map.get(key) {
+                truncated.insert(key.clone(), truncate_value_at_path(child, rest));
+            }
+            Value::Object(truncated)
+        }
+        _ => value.clone(),
+    }
 }
 
 fn hex_sha256(bytes: &[u8]) -> String {
@@ -2452,7 +2609,8 @@ mod tests {
         let body = Bytes::from_static(
             br#"{
                 "model":"claude-sonnet-4-5",
-                "system":[{"type":"text","text":"secret system","cache_control":{"type":"ephemeral"}}],
+                "tools":[{"name":"secret_tool","input_schema":{"type":"object"},"cache_control":{"type":"ephemeral"}}],
+                "system":[{"type":"text","text":"secret system","cache_control":{"type":"ephemeral","ttl":"1h"}}],
                 "messages":[
                     {"role":"user","content":"first secret"},
                     {"id":"msg_2","role":"user","content":[{"type":"text","text":"second secret","cache_control":{"type":"ephemeral"}}]}
@@ -2466,11 +2624,74 @@ mod tests {
         assert_eq!(metadata.message_id.as_deref(), Some("msg_2"));
         assert_eq!(metadata.message_index, Some(1));
         assert_eq!(metadata.message_count, Some(2));
-        assert_eq!(metadata.cache_control_block_count, Some(2));
+        assert_eq!(metadata.cache_control_block_count, Some(3));
         assert_eq!(metadata.cache_control_message_indices, vec![1]);
+        assert_eq!(metadata.cache_breakpoints.len(), 3);
+        assert_eq!(metadata.cache_breakpoints[0].block_index, 0);
+        assert_eq!(
+            metadata.cache_breakpoints[0].source,
+            RequestCacheBreakpointSource::Tools
+        );
+        assert_eq!(metadata.cache_breakpoints[0].path, "tools[0]");
+        assert_eq!(metadata.cache_breakpoints[1].block_index, 1);
+        assert_eq!(
+            metadata.cache_breakpoints[1].source,
+            RequestCacheBreakpointSource::System
+        );
+        assert_eq!(metadata.cache_breakpoints[1].path, "system[0]");
+        assert_eq!(metadata.cache_breakpoints[1].ttl.as_deref(), Some("1h"));
+        assert_eq!(metadata.cache_breakpoints[2].block_index, 2);
+        assert_eq!(
+            metadata.cache_breakpoints[2].source,
+            RequestCacheBreakpointSource::Message
+        );
+        assert_eq!(metadata.cache_breakpoints[2].path, "messages[1].content[0]");
+        assert_eq!(metadata.cache_breakpoints[2].message_index, Some(1));
+        assert_ne!(
+            metadata.cache_breakpoints[0].prefix_hash,
+            metadata.cache_breakpoints[1].prefix_hash
+        );
         let hash = metadata.cache_prefix_hash.expect("cache prefix hash");
         assert_eq!(hash.len(), 64);
+        assert_eq!(hash, metadata.cache_breakpoints[2].prefix_hash);
         assert!(!hash.contains("secret"));
+    }
+
+    #[test]
+    fn request_cache_breakpoint_hashes_ignore_later_prompt_suffixes() {
+        let headers = HeaderMap::new();
+        let first = Bytes::from_static(
+            br#"{
+                "model":"claude-sonnet-4-5",
+                "messages":[
+                    {"role":"user","content":[{"type":"text","text":"stable","cache_control":{"type":"ephemeral"}}]},
+                    {"role":"user","content":[{"type":"text","text":"suffix-a","cache_control":{"type":"ephemeral"}}]}
+                ]
+            }"#,
+        );
+        let second = Bytes::from_static(
+            br#"{
+                "model":"claude-sonnet-4-5",
+                "messages":[
+                    {"role":"user","content":[{"type":"text","text":"stable","cache_control":{"type":"ephemeral"}}]},
+                    {"role":"user","content":[{"type":"text","text":"suffix-b","cache_control":{"type":"ephemeral"}}]}
+                ]
+            }"#,
+        );
+
+        let first = request_cache_metadata(&headers, &first);
+        let second = request_cache_metadata(&headers, &second);
+
+        assert_eq!(first.cache_breakpoints.len(), 2);
+        assert_eq!(second.cache_breakpoints.len(), 2);
+        assert_eq!(
+            first.cache_breakpoints[0].prefix_hash,
+            second.cache_breakpoints[0].prefix_hash
+        );
+        assert_ne!(
+            first.cache_breakpoints[1].prefix_hash,
+            second.cache_breakpoints[1].prefix_hash
+        );
     }
 
     #[test]

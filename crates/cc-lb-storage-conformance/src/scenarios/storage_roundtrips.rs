@@ -6,7 +6,8 @@ use cc_lb_storage_api::{
     OAuthCredentialStore as _, RequestEventStore as _, StorageError,
     types::{
         AuditEntry, HistoryEntry, HistorySummary, PrincipalLimitIdentityKind, PrincipalLimitKind,
-        PrincipalLimitState, RequestCacheState, RequestEvent, RequestEventUpstream,
+        PrincipalLimitState, RequestCacheBreakpoint, RequestCacheBreakpointSource,
+        RequestCacheState, RequestEvent, RequestEventUpstream,
     },
 };
 use serde_json::json;
@@ -348,6 +349,26 @@ fn request_events() -> Vec<RequestEvent> {
             message_count: Some(3),
             cache_control_block_count: Some(2),
             cache_control_message_indices: vec![0, 2],
+            cache_breakpoints: vec![
+                RequestCacheBreakpoint {
+                    block_index: 0,
+                    source: RequestCacheBreakpointSource::System,
+                    path: "system[0]".to_owned(),
+                    message_index: None,
+                    ttl: Some("1h".to_owned()),
+                    prefix_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                        .to_owned(),
+                },
+                RequestCacheBreakpoint {
+                    block_index: 1,
+                    source: RequestCacheBreakpointSource::Message,
+                    path: "messages[2].content[0]".to_owned(),
+                    message_index: Some(2),
+                    ttl: Some("5m".to_owned()),
+                    prefix_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                        .to_owned(),
+                },
+            ],
             cache_prefix_hash: Some(
                 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef".to_owned(),
             ),
