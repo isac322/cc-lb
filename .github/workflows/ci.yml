@@ -56,7 +56,7 @@ jobs:
   nextest:
     runs-on: oracle4-cc-lb
     env:
-      CARGO_BUILD_JOBS: "2"
+      CARGO_BUILD_JOBS: "4"
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v6
@@ -82,7 +82,7 @@ jobs:
   nextest-rest:
     runs-on: oracle4-cc-lb
     env:
-      CARGO_BUILD_JOBS: "2"
+      CARGO_BUILD_JOBS: "4"
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@v6
