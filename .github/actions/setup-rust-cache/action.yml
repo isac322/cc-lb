@@ -41,6 +41,20 @@ runs:
         echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
         echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
 
+    - name: Select fast host linker
+      if: runner.os == 'Linux'
+      shell: bash
+      run: |
+        triple=$(rustc -vV | sed -n 's/^host: //p')
+        env_prefix=$(printf '%s' "$triple" | tr '[:lower:]-' '[:upper:]_')
+        if command -v mold >/dev/null 2>&1; then
+          echo "CARGO_TARGET_${env_prefix}_RUSTFLAGS=-C link-arg=-fuse-ld=mold" >> "$GITHUB_ENV"
+        elif command -v ld.lld >/dev/null 2>&1; then
+          echo "CARGO_TARGET_${env_prefix}_RUSTFLAGS=-C link-arg=-fuse-ld=lld" >> "$GITHUB_ENV"
+        else
+          echo "No mold/lld available; using default linker"
+        fi
+
     - uses: Swatinem/rust-cache@v2
       with:
         cache-on-failure: true
