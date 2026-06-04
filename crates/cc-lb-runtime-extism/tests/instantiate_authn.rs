@@ -2,8 +2,8 @@ mod common;
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    PluginRuntime, RateLimitKind, RateLimitObservation, Upstream, UpstreamCandidate, UpstreamKind,
-    shape_request,
+    PluginRuntime, RateLimitKind, RateLimitObservation, SubscriptionQuotaCandidateSnapshot,
+    SubscriptionQuotaDataState, Upstream, UpstreamCandidate, UpstreamKind, shape_request,
 };
 use cc_lb_runtime_extism::ExtismRuntime;
 use uuid::Uuid;
@@ -96,6 +96,18 @@ fn route_input_includes_candidates_as_sibling_field() {
         br#""limit":1000"#.to_vec(),
         br#""remaining":777"#.to_vec(),
         br#""reset":"2026-05-29T00:00:00Z""#.to_vec(),
+        br#""subscription_quotas":[{"#.to_vec(),
+        br#""window":"5h""#.to_vec(),
+        br#""source":"merged""#.to_vec(),
+        br#""data_state":"fresh""#.to_vec(),
+        br#""utilization":0.42"#.to_vec(),
+        br#""status":"allowed_warning""#.to_vec(),
+        br#""resets_at_unix_secs":1800003600"#.to_vec(),
+        br#""surpassed_threshold":true"#.to_vec(),
+        br#""representative_claim":"org:claim""#.to_vec(),
+        br#""disabled_reason":null"#.to_vec(),
+        br#""observed_at_unix_millis":1800000000123"#.to_vec(),
+        br#""age_secs":0"#.to_vec(),
         br#""observed_at_unix_secs":1800000000"#.to_vec(),
     ];
     let marker_refs: Vec<&[u8]> = markers.iter().map(Vec::as_slice).collect();
@@ -116,7 +128,22 @@ fn route_input_includes_candidates_as_sibling_field() {
             remaining: Some(777),
             reset: Some("2026-05-29T00:00:00Z".to_owned()),
         }],
-        subscription_quotas: Vec::new(),
+        subscription_quotas: vec![SubscriptionQuotaCandidateSnapshot {
+            window: "5h".to_owned(),
+            state: SubscriptionQuotaDataState::Fresh,
+            source: Some("merged".to_owned()),
+            utilization: Some(0.42),
+            status: Some("allowed_warning".to_owned()),
+            resets_at_unix_secs: Some(1_800_003_600),
+            surpassed_threshold: Some(true),
+            representative_claim: Some("org:claim".to_owned()),
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            observed_at_unix_millis: Some(1_800_000_000_123),
+            max_staleness_secs: 300,
+        }],
         observed_at_unix_secs: 1_800_000_000,
     }];
 

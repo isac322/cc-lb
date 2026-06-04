@@ -2574,11 +2574,11 @@ mod tests {
         let upstream_id = Uuid::new_v4();
         let mut headers = HeaderMap::new();
         headers.insert(
-            HeaderName::from_static("anthropic-ratelimit-7d-sonnet-utilization"),
-            HeaderValue::from_static("42"),
+            HeaderName::from_static("anthropic-ratelimit-unified-7d-sonnet-utilization"),
+            HeaderValue::from_static("0.42"),
         );
         headers.insert(
-            HeaderName::from_static("anthropic-ratelimit-7d-sonnet-status"),
+            HeaderName::from_static("anthropic-ratelimit-unified-7d-sonnet-status"),
             HeaderValue::from_static("allowed_warning"),
         );
 
