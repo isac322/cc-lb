@@ -9,7 +9,7 @@ inputs:
   cache-targets:
     description: Whether Swatinem/rust-cache should restore/save target directories.
     required: false
-    default: "false"
+    default: "true"
 
 runs:
   using: composite
