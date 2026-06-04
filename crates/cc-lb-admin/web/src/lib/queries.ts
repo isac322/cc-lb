@@ -32,6 +32,7 @@ import {
   putJson,
   type RecentEventsPayload,
   type SeriesResponse,
+  type UpstreamOAuthStatusResponse,
 } from './api';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -167,6 +168,7 @@ export const qk = {
     ['audit', filters] as const,
   credentials: ['credentials'] as const,
   oauthStatus: ['oauth-status'] as const,
+  upstreamOauthStatus: (id: string) => ['upstream-oauth-status', id] as const,
   pluginStatus: ['plugins', 'status'] as const,
   configCurrent: ['config', 'current'] as const,
   configSchema: ['config', 'schema'] as const,
@@ -348,6 +350,16 @@ export function useOAuthStatus() {
   return useQuery({
     queryKey: qk.oauthStatus,
     queryFn: () => getJson<OAuthStatusResponse>('/admin/oauth/status'),
+  });
+}
+export function useUpstreamOAuthStatus(id: string | null | undefined) {
+  return useQuery({
+    queryKey: qk.upstreamOauthStatus(id ?? ''),
+    queryFn: () =>
+      getJson<UpstreamOAuthStatusResponse>(
+        `/admin/v1/upstreams/${id}/oauth/status`,
+      ),
+    enabled: Boolean(id),
   });
 }
 export function usePluginStatus() {
