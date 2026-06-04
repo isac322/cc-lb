@@ -88,6 +88,8 @@ pub struct RequestEvent {
     pub cache_control_block_count: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cache_control_message_indices: Vec<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cache_breakpoints: Vec<RequestCacheBreakpoint>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_prefix_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -174,6 +176,26 @@ pub enum RequestCacheState {
     Miss,
     None,
     Unknown,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RequestCacheBreakpoint {
+    pub block_index: u64,
+    pub source: RequestCacheBreakpointSource,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_index: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ttl: Option<String>,
+    pub prefix_hash: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RequestCacheBreakpointSource {
+    System,
+    Tools,
+    Message,
 }
 
 impl RequestCacheState {
