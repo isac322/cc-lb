@@ -7,7 +7,7 @@ use axum::{
     extract::{Path, State},
     http::StatusCode,
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -40,6 +40,21 @@ pub fn router() -> Router<AdminState> {
             "/admin/v1/upstreams/{id}/oauth/complete",
             post(complete_oauth),
         )
+        .route(
+            "/admin/v1/upstreams/{id}/oauth/status",
+            get(get_oauth_status),
+        )
+}
+
+#[derive(Serialize)]
+struct UpstreamOAuthStatusResponse {
+    upstream_id: String,
+    kind: UpstreamKind,
+    has_credentials: bool,
+    status: &'static str,
+    expires_at_unix_secs: Option<u64>,
+    refresh_token_present: bool,
+    scopes: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -314,6 +329,87 @@ async fn complete_oauth(
     .into_response();
     add_dynamic_rebind_headers(&mut response, &state).await;
     response
+}
+
+async fn get_oauth_status(
+    State(state): State<AdminState>,
+    Path(upstream_id): Path<Uuid>,
+) -> Response {
+    let Some(storage) = state.storage.as_ref() else {
+        return StatusCode::NOT_IMPLEMENTED.into_response();
+    };
+    let upstream = match UpstreamStore::get_by_id(storage.as_ref(), upstream_id).await {
+        Ok(Some(upstream)) => upstream,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(error) => return storage_error_response(&error),
+    };
+
+    if upstream.kind != UpstreamKind::AnthropicOauth {
+        return Json(UpstreamOAuthStatusResponse {
+            upstream_id: upstream.id.to_string(),
+            kind: upstream.kind,
+            has_credentials: false,
+            status: "wrong_kind",
+            expires_at_unix_secs: None,
+            refresh_token_present: false,
+            scopes: Vec::new(),
+        })
+        .into_response();
+    }
+
+    let Some(encrypted) = upstream.oauth_credentials.as_ref() else {
+        return Json(UpstreamOAuthStatusResponse {
+            upstream_id: upstream.id.to_string(),
+            kind: upstream.kind,
+            has_credentials: false,
+            status: "missing",
+            expires_at_unix_secs: None,
+            refresh_token_present: false,
+            scopes: Vec::new(),
+        })
+        .into_response();
+    };
+
+    match encrypted.decrypt(state.aead.as_ref(), upstream.id.as_bytes()) {
+        Ok(bundle) => {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            let status = if bundle.expires_at_unix_secs <= now {
+                "expired"
+            } else {
+                "active"
+            };
+            Json(UpstreamOAuthStatusResponse {
+                upstream_id: upstream.id.to_string(),
+                kind: upstream.kind,
+                has_credentials: true,
+                status,
+                expires_at_unix_secs: Some(bundle.expires_at_unix_secs),
+                refresh_token_present: !bundle.refresh_token.is_empty(),
+                scopes: bundle.scopes,
+            })
+            .into_response()
+        }
+        Err(error) => {
+            tracing::warn!(
+                error = %error,
+                %upstream_id,
+                "upstream oauth credential decrypt failed"
+            );
+            Json(UpstreamOAuthStatusResponse {
+                upstream_id: upstream.id.to_string(),
+                kind: upstream.kind,
+                has_credentials: true,
+                status: "corrupted",
+                expires_at_unix_secs: None,
+                refresh_token_present: false,
+                scopes: Vec::new(),
+            })
+            .into_response()
+        }
+    }
 }
 
 fn pkce_flows() -> &'static PkceFlows {

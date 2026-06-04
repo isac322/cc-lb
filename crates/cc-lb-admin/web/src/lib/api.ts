@@ -514,6 +514,16 @@ export interface OAuthStatusResponse {
   observed: boolean;
 }
 
+export interface UpstreamOAuthStatusResponse {
+  upstream_id: string;
+  kind: string;
+  has_credentials: boolean;
+  status: string;
+  expires_at_unix_secs: number | null;
+  refresh_token_present: boolean;
+  scopes: string[];
+}
+
 interface AuditEntry {
   ts: number | null;
   ts_ms?: number | null;
