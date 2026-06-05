@@ -31,8 +31,6 @@ runs:
         key: sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
         restore-keys: |
           sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-
-          sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
-          sccache-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Export Rust compiler cache env
       if: steps.sccache-setup.outcome == 'success'
