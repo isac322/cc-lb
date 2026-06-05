@@ -5,6 +5,7 @@ fn main() {
     println!("cargo:rerun-if-env-changed=GIT_SHA");
     println!("cargo:rerun-if-env-changed=GITHUB_SHA");
     println!("cargo:rerun-if-env-changed=CI_COMMIT_SHA");
+    println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
 
     emit("CC_LB_VERSION", env!("CARGO_PKG_VERSION").to_owned());
     emit("CC_LB_GIT_SHA", git_sha());
@@ -56,10 +57,20 @@ fn rustc_version() -> String {
 }
 
 fn build_time() -> String {
+    if let Some(epoch) = source_date_epoch() {
+        return utc_rfc3339(epoch);
+    }
+
     let Ok(duration) = SystemTime::now().duration_since(UNIX_EPOCH) else {
         return "unknown".to_owned();
     };
     utc_rfc3339(duration.as_secs())
+}
+
+fn source_date_epoch() -> Option<u64> {
+    std::env::var("SOURCE_DATE_EPOCH")
+        .ok()
+        .and_then(|value| value.trim().parse().ok())
 }
 
 fn features() -> String {

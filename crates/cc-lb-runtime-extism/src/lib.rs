@@ -500,8 +500,14 @@ fn build_plugin_cell(
     );
     let mut builder = PluginBuilder::new(&entry.extism_manifest)
         .with_functions(host_functions::functions(context))
-        .with_wasi(true)
-        .with_cache_disabled();
+        .with_wasi(true);
+    if let Some(cache_config) =
+        std::env::var_os("EXTISM_CACHE_CONFIG").filter(|value| !value.is_empty())
+    {
+        builder = builder.with_cache_config(std::path::PathBuf::from(cache_config));
+    } else {
+        builder = builder.with_cache_disabled();
+    }
     if entry.limits.fuel_max > 0 {
         builder = builder.with_fuel_limit(entry.limits.fuel_max);
     }
