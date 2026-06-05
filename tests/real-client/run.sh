@@ -264,7 +264,7 @@ set +e
 unset_args=()
 while IFS='=' read -r name _; do
   case "$name" in
-    OPENCODE*|CLIO*|SISYPHUS*|AGENT*) unset_args+=("-u" "$name") ;;
+    OPENCODE*|CLIO*|SISYPHUS*|AGENT*|SOURCE_DATE_EPOCH) unset_args+=("-u" "$name") ;;
   esac
 done < <(env)
 case "$client" in
