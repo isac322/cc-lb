@@ -32,7 +32,6 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.95.0
           components: rustfmt
       - run: cargo fmt --check
 
@@ -42,7 +41,6 @@ jobs:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.95.0
           components: clippy
       - uses: ./.github/actions/setup-rust-cache
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -63,9 +61,8 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: 1.95.0
-          targets: wasm32-wasip1, wasm32-unknown-unknown
+      - name: Install wasm targets for pinned toolchain
+        run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
       - uses: ./.github/actions/setup-rust-cache
         with:
           stable-build-metadata: "true"
