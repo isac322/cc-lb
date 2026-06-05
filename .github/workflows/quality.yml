@@ -55,8 +55,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: llvm-tools-preview
-      - name: Install WASI target for pinned toolchain
-        run: rustup target add wasm32-wasip1
+      - name: Install wasm targets for pinned toolchain
+        run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov,cargo-nextest
@@ -75,6 +75,8 @@ jobs:
         run: cargo llvm-cov clean --workspace
       - name: Build Extism echo fixture
         run: cargo build -p extism-echo-plugin --target wasm32-wasip1 --release
+      - name: Build handshake spike fixture
+        run: cargo build -p plugin-handshake-spike --target wasm32-unknown-unknown --release
 
       - name: Run tests with coverage instrumentation
         run: |
