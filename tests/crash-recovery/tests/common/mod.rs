@@ -7,7 +7,6 @@ use std::os::unix::process::ExitStatusExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -29,7 +28,6 @@ const ITERATION_ENV: &str = "CC_LB_CRASH_ITERATION";
 const TOTAL_ITERATIONS_ENV: &str = "CC_LB_CRASH_ITERATIONS";
 
 const DEFAULT_ITERATIONS: usize = 100;
-const DEFAULT_PARALLELISM: usize = 4;
 const COMMITTED_ROWS: usize = 32;
 const PENDING_ROWS: usize = 10_000;
 const MASTER_KEY: [u8; 32] = [48; 32];
@@ -102,51 +100,17 @@ pub fn run_child_if_requested(case: CrashCase) -> Result<bool, Box<dyn std::erro
 
 pub fn run_parent(case: CrashCase, test_name: &str) -> TestResult {
     let iterations = iteration_count()?;
-    let parallelism = crash_parallelism(iterations)?;
     println!(
-        "start scenario={} iterations={} parallelism={} committed_rows={} pending_tx_rows={}",
+        "start scenario={} iterations={} committed_rows={} pending_tx_rows={}",
         case.as_str(),
         iterations,
-        parallelism,
         COMMITTED_ROWS,
         PENDING_ROWS
     );
 
-    if parallelism == 1 {
-        for iteration in 0..iterations {
-            run_iteration(case, test_name, iteration)?;
-        }
-        return Ok(());
+    for iteration in 0..iterations {
+        run_iteration(case, test_name, iteration)?;
     }
-
-    let next_iteration = AtomicUsize::new(0);
-    thread::scope(|scope| {
-        let mut workers = Vec::with_capacity(parallelism);
-        for _ in 0..parallelism {
-            let next_iteration = &next_iteration;
-            workers.push(scope.spawn(move || {
-                loop {
-                    let iteration = next_iteration.fetch_add(1, Ordering::Relaxed);
-                    if iteration >= iterations {
-                        break;
-                    }
-                    run_iteration(case, test_name, iteration)
-                        .map_err(|error| format!("iteration {iteration} failed: {error}"))?;
-                }
-                Ok::<(), String>(())
-            }));
-        }
-
-        for worker in workers {
-            match worker.join() {
-                Ok(Ok(())) => {}
-                Ok(Err(error)) => return Err(io_error(error)),
-                Err(_) => return Err(io_error("crash recovery worker panicked")),
-            }
-        }
-
-        Ok::<(), io::Error>(())
-    })?;
 
     Ok(())
 }
@@ -684,17 +648,6 @@ fn iteration_count() -> Result<usize, Box<dyn std::error::Error>> {
         }
         Err(_) => Ok(DEFAULT_ITERATIONS),
     }
-}
-
-fn crash_parallelism(iterations: usize) -> Result<usize, Box<dyn std::error::Error>> {
-    let configured = match env::var("CC_LB_CRASH_PARALLELISM") {
-        Ok(value) => value.parse::<usize>()?,
-        Err(_) => DEFAULT_PARALLELISM,
-    };
-    if configured == 0 {
-        return Err(io_error("CC_LB_CRASH_PARALLELISM must be greater than zero").into());
-    }
-    Ok(configured.min(iterations))
 }
 
 fn required_env(name: &str) -> Result<String, io::Error> {
