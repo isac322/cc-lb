@@ -104,31 +104,17 @@ jobs:
       - name: Check per-package coverage gates
         run: |
           set -euo pipefail
-          check_package() {
-            cargo llvm-cov report \
-              --package "$1" \
-              --fail-under-lines "$2" \
-              --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          }
-
-          pids=()
-          check_package cc-lb-core 60 & pids+=("$!")
-          check_package cc-lb-dialect-anthropic 80 & pids+=("$!")
-          check_package cc-lb-admin 60 & pids+=("$!")
-          check_package cc-lb-config 60 & pids+=("$!")
-          check_package cc-lb-observability 60 & pids+=("$!")
-          check_package cc-lb-plugin-api 60 & pids+=("$!")
-          check_package cc-lb-runtime-extism 60 & pids+=("$!")
-          check_package cc-lb-signer-anthropic-key 60 & pids+=("$!")
-          check_package cc-lb-signer-anthropic-oauth 60 & pids+=("$!")
-          check_package cc-lb-server 60 & pids+=("$!")
-          check_package cc-lb-storage-redb 60 & pids+=("$!")
-
-          failed=0
-          for pid in "${pids[@]}"; do
-            wait "$pid" || failed=1
-          done
-          exit "$failed"
+          cargo llvm-cov report --package cc-lb-core                  --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-dialect-anthropic     --fail-under-lines 80 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-admin                 --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-config                --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-observability         --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-plugin-api            --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-runtime-extism        --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-signer-anthropic-key  --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-signer-anthropic-oauth --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-server                --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-storage-redb          --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
 
       - name: Show sccache stats
         if: always()
