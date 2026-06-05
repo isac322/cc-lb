@@ -1,6 +1,6 @@
-use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
+use std::{env, fs};
 
 use bytes::Bytes;
 use cc_lb_plugin_api::{
@@ -134,8 +134,10 @@ fn controlled_builder_cannot_be_fabricated_by_normal_callers() {
 #[test]
 fn external_struct_literals_are_rejected() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let test_dir =
-        std::env::temp_dir().join(format!("cc-lb-construct-test-{}", std::process::id()));
+    let target_dir = env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| manifest_dir.join("../..").join("target"));
+    let test_dir = env::temp_dir().join(format!("cc-lb-construct-test-{}", std::process::id()));
     let src_dir = test_dir.join("src");
     if test_dir.exists() {
         fs::remove_dir_all(&test_dir).unwrap();
@@ -198,6 +200,7 @@ fn main() {
     let output = Command::new("cargo")
         .arg("check")
         .arg("--quiet")
+        .env("CARGO_TARGET_DIR", target_dir)
         .current_dir(&test_dir)
         .output()
         .unwrap();

@@ -10,6 +10,10 @@ inputs:
     description: Whether Swatinem/rust-cache should restore/save target directories.
     required: false
     default: "true"
+  stable-build-metadata:
+    description: Whether to stabilize build metadata for better compiler cache reuse.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -27,8 +31,6 @@ runs:
         key: sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
         restore-keys: |
           sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-
-          sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-
-          sccache-${{ runner.os }}-${{ runner.arch }}-
 
     - name: Export Rust compiler cache env
       if: steps.sccache-setup.outcome == 'success'
@@ -37,6 +39,24 @@ runs:
         echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
         echo "SCCACHE_DIR=$GITHUB_WORKSPACE/.sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
+        echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
+        if [ "${{ inputs.stable-build-metadata }}" = "true" ]; then
+          echo "GIT_SHA=0000000" >> "$GITHUB_ENV"
+          echo "SOURCE_DATE_EPOCH=0" >> "$GITHUB_ENV"
+        else
+          echo "SOURCE_DATE_EPOCH=$(git log -1 --format=%ct)" >> "$GITHUB_ENV"
+        fi
+
+    - name: Configure Extism compilation cache
+      shell: bash
+      run: |
+        mkdir -p "$GITHUB_WORKSPACE/.extism-cache"
+        cat > "$GITHUB_WORKSPACE/.extism-cache.toml" <<EOF
+        [cache]
+        directory = "$GITHUB_WORKSPACE/.extism-cache"
+        EOF
+        echo "EXTISM_CACHE_CONFIG=$GITHUB_WORKSPACE/.extism-cache.toml" >> "$GITHUB_ENV"
 
     - uses: Swatinem/rust-cache@v2
       with:

@@ -27,7 +27,6 @@ env:
 
 jobs:
   verify:
-    if: github.event_name != 'pull_request'
     runs-on: oracle4-cc-lb
     container:
       image: messense/rust-musl-cross:aarch64-musl

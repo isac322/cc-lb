@@ -61,11 +61,11 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install WASI target for pinned toolchain
-        run: rustup target add wasm32-wasip1
-      - name: Install wasm32-unknown-unknown for handshake spike fixture
-        run: rustup target add wasm32-unknown-unknown
+      - name: Install wasm targets for pinned toolchain
+        run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
       - uses: ./.github/actions/setup-rust-cache
+        with:
+          stable-build-metadata: "true"
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest

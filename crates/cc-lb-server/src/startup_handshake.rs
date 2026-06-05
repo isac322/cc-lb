@@ -421,9 +421,15 @@ pub mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use async_trait::async_trait;
-    use cc_lb_plugin_wire::handshake::{HANDSHAKE_SCHEMA_VERSION_V1, HandshakeAccept};
+    use cc_lb_plugin_wire::handshake::{
+        HANDSHAKE_SCHEMA_VERSION_V1, HandshakeAccept, HandshakeOffer,
+    };
     use cc_lb_plugin_wire::identity::{CC_LB_PLUGIN_MAGIC, CC_LB_PLUGIN_SECTION_NAME};
+    use cc_lb_plugin_wire::self_check::{SelfCheckResponse, SelfCheckStatus};
+    use cc_lb_runtime_extism::handshake::HandshakeExecutionError;
     use cc_lb_runtime_extism::handshake::build_offer;
+    use cc_lb_runtime_extism::registry::RegistryLifecycle;
+    use cc_lb_runtime_extism::self_check::SelfCheckExecutionError;
     use cc_lb_storage_api::{PluginBlobRepo, RepoError};
     use serde_json::json;
     use tokio::sync::{Mutex, Notify};
@@ -625,7 +631,50 @@ pub mod tests {
         blob_repo: Arc<MemoryBlobRepo>,
         caps: BTreeSet<String>,
     ) -> PluginRegistry {
-        PluginRegistry::new(registry_repo, blob_repo, build_offer(&caps)).expect("registry builds")
+        PluginRegistry::new_with_lifecycle(
+            registry_repo,
+            blob_repo,
+            build_offer(&caps),
+            Arc::new(FastRegistryLifecycle),
+        )
+        .expect("registry builds")
+    }
+
+    struct FastRegistryLifecycle;
+
+    impl RegistryLifecycle for FastRegistryLifecycle {
+        fn execute_handshake(
+            &self,
+            _plugin_bytes: &[u8],
+            offer: &HandshakeOffer,
+        ) -> Result<HandshakeAccept, HandshakeExecutionError> {
+            Ok(HandshakeAccept {
+                handshake_schema_version: offer.handshake_schema_version,
+                envelope_version: offer.envelope_version,
+                chosen_versions: offer
+                    .function_versions
+                    .iter()
+                    .map(|(function, versions)| {
+                        let chosen = versions.iter().copied().max().unwrap_or(1);
+                        (function.clone(), chosen)
+                    })
+                    .collect(),
+                plugin_supported: offer.function_versions.clone(),
+                implemented_functions: offer.function_versions.keys().cloned().collect(),
+                required_capabilities: BTreeSet::new(),
+            })
+        }
+
+        fn execute_self_check(
+            &self,
+            _plugin_bytes: &[u8],
+        ) -> Result<SelfCheckResponse, SelfCheckExecutionError> {
+            Ok(SelfCheckResponse {
+                status: SelfCheckStatus::Success,
+                failures: Vec::new(),
+                completed_at: 1,
+            })
+        }
     }
 
     #[derive(Default)]
