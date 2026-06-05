@@ -68,6 +68,7 @@ jobs:
       # that never contained that file.
       - uses: ./.github/actions/setup-rust-cache
         with:
+          rust-cache-key: coverage
           cache-targets: false
           stable-build-metadata: "true"
 
