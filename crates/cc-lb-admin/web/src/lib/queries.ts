@@ -32,7 +32,12 @@ import {
   putJson,
   type RecentEventsPayload,
   type SeriesResponse,
+  type SubscriptionMetadataResponse,
+  triggerSubscriptionMetadataRefresh,
   type UpstreamOAuthStatusResponse,
+  startOauthDraft,
+  completeOauthDraft,
+  createUpstreamFromOauthDraft,
 } from './api';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -169,6 +174,8 @@ export const qk = {
   credentials: ['credentials'] as const,
   oauthStatus: ['oauth-status'] as const,
   upstreamOauthStatus: (id: string) => ['upstream-oauth-status', id] as const,
+  upstreamSubscriptionMetadata: (id: string) =>
+    ['upstream-subscription-metadata', id] as const,
   pluginStatus: ['plugins', 'status'] as const,
   configCurrent: ['config', 'current'] as const,
   configSchema: ['config', 'schema'] as const,
@@ -360,6 +367,30 @@ export function useUpstreamOAuthStatus(id: string | null | undefined) {
         `/admin/v1/upstreams/${id}/oauth/status`,
       ),
     enabled: Boolean(id),
+  });
+}
+export function useUpstreamSubscriptionMetadata(upstreamId: string) {
+  return useQuery({
+    queryKey: qk.upstreamSubscriptionMetadata(upstreamId),
+    queryFn: () =>
+      getJson<SubscriptionMetadataResponse>(
+        `/admin/v1/upstreams/${upstreamId}/subscription-metadata`,
+      ),
+    enabled: !!upstreamId,
+    refetchInterval: 30_000,
+  });
+}
+export function useTriggerSubscriptionMetadataRefresh() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (upstreamId: string) =>
+      triggerSubscriptionMetadataRefresh(upstreamId),
+    onSuccess: (data, upstreamId) => {
+      qc.setQueryData(qk.upstreamSubscriptionMetadata(upstreamId), data);
+      qc.invalidateQueries({
+        queryKey: qk.upstreamSubscriptionMetadata(upstreamId),
+      });
+    },
   });
 }
 export function usePluginStatus() {
@@ -853,5 +884,25 @@ export function useReloadConfig() {
         '/admin/config/reload',
         {},
       ),
+  });
+}
+
+export function useStartOauthDraft() {
+  return useMutation({
+    mutationFn: () => startOauthDraft(),
+  });
+}
+
+export function useCompleteOauthDraft() {
+  return useMutation({
+    mutationFn: (body: { state_token: string; code: string }) => completeOauthDraft(body),
+  });
+}
+
+export function useCreateFromOauthDraft() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: (body: { state_token: string; name: string; base_url?: string | null }) => createUpstreamFromOauthDraft(body),
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.upstreams }),
   });
 }

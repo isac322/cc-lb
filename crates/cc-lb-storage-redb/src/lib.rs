@@ -64,6 +64,10 @@ pub const UPSTREAM_RATE_LIMIT_STATE_V1: TableDefinition<&str, &[u8]> =
     TableDefinition::new("upstream_rate_limit_state_v1");
 pub const ANTHROPIC_COMPATIBILITY_KV_V1: TableDefinition<&str, &[u8]> =
     TableDefinition::new("anthropic_compatibility_kv_v1");
+pub const UPSTREAM_SUBSCRIPTION_METADATA_V1: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("upstream_subscription_metadata_v1");
+pub const ORGANIZATION_METADATA_V1: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("organization_metadata_v1");
 pub const UPSTREAM_SUBSCRIPTION_QUOTA_OBSERVATIONS_V1: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("upstream_subscription_quota_observations_v1");
 pub const UPSTREAM_SUBSCRIPTION_QUOTA_OBSERVATIONS_BY_TIME_V1: TableDefinition<&[u8], &[u8]> =

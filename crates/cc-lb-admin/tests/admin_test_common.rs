@@ -129,6 +129,8 @@ pub fn spawn_admin_server() -> SpawnedAdminServer {
         aead: Arc::new(cc_lb_aead::AeadService::from_master_key([0; 32])),
         limit_engine: limit_engine(),
         lifecycle: None,
+        subscription_metadata_hook: None,
+        lazy_refresher: None,
         audit_sink: Some(Arc::new(audit_sink)),
         dynamic_view: dynamic_view_holder(&config),
         config: Arc::new(config),

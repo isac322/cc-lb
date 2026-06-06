@@ -524,6 +524,55 @@ export interface UpstreamOAuthStatusResponse {
   scopes: string[];
 }
 
+export interface SubscriptionMetadataInner {
+  upstream_id: string;
+  organization_uuid: string | null;
+  organization_role: string | null;
+  workspace_role: string | null;
+  observed_at_unix_millis: number;
+  last_error: string | null;
+  raw_roles: string | null;
+  raw_bootstrap: string | null;
+}
+
+export interface OrganizationMetadataInner {
+  organization_uuid: string;
+  organization_name: string | null;
+  organization_type: string | null;
+  rate_limit_tier: string | null;
+  has_extra_usage_enabled: boolean | null;
+  billing_type: string | null;
+  subscription_created_at_unix_secs: number | null;
+  account_email: string | null;
+  account_display_name: string | null;
+  account_uuid: string | null;
+  overage_credit_amount_minor_units: number | null;
+  overage_credit_currency: string | null;
+  overage_credit_granted: boolean | null;
+  overage_credit_eligible: boolean | null;
+  claude_code_trial_ends_at?: number | null;
+  payment_auth_hosted_invoice_url?: string | null;
+  observed_at_unix_millis: number;
+  last_error: string | null;
+  raw_profile: string | null;
+  raw_overage_grant: string | null;
+}
+
+export interface SubscriptionMetadataResponse {
+  upstream_id: string;
+  subscription_metadata: SubscriptionMetadataInner | null;
+  organization_metadata: OrganizationMetadataInner | null;
+}
+
+export function triggerSubscriptionMetadataRefresh(
+  upstreamId: string,
+): Promise<SubscriptionMetadataResponse> {
+  return postJson<SubscriptionMetadataResponse, Record<string, never>>(
+    `/admin/v1/upstreams/${upstreamId}/subscription-metadata/refresh`,
+    {},
+  );
+}
+
 interface AuditEntry {
   ts: number | null;
   ts_ms?: number | null;
@@ -554,6 +603,16 @@ export type SubscriptionQuotaWindow =
   | '7d_opus'
   | 'overage'
   | 'unified';
+
+export const WINDOW_LABELS: Record<SubscriptionQuotaWindow, string> = {
+  '5h': '5h',
+  '7d': '7d',
+  '7d_sonnet': '7d (Sonnet)',
+  '7d_opus': '7d (Opus)',
+  overage: 'Extra Usage',
+  unified: 'Unified',
+};
+
 export type SubscriptionQuotaDataState = 'fresh' | 'stale' | 'missing';
 export type SubscriptionQuotaSourceMerge = 'header' | 'api' | 'merged';
 
@@ -676,4 +735,22 @@ export interface AnalysisResponse {
   now_unix_secs: number;
   max_staleness_secs: number;
   upstreams: AnalysisUpstreamResponse[];
+}
+export interface DraftCompleteResponse {
+  state_token: string;
+  suggested_name: string;
+  subscription_metadata: SubscriptionMetadataInner | null;
+  organization_metadata: OrganizationMetadataInner | null;
+}
+
+export function startOauthDraft(): Promise<{ authorize_url: string; state_token: string }> {
+  return postJson('/admin/v1/oauth/draft/start', {});
+}
+
+export function completeOauthDraft(body: { state_token: string; code: string }): Promise<DraftCompleteResponse> {
+  return postJson('/admin/v1/oauth/draft/complete', body);
+}
+
+export function createUpstreamFromOauthDraft(body: { state_token: string; name: string; base_url?: string | null }): Promise<any> {
+  return postJson('/admin/v1/upstreams/from-oauth-draft', body);
 }

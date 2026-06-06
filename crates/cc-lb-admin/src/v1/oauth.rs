@@ -1,25 +1,35 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
     extract::{Path, State},
-    http::StatusCode,
+    http::{HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
-use cc_lb_aead::OAuthTokenBundle;
+use cc_lb_aead::{AeadEncryptedField, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_core::{AuditEntry, AuditPayload};
+use cc_lb_core::anthropic_compat::{
+    CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
+};
+use cc_lb_core::{
+    AuditEntry, AuditPayload, MetadataHookRequest, fetch_metadata_only, make_metadata_http_client,
+};
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_api::{Storage, StorageError, UpstreamStore};
+use cc_lb_storage_api::{
+    OrganizationMetadataRecord, Storage, StorageError, UpstreamCreate, UpstreamRecord,
+    UpstreamStore, UpstreamSubscriptionMetadataRecord, validate_identifier,
+};
 use oauth2::{AuthUrl, ClientId, TokenUrl};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sha2::{Digest, Sha256};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
 
@@ -33,8 +43,18 @@ type PkceFlows = Arc<Mutex<HashMap<String, InFlightPkce>>>;
 
 static PKCE_FLOWS: OnceLock<PkceFlows> = OnceLock::new();
 
+const PKCE_FLOW_TTL_SECS: u64 = 900;
+const METADATA_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
+const DEFAULT_OAUTH_UPSTREAM_BASE_URL: &str = "https://api.anthropic.com";
+
 pub fn router() -> Router<AdminState> {
     Router::new()
+        .route("/admin/v1/oauth/draft/start", post(start_oauth_draft))
+        .route("/admin/v1/oauth/draft/complete", post(complete_oauth_draft))
+        .route(
+            "/admin/v1/upstreams/from-oauth-draft",
+            post(create_upstream_from_oauth_draft),
+        )
         .route("/admin/v1/upstreams/{id}/oauth/start", post(start_oauth))
         .route(
             "/admin/v1/upstreams/{id}/oauth/complete",
@@ -70,10 +90,24 @@ struct StartResponse {
     revision: u64,
 }
 
+#[derive(Serialize)]
+struct DraftStartResponse {
+    authorize_url: String,
+    state_token: String,
+}
+
 #[derive(Deserialize)]
 struct CompleteRequest {
     state_token: String,
     code: String,
+}
+
+#[derive(Deserialize)]
+struct CreateFromDraftRequest {
+    state_token: String,
+    name: String,
+    #[serde(default)]
+    base_url: Option<Url>,
 }
 
 #[derive(Serialize)]
@@ -83,13 +117,48 @@ struct CompleteResponse {
     access_token_fingerprint: String,
 }
 
+#[derive(Serialize)]
+struct DraftCompleteResponse {
+    state_token: String,
+    suggested_name: String,
+    subscription_metadata: UpstreamSubscriptionMetadataRecord,
+    organization_metadata: Option<OrganizationMetadataRecord>,
+}
+
+#[derive(Serialize)]
+struct UpstreamResponse {
+    id: String,
+    name: String,
+    kind: UpstreamKind,
+    enabled: bool,
+    revision: u64,
+}
+
 #[derive(Clone)]
 struct InFlightPkce {
-    upstream_id: Uuid,
-    upstream_name: String,
-    expected_revision: u64,
     handshake: PkceHandshakeState,
     created_at_unix_secs: u64,
+    target: PkceTarget,
+}
+
+#[derive(Clone)]
+enum PkceTarget {
+    ExistingUpstream {
+        upstream_id: Uuid,
+        upstream_name: String,
+        expected_revision: u64,
+    },
+    PendingDraft {
+        completed: Option<DraftCompletion>,
+    },
+}
+
+#[derive(Clone)]
+struct DraftCompletion {
+    encrypted_tokens: EncryptedOAuthTokens,
+    subscription_metadata_record: UpstreamSubscriptionMetadataRecord,
+    organization_metadata_record: Option<OrganizationMetadataRecord>,
+    fetched_at_unix_secs: u64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -155,17 +224,21 @@ async fn start_oauth(
         .append_pair("state", &state_token);
 
     let in_flight = InFlightPkce {
-        upstream_id,
-        upstream_name: upstream.name.clone(),
-        expected_revision: upstream.revision,
         handshake: handshake_state.clone(),
         created_at_unix_secs: now_unix_secs(),
+        target: PkceTarget::ExistingUpstream {
+            upstream_id,
+            upstream_name: upstream.name.clone(),
+            expected_revision: upstream.revision,
+        },
     };
     // M-R5: redb-backed runtime management is single-process, so v1 PKCE state is in-process.
     match pkce_flows().lock() {
         Ok(mut flows) => {
             let now = now_unix_secs();
-            flows.retain(|_, flow| now.saturating_sub(flow.created_at_unix_secs) < 900);
+            flows.retain(|_, flow| {
+                now.saturating_sub(flow.created_at_unix_secs) < PKCE_FLOW_TTL_SECS
+            });
             flows.insert(state_token.clone(), in_flight);
         }
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
@@ -187,6 +260,334 @@ async fn start_oauth(
         revision: upstream_revision,
     })
     .into_response()
+}
+
+async fn start_oauth_draft(State(state): State<AdminState>) -> Response {
+    let config = state.config.current_config();
+    let claude_default;
+    let oauth = match config.oauth.anthropic.as_ref() {
+        Some(oauth) => oauth,
+        None => {
+            claude_default = claude_code_default_oauth();
+            &claude_default
+        }
+    };
+    let authorize_endpoint = match AuthUrl::new(oauth.auth_url.to_string()) {
+        Ok(url) => url,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let token_endpoint = match TokenUrl::new(oauth.token_url.to_string()) {
+        Ok(url) => url,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let handshake = start_pkce_flow(
+        ClientId::new(oauth.client_id.clone()),
+        authorize_endpoint,
+        token_endpoint,
+        oauth.scopes.clone(),
+        oauth.redirect_uri.clone(),
+    );
+    let mut handshake_state = handshake.into_state();
+    let state_token = match encode_state(Uuid::nil()) {
+        Ok(state_token) => state_token,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    handshake_state
+        .authorize_url
+        .query_pairs_mut()
+        .append_pair("state", &state_token);
+
+    let in_flight = InFlightPkce {
+        handshake: handshake_state.clone(),
+        created_at_unix_secs: now_unix_secs(),
+        target: PkceTarget::PendingDraft { completed: None },
+    };
+    match pkce_flows().lock() {
+        Ok(mut flows) => {
+            let now = now_unix_secs();
+            flows.retain(|_, flow| {
+                now.saturating_sub(flow.created_at_unix_secs) < PKCE_FLOW_TTL_SECS
+            });
+            flows.insert(state_token.clone(), in_flight);
+        }
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+
+    Json(DraftStartResponse {
+        authorize_url: handshake_state.authorize_url.to_string(),
+        state_token,
+    })
+    .into_response()
+}
+
+async fn complete_oauth_draft(
+    State(state): State<AdminState>,
+    Json(payload): Json<CompleteRequest>,
+) -> Response {
+    let in_flight = match pkce_flows().lock() {
+        Ok(flows) => flows.get(&payload.state_token).cloned(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let Some(in_flight) = in_flight else {
+        return invalid_state_response(
+            "state token expired or already used — restart the OAuth flow",
+        );
+    };
+    match &in_flight.target {
+        PkceTarget::PendingDraft { completed: None } => {}
+        PkceTarget::PendingDraft { completed: Some(_) } => {
+            return invalid_state_response("OAuth draft has already been completed");
+        }
+        PkceTarget::ExistingUpstream { .. } => {
+            return invalid_state_response("state token is for an existing upstream");
+        }
+    }
+
+    let handshake = match in_flight.handshake.into_handshake() {
+        Ok(handshake) => handshake,
+        Err(_) => {
+            return invalid_state_response(
+                "stored PKCE handshake is corrupted — restart the OAuth flow",
+            );
+        }
+    };
+    let code = normalize_oauth_code(&payload.code);
+    let credentials = match complete_pkce_flow(
+        handshake,
+        code,
+        payload.state_token.clone(),
+        Arc::new(HyperOAuthHttpClient::new()),
+    )
+    .await
+    {
+        Ok(credentials) => credentials,
+        Err(error) => return token_exchange_error_response(error),
+    };
+
+    let bundle = OAuthTokenBundle {
+        access_token: credentials.access_token,
+        refresh_token: credentials.refresh_token,
+        expires_at_unix_secs: credentials.expires_at,
+        scopes: credentials.scopes,
+    };
+    let encrypted_tokens = match AeadEncryptedField::<OAuthTokenBundle>::encrypt(
+        &state.aead,
+        &bundle,
+        Uuid::nil().as_bytes(),
+    ) {
+        Ok(encrypted) => encrypted,
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+
+    let Some(storage) = state.storage.as_ref() else {
+        return StatusCode::NOT_IMPLEMENTED.into_response();
+    };
+    let version = storage
+        .get_compatibility_kv(CLAUDE_CODE_STABLE_VERSION_KEY)
+        .await
+        .map(|record| record.map(|record| record.value))
+        .unwrap_or(None)
+        .unwrap_or_else(|| CLAUDE_CODE_STABLE_VERSION_FALLBACK.to_owned());
+    let user_agent = claude_code_user_agent(&version);
+    let client = make_metadata_http_client();
+    let cancel = CancellationToken::new();
+    let records = match tokio::time::timeout(
+        METADATA_REFRESH_TIMEOUT,
+        fetch_metadata_only(
+            &client,
+            Uuid::nil(),
+            &bundle.access_token,
+            &user_agent,
+            &cancel,
+        ),
+    )
+    .await
+    {
+        Ok(records) => records,
+        Err(_) => {
+            return (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(json!({ "error": "metadata_refresh_timeout" })),
+            )
+                .into_response();
+        }
+    };
+    let suggested_name = records
+        .organization_metadata_record
+        .as_ref()
+        .map(|record| suggest_name(record, record.account_email.as_deref()))
+        .unwrap_or_else(|| "OAuth Upstream".to_owned());
+    let completion = DraftCompletion {
+        encrypted_tokens,
+        subscription_metadata_record: records.subscription_metadata_record.clone(),
+        organization_metadata_record: records.organization_metadata_record.clone(),
+        fetched_at_unix_secs: now_unix_secs(),
+    };
+
+    match pkce_flows().lock() {
+        Ok(mut flows) => match flows.get_mut(&payload.state_token) {
+            Some(InFlightPkce {
+                target: PkceTarget::PendingDraft { completed },
+                ..
+            }) if completed.is_none() => {
+                *completed = Some(completion);
+            }
+            Some(InFlightPkce {
+                target: PkceTarget::PendingDraft { .. },
+                ..
+            }) => return invalid_state_response("OAuth draft has already been completed"),
+            Some(_) => return invalid_state_response("state token is for an existing upstream"),
+            None => {
+                return invalid_state_response(
+                    "state token expired or already used — restart the OAuth flow",
+                );
+            }
+        },
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+
+    Json(DraftCompleteResponse {
+        state_token: payload.state_token,
+        suggested_name,
+        subscription_metadata: records.subscription_metadata_record,
+        organization_metadata: records.organization_metadata_record,
+    })
+    .into_response()
+}
+
+async fn create_upstream_from_oauth_draft(
+    State(state): State<AdminState>,
+    Json(payload): Json<CreateFromDraftRequest>,
+) -> Response {
+    if let Err(error) = validate_identifier("name", &payload.name) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid_name", "detail": error.to_string() })),
+        )
+            .into_response();
+    }
+    let completion = match pkce_flows().lock() {
+        Ok(flows) => flows
+            .get(&payload.state_token)
+            .and_then(|flow| match &flow.target {
+                PkceTarget::PendingDraft {
+                    completed: Some(completion),
+                } => Some(completion.clone()),
+                _ => None,
+            }),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+    let Some(completion) = completion else {
+        return invalid_state_response("OAuth draft is missing or incomplete");
+    };
+    let Some(storage) = state.storage.as_ref() else {
+        return StatusCode::NOT_IMPLEMENTED.into_response();
+    };
+    let base_url = match payload.base_url {
+        Some(base_url) => Some(base_url),
+        None => match Url::parse(DEFAULT_OAUTH_UPSTREAM_BASE_URL) {
+            Ok(base_url) => Some(base_url),
+            Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        },
+    };
+    let created = match UpstreamStore::create(
+        storage.as_ref(),
+        UpstreamCreate {
+            name: payload.name,
+            kind: UpstreamKind::AnthropicOauth,
+            base_url,
+            api_key_ciphertext: None,
+            shape_plugin: None,
+        },
+    )
+    .await
+    {
+        Ok(created) => created,
+        Err(error) => return storage_error_response(&error),
+    };
+    let bundle = match completion
+        .encrypted_tokens
+        .decrypt(state.aead.as_ref(), Uuid::nil().as_bytes())
+    {
+        Ok(bundle) => bundle,
+        Err(error) => {
+            return rollback_oauth_draft_creation(
+                storage.as_ref(),
+                &payload.state_token,
+                created.id,
+                format!("draft token decrypt failed: {error}"),
+            )
+            .await;
+        }
+    };
+    let encrypted_tokens = match AeadEncryptedField::<OAuthTokenBundle>::encrypt(
+        state.aead.as_ref(),
+        &bundle,
+        created.id.as_bytes(),
+    ) {
+        Ok(encrypted) => encrypted,
+        Err(error) => {
+            return rollback_oauth_draft_creation(
+                storage.as_ref(),
+                &payload.state_token,
+                created.id,
+                format!("draft token re-encrypt failed: {error}"),
+            )
+            .await;
+        }
+    };
+    let updated = match storage
+        .store_oauth_tokens(created.id, created.revision, encrypted_tokens)
+        .await
+    {
+        Ok(updated) => updated,
+        Err(error) => {
+            return rollback_oauth_draft_creation(
+                storage.as_ref(),
+                &payload.state_token,
+                created.id,
+                format!("oauth token storage failed: {error}"),
+            )
+            .await;
+        }
+    };
+    let _fetched_at_unix_secs = completion.fetched_at_unix_secs;
+    let mut subscription_record = completion.subscription_metadata_record;
+    subscription_record.upstream_id = created.id;
+    if let Err(error) = storage
+        .put_upstream_subscription_metadata(&subscription_record)
+        .await
+    {
+        return rollback_oauth_draft_creation(
+            storage.as_ref(),
+            &payload.state_token,
+            created.id,
+            format!("subscription metadata storage failed: {error}"),
+        )
+        .await;
+    }
+    if let Some(organization_record) = completion.organization_metadata_record.as_ref()
+        && let Err(error) = storage.put_organization_metadata(organization_record).await
+    {
+        return rollback_oauth_draft_creation(
+            storage.as_ref(),
+            &payload.state_token,
+            created.id,
+            format!("organization metadata storage failed: {error}"),
+        )
+        .await;
+    }
+
+    if let Ok(mut flows) = pkce_flows().lock() {
+        flows.remove(&payload.state_token);
+    }
+
+    let mut response = (StatusCode::CREATED, Json(upstream_response(&updated))).into_response();
+    if let Ok(location) = HeaderValue::from_str(&format!("/admin/v1/upstreams/{}", updated.id)) {
+        response.headers_mut().insert(header::LOCATION, location);
+    }
+    add_dynamic_rebind_headers(&mut response, &state).await;
+    response
 }
 
 async fn complete_oauth(
@@ -224,7 +625,17 @@ async fn complete_oauth(
             "state token expired or already used — restart the OAuth flow",
         );
     };
-    if in_flight.upstream_id != upstream_id {
+    let (target_upstream_id, upstream_name, expected_revision) = match &in_flight.target {
+        PkceTarget::ExistingUpstream {
+            upstream_id,
+            upstream_name,
+            expected_revision,
+        } => (*upstream_id, upstream_name.clone(), *expected_revision),
+        PkceTarget::PendingDraft { .. } => {
+            return invalid_state_response("state token is for an OAuth draft");
+        }
+    };
+    if target_upstream_id != upstream_id {
         return invalid_state_response("state token does not match this upstream");
     }
 
@@ -292,7 +703,7 @@ async fn complete_oauth(
         Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     };
     let updated = match storage
-        .store_oauth_tokens(upstream_id, in_flight.expected_revision, encrypted)
+        .store_oauth_tokens(upstream_id, expected_revision, encrypted)
         .await
     {
         Ok(updated) => updated,
@@ -309,11 +720,25 @@ async fn complete_oauth(
         Err(error) => return storage_error_response(&error),
     };
 
+    if let Some(hook) = &state.subscription_metadata_hook {
+        let version = storage
+            .get_compatibility_kv(CLAUDE_CODE_STABLE_VERSION_KEY)
+            .await
+            .map(|record| record.map(|record| record.value))
+            .unwrap_or(None)
+            .unwrap_or_else(|| CLAUDE_CODE_STABLE_VERSION_FALLBACK.to_owned());
+        hook.enqueue(MetadataHookRequest {
+            upstream_id,
+            access_token: bundle.access_token.clone(),
+            user_agent: claude_code_user_agent(&version),
+        });
+    }
+
     enqueue_upstream_audit(
         &state,
         AuditPayload::UpstreamOauthComplete {
             upstream_id: upstream_id.to_string(),
-            upstream_name: in_flight.upstream_name,
+            upstream_name,
             expires_at_unix_secs: bundle.expires_at_unix_secs,
             access_token_fingerprint: access_token_fingerprint.clone(),
         },
@@ -493,10 +918,95 @@ fn storage_error_response(error: &StorageError) -> Response {
         StorageError::Unavailable { .. } | StorageError::Transient { .. } => {
             StatusCode::SERVICE_UNAVAILABLE.into_response()
         }
+        StorageError::InvalidInput { field, reason } => (
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "invalid_input", "field": field, "detail": reason })),
+        )
+            .into_response(),
         StorageError::Conflict { .. } => {
             (StatusCode::CONFLICT, Json(json!({ "error": "conflict" }))).into_response()
         }
         _ => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+async fn rollback_oauth_draft_creation(
+    storage: &dyn Storage,
+    state_token: &str,
+    upstream_id: Uuid,
+    detail: String,
+) -> Response {
+    let rollback_error = UpstreamStore::hard_delete(storage, upstream_id).await.err();
+    if let Ok(mut flows) = pkce_flows().lock() {
+        flows.remove(state_token);
+    }
+    let detail = match rollback_error {
+        Some(error) => format!("{detail}; rollback delete failed: {error}"),
+        None => detail,
+    };
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(json!({ "error": "oauth_draft_create_failed", "detail": detail })),
+    )
+        .into_response()
+}
+
+fn upstream_response(record: &UpstreamRecord) -> UpstreamResponse {
+    UpstreamResponse {
+        id: record.id.to_string(),
+        name: record.name.clone(),
+        kind: record.kind,
+        enabled: record.enabled,
+        revision: record.revision,
+    }
+}
+
+fn suggest_name(meta: &OrganizationMetadataRecord, account_email: Option<&str>) -> String {
+    let rate_suffix = rate_suffix(meta.rate_limit_tier.as_deref());
+    if let Some(name) = meta
+        .organization_name
+        .as_deref()
+        .and_then(non_generic_org_name)
+    {
+        return format!("{name}{rate_suffix}");
+    }
+    if let (Some(email_local_part), Some(short_type)) = (
+        account_email.and_then(email_local_part),
+        meta.organization_type.as_deref().and_then(short_org_type),
+    ) {
+        return format!("{email_local_part}-{short_type}{rate_suffix}");
+    }
+    meta.organization_type
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| "OAuth Upstream".to_owned())
+}
+
+fn non_generic_org_name(name: &str) -> Option<&str> {
+    let trimmed = name.trim();
+    (!trimmed.is_empty() && !trimmed.ends_with("'s Organization")).then_some(trimmed)
+}
+
+fn email_local_part(email: &str) -> Option<&str> {
+    let local_part = email.split('@').next()?.trim();
+    (!local_part.is_empty()).then_some(local_part)
+}
+
+fn short_org_type(org_type: &str) -> Option<&'static str> {
+    match org_type {
+        "claude_max" => Some("max"),
+        "claude_team" => Some("team"),
+        "claude_pro" => Some("pro"),
+        "claude_enterprise" => Some("enterprise"),
+        _ => None,
+    }
+}
+
+fn rate_suffix(rate_limit_tier: Option<&str>) -> &'static str {
+    match rate_limit_tier {
+        Some("5x") => "-5x",
+        Some("20x") => "-20x",
+        _ => "",
     }
 }
 
@@ -582,5 +1092,70 @@ fn claude_code_default_oauth() -> AnthropicOAuthConfig {
             "user:profile".to_owned(),
             "user:inference".to_owned(),
         ],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use cc_lb_storage_api::OrganizationMetadataRecord;
+
+    use super::suggest_name;
+
+    #[test]
+    fn suggest_name_uses_non_generic_org_name_with_rate_suffix() {
+        let meta = org_meta(
+            Some("Runbear"),
+            Some("claude_team"),
+            Some("5x"),
+            Some("local@runbear.io"),
+        );
+
+        assert_eq!(
+            suggest_name(&meta, meta.account_email.as_deref()),
+            "Runbear-5x"
+        );
+    }
+
+    #[test]
+    fn suggest_name_falls_back_to_email_and_short_org_type_for_generic_org() {
+        let meta = org_meta(
+            Some("Local's Organization"),
+            Some("claude_max"),
+            Some("20x"),
+            Some("isac@example.com"),
+        );
+
+        assert_eq!(
+            suggest_name(&meta, meta.account_email.as_deref()),
+            "isac-max-20x"
+        );
+    }
+
+    fn org_meta(
+        organization_name: Option<&str>,
+        organization_type: Option<&str>,
+        rate_limit_tier: Option<&str>,
+        account_email: Option<&str>,
+    ) -> OrganizationMetadataRecord {
+        OrganizationMetadataRecord {
+            organization_uuid: "org-1".to_owned(),
+            organization_name: organization_name.map(str::to_owned),
+            organization_type: organization_type.map(str::to_owned),
+            rate_limit_tier: rate_limit_tier.map(str::to_owned),
+            has_extra_usage_enabled: None,
+            billing_type: None,
+            subscription_created_at_unix_secs: None,
+            account_email: account_email.map(str::to_owned),
+            account_display_name: None,
+            account_uuid: None,
+            overage_credit_amount_minor_units: None,
+            overage_credit_currency: None,
+            overage_credit_granted: None,
+            overage_credit_eligible: None,
+            observed_at_unix_millis: 0,
+            last_error: None,
+            raw_profile: None,
+            raw_overage_grant: None,
+        }
     }
 }
