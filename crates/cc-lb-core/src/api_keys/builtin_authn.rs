@@ -88,10 +88,7 @@ impl BuiltinAuthn {
         headers: &http::HeaderMap,
         view: &PrincipalView,
     ) -> Result<AuthnSuccess, BuiltinAuthError> {
-        let input = headers
-            .get("x-api-key")
-            .and_then(|value| value.to_str().ok())
-            .ok_or(BuiltinAuthError::MissingHeader)?;
+        let input = extract_credential(headers)?;
         let (parsed_key_id, secret_bytes) =
             secret::parse(input).map_err(|_| BuiltinAuthError::InvalidFormat)?;
         let index_hash = secret::compute_index_hash(&secret_bytes);
@@ -173,6 +170,26 @@ impl BuiltinAuthn {
     }
 }
 
+fn extract_credential(headers: &http::HeaderMap) -> Result<&str, BuiltinAuthError> {
+    if let Some(value) = headers.get("x-api-key") {
+        return value.to_str().map_err(|_| BuiltinAuthError::MissingHeader);
+    }
+
+    let authorization = headers
+        .get(http::header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(BuiltinAuthError::MissingHeader)?;
+
+    let (scheme, credential) = authorization
+        .split_once(' ')
+        .ok_or(BuiltinAuthError::MissingHeader)?;
+    if !scheme.eq_ignore_ascii_case("Bearer") {
+        return Err(BuiltinAuthError::MissingHeader);
+    }
+
+    Ok(credential)
+}
+
 fn map_lookup_error(error: KeyStoreError) -> BuiltinAuthError {
     match error {
         KeyStoreError::Storage(
@@ -239,6 +256,122 @@ mod tests {
             *store.seen_index_hash.lock().unwrap(),
             Some(record.index_hash)
         );
+    }
+
+    #[tokio::test]
+    async fn bearer_happy_path() {
+        let generated = secret::generate_new();
+        let record = active_record(&generated);
+        let (authn, store) = api_key_authn(
+            LookupAction::Return(Box::new(Some((
+                "principal-1".to_owned(),
+                generated.key_id.clone(),
+                record.clone(),
+            )))),
+            true,
+        );
+        let bearer = format!("Bearer {}", generated.plaintext.expose());
+
+        let success = authn
+            .authenticate(&authorization_headers(&bearer), &principal_view(true))
+            .await
+            .expect("generated bearer key authenticates");
+
+        assert_eq!(success.principal_id, "principal-1");
+        assert_eq!(
+            success.api_key.as_deref(),
+            Some(generated.plaintext.expose())
+        );
+        assert_eq!(
+            *store.seen_index_hash.lock().unwrap(),
+            Some(record.index_hash)
+        );
+    }
+
+    #[tokio::test]
+    async fn bearer_lowercase_scheme() {
+        let generated = secret::generate_new();
+        let record = active_record(&generated);
+        let (authn, _store) = api_key_authn(
+            LookupAction::Return(Box::new(Some((
+                "principal-1".to_owned(),
+                generated.key_id.clone(),
+                record,
+            )))),
+            true,
+        );
+        let bearer = format!("bearer {}", generated.plaintext.expose());
+
+        let success = authn
+            .authenticate(&authorization_headers(&bearer), &principal_view(true))
+            .await
+            .expect("lowercase bearer scheme authenticates");
+
+        assert_eq!(success.principal_id, "principal-1");
+        assert_eq!(
+            success.api_key.as_deref(),
+            Some(generated.plaintext.expose())
+        );
+    }
+
+    #[tokio::test]
+    async fn bearer_invalid_format() {
+        let (authn, _store) = api_key_authn(LookupAction::Return(Box::new(None)), true);
+
+        let error = authn_error(
+            authn
+                .authenticate(
+                    &authorization_headers("Bearer not-a-cclb-key"),
+                    &principal_view(true),
+                )
+                .await,
+        );
+
+        assert_eq!(error, BuiltinAuthError::InvalidFormat);
+    }
+
+    #[tokio::test]
+    async fn xapikey_wins_over_authorization() {
+        let generated = secret::generate_new();
+        let record = active_record(&generated);
+        let (authn, _store) = api_key_authn(
+            LookupAction::Return(Box::new(Some((
+                "principal-1".to_owned(),
+                generated.key_id.clone(),
+                record,
+            )))),
+            true,
+        );
+
+        let success = authn
+            .authenticate(
+                &headers_with_x_api_key_and_authorization(
+                    generated.plaintext.expose(),
+                    "Bearer junk",
+                ),
+                &principal_view(true),
+            )
+            .await
+            .expect("x-api-key authenticates when authorization is junk");
+
+        assert_eq!(success.principal_id, "principal-1");
+        assert_eq!(
+            success.api_key.as_deref(),
+            Some(generated.plaintext.expose())
+        );
+    }
+
+    #[tokio::test]
+    async fn neither_header_returns_missing() {
+        let (authn, _store) = api_key_authn(LookupAction::Return(Box::new(None)), true);
+
+        let error = authn_error(
+            authn
+                .authenticate(&HeaderMap::new(), &principal_view(true))
+                .await,
+        );
+
+        assert_eq!(error, BuiltinAuthError::MissingHeader);
     }
 
     #[tokio::test]
@@ -355,6 +488,25 @@ mod tests {
         headers.insert(
             "x-api-key",
             HeaderValue::from_str(api_key).expect("test api key is a valid header value"),
+        );
+        headers
+    }
+
+    fn authorization_headers(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            HeaderValue::from_str(value).expect("test authorization is a valid header value"),
+        );
+        headers
+    }
+
+    fn headers_with_x_api_key_and_authorization(api_key: &str, authorization: &str) -> HeaderMap {
+        let mut headers = headers(api_key);
+        headers.insert(
+            "authorization",
+            HeaderValue::from_str(authorization)
+                .expect("test authorization is a valid header value"),
         );
         headers
     }
