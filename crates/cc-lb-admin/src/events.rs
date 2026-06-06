@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use cc_lb_storage_api::{RequestEvent, RequestEventUpstream, Storage, StorageError};
 use serde::Serialize;
+use uuid::Uuid;
 
 pub const DEFAULT_RECENT_EVENTS_LIMIT: usize = 100;
 pub const MAX_RECENT_EVENTS_LIMIT: usize = 500;
@@ -15,6 +16,7 @@ pub struct RecentEventsParams {
     pub limit: usize,
     pub principal_id: Option<String>,
     pub model: Option<String>,
+    pub upstream_id: Option<Uuid>,
     pub upstream: Option<RequestEventUpstream>,
     pub status_class: Option<StatusClass>,
 }
@@ -49,6 +51,7 @@ pub enum EventsError {
     InvalidUntilUnixSecs,
     InvalidLimit,
     LimitTooLarge,
+    InvalidUpstreamId,
     InvalidUpstream,
     InvalidStatusClass,
     Storage(StorageError),
@@ -89,6 +92,12 @@ pub fn parse_recent_params(
         limit,
         principal_id: filters.principal_id,
         model: filters.model,
+        upstream_id: match map.get("upstream_id") {
+            Some(value) => {
+                Some(Uuid::parse_str(value).map_err(|_| EventsError::InvalidUpstreamId)?)
+            }
+            None => None,
+        },
         upstream: filters.upstream,
         status_class: filters.status_class,
     })
@@ -150,6 +159,9 @@ pub async fn build_recent_events_payload(
             .then_with(|| left.request_id.cmp(&right.request_id))
     });
     events.retain(|event| apply_filters_to_event(event, &filters));
+    if let Some(upstream_id) = params.upstream_id {
+        events.retain(|event| event.upstream_id == Some(upstream_id));
+    }
     events.truncate(params.limit);
     let count = events.len();
 
@@ -191,6 +203,7 @@ impl EventsError {
             Self::InvalidUntilUnixSecs => "invalid_until_unix_secs",
             Self::InvalidLimit => "invalid_limit",
             Self::LimitTooLarge => "limit_too_large",
+            Self::InvalidUpstreamId => "invalid_upstream_id",
             Self::InvalidUpstream => "invalid_upstream",
             Self::InvalidStatusClass => "invalid_status_class",
             Self::Storage(_) => "storage_error",

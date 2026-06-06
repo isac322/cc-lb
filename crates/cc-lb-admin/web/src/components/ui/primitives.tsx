@@ -2,6 +2,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import { X } from 'lucide-react';
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from 'react';
+import { useState } from 'react';
 import { Area, AreaChart, ResponsiveContainer } from 'recharts';
 
 import { getWindowColor } from '../../lib/colors';
@@ -348,14 +349,25 @@ export function Hint({
   children: ReactNode;
   side?: 'top' | 'right' | 'bottom' | 'left';
 }) {
+  const [open, setOpen] = useState(false);
   return (
     <Tooltip.Provider delayDuration={200}>
-      <Tooltip.Root>
-        <Tooltip.Trigger asChild>{children}</Tooltip.Trigger>
+      <Tooltip.Root open={open} onOpenChange={setOpen}>
+        <Tooltip.Trigger asChild>
+          <span
+            onClick={(e) => {
+              e.stopPropagation();
+              setOpen((o) => !o);
+            }}
+          >
+            {children}
+          </span>
+        </Tooltip.Trigger>
         <Tooltip.Portal>
           <Tooltip.Content
             side={side}
             sideOffset={4}
+            onPointerDownOutside={() => setOpen(false)}
             className="z-50 px-2 py-1 text-[11px] rounded-sm bg-bg-sub border border-subtle-strong text-text shadow-lg"
           >
             {label}
