@@ -22,6 +22,7 @@ serde_json.workspace = true
 schemars.workspace = true
 serde_yaml = "0.9"
 tokio.workspace = true
+tokio-util.workspace = true
 rust-embed.workspace = true
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
@@ -29,6 +30,7 @@ cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-core = { path = "../cc-lb-core" }
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
+cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
 tracing.workspace = true
 http.workspace = true
 http-body-util.workspace = true

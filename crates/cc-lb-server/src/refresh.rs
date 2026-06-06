@@ -5,7 +5,10 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_core::AuditPayload;
+use cc_lb_core::anthropic_compat::{
+    CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
+};
+use cc_lb_core::{AuditPayload, MetadataHookHandle, MetadataHookRequest};
 use cc_lb_signer_anthropic_oauth::{LazyRefreshError, LazyRefreshHandle};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{AuditEntry, AuditStore, StorageError, StorageResult, UpstreamRecord};
@@ -58,6 +61,7 @@ pub struct OAuthRefresher {
     pub oauth_cfg: Arc<AnthropicOAuthConfig>,
     pub replica_id: Uuid,
     http: TokenHttpClient,
+    pub metadata_hook: Option<MetadataHookHandle>,
     pub cancel: CancellationToken,
 }
 
@@ -67,6 +71,7 @@ impl OAuthRefresher {
         aead: Arc<AeadService>,
         oauth_cfg: Arc<AnthropicOAuthConfig>,
         replica_id: Uuid,
+        metadata_hook: Option<MetadataHookHandle>,
         cancel: CancellationToken,
     ) -> Self {
         let http = TokenHttpClient::new(Duration::from_secs(30));
@@ -76,6 +81,7 @@ impl OAuthRefresher {
             oauth_cfg,
             replica_id,
             http,
+            metadata_hook,
             cancel,
         }
     }
@@ -183,6 +189,7 @@ impl OAuthRefresher {
             &self.oauth_cfg,
             self.replica_id,
             &self.http,
+            self.metadata_hook.as_ref(),
             &self.cancel,
             upstream.clone(),
         )
@@ -205,6 +212,7 @@ pub struct LazyRefresher {
     oauth_cfg: Arc<AnthropicOAuthConfig>,
     replica_id: Uuid,
     http: TokenHttpClient,
+    metadata_hook: Option<MetadataHookHandle>,
     cancel: CancellationToken,
 }
 
@@ -214,6 +222,7 @@ impl LazyRefresher {
         aead: Arc<AeadService>,
         oauth_cfg: Arc<AnthropicOAuthConfig>,
         replica_id: Uuid,
+        metadata_hook: Option<MetadataHookHandle>,
         cancel: CancellationToken,
     ) -> Self {
         let http = TokenHttpClient::new(Duration::from_secs(30));
@@ -223,6 +232,7 @@ impl LazyRefresher {
             oauth_cfg,
             replica_id,
             http,
+            metadata_hook,
             cancel,
         }
     }
@@ -258,6 +268,7 @@ impl LazyRefreshHandle for LazyRefresher {
             &self.oauth_cfg,
             self.replica_id,
             &self.http,
+            self.metadata_hook.as_ref(),
             &self.cancel,
             upstream,
         )
@@ -304,6 +315,7 @@ async fn refresh_flow(
     oauth_cfg: &AnthropicOAuthConfig,
     replica_id: Uuid,
     http: &TokenHttpClient,
+    metadata_hook: Option<&MetadataHookHandle>,
     cancel: &CancellationToken,
     upstream: UpstreamRecord,
 ) -> Result<(), RefreshError> {
@@ -336,6 +348,15 @@ async fn refresh_flow(
                 .upstreams
                 .complete_refresh(upstream.id, replica_id, encrypted)
                 .await?;
+            if let Some(metadata_hook) = metadata_hook {
+                enqueue_metadata_hook(
+                    stores,
+                    metadata_hook,
+                    upstream.id,
+                    bundle.access_token.clone(),
+                )
+                .await;
+            }
             increment_metric(&upstream.name, "success");
             emit_audit(
                 audit,
@@ -375,6 +396,26 @@ async fn refresh_flow(
             Err(error)
         }
     }
+}
+
+async fn enqueue_metadata_hook(
+    stores: &Stores,
+    metadata_hook: &MetadataHookHandle,
+    upstream_id: Uuid,
+    access_token: String,
+) {
+    let version = stores
+        .anthropic_compatibility_kv
+        .get_compatibility_kv(CLAUDE_CODE_STABLE_VERSION_KEY)
+        .await
+        .map(|record| record.map(|record| record.value))
+        .unwrap_or(None)
+        .unwrap_or_else(|| CLAUDE_CODE_STABLE_VERSION_FALLBACK.to_owned());
+    metadata_hook.enqueue(MetadataHookRequest {
+        upstream_id,
+        access_token,
+        user_agent: claude_code_user_agent(&version),
+    });
 }
 
 async fn request_refresh(

@@ -20,10 +20,11 @@ use async_trait::async_trait;
 use axum::Router;
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, RestartRequiredField};
+use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use serde::Serialize;
 
 use cc_lb_core::{
-    AuditWriterSink, DynamicView, DynamicViewHolder, Lifecycle,
+    AuditWriterSink, DynamicView, DynamicViewHolder, Lifecycle, MetadataHookHandle,
     api_keys::{key_store::KeyStore, limit_engine::LimitEngine},
 };
 use cc_lb_storage_api::Storage;
@@ -43,6 +44,8 @@ pub struct AdminState {
     pub aead: Arc<AeadService>,
     pub limit_engine: Arc<LimitEngine>,
     pub lifecycle: Option<Arc<Lifecycle>>,
+    pub subscription_metadata_hook: Option<MetadataHookHandle>,
+    pub lazy_refresher: Option<Arc<dyn LazyRefreshHandle>>,
     pub audit_sink: Option<Arc<AuditWriterSink>>,
     pub dynamic_view: Arc<DynamicViewHolder>,
     pub config: Arc<dyn CurrentConfig>,

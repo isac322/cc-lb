@@ -13,6 +13,38 @@ export const UPSTREAM_COLORS = [
   { line5h: '#64748b', line7d: '#cbd5e1' }, // slate
 ];
 
+export const WINDOW_GRADIENT_IDS = {
+  '5h': 'quota-grad-5h',
+  '7d': 'quota-grad-7d',
+  '7d_sonnet': 'quota-grad-sonnet',
+  '7d_opus': 'quota-grad-opus',
+  overage: 'quota-grad-overage',
+  unified: 'quota-grad-unified',
+} as const;
+
+export const WINDOW_DURATION_SECS: Record<string, number> = {
+  '5h': 18000,
+  '7d': 604800,
+  '7d_sonnet': 604800,
+  '7d_opus': 604800,
+};
+
+export const WINDOW_COLORS: Record<string, { stroke: string; fill: string }> = {
+  '5h': { stroke: '#3b82f6', fill: '#3b82f6' }, // blue
+  '7d': { stroke: '#8b5cf6', fill: '#8b5cf6' }, // violet
+  '7d_sonnet': { stroke: '#14b8a6', fill: '#14b8a6' }, // teal
+  '7d_opus': { stroke: '#f59e0b', fill: '#f59e0b' }, // amber
+  overage: { stroke: '#f97316', fill: '#f97316' }, // orange
+  unified: { stroke: '#64748b', fill: '#64748b' }, // slate
+};
+
+export function getWindowColor(window: string): {
+  stroke: string;
+  fill: string;
+} {
+  return WINDOW_COLORS[window] || { stroke: '#64748b', fill: '#64748b' };
+}
+
 export function getUpstreamColor(upstreamId: string): {
   line5h: string;
   line7d: string;

@@ -31,7 +31,8 @@ use cc_lb_core::{
         builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
         limit_engine::LimitEngine, principal_view::PrincipalView,
     },
-    make_default_dispatcher, spawn_audit_writer, start_subscription_quota_writer,
+    make_default_dispatcher, make_metadata_http_client, spawn_audit_writer,
+    start_subscription_metadata_hook, start_subscription_quota_writer,
     start_upstream_rate_limit_writer,
     usage_pruner::UsagePruner,
     usage_rollup_job::UsageRollupJob,
@@ -639,6 +640,12 @@ async fn build_app_with_storage_inner(
         },
         subscription_quota_writer_cancel.clone(),
     );
+    let subscription_metadata_hook_cancel = CancellationToken::new();
+    let subscription_metadata_hook = start_subscription_metadata_hook(
+        storage.clone(),
+        make_metadata_http_client(),
+        subscription_metadata_hook_cancel.clone(),
+    );
     let runtime = Arc::new(ExtismRuntime::new());
     let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
     let storage_for_dynamic = storage.clone();
@@ -760,6 +767,7 @@ async fn build_app_with_storage_inner(
                 aead.clone(),
                 oauth_cfg.clone(),
                 identity.id,
+                Some(subscription_metadata_hook.clone()),
                 refresh_cancel.clone(),
             ))
         });
@@ -827,6 +835,7 @@ async fn build_app_with_storage_inner(
     lifecycle = lifecycle.with_request_event_storage(storage.clone());
     lifecycle = lifecycle.with_upstream_rate_limit_sink(upstream_rate_limit_sink);
     lifecycle = lifecycle.with_subscription_quota_sink(subscription_quota_sink.clone());
+    lifecycle = lifecycle.with_subscription_metadata_hook(subscription_metadata_hook.clone());
     lifecycle = lifecycle.with_subscription_quota_cache(subscription_quota_cache.clone());
     let lifecycle = Arc::new(lifecycle);
     let dynamic_view = lifecycle.dynamic_view();
@@ -866,6 +875,7 @@ async fn build_app_with_storage_inner(
         sighup_handler(reload_tls_state, config_watcher.clone()),
     );
     spawn_reconcile_shutdown(signals.subscribe(), subscription_quota_writer_cancel);
+    spawn_reconcile_shutdown(signals.subscribe(), subscription_metadata_hook_cancel);
     let reconcile_cancel = CancellationToken::new();
     spawn_reconciler(ReconcilerParams {
         stores: stores.clone(),
@@ -888,6 +898,7 @@ async fn build_app_with_storage_inner(
             aead.clone(),
             oauth_cfg,
             replica_id,
+            Some(subscription_metadata_hook.clone()),
             refresh_cancel.clone(),
         );
         spawn_reconcile_shutdown(signals.subscribe(), refresh_cancel);
@@ -960,6 +971,8 @@ async fn build_app_with_storage_inner(
         aead: aead.clone(),
         limit_engine: limit_engine.clone(),
         lifecycle: Some(lifecycle.clone()),
+        subscription_metadata_hook: Some(subscription_metadata_hook),
+        lazy_refresher: lazy_refresher.clone(),
         audit_sink: audit_sink.clone(),
         dynamic_view: dynamic_view.clone(),
         config: admin_config,
@@ -1139,9 +1152,10 @@ fn spawn_oauth_refresher(
     aead: Arc<AeadService>,
     oauth_cfg: Arc<cc_lb_config::AnthropicOAuthConfig>,
     replica_id: uuid::Uuid,
+    metadata_hook: Option<cc_lb_core::MetadataHookHandle>,
     cancel: CancellationToken,
 ) {
-    let refresher = OAuthRefresher::new(stores, aead, oauth_cfg, replica_id, cancel);
+    let refresher = OAuthRefresher::new(stores, aead, oauth_cfg, replica_id, metadata_hook, cancel);
     tokio::spawn(Arc::new(refresher).run());
 }
 

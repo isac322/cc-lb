@@ -1,3 +1,6 @@
+use std::sync::Arc;
+use std::time::Duration;
+
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
@@ -8,16 +11,21 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{get, post},
 };
-use cc_lb_aead::AeadEncryptedField;
-use cc_lb_core::{AuditEntry, AuditPayload};
+use cc_lb_aead::{AeadEncryptedField, OAuthTokenBundle};
+use cc_lb_core::anthropic_compat::{
+    CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
+};
+use cc_lb_core::{AuditEntry, AuditPayload, make_metadata_http_client, run_metadata_refresh};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamShapePluginRef};
 use cc_lb_storage_api::{
-    PluginSlot, PrincipalStore, Storage, StorageError, UpstreamCreate, UpstreamRecord,
-    UpstreamStore, UpstreamUpdate,
+    OrganizationMetadataRecord, PluginSlot, PrincipalStore, Storage, StorageError, UpstreamCreate,
+    UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord, UpstreamUpdate,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use tokio_util::sync::CancellationToken;
 use url::Url;
+use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
 use crate::AdminState;
@@ -25,6 +33,8 @@ use crate::AdminState;
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 1000;
 const STORE_PAGE_LIMIT: usize = 1000;
+const METADATA_REFRESH_LOOKAHEAD_SECS: u64 = 60;
+const METADATA_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub fn router() -> Router<AdminState> {
     Router::new()
@@ -37,6 +47,14 @@ pub fn router() -> Router<AdminState> {
             get(get_upstream)
                 .put(update_upstream)
                 .delete(delete_upstream),
+        )
+        .route(
+            "/admin/v1/upstreams/{id}/subscription-metadata",
+            get(get_upstream_subscription_metadata),
+        )
+        .route(
+            "/admin/v1/upstreams/{id}/subscription-metadata/refresh",
+            post(refresh_upstream_subscription_metadata),
         )
         .route("/admin/v1/upstreams/{id}/enable", post(enable_upstream))
         .route("/admin/v1/upstreams/{id}/disable", post(disable_upstream))
@@ -103,6 +121,13 @@ struct ReferenceResponse {
     name: String,
 }
 
+#[derive(Debug, Serialize)]
+struct SubscriptionMetadataResponse {
+    upstream_id: String,
+    subscription_metadata: Option<UpstreamSubscriptionMetadataRecord>,
+    organization_metadata: Option<OrganizationMetadataRecord>,
+}
+
 enum UpstreamError {
     StorageUnavailable,
     NotFound,
@@ -111,6 +136,11 @@ enum UpstreamError {
     StaleRevision { current_revision: u64 },
     ReferencedBy { references: Vec<ReferenceResponse> },
     Conflict { detail: String },
+    NotOauthUpstream,
+    CredentialDecrypt,
+    RefreshUnavailable,
+    RefreshFailed { detail: String },
+    MetadataRefreshTimeout,
     Storage(StorageError),
 }
 
@@ -150,6 +180,31 @@ impl IntoResponse for UpstreamError {
             Self::Conflict { detail } => (
                 StatusCode::CONFLICT,
                 Json(json!({ "error": "conflict", "detail": detail })),
+            )
+                .into_response(),
+            Self::NotOauthUpstream => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": "not_oauth_upstream" })),
+            )
+                .into_response(),
+            Self::CredentialDecrypt => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "oauth_credential_decrypt_failed" })),
+            )
+                .into_response(),
+            Self::RefreshUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "error": "oauth_refresh_unavailable" })),
+            )
+                .into_response(),
+            Self::RefreshFailed { detail } => (
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "error": "oauth_refresh_failed", "detail": detail })),
+            )
+                .into_response(),
+            Self::MetadataRefreshTimeout => (
+                StatusCode::GATEWAY_TIMEOUT,
+                Json(json!({ "error": "metadata_refresh_timeout" })),
             )
                 .into_response(),
             Self::Storage(error) => {
@@ -252,6 +307,62 @@ async fn get_upstream(
         .headers_mut()
         .insert(axum::http::header::ETAG, etag_value(record.revision)?);
     Ok(response)
+}
+
+async fn get_upstream_subscription_metadata(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+) -> Result<Json<SubscriptionMetadataResponse>, UpstreamError> {
+    let storage = storage(&state)?;
+    let upstream_id = id
+        .parse::<Uuid>()
+        .map_err(|error| UpstreamError::BadRequest {
+            error: "invalid_upstream_id",
+            detail: error.to_string(),
+        })?;
+    subscription_metadata_response(storage, upstream_id)
+        .await
+        .map(Json)
+}
+
+async fn refresh_upstream_subscription_metadata(
+    State(state): State<AdminState>,
+    Path(upstream_id): Path<Uuid>,
+) -> Result<Json<SubscriptionMetadataResponse>, UpstreamError> {
+    let storage = storage_arc(&state)?;
+    let upstream = UpstreamStore::get_by_id(storage.as_ref(), upstream_id)
+        .await?
+        .ok_or(UpstreamError::NotFound)?;
+    if upstream.kind != UpstreamKind::AnthropicOauth || upstream.oauth_credentials.is_none() {
+        return Err(UpstreamError::NotOauthUpstream);
+    }
+
+    let bundle = decrypt_oauth_bundle(&state, &upstream)?;
+    let access_token =
+        fresh_enough_access_token(&state, storage.clone(), &upstream, bundle).await?;
+    let user_agent = metadata_user_agent(storage.as_ref()).await?;
+    let client = make_metadata_http_client();
+    let cancel = CancellationToken::new();
+    tokio::time::timeout(
+        METADATA_REFRESH_TIMEOUT,
+        run_metadata_refresh(
+            storage.clone(),
+            &client,
+            upstream_id,
+            &access_token,
+            &user_agent,
+            &cancel,
+        ),
+    )
+    .await
+    .map_err(|_| UpstreamError::MetadataRefreshTimeout)?
+    .map_err(|error| UpstreamError::RefreshFailed {
+        detail: error.to_string(),
+    })?;
+
+    subscription_metadata_response(storage.as_ref(), upstream_id)
+        .await
+        .map(Json)
 }
 
 async fn update_upstream(
@@ -435,6 +546,81 @@ fn storage(state: &AdminState) -> Result<&dyn Storage, UpstreamError> {
         .storage
         .as_deref()
         .ok_or(UpstreamError::StorageUnavailable)
+}
+
+fn storage_arc(state: &AdminState) -> Result<Arc<dyn Storage>, UpstreamError> {
+    state
+        .storage
+        .clone()
+        .ok_or(UpstreamError::StorageUnavailable)
+}
+
+async fn subscription_metadata_response(
+    storage: &dyn Storage,
+    upstream_id: Uuid,
+) -> Result<SubscriptionMetadataResponse, UpstreamError> {
+    let subscription_metadata = storage
+        .get_upstream_subscription_metadata(upstream_id)
+        .await?;
+    let organization_metadata = match subscription_metadata
+        .as_ref()
+        .and_then(|metadata| metadata.organization_uuid.as_deref())
+    {
+        Some(organization_uuid) => storage.get_organization_metadata(organization_uuid).await?,
+        None => None,
+    };
+    Ok(SubscriptionMetadataResponse {
+        upstream_id: upstream_id.to_string(),
+        subscription_metadata,
+        organization_metadata,
+    })
+}
+
+async fn fresh_enough_access_token(
+    state: &AdminState,
+    storage: Arc<dyn Storage>,
+    upstream: &UpstreamRecord,
+    bundle: OAuthTokenBundle,
+) -> Result<String, UpstreamError> {
+    let now = unix_now_secs();
+    if bundle.expires_at_unix_secs > now.saturating_add(METADATA_REFRESH_LOOKAHEAD_SECS) {
+        return Ok(bundle.access_token);
+    }
+    let refresher = state
+        .lazy_refresher
+        .as_ref()
+        .ok_or(UpstreamError::RefreshUnavailable)?;
+    refresher
+        .refresh_one(upstream.id)
+        .await
+        .map_err(|error| UpstreamError::RefreshFailed {
+            detail: error.to_string(),
+        })?;
+    let upstream = UpstreamStore::get_by_id(storage.as_ref(), upstream.id)
+        .await?
+        .ok_or(UpstreamError::NotFound)?;
+    Ok(decrypt_oauth_bundle(state, &upstream)?.access_token)
+}
+
+fn decrypt_oauth_bundle(
+    state: &AdminState,
+    upstream: &UpstreamRecord,
+) -> Result<OAuthTokenBundle, UpstreamError> {
+    upstream
+        .oauth_credentials
+        .as_ref()
+        .ok_or(UpstreamError::NotOauthUpstream)?
+        .decrypt(state.aead.as_ref(), upstream.id.as_bytes())
+        .map_err(|_| UpstreamError::CredentialDecrypt)
+}
+
+async fn metadata_user_agent(storage: &dyn Storage) -> Result<String, UpstreamError> {
+    let version = storage
+        .get_compatibility_kv(CLAUDE_CODE_STABLE_VERSION_KEY)
+        .await?
+        .map(|record| record.value)
+        .unwrap_or_else(|| CLAUDE_CODE_STABLE_VERSION_FALLBACK.to_owned());
+    Ok(claude_code_user_agent(&version))
 }
 
 fn upstream_response(record: &UpstreamRecord) -> UpstreamResponse {
