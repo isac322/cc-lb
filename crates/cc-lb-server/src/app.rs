@@ -950,6 +950,7 @@ async fn build_app_with_storage_inner(
     }
     let state = ProxyState {
         lifecycle: lifecycle.clone(),
+        storage: storage.clone(),
         breaker_registry,
         start_time,
         drain_controller: drain_controller.clone(),
@@ -1302,15 +1303,16 @@ impl CurrentConfig for InMemoryCurrentConfig {
 }
 
 #[derive(Clone)]
-struct ProxyState {
-    lifecycle: Arc<Lifecycle>,
+pub(crate) struct ProxyState {
+    pub(crate) lifecycle: Arc<Lifecycle>,
+    pub(crate) storage: Arc<dyn Storage>,
     breaker_registry: Arc<BreakerRegistry>,
     start_time: std::time::Instant,
     drain_controller: DrainController,
     #[allow(dead_code)]
     key_store: Option<Arc<KeyStore>>,
     #[allow(dead_code)]
-    builtin_authn: Option<Arc<BuiltinAuthn>>,
+    pub(crate) builtin_authn: Option<Arc<BuiltinAuthn>>,
 }
 
 fn spawn_price_catalog_loader(
@@ -1501,6 +1503,20 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             get(lifecycle_handler).delete(lifecycle_handler),
         )
         .route("/v1/files/{id}/content", get(lifecycle_handler))
+        .route("/api/oauth/usage", get(crate::oauth_synth::usage_handler))
+        .route(
+            "/api/oauth/claude_cli/roles",
+            get(crate::oauth_synth::roles_handler),
+        )
+        .route(
+            "/api/oauth/profile",
+            get(crate::oauth_synth::profile_handler),
+        )
+        .route(
+            "/api/oauth/account/settings",
+            get(crate::oauth_synth::account_settings_handler),
+        )
+        .route("/v1/oauth/token", post(crate::oauth_synth::token_handler))
         .route("/api/{*path}", any(lifecycle_handler))
         .route("/v1/{*path}", any(lifecycle_handler))
         .with_state(state)

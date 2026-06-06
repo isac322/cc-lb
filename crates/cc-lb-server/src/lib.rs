@@ -16,6 +16,7 @@ pub mod cli;
 pub mod drain;
 pub mod dynamic_view_builder;
 pub mod notify_listener;
+pub(crate) mod oauth_synth;
 pub mod oauth_usage_poller;
 pub mod preflight;
 pub mod reconcile;
