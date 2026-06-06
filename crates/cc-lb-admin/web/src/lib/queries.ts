@@ -53,7 +53,7 @@ export interface Upstream {
   revision: number;
   base_url?: string | null;
   api_key_env?: string | null;
-  shape_plugin?: { wasm_registry_id: string } | null;
+  shape_plugin?: { registry_id: string } | null;
 }
 interface UpstreamListResp {
   upstreams: Upstream[];
@@ -561,7 +561,7 @@ export interface UpdateUpstreamRequest {
   base_url?: string | null;
   api_key_env?: string | null;
   api_key_value?: string | null;
-  shape_plugin?: { wasm_registry_id: string } | null;
+  shape_plugin?: { registry_id: string } | null;
 }
 export function useUpdateUpstream() {
   const qc = useQueryClient();
