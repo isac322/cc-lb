@@ -235,10 +235,14 @@ async fn authenticate(state: &ProxyState, headers: &HeaderMap) -> HandlerResult<
     let Some(authn) = &state.builtin_authn else {
         return Err(invalid_token("api key storage unavailable"));
     };
-    let success = authn
-        .authenticate(headers, &view.principal_view)
-        .await
-        .map_err(|source| invalid_token(&source.to_string()))?;
+    let success = if let Some(success) = authn.authenticate_none_mode(headers).await {
+        success
+    } else {
+        authn
+            .authenticate(headers, &view.principal_view)
+            .await
+            .map_err(|source| invalid_token(&source.to_string()))?
+    };
     let principal_id = Uuid::parse_str(&success.principal_id)
         .map_err(|_| server_error("authenticated principal id is not a uuid"))?;
     let principal = PrincipalStore::get_by_id(state.storage.as_ref(), principal_id)
