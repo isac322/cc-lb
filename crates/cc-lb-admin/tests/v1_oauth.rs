@@ -54,6 +54,8 @@ impl Fixture {
             aead: Arc::clone(&aead),
             limit_engine: admin_test_common::limit_engine(),
             lifecycle: None,
+            subscription_metadata_hook: None,
+            lazy_refresher: None,
             audit_sink: Some(Arc::new(audit_sink)),
             dynamic_view: admin_test_common::dynamic_view_holder(&config),
             config: Arc::new(config),
@@ -90,6 +92,27 @@ impl Fixture {
         self.post_json(
             &format!("/admin/v1/upstreams/{upstream_id}/oauth/start"),
             json!({}),
+        )
+        .await
+    }
+
+    async fn start_draft(&self) -> (StatusCode, Value) {
+        self.post_json("/admin/v1/oauth/draft/start", json!({}))
+            .await
+    }
+
+    async fn complete_draft(&self, state_token: &str, code: &str) -> (StatusCode, Value) {
+        self.post_json(
+            "/admin/v1/oauth/draft/complete",
+            json!({ "state_token": state_token, "code": code }),
+        )
+        .await
+    }
+
+    async fn create_from_draft(&self, state_token: &str, name: &str) -> (StatusCode, Value) {
+        self.post_json(
+            "/admin/v1/upstreams/from-oauth-draft",
+            json!({ "state_token": state_token, "name": name }),
         )
         .await
     }
@@ -305,6 +328,56 @@ async fn complete_with_stale_revision_returns_409() {
     assert_eq!(status, StatusCode::CONFLICT);
     assert_eq!(body["error"], "stale_revision");
     assert_eq!(body["current_revision"], upstream.revision + 1);
+}
+
+#[tokio::test]
+async fn draft_start_returns_top_level_authorize_url_and_state() {
+    let fixture = Fixture::new().await;
+
+    let (status, start) = fixture.start_draft().await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert!(
+        start["authorize_url"]
+            .as_str()
+            .is_some_and(|url| url.contains("/oauth/authorize") && url.contains("state="))
+    );
+    assert!(
+        start["state_token"]
+            .as_str()
+            .is_some_and(|token| !token.is_empty())
+    );
+    assert!(start.get("revision").is_none());
+}
+
+#[tokio::test]
+async fn draft_complete_invalid_code_reaches_endpoint_and_returns_structured_error() {
+    let fixture = Fixture::new().await;
+    let (status, start) = fixture.start_draft().await;
+    assert_eq!(status, StatusCode::OK);
+    let state_token = start["state_token"].as_str().expect("state token");
+
+    let (status, body) = fixture
+        .complete_draft(state_token, "invalid-test-code")
+        .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_grant");
+}
+
+#[tokio::test]
+async fn create_from_incomplete_draft_returns_invalid_state() {
+    let fixture = Fixture::new().await;
+    let (status, start) = fixture.start_draft().await;
+    assert_eq!(status, StatusCode::OK);
+    let state_token = start["state_token"].as_str().expect("state token");
+
+    let (status, body) = fixture
+        .create_from_draft(state_token, "draft-upstream")
+        .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "invalid_state");
 }
 
 fn test_config(oauth_addr: SocketAddr) -> Config {

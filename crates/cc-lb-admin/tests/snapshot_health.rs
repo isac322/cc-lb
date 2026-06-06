@@ -22,6 +22,8 @@ fn test_state() -> AdminState {
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(Config::default()),
         admin_token: Some("test-token".to_string()),
+        lazy_refresher: None,
+        subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
     }
 }

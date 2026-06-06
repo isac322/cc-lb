@@ -38,6 +38,8 @@ async fn sighup_reloads_body_defaults() {
         ),
         config: watcher.clone(),
         admin_token: Some("test-token".to_string()),
+        lazy_refresher: None,
+        subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
     });
     let before_admin = admin_config(app.clone()).await;

@@ -14,8 +14,9 @@ use cc_lb_storage_api::{
 use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
     scenarios::{
-        anthropic_compatibility_kv_store, plugin_registry_store, principal_store,
-        storage_roundtrips, upstream_rate_limit_store, upstream_subscription_quota_store,
+        anthropic_compatibility_kv_store, organization_metadata_store, plugin_registry_store,
+        principal_store, storage_roundtrips, upstream_rate_limit_store,
+        upstream_subscription_metadata_store, upstream_subscription_quota_store,
     },
 };
 use cc_lb_storage_postgres::PostgresStorage;
@@ -219,6 +220,24 @@ fn upstream_subscription_quota_store_postgres() {
     run_postgres_scenario(
         "upstream_subscription_quota_store",
         upstream_subscription_quota_store::run_all,
+    );
+}
+
+#[test]
+#[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
+fn upstream_subscription_metadata_store_postgres() {
+    run_postgres_scenario(
+        "upstream_subscription_metadata_store",
+        upstream_subscription_metadata_store::run_all,
+    );
+}
+
+#[test]
+#[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
+fn organization_metadata_store_postgres() {
+    run_postgres_scenario(
+        "organization_metadata_store",
+        organization_metadata_store::run_all,
     );
 }
 
