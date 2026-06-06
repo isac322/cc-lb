@@ -12,8 +12,8 @@ import {
   Section,
   StatusBadge,
 } from '../components/ui/primitives';
-import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { QuotaUpstreamMiniChart } from '../components/ui/QuotaUpstreamMiniChart';
+import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { eventTime, type RequestEvent, streamEventsFetch } from '../lib/api';
 import { getUpstreamColor } from '../lib/colors';
 import {
@@ -347,7 +347,10 @@ function OverviewPage() {
               ) : (
                 <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
                   {chartData.upstreams.map((u) => (
-                    <Card key={u.id} className="flex flex-col bg-overlay-1 border-subtle">
+                    <Card
+                      key={u.id}
+                      className="flex flex-col bg-overlay-1 border-subtle"
+                    >
                       <div className="px-3 py-2 border-b border-subtle text-xs font-medium truncate">
                         {u.name}
                       </div>
@@ -355,7 +358,9 @@ function OverviewPage() {
                         <QuotaUpstreamMiniChart
                           upstreamId={u.id}
                           series={quotaSeries.data?.series ?? []}
-                          latest={quotaLatest.data?.upstreams.find(x => x.upstream_id === u.id)}
+                          latest={quotaLatest.data?.upstreams.find(
+                            (x) => x.upstream_id === u.id,
+                          )}
                           rangeStart={sinceUnixSecs}
                           rangeEnd={nowUnixSecs}
                           range={range}

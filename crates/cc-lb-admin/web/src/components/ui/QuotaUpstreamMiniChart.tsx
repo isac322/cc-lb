@@ -1,4 +1,5 @@
-import { useMemo, useId } from 'react';
+// biome-ignore-all lint/suspicious/noExplicitAny: chart data + metadata loose shape
+import { useId, useMemo } from 'react';
 import {
   Area,
   AreaChart,
@@ -9,8 +10,8 @@ import {
   XAxis,
   YAxis,
 } from 'recharts';
-import { getWindowColor, WINDOW_DURATION_SECS } from '../../lib/colors';
 import { WINDOW_LABELS } from '../../lib/api';
+import { getWindowColor, WINDOW_DURATION_SECS } from '../../lib/colors';
 
 export function QuotaUpstreamMiniChart({
   upstreamId,
@@ -51,7 +52,11 @@ export function QuotaUpstreamMiniChart({
       }
 
       for (const m of s.markers) {
-        if (m.at_unix_secs && m.at_unix_secs >= rangeStart && m.at_unix_secs <= rangeEnd) {
+        if (
+          m.at_unix_secs &&
+          m.at_unix_secs >= rangeStart &&
+          m.at_unix_secs <= rangeEnd
+        ) {
           markers.push({ ts: m.at_unix_secs, kind: m.kind, window: w });
         }
       }
@@ -62,7 +67,8 @@ export function QuotaUpstreamMiniChart({
       if (latestWindows) {
         for (const w of latestWindows) {
           if (w.resets_at_unix_secs && WINDOW_DURATION_SECS[w.window]) {
-            const startTs = w.resets_at_unix_secs - WINDOW_DURATION_SECS[w.window];
+            const startTs =
+              w.resets_at_unix_secs - WINDOW_DURATION_SECS[w.window];
             if (startTs >= rangeStart && startTs <= rangeEnd) {
               markers.push({
                 ts: startTs,
@@ -86,7 +92,11 @@ export function QuotaUpstreamMiniChart({
     const opus = latest.windows.find((w: any) => w.window === '7d_opus');
     if (opus && opus.state !== 'missing') chartWindows.push('7d_opus');
     const overage = latest.windows.find((w: any) => w.window === 'overage');
-    if (overage && (overage.extra_usage_enabled || overage.extra_usage_monthly_limit != null)) chartWindows.push('overage');
+    if (
+      overage &&
+      (overage.extra_usage_enabled || overage.extra_usage_monthly_limit != null)
+    )
+      chartWindows.push('overage');
   }
 
   return (
@@ -102,15 +112,32 @@ export function QuotaUpstreamMiniChart({
             margin={{ top: 8, right: 8, bottom: 4, left: -20 }}
           >
             <defs>
-              {['5h', '7d', '7d_sonnet', '7d_opus', 'overage', 'unified'].map((w) => {
-                const color = getWindowColor(w);
-                return (
-                  <linearGradient key={w} id={`${chartId}-grad-${w}`} x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="0%" stopColor={color.stroke} stopOpacity={0.55} />
-                    <stop offset="100%" stopColor={color.stroke} stopOpacity={0} />
-                  </linearGradient>
-                );
-              })}
+              {['5h', '7d', '7d_sonnet', '7d_opus', 'overage', 'unified'].map(
+                (w) => {
+                  const color = getWindowColor(w);
+                  return (
+                    <linearGradient
+                      key={w}
+                      id={`${chartId}-grad-${w}`}
+                      x1="0"
+                      y1="0"
+                      x2="0"
+                      y2="1"
+                    >
+                      <stop
+                        offset="0%"
+                        stopColor={color.stroke}
+                        stopOpacity={0.55}
+                      />
+                      <stop
+                        offset="100%"
+                        stopColor={color.stroke}
+                        stopOpacity={0}
+                      />
+                    </linearGradient>
+                  );
+                },
+              )}
             </defs>
             <CartesianGrid stroke="var(--color-border)" />
             <XAxis
@@ -177,7 +204,8 @@ export function QuotaUpstreamMiniChart({
                     </div>
                     {payload.map((p, i) => {
                       const w = String(p.dataKey);
-                      const wLabel = WINDOW_LABELS[w as keyof typeof WINDOW_LABELS] || w;
+                      const wLabel =
+                        WINDOW_LABELS[w as keyof typeof WINDOW_LABELS] || w;
                       return (
                         <div
                           key={i}
@@ -218,16 +246,29 @@ export function QuotaUpstreamMiniChart({
             {(() => {
               const chartRangeSecs = 2 * (rangeEnd - rangeStart);
               const visibleMarkers: typeof chartData.markers = [];
-              const markersByWindow = new Map<string, { start?: typeof chartData.markers[0], reset?: typeof chartData.markers[0] }>();
+              const markersByWindow = new Map<
+                string,
+                {
+                  start?: (typeof chartData.markers)[0];
+                  reset?: (typeof chartData.markers)[0];
+                }
+              >();
               for (const m of chartData.markers) {
                 if (!chartWindows.includes(m.window)) continue;
-                if (!markersByWindow.has(m.window)) markersByWindow.set(m.window, {});
-                if (m.kind === 'start') markersByWindow.get(m.window)!.start = m;
-                else if (m.kind === 'reset') markersByWindow.get(m.window)!.reset = m;
+                if (!markersByWindow.has(m.window))
+                  markersByWindow.set(m.window, {});
+                if (m.kind === 'start')
+                  markersByWindow.get(m.window)!.start = m;
+                else if (m.kind === 'reset')
+                  markersByWindow.get(m.window)!.reset = m;
                 else visibleMarkers.push(m);
               }
               for (const m of markersByWindow.values()) {
-                if (m.start && m.reset && Math.abs(m.reset.ts - m.start.ts) / chartRangeSecs < 0.25) {
+                if (
+                  m.start &&
+                  m.reset &&
+                  Math.abs(m.reset.ts - m.start.ts) / chartRangeSecs < 0.25
+                ) {
                   visibleMarkers.push(m.reset);
                 } else {
                   if (m.start) visibleMarkers.push(m.start);
@@ -242,7 +283,7 @@ export function QuotaUpstreamMiniChart({
                     x={m.ts}
                     stroke={color.stroke}
                     strokeOpacity={0.6}
-                    strokeDasharray={m.kind === 'start' ? "4 6" : "2 4"}
+                    strokeDasharray={m.kind === 'start' ? '4 6' : '2 4'}
                   />
                 );
               });

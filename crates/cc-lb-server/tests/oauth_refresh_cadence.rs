@@ -259,6 +259,7 @@ impl Fixture {
             self.aead.clone(),
             self.oauth_cfg.clone(),
             replica_id,
+            None,
             cancel,
         ))
     }

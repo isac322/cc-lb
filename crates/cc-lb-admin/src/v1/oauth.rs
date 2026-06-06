@@ -149,7 +149,7 @@ enum PkceTarget {
         expected_revision: u64,
     },
     PendingDraft {
-        completed: Option<DraftCompletion>,
+        completed: Option<Box<DraftCompletion>>,
     },
 }
 
@@ -430,7 +430,7 @@ async fn complete_oauth_draft(
                 target: PkceTarget::PendingDraft { completed },
                 ..
             }) if completed.is_none() => {
-                *completed = Some(completion);
+                *completed = Some(Box::new(completion));
             }
             Some(InFlightPkce {
                 target: PkceTarget::PendingDraft { .. },

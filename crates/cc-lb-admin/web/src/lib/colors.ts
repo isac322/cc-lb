@@ -34,11 +34,14 @@ export const WINDOW_COLORS: Record<string, { stroke: string; fill: string }> = {
   '7d': { stroke: '#8b5cf6', fill: '#8b5cf6' }, // violet
   '7d_sonnet': { stroke: '#14b8a6', fill: '#14b8a6' }, // teal
   '7d_opus': { stroke: '#f59e0b', fill: '#f59e0b' }, // amber
-  'overage': { stroke: '#f97316', fill: '#f97316' }, // orange
-  'unified': { stroke: '#64748b', fill: '#64748b' }, // slate
+  overage: { stroke: '#f97316', fill: '#f97316' }, // orange
+  unified: { stroke: '#64748b', fill: '#64748b' }, // slate
 };
 
-export function getWindowColor(window: string): { stroke: string; fill: string } {
+export function getWindowColor(window: string): {
+  stroke: string;
+  fill: string;
+} {
   return WINDOW_COLORS[window] || { stroke: '#64748b', fill: '#64748b' };
 }
 

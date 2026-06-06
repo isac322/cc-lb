@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/noExplicitAny: existing API types use any for record params
 // TanStack Query hooks for every admin v1 endpoint surfaced by the dashboard.
 // Source-of-truth: .omo/plans/cc-lb-dashboard-overhaul.md (API SURFACE section).
 
@@ -17,6 +18,8 @@ import {
   type ConfigHistoryResponse,
   type ConfigSchemaResponse,
   type CredentialsResponse,
+  completeOauthDraft,
+  createUpstreamFromOauthDraft,
   type DashboardSummaryResponse,
   type DashboardUsageResponse,
   deleteJson,
@@ -33,11 +36,9 @@ import {
   type RecentEventsPayload,
   type SeriesResponse,
   type SubscriptionMetadataResponse,
+  startOauthDraft,
   triggerSubscriptionMetadataRefresh,
   type UpstreamOAuthStatusResponse,
-  startOauthDraft,
-  completeOauthDraft,
-  createUpstreamFromOauthDraft,
 } from './api';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -895,14 +896,19 @@ export function useStartOauthDraft() {
 
 export function useCompleteOauthDraft() {
   return useMutation({
-    mutationFn: (body: { state_token: string; code: string }) => completeOauthDraft(body),
+    mutationFn: (body: { state_token: string; code: string }) =>
+      completeOauthDraft(body),
   });
 }
 
 export function useCreateFromOauthDraft() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (body: { state_token: string; name: string; base_url?: string | null }) => createUpstreamFromOauthDraft(body),
+    mutationFn: (body: {
+      state_token: string;
+      name: string;
+      base_url?: string | null;
+    }) => createUpstreamFromOauthDraft(body),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.upstreams }),
   });
 }

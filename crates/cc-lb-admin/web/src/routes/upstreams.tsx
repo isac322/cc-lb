@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/noExplicitAny: legitimate any for loose chart/metadata shapes
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import {
   ChevronLeft,
@@ -44,26 +45,26 @@ import { RelativeTime } from '../components/ui/RelativeTime';
 import { ApiError, eventTime } from '../lib/api';
 import { getWindowColor, WINDOW_DURATION_SECS } from '../lib/colors';
 import {
+  type Upstream,
+  useCompleteOauthDraft,
+  useCreateFromOauthDraft,
   useCreateUpstream,
   useDeleteUpstream,
   useOAuthComplete,
   useOAuthStart,
   usePrincipalNameMap,
   useRecentEvents,
+  useStartOauthDraft,
   useStatus,
   useSubscriptionQuotaAnalysis,
   useSubscriptionQuotaLatest,
   useSubscriptionQuotaSeries,
   useToggleUpstream,
+  useTriggerSubscriptionMetadataRefresh,
   useUpdateUpstream,
   useUpstreamOAuthStatus,
   useUpstreamSubscriptionMetadata,
-  useTriggerSubscriptionMetadataRefresh,
-  useStartOauthDraft,
-  useCompleteOauthDraft,
-  useCreateFromOauthDraft,
   useUpstreams,
-  type Upstream,
 } from '../lib/queries';
 
 const upstreamSearchSchema = z.object({ selectedId: z.string().optional() });
@@ -175,7 +176,9 @@ function UpstreamsPage() {
                     ? 'ok'
                     : 'neutral';
               const barWindows = ['5h', '7d'];
-              const overage = latest?.windows.find((w) => w.window === 'overage');
+              const overage = latest?.windows.find(
+                (w) => w.window === 'overage',
+              );
               if (
                 overage &&
                 (overage.extra_usage_enabled ||
@@ -266,7 +269,12 @@ function UpstreamsPage() {
                               <Hint
                                 label={`${snap?.state} · ${snap?.source} · ${snap?.age_secs ?? 0}s`}
                               >
-                                <div className={cx('w-1.5 h-1.5 rounded-full', stateDot)} />
+                                <div
+                                  className={cx(
+                                    'w-1.5 h-1.5 rounded-full',
+                                    stateDot,
+                                  )}
+                                />
                               </Hint>
                             )}
                           </div>
@@ -341,13 +349,29 @@ function oauthBadge(entry: {
   return { tone: 'ok', label: 'Active' };
 }
 
-
-type ChartRow = { ts: string; unix: number } & Record<string, number | null | string>;
+type ChartRow = { ts: string; unix: number } & Record<
+  string,
+  number | null | string
+>;
 
 type ChartMarker = { ts: number; kind: string; window: string };
 
-const DETAIL_WINDOWS = ['5h', '7d', '7d_sonnet', '7d_opus', 'overage', 'unified'];
-const SNAPSHOT_ORDER = ['5h', '7d', '7d_sonnet', '7d_opus', 'overage', 'unified'];
+const DETAIL_WINDOWS = [
+  '5h',
+  '7d',
+  '7d_sonnet',
+  '7d_opus',
+  'overage',
+  'unified',
+];
+const SNAPSHOT_ORDER = [
+  '5h',
+  '7d',
+  '7d_sonnet',
+  '7d_opus',
+  'overage',
+  'unified',
+];
 
 function windowLabel(windowName: string): string {
   switch (windowName) {
@@ -387,9 +411,20 @@ function SnapshotStatusComposite({ snap }: { snap: any }) {
           : snap.age_secs < 86400
             ? `${Math.floor(snap.age_secs / 3600)}h old`
             : `${Math.floor(snap.age_secs / 86400)}d old`;
-  const source = snap.source === 'api' ? 'API' : snap.source === 'header' ? 'Header' : '—';
-  const label = snap.state === 'fresh' ? 'live' : snap.state === 'stale' ? 'stale' : 'no data';
-  const dot = snap.state === 'fresh' ? 'bg-green-500' : snap.state === 'stale' ? 'bg-amber-500' : 'bg-gray-400';
+  const source =
+    snap.source === 'api' ? 'API' : snap.source === 'header' ? 'Header' : '—';
+  const label =
+    snap.state === 'fresh'
+      ? 'live'
+      : snap.state === 'stale'
+        ? 'stale'
+        : 'no data';
+  const dot =
+    snap.state === 'fresh'
+      ? 'bg-green-500'
+      : snap.state === 'stale'
+        ? 'bg-amber-500'
+        : 'bg-gray-400';
   return (
     <Hint
       label={`observed at ${
@@ -401,7 +436,11 @@ function SnapshotStatusComposite({ snap }: { snap: any }) {
       <div className="flex items-center gap-1.5 mt-0.5">
         <div
           className={cx('w-2 h-2 rounded-full', dot)}
-          style={snap.state === 'fresh' ? { animation: 'pulse-glow 2s infinite' } : undefined}
+          style={
+            snap.state === 'fresh'
+              ? { animation: 'pulse-glow 2s infinite' }
+              : undefined
+          }
         />
         <span className="text-[9px] text-text-faint font-mono">
           {label} · {source} · {age}
@@ -428,11 +467,21 @@ function PromotionalCreditsCard({ orgMeta }: { orgMeta: any }) {
       <CardHeader title="Promotional Credits" />
       <CardBody className="text-sm space-y-2">
         <div className="font-mono text-lg">
-          {amount == null ? '—' : `${(amount / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`}
+          {amount == null
+            ? '—'
+            : `${(amount / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`}
         </div>
         <div className="flex flex-wrap gap-2">
-          <StatusBadge tone={orgMeta.overage_credit_granted ? 'ok' : 'neutral'} label={orgMeta.overage_credit_granted ? 'Granted' : 'Not granted'} />
-          <StatusBadge tone={orgMeta.overage_credit_eligible ? 'ok' : 'warn'} label={orgMeta.overage_credit_eligible ? 'Eligible' : 'Not eligible'} />
+          <StatusBadge
+            tone={orgMeta.overage_credit_granted ? 'ok' : 'neutral'}
+            label={orgMeta.overage_credit_granted ? 'Granted' : 'Not granted'}
+          />
+          <StatusBadge
+            tone={orgMeta.overage_credit_eligible ? 'ok' : 'warn'}
+            label={
+              orgMeta.overage_credit_eligible ? 'Eligible' : 'Not eligible'
+            }
+          />
         </div>
       </CardBody>
     </Card>
@@ -443,7 +492,8 @@ function TrialBanner({ orgMeta }: { orgMeta: any }) {
   if (!orgMeta?.claude_code_trial_ends_at) return null;
   return (
     <div className="rounded-sm border border-accent/30 bg-accent/10 p-3 text-xs text-accent">
-      Claude Code trial ends <RelativeTime ts={orgMeta.claude_code_trial_ends_at * 1000} />
+      Claude Code trial ends{' '}
+      <RelativeTime ts={orgMeta.claude_code_trial_ends_at * 1000} />
     </div>
   );
 }
@@ -478,7 +528,8 @@ function DetailView({
   const oauthStart = useOAuthStart();
   const oauthComplete = useOAuthComplete();
   const subscriptionMetadataQ = useUpstreamSubscriptionMetadata(upstream.id);
-  const triggerSubscriptionMetadataRefresh = useTriggerSubscriptionMetadataRefresh();
+  const triggerSubscriptionMetadataRefresh =
+    useTriggerSubscriptionMetadataRefresh();
   const upstreamOAuthQ = useUpstreamOAuthStatus(
     upstream.kind === 'anthropic_oauth' ? upstream.id : null,
   );
@@ -556,7 +607,8 @@ function DetailView({
   });
 
   const chartData = useMemo(() => {
-    if (!quotaSeries.data?.series.length) return { rows: [] as ChartRow[], markers: [] as ChartMarker[] };
+    if (!quotaSeries.data?.series.length)
+      return { rows: [] as ChartRow[], markers: [] as ChartMarker[] };
 
     const bucketsByTime = new Map<number, ChartRow>();
     const markers: ChartMarker[] = [];
@@ -575,7 +627,9 @@ function DetailView({
         }
         const row = bucketsByTime.get(ts)!;
         row[windowName] =
-          bucket.utilization_last != null ? bucket.utilization_last * 100 : null;
+          bucket.utilization_last != null
+            ? bucket.utilization_last * 100
+            : null;
       }
 
       for (const marker of series.markers) {
@@ -706,17 +760,74 @@ function DetailView({
       );
     }
 
-    const fields: { label: string; value: React.ReactNode; tooltip: string }[] = [];
-    if (orgMeta?.organization_type) fields.push({ label: 'Plan', value: orgMeta.organization_type, tooltip: 'Anthropic subscription tier' });
-    if (orgMeta?.rate_limit_tier) fields.push({ label: 'Rate', value: orgMeta.rate_limit_tier, tooltip: 'Rate-limit tier (Max 5x = base plan, Max 20x = power user, Pro = Pro plan)' });
-    if (orgMeta) fields.push({ label: 'Status', value: 'Active', tooltip: 'Whether the subscription is currently active' });
-    if (orgMeta?.organization_name) fields.push({ label: 'Org', value: orgMeta.organization_name, tooltip: 'Anthropic organization name' });
-    if (subMeta?.organization_role) fields.push({ label: 'Role', value: subMeta.organization_role, tooltip: 'Your role within the organization' });
-    if (subMeta?.workspace_role) fields.push({ label: 'Seat', value: subMeta.workspace_role, tooltip: 'Seat tier within team plans' });
-    if (orgMeta?.subscription_created_at_unix_secs) fields.push({ label: 'Subscribed', value: <RelativeTime ts={new Date(orgMeta.subscription_created_at_unix_secs * 1000)} />, tooltip: 'When this organization first subscribed' });
-    if (orgMeta?.billing_type) fields.push({ label: 'Billing', value: orgMeta.billing_type, tooltip: 'How the subscription is billed' });
-    if (orgMeta?.has_extra_usage_enabled != null) fields.push({ label: 'Extra Usage Billing', value: orgMeta.has_extra_usage_enabled ? 'Enabled' : 'Disabled', tooltip: 'Whether overage spending beyond plan quota is enabled (paid extra)' });
-    if (orgMeta?.account_display_name || orgMeta?.account_email) fields.push({ label: 'Account', value: `${orgMeta.account_display_name || 'Unknown'} (${orgMeta.account_email || 'unknown'})`, tooltip: 'OAuth token account identity' });
+    const fields: { label: string; value: React.ReactNode; tooltip: string }[] =
+      [];
+    if (orgMeta?.organization_type)
+      fields.push({
+        label: 'Plan',
+        value: orgMeta.organization_type,
+        tooltip: 'Anthropic subscription tier',
+      });
+    if (orgMeta?.rate_limit_tier)
+      fields.push({
+        label: 'Rate',
+        value: orgMeta.rate_limit_tier,
+        tooltip:
+          'Rate-limit tier (Max 5x = base plan, Max 20x = power user, Pro = Pro plan)',
+      });
+    if (orgMeta)
+      fields.push({
+        label: 'Status',
+        value: 'Active',
+        tooltip: 'Whether the subscription is currently active',
+      });
+    if (orgMeta?.organization_name)
+      fields.push({
+        label: 'Org',
+        value: orgMeta.organization_name,
+        tooltip: 'Anthropic organization name',
+      });
+    if (subMeta?.organization_role)
+      fields.push({
+        label: 'Role',
+        value: subMeta.organization_role,
+        tooltip: 'Your role within the organization',
+      });
+    if (subMeta?.workspace_role)
+      fields.push({
+        label: 'Seat',
+        value: subMeta.workspace_role,
+        tooltip: 'Seat tier within team plans',
+      });
+    if (orgMeta?.subscription_created_at_unix_secs)
+      fields.push({
+        label: 'Subscribed',
+        value: (
+          <RelativeTime
+            ts={new Date(orgMeta.subscription_created_at_unix_secs * 1000)}
+          />
+        ),
+        tooltip: 'When this organization first subscribed',
+      });
+    if (orgMeta?.billing_type)
+      fields.push({
+        label: 'Billing',
+        value: orgMeta.billing_type,
+        tooltip: 'How the subscription is billed',
+      });
+    if (orgMeta?.has_extra_usage_enabled != null)
+      fields.push({
+        label: 'Extra Usage Billing',
+        value: orgMeta.has_extra_usage_enabled ? 'Enabled' : 'Disabled',
+        tooltip:
+          'Whether overage spending beyond plan quota is enabled (paid extra)',
+      });
+    if (orgMeta?.account_display_name || orgMeta?.account_email)
+      fields.push({
+        label: 'Account',
+        value: `${orgMeta.account_display_name || 'Unknown'} (${orgMeta.account_email || 'unknown'})`,
+        tooltip: 'OAuth token account identity',
+      });
 
     return (
       <div className="sticky top-0 z-30 bg-bg-sub border-b border-subtle backdrop-blur-sm">
@@ -792,7 +903,9 @@ function DetailView({
                 });
               }}
             >
-              {triggerSubscriptionMetadataRefresh.isPending ? 'Refreshing…' : 'Refresh now'}
+              {triggerSubscriptionMetadataRefresh.isPending
+                ? 'Refreshing…'
+                : 'Refresh now'}
             </Button>
           </div>
         </div>
@@ -803,10 +916,13 @@ function DetailView({
                 <span key={f.label} className="flex items-center gap-2">
                   <Hint label={f.tooltip}>
                     <span className="cursor-help border-b border-dotted border-text-faint/30 hover:text-text transition-colors">
-                      <span className="text-text-muted">{f.label}:</span> <span className="text-text">{f.value}</span>
+                      <span className="text-text-muted">{f.label}:</span>{' '}
+                      <span className="text-text">{f.value}</span>
                     </span>
                   </Hint>
-                  {i < fields.length - 1 && <span className="text-text-muted/50">·</span>}
+                  {i < fields.length - 1 && (
+                    <span className="text-text-muted/50">·</span>
+                  )}
                 </span>
               ))}
             </div>
@@ -871,8 +987,16 @@ function DetailView({
                               x2="0"
                               y2="1"
                             >
-                              <stop offset="0%" stopColor={color.stroke} stopOpacity={0.55} />
-                              <stop offset="100%" stopColor={color.stroke} stopOpacity={0} />
+                              <stop
+                                offset="0%"
+                                stopColor={color.stroke}
+                                stopOpacity={0.55}
+                              />
+                              <stop
+                                offset="100%"
+                                stopColor={color.stroke}
+                                stopOpacity={0}
+                              />
                             </linearGradient>
                           );
                         })}
@@ -882,7 +1006,11 @@ function DetailView({
                         dataKey="unix"
                         type="number"
                         domain={[sinceUnixSecs, nowUnixSecs]}
-                        tick={{ fill: 'var(--color-text-faint)', fontSize: 10, fontFamily: 'Geist Mono' }}
+                        tick={{
+                          fill: 'var(--color-text-faint)',
+                          fontSize: 10,
+                          fontFamily: 'Geist Mono',
+                        }}
                         tickFormatter={(val) => {
                           const d = new Date(Number(val) * 1000);
                           return range === '7d' || range === '24h'
@@ -894,7 +1022,11 @@ function DetailView({
                         minTickGap={40}
                       />
                       <YAxis
-                        tick={{ fill: 'var(--color-text-faint)', fontSize: 10, fontFamily: 'Geist Mono' }}
+                        tick={{
+                          fill: 'var(--color-text-faint)',
+                          fontSize: 10,
+                          fontFamily: 'Geist Mono',
+                        }}
                         tickFormatter={(val) => `${val}%`}
                         axisLine={false}
                         tickLine={false}
@@ -903,28 +1035,94 @@ function DetailView({
                         allowDataOverflow={false}
                       />
                       <Tooltip
-                        cursor={{ stroke: 'var(--color-accent)', strokeWidth: 1, strokeOpacity: 0.3 }}
+                        cursor={{
+                          stroke: 'var(--color-accent)',
+                          strokeWidth: 1,
+                          strokeOpacity: 0.3,
+                        }}
                         content={({ active, payload, label }) => {
                           if (!active || !payload?.length) return null;
-                          const first = quotaLatest.data?.upstreams[0]?.windows[0];
+                          const first =
+                            quotaLatest.data?.upstreams[0]?.windows[0];
                           return (
-                            <div style={{ background: 'var(--color-bg-sub)', border: '1px solid var(--color-border)', borderRadius: 2, color: 'var(--color-text)', fontSize: 11, fontFamily: 'Geist Mono Variable, monospace', padding: '6px 10px', boxShadow: '0 4px 12px rgba(0,0,0,0.18)', minWidth: 80 }}>
-                              <div style={{ color: 'var(--color-text-faint)', marginBottom: 4 }}>{label}</div>
+                            <div
+                              style={{
+                                background: 'var(--color-bg-sub)',
+                                border: '1px solid var(--color-border)',
+                                borderRadius: 2,
+                                color: 'var(--color-text)',
+                                fontSize: 11,
+                                fontFamily: 'Geist Mono Variable, monospace',
+                                padding: '6px 10px',
+                                boxShadow: '0 4px 12px rgba(0,0,0,0.18)',
+                                minWidth: 80,
+                              }}
+                            >
+                              <div
+                                style={{
+                                  color: 'var(--color-text-faint)',
+                                  marginBottom: 4,
+                                }}
+                              >
+                                {label}
+                              </div>
                               {payload.map((p, i) => {
                                 const key = String(p.dataKey);
                                 return (
-                                  <div key={i} style={{ color: 'var(--color-text)', padding: '1px 0', display: 'flex', justifyContent: 'space-between', gap: 8 }}>
-                                    <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                                      <div style={{ width: 8, height: 8, borderRadius: '50%', backgroundColor: getWindowColor(key).fill }} />
+                                  <div
+                                    key={i}
+                                    style={{
+                                      color: 'var(--color-text)',
+                                      padding: '1px 0',
+                                      display: 'flex',
+                                      justifyContent: 'space-between',
+                                      gap: 8,
+                                    }}
+                                  >
+                                    <div
+                                      style={{
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        gap: 6,
+                                      }}
+                                    >
+                                      <div
+                                        style={{
+                                          width: 8,
+                                          height: 8,
+                                          borderRadius: '50%',
+                                          backgroundColor:
+                                            getWindowColor(key).fill,
+                                        }}
+                                      />
                                       <span>{windowLabel(key)}</span>
                                     </div>
-                                    <span style={{ fontVariantNumeric: 'tabular-nums' }}>{typeof p.value === 'number' ? `${p.value.toFixed(1)}%` : '—'}</span>
+                                    <span
+                                      style={{
+                                        fontVariantNumeric: 'tabular-nums',
+                                      }}
+                                    >
+                                      {typeof p.value === 'number'
+                                        ? `${p.value.toFixed(1)}%`
+                                        : '—'}
+                                    </span>
                                   </div>
                                 );
                               })}
                               {first?.source && (
-                                <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid var(--color-border)', color: 'var(--color-text-faint)', fontSize: 10 }}>
-                                  from: {first.source} · observed {first.age_secs == null ? 'recently' : `${first.age_secs}s ago`}
+                                <div
+                                  style={{
+                                    marginTop: 6,
+                                    paddingTop: 6,
+                                    borderTop: '1px solid var(--color-border)',
+                                    color: 'var(--color-text-faint)',
+                                    fontSize: 10,
+                                  }}
+                                >
+                                  from: {first.source} · observed{' '}
+                                  {first.age_secs == null
+                                    ? 'recently'
+                                    : `${first.age_secs}s ago`}
                                 </div>
                               )}
                             </div>
@@ -932,21 +1130,46 @@ function DetailView({
                         }}
                       />
                       <Legend
-                        wrapperStyle={{ fontSize: 11, fontFamily: 'Geist Mono', color: 'var(--color-text-muted)' }}
+                        wrapperStyle={{
+                          fontSize: 11,
+                          fontFamily: 'Geist Mono',
+                          color: 'var(--color-text-muted)',
+                        }}
                         content={() => {
                           const latest = quotaLatest.data?.upstreams[0];
                           if (!latest) return null;
                           const windows = ['5h', '7d', '7d_sonnet'];
-                          const opus = latest.windows.find((w) => w.window === '7d_opus');
-                          if (opus && opus.state !== 'missing') windows.push('7d_opus');
-                          const overage = latest.windows.find((w) => w.window === 'overage');
-                          if (overage && (overage.extra_usage_enabled || overage.extra_usage_monthly_limit != null)) windows.push('overage');
+                          const opus = latest.windows.find(
+                            (w) => w.window === '7d_opus',
+                          );
+                          if (opus && opus.state !== 'missing')
+                            windows.push('7d_opus');
+                          const overage = latest.windows.find(
+                            (w) => w.window === 'overage',
+                          );
+                          if (
+                            overage &&
+                            (overage.extra_usage_enabled ||
+                              overage.extra_usage_monthly_limit != null)
+                          )
+                            windows.push('overage');
                           return (
                             <div className="flex flex-wrap items-center justify-center gap-4 mt-2">
                               {windows.map((windowName) => (
-                                <div key={windowName} className="flex items-center gap-1.5">
-                                  <div className="w-3 h-0.5" style={{ backgroundColor: getWindowColor(windowName).stroke }} />
-                                  <span className="text-[11px] text-text-muted font-mono">{windowLabel(windowName)}</span>
+                                <div
+                                  key={windowName}
+                                  className="flex items-center gap-1.5"
+                                >
+                                  <div
+                                    className="w-3 h-0.5"
+                                    style={{
+                                      backgroundColor:
+                                        getWindowColor(windowName).stroke,
+                                    }}
+                                  />
+                                  <span className="text-[11px] text-text-muted font-mono">
+                                    {windowLabel(windowName)}
+                                  </span>
                                 </div>
                               ))}
                             </div>
@@ -956,23 +1179,39 @@ function DetailView({
                       {(() => {
                         const visible = 2 * (nowUnixSecs - sinceUnixSecs);
                         const markers: ChartMarker[] = [];
-                        const paired = new Map<string, { start?: ChartMarker; reset?: ChartMarker }>();
+                        const paired = new Map<
+                          string,
+                          { start?: ChartMarker; reset?: ChartMarker }
+                        >();
                         for (const marker of chartData.markers) {
-                          if (!paired.has(marker.window)) paired.set(marker.window, {});
+                          if (!paired.has(marker.window))
+                            paired.set(marker.window, {});
                           const bucket = paired.get(marker.window)!;
                           if (marker.kind === 'start') bucket.start = marker;
-                          else if (marker.kind === 'reset') bucket.reset = marker;
+                          else if (marker.kind === 'reset')
+                            bucket.reset = marker;
                           else markers.push(marker);
                         }
                         for (const pair of paired.values()) {
-                          if (pair.start && pair.reset && Math.abs(pair.reset.ts - pair.start.ts) / visible < 0.25) markers.push(pair.reset);
+                          if (
+                            pair.start &&
+                            pair.reset &&
+                            Math.abs(pair.reset.ts - pair.start.ts) / visible <
+                              0.25
+                          )
+                            markers.push(pair.reset);
                           else {
                             if (pair.start) markers.push(pair.start);
                             if (pair.reset) markers.push(pair.reset);
                           }
                         }
                         return markers.map((marker, i) => {
-                          if (marker.ts < sinceUnixSecs || marker.ts > nowUnixSecs + (nowUnixSecs - sinceUnixSecs)) return null;
+                          if (
+                            marker.ts < sinceUnixSecs ||
+                            marker.ts >
+                              nowUnixSecs + (nowUnixSecs - sinceUnixSecs)
+                          )
+                            return null;
                           const color = getWindowColor(marker.window);
                           return (
                             <ReferenceLine
@@ -980,10 +1219,16 @@ function DetailView({
                               x={marker.ts}
                               stroke={color.stroke}
                               strokeOpacity={0.6}
-                              strokeDasharray={marker.kind === 'start' ? '4 6' : '2 4'}
+                              strokeDasharray={
+                                marker.kind === 'start' ? '4 6' : '2 4'
+                              }
                             >
                               <Label
-                                value={marker.kind === 'start' ? `${windowLabel(marker.window)} start` : `${windowLabel(marker.window)} reset`}
+                                value={
+                                  marker.kind === 'start'
+                                    ? `${windowLabel(marker.window)} start`
+                                    : `${windowLabel(marker.window)} reset`
+                                }
                                 position="top"
                                 fontSize={10}
                                 fill={color.stroke}
@@ -996,10 +1241,20 @@ function DetailView({
                         const latest = quotaLatest.data?.upstreams[0];
                         if (!latest) return null;
                         const windows = ['5h', '7d', '7d_sonnet'];
-                        const opus = latest.windows.find((w) => w.window === '7d_opus');
-                        if (opus && opus.state !== 'missing') windows.push('7d_opus');
-                        const overage = latest.windows.find((w) => w.window === 'overage');
-                        if (overage && (overage.extra_usage_enabled || overage.extra_usage_monthly_limit != null)) windows.push('overage');
+                        const opus = latest.windows.find(
+                          (w) => w.window === '7d_opus',
+                        );
+                        if (opus && opus.state !== 'missing')
+                          windows.push('7d_opus');
+                        const overage = latest.windows.find(
+                          (w) => w.window === 'overage',
+                        );
+                        if (
+                          overage &&
+                          (overage.extra_usage_enabled ||
+                            overage.extra_usage_monthly_limit != null)
+                        )
+                          windows.push('overage');
                         return windows.map((windowName) => (
                           <Area
                             key={windowName}
@@ -1027,7 +1282,9 @@ function DetailView({
               return (
                 <Card>
                   <CardBody className="p-6">
-                    <EmptyState title={`No subscription quota data for ${upstream.name}`} />
+                    <EmptyState
+                      title={`No subscription quota data for ${upstream.name}`}
+                    />
                   </CardBody>
                 </Card>
               );
@@ -1036,7 +1293,9 @@ function DetailView({
               <div className="space-y-4">
                 <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]">
                   {(['5h', '7d', '7d_sonnet', '7d_opus', 'overage'] as const)
-                    .map((windowName) => latest.windows.find((snap) => snap.window === windowName))
+                    .map((windowName) =>
+                      latest.windows.find((snap) => snap.window === windowName),
+                    )
                     .filter((snap): snap is NonNullable<typeof snap> => {
                       if (!snap || snap.state === 'missing') return false;
                       if (
@@ -1048,42 +1307,90 @@ function DetailView({
                       }
                       return true;
                     })
-                    .sort((a, b) => SNAPSHOT_ORDER.indexOf(a.window) - SNAPSHOT_ORDER.indexOf(b.window))
+                    .sort(
+                      (a, b) =>
+                        SNAPSHOT_ORDER.indexOf(a.window) -
+                        SNAPSHOT_ORDER.indexOf(b.window),
+                    )
                     .map((snap) => {
                       const color = getWindowColor(snap.window);
-                      const isOverage = snap.window === 'overage' && (snap.extra_usage_enabled || snap.extra_usage_monthly_limit != null);
+                      const isOverage =
+                        snap.window === 'overage' &&
+                        (snap.extra_usage_enabled ||
+                          snap.extra_usage_monthly_limit != null);
                       return (
                         <Card key={snap.window}>
                           <CardBody className="p-3 flex flex-col gap-1.5">
                             <div className="flex items-center justify-between">
-                              <span className="text-[11px] uppercase tracking-wider text-text-faint">{windowLabel(snap.window)}</span>
+                              <span className="text-[11px] uppercase tracking-wider text-text-faint">
+                                {windowLabel(snap.window)}
+                              </span>
                             </div>
                             <SnapshotStatusComposite snap={snap} />
                             {isOverage ? (
-                              snap.extra_usage_monthly_limit != null && snap.extra_usage_used_credits != null ? (
+                              snap.extra_usage_monthly_limit != null &&
+                              snap.extra_usage_used_credits != null ? (
                                 <>
-                                  <div className="text-xl font-medium tabular-nums">{((snap.extra_usage_used_credits / snap.extra_usage_monthly_limit) * 100).toFixed(1)}%</div>
+                                  <div className="text-xl font-medium tabular-nums">
+                                    {(
+                                      (snap.extra_usage_used_credits /
+                                        snap.extra_usage_monthly_limit) *
+                                      100
+                                    ).toFixed(1)}
+                                    %
+                                  </div>
                                   <div className="w-full h-1 bg-overlay-2 rounded-full overflow-hidden mt-1">
-                                    <div className="h-full rounded-full" style={{ width: `${Math.min(100, Math.max(0, (snap.extra_usage_used_credits / snap.extra_usage_monthly_limit) * 100))}%`, backgroundColor: color.fill }} />
+                                    <div
+                                      className="h-full rounded-full"
+                                      style={{
+                                        width: `${Math.min(100, Math.max(0, (snap.extra_usage_used_credits / snap.extra_usage_monthly_limit) * 100))}%`,
+                                        backgroundColor: color.fill,
+                                      }}
+                                    />
                                   </div>
                                   <div className="text-sm font-medium tabular-nums mt-1">
-                                    ${(snap.extra_usage_used_credits / 100).toFixed(2)} / ${(snap.extra_usage_monthly_limit / 100).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} USD
+                                    $
+                                    {(
+                                      snap.extra_usage_used_credits / 100
+                                    ).toFixed(2)}{' '}
+                                    / $
+                                    {(
+                                      snap.extra_usage_monthly_limit / 100
+                                    ).toLocaleString('en-US', {
+                                      minimumFractionDigits: 2,
+                                      maximumFractionDigits: 2,
+                                    })}{' '}
+                                    USD
                                   </div>
                                 </>
                               ) : (
-                                <span className="text-sm text-text-faint">Enabled — no limit set</span>
+                                <span className="text-sm text-text-faint">
+                                  Enabled — no limit set
+                                </span>
                               )
                             ) : (
-                              <div className="text-xl font-medium tabular-nums">{snap.utilization == null ? (snap.status ?? '—') : `${(snap.utilization * 100).toFixed(1)}%`}</div>
+                              <div className="text-xl font-medium tabular-nums">
+                                {snap.utilization == null
+                                  ? (snap.status ?? '—')
+                                  : `${(snap.utilization * 100).toFixed(1)}%`}
+                              </div>
                             )}
                             {snap.utilization != null && (
                               <div className="w-full h-1 bg-overlay-2 rounded-full overflow-hidden mt-1">
-                                <div className="h-full rounded-full" style={{ width: `${Math.min(100, Math.max(0, snap.utilization * 100))}%`, backgroundColor: color.fill }} />
+                                <div
+                                  className="h-full rounded-full"
+                                  style={{
+                                    width: `${Math.min(100, Math.max(0, snap.utilization * 100))}%`,
+                                    backgroundColor: color.fill,
+                                  }}
+                                />
                               </div>
                             )}
                             {snap.resets_at_unix_secs ? (
                               <div className="text-[10px] text-text-faint font-mono mt-1">
-                                <RelativeTime ts={snap.resets_at_unix_secs * 1000} />
+                                <RelativeTime
+                                  ts={snap.resets_at_unix_secs * 1000}
+                                />
                               </div>
                             ) : null}
                           </CardBody>
@@ -1116,30 +1423,58 @@ function DetailView({
               <div className="space-y-4">
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
                   {['5h', '7d', '7d_sonnet', '7d_opus'].map((windowName) => {
-                    const snap = latest?.windows.find((w) => w.window === windowName);
+                    const snap = latest?.windows.find(
+                      (w) => w.window === windowName,
+                    );
                     if (!snap || snap.state === 'missing') return null;
-                    const windowAnalysis = analysis?.windows.find((w) => w.window === windowName);
+                    const windowAnalysis = analysis?.windows.find(
+                      (w) => w.window === windowName,
+                    );
                     return (
                       <Card key={windowName}>
-                        <CardHeader title={`Time to ${windowLabel(windowName)} limit`} />
+                        <CardHeader
+                          title={`Time to ${windowLabel(windowName)} limit`}
+                        />
                         <CardBody className="p-3">
                           <div className="text-2xl font-medium tabular-nums mb-3">
-                            {formatEta(windowAnalysis?.actual_account_burn.eta_to_limit_secs)}
+                            {formatEta(
+                              windowAnalysis?.actual_account_burn
+                                .eta_to_limit_secs,
+                            )}
                           </div>
                           <div className="flex flex-col gap-1 text-xs font-mono">
                             <div className="flex items-center justify-between">
-                              <span className="text-text-faint">actual account burn:</span>
-                              <span>{windowAnalysis?.actual_account_burn.utilization_per_second == null ? '—' : `${(windowAnalysis.actual_account_burn.utilization_per_second * 60 * 100).toFixed(2)} %/min`}</span>
+                              <span className="text-text-faint">
+                                actual account burn:
+                              </span>
+                              <span>
+                                {windowAnalysis?.actual_account_burn
+                                  .utilization_per_second == null
+                                  ? '—'
+                                  : `${(windowAnalysis.actual_account_burn.utilization_per_second * 60 * 100).toFixed(2)} %/min`}
+                              </span>
                             </div>
                             <div className="flex items-center justify-between text-text-faint">
                               <span>proxy projected burn:</span>
-                              <span>{windowAnalysis?.proxy_projected_burn.utilization_per_hour == null ? '—' : `${((windowAnalysis.proxy_projected_burn.utilization_per_hour / 60) * 100).toFixed(2)} %/min`}</span>
+                              <span>
+                                {windowAnalysis?.proxy_projected_burn
+                                  .utilization_per_hour == null
+                                  ? '—'
+                                  : `${((windowAnalysis.proxy_projected_burn.utilization_per_hour / 60) * 100).toFixed(2)} %/min`}
+                              </span>
                             </div>
                           </div>
-                          {windowAnalysis?.actual_account_burn.reason === 'insufficient_growth_intervals' && (
+                          {windowAnalysis?.actual_account_burn.reason ===
+                            'insufficient_growth_intervals' && (
                             <div className="mt-3 text-[10px] text-amber-400">
-                              Waiting for utilization to rise — burn rate appears once any growth is observed.
-                              {windowAnalysis.actual_account_burn.sample_count === 0 && <div className="mt-1">Currently 0 growth intervals.</div>}
+                              Waiting for utilization to rise — burn rate
+                              appears once any growth is observed.
+                              {windowAnalysis.actual_account_burn
+                                .sample_count === 0 && (
+                                <div className="mt-1">
+                                  Currently 0 growth intervals.
+                                </div>
+                              )}
                             </div>
                           )}
                         </CardBody>
@@ -1153,24 +1488,54 @@ function DetailView({
                     {a5h?.deficit ? (
                       <div className="flex flex-col gap-2">
                         <div className="flex items-center justify-between">
-                          <span className="text-sm text-text-faint">Shortfall</span>
-                          <span className="font-mono text-amber-400">{Math.round(a5h.deficit.shortfall_tokens).toLocaleString()} tokens</span>
+                          <span className="text-sm text-text-faint">
+                            Shortfall
+                          </span>
+                          <span className="font-mono text-amber-400">
+                            {Math.round(
+                              a5h.deficit.shortfall_tokens,
+                            ).toLocaleString()}{' '}
+                            tokens
+                          </span>
                         </div>
                         <div className="flex items-center justify-between">
-                          <span className="text-sm text-text-faint">Recommended Multiplier</span>
-                          <span className="font-mono text-amber-400">{a5h.deficit.recommended_multiplier}x</span>
+                          <span className="text-sm text-text-faint">
+                            Recommended Multiplier
+                          </span>
+                          <span className="font-mono text-amber-400">
+                            {a5h.deficit.recommended_multiplier}x
+                          </span>
                         </div>
-                        <div className="text-[10px] text-text-faint mt-1">Confidence: <span className="text-text">{a5h.deficit.confidence}</span></div>
+                        <div className="text-[10px] text-text-faint mt-1">
+                          Confidence:{' '}
+                          <span className="text-text">
+                            {a5h.deficit.confidence}
+                          </span>
+                        </div>
                       </div>
                     ) : (
-                      <div className="text-sm text-text-faint h-full flex items-center">No deficit detected or insufficient data.</div>
+                      <div className="text-sm text-text-faint h-full flex items-center">
+                        No deficit detected or insufficient data.
+                      </div>
                     )}
                   </CardBody>
                 </Card>
                 <div className="bg-amber-500/10 border border-amber-500/20 rounded-sm p-3 text-xs text-amber-400 flex flex-col gap-1">
-                  <div className="font-medium flex items-center gap-1.5"><Info className="w-3.5 h-3.5" />Analysis Caveats</div>
-                  <div className="opacity-90 mb-1">Capacity is inferred from proxy tokens and quota utilization; Anthropic quota units are not directly exposed</div>
-                  {caveats.length > 0 && <ul className="list-disc list-inside opacity-90 ml-1">{caveats.map((c, i) => <li key={i}>{c}</li>)}</ul>}
+                  <div className="font-medium flex items-center gap-1.5">
+                    <Info className="w-3.5 h-3.5" />
+                    Analysis Caveats
+                  </div>
+                  <div className="opacity-90 mb-1">
+                    Capacity is inferred from proxy tokens and quota
+                    utilization; Anthropic quota units are not directly exposed
+                  </div>
+                  {caveats.length > 0 && (
+                    <ul className="list-disc list-inside opacity-90 ml-1">
+                      {caveats.map((c, i) => (
+                        <li key={i}>{c}</li>
+                      ))}
+                    </ul>
+                  )}
                 </div>
               </div>
             );
@@ -1200,16 +1565,47 @@ function DetailView({
               <tbody>
                 {recentForUpstream.length ? (
                   recentForUpstream.map((e) => (
-                    <tr key={e.request_id} className="border-b border-row hover:bg-overlay-1">
-                      <td className="px-3 py-2 text-text-faint whitespace-nowrap"><RelativeTime ts={eventTime(e)} /></td>
-                      <td className="px-3 py-2">{principalNameMap.get(e.principal_id ?? '') ?? e.principal_id ?? '—'}</td>
-                      <td className="px-3 py-2 text-text-faint truncate max-w-[200px]">{e.model ?? '—'}</td>
-                      <td className={cx('px-3 py-2 text-right', e.status >= 500 ? 'text-red-400' : e.status >= 400 ? 'text-amber-400' : 'text-green-400')}>{e.status}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{e.duration_ms}ms</td>
+                    <tr
+                      key={e.request_id}
+                      className="border-b border-row hover:bg-overlay-1"
+                    >
+                      <td className="px-3 py-2 text-text-faint whitespace-nowrap">
+                        <RelativeTime ts={eventTime(e)} />
+                      </td>
+                      <td className="px-3 py-2">
+                        {principalNameMap.get(e.principal_id ?? '') ??
+                          e.principal_id ??
+                          '—'}
+                      </td>
+                      <td className="px-3 py-2 text-text-faint truncate max-w-[200px]">
+                        {e.model ?? '—'}
+                      </td>
+                      <td
+                        className={cx(
+                          'px-3 py-2 text-right',
+                          e.status >= 500
+                            ? 'text-red-400'
+                            : e.status >= 400
+                              ? 'text-amber-400'
+                              : 'text-green-400',
+                        )}
+                      >
+                        {e.status}
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums">
+                        {e.duration_ms}ms
+                      </td>
                     </tr>
                   ))
                 ) : (
-                  <tr><td colSpan={5} className="px-3 py-6 text-center text-text-faint text-xs">No recent requests for this upstream</td></tr>
+                  <tr>
+                    <td
+                      colSpan={5}
+                      className="px-3 py-6 text-center text-text-faint text-xs"
+                    >
+                      No recent requests for this upstream
+                    </td>
+                  </tr>
                 )}
               </tbody>
             </table>
@@ -1223,10 +1619,38 @@ function DetailView({
         <Card>
           <CardHeader title="Configuration" />
           <CardBody className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-            <div><div className="text-[11px] text-text-faint uppercase tracking-wider">Kind</div><div className="font-mono mt-0.5">{upstream.kind}</div></div>
-            <div><div className="text-[11px] text-text-faint uppercase tracking-wider">Base URL</div><div className="font-mono mt-0.5 break-all">{upstream.base_url ?? '—'}</div></div>
-            {upstream.api_key_env ? <div><div className="text-[11px] text-text-faint uppercase tracking-wider">API Key Env</div><div className="font-mono mt-0.5">{upstream.api_key_env}</div></div> : null}
-            {upstream.shape_plugin ? <div><div className="text-[11px] text-text-faint uppercase tracking-wider">Shape Plugin</div><div className="font-mono mt-0.5">{upstream.shape_plugin.wasm_registry_id}</div></div> : null}
+            <div>
+              <div className="text-[11px] text-text-faint uppercase tracking-wider">
+                Kind
+              </div>
+              <div className="font-mono mt-0.5">{upstream.kind}</div>
+            </div>
+            <div>
+              <div className="text-[11px] text-text-faint uppercase tracking-wider">
+                Base URL
+              </div>
+              <div className="font-mono mt-0.5 break-all">
+                {upstream.base_url ?? '—'}
+              </div>
+            </div>
+            {upstream.api_key_env ? (
+              <div>
+                <div className="text-[11px] text-text-faint uppercase tracking-wider">
+                  API Key Env
+                </div>
+                <div className="font-mono mt-0.5">{upstream.api_key_env}</div>
+              </div>
+            ) : null}
+            {upstream.shape_plugin ? (
+              <div>
+                <div className="text-[11px] text-text-faint uppercase tracking-wider">
+                  Shape Plugin
+                </div>
+                <div className="font-mono mt-0.5">
+                  {upstream.shape_plugin.wasm_registry_id}
+                </div>
+              </div>
+            ) : null}
           </CardBody>
         </Card>
 
@@ -1246,7 +1670,9 @@ function DetailView({
                 <Card>
                   <CardHeader
                     title="OAuth Status"
-                    subtitle={hasBoundToken ? 'Bound on this upstream' : 'Not connected'}
+                    subtitle={
+                      hasBoundToken ? 'Bound on this upstream' : 'Not connected'
+                    }
                     action={
                       <Button
                         size="sm"
@@ -1254,13 +1680,19 @@ function DetailView({
                         onClick={() => {
                           oauthStart.mutate(upstream.id, {
                             onSuccess: (res) => {
-                              setOauthState({ authorize_url: res.authorize_url, state_token: res.state_token, code: '' });
+                              setOauthState({
+                                authorize_url: res.authorize_url,
+                                state_token: res.state_token,
+                                code: '',
+                              });
                               setOauthOpen(true);
                             },
                           });
                         }}
                       >
-                        {hasBoundToken ? 'Reconnect via OAuth' : 'Connect via OAuth'}
+                        {hasBoundToken
+                          ? 'Reconnect via OAuth'
+                          : 'Connect via OAuth'}
                       </Button>
                     }
                   />
@@ -1268,20 +1700,71 @@ function DetailView({
                     {statusQ.isLoading ? (
                       <Skeleton className="h-12" />
                     ) : !hasBoundToken ? (
-                      <div className="flex flex-wrap items-center gap-3"><StatusBadge tone={badge.tone} label={badge.label} /><p className="text-xs text-text-faint">Run "Connect via OAuth" to authorize this upstream.</p></div>
+                      <div className="flex flex-wrap items-center gap-3">
+                        <StatusBadge tone={badge.tone} label={badge.label} />
+                        <p className="text-xs text-text-faint">
+                          Run "Connect via OAuth" to authorize this upstream.
+                        </p>
+                      </div>
                     ) : (
                       <div className="space-y-3">
-                        <div className="flex flex-wrap items-center gap-2"><StatusBadge tone={badge.tone} label={badge.label} /><span className="text-[11px] text-text-faint font-mono">runtime: {runtimeStatus}</span></div>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <StatusBadge tone={badge.tone} label={badge.label} />
+                          <span className="text-[11px] text-text-faint font-mono">
+                            runtime: {runtimeStatus}
+                          </span>
+                        </div>
                         {principalEntry ? (
                           <>
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                              <div><div className="text-[11px] text-text-faint uppercase tracking-wider">Expires</div><div className="font-mono mt-0.5"><RelativeTime ts={principalEntry.expires_at_unix_secs ? new Date(principalEntry.expires_at_unix_secs * 1000) : null} /></div></div>
-                              <div><div className="text-[11px] text-text-faint uppercase tracking-wider">Refresh token</div><div className="mt-0.5">{principalEntry.refresh_token_present ? 'present' : <span className="text-amber-400">missing</span>}</div></div>
+                              <div>
+                                <div className="text-[11px] text-text-faint uppercase tracking-wider">
+                                  Expires
+                                </div>
+                                <div className="font-mono mt-0.5">
+                                  <RelativeTime
+                                    ts={
+                                      principalEntry.expires_at_unix_secs
+                                        ? new Date(
+                                            principalEntry.expires_at_unix_secs *
+                                              1000,
+                                          )
+                                        : null
+                                    }
+                                  />
+                                </div>
+                              </div>
+                              <div>
+                                <div className="text-[11px] text-text-faint uppercase tracking-wider">
+                                  Refresh token
+                                </div>
+                                <div className="mt-0.5">
+                                  {principalEntry.refresh_token_present ? (
+                                    'present'
+                                  ) : (
+                                    <span className="text-amber-400">
+                                      missing
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
                             </div>
-                            {principalEntry.scopes.length ? <div><div className="text-[11px] text-text-faint uppercase tracking-wider">Scopes</div><div className="font-mono mt-0.5 break-all text-xs">{principalEntry.scopes.join(', ')}</div></div> : null}
+                            {principalEntry.scopes.length ? (
+                              <div>
+                                <div className="text-[11px] text-text-faint uppercase tracking-wider">
+                                  Scopes
+                                </div>
+                                <div className="font-mono mt-0.5 break-all text-xs">
+                                  {principalEntry.scopes.join(', ')}
+                                </div>
+                              </div>
+                            ) : null}
                           </>
                         ) : (
-                          <p className="text-xs text-text-faint">Token is bound on the upstream but no credential details are available right now.</p>
+                          <p className="text-xs text-text-faint">
+                            Token is bound on the upstream but no credential
+                            details are available right now.
+                          </p>
                         )}
                       </div>
                     )}
@@ -1525,9 +2008,13 @@ function CreateUpstreamModal({
   const completeDraft = useCompleteOauthDraft();
   const createFromDraft = useCreateFromOauthDraft();
 
-  const [step, setStep] = useState<'type' | 'configure_non_oauth' | 'oauth_handshake' | 'oauth_confirm'>('type');
-  const [kind, setKind] = useState<'anthropic_api_key' | 'anthropic_oauth' | 'custom'>('anthropic_oauth');
-  
+  const [step, setStep] = useState<
+    'type' | 'configure_non_oauth' | 'oauth_handshake' | 'oauth_confirm'
+  >('type');
+  const [kind, setKind] = useState<
+    'anthropic_api_key' | 'anthropic_oauth' | 'custom'
+  >('anthropic_oauth');
+
   // Non-OAuth state
   const [name, setName] = useState('');
   const [baseUrl, setBaseUrl] = useState('https://api.anthropic.com');
@@ -1536,7 +2023,10 @@ function CreateUpstreamModal({
   const [useEnvVar, setUseEnvVar] = useState(false);
 
   // OAuth state
-  const [authState, setAuthState] = useState<{ authorize_url: string; state_token: string } | null>(null);
+  const [authState, setAuthState] = useState<{
+    authorize_url: string;
+    state_token: string;
+  } | null>(null);
   const [code, setCode] = useState('');
   const [draftResult, setDraftResult] = useState<any>(null);
   const [oauthName, setOauthName] = useState('');
@@ -1575,8 +2065,10 @@ function CreateUpstreamModal({
         name: trimmedName,
         kind,
         base_url: trimmedBase === '' ? null : trimmedBase,
-        api_key_value: isApiKey && !useEnvVar && trimmedValue !== '' ? trimmedValue : null,
-        api_key_env: isApiKey && useEnvVar && trimmedEnv !== '' ? trimmedEnv : null,
+        api_key_value:
+          isApiKey && !useEnvVar && trimmedValue !== '' ? trimmedValue : null,
+        api_key_env:
+          isApiKey && useEnvVar && trimmedEnv !== '' ? trimmedEnv : null,
       },
       {
         onSuccess: () => {
@@ -1596,7 +2088,7 @@ function CreateUpstreamModal({
       },
       onError: (err: any) => {
         setOauthError(err instanceof Error ? err.message : String(err));
-      }
+      },
     });
   };
 
@@ -1613,8 +2105,8 @@ function CreateUpstreamModal({
         },
         onError: (err: any) => {
           setOauthError(err instanceof Error ? err.message : String(err));
-        }
-      }
+        },
+      },
     );
   };
 
@@ -1629,8 +2121,8 @@ function CreateUpstreamModal({
         },
         onError: (err: any) => {
           toast.error(err instanceof Error ? err.message : String(err));
-        }
-      }
+        },
+      },
     );
   };
 
@@ -1640,24 +2132,57 @@ function CreateUpstreamModal({
         <div className="space-y-4">
           <div className="space-y-2">
             <label className="flex items-start gap-3 p-3 border border-subtle rounded-md cursor-pointer hover:bg-overlay-1 transition-colors">
-              <input type="radio" name="kind" value="anthropic_oauth" checked={kind === 'anthropic_oauth'} onChange={() => setKind('anthropic_oauth')} className="mt-1" />
+              <input
+                type="radio"
+                name="kind"
+                value="anthropic_oauth"
+                checked={kind === 'anthropic_oauth'}
+                onChange={() => setKind('anthropic_oauth')}
+                className="mt-1"
+              />
               <div>
-                <div className="font-medium text-text">Anthropic OAuth (Recommended)</div>
-                <div className="text-xs text-text-faint mt-1">Use a Claude Max/Pro/Team/Enterprise subscription via OAuth. Recommended — automatic plan detection and quota tracking via Anthropic's official APIs.</div>
+                <div className="font-medium text-text">
+                  Anthropic OAuth (Recommended)
+                </div>
+                <div className="text-xs text-text-faint mt-1">
+                  Use a Claude Max/Pro/Team/Enterprise subscription via OAuth.
+                  Recommended — automatic plan detection and quota tracking via
+                  Anthropic's official APIs.
+                </div>
               </div>
             </label>
             <label className="flex items-start gap-3 p-3 border border-subtle rounded-md cursor-pointer hover:bg-overlay-1 transition-colors">
-              <input type="radio" name="kind" value="anthropic_api_key" checked={kind === 'anthropic_api_key'} onChange={() => setKind('anthropic_api_key')} className="mt-1" />
+              <input
+                type="radio"
+                name="kind"
+                value="anthropic_api_key"
+                checked={kind === 'anthropic_api_key'}
+                onChange={() => setKind('anthropic_api_key')}
+                className="mt-1"
+              />
               <div>
                 <div className="font-medium text-text">Anthropic API Key</div>
-                <div className="text-xs text-text-faint mt-1">Use a workspace API key (sk-ant-api03-...). Pay-as-you-go billing per token.</div>
+                <div className="text-xs text-text-faint mt-1">
+                  Use a workspace API key (sk-ant-api03-...). Pay-as-you-go
+                  billing per token.
+                </div>
               </div>
             </label>
             <label className="flex items-start gap-3 p-3 border border-subtle rounded-md cursor-pointer hover:bg-overlay-1 transition-colors">
-              <input type="radio" name="kind" value="custom" checked={kind === 'custom'} onChange={() => setKind('custom')} className="mt-1" />
+              <input
+                type="radio"
+                name="kind"
+                value="custom"
+                checked={kind === 'custom'}
+                onChange={() => setKind('custom')}
+                className="mt-1"
+              />
               <div>
                 <div className="font-medium text-text">Custom Backend</div>
-                <div className="text-xs text-text-faint mt-1">Custom Anthropic-compatible endpoint. Provide your own base URL + API key.</div>
+                <div className="text-xs text-text-faint mt-1">
+                  Custom Anthropic-compatible endpoint. Provide your own base
+                  URL + API key.
+                </div>
               </div>
             </label>
           </div>
@@ -1668,22 +2193,66 @@ function CreateUpstreamModal({
     if (step === 'configure_non_oauth') {
       return (
         <div className="space-y-3">
-          <Field label="Name" required hint="A unique label, e.g. anthropic-prod">
-            <input className={INPUT_CLASS} value={name} onChange={(e) => setName(e.target.value)} placeholder="anthropic-prod" />
+          <Field
+            label="Name"
+            required
+            hint="A unique label, e.g. anthropic-prod"
+          >
+            <input
+              className={INPUT_CLASS}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="anthropic-prod"
+            />
           </Field>
           <Field label="Base URL">
-            <input className={INPUT_CLASS} value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} />
+            <input
+              className={INPUT_CLASS}
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+            />
           </Field>
           {kind === 'anthropic_api_key' ? (
             useEnvVar ? (
-              <Field label="API Key Env Var" hint="Name of an env var on the server holding the API key" required>
-                <input className={`${INPUT_CLASS} font-mono`} value={apiKeyEnv} onChange={(e) => setApiKeyEnv(e.target.value)} placeholder="ANTHROPIC_API_KEY" />
-                <button type="button" className="mt-1 text-[11px] text-text-faint hover:text-text underline underline-offset-2" onClick={() => setUseEnvVar(false)}>Use literal value instead</button>
+              <Field
+                label="API Key Env Var"
+                hint="Name of an env var on the server holding the API key"
+                required
+              >
+                <input
+                  className={`${INPUT_CLASS} font-mono`}
+                  value={apiKeyEnv}
+                  onChange={(e) => setApiKeyEnv(e.target.value)}
+                  placeholder="ANTHROPIC_API_KEY"
+                />
+                <button
+                  type="button"
+                  className="mt-1 text-[11px] text-text-faint hover:text-text underline underline-offset-2"
+                  onClick={() => setUseEnvVar(false)}
+                >
+                  Use literal value instead
+                </button>
               </Field>
             ) : (
-              <Field label="API Key Value" hint="Literal sk-ant-... key" required>
-                <input type="password" className={`${INPUT_CLASS} font-mono`} value={apiKeyValue} onChange={(e) => setApiKeyValue(e.target.value)} placeholder="sk-ant-..." />
-                <button type="button" className="mt-1 text-[11px] text-text-faint hover:text-text underline underline-offset-2" onClick={() => setUseEnvVar(true)}>Use environment variable instead</button>
+              <Field
+                label="API Key Value"
+                hint="Literal sk-ant-... key"
+                required
+              >
+                <input
+                  type="password"
+                  className={`${INPUT_CLASS} font-mono`}
+                  value={apiKeyValue}
+                  onChange={(e) => setApiKeyValue(e.target.value)}
+                  placeholder="sk-ant-..."
+                />
+                <button
+                  type="button"
+                  className="mt-1 text-[11px] text-text-faint hover:text-text underline underline-offset-2"
+                  onClick={() => setUseEnvVar(true)}
+                >
+                  Use environment variable instead
+                </button>
               </Field>
             )
           ) : null}
@@ -1694,25 +2263,39 @@ function CreateUpstreamModal({
     if (step === 'oauth_handshake') {
       return (
         <div className="space-y-4">
-          <p className="text-sm text-text-faint">We'll authorize a Claude account via Anthropic. Click Authorize, complete the flow, then paste the code below.</p>
-          
-          <Button variant="primary" onClick={handleAuthorizeClick} disabled={startDraft.isPending}>
+          <p className="text-sm text-text-faint">
+            We'll authorize a Claude account via Anthropic. Click Authorize,
+            complete the flow, then paste the code below.
+          </p>
+
+          <Button
+            variant="primary"
+            onClick={handleAuthorizeClick}
+            disabled={startDraft.isPending}
+          >
             {startDraft.isPending ? 'Starting...' : 'Authorize with Anthropic'}
           </Button>
 
           {authState && (
             <div className="mt-4 space-y-3 p-4 border border-subtle rounded-md bg-overlay-1">
               <Field label="Authorization Code" required>
-                <textarea 
-                  className={`${INPUT_CLASS} font-mono min-h-[80px]`} 
-                  value={code} 
-                  onChange={(e) => setCode(e.target.value)} 
-                  placeholder="paste code..." 
+                <textarea
+                  className={`${INPUT_CLASS} font-mono min-h-[80px]`}
+                  value={code}
+                  onChange={(e) => setCode(e.target.value)}
+                  placeholder="paste code..."
                 />
               </Field>
-              {oauthError && <div className="text-sm text-red-400">{oauthError}</div>}
-              <Button onClick={handleVerifyCode} disabled={!code.trim() || completeDraft.isPending}>
-                {completeDraft.isPending ? 'Verifying...' : 'Verify and fetch account'}
+              {oauthError && (
+                <div className="text-sm text-red-400">{oauthError}</div>
+              )}
+              <Button
+                onClick={handleVerifyCode}
+                disabled={!code.trim() || completeDraft.isPending}
+              >
+                {completeDraft.isPending
+                  ? 'Verifying...'
+                  : 'Verify and fetch account'}
               </Button>
             </div>
           )}
@@ -1723,23 +2306,44 @@ function CreateUpstreamModal({
     if (step === 'oauth_confirm') {
       const orgMeta = draftResult?.organization_metadata;
       const subMeta = draftResult?.subscription_metadata;
-      
+
       const fields: { label: string; value: React.ReactNode }[] = [];
-      if (orgMeta?.organization_type) fields.push({ label: 'Plan', value: orgMeta.organization_type });
-      if (orgMeta?.rate_limit_tier) fields.push({ label: 'Rate', value: orgMeta.rate_limit_tier });
-      if (subMeta?.organization_role) fields.push({ label: 'Role', value: subMeta.organization_role });
-      if (orgMeta?.organization_name) fields.push({ label: 'Org', value: orgMeta.organization_name });
-      if (orgMeta?.subscription_created_at_unix_secs) fields.push({ label: 'Subscribed', value: <RelativeTime ts={new Date(orgMeta.subscription_created_at_unix_secs * 1000)} /> });
-      if (orgMeta?.billing_type) fields.push({ label: 'Billing', value: orgMeta.billing_type });
-      if (orgMeta?.has_extra_usage_enabled != null) fields.push({ label: 'Extra Usage', value: orgMeta.has_extra_usage_enabled ? 'Enabled' : 'Disabled' });
-      if (orgMeta?.account_display_name || orgMeta?.account_email) fields.push({ label: 'Account', value: `${orgMeta.account_display_name || 'Unknown'} (${orgMeta.account_email || 'unknown'})` });
+      if (orgMeta?.organization_type)
+        fields.push({ label: 'Plan', value: orgMeta.organization_type });
+      if (orgMeta?.rate_limit_tier)
+        fields.push({ label: 'Rate', value: orgMeta.rate_limit_tier });
+      if (subMeta?.organization_role)
+        fields.push({ label: 'Role', value: subMeta.organization_role });
+      if (orgMeta?.organization_name)
+        fields.push({ label: 'Org', value: orgMeta.organization_name });
+      if (orgMeta?.subscription_created_at_unix_secs)
+        fields.push({
+          label: 'Subscribed',
+          value: (
+            <RelativeTime
+              ts={new Date(orgMeta.subscription_created_at_unix_secs * 1000)}
+            />
+          ),
+        });
+      if (orgMeta?.billing_type)
+        fields.push({ label: 'Billing', value: orgMeta.billing_type });
+      if (orgMeta?.has_extra_usage_enabled != null)
+        fields.push({
+          label: 'Extra Usage',
+          value: orgMeta.has_extra_usage_enabled ? 'Enabled' : 'Disabled',
+        });
+      if (orgMeta?.account_display_name || orgMeta?.account_email)
+        fields.push({
+          label: 'Account',
+          value: `${orgMeta.account_display_name || 'Unknown'} (${orgMeta.account_email || 'unknown'})`,
+        });
 
       return (
         <div className="space-y-4">
           <div className="p-4 border border-subtle rounded-md bg-overlay-1 space-y-3">
             <h3 className="text-sm font-medium text-text">Account Preview</h3>
             <div className="grid grid-cols-2 gap-2 text-xs font-mono">
-              {fields.map(f => (
+              {fields.map((f) => (
                 <div key={f.label} className="flex flex-col">
                   <span className="text-text-faint">{f.label}</span>
                   <span className="text-text truncate">{f.value}</span>
@@ -1747,9 +2351,13 @@ function CreateUpstreamModal({
               ))}
             </div>
           </div>
-          
+
           <Field label="Upstream Name" required>
-            <input className={INPUT_CLASS} value={oauthName} onChange={(e) => setOauthName(e.target.value)} />
+            <input
+              className={INPUT_CLASS}
+              value={oauthName}
+              onChange={(e) => setOauthName(e.target.value)}
+            />
           </Field>
         </div>
       );
@@ -1761,7 +2369,16 @@ function CreateUpstreamModal({
       return (
         <>
           <Button onClick={() => handleOpenChange(false)}>Cancel</Button>
-          <Button variant="primary" onClick={() => setStep(kind === 'anthropic_oauth' ? 'oauth_handshake' : 'configure_non_oauth')}>
+          <Button
+            variant="primary"
+            onClick={() =>
+              setStep(
+                kind === 'anthropic_oauth'
+                  ? 'oauth_handshake'
+                  : 'configure_non_oauth',
+              )
+            }
+          >
             Continue
           </Button>
         </>
@@ -1771,7 +2388,16 @@ function CreateUpstreamModal({
       return (
         <>
           <Button onClick={() => setStep('type')}>Back</Button>
-          <Button variant="primary" disabled={!name.trim() || create.isPending || (kind === 'anthropic_api_key' && (useEnvVar ? !apiKeyEnv.trim() : !apiKeyValue.trim()))} onClick={submitNonOauth}>
+          <Button
+            variant="primary"
+            disabled={
+              !name.trim() ||
+              create.isPending ||
+              (kind === 'anthropic_api_key' &&
+                (useEnvVar ? !apiKeyEnv.trim() : !apiKeyValue.trim()))
+            }
+            onClick={submitNonOauth}
+          >
             Create
           </Button>
         </>
@@ -1788,7 +2414,11 @@ function CreateUpstreamModal({
       return (
         <>
           <Button onClick={() => setStep('oauth_handshake')}>Back</Button>
-          <Button variant="primary" disabled={!oauthName.trim() || createFromDraft.isPending} onClick={submitOauthConfirm}>
+          <Button
+            variant="primary"
+            disabled={!oauthName.trim() || createFromDraft.isPending}
+            onClick={submitOauthConfirm}
+          >
             Save
           </Button>
         </>
@@ -1802,7 +2432,11 @@ function CreateUpstreamModal({
       onOpenChange={handleOpenChange}
       title="New upstream"
       description="Register an Anthropic API key, OAuth principal, or custom backend."
-      size={step === 'oauth_handshake' || step === 'oauth_confirm' ? 'lg' : undefined}
+      size={
+        step === 'oauth_handshake' || step === 'oauth_confirm'
+          ? 'lg'
+          : undefined
+      }
       footer={renderFooter()}
     >
       {renderStepContent()}

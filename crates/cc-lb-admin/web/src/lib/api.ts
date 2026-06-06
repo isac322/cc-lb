@@ -1,3 +1,4 @@
+// biome-ignore-all lint/suspicious/noExplicitAny: existing API types use any for record params
 import { createEventSource, type EventSourceClient } from 'eventsource-client';
 import { clearAdminToken, getAdminToken } from './auth';
 
@@ -743,14 +744,24 @@ export interface DraftCompleteResponse {
   organization_metadata: OrganizationMetadataInner | null;
 }
 
-export function startOauthDraft(): Promise<{ authorize_url: string; state_token: string }> {
+export function startOauthDraft(): Promise<{
+  authorize_url: string;
+  state_token: string;
+}> {
   return postJson('/admin/v1/oauth/draft/start', {});
 }
 
-export function completeOauthDraft(body: { state_token: string; code: string }): Promise<DraftCompleteResponse> {
+export function completeOauthDraft(body: {
+  state_token: string;
+  code: string;
+}): Promise<DraftCompleteResponse> {
   return postJson('/admin/v1/oauth/draft/complete', body);
 }
 
-export function createUpstreamFromOauthDraft(body: { state_token: string; name: string; base_url?: string | null }): Promise<any> {
+export function createUpstreamFromOauthDraft(body: {
+  state_token: string;
+  name: string;
+  base_url?: string | null;
+}): Promise<any> {
   return postJson('/admin/v1/upstreams/from-oauth-draft', body);
 }
