@@ -61,6 +61,6 @@ async fn router_upstream_id_drives_credentials_and_dispatch_upstream() {
             .lock()
             .expect("dispatched URLs lock")
             .as_slice(),
-        &["http://second.local/v1/messages".to_owned()]
+        &["https://api.anthropic.com/v1/messages".to_owned()]
     );
 }
