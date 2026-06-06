@@ -856,36 +856,43 @@ function DetailView({
             </button>
             <div className="flex items-center gap-3 flex-wrap">
               <InlineNameEditor upstream={upstream} />
-              <StatusBadge
-                tone={upstream.enabled ? 'ok' : 'neutral'}
-                label={upstream.enabled ? 'Enabled' : 'Disabled'}
-              />
+              <Hint
+                label={
+                  upstream.enabled ? 'Click to disable' : 'Click to enable'
+                }
+              >
+                <button
+                  type="button"
+                  disabled={toggle.isPending}
+                  onClick={() =>
+                    toggle.mutate(
+                      {
+                        id: upstream.id,
+                        enabled: !upstream.enabled,
+                        revision: upstream.revision,
+                      },
+                      {
+                        onSuccess: () =>
+                          toast.success(
+                            upstream.enabled
+                              ? 'Upstream disabled'
+                              : 'Upstream enabled',
+                          ),
+                      },
+                    )
+                  }
+                  className="rounded-sm focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-50 hover:opacity-80 transition-opacity"
+                >
+                  <StatusBadge
+                    tone={upstream.enabled ? 'ok' : 'neutral'}
+                    label={upstream.enabled ? 'Enabled' : 'Disabled'}
+                  />
+                </button>
+              </Hint>
               <Badge tone="mono">{upstream.kind}</Badge>
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            <Button
-              size="sm"
-              onClick={() =>
-                toggle.mutate(
-                  {
-                    id: upstream.id,
-                    enabled: !upstream.enabled,
-                    revision: upstream.revision,
-                  },
-                  {
-                    onSuccess: () =>
-                      toast.success(
-                        upstream.enabled
-                          ? 'Upstream disabled'
-                          : 'Upstream enabled',
-                      ),
-                  },
-                )
-              }
-            >
-              {upstream.enabled ? 'Disable' : 'Enable'}
-            </Button>
             <Button
               size="sm"
               variant="danger"
