@@ -662,7 +662,7 @@ async fn seed_runtime_state(
             name: "anthropic-wiremock".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: Some(Url::parse(&upstream_url)?),
-            api_key_ciphertext: None,
+            api_key_ciphertext: Some(Vec::new()),
         },
     )
     .await?;

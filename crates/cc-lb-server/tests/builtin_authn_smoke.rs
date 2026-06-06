@@ -77,7 +77,7 @@ async fn none_mode_router_parity() {
     assert_eq!(state.signer_choices.lock().unwrap().as_slice(), &["first"]);
     assert_eq!(
         state.dispatched_urls.lock().unwrap().as_slice(),
-        &["http://first.local/v1/messages"]
+        &["http://router-choice-is-advisory.local/v1/messages"]
     );
 }
 

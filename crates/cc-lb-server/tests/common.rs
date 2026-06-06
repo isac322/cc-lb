@@ -170,7 +170,7 @@ async fn seed_storage(storage_path: &Path, upstream_addr: SocketAddr) {
             base_url: Some(
                 Url::parse(&format!("http://{upstream_addr}")).expect("fake upstream URL parses"),
             ),
-            api_key_ciphertext: None,
+            api_key_ciphertext: Some(vec![0; 32]),
         },
     )
     .await

@@ -37,7 +37,7 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
             name: "fake-anthropic".to_owned(),
             kind: UpstreamKind::AnthropicApiKey,
             base_url: Some(Url::parse(&format!("http://{}", upstream_server.addr))?),
-            api_key_ciphertext: None,
+            api_key_ciphertext: Some(vec![0; 32]),
         },
     )
     .await?;
