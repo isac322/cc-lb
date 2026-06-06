@@ -2,6 +2,7 @@
 
 pub mod anthropic_compatibility_kv;
 pub mod error;
+pub mod organization_metadata;
 pub mod plugin_registry;
 pub mod principal;
 pub mod runtime_change_notifier;
@@ -10,6 +11,7 @@ pub mod traits;
 pub mod types;
 pub mod upstream;
 pub mod upstream_rate_limit;
+pub mod upstream_subscription_metadata;
 pub mod upstream_subscription_quota;
 pub mod validation;
 
@@ -19,6 +21,7 @@ use serde::{Deserialize, Serialize};
 pub use anthropic_compatibility_kv::*;
 pub use cc_lb_plugin_wire::augmented_metadata::AugmentedMetadata;
 pub use error::{PluginChainConflictReason, StorageError, StorageResult};
+pub use organization_metadata::*;
 pub use plugin_registry::*;
 pub use principal::*;
 pub use runtime_change_notifier::*;
@@ -26,6 +29,7 @@ pub use traits::*;
 pub use types::*;
 pub use upstream::*;
 pub use upstream_rate_limit::*;
+pub use upstream_subscription_metadata::*;
 pub use upstream_subscription_quota::*;
 pub use uuid::Uuid as UpstreamRecordId;
 pub use validation::validate_identifier;

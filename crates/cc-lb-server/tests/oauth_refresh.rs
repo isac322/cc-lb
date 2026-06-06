@@ -159,6 +159,7 @@ impl Fixture {
             self.aead.clone(),
             self.oauth_cfg.clone(),
             replica_id,
+            None,
             cancel,
         ))
     }
@@ -209,6 +210,7 @@ async fn expired_before_sweep_lazy_fires_and_retry_succeeds() {
         fixture.aead.clone(),
         fixture.oauth_cfg.clone(),
         replica_id,
+        None,
         CancellationToken::new(),
     ));
     let base = AnthropicOAuthSignerFactory::for_upstream_name(
@@ -249,6 +251,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
         fixture.aead.clone(),
         fixture.oauth_cfg.clone(),
         replica_id,
+        None,
         cancel,
     ));
     let runtime = ExtismRuntime::new();
@@ -381,6 +384,7 @@ async fn cancel_during_refresh_returns_within_one_second() {
         fixture.aead.clone(),
         Arc::new(cfg),
         Uuid::new_v4(),
+        None,
         cancel.clone(),
     ));
     let task = tokio::spawn(async move { refresher.sweep_once().await });

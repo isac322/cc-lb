@@ -2,6 +2,8 @@
 
 #[cfg(not(loom))]
 pub mod anthropic_compat;
+#[cfg(not(loom))]
+pub mod anthropic_metadata;
 pub mod api_keys;
 pub mod audit_payload;
 #[cfg(not(loom))]
@@ -38,12 +40,16 @@ mod sse_error_frame;
 #[cfg(not(loom))]
 mod sse_relay;
 #[cfg(not(loom))]
+pub mod subscription_metadata_hook;
+#[cfg(not(loom))]
 pub mod subscription_quota_events;
 #[cfg(not(loom))]
 pub mod upstream_rate_limit_events;
 #[cfg(not(loom))]
 pub mod usage_pruner;
 pub mod usage_rollup_job;
+#[cfg(not(loom))]
+pub use anthropic_metadata::make_metadata_http_client;
 pub use audit_payload::AuditPayload;
 #[cfg(not(loom))]
 pub use audit_writer::{AuditDropped, AuditEntry, AuditWriterSink, spawn_audit_writer};
@@ -102,6 +108,11 @@ pub use rate_limit_headers::{
 pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};
 #[cfg(not(loom))]
 pub use sse_relay::{RelayError, SseBatchConfig, SseRelay, StreamingUsage};
+#[cfg(not(loom))]
+pub use subscription_metadata_hook::{
+    MetadataHookHandle, MetadataHookRequest, MetadataRefreshError, MetadataRefreshRecords,
+    fetch_metadata_only, run_metadata_refresh, start_subscription_metadata_hook,
+};
 #[cfg(not(loom))]
 pub use subscription_quota_events::{
     SubscriptionQuotaEnqueueError, SubscriptionQuotaSink, SubscriptionQuotaWriterConfig,

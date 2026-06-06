@@ -4,6 +4,8 @@ import { X } from 'lucide-react';
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from 'react';
 import { Area, AreaChart, ResponsiveContainer } from 'recharts';
 
+import { getWindowColor } from '../../lib/colors';
+
 // ─── classnames helper ───────────────────────────────────────────────────────
 export function cx(...parts: Array<string | false | null | undefined>): string {
   return parts.filter(Boolean).join(' ');
@@ -463,13 +465,12 @@ export function Sparkline({
 // ─── QuotaMiniChart ──────────────────────────────────────────────────────────
 export function QuotaMiniChart({
   data,
-  color5h,
-  color7d,
 }: {
   data: { i: number; val5h: number | null; val7d: number | null }[];
-  color5h: string;
-  color7d: string;
 }) {
+  const c5h = getWindowColor('5h');
+  const c7d = getWindowColor('7d');
+
   return (
     <div className="w-full" style={{ minWidth: 60, height: 28 }}>
       <ResponsiveContainer
@@ -485,9 +486,8 @@ export function QuotaMiniChart({
           <Area
             type="stepAfter"
             dataKey="val7d"
-            stroke={color7d}
+            stroke={c7d.stroke}
             strokeWidth={1.4}
-            strokeDasharray="3 3"
             fill="none"
             isAnimationActive={false}
             connectNulls={false}
@@ -495,7 +495,7 @@ export function QuotaMiniChart({
           <Area
             type="stepAfter"
             dataKey="val5h"
-            stroke={color5h}
+            stroke={c5h.stroke}
             strokeWidth={1.4}
             fill="none"
             isAnimationActive={false}

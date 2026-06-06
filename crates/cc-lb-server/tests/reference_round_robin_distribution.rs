@@ -170,6 +170,8 @@ impl Harness {
             dynamic_view,
             config: current_config,
             admin_token: Some(ADMIN_TOKEN.to_owned()),
+            lazy_refresher: None,
+            subscription_metadata_hook: None,
             start_time: Instant::now(),
         });
         std::mem::forget(dir);

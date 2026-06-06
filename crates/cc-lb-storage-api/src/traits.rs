@@ -2,8 +2,10 @@ use async_trait::async_trait;
 
 use crate::{
     BackendKind, RuntimeChangeNotifier, StorageError, StorageResult,
-    anthropic_compatibility_kv::AnthropicCompatibilityKvStore, types::*,
+    anthropic_compatibility_kv::AnthropicCompatibilityKvStore,
+    organization_metadata::OrganizationMetadataStore, types::*,
     upstream_rate_limit::UpstreamRateLimitStateStore,
+    upstream_subscription_metadata::UpstreamSubscriptionMetadataStore,
     upstream_subscription_quota::UpstreamSubscriptionQuotaStore,
 };
 
@@ -302,6 +304,8 @@ pub trait Storage:
     + LimitStateStore
     + UpstreamRateLimitStateStore
     + UpstreamSubscriptionQuotaStore
+    + UpstreamSubscriptionMetadataStore
+    + OrganizationMetadataStore
     + AnthropicCompatibilityKvStore
     + UsageRollupStore
     + OAuthCredentialStore
@@ -328,6 +332,8 @@ impl<T> Storage for T where
         + LimitStateStore
         + UpstreamRateLimitStateStore
         + UpstreamSubscriptionQuotaStore
+        + UpstreamSubscriptionMetadataStore
+        + OrganizationMetadataStore
         + AnthropicCompatibilityKvStore
         + UsageRollupStore
         + OAuthCredentialStore

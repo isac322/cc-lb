@@ -79,6 +79,8 @@ pub fn test_state(config: Config, storage: Option<Arc<RedbStorage>>) -> AdminSta
         dynamic_view,
         config: Arc::new(config),
         admin_token: Some(TOKEN.to_owned()),
+        lazy_refresher: None,
+        subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
     }
 }
@@ -108,6 +110,8 @@ pub fn apply_state(
         dynamic_view,
         config: reloader,
         admin_token: Some(TOKEN.to_owned()),
+        lazy_refresher: None,
+        subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
     }
 }

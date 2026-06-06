@@ -49,6 +49,7 @@ use crate::rate_limit_headers::{
     parse_anthropic_rate_limit_headers, parse_anthropic_unified_headers,
 };
 use crate::sse_relay;
+use crate::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::upstream_rate_limit_events::UpstreamRateLimitSink;
 
@@ -313,6 +314,7 @@ pub struct Lifecycle {
     request_event_storage: Option<Arc<dyn Storage>>,
     upstream_rate_limit_sink: Option<UpstreamRateLimitSink>,
     subscription_quota_sink: Option<SubscriptionQuotaSink>,
+    subscription_metadata_hook: Option<MetadataHookHandle>,
     subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
 }
 
@@ -345,6 +347,7 @@ impl Lifecycle {
             request_event_storage: None,
             upstream_rate_limit_sink: None,
             subscription_quota_sink: None,
+            subscription_metadata_hook: None,
             subscription_quota_cache: None,
         }
     }
@@ -364,6 +367,7 @@ impl Lifecycle {
             request_event_storage: None,
             upstream_rate_limit_sink: None,
             subscription_quota_sink: None,
+            subscription_metadata_hook: None,
             subscription_quota_cache: None,
         }
     }
@@ -403,6 +407,26 @@ impl Lifecycle {
     pub fn with_subscription_quota_sink(mut self, sink: SubscriptionQuotaSink) -> Self {
         self.subscription_quota_sink = Some(sink);
         self
+    }
+
+    pub fn with_subscription_metadata_hook(mut self, hook: MetadataHookHandle) -> Self {
+        self.subscription_metadata_hook = Some(hook);
+        self
+    }
+
+    pub fn enqueue_metadata_refresh(
+        &self,
+        upstream_id: Uuid,
+        access_token: String,
+        user_agent: String,
+    ) {
+        if let Some(hook) = &self.subscription_metadata_hook {
+            hook.enqueue(MetadataHookRequest {
+                upstream_id,
+                access_token,
+                user_agent,
+            });
+        }
     }
 
     pub fn with_subscription_quota_cache(
