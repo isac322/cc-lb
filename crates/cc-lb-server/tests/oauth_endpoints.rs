@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, DownstreamAuthMode};
+use cc_lb_config::{Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
 use cc_lb_core::api_keys::key_store::{CreateParams, KeyStore};
 use cc_lb_server::app::build_app_with_storage;
 use cc_lb_storage_api::organization_metadata::{
@@ -456,6 +456,102 @@ async fn precedence_oauth_usage_hits_synth_not_wildcard() -> TestResult<()> {
     Ok(())
 }
 
+#[tokio::test]
+async fn none_mode_usage_works_without_credentials() -> TestResult<()> {
+    let harness = Harness::new_none_mode(1, AllowedUpstreams::All).await?;
+
+    let response = harness.get_without_auth("/api/oauth/usage").await?;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert!(response.json.get("five_hour").is_some());
+    assert!(response.json.get("extra_usage").is_some());
+    Ok(())
+}
+
+#[tokio::test]
+async fn none_mode_usage_accepts_arbitrary_bearer() -> TestResult<()> {
+    let harness = Harness::new_none_mode(1, AllowedUpstreams::All).await?;
+
+    let request = Request::builder()
+        .method("GET")
+        .uri("/api/oauth/usage")
+        .header("Authorization", "Bearer sk-ant-oat01-fake-upstream-token")
+        .body(Body::empty())?;
+    let response = harness.request(request).await?;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    Ok(())
+}
+
+#[tokio::test]
+async fn none_mode_roles_works_without_credentials() -> TestResult<()> {
+    let harness = Harness::new_none_mode(1, AllowedUpstreams::All).await?;
+    harness
+        .put_upstream_metadata(harness.upstreams[0], "org-none", Some("admin"))
+        .await?;
+    harness
+        .put_org_metadata(org_metadata(
+            "org-none",
+            Some("None Mode Org"),
+            None,
+            Some("max"),
+            None,
+            None,
+            None,
+        ))
+        .await?;
+
+    let response = harness
+        .get_without_auth("/api/oauth/claude_cli/roles")
+        .await?;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(response.json["organization_uuid"], "org-none");
+    assert_eq!(response.json["organization_role"], "admin");
+    assert_eq!(response.json["subscription_type"], "max");
+    Ok(())
+}
+
+#[tokio::test]
+async fn none_mode_profile_works_without_credentials() -> TestResult<()> {
+    let harness = Harness::new_none_mode(1, AllowedUpstreams::All).await?;
+    harness
+        .put_upstream_metadata(harness.upstreams[0], "org-none-profile", Some("member"))
+        .await?;
+    harness
+        .put_org_metadata(org_metadata(
+            "org-none-profile",
+            Some("Profile Org"),
+            None,
+            Some("pro"),
+            Some("acct@example.test"),
+            Some("Acct Name"),
+            Some("acct-uuid-1"),
+        ))
+        .await?;
+
+    let response = harness.get_without_auth("/api/oauth/profile").await?;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(response.json["account"]["uuid"], "acct-uuid-1");
+    assert_eq!(response.json["account"]["email"], "acct@example.test");
+    assert_eq!(response.json["organization"]["uuid"], "org-none-profile");
+    Ok(())
+}
+
+#[tokio::test]
+async fn none_mode_account_settings_works_without_credentials() -> TestResult<()> {
+    let harness = Harness::new_none_mode(1, AllowedUpstreams::All).await?;
+
+    let response = harness
+        .get_without_auth("/api/oauth/account/settings")
+        .await?;
+
+    assert_eq!(response.status, StatusCode::OK, "{}", response.body);
+    assert_eq!(response.json, json!({}));
+    Ok(())
+}
+
 async fn assert_role_mapping(
     billing_type: Option<&str>,
     organization_type: Option<&str>,
@@ -491,6 +587,11 @@ enum AllowedUpstreams {
     None,
 }
 
+enum AuthMode {
+    ApiKey,
+    None,
+}
+
 struct Harness {
     _dir: tempfile::TempDir,
     app: cc_lb_server::App,
@@ -503,6 +604,18 @@ struct Harness {
 
 impl Harness {
     async fn new(upstream_count: usize, allowed: AllowedUpstreams) -> TestResult<Self> {
+        Self::build(upstream_count, allowed, AuthMode::ApiKey).await
+    }
+
+    async fn new_none_mode(upstream_count: usize, allowed: AllowedUpstreams) -> TestResult<Self> {
+        Self::build(upstream_count, allowed, AuthMode::None).await
+    }
+
+    async fn build(
+        upstream_count: usize,
+        allowed: AllowedUpstreams,
+        auth_mode: AuthMode,
+    ) -> TestResult<Self> {
         let dir = tempfile::tempdir()?;
         let key = [41; 32];
         let storage_path = dir.path().join(format!("{}.redb", Uuid::new_v4()));
@@ -549,8 +662,19 @@ impl Harness {
         };
         config.runtime.data_dir = Some(dir.path().to_path_buf());
         config.aead.key_env = "__CC_LB_OAUTH_ENDPOINT_TEST_KEY__".to_owned();
-        config.downstream_auth.mode = DownstreamAuthMode::ApiKey;
-        config.downstream_auth.none_mode = None;
+        match auth_mode {
+            AuthMode::ApiKey => {
+                config.downstream_auth.mode = DownstreamAuthMode::ApiKey;
+                config.downstream_auth.none_mode = None;
+            }
+            AuthMode::None => {
+                config.downstream_auth.mode = DownstreamAuthMode::None;
+                config.downstream_auth.none_mode = Some(NoneModeConfig {
+                    principal_id: principal.id.to_string(),
+                    upstream_kind: NoneModeUpstreamKind::AnthropicKey,
+                });
+            }
+        }
         let app = build_app_with_storage(
             config,
             None,
