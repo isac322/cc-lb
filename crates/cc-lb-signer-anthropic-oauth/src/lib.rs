@@ -17,6 +17,7 @@ use cc_lb_plugin_api::{
 };
 use cc_lb_storage_api::{OAuthCredentialStore, OAuthCredentials, StorageError, UpstreamStore};
 use dashmap::DashMap;
+use http::HeaderMap;
 use http::header::{AUTHORIZATION, HeaderValue};
 use oauth2::ClientId;
 use secrecy::{ExposeSecret, SecretString};
@@ -444,10 +445,7 @@ impl Signer for AnthropicOAuthSigner {
         let headers = shaped.headers_mut();
         headers.remove("x-api-key");
         headers.insert(AUTHORIZATION, header_value);
-        headers.insert(
-            "anthropic-beta",
-            HeaderValue::from_static(ANTHROPIC_OAUTH_BETA),
-        );
+        merge_anthropic_beta(headers)?;
         self.remember_signed_access_token(access_token.expose_secret())
             .await;
         Ok(SignedRequest::from_shaped(shaped, capability))
@@ -619,10 +617,7 @@ impl Signer for PersistedAnthropicOAuthSigner {
         let headers = shaped.headers_mut();
         headers.remove("x-api-key");
         headers.insert(AUTHORIZATION, header_value);
-        headers.insert(
-            "anthropic-beta",
-            HeaderValue::from_static(ANTHROPIC_OAUTH_BETA),
-        );
+        merge_anthropic_beta(headers)?;
         Ok(SignedRequest::from_shaped(shaped, capability))
     }
 
@@ -675,6 +670,39 @@ fn storage_error_to_signer(source: StorageError) -> SignerError {
     }
 }
 
+fn merge_anthropic_beta(headers: &mut HeaderMap) -> Result<(), SignerError> {
+    let mut flags = Vec::new();
+    for value in headers.get_all("anthropic-beta") {
+        let value = value
+            .to_str()
+            .map_err(|source| SignerError::SigningFailed {
+                reason: source.to_string(),
+            })?;
+        for flag in value
+            .split(',')
+            .map(str::trim)
+            .filter(|flag| !flag.is_empty())
+        {
+            if !flags.iter().any(|existing| existing == flag) {
+                flags.push(flag.to_owned());
+            }
+        }
+    }
+
+    if !flags.iter().any(|flag| flag == ANTHROPIC_OAUTH_BETA) {
+        flags.push(ANTHROPIC_OAUTH_BETA.to_owned());
+    }
+
+    headers.remove("anthropic-beta");
+    let value = flags.join(", ");
+    let header_value =
+        HeaderValue::from_str(&value).map_err(|source| SignerError::SigningFailed {
+            reason: source.to_string(),
+        })?;
+    headers.insert("anthropic-beta", header_value);
+    Ok(())
+}
+
 fn bearer_header_value(token: &str) -> Result<HeaderValue, SignerError> {
     let mut value = Vec::with_capacity("Bearer ".len() + token.len());
     value.extend_from_slice(b"Bearer ");
@@ -693,6 +721,7 @@ fn now_epoch_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -704,11 +733,12 @@ mod tests {
     };
     use cc_lb_storage_api::upstream::UpstreamKind;
     use cc_lb_storage_api::{
-        StorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamRecordId,
-        UpstreamStore, UpstreamUpdate, validate_identifier,
+        OAuthCredentialStore, StorageError, StorageResult, UpstreamCreate, UpstreamRecord,
+        UpstreamRecordId, UpstreamStore, UpstreamUpdate, validate_identifier,
     };
     use http::header::{AUTHORIZATION, USER_AGENT};
     use http::{HeaderMap, HeaderValue, Method, StatusCode};
+    use oauth2::ClientId;
     use tokio::sync::Mutex;
     use url::Url;
 
@@ -717,6 +747,7 @@ mod tests {
     #[derive(Default)]
     struct MemoryUpstreamStore {
         records: Mutex<Vec<UpstreamRecord>>,
+        oauth: Mutex<HashMap<(String, String), Vec<u8>>>,
     }
 
     #[async_trait]
@@ -918,6 +949,59 @@ mod tests {
         }
     }
 
+    #[async_trait]
+    impl OAuthCredentialStore for MemoryUpstreamStore {
+        async fn put_oauth_ciphertext(
+            &self,
+            principal_id: &str,
+            provider: &str,
+            ciphertext: &[u8],
+        ) -> StorageResult<()> {
+            self.oauth.lock().await.insert(
+                (principal_id.to_owned(), provider.to_owned()),
+                ciphertext.to_vec(),
+            );
+            Ok(())
+        }
+
+        async fn get_oauth_ciphertext(
+            &self,
+            principal_id: &str,
+            provider: &str,
+        ) -> StorageResult<Option<Vec<u8>>> {
+            Ok(self
+                .oauth
+                .lock()
+                .await
+                .get(&(principal_id.to_owned(), provider.to_owned()))
+                .cloned())
+        }
+
+        async fn delete_oauth(&self, principal_id: &str, provider: &str) -> StorageResult<bool> {
+            Ok(self
+                .oauth
+                .lock()
+                .await
+                .remove(&(principal_id.to_owned(), provider.to_owned()))
+                .is_some())
+        }
+
+        async fn put_anthropic_api_key_ciphertext(
+            &self,
+            _storage_key: &str,
+            _ciphertext: &[u8],
+        ) -> StorageResult<()> {
+            Ok(())
+        }
+
+        async fn get_anthropic_api_key_ciphertext(
+            &self,
+            _storage_key: &str,
+        ) -> StorageResult<Option<Vec<u8>>> {
+            Ok(None)
+        }
+    }
+
     #[tokio::test]
     async fn build_missing_returns_missing_credentials() {
         let store = Arc::new(MemoryUpstreamStore::default());
@@ -1026,6 +1110,165 @@ mod tests {
                 .and_then(|value| value.to_str().ok()),
             Some("Bearer access-token")
         );
+    }
+
+    #[tokio::test]
+    async fn merge_anthropic_beta_preserves_client_flags_active_signer() {
+        let signer = active_signer().await;
+
+        let signed = sign_request(
+            &signer,
+            shaped_request_with_beta(Some(CLIENT_BETA_FLAGS_WITHOUT_OAUTH)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(anthropic_beta(&signed), MERGED_CLIENT_BETA_FLAGS);
+    }
+
+    #[tokio::test]
+    async fn merge_anthropic_beta_adds_oauth_when_absent_active_signer() {
+        let signer = active_signer().await;
+
+        let signed = sign_request(&signer, shaped_request_with_beta(None))
+            .await
+            .unwrap();
+
+        assert_eq!(anthropic_beta(&signed), ANTHROPIC_OAUTH_BETA);
+    }
+
+    #[tokio::test]
+    async fn merge_anthropic_beta_no_duplicate_when_oauth_already_present_active_signer() {
+        let signer = active_signer().await;
+
+        let signed = sign_request(
+            &signer,
+            shaped_request_with_beta(Some("claude-code-20250219, oauth-2025-04-20")),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            anthropic_beta(&signed),
+            "claude-code-20250219, oauth-2025-04-20"
+        );
+    }
+
+    #[tokio::test]
+    async fn merge_anthropic_beta_preserves_client_flags_persisted_signer() {
+        let signer = persisted_signer().await;
+
+        let signed = sign_request(
+            signer.as_ref(),
+            shaped_request_with_beta(Some(CLIENT_BETA_FLAGS_WITHOUT_OAUTH)),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(anthropic_beta(&signed), MERGED_CLIENT_BETA_FLAGS);
+    }
+
+    #[tokio::test]
+    async fn merge_anthropic_beta_adds_oauth_when_absent_persisted_signer() {
+        let signer = persisted_signer().await;
+
+        let signed = sign_request(signer.as_ref(), shaped_request_with_beta(None))
+            .await
+            .unwrap();
+
+        assert_eq!(anthropic_beta(&signed), ANTHROPIC_OAUTH_BETA);
+    }
+
+    #[tokio::test]
+    async fn merge_anthropic_beta_no_duplicate_when_oauth_already_present_persisted_signer() {
+        let signer = persisted_signer().await;
+
+        let signed = sign_request(
+            signer.as_ref(),
+            shaped_request_with_beta(Some("claude-code-20250219, oauth-2025-04-20")),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            anthropic_beta(&signed),
+            "claude-code-20250219, oauth-2025-04-20"
+        );
+    }
+
+    const CLIENT_BETA_FLAGS_WITHOUT_OAUTH: &str = "claude-code-20250219, interleaved-thinking-2025-05-14, context-management-2025-06-27, prompt-caching-scope-2026-01-05, effort-2025-11-24, structured-outputs-2025-12-15";
+    const MERGED_CLIENT_BETA_FLAGS: &str = "claude-code-20250219, interleaved-thinking-2025-05-14, context-management-2025-06-27, prompt-caching-scope-2026-01-05, effort-2025-11-24, structured-outputs-2025-12-15, oauth-2025-04-20";
+
+    async fn active_signer() -> AnthropicOAuthSigner {
+        let store = Arc::new(MemoryUpstreamStore::default());
+        let service = aead();
+        store_live_credentials(&store, &service, now_secs() + 600).await;
+        AnthropicOAuthSigner::new(
+            "principal",
+            "anthropic_oauth",
+            store,
+            service,
+            Url::parse("https://platform.claude.com/v1/oauth/token").unwrap(),
+            ClientId::new("client-test".to_owned()),
+        )
+    }
+
+    async fn persisted_signer() -> Arc<dyn Signer> {
+        let store = Arc::new(MemoryUpstreamStore::default());
+        let record = create_upstream(&store, "primary").await;
+        let service = aead();
+        store
+            .store_oauth_tokens(
+                record.id,
+                record.revision,
+                encrypted_tokens(&service, record.id, now_secs() + 600),
+            )
+            .await
+            .unwrap();
+        let factory = AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary");
+        factory.build(&Upstream::AnthropicDirect).await.unwrap()
+    }
+
+    async fn store_live_credentials(
+        store: &MemoryUpstreamStore,
+        aead: &AeadService,
+        expires_at_unix_secs: u64,
+    ) {
+        let plaintext = serde_json::to_vec(&OAuthCredentials {
+            access_token: "access-token".to_owned(),
+            refresh_token: "refresh-token".to_owned(),
+            expires_at: expires_at_unix_secs,
+            scopes: vec!["messages".to_owned()],
+        })
+        .unwrap();
+        let ciphertext = aead
+            .encrypt(
+                &plaintext,
+                &oauth_credentials_aad("principal", "anthropic_oauth"),
+            )
+            .unwrap();
+        store
+            .put_oauth_ciphertext("principal", "anthropic_oauth", &ciphertext)
+            .await
+            .unwrap();
+    }
+
+    fn shaped_request_with_beta(value: Option<&str>) -> ShapedRequest {
+        let mut shaped = shaped_request();
+        if let Some(value) = value {
+            shaped
+                .headers_mut()
+                .insert("anthropic-beta", value.parse().unwrap());
+        }
+        shaped
+    }
+
+    fn anthropic_beta(signed: &SignedRequest) -> &str {
+        signed
+            .headers()
+            .get("anthropic-beta")
+            .and_then(|value| value.to_str().ok())
+            .unwrap()
     }
 
     async fn create_upstream(store: &MemoryUpstreamStore, name: &str) -> UpstreamRecord {
