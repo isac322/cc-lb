@@ -98,7 +98,8 @@ fn v3_to_v4_rewrites_legacy_upstreams_without_shape_plugin()
 }
 
 #[test]
-fn v3_to_v4_converts_active_custom_upstream_to_anthropic_api_key() -> Result<(), Box<dyn std::error::Error>> {
+fn v3_to_v4_converts_active_custom_upstream_to_anthropic_api_key()
+-> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("storage.redb");
     let id = Uuid::new_v4();
@@ -120,7 +121,10 @@ fn v3_to_v4_converts_active_custom_upstream_to_anthropic_api_key() -> Result<(),
     let record: UpstreamRecord = serde_json::from_slice(&stored)?;
     assert_eq!(record.id, id);
     assert_eq!(record.name, "legacy-api-key");
-    assert_eq!(record.kind, cc_lb_storage_api::upstream::UpstreamKind::AnthropicApiKey);
+    assert_eq!(
+        record.kind,
+        cc_lb_storage_api::upstream::UpstreamKind::AnthropicApiKey
+    );
 
     Ok(())
 }
@@ -141,7 +145,10 @@ fn v3_to_v4_drops_soft_deleted_custom_upstream() -> Result<(), Box<dyn std::erro
     let read_txn = db.begin_read()?;
     let table = read_txn.open_table(UPSTREAMS_V2)?;
     let stored = table.get(id.as_bytes().as_slice())?;
-    assert!(stored.is_none(), "soft-deleted custom upstream should be dropped");
+    assert!(
+        stored.is_none(),
+        "soft-deleted custom upstream should be dropped"
+    );
 
     Ok(())
 }

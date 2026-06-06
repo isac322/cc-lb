@@ -184,7 +184,9 @@ fn migrate_upstreams_v3_to_v4(write_txn: &redb::WriteTransaction) -> Result<(), 
                 id: legacy.id,
                 name: legacy.name,
                 kind: match legacy.kind {
-                    legacy_upstreams::UpstreamKind::AnthropicApiKey => UpstreamKind::AnthropicApiKey,
+                    legacy_upstreams::UpstreamKind::AnthropicApiKey => {
+                        UpstreamKind::AnthropicApiKey
+                    }
                     legacy_upstreams::UpstreamKind::AnthropicOauth => UpstreamKind::AnthropicOauth,
                     legacy_upstreams::UpstreamKind::Custom => unreachable!(),
                 },

@@ -73,7 +73,7 @@ mod plugin {
 mod tests {
     use super::*;
     use cc_lb_plugin_wire::v1::{
-        common::{CandidateWire, HeaderWire, Principal, RequestWire, UpstreamWire},
+        common::{CandidateWire, Principal, RequestWire, UpstreamWire},
         normalize_error::NormalizeErrorRequest,
         route::RouteRequest,
         shape::ShapeRequest,
