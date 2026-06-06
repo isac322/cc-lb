@@ -62,3 +62,60 @@ export function RelativeTime({
     </Hint>
   );
 }
+
+export function ResetCountdown({
+  ts,
+  className,
+}: {
+  ts: Date | number | null | undefined;
+  className?: string;
+}) {
+  const { effective: locale } = useLocale();
+  const { effective: timezone } = useTimezone();
+  const date = useMemo(() => {
+    if (ts == null) return null;
+    if (typeof ts === 'number') return new Date(ts);
+    return ts;
+  }, [ts]);
+  const [, force] = useReducer((x) => x + 1, 0);
+  useEffect(() => {
+    const id = setInterval(force, 60_000);
+    return () => clearInterval(id);
+  }, []);
+
+  if (!date) return <span className={cx('text-text-faint', className)}>—</span>;
+
+  const now = new Date();
+  const diffMs = date.getTime() - now.getTime();
+  const absMs = Math.abs(diffMs);
+  const abs = formatAbsolute(date, locale, timezone);
+
+  let text = '';
+  if (diffMs > 0) {
+    const totalMin = Math.floor(absMs / 60000);
+    const d = Math.floor(totalMin / 1440);
+    const h = Math.floor((totalMin % 1440) / 60);
+    const m = totalMin % 60;
+    if (d > 0) text = `Resets in ${d}d ${h}h`;
+    else if (h > 0) text = `Resets in ${h}h ${m}m`;
+    else text = `Resets in ${m}m`;
+  } else {
+    if (absMs > 24 * 3600000) {
+      text = `Reset >1d ago (stale)`;
+    } else {
+      const h = Math.floor(absMs / 3600000);
+      const m = Math.floor((absMs % 3600000) / 60000);
+      if (h > 0) {
+        text = `Reset ${h}h ${m}m ago`;
+      } else {
+        text = `Reset ${m}m ago`;
+      }
+    }
+  }
+
+  return (
+    <Hint label={abs} side="top">
+      <span className={cx('cursor-help', className)}>{text}</span>
+    </Hint>
+  );
+}

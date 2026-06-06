@@ -2,17 +2,6 @@ import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { ArrowUpRight, Info } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  Area,
-  AreaChart,
-  CartesianGrid,
-  Legend,
-  ReferenceLine,
-  ResponsiveContainer,
-  Tooltip,
-  XAxis,
-  YAxis,
-} from 'recharts';
-import {
   Card,
   CardBody,
   CardHeader,
@@ -23,6 +12,7 @@ import {
   Section,
   StatusBadge,
 } from '../components/ui/primitives';
+import { QuotaUpstreamMiniChart } from '../components/ui/QuotaUpstreamMiniChart';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { eventTime, type RequestEvent, streamEventsFetch } from '../lib/api';
 import { getUpstreamColor } from '../lib/colors';
@@ -38,7 +28,6 @@ import {
   useUpstreams,
   useUsage,
 } from '../lib/queries';
-import { useTheme } from '../lib/theme';
 
 export const Route = createFileRoute('/')({
   component: OverviewPage,
@@ -69,12 +58,6 @@ function fmtPct(n: number, d: number): string {
 
 function OverviewPage() {
   const navigate = useNavigate({ from: Route.fullPath });
-  const { effective } = useTheme();
-  const isLight = effective === 'light';
-  const tooltipBg = isLight ? '#fafafa' : '#0a0a0a';
-  const tooltipBorder = isLight ? 'rgba(0,0,0,0.14)' : 'rgba(255,255,255,0.14)';
-  const tooltipText = isLight ? '#0a0a0a' : '#ededed';
-  const tooltipMuted = isLight ? '#4b5563' : '#9ca3af';
   const [range, setRange] = useState<Range>('24h');
   const stepFor = useCallback(
     (r: Range) => (r === '7d' || r === '24h' ? 'hour' : 'minute'),
@@ -327,7 +310,7 @@ function OverviewPage() {
       <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
         <Card className="xl:col-span-2 flex flex-col min-h-[360px]">
           <CardHeader
-            title="Subscription Quota Forecast"
+            title="Subscription Quota — Observed"
             subtitle={`5h and 7d utilization over ${range}`}
             action={
               <div className="flex flex-col sm:flex-row sm:items-center gap-2 w-full sm:w-auto min-w-0">
@@ -352,186 +335,40 @@ function OverviewPage() {
             }
           />
           <CardBody className="flex-1 p-3 pt-1">
-            <div className="w-full h-[300px]" style={{ minWidth: 0 }}>
+            <div className="w-full" style={{ minWidth: 0 }}>
               {quotaSeries.isLoading ? (
-                <div className="h-full flex items-center justify-center text-text-faint text-sm">
+                <div className="h-[300px] flex items-center justify-center text-text-faint text-sm">
                   Loading…
                 </div>
               ) : !chartData.rows.length ? (
-                <EmptyState title="No data in range" />
+                <div className="h-[300px]">
+                  <EmptyState title="No data in range" />
+                </div>
               ) : (
-                <ResponsiveContainer width="100%" height={300} debounce={150}>
-                  <AreaChart
-                    data={chartData.rows}
-                    margin={{ top: 8, right: 24, bottom: 4, left: 0 }}
-                  >
-                    <CartesianGrid stroke="var(--color-border)" />
-                    <XAxis
-                      dataKey="unix"
-                      tick={{
-                        fill: 'var(--color-text-faint)',
-                        fontSize: 10,
-                        fontFamily: 'Geist Mono',
-                      }}
-                      tickFormatter={(val) => {
-                        const d = new Date(val * 1000);
-                        return range === '7d' || range === '24h'
-                          ? `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-                          : `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-                      }}
-                      axisLine={false}
-                      tickLine={false}
-                      minTickGap={40}
-                    />
-                    <YAxis
-                      tick={{
-                        fill: 'var(--color-text-faint)',
-                        fontSize: 10,
-                        fontFamily: 'Geist Mono',
-                      }}
-                      tickFormatter={(val) => `${val}%`}
-                      axisLine={false}
-                      tickLine={false}
-                      width={40}
-                      domain={[0, 100]}
-                      allowDataOverflow={false}
-                    />
-                    <Tooltip
-                      cursor={{
-                        stroke: 'var(--color-accent)',
-                        strokeWidth: 1,
-                        strokeOpacity: 0.3,
-                      }}
-                      content={({ active, payload, label }) => {
-                        if (!active || !payload?.length) return null;
-                        return (
-                          <div
-                            style={{
-                              background: tooltipBg,
-                              border: `1px solid ${tooltipBorder}`,
-                              borderRadius: 2,
-                              color: tooltipText,
-                              fontSize: 11,
-                              fontFamily: 'Geist Mono Variable, monospace',
-                              padding: '6px 10px',
-                              boxShadow: '0 4px 12px rgba(0,0,0,0.18)',
-                              minWidth: 80,
-                            }}
-                          >
-                            <div
-                              style={{ color: tooltipMuted, marginBottom: 4 }}
-                            >
-                              {label}
-                            </div>
-                            {payload.map((p, i) => {
-                              const [uId, w] = (p.dataKey as string).split('_');
-                              const uName =
-                                chartData.upstreams.find((u) => u.id === uId)
-                                  ?.name ?? uId;
-                              return (
-                                <div
-                                  key={i}
-                                  style={{
-                                    color: tooltipText,
-                                    padding: '1px 0',
-                                    display: 'flex',
-                                    justifyContent: 'space-between',
-                                    gap: 8,
-                                  }}
-                                >
-                                  <span
-                                    style={{
-                                      color:
-                                        typeof p.color === 'string'
-                                          ? p.color
-                                          : tooltipText,
-                                    }}
-                                  >
-                                    {uName} ({w})
-                                  </span>
-                                  <span
-                                    style={{
-                                      fontVariantNumeric: 'tabular-nums',
-                                    }}
-                                  >
-                                    {typeof p.value === 'number'
-                                      ? `${p.value.toFixed(1)}%`
-                                      : '—'}
-                                  </span>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        );
-                      }}
-                    />
-                    {chartData.upstreams.length > 1 ? (
-                      <Legend
-                        wrapperStyle={{
-                          fontSize: 11,
-                          fontFamily: 'Geist Mono',
-                          color: 'var(--color-text-muted)',
-                        }}
-                        content={() => (
-                          <div className="flex flex-wrap items-center justify-center gap-4 mt-2">
-                            {chartData.upstreams.map((u) => (
-                              <div
-                                key={u.id}
-                                className="flex items-center gap-1.5"
-                              >
-                                <div
-                                  className="w-3 h-0.5"
-                                  style={{
-                                    backgroundColor: getUpstreamColor(u.id)
-                                      .line5h,
-                                  }}
-                                />
-                                <span className="text-[11px] text-text-muted font-mono">
-                                  {u.name}
-                                </span>
-                              </div>
-                            ))}
-                          </div>
-                        )}
-                      />
-                    ) : null}
-                    {chartData.markers.map((m, i) => (
-                      <ReferenceLine
-                        key={`marker-${i}`}
-                        x={chartData.rows.find((r) => r.unix === m.ts)?.ts}
-                        stroke={getUpstreamColor(m.upstreamId).line5h}
-                        strokeOpacity={0.5}
-                        strokeDasharray="3 3"
-                      />
-                    ))}
-                    {chartData.upstreams.map((u) => {
-                      const colors = getUpstreamColor(u.id);
-                      return [
-                        <Area
-                          key={`${u.id}_7d`}
-                          type="stepAfter"
-                          dataKey={`${u.id}_7d`}
-                          stroke={colors.line7d}
-                          strokeWidth={1.4}
-                          strokeDasharray="3 3"
-                          fill="none"
-                          isAnimationActive={false}
-                          connectNulls={false}
-                        />,
-                        <Area
-                          key={`${u.id}_5h`}
-                          type="stepAfter"
-                          dataKey={`${u.id}_5h`}
-                          stroke={colors.line5h}
-                          strokeWidth={1.4}
-                          fill="none"
-                          isAnimationActive={false}
-                          connectNulls={false}
-                        />,
-                      ];
-                    })}
-                  </AreaChart>
-                </ResponsiveContainer>
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                  {chartData.upstreams.map((u) => (
+                    <Card
+                      key={u.id}
+                      className="flex flex-col bg-overlay-1 border-subtle"
+                    >
+                      <div className="px-3 py-2 border-b border-subtle text-xs font-medium truncate">
+                        {u.name}
+                      </div>
+                      <div className="h-[140px] p-2">
+                        <QuotaUpstreamMiniChart
+                          upstreamId={u.id}
+                          series={quotaSeries.data?.series ?? []}
+                          latest={quotaLatest.data?.upstreams.find(
+                            (x) => x.upstream_id === u.id,
+                          )}
+                          rangeStart={sinceUnixSecs}
+                          rangeEnd={nowUnixSecs}
+                          range={range}
+                        />
+                      </div>
+                    </Card>
+                  ))}
+                </div>
               )}
             </div>
           </CardBody>
@@ -615,7 +452,7 @@ function OverviewPage() {
                       </span>
                     </div>
                     <div className="flex items-center gap-1.5">
-                      <span className="text-text-faint">Need:</span>
+                      <span className="text-text-faint">Recommended:</span>
                       <span className="font-mono text-amber-400">
                         {a5h?.deficit
                           ? `${a5h.deficit.recommended_multiplier}x`

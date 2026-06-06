@@ -7,8 +7,9 @@ use cc_lb_storage_api::BackendKind;
 use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
     scenarios::{
-        anthropic_compatibility_kv_store, atomicity, plugin_registry_store, principal_store,
-        storage_roundtrips, upstream_rate_limit_store, upstream_subscription_quota_store,
+        anthropic_compatibility_kv_store, atomicity, organization_metadata_store,
+        plugin_registry_store, principal_store, storage_roundtrips, upstream_rate_limit_store,
+        upstream_subscription_metadata_store, upstream_subscription_quota_store,
     },
 };
 use cc_lb_storage_redb::RedbStorage;
@@ -206,6 +207,22 @@ upstream_subscription_quota_redb_test!(
     upstream_subscription_quota_series_filters_observed_at_window_redb,
     series_filters_observed_at_window
 );
+
+#[test]
+fn upstream_subscription_metadata_store_redb() {
+    run_redb_scenario(
+        "upstream_subscription_metadata_store",
+        upstream_subscription_metadata_store::run_all,
+    );
+}
+
+#[test]
+fn organization_metadata_store_redb() {
+    run_redb_scenario(
+        "organization_metadata_store",
+        organization_metadata_store::run_all,
+    );
+}
 
 macro_rules! plugin_registry_redb_test {
     ($test_name:ident, $scenario:ident) => {
