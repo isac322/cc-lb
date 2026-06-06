@@ -248,7 +248,7 @@ if [ "$principal_code" != "201" ] && [ "$principal_code" != "409" ]; then
   fail "register principal expected 201 or 409, got $principal_code"
 fi
 
-upstream_body=$(printf '{"name":"real_client","kind":"custom","base_url":"http://127.0.0.1:%s"}' "$fake_port")
+upstream_body=$(printf '{"name":"real_client","kind":"anthropic_api_key","base_url":"http://127.0.0.1:%s","api_key_value":"sk-ant-test"}' "$fake_port")
 upstream_code=$(curl -sS -o "$TMP_DIR/admin-upstream.json" -w '%{http_code}' -X POST \
   -H 'Authorization: Bearer admin-token' \
   -H 'content-type: application/json' \

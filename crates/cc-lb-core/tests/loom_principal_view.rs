@@ -149,9 +149,7 @@ mod principal_view_swap {
 
             Ok(RouteDecision {
                 upstream_id: None,
-                upstream: Upstream::CustomAnthropicSpec {
-                    base_url: generation_url(self.generation),
-                },
+                upstream: Upstream::AnthropicDirect,
                 dialect: StdArc::new(StubDialect),
             })
         }
@@ -169,14 +167,13 @@ mod principal_view_swap {
 
     impl ObservabilityHook for StubHook {
         fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError> {
-            let ObserveEvent::UpstreamChosen {
-                upstream: Upstream::CustomAnthropicSpec { base_url },
-            } = event
-            else {
-                panic!("stub hook only expects UpstreamChosen events");
-            };
-
-            assert_eq!(base_url, generation_url(self.generation));
+            assert!(matches!(
+                event,
+                ObserveEvent::UpstreamChosen {
+                    upstream: Upstream::AnthropicDirect,
+                }
+            ));
+            let _ = self.generation;
             Ok(())
         }
     }
@@ -191,12 +188,10 @@ mod principal_view_swap {
             _principal: &Principal,
             builder: &mut ShapedRequestBuilder,
         ) -> Result<ShapedRequest, DialectError> {
-            let Upstream::CustomAnthropicSpec { base_url } = upstream else {
-                unreachable!("stub router only returns custom upstreams");
-            };
+            let _ = upstream;
 
             Ok(builder.shaped_request(
-                base_url.clone(),
+                generation_url(1),
                 ctx.method.clone(),
                 HeaderMap::new(),
                 Bytes::new(),

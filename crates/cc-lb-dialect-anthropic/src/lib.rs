@@ -2,13 +2,11 @@
 
 #![forbid(unsafe_code)]
 
-pub mod custom;
 pub mod direct;
 
 use bytes::Bytes;
 use url::Url;
 
-pub use custom::CustomAnthropicSpecDialect;
 pub use direct::AnthropicDirectDialect;
 
 pub(crate) const ANTHROPIC_API_BASE_URL: &str = "https://api.anthropic.com";

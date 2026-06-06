@@ -60,7 +60,6 @@ async fn status_shows_partial_failure_when_upstream_marked_error_in_snapshot() {
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
-            shape_plugin: None,
         },
     )
     .await
@@ -87,7 +86,6 @@ async fn export_contains_no_plaintext_oauth_tokens() {
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
-            shape_plugin: None,
         },
     )
     .await
@@ -215,10 +213,9 @@ async fn seed_upstream(storage: &cc_lb_storage_redb::Storage, name: &str) {
         storage,
         UpstreamCreate {
             name: name.to_owned(),
-            kind: UpstreamKind::Custom,
+            kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
             api_key_ciphertext: None,
-            shape_plugin: None,
         },
     )
     .await

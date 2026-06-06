@@ -1,6 +1,9 @@
 use std::sync::Arc;
 
+use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
+
+mod legacy_upstreams;
 
 use crate::{
     ANTHROPIC_COMPATIBILITY_KV_V1, API_KEYS_V1, AUDIT_LOG_V1, CONFIG_DRAFT_V1, CONFIG_HISTORY_V1,
@@ -19,13 +22,14 @@ const REQUEST_EVENT_CHECKPOINT_KEY: &str = "request_events_v1_high_water";
 
 pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> {
     let write_txn = db.begin_write()?;
+    let stored_version;
     let reset_usage_rollups;
     {
-        let mut schema = write_txn.open_table(SCHEMA_VERSION_V1)?;
-        let version = schema.get(SCHEMA_VERSION_KEY)?.map(|stored| stored.value());
+        let schema = write_txn.open_table(SCHEMA_VERSION_V1)?;
+        stored_version = schema.get(SCHEMA_VERSION_KEY)?.map(|stored| stored.value());
 
-        reset_usage_rollups = version.is_none_or(|found| found < CURRENT_SCHEMA_VERSION);
-        match version {
+        reset_usage_rollups = stored_version.is_none_or(|found| found < CURRENT_SCHEMA_VERSION);
+        match stored_version {
             Some(found) if found > CURRENT_SCHEMA_VERSION => {
                 return Err(StorageError::UnsupportedSchemaVersion {
                     found,
@@ -33,13 +37,8 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
                 });
             }
             Some(0) => return Err(StorageError::InvalidSchemaVersion(0)),
-            Some(found) if found < CURRENT_SCHEMA_VERSION => {
-                schema.insert(SCHEMA_VERSION_KEY, &CURRENT_SCHEMA_VERSION)?;
-            }
             Some(_) => {}
-            None => {
-                schema.insert(SCHEMA_VERSION_KEY, &CURRENT_SCHEMA_VERSION)?;
-            }
+            None => {}
         }
     }
     if reset_usage_rollups {
@@ -125,8 +124,100 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
     {
         write_txn.open_table(PLUGIN_CHAINS_V2)?;
     }
+    if stored_version.is_some_and(|version| version < 4) {
+        migrate_upstreams_v3_to_v4(&write_txn)?;
+    }
+    {
+        let mut schema = write_txn.open_table(SCHEMA_VERSION_V1)?;
+        schema.insert(SCHEMA_VERSION_KEY, &CURRENT_SCHEMA_VERSION)?;
+    }
 
     write_txn.commit()?;
+    Ok(())
+}
+
+fn migrate_upstreams_v3_to_v4(write_txn: &redb::WriteTransaction) -> Result<(), StorageError> {
+    let rows = {
+        let table = write_txn.open_table(UPSTREAMS_V2)?;
+        table
+            .iter()?
+            .map(|row| {
+                let (key, value) = row?;
+                Ok((key.value().to_vec(), value.value().to_vec()))
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?
+    };
+
+    let mut rewritten = Vec::with_capacity(rows.len());
+    let mut dropped_keys = Vec::new();
+    let mut dropped_names = Vec::new();
+
+    for (key, value) in rows {
+        let legacy: legacy_upstreams::UpstreamRecord = serde_json::from_slice(&value)?;
+        if legacy.kind == legacy_upstreams::UpstreamKind::Custom {
+            if legacy.deleted_at_unix_secs.is_some() {
+                dropped_keys.push(key);
+                dropped_names.push(legacy.name);
+                continue;
+            } else {
+                let record = UpstreamRecord {
+                    id: legacy.id,
+                    name: legacy.name,
+                    kind: UpstreamKind::AnthropicApiKey,
+                    base_url: legacy.base_url,
+                    enabled: legacy.enabled,
+                    oauth_credentials: legacy.oauth_credentials,
+                    api_key_ciphertext: legacy.api_key_ciphertext,
+                    refresh_lease_holder: legacy.refresh_lease_holder,
+                    refresh_lease_until_unix_secs: legacy.refresh_lease_until_unix_secs,
+                    last_apply_error: legacy.last_apply_error,
+                    last_apply_at_unix_secs: legacy.last_apply_at_unix_secs,
+                    deleted_at_unix_secs: legacy.deleted_at_unix_secs,
+                    revision: legacy.revision,
+                    created_at_unix_secs: legacy.created_at_unix_secs,
+                    updated_at_unix_secs: legacy.updated_at_unix_secs,
+                };
+                rewritten.push((key, serde_json::to_vec(&record)?));
+            }
+        } else {
+            let record = UpstreamRecord {
+                id: legacy.id,
+                name: legacy.name,
+                kind: match legacy.kind {
+                    legacy_upstreams::UpstreamKind::AnthropicApiKey => UpstreamKind::AnthropicApiKey,
+                    legacy_upstreams::UpstreamKind::AnthropicOauth => UpstreamKind::AnthropicOauth,
+                    legacy_upstreams::UpstreamKind::Custom => unreachable!(),
+                },
+                base_url: legacy.base_url,
+                enabled: legacy.enabled,
+                oauth_credentials: legacy.oauth_credentials,
+                api_key_ciphertext: legacy.api_key_ciphertext,
+                refresh_lease_holder: legacy.refresh_lease_holder,
+                refresh_lease_until_unix_secs: legacy.refresh_lease_until_unix_secs,
+                last_apply_error: legacy.last_apply_error,
+                last_apply_at_unix_secs: legacy.last_apply_at_unix_secs,
+                deleted_at_unix_secs: legacy.deleted_at_unix_secs,
+                revision: legacy.revision,
+                created_at_unix_secs: legacy.created_at_unix_secs,
+                updated_at_unix_secs: legacy.updated_at_unix_secs,
+            };
+            rewritten.push((key, serde_json::to_vec(&record)?));
+        }
+    }
+
+    let mut table = write_txn.open_table(UPSTREAMS_V2)?;
+    for key in &dropped_keys {
+        let _ = table.remove(key.as_slice());
+    }
+    for (key, value) in rewritten {
+        table.insert(key.as_slice(), value.as_slice())?;
+    }
+
+    let mut by_name_table = write_txn.open_table(UPSTREAMS_V2_BY_NAME)?;
+    for name in dropped_names {
+        let _ = by_name_table.remove(name.as_str());
+    }
+
     Ok(())
 }
 

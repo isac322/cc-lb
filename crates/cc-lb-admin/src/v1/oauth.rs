@@ -497,7 +497,6 @@ async fn create_upstream_from_oauth_draft(
             kind: UpstreamKind::AnthropicOauth,
             base_url,
             api_key_ciphertext: None,
-            shape_plugin: None,
         },
     )
     .await

@@ -772,7 +772,6 @@ mod tests {
                 last_apply_error: None,
                 last_apply_at_unix_secs: None,
                 deleted_at_unix_secs: None,
-                shape_plugin: create.shape_plugin,
                 revision: 1,
                 created_at_unix_secs: now,
                 updated_at_unix_secs: now,
@@ -1278,7 +1277,6 @@ mod tests {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: None,
                 api_key_ciphertext: None,
-                shape_plugin: None,
             })
             .await
             .unwrap()

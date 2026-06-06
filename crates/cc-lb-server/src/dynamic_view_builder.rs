@@ -16,7 +16,7 @@ use cc_lb_core::{
     ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamRateLimitCache,
     UpstreamStatusEntry, UpstreamStatusSnapshot, make_default_dispatcher,
 };
-use cc_lb_dialect_anthropic::{AnthropicDirectDialect, CustomAnthropicSpecDialect};
+use cc_lb_dialect_anthropic::AnthropicDirectDialect;
 use cc_lb_plugin_api::{
     PluginManifest, Principal, RateLimitObservation, RequestContext, RouteDecision, RouteError,
     RouterPlugin, Signer, SignerError, SignerFactory, Upstream, UpstreamCandidate, UpstreamDialect,
@@ -182,16 +182,7 @@ pub async fn build_dynamic_view(
         build_principal_chains(stores, runtime, data_dir, &principals, &mut staged).await?;
     let principal_view = Arc::new(PrincipalView::from_db(&principals, principal_chains));
     let now = unix_now_secs();
-    let (routes, statuses) = apply_upstreams(
-        stores,
-        &upstreams,
-        oauth_anthropic,
-        runtime,
-        data_dir,
-        &mut staged,
-        now,
-    )
-    .await?;
+    let (routes, statuses) = apply_upstreams(stores, &upstreams, oauth_anthropic, now).await?;
     let revision_hash = collect_revision_hash(stores).await?;
     let global_router = Arc::new(DbRouter::new(routes));
     let signer_factory = Arc::new(DbCompositeSignerFactory::new(
@@ -492,9 +483,6 @@ async fn apply_upstreams(
     stores: &Stores,
     upstreams: &[UpstreamRecord],
     _oauth_anthropic: &AnthropicOAuthConfig,
-    runtime: &ExtismRuntime,
-    data_dir: &Path,
-    staged: &mut Vec<StagedSlot>,
     now: u64,
 ) -> StorageResult<(Vec<DbRoute>, HashMap<String, UpstreamStatusEntry>)> {
     let mut routes = Vec::new();
@@ -516,7 +504,7 @@ async fn apply_upstreams(
             continue;
         }
 
-        let mut route = match validate_upstream(upstream) {
+        let route = match validate_upstream(upstream) {
             Ok(route) => route,
             Err(message) => {
                 stores
@@ -535,30 +523,6 @@ async fn apply_upstreams(
             }
         };
 
-        if let Some(shape_binding) = upstream.shape_plugin.as_ref() {
-            match apply_shape_plugin(stores, runtime, data_dir, upstream.id, shape_binding).await {
-                Ok((dialect, shape_staged)) => {
-                    route.dialect = dialect;
-                    staged.push(shape_staged);
-                }
-                Err(message) => {
-                    stores
-                        .upstreams
-                        .set_last_apply_error(upstream.id, Some(message.clone()))
-                        .await?;
-                    statuses.insert(
-                        upstream.name.clone(),
-                        UpstreamStatusEntry {
-                            status: ApplyStatus::Error,
-                            last_apply_error: Some(message),
-                            last_apply_at_unix_secs: now,
-                        },
-                    );
-                    continue;
-                }
-            }
-        }
-
         stores
             .upstreams
             .set_last_apply_error(upstream.id, None)
@@ -576,49 +540,14 @@ async fn apply_upstreams(
     Ok((routes, statuses))
 }
 
-async fn apply_shape_plugin(
-    stores: &Stores,
-    runtime: &ExtismRuntime,
-    data_dir: &Path,
-    upstream_id: Uuid,
-    binding: &cc_lb_storage_api::UpstreamShapePluginRef,
-) -> Result<(Arc<dyn UpstreamDialect>, StagedSlot), String> {
-    let registry_entry = stores
-        .plugin_registry
-        .get_registry_entry_by_id(binding.registry_id)
-        .await
-        .map_err(|error| format!("shape plugin lookup failed: {error}"))?
-        .ok_or_else(|| "shape plugin registry entry not found".to_owned())?;
-    let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256)
-        .await
-        .map_err(|error| format!("shape plugin wasm materialize failed: {error}"))?;
-    let manifest = PluginManifest {
-        name: registry_entry.name.clone(),
-        artifact: wasm_path.to_string_lossy().into_owned(),
-        config: binding.config.clone(),
-        metadata: bridged_metadata(stores.plugin_registry_repo.as_ref(), registry_entry.sha256)
-            .await,
-    };
-    runtime
-        .instantiate_dialect_for_upstream(&upstream_id.to_string(), &registry_entry.name, &manifest)
-        .map_err(|error| format!("shape plugin dialect instantiation failed: {error}"))
-}
-
 fn validate_upstream(upstream: &UpstreamRecord) -> Result<DbRoute, String> {
     let upstream_target = match upstream.kind {
         UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth => Upstream::AnthropicDirect,
-        UpstreamKind::Custom => Upstream::CustomAnthropicSpec {
-            base_url: upstream
-                .base_url
-                .clone()
-                .ok_or_else(|| "custom upstream missing base_url".to_owned())?,
-        },
     };
     let dialect: Arc<dyn UpstreamDialect> = match upstream.kind {
         UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth => Arc::new(
             AnthropicDirectDialect::with_base_url(upstream.base_url.clone()),
         ),
-        UpstreamKind::Custom => Arc::new(CustomAnthropicSpecDialect),
     };
     match upstream.kind {
         UpstreamKind::AnthropicApiKey if upstream.api_key_ciphertext.is_none() => {
@@ -743,7 +672,7 @@ impl SignerFactory for DbCompositeSignerFactory {
                 reason: "upstream not present in dynamic signer view".to_owned(),
             })?;
         match record.kind {
-            UpstreamKind::AnthropicApiKey | UpstreamKind::Custom => {
+            UpstreamKind::AnthropicApiKey => {
                 let api_key = self.downstream_api_key.clone().ok_or_else(|| {
                     SignerError::MissingCredentials {
                         reason: "dynamic api-key signer requires downstream api key until Task 22 storage signer lands".to_owned(),
@@ -794,7 +723,7 @@ fn upstream_matches(record: &UpstreamRecord, upstream: &Upstream) -> bool {
         (
             UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth,
             Upstream::AnthropicDirect
-        ) | (UpstreamKind::Custom, Upstream::CustomAnthropicSpec { .. })
+        )
     )
 }
 

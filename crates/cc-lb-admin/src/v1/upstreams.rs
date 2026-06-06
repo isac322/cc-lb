@@ -16,7 +16,7 @@ use cc_lb_core::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
 };
 use cc_lb_core::{AuditEntry, AuditPayload, make_metadata_http_client, run_metadata_refresh};
-use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamShapePluginRef};
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     OrganizationMetadataRecord, PluginSlot, PrincipalStore, Storage, StorageError, UpstreamCreate,
     UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord, UpstreamUpdate,
@@ -70,8 +70,6 @@ struct UpstreamCreateBody {
     api_key_env: Option<String>,
     #[serde(default)]
     api_key_value: Option<String>,
-    #[serde(default)]
-    shape_plugin: Option<UpstreamShapePluginRef>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,17 +82,6 @@ struct UpstreamUpdateBody {
     api_key_env: Option<String>,
     #[serde(default)]
     api_key_value: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_shape_plugin")]
-    shape_plugin: Option<Option<UpstreamShapePluginRef>>,
-}
-
-fn deserialize_optional_shape_plugin<'de, D>(
-    deserializer: D,
-) -> Result<Option<Option<UpstreamShapePluginRef>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<UpstreamShapePluginRef>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,8 +97,6 @@ struct UpstreamResponse {
     kind: UpstreamKind,
     enabled: bool,
     revision: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    shape_plugin: Option<UpstreamShapePluginRef>,
 }
 
 #[derive(Debug, Serialize)]
@@ -238,7 +223,6 @@ async fn create_upstream(
             kind,
             base_url: body.base_url,
             api_key_ciphertext,
-            shape_plugin: body.shape_plugin,
         },
     )
     .await?;
@@ -392,7 +376,6 @@ async fn update_upstream(
             name: body.name,
             base_url: body.base_url,
             api_key_ciphertext,
-            shape_plugin: body.shape_plugin,
         },
     )
     .await
@@ -630,7 +613,6 @@ fn upstream_response(record: &UpstreamRecord) -> UpstreamResponse {
         kind: record.kind,
         enabled: record.enabled,
         revision: record.revision,
-        shape_plugin: record.shape_plugin.clone(),
     }
 }
 
@@ -701,16 +683,6 @@ fn api_key_ciphertext_for_create(
                 return Err(UpstreamError::BadRequest {
                     error: "unexpected_api_key",
                     detail: "anthropic_oauth upstreams do not accept api_key_value or api_key_env"
-                        .to_owned(),
-                });
-            }
-            Ok(None)
-        }
-        UpstreamKind::Custom => {
-            if plaintext.is_some() || env_name.is_some() {
-                return Err(UpstreamError::BadRequest {
-                    error: "unexpected_api_key",
-                    detail: "custom upstreams do not accept api_key_value or api_key_env"
                         .to_owned(),
                 });
             }

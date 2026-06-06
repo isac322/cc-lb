@@ -113,9 +113,7 @@ impl RouterPlugin for RecordingFallbackRouter {
         );
         Ok(RouteDecision {
             upstream_id: None,
-            upstream: Upstream::CustomAnthropicSpec {
-                base_url: Url::parse("http://router-choice-is-advisory.local/").unwrap(),
-            },
+            upstream: Upstream::AnthropicDirect,
             dialect: Arc::new(TestDialect),
         })
     }
@@ -176,12 +174,8 @@ impl UpstreamDialect for TestDialect {
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
     ) -> Result<ShapedRequest, DialectError> {
-        let Upstream::CustomAnthropicSpec { base_url } = upstream else {
-            return Err(DialectError::UpstreamMismatch {
-                reason: "test dialect expects custom upstream".to_owned(),
-            });
-        };
-        let mut url = base_url.clone();
+        let _ = upstream;
+        let mut url = Url::parse("http://router-choice-is-advisory.local/").unwrap();
         url.set_path(ctx.path.trim_start_matches('/'));
         url.set_query(ctx.query.as_deref());
         Ok(builder.shaped_request(
@@ -241,17 +235,16 @@ fn custom_upstream(id: Uuid, name: &str, base_url: &str) -> UpstreamRecord {
     UpstreamRecord {
         id,
         name: name.to_owned(),
-        kind: UpstreamKind::Custom,
+        kind: UpstreamKind::AnthropicApiKey,
         base_url: Some(Url::parse(base_url).unwrap()),
         enabled: true,
         oauth_credentials: None,
-        api_key_ciphertext: None,
+        api_key_ciphertext: Some(Vec::new()),
         refresh_lease_holder: None,
         refresh_lease_until_unix_secs: None,
         last_apply_error: None,
         last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
-        shape_plugin: None,
         revision: 1,
         created_at_unix_secs: 0,
         updated_at_unix_secs: 0,
