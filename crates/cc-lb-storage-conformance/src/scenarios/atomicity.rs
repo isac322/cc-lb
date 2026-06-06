@@ -511,7 +511,6 @@ where
             kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
             api_key_ciphertext: None,
-            shape_plugin: None,
         })
         .await?;
     let upstream_id = upstream.id;
@@ -733,7 +732,7 @@ fn usage_events() -> Vec<RequestEvent> {
             1_800_000_045,
             "usage-req-b-1",
             "usage-principal-b",
-            RequestEventUpstream::CustomAnthropicSpec,
+            RequestEventUpstream::AnthropicDirect,
             "claude-opus-4-1",
             500,
             None,

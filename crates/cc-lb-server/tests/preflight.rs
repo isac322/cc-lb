@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use axum::Router;
-use axum::routing::get;
 use cc_lb_core::LifecycleConfig;
 use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_server::preflight::{self, PreflightReport};
@@ -15,8 +13,6 @@ use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_redb::Storage;
 use serde_json::json;
 use tempfile::TempDir;
-use tokio::net::TcpListener;
-use tokio::task::JoinHandle;
 use uuid::Uuid;
 
 #[tokio::test]
@@ -130,50 +126,6 @@ async fn partial_state() {
     assert!(report.warnings.is_empty(), "warnings={:?}", report.warnings);
 }
 
-#[tokio::test]
-async fn custom_upstream_probe_success() {
-    let fixture = Fixture::new();
-    let (base_url, server_task) = spawn_head_ok().await;
-    seed_upstream(
-        &fixture.storage,
-        "custom-ok",
-        UpstreamKind::Custom,
-        Some(&base_url),
-    )
-    .await;
-
-    let report = run_preflight(&fixture).await;
-    server_task.abort();
-
-    assert_eq!(report.upstream_count, 1);
-    assert_eq!(report.upstream_warnings, 0);
-    assert!(report.warnings.is_empty(), "warnings={:?}", report.warnings);
-}
-
-#[tokio::test]
-async fn custom_upstream_probe_network_failure_warning() {
-    let fixture = Fixture::new();
-    seed_upstream(
-        &fixture.storage,
-        "custom-fail",
-        UpstreamKind::Custom,
-        Some("http://does-not-exist.invalid:99"),
-    )
-    .await;
-
-    let report = run_preflight(&fixture).await;
-    print_report(&report);
-
-    assert_eq!(report.upstream_count, 1);
-    assert_eq!(report.upstream_warnings, 1);
-    assert_eq!(report.warnings.len(), 1);
-    assert!(
-        report.warnings[0].contains("upstream probe failed"),
-        "warnings={:?}",
-        report.warnings
-    );
-}
-
 struct Fixture {
     _db_dir: TempDir,
     data_dir: TempDir,
@@ -249,7 +201,6 @@ async fn seed_upstream(storage: &Storage, name: &str, kind: UpstreamKind, base_u
             kind,
             base_url: base_url.map(|value| value.parse().unwrap()),
             api_key_ciphertext: Some(vec![1, 2, 3]),
-            shape_plugin: None,
         },
     )
     .await
@@ -318,14 +269,4 @@ async fn seed_chain(
         })
         .await
         .unwrap();
-}
-
-async fn spawn_head_ok() -> (String, JoinHandle<()>) {
-    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let app = Router::new().route("/", get(|| async { "ok" }));
-    let task = tokio::spawn(async move {
-        axum::serve(listener, app).await.unwrap();
-    });
-    (format!("http://{addr}"), task)
 }

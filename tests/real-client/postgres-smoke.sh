@@ -115,7 +115,7 @@ PY
 }
 
 seed_runtime() {
-  upstream_body=$(printf '{"name":"real_client","kind":"custom","base_url":"http://127.0.0.1:%s"}' "$fake_port")
+  upstream_body=$(printf '{"name":"real_client","kind":"anthropic_api_key","base_url":"http://127.0.0.1:%s","api_key_value":"sk-ant-test"}' "$fake_port")
   upstream_code=$(curl -sS -o "$TMP_DIR/admin-upstream.json" -w '%{http_code}' -X POST \
     -H 'Authorization: Bearer test' \
     -H 'content-type: application/json' \

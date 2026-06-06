@@ -684,7 +684,7 @@ function DetailView({
   }, [quotaSeries.data, quotaLatest.data, range]);
 
   // The backend `/admin/events/recent?upstream=` param only accepts the
-  // RequestEventUpstream class enum (`anthropic_direct` / `custom_anthropic_spec`),
+  // RequestEventUpstream class enum (`anthropic_direct`),
   // not an upstream display name or id. Passing the name returns 400
   // `invalid_upstream`, so we fetch unfiltered and narrow client-side by
   // `upstream_name`.
@@ -806,23 +806,6 @@ function DetailView({
           label: 'API Key',
           value: 'literal',
           tooltip: 'Stored inline (literal API key)',
-        });
-      else if (upstream.kind === 'custom')
-        fields.push({
-          label: 'Credentials',
-          value: 'passthrough',
-          tooltip:
-            "Custom upstreams forward the downstream client's API key directly. No credential is stored.",
-        });
-      if (upstream.shape_plugin?.registry_id)
-        fields.push({
-          label: 'Plugin',
-          value: (
-            <span className="font-mono">
-              {upstream.shape_plugin.registry_id}
-            </span>
-          ),
-          tooltip: 'WASM shape plugin handling request/response transforms',
         });
       if (upstreamRuntimeStatus?.last_apply_error)
         fields.push({
@@ -1928,9 +1911,9 @@ function CreateUpstreamModal({
   const [step, setStep] = useState<
     'type' | 'configure_non_oauth' | 'oauth_handshake' | 'oauth_confirm'
   >('type');
-  const [kind, setKind] = useState<
-    'anthropic_api_key' | 'anthropic_oauth' | 'custom'
-  >('anthropic_oauth');
+  const [kind, setKind] = useState<'anthropic_api_key' | 'anthropic_oauth'>(
+    'anthropic_oauth',
+  );
 
   // Non-OAuth state
   const [name, setName] = useState('');
@@ -2082,24 +2065,6 @@ function CreateUpstreamModal({
                 <div className="text-xs text-text-faint mt-1">
                   Use a workspace API key (sk-ant-api03-...). Pay-as-you-go
                   billing per token.
-                </div>
-              </div>
-            </label>
-            <label className="flex items-start gap-3 p-3 border border-subtle rounded-md cursor-pointer hover:bg-overlay-1 transition-colors">
-              <input
-                type="radio"
-                name="kind"
-                value="custom"
-                checked={kind === 'custom'}
-                onChange={() => setKind('custom')}
-                className="mt-1"
-              />
-              <div>
-                <div className="font-medium text-text">Custom Backend</div>
-                <div className="text-xs text-text-faint mt-1">
-                  Custom Anthropic-compatible endpoint. Provide your own base
-                  URL; the client API key is passed through (no credential is
-                  stored).
                 </div>
               </div>
             </label>
@@ -2349,7 +2314,7 @@ function CreateUpstreamModal({
       open={open}
       onOpenChange={handleOpenChange}
       title="New upstream"
-      description="Register an Anthropic API key, OAuth principal, or custom backend."
+      description="Register an Anthropic API key or OAuth principal."
       size={
         step === 'oauth_handshake' || step === 'oauth_confirm'
           ? 'lg'

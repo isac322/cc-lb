@@ -264,7 +264,7 @@ Common subtypes (in [common.rs](../crates/cc-lb-plugin-wire/src/v1/common.rs)):
 - `Principal { id, kind, claims }` — `kind` is one of `api_key`, `oauth_subject`, etc.; `claims` is the only field where `serde_json::Value` is permitted (free-form per-deployment auth claims).
 - `RequestWire { request_id, headers, method, path, query, body_base64 }` — the canonical downstream request shape (no host headers).
 - `CandidateWire { upstream_id, name, kind, observed_rate_limits, observed_at_unix_secs }` — an upstream candidate; `observed_rate_limits` carries recent host observations so the router can avoid throttled hops.
-- `UpstreamWire` — `AnthropicDirect` or `CustomAnthropicSpec { base_url }`.
+- `UpstreamWire` — `AnthropicDirect`.
 - `DialectBinding` — currently only `SelfReferenced`; the dialect lives with the plugin.
 - `ShapedRequestWire { url, method, headers, body_base64 }` — the post-`shape` request, before signing.
 - `UpstreamErrorWire { status, body_base64, category }` with `UpstreamErrorCategory` ∈ `{Unauthorized, Retryable, Failed}`.

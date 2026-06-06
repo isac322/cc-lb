@@ -519,7 +519,7 @@ async fn seed_runtime(admin_addr: SocketAddr, upstream_addr: SocketAddr) {
     );
 
     let upstream_body = format!(
-        r#"{{"name":"fake_anthropic","kind":"custom","base_url":"http://{upstream_addr}"}}"#
+        r#"{{"name":"fake_anthropic","kind":"anthropic_api_key","base_url":"http://{upstream_addr}","api_key_value":"sk-ant-test"}}"#
     );
     let upstream = plain_post_json(admin_addr, "/admin/v1/upstreams", &upstream_body)
         .await

@@ -36,7 +36,7 @@
     [
       "UpstreamChosen",
       [
-        "CustomAnthropicSpec",
+        "AnthropicDirect",
         "http://upstream.local/"
       ]
     ]
@@ -46,7 +46,7 @@
     [
       "UpstreamChosen",
       [
-        "CustomAnthropicSpec",
+        "AnthropicDirect",
         "http://upstream.local/"
       ]
     ]
@@ -128,7 +128,7 @@
     [
       "UpstreamChosen",
       [
-        "CustomAnthropicSpec",
+        "AnthropicDirect",
         "http://upstream.local/"
       ]
     ]
@@ -138,7 +138,7 @@
     [
       "UpstreamChosen",
       [
-        "CustomAnthropicSpec",
+        "AnthropicDirect",
         "http://upstream.local/"
       ]
     ]

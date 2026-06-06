@@ -198,7 +198,6 @@ fn create_sync(
         last_apply_error: None,
         last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
-        shape_plugin: create.shape_plugin,
         revision: 1,
         created_at_unix_secs: now,
         updated_at_unix_secs: now,
@@ -289,9 +288,6 @@ fn update_sync(
         }
         if update.api_key_ciphertext.is_some() {
             record.api_key_ciphertext = update.api_key_ciphertext;
-        }
-        if let Some(shape_plugin) = update.shape_plugin {
-            record.shape_plugin = shape_plugin;
         }
         Ok(())
     })

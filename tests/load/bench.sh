@@ -121,7 +121,7 @@ seed_runtime() {
     fail "create principal expected HTTP 201 or 409, got $principal_code"
   fi
 
-  upstream_body=$(printf '{"name":"fake_anthropic","kind":"custom","base_url":"http://127.0.0.1:%s"}' "$fake_port")
+  upstream_body=$(printf '{"name":"fake_anthropic","kind":"anthropic_api_key","base_url":"http://127.0.0.1:%s","api_key_value":"sk-ant-test"}' "$fake_port")
   upstream_code=$(curl -sS -o "$TMP_DIR/admin-upstream.json" -w '%{http_code}' -X POST \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -H 'content-type: application/json' \

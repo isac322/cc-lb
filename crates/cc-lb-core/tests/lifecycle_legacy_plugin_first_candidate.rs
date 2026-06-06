@@ -61,6 +61,6 @@ async fn legacy_router_without_upstream_id_uses_first_candidate() {
             .lock()
             .expect("dispatched URLs lock")
             .as_slice(),
-        &["http://first.local/v1/messages".to_owned()]
+        &["https://api.anthropic.com/v1/messages".to_owned()]
     );
 }

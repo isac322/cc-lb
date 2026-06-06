@@ -5,7 +5,7 @@
 import { serve } from "bun";
 
 type Json = Record<string, unknown> | unknown[];
-type UpstreamKind = "anthropic_api_key" | "anthropic_oauth" | "custom";
+type UpstreamKind = "anthropic_api_key" | "anthropic_oauth";
 type PrincipalKind = "machine" | "human" | "admin";
 type ChainSlot = "router" | "observability_hook" | "shape";
 
@@ -24,7 +24,6 @@ const upstreams: any[] = [
     revision: 7,
     base_url: "https://api.anthropic.com",
     api_key_env: "ANTHROPIC_API_KEY",
-    shape_plugin: null,
   },
   {
     id: "us-anthropic-secondary",
@@ -34,7 +33,6 @@ const upstreams: any[] = [
     revision: 3,
     base_url: "https://api.anthropic.com",
     api_key_env: "ANTHROPIC_API_KEY_2",
-    shape_plugin: null,
   },
   {
     id: "us-oauth-provider",
@@ -43,17 +41,6 @@ const upstreams: any[] = [
     enabled: true,
     revision: 4,
     base_url: "https://api.anthropic.com",
-    shape_plugin: null,
-  },
-  {
-    id: "us-custom-llamacpp",
-    name: "self-hosted-llamacpp",
-    kind: "custom",
-    enabled: true,
-    revision: 1,
-    base_url: "http://10.0.0.21:8080",
-    api_key_env: null,
-    shape_plugin: { wasm_registry_id: "pl-shape-llama" },
   },
 ];
 
@@ -88,7 +75,7 @@ const principals: any[] = [
     enabled: true,
     revision: 12,
     allowed_models: ["claude-haiku-4-5-20251015"],
-    allowed_upstreams: ["us-anthropic-primary", "us-custom-llamacpp"],
+    allowed_upstreams: ["us-anthropic-primary"],
     default_limits: [{ model: "claude-haiku-4-5-20251015", rpm: 600, tpm: 200000 }],
   },
   {
@@ -211,7 +198,6 @@ const upstreamModels: Record<string, string[]> = {
   "us-anthropic-primary": ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"],
   "us-anthropic-secondary": ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"],
   "us-oauth-provider": ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"],
-  "us-custom-llamacpp": ["claude-3-5-sonnet-20241022", "gpt-4o"],
 };
 
 let killswitch = false;
@@ -468,7 +454,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
     const body = await readJson<any>(req);
     if (!body.name) return err(400, "invalid_input", "name required");
     if (upstreams.find((u) => u.name === body.name)) return err(409, "conflict", "name already exists");
-    const newU = { id: `us-${Date.now().toString(36)}`, name: body.name, kind: body.kind ?? "anthropic_api_key", enabled: true, revision: 1, base_url: body.base_url ?? "https://api.anthropic.com", api_key_env: body.api_key_env ?? null, shape_plugin: body.shape_plugin ?? null };
+    const newU = { id: `us-${Date.now().toString(36)}`, name: body.name, kind: body.kind ?? "anthropic_api_key", enabled: true, revision: 1, base_url: body.base_url ?? "https://api.anthropic.com", api_key_env: body.api_key_env ?? null };
     upstreams.push(newU);
     return created(newU, { etag: `"${newU.revision}"`, location: `/admin/v1/upstreams/${newU.id}` });
   }
@@ -813,7 +799,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
   // ── Credentials / OAuth status
   if (path === "/admin/credentials" && m === "GET") {
     return ok({
-      credentials: upstreams.filter((u) => u.kind !== "custom").map((u) => ({ principal_id: null, provider: "anthropic", kind: u.kind === "anthropic_oauth" ? "oauth" : "api_key", identity: u.kind === "anthropic_oauth" ? "claude-code-token" : u.api_key_env, associated_principals: principals.filter((p) => p.allowed_upstreams?.includes(u.id)).map((p) => p.id), has_credentials: true, expires_at_unix_secs: u.kind === "anthropic_oauth" ? NOW() + 3600 * 8 : null, status: "active" })),
+      credentials: upstreams.map((u) => ({ principal_id: null, provider: "anthropic", kind: u.kind === "anthropic_oauth" ? "oauth" : "api_key", identity: u.kind === "anthropic_oauth" ? "claude-code-token" : u.api_key_env, associated_principals: principals.filter((p) => p.allowed_upstreams?.includes(u.id)).map((p) => p.id), has_credentials: true, expires_at_unix_secs: u.kind === "anthropic_oauth" ? NOW() + 3600 * 8 : null, status: "active" })),
       observed: true,
     });
   }
