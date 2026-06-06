@@ -176,13 +176,17 @@ function UpstreamsPage() {
                   : runtimeStatus?.status === 'active'
                     ? 'ok'
                     : 'neutral';
-              const snap5h = latest?.windows.find((w) => w.window === '5h');
-              const utilization5h = snap5h?.utilization ?? null;
-              const pct5h =
-                utilization5h == null
-                  ? '—%'
-                  : `${(utilization5h * 100).toFixed(0)}%`;
-              const color5h = getWindowColor('5h');
+              const barWindows = ['5h', '7d'];
+              const overage = latest?.windows.find(
+                (w) => w.window === 'overage',
+              );
+              if (
+                overage &&
+                (overage.extra_usage_enabled ||
+                  overage.extra_usage_monthly_limit != null)
+              ) {
+                barWindows.push('overage');
+              }
               return (
                 <button
                   key={u.id}
@@ -207,22 +211,74 @@ function UpstreamsPage() {
                       <Badge tone="mono">{u.kind}</Badge>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 w-full text-[10px] font-mono">
-                    <div className="w-6 shrink-0 text-text-faint">5h</div>
-                    <div className="flex-1 h-[5px] bg-progress-track rounded-full overflow-hidden">
-                      {utilization5h != null && (
+                  <div className="flex flex-col gap-1.5 w-full">
+                    {barWindows.map((windowName) => {
+                      const snap = latest?.windows.find(
+                        (w) => w.window === windowName,
+                      );
+                      const color = getWindowColor(windowName);
+                      const label = windowLabel(windowName);
+                      let utilization = snap?.utilization ?? null;
+                      if (
+                        windowName === 'overage' &&
+                        utilization == null &&
+                        snap?.extra_usage_monthly_limit != null &&
+                        snap.extra_usage_monthly_limit > 0 &&
+                        snap.extra_usage_used_credits != null
+                      ) {
+                        utilization =
+                          snap.extra_usage_used_credits /
+                          snap.extra_usage_monthly_limit;
+                      }
+                      const pct =
+                        utilization == null
+                          ? '—%'
+                          : `${(utilization * 100).toFixed(0)}%`;
+                      const stateDot =
+                        snap?.state === 'fresh'
+                          ? 'bg-green-400'
+                          : snap?.state === 'stale'
+                            ? 'bg-amber-400'
+                            : '';
+                      return (
                         <div
-                          className="h-full rounded-full"
-                          style={{
-                            width: `${Math.min(100, Math.max(0, utilization5h * 100))}%`,
-                            backgroundColor: color5h.stroke,
-                          }}
-                        />
-                      )}
-                    </div>
-                    <div className="w-8 shrink-0 text-right tabular-nums">
-                      {pct5h}
-                    </div>
+                          key={windowName}
+                          className="flex items-center gap-2 w-full text-[10px] font-mono"
+                        >
+                          <div className="w-8 shrink-0 text-text-faint truncate">
+                            {windowName === 'overage' ? 'Extra' : label}
+                          </div>
+                          <div className="flex-1 h-[5px] bg-progress-track rounded-full overflow-hidden">
+                            {utilization != null && (
+                              <div
+                                className="h-full rounded-full"
+                                style={{
+                                  width: `${Math.min(100, Math.max(0, utilization * 100))}%`,
+                                  backgroundColor: color.stroke,
+                                }}
+                              />
+                            )}
+                          </div>
+                          <div className="w-8 shrink-0 text-right tabular-nums">
+                            {pct}
+                          </div>
+                          <div className="hidden @[240px]:flex w-2 shrink-0 justify-end">
+                            {stateDot && (
+                              <Hint
+                                label={`${snap?.state} · ${snap?.source} · ${snap?.age_secs ?? 0}s`}
+                              >
+                                <div
+                                  className={cx(
+                                    'w-1.5 h-1.5 rounded-full',
+                                    stateDot,
+                                  )}
+                                />
+                              </Hint>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </button>
               );
@@ -626,17 +682,11 @@ function DetailView({
         value: <span className="font-mono">{upstream.id.slice(0, 8)}…</span>,
         tooltip: `Internal upstream identifier (${upstream.id})`,
       },
-      {
-        label: 'Rev',
-        value: upstream.revision,
-        tooltip: 'Current configuration revision',
-      },
     ];
 
     if (isOauth) {
       primaryLabels = new Set([
         'ID',
-        'Rev',
         'Plan',
         'Rate',
         'Extra Usage Billing',
@@ -704,7 +754,7 @@ function DetailView({
           tooltip: 'How the subscription is billed',
         });
     } else {
-      primaryLabels = new Set(['ID', 'Rev', 'Base URL']);
+      primaryLabels = new Set(['ID', 'Base URL']);
       fields.push(...commonIdFields);
       if (upstream.base_url)
         fields.push({
@@ -1551,38 +1601,46 @@ function DetailView({
               const principalEntry = upstreamOAuthQ.data?.has_credentials
                 ? upstreamOAuthQ.data
                 : null;
+              const runtimeStatus = upstreamRuntimeStatus?.status;
               const hasBoundToken = Boolean(principalEntry);
               const badge: OAuthBadge = upstreamOAuthQ.isLoading
                 ? { tone: 'neutral', label: 'Loading' }
                 : principalEntry
                   ? oauthBadge(principalEntry)
                   : { tone: 'neutral', label: 'Not connected' };
-              const connectButton = (
-                <Button
-                  size="sm"
-                  iconLeft={<KeyRound className="w-3 h-3" />}
-                  onClick={() => {
-                    oauthStart.mutate(upstream.id, {
-                      onSuccess: (res) => {
-                        setOauthState({
-                          authorize_url: res.authorize_url,
-                          state_token: res.state_token,
-                          code: '',
-                        });
-                        setOauthOpen(true);
-                      },
-                    });
-                  }}
-                >
-                  {hasBoundToken ? 'Reconnect' : 'Connect via OAuth'}
-                </Button>
-              );
               return (
                 <Card>
-                  <CardHeader title="OAuth Status" action={connectButton} />
+                  <CardHeader
+                    title="OAuth Status"
+                    subtitle={
+                      hasBoundToken ? 'Bound on this upstream' : 'Not connected'
+                    }
+                    action={
+                      <Button
+                        size="sm"
+                        iconLeft={<KeyRound className="w-3 h-3" />}
+                        onClick={() => {
+                          oauthStart.mutate(upstream.id, {
+                            onSuccess: (res) => {
+                              setOauthState({
+                                authorize_url: res.authorize_url,
+                                state_token: res.state_token,
+                                code: '',
+                              });
+                              setOauthOpen(true);
+                            },
+                          });
+                        }}
+                      >
+                        {hasBoundToken
+                          ? 'Reconnect via OAuth'
+                          : 'Connect via OAuth'}
+                      </Button>
+                    }
+                  />
                   <CardBody className="text-sm">
                     {statusQ.isLoading ? (
-                      <Skeleton className="h-8" />
+                      <Skeleton className="h-12" />
                     ) : !hasBoundToken ? (
                       <div className="flex flex-wrap items-center gap-3">
                         <StatusBadge tone={badge.tone} label={badge.label} />
@@ -1590,45 +1648,67 @@ function DetailView({
                           Run "Connect via OAuth" to authorize this upstream.
                         </p>
                       </div>
-                    ) : principalEntry ? (
-                      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs font-mono">
-                        <StatusBadge tone={badge.tone} label={badge.label} />
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-text-faint">Expires:</span>
-                          <RelativeTime
-                            ts={
-                              principalEntry.expires_at_unix_secs
-                                ? new Date(
-                                    principalEntry.expires_at_unix_secs * 1000,
-                                  )
-                                : null
-                            }
-                          />
-                        </div>
-                        <div className="flex items-center gap-1.5">
-                          <span className="text-text-faint">Refresh:</span>
-                          {principalEntry.refresh_token_present ? (
-                            <span>present</span>
-                          ) : (
-                            <span className="text-amber-400">missing</span>
-                          )}
-                        </div>
-                        {principalEntry.scopes.length ? (
-                          <Hint
-                            label={principalEntry.scopes.join(', ')}
-                          >
-                            <div className="flex items-center gap-1.5 cursor-help border-b border-dotted border-text-faint/30">
-                              <span className="text-text-faint">Scopes:</span>
-                              <span>{principalEntry.scopes.length}</span>
-                            </div>
-                          </Hint>
-                        ) : null}
-                      </div>
                     ) : (
-                      <p className="text-xs text-text-faint">
-                        Token is bound on the upstream but no credential details
-                        are available right now.
-                      </p>
+                      <div className="space-y-3">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <StatusBadge tone={badge.tone} label={badge.label} />
+                          <span className="text-[11px] text-text-faint font-mono">
+                            runtime: {runtimeStatus}
+                          </span>
+                        </div>
+                        {principalEntry ? (
+                          <>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                              <div>
+                                <div className="text-[11px] text-text-faint uppercase tracking-wider">
+                                  Expires
+                                </div>
+                                <div className="font-mono mt-0.5">
+                                  <RelativeTime
+                                    ts={
+                                      principalEntry.expires_at_unix_secs
+                                        ? new Date(
+                                            principalEntry.expires_at_unix_secs *
+                                              1000,
+                                          )
+                                        : null
+                                    }
+                                  />
+                                </div>
+                              </div>
+                              <div>
+                                <div className="text-[11px] text-text-faint uppercase tracking-wider">
+                                  Refresh token
+                                </div>
+                                <div className="mt-0.5">
+                                  {principalEntry.refresh_token_present ? (
+                                    'present'
+                                  ) : (
+                                    <span className="text-amber-400">
+                                      missing
+                                    </span>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+                            {principalEntry.scopes.length ? (
+                              <div>
+                                <div className="text-[11px] text-text-faint uppercase tracking-wider">
+                                  Scopes
+                                </div>
+                                <div className="font-mono mt-0.5 break-all text-xs">
+                                  {principalEntry.scopes.join(', ')}
+                                </div>
+                              </div>
+                            ) : null}
+                          </>
+                        ) : (
+                          <p className="text-xs text-text-faint">
+                            Token is bound on the upstream but no credential
+                            details are available right now.
+                          </p>
+                        )}
+                      </div>
                     )}
                   </CardBody>
                 </Card>
