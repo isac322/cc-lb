@@ -1,8 +1,8 @@
 import * as Dialog from '@radix-ui/react-dialog';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import { X } from 'lucide-react';
-import { useState } from 'react';
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from 'react';
+import { useState } from 'react';
 import { Area, AreaChart, ResponsiveContainer } from 'recharts';
 
 import { getWindowColor } from '../../lib/colors';

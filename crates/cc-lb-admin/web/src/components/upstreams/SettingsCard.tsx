@@ -1,20 +1,20 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
 import {
-  useUpdateUpstream,
-  type Upstream,
   type UpdateUpstreamRequest,
+  type Upstream,
+  useUpdateUpstream,
 } from '../../lib/queries';
 import {
-  Card,
-  CardHeader,
-  CardBody,
-  Button,
   Badge,
-  Hint,
-  INPUT_CLASS,
+  Button,
+  Card,
+  CardBody,
+  CardHeader,
   cx,
   Field,
+  Hint,
+  INPUT_CLASS,
 } from '../ui/primitives';
 
 type Props = {
@@ -27,7 +27,9 @@ export function SettingsCard({ upstream }: Props) {
   const [useLiteral, setUseLiteral] = useState(!upstream.api_key_env);
   const [envVar, setEnvVar] = useState(upstream.api_key_env || '');
   const [literalKey, setLiteralKey] = useState('');
-  const [pluginId, setPluginId] = useState(upstream.shape_plugin?.registry_id || '');
+  const [pluginId, setPluginId] = useState(
+    upstream.shape_plugin?.registry_id || '',
+  );
 
   const update = useUpdateUpstream();
 
@@ -61,7 +63,7 @@ export function SettingsCard({ upstream }: Props) {
           toast.success('Settings updated');
           setEditing(false);
         },
-      }
+      },
     );
   };
 
@@ -172,10 +174,18 @@ export function SettingsCard({ upstream }: Props) {
             </Field>
 
             <div className="flex justify-end gap-2 mt-2">
-              <Button variant="ghost" onClick={handleCancel} disabled={update.isPending}>
+              <Button
+                variant="ghost"
+                onClick={handleCancel}
+                disabled={update.isPending}
+              >
                 Cancel
               </Button>
-              <Button variant="primary" onClick={handleSave} disabled={update.isPending}>
+              <Button
+                variant="primary"
+                onClick={handleSave}
+                disabled={update.isPending}
+              >
                 {update.isPending ? 'Saving...' : 'Save'}
               </Button>
             </div>
@@ -190,9 +200,13 @@ export function SettingsCard({ upstream }: Props) {
                 <div className="text-text-faint">API Key</div>
                 <div className="text-text">
                   {upstream.api_key_env ? (
-                    <span className="font-mono text-xs">env:{upstream.api_key_env}</span>
+                    <span className="font-mono text-xs">
+                      env:{upstream.api_key_env}
+                    </span>
                   ) : (
-                    <span className="text-text-muted italic">literal value (stored)</span>
+                    <span className="text-text-muted italic">
+                      literal value (stored)
+                    </span>
                   )}
                 </div>
               </>
@@ -212,7 +226,9 @@ export function SettingsCard({ upstream }: Props) {
             <div className="text-text-faint">Shape Plugin</div>
             <div className="text-text">
               {upstream.shape_plugin?.registry_id ? (
-                <span className="font-mono text-xs">{upstream.shape_plugin.registry_id}</span>
+                <span className="font-mono text-xs">
+                  {upstream.shape_plugin.registry_id}
+                </span>
               ) : (
                 '—'
               )}

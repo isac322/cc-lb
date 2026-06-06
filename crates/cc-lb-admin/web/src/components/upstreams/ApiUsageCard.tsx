@@ -1,17 +1,17 @@
 import { useId, useMemo } from 'react';
 import {
-  AreaChart,
   Area,
+  AreaChart,
+  CartesianGrid,
+  ResponsiveContainer,
+  Tooltip,
   XAxis,
   YAxis,
-  CartesianGrid,
-  Tooltip,
-  ResponsiveContainer,
 } from 'recharts';
-import { Card, CardHeader, CardBody, Skeleton, cx } from '../ui/primitives';
+import type { DashboardUsageResponse } from '../../lib/api';
 import { getWindowColor } from '../../lib/colors';
 import { fmtUsd } from '../../lib/format';
-import type { DashboardUsageResponse } from '../../lib/api';
+import { Card, CardBody, CardHeader, cx, Skeleton } from '../ui/primitives';
 
 type Props = {
   data: DashboardUsageResponse | undefined;
@@ -95,7 +95,7 @@ export function ApiUsageCard({
             'rounded px-2 py-1 text-xs font-medium transition-colors',
             range === '24h'
               ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100'
-              : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100'
+              : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100',
           )}
         >
           24h
@@ -107,7 +107,7 @@ export function ApiUsageCard({
             'rounded px-2 py-1 text-xs font-medium transition-colors',
             range === '7d'
               ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100'
-              : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100'
+              : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100',
           )}
         >
           7d
@@ -121,7 +121,7 @@ export function ApiUsageCard({
             'rounded px-2 py-1 text-xs font-medium transition-colors',
             metric === 'tokens'
               ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100'
-              : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100'
+              : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100',
           )}
         >
           Tokens
@@ -133,7 +133,7 @@ export function ApiUsageCard({
             'rounded px-2 py-1 text-xs font-medium transition-colors',
             metric === 'cost'
               ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100'
-              : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100'
+              : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100',
           )}
         >
           Cost
@@ -160,7 +160,10 @@ export function ApiUsageCard({
           <div className="flex flex-col gap-4">
             <div className="h-64 w-full">
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                <AreaChart
+                  data={chartData}
+                  margin={{ top: 10, right: 10, left: 0, bottom: 0 }}
+                >
                   <defs>
                     {models.map((model) => {
                       const color = getWindowColor(model).fill;
@@ -173,13 +176,26 @@ export function ApiUsageCard({
                           x2="0"
                           y2="1"
                         >
-                          <stop offset="5%" stopColor={color} stopOpacity={0.3} />
-                          <stop offset="95%" stopColor={color} stopOpacity={0} />
+                          <stop
+                            offset="5%"
+                            stopColor={color}
+                            stopOpacity={0.3}
+                          />
+                          <stop
+                            offset="95%"
+                            stopColor={color}
+                            stopOpacity={0}
+                          />
                         </linearGradient>
                       );
                     })}
                   </defs>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="currentColor" className="text-zinc-200 dark:text-zinc-800" />
+                  <CartesianGrid
+                    strokeDasharray="3 3"
+                    vertical={false}
+                    stroke="currentColor"
+                    className="text-zinc-200 dark:text-zinc-800"
+                  />
                   <XAxis
                     dataKey="ts"
                     tickFormatter={formatXAxis}
@@ -201,7 +217,10 @@ export function ApiUsageCard({
                   />
                   <Tooltip
                     labelFormatter={(label) => formatXAxis(label as number)}
-                    formatter={(value: any, name: any) => [formatTooltip(Number(value || 0)), String(name)]}
+                    formatter={(value: any, name: any) => [
+                      formatTooltip(Number(value || 0)),
+                      String(name),
+                    ]}
                     contentStyle={{
                       backgroundColor: 'var(--bg-popover, #fff)',
                       borderColor: 'var(--border, #e4e4e7)',
@@ -241,9 +260,7 @@ export function ApiUsageCard({
                     <span className="font-medium text-zinc-900 dark:text-zinc-100">
                       {model}
                     </span>
-                    <span className="text-zinc-500">
-                      {formatTooltip(val)}
-                    </span>
+                    <span className="text-zinc-500">{formatTooltip(val)}</span>
                   </div>
                 );
               })}

@@ -1,7 +1,7 @@
-import { KeyboardEvent, useEffect, useRef, useState } from 'react';
+import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { type Upstream, useUpdateUpstream } from '../../lib/queries';
-import { INPUT_CLASS, cx } from '../ui/primitives';
+import { cx, INPUT_CLASS } from '../ui/primitives';
 
 type Props = {
   upstream: Upstream;

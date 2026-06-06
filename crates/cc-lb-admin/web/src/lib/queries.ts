@@ -155,12 +155,8 @@ export const qk = {
   health: ['health'] as const,
   status: ['status'] as const,
   summary: (range: string) => ['summary', range] as const,
-  usage: (
-    range: string,
-    step: string,
-    group: string,
-    upstreamId?: string,
-  ) => ['usage', range, step, group, upstreamId ?? null] as const,
+  usage: (range: string, step: string, group: string, upstreamId?: string) =>
+    ['usage', range, step, group, upstreamId ?? null] as const,
   upstreams: ['upstreams'] as const,
   upstream: (id: string) => ['upstream', id] as const,
   principals: ['principals'] as const,

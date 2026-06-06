@@ -1016,205 +1016,313 @@ function DetailView({
         ) : null}
 
         {isOauth && (
-        <Section title="Subscription Quota">
-          <Card>
-            <CardHeader
-              title="Quota History"
-              action={
-                <div className="flex flex-wrap bg-overlay-2 border border-subtle rounded-sm p-0.5 max-w-full">
-                  {(['1h', '6h', '24h', '7d'] as const).map((r) => (
-                    <button
-                      key={r}
-                      type="button"
-                      onClick={() => setRange(r)}
-                      className={cx(
-                        'px-2.5 h-7 text-xs rounded-sm transition-colors',
-                        r === range
-                          ? 'bg-overlay-6 text-text'
-                          : 'text-text-faint hover:text-text',
-                      )}
-                    >
-                      {r}
-                    </button>
-                  ))}
-                </div>
-              }
-            />
-            <CardBody className="p-3 pt-1">
-              <div className="w-full h-[240px]" style={{ minWidth: 0 }}>
-                {quotaSeries.isLoading ? (
-                  <div className="h-full flex items-center justify-center text-text-faint text-sm">
-                    Loading…
+          <Section title="Subscription Quota">
+            <Card>
+              <CardHeader
+                title="Quota History"
+                action={
+                  <div className="flex flex-wrap bg-overlay-2 border border-subtle rounded-sm p-0.5 max-w-full">
+                    {(['1h', '6h', '24h', '7d'] as const).map((r) => (
+                      <button
+                        key={r}
+                        type="button"
+                        onClick={() => setRange(r)}
+                        className={cx(
+                          'px-2.5 h-7 text-xs rounded-sm transition-colors',
+                          r === range
+                            ? 'bg-overlay-6 text-text'
+                            : 'text-text-faint hover:text-text',
+                        )}
+                      >
+                        {r}
+                      </button>
+                    ))}
                   </div>
-                ) : !chartData.rows.length ? (
-                  <EmptyState title="No data in range" />
-                ) : (
-                  <ResponsiveContainer width="100%" height={240} debounce={150}>
-                    <AreaChart
-                      data={chartData.rows}
-                      margin={{ top: 28, right: 24, bottom: 4, left: 0 }}
+                }
+              />
+              <CardBody className="p-3 pt-1">
+                <div className="w-full h-[240px]" style={{ minWidth: 0 }}>
+                  {quotaSeries.isLoading ? (
+                    <div className="h-full flex items-center justify-center text-text-faint text-sm">
+                      Loading…
+                    </div>
+                  ) : !chartData.rows.length ? (
+                    <EmptyState title="No data in range" />
+                  ) : (
+                    <ResponsiveContainer
+                      width="100%"
+                      height={240}
+                      debounce={150}
                     >
-                      <defs>
-                        {DETAIL_WINDOWS.map((windowName) => {
-                          const color = getWindowColor(windowName);
-                          return (
-                            <linearGradient
-                              key={windowName}
-                              id={`quota-detail-grad-${windowName}`}
-                              x1="0"
-                              y1="0"
-                              x2="0"
-                              y2="1"
-                            >
-                              <stop
-                                offset="0%"
-                                stopColor={color.stroke}
-                                stopOpacity={0.55}
-                              />
-                              <stop
-                                offset="100%"
-                                stopColor={color.stroke}
-                                stopOpacity={0}
-                              />
-                            </linearGradient>
-                          );
-                        })}
-                      </defs>
-                      <CartesianGrid stroke="var(--color-border)" />
-                      <XAxis
-                        dataKey="unix"
-                        type="number"
-                        domain={[sinceUnixSecs, nowUnixSecs]}
-                        tick={{
-                          fill: 'var(--color-text-faint)',
-                          fontSize: 10,
-                          fontFamily: 'Geist Mono',
-                        }}
-                        tickFormatter={(val) => {
-                          const d = new Date(Number(val) * 1000);
-                          return range === '7d' || range === '24h'
-                            ? `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
-                            : `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-                        }}
-                        axisLine={false}
-                        tickLine={false}
-                        minTickGap={40}
-                      />
-                      <YAxis
-                        tick={{
-                          fill: 'var(--color-text-faint)',
-                          fontSize: 10,
-                          fontFamily: 'Geist Mono',
-                        }}
-                        tickFormatter={(val) => `${val}%`}
-                        axisLine={false}
-                        tickLine={false}
-                        width={40}
-                        domain={[0, 100]}
-                        allowDataOverflow={false}
-                      />
-                      <Tooltip
-                        cursor={{
-                          stroke: 'var(--color-accent)',
-                          strokeWidth: 1,
-                          strokeOpacity: 0.3,
-                        }}
-                        content={({ active, payload, label }) => {
-                          if (!active || !payload?.length) return null;
-                          const first =
-                            quotaLatest.data?.upstreams[0]?.windows[0];
-                          return (
-                            <div
-                              style={{
-                                background: 'var(--color-bg-sub)',
-                                border: '1px solid var(--color-border)',
-                                borderRadius: 2,
-                                color: 'var(--color-text)',
-                                fontSize: 11,
-                                fontFamily: 'Geist Mono Variable, monospace',
-                                padding: '6px 10px',
-                                boxShadow: '0 4px 12px rgba(0,0,0,0.18)',
-                                minWidth: 80,
-                              }}
-                            >
+                      <AreaChart
+                        data={chartData.rows}
+                        margin={{ top: 28, right: 24, bottom: 4, left: 0 }}
+                      >
+                        <defs>
+                          {DETAIL_WINDOWS.map((windowName) => {
+                            const color = getWindowColor(windowName);
+                            return (
+                              <linearGradient
+                                key={windowName}
+                                id={`quota-detail-grad-${windowName}`}
+                                x1="0"
+                                y1="0"
+                                x2="0"
+                                y2="1"
+                              >
+                                <stop
+                                  offset="0%"
+                                  stopColor={color.stroke}
+                                  stopOpacity={0.55}
+                                />
+                                <stop
+                                  offset="100%"
+                                  stopColor={color.stroke}
+                                  stopOpacity={0}
+                                />
+                              </linearGradient>
+                            );
+                          })}
+                        </defs>
+                        <CartesianGrid stroke="var(--color-border)" />
+                        <XAxis
+                          dataKey="unix"
+                          type="number"
+                          domain={[sinceUnixSecs, nowUnixSecs]}
+                          tick={{
+                            fill: 'var(--color-text-faint)',
+                            fontSize: 10,
+                            fontFamily: 'Geist Mono',
+                          }}
+                          tickFormatter={(val) => {
+                            const d = new Date(Number(val) * 1000);
+                            return range === '7d' || range === '24h'
+                              ? `${d.getMonth() + 1}/${d.getDate()} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+                              : `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+                          }}
+                          axisLine={false}
+                          tickLine={false}
+                          minTickGap={40}
+                        />
+                        <YAxis
+                          tick={{
+                            fill: 'var(--color-text-faint)',
+                            fontSize: 10,
+                            fontFamily: 'Geist Mono',
+                          }}
+                          tickFormatter={(val) => `${val}%`}
+                          axisLine={false}
+                          tickLine={false}
+                          width={40}
+                          domain={[0, 100]}
+                          allowDataOverflow={false}
+                        />
+                        <Tooltip
+                          cursor={{
+                            stroke: 'var(--color-accent)',
+                            strokeWidth: 1,
+                            strokeOpacity: 0.3,
+                          }}
+                          content={({ active, payload, label }) => {
+                            if (!active || !payload?.length) return null;
+                            const first =
+                              quotaLatest.data?.upstreams[0]?.windows[0];
+                            return (
                               <div
                                 style={{
-                                  color: 'var(--color-text-faint)',
-                                  marginBottom: 4,
+                                  background: 'var(--color-bg-sub)',
+                                  border: '1px solid var(--color-border)',
+                                  borderRadius: 2,
+                                  color: 'var(--color-text)',
+                                  fontSize: 11,
+                                  fontFamily: 'Geist Mono Variable, monospace',
+                                  padding: '6px 10px',
+                                  boxShadow: '0 4px 12px rgba(0,0,0,0.18)',
+                                  minWidth: 80,
                                 }}
                               >
-                                {label}
-                              </div>
-                              {payload.map((p, i) => {
-                                const key = String(p.dataKey);
-                                return (
-                                  <div
-                                    key={i}
-                                    style={{
-                                      color: 'var(--color-text)',
-                                      padding: '1px 0',
-                                      display: 'flex',
-                                      justifyContent: 'space-between',
-                                      gap: 8,
-                                    }}
-                                  >
+                                <div
+                                  style={{
+                                    color: 'var(--color-text-faint)',
+                                    marginBottom: 4,
+                                  }}
+                                >
+                                  {label}
+                                </div>
+                                {payload.map((p, i) => {
+                                  const key = String(p.dataKey);
+                                  return (
                                     <div
+                                      key={i}
                                       style={{
+                                        color: 'var(--color-text)',
+                                        padding: '1px 0',
                                         display: 'flex',
-                                        alignItems: 'center',
-                                        gap: 6,
+                                        justifyContent: 'space-between',
+                                        gap: 8,
                                       }}
                                     >
                                       <div
                                         style={{
-                                          width: 8,
-                                          height: 8,
-                                          borderRadius: '50%',
-                                          backgroundColor:
-                                            getWindowColor(key).fill,
+                                          display: 'flex',
+                                          alignItems: 'center',
+                                          gap: 6,
                                         }}
-                                      />
-                                      <span>{windowLabel(key)}</span>
+                                      >
+                                        <div
+                                          style={{
+                                            width: 8,
+                                            height: 8,
+                                            borderRadius: '50%',
+                                            backgroundColor:
+                                              getWindowColor(key).fill,
+                                          }}
+                                        />
+                                        <span>{windowLabel(key)}</span>
+                                      </div>
+                                      <span
+                                        style={{
+                                          fontVariantNumeric: 'tabular-nums',
+                                        }}
+                                      >
+                                        {typeof p.value === 'number'
+                                          ? `${p.value.toFixed(1)}%`
+                                          : '—'}
+                                      </span>
                                     </div>
-                                    <span
+                                  );
+                                })}
+                                {first?.source && (
+                                  <div
+                                    style={{
+                                      marginTop: 6,
+                                      paddingTop: 6,
+                                      borderTop:
+                                        '1px solid var(--color-border)',
+                                      color: 'var(--color-text-faint)',
+                                      fontSize: 10,
+                                    }}
+                                  >
+                                    from: {first.source} · observed{' '}
+                                    {first.age_secs == null
+                                      ? 'recently'
+                                      : `${first.age_secs}s ago`}
+                                  </div>
+                                )}
+                              </div>
+                            );
+                          }}
+                        />
+                        <Legend
+                          wrapperStyle={{
+                            fontSize: 11,
+                            fontFamily: 'Geist Mono',
+                            color: 'var(--color-text-muted)',
+                          }}
+                          content={() => {
+                            const latest = quotaLatest.data?.upstreams[0];
+                            if (!latest) return null;
+                            const windows = ['5h', '7d', '7d_sonnet'];
+                            const opus = latest.windows.find(
+                              (w) => w.window === '7d_opus',
+                            );
+                            if (opus && opus.state !== 'missing')
+                              windows.push('7d_opus');
+                            const overage = latest.windows.find(
+                              (w) => w.window === 'overage',
+                            );
+                            if (
+                              overage &&
+                              (overage.extra_usage_enabled ||
+                                overage.extra_usage_monthly_limit != null)
+                            )
+                              windows.push('overage');
+                            return (
+                              <div className="flex flex-wrap items-center justify-center gap-4 mt-2">
+                                {windows.map((windowName) => (
+                                  <div
+                                    key={windowName}
+                                    className="flex items-center gap-1.5"
+                                  >
+                                    <div
+                                      className="w-3 h-0.5"
                                       style={{
-                                        fontVariantNumeric: 'tabular-nums',
+                                        backgroundColor:
+                                          getWindowColor(windowName).stroke,
                                       }}
-                                    >
-                                      {typeof p.value === 'number'
-                                        ? `${p.value.toFixed(1)}%`
-                                        : '—'}
+                                    />
+                                    <span className="text-[11px] text-text-muted font-mono">
+                                      {windowLabel(windowName)}
                                     </span>
                                   </div>
-                                );
-                              })}
-                              {first?.source && (
-                                <div
-                                  style={{
-                                    marginTop: 6,
-                                    paddingTop: 6,
-                                    borderTop: '1px solid var(--color-border)',
-                                    color: 'var(--color-text-faint)',
-                                    fontSize: 10,
-                                  }}
-                                >
-                                  from: {first.source} · observed{' '}
-                                  {first.age_secs == null
-                                    ? 'recently'
-                                    : `${first.age_secs}s ago`}
-                                </div>
-                              )}
-                            </div>
-                          );
-                        }}
-                      />
-                      <Legend
-                        wrapperStyle={{
-                          fontSize: 11,
-                          fontFamily: 'Geist Mono',
-                          color: 'var(--color-text-muted)',
-                        }}
-                        content={() => {
+                                ))}
+                              </div>
+                            );
+                          }}
+                        />
+                        {(() => {
+                          const visible = 2 * (nowUnixSecs - sinceUnixSecs);
+                          const markers: ChartMarker[] = [];
+                          const paired = new Map<
+                            string,
+                            { start?: ChartMarker; reset?: ChartMarker }
+                          >();
+                          for (const marker of chartData.markers) {
+                            if (!paired.has(marker.window))
+                              paired.set(marker.window, {});
+                            const bucket = paired.get(marker.window)!;
+                            if (marker.kind === 'start') bucket.start = marker;
+                            else if (marker.kind === 'reset')
+                              bucket.reset = marker;
+                            else markers.push(marker);
+                          }
+                          for (const pair of paired.values()) {
+                            if (
+                              pair.start &&
+                              pair.reset &&
+                              Math.abs(pair.reset.ts - pair.start.ts) /
+                                visible <
+                                0.25
+                            )
+                              markers.push(pair.reset);
+                            else {
+                              if (pair.start) markers.push(pair.start);
+                              if (pair.reset) markers.push(pair.reset);
+                            }
+                          }
+                          return markers.map((marker, i) => {
+                            if (
+                              marker.ts < sinceUnixSecs ||
+                              marker.ts >
+                                nowUnixSecs + (nowUnixSecs - sinceUnixSecs)
+                            )
+                              return null;
+                            const color = getWindowColor(marker.window);
+                            return (
+                              <ReferenceLine
+                                key={`marker-${i}`}
+                                x={marker.ts}
+                                stroke={color.stroke}
+                                strokeOpacity={0.6}
+                                strokeDasharray={
+                                  marker.kind === 'start' ? '4 6' : '2 4'
+                                }
+                              >
+                                <Label
+                                  value={
+                                    marker.kind === 'start'
+                                      ? `${windowLabel(marker.window)} start`
+                                      : `${windowLabel(marker.window)} reset`
+                                  }
+                                  position="top"
+                                  fontSize={10}
+                                  fill={color.stroke}
+                                />
+                              </ReferenceLine>
+                            );
+                          });
+                        })()}
+                        {(() => {
                           const latest = quotaLatest.data?.upstreams[0];
                           if (!latest) return null;
                           const windows = ['5h', '7d', '7d_sonnet'];
@@ -1232,371 +1340,271 @@ function DetailView({
                               overage.extra_usage_monthly_limit != null)
                           )
                             windows.push('overage');
-                          return (
-                            <div className="flex flex-wrap items-center justify-center gap-4 mt-2">
-                              {windows.map((windowName) => (
-                                <div
-                                  key={windowName}
-                                  className="flex items-center gap-1.5"
-                                >
-                                  <div
-                                    className="w-3 h-0.5"
-                                    style={{
-                                      backgroundColor:
-                                        getWindowColor(windowName).stroke,
-                                    }}
-                                  />
-                                  <span className="text-[11px] text-text-muted font-mono">
-                                    {windowLabel(windowName)}
-                                  </span>
-                                </div>
-                              ))}
-                            </div>
-                          );
-                        }}
-                      />
-                      {(() => {
-                        const visible = 2 * (nowUnixSecs - sinceUnixSecs);
-                        const markers: ChartMarker[] = [];
-                        const paired = new Map<
-                          string,
-                          { start?: ChartMarker; reset?: ChartMarker }
-                        >();
-                        for (const marker of chartData.markers) {
-                          if (!paired.has(marker.window))
-                            paired.set(marker.window, {});
-                          const bucket = paired.get(marker.window)!;
-                          if (marker.kind === 'start') bucket.start = marker;
-                          else if (marker.kind === 'reset')
-                            bucket.reset = marker;
-                          else markers.push(marker);
-                        }
-                        for (const pair of paired.values()) {
-                          if (
-                            pair.start &&
-                            pair.reset &&
-                            Math.abs(pair.reset.ts - pair.start.ts) / visible <
-                              0.25
-                          )
-                            markers.push(pair.reset);
-                          else {
-                            if (pair.start) markers.push(pair.start);
-                            if (pair.reset) markers.push(pair.reset);
-                          }
-                        }
-                        return markers.map((marker, i) => {
-                          if (
-                            marker.ts < sinceUnixSecs ||
-                            marker.ts >
-                              nowUnixSecs + (nowUnixSecs - sinceUnixSecs)
-                          )
-                            return null;
-                          const color = getWindowColor(marker.window);
-                          return (
-                            <ReferenceLine
-                              key={`marker-${i}`}
-                              x={marker.ts}
-                              stroke={color.stroke}
-                              strokeOpacity={0.6}
-                              strokeDasharray={
-                                marker.kind === 'start' ? '4 6' : '2 4'
-                              }
-                            >
-                              <Label
-                                value={
-                                  marker.kind === 'start'
-                                    ? `${windowLabel(marker.window)} start`
-                                    : `${windowLabel(marker.window)} reset`
-                                }
-                                position="top"
-                                fontSize={10}
-                                fill={color.stroke}
-                              />
-                            </ReferenceLine>
-                          );
-                        });
-                      })()}
-                      {(() => {
-                        const latest = quotaLatest.data?.upstreams[0];
-                        if (!latest) return null;
-                        const windows = ['5h', '7d', '7d_sonnet'];
-                        const opus = latest.windows.find(
-                          (w) => w.window === '7d_opus',
-                        );
-                        if (opus && opus.state !== 'missing')
-                          windows.push('7d_opus');
-                        const overage = latest.windows.find(
-                          (w) => w.window === 'overage',
-                        );
-                        if (
-                          overage &&
-                          (overage.extra_usage_enabled ||
-                            overage.extra_usage_monthly_limit != null)
-                        )
-                          windows.push('overage');
-                        return windows.map((windowName) => (
-                          <Area
-                            key={windowName}
-                            type="monotone"
-                            dataKey={windowName}
-                            stroke={getWindowColor(windowName).stroke}
-                            strokeWidth={1.4}
-                            fill={`url(#quota-detail-grad-${windowName})`}
-                            fillOpacity={1}
-                            isAnimationActive={false}
-                            connectNulls={false}
-                          />
-                        ));
-                      })()}
-                    </AreaChart>
-                  </ResponsiveContainer>
-                )}
-              </div>
-            </CardBody>
-          </Card>
-
-          {(() => {
-            const latest = quotaLatest.data?.upstreams[0];
-            if (!latest) {
-              return (
-                <Card>
-                  <CardBody className="p-6">
-                    <EmptyState
-                      title={`No subscription quota data for ${upstream.name}`}
-                    />
-                  </CardBody>
-                </Card>
-              );
-            }
-            const analysis = quotaAnalysis.data?.upstreams[0];
-            const a5h = analysis?.windows.find((w) => w.window === '5h');
-            const caveats = Array.from(
-              new Set(analysis?.windows.flatMap((w) => w.caveats) ?? []),
-            ).filter(
-              (c) =>
-                c.toLowerCase().trim() !==
-                'capacity is inferred from proxy tokens and quota utilization; anthropic quota units are not directly exposed',
-            );
-            return (
-              <div className="space-y-4">
-                <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]">
-                  {(['5h', '7d', '7d_sonnet', '7d_opus', 'overage'] as const)
-                    .map((windowName) =>
-                      latest.windows.find((snap) => snap.window === windowName),
-                    )
-                    .filter((snap): snap is NonNullable<typeof snap> => {
-                      if (!snap || snap.state === 'missing') return false;
-                      if (
-                        snap.window === 'overage' &&
-                        !snap.extra_usage_enabled &&
-                        snap.extra_usage_monthly_limit == null
-                      ) {
-                        return false;
-                      }
-                      return true;
-                    })
-                    .sort(
-                      (a, b) =>
-                        SNAPSHOT_ORDER.indexOf(a.window) -
-                        SNAPSHOT_ORDER.indexOf(b.window),
-                    )
-                    .map((snap) => {
-                      const color = getWindowColor(snap.window);
-                      const isOverage =
-                        snap.window === 'overage' &&
-                        (snap.extra_usage_enabled ||
-                          snap.extra_usage_monthly_limit != null);
-                      const windowAnalysis = analysis?.windows.find(
-                        (w) => w.window === snap.window,
-                      );
-                      const actualBurn =
-                        windowAnalysis?.actual_account_burn
-                          .utilization_per_second;
-                      const projBurn =
-                        windowAnalysis?.proxy_projected_burn
-                          .utilization_per_hour;
-                      const eta =
-                        windowAnalysis?.actual_account_burn.eta_to_limit_secs;
-                      const waitingForGrowth =
-                        !isOverage &&
-                        (!windowAnalysis ||
-                          windowAnalysis.actual_account_burn.reason ===
-                            'insufficient_growth_intervals');
-                      return (
-                        <Card key={snap.window}>
-                          <CardBody className="p-3 flex flex-col gap-1.5">
-                            <div className="flex items-center justify-between">
-                              <span className="text-[11px] uppercase tracking-wider text-text-faint">
-                                {windowLabel(snap.window)}
-                              </span>
-                            </div>
-                            <SnapshotStatusComposite snap={snap} />
-                            {isOverage ? (
-                              snap.extra_usage_monthly_limit != null &&
-                              snap.extra_usage_used_credits != null ? (
-                                <>
-                                  <div className="text-xl font-medium tabular-nums">
-                                    {(
-                                      (snap.extra_usage_used_credits /
-                                        snap.extra_usage_monthly_limit) *
-                                      100
-                                    ).toFixed(1)}
-                                    %
-                                  </div>
-                                  <div className="w-full h-1 bg-progress-track rounded-full overflow-hidden mt-1">
-                                    <div
-                                      className="h-full rounded-full"
-                                      style={{
-                                        width: `${Math.min(100, Math.max(0, (snap.extra_usage_used_credits / snap.extra_usage_monthly_limit) * 100))}%`,
-                                        backgroundColor: color.fill,
-                                      }}
-                                    />
-                                  </div>
-                                  <div className="text-sm font-medium tabular-nums mt-1">
-                                    $
-                                    {(
-                                      snap.extra_usage_used_credits / 100
-                                    ).toFixed(2)}{' '}
-                                    / $
-                                    {(
-                                      snap.extra_usage_monthly_limit / 100
-                                    ).toLocaleString('en-US', {
-                                      minimumFractionDigits: 2,
-                                      maximumFractionDigits: 2,
-                                    })}{' '}
-                                    USD
-                                  </div>
-                                </>
-                              ) : (
-                                <span className="text-sm text-text-faint">
-                                  Enabled — no limit set
-                                </span>
-                              )
-                            ) : (
-                              <div className="text-xl font-medium tabular-nums">
-                                {snap.utilization == null
-                                  ? (snap.status ?? '—')
-                                  : `${(snap.utilization * 100).toFixed(1)}%`}
-                              </div>
-                            )}
-                            {!isOverage && snap.utilization != null && (
-                              <div className="w-full h-1 bg-progress-track rounded-full overflow-hidden mt-1">
-                                <div
-                                  className="h-full rounded-full"
-                                  style={{
-                                    width: `${Math.min(100, Math.max(0, snap.utilization * 100))}%`,
-                                    backgroundColor: color.fill,
-                                  }}
-                                />
-                              </div>
-                            )}
-                            {snap.resets_at_unix_secs ? (
-                              <div className="text-[10px] text-text-faint font-mono mt-1">
-                                resets{' '}
-                                <RelativeTime
-                                  ts={snap.resets_at_unix_secs * 1000}
-                                />
-                              </div>
-                            ) : null}
-                            {!isOverage && (
-                              <div className="border-t border-subtle pt-1.5 mt-1.5 flex flex-col gap-1">
-                                <div className="flex items-baseline justify-between gap-2">
-                                  <span className="text-[10px] uppercase tracking-wider text-text-faint">
-                                    ETA to limit
-                                  </span>
-                                  <span className="font-mono tabular-nums text-sm">
-                                    {formatEta(eta)}
-                                  </span>
-                                </div>
-                                <div className="flex items-center justify-between gap-2 text-[10px] font-mono text-text-faint">
-                                  <span>burn</span>
-                                  <span className="tabular-nums">
-                                    {actualBurn == null
-                                      ? '—'
-                                      : `${(actualBurn * 60 * 100).toFixed(2)}%/min`}
-                                    {' · proj '}
-                                    {projBurn == null
-                                      ? '—'
-                                      : `${((projBurn / 60) * 100).toFixed(2)}%/min`}
-                                  </span>
-                                </div>
-                                {waitingForGrowth && (
-                                  <div className="text-[10px] text-amber-400">
-                                    Waiting for utilization to rise — burn
-                                    appears once growth is observed.
-                                  </div>
-                                )}
-                              </div>
-                            )}
-                          </CardBody>
-                        </Card>
-                      );
-                    })}
+                          return windows.map((windowName) => (
+                            <Area
+                              key={windowName}
+                              type="monotone"
+                              dataKey={windowName}
+                              stroke={getWindowColor(windowName).stroke}
+                              strokeWidth={1.4}
+                              fill={`url(#quota-detail-grad-${windowName})`}
+                              fillOpacity={1}
+                              isAnimationActive={false}
+                              connectNulls={false}
+                            />
+                          ));
+                        })()}
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  )}
                 </div>
-                {a5h?.deficit && (
+              </CardBody>
+            </Card>
+
+            {(() => {
+              const latest = quotaLatest.data?.upstreams[0];
+              if (!latest) {
+                return (
                   <Card>
-                    <CardHeader title="Quota deficit" />
-                    <CardBody className="p-3">
-                      <div className="flex flex-col gap-2">
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm text-text-faint">
-                            Shortfall
-                          </span>
-                          <span className="font-mono text-amber-400">
-                            {Math.round(
-                              a5h.deficit.shortfall_tokens,
-                            ).toLocaleString()}{' '}
-                            tokens
-                          </span>
-                        </div>
-                        <div className="flex items-center justify-between">
-                          <span className="text-sm text-text-faint">
-                            Recommended Multiplier
-                          </span>
-                          <span className="font-mono text-amber-400">
-                            {a5h.deficit.recommended_multiplier}x
-                          </span>
-                        </div>
-                        <div className="text-[10px] text-text-faint mt-1">
-                          Confidence:{' '}
-                          <span className="text-text">
-                            {a5h.deficit.confidence}
-                          </span>
-                        </div>
-                      </div>
+                    <CardBody className="p-6">
+                      <EmptyState
+                        title={`No subscription quota data for ${upstream.name}`}
+                      />
                     </CardBody>
                   </Card>
-                )}
-                {caveats.length > 0 && (
-                  <div className="bg-amber-500/10 border border-amber-500/20 rounded-sm p-3 text-xs text-amber-400 flex flex-col gap-1">
-                    <div className="font-medium flex items-center gap-1.5">
-                      <Info className="w-3.5 h-3.5" />
-                      Analysis Caveats
-                    </div>
-                    <ul className="list-disc list-inside opacity-90 ml-1">
-                      {caveats.map((c, i) => (
-                        <li key={i}>{c}</li>
-                      ))}
-                    </ul>
+                );
+              }
+              const analysis = quotaAnalysis.data?.upstreams[0];
+              const a5h = analysis?.windows.find((w) => w.window === '5h');
+              const caveats = Array.from(
+                new Set(analysis?.windows.flatMap((w) => w.caveats) ?? []),
+              ).filter(
+                (c) =>
+                  c.toLowerCase().trim() !==
+                  'capacity is inferred from proxy tokens and quota utilization; anthropic quota units are not directly exposed',
+              );
+              return (
+                <div className="space-y-4">
+                  <div className="grid gap-3 [grid-template-columns:repeat(auto-fit,minmax(240px,1fr))]">
+                    {(['5h', '7d', '7d_sonnet', '7d_opus', 'overage'] as const)
+                      .map((windowName) =>
+                        latest.windows.find(
+                          (snap) => snap.window === windowName,
+                        ),
+                      )
+                      .filter((snap): snap is NonNullable<typeof snap> => {
+                        if (!snap || snap.state === 'missing') return false;
+                        if (
+                          snap.window === 'overage' &&
+                          !snap.extra_usage_enabled &&
+                          snap.extra_usage_monthly_limit == null
+                        ) {
+                          return false;
+                        }
+                        return true;
+                      })
+                      .sort(
+                        (a, b) =>
+                          SNAPSHOT_ORDER.indexOf(a.window) -
+                          SNAPSHOT_ORDER.indexOf(b.window),
+                      )
+                      .map((snap) => {
+                        const color = getWindowColor(snap.window);
+                        const isOverage =
+                          snap.window === 'overage' &&
+                          (snap.extra_usage_enabled ||
+                            snap.extra_usage_monthly_limit != null);
+                        const windowAnalysis = analysis?.windows.find(
+                          (w) => w.window === snap.window,
+                        );
+                        const actualBurn =
+                          windowAnalysis?.actual_account_burn
+                            .utilization_per_second;
+                        const projBurn =
+                          windowAnalysis?.proxy_projected_burn
+                            .utilization_per_hour;
+                        const eta =
+                          windowAnalysis?.actual_account_burn.eta_to_limit_secs;
+                        const waitingForGrowth =
+                          !isOverage &&
+                          (!windowAnalysis ||
+                            windowAnalysis.actual_account_burn.reason ===
+                              'insufficient_growth_intervals');
+                        return (
+                          <Card key={snap.window}>
+                            <CardBody className="p-3 flex flex-col gap-1.5">
+                              <div className="flex items-center justify-between">
+                                <span className="text-[11px] uppercase tracking-wider text-text-faint">
+                                  {windowLabel(snap.window)}
+                                </span>
+                              </div>
+                              <SnapshotStatusComposite snap={snap} />
+                              {isOverage ? (
+                                snap.extra_usage_monthly_limit != null &&
+                                snap.extra_usage_used_credits != null ? (
+                                  <>
+                                    <div className="text-xl font-medium tabular-nums">
+                                      {(
+                                        (snap.extra_usage_used_credits /
+                                          snap.extra_usage_monthly_limit) *
+                                        100
+                                      ).toFixed(1)}
+                                      %
+                                    </div>
+                                    <div className="w-full h-1 bg-progress-track rounded-full overflow-hidden mt-1">
+                                      <div
+                                        className="h-full rounded-full"
+                                        style={{
+                                          width: `${Math.min(100, Math.max(0, (snap.extra_usage_used_credits / snap.extra_usage_monthly_limit) * 100))}%`,
+                                          backgroundColor: color.fill,
+                                        }}
+                                      />
+                                    </div>
+                                    <div className="text-sm font-medium tabular-nums mt-1">
+                                      $
+                                      {(
+                                        snap.extra_usage_used_credits / 100
+                                      ).toFixed(2)}{' '}
+                                      / $
+                                      {(
+                                        snap.extra_usage_monthly_limit / 100
+                                      ).toLocaleString('en-US', {
+                                        minimumFractionDigits: 2,
+                                        maximumFractionDigits: 2,
+                                      })}{' '}
+                                      USD
+                                    </div>
+                                  </>
+                                ) : (
+                                  <span className="text-sm text-text-faint">
+                                    Enabled — no limit set
+                                  </span>
+                                )
+                              ) : (
+                                <div className="text-xl font-medium tabular-nums">
+                                  {snap.utilization == null
+                                    ? (snap.status ?? '—')
+                                    : `${(snap.utilization * 100).toFixed(1)}%`}
+                                </div>
+                              )}
+                              {!isOverage && snap.utilization != null && (
+                                <div className="w-full h-1 bg-progress-track rounded-full overflow-hidden mt-1">
+                                  <div
+                                    className="h-full rounded-full"
+                                    style={{
+                                      width: `${Math.min(100, Math.max(0, snap.utilization * 100))}%`,
+                                      backgroundColor: color.fill,
+                                    }}
+                                  />
+                                </div>
+                              )}
+                              {snap.resets_at_unix_secs ? (
+                                <div className="text-[10px] text-text-faint font-mono mt-1">
+                                  resets{' '}
+                                  <RelativeTime
+                                    ts={snap.resets_at_unix_secs * 1000}
+                                  />
+                                </div>
+                              ) : null}
+                              {!isOverage && (
+                                <div className="border-t border-subtle pt-1.5 mt-1.5 flex flex-col gap-1">
+                                  <div className="flex items-baseline justify-between gap-2">
+                                    <span className="text-[10px] uppercase tracking-wider text-text-faint">
+                                      ETA to limit
+                                    </span>
+                                    <span className="font-mono tabular-nums text-sm">
+                                      {formatEta(eta)}
+                                    </span>
+                                  </div>
+                                  <div className="flex items-center justify-between gap-2 text-[10px] font-mono text-text-faint">
+                                    <span>burn</span>
+                                    <span className="tabular-nums">
+                                      {actualBurn == null
+                                        ? '—'
+                                        : `${(actualBurn * 60 * 100).toFixed(2)}%/min`}
+                                      {' · proj '}
+                                      {projBurn == null
+                                        ? '—'
+                                        : `${((projBurn / 60) * 100).toFixed(2)}%/min`}
+                                    </span>
+                                  </div>
+                                  {waitingForGrowth && (
+                                    <div className="text-[10px] text-amber-400">
+                                      Waiting for utilization to rise — burn
+                                      appears once growth is observed.
+                                    </div>
+                                  )}
+                                </div>
+                              )}
+                            </CardBody>
+                          </Card>
+                        );
+                      })}
                   </div>
-                )}
-              </div>
-            );
-          })()}
-        </Section>
+                  {a5h?.deficit && (
+                    <Card>
+                      <CardHeader title="Quota deficit" />
+                      <CardBody className="p-3">
+                        <div className="flex flex-col gap-2">
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm text-text-faint">
+                              Shortfall
+                            </span>
+                            <span className="font-mono text-amber-400">
+                              {Math.round(
+                                a5h.deficit.shortfall_tokens,
+                              ).toLocaleString()}{' '}
+                              tokens
+                            </span>
+                          </div>
+                          <div className="flex items-center justify-between">
+                            <span className="text-sm text-text-faint">
+                              Recommended Multiplier
+                            </span>
+                            <span className="font-mono text-amber-400">
+                              {a5h.deficit.recommended_multiplier}x
+                            </span>
+                          </div>
+                          <div className="text-[10px] text-text-faint mt-1">
+                            Confidence:{' '}
+                            <span className="text-text">
+                              {a5h.deficit.confidence}
+                            </span>
+                          </div>
+                        </div>
+                      </CardBody>
+                    </Card>
+                  )}
+                  {caveats.length > 0 && (
+                    <div className="bg-amber-500/10 border border-amber-500/20 rounded-sm p-3 text-xs text-amber-400 flex flex-col gap-1">
+                      <div className="font-medium flex items-center gap-1.5">
+                        <Info className="w-3.5 h-3.5" />
+                        Analysis Caveats
+                      </div>
+                      <ul className="list-disc list-inside opacity-90 ml-1">
+                        {caveats.map((c, i) => (
+                          <li key={i}>{c}</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </Section>
         )}
 
         {!isOauth && (
-        <Section title="API Usage">
-          <ApiUsageCard
-            data={apiUsageQ.data}
-            isLoading={apiUsageQ.isLoading}
-            range={apiUsageRange}
-            onRangeChange={setApiUsageRange}
-            metric={apiUsageMetric}
-            onMetricChange={setApiUsageMetric}
-          />
-        </Section>
+          <Section title="API Usage">
+            <ApiUsageCard
+              data={apiUsageQ.data}
+              isLoading={apiUsageQ.isLoading}
+              range={apiUsageRange}
+              onRangeChange={setApiUsageRange}
+              metric={apiUsageMetric}
+              onMetricChange={setApiUsageMetric}
+            />
+          </Section>
         )}
 
         {!isOauth && <SettingsCard upstream={upstream} />}
