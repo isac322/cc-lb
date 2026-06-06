@@ -104,8 +104,7 @@ pub fn route_response() -> String {
     json!({
         "_v": 1,
         "upstream": {
-            "kind": "custom_anthropic_spec",
-            "base_url": "http://upstream.test/"
+            "kind": "anthropic_direct"
         },
         "dialect": {"kind": "self"}
     })
@@ -116,8 +115,7 @@ pub fn route_response_with_upstream_id(upstream_id: &str) -> String {
     json!({
         "_v": 1,
         "upstream": {
-            "kind": "custom_anthropic_spec",
-            "base_url": "http://upstream.test/"
+            "kind": "anthropic_direct"
         },
         "dialect": {"kind": "self"},
         "upstream_id": upstream_id
@@ -126,11 +124,11 @@ pub fn route_response_with_upstream_id(upstream_id: &str) -> String {
 }
 
 pub fn route_response_with_base_url(base_url: &str) -> String {
+    let _ = base_url;
     json!({
         "_v": 1,
         "upstream": {
-            "kind": "custom_anthropic_spec",
-            "base_url": base_url
+            "kind": "anthropic_direct"
         },
         "dialect": {"kind": "self"}
     })

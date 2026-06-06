@@ -30,7 +30,7 @@ pub use oauth::{api_key_storage_key, oauth_key};
 pub use plugin_registry::{RedbPluginBlobRepo, RedbPluginRegistryRepo};
 pub use price_catalog::PriceSnapshot;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 pub const OAUTH_CREDENTIALS_V1: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("OAUTH_CREDENTIALS_V1");

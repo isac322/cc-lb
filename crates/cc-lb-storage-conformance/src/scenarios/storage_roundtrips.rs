@@ -382,7 +382,7 @@ fn request_events() -> Vec<RequestEvent> {
             request_id: "roundtrip-event-002".to_owned(),
             principal_id: Some("roundtrip-principal-b".to_owned()),
             principal_kind: Some("oauth".to_owned()),
-            upstream: Some(RequestEventUpstream::CustomAnthropicSpec),
+            upstream: Some(RequestEventUpstream::AnthropicDirect),
             model: Some("claude-opus-4-1".to_owned()),
             status: 429,
             duration_ms: 144,

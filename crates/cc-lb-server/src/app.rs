@@ -491,10 +491,9 @@ pub async fn seed_app_testing_storage(
             storage,
             UpstreamCreate {
                 name: "test-upstream".to_owned(),
-                kind: UpstreamKind::Custom,
+                kind: UpstreamKind::AnthropicApiKey,
                 base_url: upstream_base_url,
-                api_key_ciphertext: None,
-                shape_plugin: None,
+                api_key_ciphertext: Some(Vec::new()),
             },
         )
         .await

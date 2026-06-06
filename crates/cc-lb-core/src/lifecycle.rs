@@ -97,9 +97,7 @@ impl RequestKind {
         match self {
             Self::AnthropicMessages => matches!(
                 kind,
-                StorageUpstreamKind::AnthropicApiKey
-                    | StorageUpstreamKind::AnthropicOauth
-                    | StorageUpstreamKind::Custom
+                StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth
             ),
         }
     }
@@ -2532,15 +2530,12 @@ fn limit_kind_name(kind: LimitKind) -> &'static str {
 fn audit_upstream_name(upstream: &Upstream) -> &'static str {
     match upstream {
         Upstream::AnthropicDirect => "anthropic_direct",
-        Upstream::CustomAnthropicSpec { .. } => "custom_anthropic_spec",
     }
 }
 
 fn pricing_upstream_kind(upstream: &Upstream) -> Option<cc_lb_pricing::UpstreamKind> {
     match upstream {
-        Upstream::AnthropicDirect | Upstream::CustomAnthropicSpec { .. } => {
-            Some(cc_lb_pricing::UpstreamKind::AnthropicKey)
-        }
+        Upstream::AnthropicDirect => Some(cc_lb_pricing::UpstreamKind::AnthropicKey),
     }
 }
 
@@ -2549,12 +2544,6 @@ fn upstream_for_record(record: &UpstreamRecord) -> Result<Upstream, String> {
         StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth => {
             Ok(Upstream::AnthropicDirect)
         }
-        StorageUpstreamKind::Custom => Ok(Upstream::CustomAnthropicSpec {
-            base_url: record
-                .base_url
-                .clone()
-                .ok_or_else(|| "custom upstream missing base_url".to_owned())?,
-        }),
     }
 }
 
@@ -2562,7 +2551,6 @@ fn upstream_kind_for_candidate(kind: StorageUpstreamKind) -> CandidateUpstreamKi
     match kind {
         StorageUpstreamKind::AnthropicApiKey => CandidateUpstreamKind::AnthropicApiKey,
         StorageUpstreamKind::AnthropicOauth => CandidateUpstreamKind::AnthropicOauth,
-        StorageUpstreamKind::Custom => CandidateUpstreamKind::Custom,
     }
 }
 

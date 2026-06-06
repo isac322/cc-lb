@@ -46,11 +46,6 @@ pub enum PrincipalKind {
 pub enum Upstream {
     /// Direct Anthropic API endpoint.
     AnthropicDirect,
-    /// Custom gateway that already speaks the Anthropic Messages wire shape.
-    CustomAnthropicSpec {
-        /// Base URL for the custom Anthropic-compatible gateway.
-        base_url: Url,
-    },
 }
 
 /// Upstream record kind exposed to router plugins for candidate selection.
@@ -61,8 +56,6 @@ pub enum UpstreamKind {
     AnthropicApiKey,
     /// Anthropic OAuth upstream.
     AnthropicOauth,
-    /// Custom Anthropic-compatible upstream.
-    Custom,
 }
 
 impl UpstreamKind {
@@ -71,7 +64,6 @@ impl UpstreamKind {
         match self {
             Self::AnthropicApiKey => "anthropic_api_key",
             Self::AnthropicOauth => "anthropic_oauth",
-            Self::Custom => "custom",
         }
     }
 }
@@ -554,12 +546,7 @@ mod tests {
 
     #[test]
     fn upstream_and_manifest_serde_round_trip() {
-        let upstreams = vec![
-            Upstream::AnthropicDirect,
-            Upstream::CustomAnthropicSpec {
-                base_url: "https://gateway.example.test".parse().unwrap(),
-            },
-        ];
+        let upstreams = vec![Upstream::AnthropicDirect];
 
         for upstream in upstreams {
             let json = serde_json::to_string(&upstream).unwrap();

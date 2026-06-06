@@ -3,30 +3,19 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
-use bytes::Bytes;
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DEFAULT_REDB_PATH, StorageConfig, TlsConfig};
 use cc_lb_core::LifecycleConfig;
-use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     PluginChainEntry, PluginSlot, PrincipalRecord, StorageError as ApiStorageError, UpstreamRecord,
 };
-use http::{Request, StatusCode};
-use http_body_util::Empty;
-use hyper_rustls::HttpsConnectorBuilder;
-use hyper_util::client::legacy::Client;
-use hyper_util::client::legacy::connect::HttpConnector;
-use hyper_util::rt::TokioExecutor;
 use thiserror::Error;
 use tokio::net::TcpListener;
 
 use crate::dynamic_view_builder::Stores;
 use crate::storage_factory;
 use crate::tls;
-
-type ProbeClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Empty<Bytes>>;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct PreflightReport {
@@ -74,12 +63,6 @@ pub async fn run_preflight(
 
     let upstreams = list_upstreams(stores).await?;
     report.upstream_count = upstreams.len();
-    let client = build_probe_client();
-    for upstream in &upstreams {
-        if upstream.kind == UpstreamKind::Custom {
-            probe_custom_upstream(&client, upstream, &mut report).await;
-        }
-    }
 
     let principals = list_principals(stores).await?;
     report.principal_count = principals.len();
@@ -214,62 +197,6 @@ async fn list_plugin_chain_entries(
     Ok(entries)
 }
 
-async fn probe_custom_upstream(
-    client: &ProbeClient,
-    upstream: &UpstreamRecord,
-    report: &mut PreflightReport,
-) {
-    let Some(base_url) = upstream.base_url.as_ref() else {
-        push_upstream_warning(
-            report,
-            format!(
-                "upstream {}: custom upstream missing base_url",
-                upstream.name
-            ),
-        );
-        return;
-    };
-
-    match probe_head(client, base_url).await {
-        Ok(status) if status.is_success() => {}
-        Ok(status) => push_upstream_warning(
-            report,
-            format!(
-                "upstream {}: upstream probe failed for {}: status {}",
-                upstream.name, base_url, status
-            ),
-        ),
-        Err(error) => push_upstream_warning(
-            report,
-            format!(
-                "upstream {}: upstream probe failed for {}: {error}",
-                upstream.name, base_url
-            ),
-        ),
-    }
-}
-
-fn build_probe_client() -> ProbeClient {
-    let connector = HttpsConnectorBuilder::new()
-        .with_webpki_roots()
-        .https_or_http()
-        .enable_http1()
-        .enable_http2()
-        .build();
-    Client::builder(TokioExecutor::new()).build(connector)
-}
-
-async fn probe_head(client: &ProbeClient, base_url: &url::Url) -> Result<StatusCode, String> {
-    let request = Request::head(base_url.as_str())
-        .body(Empty::<Bytes>::new())
-        .map_err(|error| error.to_string())?;
-    let response = tokio::time::timeout(Duration::from_secs(5), client.request(request))
-        .await
-        .map_err(|_| "request timed out".to_owned())?
-        .map_err(|error| error.to_string())?;
-    Ok(response.status())
-}
-
 async fn check_plugin_chain_entry(
     stores: &Stores,
     data_dir: &Path,
@@ -334,11 +261,6 @@ async fn check_plugin_chain_entry(
     }
 
     Ok(())
-}
-
-fn push_upstream_warning(report: &mut PreflightReport, warning: String) {
-    report.upstream_warnings += 1;
-    report.warnings.push(warning);
 }
 
 fn push_plugin_warning(report: &mut PreflightReport, warning: String) {

@@ -29,7 +29,7 @@ async fn lifecycle_does_not_invoke_normalizer_for_success_body() {
     let calls = Arc::new(AtomicUsize::new(0));
     let mut normalizer = ErrorNormalizer::new();
     normalizer.register_dialect(
-        UpstreamKind::CustomAnthropicSpec,
+        UpstreamKind::AnthropicDirect,
         Arc::new(CountingDialect {
             calls: Arc::clone(&calls),
         }),

@@ -150,10 +150,9 @@ pub async fn apply_bootstrap(
 
             let create_input = UpstreamCreate {
                 name: upstream.name,
-                kind: parse_upstream_kind(&upstream.kind),
+                kind: parse_upstream_kind(&upstream.kind)?,
                 base_url: upstream.base_url,
                 api_key_ciphertext: None,
-                shape_plugin: None,
             };
 
             upstream_store
@@ -410,11 +409,15 @@ fn unix_now_secs() -> u64 {
         .as_secs()
 }
 
-fn parse_upstream_kind(kind_str: &str) -> cc_lb_storage_api::upstream::UpstreamKind {
+fn parse_upstream_kind(
+    kind_str: &str,
+) -> BootstrapResult<cc_lb_storage_api::upstream::UpstreamKind> {
     match kind_str {
-        "anthropic_api_key" => cc_lb_storage_api::upstream::UpstreamKind::AnthropicApiKey,
-        "anthropic_oauth" => cc_lb_storage_api::upstream::UpstreamKind::AnthropicOauth,
-        _ => cc_lb_storage_api::upstream::UpstreamKind::Custom,
+        "anthropic_api_key" => Ok(cc_lb_storage_api::upstream::UpstreamKind::AnthropicApiKey),
+        "anthropic_oauth" => Ok(cc_lb_storage_api::upstream::UpstreamKind::AnthropicOauth),
+        other => Err(BootstrapError::InvalidSpec(format!(
+            "unsupported upstream kind {other}"
+        ))),
     }
 }
 

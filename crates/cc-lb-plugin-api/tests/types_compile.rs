@@ -9,14 +9,9 @@ use http::{HeaderMap, Method, StatusCode};
 
 #[test]
 fn upstream_variants_and_principal_serde_compile() {
-    let variants = [
-        Upstream::AnthropicDirect,
-        Upstream::CustomAnthropicSpec {
-            base_url: "https://gateway.example.test".parse().unwrap(),
-        },
-    ];
+    let variants = [Upstream::AnthropicDirect];
 
-    assert_eq!(variants.len(), 2);
+    assert_eq!(variants.len(), 1);
 
     let principal = Principal {
         id: "alice".to_owned(),

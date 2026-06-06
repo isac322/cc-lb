@@ -220,7 +220,6 @@ impl From<StorageError> for EventsError {
 fn parse_upstream(value: &str) -> Result<RequestEventUpstream, EventsError> {
     match value {
         "anthropic_direct" => Ok(RequestEventUpstream::AnthropicDirect),
-        "custom_anthropic_spec" => Ok(RequestEventUpstream::CustomAnthropicSpec),
         _ => Err(EventsError::InvalidUpstream),
     }
 }

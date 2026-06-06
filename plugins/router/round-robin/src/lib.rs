@@ -45,7 +45,6 @@ mod plugin {
     pub(super) fn shape_handler(request: ShapeRequest) -> Result<ShapeResponse, Infallible> {
         let base_url = match &request.upstream {
             UpstreamWire::AnthropicDirect => "https://api.anthropic.com".to_string(),
-            UpstreamWire::CustomAnthropicSpec { base_url } => base_url.clone(),
         };
         let query_part = request
             .request
@@ -74,7 +73,7 @@ mod plugin {
 mod tests {
     use super::*;
     use cc_lb_plugin_wire::v1::{
-        common::{CandidateWire, HeaderWire, Principal, RequestWire, UpstreamWire},
+        common::{CandidateWire, Principal, RequestWire, UpstreamWire},
         normalize_error::NormalizeErrorRequest,
         route::RouteRequest,
         shape::ShapeRequest,
@@ -179,37 +178,6 @@ mod tests {
             "https://api.anthropic.com/v1/messages?stream=true"
         );
         assert_eq!(response.method, "POST");
-    }
-
-    #[test]
-    fn shape_url_for_custom_uses_base_url() {
-        let response = plugin::shape_handler(ShapeRequest {
-            request: RequestWire {
-                request_id: "req-456".to_string(),
-                headers: vec![HeaderWire {
-                    name: "content-type".to_string(),
-                    value_base64: "YXBwbGljYXRpb24vanNvbg==".to_string(),
-                }],
-                method: "POST".to_string(),
-                path: "/v1/messages".to_string(),
-                query: None,
-                body_base64: "eyJtb2RlbCI6ImNsYXVkZS0zIn0=".to_string(),
-            },
-            upstream: UpstreamWire::CustomAnthropicSpec {
-                base_url: "https://gateway.example.com".to_string(),
-            },
-            principal: Principal {
-                id: "user-2".to_string(),
-                kind: "oauth_subject".to_string(),
-                claims: Default::default(),
-            },
-        })
-        .expect("shape ok");
-
-        assert_eq!(response.url, "https://gateway.example.com/v1/messages");
-        assert_eq!(response.method, "POST");
-        assert_eq!(response.headers.len(), 1);
-        assert_eq!(response.headers[0].name, "content-type");
     }
 
     #[test]

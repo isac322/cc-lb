@@ -660,10 +660,9 @@ async fn seed_runtime_state(
         storage.as_ref(),
         UpstreamCreate {
             name: "anthropic-wiremock".to_owned(),
-            kind: UpstreamKind::Custom,
+            kind: UpstreamKind::AnthropicApiKey,
             base_url: Some(Url::parse(&upstream_url)?),
-            api_key_ciphertext: None,
-            shape_plugin: None,
+            api_key_ciphertext: Some(Vec::new()),
         },
     )
     .await?;

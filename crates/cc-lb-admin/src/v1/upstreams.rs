@@ -16,13 +16,13 @@ use cc_lb_core::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
 };
 use cc_lb_core::{AuditEntry, AuditPayload, make_metadata_http_client, run_metadata_refresh};
-use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamShapePluginRef};
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    OrganizationMetadataRecord, PluginSlot, PrincipalStore, Storage, StorageError, UpstreamCreate,
-    UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord, UpstreamUpdate,
+    OrganizationMetadataRecord, Storage, StorageError, UpstreamCreate, UpstreamRecord,
+    UpstreamStore, UpstreamSubscriptionMetadataRecord, UpstreamUpdate,
 };
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
@@ -70,8 +70,6 @@ struct UpstreamCreateBody {
     api_key_env: Option<String>,
     #[serde(default)]
     api_key_value: Option<String>,
-    #[serde(default)]
-    shape_plugin: Option<UpstreamShapePluginRef>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,17 +82,6 @@ struct UpstreamUpdateBody {
     api_key_env: Option<String>,
     #[serde(default)]
     api_key_value: Option<String>,
-    #[serde(default, deserialize_with = "deserialize_optional_shape_plugin")]
-    shape_plugin: Option<Option<UpstreamShapePluginRef>>,
-}
-
-fn deserialize_optional_shape_plugin<'de, D>(
-    deserializer: D,
-) -> Result<Option<Option<UpstreamShapePluginRef>>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    Option::<UpstreamShapePluginRef>::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,15 +97,6 @@ struct UpstreamResponse {
     kind: UpstreamKind,
     enabled: bool,
     revision: u64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    shape_plugin: Option<UpstreamShapePluginRef>,
-}
-
-#[derive(Debug, Serialize)]
-struct ReferenceResponse {
-    kind: &'static str,
-    id: String,
-    name: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -134,7 +112,6 @@ enum UpstreamError {
     BadRequest { error: &'static str, detail: String },
     MissingIfMatch,
     StaleRevision { current_revision: u64 },
-    ReferencedBy { references: Vec<ReferenceResponse> },
     Conflict { detail: String },
     NotOauthUpstream,
     CredentialDecrypt,
@@ -170,11 +147,6 @@ impl IntoResponse for UpstreamError {
             Self::StaleRevision { current_revision } => (
                 StatusCode::CONFLICT,
                 Json(json!({ "error": "stale_revision", "current_revision": current_revision })),
-            )
-                .into_response(),
-            Self::ReferencedBy { references } => (
-                StatusCode::CONFLICT,
-                Json(json!({ "error": "referenced_by", "references": references })),
             )
                 .into_response(),
             Self::Conflict { detail } => (
@@ -238,7 +210,6 @@ async fn create_upstream(
             kind,
             base_url: body.base_url,
             api_key_ciphertext,
-            shape_plugin: body.shape_plugin,
         },
     )
     .await?;
@@ -392,7 +363,6 @@ async fn update_upstream(
             name: body.name,
             base_url: body.base_url,
             api_key_ciphertext,
-            shape_plugin: body.shape_plugin,
         },
     )
     .await
@@ -446,10 +416,6 @@ async fn delete_upstream(
         return Err(UpstreamError::StaleRevision {
             current_revision: current.revision,
         });
-    }
-    let references = upstream_references(&state, &current).await?;
-    if !references.is_empty() {
-        return Err(UpstreamError::ReferencedBy { references });
     }
 
     let storage = storage(&state)?;
@@ -630,7 +596,6 @@ fn upstream_response(record: &UpstreamRecord) -> UpstreamResponse {
         kind: record.kind,
         enabled: record.enabled,
         revision: record.revision,
-        shape_plugin: record.shape_plugin.clone(),
     }
 }
 
@@ -701,16 +666,6 @@ fn api_key_ciphertext_for_create(
                 return Err(UpstreamError::BadRequest {
                     error: "unexpected_api_key",
                     detail: "anthropic_oauth upstreams do not accept api_key_value or api_key_env"
-                        .to_owned(),
-                });
-            }
-            Ok(None)
-        }
-        UpstreamKind::Custom => {
-            if plaintext.is_some() || env_name.is_some() {
-                return Err(UpstreamError::BadRequest {
-                    error: "unexpected_api_key",
-                    detail: "custom upstreams do not accept api_key_value or api_key_env"
                         .to_owned(),
                 });
             }
@@ -829,63 +784,6 @@ async fn list_all_upstreams(state: &AdminState) -> Result<Vec<UpstreamRecord>, U
         }
     }
     Ok(all)
-}
-
-async fn upstream_references(
-    state: &AdminState,
-    upstream: &UpstreamRecord,
-) -> Result<Vec<ReferenceResponse>, UpstreamError> {
-    let storage = storage(state)?;
-    let mut references = Vec::new();
-    let mut offset = 0;
-    loop {
-        let principals = PrincipalStore::list(storage, offset, STORE_PAGE_LIMIT, false).await?;
-        if principals.is_empty() {
-            break;
-        }
-        for principal in &principals {
-            let router_entries = storage
-                .list_chain_for_principal(principal.id, PluginSlot::Router)
-                .await?;
-            let hook_entries = storage
-                .list_chain_for_principal(principal.id, PluginSlot::ObservabilityHook)
-                .await?;
-            let shape_entries = storage
-                .list_chain_for_principal(principal.id, PluginSlot::Shape)
-                .await?;
-            if router_entries
-                .iter()
-                .chain(hook_entries.iter())
-                .chain(shape_entries.iter())
-                .any(|entry| config_references_upstream(&entry.config, &upstream.name))
-            {
-                references.push(ReferenceResponse {
-                    kind: "principal",
-                    id: principal.id.to_string(),
-                    name: principal.name.clone(),
-                });
-            }
-        }
-        let page_len = principals.len();
-        offset += page_len;
-        if page_len < STORE_PAGE_LIMIT {
-            break;
-        }
-    }
-    Ok(references)
-}
-
-fn config_references_upstream(config: &Value, upstream_name: &str) -> bool {
-    match config {
-        Value::Object(object) => object.iter().any(|(key, value)| {
-            (key == "upstream_name" && value.as_str() == Some(upstream_name))
-                || config_references_upstream(value, upstream_name)
-        }),
-        Value::Array(values) => values
-            .iter()
-            .any(|value| config_references_upstream(value, upstream_name)),
-        _ => false,
-    }
 }
 
 fn enqueue_upstream_audit(state: &AdminState, upstream: &UpstreamRecord, payload: AuditPayload) {
