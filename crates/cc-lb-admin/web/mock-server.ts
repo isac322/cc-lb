@@ -207,6 +207,13 @@ const MODEL_LIST = [
   "claude-3-5-sonnet-20241022",
 ];
 
+const upstreamModels: Record<string, string[]> = {
+  "us-anthropic-primary": ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"],
+  "us-anthropic-secondary": ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"],
+  "us-oauth-provider": ["claude-3-5-sonnet-20241022", "claude-3-5-haiku-20241022"],
+  "us-custom-llamacpp": ["claude-3-5-sonnet-20241022", "gpt-4o"],
+};
+
 let killswitch = false;
 let configRevision = 12;
 let configDraft: { draft: unknown | null; revision: number; last_validated_revision: number | null; last_validation_error: string | null; saved_at_unix_secs: number | null } = {
@@ -276,7 +283,7 @@ function randomSeed(seed: number): () => number {
     return s / 0xffffffff;
   };
 }
-function buildBuckets(range: string, step: string, groups: string[], requestEnd = NOW()) {
+function buildBuckets(range: string, step: string, groups: string[], requestEnd = NOW(), groupBy: string = "none", upstreamId?: string) {
   const stepSecs = step === "minute" ? 60 : step === "hour" ? 3600 : 60;
   const rangeSecs: Record<string, number> = {
     "1h": 3600, "6h": 6 * 3600, "24h": 24 * 3600, "7d": 7 * 24 * 3600, "30d": 30 * 24 * 3600,
@@ -286,9 +293,12 @@ function buildBuckets(range: string, step: string, groups: string[], requestEnd 
   const windowEnd = requestEnd;
   const windowStart = windowEnd - points * stepSecs;
   const series = groups.map((g, gi) => {
-    const rng = randomSeed(0xabc + gi * 31 + g.length);
+    const seedBase = upstreamId ? upstreamId.charCodeAt(0) * 1000 + upstreamId.length : 0xabc;
+    const rng = randomSeed(seedBase + gi * 31 + g.length);
+    const upstreamName = groupBy === "upstream" ? upstreams.find((u) => u.name === g)?.name : undefined;
     return {
       key: g,
+      ...(upstreamName && { upstream_name: upstreamName }),
       buckets: Array.from({ length: points }).map((_, i) => {
         const ts = windowStart + i * stepSecs;
         const base = 60 + Math.floor(rng() * 220);
@@ -296,33 +306,55 @@ function buildBuckets(range: string, step: string, groups: string[], requestEnd 
         const errors = i % 17 === 0 ? Math.floor(requests * 0.05) : 0;
         const input = requests * (300 + Math.floor(rng() * 200));
         const output = requests * (700 + Math.floor(rng() * 600));
+        const cacheCreation = Math.floor(input * 0.1);
+        const cacheRead = Math.floor(input * 0.05);
+        const latencySum = requests * (40 + Math.floor(rng() * 200));
+        const proxySetupMs = Math.floor(requests * (2 + rng() * 8));
+        const shapeMs = Math.floor(requests * (1 + rng() * 4));
+        const signMs = Math.floor(requests * (1 + rng() * 3));
+        const upstreamTtfbMs = Math.floor(requests * (20 + rng() * 100));
+        const upstreamBodyMs = Math.floor(requests * (10 + rng() * 50));
         return {
           bucket_start_unix_secs: ts,
           request_count: requests,
           input_tokens: input,
           output_tokens: output,
+          cache_creation_input_tokens: cacheCreation,
+          cache_read_input_tokens: cacheRead,
           error_count: errors,
           virtual_cost_micros: input * 3 + output * 15,
-          latency_ms_sum: requests * (40 + Math.floor(rng() * 200)),
+          latency_ms_sum: latencySum,
           latency_count: requests,
+          latency_ms_min: requests > 0 ? 20 : undefined,
+          latency_ms_max: requests > 0 ? 300 : undefined,
+          proxy_setup_ms_sum: proxySetupMs,
+          proxy_setup_ms_count: requests,
+          shape_ms_sum: shapeMs,
+          shape_ms_count: requests,
+          sign_ms_sum: signMs,
+          sign_ms_count: requests,
+          upstream_ttfb_ms_sum: upstreamTtfbMs,
+          upstream_ttfb_ms_count: requests,
+          upstream_body_ms_sum: upstreamBodyMs,
+          upstream_body_ms_count: requests,
         };
       }),
     };
   });
-  return { range, step, group_by: groups.length > 1 ? "model" : "none", window_start_unix_secs: windowStart, window_end_unix_secs: windowEnd, series, observed: true };
+  return { range, step, group_by: groupBy, window_start_unix_secs: windowStart, window_end_unix_secs: windowEnd, series, observed: true };
 }
 
-// recent events generator (used by /admin/events/recent and SSE stream)
-function generateEvent(seq: number) {
+function generateEvent(seq: number, forceUpstreamId?: string) {
   const rng = randomSeed(seq);
+  const upstream = forceUpstreamId ? upstreams.find((u) => u.id === forceUpstreamId) : upstreams[Math.floor(rng() * upstreams.length)];
+  if (!upstream) return null;
   const principal = principals[Math.floor(rng() * principals.length)];
-  const upstream = upstreams[Math.floor(rng() * upstreams.length)];
-  const model = MODEL_LIST[Math.floor(rng() * MODEL_LIST.length)];
+  const upstreamModelList = upstreamModels[upstream.id] ?? MODEL_LIST;
+  const model = upstreamModelList[Math.floor(rng() * upstreamModelList.length)];
   const status = rng() < 0.92 ? 200 : rng() < 0.5 ? 429 : 500;
   const latency = Math.floor(40 + rng() * 800);
   const inputTokens = Math.floor(120 + rng() * 1800);
   const outputTokens = Math.floor(220 + rng() * 4200);
-  // Realistic micros: $3 per 1M input tokens, $15 per 1M output tokens. So per token = 3 µUSD / 15 µUSD.
   const costMicros = inputTokens * 3 + outputTokens * 15;
   return {
     ts: NOW() - Math.floor(rng() * 600),
@@ -347,7 +379,7 @@ function generateEvent(seq: number) {
     payload: {},
   };
 }
-const RECENT_EVENTS = Array.from({ length: 220 }).map((_, i) => generateEvent(i + 1)).sort((a, b) => b.ts - a.ts);
+const RECENT_EVENTS = Array.from({ length: 220 }).map((_, i) => generateEvent(i + 1)).filter((e): e is NonNullable<typeof e> => e !== null).sort((a, b) => b.ts - a.ts);
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Route handlers (path-based)
@@ -364,7 +396,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
   // ── Dashboard summary + usage
   if (path === "/admin/dashboard/summary" && m === "GET") {
     const range = url.searchParams.get("range") ?? "1h";
-    const sparkline = buildBuckets(range, range === "7d" ? "hour" : "minute", ["all"]);
+    const sparkline = buildBuckets(range, range === "7d" ? "hour" : "minute", ["all"], NOW(), "none");
     const totals = {
       request_count: 12_345,
       input_tokens: 4_222_111,
@@ -379,11 +411,16 @@ async function handle(req: Request, url: URL): Promise<Response> {
     const range = url.searchParams.get("range") ?? "1h";
     const step = url.searchParams.get("step") ?? (range === "7d" ? "hour" : "minute");
     const groupBy = url.searchParams.get("group_by") ?? "none";
+    const upstreamId = url.searchParams.get("upstream_id");
     let groups: string[] = ["all"];
-    if (groupBy === "model") groups = MODEL_LIST;
-    else if (groupBy === "principal") groups = principals.map((p) => p.name);
-    else if (groupBy === "upstream") groups = upstreams.map((u) => u.name);
-    return ok(buildBuckets(range, step, groups));
+    if (groupBy === "model") {
+      groups = upstreamId ? (upstreamModels[upstreamId] ?? []) : MODEL_LIST;
+    } else if (groupBy === "principal") {
+      groups = principals.map((p) => p.name);
+    } else if (groupBy === "upstream") {
+      groups = upstreamId ? [upstreams.find((u) => u.id === upstreamId)?.name ?? "unknown"].filter(Boolean) : upstreams.map((u) => u.name);
+    }
+    return ok(buildBuckets(range, step, groups, NOW(), groupBy, upstreamId || undefined));
   }
 
   // ── Events recent + SSE stream
@@ -393,11 +430,13 @@ async function handle(req: Request, url: URL): Promise<Response> {
       const pid = url.searchParams.get("principal_id");
       const kid = url.searchParams.get("key_id");
       const ups = url.searchParams.get("upstream");
+      const upsId = url.searchParams.get("upstream_id");
       const model = url.searchParams.get("model");
       const status = url.searchParams.get("status");
       if (pid && e.principal_id !== pid) return false;
       if (kid && e.key_id !== kid) return false;
       if (ups && e.upstream !== ups) return false;
+      if (upsId && e.upstream_id !== upsId) return false;
       if (model && e.model !== model) return false;
       if (status && String(e.status) !== status) return false;
       return true;

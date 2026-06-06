@@ -1,0 +1,256 @@
+import { useId, useMemo } from 'react';
+import {
+  AreaChart,
+  Area,
+  XAxis,
+  YAxis,
+  CartesianGrid,
+  Tooltip,
+  ResponsiveContainer,
+} from 'recharts';
+import { Card, CardHeader, CardBody, Skeleton, cx } from '../ui/primitives';
+import { getWindowColor } from '../../lib/colors';
+import { fmtUsd } from '../../lib/format';
+import type { DashboardUsageResponse } from '../../lib/api';
+
+type Props = {
+  data: DashboardUsageResponse | undefined;
+  isLoading: boolean;
+  range: '24h' | '7d';
+  onRangeChange: (r: '24h' | '7d') => void;
+  metric: 'tokens' | 'cost';
+  onMetricChange: (m: 'tokens' | 'cost') => void;
+};
+
+export function ApiUsageCard({
+  data,
+  isLoading,
+  range,
+  onRangeChange,
+  metric,
+  onMetricChange,
+}: Props) {
+  const chartId = useId();
+
+  const chartData = useMemo(() => {
+    if (!data || !data.series || data.series.length === 0) return [];
+
+    const bucketsByTs = new Map<number, Record<string, number>>();
+
+    for (const series of data.series) {
+      const model = series.key;
+      for (const bucket of series.buckets) {
+        const ts = bucket.bucket_start_unix_secs;
+        if (!bucketsByTs.has(ts)) {
+          bucketsByTs.set(ts, { ts });
+        }
+        const row = bucketsByTs.get(ts)!;
+        if (metric === 'tokens') {
+          row[model] = bucket.input_tokens + bucket.output_tokens;
+        } else {
+          row[model] = bucket.virtual_cost_micros / 1_000_000;
+        }
+      }
+    }
+
+    return Array.from(bucketsByTs.values()).sort((a, b) => a.ts - b.ts);
+  }, [data, metric]);
+
+  const models = useMemo(() => {
+    if (!data || !data.series) return [];
+    return data.series.map((s) => s.key);
+  }, [data]);
+
+  const formatXAxis = (ts: number) => {
+    const d = new Date(ts * 1000);
+    if (range === '24h') {
+      return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    }
+    return d.toLocaleDateString([], { month: 'short', day: 'numeric' });
+  };
+
+  const formatYAxis = (val: number) => {
+    if (metric === 'cost') {
+      return fmtUsd(val * 1_000_000);
+    }
+    if (val >= 1_000_000) return `${(val / 1_000_000).toFixed(1)}M`;
+    if (val >= 1_000) return `${(val / 1_000).toFixed(1)}K`;
+    return val.toString();
+  };
+
+  const formatTooltip = (val: number) => {
+    if (metric === 'cost') {
+      return fmtUsd(val * 1_000_000);
+    }
+    return val.toLocaleString();
+  };
+
+  const action = (
+    <div className="flex items-center gap-2">
+      <div className="flex items-center rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800">
+        <button
+          type="button"
+          onClick={() => onRangeChange('24h')}
+          className={cx(
+            'rounded px-2 py-1 text-xs font-medium transition-colors',
+            range === '24h'
+              ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100'
+              : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100'
+          )}
+        >
+          24h
+        </button>
+        <button
+          type="button"
+          onClick={() => onRangeChange('7d')}
+          className={cx(
+            'rounded px-2 py-1 text-xs font-medium transition-colors',
+            range === '7d'
+              ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100'
+              : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100'
+          )}
+        >
+          7d
+        </button>
+      </div>
+      <div className="flex items-center rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800">
+        <button
+          type="button"
+          onClick={() => onMetricChange('tokens')}
+          className={cx(
+            'rounded px-2 py-1 text-xs font-medium transition-colors',
+            metric === 'tokens'
+              ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100'
+              : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100'
+          )}
+        >
+          Tokens
+        </button>
+        <button
+          type="button"
+          onClick={() => onMetricChange('cost')}
+          className={cx(
+            'rounded px-2 py-1 text-xs font-medium transition-colors',
+            metric === 'cost'
+              ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100'
+              : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100'
+          )}
+        >
+          Cost
+        </button>
+      </div>
+    </div>
+  );
+
+  return (
+    <Card>
+      <CardHeader
+        title="API Usage"
+        subtitle="Token + cost breakdown by model"
+        action={action}
+      />
+      <CardBody>
+        {isLoading ? (
+          <Skeleton className="h-64 w-full" />
+        ) : chartData.length === 0 ? (
+          <div className="flex h-64 items-center justify-center text-sm text-zinc-500">
+            No usage in selected range
+          </div>
+        ) : (
+          <div className="flex flex-col gap-4">
+            <div className="h-64 w-full">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={chartData} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                  <defs>
+                    {models.map((model) => {
+                      const color = getWindowColor(model).fill;
+                      return (
+                        <linearGradient
+                          key={`${chartId}-${model}`}
+                          id={`${chartId}-${model}`}
+                          x1="0"
+                          y1="0"
+                          x2="0"
+                          y2="1"
+                        >
+                          <stop offset="5%" stopColor={color} stopOpacity={0.3} />
+                          <stop offset="95%" stopColor={color} stopOpacity={0} />
+                        </linearGradient>
+                      );
+                    })}
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="currentColor" className="text-zinc-200 dark:text-zinc-800" />
+                  <XAxis
+                    dataKey="ts"
+                    tickFormatter={formatXAxis}
+                    tick={{ fontSize: 12 }}
+                    tickLine={false}
+                    axisLine={false}
+                    minTickGap={30}
+                    stroke="currentColor"
+                    className="text-zinc-500"
+                  />
+                  <YAxis
+                    tickFormatter={formatYAxis}
+                    tick={{ fontSize: 12 }}
+                    tickLine={false}
+                    axisLine={false}
+                    width={60}
+                    stroke="currentColor"
+                    className="text-zinc-500"
+                  />
+                  <Tooltip
+                    labelFormatter={(label) => formatXAxis(label as number)}
+                    formatter={(value: any, name: any) => [formatTooltip(Number(value || 0)), String(name)]}
+                    contentStyle={{
+                      backgroundColor: 'var(--bg-popover, #fff)',
+                      borderColor: 'var(--border, #e4e4e7)',
+                      borderRadius: '0.5rem',
+                      fontSize: '0.875rem',
+                    }}
+                  />
+                  {models.map((model) => {
+                    const color = getWindowColor(model).fill;
+                    return (
+                      <Area
+                        key={model}
+                        type="monotone"
+                        dataKey={model}
+                        stackId="1"
+                        stroke={color}
+                        fill={`url(#${chartId}-${model})`}
+                        strokeWidth={2}
+                        isAnimationActive={false}
+                      />
+                    );
+                  })}
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+            <div className="flex flex-wrap items-center gap-4 text-sm">
+              {models.map((model) => {
+                const color = getWindowColor(model).fill;
+                const lastBucket = chartData[chartData.length - 1];
+                const val = lastBucket ? lastBucket[model] || 0 : 0;
+                return (
+                  <div key={model} className="flex items-center gap-2">
+                    <div
+                      className="h-3 w-3 rounded-full"
+                      style={{ backgroundColor: color }}
+                    />
+                    <span className="font-medium text-zinc-900 dark:text-zinc-100">
+                      {model}
+                    </span>
+                    <span className="text-zinc-500">
+                      {formatTooltip(val)}
+                    </span>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </CardBody>
+    </Card>
+  );
+}

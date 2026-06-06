@@ -5,7 +5,6 @@ import {
   ExternalLink,
   Info,
   KeyRound,
-  Pencil,
   Plus,
   RefreshCw,
   Trash2,
@@ -43,6 +42,9 @@ import {
   StatusBadge,
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
+import { ApiUsageCard } from '../components/upstreams/ApiUsageCard';
+import { InlineNameEditor } from '../components/upstreams/InlineNameEditor';
+import { SettingsCard } from '../components/upstreams/SettingsCard';
 import { ApiError, eventTime } from '../lib/api';
 import { getWindowColor, WINDOW_DURATION_SECS } from '../lib/colors';
 import {
@@ -62,10 +64,10 @@ import {
   useSubscriptionQuotaSeries,
   useToggleUpstream,
   useTriggerSubscriptionMetadataRefresh,
-  useUpdateUpstream,
   useUpstreamOAuthStatus,
   useUpstreamSubscriptionMetadata,
   useUpstreams,
+  useUsage,
 } from '../lib/queries';
 
 const upstreamSearchSchema = z.object({ selectedId: z.string().optional() });
@@ -89,6 +91,21 @@ function UpstreamsPage() {
     windows: '5h,7d,overage',
     source: 'merged',
   });
+
+  const listUsage = useUsage('7d', 'hour', 'upstream');
+  const usageByUpstreamId = useMemo(() => {
+    const m = new Map<string, { cost_usd: number; tokens: number }>();
+    for (const series of listUsage.data?.series ?? []) {
+      let cost = 0;
+      let tokens = 0;
+      for (const b of series.buckets) {
+        cost += (b.virtual_cost_micros ?? 0) / 1_000_000;
+        tokens += (b.input_tokens ?? 0) + (b.output_tokens ?? 0);
+      }
+      m.set(series.key, { cost_usd: cost, tokens });
+    }
+    return m;
+  }, [listUsage.data]);
 
   // /admin/v1/status reports per-upstream runtime state incl. OAuth binding.
   const status = useStatus();
@@ -211,75 +228,99 @@ function UpstreamsPage() {
                       <Badge tone="mono">{u.kind}</Badge>
                     </div>
                   </div>
-                  <div className="flex flex-col gap-1.5 w-full">
-                    {barWindows.map((windowName) => {
-                      const snap = latest?.windows.find(
-                        (w) => w.window === windowName,
-                      );
-                      const color = getWindowColor(windowName);
-                      const label = windowLabel(windowName);
-                      let utilization = snap?.utilization ?? null;
-                      if (
-                        windowName === 'overage' &&
-                        utilization == null &&
-                        snap?.extra_usage_monthly_limit != null &&
-                        snap.extra_usage_monthly_limit > 0 &&
-                        snap.extra_usage_used_credits != null
-                      ) {
-                        utilization =
-                          snap.extra_usage_used_credits /
-                          snap.extra_usage_monthly_limit;
-                      }
-                      const pct =
-                        utilization == null
-                          ? '—%'
-                          : `${(utilization * 100).toFixed(0)}%`;
-                      const stateDot =
-                        snap?.state === 'fresh'
-                          ? 'bg-green-400'
-                          : snap?.state === 'stale'
-                            ? 'bg-amber-400'
-                            : '';
-                      return (
-                        <div
-                          key={windowName}
-                          className="flex items-center gap-2 w-full text-[10px] font-mono"
-                        >
-                          <div className="w-8 shrink-0 text-text-faint truncate">
-                            {windowName === 'overage' ? 'Extra' : label}
-                          </div>
-                          <div className="flex-1 h-[5px] bg-progress-track rounded-full overflow-hidden">
-                            {utilization != null && (
-                              <div
-                                className="h-full rounded-full"
-                                style={{
-                                  width: `${Math.min(100, Math.max(0, utilization * 100))}%`,
-                                  backgroundColor: color.stroke,
-                                }}
-                              />
-                            )}
-                          </div>
-                          <div className="w-8 shrink-0 text-right tabular-nums">
-                            {pct}
-                          </div>
-                          <div className="hidden @[240px]:flex w-2 shrink-0 justify-end">
-                            {stateDot && (
-                              <Hint
-                                label={`${snap?.state} · ${snap?.source} · ${snap?.age_secs ?? 0}s`}
-                              >
+                  {u.kind === 'anthropic_oauth' ? (
+                    <div className="flex flex-col gap-1.5 w-full">
+                      {barWindows.map((windowName) => {
+                        const snap = latest?.windows.find(
+                          (w) => w.window === windowName,
+                        );
+                        const color = getWindowColor(windowName);
+                        const label = windowLabel(windowName);
+                        let utilization = snap?.utilization ?? null;
+                        if (
+                          windowName === 'overage' &&
+                          utilization == null &&
+                          snap?.extra_usage_monthly_limit != null &&
+                          snap.extra_usage_monthly_limit > 0 &&
+                          snap.extra_usage_used_credits != null
+                        ) {
+                          utilization =
+                            snap.extra_usage_used_credits /
+                            snap.extra_usage_monthly_limit;
+                        }
+                        const pct =
+                          utilization == null
+                            ? '—%'
+                            : `${(utilization * 100).toFixed(0)}%`;
+                        const stateDot =
+                          snap?.state === 'fresh'
+                            ? 'bg-green-400'
+                            : snap?.state === 'stale'
+                              ? 'bg-amber-400'
+                              : '';
+                        return (
+                          <div
+                            key={windowName}
+                            className="flex items-center gap-2 w-full text-[10px] font-mono"
+                          >
+                            <div className="w-8 shrink-0 text-text-faint truncate">
+                              {windowName === 'overage' ? 'Extra' : label}
+                            </div>
+                            <div className="flex-1 h-[5px] bg-progress-track rounded-full overflow-hidden">
+                              {utilization != null && (
                                 <div
-                                  className={cx(
-                                    'w-1.5 h-1.5 rounded-full',
-                                    stateDot,
-                                  )}
+                                  className="h-full rounded-full"
+                                  style={{
+                                    width: `${Math.min(100, Math.max(0, utilization * 100))}%`,
+                                    backgroundColor: color.stroke,
+                                  }}
                                 />
-                              </Hint>
-                            )}
+                              )}
+                            </div>
+                            <div className="w-8 shrink-0 text-right tabular-nums">
+                              {pct}
+                            </div>
+                            <div className="hidden @[240px]:flex w-2 shrink-0 justify-end">
+                              {stateDot && (
+                                <Hint
+                                  label={`${snap?.state} · ${snap?.source} · ${snap?.age_secs ?? 0}s`}
+                                >
+                                  <div
+                                    className={cx(
+                                      'w-1.5 h-1.5 rounded-full',
+                                      stateDot,
+                                    )}
+                                  />
+                                </Hint>
+                              )}
+                            </div>
                           </div>
-                        </div>
-                      );
-                    })}
-                  </div>
+                        );
+                      })}
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2 text-[10px] font-mono text-text-faint">
+                      <Hint label="Spend and total tokens over the last 7 days">
+                        {(() => {
+                          const usage = usageByUpstreamId.get(u.id);
+                          if (!usage) {
+                            return <span>—</span>;
+                          }
+                          const tokens =
+                            usage.tokens >= 1_000_000
+                              ? `${(usage.tokens / 1_000_000).toFixed(1)}M`
+                              : usage.tokens >= 1_000
+                                ? `${(usage.tokens / 1_000).toFixed(1)}K`
+                                : String(usage.tokens);
+                          return (
+                            <span className="text-text">
+                              ${usage.cost_usd.toFixed(2)} · {tokens} tok
+                            </span>
+                          );
+                        })()}
+                      </Hint>
+                    </div>
+                  )}
                 </button>
               );
             })
@@ -500,7 +541,6 @@ function DetailView({
 }) {
   const toggle = useToggleUpstream();
   const del = useDeleteUpstream();
-  const update = useUpdateUpstream();
   const oauthStart = useOAuthStart();
   const oauthComplete = useOAuthComplete();
   const subscriptionMetadataQ = useUpstreamSubscriptionMetadata(upstream.id);
@@ -515,20 +555,12 @@ function DetailView({
     () => statusQ.data?.upstreams.find((u) => u.id === upstream.id) ?? null,
     [statusQ.data, upstream.id],
   );
-  const [editOpen, setEditOpen] = useState(false);
   const [oauthOpen, setOauthOpen] = useState(false);
   const [oauthState, setOauthState] = useState<{
     authorize_url?: string;
     state_token?: string;
     code?: string;
   }>({});
-  const [name, setName] = useState(upstream.name);
-  const [baseUrl, setBaseUrl] = useState(upstream.base_url ?? '');
-  const [editApiKeyValue, setEditApiKeyValue] = useState('');
-  const [editApiKeyEnv, setEditApiKeyEnv] = useState(
-    upstream.api_key_env ?? '',
-  );
-  const [editUseEnvVar, setEditUseEnvVar] = useState(false);
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   const [range, setRange] = useState<'1h' | '6h' | '24h' | '7d'>('7d');
   const [showMoreMeta, setShowMoreMeta] = useState(false);
@@ -582,6 +614,17 @@ function DetailView({
     sinceUnixSecs,
     untilUnixSecs: nowUnixSecs,
   });
+
+  const [apiUsageRange, setApiUsageRange] = useState<'24h' | '7d'>('24h');
+  const [apiUsageMetric, setApiUsageMetric] = useState<'tokens' | 'cost'>(
+    'tokens',
+  );
+  const apiUsageQ = useUsage(
+    apiUsageRange,
+    'hour',
+    'model',
+    upstream.kind === 'anthropic_oauth' ? undefined : upstream.id,
+  );
 
   const chartData = useMemo(() => {
     if (!quotaSeries.data?.series.length)
@@ -639,16 +682,6 @@ function DetailView({
       markers,
     };
   }, [quotaSeries.data, quotaLatest.data, range]);
-
-  useEffect(() => {
-    if (editOpen) {
-      setName(upstream.name);
-      setBaseUrl(upstream.base_url ?? '');
-      setEditApiKeyValue('');
-      setEditApiKeyEnv(upstream.api_key_env ?? '');
-      setEditUseEnvVar(false);
-    }
-  }, [editOpen, upstream]);
 
   // The backend `/admin/events/recent?upstream=` param only accepts the
   // RequestEventUpstream class enum (`anthropic_direct` / `custom_anthropic_spec`),
@@ -768,14 +801,18 @@ function DetailView({
           value: <span className="font-mono">env:{upstream.api_key_env}</span>,
           tooltip: `Loaded from the ${upstream.api_key_env} environment variable on the server`,
         });
-      else if (
-        upstream.kind === 'anthropic_api_key' ||
-        upstream.kind === 'custom'
-      )
+      else if (upstream.kind === 'anthropic_api_key')
         fields.push({
           label: 'API Key',
           value: 'literal',
           tooltip: 'Stored inline (literal API key)',
+        });
+      else if (upstream.kind === 'custom')
+        fields.push({
+          label: 'Credentials',
+          value: 'passthrough',
+          tooltip:
+            "Custom upstreams forward the downstream client's API key directly. No credential is stored.",
         });
       if (upstream.shape_plugin?.registry_id)
         fields.push({
@@ -799,12 +836,12 @@ function DetailView({
         });
     }
 
-    const visibleFields = fields.filter(
-      (f) => showMoreMeta || primaryLabels.has(f.label),
-    );
-    const hiddenCount = fields.filter(
-      (f) => !primaryLabels.has(f.label),
-    ).length;
+    const visibleFields = isOauth
+      ? fields.filter((f) => showMoreMeta || primaryLabels.has(f.label))
+      : fields;
+    const hiddenCount = isOauth
+      ? fields.filter((f) => !primaryLabels.has(f.label)).length
+      : 0;
 
     return (
       <div className="sticky top-0 z-30 bg-bg-sub border-b border-subtle backdrop-blur-sm">
@@ -818,9 +855,7 @@ function DetailView({
               <ChevronLeft className="w-3 h-3" /> Back
             </button>
             <div className="flex items-center gap-3 flex-wrap">
-              <h2 className="text-xl font-medium text-text truncate">
-                {upstream.name}
-              </h2>
+              <InlineNameEditor upstream={upstream} />
               <StatusBadge
                 tone={upstream.enabled ? 'ok' : 'neutral'}
                 label={upstream.enabled ? 'Enabled' : 'Disabled'}
@@ -829,13 +864,6 @@ function DetailView({
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
-            <Button
-              size="sm"
-              iconLeft={<Pencil className="w-3 h-3" />}
-              onClick={() => setEditOpen(true)}
-            >
-              Edit
-            </Button>
             <Button
               size="sm"
               onClick={() =>
@@ -957,6 +985,7 @@ function DetailView({
           </div>
         ) : null}
 
+        {isOauth && (
         <Section title="Subscription Quota">
           <Card>
             <CardHeader
@@ -1525,6 +1554,22 @@ function DetailView({
             );
           })()}
         </Section>
+        )}
+
+        {!isOauth && (
+        <Section title="API Usage">
+          <ApiUsageCard
+            data={apiUsageQ.data}
+            isLoading={apiUsageQ.isLoading}
+            range={apiUsageRange}
+            onRangeChange={setApiUsageRange}
+            metric={apiUsageMetric}
+            onMetricChange={setApiUsageMetric}
+          />
+        </Section>
+        )}
+
+        {!isOauth && <SettingsCard upstream={upstream} />}
 
         <Card>
           <CardHeader
@@ -1716,114 +1761,6 @@ function DetailView({
             })()
           : null}
       </div>
-
-      <Modal
-        open={editOpen}
-        onOpenChange={setEditOpen}
-        title="Edit upstream"
-        footer={
-          <>
-            <Button onClick={() => setEditOpen(false)}>Cancel</Button>
-            <Button
-              variant="primary"
-              onClick={() => {
-                const trimmedName = name.trim();
-                const trimmedBase = baseUrl.trim();
-                const trimmedKeyValue = editApiKeyValue.trim();
-                const trimmedKeyEnv = editApiKeyEnv.trim();
-                const isApiKey = upstream.kind === 'anthropic_api_key';
-                update.mutate(
-                  {
-                    id: upstream.id,
-                    body: {
-                      name: trimmedName,
-                      base_url: trimmedBase === '' ? null : trimmedBase,
-                      api_key_value:
-                        isApiKey && !editUseEnvVar && trimmedKeyValue !== ''
-                          ? trimmedKeyValue
-                          : null,
-                      api_key_env:
-                        isApiKey && editUseEnvVar && trimmedKeyEnv !== ''
-                          ? trimmedKeyEnv
-                          : null,
-                    },
-                    revision: upstream.revision,
-                  },
-                  {
-                    onSuccess: () => {
-                      toast.success('Upstream updated');
-                      setEditOpen(false);
-                    },
-                  },
-                );
-              }}
-            >
-              Save
-            </Button>
-          </>
-        }
-      >
-        <div className="space-y-3">
-          <Field label="Name" required>
-            <input
-              className={INPUT_CLASS}
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-            />
-          </Field>
-          <Field label="Base URL">
-            <input
-              className={INPUT_CLASS}
-              value={baseUrl}
-              onChange={(e) => setBaseUrl(e.target.value)}
-            />
-          </Field>
-          {upstream.kind === 'anthropic_api_key' ? (
-            editUseEnvVar ? (
-              <Field
-                label="API Key Env Var"
-                hint="Name of an env var on the server holding the new API key. Leave unchanged to keep the existing credential."
-              >
-                <input
-                  className={`${INPUT_CLASS} font-mono`}
-                  value={editApiKeyEnv}
-                  onChange={(e) => setEditApiKeyEnv(e.target.value)}
-                  placeholder="ANTHROPIC_API_KEY"
-                />
-                <button
-                  type="button"
-                  className="mt-1 text-[11px] text-text-faint hover:text-text underline underline-offset-2"
-                  onClick={() => setEditUseEnvVar(false)}
-                >
-                  Paste new API key instead
-                </button>
-              </Field>
-            ) : (
-              <Field
-                label="Rotate API Key"
-                hint="Paste a new API key to replace the stored one. Leave blank to keep the existing credential."
-              >
-                <input
-                  type="password"
-                  autoComplete="off"
-                  spellCheck={false}
-                  className={`${INPUT_CLASS} font-mono`}
-                  value={editApiKeyValue}
-                  onChange={(e) => setEditApiKeyValue(e.target.value)}
-                  placeholder="sk-ant-..."
-                />
-                <button
-                  type="button"
-                  className="mt-1 text-[11px] text-text-faint hover:text-text underline underline-offset-2"
-                  onClick={() => setEditUseEnvVar(true)}
-                >
-                  Use env var instead
-                </button>
-              </Field>
-            )
-          ) : null}
-        </div>
-      </Modal>
 
       <Modal
         open={oauthOpen}
@@ -2123,7 +2060,8 @@ function CreateUpstreamModal({
                 <div className="font-medium text-text">Custom Backend</div>
                 <div className="text-xs text-text-faint mt-1">
                   Custom Anthropic-compatible endpoint. Provide your own base
-                  URL + API key.
+                  URL; the client API key is passed through (no credential is
+                  stored).
                 </div>
               </div>
             </label>

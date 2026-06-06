@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use cc_lb_storage_api::{Storage, StorageError, UsageRollup, UsageRollupResolution};
 use serde::Serialize;
+use uuid::Uuid;
 
 const MINUTE_SECS: u64 = 60;
 const HOUR_SECS: u64 = 60 * 60;
@@ -216,6 +217,7 @@ pub async fn build_dashboard_usage(
     range: DashboardRange,
     step: UsageRollupResolution,
     group_by: UsageGroupBy,
+    upstream_id: Option<Uuid>,
     now_unix_secs: u64,
 ) -> Result<DashboardUsageResponse, StorageError> {
     let (window_start_unix_secs, window_end_unix_secs) =
@@ -223,6 +225,10 @@ pub async fn build_dashboard_usage(
     let rollups = storage
         .query_usage_rollups_in_range(step, window_start_unix_secs, window_end_unix_secs)
         .await?;
+    let rollups = rollups
+        .into_iter()
+        .filter(|rollup| upstream_id.is_none_or(|id| rollup.upstream_id == id))
+        .collect::<Vec<_>>();
     let observed = !rollups.is_empty();
     let (series, truncated_series_count) = build_usage_series(
         group_by,
@@ -249,10 +255,11 @@ pub async fn build_dashboard_usage_checked(
     range: DashboardRange,
     step: UsageRollupResolution,
     group_by: UsageGroupBy,
+    upstream_id: Option<Uuid>,
     now_unix_secs: u64,
 ) -> Result<DashboardUsageResponse, DashboardBuildError> {
     validate_step_for_range(range, step)?;
-    build_dashboard_usage(storage, range, step, group_by, now_unix_secs)
+    build_dashboard_usage(storage, range, step, group_by, upstream_id, now_unix_secs)
         .await
         .map_err(Into::into)
 }
