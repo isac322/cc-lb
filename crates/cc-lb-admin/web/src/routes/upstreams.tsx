@@ -863,6 +863,8 @@ function DetailView({
               >
                 <button
                   type="button"
+                  role="switch"
+                  aria-checked={upstream.enabled}
                   disabled={toggle.isPending}
                   onClick={() =>
                     toggle.mutate(
@@ -881,12 +883,33 @@ function DetailView({
                       },
                     )
                   }
-                  className="rounded-sm focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-50 hover:opacity-80 transition-opacity"
+                  className="group inline-flex items-center gap-2 h-7 px-2 rounded-sm transition-colors focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-overlay-3"
                 >
-                  <StatusBadge
-                    tone={upstream.enabled ? 'ok' : 'neutral'}
-                    label={upstream.enabled ? 'Enabled' : 'Disabled'}
-                  />
+                  <div
+                    className={cx(
+                      'relative inline-flex h-4 w-8 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out border',
+                      upstream.enabled
+                        ? 'bg-emerald-500 border-emerald-500'
+                        : 'bg-overlay-5 border-subtle-strong group-hover:border-text-muted',
+                    )}
+                  >
+                    <span
+                      className={cx(
+                        'pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
+                        upstream.enabled ? 'translate-x-4' : 'translate-x-0.5',
+                      )}
+                    />
+                  </div>
+                  <span
+                    className={cx(
+                      'text-[11px] font-mono uppercase tracking-wider',
+                      upstream.enabled
+                        ? 'text-emerald-400'
+                        : 'text-text-muted group-hover:text-text',
+                    )}
+                  >
+                    {upstream.enabled ? 'Enabled' : 'Disabled'}
+                  </span>
                 </button>
               </Hint>
               <Badge tone="mono">{upstream.kind}</Badge>
