@@ -23,12 +23,7 @@ fn instantiate_router_and_dialect_wrappers() {
         .route(&common::ctx(), &common::principal(), &[])
         .expect("route succeeds");
     assert_eq!(route.upstream_id, None);
-    match route.upstream {
-        Upstream::CustomAnthropicSpec { ref base_url } => {
-            assert_eq!(base_url.as_str(), "http://upstream.test/");
-        }
-        _ => panic!("unexpected upstream"),
-    }
+    assert_eq!(route.upstream, Upstream::AnthropicDirect);
     let shaped = shape_request(
         route.dialect.as_ref(),
         &common::ctx(),
@@ -151,12 +146,7 @@ fn route_input_includes_candidates_as_sibling_field() {
         .route(&common::ctx(), &common::principal(), &candidates)
         .expect("route succeeds");
 
-    match route.upstream {
-        Upstream::CustomAnthropicSpec { base_url } => {
-            assert_eq!(base_url.as_str(), "http://candidate-input-ok.test/");
-        }
-        _ => panic!("unexpected upstream"),
-    }
+    assert_eq!(route.upstream, Upstream::AnthropicDirect);
 }
 
 #[test]

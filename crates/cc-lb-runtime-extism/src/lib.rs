@@ -305,17 +305,6 @@ impl ExtismRuntime {
         self.instantiate_observability_for(GLOBAL_PRINCIPAL, plugin_name, manifest)
     }
 
-    pub fn instantiate_dialect_for_upstream(
-        &self,
-        upstream_id: &str,
-        plugin_name: &str,
-        manifest: &PluginManifest,
-    ) -> Result<(Arc<dyn UpstreamDialect>, StagedSlot), RuntimeError> {
-        let scope = format!("upstream:{upstream_id}");
-        let (slot, staged) = self.stage_slot(&scope, plugin_name, manifest, "shape")?;
-        Ok((Arc::new(ExtismDialectPlugin::new(slot)), staged))
-    }
-
     pub fn instantiate_dialect_for_principal(
         &self,
         principal_id: &str,

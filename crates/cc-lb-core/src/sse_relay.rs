@@ -435,9 +435,7 @@ impl RelayRuntime {
 
 fn streaming_usage_dialect_label(upstream_kind: Option<UpstreamKind>) -> &'static str {
     match upstream_kind {
-        Some(UpstreamKind::AnthropicDirect | UpstreamKind::CustomAnthropicSpec) | None => {
-            "anthropic"
-        }
+        Some(UpstreamKind::AnthropicDirect) | None => "anthropic",
     }
 }
 

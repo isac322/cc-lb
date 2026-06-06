@@ -61,7 +61,7 @@ pub fn custom_record(id: Uuid, name: &str, base_url: &str) -> UpstreamRecord {
     upstream_record(
         id,
         name,
-        StorageUpstreamKind::Custom,
+        StorageUpstreamKind::AnthropicApiKey,
         Some(Url::parse(base_url).expect("test base URL parses")),
     )
 }
@@ -83,13 +83,12 @@ fn upstream_record(
         base_url,
         enabled: true,
         oauth_credentials: None,
-        api_key_ciphertext: None,
+        api_key_ciphertext: Some(Vec::new()),
         refresh_lease_holder: None,
         refresh_lease_until_unix_secs: None,
         last_apply_error: None,
         last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
-        shape_plugin: None,
         revision: 1,
         created_at_unix_secs: 0,
         updated_at_unix_secs: 0,
@@ -155,9 +154,8 @@ impl RouterPlugin for RejectingEmptyRouter {
 }
 
 pub fn plugin_upstream(base_url: &str) -> Upstream {
-    Upstream::CustomAnthropicSpec {
-        base_url: Url::parse(base_url).expect("test plugin URL parses"),
-    }
+    let _ = base_url;
+    Upstream::AnthropicDirect
 }
 
 struct RecordingSignerFactory {
@@ -241,7 +239,6 @@ impl UpstreamDialect for UniversalDialect {
     ) -> Result<ShapedRequest, DialectError> {
         let mut url = match upstream {
             Upstream::AnthropicDirect => Url::parse("https://api.anthropic.com/")?,
-            Upstream::CustomAnthropicSpec { base_url } => base_url.clone(),
         };
         url.set_path(ctx.path.trim_start_matches('/'));
         url.set_query(ctx.query.as_deref());

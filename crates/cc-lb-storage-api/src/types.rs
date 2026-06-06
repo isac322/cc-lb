@@ -164,7 +164,6 @@ fn is_zero(value: &u64) -> bool {
 #[serde(rename_all = "snake_case")]
 pub enum RequestEventUpstream {
     AnthropicDirect,
-    CustomAnthropicSpec,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
