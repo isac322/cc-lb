@@ -9,6 +9,7 @@ use axum::{
 };
 use serde::Deserialize;
 use serde_json::json;
+use uuid::Uuid;
 
 use crate::AdminState;
 use crate::dashboard::{
@@ -54,6 +55,8 @@ struct UsageQuery {
     group_by: Option<String>,
     #[serde(default)]
     step: Option<String>,
+    #[serde(default)]
+    upstream_id: Option<String>,
 }
 
 async fn handle_dashboard_usage(
@@ -81,8 +84,22 @@ async fn handle_dashboard_usage(
         },
         None => crate::dashboard::UsageGroupBy::None,
     };
-    match build_dashboard_usage_checked(storage.as_ref(), range, step, group_by, now_unix_secs())
-        .await
+    let upstream_id = match query.upstream_id.as_deref() {
+        Some(value) => match Uuid::parse_str(value) {
+            Ok(upstream_id) => Some(upstream_id),
+            Err(_) => return bad_request("invalid_upstream_id"),
+        },
+        None => None,
+    };
+    match build_dashboard_usage_checked(
+        storage.as_ref(),
+        range,
+        step,
+        group_by,
+        upstream_id,
+        now_unix_secs(),
+    )
+    .await
     {
         Ok(response) => Json(response).into_response(),
         Err(DashboardBuildError::Query(error)) => bad_request(error.as_str()),
