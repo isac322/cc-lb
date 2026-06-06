@@ -34,27 +34,3 @@ fn direct_shape_preserves_method_headers_and_body_bytes() {
     assert_eq!(shaped.headers(), &ctx.downstream_headers);
     assert_eq!(shaped.body(), &body);
 }
-
-#[test]
-fn direct_shape_rejects_wrong_upstream_variant() {
-    let ctx = common::request_context(
-        Method::POST,
-        "/v1/messages",
-        None,
-        Bytes::from_static(b"{}"),
-        common::anthropic_headers(),
-    );
-    let upstream = Upstream::CustomAnthropicSpec {
-        base_url: "https://gw.example/api".parse().expect("valid test url"),
-    };
-
-    let err = shape_request(
-        &AnthropicDirectDialect::default(),
-        &ctx,
-        &upstream,
-        &common::principal(),
-    )
-    .expect_err("wrong upstream must be rejected");
-
-    assert!(err.to_string().contains("AnthropicDirect"));
-}

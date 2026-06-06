@@ -48,12 +48,11 @@ import {
 export interface Upstream {
   id: string;
   name: string;
-  kind: 'anthropic_api_key' | 'anthropic_oauth' | 'custom';
+  kind: 'anthropic_api_key' | 'anthropic_oauth';
   enabled: boolean;
   revision: number;
   base_url?: string | null;
   api_key_env?: string | null;
-  shape_plugin?: { registry_id: string } | null;
 }
 interface UpstreamListResp {
   upstreams: Upstream[];
@@ -569,7 +568,6 @@ export interface UpdateUpstreamRequest {
   base_url?: string | null;
   api_key_env?: string | null;
   api_key_value?: string | null;
-  shape_plugin?: { registry_id: string } | null;
 }
 export function useUpdateUpstream() {
   const qc = useQueryClient();

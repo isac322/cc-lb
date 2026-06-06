@@ -347,10 +347,9 @@ async fn seed_storage(storage: &RedbStorage) -> TestResult<()> {
         storage,
         UpstreamCreate {
             name: "state-machine-upstream".to_owned(),
-            kind: UpstreamKind::Custom,
+            kind: UpstreamKind::AnthropicApiKey,
             base_url: Some(Url::parse("http://127.0.0.1:1")?),
             api_key_ciphertext: None,
-            shape_plugin: None,
         },
     )
     .await?;

@@ -125,15 +125,17 @@ impl RouterPlugin for TestRouter {
     ) -> Result<RouteDecision, RouteError> {
         Ok(RouteDecision {
             upstream_id: None,
-            upstream: Upstream::CustomAnthropicSpec {
+            upstream: Upstream::AnthropicDirect,
+            dialect: Arc::new(PassthroughDialect {
                 base_url: self.base_url.clone(),
-            },
-            dialect: Arc::new(PassthroughDialect),
+            }),
         })
     }
 }
 
-pub struct PassthroughDialect;
+pub struct PassthroughDialect {
+    pub base_url: Url,
+}
 
 impl UpstreamDialect for PassthroughDialect {
     fn shape(
@@ -143,12 +145,8 @@ impl UpstreamDialect for PassthroughDialect {
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
     ) -> Result<ShapedRequest, DialectError> {
-        let Upstream::CustomAnthropicSpec { base_url } = upstream else {
-            return Err(DialectError::UpstreamMismatch {
-                reason: "test dialect expects custom upstream".to_owned(),
-            });
-        };
-        let mut url = base_url.clone();
+        let _ = upstream;
+        let mut url = self.base_url.clone();
         url.set_path(ctx.path.trim_start_matches('/'));
         url.set_query(ctx.query.as_deref());
         Ok(builder.shaped_request(
@@ -316,17 +314,16 @@ fn default_upstream_record() -> UpstreamRecord {
         id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
             .expect("default upstream id parses"),
         name: "test-upstream".to_owned(),
-        kind: StorageUpstreamKind::Custom,
+        kind: StorageUpstreamKind::AnthropicApiKey,
         base_url: Some(Url::parse("http://upstream.local/").expect("test URL parses")),
         enabled: true,
         oauth_credentials: None,
-        api_key_ciphertext: None,
+        api_key_ciphertext: Some(Vec::new()),
         refresh_lease_holder: None,
         refresh_lease_until_unix_secs: None,
         last_apply_error: None,
         last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
-        shape_plugin: None,
         revision: 1,
         created_at_unix_secs: 0,
         updated_at_unix_secs: 0,
@@ -356,9 +353,7 @@ pub async fn collect_body(response: Response<Body>) -> (StatusCode, HeaderMap, B
 }
 
 pub async fn signed_request(base_url: &str) -> SignedRequest {
-    let upstream = Upstream::CustomAnthropicSpec {
-        base_url: Url::parse(base_url).expect("test URL parses"),
-    };
+    let upstream = Upstream::AnthropicDirect;
     let ctx = RequestContext {
         request_id: "test-request".to_owned(),
         downstream_headers: HeaderMap::new(),
@@ -372,8 +367,15 @@ pub async fn signed_request(base_url: &str) -> SignedRequest {
         kind: PrincipalKind::ApiKey,
         claims: serde_json::Map::new(),
     };
-    let shaped = cc_lb_plugin_api::shape_request(&PassthroughDialect, &ctx, &upstream, &principal)
-        .expect("test request shapes");
+    let shaped = cc_lb_plugin_api::shape_request(
+        &PassthroughDialect {
+            base_url: Url::parse(base_url).expect("test URL parses"),
+        },
+        &ctx,
+        &upstream,
+        &principal,
+    )
+    .expect("test request shapes");
     sign_request(&NoopSigner, shaped)
         .await
         .expect("test request signs")

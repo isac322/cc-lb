@@ -147,7 +147,6 @@ impl CandidateWire {
 #[serde(deny_unknown_fields)]
 pub enum UpstreamWire {
     AnthropicDirect,
-    CustomAnthropicSpec { base_url: String },
 }
 
 impl UpstreamWire {

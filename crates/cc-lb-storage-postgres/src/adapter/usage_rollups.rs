@@ -581,7 +581,6 @@ fn normalize_dimension(value: Option<&str>) -> String {
 fn upstream_dimension(upstream: RequestEventUpstream) -> String {
     match upstream {
         RequestEventUpstream::AnthropicDirect => "anthropic_direct",
-        RequestEventUpstream::CustomAnthropicSpec => "custom_anthropic_spec",
     }
     .to_owned()
 }

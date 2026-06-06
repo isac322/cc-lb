@@ -174,8 +174,9 @@ async fn create_upstream_rebinds_dynamic_view_before_response_returns() {
                 .body(Body::from(
                     json!({
                         "name": "sync-primary",
-                        "kind": "custom",
-                        "base_url": "https://example.com"
+                        "kind": "anthropic_api_key",
+                        "base_url": "https://example.com",
+                        "api_key_value": "sk-ant-test"
                     })
                     .to_string(),
                 ))

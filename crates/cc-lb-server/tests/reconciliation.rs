@@ -94,7 +94,6 @@ async fn create_upstream(storage: &Storage, name: &str) -> UpstreamRecord {
             kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
             api_key_ciphertext: Some(vec![1, 2, 3]),
-            shape_plugin: None,
         },
     )
     .await

@@ -1,8 +1,4 @@
-//! Task 16 cascade-block rule exercised here: delete scans every non-deleted principal and both
-//! plugin-chain slots, then blocks only when a chain entry config contains an `upstream_name`
-//! string equal to the upstream's current name. The eight scenarios below cover the requested
-//! no-reference delete path; referenced delete is intentionally left for the plugin-chain endpoint
-//! tasks that create real chain rows.
+//! Upstream CRUD admin endpoint smoke tests (list, create, get, update, delete, enable/disable).
 
 mod admin_test_common;
 
@@ -308,7 +304,7 @@ async fn enable_disable_emits_audit_and_persists_state() {
 }
 
 #[tokio::test]
-async fn delete_soft_deletes_when_no_references() {
+async fn delete_soft_deletes_upstream() {
     let (_dir, storage) = new_store();
     let app = router(test_state(storage, None));
     let created = create(app.clone(), "primary").await;

@@ -14,14 +14,12 @@ use crate::sse_error_frame::make_error_frame_from_json;
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum UpstreamKind {
     AnthropicDirect,
-    CustomAnthropicSpec,
 }
 
 impl From<&Upstream> for UpstreamKind {
     fn from(upstream: &Upstream) -> Self {
         match upstream {
             Upstream::AnthropicDirect => Self::AnthropicDirect,
-            Upstream::CustomAnthropicSpec { .. } => Self::CustomAnthropicSpec,
         }
     }
 }
@@ -84,9 +82,7 @@ impl ErrorNormalizer {
         raw_event_data_json: &Bytes,
     ) -> Bytes {
         let error_json = match kind {
-            UpstreamKind::AnthropicDirect | UpstreamKind::CustomAnthropicSpec => {
-                anthropic_sse_error_json(raw_event_data_json)
-            }
+            UpstreamKind::AnthropicDirect => anthropic_sse_error_json(raw_event_data_json),
         };
         make_error_frame_from_json(&error_json)
     }

@@ -54,7 +54,7 @@ expression: body
     {
       "enabled": true,
       "expires_at_unix_secs": null,
-      "kind": "custom",
+      "kind": "anthropic_api_key",
       "name": "alpha",
       "oauth_credentials_present": false,
       "revision": 1
@@ -62,7 +62,7 @@ expression: body
     {
       "enabled": true,
       "expires_at_unix_secs": null,
-      "kind": "custom",
+      "kind": "anthropic_api_key",
       "name": "bravo",
       "oauth_credentials_present": false,
       "revision": 1

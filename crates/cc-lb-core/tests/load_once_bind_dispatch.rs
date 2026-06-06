@@ -214,7 +214,7 @@ fn test_upstream_record() -> UpstreamRecord {
         id: uuid::Uuid::parse_str("00000000-0000-0000-0000-000000000001")
             .expect("test upstream id parses"),
         name: "test-upstream".to_owned(),
-        kind: StorageUpstreamKind::Custom,
+        kind: StorageUpstreamKind::AnthropicApiKey,
         base_url: Some(Url::parse("http://upstream.local/").expect("test URL parses")),
         enabled: true,
         oauth_credentials: None,
@@ -224,7 +224,6 @@ fn test_upstream_record() -> UpstreamRecord {
         last_apply_error: None,
         last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
-        shape_plugin: None,
         revision: 1,
         created_at_unix_secs: 0,
         updated_at_unix_secs: 0,
@@ -249,10 +248,10 @@ impl RouterPlugin for RecordingRouter {
             .push(format!("{}:{}", self.name, principal.id));
         Ok(RouteDecision {
             upstream_id: None,
-            upstream: Upstream::CustomAnthropicSpec {
+            upstream: Upstream::AnthropicDirect,
+            dialect: Arc::new(common::PassthroughDialect {
                 base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
-            },
-            dialect: Arc::new(common::PassthroughDialect),
+            }),
         })
     }
 }

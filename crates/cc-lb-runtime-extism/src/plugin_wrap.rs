@@ -584,22 +584,12 @@ fn principal_kind_to_wire(principal: &Principal) -> String {
 pub(crate) fn upstream_to_wire(upstream: &Upstream) -> UpstreamWire {
     match upstream {
         Upstream::AnthropicDirect => UpstreamWire::AnthropicDirect,
-        Upstream::CustomAnthropicSpec { base_url } => UpstreamWire::CustomAnthropicSpec {
-            base_url: base_url.to_string(),
-        },
     }
 }
 
 fn upstream_from_wire(upstream: UpstreamWire) -> Result<Upstream, WireError> {
     match upstream {
         UpstreamWire::AnthropicDirect => Ok(Upstream::AnthropicDirect),
-        UpstreamWire::CustomAnthropicSpec { base_url } => {
-            let base_url = Url::parse(&base_url).map_err(|source| WireError::InvalidUrl {
-                url: base_url,
-                source,
-            })?;
-            Ok(Upstream::CustomAnthropicSpec { base_url })
-        }
     }
 }
 
@@ -669,10 +659,6 @@ fn headers_from_wire(headers: Vec<HeaderWire>) -> Result<HeaderMap, WireError> {
 
 #[derive(Debug)]
 pub(crate) enum WireError {
-    InvalidUrl {
-        url: String,
-        source: url::ParseError,
-    },
     InvalidHeaderName {
         name: String,
         source: http::header::InvalidHeaderName,
@@ -690,9 +676,6 @@ pub(crate) enum WireError {
 impl fmt::Display for WireError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidUrl { url, source } => {
-                write!(f, "invalid upstream url {url}: {source}")
-            }
             Self::InvalidHeaderName { name, source } => {
                 write!(f, "invalid header name {name}: {source}")
             }

@@ -6,7 +6,7 @@ For the protocol-level reference (PDK macros, lifecycle, wire types, registratio
 
 ## Algorithm
 
-The router maintains a process-local `AtomicUsize` counter. For each `route` call, the selected upstream index is `counter.fetch_add(1, Relaxed) % candidates.len()`, returning the corresponding `upstream_id`. If `candidates` is empty, the response carries `upstream_id = None` and the host falls back to `RouteFn`'s `FallbackPolicy::UseDefault`. The counter is per cc-lb process; on restart it resets to zero. The `shape` handler builds the upstream URL from `UpstreamWire::AnthropicDirect` (canonical Anthropic base) or `UpstreamWire::CustomAnthropicSpec.base_url`, and `normalize_error` returns `body_base64 = None` so the host passes upstream errors through unchanged.
+The router maintains a process-local `AtomicUsize` counter. For each `route` call, the selected upstream index is `counter.fetch_add(1, Relaxed) % candidates.len()`, returning the corresponding `upstream_id`. If `candidates` is empty, the response carries `upstream_id = None` and the host falls back to `RouteFn`'s `FallbackPolicy::UseDefault`. The counter is per cc-lb process; on restart it resets to zero. The `shape` handler builds the upstream URL from `UpstreamWire::AnthropicDirect` (canonical Anthropic base) or `UpstreamWire::AnthropicDirect.base_url`, and `normalize_error` returns `body_base64 = None` so the host passes upstream errors through unchanged.
 
 ## Build
 
