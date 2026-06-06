@@ -15,7 +15,9 @@ use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, RetryDecision, ShapedRequest, SignedRequest, Signer, SignerError,
     SignerFactory, SigningCapability, Upstream, UpstreamError,
 };
-use cc_lb_storage_api::{OAuthCredentialStore, OAuthCredentials, StorageError, UpstreamStore};
+use cc_lb_storage_api::{
+    OAuthCredentialStore, OAuthCredentials, StorageError, UpstreamRecord, UpstreamStore,
+};
 use dashmap::DashMap;
 use http::HeaderMap;
 use http::header::{AUTHORIZATION, HeaderValue};
@@ -48,16 +50,26 @@ pub trait LazyRefreshHandle: Send + Sync {
     async fn refresh_one(&self, upstream_id: Uuid) -> Result<(), LazyRefreshError>;
 }
 
+pub trait LazyRefreshConfigurable: SignerFactory + Clone {
+    fn with_lazy_refresh(
+        &self,
+        refresh_handle: Arc<dyn LazyRefreshHandle>,
+        upstream_id: Uuid,
+        refresh_locks: RefreshLocks,
+    ) -> Self;
+}
+
 #[derive(Clone)]
-pub struct AnthropicOAuthSignerFactoryWithLazyRefresh<Inner: SignerFactory + Clone> {
+pub struct AnthropicOAuthSignerFactoryWithLazyRefresh<Inner: LazyRefreshConfigurable + Clone> {
     inner: Inner,
     refresh_handle: Arc<dyn LazyRefreshHandle>,
+    refresh_locks: RefreshLocks,
     upstream_id: Uuid,
 }
 
 impl<Inner> AnthropicOAuthSignerFactoryWithLazyRefresh<Inner>
 where
-    Inner: SignerFactory + Clone,
+    Inner: LazyRefreshConfigurable + Clone,
 {
     pub fn new(
         inner: Inner,
@@ -67,6 +79,7 @@ where
         Self {
             inner,
             refresh_handle,
+            refresh_locks: new_refresh_locks(),
             upstream_id,
         }
     }
@@ -74,13 +87,14 @@ where
 
 impl<Inner> fmt::Debug for AnthropicOAuthSignerFactoryWithLazyRefresh<Inner>
 where
-    Inner: SignerFactory + Clone + fmt::Debug,
+    Inner: LazyRefreshConfigurable + Clone + fmt::Debug,
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("AnthropicOAuthSignerFactoryWithLazyRefresh")
             .field("inner", &self.inner)
             .field("refresh_handle", &"LazyRefreshHandle")
+            .field("refresh_locks", &"RefreshLocks")
             .field("upstream_id", &self.upstream_id)
             .finish()
     }
@@ -89,50 +103,60 @@ where
 #[async_trait]
 impl<Inner> SignerFactory for AnthropicOAuthSignerFactoryWithLazyRefresh<Inner>
 where
-    Inner: SignerFactory + Clone + Send + Sync + 'static,
+    Inner: LazyRefreshConfigurable + Clone + Send + Sync + 'static,
 {
     async fn build(&self, upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
-        match self.inner.build(upstream).await {
+        let inner = self.inner.with_lazy_refresh(
+            self.refresh_handle.clone(),
+            self.upstream_id,
+            self.refresh_locks.clone(),
+        );
+        match inner.build(upstream).await {
             Ok(signer) => Ok(Arc::new(LazyRefreshSigner {
                 signer,
-                inner: self.inner.clone(),
+                inner,
                 refresh_handle: self.refresh_handle.clone(),
+                refresh_locks: self.refresh_locks.clone(),
                 upstream_id: self.upstream_id,
                 upstream: upstream.clone(),
             })),
             Err(original @ SignerError::ExpiredToken { .. }) => {
-                if self
-                    .refresh_handle
-                    .refresh_one(self.upstream_id)
-                    .await
-                    .is_err()
+                if lazy_refresh_under_single_flight(
+                    &self.refresh_locks,
+                    &self.refresh_handle,
+                    self.upstream_id,
+                )
+                .await
+                .is_err()
                 {
                     return Err(original);
                 }
-                self.inner.build(upstream).await
+                inner.build(upstream).await
             }
             Err(error) => Err(error),
         }
     }
 }
 
-struct LazyRefreshSigner<Inner: SignerFactory + Clone> {
+struct LazyRefreshSigner<Inner: LazyRefreshConfigurable + Clone> {
     signer: Arc<dyn Signer>,
     inner: Inner,
     refresh_handle: Arc<dyn LazyRefreshHandle>,
+    refresh_locks: RefreshLocks,
     upstream_id: Uuid,
     upstream: Upstream,
 }
 
 impl<Inner> fmt::Debug for LazyRefreshSigner<Inner>
 where
-    Inner: SignerFactory + Clone,
+    Inner: LazyRefreshConfigurable + Clone,
 {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("LazyRefreshSigner")
             .field("signer", &"Signer")
             .field("refresh_handle", &"LazyRefreshHandle")
+            .field("refresh_locks", &"RefreshLocks")
             .field("upstream_id", &self.upstream_id)
             .finish()
     }
@@ -141,7 +165,7 @@ where
 #[async_trait]
 impl<Inner> Signer for LazyRefreshSigner<Inner>
 where
-    Inner: SignerFactory + Clone + Send + Sync + 'static,
+    Inner: LazyRefreshConfigurable + Clone + Send + Sync + 'static,
 {
     async fn sign(
         &self,
@@ -152,11 +176,13 @@ where
         match self.signer.sign(shaped, capability).await {
             Ok(signed) => Ok(signed),
             Err(original @ SignerError::ExpiredToken { .. }) => {
-                if self
-                    .refresh_handle
-                    .refresh_one(self.upstream_id)
-                    .await
-                    .is_err()
+                if lazy_refresh_under_single_flight(
+                    &self.refresh_locks,
+                    &self.refresh_handle,
+                    self.upstream_id,
+                )
+                .await
+                .is_err()
                 {
                     return Err(original);
                 }
@@ -170,6 +196,17 @@ where
     async fn on_unauthorized(&self, err: &UpstreamError) -> RetryDecision {
         self.signer.on_unauthorized(err).await
     }
+}
+
+async fn lazy_refresh_under_single_flight(
+    refresh_locks: &RefreshLocks,
+    refresh_handle: &Arc<dyn LazyRefreshHandle>,
+    upstream_id: Uuid,
+) -> Result<(), LazyRefreshError> {
+    let upstream_key = upstream_id.to_string();
+    let lock = single_flight::lock_for(refresh_locks, "upstream", &upstream_key);
+    let _guard = lock.lock().await;
+    refresh_handle.refresh_one(upstream_id).await
 }
 
 #[derive(Clone, Debug)]
@@ -469,6 +506,9 @@ pub struct AnthropicOAuthSignerFactory {
     store: Arc<dyn UpstreamStore>,
     aead: Arc<AeadService>,
     upstream_name: Option<String>,
+    refresh_handle: Option<Arc<dyn LazyRefreshHandle>>,
+    refresh_locks: RefreshLocks,
+    refresh_upstream_id: Option<Uuid>,
 }
 
 impl AnthropicOAuthSignerFactory {
@@ -477,6 +517,9 @@ impl AnthropicOAuthSignerFactory {
             store,
             aead,
             upstream_name: None,
+            refresh_handle: None,
+            refresh_locks: new_refresh_locks(),
+            refresh_upstream_id: None,
         }
     }
 
@@ -489,10 +532,16 @@ impl AnthropicOAuthSignerFactory {
             aead,
             store,
             upstream_name: Some(upstream_name.into()),
+            refresh_handle: None,
+            refresh_locks: new_refresh_locks(),
+            refresh_upstream_id: None,
         }
     }
 
-    async fn load_tokens(&self, upstream: &Upstream) -> Result<OAuthTokenBundle, SignerError> {
+    async fn load_record_and_tokens(
+        &self,
+        upstream: &Upstream,
+    ) -> Result<(UpstreamRecord, OAuthTokenBundle), SignerError> {
         let record = if let Some(name) = &self.upstream_name {
             self.store
                 .get_by_name(name)
@@ -505,29 +554,15 @@ impl AnthropicOAuthSignerFactory {
             self.resolve_without_name(upstream).await?
         };
 
-        if !record.enabled {
-            return Err(SignerError::MissingCredentials {
-                reason: "oauth upstream disabled".to_owned(),
-            });
-        }
-        let encrypted =
-            record
-                .oauth_credentials
-                .as_ref()
-                .ok_or_else(|| SignerError::MissingCredentials {
-                    reason: "oauth credentials not found".to_owned(),
-                })?;
-        encrypted
-            .decrypt(&self.aead, record.id.as_bytes())
-            .map_err(|source| SignerError::SigningFailed {
-                reason: source.to_string(),
-            })
+        ensure_oauth_upstream_usable(&record)?;
+        let tokens = decrypt_upstream_tokens(&self.aead, &record)?;
+        Ok((record, tokens))
     }
 
     async fn resolve_without_name(
         &self,
         _upstream: &Upstream,
-    ) -> Result<cc_lb_storage_api::UpstreamRecord, SignerError> {
+    ) -> Result<UpstreamRecord, SignerError> {
         let mut after = None;
         loop {
             let page = self
@@ -558,7 +593,28 @@ impl fmt::Debug for AnthropicOAuthSignerFactory {
             .field("store", &"UpstreamStore")
             .field("aead", &"AeadService")
             .field("upstream_name", &self.upstream_name)
+            .field(
+                "refresh_handle",
+                &self.refresh_handle.as_ref().map(|_| "LazyRefreshHandle"),
+            )
+            .field("refresh_locks", &"RefreshLocks")
+            .field("refresh_upstream_id", &self.refresh_upstream_id)
             .finish()
+    }
+}
+
+impl LazyRefreshConfigurable for AnthropicOAuthSignerFactory {
+    fn with_lazy_refresh(
+        &self,
+        refresh_handle: Arc<dyn LazyRefreshHandle>,
+        upstream_id: Uuid,
+        refresh_locks: RefreshLocks,
+    ) -> Self {
+        let mut factory = self.clone();
+        factory.refresh_handle = Some(refresh_handle);
+        factory.refresh_locks = refresh_locks;
+        factory.refresh_upstream_id = Some(upstream_id);
+        factory
     }
 }
 
@@ -577,10 +633,15 @@ impl ApiKeyAwareSignerFactory for AnthropicOAuthSignerFactory {
 #[async_trait]
 impl SignerFactory for AnthropicOAuthSignerFactory {
     async fn build(&self, upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
-        let tokens = self.load_tokens(upstream).await?;
+        let (record, tokens) = self.load_record_and_tokens(upstream).await?;
         Ok(Arc::new(PersistedAnthropicOAuthSigner {
             access_token: SecretString::new(tokens.access_token.into_boxed_str()),
             expires_at_unix_secs: tokens.expires_at_unix_secs,
+            store: self.store.clone(),
+            aead: self.aead.clone(),
+            upstream_id: self.refresh_upstream_id.unwrap_or(record.id),
+            refresh_handle: self.refresh_handle.clone(),
+            refresh_locks: self.refresh_locks.clone(),
         }))
     }
 }
@@ -589,6 +650,11 @@ impl SignerFactory for AnthropicOAuthSignerFactory {
 struct PersistedAnthropicOAuthSigner {
     access_token: SecretString,
     expires_at_unix_secs: u64,
+    store: Arc<dyn UpstreamStore>,
+    aead: Arc<AeadService>,
+    upstream_id: Uuid,
+    refresh_handle: Option<Arc<dyn LazyRefreshHandle>>,
+    refresh_locks: RefreshLocks,
 }
 
 impl fmt::Debug for PersistedAnthropicOAuthSigner {
@@ -597,7 +663,80 @@ impl fmt::Debug for PersistedAnthropicOAuthSigner {
             .debug_struct("PersistedAnthropicOAuthSigner")
             .field("access_token", &"[REDACTED]")
             .field("expires_at_unix_secs", &self.expires_at_unix_secs)
+            .field("store", &"UpstreamStore")
+            .field("aead", &"AeadService")
+            .field("upstream_id", &self.upstream_id)
+            .field(
+                "refresh_handle",
+                &self.refresh_handle.as_ref().map(|_| "LazyRefreshHandle"),
+            )
+            .field("refresh_locks", &"RefreshLocks")
             .finish()
+    }
+}
+
+impl PersistedAnthropicOAuthSigner {
+    async fn on_unauthorized_refresh(&self) -> Result<OAuthTokenBundle, SignerError> {
+        let upstream_key = self.upstream_id.to_string();
+        let lock = single_flight::lock_for(&self.refresh_locks, "upstream", &upstream_key);
+        let _guard = lock.lock().await;
+
+        let current = self.load_current_tokens().await?;
+        if self.storage_has_newer_usable_token(&current) {
+            return Ok(current);
+        }
+
+        let refresh_handle =
+            self.refresh_handle
+                .as_ref()
+                .ok_or_else(|| SignerError::SigningFailed {
+                    reason: "oauth refresh handle unavailable".to_owned(),
+                })?;
+        refresh_handle
+            .refresh_one(self.upstream_id)
+            .await
+            .map_err(|source| SignerError::SigningFailed {
+                reason: source.to_string(),
+            })?;
+
+        let refreshed = self.load_current_tokens().await?;
+        if persisted_token_is_usable(refreshed.expires_at_unix_secs) {
+            Ok(refreshed)
+        } else {
+            Err(SignerError::ExpiredToken {
+                reason: "oauth access token expired".to_owned(),
+            })
+        }
+    }
+
+    async fn load_current_tokens(&self) -> Result<OAuthTokenBundle, SignerError> {
+        let record = self
+            .store
+            .get_by_id(self.upstream_id)
+            .await
+            .map_err(storage_error_to_signer)?
+            .ok_or_else(|| SignerError::MissingCredentials {
+                reason: "oauth upstream not found".to_owned(),
+            })?;
+        ensure_oauth_upstream_usable(&record)?;
+        decrypt_upstream_tokens(&self.aead, &record)
+    }
+
+    fn storage_has_newer_usable_token(&self, current: &OAuthTokenBundle) -> bool {
+        persisted_token_is_usable(current.expires_at_unix_secs)
+            && current.access_token != self.access_token.expose_secret()
+    }
+
+    fn with_tokens(&self, tokens: OAuthTokenBundle) -> Self {
+        Self {
+            access_token: SecretString::new(tokens.access_token.into_boxed_str()),
+            expires_at_unix_secs: tokens.expires_at_unix_secs,
+            store: self.store.clone(),
+            aead: self.aead.clone(),
+            upstream_id: self.upstream_id,
+            refresh_handle: self.refresh_handle.clone(),
+            refresh_locks: self.refresh_locks.clone(),
+        }
     }
 }
 
@@ -622,7 +761,12 @@ impl Signer for PersistedAnthropicOAuthSigner {
     }
 
     async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
-        RetryDecision::Fail
+        match self.on_unauthorized_refresh().await {
+            Ok(tokens) => RetryDecision::Refresh {
+                new_signer: Arc::new(self.with_tokens(tokens)),
+            },
+            Err(_) => RetryDecision::Fail,
+        }
     }
 }
 
@@ -656,6 +800,44 @@ fn refresh_error_to_signer(error: RefreshError) -> SignerError {
             reason: other.to_string(),
         },
     }
+}
+
+fn ensure_oauth_upstream_usable(record: &UpstreamRecord) -> Result<(), SignerError> {
+    if record.kind != cc_lb_storage_api::upstream::UpstreamKind::AnthropicOauth
+        || record.deleted_at_unix_secs.is_some()
+    {
+        return Err(SignerError::MissingCredentials {
+            reason: "oauth upstream not found".to_owned(),
+        });
+    }
+    if !record.enabled {
+        return Err(SignerError::MissingCredentials {
+            reason: "oauth upstream disabled".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn decrypt_upstream_tokens(
+    aead: &AeadService,
+    record: &UpstreamRecord,
+) -> Result<OAuthTokenBundle, SignerError> {
+    let encrypted =
+        record
+            .oauth_credentials
+            .as_ref()
+            .ok_or_else(|| SignerError::MissingCredentials {
+                reason: "oauth credentials not found".to_owned(),
+            })?;
+    encrypted
+        .decrypt(aead, record.id.as_bytes())
+        .map_err(|source| SignerError::SigningFailed {
+            reason: source.to_string(),
+        })
+}
+
+fn persisted_token_is_usable(expires_at_unix_secs: u64) -> bool {
+    expires_at_unix_secs > now_epoch_secs().saturating_add(OAUTH_EXPIRY_SKEW_SECS)
 }
 
 fn storage_error_to_signer(source: StorageError) -> SignerError {
@@ -723,6 +905,7 @@ fn now_epoch_secs() -> u64 {
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use async_trait::async_trait;
@@ -1271,6 +1454,104 @@ mod tests {
             .unwrap()
     }
 
+    #[tokio::test]
+    async fn persisted_signer_refreshes_on_unauthorized() {
+        let store = Arc::new(MemoryUpstreamStore::default());
+        let record = create_upstream(&store, "primary").await;
+        let service = aead();
+        store
+            .store_oauth_tokens(
+                record.id,
+                record.revision,
+                encrypted_tokens(&service, record.id, now_secs() + 600),
+            )
+            .await
+            .unwrap();
+        let refresh_handle = Arc::new(RefreshingLazyHandle {
+            store: store.clone(),
+            aead: service.clone(),
+            calls: AtomicU32::new(0),
+        });
+        let base = AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary");
+        let factory = AnthropicOAuthSignerFactoryWithLazyRefresh::new(
+            base,
+            refresh_handle.clone(),
+            record.id,
+        );
+        let signer = factory.build(&Upstream::AnthropicDirect).await.unwrap();
+
+        let new_signer = match signer.on_unauthorized(&unauthorized_error()).await {
+            RetryDecision::Refresh { new_signer } => new_signer,
+            RetryDecision::Fail => panic!("persisted signer did not refresh on unauthorized"),
+        };
+        let signed = sign_request(new_signer.as_ref(), shaped_request())
+            .await
+            .unwrap();
+
+        assert_eq!(refresh_handle.call_count(), 1);
+        assert_eq!(
+            signed
+                .headers()
+                .get(AUTHORIZATION)
+                .and_then(|value| value.to_str().ok()),
+            Some("Bearer refreshed-access-token")
+        );
+    }
+
+    struct RefreshingLazyHandle {
+        store: Arc<MemoryUpstreamStore>,
+        aead: Arc<AeadService>,
+        calls: AtomicU32,
+    }
+
+    impl RefreshingLazyHandle {
+        fn call_count(&self) -> u32 {
+            self.calls.load(Ordering::Relaxed)
+        }
+    }
+
+    #[async_trait]
+    impl LazyRefreshHandle for RefreshingLazyHandle {
+        async fn refresh_one(&self, upstream_id: Uuid) -> Result<(), LazyRefreshError> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let record = self
+                .store
+                .get_by_id(upstream_id)
+                .await
+                .map_err(lazy_refresh_error)?
+                .ok_or_else(|| LazyRefreshError::Failed {
+                    reason: "oauth upstream not found".to_owned(),
+                })?;
+            self.store
+                .store_oauth_tokens(
+                    record.id,
+                    record.revision,
+                    encrypted_tokens_with_access_token(
+                        &self.aead,
+                        record.id,
+                        "refreshed-access-token",
+                        now_secs() + 600,
+                    ),
+                )
+                .await
+                .map_err(lazy_refresh_error)?;
+            Ok(())
+        }
+    }
+
+    fn lazy_refresh_error(source: StorageError) -> LazyRefreshError {
+        LazyRefreshError::Failed {
+            reason: source.to_string(),
+        }
+    }
+
+    fn unauthorized_error() -> UpstreamError {
+        UpstreamError::Unauthorized {
+            status: StatusCode::UNAUTHORIZED,
+            body: None,
+        }
+    }
+
     async fn create_upstream(store: &MemoryUpstreamStore, name: &str) -> UpstreamRecord {
         store
             .create(UpstreamCreate {
@@ -1289,10 +1570,19 @@ mod tests {
         upstream_id: UpstreamRecordId,
         expires_at_unix_secs: u64,
     ) -> EncryptedOAuthTokens {
+        encrypted_tokens_with_access_token(aead, upstream_id, "access-token", expires_at_unix_secs)
+    }
+
+    fn encrypted_tokens_with_access_token(
+        aead: &AeadService,
+        upstream_id: UpstreamRecordId,
+        access_token: &str,
+        expires_at_unix_secs: u64,
+    ) -> EncryptedOAuthTokens {
         EncryptedOAuthTokens::encrypt(
             aead,
             &OAuthTokenBundle {
-                access_token: "access-token".to_owned(),
+                access_token: access_token.to_owned(),
                 refresh_token: "refresh-token".to_owned(),
                 expires_at_unix_secs,
                 scopes: vec!["messages".to_owned()],
