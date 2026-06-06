@@ -1911,9 +1911,9 @@ function CreateUpstreamModal({
   const [step, setStep] = useState<
     'type' | 'configure_non_oauth' | 'oauth_handshake' | 'oauth_confirm'
   >('type');
-  const [kind, setKind] = useState<
-    'anthropic_api_key' | 'anthropic_oauth'
-  >('anthropic_oauth');
+  const [kind, setKind] = useState<'anthropic_api_key' | 'anthropic_oauth'>(
+    'anthropic_oauth',
+  );
 
   // Non-OAuth state
   const [name, setName] = useState('');
