@@ -176,17 +176,13 @@ function UpstreamsPage() {
                   : runtimeStatus?.status === 'active'
                     ? 'ok'
                     : 'neutral';
-              const barWindows = ['5h', '7d'];
-              const overage = latest?.windows.find(
-                (w) => w.window === 'overage',
-              );
-              if (
-                overage &&
-                (overage.extra_usage_enabled ||
-                  overage.extra_usage_monthly_limit != null)
-              ) {
-                barWindows.push('overage');
-              }
+              const snap5h = latest?.windows.find((w) => w.window === '5h');
+              const utilization5h = snap5h?.utilization ?? null;
+              const pct5h =
+                utilization5h == null
+                  ? '—%'
+                  : `${(utilization5h * 100).toFixed(0)}%`;
+              const color5h = getWindowColor('5h');
               return (
                 <button
                   key={u.id}
@@ -207,81 +203,26 @@ function UpstreamsPage() {
                         {u.name}
                       </span>
                     </div>
-                    <div className="hidden @[240px]:flex items-center gap-2 text-[10px] font-mono shrink-0">
-                      <span className="text-text-faint">rev {u.revision}</span>
+                    <div className="hidden @[240px]:flex items-center shrink-0">
+                      <Badge tone="mono">{u.kind}</Badge>
                     </div>
                   </div>
-                  <div className="hidden @[240px]:flex items-center gap-2 mb-3 flex-wrap">
-                    <Badge tone="mono">{u.kind}</Badge>
-                  </div>
-                  <div className="flex flex-col gap-1.5 w-full">
-                    {barWindows.map((windowName) => {
-                      const snap = latest?.windows.find(
-                        (w) => w.window === windowName,
-                      );
-                      const color = getWindowColor(windowName);
-                      const label = windowLabel(windowName);
-                      let utilization = snap?.utilization ?? null;
-                      if (
-                        windowName === 'overage' &&
-                        utilization == null &&
-                        snap?.extra_usage_monthly_limit != null &&
-                        snap.extra_usage_monthly_limit > 0 &&
-                        snap.extra_usage_used_credits != null
-                      ) {
-                        utilization =
-                          snap.extra_usage_used_credits /
-                          snap.extra_usage_monthly_limit;
-                      }
-                      const pct =
-                        utilization == null
-                          ? '—%'
-                          : `${(utilization * 100).toFixed(0)}%`;
-                      const stateDot =
-                        snap?.state === 'fresh'
-                          ? 'bg-green-400'
-                          : snap?.state === 'stale'
-                            ? 'bg-amber-400'
-                            : '';
-                      return (
+                  <div className="flex items-center gap-2 w-full text-[10px] font-mono">
+                    <div className="w-6 shrink-0 text-text-faint">5h</div>
+                    <div className="flex-1 h-[5px] bg-progress-track rounded-full overflow-hidden">
+                      {utilization5h != null && (
                         <div
-                          key={windowName}
-                          className="flex items-center gap-2 w-full text-[10px] font-mono"
-                        >
-                          <div className="w-8 shrink-0 text-text-faint truncate">
-                            {windowName === 'overage' ? 'Extra' : label}
-                          </div>
-                          <div className="flex-1 h-[5px] bg-progress-track rounded-full overflow-hidden">
-                            {utilization != null && (
-                              <div
-                                className="h-full rounded-full"
-                                style={{
-                                  width: `${Math.min(100, Math.max(0, utilization * 100))}%`,
-                                  backgroundColor: color.stroke,
-                                }}
-                              />
-                            )}
-                          </div>
-                          <div className="w-8 shrink-0 text-right tabular-nums">
-                            {pct}
-                          </div>
-                          <div className="hidden @[240px]:flex w-2 shrink-0 justify-end">
-                            {stateDot && (
-                              <Hint
-                                label={`${snap?.state} · ${snap?.source} · ${snap?.age_secs ?? 0}s`}
-                              >
-                                <div
-                                  className={cx(
-                                    'w-1.5 h-1.5 rounded-full',
-                                    stateDot,
-                                  )}
-                                />
-                              </Hint>
-                            )}
-                          </div>
-                        </div>
-                      );
-                    })}
+                          className="h-full rounded-full"
+                          style={{
+                            width: `${Math.min(100, Math.max(0, utilization5h * 100))}%`,
+                            backgroundColor: color5h.stroke,
+                          }}
+                        />
+                      )}
+                    </div>
+                    <div className="w-8 shrink-0 text-right tabular-nums">
+                      {pct5h}
+                    </div>
                   </div>
                 </button>
               );
@@ -435,7 +376,7 @@ function SnapshotStatusComposite({ snap }: { snap: any }) {
   );
 }
 
-function PromotionalCreditsCard({ orgMeta }: { orgMeta: any }) {
+function PromotionalCreditsBadge({ orgMeta }: { orgMeta: any }) {
   const hasAny =
     orgMeta?.overage_credit_granted === true ||
     orgMeta?.overage_credit_eligible === true ||
@@ -447,29 +388,23 @@ function PromotionalCreditsCard({ orgMeta }: { orgMeta: any }) {
   }
   const amount = orgMeta.overage_credit_amount_minor_units;
   const currency = orgMeta.overage_credit_currency ?? 'USD';
+  const amountText =
+    amount == null
+      ? '—'
+      : `${(amount / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`;
+  const tone = orgMeta.overage_credit_granted ? 'ok' : 'neutral';
+  const status = orgMeta.overage_credit_granted
+    ? 'Granted'
+    : orgMeta.overage_credit_eligible
+      ? 'Eligible'
+      : 'Available';
   return (
-    <Card>
-      <CardHeader title="Promotional Credits" />
-      <CardBody className="text-sm space-y-2">
-        <div className="font-mono text-lg">
-          {amount == null
-            ? '—'
-            : `${(amount / 100).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${currency}`}
-        </div>
-        <div className="flex flex-wrap gap-2">
-          <StatusBadge
-            tone={orgMeta.overage_credit_granted ? 'ok' : 'neutral'}
-            label={orgMeta.overage_credit_granted ? 'Granted' : 'Not granted'}
-          />
-          <StatusBadge
-            tone={orgMeta.overage_credit_eligible ? 'ok' : 'warn'}
-            label={
-              orgMeta.overage_credit_eligible ? 'Eligible' : 'Not eligible'
-            }
-          />
-        </div>
-      </CardBody>
-    </Card>
+    <div className="rounded-sm border border-subtle bg-overlay-1 px-3 py-2 text-xs font-mono flex items-center gap-2">
+      <span className="text-text-faint">Promo credits:</span>
+      <span className="text-text">{amountText}</span>
+      <span className="text-text-muted/50">·</span>
+      <StatusBadge tone={tone} label={status} />
+    </div>
   );
 }
 
@@ -678,9 +613,152 @@ function DetailView({
   const orgMeta = subscriptionMetadataQ.data?.organization_metadata;
 
   const renderHeader = () => {
-    if (!isOauth) {
-      return (
-        <header className="px-4 md:px-6 py-4 border-b border-subtle flex items-start justify-between gap-3 flex-wrap shrink-0">
+    const fields: {
+      label: string;
+      value: React.ReactNode;
+      tooltip: string;
+    }[] = [];
+    let primaryLabels: Set<string>;
+
+    const commonIdFields: typeof fields = [
+      {
+        label: 'ID',
+        value: <span className="font-mono">{upstream.id.slice(0, 8)}…</span>,
+        tooltip: `Internal upstream identifier (${upstream.id})`,
+      },
+      {
+        label: 'Rev',
+        value: upstream.revision,
+        tooltip: 'Current configuration revision',
+      },
+    ];
+
+    if (isOauth) {
+      primaryLabels = new Set([
+        'ID',
+        'Rev',
+        'Plan',
+        'Rate',
+        'Extra Usage Billing',
+        'Account',
+      ]);
+      fields.push(...commonIdFields);
+      if (orgMeta?.organization_type)
+        fields.push({
+          label: 'Plan',
+          value: orgMeta.organization_type,
+          tooltip: 'Anthropic subscription tier',
+        });
+      if (orgMeta?.rate_limit_tier)
+        fields.push({
+          label: 'Rate',
+          value: orgMeta.rate_limit_tier,
+          tooltip:
+            'Rate-limit tier (Max 5x = base plan, Max 20x = power user, Pro = Pro plan)',
+        });
+      if (orgMeta?.has_extra_usage_enabled != null)
+        fields.push({
+          label: 'Extra Usage Billing',
+          value: orgMeta.has_extra_usage_enabled ? 'Enabled' : 'Disabled',
+          tooltip:
+            'Whether overage spending beyond plan quota is enabled (paid extra)',
+        });
+      if (orgMeta?.account_display_name || orgMeta?.account_email)
+        fields.push({
+          label: 'Account',
+          value: `${orgMeta.account_display_name || 'Unknown'} (${orgMeta.account_email || 'unknown'})`,
+          tooltip: 'OAuth token account identity',
+        });
+      if (orgMeta?.organization_name)
+        fields.push({
+          label: 'Org',
+          value: orgMeta.organization_name,
+          tooltip: 'Anthropic organization name',
+        });
+      if (subMeta?.organization_role)
+        fields.push({
+          label: 'Role',
+          value: subMeta.organization_role,
+          tooltip: 'Your role within the organization',
+        });
+      if (subMeta?.workspace_role)
+        fields.push({
+          label: 'Seat',
+          value: subMeta.workspace_role,
+          tooltip: 'Seat tier within team plans',
+        });
+      if (orgMeta?.subscription_created_at_unix_secs)
+        fields.push({
+          label: 'Subscribed',
+          value: (
+            <RelativeTime
+              ts={new Date(orgMeta.subscription_created_at_unix_secs * 1000)}
+            />
+          ),
+          tooltip: 'When this organization first subscribed',
+        });
+      if (orgMeta?.billing_type)
+        fields.push({
+          label: 'Billing',
+          value: orgMeta.billing_type,
+          tooltip: 'How the subscription is billed',
+        });
+    } else {
+      primaryLabels = new Set(['ID', 'Rev', 'Base URL']);
+      fields.push(...commonIdFields);
+      if (upstream.base_url)
+        fields.push({
+          label: 'Base URL',
+          value: <span className="font-mono">{upstream.base_url}</span>,
+          tooltip: 'Endpoint base URL for upstream requests',
+        });
+      if (upstream.api_key_env)
+        fields.push({
+          label: 'API Key',
+          value: <span className="font-mono">env:{upstream.api_key_env}</span>,
+          tooltip: `Loaded from the ${upstream.api_key_env} environment variable on the server`,
+        });
+      else if (
+        upstream.kind === 'anthropic_api_key' ||
+        upstream.kind === 'custom'
+      )
+        fields.push({
+          label: 'API Key',
+          value: 'literal',
+          tooltip: 'Stored inline (literal API key)',
+        });
+      if (upstream.shape_plugin?.registry_id)
+        fields.push({
+          label: 'Plugin',
+          value: (
+            <span className="font-mono">
+              {upstream.shape_plugin.registry_id}
+            </span>
+          ),
+          tooltip: 'WASM shape plugin handling request/response transforms',
+        });
+      if (upstreamRuntimeStatus?.last_apply_error)
+        fields.push({
+          label: 'Apply error',
+          value: (
+            <span className="text-red-400">
+              {upstreamRuntimeStatus.last_apply_error}
+            </span>
+          ),
+          tooltip: 'Most recent failed reconciliation',
+        });
+    }
+
+    const visibleFields = fields.filter(
+      (f) => showMoreMeta || primaryLabels.has(f.label),
+    );
+    const hiddenCount = fields.filter(
+      (f) => !primaryLabels.has(f.label),
+    ).length;
+
+    return (
+      <div className="sticky top-0 z-30 bg-bg-sub border-b border-subtle backdrop-blur-sm">
+        <div className="px-4 md:px-6 py-3 flex items-start justify-between gap-3 flex-wrap shrink-0">
           <div className="min-w-0">
             <button
               type="button"
@@ -690,7 +768,7 @@ function DetailView({
               <ChevronLeft className="w-3 h-3" /> Back
             </button>
             <div className="flex items-center gap-3 flex-wrap">
-              <h2 className="text-lg font-medium text-text truncate">
+              <h2 className="text-xl font-medium text-text truncate">
                 {upstream.name}
               </h2>
               <StatusBadge
@@ -698,9 +776,6 @@ function DetailView({
                 label={upstream.enabled ? 'Enabled' : 'Disabled'}
               />
               <Badge tone="mono">{upstream.kind}</Badge>
-            </div>
-            <div className="text-xs text-text-faint font-mono mt-0.5">
-              ID {upstream.id} · rev {upstream.revision}
             </div>
           </div>
           <div className="flex items-center gap-2 shrink-0">
@@ -742,156 +817,37 @@ function DetailView({
               Delete
             </Button>
           </div>
-        </header>
-      );
-    }
-
-    const fields: { label: string; value: React.ReactNode; tooltip: string }[] =
-      [];
-    if (orgMeta?.organization_type)
-      fields.push({
-        label: 'Plan',
-        value: orgMeta.organization_type,
-        tooltip: 'Anthropic subscription tier',
-      });
-    if (orgMeta?.rate_limit_tier)
-      fields.push({
-        label: 'Rate',
-        value: orgMeta.rate_limit_tier,
-        tooltip:
-          'Rate-limit tier (Max 5x = base plan, Max 20x = power user, Pro = Pro plan)',
-      });
-    if (orgMeta?.organization_name)
-      fields.push({
-        label: 'Org',
-        value: orgMeta.organization_name,
-        tooltip: 'Anthropic organization name',
-      });
-    if (subMeta?.organization_role)
-      fields.push({
-        label: 'Role',
-        value: subMeta.organization_role,
-        tooltip: 'Your role within the organization',
-      });
-    if (subMeta?.workspace_role)
-      fields.push({
-        label: 'Seat',
-        value: subMeta.workspace_role,
-        tooltip: 'Seat tier within team plans',
-      });
-    if (orgMeta?.subscription_created_at_unix_secs)
-      fields.push({
-        label: 'Subscribed',
-        value: (
-          <RelativeTime
-            ts={new Date(orgMeta.subscription_created_at_unix_secs * 1000)}
-          />
-        ),
-        tooltip: 'When this organization first subscribed',
-      });
-    if (orgMeta?.billing_type)
-      fields.push({
-        label: 'Billing',
-        value: orgMeta.billing_type,
-        tooltip: 'How the subscription is billed',
-      });
-    if (orgMeta?.has_extra_usage_enabled != null)
-      fields.push({
-        label: 'Extra Usage Billing',
-        value: orgMeta.has_extra_usage_enabled ? 'Enabled' : 'Disabled',
-        tooltip:
-          'Whether overage spending beyond plan quota is enabled (paid extra)',
-      });
-    if (orgMeta?.account_display_name || orgMeta?.account_email)
-      fields.push({
-        label: 'Account',
-        value: `${orgMeta.account_display_name || 'Unknown'} (${orgMeta.account_email || 'unknown'})`,
-        tooltip: 'OAuth token account identity',
-      });
-
-    return (
-      <div className="sticky top-0 z-30 bg-bg-sub border-b border-subtle backdrop-blur-sm">
-        <div className="px-4 md:px-6 py-3 flex items-start justify-between gap-3 flex-wrap shrink-0">
-          <div className="min-w-0">
-            <button
-              type="button"
-              onClick={onBack}
-              className="md:hidden inline-flex items-center gap-1 text-xs text-text-faint hover:text-text mb-1"
-            >
-              <ChevronLeft className="w-3 h-3" /> Back
-            </button>
-            <div className="flex items-center gap-3 flex-wrap">
-              <h2 className="text-xl font-medium text-text truncate">
-                {upstream.name}
-              </h2>
-              <StatusBadge
-                tone={upstream.enabled ? 'ok' : 'neutral'}
-                label={upstream.enabled ? 'Enabled' : 'Disabled'}
-              />
-              <Badge tone="mono">{upstream.kind}</Badge>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <Button
-              size="sm"
-              iconLeft={<Pencil className="w-3 h-3" />}
-              onClick={() => setEditOpen(true)}
-            >
-              Edit
-            </Button>
-            <Button
-              size="sm"
-              variant="danger"
-              iconLeft={<Trash2 className="w-3 h-3" />}
-              onClick={() => setConfirmDeleteOpen(true)}
-            >
-              Delete
-            </Button>
-          </div>
         </div>
-        {(() => {
-          const PRIMARY_LABELS = new Set([
-            'Plan',
-            'Rate',
-            'Extra Usage Billing',
-            'Account',
-          ]);
-          const visibleFields = fields.filter(
-            (f) => showMoreMeta || PRIMARY_LABELS.has(f.label),
-          );
-          const hiddenCount = fields.filter(
-            (f) => !PRIMARY_LABELS.has(f.label),
-          ).length;
-          if (fields.length === 0) return null;
-          return (
-            <div className="px-4 md:px-6 py-2 border-t border-subtle bg-overlay-1 flex items-center gap-3">
-              <div className="flex-1 min-w-0 overflow-x-auto whitespace-nowrap scrollbar-none">
-                <div className="flex items-center gap-2 text-xs font-mono text-text-faint">
-                  {visibleFields.map((f, i) => (
-                    <span key={f.label} className="flex items-center gap-2">
-                      <Hint label={f.tooltip}>
-                        <span className="cursor-help border-b border-dotted border-text-faint/30 hover:text-text transition-colors">
-                          <span className="text-text-muted">{f.label}:</span>{' '}
-                          <span className="text-text">{f.value}</span>
-                        </span>
-                      </Hint>
-                      {i < visibleFields.length - 1 && (
-                        <span className="text-text-muted/50">·</span>
-                      )}
-                    </span>
-                  ))}
-                </div>
+        {fields.length > 0 && (
+          <div className="px-4 md:px-6 py-2 border-t border-subtle bg-overlay-1 flex items-center gap-3">
+            <div className="flex-1 min-w-0 overflow-x-auto whitespace-nowrap scrollbar-none">
+              <div className="flex items-center gap-2 text-xs font-mono text-text-faint">
+                {visibleFields.map((f, i) => (
+                  <span key={f.label} className="flex items-center gap-2">
+                    <Hint label={f.tooltip}>
+                      <span className="cursor-help border-b border-dotted border-text-faint/30 hover:text-text transition-colors">
+                        <span className="text-text-muted">{f.label}:</span>{' '}
+                        <span className="text-text">{f.value}</span>
+                      </span>
+                    </Hint>
+                    {i < visibleFields.length - 1 && (
+                      <span className="text-text-muted/50">·</span>
+                    )}
+                  </span>
+                ))}
               </div>
-              <div className="flex items-center gap-2 shrink-0">
-                {hiddenCount > 0 && (
-                  <button
-                    type="button"
-                    onClick={() => setShowMoreMeta((v) => !v)}
-                    className="text-[11px] font-mono text-text-faint hover:text-text underline underline-offset-2"
-                  >
-                    {showMoreMeta ? 'Less' : `+${hiddenCount} more`}
-                  </button>
-                )}
+            </div>
+            <div className="flex items-center gap-2 shrink-0">
+              {hiddenCount > 0 && (
+                <button
+                  type="button"
+                  onClick={() => setShowMoreMeta((v) => !v)}
+                  className="text-[11px] font-mono text-text-faint hover:text-text underline underline-offset-2"
+                >
+                  {showMoreMeta ? 'Less' : `+${hiddenCount} more`}
+                </button>
+              )}
+              {isOauth && (
                 <Hint label="Refresh subscription metadata">
                   <button
                     type="button"
@@ -923,10 +879,10 @@ function DetailView({
                     />
                   </button>
                 </Hint>
-              </div>
+              )}
             </div>
-          );
-        })()}
+          </div>
+        )}
       </div>
     );
   };
@@ -936,6 +892,21 @@ function DetailView({
       {renderHeader()}
 
       <div className="flex-1 overflow-y-auto p-4 md:p-6 pb-8 md:pb-12 space-y-6">
+        {isOauth &&
+        (orgMeta?.claude_code_trial_ends_at ||
+          orgMeta?.payment_auth_hosted_invoice_url ||
+          orgMeta?.overage_credit_granted ||
+          orgMeta?.overage_credit_eligible ||
+          (orgMeta as any)?.overage_credit_available ||
+          (orgMeta?.overage_credit_amount_minor_units != null &&
+            orgMeta.overage_credit_amount_minor_units > 0)) ? (
+          <div className="space-y-2">
+            <TrialBanner orgMeta={orgMeta} />
+            <PaymentWarning orgMeta={orgMeta} />
+            <PromotionalCreditsBadge orgMeta={orgMeta} />
+          </div>
+        ) : null}
+
         <Section title="Subscription Quota">
           <Card>
             <CardHeader
@@ -1575,93 +1546,43 @@ function DetailView({
           </div>
         </Card>
 
-        <TrialBanner orgMeta={orgMeta} />
-        <PaymentWarning orgMeta={orgMeta} />
-        <PromotionalCreditsCard orgMeta={orgMeta} />
-
-        {(upstream.base_url ||
-          upstream.api_key_env ||
-          upstream.shape_plugin?.registry_id) && (
-          <Card>
-            <CardHeader title="Configuration" />
-            <CardBody className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-              {upstream.base_url ? (
-                <div>
-                  <div className="text-[11px] text-text-faint uppercase tracking-wider">
-                    Base URL
-                  </div>
-                  <div className="font-mono mt-0.5 break-all">
-                    {upstream.base_url}
-                  </div>
-                </div>
-              ) : null}
-              {upstream.api_key_env ? (
-                <div>
-                  <div className="text-[11px] text-text-faint uppercase tracking-wider">
-                    API Key Env
-                  </div>
-                  <div className="font-mono mt-0.5">{upstream.api_key_env}</div>
-                </div>
-              ) : null}
-              {upstream.shape_plugin?.registry_id ? (
-                <div>
-                  <div className="text-[11px] text-text-faint uppercase tracking-wider">
-                    Shape Plugin
-                  </div>
-                  <div className="font-mono mt-0.5">
-                    {upstream.shape_plugin.registry_id}
-                  </div>
-                </div>
-              ) : null}
-            </CardBody>
-          </Card>
-        )}
-
         {upstream.kind === 'anthropic_oauth'
           ? (() => {
               const principalEntry = upstreamOAuthQ.data?.has_credentials
                 ? upstreamOAuthQ.data
                 : null;
-              const runtimeStatus = upstreamRuntimeStatus?.status;
               const hasBoundToken = Boolean(principalEntry);
               const badge: OAuthBadge = upstreamOAuthQ.isLoading
                 ? { tone: 'neutral', label: 'Loading' }
                 : principalEntry
                   ? oauthBadge(principalEntry)
                   : { tone: 'neutral', label: 'Not connected' };
+              const connectButton = (
+                <Button
+                  size="sm"
+                  iconLeft={<KeyRound className="w-3 h-3" />}
+                  onClick={() => {
+                    oauthStart.mutate(upstream.id, {
+                      onSuccess: (res) => {
+                        setOauthState({
+                          authorize_url: res.authorize_url,
+                          state_token: res.state_token,
+                          code: '',
+                        });
+                        setOauthOpen(true);
+                      },
+                    });
+                  }}
+                >
+                  {hasBoundToken ? 'Reconnect' : 'Connect via OAuth'}
+                </Button>
+              );
               return (
                 <Card>
-                  <CardHeader
-                    title="OAuth Status"
-                    subtitle={
-                      hasBoundToken ? 'Bound on this upstream' : 'Not connected'
-                    }
-                    action={
-                      <Button
-                        size="sm"
-                        iconLeft={<KeyRound className="w-3 h-3" />}
-                        onClick={() => {
-                          oauthStart.mutate(upstream.id, {
-                            onSuccess: (res) => {
-                              setOauthState({
-                                authorize_url: res.authorize_url,
-                                state_token: res.state_token,
-                                code: '',
-                              });
-                              setOauthOpen(true);
-                            },
-                          });
-                        }}
-                      >
-                        {hasBoundToken
-                          ? 'Reconnect via OAuth'
-                          : 'Connect via OAuth'}
-                      </Button>
-                    }
-                  />
+                  <CardHeader title="OAuth Status" action={connectButton} />
                   <CardBody className="text-sm">
                     {statusQ.isLoading ? (
-                      <Skeleton className="h-12" />
+                      <Skeleton className="h-8" />
                     ) : !hasBoundToken ? (
                       <div className="flex flex-wrap items-center gap-3">
                         <StatusBadge tone={badge.tone} label={badge.label} />
@@ -1669,67 +1590,45 @@ function DetailView({
                           Run "Connect via OAuth" to authorize this upstream.
                         </p>
                       </div>
-                    ) : (
-                      <div className="space-y-3">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <StatusBadge tone={badge.tone} label={badge.label} />
-                          <span className="text-[11px] text-text-faint font-mono">
-                            runtime: {runtimeStatus}
-                          </span>
+                    ) : principalEntry ? (
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-xs font-mono">
+                        <StatusBadge tone={badge.tone} label={badge.label} />
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-text-faint">Expires:</span>
+                          <RelativeTime
+                            ts={
+                              principalEntry.expires_at_unix_secs
+                                ? new Date(
+                                    principalEntry.expires_at_unix_secs * 1000,
+                                  )
+                                : null
+                            }
+                          />
                         </div>
-                        {principalEntry ? (
-                          <>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                              <div>
-                                <div className="text-[11px] text-text-faint uppercase tracking-wider">
-                                  Expires
-                                </div>
-                                <div className="font-mono mt-0.5">
-                                  <RelativeTime
-                                    ts={
-                                      principalEntry.expires_at_unix_secs
-                                        ? new Date(
-                                            principalEntry.expires_at_unix_secs *
-                                              1000,
-                                          )
-                                        : null
-                                    }
-                                  />
-                                </div>
-                              </div>
-                              <div>
-                                <div className="text-[11px] text-text-faint uppercase tracking-wider">
-                                  Refresh token
-                                </div>
-                                <div className="mt-0.5">
-                                  {principalEntry.refresh_token_present ? (
-                                    'present'
-                                  ) : (
-                                    <span className="text-amber-400">
-                                      missing
-                                    </span>
-                                  )}
-                                </div>
-                              </div>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-text-faint">Refresh:</span>
+                          {principalEntry.refresh_token_present ? (
+                            <span>present</span>
+                          ) : (
+                            <span className="text-amber-400">missing</span>
+                          )}
+                        </div>
+                        {principalEntry.scopes.length ? (
+                          <Hint
+                            label={principalEntry.scopes.join(', ')}
+                          >
+                            <div className="flex items-center gap-1.5 cursor-help border-b border-dotted border-text-faint/30">
+                              <span className="text-text-faint">Scopes:</span>
+                              <span>{principalEntry.scopes.length}</span>
                             </div>
-                            {principalEntry.scopes.length ? (
-                              <div>
-                                <div className="text-[11px] text-text-faint uppercase tracking-wider">
-                                  Scopes
-                                </div>
-                                <div className="font-mono mt-0.5 break-all text-xs">
-                                  {principalEntry.scopes.join(', ')}
-                                </div>
-                              </div>
-                            ) : null}
-                          </>
-                        ) : (
-                          <p className="text-xs text-text-faint">
-                            Token is bound on the upstream but no credential
-                            details are available right now.
-                          </p>
-                        )}
+                          </Hint>
+                        ) : null}
                       </div>
+                    ) : (
+                      <p className="text-xs text-text-faint">
+                        Token is bound on the upstream but no credential details
+                        are available right now.
+                      </p>
                     )}
                   </CardBody>
                 </Card>
