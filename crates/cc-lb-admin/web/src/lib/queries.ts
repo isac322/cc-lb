@@ -53,7 +53,7 @@ export interface Upstream {
   revision: number;
   base_url?: string | null;
   api_key_env?: string | null;
-  shape_plugin?: { wasm_registry_id: string } | null;
+  shape_plugin?: { registry_id: string } | null;
 }
 interface UpstreamListResp {
   upstreams: Upstream[];
@@ -155,8 +155,8 @@ export const qk = {
   health: ['health'] as const,
   status: ['status'] as const,
   summary: (range: string) => ['summary', range] as const,
-  usage: (range: string, step: string, group: string) =>
-    ['usage', range, step, group] as const,
+  usage: (range: string, step: string, group: string, upstreamId?: string) =>
+    ['usage', range, step, group, upstreamId ?? null] as const,
   upstreams: ['upstreams'] as const,
   upstream: (id: string) => ['upstream', id] as const,
   principals: ['principals'] as const,
@@ -229,13 +229,21 @@ export function useUsage(
   range: string,
   step: string,
   group: 'none' | 'model' | 'principal' | 'upstream',
+  upstreamId?: string,
 ) {
   return useQuery({
-    queryKey: qk.usage(range, step, group),
-    queryFn: () =>
-      getJson<DashboardUsageResponse>(
-        `/admin/usage?range=${encodeURIComponent(range)}&step=${encodeURIComponent(step)}&group_by=${encodeURIComponent(group)}`,
-      ),
+    queryKey: qk.usage(range, step, group, upstreamId),
+    queryFn: () => {
+      const params = new URLSearchParams({
+        range,
+        step,
+        group_by: group,
+      });
+      if (upstreamId) params.set('upstream_id', upstreamId);
+      return getJson<DashboardUsageResponse>(
+        `/admin/usage?${params.toString()}`,
+      );
+    },
     refetchInterval: 30_000,
   });
 }
@@ -561,7 +569,7 @@ export interface UpdateUpstreamRequest {
   base_url?: string | null;
   api_key_env?: string | null;
   api_key_value?: string | null;
-  shape_plugin?: { wasm_registry_id: string } | null;
+  shape_plugin?: { registry_id: string } | null;
 }
 export function useUpdateUpstream() {
   const qc = useQueryClient();
