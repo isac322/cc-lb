@@ -378,3 +378,14 @@
 - `cc_lb_cache_token_drift{upstream,model}` records `actual cache_read_input_tokens - chosen candidate predicted_cache_read_tokens`; `predicted=0` remains meaningful for upstream-cache false negatives.
 - `cc_lb_cache_observation_dropped_total{reason}` uses the fixed reason set `queue_full`, `below_threshold`, `status_4xx`, `abort`.
 - `cc_lb_cache_observation_write_failed_total{store}` is emitted by the prompt-cache observation sink writer with static store labels such as `redb` and `postgres`.
+
+## 2026-06-07T00:00:00Z Task: 32 (Observability runbook docs)
+- **File added**: `crates/cc-lb-observability/RUNBOOK.md`
+- **Metrics documented**:
+  1. `cc_lb_cache_token_drift` (histogram)
+  2. `cc_lb_cache_hit_total` (counter)
+  3. `cc_lb_cache_miss_total` (counter)
+  4. `cc_lb_cache_observation_dropped_total` (counter)
+  5. `cc_lb_cache_observation_write_failed_total` (counter)
+- **Troubleshooting runbook**: Added a detailed runbook for when the prompt cache hit-rate suddenly drops.
+- **Verification**: Verified that all 5 metrics are present in the runbook using grep and saved the output to `.omo/evidence/task-32-runbook.txt`.
