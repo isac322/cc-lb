@@ -460,11 +460,13 @@ pub(crate) struct PluginSlot {
 
 impl PluginSlot {
     fn new(entry: PluginEntry, cell: PluginCell) -> Self {
-        Self {
+        let slot = Self {
             name: entry.name.clone(),
             entry: RwLock::new(entry),
             current: ArcSwap::from_pointee(cell),
-        }
+        };
+        slot.log_negotiated_wire_version();
+        slot
     }
 
     fn replace(&self, entry: PluginEntry, cell: PluginCell) -> Result<(), RuntimeError> {
@@ -473,6 +475,7 @@ impl PluginSlot {
             .entry
             .write()
             .map_err(|_| runtime_error("plugin entry lock poisoned"))? = entry;
+        self.log_negotiated_wire_version();
         Ok(())
     }
 
@@ -491,6 +494,16 @@ impl PluginSlot {
             .read()
             .map_err(|_| runtime_error("plugin entry lock poisoned"))?
             .negotiated_wire_version)
+    }
+
+    fn log_negotiated_wire_version(&self) {
+        if let Ok(wire_version) = self.negotiated_wire_version() {
+            tracing::debug!(
+                plugin = %self.name,
+                wire_version,
+                "plugin wire version negotiated"
+            );
+        }
     }
 
     fn function_exists(&self, hook: &str) -> Result<bool, RuntimeError> {
