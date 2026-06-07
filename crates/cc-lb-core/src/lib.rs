@@ -13,7 +13,7 @@ mod bulkhead;
 #[cfg(not(loom))]
 mod circuit_breaker;
 #[cfg(not(loom))]
-mod clock;
+pub mod clock;
 #[cfg(not(loom))]
 mod dashboard_broadcaster;
 #[cfg(not(loom))]
@@ -29,7 +29,7 @@ mod error_normalizer;
 #[cfg(not(loom))]
 mod hop_by_hop;
 #[cfg(not(loom))]
-mod lifecycle;
+pub mod lifecycle;
 #[cfg(not(loom))]
 pub mod poll_schedule_estimator;
 #[cfg(not(loom))]
@@ -43,6 +43,8 @@ mod sse_relay;
 pub mod subscription_metadata_hook;
 #[cfg(not(loom))]
 pub mod subscription_quota_events;
+#[cfg(not(loom))]
+pub mod tokenizer;
 #[cfg(not(loom))]
 pub mod upstream_rate_limit_events;
 #[cfg(not(loom))]
@@ -66,7 +68,7 @@ pub use circuit_breaker::{
     CircuitBreakerConfig, CircuitBreakerDispatch, Permit,
 };
 #[cfg(not(loom))]
-pub use clock::{Clock, MockClock, SystemClock};
+pub use clock::{Clock, ClockHandle, SystemClock, TestClock};
 #[cfg(not(loom))]
 pub use dashboard_broadcaster::{DashboardBroadcaster, record_dashboard_sse_lagged};
 #[doc(hidden)]
