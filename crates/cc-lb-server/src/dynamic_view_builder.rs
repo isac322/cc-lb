@@ -162,6 +162,7 @@ pub async fn build_dynamic_view(
     data_dir: &Path,
     subscription_quota_cache: Arc<SubscriptionQuotaCache>,
     subscription_quota_routing_max_staleness_secs: u64,
+    config: &cc_lb_config::Config,
 ) -> Result<Arc<DynamicView>, RebindError> {
     let upstreams = list_upstreams(stores).await?;
     let all_upstream_ids = upstreams
@@ -202,6 +203,14 @@ pub async fn build_dynamic_view(
             new_prompt_cache_observation_cache()
         }
     };
+    if config.prompt_cache_shadow.enabled {
+        let cache_clone = Arc::clone(&prompt_cache_observation_cache);
+        let store_clone = stores.prompt_cache_observations.clone();
+        let interval_secs = config.prompt_cache_shadow.sweeper_interval_secs;
+        tokio::spawn(async move {
+            let _ = cache_clone.spawn_sweeper(store_clone, interval_secs).await;
+        });
+    }
     let upstream_rate_limit_records = stores
         .upstream_rate_limits
         .list_for_upstream_ids(&all_upstream_ids)
@@ -921,6 +930,7 @@ mod tests {
             data_dir,
             Arc::new(SubscriptionQuotaCache::new()),
             1800,
+            &cc_lb_config::Config::default(),
         )
         .await
         .expect("dynamic view builds")

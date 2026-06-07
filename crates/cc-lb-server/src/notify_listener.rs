@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use cc_lb_aead::AeadService;
-use cc_lb_config::AnthropicOAuthConfig;
+use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_core::DynamicViewHolder;
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_storage_api::{ChangeChannel, ChangeEvent, RuntimeChangeNotifier};
@@ -26,6 +26,7 @@ pub struct NotifyListener {
     lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     subscription_quota_cache: Arc<SubscriptionQuotaCache>,
     subscription_quota_routing_max_staleness_secs: u64,
+    config: Arc<Config>,
 }
 
 pub struct NotifyListenerParams {
@@ -40,6 +41,7 @@ pub struct NotifyListenerParams {
     pub lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>>,
     pub subscription_quota_cache: Arc<SubscriptionQuotaCache>,
     pub subscription_quota_routing_max_staleness_secs: u64,
+    pub config: Arc<Config>,
 }
 
 impl NotifyListener {
@@ -57,6 +59,7 @@ impl NotifyListener {
             subscription_quota_cache: params.subscription_quota_cache,
             subscription_quota_routing_max_staleness_secs: params
                 .subscription_quota_routing_max_staleness_secs,
+            config: params.config,
         }
     }
 
@@ -127,6 +130,7 @@ impl NotifyListener {
             &self.data_dir,
             self.subscription_quota_cache.clone(),
             self.subscription_quota_routing_max_staleness_secs,
+            &self.config,
         )
         .await
         {

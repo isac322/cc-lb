@@ -569,7 +569,7 @@ impl Default for AnthropicCompatPollerConfig {
 /// - `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence
 /// - `sweeper_interval_secs` (default: 300) - interval between expiry purge scans
 /// - `warm_set_cap` (default: 32) - max snapshot entries per upstream/model
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct PromptCacheShadowConfig {
     #[serde(default)]
