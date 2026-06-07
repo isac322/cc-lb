@@ -1,8 +1,8 @@
 //! Clock abstraction for deterministic TTL math in cache layers.
 //! SystemClock for prod, TestClock for tests. ClockHandle = Arc<dyn Clock>.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// Trait for time sources used in TTL and quota calculations.
@@ -105,13 +105,25 @@ mod tests {
         assert_eq!(clock.now_unix_secs(), 0, "TestClock should start at 0");
 
         clock.advance_secs(60);
-        assert_eq!(clock.now_unix_secs(), 60, "After advance_secs(60), should be at 60");
+        assert_eq!(
+            clock.now_unix_secs(),
+            60,
+            "After advance_secs(60), should be at 60"
+        );
 
         clock.set_unix_secs(100);
-        assert_eq!(clock.now_unix_secs(), 100, "After set_unix_secs(100), should be at 100");
+        assert_eq!(
+            clock.now_unix_secs(),
+            100,
+            "After set_unix_secs(100), should be at 100"
+        );
 
         clock.advance_secs(50);
-        assert_eq!(clock.now_unix_secs(), 150, "After advance_secs(50), should be at 150");
+        assert_eq!(
+            clock.now_unix_secs(),
+            150,
+            "After advance_secs(50), should be at 150"
+        );
     }
 
     #[test]
@@ -119,7 +131,11 @@ mod tests {
         let test_clock = TestClock::new_at_secs(100);
         let handle: ClockHandle = Arc::new(test_clock);
 
-        assert_eq!(handle.now_unix_secs(), 100, "ClockHandle should dispatch to TestClock");
+        assert_eq!(
+            handle.now_unix_secs(),
+            100,
+            "ClockHandle should dispatch to TestClock"
+        );
         assert_eq!(
             handle.now_unix_millis(),
             100_000,

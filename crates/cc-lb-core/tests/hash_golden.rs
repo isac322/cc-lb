@@ -57,7 +57,11 @@ fn golden_base_request_hash_stable() {
         "base_request hash changed. Current: {}, Expected: {}",
         computed_hash, expected_hash
     );
-    assert_eq!(computed_hash.len(), 64, "Hash should be 64 hex chars (SHA-256)");
+    assert_eq!(
+        computed_hash.len(),
+        64,
+        "Hash should be 64 hex chars (SHA-256)"
+    );
 }
 
 #[test]
@@ -147,10 +151,7 @@ fn golden_alias_vs_dated_v1() {
     );
 
     eprintln!("v1 alias hash (claude-sonnet-4-5): {}", alias_hash);
-    eprintln!(
-        "v1 dated hash (claude-sonnet-4-5-20250929): {}",
-        dated_hash
-    );
+    eprintln!("v1 dated hash (claude-sonnet-4-5-20250929): {}", dated_hash);
 
     assert_ne!(
         alias_hash, dated_hash,

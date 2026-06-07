@@ -752,6 +752,8 @@ fn shaped_request() -> ShapedRequest {
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(b"{}"),
+        cache_breakpoints: Vec::new(),
+        canonical_model_id: String::new(),
     };
     let principal = cc_lb_plugin_api::Principal {
         id: "principal".to_owned(),

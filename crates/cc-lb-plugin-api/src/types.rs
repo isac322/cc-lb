@@ -268,6 +268,9 @@ pub struct UpstreamCandidate {
     pub subscription_quotas: Vec<SubscriptionQuotaCandidateSnapshot>,
     /// Unix timestamp in seconds for the candidate observation snapshot.
     pub observed_at_unix_secs: u64,
+    /// Predicted cache utility for this candidate, if available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_score: Option<CacheScore>,
 }
 
 /// Credential strategy expected by a selected upstream.
@@ -297,6 +300,10 @@ pub struct RequestContext {
     pub query: Option<String>,
     /// Buffered request body bytes, required by SigV4 and other signing schemes.
     pub body_bytes: Bytes,
+    /// Cache breakpoints extracted from the request for prompt cache optimization.
+    pub cache_breakpoints: Vec<CacheBreakpoint>,
+    /// Canonical model identifier resolved from the request.
+    pub canonical_model_id: String,
 }
 
 /// Request produced by an upstream dialect before credentials are applied.
@@ -565,6 +572,9 @@ pub struct PluginManifest {
     pub name: String,
     /// Filesystem path or runtime-specific locator for the plugin artifact.
     pub artifact: String,
+    /// Preferred plugin wire envelope version. Omitted manifests default to v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_version: Option<u8>,
     /// Runtime configuration provided to the plugin.
     pub config: serde_json::Value,
     /// Runtime-specific metadata not interpreted by the core API contract.
@@ -655,7 +665,17 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(manifest.name, "authn");
+        assert_eq!(manifest.wire_version, None);
         assert!(manifest.metadata.is_empty());
+
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "name": "cache-aware",
+            "artifact": "plugin.wasm",
+            "wire_version": 2,
+            "config": {}
+        }))
+        .unwrap();
+        assert_eq!(manifest.wire_version, Some(2));
     }
 
     #[test]
@@ -767,13 +787,148 @@ mod tests {
         };
         let json = serde_json::to_string(&cache_score).unwrap();
         let decoded: CacheScore = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded.predicted_cache_read_tokens, cache_score.predicted_cache_read_tokens);
-        assert_eq!(decoded.predicted_cache_creation_tokens_5m, cache_score.predicted_cache_creation_tokens_5m);
-        assert_eq!(decoded.predicted_cache_creation_tokens_1h, cache_score.predicted_cache_creation_tokens_1h);
-        assert_eq!(decoded.predicted_uncached_input_tokens, cache_score.predicted_uncached_input_tokens);
-        assert_eq!(decoded.predicted_expires_at_unix_secs, cache_score.predicted_expires_at_unix_secs);
-        assert_eq!(decoded.matched_breakpoint_index, cache_score.matched_breakpoint_index);
+        assert_eq!(
+            decoded.predicted_cache_read_tokens,
+            cache_score.predicted_cache_read_tokens
+        );
+        assert_eq!(
+            decoded.predicted_cache_creation_tokens_5m,
+            cache_score.predicted_cache_creation_tokens_5m
+        );
+        assert_eq!(
+            decoded.predicted_cache_creation_tokens_1h,
+            cache_score.predicted_cache_creation_tokens_1h
+        );
+        assert_eq!(
+            decoded.predicted_uncached_input_tokens,
+            cache_score.predicted_uncached_input_tokens
+        );
+        assert_eq!(
+            decoded.predicted_expires_at_unix_secs,
+            cache_score.predicted_expires_at_unix_secs
+        );
+        assert_eq!(
+            decoded.matched_breakpoint_index,
+            cache_score.matched_breakpoint_index
+        );
         assert!((decoded.confidence - cache_score.confidence).abs() < 0.0001);
         assert_eq!(decoded.ambiguity_reason, cache_score.ambiguity_reason);
+    }
+
+    #[test]
+    fn upstream_candidate_cache_score_roundtrip() {
+        let candidate_no_cache = UpstreamCandidate {
+            upstream_id: Uuid::new_v4(),
+            name: "test-upstream".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            observed_rate_limits: vec![],
+            subscription_quotas: vec![],
+            observed_at_unix_secs: 1700000000,
+            cache_score: None,
+        };
+        let json = serde_json::to_string(&candidate_no_cache).unwrap();
+        let decoded: UpstreamCandidate = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.upstream_id, candidate_no_cache.upstream_id);
+        assert_eq!(decoded.name, candidate_no_cache.name);
+        assert_eq!(decoded.cache_score, None);
+
+        let cache_score = CacheScore {
+            predicted_cache_read_tokens: 50,
+            predicted_cache_creation_tokens_5m: 100,
+            predicted_cache_creation_tokens_1h: 200,
+            predicted_uncached_input_tokens: 25,
+            predicted_expires_at_unix_secs: Some(1700000000),
+            matched_breakpoint_index: Some(0),
+            confidence: 0.95,
+            ambiguity_reason: None,
+        };
+        let candidate_with_cache = UpstreamCandidate {
+            upstream_id: Uuid::new_v4(),
+            name: "test-upstream-cached".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            observed_rate_limits: vec![],
+            subscription_quotas: vec![],
+            observed_at_unix_secs: 1700000000,
+            cache_score: Some(cache_score),
+        };
+        let json = serde_json::to_string(&candidate_with_cache).unwrap();
+        let decoded: UpstreamCandidate = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.upstream_id, candidate_with_cache.upstream_id);
+        assert_eq!(decoded.name, candidate_with_cache.name);
+        assert!(decoded.cache_score.is_some());
+        assert_eq!(decoded.cache_score.unwrap().predicted_cache_read_tokens, 50);
+    }
+
+    #[test]
+    fn request_context_cache_fields_roundtrip() {
+        let ctx_empty = RequestContext {
+            request_id: "req-1".to_owned(),
+            downstream_headers: HeaderMap::new(),
+            method: Method::POST,
+            path: "/v1/messages".to_owned(),
+            query: None,
+            body_bytes: Bytes::new(),
+            cache_breakpoints: Vec::new(),
+            canonical_model_id: String::new(),
+        };
+        assert_eq!(ctx_empty.cache_breakpoints.len(), 0);
+        assert_eq!(ctx_empty.canonical_model_id, "");
+
+        let breakpoint = CacheBreakpoint {
+            block_index: 1,
+            source: CacheBreakpointSource::Message,
+            path: "messages.0.content.0".to_owned(),
+            message_index: Some(0),
+            prefix_hash: "hash123".to_owned(),
+            prefix_token_count: 150,
+            requested_ttl: TtlClass::Ephemeral1h,
+            origin: BreakpointOrigin::Explicit,
+        };
+        let ctx_populated = RequestContext {
+            request_id: "req-2".to_owned(),
+            downstream_headers: HeaderMap::new(),
+            method: Method::POST,
+            path: "/v1/messages".to_owned(),
+            query: Some("param=value".to_owned()),
+            body_bytes: Bytes::from_static(b"test"),
+            cache_breakpoints: vec![breakpoint],
+            canonical_model_id: "claude-sonnet-4-5-20250929".to_owned(),
+        };
+        assert_eq!(ctx_populated.cache_breakpoints.len(), 1);
+        assert_eq!(
+            ctx_populated.canonical_model_id,
+            "claude-sonnet-4-5-20250929"
+        );
+    }
+
+    #[test]
+    fn upstream_candidate_deserialize_without_cache_score_field() {
+        let json = r#"{
+            "upstream_id": "00000000-0000-0000-0000-000000000001",
+            "name": "legacy-upstream",
+            "kind": "anthropic_api_key",
+            "observed_rate_limits": [],
+            "subscription_quotas": [],
+            "observed_at_unix_secs": 1700000000
+        }"#;
+        let candidate: UpstreamCandidate = serde_json::from_str(json).unwrap();
+        assert!(candidate.cache_score.is_none());
+        assert_eq!(candidate.name, "legacy-upstream");
+    }
+
+    #[test]
+    fn request_context_cache_breakpoints_default_on_missing_fields() {
+        let ctx = RequestContext {
+            request_id: "test".to_owned(),
+            downstream_headers: HeaderMap::new(),
+            method: Method::GET,
+            path: "/test".to_owned(),
+            query: None,
+            body_bytes: Bytes::new(),
+            cache_breakpoints: Vec::new(),
+            canonical_model_id: String::new(),
+        };
+        assert!(ctx.cache_breakpoints.is_empty());
+        assert!(ctx.canonical_model_id.is_empty());
     }
 }

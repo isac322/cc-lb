@@ -30,6 +30,7 @@ fn wire_compat_round_robin_unchanged_v1() {
     let manifest = PluginManifest {
         name: "round-robin-compat".to_owned(),
         artifact: snapshot_path.to_owned(),
+        wire_version: None,
         config: json!({}),
         metadata: BTreeMap::new(),
     };
@@ -41,7 +42,11 @@ fn wire_compat_round_robin_unchanged_v1() {
 
     // Build a minimal v1 RouteRequest with one candidate.
     let route_response = router
-        .route(&common::ctx(), &common::principal(), &[common::candidate_wire()])
+        .route(
+            &common::ctx(),
+            &common::principal(),
+            &[common::candidate_wire()],
+        )
         .expect("route() invoked successfully");
 
     // Verify the RouteResponse is well-formed:
@@ -74,6 +79,7 @@ fn wire_compat_round_robin_no_candidates_v1() {
     let manifest = PluginManifest {
         name: "round-robin-compat-empty".to_owned(),
         artifact: snapshot_path.to_owned(),
+        wire_version: None,
         config: json!({}),
         metadata: BTreeMap::new(),
     };

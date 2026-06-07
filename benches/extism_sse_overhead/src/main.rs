@@ -237,6 +237,7 @@ impl ObserveFixture {
             manifest: PluginManifest {
                 name: format!("observe-{name}"),
                 artifact: artifact.display().to_string(),
+                wire_version: None,
                 config: json!({}),
                 metadata,
             },

@@ -16,6 +16,7 @@ fn v2_mirrors_v1_byte_compat() {
         observed_rate_limits: Vec::new(),
         subscription_quotas: Vec::new(),
         observed_at_unix_secs: 1_717_171_717,
+        cache_score: None,
     };
 
     let v1_json = serde_json::to_string(&v1_candidate).unwrap();

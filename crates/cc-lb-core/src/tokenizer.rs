@@ -1,8 +1,8 @@
 //! Single tokenizer wrapper. o200k_base used for ALL Anthropic models.
 //! Drift expected (Anthropic uses its own tokenizer); monitored via cc_lb_cache_token_drift metric.
 
-use std::sync::OnceLock;
 use serde_json::Value as JsonValue;
+use std::sync::OnceLock;
 use tiktoken_rs::o200k_base;
 
 /// Wraps the o200k_base tokenizer for consistent token counting across the proxy.
@@ -30,8 +30,7 @@ impl PrefixTokenizer {
 
     /// Count tokens for a JSON prefix (serialized to string first).
     pub fn count_tokens_for_prefix(&self, body_prefix_json: &JsonValue) -> usize {
-        let serialized = serde_json::to_string(body_prefix_json)
-            .unwrap_or_else(|_| String::new());
+        let serialized = serde_json::to_string(body_prefix_json).unwrap_or_else(|_| String::new());
         self.count_tokens(&serialized)
     }
 
@@ -64,7 +63,10 @@ mod tests {
     fn count_tokens_basic() {
         let tokenizer = PrefixTokenizer::global();
         let count = tokenizer.count_tokens("Hello, world!");
-        assert!(count > 0, "Expected non-zero token count for 'Hello, world!'");
+        assert!(
+            count > 0,
+            "Expected non-zero token count for 'Hello, world!'"
+        );
     }
 
     #[test]
@@ -82,18 +84,27 @@ mod tests {
     fn is_above_threshold_for_sonnet_at_1024() {
         let tokenizer = PrefixTokenizer::global();
         let model = "claude-3-5-sonnet-20241022";
-        
+
         // Below threshold (512 < 1024)
-        assert!(!tokenizer.is_above_threshold(512, model), 
-            "512 tokens should be below threshold for {}", model);
-        
+        assert!(
+            !tokenizer.is_above_threshold(512, model),
+            "512 tokens should be below threshold for {}",
+            model
+        );
+
         // At threshold (1024 >= 1024)
-        assert!(tokenizer.is_above_threshold(1024, model),
-            "1024 tokens should be at/above threshold for {}", model);
-        
+        assert!(
+            tokenizer.is_above_threshold(1024, model),
+            "1024 tokens should be at/above threshold for {}",
+            model
+        );
+
         // Above threshold (2048 >= 1024)
-        assert!(tokenizer.is_above_threshold(2048, model),
-            "2048 tokens should be above threshold for {}", model);
+        assert!(
+            tokenizer.is_above_threshold(2048, model),
+            "2048 tokens should be above threshold for {}",
+            model
+        );
     }
 
     #[test]
@@ -114,7 +125,10 @@ mod tests {
         let count = tokenizer.count_tokens(text);
         assert!(count > 0, "Expected positive token count");
         // o200k_base should tokenize this into roughly 9-10 tokens
-        assert!(count >= 8 && count <= 12, 
-            "Expected ~10 tokens for test text, got {}", count);
+        assert!(
+            count >= 8 && count <= 12,
+            "Expected ~10 tokens for test text, got {}",
+            count
+        );
     }
 }

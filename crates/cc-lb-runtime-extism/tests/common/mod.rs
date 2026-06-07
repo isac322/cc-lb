@@ -24,6 +24,7 @@ pub fn fixture(name: &str, wat: &str, metadata: BTreeMap<String, Value>) -> Wasm
         manifest: PluginManifest {
             name: name.to_owned(),
             artifact: artifact.to_string_lossy().into_owned(),
+            wire_version: None,
             config: json!({}),
             metadata,
         },
@@ -50,6 +51,8 @@ pub fn ctx() -> RequestContext {
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(br#"{"model":"claude-test"}"#),
+        cache_breakpoints: Vec::new(),
+        canonical_model_id: String::new(),
     }
 }
 

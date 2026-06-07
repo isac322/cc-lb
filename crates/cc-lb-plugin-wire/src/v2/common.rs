@@ -129,6 +129,8 @@ pub struct CandidateWire {
     pub observed_rate_limits: Vec<RateLimitObservationWire>,
     pub subscription_quotas: Vec<SubscriptionQuotaCandidateSnapshotWire>,
     pub observed_at_unix_secs: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_score: Option<CacheScoreWire>,
 }
 
 impl CandidateWire {
@@ -140,6 +142,7 @@ impl CandidateWire {
             observed_rate_limits: Vec::new(),
             subscription_quotas: Vec::new(),
             observed_at_unix_secs: 0,
+            cache_score: None,
         }
     }
 }
@@ -266,5 +269,147 @@ impl ObserveEventWire {
             request_id: String::from("dry-run-request"),
             downstream_user_agent: None,
         }
+    }
+}
+
+// Cache-related wire types (v2 only)
+
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum TtlClassWire {
+    #[default]
+    Ephemeral5m,
+    Ephemeral1h,
+}
+
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum BreakpointOriginWire {
+    Explicit,
+    AutoCacheInferred,
+}
+
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "snake_case")]
+pub enum CacheBreakpointSourceWire {
+    Tools,
+    System,
+    Message,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheBreakpointWire {
+    pub block_index: u32,
+    pub source: CacheBreakpointSourceWire,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message_index: Option<u32>,
+    pub prefix_hash: String,
+    pub prefix_token_count: u64,
+    pub requested_ttl: TtlClassWire,
+    pub origin: BreakpointOriginWire,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WarmCacheEntryWire {
+    pub prefix_hash: String,
+    pub expires_at_unix_secs: u64,
+    pub ttl_class: TtlClassWire,
+    pub last_observed_at_unix_secs: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CacheScoreWire {
+    pub predicted_cache_read_tokens: u32,
+    pub predicted_cache_creation_tokens_5m: u32,
+    pub predicted_cache_creation_tokens_1h: u32,
+    pub predicted_uncached_input_tokens: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub predicted_expires_at_unix_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub matched_breakpoint_index: Option<u32>,
+    pub confidence: f32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ambiguity_reason: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cache_score_wire_roundtrip() {
+        let score = CacheScoreWire {
+            predicted_cache_read_tokens: 1000,
+            predicted_cache_creation_tokens_5m: 200,
+            predicted_cache_creation_tokens_1h: 0,
+            predicted_uncached_input_tokens: 50,
+            predicted_expires_at_unix_secs: Some(1700000000),
+            matched_breakpoint_index: Some(0),
+            confidence: 0.85,
+            ambiguity_reason: None,
+        };
+        let json = serde_json::to_string(&score).unwrap();
+        let parsed: CacheScoreWire = serde_json::from_str(&json).unwrap();
+        assert_eq!(score, parsed);
+    }
+
+    #[test]
+    fn candidate_wire_with_cache_score_roundtrip() {
+        let candidate = CandidateWire {
+            upstream_id: String::from("00000000-0000-0000-0000-000000000000"),
+            name: String::from("test-upstream"),
+            kind: String::from("anthropic_api_key"),
+            observed_rate_limits: Vec::new(),
+            subscription_quotas: Vec::new(),
+            observed_at_unix_secs: 1_717_171_717,
+            cache_score: Some(CacheScoreWire {
+                predicted_cache_read_tokens: 500,
+                predicted_cache_creation_tokens_5m: 100,
+                predicted_cache_creation_tokens_1h: 50,
+                predicted_uncached_input_tokens: 25,
+                predicted_expires_at_unix_secs: None,
+                matched_breakpoint_index: Some(1),
+                confidence: 0.95,
+                ambiguity_reason: None,
+            }),
+        };
+        let json = serde_json::to_string(&candidate).unwrap();
+        let parsed: CandidateWire = serde_json::from_str(&json).unwrap();
+        assert_eq!(candidate, parsed);
+    }
+
+    #[test]
+    fn candidate_wire_without_cache_score_deserializes() {
+        let json = r#"{
+            "upstream_id": "11111111-1111-1111-1111-111111111111",
+            "name": "legacy-upstream",
+            "kind": "anthropic_api_key",
+            "observed_rate_limits": [],
+            "subscription_quotas": [],
+            "observed_at_unix_secs": 1000000000
+        }"#;
+        let parsed: CandidateWire = serde_json::from_str(json).unwrap();
+        assert_eq!(parsed.cache_score, None);
+    }
+
+    #[test]
+    fn cache_breakpoint_wire_roundtrip() {
+        let bp = CacheBreakpointWire {
+            block_index: 0,
+            source: CacheBreakpointSourceWire::Tools,
+            path: String::from("/v1/messages/create"),
+            message_index: Some(5),
+            prefix_hash: String::from("abc123def456"),
+            prefix_token_count: 2048,
+            requested_ttl: TtlClassWire::Ephemeral5m,
+            origin: BreakpointOriginWire::Explicit,
+        };
+        let json = serde_json::to_string(&bp).unwrap();
+        let parsed: CacheBreakpointWire = serde_json::from_str(&json).unwrap();
+        assert_eq!(bp, parsed);
     }
 }
