@@ -1,0 +1,11 @@
+    Blocking waiting for file lock on package cache
+    Blocking waiting for file lock on package cache
+    Finished `release` profile [optimized] target(s) in 0.25s
+     Running tests/cache_memory_bound.rs (target/release/deps/cache_memory_bound-101e01988ba3bd94)
+
+running 1 test
+cache_memory_bound: before_bytes=1255360 after_bytes=22979952 delta_mib=20 observation_count=100000
+test prompt_cache_100k_observations_under_200mib ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.03s
+
