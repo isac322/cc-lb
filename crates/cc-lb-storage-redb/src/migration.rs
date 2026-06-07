@@ -24,9 +24,11 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
     let write_txn = db.begin_write()?;
     let stored_version;
     let reset_usage_rollups;
+    let old_version;
     {
         let schema = write_txn.open_table(SCHEMA_VERSION_V1)?;
         stored_version = schema.get(SCHEMA_VERSION_KEY)?.map(|stored| stored.value());
+        old_version = stored_version;
 
         reset_usage_rollups = stored_version.is_none_or(|found| found < CURRENT_SCHEMA_VERSION);
         match stored_version {
@@ -43,6 +45,13 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
     }
     if reset_usage_rollups {
         reset_usage_rollups_v1(&write_txn)?;
+    }
+    // Schema v4 -> v5: prompt_cache_observations key changed to include canonical_model_id.
+    // Ephemeral data (5min/1h TTL) is acceptable to lose on upgrade.
+    if let Some(version) = old_version {
+        if version < 5 && version >= 4 {
+            reset_prompt_cache_observations_v4_to_v5(&write_txn)?;
+        }
     }
 
     {
@@ -243,6 +252,25 @@ fn reset_usage_rollups_v1(write_txn: &redb::WriteTransaction) -> Result<(), Stor
     {
         let mut checkpoints = write_txn.open_table(USAGE_ROLLUP_CHECKPOINTS_V1)?;
         checkpoints.remove(REQUEST_EVENT_CHECKPOINT_KEY)?;
+    }
+    Ok(())
+}
+
+fn reset_prompt_cache_observations_v4_to_v5(
+    write_txn: &redb::WriteTransaction,
+) -> Result<(), StorageError> {
+    let keys = {
+        let table = write_txn.open_table(PROMPT_CACHE_OBSERVATIONS)?;
+        table
+            .iter()?
+            .map(|row| row.map(|(key, _)| key.value().to_vec()))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    {
+        let mut table = write_txn.open_table(PROMPT_CACHE_OBSERVATIONS)?;
+        for key in keys {
+            table.remove(key.as_slice())?;
+        }
     }
     Ok(())
 }

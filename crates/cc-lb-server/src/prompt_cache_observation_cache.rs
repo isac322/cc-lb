@@ -74,6 +74,10 @@ impl PromptCacheObservationCache {
         }
     }
 
+    pub fn grace_margin_secs(&self) -> u64 {
+        self.grace_margin_secs
+    }
+
     pub async fn hydrate_from_store(
         &self,
         store: &dyn PromptCacheObservationStore,
@@ -280,6 +284,10 @@ impl PromptCacheObservationCacheLike for PromptCacheObservationCache {
             ttl_class,
             now_unix_secs,
         )
+    }
+
+    fn grace_margin_secs(&self) -> u64 {
+        Self::grace_margin_secs(self)
     }
 }
 

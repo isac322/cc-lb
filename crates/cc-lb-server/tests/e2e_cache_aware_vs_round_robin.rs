@@ -46,8 +46,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use cc_lb_core::clock::{ClockHandle, TestClock};
 use cc_lb_plugin_api::types::{
-    BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheScore, TtlClass,
-    WarmCacheEntry,
+    BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheScore, TtlClass, WarmCacheEntry,
 };
 use cc_lb_plugin_api::{
     PluginManifest, PluginRuntime, Principal, PrincipalKind, RequestContext, UpstreamCandidate,
@@ -57,8 +56,8 @@ use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_server::prompt_cache_observation_cache::PromptCacheObservationCache;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use http::{HeaderMap, Method};
-use sha2::{Digest, Sha256};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::task::JoinHandle;
@@ -351,10 +350,9 @@ async fn spawn_fake_anthropic_upstreams(count: usize) -> TestResult<Vec<Upstream
     for (index, name) in UPSTREAM_NAMES.iter().take(count).enumerate() {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
-        let server =
-            tokio::spawn(
-                async move { axum::serve(listener, fake_anthropic_app(AppConfig::default())).await },
-            );
+        let server = tokio::spawn(async move {
+            axum::serve(listener, fake_anthropic_app(AppConfig::default())).await
+        });
         wait_for_listening(addr).await?;
         upstreams.push(Upstream {
             id: Uuid::from_u128(0x0e2e_0000_0000_0000_0000_0000_0000_0001u128 + index as u128),

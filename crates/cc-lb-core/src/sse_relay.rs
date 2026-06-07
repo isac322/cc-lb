@@ -252,7 +252,7 @@ impl RelayRuntime {
         let mut batcher = SseBatcher::new(self.batch);
         let mut usage = self.current_usage();
         let mut prompt_cache_observations: Vec<DecodedPromptCacheObservation> = Vec::new();
-        let mut prompt_cache_upserted = false;
+        let mut prompt_cache_observations_buffered = false;
         let mut deadline = Box::pin(sleep(self.batch.max_age));
         reset_deadline(&mut deadline, self.batch.max_age);
 
@@ -286,7 +286,7 @@ impl RelayRuntime {
                                     &mut deadline,
                                     &mut usage,
                                     &mut prompt_cache_observations,
-                                    &mut prompt_cache_upserted,
+                                    &mut prompt_cache_observations_buffered,
                                 ).await.is_err() {
                                     self.observe_finished(client_disconnected_status(), None, None, None, None);
                                     break;
@@ -333,7 +333,7 @@ impl RelayRuntime {
         deadline: &mut Pin<Box<Sleep>>,
         usage: &mut StreamingUsage,
         prompt_cache_observations: &mut Vec<DecodedPromptCacheObservation>,
-        prompt_cache_upserted: &mut bool,
+        prompt_cache_observations_buffered: &mut bool,
     ) -> Result<(), ()> {
         while let Some(end) = find_sse_event_end(buffer) {
             let raw = buffer.split_to(end).freeze();
@@ -346,7 +346,7 @@ impl RelayRuntime {
                         let usage_update = update_usage_from_event(&event, usage);
                         self.store_usage(*usage);
                         if usage_update.message_start_usage
-                            && !*prompt_cache_upserted
+                            && !*prompt_cache_observations_buffered
                             && let Some(context) = self.prompt_cache_observation_context.as_ref()
                         {
                             let now_unix_secs = unix_now_secs();
@@ -358,22 +358,24 @@ impl RelayRuntime {
                                 },
                                 now_unix_secs,
                             );
+                            *prompt_cache_observations_buffered = true;
+                        }
+                        if usage_update.message_stop
+                            && *prompt_cache_observations_buffered
+                            && let Some(context) = self.prompt_cache_observation_context.as_ref()
+                        {
+                            let now_unix_secs = unix_now_secs();
                             upsert_prompt_cache_observations(
                                 context,
                                 prompt_cache_observations,
                                 now_unix_secs,
                             );
-                            *prompt_cache_upserted = true;
-                        }
-                        if usage_update.message_stop
-                            && *prompt_cache_upserted
-                            && let Some(context) = self.prompt_cache_observation_context.as_ref()
-                        {
                             enqueue_prompt_cache_observations(
                                 context,
                                 prompt_cache_observations,
-                                unix_now_secs(),
+                                now_unix_secs,
                             );
+                            *prompt_cache_observations_buffered = false;
                         }
                     }
                 }
@@ -750,6 +752,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn abort_skips_in_memory_upsert() {
+        let cache = Arc::new(RecordingPromptCacheObservationCache::default());
+        let sink = Arc::new(RecordingPromptCacheObservationSink::default());
+        let relay = relay_with_context(cache.clone(), sink);
+
+        let response = relay.into_response_from_body(Body::from(sse_event(
+            "message_start",
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":1600,"cache_creation_input_tokens":1600}}}"#,
+        )));
+        let _body = response.into_body().collect().await.expect("body collects");
+
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000231").unwrap();
+        let snapshot = cache.snapshot_for_upstream(
+            upstream_id,
+            TEST_MODEL,
+            &[("write".to_owned(), TtlClass::Ephemeral5m)],
+            unix_now_secs(),
+        );
+        assert!(snapshot.is_empty());
+    }
+
+    #[tokio::test]
     async fn message_stop_enables_enqueue() {
         let cache = Arc::new(RecordingPromptCacheObservationCache::default());
         let sink = Arc::new(RecordingPromptCacheObservationSink::default());
@@ -832,10 +856,24 @@ mod tests {
             &self,
             _upstream_id: Uuid,
             _canonical_model: &str,
-            _request_breakpoint_hashes: &[(String, TtlClass)],
-            _now_unix_secs: u64,
+            request_breakpoint_hashes: &[(String, TtlClass)],
+            now_unix_secs: u64,
         ) -> Vec<WarmCacheEntry> {
-            Vec::new()
+            let upserts = self.upserts.lock().expect("upserts lock");
+            request_breakpoint_hashes
+                .iter()
+                .filter_map(|(prefix_hash, ttl_class)| {
+                    upserts
+                        .get(prefix_hash)
+                        .copied()
+                        .map(|expires_at_unix_secs| WarmCacheEntry {
+                            prefix_hash: prefix_hash.clone(),
+                            expires_at_unix_secs,
+                            ttl_class: *ttl_class,
+                            last_observed_at_unix_secs: now_unix_secs,
+                        })
+                })
+                .collect()
         }
 
         fn upsert_observation(

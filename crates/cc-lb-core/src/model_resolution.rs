@@ -21,16 +21,16 @@ pub fn canonical_model_id(requested: &str) -> &str {
         // Sonnet aliases
         "claude-sonnet-4-5" => "claude-sonnet-4-5-20250929",
         "claude-sonnet-4-6" => "claude-sonnet-4-6-20250929", // If uncertain, use same
-        
+
         // Opus aliases
         "claude-opus-4-5" => "claude-opus-4-5-20251101",
         "claude-opus-4-6" => "claude-opus-4-6-20251101", // If uncertain, use same
         "claude-opus-4-7" => "claude-opus-4-7-20250819", // If uncertain, use same
         "claude-opus-4-8" => "claude-opus-4-8-20250514",
-        
+
         // Haiku aliases
         "claude-haiku-4-5" => "claude-haiku-4-5-20251001",
-        
+
         // Already-dated or unknown: pass through unchanged
         other => {
             // Only warn if it looks like an alias (doesn't end with -YYYYMMDD)
@@ -77,11 +77,11 @@ pub fn cache_threshold_tokens(canonical: &str) -> usize {
         "claude-sonnet-4-6-20250929" => 1024,
         "claude-sonnet-4-5" => 1024,
         "claude-sonnet-4-6" => 1024,
-        
+
         // Opus 4.8: 1024
         "claude-opus-4-8-20250514" => 1024,
         "claude-opus-4-8" => 1024,
-        
+
         // Opus 4.5 / 4.6 / 4.7: 4096
         "claude-opus-4-5-20251101" => 4096,
         "claude-opus-4-6-20251101" => 4096,
@@ -89,11 +89,11 @@ pub fn cache_threshold_tokens(canonical: &str) -> usize {
         "claude-opus-4-5" => 4096,
         "claude-opus-4-6" => 4096,
         "claude-opus-4-7" => 4096,
-        
+
         // Haiku 4.5: 4096
         "claude-haiku-4-5-20251001" => 4096,
         "claude-haiku-4-5" => 4096,
-        
+
         // Unknown: default to 1024 + warn
         other => {
             tracing::warn!(model = %other, "unknown model, defaulting cache threshold to 1024");
@@ -132,10 +132,7 @@ mod tests {
 
     #[test]
     fn unknown_passes_through() {
-        assert_eq!(
-            canonical_model_id("future-model-xyz"),
-            "future-model-xyz"
-        );
+        assert_eq!(canonical_model_id("future-model-xyz"), "future-model-xyz");
     }
 
     #[test]

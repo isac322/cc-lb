@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
-use cc_lb_config::AnthropicOAuthConfig;
+use cc_lb_config::{AnthropicOAuthConfig, PromptCacheShadowConfig};
 use cc_lb_core::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
     RouterPluginCache,
@@ -172,45 +172,46 @@ pub async fn build_dynamic_view(
     subscription_quota_cache
         .hydrate_from_store(stores, &all_upstream_ids)
         .await?;
-    let prompt_cache_observation_cache = new_prompt_cache_observation_cache();
-    let prompt_cache_observation_cache = match tokio::time::timeout(
-        Duration::from_secs(5),
-        prompt_cache_observation_cache
-            .hydrate_from_store(stores.prompt_cache_observations.as_ref(), &all_upstream_ids),
-    )
-    .await
-    {
-        Ok(Ok(record_count)) => {
-            tracing::info!(
-                record_count,
-                upstream_count = all_upstream_ids.len(),
-                "hydrated prompt cache observation cache from store"
-            );
-            prompt_cache_observation_cache
-        }
-        Ok(Err(error)) => {
-            tracing::warn!(
-                %error,
-                "failed to hydrate prompt cache observation cache from store; continuing with empty cache"
-            );
-            new_prompt_cache_observation_cache()
-        }
-        Err(_) => {
-            tracing::warn!(
-                timeout_secs = 5,
-                "timed out hydrating prompt cache observation cache from store; continuing with empty cache"
-            );
-            new_prompt_cache_observation_cache()
-        }
-    };
-    if config.prompt_cache_shadow.enabled {
-        let cache_clone = Arc::clone(&prompt_cache_observation_cache);
+    let prompt_cache_shadow = &config.prompt_cache_shadow;
+    let prompt_cache_observation_cache = if prompt_cache_shadow.enabled {
+        let cache = new_prompt_cache_observation_cache(prompt_cache_shadow);
+        let cache = match tokio::time::timeout(
+            Duration::from_secs(5),
+            cache.hydrate_from_store(stores.prompt_cache_observations.as_ref(), &all_upstream_ids),
+        )
+        .await
+        {
+            Ok(Ok(record_count)) => {
+                tracing::info!(
+                    record_count,
+                    upstream_count = all_upstream_ids.len(),
+                    "hydrated prompt cache observation cache from store"
+                );
+                cache
+            }
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    %error,
+                    "failed to hydrate prompt cache observation cache from store; continuing with empty cache"
+                );
+                new_prompt_cache_observation_cache(prompt_cache_shadow)
+            }
+            Err(_) => {
+                tracing::warn!(
+                    timeout_secs = 5,
+                    "timed out hydrating prompt cache observation cache from store; continuing with empty cache"
+                );
+                new_prompt_cache_observation_cache(prompt_cache_shadow)
+            }
+        };
+        let cache_clone = Arc::clone(&cache);
         let store_clone = stores.prompt_cache_observations.clone();
-        let interval_secs = config.prompt_cache_shadow.sweeper_interval_secs;
-        tokio::spawn(async move {
-            let _ = cache_clone.spawn_sweeper(store_clone, interval_secs).await;
-        });
-    }
+        let interval_secs = prompt_cache_shadow.sweeper_interval_secs;
+        let _sweeper = cache_clone.spawn_sweeper(store_clone, interval_secs);
+        Some(cache)
+    } else {
+        None
+    };
     let upstream_rate_limit_records = stores
         .upstream_rate_limits
         .list_for_upstream_ids(&all_upstream_ids)
@@ -243,7 +244,7 @@ pub async fn build_dynamic_view(
 
     runtime.commit_staged(staged)?;
 
-    Ok(DynamicViewBuilder::new(current_generation)
+    let mut builder = DynamicViewBuilder::new(current_generation)
         .signer_factory(signer_factory)
         .global_router(global_router)
         .dispatcher(dispatcher)
@@ -256,17 +257,21 @@ pub async fn build_dynamic_view(
         .subscription_quota_routing_max_staleness_secs(
             subscription_quota_routing_max_staleness_secs,
         )
-        .prompt_cache_observation_cache(prompt_cache_observation_cache)
-        .upstream_records(upstreams.clone())
-        .build())
+        .upstream_records(upstreams.clone());
+    if let Some(cache) = prompt_cache_observation_cache {
+        builder = builder.prompt_cache_observation_cache(cache);
+    }
+    Ok(builder.build())
 }
 
-fn new_prompt_cache_observation_cache() -> Arc<PromptCacheObservationCache> {
+fn new_prompt_cache_observation_cache(
+    config: &PromptCacheShadowConfig,
+) -> Arc<PromptCacheObservationCache> {
     Arc::new(PromptCacheObservationCache::new_with_debounce(
         Arc::new(SystemClock),
-        30,
-        32,
-        60,
+        config.grace_margin_secs,
+        config.warm_set_cap,
+        config.refresh_debounce_secs,
     ))
 }
 
@@ -920,6 +925,17 @@ mod tests {
         runtime: &ExtismRuntime,
         data_dir: &Path,
     ) -> Arc<DynamicView> {
+        let mut config = cc_lb_config::Config::default();
+        config.prompt_cache_shadow.enabled = true;
+        build_view_with_config(stores, runtime, data_dir, config).await
+    }
+
+    async fn build_view_with_config(
+        stores: &Stores,
+        runtime: &ExtismRuntime,
+        data_dir: &Path,
+        config: cc_lb_config::Config,
+    ) -> Arc<DynamicView> {
         build_dynamic_view(
             stores,
             &AnthropicOAuthConfig::default(),
@@ -930,7 +946,7 @@ mod tests {
             data_dir,
             Arc::new(SubscriptionQuotaCache::new()),
             1800,
-            &cc_lb_config::Config::default(),
+            &config,
         )
         .await
         .expect("dynamic view builds")
@@ -967,7 +983,8 @@ mod tests {
         let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
 
         let snapshot = dynamic_view
-            .prompt_cache_observation_cache()
+            .prompt_cache_observation_cache_opt()
+            .expect("prompt cache enabled")
             .snapshot_for_upstream(
                 upstream.id,
                 MODEL,
@@ -1006,7 +1023,8 @@ mod tests {
 
         assert!(started.elapsed() <= Duration::from_secs(6));
         let snapshot = dynamic_view
-            .prompt_cache_observation_cache()
+            .prompt_cache_observation_cache_opt()
+            .expect("prompt cache enabled")
             .snapshot_for_upstream(
                 upstream.id,
                 MODEL,
@@ -1014,5 +1032,44 @@ mod tests {
                 unix_now_secs(),
             );
         assert!(snapshot.is_empty());
+    }
+
+    #[tokio::test]
+    async fn disabled_flag_skips_cache_construction() {
+        let (dir, storage) = storage_fixture(21);
+        let stores = stores(
+            storage,
+            Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
+        );
+        let runtime = ExtismRuntime::new();
+        let mut config = cc_lb_config::Config::default();
+        config.prompt_cache_shadow.enabled = false;
+
+        let dynamic_view = build_view_with_config(&stores, &runtime, dir.path(), config).await;
+
+        assert!(dynamic_view.prompt_cache_observation_cache_opt().is_none());
+    }
+
+    #[tokio::test]
+    async fn tunables_propagate_to_cache() {
+        let (dir, storage) = storage_fixture(22);
+        let stores = stores(
+            storage,
+            Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
+        );
+        let runtime = ExtismRuntime::new();
+        let mut config = cc_lb_config::Config::default();
+        config.prompt_cache_shadow.enabled = true;
+        config.prompt_cache_shadow.grace_margin_secs = 99;
+        config.prompt_cache_shadow.warm_set_cap = 7;
+        config.prompt_cache_shadow.refresh_debounce_secs = 123;
+        config.prompt_cache_shadow.sweeper_interval_secs = 456;
+
+        let dynamic_view = build_view_with_config(&stores, &runtime, dir.path(), config).await;
+
+        let cache = dynamic_view
+            .prompt_cache_observation_cache_opt()
+            .expect("prompt cache enabled");
+        assert_eq!(cache.grace_margin_secs(), 99);
     }
 }

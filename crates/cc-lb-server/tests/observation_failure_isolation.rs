@@ -174,9 +174,8 @@ fn observation_failure_does_not_fail_response() {
         rendered.contains("cc_lb_cache_observation_write_failed_total{store=\"redb\"}"),
         "expected write_failed counter for store=redb in metrics output:\n{rendered}"
     );
-    let counter_value =
-        parse_write_failed_counter(&rendered, cache_observation_store_kind::REDB)
-            .expect("write_failed counter parses from prometheus output");
+    let counter_value = parse_write_failed_counter(&rendered, cache_observation_store_kind::REDB)
+        .expect("write_failed counter parses from prometheus output");
     assert!(
         counter_value >= 1,
         "expected write_failed counter >= 1 for store=redb, got {counter_value}\n{rendered}"

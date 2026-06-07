@@ -28,7 +28,7 @@ pub struct DynamicView {
     pub upstream_rate_limit_cache: Arc<RwLock<UpstreamRateLimitCache>>,
     pub subscription_quota_cache: Arc<dyn SubscriptionQuotaCacheLike>,
     pub subscription_quota_routing_max_staleness_secs: u64,
-    pub prompt_cache_observation_cache: Arc<dyn PromptCacheObservationCacheLike>,
+    pub prompt_cache_observation_cache: Option<Arc<dyn PromptCacheObservationCacheLike>>,
     pub prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     pub generation: u64,
     upstream_records: Vec<UpstreamRecord>,
@@ -39,14 +39,10 @@ impl DynamicView {
         &self.upstream_records
     }
 
-    pub fn prompt_cache_observation_cache(&self) -> &Arc<dyn PromptCacheObservationCacheLike> {
-        &self.prompt_cache_observation_cache
-    }
-
     pub fn prompt_cache_observation_cache_opt(
         &self,
     ) -> Option<&Arc<dyn PromptCacheObservationCacheLike>> {
-        Some(&self.prompt_cache_observation_cache)
+        self.prompt_cache_observation_cache.as_ref()
     }
 
     pub fn prompt_cache_observation_sink_opt(
@@ -236,7 +232,7 @@ impl DynamicViewBuilder {
             subscription_quota_routing_max_staleness_secs: Some(
                 view.subscription_quota_routing_max_staleness_secs,
             ),
-            prompt_cache_observation_cache: Some(Arc::clone(&view.prompt_cache_observation_cache)),
+            prompt_cache_observation_cache: view.prompt_cache_observation_cache.clone(),
             prompt_cache_observation_sink: view.prompt_cache_observation_sink.clone(),
             upstream_records: view.upstreams_snapshot().to_vec(),
         }
@@ -357,9 +353,7 @@ impl DynamicViewBuilder {
             subscription_quota_routing_max_staleness_secs: self
                 .subscription_quota_routing_max_staleness_secs
                 .unwrap_or(0),
-            prompt_cache_observation_cache: self
-                .prompt_cache_observation_cache
-                .unwrap_or_else(|| Arc::new(NoopSubscriptionQuotaCache)),
+            prompt_cache_observation_cache: self.prompt_cache_observation_cache,
             prompt_cache_observation_sink: self.prompt_cache_observation_sink,
             generation: self.previous_generation.saturating_add(1),
             upstream_records: self.upstream_records,

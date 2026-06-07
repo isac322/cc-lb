@@ -108,6 +108,10 @@ pub trait PromptCacheObservationCacheLike: Send + Sync {
         ttl_class: TtlClass,
         now_unix_secs: u64,
     ) -> bool;
+
+    fn grace_margin_secs(&self) -> u64 {
+        0
+    }
 }
 
 pub trait PromptCacheObservationSinkLike: Send + Sync {
@@ -2554,7 +2558,7 @@ fn collect_cache_breakpoints(
                     path: path.clone(),
                     message_index,
                     ttl: cache_control_ttl(cache_control),
-                    prefix_hash: cache_prefix_hash(request, source, &path, message_index),
+                    prefix_hash: cache_prefix_hash_v2(request, source, &path, message_index),
                 });
             }
             for (key, value) in map {
@@ -3646,6 +3650,43 @@ mod tests {
         assert_eq!(hash.len(), 64);
         assert_eq!(hash, metadata.cache_breakpoints[2].prefix_hash);
         assert!(!hash.contains("secret"));
+    }
+
+    #[test]
+    fn request_cache_metadata_uses_v2_hash() {
+        let headers = HeaderMap::new();
+        let body = Bytes::from_static(
+            br#"{
+                "model":"claude-sonnet-4-5",
+                "system":[{"type":"text","text":"stable system","cache_control":{"type":"ephemeral"}}],
+                "messages":[{"role":"user","content":"hello"}],
+                "tool_choice":{"type":"auto"},
+                "thinking":{"type":"enabled","budget_tokens":1024}
+            }"#,
+        );
+        let request: Value = serde_json::from_slice(&body).expect("request json");
+
+        let metadata = request_cache_metadata(&headers, &body);
+
+        let breakpoint = metadata
+            .cache_breakpoints
+            .first()
+            .expect("system cache breakpoint");
+        let expected_v2 = cache_prefix_hash_v2(
+            &request,
+            RequestCacheBreakpointSource::System,
+            "system[0]",
+            None,
+        );
+        let legacy_v1 = cache_prefix_hash(
+            &request,
+            RequestCacheBreakpointSource::System,
+            "system[0]",
+            None,
+        );
+
+        assert_eq!(breakpoint.prefix_hash, expected_v2);
+        assert_ne!(breakpoint.prefix_hash, legacy_v1);
     }
 
     #[test]

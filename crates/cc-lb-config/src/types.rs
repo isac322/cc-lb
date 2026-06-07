@@ -557,7 +557,7 @@ impl Default for AnthropicCompatPollerConfig {
 /// Prompt cache shadow mode configuration.
 ///
 /// Controls the prompt cache observation cache behavior. When `enabled=false`, the cache layer
-/// is constructed but observation flow is gated off at the lifecycle level for byte-equivalent
+/// is not constructed and observation flow is gated off at the lifecycle level for byte-equivalent
 /// pre-T22 behavior (no observation enqueue, no snapshot, no sweeper). When `enabled=true`,
 /// the full cache pipeline activates: observations from successful responses are decoded,
 /// upserted into the in-memory cache, and enqueued for persistent storage; `build_candidates`

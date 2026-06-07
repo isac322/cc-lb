@@ -16,8 +16,8 @@ fn fixture_dir() -> PathBuf {
 
 fn load_fixture_json(name: &str) -> Value {
     let path = fixture_dir().join(format!("{}.json", name));
-    let content = fs::read_to_string(&path)
-        .unwrap_or_else(|_| panic!("Failed to read fixture {}", name));
+    let content =
+        fs::read_to_string(&path).unwrap_or_else(|_| panic!("Failed to read fixture {}", name));
     serde_json::from_str(&content).unwrap_or_else(|_| panic!("Invalid JSON in fixture {}", name))
 }
 

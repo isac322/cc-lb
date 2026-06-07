@@ -57,7 +57,12 @@ fn upsert_observation_sync(
     let write_txn = storage.db.begin_write()?;
     {
         let mut table = write_txn.open_table(PROMPT_CACHE_OBSERVATIONS)?;
-        let key = observation_key(record.upstream_id, &record.prefix_hash, record.ttl_class);
+        let key = observation_key(
+            record.upstream_id,
+            &record.canonical_model_id,
+            &record.prefix_hash,
+            record.ttl_class,
+        );
         let bytes = serde_json::to_vec(record)?;
         table.insert(key.as_slice(), bytes.as_slice())?;
     }
@@ -127,11 +132,20 @@ fn count_sync(storage: &RedbStorage) -> Result<u64, StorageError> {
     Ok(table.len()?)
 }
 
-fn observation_key(upstream_id: Uuid, prefix_hash: &str, ttl_class: TtlClass) -> Vec<u8> {
+fn observation_key(
+    upstream_id: Uuid,
+    canonical_model_id: &str,
+    prefix_hash: &str,
+    ttl_class: TtlClass,
+) -> Vec<u8> {
+    let model_bytes = canonical_model_id.as_bytes();
+    let model_len = u32::try_from(model_bytes.len()).unwrap_or(u32::MAX);
     let prefix_bytes = prefix_hash.as_bytes();
     let prefix_len = u32::try_from(prefix_bytes.len()).unwrap_or(u32::MAX);
-    let mut key = Vec::with_capacity(16 + 4 + prefix_bytes.len() + 1);
+    let mut key = Vec::with_capacity(16 + 4 + model_bytes.len() + 4 + prefix_bytes.len() + 1);
     key.extend_from_slice(upstream_id.as_bytes());
+    key.extend_from_slice(&model_len.to_be_bytes());
+    key.extend_from_slice(model_bytes);
     key.extend_from_slice(&prefix_len.to_be_bytes());
     key.extend_from_slice(prefix_bytes);
     key.push(ttl_class_code(ttl_class));
@@ -253,6 +267,36 @@ mod tests {
         storage.upsert_observation(&two).await?;
 
         assert_eq!(storage.count().await?, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn redb_prompt_cache_isolates_observations_by_model() -> TestResult {
+        let (_dir, storage) = temp_storage()?;
+        let upstream_id = Uuid::from_u128(0x6666_7777_8888_9999_aaaa_bbbb_cccc_dddd);
+        let shared_prefix = "sha256:shared-prefix";
+        let ttl_class = TtlClass::Ephemeral5m;
+        let expires_at = 2_000;
+
+        let mut record_model_a = observation(upstream_id, shared_prefix, ttl_class, expires_at);
+        record_model_a.canonical_model_id = "claude-opus-4-5-20250514".to_owned();
+
+        let mut record_model_b = observation(upstream_id, shared_prefix, ttl_class, expires_at);
+        record_model_b.canonical_model_id = "claude-sonnet-4-5-20250929".to_owned();
+
+        storage.upsert_observation(&record_model_a).await?;
+        storage.upsert_observation(&record_model_b).await?;
+
+        assert_eq!(storage.count().await?, 2);
+
+        let records = storage.list_active_for_upstream(upstream_id, 1_000).await?;
+        assert_eq!(records.len(), 2);
+        let model_ids: Vec<_> = records
+            .iter()
+            .map(|r| r.canonical_model_id.as_str())
+            .collect();
+        assert!(model_ids.contains(&"claude-opus-4-5-20250514"));
+        assert!(model_ids.contains(&"claude-sonnet-4-5-20250929"));
         Ok(())
     }
 }
