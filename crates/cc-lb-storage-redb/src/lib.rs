@@ -74,6 +74,8 @@ pub const UPSTREAM_SUBSCRIPTION_QUOTA_OBSERVATIONS_BY_TIME_V1: TableDefinition<&
     TableDefinition::new("upstream_subscription_quota_observations_by_time_v1");
 pub const UPSTREAM_SUBSCRIPTION_QUOTA_LATEST_V1: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("upstream_subscription_quota_latest_v1");
+pub const PROMPT_CACHE_OBSERVATIONS: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("prompt_cache_observations_v1");
 pub const WASM_BLOBS_V2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("wasm_blobs_v2");
 pub const WASM_REGISTRY_V2: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("wasm_registry_v2");

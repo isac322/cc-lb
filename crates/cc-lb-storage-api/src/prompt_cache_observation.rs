@@ -54,34 +54,6 @@ pub trait PromptCacheObservationStore: Send + Sync + 'static {
     }
 }
 
-impl<T> PromptCacheObservationStore for T where
-    T: crate::traits::AuditStore
-        + crate::plugin_registry::PluginRegistryStore
-        + crate::principal::PrincipalStore
-        + crate::upstream::UpstreamStore
-        + crate::traits::RequestEventStore
-        + crate::traits::QuotaStore
-        + crate::traits::LimitStateStore
-        + crate::upstream_rate_limit::UpstreamRateLimitStateStore
-        + crate::upstream_subscription_quota::UpstreamSubscriptionQuotaStore
-        + crate::upstream_subscription_metadata::UpstreamSubscriptionMetadataStore
-        + crate::organization_metadata::OrganizationMetadataStore
-        + crate::anthropic_compatibility_kv::AnthropicCompatibilityKvStore
-        + crate::traits::UsageRollupStore
-        + crate::traits::OAuthCredentialStore
-        + crate::traits::ApiKeyStore
-        + crate::traits::PriceCatalogCache
-        + crate::traits::ConfigStore
-        + crate::traits::MetaStore
-        + crate::RuntimeChangeNotifier
-        + crate::PluginRegistryRepo
-        + crate::PluginBlobRepo
-        + Send
-        + Sync
-        + 'static
-{
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
