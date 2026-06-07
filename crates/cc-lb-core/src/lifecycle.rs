@@ -18,8 +18,9 @@ use cc_lb_plugin_api::{
 };
 use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_api::{
-    Storage, SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind,
-    SubscriptionQuotaSource, UpstreamRateLimitObservationRecord, UpstreamRecord,
+    PromptCacheObservationRecord, Storage, SubscriptionQuotaObservationRecord,
+    SubscriptionQuotaSampleKind, SubscriptionQuotaSource, TtlClass as StorageTtlClass,
+    UpstreamRateLimitObservationRecord, UpstreamRecord,
     types::{
         RequestCacheBreakpoint, RequestCacheBreakpointSource, RequestCacheState, RequestEvent,
         StoredApiKeyRecord,
@@ -48,7 +49,7 @@ use crate::dynamic_view::{
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
 use crate::hop_by_hop::strip_hop_by_hop;
-use crate::model_resolution::canonical_model_id;
+use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::rate_limit_headers::{
     parse_anthropic_rate_limit_headers, parse_anthropic_unified_headers,
 };
@@ -63,6 +64,7 @@ pub const HASH_SCHEMA_VERSION: u8 = 2;
 
 const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
+const PROMPT_CACHE_TTL_GRACE_SECS: u64 = 30;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -85,6 +87,38 @@ pub trait PromptCacheObservationCacheLike: Send + Sync {
         request_breakpoint_hashes: &[(String, TtlClass)],
         now_unix_secs: u64,
     ) -> Vec<WarmCacheEntry>;
+
+    fn upsert_observation(
+        &self,
+        upstream_id: Uuid,
+        canonical_model: String,
+        prefix_hash: String,
+        ttl_class: TtlClass,
+        expires_at_unix_secs: u64,
+        now_unix_secs: u64,
+    );
+
+    fn refresh_on_hit(
+        &self,
+        upstream_id: Uuid,
+        canonical_model: &str,
+        prefix_hash: &str,
+        ttl_class: TtlClass,
+        now_unix_secs: u64,
+    ) -> bool;
+}
+
+pub trait PromptCacheObservationSinkLike: Send + Sync {
+    fn enqueue(
+        &self,
+        record: PromptCacheObservationRecord,
+    ) -> Result<(), PromptCacheObservationEnqueueError>;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PromptCacheObservationEnqueueError {
+    ChannelFull,
+    ChannelClosed,
 }
 
 #[derive(Debug, Default)]
@@ -244,6 +278,247 @@ fn build_cache_score(
 
 fn saturating_u64_to_u32(value: u64) -> u32 {
     u32::try_from(value).unwrap_or(u32::MAX)
+}
+
+#[derive(Clone)]
+pub struct PromptCacheObservationContext {
+    pub(crate) upstream_id: Uuid,
+    pub(crate) canonical_model_id: String,
+    pub(crate) cache_breakpoints: Vec<CacheBreakpoint>,
+    pub(crate) warm_entries_at_decision: Vec<WarmCacheEntry>,
+    pub(crate) cache: Arc<dyn PromptCacheObservationCacheLike>,
+    pub(crate) sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct PromptCacheUsage {
+    pub(crate) cache_creation_input_tokens: u64,
+    pub(crate) cache_read_input_tokens: u64,
+}
+
+impl From<&UsageCounts> for PromptCacheUsage {
+    fn from(usage: &UsageCounts) -> Self {
+        Self {
+            cache_creation_input_tokens: usage.cache_creation_input_tokens,
+            cache_read_input_tokens: usage.cache_read_input_tokens,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct DecodedPromptCacheObservation {
+    pub(crate) prefix_hash: String,
+    pub(crate) ttl_class: TtlClass,
+    pub(crate) expires_at_unix_secs: u64,
+    kind: DecodedPromptCacheObservationKind,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DecodedPromptCacheObservationKind {
+    Hit,
+    Write,
+}
+
+pub(crate) fn prompt_cache_observation_context(
+    view: &DynamicView,
+    upstream_id: Uuid,
+    canonical_model_id: &str,
+    cache_breakpoints: &[CacheBreakpoint],
+    now_unix_secs: u64,
+) -> Option<PromptCacheObservationContext> {
+    if canonical_model_id.is_empty() || cache_breakpoints.is_empty() {
+        return None;
+    }
+    let cache = view.prompt_cache_observation_cache_opt()?.clone();
+    let request_breakpoint_hashes = cache_breakpoints
+        .iter()
+        .map(|breakpoint| (breakpoint.prefix_hash.clone(), breakpoint.requested_ttl))
+        .collect::<Vec<_>>();
+    let warm_entries_at_decision = cache.snapshot_for_upstream(
+        upstream_id,
+        canonical_model_id,
+        &request_breakpoint_hashes,
+        now_unix_secs,
+    );
+    Some(PromptCacheObservationContext {
+        upstream_id,
+        canonical_model_id: canonical_model_id.to_owned(),
+        cache_breakpoints: cache_breakpoints.to_vec(),
+        warm_entries_at_decision,
+        cache,
+        sink: view.prompt_cache_observation_sink_opt().cloned(),
+    })
+}
+
+pub(crate) fn decode_prompt_cache_observations(
+    context: &PromptCacheObservationContext,
+    usage: PromptCacheUsage,
+    now_unix_secs: u64,
+) -> Vec<DecodedPromptCacheObservation> {
+    if usage.cache_creation_input_tokens == 0 && usage.cache_read_input_tokens == 0 {
+        return Vec::new();
+    }
+
+    let threshold = cache_threshold_tokens(&context.canonical_model_id) as u64;
+    let warm_match_for = |breakpoint: &CacheBreakpoint| {
+        context
+            .warm_entries_at_decision
+            .iter()
+            .filter(|entry| entry.prefix_hash == breakpoint.prefix_hash)
+            .max_by_key(|entry| entry.expires_at_unix_secs)
+    };
+    let hit = (usage.cache_read_input_tokens > 0)
+        .then(|| {
+            context
+                .cache_breakpoints
+                .iter()
+                .filter_map(|breakpoint| {
+                    warm_match_for(breakpoint).map(|entry| (breakpoint, entry))
+                })
+                .max_by_key(|(breakpoint, _)| breakpoint.prefix_token_count)
+        })
+        .flatten();
+
+    let mut observations = Vec::new();
+    if let Some((breakpoint, warm_entry)) = hit
+        && breakpoint.prefix_token_count >= threshold
+    {
+        observations.push(DecodedPromptCacheObservation {
+            prefix_hash: breakpoint.prefix_hash.clone(),
+            ttl_class: warm_entry.ttl_class,
+            expires_at_unix_secs: warm_entry.expires_at_unix_secs,
+            kind: DecodedPromptCacheObservationKind::Hit,
+        });
+    }
+
+    if usage.cache_creation_input_tokens > 0 {
+        let hit_block_index = hit.map(|(breakpoint, _)| breakpoint.block_index);
+        for breakpoint in &context.cache_breakpoints {
+            if hit_block_index.is_some_and(|hit_index| breakpoint.block_index <= hit_index) {
+                continue;
+            }
+            if breakpoint.prefix_token_count < threshold {
+                continue;
+            }
+            observations.push(DecodedPromptCacheObservation {
+                prefix_hash: breakpoint.prefix_hash.clone(),
+                ttl_class: breakpoint.requested_ttl,
+                expires_at_unix_secs: prompt_cache_observation_expires_at(
+                    now_unix_secs,
+                    breakpoint.requested_ttl,
+                ),
+                kind: DecodedPromptCacheObservationKind::Write,
+            });
+        }
+    }
+
+    observations
+}
+
+pub(crate) fn upsert_prompt_cache_observations(
+    context: &PromptCacheObservationContext,
+    observations: &[DecodedPromptCacheObservation],
+    now_unix_secs: u64,
+) {
+    for observation in observations {
+        context.cache.upsert_observation(
+            context.upstream_id,
+            context.canonical_model_id.clone(),
+            observation.prefix_hash.clone(),
+            observation.ttl_class,
+            observation.expires_at_unix_secs,
+            now_unix_secs,
+        );
+    }
+}
+
+pub(crate) fn enqueue_prompt_cache_observations(
+    context: &PromptCacheObservationContext,
+    observations: &[DecodedPromptCacheObservation],
+    now_unix_secs: u64,
+) {
+    let Some(sink) = context.sink.as_ref() else {
+        return;
+    };
+    for observation in observations {
+        let refresh_should_persist = context.cache.refresh_on_hit(
+            context.upstream_id,
+            &context.canonical_model_id,
+            &observation.prefix_hash,
+            observation.ttl_class,
+            now_unix_secs,
+        );
+        let should_persist = match observation.kind {
+            DecodedPromptCacheObservationKind::Hit => refresh_should_persist,
+            DecodedPromptCacheObservationKind::Write => true,
+        };
+        if !should_persist {
+            continue;
+        }
+        let record = PromptCacheObservationRecord {
+            upstream_id: context.upstream_id,
+            canonical_model_id: context.canonical_model_id.clone(),
+            prefix_hash: observation.prefix_hash.clone(),
+            ttl_class: ttl_to_storage(observation.ttl_class),
+            expires_at_unix_secs: observation.expires_at_unix_secs,
+            last_observed_at_unix_secs: now_unix_secs,
+            hash_schema_version: HASH_SCHEMA_VERSION,
+        };
+        if let Err(error) = sink.enqueue(record) {
+            match error {
+                PromptCacheObservationEnqueueError::ChannelFull => {}
+                PromptCacheObservationEnqueueError::ChannelClosed => {
+                    tracing::warn!("prompt cache observation sink is closed");
+                }
+            }
+        }
+    }
+}
+
+pub(crate) fn record_prompt_cache_observations(
+    context: &PromptCacheObservationContext,
+    usage: PromptCacheUsage,
+    now_unix_secs: u64,
+) -> Vec<DecodedPromptCacheObservation> {
+    let observations = decode_prompt_cache_observations(context, usage, now_unix_secs);
+    upsert_prompt_cache_observations(context, &observations, now_unix_secs);
+    enqueue_prompt_cache_observations(context, &observations, now_unix_secs);
+    observations
+}
+
+fn record_prompt_cache_observations_for_response_status(
+    status: StatusCode,
+    context: Option<&PromptCacheObservationContext>,
+    usage: PromptCacheUsage,
+    now_unix_secs: u64,
+) -> Vec<DecodedPromptCacheObservation> {
+    if status != StatusCode::OK {
+        return Vec::new();
+    }
+    let Some(context) = context else {
+        return Vec::new();
+    };
+    record_prompt_cache_observations(context, usage, now_unix_secs)
+}
+
+fn ttl_to_storage(t: cc_lb_plugin_api::types::TtlClass) -> StorageTtlClass {
+    match t {
+        cc_lb_plugin_api::types::TtlClass::Ephemeral5m => StorageTtlClass::Ephemeral5m,
+        cc_lb_plugin_api::types::TtlClass::Ephemeral1h => StorageTtlClass::Ephemeral1h,
+    }
+}
+
+fn prompt_cache_observation_expires_at(now_unix_secs: u64, ttl_class: TtlClass) -> u64 {
+    now_unix_secs
+        .saturating_add(prompt_cache_ttl_secs(ttl_class))
+        .saturating_sub(PROMPT_CACHE_TTL_GRACE_SECS)
+}
+
+fn prompt_cache_ttl_secs(ttl_class: TtlClass) -> u64 {
+    match ttl_class {
+        TtlClass::Ephemeral5m => 5 * 60,
+        TtlClass::Ephemeral1h => 60 * 60,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -806,6 +1081,13 @@ impl Lifecycle {
             dialect,
         };
         let metric_context = ApiKeyMetricContext::new(&success, &route.upstream, &ctx.body_bytes);
+        let prompt_cache_observation_context = prompt_cache_observation_context(
+            &view,
+            resolved_upstream_id,
+            &ctx.canonical_model_id,
+            &ctx.cache_breakpoints,
+            unix_now_secs(),
+        );
 
         observe_many(
             hooks,
@@ -1001,6 +1283,7 @@ impl Lifecycle {
                     stage_timings: attempt_timings,
                     cache_metadata,
                 },
+                prompt_cache_observation_context,
             )
             .await;
         observe_finished_for_principal(hooks, status, started, &principal, &ctx.body_bytes);
@@ -1089,6 +1372,7 @@ impl Lifecycle {
         hooks: &[Arc<dyn ObservabilityHook>],
         stream_hooks: StreamHooks,
         event_ctx: RequestEventContext,
+        prompt_cache_observation_context: Option<PromptCacheObservationContext>,
     ) -> Response<Body> {
         let mut active_limit = active_limit;
         if active_limit
@@ -1105,6 +1389,7 @@ impl Lifecycle {
                 active_limit.take(),
                 metric_context.clone(),
                 event_ctx.clone(),
+                prompt_cache_observation_context,
             );
             self.attach_limit_headers(&mut response, None);
             return response;
@@ -1148,6 +1433,14 @@ impl Lifecycle {
             "request latency breakdown"
         );
         let usage = usage_from_json_body(&body);
+        if usage.present {
+            record_prompt_cache_observations_for_response_status(
+                status,
+                prompt_cache_observation_context.as_ref(),
+                PromptCacheUsage::from(&usage),
+                unix_now_secs(),
+            );
+        }
         if usage.present {
             observe_many(
                 hooks,
@@ -1438,6 +1731,7 @@ impl Lifecycle {
         active_limit: Option<ActiveLimit>,
         metric_context: ApiKeyMetricContext,
         event_ctx: RequestEventContext,
+        prompt_cache_observation_context: Option<PromptCacheObservationContext>,
     ) -> Response<Body> {
         let (mut parts, mut body) = response.into_parts();
         strip_hop_by_hop(&mut parts.headers);
@@ -1455,6 +1749,8 @@ impl Lifecycle {
             let mut first_content_delta_at: Option<Instant> = None;
             let mut last_content_delta_at: Option<Instant> = None;
             let mut message_stop_at: Option<Instant> = None;
+            let mut prompt_cache_observations: Vec<DecodedPromptCacheObservation> = Vec::new();
+            let mut prompt_cache_upserted = false;
             let mut sse_event_count: u64 = 0;
             let mut content_delta_count: u64 = 0;
             let mut ping_count: u64 = 0;
@@ -1472,7 +1768,7 @@ impl Lifecycle {
                             buffer.extend_from_slice(&data);
                             while let Some(end) = sse_relay::find_sse_event_end(&buffer) {
                                 let raw = buffer.drain(..end).collect::<Vec<u8>>();
-                                accumulate_sse_usage(&raw, &mut usage);
+                                let usage_update = accumulate_sse_usage(&raw, &mut usage);
                                 sse_event_count = sse_event_count.saturating_add(1);
                                 match sse_event_name(&raw) {
                                     Some(b"message_start") if message_start_at.is_none() => {
@@ -1497,6 +1793,46 @@ impl Lifecycle {
                                         ping_count = ping_count.saturating_add(1);
                                     }
                                     _ => {}
+                                }
+                                if usage_update.message_start_usage {
+                                    if message_start_at.is_none() {
+                                        message_start_at = Some(now);
+                                    }
+                                    if status == StatusCode::OK
+                                        && !prompt_cache_upserted
+                                        && let Some(context) =
+                                            prompt_cache_observation_context.as_ref()
+                                    {
+                                        let now_unix_secs = unix_now_secs();
+                                        prompt_cache_observations =
+                                            decode_prompt_cache_observations(
+                                                context,
+                                                PromptCacheUsage::from(&usage),
+                                                now_unix_secs,
+                                            );
+                                        upsert_prompt_cache_observations(
+                                            context,
+                                            &prompt_cache_observations,
+                                            now_unix_secs,
+                                        );
+                                        prompt_cache_upserted = true;
+                                    }
+                                }
+                                if usage_update.message_stop {
+                                    if message_stop_at.is_none() {
+                                        message_stop_at = Some(now);
+                                    }
+                                    if status == StatusCode::OK
+                                        && prompt_cache_upserted
+                                        && let Some(context) =
+                                            prompt_cache_observation_context.as_ref()
+                                    {
+                                        enqueue_prompt_cache_observations(
+                                            context,
+                                            &prompt_cache_observations,
+                                            unix_now_secs(),
+                                        );
+                                    }
                                 }
                             }
                             observe_many(hooks.as_slice(), ObserveEvent::Chunk {
@@ -1843,7 +2179,7 @@ fn next_request_id() -> String {
     request_id
 }
 
-fn unix_now_secs() -> u64 {
+pub(crate) fn unix_now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -2485,10 +2821,17 @@ fn limit_reject_metric_kind(reason: &RejectReason) -> Option<&'static str> {
     }
 }
 
-fn accumulate_sse_usage(raw: &[u8], usage: &mut UsageCounts) {
+#[derive(Clone, Copy, Debug, Default)]
+struct SseUsageUpdate {
+    message_start_usage: bool,
+    message_stop: bool,
+}
+
+fn accumulate_sse_usage(raw: &[u8], usage: &mut UsageCounts) -> SseUsageUpdate {
+    let mut update = SseUsageUpdate::default();
     let text = match std::str::from_utf8(raw) {
         Ok(text) => text,
-        Err(_) => return,
+        Err(_) => return update,
     };
     for line in text.lines() {
         let Some(payload) = line.strip_prefix("data:").map(str::trim_start) else {
@@ -2497,12 +2840,22 @@ fn accumulate_sse_usage(raw: &[u8], usage: &mut UsageCounts) {
         let Ok(value) = serde_json::from_str::<Value>(payload) else {
             continue;
         };
+        let event_type = value
+            .get("type")
+            .and_then(Value::as_str)
+            .or_else(|| sse_event_name(raw).and_then(|name| std::str::from_utf8(name).ok()));
+        if event_type == Some("message_stop") {
+            update.message_stop = true;
+        }
         let reported = value
             .get("usage")
             .or_else(|| value.get("message").and_then(|m| m.get("usage")));
         let Some(reported) = reported else {
             continue;
         };
+        if event_type == Some("message_start") {
+            update.message_start_usage = true;
+        }
         usage.present = true;
         if let Some(input_tokens) = reported.get("input_tokens").and_then(Value::as_u64) {
             usage.input_tokens = input_tokens;
@@ -2523,6 +2876,7 @@ fn accumulate_sse_usage(raw: &[u8], usage: &mut UsageCounts) {
             usage.cache_read_input_tokens = cache_read;
         }
     }
+    update
 }
 
 fn usage_from_json_body(body: &Bytes) -> UsageCounts {
@@ -2774,11 +3128,12 @@ fn observe_many(hooks: &[Arc<dyn ObservabilityHook>], event: ObserveEvent) {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+    use std::sync::Mutex;
 
     use async_trait::async_trait;
     use cc_lb_storage_api::{
-        SubscriptionQuotaSampleKind, SubscriptionQuotaSource, SubscriptionQuotaStatus,
-        SubscriptionQuotaWindow,
+        PromptCacheObservationRecord, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
+        SubscriptionQuotaStatus, SubscriptionQuotaWindow,
         principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord},
         upstream::{UpstreamKind as StorageRecordKind, UpstreamRecord},
     };
@@ -2880,6 +3235,134 @@ mod tests {
         let score = candidates[0].cache_score.as_ref().expect("cache score");
         assert_eq!(score.predicted_cache_read_tokens, 32);
         assert_eq!(score.matched_breakpoint_index, Some(31));
+    }
+
+    #[test]
+    fn response_decoder_records_observations() {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000221").unwrap();
+        let now = 1_800_000_000;
+        let cache = Arc::new(RecordingPromptCacheObservationCache::new(vec![
+            warm_entry("short", TtlClass::Ephemeral5m, now + 120, 1),
+            warm_entry("hit", TtlClass::Ephemeral1h, now + 3_000, 2),
+        ]));
+        let sink = Arc::new(RecordingPromptCacheObservationSink::default());
+        let context = PromptCacheObservationContext {
+            upstream_id,
+            canonical_model_id: TEST_MODEL.to_owned(),
+            cache_breakpoints: vec![
+                cache_breakpoint(0, "short", 1_200, TtlClass::Ephemeral5m),
+                cache_breakpoint(1, "hit", 2_400, TtlClass::Ephemeral1h),
+                cache_breakpoint(2, "write", 3_200, TtlClass::Ephemeral5m),
+            ],
+            warm_entries_at_decision: vec![
+                warm_entry("short", TtlClass::Ephemeral5m, now + 120, 1),
+                warm_entry("hit", TtlClass::Ephemeral1h, now + 3_000, 2),
+            ],
+            cache: cache.clone(),
+            sink: Some(sink.clone()),
+        };
+
+        let decoded = record_prompt_cache_observations_for_response_status(
+            StatusCode::OK,
+            Some(&context),
+            PromptCacheUsage {
+                cache_creation_input_tokens: 800,
+                cache_read_input_tokens: 2_400,
+            },
+            now,
+        );
+
+        assert_eq!(decoded.len(), 2);
+        let upserts = cache.upserts();
+        assert_eq!(upserts.len(), 2);
+        assert_eq!(upserts[0].prefix_hash, "hit");
+        assert_eq!(upserts[0].ttl_class, TtlClass::Ephemeral1h);
+        assert_eq!(upserts[0].expires_at_unix_secs, now + 3_000);
+        assert_eq!(upserts[1].prefix_hash, "write");
+        assert_eq!(upserts[1].ttl_class, TtlClass::Ephemeral5m);
+        assert_eq!(upserts[1].expires_at_unix_secs, now + 270);
+        let records = sink.records();
+        assert_eq!(records.len(), 2);
+        assert_eq!(records[0].upstream_id, upstream_id);
+        assert_eq!(records[0].canonical_model_id, TEST_MODEL);
+        assert_eq!(records[0].prefix_hash, "hit");
+        assert_eq!(records[0].ttl_class, StorageTtlClass::Ephemeral1h);
+        assert_eq!(records[0].expires_at_unix_secs, now + 3_000);
+        assert_eq!(records[0].last_observed_at_unix_secs, now);
+        assert_eq!(records[0].hash_schema_version, HASH_SCHEMA_VERSION);
+        assert_eq!(records[1].prefix_hash, "write");
+        assert_eq!(records[1].ttl_class, StorageTtlClass::Ephemeral5m);
+        assert_eq!(records[1].expires_at_unix_secs, now + 270);
+    }
+
+    #[test]
+    fn response_decoder_error_response_skips_observation() {
+        error_response_skips_observation();
+    }
+
+    #[test]
+    fn error_response_skips_observation() {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000222").unwrap();
+        let now = 1_800_000_000;
+        let cache = Arc::new(RecordingPromptCacheObservationCache::new(vec![warm_entry(
+            "hit",
+            TtlClass::Ephemeral5m,
+            now + 120,
+            1,
+        )]));
+        let sink = Arc::new(RecordingPromptCacheObservationSink::default());
+        let context = PromptCacheObservationContext {
+            upstream_id,
+            canonical_model_id: TEST_MODEL.to_owned(),
+            cache_breakpoints: vec![cache_breakpoint(0, "hit", 1_200, TtlClass::Ephemeral5m)],
+            warm_entries_at_decision: vec![warm_entry("hit", TtlClass::Ephemeral5m, now + 120, 1)],
+            cache: cache.clone(),
+            sink: Some(sink.clone()),
+        };
+
+        let decoded = record_prompt_cache_observations_for_response_status(
+            StatusCode::BAD_REQUEST,
+            Some(&context),
+            PromptCacheUsage {
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 1_200,
+            },
+            now,
+        );
+
+        assert!(decoded.is_empty());
+        assert!(cache.upserts().is_empty());
+        assert!(sink.records().is_empty());
+    }
+
+    #[test]
+    fn below_threshold_prefix_skips_observation() {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000223").unwrap();
+        let now = 1_800_000_000;
+        let cache = Arc::new(RecordingPromptCacheObservationCache::new(Vec::new()));
+        let sink = Arc::new(RecordingPromptCacheObservationSink::default());
+        let context = PromptCacheObservationContext {
+            upstream_id,
+            canonical_model_id: TEST_MODEL.to_owned(),
+            cache_breakpoints: vec![cache_breakpoint(0, "tiny", 1_023, TtlClass::Ephemeral5m)],
+            warm_entries_at_decision: Vec::new(),
+            cache: cache.clone(),
+            sink: Some(sink.clone()),
+        };
+
+        let decoded = record_prompt_cache_observations_for_response_status(
+            StatusCode::OK,
+            Some(&context),
+            PromptCacheUsage {
+                cache_creation_input_tokens: 1_023,
+                cache_read_input_tokens: 0,
+            },
+            now,
+        );
+
+        assert!(decoded.is_empty());
+        assert!(cache.upserts().is_empty());
+        assert!(sink.records().is_empty());
     }
 
     #[test]
@@ -3045,6 +3528,114 @@ mod tests {
         assert_eq!(event.cache_state, Some(RequestCacheState::Miss));
     }
 
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    struct RecordedPromptCacheUpsert {
+        upstream_id: Uuid,
+        canonical_model: String,
+        prefix_hash: String,
+        ttl_class: TtlClass,
+        expires_at_unix_secs: u64,
+        now_unix_secs: u64,
+    }
+
+    struct RecordingPromptCacheObservationCache {
+        warm_entries: Vec<WarmCacheEntry>,
+        upserts: Mutex<Vec<RecordedPromptCacheUpsert>>,
+        refreshes: Mutex<Vec<String>>,
+    }
+
+    impl RecordingPromptCacheObservationCache {
+        fn new(warm_entries: Vec<WarmCacheEntry>) -> Self {
+            Self {
+                warm_entries,
+                upserts: Mutex::new(Vec::new()),
+                refreshes: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn upserts(&self) -> Vec<RecordedPromptCacheUpsert> {
+            self.upserts.lock().expect("upserts lock").clone()
+        }
+    }
+
+    impl PromptCacheObservationCacheLike for RecordingPromptCacheObservationCache {
+        fn snapshot_for_upstream(
+            &self,
+            _upstream_id: Uuid,
+            _canonical_model: &str,
+            request_breakpoint_hashes: &[(String, TtlClass)],
+            _now_unix_secs: u64,
+        ) -> Vec<WarmCacheEntry> {
+            self.warm_entries
+                .iter()
+                .filter(|entry| {
+                    request_breakpoint_hashes
+                        .iter()
+                        .any(|(hash, ttl)| hash == &entry.prefix_hash && ttl == &entry.ttl_class)
+                })
+                .cloned()
+                .collect()
+        }
+
+        fn upsert_observation(
+            &self,
+            upstream_id: Uuid,
+            canonical_model: String,
+            prefix_hash: String,
+            ttl_class: TtlClass,
+            expires_at_unix_secs: u64,
+            now_unix_secs: u64,
+        ) {
+            self.upserts
+                .lock()
+                .expect("upserts lock")
+                .push(RecordedPromptCacheUpsert {
+                    upstream_id,
+                    canonical_model,
+                    prefix_hash,
+                    ttl_class,
+                    expires_at_unix_secs,
+                    now_unix_secs,
+                });
+        }
+
+        fn refresh_on_hit(
+            &self,
+            _upstream_id: Uuid,
+            _canonical_model: &str,
+            prefix_hash: &str,
+            _ttl_class: TtlClass,
+            _now_unix_secs: u64,
+        ) -> bool {
+            self.refreshes
+                .lock()
+                .expect("refreshes lock")
+                .push(prefix_hash.to_owned());
+            true
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingPromptCacheObservationSink {
+        records: Mutex<Vec<PromptCacheObservationRecord>>,
+    }
+
+    impl RecordingPromptCacheObservationSink {
+        fn records(&self) -> Vec<PromptCacheObservationRecord> {
+            self.records.lock().expect("records lock").clone()
+        }
+    }
+
+    impl PromptCacheObservationSinkLike for RecordingPromptCacheObservationSink {
+        fn enqueue(
+            &self,
+            record: PromptCacheObservationRecord,
+        ) -> Result<(), PromptCacheObservationEnqueueError> {
+            self.records.lock().expect("records lock").push(record);
+            Ok(())
+        }
+    }
+
     struct TestPromptCacheObservationCache {
         cap: usize,
         expected_model: &'static str,
@@ -3095,6 +3686,28 @@ mod tests {
             });
             snapshot.truncate(self.cap);
             snapshot
+        }
+
+        fn upsert_observation(
+            &self,
+            _upstream_id: Uuid,
+            _canonical_model: String,
+            _prefix_hash: String,
+            _ttl_class: TtlClass,
+            _expires_at_unix_secs: u64,
+            _now_unix_secs: u64,
+        ) {
+        }
+
+        fn refresh_on_hit(
+            &self,
+            _upstream_id: Uuid,
+            _canonical_model: &str,
+            _prefix_hash: &str,
+            _ttl_class: TtlClass,
+            _now_unix_secs: u64,
+        ) -> bool {
+            false
         }
     }
 

@@ -22,6 +22,11 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant as TokioInstant, Sleep, sleep};
 
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
+use crate::lifecycle::{
+    DecodedPromptCacheObservation, PromptCacheObservationContext, PromptCacheUsage,
+    decode_prompt_cache_observations, enqueue_prompt_cache_observations, unix_now_secs,
+    upsert_prompt_cache_observations,
+};
 use crate::sse_error_frame::{make_error_frame, make_error_frame_from_json};
 
 const CLIENT_DISCONNECTED_STATUS: u16 = 499;
@@ -34,6 +39,7 @@ pub struct SseRelay {
     pub error_normalizer: Option<Arc<ErrorNormalizer>>,
     pub upstream_kind: Option<UpstreamKind>,
     pub streaming_usage: Arc<Mutex<StreamingUsage>>,
+    pub prompt_cache_observation_context: Option<PromptCacheObservationContext>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -90,6 +96,7 @@ struct RelayRuntime {
     error_normalizer: Option<Arc<ErrorNormalizer>>,
     upstream_kind: Option<UpstreamKind>,
     streaming_usage: Arc<Mutex<StreamingUsage>>,
+    prompt_cache_observation_context: Option<PromptCacheObservationContext>,
     started: StdInstant,
 }
 
@@ -176,6 +183,7 @@ impl SseRelay {
             error_normalizer: self.error_normalizer,
             upstream_kind: self.upstream_kind,
             streaming_usage: self.streaming_usage,
+            prompt_cache_observation_context: self.prompt_cache_observation_context,
             started: StdInstant::now(),
         }
     }
@@ -243,6 +251,8 @@ impl RelayRuntime {
         let mut buffer = BytesMut::new();
         let mut batcher = SseBatcher::new(self.batch);
         let mut usage = self.current_usage();
+        let mut prompt_cache_observations: Vec<DecodedPromptCacheObservation> = Vec::new();
+        let mut prompt_cache_upserted = false;
         let mut deadline = Box::pin(sleep(self.batch.max_age));
         reset_deadline(&mut deadline, self.batch.max_age);
 
@@ -269,7 +279,15 @@ impl RelayRuntime {
                         Some(Ok(frame)) => {
                             if let Ok(data) = frame.into_data() {
                                 buffer.extend_from_slice(&data);
-                                if self.drain_complete_events(&mut buffer, &tx, &mut batcher, &mut deadline, &mut usage).await.is_err() {
+                                if self.drain_complete_events(
+                                    &mut buffer,
+                                    &tx,
+                                    &mut batcher,
+                                    &mut deadline,
+                                    &mut usage,
+                                    &mut prompt_cache_observations,
+                                    &mut prompt_cache_upserted,
+                                ).await.is_err() {
                                     self.observe_finished(client_disconnected_status(), None, None, None, None);
                                     break;
                                 }
@@ -306,6 +324,7 @@ impl RelayRuntime {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn drain_complete_events(
         &self,
         buffer: &mut BytesMut,
@@ -313,6 +332,8 @@ impl RelayRuntime {
         batcher: &mut SseBatcher,
         deadline: &mut Pin<Box<Sleep>>,
         usage: &mut StreamingUsage,
+        prompt_cache_observations: &mut Vec<DecodedPromptCacheObservation>,
+        prompt_cache_upserted: &mut bool,
     ) -> Result<(), ()> {
         while let Some(end) = find_sse_event_end(buffer) {
             let raw = buffer.split_to(end).freeze();
@@ -322,8 +343,38 @@ impl RelayRuntime {
                     if event.event == "error" {
                         outgoing = self.error_frame_from_event(&event, outgoing);
                     } else {
-                        update_usage_from_event(&event, usage);
+                        let usage_update = update_usage_from_event(&event, usage);
                         self.store_usage(*usage);
+                        if usage_update.message_start_usage
+                            && !*prompt_cache_upserted
+                            && let Some(context) = self.prompt_cache_observation_context.as_ref()
+                        {
+                            let now_unix_secs = unix_now_secs();
+                            *prompt_cache_observations = decode_prompt_cache_observations(
+                                context,
+                                PromptCacheUsage {
+                                    cache_creation_input_tokens: usage.cache_creation_input_tokens,
+                                    cache_read_input_tokens: usage.cache_read_input_tokens,
+                                },
+                                now_unix_secs,
+                            );
+                            upsert_prompt_cache_observations(
+                                context,
+                                prompt_cache_observations,
+                                now_unix_secs,
+                            );
+                            *prompt_cache_upserted = true;
+                        }
+                        if usage_update.message_stop
+                            && *prompt_cache_upserted
+                            && let Some(context) = self.prompt_cache_observation_context.as_ref()
+                        {
+                            enqueue_prompt_cache_observations(
+                                context,
+                                prompt_cache_observations,
+                                unix_now_secs(),
+                            );
+                        }
                     }
                 }
                 Ok(None) => {}
@@ -545,9 +596,16 @@ fn event_stream_error_to_string(error: EventStreamError<Infallible>) -> String {
     }
 }
 
-fn update_usage_from_event(event: &Event, usage: &mut StreamingUsage) {
+#[derive(Clone, Copy, Debug, Default)]
+struct StreamingUsageUpdate {
+    message_start_usage: bool,
+    message_stop: bool,
+}
+
+fn update_usage_from_event(event: &Event, usage: &mut StreamingUsage) -> StreamingUsageUpdate {
+    let mut update = StreamingUsageUpdate::default();
     let Ok(value) = serde_json::from_str::<Value>(&event.data) else {
-        return;
+        return update;
     };
     let event_type = value
         .get("type")
@@ -560,6 +618,7 @@ fn update_usage_from_event(event: &Event, usage: &mut StreamingUsage) {
                 .and_then(|message| message.get("usage"))
             {
                 usage.observe_message_start(usage_json);
+                update.message_start_usage = true;
             }
         }
         "message_delta" => {
@@ -570,9 +629,11 @@ fn update_usage_from_event(event: &Event, usage: &mut StreamingUsage) {
         "message_stop" => {
             update_usage_from_value(&value, usage);
             usage.mark_complete();
+            update.message_stop = true;
         }
         _ => {}
     }
+    update
 }
 
 pub(crate) fn usage_from_json_bytes(bytes: &Bytes) -> StreamingUsage {
@@ -646,4 +707,209 @@ fn reset_deadline(deadline: &mut Pin<Box<Sleep>>, max_age: Duration) {
 
 fn client_disconnected_status() -> StatusCode {
     StatusCode::from_u16(CLIENT_DISCONNECTED_STATUS).unwrap_or(StatusCode::BAD_GATEWAY)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::sync::{Arc, Mutex};
+
+    use cc_lb_plugin_api::types::{
+        BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, TtlClass, WarmCacheEntry,
+    };
+    use cc_lb_plugin_api::{
+        DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal,
+        RequestContext, ShapedRequest, ShapedRequestBuilder, Upstream, UpstreamDialect,
+    };
+    use cc_lb_storage_api::PromptCacheObservationRecord;
+    use http_body_util::BodyExt;
+    use uuid::Uuid;
+
+    use crate::lifecycle::{
+        PromptCacheObservationCacheLike, PromptCacheObservationEnqueueError,
+        PromptCacheObservationSinkLike,
+    };
+
+    use super::*;
+
+    const TEST_MODEL: &str = "claude-sonnet-4-5-20250929";
+
+    #[tokio::test]
+    async fn abort_skips_observation() {
+        let cache = Arc::new(RecordingPromptCacheObservationCache::default());
+        let sink = Arc::new(RecordingPromptCacheObservationSink::default());
+        let relay = relay_with_context(cache, sink.clone());
+
+        let response = relay.into_response_from_body(Body::from(sse_event(
+            "message_start",
+            r#"{"type":"message_start","message":{"usage":{"input_tokens":1600,"cache_creation_input_tokens":1600}}}"#,
+        )));
+        let _body = response.into_body().collect().await.expect("body collects");
+
+        assert!(sink.records().is_empty());
+    }
+
+    #[tokio::test]
+    async fn message_stop_enables_enqueue() {
+        let cache = Arc::new(RecordingPromptCacheObservationCache::default());
+        let sink = Arc::new(RecordingPromptCacheObservationSink::default());
+        let relay = relay_with_context(cache, sink.clone());
+        let body = format!(
+            "{}{}",
+            sse_event(
+                "message_start",
+                r#"{"type":"message_start","message":{"usage":{"input_tokens":1600,"cache_creation_input_tokens":1600}}}"#,
+            ),
+            sse_event("message_stop", r#"{"type":"message_stop"}"#),
+        );
+
+        let response = relay.into_response_from_body(Body::from(body));
+        let _body = response.into_body().collect().await.expect("body collects");
+
+        let records = sink.records();
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].prefix_hash, "write");
+        assert_eq!(records[0].canonical_model_id, TEST_MODEL);
+        assert_eq!(
+            records[0].hash_schema_version,
+            crate::lifecycle::HASH_SCHEMA_VERSION
+        );
+    }
+
+    fn relay_with_context(
+        cache: Arc<RecordingPromptCacheObservationCache>,
+        sink: Arc<RecordingPromptCacheObservationSink>,
+    ) -> SseRelay {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000231").unwrap();
+        SseRelay {
+            obs: Arc::new(NoopHook),
+            dialect: Arc::new(TestDialect),
+            batch: SseBatchConfig::default(),
+            error_normalizer: None,
+            upstream_kind: None,
+            streaming_usage: Arc::new(Mutex::new(StreamingUsage::default())),
+            prompt_cache_observation_context: Some(PromptCacheObservationContext {
+                upstream_id,
+                canonical_model_id: TEST_MODEL.to_owned(),
+                cache_breakpoints: vec![cache_breakpoint(0, "write", 1_600, TtlClass::Ephemeral5m)],
+                warm_entries_at_decision: Vec::new(),
+                cache,
+                sink: Some(sink),
+            }),
+        }
+    }
+
+    fn sse_event(event: &str, data: &str) -> String {
+        format!("event: {event}\ndata: {data}\n\n")
+    }
+
+    fn cache_breakpoint(
+        index: u32,
+        prefix_hash: &str,
+        prefix_token_count: u64,
+        requested_ttl: TtlClass,
+    ) -> CacheBreakpoint {
+        CacheBreakpoint {
+            block_index: index,
+            source: CacheBreakpointSource::Message,
+            path: format!("messages[{index}]"),
+            message_index: Some(index),
+            prefix_hash: prefix_hash.to_owned(),
+            prefix_token_count,
+            requested_ttl,
+            origin: BreakpointOrigin::Explicit,
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingPromptCacheObservationCache {
+        upserts: Mutex<HashMap<String, u64>>,
+    }
+
+    impl PromptCacheObservationCacheLike for RecordingPromptCacheObservationCache {
+        fn snapshot_for_upstream(
+            &self,
+            _upstream_id: Uuid,
+            _canonical_model: &str,
+            _request_breakpoint_hashes: &[(String, TtlClass)],
+            _now_unix_secs: u64,
+        ) -> Vec<WarmCacheEntry> {
+            Vec::new()
+        }
+
+        fn upsert_observation(
+            &self,
+            _upstream_id: Uuid,
+            _canonical_model: String,
+            prefix_hash: String,
+            _ttl_class: TtlClass,
+            expires_at_unix_secs: u64,
+            _now_unix_secs: u64,
+        ) {
+            self.upserts
+                .lock()
+                .expect("upserts lock")
+                .insert(prefix_hash, expires_at_unix_secs);
+        }
+
+        fn refresh_on_hit(
+            &self,
+            _upstream_id: Uuid,
+            _canonical_model: &str,
+            _prefix_hash: &str,
+            _ttl_class: TtlClass,
+            _now_unix_secs: u64,
+        ) -> bool {
+            true
+        }
+    }
+
+    #[derive(Default)]
+    struct RecordingPromptCacheObservationSink {
+        records: Mutex<Vec<PromptCacheObservationRecord>>,
+    }
+
+    impl RecordingPromptCacheObservationSink {
+        fn records(&self) -> Vec<PromptCacheObservationRecord> {
+            self.records.lock().expect("records lock").clone()
+        }
+    }
+
+    impl PromptCacheObservationSinkLike for RecordingPromptCacheObservationSink {
+        fn enqueue(
+            &self,
+            record: PromptCacheObservationRecord,
+        ) -> Result<(), PromptCacheObservationEnqueueError> {
+            self.records.lock().expect("records lock").push(record);
+            Ok(())
+        }
+    }
+
+    struct NoopHook;
+
+    impl ObservabilityHook for NoopHook {
+        fn observe(&self, _event: ObserveEvent) -> Result<(), ObservabilityError> {
+            Ok(())
+        }
+    }
+
+    struct TestDialect;
+
+    impl UpstreamDialect for TestDialect {
+        fn shape(
+            &self,
+            _ctx: &RequestContext,
+            _upstream: &Upstream,
+            _principal: &Principal,
+            _builder: &mut ShapedRequestBuilder,
+        ) -> Result<ShapedRequest, DialectError> {
+            Err(DialectError::UnsupportedRequest {
+                reason: "test dialect is relay-only".to_owned(),
+            })
+        }
+
+        fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
+            None
+        }
+    }
 }

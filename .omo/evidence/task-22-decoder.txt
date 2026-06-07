@@ -1,0 +1,3 @@
+Task 22 decoder evidence:
+- Added lifecycle response decoder that records HIT/WRITE prompt-cache observations for HTTP 200 usage responses.
+- `cargo test -p cc-lb-core lifecycle::tests::response_decoder -- --nocapture` passed.

@@ -3,6 +3,7 @@ use std::sync::{
     atomic::{AtomicU64, Ordering},
 };
 
+use cc_lb_core::lifecycle::{PromptCacheObservationEnqueueError, PromptCacheObservationSinkLike};
 use cc_lb_storage_api::{PromptCacheObservationRecord, PromptCacheObservationStore};
 use thiserror::Error;
 use tokio::sync::mpsc::{self, Sender, error::TrySendError};
@@ -63,6 +64,18 @@ impl PromptCacheObservationSink {
     /// Reads the dropped counter.
     pub fn dropped_total(&self) -> u64 {
         self.dropped_counter.load(Ordering::Relaxed)
+    }
+}
+
+impl PromptCacheObservationSinkLike for PromptCacheObservationSink {
+    fn enqueue(
+        &self,
+        record: PromptCacheObservationRecord,
+    ) -> Result<(), PromptCacheObservationEnqueueError> {
+        PromptCacheObservationSink::enqueue(self, record).map_err(|error| match error {
+            EnqueueError::ChannelFull => PromptCacheObservationEnqueueError::ChannelFull,
+            EnqueueError::ChannelClosed => PromptCacheObservationEnqueueError::ChannelClosed,
+        })
     }
 }
 

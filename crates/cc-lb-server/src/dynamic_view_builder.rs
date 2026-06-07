@@ -3,7 +3,7 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cc_lb_aead::AeadService;
@@ -12,6 +12,7 @@ use cc_lb_core::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
     RouterPluginCache,
 };
+use cc_lb_core::clock::SystemClock;
 use cc_lb_core::{
     ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamRateLimitCache,
     UpstreamStatusEntry, UpstreamStatusSnapshot, make_default_dispatcher,
@@ -25,14 +26,15 @@ use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     AnthropicCompatibilityKvStore, AuditStore, PluginRegistryRepo, PluginRegistryStore, PluginSlot,
-    PrincipalRecord, PrincipalStore, RateLimitKind, StorageError, StorageResult,
-    UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
-    UpstreamSubscriptionQuotaStore,
+    PrincipalRecord, PrincipalStore, PromptCacheObservationStore, RateLimitKind, StorageError,
+    StorageResult, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord,
+    UpstreamStore, UpstreamSubscriptionQuotaStore,
 };
 use parking_lot::RwLock;
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::prompt_cache_observation_cache::PromptCacheObservationCache;
 use crate::reconcile::collect_revision_hash;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
@@ -42,6 +44,7 @@ pub struct Stores {
     pub plugin_registry: Arc<dyn PluginRegistryStore>,
     pub upstream_rate_limits: Arc<dyn UpstreamRateLimitStateStore>,
     pub upstream_subscription_quotas: Arc<dyn UpstreamSubscriptionQuotaStore>,
+    pub prompt_cache_observations: Arc<dyn PromptCacheObservationStore>,
     pub anthropic_compatibility_kv: Arc<dyn AnthropicCompatibilityKvStore>,
     pub audit: Option<Arc<dyn AuditStore>>,
     /// T43 bridge: when `Some` and a `PluginRegistryRecord` exists for the
@@ -168,6 +171,37 @@ pub async fn build_dynamic_view(
     subscription_quota_cache
         .hydrate_from_store(stores, &all_upstream_ids)
         .await?;
+    let prompt_cache_observation_cache = new_prompt_cache_observation_cache();
+    let prompt_cache_observation_cache = match tokio::time::timeout(
+        Duration::from_secs(5),
+        prompt_cache_observation_cache
+            .hydrate_from_store(stores.prompt_cache_observations.as_ref(), &all_upstream_ids),
+    )
+    .await
+    {
+        Ok(Ok(record_count)) => {
+            tracing::info!(
+                record_count,
+                upstream_count = all_upstream_ids.len(),
+                "hydrated prompt cache observation cache from store"
+            );
+            prompt_cache_observation_cache
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                %error,
+                "failed to hydrate prompt cache observation cache from store; continuing with empty cache"
+            );
+            new_prompt_cache_observation_cache()
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = 5,
+                "timed out hydrating prompt cache observation cache from store; continuing with empty cache"
+            );
+            new_prompt_cache_observation_cache()
+        }
+    };
     let upstream_rate_limit_records = stores
         .upstream_rate_limits
         .list_for_upstream_ids(&all_upstream_ids)
@@ -213,8 +247,18 @@ pub async fn build_dynamic_view(
         .subscription_quota_routing_max_staleness_secs(
             subscription_quota_routing_max_staleness_secs,
         )
+        .prompt_cache_observation_cache(prompt_cache_observation_cache)
         .upstream_records(upstreams.clone())
         .build())
+}
+
+fn new_prompt_cache_observation_cache() -> Arc<PromptCacheObservationCache> {
+    Arc::new(PromptCacheObservationCache::new_with_debounce(
+        Arc::new(SystemClock),
+        30,
+        32,
+        60,
+    ))
 }
 
 fn group_rate_limit_observations(
@@ -760,4 +804,205 @@ fn hex_sha256(sha256: [u8; 32]) -> String {
         let _ = write!(&mut output, "{byte:02x}");
     }
     output
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use cc_lb_plugin_api::types::TtlClass as PluginTtlClass;
+    use cc_lb_storage_api::{
+        PromptCacheObservationRecord, TtlClass as StorageTtlClass, UpstreamCreate,
+    };
+    use cc_lb_storage_redb::Storage;
+
+    use super::*;
+    use crate::prompt_cache_observation_cache::HASH_SCHEMA_VERSION;
+
+    const MODEL: &str = "claude-sonnet-4-5-20250929";
+
+    #[derive(Clone)]
+    struct FakePromptCacheObservationStore {
+        records: Arc<Vec<PromptCacheObservationRecord>>,
+        list_delay: Option<Duration>,
+    }
+
+    impl FakePromptCacheObservationStore {
+        fn new(records: Vec<PromptCacheObservationRecord>) -> Self {
+            Self {
+                records: Arc::new(records),
+                list_delay: None,
+            }
+        }
+
+        fn sleeping(delay: Duration) -> Self {
+            Self {
+                records: Arc::new(Vec::new()),
+                list_delay: Some(delay),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl PromptCacheObservationStore for FakePromptCacheObservationStore {
+        async fn list_active_for_upstream(
+            &self,
+            upstream_id: Uuid,
+            not_expired_at_unix_secs: u64,
+        ) -> StorageResult<Vec<PromptCacheObservationRecord>> {
+            if let Some(delay) = self.list_delay {
+                tokio::time::sleep(delay).await;
+            }
+            Ok(self
+                .records
+                .iter()
+                .filter(|record| {
+                    record.upstream_id == upstream_id
+                        && record.expires_at_unix_secs > not_expired_at_unix_secs
+                })
+                .cloned()
+                .collect())
+        }
+    }
+
+    fn storage_fixture(seed: u8) -> (tempfile::TempDir, Arc<Storage>) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let storage = Arc::new(
+            Storage::open(&dir.path().join("dynamic-view-builder.redb"), [seed; 32])
+                .expect("storage"),
+        );
+        (dir, storage)
+    }
+
+    fn stores(
+        storage: Arc<Storage>,
+        prompt_cache_observations: Arc<dyn PromptCacheObservationStore>,
+    ) -> Stores {
+        Stores {
+            upstreams: storage.clone(),
+            principals: storage.clone(),
+            plugin_registry: storage.clone(),
+            upstream_rate_limits: storage.clone(),
+            upstream_subscription_quotas: storage.clone(),
+            prompt_cache_observations,
+            anthropic_compatibility_kv: storage.clone(),
+            audit: Some(storage),
+            plugin_registry_repo: None,
+        }
+    }
+
+    async fn create_upstream(storage: &Storage, name: &str) -> UpstreamRecord {
+        UpstreamStore::create(
+            storage,
+            UpstreamCreate {
+                name: name.to_owned(),
+                kind: UpstreamKind::AnthropicApiKey,
+                base_url: None,
+                api_key_ciphertext: Some(vec![1, 2, 3]),
+                shape_plugin: None,
+            },
+        )
+        .await
+        .expect("upstream created")
+    }
+
+    async fn build_view(
+        stores: &Stores,
+        runtime: &ExtismRuntime,
+        data_dir: &Path,
+    ) -> Arc<DynamicView> {
+        build_dynamic_view(
+            stores,
+            &AnthropicOAuthConfig::default(),
+            Arc::new(AeadService::from_master_key([19; 32])),
+            None,
+            0,
+            runtime,
+            data_dir,
+            Arc::new(SubscriptionQuotaCache::new()),
+            1800,
+        )
+        .await
+        .expect("dynamic view builds")
+    }
+
+    fn prompt_record(
+        upstream_id: Uuid,
+        prefix_hash: &str,
+        last_observed_at_unix_secs: u64,
+    ) -> PromptCacheObservationRecord {
+        PromptCacheObservationRecord {
+            upstream_id,
+            canonical_model_id: MODEL.to_owned(),
+            prefix_hash: prefix_hash.to_owned(),
+            ttl_class: StorageTtlClass::Ephemeral5m,
+            expires_at_unix_secs: 4_100_000_000,
+            last_observed_at_unix_secs,
+            hash_schema_version: HASH_SCHEMA_VERSION,
+        }
+    }
+
+    #[tokio::test]
+    async fn includes_prompt_cache() {
+        let (dir, storage) = storage_fixture(19);
+        let upstream = create_upstream(&storage, "prompt-cache-upstream").await;
+        let prompt_store = Arc::new(FakePromptCacheObservationStore::new(vec![
+            prompt_record(upstream.id, "hash-a", 1_700_000_001),
+            prompt_record(upstream.id, "hash-b", 1_700_000_002),
+            prompt_record(upstream.id, "hash-c", 1_700_000_003),
+        ]));
+        let stores = stores(storage, prompt_store);
+        let runtime = ExtismRuntime::new();
+
+        let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
+
+        let snapshot = dynamic_view
+            .prompt_cache_observation_cache()
+            .snapshot_for_upstream(
+                upstream.id,
+                MODEL,
+                &[
+                    ("hash-a".to_owned(), PluginTtlClass::Ephemeral5m),
+                    ("hash-b".to_owned(), PluginTtlClass::Ephemeral5m),
+                    ("hash-c".to_owned(), PluginTtlClass::Ephemeral5m),
+                ],
+                unix_now_secs(),
+            );
+        let prefix_hashes = snapshot
+            .into_iter()
+            .map(|entry| entry.prefix_hash)
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            prefix_hashes,
+            BTreeSet::from_iter(["hash-a", "hash-b", "hash-c"].map(str::to_owned))
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn hydrate_timeout_logs_warn_and_continues() {
+        let (dir, storage) = storage_fixture(20);
+        let upstream = create_upstream(&storage, "timeout-upstream").await;
+        let stores = stores(
+            storage,
+            Arc::new(FakePromptCacheObservationStore::sleeping(
+                Duration::from_secs(30),
+            )),
+        );
+        let runtime = ExtismRuntime::new();
+        let started = tokio::time::Instant::now();
+
+        let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
+
+        assert!(started.elapsed() <= Duration::from_secs(6));
+        let snapshot = dynamic_view
+            .prompt_cache_observation_cache()
+            .snapshot_for_upstream(
+                upstream.id,
+                MODEL,
+                &[("hash-a".to_owned(), PluginTtlClass::Ephemeral5m)],
+                unix_now_secs(),
+            );
+        assert!(snapshot.is_empty());
+    }
 }

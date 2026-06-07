@@ -323,6 +323,13 @@
 - **Evidence targets**: `.omo/evidence/task-16-asymmetric-ttl.txt` and `.omo/evidence/task-16-cap.txt`.
 - **Dependency mismatch found**: T11 notes said cache types were reachable via `cc_lb_plugin_api::types`, but `types` was private in this worktree; `crates/cc-lb-plugin-api/src/lib.rs` needed `pub mod types;` for the required import path to compile.
 
+## 2026-06-07T00:00:00Z Task: 18 (Prompt cache observation sink)
+- **File added**: crates/cc-lb-server/src/prompt_cache_observation_sink.rs
+- **Module export**: Added `pub mod prompt_cache_observation_sink;` to cc-lb-server lib.rs.
+- **Sink behavior**: bounded tokio mpsc sender with non-blocking `try_send`; full queues increment the sink-local `Arc<AtomicU64>` drop counter, while closed channels return `ChannelClosed` without incrementing.
+- **Writer behavior**: spawned task drains `rx.recv().await`, calls `PromptCacheObservationStore::upsert_observation(&record)`, logs `tracing::warn!(error = ?e, "prompt cache observation write failed")` on store errors, and does not retry.
+- **Tests**: overflow coverage uses a held receiver with no reader so capacity=2 plus 5 attempts yields `dropped_total() == 3`; writer coverage drains 3 records into a Mutex-backed mock store; closed-channel coverage aborts the writer and verifies no drop-counter increment.
+
 ## 2026-06-07T00:00:00Z Task: 17
 - **Cache hydration source**: `PromptCacheObservationCache::hydrate_from_store` uses `self.clock.now_unix_secs()` with `PromptCacheObservationStore::list_active_for_upstream`, then drops records whose `hash_schema_version` does not match `HASH_SCHEMA_VERSION`.
 - **Schema constant**: Server cache exposes `pub const HASH_SCHEMA_VERSION: u8` by sourcing `cc_lb_core::lifecycle::HASH_SCHEMA_VERSION` (currently 2), avoiding a second local magic version.
@@ -333,3 +340,20 @@
 - `RequestContext.cache_breakpoints` and `canonical_model_id` are populated immediately after parse from `RequestCacheMetadata`, but only when `DynamicView::prompt_cache_observation_cache_opt()` is wired; without that cache, lifecycle preserves defensive empty defaults and candidate `cache_score = None`.
 - `build_candidates` now accepts canonical model + request `CacheBreakpoint`s and calls the prompt-cache snapshot synchronously per upstream. It trusts the snapshot warm-set cap and does not cap again.
 - Cache score prediction treats the longest warm-matched breakpoint as the read prediction, sums token counts for unmatched breakpoints by requested TTL, and leaves uncached input tokens at `0` until full token counting is wired.
+
+## 2026-06-07T00:00:00Z Task: 27 (fake-anthropic injected cache stats)
+- **Fake Anthropic fixture located**: `tests/fixtures/fake-anthropic` (package `fake-anthropic`). Main router is `src/routes.rs`; existing debug-style endpoints include `GET /__last_request` and `GET /__refresh_history`.
+- **Signature scheme**: No existing `request_signature`/`request_hash` implementation was present in the fixture. T27 uses SHA-256 over `serde_json::to_string(Value)` of the parsed request body, emitted as lowercase hex via existing `ring` dependency.
+- **Endpoint gating**: `POST /__inject_cache_stats` is available only under `debug_assertions` or the new `debug-endpoints` feature, so default release builds exclude the route.
+- **Injection behavior**: Non-streaming `POST /v1/messages` computes the request signature and augments `usage.cache_creation_input_tokens` / `usage.cache_read_input_tokens` only when a stored signature matches; non-matching requests keep the default usage shape.
+
+## 2026-06-07T00:00:00Z Task: 19 (dynamic_view_builder wiring + DynamicView extension)
+- `DynamicView` now owns a non-optional prompt-cache observation cache and exposes both `prompt_cache_observation_cache()` and `_opt()`; `_opt()` returns `Some(...)` for T21 compatibility.
+- `build_dynamic_view` constructs `PromptCacheObservationCache::new_with_debounce(Arc::new(SystemClock), 30, 32, 60)` and hydrates it inline after subscription quota hydration using the same `all_upstream_ids` set.
+- Hydration is bounded by `tokio::time::timeout(Duration::from_secs(5), ...)`; timeout or storage errors log `warn!` and replace any partial cache with a fresh empty cache for degraded boot.
+- `Stores` now carries `prompt_cache_observations: Arc<dyn PromptCacheObservationStore>` so dynamic view rebuilds can hydrate prompt cache state from the same storage family as upstream/quota state.
+
+## 2026-06-07 Task 22 (lifecycle response decoder + observation sink)
+- Unary response observations are decoded only for HTTP 200 after `usage_from_json_body`; 4xx/5xx skip before any prompt-cache upsert or sink enqueue.
+- The decoder uses `RequestContext.cache_breakpoints`, decision-time warm entries from `snapshot_for_upstream`, and `cache_threshold_tokens(canonical_model_id)` to identify the longest HIT and later WRITE breakpoints.
+- Streaming paths upsert at `message_start` when usage first appears, but sink enqueue is deferred until `message_stop`; stream aborts before `message_stop` leave the in-memory upsert only and do not persist.

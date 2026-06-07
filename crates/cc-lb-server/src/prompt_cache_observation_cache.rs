@@ -243,6 +243,44 @@ impl PromptCacheObservationCacheLike for PromptCacheObservationCache {
             now_unix_secs,
         )
     }
+
+    fn upsert_observation(
+        &self,
+        upstream_id: Uuid,
+        canonical_model: String,
+        prefix_hash: String,
+        ttl_class: TtlClass,
+        expires_at_unix_secs: u64,
+        now_unix_secs: u64,
+    ) {
+        Self::upsert_observation(
+            self,
+            upstream_id,
+            canonical_model,
+            prefix_hash,
+            ttl_class,
+            expires_at_unix_secs,
+            now_unix_secs,
+        );
+    }
+
+    fn refresh_on_hit(
+        &self,
+        upstream_id: Uuid,
+        canonical_model: &str,
+        prefix_hash: &str,
+        ttl_class: TtlClass,
+        now_unix_secs: u64,
+    ) -> bool {
+        Self::refresh_on_hit(
+            self,
+            upstream_id,
+            canonical_model,
+            prefix_hash,
+            ttl_class,
+            now_unix_secs,
+        )
+    }
 }
 
 fn ttl_matches_request(request_ttl: TtlClass, entry_ttl: TtlClass) -> bool {
