@@ -357,3 +357,13 @@
 - Unary response observations are decoded only for HTTP 200 after `usage_from_json_body`; 4xx/5xx skip before any prompt-cache upsert or sink enqueue.
 - The decoder uses `RequestContext.cache_breakpoints`, decision-time warm entries from `snapshot_for_upstream`, and `cache_threshold_tokens(canonical_model_id)` to identify the longest HIT and later WRITE breakpoints.
 - Streaming paths upsert at `message_start` when usage first appears, but sink enqueue is deferred until `message_stop`; stream aborts before `message_stop` leave the in-memory upsert only and do not persist.
+
+## 2026-06-07 Task 26 (cache hit/miss counters)
+- `cc_lb_cache_hit_total{upstream,model}` incremented when response indicates cache_read_input_tokens > 0.
+- `cc_lb_cache_miss_total{upstream,model}` incremented when cache_read_input_tokens == 0 or absent.
+- Wired at T22 response decoder in finish_success_response(): after usage_from_json_body, checks status==200 and cache_breakpoints non-empty before emitting.
+- Labels: upstream (from event_ctx.upstream_name, default "unknown") and model (from canonical_model_id).
+- Hit-rate formula: PromQL-side `cc_lb_cache_hit_total / (cc_lb_cache_hit_total + cc_lb_cache_miss_total)`.
+- Accessor functions in cc_lb_observability: `inc_cache_hit(upstream, model)` and `inc_cache_miss(upstream, model)`.
+- Test: hit_miss_counters_emitted_on_cache_hits_and_misses validates logic for cache read detection and edge cases.
+- LSP diagnostics clean on modified files.

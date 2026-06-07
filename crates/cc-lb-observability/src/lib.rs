@@ -23,3 +23,23 @@ pub use init::{
 pub use panic_hook::install_panic_hook;
 pub use redaction::{REDACTED, RedactingMakeWriter, RedactionLayer, RedactionPolicy};
 pub use trace_layer::{ObservabilityTraceLayer, trace_layer};
+
+/// Increment cache hit counter by upstream and model.
+pub fn inc_cache_hit(upstream: &str, model: &str) {
+    metrics::counter!(
+        "cc_lb_cache_hit_total",
+        "upstream" => upstream.to_owned(),
+        "model" => model.to_owned()
+    )
+    .increment(1);
+}
+
+/// Increment cache miss counter by upstream and model.
+pub fn inc_cache_miss(upstream: &str, model: &str) {
+    metrics::counter!(
+        "cc_lb_cache_miss_total",
+        "upstream" => upstream.to_owned(),
+        "model" => model.to_owned()
+    )
+    .increment(1);
+}

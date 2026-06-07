@@ -2,7 +2,7 @@ use metrics::Unit;
 
 use crate::{MetricDefinition, MetricKind};
 
-pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 14] = [
+pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 16] = [
     MetricDefinition {
         name: "cclb_api_key_requests_total",
         kind: MetricKind::Counter,
@@ -72,6 +72,16 @@ pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 14] = [
         name: "cclb_streaming_usage_missing_total",
         kind: MetricKind::Counter,
         description: "Total streaming responses that finished without parsed usage by dialect.",
+    },
+    MetricDefinition {
+        name: "cc_lb_cache_hit_total",
+        kind: MetricKind::Counter,
+        description: "Total cache hit responses by upstream and model.",
+    },
+    MetricDefinition {
+        name: "cc_lb_cache_miss_total",
+        kind: MetricKind::Counter,
+        description: "Total cache miss responses by upstream and model.",
     },
 ];
 
@@ -146,6 +156,16 @@ pub(crate) fn register_prometheus14_metrics() {
         Unit::Count,
         "Total streaming responses that finished without parsed usage by dialect."
     );
+    metrics::describe_counter!(
+        "cc_lb_cache_hit_total",
+        Unit::Count,
+        "Total cache hit responses by upstream and model."
+    );
+    metrics::describe_counter!(
+        "cc_lb_cache_miss_total",
+        Unit::Count,
+        "Total cache miss responses by upstream and model."
+    );
 }
 
 pub fn prometheus14_metric_definitions() -> &'static [MetricDefinition] {
@@ -194,6 +214,18 @@ pub fn touch_prometheus14_metrics() {
     metrics::counter!("cclb_key_auth_failures_total", "reason" => "InvalidKey").increment(1);
     metrics::counter!("cclb_concurrent_rejects_total", "key_id" => "smoke-key").increment(1);
     metrics::counter!("cclb_streaming_usage_missing_total", "dialect" => "anthropic").increment(1);
+    metrics::counter!(
+        "cc_lb_cache_hit_total",
+        "upstream" => "smoke-upstream",
+        "model" => "smoke-model"
+    )
+    .increment(1);
+    metrics::counter!(
+        "cc_lb_cache_miss_total",
+        "upstream" => "smoke-upstream",
+        "model" => "smoke-model"
+    )
+    .increment(1);
 }
 
 pub(crate) fn touch_prometheus14_metric_handles() {

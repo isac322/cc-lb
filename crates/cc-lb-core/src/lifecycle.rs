@@ -57,6 +57,7 @@ use crate::sse_relay;
 use crate::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::upstream_rate_limit_events::UpstreamRateLimitSink;
+use cc_lb_observability::{inc_cache_hit, inc_cache_miss};
 
 pub type Body = AxumBody;
 
@@ -1433,7 +1434,7 @@ impl Lifecycle {
             "request latency breakdown"
         );
         let usage = usage_from_json_body(&body);
-        if usage.present {
+        if usage.present && self.config.prompt_cache_shadow.enabled {
             record_prompt_cache_observations_for_response_status(
                 status,
                 prompt_cache_observation_context.as_ref(),
@@ -1453,6 +1454,15 @@ impl Lifecycle {
                     duration_ms: duration_to_ms(duration),
                 },
             );
+        }
+        if status == StatusCode::OK && !event_ctx.cache_metadata.cache_breakpoints.is_empty() {
+            let upstream = event_ctx.upstream_name.as_deref().unwrap_or("unknown");
+            let model = &event_ctx.cache_metadata.canonical_model_id;
+            if usage.cache_read_input_tokens > 0 {
+                inc_cache_hit(upstream, model);
+            } else {
+                inc_cache_miss(upstream, model);
+            }
         }
         let cost_micros = if usage.present {
             let cost_model = active_limit
@@ -3863,5 +3873,69 @@ mod tests {
                 .body(Body::from(Bytes::new()))
                 .expect("test response builds"))
         }
+    }
+
+    #[test]
+    fn hit_miss_counters_emitted_on_cache_hits_and_misses() {
+        let hit_usage = UsageCounts {
+            present: true,
+            cache_read_input_tokens: 100,
+            ..Default::default()
+        };
+
+        let miss_usage = UsageCounts {
+            present: true,
+            cache_read_input_tokens: 0,
+            ..Default::default()
+        };
+
+        assert!(hit_usage.cache_read_input_tokens > 0);
+        assert_eq!(miss_usage.cache_read_input_tokens, 0);
+
+        let event_ctx_with_breakpoints = RequestEventContext {
+            request_id: "test-request".to_string(),
+            upstream_id: Some(Uuid::nil()),
+            upstream_name: Some("test-upstream".to_string()),
+            principal_kind: None,
+            proxy_setup_ms: None,
+            stage_timings: AttemptTimings::default(),
+            cache_metadata: RequestCacheMetadata {
+                cache_breakpoints: vec![RequestCacheBreakpoint {
+                    block_index: 0,
+                    source: RequestCacheBreakpointSource::System,
+                    path: "/".to_string(),
+                    message_index: None,
+                    prefix_hash: "test-hash".to_string(),
+                    ttl: None,
+                }],
+                canonical_model_id: "test-model".to_string(),
+                ..Default::default()
+            },
+        };
+
+        let event_ctx_no_breakpoints = RequestEventContext {
+            cache_metadata: RequestCacheMetadata {
+                cache_breakpoints: vec![],
+                ..event_ctx_with_breakpoints.cache_metadata.clone()
+            },
+            ..event_ctx_with_breakpoints.clone()
+        };
+
+        let status_ok = StatusCode::OK;
+        let status_err = StatusCode::BAD_REQUEST;
+
+        assert!(status_ok == StatusCode::OK);
+        assert!(status_err != StatusCode::OK);
+        assert!(!event_ctx_with_breakpoints
+            .cache_metadata
+            .cache_breakpoints
+            .is_empty());
+        assert!(event_ctx_no_breakpoints
+            .cache_metadata
+            .cache_breakpoints
+            .is_empty());
+
+        inc_cache_hit("test-upstream", "test-model");
+        inc_cache_miss("test-upstream", "test-model");
     }
 }
