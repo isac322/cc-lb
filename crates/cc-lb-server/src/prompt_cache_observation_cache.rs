@@ -1,11 +1,17 @@
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::time::Duration;
 
 use cc_lb_core::clock::ClockHandle;
 use cc_lb_plugin_api::types::{TtlClass, WarmCacheEntry};
+use cc_lb_storage_api::{PromptCacheObservationStore, StorageResult};
 use parking_lot::RwLock;
 use uuid::Uuid;
 
+pub const HASH_SCHEMA_VERSION: u8 = cc_lb_core::lifecycle::HASH_SCHEMA_VERSION;
+
 const DEFAULT_WARM_SET_CAP: usize = 32;
+const DEFAULT_REFRESH_DEBOUNCE_SECS: u64 = 60;
 
 pub struct PromptCacheObservationCache {
     #[allow(clippy::type_complexity)]
@@ -27,6 +33,7 @@ pub struct PromptCacheObservationCache {
     #[allow(dead_code)]
     grace_margin_secs: u64,
     warm_set_cap: usize,
+    refresh_debounce_secs: u64,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -39,6 +46,20 @@ pub struct CacheEntry {
 
 impl PromptCacheObservationCache {
     pub fn new(clock: ClockHandle, grace_margin_secs: u64, warm_set_cap: usize) -> Self {
+        Self::new_with_debounce(
+            clock,
+            grace_margin_secs,
+            warm_set_cap,
+            DEFAULT_REFRESH_DEBOUNCE_SECS,
+        )
+    }
+
+    pub fn new_with_debounce(
+        clock: ClockHandle,
+        grace_margin_secs: u64,
+        warm_set_cap: usize,
+        refresh_debounce_secs: u64,
+    ) -> Self {
         Self {
             entries: RwLock::new(HashMap::new()),
             clock,
@@ -48,7 +69,36 @@ impl PromptCacheObservationCache {
             } else {
                 warm_set_cap
             },
+            refresh_debounce_secs,
         }
+    }
+
+    pub async fn hydrate_from_store(
+        &self,
+        store: &dyn PromptCacheObservationStore,
+        upstream_ids: &[Uuid],
+    ) -> StorageResult<usize> {
+        let mut loaded = 0;
+        for upstream_id in upstream_ids {
+            let records = store
+                .list_active_for_upstream(*upstream_id, self.clock.now_unix_secs())
+                .await?;
+            for record in records {
+                if record.hash_schema_version != HASH_SCHEMA_VERSION {
+                    continue;
+                }
+                self.upsert_observation(
+                    record.upstream_id,
+                    record.canonical_model_id,
+                    record.prefix_hash,
+                    ttl_class_from_storage(record.ttl_class),
+                    record.expires_at_unix_secs,
+                    record.last_observed_at_unix_secs,
+                );
+                loaded += 1;
+            }
+        }
+        Ok(loaded)
     }
 
     pub fn upsert_observation(
@@ -119,6 +169,61 @@ impl PromptCacheObservationCache {
         snapshot.truncate(self.warm_set_cap);
         snapshot
     }
+
+    pub fn refresh_on_hit(
+        &self,
+        upstream_id: Uuid,
+        canonical_model: &str,
+        prefix_hash: &str,
+        ttl_class: TtlClass,
+        now_unix_secs: u64,
+    ) -> bool {
+        let mut guard = self.entries.write();
+        let Some(entries) = guard.get_mut(&upstream_id) else {
+            return false;
+        };
+        let key = (
+            canonical_model.to_owned(),
+            prefix_hash.to_owned(),
+            ttl_class,
+        );
+        let Some(entry) = entries.get_mut(&key) else {
+            return false;
+        };
+
+        let should_persist = now_unix_secs.saturating_sub(entry.last_persisted_at_unix_secs)
+            > self.refresh_debounce_secs;
+        entry.last_observed_at_unix_secs = now_unix_secs;
+        if should_persist {
+            entry.last_persisted_at_unix_secs = now_unix_secs;
+        }
+        should_persist
+    }
+
+    pub fn spawn_sweeper(
+        self: Arc<Self>,
+        store: Arc<dyn PromptCacheObservationStore + Send + Sync>,
+        interval_secs: u64,
+    ) -> tokio::task::JoinHandle<()> {
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let purge_before = self.clock.now_unix_secs().saturating_sub(60);
+                if let Err(error) = store.purge_expired_before(purge_before).await {
+                    tracing::warn!(%error, "failed to purge expired prompt cache observations");
+                }
+            }
+        })
+    }
+}
+
+fn ttl_class_from_storage(ttl_class: cc_lb_storage_api::TtlClass) -> TtlClass {
+    match ttl_class {
+        cc_lb_storage_api::TtlClass::Ephemeral5m => TtlClass::Ephemeral5m,
+        cc_lb_storage_api::TtlClass::Ephemeral1h => TtlClass::Ephemeral1h,
+    }
 }
 
 fn ttl_matches_request(request_ttl: TtlClass, entry_ttl: TtlClass) -> bool {
@@ -130,9 +235,15 @@ fn ttl_matches_request(request_ttl: TtlClass, entry_ttl: TtlClass) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
+    use async_trait::async_trait;
     use cc_lb_core::clock::{Clock, ClockHandle, TestClock};
+    use cc_lb_storage_api::{
+        PromptCacheObservationRecord, PromptCacheObservationStore, StorageResult,
+        TtlClass as StorageTtlClass,
+    };
 
     use super::*;
 
@@ -164,6 +275,232 @@ pub(crate) mod tests {
             expires_at_unix_secs,
             now_unix_secs,
         );
+    }
+
+    #[derive(Clone, Default)]
+    struct MockStore {
+        records: Arc<Mutex<Vec<PromptCacheObservationRecord>>>,
+        purge_calls: Arc<Mutex<Vec<u64>>>,
+    }
+
+    impl MockStore {
+        fn new(records: Vec<PromptCacheObservationRecord>) -> Self {
+            Self {
+                records: Arc::new(Mutex::new(records)),
+                purge_calls: Arc::new(Mutex::new(Vec::new())),
+            }
+        }
+
+        fn purge_calls(&self) -> Vec<u64> {
+            self.purge_calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait]
+    impl PromptCacheObservationStore for MockStore {
+        async fn upsert_observation(
+            &self,
+            record: &PromptCacheObservationRecord,
+        ) -> StorageResult<()> {
+            self.records.lock().unwrap().push(record.clone());
+            Ok(())
+        }
+
+        async fn list_active_for_upstream(
+            &self,
+            upstream_id: Uuid,
+            not_expired_at_unix_secs: u64,
+        ) -> StorageResult<Vec<PromptCacheObservationRecord>> {
+            Ok(self
+                .records
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|record| {
+                    record.upstream_id == upstream_id
+                        && record.expires_at_unix_secs > not_expired_at_unix_secs
+                })
+                .cloned()
+                .collect())
+        }
+
+        async fn purge_expired_before(&self, ts_unix_secs: u64) -> StorageResult<u64> {
+            self.purge_calls.lock().unwrap().push(ts_unix_secs);
+            let mut records = self.records.lock().unwrap();
+            let before = records.len();
+            records.retain(|record| record.expires_at_unix_secs >= ts_unix_secs);
+            Ok((before - records.len()) as u64)
+        }
+
+        async fn count(&self) -> StorageResult<u64> {
+            Ok(self.records.lock().unwrap().len() as u64)
+        }
+    }
+
+    fn storage_record(
+        upstream_id: Uuid,
+        prefix_hash: &str,
+        ttl_class: StorageTtlClass,
+        expires_at_unix_secs: u64,
+        last_observed_at_unix_secs: u64,
+        hash_schema_version: u8,
+    ) -> PromptCacheObservationRecord {
+        PromptCacheObservationRecord {
+            upstream_id,
+            canonical_model_id: MODEL.to_owned(),
+            prefix_hash: prefix_hash.to_owned(),
+            ttl_class,
+            expires_at_unix_secs,
+            last_observed_at_unix_secs,
+            hash_schema_version,
+        }
+    }
+
+    #[tokio::test]
+    async fn hydrate_filters() {
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(BASE_TS));
+        let cache = PromptCacheObservationCache::new(clock, 30, 32);
+        let upstream_id = Uuid::new_v4();
+        let store = MockStore::new(vec![
+            storage_record(
+                upstream_id,
+                "active",
+                StorageTtlClass::Ephemeral5m,
+                BASE_TS + 300,
+                BASE_TS - 10,
+                HASH_SCHEMA_VERSION,
+            ),
+            storage_record(
+                upstream_id,
+                "expired",
+                StorageTtlClass::Ephemeral5m,
+                BASE_TS,
+                BASE_TS - 20,
+                HASH_SCHEMA_VERSION,
+            ),
+            storage_record(
+                upstream_id,
+                "schema-v1",
+                StorageTtlClass::Ephemeral5m,
+                BASE_TS + 300,
+                BASE_TS - 30,
+                1,
+            ),
+        ]);
+
+        let loaded = cache
+            .hydrate_from_store(&store, &[upstream_id])
+            .await
+            .unwrap();
+
+        assert_eq!(loaded, 1);
+        let snapshot = cache.snapshot_for_upstream(
+            upstream_id,
+            MODEL,
+            &[
+                ("active".to_owned(), TtlClass::Ephemeral5m),
+                ("expired".to_owned(), TtlClass::Ephemeral5m),
+                ("schema-v1".to_owned(), TtlClass::Ephemeral5m),
+            ],
+            BASE_TS,
+        );
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].prefix_hash, "active");
+    }
+
+    #[test]
+    fn refresh_debounce() {
+        let clock = Arc::new(TestClock::new_at_secs(BASE_TS));
+        let cache = PromptCacheObservationCache::new_with_debounce(clock.clone(), 30, 32, 60);
+        let upstream_id = Uuid::new_v4();
+
+        upsert(
+            &cache,
+            upstream_id,
+            "debounced",
+            TtlClass::Ephemeral5m,
+            BASE_TS + 300,
+            clock.now_unix_secs(),
+        );
+
+        clock.advance_secs(30);
+        assert!(!cache.refresh_on_hit(
+            upstream_id,
+            MODEL,
+            "debounced",
+            TtlClass::Ephemeral5m,
+            clock.now_unix_secs(),
+        ));
+        let key = (
+            MODEL.to_owned(),
+            "debounced".to_owned(),
+            TtlClass::Ephemeral5m,
+        );
+        {
+            let guard = cache.entries.read();
+            let entry = guard.get(&upstream_id).unwrap().get(&key).unwrap();
+            assert_eq!(entry.last_observed_at_unix_secs, BASE_TS + 30);
+            assert_eq!(entry.last_persisted_at_unix_secs, BASE_TS);
+        }
+
+        clock.advance_secs(40);
+        assert!(cache.refresh_on_hit(
+            upstream_id,
+            MODEL,
+            "debounced",
+            TtlClass::Ephemeral5m,
+            clock.now_unix_secs(),
+        ));
+        let guard = cache.entries.read();
+        let entry = guard.get(&upstream_id).unwrap().get(&key).unwrap();
+        assert_eq!(entry.last_observed_at_unix_secs, BASE_TS + 70);
+        assert_eq!(entry.last_persisted_at_unix_secs, BASE_TS + 70);
+    }
+
+    #[tokio::test]
+    async fn hydrate_returns_zero_when_store_empty() {
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(BASE_TS));
+        let cache = PromptCacheObservationCache::new(clock, 30, 32);
+        let upstream_id = Uuid::new_v4();
+        let store = MockStore::default();
+
+        let loaded = cache
+            .hydrate_from_store(&store, &[upstream_id])
+            .await
+            .unwrap();
+
+        assert_eq!(loaded, 0);
+        let snapshot = cache.snapshot_for_upstream(
+            upstream_id,
+            MODEL,
+            &[("missing".to_owned(), TtlClass::Ephemeral5m)],
+            BASE_TS,
+        );
+        assert!(snapshot.is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sweeper_calls_purge() {
+        tokio::time::pause();
+        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(BASE_TS));
+        let cache = Arc::new(PromptCacheObservationCache::new(clock, 30, 32));
+        let store = Arc::new(MockStore::default());
+
+        let handle = Arc::clone(&cache).spawn_sweeper(store.clone(), 1);
+        tokio::task::yield_now().await;
+
+        for _ in 0..2 {
+            if !store.purge_calls().is_empty() {
+                break;
+            }
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+        }
+
+        let purge_calls = store.purge_calls();
+        assert!(!purge_calls.is_empty());
+        assert_eq!(purge_calls[0], BASE_TS - 60);
+        handle.abort();
     }
 
     #[test]

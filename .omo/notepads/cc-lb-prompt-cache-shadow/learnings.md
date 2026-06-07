@@ -322,3 +322,9 @@
 - **Tests added**: `snapshot_asymmetric_ttl`, `snapshot_cap`, `upsert_replaces_existing_and_preserves_last_persisted_at`, `snapshot_excludes_expired_at_now`, `snapshot_filters_to_request_breakpoints_only`, `snapshot_ignores_other_upstream`.
 - **Evidence targets**: `.omo/evidence/task-16-asymmetric-ttl.txt` and `.omo/evidence/task-16-cap.txt`.
 - **Dependency mismatch found**: T11 notes said cache types were reachable via `cc_lb_plugin_api::types`, but `types` was private in this worktree; `crates/cc-lb-plugin-api/src/lib.rs` needed `pub mod types;` for the required import path to compile.
+
+## 2026-06-07T00:00:00Z Task: 17
+- **Cache hydration source**: `PromptCacheObservationCache::hydrate_from_store` uses `self.clock.now_unix_secs()` with `PromptCacheObservationStore::list_active_for_upstream`, then drops records whose `hash_schema_version` does not match `HASH_SCHEMA_VERSION`.
+- **Schema constant**: Server cache exposes `pub const HASH_SCHEMA_VERSION: u8` by sourcing `cc_lb_core::lifecycle::HASH_SCHEMA_VERSION` (currently 2), avoiding a second local magic version.
+- **Refresh debounce**: `refresh_on_hit` updates the in-memory `last_observed_at_unix_secs` under one write lock and returns true only when the cached `last_persisted_at_unix_secs` is older than the configured debounce window; true also bumps the persisted timestamp in memory.
+- **Sweeper behavior**: `spawn_sweeper` intentionally consumes the immediate `tokio::time::interval` tick before looping so the first purge happens after the requested interval, not immediately.
