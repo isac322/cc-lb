@@ -154,6 +154,100 @@ pub struct SubscriptionQuotaCandidateSnapshot {
     pub max_staleness_secs: u64,
 }
 
+/// Prompt cache TTL class: immutable after entry creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum TtlClass {
+    /// 5-minute TTL cache entry.
+    #[default]
+    Ephemeral5m,
+    /// 1-hour TTL cache entry.
+    Ephemeral1h,
+}
+
+/// Origin of a cache breakpoint: whether explicitly requested or auto-inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum BreakpointOrigin {
+    /// Explicit cache breakpoint requested by the user or application.
+    Explicit,
+    /// Auto-inferred cache breakpoint from proxy analysis.
+    AutoCacheInferred,
+}
+
+/// Source of a cache breakpoint within the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum CacheBreakpointSource {
+    /// Breakpoint from tools in the request.
+    Tools,
+    /// Breakpoint from system content.
+    System,
+    /// Breakpoint from message content.
+    Message,
+}
+
+/// Cache breakpoint position in the request, for prompt cache optimization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct CacheBreakpoint {
+    /// Block index of the breakpoint.
+    pub block_index: u32,
+    /// Source of the breakpoint.
+    pub source: CacheBreakpointSource,
+    /// Dot-separated path (e.g., "messages.0.content.1") within request.
+    pub path: String,
+    /// Message index if this breakpoint is within a message, None for system content.
+    pub message_index: Option<u32>,
+    /// Content hash of the prefix up to this breakpoint.
+    pub prefix_hash: String,
+    /// Token count of the prefix up to this breakpoint.
+    pub prefix_token_count: u64,
+    /// Requested TTL class for this breakpoint.
+    pub requested_ttl: TtlClass,
+    /// Origin of this breakpoint.
+    pub origin: BreakpointOrigin,
+}
+
+/// Warm cache entry eligible for reuse in upstream requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct WarmCacheEntry {
+    /// Content hash of the cached prefix.
+    pub prefix_hash: String,
+    /// Unix timestamp in seconds when this entry expires.
+    pub expires_at_unix_secs: u64,
+    /// TTL class of this cache entry.
+    pub ttl_class: TtlClass,
+    /// Last observed usage time in Unix seconds.
+    pub last_observed_at_unix_secs: u64,
+}
+
+/// Cache utility prediction for routing decisions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct CacheScore {
+    /// Predicted input tokens that can be read from cache.
+    pub predicted_cache_read_tokens: u32,
+    /// Predicted input tokens written to 5-minute cache.
+    pub predicted_cache_creation_tokens_5m: u32,
+    /// Predicted input tokens written to 1-hour cache.
+    pub predicted_cache_creation_tokens_1h: u32,
+    /// Predicted input tokens not read from cache.
+    pub predicted_uncached_input_tokens: u32,
+    /// Predicted Unix timestamp when the cache entry will expire, None if permanent.
+    pub predicted_expires_at_unix_secs: Option<u64>,
+    /// Index of the matched cache breakpoint if one was selected, None otherwise.
+    pub matched_breakpoint_index: Option<u32>,
+    /// Confidence score for this prediction (0.0 to 1.0).
+    pub confidence: f32,
+    /// Optional explanation for ambiguous or low-confidence predictions.
+    pub ambiguity_reason: Option<String>,
+}
+
 /// Available upstream candidate for routing decisions.
 ///
 /// The router receives a list of available upstream candidates sorted by
@@ -618,5 +712,68 @@ mod tests {
         ];
 
         assert_eq!(events, events.clone());
+    }
+
+    #[test]
+    fn cache_types_roundtrip() {
+        let ttl_class = TtlClass::Ephemeral1h;
+        let json = serde_json::to_string(&ttl_class).unwrap();
+        let decoded: TtlClass = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, ttl_class);
+
+        let origin = BreakpointOrigin::AutoCacheInferred;
+        let json = serde_json::to_string(&origin).unwrap();
+        let decoded: BreakpointOrigin = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, origin);
+
+        let source = CacheBreakpointSource::System;
+        let json = serde_json::to_string(&source).unwrap();
+        let decoded: CacheBreakpointSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, source);
+
+        let breakpoint = CacheBreakpoint {
+            block_index: 0,
+            source: CacheBreakpointSource::Message,
+            path: "messages.0.content.1".to_owned(),
+            message_index: Some(0),
+            prefix_hash: "abc123".to_owned(),
+            prefix_token_count: 100,
+            requested_ttl: TtlClass::Ephemeral5m,
+            origin: BreakpointOrigin::Explicit,
+        };
+        let json = serde_json::to_string(&breakpoint).unwrap();
+        let decoded: CacheBreakpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, breakpoint);
+
+        let warm_entry = WarmCacheEntry {
+            prefix_hash: "def456".to_owned(),
+            expires_at_unix_secs: 1700000000,
+            ttl_class: TtlClass::Ephemeral1h,
+            last_observed_at_unix_secs: 1699999000,
+        };
+        let json = serde_json::to_string(&warm_entry).unwrap();
+        let decoded: WarmCacheEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, warm_entry);
+
+        let cache_score = CacheScore {
+            predicted_cache_read_tokens: 50,
+            predicted_cache_creation_tokens_5m: 100,
+            predicted_cache_creation_tokens_1h: 200,
+            predicted_uncached_input_tokens: 25,
+            predicted_expires_at_unix_secs: Some(1700000000),
+            matched_breakpoint_index: Some(0),
+            confidence: 0.95,
+            ambiguity_reason: None,
+        };
+        let json = serde_json::to_string(&cache_score).unwrap();
+        let decoded: CacheScore = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.predicted_cache_read_tokens, cache_score.predicted_cache_read_tokens);
+        assert_eq!(decoded.predicted_cache_creation_tokens_5m, cache_score.predicted_cache_creation_tokens_5m);
+        assert_eq!(decoded.predicted_cache_creation_tokens_1h, cache_score.predicted_cache_creation_tokens_1h);
+        assert_eq!(decoded.predicted_uncached_input_tokens, cache_score.predicted_uncached_input_tokens);
+        assert_eq!(decoded.predicted_expires_at_unix_secs, cache_score.predicted_expires_at_unix_secs);
+        assert_eq!(decoded.matched_breakpoint_index, cache_score.matched_breakpoint_index);
+        assert!((decoded.confidence - cache_score.confidence).abs() < 0.0001);
+        assert_eq!(decoded.ambiguity_reason, cache_score.ambiguity_reason);
     }
 }

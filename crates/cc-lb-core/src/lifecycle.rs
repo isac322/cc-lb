@@ -145,7 +145,6 @@ pub fn build_candidates(
                         view.subscription_quota_routing_max_staleness_secs,
                     ),
                     observed_at_unix_secs,
-                    cache_score: None,
                 }
             })
             .collect()
@@ -1233,7 +1232,6 @@ impl Lifecycle {
             path,
             query: parts.uri.query().map(ToOwned::to_owned),
             body_bytes: body,
-            cache_markers: Vec::new(),
         })
     }
 
