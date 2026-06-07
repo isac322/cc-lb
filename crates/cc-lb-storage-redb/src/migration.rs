@@ -48,10 +48,8 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
     }
     // Schema v4 -> v5: prompt_cache_observations key changed to include canonical_model_id.
     // Ephemeral data (5min/1h TTL) is acceptable to lose on upgrade.
-    if let Some(version) = old_version {
-        if version < 5 && version >= 4 {
-            reset_prompt_cache_observations_v4_to_v5(&write_txn)?;
-        }
+    if let Some(4) = old_version {
+        reset_prompt_cache_observations_v4_to_v5(&write_txn)?;
     }
 
     {
