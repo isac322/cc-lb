@@ -28,9 +28,12 @@ use cc_lb_plugin_wire::v1::on_unauthorized::{OnUnauthorizedFn, OnUnauthorizedReq
 use cc_lb_plugin_wire::v1::route::{RouteFn, RouteRequest};
 use cc_lb_plugin_wire::v1::shape::{ShapeFn, ShapeRequest};
 use cc_lb_plugin_wire::v1::sign::{SignFn, SignRequest};
+use cc_lb_plugin_wire::v2::common as v2_common;
+use cc_lb_plugin_wire::v2::route::{RouteFn as RouteFnV2, RouteRequest as RouteRequestV2};
 use cc_lb_plugin_wire::wire_function::{FallbackPolicy, WireFunction};
 use http::header::{HeaderName, HeaderValue};
 use http::{HeaderMap, Method, StatusCode};
+use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::oneshot;
 use url::Url;
@@ -48,25 +51,14 @@ impl ExtismRouterPlugin {
     pub(crate) fn new(slot: Arc<PluginSlot>) -> Self {
         Self { slot }
     }
-}
 
-impl RouterPlugin for ExtismRouterPlugin {
-    fn route(
+    fn route_v1(
         &self,
         ctx: &RequestContext,
         principal: &Principal,
         candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
-        let request = RouteRequest {
-            request_id: ctx.request_id.clone(),
-            headers: request_headers_to_wire(ctx),
-            method: ctx.method.as_str().to_owned(),
-            path: ctx.path.clone(),
-            query: ctx.query.clone(),
-            body_base64: BASE64.encode(&ctx.body_bytes),
-            principal: principal_to_wire(principal),
-            candidates: candidates_to_wire(candidates),
-        };
+        let request = route_request_to_wire(ctx, principal, candidates);
         let response = match self.slot.dispatch_wire_call_sync::<RouteFn>(request) {
             DispatchOutcome::Ok(response) => response,
             DispatchOutcome::Fallback(FallbackPolicy::UseDefault) => {
@@ -90,6 +82,72 @@ impl RouterPlugin for ExtismRouterPlugin {
             upstream,
             dialect,
         })
+    }
+
+    fn route_v2(
+        &self,
+        ctx: &RequestContext,
+        principal: &Principal,
+        candidates: &[UpstreamCandidate],
+    ) -> Result<RouteDecision, RouteError> {
+        let request = route_request_to_wire_v2(ctx, principal, candidates);
+        let response = match self.slot.dispatch_wire_call_sync::<RouteFnV2>(request) {
+            DispatchOutcome::Ok(response) => response,
+            DispatchOutcome::Fallback(FallbackPolicy::UseDefault) => {
+                return Ok(default_route_decision(self.slot.clone()));
+            }
+            DispatchOutcome::Fallback(policy) => return Err(route_unexpected_fallback(policy)),
+        };
+        let dialect: Arc<dyn UpstreamDialect> = match response.dialect {
+            v2_common::DialectBinding::SelfReferenced => {
+                Arc::new(ExtismDialectPlugin::new(self.slot.clone()))
+            }
+        };
+        let upstream = upstream_from_wire_v2(response.upstream).map_err(route_runtime_message)?;
+        let upstream_id = response
+            .upstream_id
+            .map(|upstream_id| Uuid::parse_str(&upstream_id))
+            .transpose()
+            .map_err(|source| RouteError::Runtime {
+                reason: format!("plugin returned invalid upstream_id: {source}"),
+            })?;
+        Ok(RouteDecision {
+            upstream_id,
+            upstream,
+            dialect,
+        })
+    }
+}
+
+impl RouterPlugin for ExtismRouterPlugin {
+    fn route(
+        &self,
+        ctx: &RequestContext,
+        principal: &Principal,
+        candidates: &[UpstreamCandidate],
+    ) -> Result<RouteDecision, RouteError> {
+        match self.slot.negotiated_wire_version() {
+            Ok(1) => self.route_v1(ctx, principal, candidates),
+            Ok(2) => self.route_v2(ctx, principal, candidates),
+            Ok(other) => {
+                tracing::warn!(
+                    plugin = %self.slot.name,
+                    wire_version = other,
+                    "plugin {} has unsupported wire_version {}, falling back to v1",
+                    self.slot.name,
+                    other,
+                );
+                self.route_v1(ctx, principal, candidates)
+            }
+            Err(source) => {
+                tracing::warn!(
+                    plugin = %self.slot.name,
+                    error = %source,
+                    "plugin wire_version unavailable, falling back to v1"
+                );
+                self.route_v1(ctx, principal, candidates)
+            }
+        }
     }
 }
 
@@ -515,11 +573,78 @@ fn candidates_to_wire(candidates: &[UpstreamCandidate]) -> Vec<CandidateWire> {
         .collect()
 }
 
+fn candidates_to_wire_v2(candidates: &[UpstreamCandidate]) -> Vec<v2_common::CandidateWire> {
+    candidates
+        .iter()
+        .map(|candidate| v2_common::CandidateWire {
+            upstream_id: candidate.upstream_id.to_string(),
+            name: candidate.name.clone(),
+            kind: candidate.kind.as_str().to_owned(),
+            observed_rate_limits: candidate
+                .observed_rate_limits
+                .iter()
+                .map(|observation| v2_common::RateLimitObservationWire {
+                    kind: observation.kind.as_str().to_owned(),
+                    window: observation.window.clone(),
+                    limit: observation.limit,
+                    remaining: observation.remaining,
+                    reset: observation.reset.clone(),
+                })
+                .collect(),
+            subscription_quotas: candidate
+                .subscription_quotas
+                .iter()
+                .map(|snapshot| {
+                    subscription_quota_to_wire_v2(snapshot, candidate.observed_at_unix_secs)
+                })
+                .collect(),
+            observed_at_unix_secs: candidate.observed_at_unix_secs,
+            cache_score: candidate
+                .cache_score
+                .as_ref()
+                .map(|score| v2_common::CacheScoreWire {
+                    predicted_cache_read_tokens: score.predicted_cache_read_tokens,
+                    predicted_cache_creation_tokens_5m: score.predicted_cache_creation_tokens_5m,
+                    predicted_cache_creation_tokens_1h: score.predicted_cache_creation_tokens_1h,
+                    predicted_uncached_input_tokens: score.predicted_uncached_input_tokens,
+                    predicted_expires_at_unix_secs: score.predicted_expires_at_unix_secs,
+                    matched_breakpoint_index: score.matched_breakpoint_index,
+                    confidence: score.confidence,
+                    ambiguity_reason: score.ambiguity_reason.clone(),
+                }),
+        })
+        .collect()
+}
+
 fn subscription_quota_to_wire(
     snapshot: &SubscriptionQuotaCandidateSnapshot,
     observed_at_unix_secs: u64,
 ) -> SubscriptionQuotaCandidateSnapshotWire {
     SubscriptionQuotaCandidateSnapshotWire {
+        window: snapshot.window.clone(),
+        source: snapshot
+            .source
+            .clone()
+            .unwrap_or_else(|| "missing".to_owned()),
+        data_state: subscription_quota_data_state_to_wire(snapshot.state).to_owned(),
+        utilization: snapshot.utilization,
+        status: snapshot.status.clone(),
+        resets_at_unix_secs: snapshot.resets_at_unix_secs,
+        surpassed_threshold: snapshot.surpassed_threshold,
+        representative_claim: snapshot.representative_claim.clone(),
+        disabled_reason: snapshot.disabled_reason.clone(),
+        observed_at_unix_millis: snapshot.observed_at_unix_millis,
+        age_secs: snapshot
+            .observed_at_unix_millis
+            .map(|observed_at| observed_at_unix_secs.saturating_sub(observed_at / 1_000)),
+    }
+}
+
+fn subscription_quota_to_wire_v2(
+    snapshot: &SubscriptionQuotaCandidateSnapshot,
+    observed_at_unix_secs: u64,
+) -> v2_common::SubscriptionQuotaCandidateSnapshotWire {
+    v2_common::SubscriptionQuotaCandidateSnapshotWire {
         window: snapshot.window.clone(),
         source: snapshot
             .source
@@ -558,6 +683,55 @@ pub(crate) fn request_to_wire(ctx: &RequestContext) -> RequestWire {
     }
 }
 
+fn route_request_to_wire(
+    ctx: &RequestContext,
+    principal: &Principal,
+    candidates: &[UpstreamCandidate],
+) -> RouteRequest {
+    RouteRequest {
+        request_id: ctx.request_id.clone(),
+        headers: request_headers_to_wire(ctx),
+        method: ctx.method.as_str().to_owned(),
+        path: ctx.path.clone(),
+        query: ctx.query.clone(),
+        body_base64: BASE64.encode(&ctx.body_bytes),
+        principal: principal_to_wire(principal),
+        candidates: candidates_to_wire(candidates),
+    }
+}
+
+fn route_request_to_wire_v2(
+    ctx: &RequestContext,
+    principal: &Principal,
+    candidates: &[UpstreamCandidate],
+) -> RouteRequestV2 {
+    RouteRequestV2 {
+        request_id: ctx.request_id.clone(),
+        headers: request_headers_to_wire_v2(ctx),
+        method: ctx.method.as_str().to_owned(),
+        path: ctx.path.clone(),
+        query: ctx.query.clone(),
+        body_base64: BASE64.encode(&ctx.body_bytes),
+        principal: principal_to_wire_v2(principal),
+        candidates: candidates_to_wire_v2(candidates),
+        cache_breakpoints: ctx
+            .cache_breakpoints
+            .iter()
+            .map(|breakpoint| v2_common::CacheBreakpointWire {
+                block_index: breakpoint.block_index,
+                source: cache_breakpoint_source_to_wire_v2(&breakpoint.source),
+                path: breakpoint.path.clone(),
+                message_index: breakpoint.message_index,
+                prefix_hash: breakpoint.prefix_hash.clone(),
+                prefix_token_count: breakpoint.prefix_token_count,
+                requested_ttl: ttl_class_to_wire_v2(&breakpoint.requested_ttl),
+                origin: breakpoint_origin_to_wire_v2(&breakpoint.origin),
+            })
+            .collect(),
+        canonical_model_id: ctx.canonical_model_id.clone(),
+    }
+}
+
 fn request_headers_to_wire(ctx: &RequestContext) -> Vec<HeaderWire> {
     let mut headers = ctx.downstream_headers.clone();
     headers.remove(http::header::HOST);
@@ -566,12 +740,82 @@ fn request_headers_to_wire(ctx: &RequestContext) -> Vec<HeaderWire> {
     headers_to_wire(&headers)
 }
 
+fn request_headers_to_wire_v2(ctx: &RequestContext) -> Vec<v2_common::HeaderWire> {
+    let mut headers = ctx.downstream_headers.clone();
+    headers.remove(http::header::HOST);
+    headers.remove(http::header::AUTHORIZATION);
+    headers.remove("x-api-key");
+    headers_to_wire_v2(&headers)
+}
+
 pub(crate) fn principal_to_wire(principal: &Principal) -> PrincipalWire {
     PrincipalWire {
         id: principal.id.clone(),
         kind: principal_kind_to_wire(principal),
         claims: principal.claims.clone(),
     }
+}
+
+fn principal_to_wire_v2(principal: &Principal) -> v2_common::Principal {
+    v2_common::Principal {
+        id: principal.id.clone(),
+        kind: principal_kind_to_wire(principal),
+        claims: principal.claims.clone(),
+    }
+}
+
+fn ttl_class_to_wire_v2(ttl: &impl Serialize) -> v2_common::TtlClassWire {
+    match serialized_enum_name(ttl).as_deref() {
+        Some("ephemeral1h" | "ephemeral_1h") => v2_common::TtlClassWire::Ephemeral1h,
+        Some("ephemeral5m" | "ephemeral_5m") => v2_common::TtlClassWire::Ephemeral5m,
+        Some(other) => {
+            tracing::warn!(
+                ttl_class = other,
+                "unknown cache TTL class, falling back to ephemeral_5m"
+            );
+            v2_common::TtlClassWire::Ephemeral5m
+        }
+        None => v2_common::TtlClassWire::Ephemeral5m,
+    }
+}
+
+fn breakpoint_origin_to_wire_v2(origin: &impl Serialize) -> v2_common::BreakpointOriginWire {
+    match serialized_enum_name(origin).as_deref() {
+        Some("auto_cache_inferred") => v2_common::BreakpointOriginWire::AutoCacheInferred,
+        Some("explicit") => v2_common::BreakpointOriginWire::Explicit,
+        Some(other) => {
+            tracing::warn!(
+                origin = other,
+                "unknown cache breakpoint origin, falling back to explicit"
+            );
+            v2_common::BreakpointOriginWire::Explicit
+        }
+        None => v2_common::BreakpointOriginWire::Explicit,
+    }
+}
+
+fn cache_breakpoint_source_to_wire_v2(
+    source: &impl Serialize,
+) -> v2_common::CacheBreakpointSourceWire {
+    match serialized_enum_name(source).as_deref() {
+        Some("tools") => v2_common::CacheBreakpointSourceWire::Tools,
+        Some("system") => v2_common::CacheBreakpointSourceWire::System,
+        Some("message") => v2_common::CacheBreakpointSourceWire::Message,
+        Some(other) => {
+            tracing::warn!(
+                source = other,
+                "unknown cache breakpoint source, falling back to message"
+            );
+            v2_common::CacheBreakpointSourceWire::Message
+        }
+        None => v2_common::CacheBreakpointSourceWire::Message,
+    }
+}
+
+fn serialized_enum_name(value: &impl Serialize) -> Option<String> {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|value| value.as_str().map(ToOwned::to_owned))
 }
 
 fn principal_kind_to_wire(principal: &Principal) -> String {
@@ -590,6 +834,19 @@ pub(crate) fn upstream_to_wire(upstream: &Upstream) -> UpstreamWire {
 fn upstream_from_wire(upstream: UpstreamWire) -> Result<Upstream, WireError> {
     match upstream {
         UpstreamWire::AnthropicDirect => Ok(Upstream::AnthropicDirect),
+    }
+}
+
+fn upstream_from_wire_v2(upstream: v2_common::UpstreamWire) -> Result<Upstream, WireError> {
+    match upstream {
+        v2_common::UpstreamWire::AnthropicDirect => Ok(Upstream::AnthropicDirect),
+        v2_common::UpstreamWire::CustomAnthropicSpec { base_url } => {
+            let base_url = Url::parse(&base_url).map_err(|source| WireError::InvalidUrl {
+                url: base_url,
+                source,
+            })?;
+            Ok(Upstream::CustomAnthropicSpec { base_url })
+        }
     }
 }
 
@@ -626,6 +883,16 @@ pub(crate) fn headers_to_wire(headers: &HeaderMap) -> Vec<HeaderWire> {
     headers
         .iter()
         .map(|(name, value)| HeaderWire {
+            name: name.as_str().to_owned(),
+            value_base64: BASE64.encode(value.as_bytes()),
+        })
+        .collect()
+}
+
+fn headers_to_wire_v2(headers: &HeaderMap) -> Vec<v2_common::HeaderWire> {
+    headers
+        .iter()
+        .map(|(name, value)| v2_common::HeaderWire {
             name: name.as_str().to_owned(),
             value_base64: BASE64.encode(value.as_bytes()),
         })
@@ -720,5 +987,172 @@ fn dialect_unexpected_fallback(policy: FallbackPolicy) -> DialectError {
 fn signer_unexpected_fallback(policy: FallbackPolicy) -> SignerError {
     SignerError::SigningFailed {
         reason: format!("unexpected plugin signer fallback policy: {policy:?}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use bytes::Bytes;
+    use cc_lb_plugin_api::{PrincipalKind, RateLimitKind, RateLimitObservation, UpstreamKind};
+    use http::{HeaderMap, Method};
+    use serde_json::json;
+    use uuid::Uuid;
+
+    use super::*;
+
+    fn test_candidate_without_cache_score() -> UpstreamCandidate {
+        UpstreamCandidate {
+            upstream_id: Uuid::parse_str("11111111-1111-1111-1111-111111111111")
+                .expect("fixture UUID parses"),
+            name: "anthropic-direct".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            observed_rate_limits: vec![RateLimitObservation {
+                kind: RateLimitKind::Requests,
+                window: "minute".to_owned(),
+                limit: Some(100),
+                remaining: Some(42),
+                reset: Some("60".to_owned()),
+            }],
+            subscription_quotas: Vec::new(),
+            observed_at_unix_secs: 1_800_000_000,
+            cache_score: None,
+        }
+    }
+
+    fn test_candidate_with_cache_score() -> UpstreamCandidate {
+        UpstreamCandidate {
+            cache_score: serde_json::from_value(json!({
+                "predicted_cache_read_tokens": 1024,
+                "predicted_cache_creation_tokens_5m": 256,
+                "predicted_cache_creation_tokens_1h": 128,
+                "predicted_uncached_input_tokens": 64,
+                "predicted_expires_at_unix_secs": 1900000000u64,
+                "matched_breakpoint_index": 0,
+                "confidence": 0.875,
+                "ambiguity_reason": "fixture confidence"
+            }))
+            .expect("cache score fixture deserializes"),
+            ..test_candidate_without_cache_score()
+        }
+    }
+
+    fn test_principal() -> Principal {
+        Principal {
+            id: "principal-test".to_owned(),
+            kind: PrincipalKind::ApiKey,
+            claims: serde_json::Map::new(),
+        }
+    }
+
+    fn test_request_context() -> RequestContext {
+        RequestContext {
+            request_id: "req-test".to_owned(),
+            downstream_headers: HeaderMap::new(),
+            method: Method::POST,
+            path: "/v1/messages".to_owned(),
+            query: None,
+            body_bytes: Bytes::from_static(br#"{"model":"claude-test"}"#),
+            cache_breakpoints: Vec::new(),
+            canonical_model_id: String::new(),
+        }
+    }
+
+    fn add_cache_fields(ctx: &mut RequestContext) {
+        ctx.cache_breakpoints = serde_json::from_value(json!([{
+            "block_index": 7,
+            "source": "message",
+            "path": "messages.0.content.1",
+            "message_index": 0,
+            "prefix_hash": "prefix-hash-123",
+            "prefix_token_count": 2048,
+            "requested_ttl": "ephemeral1h",
+            "origin": "auto_cache_inferred"
+        }]))
+        .expect("cache breakpoint fixture deserializes");
+        ctx.canonical_model_id = "claude-sonnet-4-5-20250929".to_owned();
+    }
+
+    #[test]
+    fn candidates_to_wire_versioned_v1_wire_omits_cache_score() {
+        let candidates = vec![test_candidate_without_cache_score()];
+
+        let wire = candidates_to_wire(&candidates);
+        let json = serde_json::to_value(&wire[0]).expect("v1 candidate serializes");
+
+        assert!(json.get("cache_score").is_none());
+    }
+
+    #[test]
+    fn candidates_to_wire_versioned_v2_wire_includes_cache_score() {
+        let candidates = vec![test_candidate_with_cache_score()];
+
+        let wire = candidates_to_wire_v2(&candidates);
+        let wire_score = wire[0]
+            .cache_score
+            .as_ref()
+            .expect("v2 candidate carries cache score");
+
+        assert_eq!(wire_score.predicted_cache_read_tokens, 1_024);
+        assert_eq!(wire_score.predicted_cache_creation_tokens_5m, 256);
+        assert_eq!(wire_score.predicted_cache_creation_tokens_1h, 128);
+        assert_eq!(wire_score.predicted_uncached_input_tokens, 64);
+        assert_eq!(
+            wire_score.predicted_expires_at_unix_secs,
+            Some(1_900_000_000)
+        );
+        assert_eq!(wire_score.matched_breakpoint_index, Some(0));
+        assert_eq!(wire_score.confidence, 0.875);
+        assert_eq!(
+            wire_score.ambiguity_reason.as_deref(),
+            Some("fixture confidence")
+        );
+
+        let json = serde_json::to_value(&wire[0]).expect("v2 candidate serializes");
+        assert!(json.get("cache_score").is_some());
+    }
+
+    #[test]
+    fn candidates_to_wire_versioned_v1_route_request_omits_cache_fields() {
+        let mut ctx = test_request_context();
+        add_cache_fields(&mut ctx);
+
+        let request = route_request_to_wire(&ctx, &test_principal(), &[]);
+        let json = serde_json::to_value(&request).expect("v1 route request serializes");
+
+        assert!(json.get("cache_breakpoints").is_none());
+        assert!(json.get("canonical_model_id").is_none());
+    }
+
+    #[test]
+    fn candidates_to_wire_versioned_v2_route_request_includes_cache_fields() {
+        let mut ctx = test_request_context();
+        add_cache_fields(&mut ctx);
+
+        let request = route_request_to_wire_v2(&ctx, &test_principal(), &[]);
+
+        assert_eq!(request.canonical_model_id, ctx.canonical_model_id);
+        assert_eq!(request.cache_breakpoints.len(), 1);
+        let breakpoint = &request.cache_breakpoints[0];
+        assert_eq!(breakpoint.block_index, 7);
+        assert_eq!(
+            breakpoint.source,
+            v2_common::CacheBreakpointSourceWire::Message
+        );
+        assert_eq!(breakpoint.path, "messages.0.content.1");
+        assert_eq!(breakpoint.message_index, Some(0));
+        assert_eq!(breakpoint.prefix_hash, "prefix-hash-123");
+        assert_eq!(breakpoint.prefix_token_count, 2_048);
+        assert_eq!(
+            breakpoint.requested_ttl,
+            v2_common::TtlClassWire::Ephemeral1h
+        );
+        assert_eq!(
+            breakpoint.origin,
+            v2_common::BreakpointOriginWire::AutoCacheInferred
+        );
+
+        let json = serde_json::to_value(&request).expect("v2 route request serializes");
+        assert!(json.get("cache_breakpoints").is_some());
+        assert!(json.get("canonical_model_id").is_some());
     }
 }
