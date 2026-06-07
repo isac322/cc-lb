@@ -1,8 +1,10 @@
+// v2_alias and v2_dated MUST share a hash because v2 hashes canonical_model_id,
+// collapsing claude-sonnet-4-5 to claude-sonnet-4-5-20250929.
 use serde_json::Value;
 use std::fs;
 use std::path::PathBuf;
 
-use cc_lb_core::lifecycle::cache_prefix_hash;
+use cc_lb_core::lifecycle::{cache_prefix_hash, cache_prefix_hash_v2};
 use cc_lb_storage_api::types::RequestCacheBreakpointSource;
 
 fn fixture_dir() -> PathBuf {
@@ -14,21 +16,42 @@ fn fixture_dir() -> PathBuf {
 
 fn load_fixture_json(name: &str) -> Value {
     let path = fixture_dir().join(format!("{}.json", name));
-    let content = fs::read_to_string(&path).expect(&format!("Failed to read fixture {}", name));
-    serde_json::from_str(&content).expect(&format!("Invalid JSON in fixture {}", name))
+    let content = fs::read_to_string(&path)
+        .unwrap_or_else(|_| panic!("Failed to read fixture {}", name));
+    serde_json::from_str(&content).unwrap_or_else(|_| panic!("Invalid JSON in fixture {}", name))
 }
 
 fn load_expected_hash(name: &str) -> String {
     let path = fixture_dir().join(format!("{}.expected_hash", name));
     fs::read_to_string(&path)
-        .expect(&format!("Failed to read expected hash for {}", name))
+        .unwrap_or_else(|_| panic!("Failed to read expected hash for {}", name))
         .trim()
         .to_string()
 }
 
 fn save_expected_hash(name: &str, hash: &str) {
     let path = fixture_dir().join(format!("{}.expected_hash", name));
-    fs::write(&path, format!("{}\n", hash)).expect(&format!("Failed to write hash for {}", name));
+    fs::write(&path, format!("{}\n", hash))
+        .unwrap_or_else(|_| panic!("Failed to write hash for {}", name));
+}
+
+fn ensure_expected_hash(name: &str, hash: &str) -> String {
+    let expected_path = fixture_dir().join(format!("{}.expected_hash", name));
+    if !expected_path.exists() {
+        save_expected_hash(name, hash);
+        eprintln!("Recorded {} hash: {}", name, hash);
+    }
+    load_expected_hash(name)
+}
+
+fn compute_v2_system_hash(name: &str) -> String {
+    let request = load_fixture_json(name);
+    cache_prefix_hash_v2(
+        &request,
+        RequestCacheBreakpointSource::System,
+        "system[0]",
+        None,
+    )
 }
 
 #[test]
@@ -172,4 +195,57 @@ fn golden_alias_vs_dated_v1() {
         save_expected_hash("base_request_dated", &dated_hash);
         eprintln!("Recorded base_request_dated hash: {}", dated_hash);
     }
+}
+
+#[test]
+fn golden_alias_vs_dated_v2_canonical() {
+    let alias_hash = compute_v2_system_hash("v2_alias");
+    let dated_hash = compute_v2_system_hash("v2_dated");
+
+    assert_eq!(
+        alias_hash, dated_hash,
+        "v2 behavior: alias and dated model names should hash identically after canonical_model_id"
+    );
+
+    let alias_expected = ensure_expected_hash("v2_alias", &alias_hash);
+    let dated_expected = ensure_expected_hash("v2_dated", &dated_hash);
+
+    assert_eq!(alias_hash, alias_expected);
+    assert_eq!(dated_hash, dated_expected);
+    assert_eq!(
+        alias_expected, dated_expected,
+        "v2_alias.expected_hash and v2_dated.expected_hash must contain the same hash"
+    );
+}
+
+#[test]
+fn golden_tool_choice_changes_hash() {
+    let base_hash = compute_v2_system_hash("v2_base");
+    let tool_choice_hash = compute_v2_system_hash("v2_tool_choice_changed");
+
+    let base_expected = ensure_expected_hash("v2_base", &base_hash);
+    let tool_choice_expected = ensure_expected_hash("v2_tool_choice_changed", &tool_choice_hash);
+
+    assert_eq!(base_hash, base_expected);
+    assert_eq!(tool_choice_hash, tool_choice_expected);
+    assert_ne!(
+        base_hash, tool_choice_hash,
+        "Changing tool_choice should change the v2 prefix hash"
+    );
+}
+
+#[test]
+fn golden_thinking_changes_hash() {
+    let base_hash = compute_v2_system_hash("v2_base");
+    let thinking_hash = compute_v2_system_hash("v2_thinking_changed");
+
+    let base_expected = ensure_expected_hash("v2_base", &base_hash);
+    let thinking_expected = ensure_expected_hash("v2_thinking_changed", &thinking_hash);
+
+    assert_eq!(base_hash, base_expected);
+    assert_eq!(thinking_hash, thinking_expected);
+    assert_ne!(
+        base_hash, thinking_hash,
+        "Changing thinking should change the v2 prefix hash"
+    );
 }

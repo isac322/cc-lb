@@ -31,6 +31,8 @@ mod hop_by_hop;
 #[cfg(not(loom))]
 pub mod lifecycle;
 #[cfg(not(loom))]
+pub mod model_resolution;
+#[cfg(not(loom))]
 pub mod poll_schedule_estimator;
 #[cfg(not(loom))]
 #[allow(dead_code)]

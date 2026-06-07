@@ -1,12 +1,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cc_lb_core::{BreakerConfig, BreakerError, CircuitBreaker, MockClock};
+use cc_lb_core::{BreakerConfig, BreakerError, CircuitBreaker, TestClock};
 use tokio::sync::Barrier;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn half_open_allows_only_one_concurrent_probe() -> Result<(), Box<dyn std::error::Error>> {
-    let clock = Arc::new(MockClock::new(100));
+    let clock = Arc::new(TestClock::new_at_secs(100));
     let breaker = CircuitBreaker::with_clock(
         "bedrock",
         BreakerConfig {
@@ -18,7 +18,7 @@ async fn half_open_allows_only_one_concurrent_probe() -> Result<(), Box<dyn std:
         clock.clone(),
     );
     breaker.permit()?.record_failure();
-    clock.advance(Duration::from_secs(6));
+    clock.advance_secs(6);
 
     let barrier = Arc::new(Barrier::new(10));
     let mut tasks = tokio::task::JoinSet::new();

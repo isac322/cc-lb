@@ -1,11 +1,11 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use cc_lb_core::{BreakerConfig, BreakerState, CircuitBreaker, MockClock};
+use cc_lb_core::{BreakerConfig, BreakerState, CircuitBreaker, TestClock};
 
 #[test]
 fn open_breaker_allows_half_open_probe_after_timeout() -> Result<(), Box<dyn std::error::Error>> {
-    let clock = Arc::new(MockClock::new(100));
+    let clock = Arc::new(TestClock::new_at_secs(100));
     let breaker = CircuitBreaker::with_clock(
         "bedrock",
         BreakerConfig {
@@ -18,7 +18,7 @@ fn open_breaker_allows_half_open_probe_after_timeout() -> Result<(), Box<dyn std
     );
     breaker.permit()?.record_failure();
 
-    clock.advance(Duration::from_secs(6));
+    clock.advance_secs(6);
     let permit = breaker.permit()?;
 
     assert!(permit.is_half_open());

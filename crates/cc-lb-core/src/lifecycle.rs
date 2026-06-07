@@ -45,6 +45,7 @@ use crate::dynamic_view::{
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
 use crate::hop_by_hop::strip_hop_by_hop;
+use crate::model_resolution::canonical_model_id;
 use crate::rate_limit_headers::{
     parse_anthropic_rate_limit_headers, parse_anthropic_unified_headers,
 };
@@ -54,6 +55,8 @@ use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::upstream_rate_limit_events::UpstreamRateLimitSink;
 
 pub type Body = AxumBody;
+
+pub const HASH_SCHEMA_VERSION: u8 = 2;
 
 const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
@@ -1822,6 +1825,8 @@ struct RequestCacheMetadata {
     cache_control_message_indices: Vec<u64>,
     cache_breakpoints: Vec<RequestCacheBreakpoint>,
     cache_prefix_hash: Option<String>,
+    #[allow(dead_code)]
+    canonical_model_id: String,
 }
 
 impl RequestCacheMetadata {
@@ -1880,6 +1885,12 @@ fn request_cache_metadata(headers: &HeaderMap, body: &Bytes) -> RequestCacheMeta
             ..Default::default()
         };
     };
+    let canonical_model_id = value
+        .get("model")
+        .and_then(Value::as_str)
+        .map(canonical_model_id)
+        .unwrap_or_default()
+        .to_owned();
 
     let messages = value.get("messages").and_then(Value::as_array);
     let message_count = messages.map(|items| items.len() as u64);
@@ -1939,6 +1950,7 @@ fn request_cache_metadata(headers: &HeaderMap, body: &Bytes) -> RequestCacheMeta
         cache_control_message_indices,
         cache_breakpoints,
         cache_prefix_hash,
+        canonical_model_id,
     }
 }
 
@@ -2034,6 +2046,56 @@ pub fn cache_prefix_hash(
             "messages".to_owned(),
             truncate_value_at_path(messages, &relative_cache_path(path, "messages")),
         );
+    }
+    let bytes = serde_json::to_vec(&Value::Object(prefix)).unwrap_or_default();
+    hex_sha256(&bytes)
+}
+
+pub fn cache_prefix_hash_v2(
+    request: &Value,
+    source: RequestCacheBreakpointSource,
+    path: &str,
+    message_index: Option<u64>,
+) -> String {
+    let mut prefix = serde_json::Map::new();
+    prefix.insert("breakpoint_path".to_owned(), Value::String(path.to_owned()));
+    if let Some(raw_model) = request.get("model").and_then(Value::as_str) {
+        prefix.insert(
+            "model".to_owned(),
+            Value::String(canonical_model_id(raw_model).to_owned()),
+        );
+    }
+    if let Some(value) = request.get("tools") {
+        let value = if source == RequestCacheBreakpointSource::Tools {
+            truncate_value_at_path(value, &relative_cache_path(path, "tools"))
+        } else {
+            value.clone()
+        };
+        prefix.insert("tools".to_owned(), value);
+    }
+    if matches!(
+        source,
+        RequestCacheBreakpointSource::System | RequestCacheBreakpointSource::Message
+    ) && let Some(value) = request.get("system")
+    {
+        let value = if source == RequestCacheBreakpointSource::System {
+            truncate_value_at_path(value, &relative_cache_path(path, "system"))
+        } else {
+            value.clone()
+        };
+        prefix.insert("system".to_owned(), value);
+    }
+    if let (Some(messages), Some(_)) = (request.get("messages"), message_index) {
+        prefix.insert(
+            "messages".to_owned(),
+            truncate_value_at_path(messages, &relative_cache_path(path, "messages")),
+        );
+    }
+    if let Some(value) = request.get("tool_choice") {
+        prefix.insert("tool_choice".to_owned(), value.clone());
+    }
+    if let Some(value) = request.get("thinking") {
+        prefix.insert("thinking".to_owned(), value.clone());
     }
     let bytes = serde_json::to_vec(&Value::Object(prefix)).unwrap_or_default();
     hex_sha256(&bytes)

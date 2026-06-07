@@ -111,9 +111,8 @@ mod tests {
     fn tokenizer_singleton_consistency() {
         let tokenizer1 = PrefixTokenizer::global();
         let tokenizer2 = PrefixTokenizer::global();
-        assert_eq!(
+        assert!(
             std::ptr::eq(tokenizer1, tokenizer2),
-            true,
             "global() should return the same instance"
         );
     }
@@ -126,7 +125,7 @@ mod tests {
         assert!(count > 0, "Expected positive token count");
         // o200k_base should tokenize this into roughly 9-10 tokens
         assert!(
-            count >= 8 && count <= 12,
+            (8..=12).contains(&count),
             "Expected ~10 tokens for test text, got {}",
             count
         );
