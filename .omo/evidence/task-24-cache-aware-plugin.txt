@@ -1,0 +1,39 @@
+Task 24 cache-aware plugin verification
+
+$ cargo check -p cache-aware-router --target wasm32-unknown-unknown
+    Checking cache-aware-router v0.1.0 (/home/bhyoo/.local/share/opencode/worktree/8b031e50bfdcbbbec2b64be6945414766d5e93f2/playful-island/plugins/router/cache-aware)
+    Finished `dev` profile [unoptimized] target(s) in 0.24s
+
+$ cargo build -p cache-aware-router --target wasm32-unknown-unknown --release
+   Compiling cache-aware-router v0.1.0 (/home/bhyoo/.local/share/opencode/worktree/8b031e50bfdcbbbec2b64be6945414766d5e93f2/playful-island/plugins/router/cache-aware)
+    Finished `release` profile [optimized] target(s) in 6.22s
+
+$ cargo test -p cache-aware-router
+   Compiling cc-lb-plugin-api v0.1.0 (/home/bhyoo/.local/share/opencode/worktree/8b031e50bfdcbbbec2b64be6945414766d5e93f2/playful-island/crates/cc-lb-plugin-api)
+   Compiling cache-aware-router v0.1.0 (/home/bhyoo/.local/share/opencode/worktree/8b031e50bfdcbbbec2b64be6945414766d5e93f2/playful-island/plugins/router/cache-aware)
+    Finished `test` profile [unoptimized] target(s) in 0.54s
+     Running unittests src/lib.rs (target/debug/deps/cache_aware_router-271cb161d3ef5ea6)
+
+running 6 tests
+test tests::handshake_declares_wire_version_2 ... ok
+test tests::route_falls_through_to_rr_when_all_cold ... ok
+test tests::route_picks_warm_candidate ... ok
+test tests::route_round_robins_exact_cache_ties ... ok
+test tests::select_candidate_index_empty_returns_none ... ok
+test tests::route_tiebreak_by_predicted_read_tokens ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+
+$ cargo check --workspace
+    Checking cache-aware-router v0.1.0 (/home/bhyoo/.local/share/opencode/worktree/8b031e50bfdcbbbec2b64be6945414766d5e93f2/playful-island/plugins/router/cache-aware)
+    Finished `dev` profile [unoptimized] target(s) in 0.25s
+
+$ cargo clippy -p cache-aware-router --target wasm32-unknown-unknown -- -D warnings
+   Compiling cc-lb-plugin-wire v0.1.0 (/home/bhyoo/.local/share/opencode/worktree/8b031e50bfdcbbbec2b64be6945414766d5e93f2/playful-island/crates/cc-lb-plugin-wire)
+   Compiling cc-lb-pdk v0.1.0 (/home/bhyoo/.local/share/opencode/worktree/8b031e50bfdcbbbec2b64be6945414766d5e93f2/playful-island/crates/cc-lb-pdk)
+    Checking cache-aware-router v0.1.0 (/home/bhyoo/.local/share/opencode/worktree/8b031e50bfdcbbbec2b64be6945414766d5e93f2/playful-island/plugins/router/cache-aware)
+    Finished `dev` profile [unoptimized] target(s) in 1.63s
+
+Artifact check:
+target/wasm32-unknown-unknown/release/cache_aware_router.wasm
