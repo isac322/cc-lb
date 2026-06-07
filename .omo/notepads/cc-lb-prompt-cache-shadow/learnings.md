@@ -328,3 +328,8 @@
 - **Schema constant**: Server cache exposes `pub const HASH_SCHEMA_VERSION: u8` by sourcing `cc_lb_core::lifecycle::HASH_SCHEMA_VERSION` (currently 2), avoiding a second local magic version.
 - **Refresh debounce**: `refresh_on_hit` updates the in-memory `last_observed_at_unix_secs` under one write lock and returns true only when the cached `last_persisted_at_unix_secs` is older than the configured debounce window; true also bumps the persisted timestamp in memory.
 - **Sweeper behavior**: `spawn_sweeper` intentionally consumes the immediate `tokio::time::interval` tick before looping so the first purge happens after the requested interval, not immediately.
+
+## 2026-06-07 Task 21 (Lifecycle cache score surface)
+- `RequestContext.cache_breakpoints` and `canonical_model_id` are populated immediately after parse from `RequestCacheMetadata`, but only when `DynamicView::prompt_cache_observation_cache_opt()` is wired; without that cache, lifecycle preserves defensive empty defaults and candidate `cache_score = None`.
+- `build_candidates` now accepts canonical model + request `CacheBreakpoint`s and calls the prompt-cache snapshot synchronously per upstream. It trusts the snapshot warm-set cap and does not cap again.
+- Cache score prediction treats the longest warm-matched breakpoint as the read prediction, sums token counts for unmatched breakpoints by requested TTL, and leaves uncached input tokens at `0` until full token counting is wired.

@@ -7,6 +7,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use axum::body::Body as AxumBody;
 use bytes::Bytes;
+use cc_lb_plugin_api::types::{
+    BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheScore, TtlClass, WarmCacheEntry,
+};
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
     RequestContext, RetryDecision, RouterPlugin, SignedRequest, SubscriptionQuotaCandidateSnapshot,
@@ -74,6 +77,16 @@ pub trait SubscriptionQuotaCacheLike: Send + Sync {
     ) -> Vec<SubscriptionQuotaCandidateSnapshot>;
 }
 
+pub trait PromptCacheObservationCacheLike: Send + Sync {
+    fn snapshot_for_upstream(
+        &self,
+        upstream_id: Uuid,
+        canonical_model: &str,
+        request_breakpoint_hashes: &[(String, TtlClass)],
+        now_unix_secs: u64,
+    ) -> Vec<WarmCacheEntry>;
+}
+
 #[derive(Debug, Default)]
 pub struct NoopSubscriptionQuotaCache;
 
@@ -110,6 +123,8 @@ pub fn build_candidates(
     view: &DynamicView,
     principal_id: &str,
     request_kind: RequestKind,
+    canonical_model: &str,
+    request_breakpoints: &[CacheBreakpoint],
 ) -> Vec<UpstreamCandidate> {
     let Some(allowed_upstreams) = view.principal_view.allowed_upstreams(principal_id) else {
         return Vec::new();
@@ -118,6 +133,12 @@ pub fn build_candidates(
     let mut candidates: Vec<UpstreamCandidate> = {
         let rate_limit_cache = view.upstream_rate_limit_cache.read();
         let now_unix_millis = unix_now_ms();
+        let now_unix_secs = unix_now_secs();
+        let prompt_cache = view.prompt_cache_observation_cache_opt();
+        let request_breakpoint_hashes_with_ttl = request_breakpoints
+            .iter()
+            .map(|breakpoint| (breakpoint.prefix_hash.clone(), breakpoint.requested_ttl))
+            .collect::<Vec<_>>();
         view.upstreams_snapshot()
             .iter()
             .filter(|upstream| upstream.enabled)
@@ -137,6 +158,15 @@ pub fn build_candidates(
                 } else {
                     rate_limit_cache.updated_at_unix_secs
                 };
+                let cache_score = prompt_cache.and_then(|cache| {
+                    let warm_entries = cache.snapshot_for_upstream(
+                        upstream.id,
+                        canonical_model,
+                        &request_breakpoint_hashes_with_ttl,
+                        now_unix_secs,
+                    );
+                    build_cache_score(request_breakpoints, &warm_entries)
+                });
                 UpstreamCandidate {
                     upstream_id: upstream.id,
                     name: upstream.name.clone(),
@@ -148,13 +178,72 @@ pub fn build_candidates(
                         view.subscription_quota_routing_max_staleness_secs,
                     ),
                     observed_at_unix_secs,
-                    cache_score: None,
+                    cache_score,
                 }
             })
             .collect()
     };
     candidates.sort_unstable_by_key(|c| c.upstream_id);
     candidates
+}
+
+fn build_cache_score(
+    request_breakpoints: &[CacheBreakpoint],
+    warm_entries: &[WarmCacheEntry],
+) -> Option<CacheScore> {
+    if warm_entries.is_empty() {
+        return None;
+    }
+
+    let warm_entry_for = |breakpoint: &CacheBreakpoint| {
+        warm_entries
+            .iter()
+            .filter(|entry| entry.prefix_hash == breakpoint.prefix_hash)
+            .max_by_key(|entry| entry.expires_at_unix_secs)
+    };
+    let longest_match = request_breakpoints
+        .iter()
+        .filter_map(|breakpoint| warm_entry_for(breakpoint).map(|entry| (breakpoint, entry)))
+        .max_by_key(|(breakpoint, _)| breakpoint.prefix_token_count);
+
+    let mut predicted_cache_creation_tokens_5m = 0_u64;
+    let mut predicted_cache_creation_tokens_1h = 0_u64;
+    for breakpoint in request_breakpoints {
+        if warm_entry_for(breakpoint).is_some() {
+            continue;
+        }
+        match breakpoint.requested_ttl {
+            TtlClass::Ephemeral5m => {
+                predicted_cache_creation_tokens_5m = predicted_cache_creation_tokens_5m
+                    .saturating_add(breakpoint.prefix_token_count);
+            }
+            TtlClass::Ephemeral1h => {
+                predicted_cache_creation_tokens_1h = predicted_cache_creation_tokens_1h
+                    .saturating_add(breakpoint.prefix_token_count);
+            }
+        }
+    }
+
+    Some(CacheScore {
+        predicted_cache_read_tokens: longest_match
+            .map(|(breakpoint, _)| saturating_u64_to_u32(breakpoint.prefix_token_count))
+            .unwrap_or(0),
+        predicted_cache_creation_tokens_5m: saturating_u64_to_u32(
+            predicted_cache_creation_tokens_5m,
+        ),
+        predicted_cache_creation_tokens_1h: saturating_u64_to_u32(
+            predicted_cache_creation_tokens_1h,
+        ),
+        predicted_uncached_input_tokens: 0,
+        predicted_expires_at_unix_secs: longest_match.map(|(_, entry)| entry.expires_at_unix_secs),
+        matched_breakpoint_index: longest_match.map(|(breakpoint, _)| breakpoint.block_index),
+        confidence: if longest_match.is_some() { 1.0 } else { 0.0 },
+        ambiguity_reason: None,
+    })
+}
+
+fn saturating_u64_to_u32(value: u64) -> u32 {
+    u32::try_from(value).unwrap_or(u32::MAX)
 }
 
 #[derive(Clone, Debug)]
@@ -505,9 +594,21 @@ impl Lifecycle {
         let principal_view = Arc::clone(&view.principal_view);
         let started = Instant::now();
         let parsed = self.parse(req);
-        let ctx = match parsed {
+        let mut ctx = match parsed {
             Ok(ctx) => ctx,
             Err(response) => return Ok(*response),
+        };
+        let cache_metadata = request_cache_metadata(&ctx.downstream_headers, &ctx.body_bytes);
+        let cache_breakpoints = if view.prompt_cache_observation_cache_opt().is_some() {
+            cache_metadata.plugin_cache_breakpoints()
+        } else {
+            Vec::new()
+        };
+        ctx.cache_breakpoints = cache_breakpoints;
+        ctx.canonical_model_id = if view.prompt_cache_observation_cache_opt().is_some() {
+            cache_metadata.canonical_model_id.clone()
+        } else {
+            String::new()
         };
 
         // Pre-authn observe: global hooks only (no principal context). Silent no-op when global is empty.
@@ -598,7 +699,13 @@ impl Lifecycle {
             },
         );
 
-        let candidates = build_candidates(&view, &principal.id, RequestKind::AnthropicMessages);
+        let candidates = build_candidates(
+            &view,
+            &principal.id,
+            RequestKind::AnthropicMessages,
+            &ctx.canonical_model_id,
+            &ctx.cache_breakpoints,
+        );
 
         let route = match router.route(&ctx, &principal, &candidates) {
             Ok(route) => route,
@@ -892,10 +999,7 @@ impl Lifecycle {
                     principal_kind: Some(principal_kind_as_str(&principal.kind).to_owned()),
                     proxy_setup_ms: Some(proxy_setup_ms),
                     stage_timings: attempt_timings,
-                    cache_metadata: request_cache_metadata(
-                        &ctx.downstream_headers,
-                        &ctx.body_bytes,
-                    ),
+                    cache_metadata,
                 },
             )
             .await;
@@ -1830,6 +1934,22 @@ struct RequestCacheMetadata {
 }
 
 impl RequestCacheMetadata {
+    fn plugin_cache_breakpoints(&self) -> Vec<CacheBreakpoint> {
+        self.cache_breakpoints
+            .iter()
+            .map(|breakpoint| CacheBreakpoint {
+                block_index: saturating_u64_to_u32(breakpoint.block_index),
+                source: plugin_cache_breakpoint_source(breakpoint.source),
+                path: breakpoint.path.clone(),
+                message_index: breakpoint.message_index.map(saturating_u64_to_u32),
+                prefix_hash: breakpoint.prefix_hash.clone(),
+                prefix_token_count: 0,
+                requested_ttl: plugin_ttl_class(breakpoint.ttl.as_deref()),
+                origin: BreakpointOrigin::Explicit,
+            })
+            .collect()
+    }
+
     fn apply_to(&self, event: &mut RequestEvent, usage: &UsageCounts) {
         event.thread_id = self.thread_id.clone();
         event.message_id = self.message_id.clone();
@@ -1856,6 +1976,21 @@ impl RequestCacheMetadata {
             (false, false, false, true) => RequestCacheState::None,
             _ => RequestCacheState::Unknown,
         }
+    }
+}
+
+fn plugin_cache_breakpoint_source(source: RequestCacheBreakpointSource) -> CacheBreakpointSource {
+    match source {
+        RequestCacheBreakpointSource::Tools => CacheBreakpointSource::Tools,
+        RequestCacheBreakpointSource::System => CacheBreakpointSource::System,
+        RequestCacheBreakpointSource::Message => CacheBreakpointSource::Message,
+    }
+}
+
+fn plugin_ttl_class(ttl: Option<&str>) -> TtlClass {
+    match ttl {
+        Some(ttl) if ttl.eq_ignore_ascii_case("1h") => TtlClass::Ephemeral1h,
+        _ => TtlClass::Ephemeral5m,
     }
 }
 
@@ -2638,13 +2773,114 @@ fn observe_many(hooks: &[Arc<dyn ObservabilityHook>], event: ObserveEvent) {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
+    use async_trait::async_trait;
     use cc_lb_storage_api::{
         SubscriptionQuotaSampleKind, SubscriptionQuotaSource, SubscriptionQuotaStatus,
         SubscriptionQuotaWindow,
+        principal::{PrincipalKind as StoragePrincipalKind, PrincipalRecord},
+        upstream::{UpstreamKind as StorageRecordKind, UpstreamRecord},
     };
     use http::header::{HeaderName, HeaderValue};
 
     use super::*;
+
+    const TEST_MODEL: &str = "claude-sonnet-4-5-20250929";
+
+    #[test]
+    fn build_candidates_cache_score() {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000201").unwrap();
+        let cache = TestPromptCacheObservationCache::new(32, TEST_MODEL).with_entries(
+            upstream_id,
+            vec![
+                warm_entry("short", TtlClass::Ephemeral5m, 4_100_000_300, 12),
+                warm_entry("long", TtlClass::Ephemeral1h, 4_100_003_600, 13),
+            ],
+        );
+        let view = cache_score_view(upstream_id, Arc::new(cache));
+        let breakpoints = vec![
+            cache_breakpoint(0, "short", 100, TtlClass::Ephemeral5m),
+            cache_breakpoint(1, "long", 250, TtlClass::Ephemeral1h),
+            cache_breakpoint(2, "cold", 50, TtlClass::Ephemeral5m),
+        ];
+
+        let candidates = build_candidates(
+            &view,
+            "principal",
+            RequestKind::AnthropicMessages,
+            TEST_MODEL,
+            &breakpoints,
+        );
+
+        let score = candidates[0].cache_score.as_ref().expect("cache score");
+        assert_eq!(score.predicted_cache_read_tokens, 250);
+        assert_eq!(score.predicted_cache_creation_tokens_5m, 50);
+        assert_eq!(score.predicted_cache_creation_tokens_1h, 0);
+        assert_eq!(score.predicted_uncached_input_tokens, 0);
+        assert_eq!(score.predicted_expires_at_unix_secs, Some(4_100_003_600));
+        assert_eq!(score.matched_breakpoint_index, Some(1));
+        assert_eq!(score.confidence, 1.0);
+        assert_eq!(score.ambiguity_reason, None);
+    }
+
+    #[test]
+    fn build_candidates_no_warm_returns_none() {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000202").unwrap();
+        let view = cache_score_view(
+            upstream_id,
+            Arc::new(TestPromptCacheObservationCache::new(32, TEST_MODEL)),
+        );
+        let breakpoints = vec![cache_breakpoint(0, "cold", 100, TtlClass::Ephemeral5m)];
+
+        let candidates = build_candidates(
+            &view,
+            "principal",
+            RequestKind::AnthropicMessages,
+            TEST_MODEL,
+            &breakpoints,
+        );
+
+        assert_eq!(candidates[0].cache_score, None);
+    }
+
+    #[test]
+    fn build_candidates_warm_set_cap_respected() {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000203").unwrap();
+        let breakpoints = (0_u32..50)
+            .map(|index| {
+                cache_breakpoint(
+                    index,
+                    &format!("hash-{index}"),
+                    u64::from(index + 1),
+                    TtlClass::Ephemeral5m,
+                )
+            })
+            .collect::<Vec<_>>();
+        let warm_entries = (0_u32..50)
+            .map(|index| WarmCacheEntry {
+                prefix_hash: format!("hash-{index}"),
+                expires_at_unix_secs: 4_100_000_300,
+                ttl_class: TtlClass::Ephemeral5m,
+                last_observed_at_unix_secs: 1_700_000_100 + u64::from(50 - index),
+            })
+            .collect::<Vec<_>>();
+        let cache = TestPromptCacheObservationCache::new(32, TEST_MODEL)
+            .with_entries(upstream_id, warm_entries);
+        let view = cache_score_view(upstream_id, Arc::new(cache));
+
+        let candidates = build_candidates(
+            &view,
+            "principal",
+            RequestKind::AnthropicMessages,
+            TEST_MODEL,
+            &breakpoints,
+        );
+
+        let score = candidates[0].cache_score.as_ref().expect("cache score");
+        assert_eq!(score.predicted_cache_read_tokens, 32);
+        assert_eq!(score.matched_breakpoint_index, Some(31));
+    }
 
     #[test]
     fn observe_subscription_quota_headers_builds_header_sample_records() {
@@ -2807,5 +3043,212 @@ mod tests {
             },
         );
         assert_eq!(event.cache_state, Some(RequestCacheState::Miss));
+    }
+
+    struct TestPromptCacheObservationCache {
+        cap: usize,
+        expected_model: &'static str,
+        entries: HashMap<Uuid, Vec<WarmCacheEntry>>,
+    }
+
+    impl TestPromptCacheObservationCache {
+        fn new(cap: usize, expected_model: &'static str) -> Self {
+            Self {
+                cap,
+                expected_model,
+                entries: HashMap::new(),
+            }
+        }
+
+        fn with_entries(mut self, upstream_id: Uuid, entries: Vec<WarmCacheEntry>) -> Self {
+            self.entries.insert(upstream_id, entries);
+            self
+        }
+    }
+
+    impl PromptCacheObservationCacheLike for TestPromptCacheObservationCache {
+        fn snapshot_for_upstream(
+            &self,
+            upstream_id: Uuid,
+            canonical_model: &str,
+            request_breakpoint_hashes: &[(String, TtlClass)],
+            now_unix_secs: u64,
+        ) -> Vec<WarmCacheEntry> {
+            assert_eq!(canonical_model, self.expected_model);
+            let mut snapshot = self
+                .entries
+                .get(&upstream_id)
+                .into_iter()
+                .flatten()
+                .filter(|entry| entry.expires_at_unix_secs > now_unix_secs)
+                .filter(|entry| {
+                    request_breakpoint_hashes
+                        .iter()
+                        .any(|(hash, ttl)| hash == &entry.prefix_hash && ttl == &entry.ttl_class)
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            snapshot.sort_by(|left, right| {
+                right
+                    .last_observed_at_unix_secs
+                    .cmp(&left.last_observed_at_unix_secs)
+            });
+            snapshot.truncate(self.cap);
+            snapshot
+        }
+    }
+
+    fn cache_score_view(
+        upstream_id: Uuid,
+        cache: Arc<dyn PromptCacheObservationCacheLike>,
+    ) -> Arc<DynamicView> {
+        DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(TestSignerFactory))
+            .global_router(Arc::new(TestRouter))
+            .dispatcher(Arc::new(TestDispatcher))
+            .global_observability_hooks(Vec::new())
+            .error_normalizer(Arc::new(ErrorNormalizer::new()))
+            .principal_view(Arc::new(PrincipalView::from_db(
+                &[principal_record("principal")],
+                HashMap::new(),
+            )))
+            .upstream_records(vec![upstream_record(upstream_id)])
+            .prompt_cache_observation_cache(cache)
+            .build()
+    }
+
+    fn cache_breakpoint(
+        index: u32,
+        prefix_hash: &str,
+        prefix_token_count: u64,
+        requested_ttl: TtlClass,
+    ) -> CacheBreakpoint {
+        CacheBreakpoint {
+            block_index: index,
+            source: CacheBreakpointSource::Message,
+            path: format!("messages[{index}]"),
+            message_index: Some(index),
+            prefix_hash: prefix_hash.to_owned(),
+            prefix_token_count,
+            requested_ttl,
+            origin: BreakpointOrigin::Explicit,
+        }
+    }
+
+    fn warm_entry(
+        prefix_hash: &str,
+        ttl_class: TtlClass,
+        expires_at_unix_secs: u64,
+        observed_offset: u64,
+    ) -> WarmCacheEntry {
+        WarmCacheEntry {
+            prefix_hash: prefix_hash.to_owned(),
+            expires_at_unix_secs,
+            ttl_class,
+            last_observed_at_unix_secs: 1_700_000_000 + observed_offset,
+        }
+    }
+
+    fn principal_record(name: &str) -> PrincipalRecord {
+        PrincipalRecord {
+            id: Uuid::new_v4(),
+            name: name.to_owned(),
+            kind: StoragePrincipalKind::Machine,
+            allowed_models: Vec::new(),
+            allowed_upstreams: Vec::new(),
+            default_limits: Vec::new(),
+            enabled: true,
+            last_apply_error: None,
+            last_apply_at_unix_secs: None,
+            deleted_at_unix_secs: None,
+            revision: 1,
+            created_at_unix_secs: 0,
+            updated_at_unix_secs: 0,
+        }
+    }
+
+    fn upstream_record(id: Uuid) -> UpstreamRecord {
+        UpstreamRecord {
+            id,
+            name: format!("upstream-{id}"),
+            kind: StorageRecordKind::AnthropicApiKey,
+            base_url: None,
+            enabled: true,
+            oauth_credentials: None,
+            api_key_ciphertext: None,
+            refresh_lease_holder: None,
+            refresh_lease_until_unix_secs: None,
+            last_apply_error: None,
+            last_apply_at_unix_secs: None,
+            deleted_at_unix_secs: None,
+            shape_plugin: None,
+            revision: 1,
+            created_at_unix_secs: 0,
+            updated_at_unix_secs: 0,
+        }
+    }
+
+    struct TestSignerFactory;
+
+    impl ApiKeyAwareSignerFactory for TestSignerFactory {
+        fn with_router_choice(
+            &self,
+            _api_key: String,
+            _router_chosen_upstream_name: String,
+        ) -> Arc<dyn cc_lb_plugin_api::SignerFactory> {
+            Arc::new(Self)
+        }
+    }
+
+    #[async_trait]
+    impl cc_lb_plugin_api::SignerFactory for TestSignerFactory {
+        async fn build(
+            &self,
+            _upstream: &Upstream,
+        ) -> Result<Arc<dyn cc_lb_plugin_api::Signer>, cc_lb_plugin_api::SignerError> {
+            Ok(Arc::new(TestSigner))
+        }
+    }
+
+    struct TestSigner;
+
+    #[async_trait]
+    impl cc_lb_plugin_api::Signer for TestSigner {
+        async fn sign(
+            &self,
+            shaped: cc_lb_plugin_api::ShapedRequest,
+            capability: &mut cc_lb_plugin_api::SigningCapability,
+        ) -> Result<SignedRequest, cc_lb_plugin_api::SignerError> {
+            Ok(SignedRequest::from_shaped(shaped, capability))
+        }
+
+        async fn on_unauthorized(&self, _err: &UpstreamError) -> RetryDecision {
+            RetryDecision::Fail
+        }
+    }
+
+    struct TestRouter;
+
+    impl RouterPlugin for TestRouter {
+        fn route(
+            &self,
+            _ctx: &RequestContext,
+            _principal: &Principal,
+            _candidates: &[UpstreamCandidate],
+        ) -> Result<cc_lb_plugin_api::RouteDecision, cc_lb_plugin_api::RouteError> {
+            panic!("cache score tests do not route")
+        }
+    }
+
+    struct TestDispatcher;
+
+    #[async_trait]
+    impl UpstreamDispatch for TestDispatcher {
+        async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+            Ok(Response::builder()
+                .status(StatusCode::OK)
+                .body(Body::from(Bytes::new()))
+                .expect("test response builds"))
+        }
     }
 }

@@ -9,7 +9,10 @@ use uuid::Uuid;
 
 use crate::api_keys::principal_view::PrincipalView;
 use crate::error_normalizer::ErrorNormalizer;
-use crate::lifecycle::{NoopSubscriptionQuotaCache, SubscriptionQuotaCacheLike, UpstreamDispatch};
+use crate::lifecycle::{
+    NoopSubscriptionQuotaCache, PromptCacheObservationCacheLike, SubscriptionQuotaCacheLike,
+    UpstreamDispatch,
+};
 
 #[non_exhaustive]
 pub struct DynamicView {
@@ -23,6 +26,7 @@ pub struct DynamicView {
     pub upstream_rate_limit_cache: Arc<RwLock<UpstreamRateLimitCache>>,
     pub subscription_quota_cache: Arc<dyn SubscriptionQuotaCacheLike>,
     pub subscription_quota_routing_max_staleness_secs: u64,
+    pub prompt_cache_observation_cache: Option<Arc<dyn PromptCacheObservationCacheLike>>,
     pub generation: u64,
     upstream_records: Vec<UpstreamRecord>,
 }
@@ -30,6 +34,12 @@ pub struct DynamicView {
 impl DynamicView {
     pub fn upstreams_snapshot(&self) -> &[UpstreamRecord] {
         &self.upstream_records
+    }
+
+    pub fn prompt_cache_observation_cache_opt(
+        &self,
+    ) -> Option<&Arc<dyn PromptCacheObservationCacheLike>> {
+        self.prompt_cache_observation_cache.as_ref()
     }
 }
 
@@ -139,6 +149,7 @@ pub struct DynamicViewBuilder {
     upstream_rate_limit_cache: Option<Arc<RwLock<UpstreamRateLimitCache>>>,
     subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     subscription_quota_routing_max_staleness_secs: Option<u64>,
+    prompt_cache_observation_cache: Option<Arc<dyn PromptCacheObservationCacheLike>>,
     upstream_records: Vec<UpstreamRecord>,
 }
 
@@ -156,6 +167,7 @@ impl DynamicViewBuilder {
             upstream_rate_limit_cache: None,
             subscription_quota_cache: None,
             subscription_quota_routing_max_staleness_secs: None,
+            prompt_cache_observation_cache: None,
             upstream_records: Vec::new(),
         }
     }
@@ -175,6 +187,7 @@ impl DynamicViewBuilder {
             subscription_quota_routing_max_staleness_secs: Some(
                 view.subscription_quota_routing_max_staleness_secs,
             ),
+            prompt_cache_observation_cache: view.prompt_cache_observation_cache.clone(),
             upstream_records: view.upstreams_snapshot().to_vec(),
         }
     }
@@ -243,6 +256,14 @@ impl DynamicViewBuilder {
         self
     }
 
+    pub fn prompt_cache_observation_cache(
+        mut self,
+        cache: Arc<dyn PromptCacheObservationCacheLike>,
+    ) -> Self {
+        self.prompt_cache_observation_cache = Some(cache);
+        self
+    }
+
     pub fn upstream_records(mut self, records: Vec<UpstreamRecord>) -> Self {
         self.upstream_records = records;
         self
@@ -278,6 +299,7 @@ impl DynamicViewBuilder {
             subscription_quota_routing_max_staleness_secs: self
                 .subscription_quota_routing_max_staleness_secs
                 .unwrap_or(0),
+            prompt_cache_observation_cache: self.prompt_cache_observation_cache,
             generation: self.previous_generation.saturating_add(1),
             upstream_records: self.upstream_records,
         })

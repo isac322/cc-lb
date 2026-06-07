@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_core::clock::ClockHandle;
+use cc_lb_core::lifecycle::PromptCacheObservationCacheLike;
 use cc_lb_plugin_api::types::{TtlClass, WarmCacheEntry};
 use cc_lb_storage_api::{PromptCacheObservationStore, StorageResult};
 use parking_lot::RwLock;
@@ -223,6 +224,24 @@ fn ttl_class_from_storage(ttl_class: cc_lb_storage_api::TtlClass) -> TtlClass {
     match ttl_class {
         cc_lb_storage_api::TtlClass::Ephemeral5m => TtlClass::Ephemeral5m,
         cc_lb_storage_api::TtlClass::Ephemeral1h => TtlClass::Ephemeral1h,
+    }
+}
+
+impl PromptCacheObservationCacheLike for PromptCacheObservationCache {
+    fn snapshot_for_upstream(
+        &self,
+        upstream_id: Uuid,
+        canonical_model: &str,
+        request_breakpoint_hashes: &[(String, TtlClass)],
+        now_unix_secs: u64,
+    ) -> Vec<WarmCacheEntry> {
+        Self::snapshot_for_upstream(
+            self,
+            upstream_id,
+            canonical_model,
+            request_breakpoint_hashes,
+            now_unix_secs,
+        )
     }
 }
 
