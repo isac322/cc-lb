@@ -1,0 +1,22 @@
+Task 30 redb hydrate perf evidence
+
+Command:
+cargo test -p cc-lb-storage-redb --release --test hydrate_50k_under_500ms -- --ignored --nocapture
+
+Result: PASS
+
+Output excerpt:
+running 1 test
+total_elapsed_ms=39.331
+upstream_id=30000000-0000-0000-0000-000000000000 elapsed_ms=14.629
+upstream_id=30000000-0000-0000-0000-000000000001 elapsed_ms=5.971
+upstream_id=30000000-0000-0000-0000-000000000002 elapsed_ms=5.777
+upstream_id=30000000-0000-0000-0000-000000000003 elapsed_ms=6.476
+upstream_id=30000000-0000-0000-0000-000000000004 elapsed_ms=6.478
+test hydrate_50k_rows_90percent_expired_under_500ms ... ok
+
+Additional verification:
+- cargo build -p cc-lb-storage-redb --release --test hydrate_50k_under_500ms: PASS
+- cargo check --workspace: PASS
+- cargo clippy -p cc-lb-storage-redb --all-targets -- -D warnings: PASS
+- LSP diagnostics on crates/cc-lb-storage-redb/tests/hydrate_50k_under_500ms.rs: clean

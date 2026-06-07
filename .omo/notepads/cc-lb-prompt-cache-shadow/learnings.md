@@ -367,3 +367,9 @@
 - Accessor functions in cc_lb_observability: `inc_cache_hit(upstream, model)` and `inc_cache_miss(upstream, model)`.
 - Test: hit_miss_counters_emitted_on_cache_hits_and_misses validates logic for cache read detection and edge cases.
 - LSP diagnostics clean on modified files.
+
+## 2026-06-07T00:00:00Z Task: 30 (Storage hydrate perf tests)
+- Added ignored release-only integration tests for raw `PromptCacheObservationStore::list_active_for_upstream` hydration across 50K records: 5 upstreams × 10K rows each, with 9K expired and 1K active per upstream.
+- Redb fixture follows temp-dir `RedbStorage::open(&path, [30; 32])`; setup/upsert time is outside the measured section, and only the five list calls are timed and summed.
+- Postgres fixture mirrors the live `CI_POSTGRES_URL` schema pattern from T14 and prints `skipped: CI_POSTGRES_URL not set` when the env var is absent.
+- Both tests print `total_elapsed_ms` plus per-upstream elapsed milliseconds and assert total list time stays below 500ms in release mode.
