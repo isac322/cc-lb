@@ -226,6 +226,7 @@ async fn router_choice_selects_matching_oauth_upstream() {
         fixture._dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
+        &cc_lb_config::Config::default(),
     )
     .await
     .expect("dynamic view builds");
@@ -266,6 +267,7 @@ async fn empty_router_choice_errors() {
         fixture._dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
+        &cc_lb_config::Config::default(),
     )
     .await
     .expect("dynamic view builds");

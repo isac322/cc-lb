@@ -56,6 +56,7 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
         fixture._dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
+        &cc_lb_config::Config::default(),
     )
     .await
     .expect("dynamic view builds");

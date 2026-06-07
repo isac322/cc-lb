@@ -506,6 +506,7 @@ async fn rebuild_test_view(
         data_dir,
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
+        &cc_lb_config::Config::default(),
     )
     .await?;
     Ok(DynamicViewBuilder::from_view(&view)

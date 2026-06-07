@@ -138,6 +138,7 @@ async fn initial_holder(
         data_dir,
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
+        &cc_lb_config::Config::default(),
     )
     .await
     .expect("initial dynamic view");
@@ -162,6 +163,7 @@ fn reconciler(
         data_dir.to_path_buf(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
+        Arc::new(cc_lb_config::Config::default()),
     ))
 }
 

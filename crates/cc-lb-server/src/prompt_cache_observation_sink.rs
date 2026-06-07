@@ -4,6 +4,10 @@ use std::sync::{
 };
 
 use cc_lb_core::lifecycle::{PromptCacheObservationEnqueueError, PromptCacheObservationSinkLike};
+use cc_lb_observability::{
+    cache_observation_dropped_reason, inc_cache_observation_dropped,
+    inc_cache_observation_write_failed,
+};
 use cc_lb_storage_api::{PromptCacheObservationRecord, PromptCacheObservationStore};
 use thiserror::Error;
 use tokio::sync::mpsc::{self, Sender, error::TrySendError};
@@ -30,6 +34,7 @@ impl PromptCacheObservationSink {
     pub fn new(
         store: Arc<dyn PromptCacheObservationStore + Send + Sync>,
         capacity: usize,
+        store_kind: &'static str,
     ) -> (Self, JoinHandle<()>) {
         let bounded_capacity = capacity.max(1);
         let (tx, mut rx) = mpsc::channel(bounded_capacity);
@@ -41,6 +46,7 @@ impl PromptCacheObservationSink {
         let writer = tokio::spawn(async move {
             while let Some(record) = rx.recv().await {
                 if let Err(e) = store.upsert_observation(&record).await {
+                    inc_cache_observation_write_failed(store_kind);
                     tracing::warn!(error = ?e, "prompt cache observation write failed");
                 }
             }
@@ -55,6 +61,7 @@ impl PromptCacheObservationSink {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
                 self.dropped_counter.fetch_add(1, Ordering::Relaxed);
+                inc_cache_observation_dropped(cache_observation_dropped_reason::QUEUE_FULL);
                 Err(EnqueueError::ChannelFull)
             }
             Err(TrySendError::Closed(_)) => Err(EnqueueError::ChannelClosed),
@@ -146,7 +153,7 @@ mod tests {
     async fn writer_processes_records_into_store() {
         let store = MockStore::default();
         let records = Arc::clone(&store.records);
-        let (sink, writer) = PromptCacheObservationSink::new(Arc::new(store), 8);
+        let (sink, writer) = PromptCacheObservationSink::new(Arc::new(store), 8, "redb");
 
         for index in 0..3 {
             sink.enqueue(record(index)).expect("record enqueued");
@@ -162,7 +169,8 @@ mod tests {
 
     #[tokio::test]
     async fn closed_channel_returns_closed_error() {
-        let (sink, writer) = PromptCacheObservationSink::new(Arc::new(MockStore::default()), 2);
+        let (sink, writer) =
+            PromptCacheObservationSink::new(Arc::new(MockStore::default()), 2, "redb");
 
         writer.abort();
         let _ = writer.await;

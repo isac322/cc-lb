@@ -373,3 +373,8 @@
 - Redb fixture follows temp-dir `RedbStorage::open(&path, [30; 32])`; setup/upsert time is outside the measured section, and only the five list calls are timed and summed.
 - Postgres fixture mirrors the live `CI_POSTGRES_URL` schema pattern from T14 and prints `skipped: CI_POSTGRES_URL not set` when the env var is absent.
 - Both tests print `total_elapsed_ms` plus per-upstream elapsed milliseconds and assert total list time stays below 500ms in release mode.
+
+## 2026-06-07T00:00:00Z Task: 25 (drift/drop/write-fail observability)
+- `cc_lb_cache_token_drift{upstream,model}` records `actual cache_read_input_tokens - chosen candidate predicted_cache_read_tokens`; `predicted=0` remains meaningful for upstream-cache false negatives.
+- `cc_lb_cache_observation_dropped_total{reason}` uses the fixed reason set `queue_full`, `below_threshold`, `status_4xx`, `abort`.
+- `cc_lb_cache_observation_write_failed_total{store}` is emitted by the prompt-cache observation sink writer with static store labels such as `redb` and `postgres`.

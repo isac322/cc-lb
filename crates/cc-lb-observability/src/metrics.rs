@@ -2,7 +2,7 @@ use metrics::Unit;
 
 use crate::{MetricDefinition, MetricKind};
 
-pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 16] = [
+pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 19] = [
     MetricDefinition {
         name: "cclb_api_key_requests_total",
         kind: MetricKind::Counter,
@@ -82,6 +82,21 @@ pub const PROMETHEUS14_METRIC_DEFINITIONS: [MetricDefinition; 16] = [
         name: "cc_lb_cache_miss_total",
         kind: MetricKind::Counter,
         description: "Total cache miss responses by upstream and model.",
+    },
+    MetricDefinition {
+        name: "cc_lb_cache_token_drift",
+        kind: MetricKind::Histogram,
+        description: "Actual cache read tokens minus predicted cache read tokens by upstream and model.",
+    },
+    MetricDefinition {
+        name: "cc_lb_cache_observation_dropped_total",
+        kind: MetricKind::Counter,
+        description: "Total prompt-cache observations dropped by fixed reason.",
+    },
+    MetricDefinition {
+        name: "cc_lb_cache_observation_write_failed_total",
+        kind: MetricKind::Counter,
+        description: "Total prompt-cache observation store writes that failed by store kind.",
     },
 ];
 
@@ -166,6 +181,21 @@ pub(crate) fn register_prometheus14_metrics() {
         Unit::Count,
         "Total cache miss responses by upstream and model."
     );
+    metrics::describe_histogram!(
+        "cc_lb_cache_token_drift",
+        Unit::Count,
+        "Actual cache read tokens minus predicted cache read tokens by upstream and model."
+    );
+    metrics::describe_counter!(
+        "cc_lb_cache_observation_dropped_total",
+        Unit::Count,
+        "Total prompt-cache observations dropped by fixed reason."
+    );
+    metrics::describe_counter!(
+        "cc_lb_cache_observation_write_failed_total",
+        Unit::Count,
+        "Total prompt-cache observation store writes that failed by store kind."
+    );
 }
 
 pub fn prometheus14_metric_definitions() -> &'static [MetricDefinition] {
@@ -226,6 +256,22 @@ pub fn touch_prometheus14_metrics() {
         "model" => "smoke-model"
     )
     .increment(1);
+    metrics::histogram!(
+        "cc_lb_cache_token_drift",
+        "upstream" => "smoke-upstream",
+        "model" => "smoke-model"
+    )
+    .record(0.0);
+    metrics::counter!(
+        "cc_lb_cache_observation_dropped_total",
+        "reason" => "queue_full"
+    )
+    .increment(1);
+    metrics::counter!(
+        "cc_lb_cache_observation_write_failed_total",
+        "store" => "redb"
+    )
+    .increment(1);
 }
 
 pub(crate) fn touch_prometheus14_metric_handles() {
@@ -270,4 +316,32 @@ pub(crate) fn touch_prometheus14_metric_handles() {
     metrics::counter!("cclb_key_auth_failures_total", "reason" => "unknown").increment(0);
     metrics::counter!("cclb_concurrent_rejects_total", "key_id" => "unknown").increment(0);
     metrics::counter!("cclb_streaming_usage_missing_total", "dialect" => "unknown").increment(0);
+    metrics::counter!(
+        "cc_lb_cache_hit_total",
+        "upstream" => "unknown",
+        "model" => "unknown"
+    )
+    .increment(0);
+    metrics::counter!(
+        "cc_lb_cache_miss_total",
+        "upstream" => "unknown",
+        "model" => "unknown"
+    )
+    .increment(0);
+    metrics::histogram!(
+        "cc_lb_cache_token_drift",
+        "upstream" => "unknown",
+        "model" => "unknown"
+    )
+    .record(0.0);
+    metrics::counter!(
+        "cc_lb_cache_observation_dropped_total",
+        "reason" => "unknown"
+    )
+    .increment(0);
+    metrics::counter!(
+        "cc_lb_cache_observation_write_failed_total",
+        "store" => "unknown"
+    )
+    .increment(0);
 }

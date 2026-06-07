@@ -218,6 +218,7 @@ async fn fixture() -> Fixture {
         dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
+        &cc_lb_config::Config::default(),
     )
     .await
     .expect("initial dynamic view builds");
@@ -251,6 +252,7 @@ async fn spawn_listener(
         lazy_refresher: None,
         subscription_quota_cache: Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         subscription_quota_routing_max_staleness_secs: 1800,
+        config: Arc::new(cc_lb_config::Config::default()),
     }));
     let task = tokio::spawn(async move {
         listener.run().await;
