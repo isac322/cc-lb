@@ -922,6 +922,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "cc-lb-aead",
+ "cc-lb-core",
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
  "cc-lb-storage-redb",
