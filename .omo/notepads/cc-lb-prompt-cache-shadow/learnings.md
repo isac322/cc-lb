@@ -389,3 +389,30 @@
   5. `cc_lb_cache_observation_write_failed_total` (counter)
 - **Troubleshooting runbook**: Added a detailed runbook for when the prompt cache hit-rate suddenly drops.
 - **Verification**: Verified that all 5 metrics are present in the runbook using grep and saved the output to `.omo/evidence/task-32-runbook.txt`.
+
+## T29: Memory bound test (100K observations) - 2026-06-07
+
+- Created `crates/cc-lb-server/tests/cache_memory_bound.rs` integration test, `#[ignore]` gated.
+- Dev-deps already present in `crates/cc-lb-server/Cargo.toml` from prior aborted attempt:
+  - `jemalloc_ctl = { package = "tikv-jemalloc-ctl", version = "0.6", features = ["stats"] }`
+  - `tikv-jemallocator = "0.6"`
+  - Alias `jemalloc_ctl -> tikv-jemalloc-ctl` is required because the crate's actual published name is `tikv-jemalloc-ctl`.
+- Global allocator set with `#[global_allocator] static A: tikv_jemallocator::Jemalloc = ...;` inside the integration test binary (per-test-binary allocator works because each integration test compiles to its own bin).
+- Reading `jemalloc_ctl::stats::allocated::read()` requires calling `jemalloc_ctl::epoch::advance()` first to refresh the cached stats. Without `epoch::advance` the before/after reads return the same cached value.
+- Measured result with release build, 10 upstreams × 10K observations (100K total, model `claude-sonnet-4-5-20250929`, distinct `prefix_hash`, `Ephemeral5m`, `expires_at = now + 300`):
+  - before_bytes=1255360
+  - after_bytes=22979952
+  - delta_mib=20 (well under the 200 MiB cap)
+- Run command: `cargo test -p cc-lb-server --release --test cache_memory_bound -- --ignored --nocapture`
+- Evidence: `.omo/evidence/task-29-memory-bound.txt`
+
+## 2026-06-07T00:00:00Z Task: 31 (Async observation failure isolation)
+- **Test file**: `crates/cc-lb-server/tests/observation_failure_isolation.rs`.
+- **Approach**: Per task MUST DO, used the T18 `PromptCacheObservationSink::new(Arc<dyn PromptCacheObservationStore>, capacity, store_kind)` constructor directly instead of booting the full server. The response-status-200 invariant is represented by `sink.enqueue(...)` returning `Ok(())` for every record even though every `upsert_observation` call returns `Err(StorageError::Unavailable)`. The synchronous response path has no path to learn about async store failure.
+- **MockStore**: Inline `FailingStore` implementing only `PromptCacheObservationStore::upsert_observation` (other trait methods are not required because the sink writer only ever calls `upsert_observation`); returns `StorageError::Unavailable { message: SIMULATED_ERROR_MESSAGE }` where the message is a literal const so the log assertion can find a stable substring.
+- **Tracing capture**: Re-used the `CapturedLogs` / `CapturedWriter` / `MakeWriter` pattern from `tests/oauth_refresh_cadence.rs`. `tracing_subscriber::fmt().with_ansi(false).with_max_level(Level::DEBUG)` plus `tracing::subscriber::set_default(...)` keeps capture per-test.
+- **Counter capture**: Followed `tests/prompt_cache_observation_metrics.rs`. `PrometheusBuilder::new().build_recorder()` + `metrics::with_local_recorder(&recorder, || { ... })` returns a local handle without contaminating the global recorder. Parsed `cc_lb_cache_observation_write_failed_total{store="redb"} <n>` from `handle.render()` and asserted `n >= 1`.
+- **Runtime gotcha**: `metrics::with_local_recorder` is a **thread-local** install. Using `#[tokio::test]` directly (which spins up its own runtime, potentially multi-threaded) makes the writer task lose the recorder context. Fix: declare the test as `#[test]`, then build a `tokio::runtime::Builder::new_current_thread().enable_time().build()` inside the `with_local_recorder` closure and `block_on` an `async move { ... }`. This is the exact same pattern as `prompt_cache_observation_metrics.rs`. Do not nest `block_on` inside `#[tokio::test]` — it will panic at runtime.
+- **Writer drain pattern**: `drop(sink)` to close the mpsc, then `tokio::time::timeout(Duration::from_secs(5), writer).await.expect(...).expect(...)`. The 5 s cap is the task budget; in practice the writer drains the 3 records in milliseconds because each `upsert_observation` is a synchronous `Err` return with no I/O.
+- **Verification**: PASS `cargo build -p cc-lb-server --test observation_failure_isolation`; PASS `cargo test -p cc-lb-server --test observation_failure_isolation -- --nocapture`; PASS `cargo clippy -p cc-lb-server --all-targets -- -D warnings`; PASS `cargo check --workspace`; PASS LSP diagnostics on the new test file.
+- **Evidence**: `.omo/evidence/task-31-failure-isolation.txt`.
