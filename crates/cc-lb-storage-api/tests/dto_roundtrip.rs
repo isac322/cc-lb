@@ -142,6 +142,7 @@ fn dto_roundtrip_preserves_representative_storage_domain_shapes() {
             ttl: Some("5m".to_owned()),
             prefix_hash: "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
                 .to_owned(),
+            prefix_token_count: 2048,
         }],
         cache_prefix_hash: Some(
             "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789".to_owned(),

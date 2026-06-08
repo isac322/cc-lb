@@ -5,6 +5,7 @@ pub mod error;
 pub mod organization_metadata;
 pub mod plugin_registry;
 pub mod principal;
+pub mod prompt_cache_observation;
 pub mod runtime_change_notifier;
 pub mod sparse_order;
 pub mod traits;
@@ -24,6 +25,9 @@ pub use error::{PluginChainConflictReason, StorageError, StorageResult};
 pub use organization_metadata::*;
 pub use plugin_registry::*;
 pub use principal::*;
+pub use prompt_cache_observation::{
+    PromptCacheObservationRecord, PromptCacheObservationStore, TtlClass,
+};
 pub use runtime_change_notifier::*;
 pub use traits::*;
 pub use types::*;

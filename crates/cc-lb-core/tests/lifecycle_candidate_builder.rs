@@ -110,19 +110,19 @@ fn build_candidates_filters_by_principal_enabled_deleted_kind_and_sorts() {
         ],
     );
 
-    let limited = build_candidates(&view, "limited", RequestKind::AnthropicMessages);
+    let limited = build_candidates(&view, "limited", RequestKind::AnthropicMessages, "", &[]);
     assert_eq!(
         candidate_ids(&limited),
         vec![allowed_low, allowed_mid, allowed_high]
     );
 
-    let all = build_candidates(&view, "all", RequestKind::AnthropicMessages);
+    let all = build_candidates(&view, "all", RequestKind::AnthropicMessages, "", &[]);
     assert_eq!(
         candidate_ids(&all),
         vec![not_allowed, allowed_low, allowed_mid, allowed_high]
     );
 
-    assert!(build_candidates(&view, "missing", RequestKind::AnthropicMessages).is_empty());
+    assert!(build_candidates(&view, "missing", RequestKind::AnthropicMessages, "", &[]).is_empty());
 }
 
 fn test_view(principals: Vec<PrincipalRecord>, upstreams: Vec<UpstreamRecord>) -> Arc<DynamicView> {

@@ -140,6 +140,8 @@ fn route_input_includes_candidates_as_sibling_field() {
             max_staleness_secs: 300,
         }],
         observed_at_unix_secs: 1_800_000_000,
+        cache_score: None,
+        base_url: None,
     }];
 
     let route = router

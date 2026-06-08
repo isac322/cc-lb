@@ -42,6 +42,8 @@ async fn fake_anthropic_accepts_signed_request() {
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(b"{}"),
+        cache_breakpoints: Vec::new(),
+        canonical_model_id: String::new(),
     };
     let principal = Principal {
         id: "alice".to_owned(),

@@ -59,6 +59,8 @@ pub struct Config {
     pub bulkhead: BulkheadConfig,
     pub dns: DnsConfig,
     pub egress: EgressConfig,
+    #[serde(default)]
+    pub prompt_cache_shadow: PromptCacheShadowConfig,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -552,6 +554,48 @@ impl Default for AnthropicCompatPollerConfig {
     }
 }
 
+/// Prompt cache shadow mode configuration.
+///
+/// Controls the prompt cache observation cache behavior. When `enabled=false`, the cache layer
+/// is not constructed and observation flow is gated off at the lifecycle level for byte-equivalent
+/// pre-T22 behavior (no observation enqueue, no snapshot, no sweeper). When `enabled=true`,
+/// the full cache pipeline activates: observations from successful responses are decoded,
+/// upserted into the in-memory cache, and enqueued for persistent storage; `build_candidates`
+/// snapshots cache state per upstream to compute cache scores.
+///
+/// Configuration keys and defaults:
+/// - `enabled` (default: false) - gate all observation flow and sweeper spawn
+/// - `grace_margin_secs` (default: 30) - minimum age before a cache hit is refreshed
+/// - `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence
+/// - `sweeper_interval_secs` (default: 300) - interval between expiry purge scans
+/// - `warm_set_cap` (default: 32) - max snapshot entries per upstream/model
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default)]
+pub struct PromptCacheShadowConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_prompt_cache_shadow_grace_margin_secs")]
+    pub grace_margin_secs: u64,
+    #[serde(default = "default_prompt_cache_shadow_refresh_debounce_secs")]
+    pub refresh_debounce_secs: u64,
+    #[serde(default = "default_prompt_cache_shadow_sweeper_interval_secs")]
+    pub sweeper_interval_secs: u64,
+    #[serde(default = "default_prompt_cache_shadow_warm_set_cap")]
+    pub warm_set_cap: usize,
+}
+
+impl Default for PromptCacheShadowConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            grace_margin_secs: 30,
+            refresh_debounce_secs: 60,
+            sweeper_interval_secs: 300,
+            warm_set_cap: 32,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct RuntimeConfig {
@@ -927,6 +971,22 @@ fn default_anthropic_compat_poller_jitter_secs() -> u64 {
 
 fn default_anthropic_compat_poller_request_timeout_secs() -> u64 {
     AnthropicCompatPollerConfig::default().request_timeout_secs
+}
+
+fn default_prompt_cache_shadow_grace_margin_secs() -> u64 {
+    PromptCacheShadowConfig::default().grace_margin_secs
+}
+
+fn default_prompt_cache_shadow_refresh_debounce_secs() -> u64 {
+    PromptCacheShadowConfig::default().refresh_debounce_secs
+}
+
+fn default_prompt_cache_shadow_sweeper_interval_secs() -> u64 {
+    PromptCacheShadowConfig::default().sweeper_interval_secs
+}
+
+fn default_prompt_cache_shadow_warm_set_cap() -> usize {
+    PromptCacheShadowConfig::default().warm_set_cap
 }
 
 #[cfg(test)]

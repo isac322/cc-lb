@@ -124,6 +124,8 @@ mod principal_view_swap {
             path: "/v1/messages".to_owned(),
             query: None,
             body_bytes: Bytes::from_static(b"{}"),
+            cache_breakpoints: Vec::new(),
+            canonical_model_id: String::new(),
         }
     }
 

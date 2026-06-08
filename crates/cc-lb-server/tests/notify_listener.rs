@@ -200,6 +200,7 @@ async fn fixture() -> Fixture {
         plugin_registry: storage.clone(),
         upstream_rate_limits: storage.clone(),
         upstream_subscription_quotas: storage.clone(),
+        prompt_cache_observations: storage.clone(),
         anthropic_compatibility_kv: storage.clone(),
         audit: None,
         plugin_registry_repo: None,
@@ -217,6 +218,7 @@ async fn fixture() -> Fixture {
         dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
+        &cc_lb_config::Config::default(),
     )
     .await
     .expect("initial dynamic view builds");
@@ -250,6 +252,7 @@ async fn spawn_listener(
         lazy_refresher: None,
         subscription_quota_cache: Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         subscription_quota_routing_max_staleness_secs: 1800,
+        config: Arc::new(cc_lb_config::Config::default()),
     }));
     let task = tokio::spawn(async move {
         listener.run().await;
@@ -334,6 +337,7 @@ async fn cancel_during_rebuild_graceful() {
         plugin_registry: fixture.storage.clone(),
         upstream_rate_limits: fixture.storage.clone(),
         upstream_subscription_quotas: fixture.storage.clone(),
+        prompt_cache_observations: fixture.storage.clone(),
         anthropic_compatibility_kv: fixture.storage.clone(),
         audit: None,
         plugin_registry_repo: None,
@@ -364,6 +368,7 @@ async fn rebuild_failure_does_not_swap_view() {
         plugin_registry: fixture.storage.clone(),
         upstream_rate_limits: fixture.storage.clone(),
         upstream_subscription_quotas: fixture.storage.clone(),
+        prompt_cache_observations: fixture.storage.clone(),
         anthropic_compatibility_kv: fixture.storage.clone(),
         audit: None,
         plugin_registry_repo: None,

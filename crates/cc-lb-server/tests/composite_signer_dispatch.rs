@@ -56,6 +56,7 @@ async fn router_choice_dispatches_to_matching_oauth_upstream_not_first_anthropic
         fixture._dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
+        &cc_lb_config::Config::default(),
     )
     .await
     .expect("dynamic view builds");
@@ -111,6 +112,7 @@ impl Fixture {
             plugin_registry: storage.clone(),
             upstream_rate_limits: storage.clone(),
             upstream_subscription_quotas: storage.clone(),
+            prompt_cache_observations: storage.clone(),
             anthropic_compatibility_kv: storage.clone(),
             audit: Some(storage.clone()),
             plugin_registry_repo: None,

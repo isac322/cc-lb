@@ -1,0 +1,16 @@
+[package]
+name = "cache-aware-router"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+cc-lb-pdk = { path = "../../../crates/cc-lb-pdk" }
+cc-lb-plugin-wire = { path = "../../../crates/cc-lb-plugin-wire" }
+
+[dev-dependencies]
+cc-lb-plugin-api = { path = "../../../crates/cc-lb-plugin-api" }
+
+[lib]
+crate-type = ["cdylib"]

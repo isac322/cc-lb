@@ -361,6 +361,8 @@ pub async fn signed_request(base_url: &str) -> SignedRequest {
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(br#"{"model":"claude-test","messages":[]}"#),
+        cache_breakpoints: Vec::new(),
+        canonical_model_id: String::new(),
     };
     let principal = Principal {
         id: "principal-test".to_owned(),

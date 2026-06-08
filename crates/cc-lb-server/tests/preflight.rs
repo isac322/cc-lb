@@ -148,6 +148,7 @@ impl Fixture {
             plugin_registry,
             upstream_rate_limits: storage.clone(),
             upstream_subscription_quotas: storage.clone(),
+            prompt_cache_observations: storage.clone(),
             anthropic_compatibility_kv: storage.clone(),
             audit: None,
             plugin_registry_repo: None,
@@ -266,6 +267,7 @@ async fn seed_chain(
             sse_per_event: false,
             batched_events_per_flush: 1,
             batched_flush_ms: 100,
+            wire_version: None,
         })
         .await
         .unwrap();
