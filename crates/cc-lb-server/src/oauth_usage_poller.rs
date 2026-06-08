@@ -268,8 +268,8 @@ pub fn spawn_oauth_usage_poller(
 }
 
 pub fn is_usage_poll_candidate(record: &UpstreamRecord) -> bool {
+    // `enabled` is intentionally not checked: it gates routing, not quota polling.
     record.kind == UpstreamKind::AnthropicOauth
-        && record.enabled
         && record.deleted_at_unix_secs.is_none()
         && record.oauth_credentials.is_some()
 }
