@@ -108,6 +108,7 @@ fn event(index: usize) -> RequestEvent {
             message_index: Some(index as u64),
             ttl: Some("5m".to_owned()),
             prefix_hash: format!("{:064x}", index + 1),
+            prefix_token_count: 1024,
         }],
         cache_prefix_hash: Some(format!("{index:064x}")),
         cost_usd_micros: Some(0),

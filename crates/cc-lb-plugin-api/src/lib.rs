@@ -19,7 +19,7 @@
 
 mod errors;
 mod traits;
-mod types;
+pub mod types;
 
 pub use errors::{
     DialectError, ObservabilityError, RouteError, RuntimeError, SignerError, UpstreamError,

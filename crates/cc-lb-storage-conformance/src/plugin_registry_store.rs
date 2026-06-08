@@ -1209,6 +1209,7 @@ fn chain_with_slot(
         sse_per_event: false,
         batched_events_per_flush: 1,
         batched_flush_ms: 100,
+        wire_version: None,
     }
 }
 

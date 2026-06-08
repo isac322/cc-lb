@@ -32,6 +32,7 @@ ignore = [
     { id = "RUSTSEC-2026-0095", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
     { id = "RUSTSEC-2026-0096", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
     { id = "RUSTSEC-2026-0114", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
+    { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained but required by tikv-jemalloc-ctl for memory bound testing." },
 ]
 
 [bans]

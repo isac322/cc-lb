@@ -17,6 +17,7 @@ pub mod organization_metadata;
 pub mod plugin_registry;
 pub mod price_catalog;
 pub mod principals;
+pub mod prompt_cache_observation;
 pub mod quota;
 pub mod request_events;
 pub mod retry;

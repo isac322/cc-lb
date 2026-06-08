@@ -13,6 +13,7 @@ postgres = ["dep:cc-lb-storage-postgres", "dep:sqlx"]
 
 [dependencies]
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
+cc-lb-core = { path = "../cc-lb-core" }
 cc-lb-aead = { path = "../cc-lb-aead" }
 async-trait = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

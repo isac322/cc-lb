@@ -4,10 +4,14 @@ use std::collections::BTreeMap;
 use std::fs;
 
 use bytes::Bytes;
-use cc_lb_plugin_api::{PluginManifest, Principal, PrincipalKind, RequestContext};
+use cc_lb_plugin_api::{
+    PluginManifest, Principal, PrincipalKind, RateLimitKind, RateLimitObservation, RequestContext,
+    UpstreamCandidate, UpstreamKind,
+};
 use http::{HeaderMap, Method};
 use serde_json::{Value, json};
 use tempfile::TempDir;
+use uuid::Uuid;
 
 pub struct WasmFixture {
     _dir: TempDir,
@@ -24,6 +28,7 @@ pub fn fixture(name: &str, wat: &str, metadata: BTreeMap<String, Value>) -> Wasm
         manifest: PluginManifest {
             name: name.to_owned(),
             artifact: artifact.to_string_lossy().into_owned(),
+            wire_version: None,
             config: json!({}),
             metadata,
         },
@@ -50,6 +55,8 @@ pub fn ctx() -> RequestContext {
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(br#"{"model":"claude-test"}"#),
+        cache_breakpoints: Vec::new(),
+        canonical_model_id: String::new(),
     }
 }
 
@@ -58,6 +65,26 @@ pub fn principal() -> Principal {
         id: "principal-test".to_owned(),
         kind: PrincipalKind::ApiKey,
         claims: serde_json::Map::new(),
+    }
+}
+
+pub fn candidate_wire() -> UpstreamCandidate {
+    UpstreamCandidate {
+        upstream_id: Uuid::parse_str("11111111-1111-1111-1111-111111111111")
+            .expect("fixture UUID parses"),
+        name: "anthropic-direct".to_owned(),
+        kind: UpstreamKind::AnthropicApiKey,
+        observed_rate_limits: vec![RateLimitObservation {
+            kind: RateLimitKind::Requests,
+            window: "minute".to_owned(),
+            limit: Some(100),
+            remaining: Some(99),
+            reset: None,
+        }],
+        subscription_quotas: Vec::new(),
+        observed_at_unix_secs: 1_800_000_000,
+        cache_score: None,
+        base_url: None,
     }
 }
 

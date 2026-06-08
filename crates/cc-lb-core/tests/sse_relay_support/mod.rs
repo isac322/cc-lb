@@ -106,6 +106,7 @@ pub fn relay_for(hook: Arc<RecordingHook>, batch: SseBatchConfig) -> SseRelay {
         error_normalizer: None,
         upstream_kind: None,
         streaming_usage: Arc::new(Mutex::new(Default::default())),
+        prompt_cache_observation_context: None,
     }
 }
 

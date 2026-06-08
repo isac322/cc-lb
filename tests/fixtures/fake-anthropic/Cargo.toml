@@ -6,6 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = []
+debug-endpoints = []
+
 [dependencies]
 async-stream.workspace = true
 axum.workspace = true

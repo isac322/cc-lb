@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+#[cfg(any(debug_assertions, feature = "debug-endpoints"))]
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -10,6 +12,8 @@ use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
+#[cfg(any(debug_assertions, feature = "debug-endpoints"))]
+use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::time::sleep;
 
@@ -43,6 +47,24 @@ pub struct AppState {
     request_counts: Mutex<BTreeMap<&'static str, u64>>,
     last_x_api_key: Mutex<Option<String>>,
     last_selected_headers: Mutex<BTreeMap<&'static str, Option<String>>>,
+    #[cfg(any(debug_assertions, feature = "debug-endpoints"))]
+    injected_usage: Mutex<HashMap<String, InjectedUsage>>,
+}
+
+#[cfg(any(debug_assertions, feature = "debug-endpoints"))]
+#[derive(Clone, Debug, Default, Deserialize)]
+struct InjectedUsage {
+    #[serde(default)]
+    cache_creation_input_tokens: Option<u64>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
+}
+
+#[cfg(any(debug_assertions, feature = "debug-endpoints"))]
+#[derive(Debug, Deserialize)]
+struct InjectCacheStatsRequest {
+    match_request_signature: String,
+    usage: InjectedUsage,
 }
 
 impl AppState {
@@ -56,6 +78,8 @@ impl AppState {
                 ("x-organization-uuid", None),
                 ("x-trusted-device-token", None),
             ])),
+            #[cfg(any(debug_assertions, feature = "debug-endpoints"))]
+            injected_usage: Mutex::new(HashMap::new()),
         }
     }
 
@@ -95,14 +119,19 @@ pub fn app(config: AppConfig) -> Router {
     let max_body = config.files_cap_bytes;
     let state = Arc::new(AppState::new(config));
 
-    Router::new()
+    let router = Router::new()
         .route("/v1/messages", post(messages))
         .route("/v1/messages/count_tokens", post(count_tokens))
         .route("/oauth/authorize", get(authorize))
         .route("/oauth/token", post(token))
         .route("/v1/oauth/token", post(token))
         .route("/__refresh_history", get(refresh_history))
-        .route("/__last_request", get(last_request))
+        .route("/__last_request", get(last_request));
+
+    #[cfg(any(debug_assertions, feature = "debug-endpoints"))]
+    let router = router.route("/__inject_cache_stats", post(inject_cache_stats));
+
+    router
         .route("/v1/models", get(list_models))
         .route("/v1/models/{id}", get(get_model))
         .route("/v1/files", get(list_files).post(create_file))
@@ -110,6 +139,24 @@ pub fn app(config: AppConfig) -> Router {
         .fallback(not_found)
         .with_state(state)
         .layer(DefaultBodyLimit::max(max_body))
+}
+
+#[cfg(any(debug_assertions, feature = "debug-endpoints"))]
+async fn inject_cache_stats(
+    State(state): State<Arc<AppState>>,
+    Json(request): Json<InjectCacheStatsRequest>,
+) -> Response {
+    match state.injected_usage.lock() {
+        Ok(mut injected_usage) => {
+            injected_usage.insert(request.match_request_signature, request.usage);
+            json_response(StatusCode::OK, json!({ "ok": true }))
+        }
+        Err(_) => error_response(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "api_error",
+            "failed to record injected cache stats",
+        ),
+    }
 }
 
 async fn last_request(State(state): State<Arc<AppState>>) -> Response {
@@ -151,25 +198,76 @@ async fn messages(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
         return streaming_response(model, mode, state.config.slow_mode_bps);
     }
 
-    json_response(
-        StatusCode::OK,
-        json!({
-            "id": "msg_fake_000000000000000000000000",
-            "type": "message",
-            "role": "assistant",
-            "model": model,
-            "content": [{
-                "type": "text",
-                "text": "fake anthropic fixture response HELLO"
-            }],
-            "stop_reason": "end_turn",
-            "stop_sequence": null,
-            "usage": {
-                "input_tokens": 100,
-                "output_tokens": 50
-            }
-        }),
-    )
+    let response_body = json!({
+        "id": "msg_fake_000000000000000000000000",
+        "type": "message",
+        "role": "assistant",
+        "model": model,
+        "content": [{
+            "type": "text",
+            "text": "fake anthropic fixture response HELLO"
+        }],
+        "stop_reason": "end_turn",
+        "stop_sequence": null,
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 50
+        }
+    });
+
+    #[cfg(any(debug_assertions, feature = "debug-endpoints"))]
+    let response_body = response_body_with_injected_usage(&state, &body_json, response_body);
+
+    json_response(StatusCode::OK, response_body)
+}
+
+#[cfg(any(debug_assertions, feature = "debug-endpoints"))]
+fn response_body_with_injected_usage(
+    state: &AppState,
+    body_json: &Value,
+    mut response_body: Value,
+) -> Value {
+    let signature = request_signature(body_json);
+    let injected_usage = state
+        .injected_usage
+        .lock()
+        .ok()
+        .and_then(|injected_usage| injected_usage.get(&signature).cloned());
+
+    if let Some(injected_usage) = injected_usage
+        && let Some(usage) = response_body
+            .get_mut("usage")
+            .and_then(Value::as_object_mut)
+    {
+        if let Some(tokens) = injected_usage.cache_creation_input_tokens {
+            usage.insert("cache_creation_input_tokens".to_owned(), json!(tokens));
+        }
+        if let Some(tokens) = injected_usage.cache_read_input_tokens {
+            usage.insert("cache_read_input_tokens".to_owned(), json!(tokens));
+        }
+    }
+
+    response_body
+}
+
+#[cfg(any(debug_assertions, feature = "debug-endpoints"))]
+fn request_signature(body_json: &Value) -> String {
+    // No previous fake-anthropic request signature scheme exists. Use the plan's
+    // deterministic fallback: SHA-256 over serde_json's canonical Value string.
+    let canonical = serde_json::to_string(body_json).unwrap_or_else(|_| "null".to_owned());
+    let digest = ring::digest::digest(&ring::digest::SHA256, canonical.as_bytes());
+    lowercase_hex(digest.as_ref())
+}
+
+#[cfg(any(debug_assertions, feature = "debug-endpoints"))]
+fn lowercase_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut output = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        output.push(HEX[(byte >> 4) as usize] as char);
+        output.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    output
 }
 
 async fn count_tokens(

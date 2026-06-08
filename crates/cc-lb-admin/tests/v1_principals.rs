@@ -307,6 +307,7 @@ async fn delete_cascade_blocks_when_plugin_chain_exists_else_soft_deletes() {
             sse_per_event: false,
             batched_events_per_flush: 1,
             batched_flush_ms: 1000,
+            wire_version: None,
         })
         .await
         .unwrap();

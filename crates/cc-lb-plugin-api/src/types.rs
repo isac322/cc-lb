@@ -154,6 +154,100 @@ pub struct SubscriptionQuotaCandidateSnapshot {
     pub max_staleness_secs: u64,
 }
 
+/// Prompt cache TTL class: immutable after entry creation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum TtlClass {
+    /// 5-minute TTL cache entry.
+    #[default]
+    Ephemeral5m,
+    /// 1-hour TTL cache entry.
+    Ephemeral1h,
+}
+
+/// Origin of a cache breakpoint: whether explicitly requested or auto-inferred.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum BreakpointOrigin {
+    /// Explicit cache breakpoint requested by the user or application.
+    Explicit,
+    /// Auto-inferred cache breakpoint from proxy analysis.
+    AutoCacheInferred,
+}
+
+/// Source of a cache breakpoint within the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[allow(dead_code)]
+pub enum CacheBreakpointSource {
+    /// Breakpoint from tools in the request.
+    Tools,
+    /// Breakpoint from system content.
+    System,
+    /// Breakpoint from message content.
+    Message,
+}
+
+/// Cache breakpoint position in the request, for prompt cache optimization.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct CacheBreakpoint {
+    /// Block index of the breakpoint.
+    pub block_index: u32,
+    /// Source of the breakpoint.
+    pub source: CacheBreakpointSource,
+    /// Dot-separated path (e.g., "messages.0.content.1") within request.
+    pub path: String,
+    /// Message index if this breakpoint is within a message, None for system content.
+    pub message_index: Option<u32>,
+    /// Content hash of the prefix up to this breakpoint.
+    pub prefix_hash: String,
+    /// Token count of the prefix up to this breakpoint.
+    pub prefix_token_count: u64,
+    /// Requested TTL class for this breakpoint.
+    pub requested_ttl: TtlClass,
+    /// Origin of this breakpoint.
+    pub origin: BreakpointOrigin,
+}
+
+/// Warm cache entry eligible for reuse in upstream requests.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct WarmCacheEntry {
+    /// Content hash of the cached prefix.
+    pub prefix_hash: String,
+    /// Unix timestamp in seconds when this entry expires.
+    pub expires_at_unix_secs: u64,
+    /// TTL class of this cache entry.
+    pub ttl_class: TtlClass,
+    /// Last observed usage time in Unix seconds.
+    pub last_observed_at_unix_secs: u64,
+}
+
+/// Cache utility prediction for routing decisions.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[allow(dead_code)]
+pub struct CacheScore {
+    /// Predicted input tokens that can be read from cache.
+    pub predicted_cache_read_tokens: u32,
+    /// Predicted input tokens written to 5-minute cache.
+    pub predicted_cache_creation_tokens_5m: u32,
+    /// Predicted input tokens written to 1-hour cache.
+    pub predicted_cache_creation_tokens_1h: u32,
+    /// Predicted input tokens not read from cache.
+    pub predicted_uncached_input_tokens: u32,
+    /// Predicted Unix timestamp when the cache entry will expire, None if permanent.
+    pub predicted_expires_at_unix_secs: Option<u64>,
+    /// Index of the matched cache breakpoint if one was selected, None otherwise.
+    pub matched_breakpoint_index: Option<u32>,
+    /// Confidence score for this prediction (0.0 to 1.0).
+    pub confidence: f32,
+    /// Optional explanation for ambiguous or low-confidence predictions.
+    pub ambiguity_reason: Option<String>,
+}
+
 /// Available upstream candidate for routing decisions.
 ///
 /// The router receives a list of available upstream candidates sorted by
@@ -174,6 +268,14 @@ pub struct UpstreamCandidate {
     pub subscription_quotas: Vec<SubscriptionQuotaCandidateSnapshot>,
     /// Unix timestamp in seconds for the candidate observation snapshot.
     pub observed_at_unix_secs: u64,
+    /// Predicted cache utility for this candidate, if available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_score: Option<CacheScore>,
+    /// Resolved upstream base URL. Populated by the host so that v2 plugins
+    /// that self-reference for shape can construct the dispatch URL against
+    /// the configured upstream instead of hardcoding api.anthropic.com.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
 }
 
 /// Credential strategy expected by a selected upstream.
@@ -203,6 +305,10 @@ pub struct RequestContext {
     pub query: Option<String>,
     /// Buffered request body bytes, required by SigV4 and other signing schemes.
     pub body_bytes: Bytes,
+    /// Cache breakpoints extracted from the request for prompt cache optimization.
+    pub cache_breakpoints: Vec<CacheBreakpoint>,
+    /// Canonical model identifier resolved from the request.
+    pub canonical_model_id: String,
 }
 
 /// Request produced by an upstream dialect before credentials are applied.
@@ -471,6 +577,9 @@ pub struct PluginManifest {
     pub name: String,
     /// Filesystem path or runtime-specific locator for the plugin artifact.
     pub artifact: String,
+    /// Preferred plugin wire envelope version. Omitted manifests default to v1.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_version: Option<u8>,
     /// Runtime configuration provided to the plugin.
     pub config: serde_json::Value,
     /// Runtime-specific metadata not interpreted by the core API contract.
@@ -561,7 +670,17 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(manifest.name, "authn");
+        assert_eq!(manifest.wire_version, None);
         assert!(manifest.metadata.is_empty());
+
+        let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
+            "name": "cache-aware",
+            "artifact": "plugin.wasm",
+            "wire_version": 2,
+            "config": {}
+        }))
+        .unwrap();
+        assert_eq!(manifest.wire_version, Some(2));
     }
 
     #[test]
@@ -618,5 +737,205 @@ mod tests {
         ];
 
         assert_eq!(events, events.clone());
+    }
+
+    #[test]
+    fn cache_types_roundtrip() {
+        let ttl_class = TtlClass::Ephemeral1h;
+        let json = serde_json::to_string(&ttl_class).unwrap();
+        let decoded: TtlClass = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, ttl_class);
+
+        let origin = BreakpointOrigin::AutoCacheInferred;
+        let json = serde_json::to_string(&origin).unwrap();
+        let decoded: BreakpointOrigin = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, origin);
+
+        let source = CacheBreakpointSource::System;
+        let json = serde_json::to_string(&source).unwrap();
+        let decoded: CacheBreakpointSource = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, source);
+
+        let breakpoint = CacheBreakpoint {
+            block_index: 0,
+            source: CacheBreakpointSource::Message,
+            path: "messages.0.content.1".to_owned(),
+            message_index: Some(0),
+            prefix_hash: "abc123".to_owned(),
+            prefix_token_count: 100,
+            requested_ttl: TtlClass::Ephemeral5m,
+            origin: BreakpointOrigin::Explicit,
+        };
+        let json = serde_json::to_string(&breakpoint).unwrap();
+        let decoded: CacheBreakpoint = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, breakpoint);
+
+        let warm_entry = WarmCacheEntry {
+            prefix_hash: "def456".to_owned(),
+            expires_at_unix_secs: 1700000000,
+            ttl_class: TtlClass::Ephemeral1h,
+            last_observed_at_unix_secs: 1699999000,
+        };
+        let json = serde_json::to_string(&warm_entry).unwrap();
+        let decoded: WarmCacheEntry = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded, warm_entry);
+
+        let cache_score = CacheScore {
+            predicted_cache_read_tokens: 50,
+            predicted_cache_creation_tokens_5m: 100,
+            predicted_cache_creation_tokens_1h: 200,
+            predicted_uncached_input_tokens: 25,
+            predicted_expires_at_unix_secs: Some(1700000000),
+            matched_breakpoint_index: Some(0),
+            confidence: 0.95,
+            ambiguity_reason: None,
+        };
+        let json = serde_json::to_string(&cache_score).unwrap();
+        let decoded: CacheScore = serde_json::from_str(&json).unwrap();
+        assert_eq!(
+            decoded.predicted_cache_read_tokens,
+            cache_score.predicted_cache_read_tokens
+        );
+        assert_eq!(
+            decoded.predicted_cache_creation_tokens_5m,
+            cache_score.predicted_cache_creation_tokens_5m
+        );
+        assert_eq!(
+            decoded.predicted_cache_creation_tokens_1h,
+            cache_score.predicted_cache_creation_tokens_1h
+        );
+        assert_eq!(
+            decoded.predicted_uncached_input_tokens,
+            cache_score.predicted_uncached_input_tokens
+        );
+        assert_eq!(
+            decoded.predicted_expires_at_unix_secs,
+            cache_score.predicted_expires_at_unix_secs
+        );
+        assert_eq!(
+            decoded.matched_breakpoint_index,
+            cache_score.matched_breakpoint_index
+        );
+        assert!((decoded.confidence - cache_score.confidence).abs() < 0.0001);
+        assert_eq!(decoded.ambiguity_reason, cache_score.ambiguity_reason);
+    }
+
+    #[test]
+    fn upstream_candidate_cache_score_roundtrip() {
+        let candidate_no_cache = UpstreamCandidate {
+            upstream_id: Uuid::new_v4(),
+            name: "test-upstream".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            observed_rate_limits: vec![],
+            subscription_quotas: vec![],
+            observed_at_unix_secs: 1700000000,
+            cache_score: None,
+            base_url: None,
+        };
+        let json = serde_json::to_string(&candidate_no_cache).unwrap();
+        let decoded: UpstreamCandidate = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.upstream_id, candidate_no_cache.upstream_id);
+        assert_eq!(decoded.name, candidate_no_cache.name);
+        assert_eq!(decoded.cache_score, None);
+
+        let cache_score = CacheScore {
+            predicted_cache_read_tokens: 50,
+            predicted_cache_creation_tokens_5m: 100,
+            predicted_cache_creation_tokens_1h: 200,
+            predicted_uncached_input_tokens: 25,
+            predicted_expires_at_unix_secs: Some(1700000000),
+            matched_breakpoint_index: Some(0),
+            confidence: 0.95,
+            ambiguity_reason: None,
+        };
+        let candidate_with_cache = UpstreamCandidate {
+            upstream_id: Uuid::new_v4(),
+            name: "test-upstream-cached".to_owned(),
+            kind: UpstreamKind::AnthropicApiKey,
+            observed_rate_limits: vec![],
+            subscription_quotas: vec![],
+            observed_at_unix_secs: 1700000000,
+            cache_score: Some(cache_score),
+            base_url: None,
+        };
+        let json = serde_json::to_string(&candidate_with_cache).unwrap();
+        let decoded: UpstreamCandidate = serde_json::from_str(&json).unwrap();
+        assert_eq!(decoded.upstream_id, candidate_with_cache.upstream_id);
+        assert_eq!(decoded.name, candidate_with_cache.name);
+        assert!(decoded.cache_score.is_some());
+        assert_eq!(decoded.cache_score.unwrap().predicted_cache_read_tokens, 50);
+    }
+
+    #[test]
+    fn request_context_cache_fields_roundtrip() {
+        let ctx_empty = RequestContext {
+            request_id: "req-1".to_owned(),
+            downstream_headers: HeaderMap::new(),
+            method: Method::POST,
+            path: "/v1/messages".to_owned(),
+            query: None,
+            body_bytes: Bytes::new(),
+            cache_breakpoints: Vec::new(),
+            canonical_model_id: String::new(),
+        };
+        assert_eq!(ctx_empty.cache_breakpoints.len(), 0);
+        assert_eq!(ctx_empty.canonical_model_id, "");
+
+        let breakpoint = CacheBreakpoint {
+            block_index: 1,
+            source: CacheBreakpointSource::Message,
+            path: "messages.0.content.0".to_owned(),
+            message_index: Some(0),
+            prefix_hash: "hash123".to_owned(),
+            prefix_token_count: 150,
+            requested_ttl: TtlClass::Ephemeral1h,
+            origin: BreakpointOrigin::Explicit,
+        };
+        let ctx_populated = RequestContext {
+            request_id: "req-2".to_owned(),
+            downstream_headers: HeaderMap::new(),
+            method: Method::POST,
+            path: "/v1/messages".to_owned(),
+            query: Some("param=value".to_owned()),
+            body_bytes: Bytes::from_static(b"test"),
+            cache_breakpoints: vec![breakpoint],
+            canonical_model_id: "claude-sonnet-4-5-20250929".to_owned(),
+        };
+        assert_eq!(ctx_populated.cache_breakpoints.len(), 1);
+        assert_eq!(
+            ctx_populated.canonical_model_id,
+            "claude-sonnet-4-5-20250929"
+        );
+    }
+
+    #[test]
+    fn upstream_candidate_deserialize_without_cache_score_field() {
+        let json = r#"{
+            "upstream_id": "00000000-0000-0000-0000-000000000001",
+            "name": "legacy-upstream",
+            "kind": "anthropic_api_key",
+            "observed_rate_limits": [],
+            "subscription_quotas": [],
+            "observed_at_unix_secs": 1700000000
+        }"#;
+        let candidate: UpstreamCandidate = serde_json::from_str(json).unwrap();
+        assert!(candidate.cache_score.is_none());
+        assert_eq!(candidate.name, "legacy-upstream");
+    }
+
+    #[test]
+    fn request_context_cache_breakpoints_default_on_missing_fields() {
+        let ctx = RequestContext {
+            request_id: "test".to_owned(),
+            downstream_headers: HeaderMap::new(),
+            method: Method::GET,
+            path: "/test".to_owned(),
+            query: None,
+            body_bytes: Bytes::new(),
+            cache_breakpoints: Vec::new(),
+            canonical_model_id: String::new(),
+        };
+        assert!(ctx.cache_breakpoints.is_empty());
+        assert!(ctx.canonical_model_id.is_empty());
     }
 }
