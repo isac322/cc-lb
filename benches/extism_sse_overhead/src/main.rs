@@ -167,6 +167,7 @@ async fn measure_relay(
             error_normalizer: None,
             upstream_kind: None,
             streaming_usage: std::sync::Arc::new(std::sync::Mutex::new(Default::default())),
+            prompt_cache_observation_context: None,
         };
         let started = Instant::now();
         let response = relay.into_response_from_body(body_from_events(events));
@@ -237,6 +238,7 @@ impl ObserveFixture {
             manifest: PluginManifest {
                 name: format!("observe-{name}"),
                 artifact: artifact.display().to_string(),
+                wire_version: None,
                 config: json!({}),
                 metadata,
             },

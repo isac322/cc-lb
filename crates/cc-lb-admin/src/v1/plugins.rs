@@ -75,6 +75,7 @@ struct InsertChainBody {
     batched_events_per_flush: Option<u32>,
     batched_flush_ms: Option<u64>,
     position: Option<Position>,
+    wire_version: Option<u8>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -288,6 +289,7 @@ async fn insert_chain(
         sse_per_event: body.sse_per_event.unwrap_or(false),
         batched_events_per_flush: body.batched_events_per_flush.unwrap_or(1),
         batched_flush_ms: body.batched_flush_ms.unwrap_or(100),
+        wire_version: body.wire_version,
     };
     match storage.insert_chain_entry(input).await {
         Ok(entry) => {

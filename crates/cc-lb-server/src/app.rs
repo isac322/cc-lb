@@ -703,6 +703,7 @@ async fn build_app_with_storage_inner(
         plugin_registry: storage_for_dynamic.clone(),
         upstream_rate_limits: storage_for_dynamic.clone(),
         upstream_subscription_quotas: storage_for_dynamic.clone(),
+        prompt_cache_observations: storage_for_dynamic.clone(),
         anthropic_compatibility_kv: storage_for_dynamic.clone(),
         audit: Some(storage_for_dynamic.clone()),
         plugin_registry_repo: Some(plugin_registry_repo.clone()),
@@ -711,6 +712,7 @@ async fn build_app_with_storage_inner(
         messages_body_cap_bytes: cap_to_usize(config.body.messages_cap_bytes),
         files_body_cap_bytes: cap_to_usize(config.body.files_cap_bytes),
         replica_identity,
+        prompt_cache_shadow: config.prompt_cache_shadow.clone(),
     };
     if let Some(startup_preflight) = startup_preflight {
         let report = preflight::run_preflight(&stores, &lifecycle_config, &data_dir).await?;
@@ -784,6 +786,7 @@ async fn build_app_with_storage_inner(
         &data_dir,
         subscription_quota_cache.clone(),
         config.subscription_quota.routing_max_staleness_secs,
+        &config,
     )
     .await?;
     let dynamic_view_holder = Arc::new(DynamicViewHolder::new(initial_view));
@@ -812,6 +815,7 @@ async fn build_app_with_storage_inner(
         subscription_quota_routing_max_staleness_secs: config
             .subscription_quota
             .routing_max_staleness_secs,
+        config: Arc::new(config.clone()),
     }));
     let notify_listener_task = Some(tokio::spawn(async move {
         notify_listener.run().await;
@@ -857,6 +861,7 @@ async fn build_app_with_storage_inner(
         subscription_quota_routing_max_staleness_secs: config
             .subscription_quota
             .routing_max_staleness_secs,
+        config: Arc::new(config.clone()),
     });
     let config_watcher = config_path.map(|path| {
         let watcher = Arc::new(ConfigWatcher::new_with_principal_view(
@@ -889,6 +894,7 @@ async fn build_app_with_storage_inner(
         subscription_quota_routing_max_staleness_secs: config
             .subscription_quota
             .routing_max_staleness_secs,
+        config: Arc::new(config.clone()),
     });
     spawn_reconcile_shutdown(signals.subscribe(), reconcile_cancel);
     if let Some(replica_id) = replica_id {
@@ -1015,6 +1021,7 @@ struct ServerDynamicViewRebinder {
     data_dir: PathBuf,
     subscription_quota_cache: Arc<SubscriptionQuotaCache>,
     subscription_quota_routing_max_staleness_secs: u64,
+    config: Arc<cc_lb_config::Config>,
 }
 
 #[async_trait]
@@ -1033,6 +1040,7 @@ impl DynamicViewRebinder for ServerDynamicViewRebinder {
             &self.data_dir,
             self.subscription_quota_cache.clone(),
             self.subscription_quota_routing_max_staleness_secs,
+            &self.config,
         )
         .await?)
     }
@@ -1128,6 +1136,7 @@ struct ReconcilerParams {
     data_dir: PathBuf,
     subscription_quota_cache: Arc<SubscriptionQuotaCache>,
     subscription_quota_routing_max_staleness_secs: u64,
+    config: Arc<cc_lb_config::Config>,
 }
 
 fn spawn_reconciler(params: ReconcilerParams) {
@@ -1142,6 +1151,7 @@ fn spawn_reconciler(params: ReconcilerParams) {
         params.data_dir,
         params.subscription_quota_cache,
         params.subscription_quota_routing_max_staleness_secs,
+        params.config,
     ));
     tokio::spawn(reconciler.run());
 }

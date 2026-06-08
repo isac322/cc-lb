@@ -187,6 +187,8 @@ pub struct RequestCacheBreakpoint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ttl: Option<String>,
     pub prefix_hash: String,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub prefix_token_count: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

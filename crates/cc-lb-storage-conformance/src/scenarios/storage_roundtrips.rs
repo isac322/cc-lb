@@ -358,6 +358,7 @@ fn request_events() -> Vec<RequestEvent> {
                     ttl: Some("1h".to_owned()),
                     prefix_hash: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                         .to_owned(),
+                    prefix_token_count: 1536,
                 },
                 RequestCacheBreakpoint {
                     block_index: 1,
@@ -367,6 +368,7 @@ fn request_events() -> Vec<RequestEvent> {
                     ttl: Some("5m".to_owned()),
                     prefix_hash: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                         .to_owned(),
+                    prefix_token_count: 4096,
                 },
             ],
             cache_prefix_hash: Some(

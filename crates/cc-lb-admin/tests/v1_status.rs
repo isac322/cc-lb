@@ -147,6 +147,7 @@ async fn export_round_trips_through_stable_key_ordering() {
             sse_per_event: true,
             batched_events_per_flush: 3,
             batched_flush_ms: 250,
+            wire_version: None,
         })
         .await
         .unwrap();

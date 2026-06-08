@@ -2,7 +2,7 @@ use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use metrics::Unit;
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
+use metrics_exporter_prometheus::{Matcher, PrometheusBuilder, PrometheusHandle};
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::SdkTracerProvider;
@@ -19,6 +19,10 @@ use crate::panic_hook::install_panic_hook;
 use crate::redaction::{RedactingMakeWriter, RedactionLayer, RedactionPolicy};
 
 static PANIC_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+const CACHE_TOKEN_DRIFT_BUCKETS: [f64; 11] = [
+    -1000.0, -500.0, -100.0, -50.0, -10.0, 0.0, 10.0, 50.0, 100.0, 500.0, 1000.0,
+];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservabilityConfig {
@@ -89,7 +93,7 @@ pub struct MetricDefinition {
     pub description: &'static str,
 }
 
-const METRIC_DEFINITIONS: [MetricDefinition; 31] = [
+const METRIC_DEFINITIONS: [MetricDefinition; 36] = [
     MetricDefinition {
         name: "cc_lb_requests_total",
         kind: MetricKind::Counter,
@@ -189,6 +193,11 @@ const METRIC_DEFINITIONS: [MetricDefinition; 31] = [
     PROMETHEUS14_METRIC_DEFINITIONS[11],
     PROMETHEUS14_METRIC_DEFINITIONS[12],
     PROMETHEUS14_METRIC_DEFINITIONS[13],
+    PROMETHEUS14_METRIC_DEFINITIONS[14],
+    PROMETHEUS14_METRIC_DEFINITIONS[15],
+    PROMETHEUS14_METRIC_DEFINITIONS[16],
+    PROMETHEUS14_METRIC_DEFINITIONS[17],
+    PROMETHEUS14_METRIC_DEFINITIONS[18],
 ];
 
 pub fn init(cfg: &ObservabilityConfig) -> Result<TracingGuard, InitError> {
@@ -345,7 +354,14 @@ pub fn panic_total() -> u64 {
 }
 
 fn install_prometheus(cfg: &ObservabilityConfig) -> Result<Option<PrometheusHandle>, InitError> {
-    let builder = PrometheusBuilder::new();
+    let builder = PrometheusBuilder::new()
+        .set_buckets_for_metric(
+            Matcher::Full("cc_lb_cache_token_drift".to_owned()),
+            &CACHE_TOKEN_DRIFT_BUCKETS,
+        )
+        .map_err(|source| InitError::Prometheus {
+            message: source.to_string(),
+        })?;
 
     if let Some(endpoint) = cfg.prometheus_endpoint.as_deref() {
         let addr = parse_socket_addr(endpoint)?;

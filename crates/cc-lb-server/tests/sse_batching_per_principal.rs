@@ -119,6 +119,7 @@ fn manifest_for(fixture: &WasmFixture, config: &HookConfig) -> PluginManifest {
     PluginManifest {
         name: config.plugin_name.to_owned(),
         artifact: fixture.artifact.clone(),
+        wire_version: None,
         config: json!({}),
         metadata: metadata(&[
             ("observe_batch_count", config.observe_batch_count),

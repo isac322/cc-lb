@@ -1,7 +1,8 @@
 use cc_lb_storage_api::UpstreamRecord;
 use cc_lb_storage_redb::{
-    AUDIT_LOG_V1, CURRENT_SCHEMA_VERSION, KILLSWITCH_V1, OAUTH_CREDENTIALS_V1, REQUEST_EVENTS_V1,
-    SCHEMA_VERSION_V1, Storage, StorageError, UPSTREAMS_V2,
+    AUDIT_LOG_V1, CURRENT_SCHEMA_VERSION, KILLSWITCH_V1, OAUTH_CREDENTIALS_V1,
+    PROMPT_CACHE_OBSERVATIONS, REQUEST_EVENTS_V1, SCHEMA_VERSION_V1, Storage, StorageError,
+    UPSTREAMS_V2,
 };
 use redb::{ReadableDatabase, TableHandle};
 use serde_json::json;
@@ -33,6 +34,7 @@ fn opening_empty_database_initializes_schema_v1() -> Result<(), Box<dyn std::err
     assert!(table_names.contains(&OAUTH_CREDENTIALS_V1.name().to_owned()));
     assert!(table_names.contains(&AUDIT_LOG_V1.name().to_owned()));
     assert!(table_names.contains(&REQUEST_EVENTS_V1.name().to_owned()));
+    assert!(table_names.contains(&PROMPT_CACHE_OBSERVATIONS.name().to_owned()));
     assert!(table_names.contains(&SCHEMA_VERSION_V1.name().to_owned()));
     assert!(table_names.contains(&KILLSWITCH_V1.name().to_owned()));
 

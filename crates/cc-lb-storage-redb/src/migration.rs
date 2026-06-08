@@ -9,10 +9,10 @@ use crate::{
     ANTHROPIC_COMPATIBILITY_KV_V1, API_KEYS_V1, AUDIT_LOG_V1, CONFIG_DRAFT_V1, CONFIG_HISTORY_V1,
     CURRENT_SCHEMA_VERSION, KEY_INDEX_BY_HASH_V1, KILLSWITCH_KEY, KILLSWITCH_V1,
     OAUTH_CREDENTIALS_V1, ORGANIZATION_METADATA_V1, PLUGIN_CHAINS_V2, PRICE_CATALOG_V1,
-    PRINCIPAL_ALLOWED_UPSTREAMS_V1, PRINCIPALS_V2, PRINCIPALS_V2_BY_NAME, REQUEST_EVENTS_V1,
-    SCHEMA_VERSION_KEY, SCHEMA_VERSION_V1, StorageError, UPSTREAM_RATE_LIMIT_STATE_V1,
-    UPSTREAM_SUBSCRIPTION_METADATA_V1, UPSTREAM_SUBSCRIPTION_QUOTA_LATEST_V1,
-    UPSTREAM_SUBSCRIPTION_QUOTA_OBSERVATIONS_BY_TIME_V1,
+    PRINCIPAL_ALLOWED_UPSTREAMS_V1, PRINCIPALS_V2, PRINCIPALS_V2_BY_NAME,
+    PROMPT_CACHE_OBSERVATIONS, REQUEST_EVENTS_V1, SCHEMA_VERSION_KEY, SCHEMA_VERSION_V1,
+    StorageError, UPSTREAM_RATE_LIMIT_STATE_V1, UPSTREAM_SUBSCRIPTION_METADATA_V1,
+    UPSTREAM_SUBSCRIPTION_QUOTA_LATEST_V1, UPSTREAM_SUBSCRIPTION_QUOTA_OBSERVATIONS_BY_TIME_V1,
     UPSTREAM_SUBSCRIPTION_QUOTA_OBSERVATIONS_V1, UPSTREAMS_V2, UPSTREAMS_V2_BY_NAME,
     USAGE_ROLLUP_CHECKPOINTS_V1, USAGE_ROLLUPS_V2, WASM_BLOBS_V2, WASM_REGISTRY_V2,
 };
@@ -24,9 +24,11 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
     let write_txn = db.begin_write()?;
     let stored_version;
     let reset_usage_rollups;
+    let old_version;
     {
         let schema = write_txn.open_table(SCHEMA_VERSION_V1)?;
         stored_version = schema.get(SCHEMA_VERSION_KEY)?.map(|stored| stored.value());
+        old_version = stored_version;
 
         reset_usage_rollups = stored_version.is_none_or(|found| found < CURRENT_SCHEMA_VERSION);
         match stored_version {
@@ -43,6 +45,11 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
     }
     if reset_usage_rollups {
         reset_usage_rollups_v1(&write_txn)?;
+    }
+    // Schema v4 -> v5: prompt_cache_observations key changed to include canonical_model_id.
+    // Ephemeral data (5min/1h TTL) is acceptable to lose on upgrade.
+    if let Some(4) = old_version {
+        reset_prompt_cache_observations_v4_to_v5(&write_txn)?;
     }
 
     {
@@ -114,6 +121,9 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
     }
     {
         write_txn.open_table(UPSTREAM_SUBSCRIPTION_QUOTA_LATEST_V1)?;
+    }
+    {
+        write_txn.open_table(PROMPT_CACHE_OBSERVATIONS)?;
     }
     {
         write_txn.open_table(WASM_BLOBS_V2)?;
@@ -240,6 +250,25 @@ fn reset_usage_rollups_v1(write_txn: &redb::WriteTransaction) -> Result<(), Stor
     {
         let mut checkpoints = write_txn.open_table(USAGE_ROLLUP_CHECKPOINTS_V1)?;
         checkpoints.remove(REQUEST_EVENT_CHECKPOINT_KEY)?;
+    }
+    Ok(())
+}
+
+fn reset_prompt_cache_observations_v4_to_v5(
+    write_txn: &redb::WriteTransaction,
+) -> Result<(), StorageError> {
+    let keys = {
+        let table = write_txn.open_table(PROMPT_CACHE_OBSERVATIONS)?;
+        table
+            .iter()?
+            .map(|row| row.map(|(key, _)| key.value().to_vec()))
+            .collect::<Result<Vec<_>, _>>()?
+    };
+    {
+        let mut table = write_txn.open_table(PROMPT_CACHE_OBSERVATIONS)?;
+        for key in keys {
+            table.remove(key.as_slice())?;
+        }
     }
     Ok(())
 }

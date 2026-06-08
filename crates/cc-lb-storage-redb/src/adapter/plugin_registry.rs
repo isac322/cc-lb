@@ -519,6 +519,7 @@ impl RedbStorage {
             batched_events_per_flush: input.batched_events_per_flush,
             batched_flush_ms: input.batched_flush_ms,
             revision: 0,
+            wire_version: input.wire_version,
         };
         put_chain(&write_txn, &record)?;
         write_txn.commit()?;

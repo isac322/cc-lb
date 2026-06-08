@@ -34,6 +34,8 @@ const DEFAULT_STORAGE_QUOTA_BYTES: usize = 1024 * 1024;
 const DEFAULT_OBSERVE_BATCH_COUNT: usize = 32;
 const DEFAULT_OBSERVE_FLUSH_MS: u64 = 100;
 const GLOBAL_PRINCIPAL: &str = "__global__";
+const WIRE_VERSION_V1: u8 = 1;
+const WIRE_VERSION_V2: u8 = 2;
 
 // Guardrail exemption: per-principal plugin overrides require runtime slots to be
 // keyed by both principal and plugin so same-name plugins do not collide.
@@ -406,6 +408,7 @@ pub(crate) struct PluginEntry {
     original: PluginManifest,
     extism_manifest: Manifest,
     limits: ResourceLimits,
+    negotiated_wire_version: u8,
 }
 
 impl PluginEntry {
@@ -419,13 +422,33 @@ impl PluginEntry {
             });
         }
         let limits = ResourceLimits::from_manifest(manifest, defaults)?;
+        let negotiated_wire_version = negotiate_wire_version(manifest);
         let extism_manifest = extism_manifest_from_plugin_manifest(manifest, &limits)?;
         Ok(Self {
             name: manifest.name.clone(),
             original: manifest.clone(),
             extism_manifest,
             limits,
+            negotiated_wire_version,
         })
+    }
+}
+
+fn negotiate_wire_version(manifest: &PluginManifest) -> u8 {
+    match manifest.wire_version {
+        Some(version @ WIRE_VERSION_V1..=WIRE_VERSION_V2) => version,
+        None => WIRE_VERSION_V1,
+        Some(version) => {
+            tracing::warn!(
+                plugin = %manifest.name,
+                declared_wire_version = version,
+                fallback_wire_version = WIRE_VERSION_V1,
+                "plugin {} declared unsupported wire_version {}, falling back to v1",
+                manifest.name,
+                version,
+            );
+            WIRE_VERSION_V1
+        }
     }
 }
 
@@ -437,11 +460,13 @@ pub(crate) struct PluginSlot {
 
 impl PluginSlot {
     fn new(entry: PluginEntry, cell: PluginCell) -> Self {
-        Self {
+        let slot = Self {
             name: entry.name.clone(),
             entry: RwLock::new(entry),
             current: ArcSwap::from_pointee(cell),
-        }
+        };
+        slot.log_negotiated_wire_version();
+        slot
     }
 
     fn replace(&self, entry: PluginEntry, cell: PluginCell) -> Result<(), RuntimeError> {
@@ -450,6 +475,7 @@ impl PluginSlot {
             .entry
             .write()
             .map_err(|_| runtime_error("plugin entry lock poisoned"))? = entry;
+        self.log_negotiated_wire_version();
         Ok(())
     }
 
@@ -460,6 +486,24 @@ impl PluginSlot {
             .map_err(|_| runtime_error("plugin entry lock poisoned"))?
             .limits
             .clone())
+    }
+
+    pub(crate) fn negotiated_wire_version(&self) -> Result<u8, RuntimeError> {
+        Ok(self
+            .entry
+            .read()
+            .map_err(|_| runtime_error("plugin entry lock poisoned"))?
+            .negotiated_wire_version)
+    }
+
+    fn log_negotiated_wire_version(&self) {
+        if let Ok(wire_version) = self.negotiated_wire_version() {
+            tracing::debug!(
+                plugin = %self.name,
+                wire_version,
+                "plugin wire version negotiated"
+            );
+        }
     }
 
     fn function_exists(&self, hook: &str) -> Result<bool, RuntimeError> {
@@ -590,6 +634,60 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    mod wire_version_negotiation {
+        use super::*;
+
+        #[test]
+        fn wire_version_v1_default_for_unmarked_plugin() {
+            let fixture = wasm_manifest("wire-version-default", noroute_module());
+            let runtime = ExtismRuntime::new();
+
+            let slot = runtime
+                .register_slot(&fixture.manifest)
+                .expect("slot registers with default wire version");
+
+            assert_eq!(
+                slot.negotiated_wire_version()
+                    .expect("wire version is readable"),
+                WIRE_VERSION_V1
+            );
+        }
+
+        #[test]
+        fn wire_version_v2_for_marked_plugin() {
+            let mut fixture = wasm_manifest("wire-version-v2", noroute_module());
+            fixture.manifest.wire_version = Some(WIRE_VERSION_V2);
+            let runtime = ExtismRuntime::new();
+
+            let slot = runtime
+                .register_slot(&fixture.manifest)
+                .expect("slot registers with v2 wire version");
+
+            assert_eq!(
+                slot.negotiated_wire_version()
+                    .expect("wire version is readable"),
+                WIRE_VERSION_V2
+            );
+        }
+
+        #[test]
+        fn wire_version_unknown_falls_back_to_v1() {
+            let mut fixture = wasm_manifest("wire-version-unknown", noroute_module());
+            fixture.manifest.wire_version = Some(99);
+            let runtime = ExtismRuntime::new();
+
+            let slot = runtime
+                .register_slot(&fixture.manifest)
+                .expect("slot registers with fallback wire version");
+
+            assert_eq!(
+                slot.negotiated_wire_version()
+                    .expect("wire version is readable"),
+                WIRE_VERSION_V1
+            );
+        }
+    }
 
     #[test]
     fn slots_with_same_plugin_name_and_different_principals_coexist() {
@@ -749,6 +847,7 @@ mod tests {
             manifest: PluginManifest {
                 name: name.to_owned(),
                 artifact: artifact.to_string_lossy().into_owned(),
+                wire_version: None,
                 config: json!({}),
                 metadata: BTreeMap::new(),
             },

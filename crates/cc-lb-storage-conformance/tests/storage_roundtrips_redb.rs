@@ -3,13 +3,15 @@
 use std::{future::Future, sync::Arc};
 
 use async_trait::async_trait;
+use cc_lb_core::{ClockHandle, TestClock};
 use cc_lb_storage_api::BackendKind;
 use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
     scenarios::{
         anthropic_compatibility_kv_store, atomicity, organization_metadata_store,
-        plugin_registry_store, principal_store, storage_roundtrips, upstream_rate_limit_store,
-        upstream_subscription_metadata_store, upstream_subscription_quota_store,
+        plugin_registry_store, principal_store, prompt_cache_observation_store, storage_roundtrips,
+        upstream_rate_limit_store, upstream_subscription_metadata_store,
+        upstream_subscription_quota_store,
     },
 };
 use cc_lb_storage_redb::RedbStorage;
@@ -208,6 +210,34 @@ upstream_subscription_quota_redb_test!(
     series_filters_observed_at_window
 );
 
+macro_rules! prompt_cache_observation_redb_test {
+    ($test_name:ident, $scenario:ident) => {
+        #[test]
+        fn $test_name() {
+            run_redb_scenario(stringify!($scenario), |backend| async move {
+                prompt_cache_observation_store::$scenario(backend, prompt_cache_clock()).await
+            });
+        }
+    };
+}
+
+prompt_cache_observation_redb_test!(
+    prompt_cache_observation_upsert_then_list_returns_active_only_redb,
+    upsert_then_list_returns_active_only
+);
+prompt_cache_observation_redb_test!(
+    prompt_cache_observation_asymmetric_ttl_snapshot_visibility_redb,
+    asymmetric_ttl_snapshot_visibility
+);
+prompt_cache_observation_redb_test!(
+    prompt_cache_observation_purge_expired_before_removes_only_expired_redb,
+    purge_expired_before_removes_only_expired
+);
+prompt_cache_observation_redb_test!(
+    prompt_cache_observation_hydrate_after_restart_filters_expired_redb,
+    hydrate_after_restart_filters_expired
+);
+
 #[test]
 fn upstream_subscription_metadata_store_redb() {
     run_redb_scenario(
@@ -299,4 +329,8 @@ where
         .expect("tokio runtime")
         .block_on(scenario(Arc::new(RedbConformanceBackend)))
         .unwrap_or_else(|error| panic!("{name} redb: {error}"));
+}
+
+fn prompt_cache_clock() -> ClockHandle {
+    Arc::new(TestClock::new_at_secs(1_700_000_000))
 }

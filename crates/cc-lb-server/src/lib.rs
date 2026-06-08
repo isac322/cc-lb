@@ -18,6 +18,8 @@ pub mod dynamic_view_builder;
 pub mod notify_listener;
 pub mod oauth_usage_poller;
 pub mod preflight;
+pub mod prompt_cache_observation_cache;
+pub mod prompt_cache_observation_sink;
 pub mod reconcile;
 pub mod refresh;
 pub mod reload;
