@@ -2395,7 +2395,7 @@ impl RequestCacheMetadata {
                 path: breakpoint.path.clone(),
                 message_index: breakpoint.message_index.map(saturating_u64_to_u32),
                 prefix_hash: breakpoint.prefix_hash.clone(),
-                prefix_token_count: 0,
+                prefix_token_count: breakpoint.prefix_token_count,
                 requested_ttl: plugin_ttl_class(breakpoint.ttl.as_deref()),
                 origin: BreakpointOrigin::Explicit,
             })
@@ -2461,6 +2461,10 @@ fn principal_kind_as_str(kind: &PrincipalKind) -> &'static str {
         PrincipalKind::WorkloadIdentity => "workload_identity",
         PrincipalKind::SubscriptionBearer => "subscription_bearer",
     }
+}
+
+pub fn parse_request_cache_breakpoints(headers: &HeaderMap, body: &Bytes) -> Vec<CacheBreakpoint> {
+    request_cache_metadata(headers, body).plugin_cache_breakpoints()
 }
 
 fn request_cache_metadata(headers: &HeaderMap, body: &Bytes) -> RequestCacheMetadata {
@@ -2552,13 +2556,16 @@ fn collect_cache_breakpoints(
     match value {
         Some(Value::Object(map)) => {
             if let Some(cache_control) = map.get("cache_control") {
+                let (prefix_hash, prefix_token_count) =
+                    cache_prefix_hash_and_token_count_v2(request, source, &path, message_index);
                 breakpoints.push(RequestCacheBreakpoint {
                     block_index: breakpoints.len() as u64,
                     source,
                     path: path.clone(),
                     message_index,
                     ttl: cache_control_ttl(cache_control),
-                    prefix_hash: cache_prefix_hash_v2(request, source, &path, message_index),
+                    prefix_hash,
+                    prefix_token_count,
                 });
             }
             for (key, value) in map {
@@ -2644,6 +2651,31 @@ pub fn cache_prefix_hash_v2(
     path: &str,
     message_index: Option<u64>,
 ) -> String {
+    cache_prefix_hash_and_token_count_v2(request, source, path, message_index).0
+}
+
+pub fn cache_prefix_hash_and_token_count_v2(
+    request: &Value,
+    source: RequestCacheBreakpointSource,
+    path: &str,
+    message_index: Option<u64>,
+) -> (String, u64) {
+    let prefix = build_cache_prefix_value_v2(request, source, path, message_index);
+    let bytes = serde_json::to_vec(&prefix).unwrap_or_default();
+    let hash = hex_sha256(&bytes);
+    let token_count = match std::str::from_utf8(&bytes) {
+        Ok(text) => crate::tokenizer::PrefixTokenizer::global().count_tokens(text) as u64,
+        Err(_) => 0,
+    };
+    (hash, token_count)
+}
+
+fn build_cache_prefix_value_v2(
+    request: &Value,
+    source: RequestCacheBreakpointSource,
+    path: &str,
+    message_index: Option<u64>,
+) -> Value {
     let mut prefix = serde_json::Map::new();
     prefix.insert("breakpoint_path".to_owned(), Value::String(path.to_owned()));
     if let Some(raw_model) = request.get("model").and_then(Value::as_str) {
@@ -2684,8 +2716,7 @@ pub fn cache_prefix_hash_v2(
     if let Some(value) = request.get("thinking") {
         prefix.insert("thinking".to_owned(), value.clone());
     }
-    let bytes = serde_json::to_vec(&Value::Object(prefix)).unwrap_or_default();
-    hex_sha256(&bytes)
+    Value::Object(prefix)
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3344,6 +3375,51 @@ mod tests {
     }
 
     #[test]
+    fn build_candidates_cache_score_from_production_parsed_breakpoints() {
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000204").unwrap();
+        let lorem: String =
+            "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(300);
+        let body_string = format!(
+            r#"{{"model":"{TEST_MODEL}","system":[{{"type":"text","text":"{lorem}","cache_control":{{"type":"ephemeral","ttl":"1h"}}}}],"messages":[{{"role":"user","content":"hi"}}],"max_tokens":16}}"#,
+        );
+        let body = Bytes::from(body_string);
+
+        let breakpoints = parse_request_cache_breakpoints(&HeaderMap::new(), &body);
+        assert_eq!(breakpoints.len(), 1);
+        let prefix_hash = breakpoints[0].prefix_hash.clone();
+        let prefix_token_count = breakpoints[0].prefix_token_count;
+        assert!(
+            prefix_token_count >= 1024,
+            "expected real tokenizer to exceed Sonnet threshold, got {prefix_token_count}"
+        );
+
+        let cache = TestPromptCacheObservationCache::new(32, TEST_MODEL).with_entries(
+            upstream_id,
+            vec![warm_entry(
+                &prefix_hash,
+                TtlClass::Ephemeral1h,
+                4_100_003_600,
+                12,
+            )],
+        );
+        let view = cache_score_view(upstream_id, Arc::new(cache));
+
+        let candidates = build_candidates(
+            &view,
+            "principal",
+            RequestKind::AnthropicMessages,
+            TEST_MODEL,
+            &breakpoints,
+        );
+
+        let score = candidates[0].cache_score.as_ref().expect("cache score");
+        assert_eq!(u64::from(score.predicted_cache_read_tokens), prefix_token_count);
+        assert!(score.predicted_cache_read_tokens >= 1024);
+        assert_eq!(score.matched_breakpoint_index, Some(0));
+        assert_eq!(score.confidence, 1.0);
+    }
+
+    #[test]
     fn build_candidates_no_warm_returns_none() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000202").unwrap();
         let view = cache_score_view(
@@ -3687,6 +3763,83 @@ mod tests {
 
         assert_eq!(breakpoint.prefix_hash, expected_v2);
         assert_ne!(breakpoint.prefix_hash, legacy_v1);
+    }
+
+    #[test]
+    fn request_cache_metadata_fills_prefix_token_count() {
+        let headers = HeaderMap::new();
+        let body = Bytes::from_static(
+            br#"{
+                "model":"claude-sonnet-4-5",
+                "system":[{"type":"text","text":"You are a helpful assistant. Please be concise.","cache_control":{"type":"ephemeral"}}],
+                "messages":[{"role":"user","content":"hello"}]
+            }"#,
+        );
+
+        let metadata = request_cache_metadata(&headers, &body);
+
+        assert_eq!(metadata.cache_breakpoints.len(), 1);
+        let breakpoint = &metadata.cache_breakpoints[0];
+        assert!(
+            breakpoint.prefix_token_count > 0,
+            "expected non-zero prefix_token_count, got {}",
+            breakpoint.prefix_token_count
+        );
+
+        let plugin_breakpoints = metadata.plugin_cache_breakpoints();
+        assert_eq!(plugin_breakpoints.len(), 1);
+        assert_eq!(
+            plugin_breakpoints[0].prefix_token_count,
+            breakpoint.prefix_token_count
+        );
+    }
+
+    #[test]
+    fn request_cache_metadata_prefix_token_count_scales_with_prefix_size() {
+        let headers = HeaderMap::new();
+        let short_body = Bytes::from_static(
+            br#"{
+                "model":"claude-sonnet-4-5",
+                "system":[{"type":"text","text":"short","cache_control":{"type":"ephemeral"}}],
+                "messages":[{"role":"user","content":"hello"}]
+            }"#,
+        );
+        let long_text: String = "lorem ipsum ".repeat(2_000);
+        let long_body_string = format!(
+            r#"{{"model":"claude-sonnet-4-5","system":[{{"type":"text","text":"{long_text}","cache_control":{{"type":"ephemeral"}}}}],"messages":[{{"role":"user","content":"hello"}}]}}"#,
+        );
+        let long_body = Bytes::from(long_body_string);
+
+        let short_metadata = request_cache_metadata(&headers, &short_body);
+        let long_metadata = request_cache_metadata(&headers, &long_body);
+
+        let short_count = short_metadata.cache_breakpoints[0].prefix_token_count;
+        let long_count = long_metadata.cache_breakpoints[0].prefix_token_count;
+
+        assert!(short_count > 0);
+        assert!(
+            long_count > short_count.saturating_mul(10),
+            "expected long prefix ({long_count}) to be >10x short prefix ({short_count})"
+        );
+    }
+
+    #[test]
+    fn request_cache_metadata_prefix_token_count_crosses_sonnet_threshold() {
+        let headers = HeaderMap::new();
+        let varied_text: String =
+            "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(300);
+        let body_string = format!(
+            r#"{{"model":"claude-sonnet-4-5","system":[{{"type":"text","text":"{varied_text}","cache_control":{{"type":"ephemeral","ttl":"1h"}}}}],"messages":[{{"role":"user","content":"hi"}}],"max_tokens":16}}"#,
+        );
+        let body = Bytes::from(body_string);
+
+        let metadata = request_cache_metadata(&headers, &body);
+        assert_eq!(metadata.cache_breakpoints.len(), 1);
+        let count = metadata.cache_breakpoints[0].prefix_token_count;
+        assert!(
+            count >= 1024,
+            "prefix token count {count} should be above Sonnet 4.5 cache threshold (1024)"
+        );
     }
 
     #[test]
@@ -4132,6 +4285,7 @@ mod tests {
                     path: "/".to_string(),
                     message_index: None,
                     prefix_hash: "test-hash".to_string(),
+                    prefix_token_count: 0,
                     ttl: None,
                 }],
                 canonical_model_id: "test-model".to_string(),

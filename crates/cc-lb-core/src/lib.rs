@@ -99,7 +99,7 @@ pub use lifecycle::{
     Body, DispatchError, HyperDispatcher, Lifecycle, LifecycleConfig, LimitSubject,
     LimitSubjectProvider, NoopSubscriptionQuotaCache, ProxyError, ReplicaIdentity, RequestKind,
     SubscriptionQuotaCacheLike, UpstreamDispatch, build_candidates, observe_rate_limits,
-    observe_subscription_quota_headers,
+    observe_subscription_quota_headers, parse_request_cache_breakpoints,
 };
 #[cfg(not(loom))]
 pub use poll_schedule_estimator::{EstimatorConfig, PollScheduleEstimator, ThrottleObservation};

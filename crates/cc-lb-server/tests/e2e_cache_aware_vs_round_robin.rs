@@ -7,17 +7,14 @@
 //! ------------
 //! The test exercises the cache-aware plugin via `cc-lb-runtime-extism` and the
 //! production `PromptCacheObservationCache` directly, rather than through
-//! `cc_lb_core::Lifecycle::handle`. Production `request_cache_metadata` in
-//! `crates/cc-lb-core/src/lifecycle.rs` currently hard-codes
-//! `prefix_token_count: 0` on the per-request `CacheBreakpoint` it surfaces to
-//! the routing plugin (the tokenizer is not yet wired into parse). With
-//! `prefix_token_count == 0`, the production cache-score builder always
-//! computes `predicted_cache_read_tokens == 0`, so the cache-aware plugin
-//! always sees `score == 0` and falls through to round-robin. The task plan's
-//! "RR vs cache-aware" hit-rate assertions can therefore not be demonstrated
-//! through the full proxy lifecycle on the current production code.
+//! `cc_lb_core::Lifecycle::handle`. It now parses the request through the real
+//! `cc_lb_core::parse_request_cache_breakpoints` helper, so the `prefix_hash`
+//! and `prefix_token_count` driving the cache-aware plugin are produced by
+//! production code rather than synthesised.
 //!
-//! The test still exercises:
+//! The test exercises:
+//!   - production cache-breakpoint extraction + tokenization
+//!     (`parse_request_cache_breakpoints`),
 //!   - the production prompt cache (`PromptCacheObservationCache`),
 //!   - the production extism runtime (`ExtismRuntime`), which compiles and
 //!     loads the released wasm artefacts for both router plugins,
@@ -26,12 +23,10 @@
 //!     `__inject_cache_stats` endpoint controlling which upstream reports a
 //!     cache read on its `/v1/messages` responses.
 //!
-//! For the cache-aware phase, the test synthesises a single non-zero
-//! `CacheBreakpoint` (`prefix_token_count > sonnet threshold`) so the
-//! production cache-score formula can be invoked, and upserts a warm
-//! observation into the production cache after each response that comes back
-//! with `cache_read_input_tokens > 0`. This mirrors what the production
-//! response decoder would do once `prefix_token_count` is correctly populated.
+//! For the cache-aware phase, the test upserts a warm observation into the
+//! production cache after each response that comes back with
+//! `cache_read_input_tokens > 0`. This mirrors what the production response
+//! decoder does for the same scenario.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -45,9 +40,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use cc_lb_core::clock::{ClockHandle, TestClock};
-use cc_lb_plugin_api::types::{
-    BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheScore, TtlClass, WarmCacheEntry,
-};
+use cc_lb_core::parse_request_cache_breakpoints;
+use cc_lb_plugin_api::types::{CacheBreakpoint, CacheScore, TtlClass, WarmCacheEntry};
 use cc_lb_plugin_api::{
     PluginManifest, PluginRuntime, Principal, PrincipalKind, RequestContext, UpstreamCandidate,
     UpstreamKind,
@@ -70,9 +64,6 @@ const REQUEST_COUNT: usize = 100;
 const NOW_UNIX_SECS: u64 = 1_700_000_000;
 const ONE_HOUR_SECS: u64 = 3_600;
 const TEST_MODEL: &str = "claude-sonnet-4-5-20250929";
-const PREFIX_HASH: &str = "e2e-shared-prefix-hash-v1";
-// Sonnet 4.5 threshold from `model_resolution::cache_threshold_tokens` is 1024.
-const PREFIX_TOKEN_COUNT: u64 = 4_096;
 const INJECTED_CACHE_READ_TOKENS: u64 = 4_096;
 const INJECTED_CACHE_CREATION_TOKENS: u64 = 4_096;
 const RR_HIT_RATE_MAX: f64 = 0.40;
@@ -176,17 +167,20 @@ async fn run_phase(
         .instantiate_router(&manifest)
         .map_err(|err| io_err(format!("instantiate {label} router: {err}")))?;
 
-    let request_breakpoint = CacheBreakpoint {
-        block_index: 0,
-        source: CacheBreakpointSource::System,
-        path: "system".to_owned(),
-        message_index: None,
-        prefix_hash: PREFIX_HASH.to_owned(),
-        prefix_token_count: PREFIX_TOKEN_COUNT,
-        requested_ttl: TtlClass::Ephemeral1h,
-        origin: BreakpointOrigin::Explicit,
-    };
-    let request_breakpoints = vec![request_breakpoint];
+    let request_breakpoints =
+        parse_request_cache_breakpoints(&HeaderMap::new(), &Bytes::copy_from_slice(body_bytes));
+    assert!(
+        !request_breakpoints.is_empty(),
+        "production request_cache_metadata returned no breakpoints for cacheable body",
+    );
+    assert!(
+        request_breakpoints
+            .iter()
+            .all(|bp| bp.prefix_token_count >= 1024),
+        "production tokenizer must yield prefix_token_count above the Sonnet 4.5 cache threshold (1024) so observation writes are not gated out: {request_breakpoints:?}",
+    );
+    let primary_prefix_hash = request_breakpoints[0].prefix_hash.clone();
+    let primary_ttl = request_breakpoints[0].requested_ttl;
     let request_breakpoint_hashes: Vec<(String, TtlClass)> = request_breakpoints
         .iter()
         .map(|bp| (bp.prefix_hash.clone(), bp.requested_ttl))
@@ -241,8 +235,8 @@ async fn run_phase(
             cache.upsert_observation(
                 picked.id,
                 TEST_MODEL.to_owned(),
-                PREFIX_HASH.to_owned(),
-                TtlClass::Ephemeral1h,
+                primary_prefix_hash.clone(),
+                primary_ttl,
                 now + ONE_HOUR_SECS,
                 now,
             );
@@ -309,10 +303,8 @@ fn test_ctx(body_bytes: &[u8]) -> RequestContext {
 }
 
 fn build_cacheable_request_body() -> Value {
-    // ~8000 character system block. The plugin layer doesn't tokenize this in
-    // production today; the body is only here so fake-anthropic receives a
-    // realistic cacheable shape and so the prefix hash is non-trivial.
-    let large_text: String = "X".repeat(8_000);
+    let large_text: String =
+        "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(300);
     json!({
         "model": TEST_MODEL,
         "system": [{
