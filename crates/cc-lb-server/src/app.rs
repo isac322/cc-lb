@@ -1805,10 +1805,7 @@ mod tests {
 
         install_default_fallback_if_uninitialized(&catalog);
 
-        assert!(matches!(
-            catalog.status(),
-            cc_lb_pricing::CatalogStatus::Ok
-        ));
+        assert!(matches!(catalog.status(), cc_lb_pricing::CatalogStatus::Ok));
         assert!(catalog.lookup("claude-opus-4-5", None).is_some());
     }
 
