@@ -1317,8 +1317,7 @@ fn spawn_price_catalog_loader(
     storage: Arc<dyn Storage>,
     price_catalog: Arc<cc_lb_pricing::PriceCatalog>,
 ) {
-    // Fallback so cost works immediately and survives LiteLLM fetch failures.
-    price_catalog.install_snapshot(claude_default_snapshot());
+    install_default_fallback_if_uninitialized(&price_catalog);
 
     let cfg = &config.api_keys.price_catalog;
     let storage_cache: Arc<dyn cc_lb_storage_api::PriceCatalogCache> = storage;
@@ -1336,6 +1335,12 @@ fn spawn_price_catalog_loader(
         "starting LiteLLM price catalog loader",
     );
     let _handle = loader.start_daemon();
+}
+
+fn install_default_fallback_if_uninitialized(price_catalog: &cc_lb_pricing::PriceCatalog) {
+    if !matches!(price_catalog.status(), cc_lb_pricing::CatalogStatus::Ok) {
+        price_catalog.install_snapshot(claude_default_snapshot());
+    }
 }
 
 fn claude_default_snapshot() -> cc_lb_pricing::CatalogSnapshot {
@@ -1788,6 +1793,52 @@ mod tests {
         let opts = startup_handshake_opts_from_flags(Some(true), Some(false), &cfg);
         assert!(opts.skip_if_fresh);
         assert!(!opts.force);
+    }
+
+    #[test]
+    fn default_fallback_populates_empty_catalog() {
+        let catalog = cc_lb_pricing::PriceCatalog::new_empty();
+        assert!(matches!(
+            catalog.status(),
+            cc_lb_pricing::CatalogStatus::CostDisabled
+        ));
+
+        install_default_fallback_if_uninitialized(&catalog);
+
+        assert!(matches!(
+            catalog.status(),
+            cc_lb_pricing::CatalogStatus::Ok
+        ));
+        assert!(catalog.lookup("claude-opus-4-5", None).is_some());
+    }
+
+    #[test]
+    fn default_fallback_preserves_existing_ok_snapshot() {
+        use std::collections::HashMap;
+
+        let catalog = cc_lb_pricing::PriceCatalog::new_empty();
+        let mut models = HashMap::new();
+        models.insert(
+            "operator-model-a".to_owned(),
+            cc_lb_pricing::Pricing {
+                model: "operator-model-a".to_owned(),
+                input_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(2),
+                output_per_million_usd: cc_lb_pricing::UsdPerMillion::from_whole_usd(8),
+            },
+        );
+        catalog.install_snapshot(cc_lb_pricing::CatalogSnapshot {
+            fetched_at_ms: 0,
+            models,
+            raw_json: Vec::new(),
+            cache_creation_per_million_usd: HashMap::new(),
+            cache_read_per_million_usd: HashMap::new(),
+            status: cc_lb_pricing::CatalogStatus::Ok,
+        });
+
+        install_default_fallback_if_uninitialized(&catalog);
+
+        assert!(catalog.lookup("operator-model-a", None).is_some());
+        assert!(catalog.lookup("claude-opus-4-5", None).is_none());
     }
 
     async fn assert_admin_state(router: Router, expected: &str) {
