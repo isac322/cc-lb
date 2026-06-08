@@ -779,7 +779,7 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
- "wasmparser 0.243.0",
+ "wasmparser 0.251.0",
  "wat",
 ]
 
@@ -2263,6 +2263,11 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+dependencies = [
+ "foldhash 0.2.0",
+ "serde",
+ "serde_core",
+]
 
 [[package]]
 name = "hashlink"
@@ -3577,7 +3582,7 @@ version = "0.1.0"
 dependencies = [
  "extism",
  "serde_json",
- "wasmparser 0.243.0",
+ "wasmparser 0.251.0",
 ]
 
 [[package]]
@@ -5741,8 +5746,10 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "437970b35b1a85cfde9c74b2398352d8d653f3bd8e3a3db0c063ea8f5b4b36ff"
 dependencies = [
  "bitflags",
+ "hashbrown 0.17.1",
  "indexmap",
  "semver",
+ "serde",
 ]
 
 [[package]]
