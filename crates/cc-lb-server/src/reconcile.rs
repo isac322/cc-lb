@@ -3,7 +3,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_aead::AeadService;
-use cc_lb_config::AnthropicOAuthConfig;
+use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_core::DynamicViewHolder;
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_storage_api::{PluginSlot, StorageResult};
@@ -25,6 +25,7 @@ pub struct Reconciler {
     pub data_dir: PathBuf,
     pub subscription_quota_cache: Arc<SubscriptionQuotaCache>,
     pub subscription_quota_routing_max_staleness_secs: u64,
+    pub config: Arc<Config>,
 }
 
 impl Reconciler {
@@ -40,6 +41,7 @@ impl Reconciler {
         data_dir: PathBuf,
         subscription_quota_cache: Arc<SubscriptionQuotaCache>,
         subscription_quota_routing_max_staleness_secs: u64,
+        config: Arc<Config>,
     ) -> Self {
         Self {
             stores,
@@ -52,6 +54,7 @@ impl Reconciler {
             data_dir,
             subscription_quota_cache,
             subscription_quota_routing_max_staleness_secs,
+            config,
         }
     }
 
@@ -102,6 +105,7 @@ impl Reconciler {
             &self.data_dir,
             self.subscription_quota_cache.clone(),
             self.subscription_quota_routing_max_staleness_secs,
+            &self.config,
         )
         .await
         {

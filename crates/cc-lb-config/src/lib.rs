@@ -23,8 +23,8 @@ pub use types::{
     DEFAULT_REDB_PATH, DnsConfig, DownstreamAuthConfig, DownstreamAuthMode, EgressConfig, Limit,
     LimitKind, ListenerConfig, ListenerOverrides, NoneModeConfig, NoneModeUpstreamKind,
     OAuthUsagePollerConfig, ObservabilityConfig, PostgresPoolConfig, PriceCatalogConfig,
-    RestartRequiredField, RuntimeConfig, StartupHandshakeConfig, StorageConfig,
-    SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig,
+    PromptCacheShadowConfig, RestartRequiredField, RuntimeConfig, StartupHandshakeConfig,
+    StorageConfig, SubscriptionQuotaConfig, TimeoutsConfig, TlsConfig,
 };
 pub use validation::{ValidationError, validate_postgres_url};
 

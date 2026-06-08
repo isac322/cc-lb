@@ -4,6 +4,7 @@ members = [
     "crates/cc-lb-plugin-wire",
     "crates/cc-lb-*",
     "benches/extism_sse_overhead",
+    "plugins/router/cache-aware",
     "plugins/router/round-robin",
     "tests/fixtures/fake-anthropic",
     "tests/fixtures/extism-echo-plugin",

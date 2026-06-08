@@ -2,7 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use cc_lb_core::{BreakerConfig, BreakerError, CircuitBreaker, MockClock};
+use cc_lb_core::{BreakerConfig, BreakerError, CircuitBreaker, TestClock};
 
 #[test]
 fn open_breaker_returns_error_without_calling_upstream() -> Result<(), Box<dyn std::error::Error>> {
@@ -14,7 +14,7 @@ fn open_breaker_returns_error_without_calling_upstream() -> Result<(), Box<dyn s
             half_open_after: Duration::from_secs(30),
             half_open_max_in_flight: 1,
         },
-        Arc::new(MockClock::new(100)),
+        Arc::new(TestClock::new_at_secs(100)),
     );
     breaker.permit()?.record_failure();
 

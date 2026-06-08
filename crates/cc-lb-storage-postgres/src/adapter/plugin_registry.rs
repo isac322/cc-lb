@@ -302,8 +302,8 @@ impl PluginRegistryStore for PostgresStorage {
             .await
             .map_err(map_sqlx_error)?;
         let id = Uuid::new_v4();
-        let row = sqlx::query("INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0) RETURNING *")
-            .bind(id).bind(input.principal_id).bind(input.slot.as_str()).bind(input.order).bind(input.wasm_registry_id).bind(input.config).bind(input.sse_per_event).bind(i32::try_from(input.batched_events_per_flush).map_err(|_| StorageError::Fatal { message: "batched_events_per_flush exceeds i32".to_owned() })?).bind(u64_to_i64(input.batched_flush_ms, "plugin_chain.batched_flush_ms")?)
+        let row = sqlx::query("INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision, wire_version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0,$10) RETURNING *")
+            .bind(id).bind(input.principal_id).bind(input.slot.as_str()).bind(input.order).bind(input.wasm_registry_id).bind(input.config).bind(input.sse_per_event).bind(i32::try_from(input.batched_events_per_flush).map_err(|_| StorageError::Fatal { message: "batched_events_per_flush exceeds i32".to_owned() })?).bind(u64_to_i64(input.batched_flush_ms, "plugin_chain.batched_flush_ms")?).bind(input.wire_version.map(i16::from))
             .fetch_one(&mut *tx).await.map_err(map_sqlx_error)?;
         sqlx::query("SELECT pg_notify('cclb_plugin_chain_changed', $1)")
             .bind(input.principal_id.to_string())
@@ -705,6 +705,10 @@ fn chain_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PluginChainEntry>
             row.try_get("revision").map_err(map_sqlx_error)?,
             "plugin_chain.revision",
         )?,
+        wire_version: row
+            .try_get::<Option<i16>, _>("wire_version")
+            .map_err(map_sqlx_error)?
+            .map(|value| value.clamp(0, i16::from(u8::MAX)) as u8),
     })
 }
 

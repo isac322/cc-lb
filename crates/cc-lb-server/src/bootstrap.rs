@@ -103,6 +103,8 @@ pub struct BootstrapPluginEntry {
     pub batched_events_per_flush: Option<u32>,
     #[serde(default)]
     pub batched_flush_ms: Option<u64>,
+    #[serde(default)]
+    pub wire_version: Option<u8>,
 }
 
 pub async fn apply_bootstrap(
@@ -267,6 +269,7 @@ async fn apply_plugin_chain(
                 sse_per_event: plugin.sse_per_event().unwrap_or(false),
                 batched_events_per_flush: plugin.batched_events_per_flush().unwrap_or(1),
                 batched_flush_ms: plugin.batched_flush_ms().unwrap_or(100),
+                wire_version: plugin.wire_version(),
             })
             .await
             .map_err(|e| BootstrapError::Storage(e.to_string()))?;
@@ -374,6 +377,13 @@ impl BootstrapPluginRef {
         match self {
             Self::Name(_) => None,
             Self::Entry(entry) => entry.batched_flush_ms,
+        }
+    }
+
+    fn wire_version(&self) -> Option<u8> {
+        match self {
+            Self::Name(_) => None,
+            Self::Entry(entry) => entry.wire_version,
         }
     }
 

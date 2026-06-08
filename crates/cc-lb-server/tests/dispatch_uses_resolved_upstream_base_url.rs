@@ -104,6 +104,7 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         anthropic_compatibility_kv: storage.clone(),
         audit: Some(storage.clone()),
         plugin_registry_repo: None,
+        prompt_cache_observations: storage.clone(),
     });
 
     let aead = Arc::new(AeadService::from_master_key([33; 32]));
@@ -115,6 +116,7 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         scopes: vec!["messages".to_owned()],
     });
     let runtime = ExtismRuntime::new();
+    let config = cc_lb_config::Config::default();
     let view = build_dynamic_view(
         stores.as_ref(),
         oauth_cfg.as_ref(),
@@ -125,6 +127,7 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
         dir.path(),
         Arc::new(SubscriptionQuotaCache::new()),
         1800,
+        &config,
     )
     .await
     .expect("dynamic view builds");

@@ -11,6 +11,7 @@ use cc_lb_storage_api::types::{PrincipalKindLite, UpstreamKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
+use super::add_dynamic_rebind_headers;
 use crate::AdminState;
 
 pub fn router() -> Router<AdminState> {
@@ -92,7 +93,9 @@ async fn issue_key(
                 plaintext_key: plaintext.expose().to_string(),
                 issued_at_unix_secs: record.issued_at_unix_secs,
             };
-            (StatusCode::CREATED, Json(response)).into_response()
+            let mut http_response = (StatusCode::CREATED, Json(response)).into_response();
+            add_dynamic_rebind_headers(&mut http_response, &state).await;
+            http_response
         }
         Err(e) => {
             tracing::error!("Failed to issue key: {}", e);
@@ -220,7 +223,9 @@ async fn revoke_key(
                 key_id,
                 revoked_at_unix_secs: now,
             };
-            Json(response).into_response()
+            let mut http_response = Json(response).into_response();
+            add_dynamic_rebind_headers(&mut http_response, &state).await;
+            http_response
         }
         Err(e) => {
             tracing::error!("Failed to revoke key: {}", e);

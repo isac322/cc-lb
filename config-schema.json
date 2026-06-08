@@ -116,6 +116,16 @@
         "user_prompt_redaction": false
       }
     },
+    "prompt_cache_shadow": {
+      "$ref": "#/$defs/PromptCacheShadowConfig",
+      "default": {
+        "enabled": false,
+        "grace_margin_secs": 30,
+        "refresh_debounce_secs": 60,
+        "sweeper_interval_secs": 300,
+        "warm_set_cap": 32
+      }
+    },
     "runtime": {
       "$ref": "#/$defs/RuntimeConfig",
       "default": {
@@ -675,6 +685,40 @@
         }
       },
       "additionalProperties": false
+    },
+    "PromptCacheShadowConfig": {
+      "description": "Prompt cache shadow mode configuration.\n\nControls the prompt cache observation cache behavior. When `enabled=false`, the cache layer\nis not constructed and observation flow is gated off at the lifecycle level for byte-equivalent\npre-T22 behavior (no observation enqueue, no snapshot, no sweeper). When `enabled=true`,\nthe full cache pipeline activates: observations from successful responses are decoded,\nupserted into the in-memory cache, and enqueued for persistent storage; `build_candidates`\nsnapshots cache state per upstream to compute cache scores.\n\nConfiguration keys and defaults:\n- `enabled` (default: false) - gate all observation flow and sweeper spawn\n- `grace_margin_secs` (default: 30) - minimum age before a cache hit is refreshed\n- `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence\n- `sweeper_interval_secs` (default: 300) - interval between expiry purge scans\n- `warm_set_cap` (default: 32) - max snapshot entries per upstream/model",
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "grace_margin_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        },
+        "refresh_debounce_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 60,
+          "minimum": 0
+        },
+        "sweeper_interval_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "minimum": 0
+        },
+        "warm_set_cap": {
+          "type": "integer",
+          "format": "uint",
+          "default": 32,
+          "minimum": 0
+        }
+      }
     },
     "RuntimeConfig": {
       "type": "object",

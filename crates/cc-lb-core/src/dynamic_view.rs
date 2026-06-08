@@ -1,15 +1,20 @@
 use std::{collections::HashMap, sync::Arc};
 
 use arc_swap::ArcSwap;
-use cc_lb_plugin_api::{ApiKeyAwareSignerFactory, RateLimitObservation};
-use cc_lb_plugin_api::{ObservabilityHook, RouterPlugin};
+use cc_lb_plugin_api::types::{TtlClass, WarmCacheEntry};
+use cc_lb_plugin_api::{
+    ApiKeyAwareSignerFactory, ObservabilityHook, RateLimitObservation, RouterPlugin,
+};
 use cc_lb_storage_api::{UpstreamRateLimitObservationRecord, UpstreamRecord};
 use parking_lot::RwLock;
 use uuid::Uuid;
 
 use crate::api_keys::principal_view::PrincipalView;
 use crate::error_normalizer::ErrorNormalizer;
-use crate::lifecycle::{NoopSubscriptionQuotaCache, SubscriptionQuotaCacheLike, UpstreamDispatch};
+use crate::lifecycle::{
+    NoopSubscriptionQuotaCache, PromptCacheObservationCacheLike, PromptCacheObservationSinkLike,
+    SubscriptionQuotaCacheLike, UpstreamDispatch,
+};
 
 #[non_exhaustive]
 pub struct DynamicView {
@@ -23,6 +28,8 @@ pub struct DynamicView {
     pub upstream_rate_limit_cache: Arc<RwLock<UpstreamRateLimitCache>>,
     pub subscription_quota_cache: Arc<dyn SubscriptionQuotaCacheLike>,
     pub subscription_quota_routing_max_staleness_secs: u64,
+    pub prompt_cache_observation_cache: Option<Arc<dyn PromptCacheObservationCacheLike>>,
+    pub prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     pub generation: u64,
     upstream_records: Vec<UpstreamRecord>,
 }
@@ -30,6 +37,56 @@ pub struct DynamicView {
 impl DynamicView {
     pub fn upstreams_snapshot(&self) -> &[UpstreamRecord] {
         &self.upstream_records
+    }
+
+    pub fn prompt_cache_observation_cache_opt(
+        &self,
+    ) -> Option<&Arc<dyn PromptCacheObservationCacheLike>> {
+        self.prompt_cache_observation_cache.as_ref()
+    }
+
+    pub fn prompt_cache_observation_sink_opt(
+        &self,
+    ) -> Option<&Arc<dyn PromptCacheObservationSinkLike>> {
+        self.prompt_cache_observation_sink.as_ref()
+    }
+}
+
+impl PromptCacheObservationCacheLike for NoopSubscriptionQuotaCache {
+    fn snapshot_for_upstream(
+        &self,
+        _upstream_id: Uuid,
+        _canonical_model: &str,
+        _request_breakpoint_hashes: &[(String, TtlClass)],
+        _now_unix_secs: u64,
+    ) -> Vec<WarmCacheEntry> {
+        Vec::new()
+    }
+
+    fn upsert_observation(
+        &self,
+        _upstream_id: Uuid,
+        _canonical_model: String,
+        _prefix_hash: String,
+        _ttl_class: TtlClass,
+        _expires_at_unix_secs: u64,
+        _now_unix_secs: u64,
+    ) {
+    }
+
+    fn refresh_on_hit(
+        &self,
+        _upstream_id: Uuid,
+        _canonical_model: &str,
+        _prefix_hash: &str,
+        _ttl_class: TtlClass,
+        _now_unix_secs: u64,
+    ) -> bool {
+        false
+    }
+
+    fn clock_now_unix_secs(&self) -> u64 {
+        0
     }
 }
 
@@ -139,6 +196,8 @@ pub struct DynamicViewBuilder {
     upstream_rate_limit_cache: Option<Arc<RwLock<UpstreamRateLimitCache>>>,
     subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
     subscription_quota_routing_max_staleness_secs: Option<u64>,
+    prompt_cache_observation_cache: Option<Arc<dyn PromptCacheObservationCacheLike>>,
+    prompt_cache_observation_sink: Option<Arc<dyn PromptCacheObservationSinkLike>>,
     upstream_records: Vec<UpstreamRecord>,
 }
 
@@ -156,6 +215,8 @@ impl DynamicViewBuilder {
             upstream_rate_limit_cache: None,
             subscription_quota_cache: None,
             subscription_quota_routing_max_staleness_secs: None,
+            prompt_cache_observation_cache: None,
+            prompt_cache_observation_sink: None,
             upstream_records: Vec::new(),
         }
     }
@@ -175,6 +236,8 @@ impl DynamicViewBuilder {
             subscription_quota_routing_max_staleness_secs: Some(
                 view.subscription_quota_routing_max_staleness_secs,
             ),
+            prompt_cache_observation_cache: view.prompt_cache_observation_cache.clone(),
+            prompt_cache_observation_sink: view.prompt_cache_observation_sink.clone(),
             upstream_records: view.upstreams_snapshot().to_vec(),
         }
     }
@@ -243,6 +306,22 @@ impl DynamicViewBuilder {
         self
     }
 
+    pub fn prompt_cache_observation_cache(
+        mut self,
+        cache: Arc<dyn PromptCacheObservationCacheLike>,
+    ) -> Self {
+        self.prompt_cache_observation_cache = Some(cache);
+        self
+    }
+
+    pub fn prompt_cache_observation_sink(
+        mut self,
+        sink: Arc<dyn PromptCacheObservationSinkLike>,
+    ) -> Self {
+        self.prompt_cache_observation_sink = Some(sink);
+        self
+    }
+
     pub fn upstream_records(mut self, records: Vec<UpstreamRecord>) -> Self {
         self.upstream_records = records;
         self
@@ -278,6 +357,8 @@ impl DynamicViewBuilder {
             subscription_quota_routing_max_staleness_secs: self
                 .subscription_quota_routing_max_staleness_secs
                 .unwrap_or(0),
+            prompt_cache_observation_cache: self.prompt_cache_observation_cache,
+            prompt_cache_observation_sink: self.prompt_cache_observation_sink,
             generation: self.previous_generation.saturating_add(1),
             upstream_records: self.upstream_records,
         })

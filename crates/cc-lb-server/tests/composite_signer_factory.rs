@@ -51,6 +51,7 @@ impl Fixture {
             plugin_registry: storage.clone(),
             upstream_rate_limits: storage.clone(),
             upstream_subscription_quotas: storage.clone(),
+            prompt_cache_observations: storage.clone(),
             anthropic_compatibility_kv: storage.clone(),
             audit: Some(storage.clone()),
             plugin_registry_repo: None,
@@ -225,6 +226,7 @@ async fn router_choice_selects_matching_oauth_upstream() {
         fixture._dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
+        &cc_lb_config::Config::default(),
     )
     .await
     .expect("dynamic view builds");
@@ -265,6 +267,7 @@ async fn empty_router_choice_errors() {
         fixture._dir.path(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
+        &cc_lb_config::Config::default(),
     )
     .await
     .expect("dynamic view builds");
@@ -349,6 +352,8 @@ fn shaped_request() -> ShapedRequest {
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(b"{}"),
+        cache_breakpoints: Vec::new(),
+        canonical_model_id: String::new(),
     };
     let principal = Principal {
         id: "principal".to_owned(),

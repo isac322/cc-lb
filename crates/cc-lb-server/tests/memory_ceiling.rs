@@ -93,6 +93,7 @@ impl StubWasms {
         PluginManifest {
             name: "router".to_owned(),
             artifact: self.router_path.to_string_lossy().into_owned(),
+            wire_version: None,
             config: json!({}),
             metadata: BTreeMap::new(),
         }
@@ -102,6 +103,7 @@ impl StubWasms {
         PluginManifest {
             name: "observe".to_owned(),
             artifact: self.observe_path.to_string_lossy().into_owned(),
+            wire_version: None,
             config: json!({}),
             metadata: BTreeMap::new(),
         }

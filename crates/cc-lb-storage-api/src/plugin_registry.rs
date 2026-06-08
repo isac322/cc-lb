@@ -79,6 +79,11 @@ pub struct PluginChainEntryInput {
     pub sse_per_event: bool,
     pub batched_events_per_flush: u32,
     pub batched_flush_ms: u64,
+    /// Host-side wire version to negotiate when instantiating this plugin.
+    /// `None` (the default) preserves the historical behaviour of falling back
+    /// to wire v1 inside the runtime; admins must opt v2 plugins in explicitly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_version: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -93,6 +98,11 @@ pub struct PluginChainEntry {
     pub batched_events_per_flush: u32,
     pub batched_flush_ms: u64,
     pub revision: u64,
+    /// Negotiated wire version requested for this chain entry. Forward-compatible
+    /// `None` for records persisted before this field existed; reads back from
+    /// redb/postgres after a round-trip through `insert_chain_entry`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wire_version: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]

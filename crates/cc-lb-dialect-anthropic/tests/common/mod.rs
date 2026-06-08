@@ -26,6 +26,8 @@ pub fn request_context(
         path: path.to_owned(),
         query: query.map(ToOwned::to_owned),
         body_bytes,
+        cache_breakpoints: Vec::new(),
+        canonical_model_id: String::new(),
     }
 }
 

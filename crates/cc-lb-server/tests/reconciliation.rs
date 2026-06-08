@@ -13,7 +13,7 @@ use cc_lb_server::reconcile::Reconciler;
 use cc_lb_storage_api::{
     AnthropicCompatibilityKvStore, CompatibilityKvRecord, PluginChainEntry, PluginChainEntryInput,
     PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
-    PrincipalRecord, PrincipalStore, PrincipalUpdate, StorageResult,
+    PrincipalRecord, PrincipalStore, PrincipalUpdate, PromptCacheObservationStore, StorageResult,
     SubscriptionQuotaObservationRecord, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
     UpstreamCreate, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
     UpstreamRecord, UpstreamStore, UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob,
@@ -64,6 +64,7 @@ fn stores(storage: Arc<Storage>) -> Arc<Stores> {
         plugin_registry: storage.clone(),
         upstream_rate_limits: storage.clone(),
         upstream_subscription_quotas: storage.clone(),
+        prompt_cache_observations: storage.clone(),
         anthropic_compatibility_kv: storage,
         audit: None,
         plugin_registry_repo: None,
@@ -137,6 +138,7 @@ async fn initial_holder(
         data_dir,
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
+        &cc_lb_config::Config::default(),
     )
     .await
     .expect("initial dynamic view");
@@ -161,6 +163,7 @@ fn reconciler(
         data_dir.to_path_buf(),
         Arc::new(cc_lb_server::SubscriptionQuotaCache::new()),
         1800,
+        Arc::new(cc_lb_config::Config::default()),
     ))
 }
 
@@ -288,6 +291,7 @@ async fn cancel_during_tick_is_graceful() {
         plugin_registry: Arc::new(EmptyPluginRegistryStore),
         upstream_rate_limits: Arc::new(EmptyRateLimitStore),
         upstream_subscription_quotas: Arc::new(EmptySubscriptionQuotaStore),
+        prompt_cache_observations: Arc::new(EmptyPromptCacheObservationStore),
         anthropic_compatibility_kv: Arc::new(EmptyCompatibilityKvStore),
         audit: None,
         plugin_registry_repo: None,
@@ -478,6 +482,10 @@ impl UpstreamSubscriptionQuotaStore for EmptySubscriptionQuotaStore {
         Ok(0)
     }
 }
+
+struct EmptyPromptCacheObservationStore;
+
+impl PromptCacheObservationStore for EmptyPromptCacheObservationStore {}
 
 struct EmptyCompatibilityKvStore;
 

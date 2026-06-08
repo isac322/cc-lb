@@ -8,6 +8,7 @@ use std::{
 };
 
 use async_trait::async_trait;
+use cc_lb_core::{ClockHandle, TestClock};
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PluginRegistryStore, WasmBlob, WasmRegistryEntryInput,
 };
@@ -15,8 +16,9 @@ use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
     scenarios::{
         anthropic_compatibility_kv_store, organization_metadata_store, plugin_registry_store,
-        principal_store, storage_roundtrips, upstream_rate_limit_store,
-        upstream_subscription_metadata_store, upstream_subscription_quota_store,
+        principal_store, prompt_cache_observation_store, storage_roundtrips,
+        upstream_rate_limit_store, upstream_subscription_metadata_store,
+        upstream_subscription_quota_store,
     },
 };
 use cc_lb_storage_postgres::PostgresStorage;
@@ -73,7 +75,14 @@ impl ConformanceBackend for PostgresConformanceBackend {
     }
 
     async fn open(&self, fixture: &Self::Fixture) -> anyhow::Result<Self::Storage> {
-        Ok(PostgresStorage::new(fixture.pool.clone()))
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect_with(
+                PgConnectOptions::from_str(&fixture.url)?
+                    .options([("search_path", fixture.schema.as_str())]),
+            )
+            .await?;
+        Ok(PostgresStorage::new(pool))
     }
 
     async fn teardown(&self, fixture: Self::Fixture) -> anyhow::Result<()> {
@@ -241,6 +250,35 @@ fn organization_metadata_store_postgres() {
     );
 }
 
+macro_rules! prompt_cache_observation_postgres_test {
+    ($test_name:ident, $scenario:ident) => {
+        #[test]
+        #[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
+        fn $test_name() {
+            run_postgres_scenario(stringify!($scenario), |backend| async move {
+                prompt_cache_observation_store::$scenario(backend, prompt_cache_clock()).await
+            });
+        }
+    };
+}
+
+prompt_cache_observation_postgres_test!(
+    prompt_cache_observation_upsert_then_list_returns_active_only_postgres,
+    upsert_then_list_returns_active_only
+);
+prompt_cache_observation_postgres_test!(
+    prompt_cache_observation_asymmetric_ttl_snapshot_visibility_postgres,
+    asymmetric_ttl_snapshot_visibility
+);
+prompt_cache_observation_postgres_test!(
+    prompt_cache_observation_purge_expired_before_removes_only_expired_postgres,
+    purge_expired_before_removes_only_expired
+);
+prompt_cache_observation_postgres_test!(
+    prompt_cache_observation_hydrate_after_restart_filters_expired_postgres,
+    hydrate_after_restart_filters_expired
+);
+
 fn run_postgres_scenario<F, Fut>(name: &str, scenario: F)
 where
     F: FnOnce(Arc<PostgresConformanceBackend>) -> Fut,
@@ -255,6 +293,10 @@ where
         .expect("tokio runtime")
         .block_on(scenario(Arc::new(PostgresConformanceBackend { url })))
         .unwrap_or_else(|error| panic!("{name} postgres: {error}"));
+}
+
+fn prompt_cache_clock() -> ClockHandle {
+    Arc::new(TestClock::new_at_secs(1_700_000_000))
 }
 
 async fn concurrent_upload_returns_existed_once(url: String) -> anyhow::Result<()> {

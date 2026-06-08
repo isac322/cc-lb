@@ -354,6 +354,7 @@ crates/cc-lb-admin/web/playwright-report/
 
 # Test-spawned replica_id artifacts (Task 6 LoadReplicaId may run from any cwd in tests)
 **/data/replica_id
+graphify-out
 graphify-out/
 
 # Local mockup / agent-browser captures

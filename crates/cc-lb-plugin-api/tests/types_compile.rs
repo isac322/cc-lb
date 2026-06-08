@@ -33,6 +33,8 @@ fn remaining_public_types_compile() {
         path: "/v1/messages".to_owned(),
         query: None,
         body_bytes: Bytes::from_static(b"{}"),
+        cache_breakpoints: Vec::new(),
+        canonical_model_id: String::new(),
     };
     assert_eq!(ctx.method, Method::POST);
 
