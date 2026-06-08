@@ -82,7 +82,10 @@ fn request_event_decodes_pre_existing_audit_row_without_prefix_token_count() {
         }]
     });
     let decoded: RequestEvent = serde_json::from_value(legacy_audit_row).expect("decode");
-    assert_eq!(decoded.upstream, Some(RequestEventUpstream::AnthropicDirect));
+    assert_eq!(
+        decoded.upstream,
+        Some(RequestEventUpstream::AnthropicDirect)
+    );
     assert_eq!(decoded.cache_breakpoints.len(), 1);
     assert_eq!(decoded.cache_breakpoints[0].prefix_token_count, 0);
     assert_eq!(decoded.cache_breakpoints[0].prefix_hash, "legacyhash");

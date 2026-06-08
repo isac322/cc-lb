@@ -108,7 +108,11 @@ impl ExtismRouterPlugin {
                 reason: format!("plugin returned invalid upstream_id: {source}"),
             })?;
         let chosen_base_url = upstream_id
-            .and_then(|id| candidates.iter().find(|candidate| candidate.upstream_id == id))
+            .and_then(|id| {
+                candidates
+                    .iter()
+                    .find(|candidate| candidate.upstream_id == id)
+            })
             .and_then(|candidate| candidate.base_url.clone());
         let dialect: Arc<dyn UpstreamDialect> = match response.dialect {
             v2_common::DialectBinding::SelfReferenced => Arc::new(

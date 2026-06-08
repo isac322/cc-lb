@@ -99,9 +99,9 @@ mod plugin {
     #[cc_lb_pdk::handler(name = "shape", versions = [1])]
     pub(super) fn shape_handler(request: ShapeRequest) -> Result<ShapeResponse, Infallible> {
         let base_url = match (&request.upstream, &request.upstream_base_url) {
-            (UpstreamWire::AnthropicDirect, Some(host_base_url)) => host_base_url
-                .trim_end_matches('/')
-                .to_string(),
+            (UpstreamWire::AnthropicDirect, Some(host_base_url)) => {
+                host_base_url.trim_end_matches('/').to_string()
+            }
             (UpstreamWire::AnthropicDirect, None) => "https://api.anthropic.com".to_string(),
         };
         let query_part = request

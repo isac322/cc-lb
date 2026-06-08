@@ -3375,8 +3375,7 @@ mod tests {
     #[test]
     fn build_candidates_cache_score_from_production_parsed_breakpoints() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000204").unwrap();
-        let lorem: String =
-            "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(300);
+        let lorem: String = "Lorem ipsum dolor sit amet, consectetur adipiscing elit. ".repeat(300);
         let body_string = format!(
             r#"{{"model":"{TEST_MODEL}","system":[{{"type":"text","text":"{lorem}","cache_control":{{"type":"ephemeral","ttl":"1h"}}}}],"messages":[{{"role":"user","content":"hi"}}],"max_tokens":16}}"#,
         );
@@ -3411,7 +3410,10 @@ mod tests {
         );
 
         let score = candidates[0].cache_score.as_ref().expect("cache score");
-        assert_eq!(u64::from(score.predicted_cache_read_tokens), prefix_token_count);
+        assert_eq!(
+            u64::from(score.predicted_cache_read_tokens),
+            prefix_token_count
+        );
         assert!(score.predicted_cache_read_tokens >= 1024);
         assert_eq!(score.matched_breakpoint_index, Some(0));
         assert_eq!(score.confidence, 1.0);
