@@ -84,6 +84,10 @@ impl PromptCacheObservationCacheLike for NoopSubscriptionQuotaCache {
     ) -> bool {
         false
     }
+
+    fn clock_now_unix_secs(&self) -> u64 {
+        0
+    }
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Eq)]

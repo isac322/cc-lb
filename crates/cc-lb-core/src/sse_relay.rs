@@ -24,7 +24,7 @@ use tokio::time::{Instant as TokioInstant, Sleep, sleep};
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
 use crate::lifecycle::{
     DecodedPromptCacheObservation, PromptCacheObservationContext, PromptCacheUsage,
-    decode_prompt_cache_observations, enqueue_prompt_cache_observations, unix_now_secs,
+    decode_prompt_cache_observations, enqueue_prompt_cache_observations,
     upsert_prompt_cache_observations,
 };
 use crate::sse_error_frame::{make_error_frame, make_error_frame_from_json};
@@ -349,7 +349,7 @@ impl RelayRuntime {
                             && !*prompt_cache_observations_buffered
                             && let Some(context) = self.prompt_cache_observation_context.as_ref()
                         {
-                            let now_unix_secs = unix_now_secs();
+                            let now_unix_secs = context.cache.clock_now_unix_secs();
                             *prompt_cache_observations = decode_prompt_cache_observations(
                                 context,
                                 PromptCacheUsage {
@@ -364,7 +364,7 @@ impl RelayRuntime {
                             && *prompt_cache_observations_buffered
                             && let Some(context) = self.prompt_cache_observation_context.as_ref()
                         {
-                            let now_unix_secs = unix_now_secs();
+                            let now_unix_secs = context.cache.clock_now_unix_secs();
                             upsert_prompt_cache_observations(
                                 context,
                                 prompt_cache_observations,
@@ -768,7 +768,7 @@ mod tests {
             upstream_id,
             TEST_MODEL,
             &[("write".to_owned(), TtlClass::Ephemeral5m)],
-            unix_now_secs(),
+            cache.clock_now_unix_secs(),
         );
         assert!(snapshot.is_empty());
     }
@@ -900,6 +900,10 @@ mod tests {
             _now_unix_secs: u64,
         ) -> bool {
             true
+        }
+
+        fn clock_now_unix_secs(&self) -> u64 {
+            0
         }
     }
 

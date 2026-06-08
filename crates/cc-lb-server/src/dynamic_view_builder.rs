@@ -34,7 +34,12 @@ use parking_lot::RwLock;
 use thiserror::Error;
 use uuid::Uuid;
 
+use cc_lb_core::lifecycle::PromptCacheObservationSinkLike;
+
 use crate::prompt_cache_observation_cache::PromptCacheObservationCache;
+use crate::prompt_cache_observation_sink::{
+    DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY, PromptCacheObservationSink,
+};
 use crate::reconcile::collect_revision_hash;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
@@ -173,7 +178,9 @@ pub async fn build_dynamic_view(
         .hydrate_from_store(stores, &all_upstream_ids)
         .await?;
     let prompt_cache_shadow = &config.prompt_cache_shadow;
-    let prompt_cache_observation_cache = if prompt_cache_shadow.enabled {
+    let (prompt_cache_observation_cache, prompt_cache_observation_sink) = if prompt_cache_shadow
+        .enabled
+    {
         let cache = new_prompt_cache_observation_cache(prompt_cache_shadow);
         let cache = match tokio::time::timeout(
             Duration::from_secs(5),
@@ -208,9 +215,23 @@ pub async fn build_dynamic_view(
         let store_clone = stores.prompt_cache_observations.clone();
         let interval_secs = prompt_cache_shadow.sweeper_interval_secs;
         let _sweeper = cache_clone.spawn_sweeper(store_clone, interval_secs);
-        Some(cache)
+
+        // Spawn the async observation sink writer. The JoinHandle is intentionally
+        // dropped: when the sender is dropped on the next rebind the mpsc channel
+        // closes and the writer task exits naturally.
+        //
+        // TODO: thread the actual storage backend kind through `Stores` so the
+        // `store_kind` metric label reflects redb vs postgres deployments. The
+        // sole production backend wired today is redb.
+        let (sink, _writer) = PromptCacheObservationSink::new(
+            stores.prompt_cache_observations.clone(),
+            DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY,
+            "redb",
+        );
+        let sink_arc: Arc<dyn PromptCacheObservationSinkLike> = Arc::new(sink);
+        (Some(cache), Some(sink_arc))
     } else {
-        None
+        (None, None)
     };
     let upstream_rate_limit_records = stores
         .upstream_rate_limits
@@ -260,6 +281,9 @@ pub async fn build_dynamic_view(
         .upstream_records(upstreams.clone());
     if let Some(cache) = prompt_cache_observation_cache {
         builder = builder.prompt_cache_observation_cache(cache);
+    }
+    if let Some(sink) = prompt_cache_observation_sink {
+        builder = builder.prompt_cache_observation_sink(sink);
     }
     Ok(builder.build())
 }

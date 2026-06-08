@@ -112,6 +112,8 @@ pub trait PromptCacheObservationCacheLike: Send + Sync {
     fn grace_margin_secs(&self) -> u64 {
         0
     }
+
+    fn clock_now_unix_secs(&self) -> u64;
 }
 
 pub trait PromptCacheObservationSinkLike: Send + Sync {
@@ -173,7 +175,6 @@ pub fn build_candidates(
     let mut candidates: Vec<UpstreamCandidate> = {
         let rate_limit_cache = view.upstream_rate_limit_cache.read();
         let now_unix_millis = unix_now_ms();
-        let now_unix_secs = unix_now_secs();
         let prompt_cache = view.prompt_cache_observation_cache_opt();
         let request_breakpoint_hashes_with_ttl = request_breakpoints
             .iter()
@@ -203,7 +204,7 @@ pub fn build_candidates(
                         upstream.id,
                         canonical_model,
                         &request_breakpoint_hashes_with_ttl,
-                        now_unix_secs,
+                        cache.clock_now_unix_secs(),
                     );
                     build_cache_score(request_breakpoints, &warm_entries)
                 });
@@ -332,7 +333,6 @@ pub(crate) fn prompt_cache_observation_context(
     canonical_model_id: &str,
     predicted_cache_read_tokens: u32,
     cache_breakpoints: &[CacheBreakpoint],
-    now_unix_secs: u64,
 ) -> Option<PromptCacheObservationContext> {
     if canonical_model_id.is_empty() || cache_breakpoints.is_empty() {
         return None;
@@ -346,7 +346,7 @@ pub(crate) fn prompt_cache_observation_context(
         upstream_id,
         canonical_model_id,
         &request_breakpoint_hashes,
-        now_unix_secs,
+        cache.clock_now_unix_secs(),
     );
     Some(PromptCacheObservationContext {
         upstream_id,
@@ -529,7 +529,6 @@ fn record_prompt_cache_observations_for_response_status(
     status: StatusCode,
     context: Option<&PromptCacheObservationContext>,
     usage: PromptCacheUsage,
-    now_unix_secs: u64,
 ) -> Vec<DecodedPromptCacheObservation> {
     if status != StatusCode::OK {
         if status.is_client_error() && context.is_some() {
@@ -542,7 +541,7 @@ fn record_prompt_cache_observations_for_response_status(
     let Some(context) = context else {
         return Vec::new();
     };
-    record_prompt_cache_observations(context, usage, now_unix_secs)
+    record_prompt_cache_observations(context, usage, context.cache.clock_now_unix_secs())
 }
 
 fn ttl_to_storage(t: cc_lb_plugin_api::types::TtlClass) -> StorageTtlClass {
@@ -1143,7 +1142,6 @@ impl Lifecycle {
             &ctx.canonical_model_id,
             predicted_cache_read_tokens,
             &ctx.cache_breakpoints,
-            unix_now_secs(),
         );
 
         observe_many(
@@ -1507,7 +1505,6 @@ impl Lifecycle {
                 status,
                 prompt_cache_observation_context.as_ref(),
                 PromptCacheUsage::from(&usage),
-                unix_now_secs(),
             );
         }
         if usage.present {
@@ -1895,7 +1892,7 @@ impl Lifecycle {
                                         && let Some(context) =
                                             prompt_cache_observation_context.as_ref()
                                     {
-                                        let now_unix_secs = unix_now_secs();
+                                        let now_unix_secs = context.cache.clock_now_unix_secs();
                                         prompt_cache_observations =
                                             decode_prompt_cache_observations(
                                                 context,
@@ -1923,7 +1920,7 @@ impl Lifecycle {
                                         enqueue_prompt_cache_observations(
                                             context,
                                             &prompt_cache_observations,
-                                            unix_now_secs(),
+                                            context.cache.clock_now_unix_secs(),
                                         );
                                         prompt_cache_enqueued = true;
                                     }
@@ -3481,10 +3478,13 @@ mod tests {
     fn response_decoder_records_observations() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000221").unwrap();
         let now = 1_800_000_000;
-        let cache = Arc::new(RecordingPromptCacheObservationCache::new(vec![
-            warm_entry("short", TtlClass::Ephemeral5m, now + 120, 1),
-            warm_entry("hit", TtlClass::Ephemeral1h, now + 3_000, 2),
-        ]));
+        let cache = Arc::new(
+            RecordingPromptCacheObservationCache::new(vec![
+                warm_entry("short", TtlClass::Ephemeral5m, now + 120, 1),
+                warm_entry("hit", TtlClass::Ephemeral1h, now + 3_000, 2),
+            ])
+            .with_clock_now(now),
+        );
         let sink = Arc::new(RecordingPromptCacheObservationSink::default());
         let context = PromptCacheObservationContext {
             upstream_id,
@@ -3510,7 +3510,6 @@ mod tests {
                 cache_creation_input_tokens: 800,
                 cache_read_input_tokens: 2_400,
             },
-            now,
         );
 
         assert_eq!(decoded.len(), 2);
@@ -3569,7 +3568,6 @@ mod tests {
                 cache_creation_input_tokens: 0,
                 cache_read_input_tokens: 1_200,
             },
-            now,
         );
 
         assert!(decoded.is_empty());
@@ -3580,7 +3578,6 @@ mod tests {
     #[test]
     fn below_threshold_prefix_skips_observation() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000223").unwrap();
-        let now = 1_800_000_000;
         let cache = Arc::new(RecordingPromptCacheObservationCache::new(Vec::new()));
         let sink = Arc::new(RecordingPromptCacheObservationSink::default());
         let context = PromptCacheObservationContext {
@@ -3600,7 +3597,6 @@ mod tests {
                 cache_creation_input_tokens: 1_023,
                 cache_read_input_tokens: 0,
             },
-            now,
         );
 
         assert!(decoded.is_empty());
@@ -3931,6 +3927,7 @@ mod tests {
         warm_entries: Vec<WarmCacheEntry>,
         upserts: Mutex<Vec<RecordedPromptCacheUpsert>>,
         refreshes: Mutex<Vec<String>>,
+        clock_now: u64,
     }
 
     impl RecordingPromptCacheObservationCache {
@@ -3939,7 +3936,13 @@ mod tests {
                 warm_entries,
                 upserts: Mutex::new(Vec::new()),
                 refreshes: Mutex::new(Vec::new()),
+                clock_now: 0,
             }
+        }
+
+        fn with_clock_now(mut self, clock_now: u64) -> Self {
+            self.clock_now = clock_now;
+            self
         }
 
         fn upserts(&self) -> Vec<RecordedPromptCacheUpsert> {
@@ -4001,6 +4004,10 @@ mod tests {
                 .expect("refreshes lock")
                 .push(prefix_hash.to_owned());
             true
+        }
+
+        fn clock_now_unix_secs(&self) -> u64 {
+            self.clock_now
         }
     }
 
@@ -4097,6 +4104,10 @@ mod tests {
             _now_unix_secs: u64,
         ) -> bool {
             false
+        }
+
+        fn clock_now_unix_secs(&self) -> u64 {
+            0
         }
     }
 

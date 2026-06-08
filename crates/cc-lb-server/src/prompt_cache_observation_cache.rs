@@ -289,6 +289,10 @@ impl PromptCacheObservationCacheLike for PromptCacheObservationCache {
     fn grace_margin_secs(&self) -> u64 {
         Self::grace_margin_secs(self)
     }
+
+    fn clock_now_unix_secs(&self) -> u64 {
+        self.clock.now_unix_secs()
+    }
 }
 
 fn ttl_matches_request(request_ttl: TtlClass, entry_ttl: TtlClass) -> bool {
