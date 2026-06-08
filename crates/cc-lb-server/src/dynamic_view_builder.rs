@@ -401,7 +401,7 @@ async fn build_principal_chains(
             let manifest = PluginManifest {
                 name: registry_entry.name,
                 artifact: wasm_path.to_string_lossy().into_owned(),
-                wire_version: None,
+                wire_version: entry.wire_version,
                 config: entry.config,
                 metadata: bridged_metadata(
                     stores.plugin_registry_repo.as_ref(),
@@ -447,7 +447,7 @@ async fn build_principal_chains(
             let manifest = PluginManifest {
                 name: registry_entry.name,
                 artifact: wasm_path.to_string_lossy().into_owned(),
-                wire_version: None,
+                wire_version: entry.wire_version,
                 config: entry.config,
                 metadata: bridged_metadata(
                     stores.plugin_registry_repo.as_ref(),
@@ -494,7 +494,7 @@ async fn build_principal_chains(
             let manifest = PluginManifest {
                 name: registry_entry.name,
                 artifact: wasm_path.to_string_lossy().into_owned(),
-                wire_version: None,
+                wire_version: entry.wire_version,
                 config: entry.config,
                 metadata: bridged_metadata(
                     stores.plugin_registry_repo.as_ref(),

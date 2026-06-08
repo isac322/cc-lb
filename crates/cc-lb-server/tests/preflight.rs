@@ -267,6 +267,7 @@ async fn seed_chain(
             sse_per_event: false,
             batched_events_per_flush: 1,
             batched_flush_ms: 100,
+            wire_version: None,
         })
         .await
         .unwrap();
