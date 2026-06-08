@@ -840,13 +840,6 @@ fn upstream_from_wire(upstream: UpstreamWire) -> Result<Upstream, WireError> {
 fn upstream_from_wire_v2(upstream: v2_common::UpstreamWire) -> Result<Upstream, WireError> {
     match upstream {
         v2_common::UpstreamWire::AnthropicDirect => Ok(Upstream::AnthropicDirect),
-        v2_common::UpstreamWire::CustomAnthropicSpec { base_url } => {
-            let base_url = Url::parse(&base_url).map_err(|source| WireError::InvalidUrl {
-                url: base_url,
-                source,
-            })?;
-            Ok(Upstream::CustomAnthropicSpec { base_url })
-        }
     }
 }
 

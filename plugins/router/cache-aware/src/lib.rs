@@ -100,7 +100,6 @@ mod plugin {
     pub(super) fn shape_handler(request: ShapeRequest) -> Result<ShapeResponse, Infallible> {
         let base_url = match &request.upstream {
             UpstreamWire::AnthropicDirect => "https://api.anthropic.com".to_string(),
-            UpstreamWire::CustomAnthropicSpec { base_url } => base_url.clone(),
         };
         let query_part = request
             .request
