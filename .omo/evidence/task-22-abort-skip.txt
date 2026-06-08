@@ -1,3 +1,0 @@
-Task 22 SSE abort evidence:
-- Added streaming message_stop completion guard; abort before message_stop skips sink enqueue.
-- `cargo test -p cc-lb-core sse_relay::tests::abort_skips_observation -- --nocapture` passed.

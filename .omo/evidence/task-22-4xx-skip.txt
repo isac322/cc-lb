@@ -1,3 +1,0 @@
-Task 22 4xx skip evidence:
-- Added 4xx/5xx response status guard before prompt-cache upsert/enqueue.
-- `cargo test -p cc-lb-core lifecycle::tests::error_response_skips_observation -- --nocapture` is part of verification.
