@@ -863,6 +863,7 @@ mod tests {
     struct FakePromptCacheObservationStore {
         records: Arc<Vec<PromptCacheObservationRecord>>,
         list_delay: Option<Duration>,
+        upserts: Arc<tokio::sync::Mutex<Vec<PromptCacheObservationRecord>>>,
     }
 
     impl FakePromptCacheObservationStore {
@@ -870,6 +871,7 @@ mod tests {
             Self {
                 records: Arc::new(records),
                 list_delay: None,
+                upserts: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             }
         }
 
@@ -877,7 +879,16 @@ mod tests {
             Self {
                 records: Arc::new(Vec::new()),
                 list_delay: Some(delay),
+                upserts: Arc::new(tokio::sync::Mutex::new(Vec::new())),
             }
+        }
+
+        async fn list_count(&self) -> usize {
+            self.upserts.lock().await.len()
+        }
+
+        async fn list_all(&self) -> Vec<PromptCacheObservationRecord> {
+            self.upserts.lock().await.clone()
         }
     }
 
@@ -900,6 +911,14 @@ mod tests {
                 })
                 .cloned()
                 .collect())
+        }
+
+        async fn upsert_observation(
+            &self,
+            record: &PromptCacheObservationRecord,
+        ) -> StorageResult<()> {
+            self.upserts.lock().await.push(record.clone());
+            Ok(())
         }
     }
 
@@ -1028,6 +1047,52 @@ mod tests {
             prefix_hashes,
             BTreeSet::from_iter(["hash-a", "hash-b", "hash-c"].map(str::to_owned))
         );
+
+        assert!(
+            dynamic_view.prompt_cache_observation_sink_opt().is_some(),
+            "prompt cache observation sink must be wired into DynamicView when prompt_cache_shadow is enabled"
+        );
+    }
+
+    #[tokio::test]
+    async fn observation_sink_routes_records_to_store() {
+        let (dir, storage) = storage_fixture(22);
+        let upstream = create_upstream(&storage, "sink-wiring-upstream").await;
+        let prompt_store = Arc::new(FakePromptCacheObservationStore::new(Vec::new()));
+        let stores = stores(storage, prompt_store.clone());
+        let runtime = ExtismRuntime::new();
+
+        let dynamic_view = build_view(&stores, &runtime, dir.path()).await;
+
+        let sink = dynamic_view
+            .prompt_cache_observation_sink_opt()
+            .expect("sink wired when prompt_cache_shadow enabled")
+            .clone();
+        let record = PromptCacheObservationRecord {
+            upstream_id: upstream.id,
+            canonical_model_id: MODEL.to_owned(),
+            prefix_hash: "sink-wiring-prefix".to_owned(),
+            ttl_class: cc_lb_storage_api::TtlClass::Ephemeral5m,
+            expires_at_unix_secs: 4_100_000_300,
+            last_observed_at_unix_secs: 1_700_000_000,
+            hash_schema_version: HASH_SCHEMA_VERSION,
+        };
+        sink.enqueue(record.clone())
+            .expect("enqueue succeeds while writer is alive");
+        for _ in 0..50 {
+            if prompt_store.list_count().await >= 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let stored = prompt_store.list_all().await;
+        assert_eq!(
+            stored.len(),
+            1,
+            "observation enqueued through DynamicView sink must reach the production store"
+        );
+        assert_eq!(stored[0].prefix_hash, "sink-wiring-prefix");
+        assert_eq!(stored[0].upstream_id, upstream.id);
     }
 
     #[tokio::test(flavor = "current_thread", start_paused = true)]
@@ -1072,6 +1137,10 @@ mod tests {
         let dynamic_view = build_view_with_config(&stores, &runtime, dir.path(), config).await;
 
         assert!(dynamic_view.prompt_cache_observation_cache_opt().is_none());
+        assert!(
+            dynamic_view.prompt_cache_observation_sink_opt().is_none(),
+            "prompt cache observation sink must NOT be wired when prompt_cache_shadow is disabled"
+        );
     }
 
     #[tokio::test]

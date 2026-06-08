@@ -3417,6 +3417,71 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "release-only perf assertion; run with --release --ignored"]
+    fn build_candidates_cache_routing_latency_under_baseline_plus_2ms_p99() {
+        const ITERATIONS: usize = 10_000;
+        const ROUTING_BUDGET_P99_NANOS: u128 = 5_000_000;
+        let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000299").unwrap();
+        let cache = TestPromptCacheObservationCache::new(32, TEST_MODEL).with_entries(
+            upstream_id,
+            vec![
+                warm_entry("warm-prefix-a", TtlClass::Ephemeral1h, 4_100_003_600, 12),
+                warm_entry("warm-prefix-b", TtlClass::Ephemeral5m, 4_100_000_300, 11),
+            ],
+        );
+        let view_with_cache = cache_score_view(upstream_id, Arc::new(cache));
+        let view_without_cache = DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(TestSignerFactory))
+            .global_router(Arc::new(TestRouter))
+            .dispatcher(Arc::new(TestDispatcher))
+            .global_observability_hooks(Vec::new())
+            .error_normalizer(Arc::new(ErrorNormalizer::new()))
+            .principal_view(Arc::new(PrincipalView::from_db(
+                &[principal_record("principal")],
+                HashMap::new(),
+            )))
+            .upstream_records(vec![upstream_record(upstream_id)])
+            .build();
+        let breakpoints = vec![
+            cache_breakpoint(0, "warm-prefix-a", 2_400, TtlClass::Ephemeral1h),
+            cache_breakpoint(1, "warm-prefix-b", 1_200, TtlClass::Ephemeral5m),
+            cache_breakpoint(2, "cold-prefix", 800, TtlClass::Ephemeral5m),
+        ];
+
+        let measure = |view: &DynamicView| {
+            let mut samples = Vec::with_capacity(ITERATIONS);
+            for _ in 0..ITERATIONS {
+                let start = std::time::Instant::now();
+                let _ = build_candidates(
+                    view,
+                    "principal",
+                    RequestKind::AnthropicMessages,
+                    TEST_MODEL,
+                    &breakpoints,
+                );
+                samples.push(start.elapsed().as_nanos());
+            }
+            samples.sort_unstable();
+            samples[(ITERATIONS * 99) / 100]
+        };
+
+        let p99_without_cache = measure(&view_without_cache);
+        let p99_with_cache = measure(&view_with_cache);
+        let delta = p99_with_cache.saturating_sub(p99_without_cache);
+        eprintln!(
+            "build_candidates p99: without_cache={p99_without_cache}ns with_cache={p99_with_cache}ns delta={delta}ns budget={ROUTING_BUDGET_P99_NANOS}ns"
+        );
+        assert!(
+            p99_with_cache < ROUTING_BUDGET_P99_NANOS,
+            "build_candidates with prompt cache p99 {p99_with_cache}ns exceeded {ROUTING_BUDGET_P99_NANOS}ns budget (baseline p99={p99_without_cache}ns)"
+        );
+        assert!(
+            delta < 2_000_000,
+            "cache lookup added {delta}ns to p99, exceeding the 2_000_000ns budget (with={p99_with_cache}ns without={p99_without_cache}ns)"
+        );
+    }
+
+    #[test]
     fn build_candidates_no_warm_returns_none() {
         let upstream_id = Uuid::parse_str("00000000-0000-0000-0000-000000000202").unwrap();
         let view = cache_score_view(
