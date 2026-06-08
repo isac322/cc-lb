@@ -43,7 +43,7 @@
     "@types/bun": "1.3.14",
     "@types/react": "19.2.15",
     "@types/react-dom": "19.2.3",
-    "@typescript/native-preview": "7.0.0-dev.20260601.1",
+    "@typescript/native-preview": "7.0.0-dev.20260607.1",
     "@vitejs/plugin-react": "6.0.2",
     "jsdom": "^29.1.1",
     "tailwindcss": "4.3.0",
