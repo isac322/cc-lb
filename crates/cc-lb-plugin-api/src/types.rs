@@ -271,6 +271,11 @@ pub struct UpstreamCandidate {
     /// Predicted cache utility for this candidate, if available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_score: Option<CacheScore>,
+    /// Resolved upstream base URL. Populated by the host so that v2 plugins
+    /// that self-reference for shape can construct the dispatch URL against
+    /// the configured upstream instead of hardcoding api.anthropic.com.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_url: Option<String>,
 }
 
 /// Credential strategy expected by a selected upstream.
@@ -825,6 +830,7 @@ mod tests {
             subscription_quotas: vec![],
             observed_at_unix_secs: 1700000000,
             cache_score: None,
+            base_url: None,
         };
         let json = serde_json::to_string(&candidate_no_cache).unwrap();
         let decoded: UpstreamCandidate = serde_json::from_str(&json).unwrap();
@@ -850,6 +856,7 @@ mod tests {
             subscription_quotas: vec![],
             observed_at_unix_secs: 1700000000,
             cache_score: Some(cache_score),
+            base_url: None,
         };
         let json = serde_json::to_string(&candidate_with_cache).unwrap();
         let decoded: UpstreamCandidate = serde_json::from_str(&json).unwrap();

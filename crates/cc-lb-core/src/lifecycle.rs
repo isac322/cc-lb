@@ -220,6 +220,7 @@ pub fn build_candidates(
                     ),
                     observed_at_unix_secs,
                     cache_score,
+                    base_url: upstream.base_url.as_ref().map(|url| url.to_string()),
                 }
             })
             .collect()

@@ -84,6 +84,7 @@ pub fn candidate_wire() -> UpstreamCandidate {
         subscription_quotas: Vec::new(),
         observed_at_unix_secs: 1_800_000_000,
         cache_score: None,
+        base_url: None,
     }
 }
 

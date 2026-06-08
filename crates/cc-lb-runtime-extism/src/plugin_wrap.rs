@@ -30,6 +30,7 @@ use cc_lb_plugin_wire::v1::shape::{ShapeFn, ShapeRequest};
 use cc_lb_plugin_wire::v1::sign::{SignFn, SignRequest};
 use cc_lb_plugin_wire::v2::common as v2_common;
 use cc_lb_plugin_wire::v2::route::{RouteFn as RouteFnV2, RouteRequest as RouteRequestV2};
+use cc_lb_plugin_wire::v2::shape::{ShapeFn as ShapeFnV2, ShapeRequest as ShapeRequestV2};
 use cc_lb_plugin_wire::wire_function::{FallbackPolicy, WireFunction};
 use http::header::{HeaderName, HeaderValue};
 use http::{HeaderMap, Method, StatusCode};
@@ -98,11 +99,6 @@ impl ExtismRouterPlugin {
             }
             DispatchOutcome::Fallback(policy) => return Err(route_unexpected_fallback(policy)),
         };
-        let dialect: Arc<dyn UpstreamDialect> = match response.dialect {
-            v2_common::DialectBinding::SelfReferenced => {
-                Arc::new(ExtismDialectPlugin::new(self.slot.clone()))
-            }
-        };
         let upstream = upstream_from_wire_v2(response.upstream).map_err(route_runtime_message)?;
         let upstream_id = response
             .upstream_id
@@ -111,6 +107,14 @@ impl ExtismRouterPlugin {
             .map_err(|source| RouteError::Runtime {
                 reason: format!("plugin returned invalid upstream_id: {source}"),
             })?;
+        let chosen_base_url = upstream_id
+            .and_then(|id| candidates.iter().find(|candidate| candidate.upstream_id == id))
+            .and_then(|candidate| candidate.base_url.clone());
+        let dialect: Arc<dyn UpstreamDialect> = match response.dialect {
+            v2_common::DialectBinding::SelfReferenced => Arc::new(
+                ExtismDialectPlugin::with_base_url(self.slot.clone(), chosen_base_url),
+            ),
+        };
         Ok(RouteDecision {
             upstream_id,
             upstream,
@@ -154,11 +158,19 @@ impl RouterPlugin for ExtismRouterPlugin {
 #[derive(Clone)]
 pub(crate) struct ExtismDialectPlugin {
     slot: Arc<PluginSlot>,
+    base_url: Option<String>,
 }
 
 impl ExtismDialectPlugin {
     pub(crate) fn new(slot: Arc<PluginSlot>) -> Self {
-        Self { slot }
+        Self {
+            slot,
+            base_url: None,
+        }
+    }
+
+    pub(crate) fn with_base_url(slot: Arc<PluginSlot>, base_url: Option<String>) -> Self {
+        Self { slot, base_url }
     }
 }
 
@@ -170,19 +182,42 @@ impl UpstreamDialect for ExtismDialectPlugin {
         principal: &Principal,
         builder: &mut ShapedRequestBuilder,
     ) -> Result<ShapedRequest, DialectError> {
-        let request = ShapeRequest {
-            request: request_to_wire(ctx),
-            upstream: upstream_to_wire(upstream),
-            principal: principal_to_wire(principal),
-        };
-        let response = match self.slot.dispatch_wire_call_sync::<ShapeFn>(request) {
-            DispatchOutcome::Ok(response) => response,
-            DispatchOutcome::Fallback(FallbackPolicy::FailRequest) => {
-                return Err(DialectError::UnsupportedRequest {
-                    reason: "plugin shape failed".to_owned(),
-                });
+        let use_v2 = matches!(self.slot.negotiated_wire_version(), Ok(2));
+        let response = if use_v2 {
+            let request = ShapeRequestV2 {
+                request: request_to_wire_v2(ctx),
+                upstream: v2_upstream_to_wire(upstream),
+                principal: principal_to_wire_v2(principal),
+                upstream_base_url: self.base_url.clone(),
+            };
+            match self.slot.dispatch_wire_call_sync::<ShapeFnV2>(request) {
+                DispatchOutcome::Ok(response) => v2_shape_response_to_v1(response),
+                DispatchOutcome::Fallback(FallbackPolicy::FailRequest) => {
+                    return Err(DialectError::UnsupportedRequest {
+                        reason: "plugin shape failed".to_owned(),
+                    });
+                }
+                DispatchOutcome::Fallback(policy) => {
+                    return Err(dialect_unexpected_fallback(policy));
+                }
             }
-            DispatchOutcome::Fallback(policy) => return Err(dialect_unexpected_fallback(policy)),
+        } else {
+            let request = ShapeRequest {
+                request: request_to_wire(ctx),
+                upstream: upstream_to_wire(upstream),
+                principal: principal_to_wire(principal),
+            };
+            match self.slot.dispatch_wire_call_sync::<ShapeFn>(request) {
+                DispatchOutcome::Ok(response) => response,
+                DispatchOutcome::Fallback(FallbackPolicy::FailRequest) => {
+                    return Err(DialectError::UnsupportedRequest {
+                        reason: "plugin shape failed".to_owned(),
+                    });
+                }
+                DispatchOutcome::Fallback(policy) => {
+                    return Err(dialect_unexpected_fallback(policy));
+                }
+            }
         };
         let url =
             Url::parse(&response.url).map_err(|source| DialectError::InvalidUrl { source })?;
@@ -892,6 +927,41 @@ fn headers_to_wire_v2(headers: &HeaderMap) -> Vec<v2_common::HeaderWire> {
         .collect()
 }
 
+fn request_to_wire_v2(ctx: &RequestContext) -> v2_common::RequestWire {
+    v2_common::RequestWire {
+        request_id: ctx.request_id.clone(),
+        headers: request_headers_to_wire_v2(ctx),
+        method: ctx.method.as_str().to_owned(),
+        path: ctx.path.clone(),
+        query: ctx.query.clone(),
+        body_base64: BASE64.encode(&ctx.body_bytes),
+    }
+}
+
+fn v2_upstream_to_wire(upstream: &Upstream) -> v2_common::UpstreamWire {
+    match upstream {
+        Upstream::AnthropicDirect => v2_common::UpstreamWire::AnthropicDirect,
+    }
+}
+
+fn v2_shape_response_to_v1(
+    response: cc_lb_plugin_wire::v2::shape::ShapeResponse,
+) -> cc_lb_plugin_wire::v1::shape::ShapeResponse {
+    cc_lb_plugin_wire::v1::shape::ShapeResponse {
+        url: response.url,
+        method: response.method,
+        headers: response
+            .headers
+            .into_iter()
+            .map(|h| HeaderWire {
+                name: h.name,
+                value_base64: h.value_base64,
+            })
+            .collect(),
+        body_base64: response.body_base64,
+    }
+}
+
 fn headers_from_wire(headers: Vec<HeaderWire>) -> Result<HeaderMap, WireError> {
     let mut out = HeaderMap::new();
     for header in headers {
@@ -1009,6 +1079,7 @@ mod tests {
             subscription_quotas: Vec::new(),
             observed_at_unix_secs: 1_800_000_000,
             cache_score: None,
+            base_url: None,
         }
     }
 

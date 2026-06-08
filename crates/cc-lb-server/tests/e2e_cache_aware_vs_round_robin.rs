@@ -209,6 +209,7 @@ async fn run_phase(
                     subscription_quotas: Vec::new(),
                     observed_at_unix_secs: now,
                     cache_score: build_cache_score(&request_breakpoints, &warm),
+                    base_url: None,
                 }
             })
             .collect();

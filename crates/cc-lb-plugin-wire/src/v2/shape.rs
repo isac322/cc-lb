@@ -14,6 +14,8 @@ pub struct ShapeRequest {
     pub request: RequestWire,
     pub upstream: UpstreamWire,
     pub principal: Principal,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_base_url: Option<String>,
 }
 
 impl ShapeRequest {
@@ -22,6 +24,7 @@ impl ShapeRequest {
             request: RequestWire::dry_run_sample(),
             upstream: UpstreamWire::dry_run_sample(),
             principal: Principal::dry_run_sample(),
+            upstream_base_url: None,
         }
     }
 }
