@@ -566,6 +566,7 @@ fn validate_upstream(upstream: &UpstreamRecord) -> Result<DbRoute, String> {
         _ => {}
     }
     Ok(DbRoute {
+        id: upstream.id,
         name: upstream.name.clone(),
         upstream: upstream_target,
         dialect,
@@ -574,6 +575,7 @@ fn validate_upstream(upstream: &UpstreamRecord) -> Result<DbRoute, String> {
 
 #[derive(Clone)]
 struct DbRoute {
+    id: Uuid,
     name: String,
     upstream: Upstream,
     dialect: Arc<dyn UpstreamDialect>,
@@ -594,14 +596,28 @@ impl RouterPlugin for DbRouter {
         &self,
         _ctx: &RequestContext,
         _principal: &Principal,
-        _candidates: &[UpstreamCandidate],
+        candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
-        let route = self.routes.first().ok_or_else(|| RouteError::NoRoute {
-            reason: "no active upstreams in dynamic view".to_owned(),
+        let candidate = candidates.first().ok_or_else(|| RouteError::NoRoute {
+            reason: "no eligible upstream candidates for principal".to_owned(),
         })?;
-        tracing::debug!(upstream = route.name.as_str(), "dynamic route selected");
+        let route = self
+            .routes
+            .iter()
+            .find(|route| route.id == candidate.upstream_id)
+            .ok_or_else(|| RouteError::NoRoute {
+                reason: format!(
+                    "candidate upstream {} is not present in active routes",
+                    candidate.upstream_id
+                ),
+            })?;
+        tracing::debug!(
+            upstream = route.name.as_str(),
+            upstream_id = %route.id,
+            "dynamic route selected",
+        );
         Ok(RouteDecision {
-            upstream_id: None,
+            upstream_id: Some(route.id),
             upstream: route.upstream.clone(),
             dialect: route.dialect.clone(),
         })
