@@ -101,6 +101,43 @@ pub async fn request_event_append_order<B: ConformanceBackend>(backend: Arc<B>) 
     .await
 }
 
+pub async fn request_event_recent_descending<B: ConformanceBackend>(backend: Arc<B>) -> Result<()> {
+    with_fixture(backend, |storage| async move {
+        for index in 0..100 {
+            storage.append_request_event(&request_event(index)).await?;
+        }
+
+        let events = storage
+            .query_recent_request_events(0, u64::MAX, 5)
+            .await?;
+
+        assert_eq!(events.len(), 5);
+        assert_eq!(events[0].request_id, "req-0099");
+        assert_eq!(events[4].request_id, "req-0095");
+        assert!(events.windows(2).all(|w| w[0].ts >= w[1].ts));
+
+        let in_range = storage
+            .query_recent_request_events(REQUEST_EVENT_BASE_TS + 5, REQUEST_EVENT_BASE_TS + 6, 100)
+            .await?;
+        assert_eq!(in_range.len(), 20);
+        assert_eq!(in_range[0].request_id, "req-0069");
+        assert_eq!(in_range[19].request_id, "req-0050");
+
+        let empty_range = storage
+            .query_recent_request_events(REQUEST_EVENT_BASE_TS + 4, REQUEST_EVENT_BASE_TS + 3, 100)
+            .await?;
+        assert!(empty_range.is_empty());
+
+        let zero_limit = storage
+            .query_recent_request_events(0, u64::MAX, 0)
+            .await?;
+        assert!(zero_limit.is_empty());
+
+        Ok(())
+    })
+    .await
+}
+
 pub async fn request_event_time_range<B: ConformanceBackend>(backend: Arc<B>) -> Result<()> {
     with_fixture(backend, |storage| async move {
         for index in 0..50 {
@@ -137,7 +174,8 @@ pub async fn run_all<B: ConformanceBackend>(backend: Arc<B>) -> Result<()> {
     audit_principal_filter(Arc::clone(&backend)).await?;
     audit_prune(Arc::clone(&backend)).await?;
     request_event_append_order(Arc::clone(&backend)).await?;
-    request_event_time_range(backend).await?;
+    request_event_time_range(Arc::clone(&backend)).await?;
+    request_event_recent_descending(backend).await?;
 
     Ok(())
 }
