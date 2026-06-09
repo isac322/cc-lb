@@ -57,7 +57,7 @@ pub fn lifecycle_with_records(
     )
 }
 
-pub fn custom_record(id: Uuid, name: &str, base_url: &str) -> UpstreamRecord {
+pub fn api_key_record(id: Uuid, name: &str, base_url: &str) -> UpstreamRecord {
     upstream_record(
         id,
         name,

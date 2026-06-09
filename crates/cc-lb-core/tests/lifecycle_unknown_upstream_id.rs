@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use common::{collect_body, messages_request};
 use router_lifecycle_support::{
-    RouterLifecycleState, SelectingRouter, custom_record, lifecycle_with_records, plugin_upstream,
+    RouterLifecycleState, SelectingRouter, api_key_record, lifecycle_with_records, plugin_upstream,
 };
 
 #[tokio::test]
@@ -18,7 +18,7 @@ async fn unknown_router_upstream_id_is_rejected_before_signing_or_dispatch() {
     let unknown = Uuid::parse_str("00000000-0000-0000-0000-0000000000ff").unwrap();
     let state = RouterLifecycleState::default();
     let lifecycle = lifecycle_with_records(
-        vec![custom_record(known, "known", "http://known.local/")],
+        vec![api_key_record(known, "known", "http://known.local/")],
         Arc::new(SelectingRouter {
             selected_id: Some(unknown),
             state: state.clone(),
