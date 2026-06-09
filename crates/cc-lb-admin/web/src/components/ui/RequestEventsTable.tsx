@@ -208,8 +208,12 @@ function tokenBreakdown(e: RequestEvent): TokenBreakdown {
   return { input, output, cc_5m: legacy, cc_1h: 0, cr };
 }
 
+function totalInputTokens(b: TokenBreakdown): number {
+  return b.input + b.cc_5m + b.cc_1h + b.cr;
+}
+
 function hitRatioPercent(b: TokenBreakdown): number {
-  const denom = b.input + b.cr;
+  const denom = totalInputTokens(b);
   if (denom <= 0) return 0;
   return Math.round((b.cr / denom) * 100);
 }
@@ -217,7 +221,7 @@ function hitRatioPercent(b: TokenBreakdown): number {
 function TokenCell({ event }: { event: RequestEvent }) {
   const b = tokenBreakdown(event);
   const hit = hitRatioPercent(b);
-  const inp = splitNum(b.input);
+  const inp = splitNum(totalInputTokens(b));
   const out = splitNum(b.output);
 
   const popover = (
@@ -276,7 +280,7 @@ function TokenCell({ event }: { event: RequestEvent }) {
             <span className="shrink-0 w-[1ch] text-left text-text-faint">
               {out.unit}
             </span>
-            <span className="shrink-0 w-[3ch] text-right text-[10px] text-text-faint">
+            <span className="shrink-0 w-[3ch] text-right text-[10px] text-text-faint ml-3">
               hit
             </span>
             <span
