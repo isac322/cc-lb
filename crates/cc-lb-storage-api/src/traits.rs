@@ -57,6 +57,24 @@ pub trait RequestEventStore: Send + Sync {
         limit: usize,
     ) -> StorageResult<Vec<RequestEvent>>;
 
+    /// Return at most `limit` events within `[since, until]` ordered by
+    /// timestamp DESCENDING (newest first). The descending direction is the
+    /// load-bearing contract: callers serving "recent events" rely on this to
+    /// not lose newly-written events when `limit` is small. Backends MUST
+    /// scan in reverse instead of pulling oldest-first and re-sorting.
+    async fn query_recent_request_events(
+        &self,
+        since: u64,
+        until: u64,
+        limit: usize,
+    ) -> StorageResult<Vec<RequestEvent>> {
+        let _ = (since, until, limit);
+        Err(StorageError::Fatal {
+            message: "query_recent_request_events is not implemented for this storage backend"
+                .to_owned(),
+        })
+    }
+
     async fn prune_request_events_before(
         &self,
         cutoff_ms_x_1m: u64,

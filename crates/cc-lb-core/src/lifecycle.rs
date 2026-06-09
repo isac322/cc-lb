@@ -17,7 +17,7 @@ use cc_lb_plugin_api::{
     Upstream, UpstreamCandidate, UpstreamError, UpstreamKind as CandidateUpstreamKind,
     shape_request, sign_request,
 };
-use cc_lb_pricing::{global_catalog, virtual_cost_micros_full};
+use cc_lb_pricing::{PricingStatus, global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_api::{
     PromptCacheObservationRecord, Storage, SubscriptionQuotaObservationRecord,
     SubscriptionQuotaSampleKind, SubscriptionQuotaSource, TtlClass as StorageTtlClass,
@@ -1530,7 +1530,7 @@ impl Lifecycle {
                 inc_cache_miss(upstream, model);
             }
         }
-        let cost_micros = if usage.present {
+        let (cost_micros, cost_breakdown_opts) = if usage.present {
             let cost_model = active_limit
                 .as_ref()
                 .map(|active_limit| active_limit.request.model.as_str())
@@ -1539,20 +1539,20 @@ impl Lifecycle {
                 .as_ref()
                 .and_then(|active_limit| active_limit.upstream_kind)
                 .or(metric_context.pricing_upstream_kind);
-            let cost_micros = virtual_cost_micros_full(
+            let breakdown = virtual_cost_micros_full(
                 cost_model,
                 usage.input_tokens,
                 usage.output_tokens,
-                usage.cache_creation_input_tokens,
+                usage.cache_creation_input_tokens_5m,
+                usage.cache_creation_input_tokens_1h,
                 usage.cache_read_input_tokens,
                 pricing_upstream_kind,
-            )
-            .micros_usd
-            .unwrap_or(0);
+            );
+            let cost_micros = breakdown.total_micros.max(0) as u64;
             record_api_key_usage_metrics(metric_context, &usage, cost_micros);
-            cost_micros
+            (cost_micros, cost_breakdown_to_event_options(&breakdown))
         } else {
-            0
+            (0, CostBreakdownOptions::default())
         };
 
         if let (Some(storage), Some(active_limit)) =
@@ -1573,8 +1573,15 @@ impl Lifecycle {
                 input_tokens: Some(usage.input_tokens),
                 output_tokens: Some(usage.output_tokens),
                 cache_creation_input_tokens: Some(usage.cache_creation_input_tokens),
+                cache_creation_input_tokens_5m: Some(usage.cache_creation_input_tokens_5m),
+                cache_creation_input_tokens_1h: Some(usage.cache_creation_input_tokens_1h),
                 cache_read_input_tokens: Some(usage.cache_read_input_tokens),
-                cost_usd_micros: Some(cost_micros as i64),
+                cost_usd_micros: cost_breakdown_opts.total,
+                cost_input_micros: cost_breakdown_opts.input,
+                cost_output_micros: cost_breakdown_opts.output,
+                cost_cache_creation_5m_micros: cost_breakdown_opts.cache_creation_5m,
+                cost_cache_creation_1h_micros: cost_breakdown_opts.cache_creation_1h,
+                cost_cache_read_micros: cost_breakdown_opts.cache_read,
                 duration_ms: total_ms,
                 proxy_setup_ms: event_ctx.proxy_setup_ms,
                 shape_ms: event_ctx.stage_timings.shape_ms,
@@ -1996,25 +2003,25 @@ impl Lifecycle {
             );
             let total_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
             if let Some(mut active_limit) = active_limit {
-                let cost_micros = if usage.present {
+                let (cost_micros, cost_breakdown_opts) = if usage.present {
                     let cost_model = active_limit.request.model.as_str();
                     let pricing_upstream_kind = active_limit
                         .upstream_kind
                         .or(metric_context.pricing_upstream_kind);
-                    let cost = virtual_cost_micros_full(
+                    let breakdown = virtual_cost_micros_full(
                         cost_model,
                         usage.input_tokens,
                         usage.output_tokens,
-                        usage.cache_creation_input_tokens,
+                        usage.cache_creation_input_tokens_5m,
+                        usage.cache_creation_input_tokens_1h,
                         usage.cache_read_input_tokens,
                         pricing_upstream_kind,
-                    )
-                    .micros_usd
-                    .unwrap_or(0);
+                    );
+                    let cost = breakdown.total_micros.max(0) as u64;
                     record_api_key_usage_metrics(&metric_context, &usage, cost);
-                    cost
+                    (cost, cost_breakdown_to_event_options(&breakdown))
                 } else {
-                    0
+                    (0, CostBreakdownOptions::default())
                 };
                 if let Some(storage) = storage.as_ref() {
                     let now_ms = unix_now_ms();
@@ -2031,8 +2038,15 @@ impl Lifecycle {
                         input_tokens: Some(usage.input_tokens),
                         output_tokens: Some(usage.output_tokens),
                         cache_creation_input_tokens: Some(usage.cache_creation_input_tokens),
+                        cache_creation_input_tokens_5m: Some(usage.cache_creation_input_tokens_5m),
+                        cache_creation_input_tokens_1h: Some(usage.cache_creation_input_tokens_1h),
                         cache_read_input_tokens: Some(usage.cache_read_input_tokens),
-                        cost_usd_micros: Some(cost_micros as i64),
+                        cost_usd_micros: cost_breakdown_opts.total,
+                        cost_input_micros: cost_breakdown_opts.input,
+                        cost_output_micros: cost_breakdown_opts.output,
+                        cost_cache_creation_5m_micros: cost_breakdown_opts.cache_creation_5m,
+                        cost_cache_creation_1h_micros: cost_breakdown_opts.cache_creation_1h,
+                        cost_cache_read_micros: cost_breakdown_opts.cache_read,
                         duration_ms: total_duration_ms,
                         proxy_setup_ms: event_ctx.proxy_setup_ms,
                         shape_ms: event_ctx.stage_timings.shape_ms,
@@ -2799,7 +2813,35 @@ struct UsageCounts {
     input_tokens: u64,
     output_tokens: u64,
     cache_creation_input_tokens: u64,
+    cache_creation_input_tokens_5m: u64,
+    cache_creation_input_tokens_1h: u64,
     cache_read_input_tokens: u64,
+}
+
+#[derive(Clone, Copy, Default)]
+struct CostBreakdownOptions {
+    total: Option<i64>,
+    input: Option<i64>,
+    output: Option<i64>,
+    cache_creation_5m: Option<i64>,
+    cache_creation_1h: Option<i64>,
+    cache_read: Option<i64>,
+}
+
+fn cost_breakdown_to_event_options(
+    breakdown: &cc_lb_pricing::CostBreakdown,
+) -> CostBreakdownOptions {
+    match breakdown.pricing_status {
+        PricingStatus::Known => CostBreakdownOptions {
+            total: Some(breakdown.total_micros),
+            input: Some(breakdown.input_micros),
+            output: Some(breakdown.output_micros),
+            cache_creation_5m: Some(breakdown.cache_creation_5m_micros),
+            cache_creation_1h: Some(breakdown.cache_creation_1h_micros),
+            cache_read: Some(breakdown.cache_read_micros),
+        },
+        PricingStatus::Unknown => CostBreakdownOptions::default(),
+    }
 }
 
 #[derive(Clone)]
@@ -3008,11 +3050,14 @@ fn accumulate_sse_usage(raw: &[u8], usage: &mut UsageCounts) -> SseUsageUpdate {
         if let Some(output_tokens) = reported.get("output_tokens").and_then(Value::as_u64) {
             usage.output_tokens = output_tokens;
         }
-        if let Some(cache_creation) = reported
-            .get("cache_creation_input_tokens")
-            .and_then(Value::as_u64)
+        let (cc_total, cc_5m, cc_1h) = parse_cache_creation_split(reported);
+        if cc_total > 0
+            || reported.get("cache_creation").is_some()
+            || reported.get("cache_creation_input_tokens").is_some()
         {
-            usage.cache_creation_input_tokens = cache_creation;
+            usage.cache_creation_input_tokens = cc_total;
+            usage.cache_creation_input_tokens_5m = cc_5m;
+            usage.cache_creation_input_tokens_1h = cc_1h;
         }
         if let Some(cache_read) = reported
             .get("cache_read_input_tokens")
@@ -3024,6 +3069,25 @@ fn accumulate_sse_usage(raw: &[u8], usage: &mut UsageCounts) -> SseUsageUpdate {
     update
 }
 
+fn parse_cache_creation_split(usage: &Value) -> (u64, u64, u64) {
+    if let Some(cc) = usage.get("cache_creation").and_then(Value::as_object) {
+        let m5 = cc
+            .get("ephemeral_5m_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let m1 = cc
+            .get("ephemeral_1h_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        return (m5.saturating_add(m1), m5, m1);
+    }
+    let flat = usage
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    (flat, flat, 0)
+}
+
 fn usage_from_json_body(body: &Bytes) -> UsageCounts {
     let Ok(value) = serde_json::from_slice::<Value>(body) else {
         return UsageCounts::default();
@@ -3031,6 +3095,7 @@ fn usage_from_json_body(body: &Bytes) -> UsageCounts {
     let Some(usage) = value.get("usage") else {
         return UsageCounts::default();
     };
+    let (cc_total, cc_5m, cc_1h) = parse_cache_creation_split(usage);
     UsageCounts {
         present: true,
         input_tokens: usage
@@ -3041,10 +3106,9 @@ fn usage_from_json_body(body: &Bytes) -> UsageCounts {
             .get("output_tokens")
             .and_then(Value::as_u64)
             .unwrap_or(0),
-        cache_creation_input_tokens: usage
-            .get("cache_creation_input_tokens")
-            .and_then(Value::as_u64)
-            .unwrap_or(0),
+        cache_creation_input_tokens: cc_total,
+        cache_creation_input_tokens_5m: cc_5m,
+        cache_creation_input_tokens_1h: cc_1h,
         cache_read_input_tokens: usage
             .get("cache_read_input_tokens")
             .and_then(Value::as_u64)

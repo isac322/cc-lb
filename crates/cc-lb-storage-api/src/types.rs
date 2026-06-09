@@ -73,6 +73,10 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens_5m: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_input_tokens_1h: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_state: Option<RequestCacheState>,
@@ -94,6 +98,16 @@ pub struct RequestEvent {
     pub cache_prefix_hash: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_usd_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_input_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_output_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_creation_5m_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_creation_1h_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cost_cache_read_micros: Option<i64>,
     pub duration_ms: u64,
     /// handle entry → attempt() entry (auth + route + ctx).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -602,4 +616,62 @@ pub struct ApiKeyMutation {
 pub struct PriceCatalogSnapshotRecord {
     pub json_bytes: Vec<u8>,
     pub fetched_at_ms: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn request_event_serde_round_trips_new_optional_fields() {
+        let original = RequestEvent {
+            request_id: "req_round_trip".to_owned(),
+            cache_creation_input_tokens: Some(700),
+            cache_creation_input_tokens_5m: Some(400),
+            cache_creation_input_tokens_1h: Some(300),
+            cache_read_input_tokens: Some(200),
+            cost_usd_micros: Some(987_654),
+            cost_input_micros: Some(369_000),
+            cost_output_micros: Some(675_000),
+            cost_cache_creation_5m_micros: Some(150_000),
+            cost_cache_creation_1h_micros: Some(180_000),
+            cost_cache_read_micros: Some(60_000),
+            ..Default::default()
+        };
+
+        let bytes = serde_json::to_vec(&original).expect("serialize");
+        let parsed: RequestEvent = serde_json::from_slice(&bytes).expect("deserialize");
+
+        assert_eq!(parsed, original);
+    }
+
+    #[test]
+    fn request_event_serde_old_json_missing_new_fields_yields_none() {
+        let old_json = serde_json::json!({
+            "ts": 1_700_000_000u64,
+            "request_id": "req_old",
+            "principal_id": null,
+            "principal_kind": null,
+            "upstream": null,
+            "model": null,
+            "status": 200u16,
+            "input_tokens": null,
+            "output_tokens": null,
+            "cache_creation_input_tokens": 1600u64,
+            "cache_read_input_tokens": 0u64,
+            "cost_usd_micros": 12_345i64,
+            "duration_ms": 100u64,
+        });
+
+        let parsed: RequestEvent = serde_json::from_value(old_json).expect("deserialize old shape");
+
+        assert_eq!(parsed.cache_creation_input_tokens, Some(1600));
+        assert_eq!(parsed.cache_creation_input_tokens_5m, None);
+        assert_eq!(parsed.cache_creation_input_tokens_1h, None);
+        assert_eq!(parsed.cost_input_micros, None);
+        assert_eq!(parsed.cost_output_micros, None);
+        assert_eq!(parsed.cost_cache_creation_5m_micros, None);
+        assert_eq!(parsed.cost_cache_creation_1h_micros, None);
+        assert_eq!(parsed.cost_cache_read_micros, None);
+    }
 }

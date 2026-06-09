@@ -150,14 +150,8 @@ pub async fn build_recent_events_payload(
         (params.limit * RECENT_EVENTS_PULL_INFLATION_FACTOR).min(MAX_RECENT_EVENTS_PULL_LIMIT);
     let filters = params.stream_filters();
     let mut events = storage
-        .query_request_events(params.since_unix_secs, params.until_unix_secs, pull_limit)
+        .query_recent_request_events(params.since_unix_secs, params.until_unix_secs, pull_limit)
         .await?;
-    events.sort_by(|left, right| {
-        right
-            .ts
-            .cmp(&left.ts)
-            .then_with(|| left.request_id.cmp(&right.request_id))
-    });
     events.retain(|event| apply_filters_to_event(event, &filters));
     if let Some(upstream_id) = params.upstream_id {
         events.retain(|event| event.upstream_id == Some(upstream_id));

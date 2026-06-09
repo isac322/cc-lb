@@ -20,6 +20,7 @@ pub mod revisioning_meta;
 #[cfg(any())]
 pub mod runtime_change_notifier;
 pub mod storage_roundtrips;
+pub mod storage_roundtrips_cache_split;
 pub mod upstream_rate_limit_store;
 #[cfg(any())]
 pub mod upstream_store;

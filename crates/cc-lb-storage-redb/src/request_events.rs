@@ -49,6 +49,36 @@ impl Storage {
         Ok(events)
     }
 
+    pub fn query_recent_request_events(
+        &self,
+        since: u64,
+        until: u64,
+        limit: usize,
+    ) -> Result<Vec<RequestEvent>, StorageError> {
+        if limit == 0 || until < since {
+            return Ok(Vec::new());
+        }
+
+        let read_txn = self.db.begin_read()?;
+        let table = read_txn.open_table(REQUEST_EVENTS_V1)?;
+        let mut events = Vec::new();
+
+        for row in table.iter()?.rev() {
+            let (_, value) = row?;
+            let event: RequestEvent = serde_json::from_slice(value.value())?;
+            let event_ts_ms = event_ts_ms(&event);
+            if event_ts_ms < since || event_ts_ms > until {
+                continue;
+            }
+            events.push(event);
+            if events.len() >= limit {
+                break;
+            }
+        }
+
+        Ok(events)
+    }
+
     pub fn prune_request_events_before(
         &self,
         cutoff_ms_x_1m: u64,

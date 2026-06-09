@@ -115,6 +115,35 @@ impl RequestEventStore for PostgresStorage {
             .collect()
     }
 
+    async fn query_recent_request_events(
+        &self,
+        since: u64,
+        until: u64,
+        limit: usize,
+    ) -> StorageResult<Vec<RequestEvent>> {
+        if limit == 0 || until < since {
+            return Ok(Vec::new());
+        }
+        let Some(since) = unix_secs_to_datetime_lower(since, "request event since")? else {
+            return Ok(Vec::new());
+        };
+        let until = unix_secs_to_datetime_upper(until, "request event until")?;
+
+        let rows = sqlx::query_scalar::<_, Vec<u8>>(
+            "SELECT payload FROM request_events_v1              WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2)              ORDER BY seq DESC LIMIT $3",
+        )
+        .bind(since)
+        .bind(until)
+        .bind(u64_to_i64(limit as u64, "request event limit")?)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+
+        rows.into_iter()
+            .map(|payload| serde_json::from_slice(&payload).map_err(Into::into))
+            .collect()
+    }
+
     async fn prune_request_events_before(
         &self,
         cutoff_ms_x_1m: u64,
