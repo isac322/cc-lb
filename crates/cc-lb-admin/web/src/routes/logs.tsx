@@ -31,6 +31,8 @@ import {
   useUpstreams,
 } from '../lib/queries';
 
+import { computeLatencySections } from './computeLatencySections';
+
 const logsSearchSchema = z.object({
   principal_id: z.string().optional(),
   upstream: z.string().optional(),
@@ -381,17 +383,7 @@ function RequestDetail({
     (event.sse_event_count ?? 0) > 0 ||
     event.stream_first_content_delta_ms != null;
 
-  // Latency breakdown — sum known stages to compute "Unaccounted".
-  const stages: { label: string; value?: number }[] = [
-    { label: 'Proxy setup', value: event.proxy_setup_ms },
-    { label: 'Shape', value: event.shape_ms },
-    { label: 'Sign', value: event.sign_ms },
-    { label: 'Upstream TTFB', value: event.upstream_ttfb_ms },
-    { label: 'Upstream body', value: event.upstream_body_ms },
-    { label: 'First body chunk', value: event.first_body_chunk_ms },
-  ];
-  const knownSum = stages.reduce((a, s) => a + (s.value ?? 0), 0);
-  const unaccounted = Math.max(0, (event.duration_ms ?? 0) - knownSum);
+  const { sections, unaccounted } = computeLatencySections(event);
 
   const principalLabel = principalName ?? event.principal_id ?? DASH;
 
@@ -607,21 +599,31 @@ function RequestDetail({
             label="Total"
             value={<MonoNum>{fmtMs(event.duration_ms)}</MonoNum>}
           />
-          {stages.map((s) => (
-            <KvRow
-              key={s.label}
-              label={s.label}
-              value={<MonoNum>{fmtMs(s.value)}</MonoNum>}
-            />
+          {sections.map((s) => (
+            <div key={s.title} className="mt-2">
+              <div className="flex items-center gap-2 text-[11px] uppercase tracking-wider text-text-faint mb-1">
+                <span>{s.title}</span>
+                {s.warmPool ? (
+                  <span className="px-1.5 py-0.5 rounded-sm bg-emerald-500/20 text-emerald-300 text-[10px]">
+                    Warm pool
+                  </span>
+                ) : null}
+              </div>
+              {s.rows.map((r) => (
+                <KvRow
+                  key={r.label}
+                  label={r.label}
+                  value={<MonoNum>{fmtMs(r.value)}</MonoNum>}
+                />
+              ))}
+            </div>
           ))}
-          <KvRow
-            label="Unaccounted"
-            value={
-              <MonoNum>
-                {event.duration_ms != null ? fmtMs(unaccounted) : DASH}
-              </MonoNum>
-            }
-          />
+          {unaccounted > 10 ? (
+            <KvRow
+              label="Unaccounted"
+              value={<MonoNum>{fmtMs(unaccounted)}</MonoNum>}
+            />
+          ) : null}
         </DetailSection>
 
         {isStream ? (
