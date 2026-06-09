@@ -30,6 +30,58 @@ pub enum PricingStatus {
     Unknown,
 }
 
+/// Per-component cost breakdown of a single request, in micros USD.
+///
+/// `total_micros == input + output + cache_creation_5m + cache_creation_1h + cache_read`.
+/// When `pricing_status == Unknown`, all numeric fields are 0.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CostBreakdown {
+    pub input_micros: i64,
+    pub output_micros: i64,
+    pub cache_creation_5m_micros: i64,
+    pub cache_creation_1h_micros: i64,
+    pub cache_read_micros: i64,
+    pub total_micros: i64,
+    pub pricing_status: PricingStatus,
+}
+
+impl CostBreakdown {
+    pub const fn unknown() -> Self {
+        Self {
+            input_micros: 0,
+            output_micros: 0,
+            cache_creation_5m_micros: 0,
+            cache_creation_1h_micros: 0,
+            cache_read_micros: 0,
+            total_micros: 0,
+            pricing_status: PricingStatus::Unknown,
+        }
+    }
+
+    pub fn into_estimate(self) -> CostEstimate {
+        CostEstimate {
+            micros_usd: match self.pricing_status {
+                PricingStatus::Known => Some(self.total_micros.max(0) as u64),
+                PricingStatus::Unknown => None,
+            },
+            pricing_status: self.pricing_status,
+        }
+    }
+}
+
+// Anthropic cache write pricing multipliers vs base input rate
+// (verified 2026-05-22, 1h GA): cc_5m = 1.25x base, cc_1h = 2.00x base.
+// We derive the 1h per-million price as `cc_5m_price * 200 / 125 = cc_5m_price * 8 / 5`
+// because LiteLLM publishes only a single `cache_creation_input_token_cost`.
+const CACHE_CREATION_1H_NUMERATOR: u128 = 8;
+const CACHE_CREATION_1H_DENOMINATOR: u128 = 5;
+
+fn cache_creation_1h_price(price_5m: UsdPerMillion) -> UsdPerMillion {
+    let numer = u128::from(price_5m.as_micros_usd()) * CACHE_CREATION_1H_NUMERATOR;
+    let micros = (numer + CACHE_CREATION_1H_DENOMINATOR / 2) / CACHE_CREATION_1H_DENOMINATOR;
+    UsdPerMillion::from_micros_usd(micros.try_into().unwrap_or(u64::MAX))
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
 pub struct UsdPerMillion(u64);
 
@@ -174,28 +226,27 @@ pub fn pricing_for_model_with_kind(
 
 #[deprecated(note = "use virtual_cost_micros_full to include cache token costs and upstream kind")]
 pub fn virtual_cost_micros(model: &str, input_tokens: u64, output_tokens: u64) -> CostEstimate {
-    virtual_cost_micros_full(model, input_tokens, output_tokens, 0, 0, None)
+    virtual_cost_micros_full(model, input_tokens, output_tokens, 0, 0, 0, None).into_estimate()
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn virtual_cost_micros_full(
     model: &str,
     input: u64,
     output: u64,
-    cache_creation_input: u64,
+    cache_creation_5m_input: u64,
+    cache_creation_1h_input: u64,
     cache_read_input: u64,
     upstream_kind: Option<UpstreamKind>,
-) -> CostEstimate {
+) -> CostBreakdown {
     let normalized = normalize_model_id(model, upstream_kind);
     let snapshot = global_catalog().current();
     let Some(pricing) = snapshot.models.get(&normalized) else {
         record_missing_price_field(&normalized, "model");
-        return CostEstimate {
-            micros_usd: None,
-            pricing_status: PricingStatus::Unknown,
-        };
+        return CostBreakdown::unknown();
     };
 
-    let cache_creation_price = snapshot
+    let cc_5m_price = snapshot
         .cache_creation_per_million_usd
         .get(&normalized)
         .copied();
@@ -204,18 +255,49 @@ pub fn virtual_cost_micros_full(
         .get(&normalized)
         .copied();
 
-    CostEstimate {
-        micros_usd: Some(token_cost_micros(
-            input,
-            pricing.input_per_million_usd,
-            output,
-            pricing.output_per_million_usd,
-            cache_creation_input,
-            cache_creation_price,
-            cache_read_input,
-            cache_read_price,
-            &normalized,
-        )),
+    let input_micros = component_cost(input, pricing.input_per_million_usd);
+    let output_micros = component_cost(output, pricing.output_per_million_usd);
+
+    let (cc_5m_micros, cc_1h_micros) = if let Some(price_5m) = cc_5m_price {
+        (
+            component_cost(cache_creation_5m_input, price_5m),
+            component_cost(cache_creation_1h_input, cache_creation_1h_price(price_5m)),
+        )
+    } else {
+        if cache_creation_5m_input + cache_creation_1h_input > 0 {
+            record_missing_cache_field(&normalized, "cache_creation_per_million_usd");
+        }
+        (0, 0)
+    };
+
+    let cr_micros = cache_read_price
+        .map(|price| component_cost(cache_read_input, price))
+        .unwrap_or_else(|| {
+            if cache_read_input > 0 {
+                record_missing_cache_field(&normalized, "cache_read_per_million_usd");
+            }
+            0
+        });
+
+    let to_i64 = |v: u128| -> i64 { v.try_into().unwrap_or(i64::MAX) };
+    let input_i = to_i64(input_micros);
+    let output_i = to_i64(output_micros);
+    let cc5_i = to_i64(cc_5m_micros);
+    let cc1_i = to_i64(cc_1h_micros);
+    let cr_i = to_i64(cr_micros);
+    let total = input_i
+        .saturating_add(output_i)
+        .saturating_add(cc5_i)
+        .saturating_add(cc1_i)
+        .saturating_add(cr_i);
+
+    CostBreakdown {
+        input_micros: input_i,
+        output_micros: output_i,
+        cache_creation_5m_micros: cc5_i,
+        cache_creation_1h_micros: cc1_i,
+        cache_read_micros: cr_i,
+        total_micros: total,
         pricing_status: PricingStatus::Known,
     }
 }
@@ -395,12 +477,131 @@ mod tests {
         let _guard = GLOBAL_TEST_LOCK.lock().expect("global catalog test lock");
         global_catalog().install_snapshot(CatalogSnapshot::empty_cost_disabled());
 
+        let breakdown = virtual_cost_micros_full("missing-model", 1, 1, 1, 1, 1, None);
+        assert_eq!(breakdown, CostBreakdown::unknown());
+        assert_eq!(breakdown.into_estimate().micros_usd, None);
         assert_eq!(
-            virtual_cost_micros_full("missing-model", 1, 1, 1, 1, None),
-            CostEstimate {
-                micros_usd: None,
-                pricing_status: PricingStatus::Unknown,
-            }
+            breakdown.into_estimate().pricing_status,
+            PricingStatus::Unknown
+        );
+    }
+
+    fn snapshot_with_cache_prices(
+        model: &str,
+        pricing: Pricing,
+        cache_creation_5m: Option<UsdPerMillion>,
+        cache_read: Option<UsdPerMillion>,
+    ) -> CatalogSnapshot {
+        let mut snap = snapshot_with(model, pricing);
+        if let Some(price) = cache_creation_5m {
+            snap.cache_creation_per_million_usd
+                .insert(model.to_owned(), price);
+        }
+        if let Some(price) = cache_read {
+            snap.cache_read_per_million_usd
+                .insert(model.to_owned(), price);
+        }
+        snap
+    }
+
+    #[test]
+    fn cache_creation_1h_price_derives_1_6x_5m() {
+        let price_5m = UsdPerMillion::from_micros_usd(3_750_000);
+        assert_eq!(
+            cache_creation_1h_price(price_5m),
+            UsdPerMillion::from_micros_usd(6_000_000),
+        );
+    }
+
+    #[test]
+    fn breakdown_splits_5m_and_1h() {
+        let _guard = GLOBAL_TEST_LOCK.lock().expect("global catalog test lock");
+        let model = "claude-3-5-sonnet-20241022";
+        global_catalog().install_snapshot(snapshot_with_cache_prices(
+            model,
+            pricing(model, 3, 15),
+            Some(UsdPerMillion::from_micros_usd(3_750_000)),
+            Some(UsdPerMillion::from_micros_usd(300_000)),
+        ));
+
+        let breakdown = virtual_cost_micros_full(model, 0, 0, 1_000_000, 1_000_000, 0, None);
+        assert_eq!(breakdown.cache_creation_5m_micros, 3_750_000);
+        assert_eq!(breakdown.cache_creation_1h_micros, 6_000_000);
+        assert_eq!(breakdown.total_micros, 9_750_000);
+        assert_eq!(breakdown.pricing_status, PricingStatus::Known);
+    }
+
+    #[test]
+    fn breakdown_cache_read_uses_catalog_price_directly() {
+        let _guard = GLOBAL_TEST_LOCK.lock().expect("global catalog test lock");
+        let model = "claude-3-5-sonnet-20241022";
+        global_catalog().install_snapshot(snapshot_with_cache_prices(
+            model,
+            pricing(model, 3, 15),
+            Some(UsdPerMillion::from_micros_usd(3_750_000)),
+            Some(UsdPerMillion::from_micros_usd(300_000)),
+        ));
+
+        let breakdown = virtual_cost_micros_full(model, 0, 0, 0, 0, 1_000_000, None);
+        assert_eq!(breakdown.cache_read_micros, 300_000);
+        assert_eq!(breakdown.cache_creation_5m_micros, 0);
+        assert_eq!(breakdown.cache_creation_1h_micros, 0);
+        assert_eq!(breakdown.total_micros, 300_000);
+    }
+
+    #[test]
+    fn breakdown_handles_missing_cache_creation_price() {
+        let _guard = GLOBAL_TEST_LOCK.lock().expect("global catalog test lock");
+        let model = "claude-3-5-sonnet-20241022";
+        global_catalog().install_snapshot(snapshot_with_cache_prices(
+            model,
+            pricing(model, 3, 15),
+            None,
+            Some(UsdPerMillion::from_micros_usd(300_000)),
+        ));
+
+        let breakdown = virtual_cost_micros_full(model, 0, 0, 1_000_000, 1_000_000, 0, None);
+        assert_eq!(breakdown.cache_creation_5m_micros, 0);
+        assert_eq!(breakdown.cache_creation_1h_micros, 0);
+        assert_eq!(breakdown.pricing_status, PricingStatus::Known);
+    }
+
+    #[test]
+    fn breakdown_total_matches_component_sum() {
+        let _guard = GLOBAL_TEST_LOCK.lock().expect("global catalog test lock");
+        let model = "claude-3-5-sonnet-20241022";
+        global_catalog().install_snapshot(snapshot_with_cache_prices(
+            model,
+            pricing(model, 3, 15),
+            Some(UsdPerMillion::from_micros_usd(3_750_000)),
+            Some(UsdPerMillion::from_micros_usd(300_000)),
+        ));
+
+        let breakdown =
+            virtual_cost_micros_full(model, 2_000_000, 1_000_000, 100_000, 200_000, 500_000, None);
+        let expected_sum = breakdown.input_micros
+            + breakdown.output_micros
+            + breakdown.cache_creation_5m_micros
+            + breakdown.cache_creation_1h_micros
+            + breakdown.cache_read_micros;
+        assert_eq!(breakdown.total_micros, expected_sum);
+    }
+
+    #[test]
+    fn into_estimate_round_trips_total_when_known() {
+        let breakdown = CostBreakdown {
+            input_micros: 1,
+            output_micros: 2,
+            cache_creation_5m_micros: 3,
+            cache_creation_1h_micros: 4,
+            cache_read_micros: 5,
+            total_micros: 15,
+            pricing_status: PricingStatus::Known,
+        };
+        assert_eq!(breakdown.into_estimate().micros_usd, Some(15));
+        assert_eq!(
+            breakdown.into_estimate().pricing_status,
+            PricingStatus::Known
         );
     }
 }

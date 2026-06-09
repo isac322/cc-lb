@@ -42,6 +42,7 @@ import {
   StatusBadge,
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
+import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import {
   type ChainSlot,
   type Principal,
@@ -54,11 +55,14 @@ import {
   usePluginRegistry,
   usePrincipalKeys,
   usePrincipalLimits,
+  usePrincipalNameMap,
   usePrincipals,
+  useRecentEvents,
   useReorderChain,
   useRevokeKey,
   useSetAllowedModels,
   useTogglePrincipal,
+  useUpstreamNameMap,
 } from '../lib/queries';
 
 const principalSearchSchema = z.object({ selectedId: z.string().optional() });
@@ -309,10 +313,49 @@ function PrincipalDetail({
         <AllowedModelsCard principal={principal} />
         <DefaultLimitsCard principal={principal} />
         <LiveLimitsCard principal={principal} />
+        <RecentRequestsCard principal={principal} />
         <PluginChainCard principal={principal} />
         <ApiKeysCard principal={principal} />
       </div>
     </>
+  );
+}
+
+function RecentRequestsCard({ principal }: { principal: Principal }) {
+  const principalNameMap = usePrincipalNameMap();
+  const upstreamNameMap = useUpstreamNameMap();
+  const recent = useRecentEvents({
+    principal_id: principal.id,
+    limit: '5',
+  });
+  const events = recent.data?.events ?? [];
+  return (
+    <Card>
+      <CardHeader
+        title="Recent Requests"
+        subtitle={
+          events.length === 0
+            ? `No recent requests from ${principal.name}`
+            : `Last ${events.length} from ${principal.name}`
+        }
+      />
+      <div className="overflow-x-auto">
+        <RequestEventsTable
+          events={events}
+          principalNameMap={principalNameMap}
+          upstreamNameMap={upstreamNameMap}
+          loading={recent.isLoading}
+          columns={{
+            principal: false,
+            cache: true,
+            cost: true,
+            tokens: true,
+          }}
+          minWidthClass="min-w-[820px]"
+          emptyTitle="No recent requests for this principal"
+        />
+      </div>
+    </Card>
   );
 }
 
