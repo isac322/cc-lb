@@ -1610,7 +1610,6 @@ function DetailView({
               loading={recent.isLoading}
               columns={{
                 upstream: false,
-                cache: true,
                 cost: true,
                 tokens: true,
               }}
