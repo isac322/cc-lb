@@ -591,7 +591,7 @@ function OverviewPage() {
               loading={events.isLoading}
               liveFlashIds={recentLiveIds}
               onRowClick={() => navigate({ to: '/logs' })}
-              columns={{ cache: true, cost: true, tokens: true }}
+              columns={{ cost: true, tokens: true }}
               sentinelRef={sentinelRef}
               loadingMore={events.isFetchingNextPage}
               hasMore={events.hasNextPage}
