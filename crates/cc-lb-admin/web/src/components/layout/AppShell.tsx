@@ -73,7 +73,7 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
       {/* Desktop sidebar — sticky to viewport so body can scroll */}
       <aside
         className={cx(
-          'hidden md:flex flex-col bg-bg-sub border-r border-subtle shrink-0 transition-[width] duration-150',
+          'hidden lg:flex flex-col bg-bg-sub border-r border-subtle shrink-0 transition-[width] duration-150',
           'sticky top-0 self-start h-screen z-20',
           collapsed ? 'w-14' : 'w-56',
         )}
@@ -86,11 +86,11 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
       {/* Mobile drawer — Radix Dialog with left-side slide-in */}
       <Dialog.Root open={mobileOpen} onOpenChange={setMobileOpen}>
         <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 z-40 bg-modal-backdrop backdrop-blur-sm md:hidden" />
+          <Dialog.Overlay className="fixed inset-0 z-40 bg-modal-backdrop backdrop-blur-sm lg:hidden" />
           <Dialog.Content
             aria-describedby={undefined}
             style={{ height: '100vh' }}
-            className="fixed left-0 top-0 z-50 w-64 bg-bg-sub border-r border-subtle grid grid-rows-[3rem_1fr_auto] outline-none md:hidden"
+            className="fixed left-0 top-0 z-50 w-64 bg-bg-sub border-r border-subtle grid grid-rows-[3rem_1fr_auto] outline-none lg:hidden"
           >
             <Dialog.Title className="sr-only">Navigation</Dialog.Title>
             <div className="flex items-center justify-between px-4 border-b border-subtle">
@@ -217,7 +217,7 @@ function Topbar({
         <button
           type="button"
           aria-label="Open menu"
-          className="md:hidden h-9 w-9 inline-flex items-center justify-center text-text-muted hover:text-text"
+          className="lg:hidden h-9 w-9 inline-flex items-center justify-center text-text-muted hover:text-text"
           onClick={onMobileMenu}
         >
           <Menu className="w-5 h-5" />
@@ -225,7 +225,7 @@ function Topbar({
         <button
           type="button"
           aria-label="Toggle sidebar"
-          className="hidden md:inline-flex h-8 w-8 items-center justify-center text-text-muted hover:text-text rounded-sm hover:bg-overlay-5"
+          className="hidden lg:inline-flex h-8 w-8 items-center justify-center text-text-muted hover:text-text rounded-sm hover:bg-overlay-5"
           onClick={onToggleSidebar}
         >
           <Menu className="w-4 h-4" />
