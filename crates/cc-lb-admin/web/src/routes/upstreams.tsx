@@ -47,6 +47,7 @@ import { InlineNameEditor } from '../components/upstreams/InlineNameEditor';
 import { SettingsCard } from '../components/upstreams/SettingsCard';
 import { ApiError, eventTime } from '../lib/api';
 import { getWindowColor, WINDOW_DURATION_SECS } from '../lib/colors';
+import { DEFAULT_ANTHROPIC_BASE_URL } from '../lib/constants';
 import {
   type Upstream,
   useCompleteOauthDraft,
@@ -789,12 +790,17 @@ function DetailView({
     } else {
       primaryLabels = new Set(['ID', 'Base URL']);
       fields.push(...commonIdFields);
-      if (upstream.base_url)
-        fields.push({
-          label: 'Base URL',
-          value: <span className="font-mono">{upstream.base_url}</span>,
-          tooltip: 'Endpoint base URL for upstream requests',
-        });
+      fields.push({
+        label: 'Base URL',
+        value: (
+          <span className="font-mono">
+            {upstream.base_url || DEFAULT_ANTHROPIC_BASE_URL}
+          </span>
+        ),
+        tooltip: upstream.base_url
+          ? 'Endpoint base URL for upstream requests'
+          : `Endpoint base URL for upstream requests (default: ${DEFAULT_ANTHROPIC_BASE_URL})`,
+      });
       if (upstream.api_key_env)
         fields.push({
           label: 'API Key',
@@ -1917,7 +1923,7 @@ function CreateUpstreamModal({
 
   // Non-OAuth state
   const [name, setName] = useState('');
-  const [baseUrl, setBaseUrl] = useState('https://api.anthropic.com');
+  const [baseUrl, setBaseUrl] = useState(DEFAULT_ANTHROPIC_BASE_URL);
   const [apiKeyValue, setApiKeyValue] = useState('');
   const [apiKeyEnv, setApiKeyEnv] = useState('ANTHROPIC_API_KEY');
   const [useEnvVar, setUseEnvVar] = useState(false);
@@ -1937,7 +1943,7 @@ function CreateUpstreamModal({
       setStep('type');
       setKind('anthropic_oauth');
       setName('');
-      setBaseUrl('https://api.anthropic.com');
+      setBaseUrl(DEFAULT_ANTHROPIC_BASE_URL);
       setApiKeyValue('');
       setApiKeyEnv('ANTHROPIC_API_KEY');
       setUseEnvVar(false);

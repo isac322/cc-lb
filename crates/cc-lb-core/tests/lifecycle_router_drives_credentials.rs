@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use common::{collect_body, messages_request};
 use router_lifecycle_support::{
-    RouterLifecycleState, SelectingRouter, custom_record, lifecycle_with_records, plugin_upstream,
+    RouterLifecycleState, SelectingRouter, api_key_record, lifecycle_with_records, plugin_upstream,
 };
 
 #[tokio::test]
@@ -19,8 +19,8 @@ async fn router_upstream_id_drives_credentials_and_dispatch_upstream() {
     let state = RouterLifecycleState::default();
     let lifecycle = lifecycle_with_records(
         vec![
-            custom_record(first, "first", "http://first.local/"),
-            custom_record(second, "second", "http://second.local/"),
+            api_key_record(first, "first", "http://first.local/"),
+            api_key_record(second, "second", "http://second.local/"),
         ],
         Arc::new(SelectingRouter {
             selected_id: Some(second),

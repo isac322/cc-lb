@@ -53,8 +53,8 @@ async fn none_mode_router_parity() {
         .error_normalizer(Arc::new(ErrorNormalizer::new()))
         .principal_view(principal_view)
         .upstream_records(vec![
-            custom_upstream(second_id, "second", "http://second.local/"),
-            custom_upstream(first_id, "first", "http://first.local/"),
+            api_key_upstream(second_id, "second", "http://second.local/"),
+            api_key_upstream(first_id, "first", "http://first.local/"),
         ])
         .build();
     let lifecycle = Lifecycle::new_with_dynamic_view(
@@ -231,7 +231,7 @@ fn principal(name: &str, allowed_upstreams: Vec<Uuid>) -> PrincipalRecord {
     }
 }
 
-fn custom_upstream(id: Uuid, name: &str, base_url: &str) -> UpstreamRecord {
+fn api_key_upstream(id: Uuid, name: &str, base_url: &str) -> UpstreamRecord {
     UpstreamRecord {
         id,
         name: name.to_owned(),

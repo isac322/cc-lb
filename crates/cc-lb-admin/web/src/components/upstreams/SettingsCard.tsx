@@ -1,5 +1,6 @@
 import { useState } from 'react';
 import { toast } from 'sonner';
+import { DEFAULT_ANTHROPIC_BASE_URL } from '../../lib/constants';
 import {
   type UpdateUpstreamRequest,
   type Upstream,
@@ -88,7 +89,7 @@ export function SettingsCard({ upstream }: Props) {
                 className={INPUT_CLASS}
                 value={baseUrl}
                 onChange={(e) => setBaseUrl(e.target.value)}
-                placeholder="e.g. https://api.anthropic.com"
+                placeholder={`e.g. ${DEFAULT_ANTHROPIC_BASE_URL}`}
               />
             </Field>
 
