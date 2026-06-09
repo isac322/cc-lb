@@ -7,9 +7,9 @@ confidence-threshold = 0.8
 
 [advisories]
 # cargo audit gates warnings as failures in CI via `cargo audit --deny warnings`.
-# The current workspace still pins `extism 1.21.0`, which resolves to `wasmtime 41.0.4`.
-# crates.io does not currently provide a newer extism release in this workspace range, so
-# the Wasmtime advisories are documented here as a follow-up runtime upgrade item.
+# The workspace pins `extism 1.30.0`, which resolves to `wasmtime 43.0.2`.
+# Several Wasmtime advisories remain unpatched upstream in the 43.x line and are
+# documented here as a follow-up runtime upgrade item once a fixed release lands.
 # `rustls-pemfile` remains reachable through `rustls 0.23`; removing it requires a broader
 # TLS stack migration than this quality-gate task.
 # `bincode 2.x` was marked unmaintained on 2025-12-16 (no safe upgrade available; the
@@ -20,18 +20,10 @@ yanked = "warn"
 ignore = [
     { id = "RUSTSEC-2025-0134", reason = "rustls 0.23 still depends on rustls-pemfile 2.2.0; removing it requires a broader TLS stack migration." },
     { id = "RUSTSEC-2025-0141", reason = "cc-lb-storage-redb uses bincode 2.x `serde` integration; the upstream team ceased development permanently with no safe upgrade available." },
-    { id = "RUSTSEC-2026-0085", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
-    { id = "RUSTSEC-2026-0086", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
-    { id = "RUSTSEC-2026-0087", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
-    { id = "RUSTSEC-2026-0088", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
-    { id = "RUSTSEC-2026-0089", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
-    { id = "RUSTSEC-2026-0091", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
-    { id = "RUSTSEC-2026-0092", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
-    { id = "RUSTSEC-2026-0093", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
-    { id = "RUSTSEC-2026-0094", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
-    { id = "RUSTSEC-2026-0095", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
-    { id = "RUSTSEC-2026-0096", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
-    { id = "RUSTSEC-2026-0114", reason = "wasmtime 41.0.4 is pinned by extism 1.21.0; upgrading to a fixed wasmtime line requires a larger runtime refresh." },
+    { id = "RUSTSEC-2026-0085", reason = "wasmtime 43.0.2 is pinned by extism 1.30.0; awaiting an upstream wasmtime patch release." },
+    { id = "RUSTSEC-2026-0086", reason = "wasmtime 43.0.2 is pinned by extism 1.30.0; awaiting an upstream wasmtime patch release." },
+    { id = "RUSTSEC-2026-0087", reason = "wasmtime 43.0.2 is pinned by extism 1.30.0; awaiting an upstream wasmtime patch release." },
+    { id = "RUSTSEC-2026-0088", reason = "wasmtime 43.0.2 is pinned by extism 1.30.0; awaiting an upstream wasmtime patch release." },
     { id = "RUSTSEC-2024-0436", reason = "paste is unmaintained but required by tikv-jemalloc-ctl for memory bound testing." },
 ]
 

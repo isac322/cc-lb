@@ -86,8 +86,8 @@ toml.workspace = true
 base64.workspace = true
 metrics-exporter-prometheus.workspace = true
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", features = ["debug-endpoints"] }
-jemalloc_ctl = { package = "tikv-jemalloc-ctl", version = "0.6", features = ["stats"] }
+jemalloc_ctl = { package = "tikv-jemalloc-ctl", version = "0.7", features = ["stats"] }
 redb.workspace = true
-tikv-jemallocator = "0.6"
+tikv-jemallocator = "0.7"
 tracing-subscriber.workspace = true
 wat.workspace = true
