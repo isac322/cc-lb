@@ -8,4 +8,4 @@ license.workspace = true
 [dependencies]
 extism = { workspace = true }
 serde_json = { workspace = true }
-wasmparser = "0.243"
+wasmparser = "0.251"
