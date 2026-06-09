@@ -591,11 +591,11 @@ function OverviewPage() {
               loading={events.isLoading}
               liveFlashIds={recentLiveIds}
               onRowClick={() => navigate({ to: '/logs' })}
-              columns={{ cache: false, cost: true, tokens: true }}
+              columns={{ cache: true, cost: true, tokens: true }}
               sentinelRef={sentinelRef}
               loadingMore={events.isFetchingNextPage}
               hasMore={events.hasNextPage}
-              minWidthClass="min-w-[820px]"
+              minWidthClass="min-w-[980px]"
               emptyTitle="No recent requests"
             />
           </div>
