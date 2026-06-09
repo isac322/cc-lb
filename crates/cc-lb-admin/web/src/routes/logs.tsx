@@ -303,7 +303,7 @@ function LogsPage() {
               upstreamNameMap={upstreamNameMap}
               liveFlashIds={tailing ? recentLiveIds : undefined}
               onRowClick={setSelected}
-              columns={{ cache: true, cost: true, tokens: true }}
+              columns={{ cost: true, tokens: true }}
               sentinelRef={sentinelRef}
               loadingMore={recent.isFetchingNextPage}
               hasMore={recent.hasNextPage}
@@ -364,6 +364,17 @@ function RequestDetail({
     event.body_bytes != null;
 
   const totalTokens = (event.input_tokens ?? 0) + (event.output_tokens ?? 0);
+
+  const hasCacheCreationSplit =
+    event.cache_creation_input_tokens_5m != null ||
+    event.cache_creation_input_tokens_1h != null;
+
+  const hasCostBreakdown =
+    event.cost_input_micros != null ||
+    event.cost_output_micros != null ||
+    event.cost_cache_creation_5m_micros != null ||
+    event.cost_cache_creation_1h_micros != null ||
+    event.cost_cache_read_micros != null;
 
   const isStream =
     event.stream_total_ms != null ||
@@ -508,12 +519,33 @@ function RequestDetail({
               label="Output"
               value={<MonoNum>{fmtN(event.output_tokens)}</MonoNum>}
             />
-            <KvRow
-              label="Cache creation"
-              value={
-                <MonoNum>{fmtN(event.cache_creation_input_tokens)}</MonoNum>
-              }
-            />
+            {hasCacheCreationSplit ? (
+              <>
+                <KvRow
+                  label="Cache create 5m"
+                  value={
+                    <MonoNum>
+                      {fmtN(event.cache_creation_input_tokens_5m ?? 0)}
+                    </MonoNum>
+                  }
+                />
+                <KvRow
+                  label="Cache create 1h"
+                  value={
+                    <MonoNum>
+                      {fmtN(event.cache_creation_input_tokens_1h ?? 0)}
+                    </MonoNum>
+                  }
+                />
+              </>
+            ) : (
+              <KvRow
+                label="Cache creation"
+                value={
+                  <MonoNum>{fmtN(event.cache_creation_input_tokens)}</MonoNum>
+                }
+              />
+            )}
             <KvRow
               label="Cache read"
               value={<MonoNum>{fmtN(event.cache_read_input_tokens)}</MonoNum>}
@@ -530,8 +562,42 @@ function RequestDetail({
         ) : null}
 
         <DetailSection title="Cost">
+          {hasCostBreakdown ? (
+            <>
+              <KvRow
+                label="Input"
+                value={<MonoNum>{fmtUsd(event.cost_input_micros)}</MonoNum>}
+              />
+              <KvRow
+                label="Output"
+                value={<MonoNum>{fmtUsd(event.cost_output_micros)}</MonoNum>}
+              />
+              <KvRow
+                label="Cache create 5m"
+                value={
+                  <MonoNum>
+                    {fmtUsd(event.cost_cache_creation_5m_micros)}
+                  </MonoNum>
+                }
+              />
+              <KvRow
+                label="Cache create 1h"
+                value={
+                  <MonoNum>
+                    {fmtUsd(event.cost_cache_creation_1h_micros)}
+                  </MonoNum>
+                }
+              />
+              <KvRow
+                label="Cache read"
+                value={
+                  <MonoNum>{fmtUsd(event.cost_cache_read_micros)}</MonoNum>
+                }
+              />
+            </>
+          ) : null}
           <KvRow
-            label="Cost (USD)"
+            label="Total (USD)"
             value={<MonoNum>{fmtUsd(event.cost_usd_micros)}</MonoNum>}
           />
         </DetailSection>
