@@ -16,6 +16,8 @@ interface RequestEventsTableProps {
   liveFlashIds?: Set<string>;
   onRowClick?: (event: RequestEvent) => void;
   columns?: {
+    principal?: boolean;
+    upstream?: boolean;
     cache?: boolean;
     cost?: boolean;
     tokens?: boolean;
@@ -36,32 +38,52 @@ export function RequestEventsTable({
   emptyDescription,
   liveFlashIds,
   onRowClick,
-  columns = { cache: false, cost: true, tokens: true },
+  columns,
   sentinelRef,
   loadingMore,
   hasMore,
   minWidthClass = 'min-w-[820px]',
   className,
 }: RequestEventsTableProps) {
+  const showPrincipal = columns?.principal ?? true;
+  const showUpstream = columns?.upstream ?? true;
+  const showTokens = columns?.tokens ?? true;
+  const showCache = columns?.cache ?? false;
+  const showCost = columns?.cost ?? true;
+
+  // Always shown: Timestamp, Model, Status, Latency (4)
+  // Toggleable: Principal, Upstream, Tokens, Cache, Cost (up to 5)
+  const colCount =
+    4 +
+    (showPrincipal ? 1 : 0) +
+    (showUpstream ? 1 : 0) +
+    (showTokens ? 1 : 0) +
+    (showCache ? 1 : 0) +
+    (showCost ? 1 : 0);
+
   return (
     <table className={cx(minWidthClass, 'w-full font-mono text-xs', className)}>
       <thead className="table-header sticky top-0 z-10">
         <tr className="text-[10px] uppercase tracking-wider">
           <th className="text-left px-3 py-2 whitespace-nowrap">Timestamp</th>
-          <th className="text-left px-3 py-2 whitespace-nowrap">Principal</th>
-          <th className="text-left px-3 py-2 whitespace-nowrap">Upstream</th>
+          {showPrincipal && (
+            <th className="text-left px-3 py-2 whitespace-nowrap">Principal</th>
+          )}
+          {showUpstream && (
+            <th className="text-left px-3 py-2 whitespace-nowrap">Upstream</th>
+          )}
           <th className="text-left px-3 py-2 whitespace-nowrap">Model</th>
           <th className="text-right px-3 py-2 whitespace-nowrap">Status</th>
           <th className="text-right px-3 py-2 whitespace-nowrap">Latency</th>
-          {columns.tokens && (
+          {showTokens && (
             <th className="text-right px-3 py-2 whitespace-nowrap">
               Tokens I/O
             </th>
           )}
-          {columns.cache && (
+          {showCache && (
             <th className="text-right px-3 py-2 whitespace-nowrap">Cache</th>
           )}
-          {columns.cost && (
+          {showCost && (
             <th className="text-right px-3 py-2 whitespace-nowrap">Cost</th>
           )}
         </tr>
@@ -69,19 +91,11 @@ export function RequestEventsTable({
       <tbody>
         {loading ? (
           Array.from({ length: 5 }).map((_, i) => (
-            <SkeletonRow
-              key={i}
-              cols={
-                6 +
-                (columns.tokens ? 1 : 0) +
-                (columns.cache ? 1 : 0) +
-                (columns.cost ? 1 : 0)
-              }
-            />
+            <SkeletonRow key={i} cols={colCount} />
           ))
         ) : events.length ? (
           events.map((e) => {
-            const ratio = columns.cache ? cacheHitRatio(e) : null;
+            const ratio = showCache ? cacheHitRatio(e) : null;
             return (
               <tr
                 key={e.request_id}
@@ -105,17 +119,21 @@ export function RequestEventsTable({
                   />
                   <RelativeTime ts={eventTime(e)} />
                 </td>
-                <td className="px-3 py-2 whitespace-nowrap truncate max-w-[160px]">
-                  {(e.principal_id && principalNameMap.get(e.principal_id)) ??
-                    e.principal_id ??
-                    DASH}
-                </td>
-                <td className="px-3 py-2 whitespace-nowrap truncate max-w-[180px]">
-                  {upstreamNameMap.get(e.upstream ?? '') ??
-                    e.upstream_name ??
-                    e.upstream ??
-                    DASH}
-                </td>
+                {showPrincipal && (
+                  <td className="px-3 py-2 whitespace-nowrap truncate max-w-[160px]">
+                    {(e.principal_id && principalNameMap.get(e.principal_id)) ??
+                      e.principal_id ??
+                      DASH}
+                  </td>
+                )}
+                {showUpstream && (
+                  <td className="px-3 py-2 whitespace-nowrap truncate max-w-[180px]">
+                    {upstreamNameMap.get(e.upstream ?? '') ??
+                      e.upstream_name ??
+                      e.upstream ??
+                      DASH}
+                  </td>
+                )}
                 <td className="px-3 py-2 text-text-muted truncate max-w-[260px]">
                   {e.model ?? DASH}
                 </td>
@@ -134,17 +152,17 @@ export function RequestEventsTable({
                 <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">
                   {e.duration_ms}ms
                 </td>
-                {columns.tokens && (
+                {showTokens && (
                   <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">
                     {e.input_tokens ?? 0} / {e.output_tokens ?? 0}
                   </td>
                 )}
-                {columns.cache && (
+                {showCache && (
                   <td className="px-3 py-2 text-right tabular-nums text-text-muted whitespace-nowrap">
                     {ratio == null ? DASH : `${(ratio * 100).toFixed(0)}%`}
                   </td>
                 )}
-                {columns.cost && (
+                {showCost && (
                   <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">
                     {fmtUsd(e.cost_usd_micros)}
                   </td>
@@ -155,12 +173,7 @@ export function RequestEventsTable({
         ) : (
           <tr>
             <td
-              colSpan={
-                6 +
-                (columns.tokens ? 1 : 0) +
-                (columns.cache ? 1 : 0) +
-                (columns.cost ? 1 : 0)
-              }
+              colSpan={colCount}
               className="px-3 py-8 text-center text-text-faint text-xs"
             >
               <div className="flex flex-col items-center justify-center text-center py-4">
@@ -177,12 +190,7 @@ export function RequestEventsTable({
         {events.length > 0 && sentinelRef && (
           <tr ref={sentinelRef}>
             <td
-              colSpan={
-                6 +
-                (columns.tokens ? 1 : 0) +
-                (columns.cache ? 1 : 0) +
-                (columns.cost ? 1 : 0)
-              }
+              colSpan={colCount}
               className="px-3 py-4 text-center text-text-faint text-[11px]"
             >
               {loadingMore ? 'Loading…' : hasMore ? '' : 'No more entries'}

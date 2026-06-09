@@ -33,6 +33,22 @@ impl RequestEventStore for RedbStorage {
         .map_err(map_redb_err)
     }
 
+    async fn query_recent_request_events(
+        &self,
+        since: u64,
+        until: u64,
+        limit: usize,
+    ) -> StorageResult<Vec<RequestEvent>> {
+        let storage = self.clone();
+
+        tokio::task::spawn_blocking(move || {
+            RedbStorage::query_recent_request_events(&storage, since, until, limit)
+        })
+        .await
+        .map_err(map_join_err)?
+        .map_err(map_redb_err)
+    }
+
     async fn prune_request_events_before(
         &self,
         cutoff_ms_x_1m: u64,
