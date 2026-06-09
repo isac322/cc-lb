@@ -347,7 +347,6 @@ function RecentRequestsCard({ principal }: { principal: Principal }) {
           loading={recent.isLoading}
           columns={{
             principal: false,
-            cache: true,
             cost: true,
             tokens: true,
           }}
