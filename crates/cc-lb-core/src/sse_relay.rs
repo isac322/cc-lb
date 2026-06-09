@@ -47,6 +47,8 @@ pub struct StreamingUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
     pub cache_creation_input_tokens: u64,
+    pub cache_creation_input_tokens_5m: u64,
+    pub cache_creation_input_tokens_1h: u64,
     pub cache_read_input_tokens: u64,
     pub complete: bool,
 }
@@ -194,12 +196,7 @@ impl StreamingUsage {
         if let Some(input_tokens) = usage_json.get("input_tokens").and_then(Value::as_u64) {
             self.input_tokens = input_tokens;
         }
-        if let Some(cache_creation_input_tokens) = usage_json
-            .get("cache_creation_input_tokens")
-            .and_then(Value::as_u64)
-        {
-            self.cache_creation_input_tokens = cache_creation_input_tokens;
-        }
+        apply_cache_creation_split(self, usage_json);
         if let Some(cache_read_input_tokens) = usage_json
             .get("cache_read_input_tokens")
             .and_then(Value::as_u64)
@@ -212,12 +209,7 @@ impl StreamingUsage {
         if let Some(output_tokens) = usage_json.get("output_tokens").and_then(Value::as_u64) {
             self.output_tokens = output_tokens;
         }
-        if let Some(cache_creation_input_tokens) = usage_json
-            .get("cache_creation_input_tokens")
-            .and_then(Value::as_u64)
-        {
-            self.cache_creation_input_tokens = cache_creation_input_tokens;
-        }
+        apply_cache_creation_split(self, usage_json);
         if let Some(cache_read_input_tokens) = usage_json
             .get("cache_read_input_tokens")
             .and_then(Value::as_u64)
@@ -228,6 +220,31 @@ impl StreamingUsage {
 
     pub fn mark_complete(&mut self) {
         self.complete = true;
+    }
+}
+
+fn apply_cache_creation_split(usage: &mut StreamingUsage, reported: &Value) {
+    if let Some(cc) = reported.get("cache_creation").and_then(Value::as_object) {
+        let m5 = cc
+            .get("ephemeral_5m_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let m1 = cc
+            .get("ephemeral_1h_input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        usage.cache_creation_input_tokens_5m = m5;
+        usage.cache_creation_input_tokens_1h = m1;
+        usage.cache_creation_input_tokens = m5.saturating_add(m1);
+        return;
+    }
+    if let Some(flat) = reported
+        .get("cache_creation_input_tokens")
+        .and_then(Value::as_u64)
+    {
+        usage.cache_creation_input_tokens_5m = flat;
+        usage.cache_creation_input_tokens_1h = 0;
+        usage.cache_creation_input_tokens = flat;
     }
 }
 
@@ -665,11 +682,8 @@ fn update_usage_from_value(value: &Value, usage: &mut StreamingUsage) {
     {
         usage.output_tokens = output_tokens;
     }
-    if let Some(cache_creation_input_tokens) = reported_usage
-        .and_then(|usage| usage.get("cache_creation_input_tokens"))
-        .and_then(Value::as_u64)
-    {
-        usage.cache_creation_input_tokens = cache_creation_input_tokens;
+    if let Some(reported) = reported_usage {
+        apply_cache_creation_split(usage, reported);
     }
     if let Some(cache_read_input_tokens) = reported_usage
         .and_then(|usage| usage.get("cache_read_input_tokens"))
@@ -954,5 +968,97 @@ mod tests {
         fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
             None
         }
+    }
+
+    fn parse_usage(json: &str) -> Value {
+        serde_json::from_str(json).expect("test usage json")
+    }
+
+    #[test]
+    fn observe_message_start_nested_cache_creation_split() {
+        let mut usage = StreamingUsage::default();
+        let v = parse_usage(
+            r#"{"input_tokens":10,"cache_creation":{"ephemeral_5m_input_tokens":400,"ephemeral_1h_input_tokens":1200},"cache_read_input_tokens":50}"#,
+        );
+
+        usage.observe_message_start(&v);
+
+        assert_eq!(usage.input_tokens, 10);
+        assert_eq!(usage.cache_creation_input_tokens_5m, 400);
+        assert_eq!(usage.cache_creation_input_tokens_1h, 1200);
+        assert_eq!(usage.cache_creation_input_tokens, 1600);
+        assert_eq!(usage.cache_read_input_tokens, 50);
+    }
+
+    #[test]
+    fn observe_message_start_legacy_flat_only() {
+        let mut usage = StreamingUsage::default();
+        let v = parse_usage(r#"{"cache_creation_input_tokens":1600}"#);
+
+        usage.observe_message_start(&v);
+
+        assert_eq!(usage.cache_creation_input_tokens_5m, 1600);
+        assert_eq!(usage.cache_creation_input_tokens_1h, 0);
+        assert_eq!(usage.cache_creation_input_tokens, 1600);
+    }
+
+    #[test]
+    fn observe_message_start_nested_overrides_legacy() {
+        let mut usage = StreamingUsage::default();
+        let v = parse_usage(
+            r#"{"cache_creation_input_tokens":9999,"cache_creation":{"ephemeral_5m_input_tokens":500,"ephemeral_1h_input_tokens":500}}"#,
+        );
+
+        usage.observe_message_start(&v);
+
+        assert_eq!(usage.cache_creation_input_tokens_5m, 500);
+        assert_eq!(usage.cache_creation_input_tokens_1h, 500);
+        assert_eq!(usage.cache_creation_input_tokens, 1000);
+    }
+
+    #[test]
+    fn observe_message_delta_nested_cache_creation_split() {
+        let mut usage = StreamingUsage::default();
+        let v = parse_usage(
+            r#"{"output_tokens":7,"cache_creation":{"ephemeral_5m_input_tokens":11,"ephemeral_1h_input_tokens":22}}"#,
+        );
+
+        usage.observe_message_delta(&v);
+
+        assert_eq!(usage.output_tokens, 7);
+        assert_eq!(usage.cache_creation_input_tokens_5m, 11);
+        assert_eq!(usage.cache_creation_input_tokens_1h, 22);
+        assert_eq!(usage.cache_creation_input_tokens, 33);
+    }
+
+    #[test]
+    fn usage_from_json_bytes_nested_cache_creation_split() {
+        let body = Bytes::from_static(
+            br#"{"usage":{"input_tokens":3,"output_tokens":5,"cache_creation":{"ephemeral_5m_input_tokens":400,"ephemeral_1h_input_tokens":1200},"cache_read_input_tokens":7}}"#,
+        );
+
+        let usage = usage_from_json_bytes(&body);
+
+        assert!(usage.complete);
+        assert_eq!(usage.input_tokens, 3);
+        assert_eq!(usage.output_tokens, 5);
+        assert_eq!(usage.cache_creation_input_tokens_5m, 400);
+        assert_eq!(usage.cache_creation_input_tokens_1h, 1200);
+        assert_eq!(usage.cache_creation_input_tokens, 1600);
+        assert_eq!(usage.cache_read_input_tokens, 7);
+    }
+
+    #[test]
+    fn usage_from_json_bytes_legacy_flat() {
+        let body = Bytes::from_static(
+            br#"{"message":{"usage":{"cache_creation_input_tokens":42,"cache_read_input_tokens":3}}}"#,
+        );
+
+        let usage = usage_from_json_bytes(&body);
+
+        assert_eq!(usage.cache_creation_input_tokens_5m, 42);
+        assert_eq!(usage.cache_creation_input_tokens_1h, 0);
+        assert_eq!(usage.cache_creation_input_tokens, 42);
+        assert_eq!(usage.cache_read_input_tokens, 3);
     }
 }

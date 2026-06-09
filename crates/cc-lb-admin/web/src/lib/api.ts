@@ -363,8 +363,15 @@ export interface RequestEvent {
   input_tokens?: number;
   output_tokens?: number;
   cache_creation_input_tokens?: number;
+  cache_creation_input_tokens_5m?: number;
+  cache_creation_input_tokens_1h?: number;
   cache_read_input_tokens?: number;
   cost_usd_micros?: number;
+  cost_input_micros?: number;
+  cost_output_micros?: number;
+  cost_cache_creation_5m_micros?: number;
+  cost_cache_creation_1h_micros?: number;
+  cost_cache_read_micros?: number;
   duration_ms: number;
   proxy_setup_ms?: number;
   shape_ms?: number;

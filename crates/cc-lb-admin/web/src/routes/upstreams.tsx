@@ -42,10 +42,11 @@ import {
   StatusBadge,
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
+import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { ApiUsageCard } from '../components/upstreams/ApiUsageCard';
 import { InlineNameEditor } from '../components/upstreams/InlineNameEditor';
 import { SettingsCard } from '../components/upstreams/SettingsCard';
-import { ApiError, eventTime } from '../lib/api';
+import { ApiError } from '../lib/api';
 import { getWindowColor, WINDOW_DURATION_SECS } from '../lib/colors';
 import { DEFAULT_ANTHROPIC_BASE_URL } from '../lib/constants';
 import {
@@ -65,6 +66,7 @@ import {
   useSubscriptionQuotaSeries,
   useToggleUpstream,
   useTriggerSubscriptionMetadataRefresh,
+  useUpstreamNameMap,
   useUpstreamOAuthStatus,
   useUpstreamSubscriptionMetadata,
   useUpstreams,
@@ -552,6 +554,7 @@ function DetailView({
   );
   const statusQ = useStatus();
   const principalNameMap = usePrincipalNameMap();
+  const upstreamNameMap = useUpstreamNameMap();
   const upstreamRuntimeStatus = useMemo(
     () => statusQ.data?.upstreams.find((u) => u.id === upstream.id) ?? null,
     [statusQ.data, upstream.id],
@@ -684,19 +687,11 @@ function DetailView({
     };
   }, [quotaSeries.data, quotaLatest.data, range]);
 
-  // The backend `/admin/events/recent?upstream=` param only accepts the
-  // RequestEventUpstream class enum (`anthropic_direct`),
-  // not an upstream display name or id. Passing the name returns 400
-  // `invalid_upstream`, so we fetch unfiltered and narrow client-side by
-  // `upstream_name`.
-  const recent = useRecentEvents({ limit: '50' });
-  const recentForUpstream = useMemo(
-    () =>
-      (recent.data?.events ?? [])
-        .filter((e) => e.upstream_name === upstream.name)
-        .slice(0, 5),
-    [recent.data, upstream.name],
-  );
+  const recent = useRecentEvents({
+    upstream_id: upstream.id,
+    limit: '5',
+  });
+  const recentForUpstream = recent.data?.events ?? [];
 
   const isOauth = upstream.kind === 'anthropic_oauth';
   const subMeta = subscriptionMetadataQ.data?.subscription_metadata;
@@ -1608,63 +1603,20 @@ function DetailView({
             }
           />
           <div className="overflow-x-auto">
-            <table className="w-full font-mono text-xs">
-              <thead className="table-header sticky top-0 z-10">
-                <tr className="text-[10px] uppercase tracking-wider">
-                  <th className="text-left px-3 py-2">Time</th>
-                  <th className="text-left px-3 py-2">Principal</th>
-                  <th className="text-left px-3 py-2">Model</th>
-                  <th className="text-right px-3 py-2">Status</th>
-                  <th className="text-right px-3 py-2">Latency</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentForUpstream.length ? (
-                  recentForUpstream.map((e) => (
-                    <tr
-                      key={e.request_id}
-                      className="border-b border-row hover:bg-overlay-1"
-                    >
-                      <td className="px-3 py-2 text-text-faint whitespace-nowrap">
-                        <RelativeTime ts={eventTime(e)} />
-                      </td>
-                      <td className="px-3 py-2">
-                        {principalNameMap.get(e.principal_id ?? '') ??
-                          e.principal_id ??
-                          '—'}
-                      </td>
-                      <td className="px-3 py-2 text-text-faint truncate max-w-[200px]">
-                        {e.model ?? '—'}
-                      </td>
-                      <td
-                        className={cx(
-                          'px-3 py-2 text-right',
-                          e.status >= 500
-                            ? 'text-red-400'
-                            : e.status >= 400
-                              ? 'text-amber-400'
-                              : 'text-green-400',
-                        )}
-                      >
-                        {e.status}
-                      </td>
-                      <td className="px-3 py-2 text-right tabular-nums">
-                        {e.duration_ms}ms
-                      </td>
-                    </tr>
-                  ))
-                ) : (
-                  <tr>
-                    <td
-                      colSpan={5}
-                      className="px-3 py-6 text-center text-text-faint text-xs"
-                    >
-                      No recent requests for this upstream
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
+            <RequestEventsTable
+              events={recentForUpstream}
+              principalNameMap={principalNameMap}
+              upstreamNameMap={upstreamNameMap}
+              loading={recent.isLoading}
+              columns={{
+                upstream: false,
+                cache: true,
+                cost: true,
+                tokens: true,
+              }}
+              minWidthClass="min-w-[820px]"
+              emptyTitle="No recent requests for this upstream"
+            />
           </div>
         </Card>
 
