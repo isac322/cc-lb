@@ -259,33 +259,36 @@ function TokenCell({ event }: { event: RequestEvent }) {
       onClick={(e) => e.stopPropagation()}
     >
       <Hint label={popover}>
-        <div className="px-3 py-2 cursor-help inline-block w-full">
-          <div className="flex items-baseline justify-end gap-0 tabular-nums">
-            <span className="inline-block w-[4ch] text-right text-sky-400">
+        <div className="px-3 py-2 cursor-help block">
+          <div className="flex items-baseline justify-end tabular-nums leading-tight">
+            <span className="shrink-0 w-[4ch] text-right text-sky-400">
               {inp.value}
             </span>
-            <span className="inline-block w-[1ch] text-text-faint">
+            <span className="shrink-0 w-[1ch] text-left text-text-faint">
               {inp.unit}
             </span>
-            <span className="inline-block w-[1ch] text-text-faint text-center">
+            <span className="shrink-0 w-[2ch] text-center text-text-faint">
               /
             </span>
-            <span className="inline-block w-[4ch] text-right text-violet-400">
+            <span className="shrink-0 w-[4ch] text-right text-violet-400">
               {out.value}
             </span>
-            <span className="inline-block w-[1ch] text-text-faint">
+            <span className="shrink-0 w-[1ch] text-left text-text-faint">
               {out.unit}
             </span>
-            <span className="inline-block ml-2 text-[10px] text-text-faint">
-              hit{' '}
-              <span
-                className={cx(
-                  'tabular-nums',
-                  hit > 0 ? 'text-emerald-400' : 'text-text-faint',
-                )}
-              >
-                {hit}%
-              </span>
+            <span className="shrink-0 w-[3ch] text-right text-[10px] text-text-faint">
+              hit
+            </span>
+            <span
+              className={cx(
+                'shrink-0 w-[3ch] text-right text-[10px] tabular-nums ml-1',
+                hit > 0 ? 'text-emerald-400' : 'text-text-faint',
+              )}
+            >
+              {hit}
+            </span>
+            <span className="shrink-0 w-[1ch] text-left text-[10px] text-text-faint">
+              %
             </span>
           </div>
           <Sparkline
@@ -392,8 +395,8 @@ function CostCell({ event }: { event: RequestEvent }) {
       onClick={(e) => e.stopPropagation()}
     >
       <Hint label={popover}>
-        <div className="px-3 py-2 cursor-help inline-block w-full">
-          <div className="text-right tabular-nums">
+        <div className="px-3 py-2 cursor-help block">
+          <div className="text-right tabular-nums leading-tight">
             {fmtUsdCompact(c.total)}
           </div>
           {c.hasComponents ? (
