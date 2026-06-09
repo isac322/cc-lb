@@ -341,7 +341,29 @@ function generateEvent(seq: number, forceUpstreamId?: string) {
   const latency = Math.floor(40 + rng() * 800);
   const inputTokens = Math.floor(120 + rng() * 1800);
   const outputTokens = Math.floor(220 + rng() * 4200);
-  const costMicros = inputTokens * 3 + outputTokens * 15;
+  // Cache scenarios to exercise the redesigned Token + Cost cells:
+  //   0: no cache, 1: 5m-only, 2: 5m + 1h, 3: 1h-only + read, 4: read-only
+  const cacheScenario = Math.floor(rng() * 5);
+  let cc5m = 0;
+  let cc1h = 0;
+  let cr = 0;
+  if (cacheScenario === 1) cc5m = Math.floor(800 + rng() * 4000);
+  else if (cacheScenario === 2) {
+    cc5m = Math.floor(400 + rng() * 1500);
+    cc1h = Math.floor(2000 + rng() * 12000);
+  } else if (cacheScenario === 3) {
+    cc1h = Math.floor(2000 + rng() * 8000);
+    cr = Math.floor(500 + rng() * 2400);
+  } else if (cacheScenario === 4) {
+    cr = Math.floor(800 + rng() * 6000);
+  }
+  // Anthropic Sonnet-like rates: input $3, output $15, cc_5m $3.75, cc_1h $6, cr $0.30
+  const costInput = inputTokens * 3;
+  const costOutput = outputTokens * 15;
+  const costCc5m = Math.floor(cc5m * 3.75);
+  const costCc1h = cc1h * 6;
+  const costCr = Math.floor(cr * 0.3);
+  const costMicros = costInput + costOutput + costCc5m + costCc1h + costCr;
   return {
     ts: NOW() - Math.floor(rng() * 600),
     request_id: `req_${seq.toString(36)}${Math.floor(rng() * 0xffff).toString(36)}`,
@@ -355,7 +377,16 @@ function generateEvent(seq: number, forceUpstreamId?: string) {
     status,
     input_tokens: inputTokens,
     output_tokens: outputTokens,
+    cache_creation_input_tokens: cc5m + cc1h,
+    cache_creation_input_tokens_5m: cc5m,
+    cache_creation_input_tokens_1h: cc1h,
+    cache_read_input_tokens: cr,
     cost_usd_micros: costMicros,
+    cost_input_micros: costInput,
+    cost_output_micros: costOutput,
+    cost_cache_creation_5m_micros: costCc5m,
+    cost_cache_creation_1h_micros: costCc1h,
+    cost_cache_read_micros: costCr,
     duration_ms: latency,
     queue_ms: Math.floor(rng() * 30),
     auth_ms: Math.floor(rng() * 12),
