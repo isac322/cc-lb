@@ -107,9 +107,7 @@ pub async fn request_event_recent_descending<B: ConformanceBackend>(backend: Arc
             storage.append_request_event(&request_event(index)).await?;
         }
 
-        let events = storage
-            .query_recent_request_events(0, u64::MAX, 5)
-            .await?;
+        let events = storage.query_recent_request_events(0, u64::MAX, 5).await?;
 
         assert_eq!(events.len(), 5);
         assert_eq!(events[0].request_id, "req-0099");
@@ -128,9 +126,7 @@ pub async fn request_event_recent_descending<B: ConformanceBackend>(backend: Arc
             .await?;
         assert!(empty_range.is_empty());
 
-        let zero_limit = storage
-            .query_recent_request_events(0, u64::MAX, 0)
-            .await?;
+        let zero_limit = storage.query_recent_request_events(0, u64::MAX, 0).await?;
         assert!(zero_limit.is_empty());
 
         Ok(())

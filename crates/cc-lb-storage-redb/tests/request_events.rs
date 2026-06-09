@@ -55,8 +55,7 @@ fn request_events_query_returns_append_order_for_monotonic_keys()
 }
 
 #[test]
-fn query_recent_request_events_returns_newest_first()
--> Result<(), Box<dyn std::error::Error>> {
+fn query_recent_request_events_returns_newest_first() -> Result<(), Box<dyn std::error::Error>> {
     let dir = tempfile::tempdir()?;
     let path = dir.path().join("events.redb");
     let storage = RedbStorage::open(&path, [0; 32])?;
@@ -69,18 +68,18 @@ fn query_recent_request_events_returns_newest_first()
     assert_eq!(events.len(), 5);
     assert_eq!(events[0].key_id.as_deref(), Some("req-0099"));
     assert_eq!(events[4].key_id.as_deref(), Some("req-0095"));
-    assert!(events.windows(2).all(|w| {
-        w[0].ts_ms.unwrap_or_default() >= w[1].ts_ms.unwrap_or_default()
-    }));
+    assert!(
+        events
+            .windows(2)
+            .all(|w| { w[0].ts_ms.unwrap_or_default() >= w[1].ts_ms.unwrap_or_default() })
+    );
 
-    let in_range =
-        storage.query_recent_request_events(1_800_000_005, 1_800_000_006, 100)?;
+    let in_range = storage.query_recent_request_events(1_800_000_005, 1_800_000_006, 100)?;
     assert_eq!(in_range.len(), 20);
     assert_eq!(in_range[0].key_id.as_deref(), Some("req-0069"));
     assert_eq!(in_range[19].key_id.as_deref(), Some("req-0050"));
 
-    let empty_range =
-        storage.query_recent_request_events(1_800_000_004, 1_800_000_003, 100)?;
+    let empty_range = storage.query_recent_request_events(1_800_000_004, 1_800_000_003, 100)?;
     assert!(empty_range.is_empty());
 
     let zero_limit = storage.query_recent_request_events(0, u64::MAX, 0)?;
