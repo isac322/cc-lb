@@ -108,6 +108,24 @@ pub struct RequestEvent {
     pub cost_cache_creation_1h_micros: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cost_cache_read_micros: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_reserve_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bulkhead_wait_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dns_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connection_reused: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit_reconcile_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observability_post_ms: Option<u64>,
     pub duration_ms: u64,
     /// handle entry → attempt() entry (auth + route + ctx).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -673,5 +691,65 @@ mod tests {
         assert_eq!(parsed.cost_cache_creation_5m_micros, None);
         assert_eq!(parsed.cost_cache_creation_1h_micros, None);
         assert_eq!(parsed.cost_cache_read_micros, None);
+    }
+
+    #[test]
+    fn request_event_serializes_new_latency_fields_round_trip() {
+        let event = RequestEvent {
+            auth_ms: Some(50),
+            route_ms: Some(30),
+            limit_reserve_ms: Some(10),
+            bulkhead_wait_ms: Some(3),
+            dns_ms: Some(12),
+            connect_ms: Some(85),
+            connection_reused: Some(false),
+            limit_reconcile_ms: Some(15),
+            observability_post_ms: Some(20),
+            ..RequestEvent::default()
+        };
+        let json = serde_json::to_string(&event).expect("serializes");
+        let decoded: RequestEvent = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(decoded.auth_ms, Some(50));
+        assert_eq!(decoded.route_ms, Some(30));
+        assert_eq!(decoded.limit_reserve_ms, Some(10));
+        assert_eq!(decoded.bulkhead_wait_ms, Some(3));
+        assert_eq!(decoded.dns_ms, Some(12));
+        assert_eq!(decoded.connect_ms, Some(85));
+        assert_eq!(decoded.connection_reused, Some(false));
+        assert_eq!(decoded.limit_reconcile_ms, Some(15));
+        assert_eq!(decoded.observability_post_ms, Some(20));
+    }
+
+    #[test]
+    fn request_event_decodes_old_event_without_new_fields_yields_none() {
+        let old_json =
+            r#"{"ts": 1700000000, "request_id": "test", "status": 200, "duration_ms": 100}"#;
+        let decoded: RequestEvent = serde_json::from_str(old_json).expect("deserializes old shape");
+        assert_eq!(decoded.auth_ms, None);
+        assert_eq!(decoded.route_ms, None);
+        assert_eq!(decoded.limit_reserve_ms, None);
+        assert_eq!(decoded.bulkhead_wait_ms, None);
+        assert_eq!(decoded.dns_ms, None);
+        assert_eq!(decoded.connect_ms, None);
+        assert_eq!(decoded.connection_reused, None);
+        assert_eq!(decoded.limit_reconcile_ms, None);
+        assert_eq!(decoded.observability_post_ms, None);
+    }
+
+    #[test]
+    fn request_event_warm_pool_invariant_preserved_through_round_trip() {
+        let event = RequestEvent {
+            connection_reused: Some(true),
+            dns_ms: None,
+            connect_ms: None,
+            ..RequestEvent::default()
+        };
+        let json = serde_json::to_string(&event).expect("serializes");
+        assert!(!json.contains("dns_ms"));
+        assert!(!json.contains("connect_ms"));
+        let decoded: RequestEvent = serde_json::from_str(&json).expect("deserializes");
+        assert_eq!(decoded.connection_reused, Some(true));
+        assert_eq!(decoded.dns_ms, None);
+        assert_eq!(decoded.connect_ms, None);
     }
 }

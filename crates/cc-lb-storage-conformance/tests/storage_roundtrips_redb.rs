@@ -10,8 +10,9 @@ use cc_lb_storage_conformance::{
     scenarios::{
         anthropic_compatibility_kv_store, atomicity, organization_metadata_store,
         plugin_registry_store, principal_store, prompt_cache_observation_store, storage_roundtrips,
-        storage_roundtrips_cache_split, upstream_rate_limit_store,
-        upstream_subscription_metadata_store, upstream_subscription_quota_store,
+        storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
+        upstream_rate_limit_store, upstream_subscription_metadata_store,
+        upstream_subscription_quota_store,
     },
 };
 use cc_lb_storage_redb::RedbStorage;
@@ -58,6 +59,14 @@ fn request_event_cache_split_round_trip_redb() {
     run_redb_scenario(
         "request_event_cache_split_round_trip",
         storage_roundtrips_cache_split::request_event_cache_split_round_trip,
+    );
+}
+
+#[test]
+fn request_event_latency_stage_round_trip_redb() {
+    run_redb_scenario(
+        "request_event_latency_stage_round_trip",
+        storage_roundtrips_latency_stages::request_event_latency_stage_round_trip,
     );
 }
 

@@ -1,6 +1,8 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Once};
 use std::time::Duration;
+#[cfg(not(test))]
+use std::time::Instant;
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -15,7 +17,11 @@ use hyper_util::rt::TokioExecutor;
 use metrics::Unit;
 use thiserror::Error;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+#[cfg(test)]
+use tokio::time::Instant;
 
+use crate::dns_cache::{CachingDnsConnector, DnsResolverConfig};
+use crate::instrumented_connector::InstrumentedHttpsConnector;
 use crate::lifecycle::{Body, DispatchError, UpstreamDispatch};
 
 const DEFAULT_POOL_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
@@ -70,9 +76,11 @@ impl Bulkhead {
     }
 
     pub async fn execute(&self, signed: SignedRequest) -> Result<Response<Body>, ExecuteError> {
+        let wait_start = Instant::now();
         let _guard = self.acquire().await.map_err(|source| match source {
             BulkheadError::QueueFull { retry_after } => ExecuteError::BulkheadFull(retry_after),
         })?;
+        crate::request_timing::record_bulkhead_wait(wait_start.elapsed());
         self.client
             .dispatch(signed)
             .await
@@ -254,12 +262,16 @@ impl UpstreamDispatch for Arc<Bulkhead> {
 }
 
 pub fn make_default_dispatcher(max_idle_per_host: usize) -> Arc<dyn UpstreamDispatch> {
+    let caching_http = CachingDnsConnector::new(&DnsResolverConfig::default())
+        .expect("default DNS resolver builds");
     let connector = HttpsConnectorBuilder::new()
         .with_webpki_roots()
         .https_or_http()
         .enable_http1()
         .enable_http2()
-        .build();
+        .wrap_connector(caching_http);
+    let connector = InstrumentedHttpsConnector::new(connector);
+    tracing::info!("dispatcher built with caching DNS + instrumented HTTPS connector");
     Arc::new(HttpsHyperDispatcher {
         client: build_client(connector, max_idle_per_host),
     })
@@ -276,7 +288,10 @@ pub fn make_http_dispatcher_with_connector(
 
 #[derive(Clone)]
 struct HttpsHyperDispatcher {
-    client: Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>,
+    client: Client<
+        InstrumentedHttpsConnector<hyper_rustls::HttpsConnector<CachingDnsConnector>>,
+        Full<Bytes>,
+    >,
 }
 
 #[derive(Clone)]
@@ -368,4 +383,174 @@ fn register_bulkhead_metrics() {
             "Active in-flight upstream requests admitted by each bulkhead."
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use async_trait::async_trait;
+    use bytes::Bytes;
+    use cc_lb_plugin_api::{
+        DialectError, Principal, PrincipalKind, RequestContext, RetryDecision, ShapedRequest,
+        ShapedRequestBuilder, SignedRequest, Signer, SignerError, SigningCapability, Upstream,
+        UpstreamDialect, shape_request, sign_request,
+    };
+    use http::{HeaderMap, Method, Response, StatusCode};
+    use url::Url;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn no_contention_wait_ms_is_under_threshold() {
+        use crate::request_timing::with_timings;
+
+        let bulkhead = bulkhead_for_test(8);
+        let (_, timings) = with_timings(async {
+            bulkhead
+                .execute(signed_request().await)
+                .await
+                .expect("bulkhead execute succeeds");
+        })
+        .await;
+
+        assert!(
+            timings.bulkhead_wait_ms.unwrap_or(0) <= 10,
+            "expected <=10ms, got {:?}",
+            timings.bulkhead_wait_ms
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn high_contention_forces_wait_ms() {
+        use crate::request_timing::with_timings;
+
+        let bulkhead = bulkhead_for_test(1);
+        let permit_holder = bulkhead.acquire().await.expect("acquire");
+        let release_handle = tokio::spawn(async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        });
+
+        let execute = with_timings(async {
+            bulkhead
+                .execute(signed_request().await)
+                .await
+                .expect("bulkhead execute succeeds");
+        });
+        tokio::pin!(execute);
+        tokio::select! {
+            release_result = release_handle => {
+                release_result.expect("release task");
+                drop(permit_holder);
+            }
+            _ = &mut execute => panic!("execute completed before permit release"),
+        }
+        let (_, timings) = execute.await;
+
+        assert!(
+            timings.bulkhead_wait_ms.unwrap_or(0) >= 90,
+            "expected >=90ms wait, got {:?}",
+            timings.bulkhead_wait_ms
+        );
+    }
+
+    #[tokio::test]
+    async fn bulkhead_outside_scope_does_not_panic() {
+        let bulkhead = bulkhead_for_test(4);
+
+        bulkhead
+            .execute(signed_request().await)
+            .await
+            .expect("bulkhead execute succeeds");
+    }
+
+    fn bulkhead_for_test(semaphore_permits: u32) -> Arc<Bulkhead> {
+        Bulkhead::new(
+            "test-upstream",
+            BulkheadConfig {
+                max_conns_per_upstream: semaphore_permits,
+                semaphore_permits,
+                acquire_timeout: Duration::from_secs(1),
+            },
+            Arc::new(NoopDispatch),
+        )
+    }
+
+    struct NoopDispatch;
+
+    #[async_trait]
+    impl UpstreamDispatch for NoopDispatch {
+        async fn dispatch(&self, _request: SignedRequest) -> Result<Response<Body>, DispatchError> {
+            Ok(Response::new(Body::from(Bytes::new())))
+        }
+    }
+
+    async fn signed_request() -> SignedRequest {
+        let upstream = Upstream::AnthropicDirect;
+        let ctx = RequestContext {
+            request_id: "test-request".to_owned(),
+            downstream_headers: HeaderMap::new(),
+            method: Method::POST,
+            path: "/v1/messages".to_owned(),
+            query: None,
+            body_bytes: Bytes::from_static(br#"{"model":"claude-test","messages":[]}"#),
+            cache_breakpoints: Vec::new(),
+            canonical_model_id: String::new(),
+        };
+        let principal = Principal {
+            id: "principal-test".to_owned(),
+            kind: PrincipalKind::ApiKey,
+            claims: serde_json::Map::new(),
+        };
+        let shaped = shape_request(&PassthroughDialect, &ctx, &upstream, &principal)
+            .expect("test request shapes");
+
+        sign_request(&NoopSigner, shaped)
+            .await
+            .expect("test request signs")
+    }
+
+    struct PassthroughDialect;
+
+    impl UpstreamDialect for PassthroughDialect {
+        fn shape(
+            &self,
+            ctx: &RequestContext,
+            _upstream: &Upstream,
+            _principal: &Principal,
+            builder: &mut ShapedRequestBuilder,
+        ) -> Result<ShapedRequest, DialectError> {
+            let mut url = Url::parse("http://upstream.local/").expect("test URL parses");
+            url.set_path(ctx.path.trim_start_matches('/'));
+            url.set_query(ctx.query.as_deref());
+            Ok(builder.shaped_request(
+                url,
+                ctx.method.clone(),
+                ctx.downstream_headers.clone(),
+                ctx.body_bytes.clone(),
+            ))
+        }
+
+        fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
+            None
+        }
+    }
+
+    struct NoopSigner;
+
+    #[async_trait]
+    impl Signer for NoopSigner {
+        async fn sign(
+            &self,
+            shaped: ShapedRequest,
+            capability: &mut SigningCapability,
+        ) -> Result<SignedRequest, SignerError> {
+            Ok(SignedRequest::from_shaped(shaped, capability))
+        }
+
+        async fn on_unauthorized(&self, _err: &cc_lb_plugin_api::UpstreamError) -> RetryDecision {
+            RetryDecision::Fail
+        }
+    }
 }
