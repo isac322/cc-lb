@@ -9,11 +9,13 @@ use axum::body::Body as AxumBody;
 use bytes::Bytes;
 use cc_lb_config::PromptCacheShadowConfig;
 use cc_lb_plugin_api::types::{
-    BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheScore, TtlClass, WarmCacheEntry,
+    BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheScore, StageDecision, TtlClass,
+    WarmCacheEntry,
 };
 use cc_lb_plugin_api::{
-    ApiKeyAwareSignerFactory, ObservabilityHook, ObserveEvent, Principal, PrincipalKind,
-    RequestContext, RetryDecision, RouterPlugin, SignedRequest, SubscriptionQuotaCandidateSnapshot,
+    ApiKeyAwareSignerFactory, FilterError, FilterOutput, InternalError, InternalErrorKind,
+    InternalErrorStage, ObservabilityHook, ObserveEvent, Principal, PrincipalKind, RequestContext,
+    RetryDecision, RouterPlugin, RoutingTrace, SignedRequest, SubscriptionQuotaCandidateSnapshot,
     Upstream, UpstreamCandidate, UpstreamError, UpstreamKind as CandidateUpstreamKind,
     shape_request, sign_request,
 };
@@ -1037,27 +1039,6 @@ impl Lifecycle {
             );
             return Ok(response);
         }
-        if !router_pipeline.user_filters.is_empty() {
-            observe_error(
-                hooks,
-                "router_pipeline_unavailable",
-                "router pipeline execution is not enabled",
-                "router",
-            );
-            let response = anthropic_error_response(
-                StatusCode::BAD_GATEWAY,
-                "route_not_configured",
-                "router pipeline execution is not enabled",
-            );
-            observe_finished_for_principal(
-                hooks,
-                StatusCode::BAD_GATEWAY,
-                started,
-                &principal,
-                &ctx.body_bytes,
-            );
-            return Ok(response);
-        }
         let router = &view.global_router;
 
         observe_many(
@@ -1076,8 +1057,15 @@ impl Lifecycle {
             &ctx.canonical_model_id,
             &ctx.cache_breakpoints,
         );
+        let pipeline_result = execute_filter_pipeline(
+            &router_pipeline.user_filters,
+            &ctx,
+            &principal,
+            candidates,
+            hooks,
+        );
 
-        let route = match router.route(&ctx, &principal, &candidates) {
+        let route = match router.route(&ctx, &principal, &pipeline_result.candidates) {
             Ok(route) => route,
             Err(source) => {
                 observe_error(hooks, "route_not_configured", &source.to_string(), "router");
@@ -1097,9 +1085,17 @@ impl Lifecycle {
             }
         };
 
-        let fallback_upstream_id = candidates.first().map(|candidate| candidate.upstream_id);
+        let fallback_upstream_id = pipeline_result
+            .candidates
+            .first()
+            .map(|candidate| candidate.upstream_id);
         let resolved_upstream_id = match route.upstream_id.or(fallback_upstream_id) {
-            Some(upstream_id) if candidates.iter().any(|c| c.upstream_id == upstream_id) => {
+            Some(upstream_id)
+                if pipeline_result
+                    .candidates
+                    .iter()
+                    .any(|c| c.upstream_id == upstream_id) =>
+            {
                 upstream_id
             }
             _ => {
@@ -1177,7 +1173,8 @@ impl Lifecycle {
         };
         let route_ms = duration_to_ms(route_start.elapsed());
         let metric_context = ApiKeyMetricContext::new(&success, &route.upstream, &ctx.body_bytes);
-        let predicted_cache_read_tokens = candidates
+        let predicted_cache_read_tokens = pipeline_result
+            .candidates
             .iter()
             .find(|candidate| candidate.upstream_id == resolved_upstream_id)
             .and_then(|candidate| candidate.cache_score.as_ref())
@@ -1398,6 +1395,8 @@ impl Lifecycle {
                     proxy_setup_ms: Some(proxy_setup_ms),
                     stage_timings: attempt_timings,
                     cache_metadata,
+                    routing_trace: pipeline_result.routing_trace(),
+                    internal_errors: pipeline_result.internal_errors,
                 },
                 prompt_cache_observation_context,
             )
@@ -1678,6 +1677,8 @@ impl Lifecycle {
                 body_chunk_count: Some(body_chunk_count),
                 body_bytes: Some(body.len() as u64),
                 status: status.as_u16(),
+                routing_trace: event_ctx.routing_trace.clone(),
+                internal_errors: event_ctx.internal_errors.clone(),
                 ..Default::default()
             };
             event_ctx.cache_metadata.apply_to(&mut event, &usage);
@@ -2180,6 +2181,8 @@ impl Lifecycle {
                         ping_count: Some(ping_count),
                         inter_token_avg_ms,
                         status: status.as_u16(),
+                        routing_trace: event_ctx.routing_trace.clone(),
+                        internal_errors: event_ctx.internal_errors.clone(),
                         ..Default::default()
                     };
                     event_ctx.cache_metadata.apply_to(&mut event, &usage);
@@ -2245,6 +2248,99 @@ pub fn observe_subscription_quota_headers(
             extra_usage_used_credits: None,
             ingested_at_unix_millis: observed_at_unix_millis,
         })
+        .collect()
+}
+
+struct FilterPipelineResult {
+    candidates: Vec<UpstreamCandidate>,
+    stages: Vec<StageDecision>,
+    internal_errors: Vec<InternalError>,
+}
+
+impl FilterPipelineResult {
+    fn routing_trace(&self) -> Option<RoutingTrace> {
+        (!self.stages.is_empty()).then(|| RoutingTrace {
+            stages: self.stages.clone(),
+            terminal_decision: None,
+        })
+    }
+}
+
+fn execute_filter_pipeline(
+    filters: &[Arc<dyn cc_lb_plugin_api::FilterPlugin>],
+    ctx: &RequestContext,
+    principal: &Principal,
+    candidates: Vec<UpstreamCandidate>,
+    hooks: &[Arc<dyn ObservabilityHook>],
+) -> FilterPipelineResult {
+    let mut current = candidates;
+    let mut stages = Vec::with_capacity(filters.len());
+    let mut internal_errors = Vec::new();
+
+    for filter in filters {
+        let stage_name = filter.plugin_name().to_owned();
+        let stage_started = Instant::now();
+        match filter.filter(ctx, principal, &current) {
+            Ok(output) => {
+                let output = validate_filter_output_stub(output);
+                let duration_ms = duration_to_ms(stage_started.elapsed());
+                tracing::debug!(
+                    stage = stage_name.as_str(),
+                    duration_ms,
+                    input_candidates = current.len(),
+                    kept_candidates = output.kept_upstream_ids.len(),
+                    "router filter stage completed"
+                );
+                stages.push(StageDecision {
+                    stage_name,
+                    upstream_id: output.kept_upstream_ids.first().copied(),
+                    reason: Some(output.reason.clone()),
+                });
+                current = keep_filter_candidates(&current, &output.kept_upstream_ids);
+            }
+            Err(error @ (FilterError::Trap { .. } | FilterError::Runtime { .. })) => {
+                let duration_ms = duration_to_ms(stage_started.elapsed());
+                let message = error.to_string();
+                tracing::warn!(
+                    stage = stage_name.as_str(),
+                    duration_ms,
+                    error = message.as_str(),
+                    "router filter stage failed; passing candidates through"
+                );
+                observe_error(hooks, "router_filter_passthrough", &message, "router");
+                stages.push(StageDecision {
+                    stage_name,
+                    upstream_id: current.first().map(|candidate| candidate.upstream_id),
+                    reason: Some(message.clone()),
+                });
+                internal_errors.push(InternalError {
+                    stage: InternalErrorStage::Router,
+                    kind: InternalErrorKind::PluginError,
+                    message: Some(message),
+                });
+            }
+        }
+    }
+
+    FilterPipelineResult {
+        candidates: current,
+        stages,
+        internal_errors,
+    }
+}
+
+fn validate_filter_output_stub(output: FilterOutput) -> FilterOutput {
+    output
+}
+
+fn keep_filter_candidates(
+    candidates: &[UpstreamCandidate],
+    kept_upstream_ids: &[Uuid],
+) -> Vec<UpstreamCandidate> {
+    candidates
+        .iter()
+        .filter(|candidate| kept_upstream_ids.contains(&candidate.upstream_id))
+        .cloned()
         .collect()
 }
 
@@ -2473,6 +2569,8 @@ struct RequestEventContext {
     proxy_setup_ms: Option<u64>,
     stage_timings: AttemptTimings,
     cache_metadata: RequestCacheMetadata,
+    routing_trace: Option<RoutingTrace>,
+    internal_errors: Vec<InternalError>,
 }
 
 #[derive(Clone, Default)]
@@ -4532,6 +4630,8 @@ mod tests {
             principal_kind: None,
             proxy_setup_ms: None,
             stage_timings: AttemptTimings::default(),
+            routing_trace: None,
+            internal_errors: Vec::new(),
             cache_metadata: RequestCacheMetadata {
                 cache_breakpoints: vec![RequestCacheBreakpoint {
                     block_index: 0,
