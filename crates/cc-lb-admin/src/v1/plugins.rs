@@ -311,7 +311,7 @@ async fn insert_chain(
         }) => invalid_order(),
         Err(StorageError::PluginChainConflict {
             reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id },
-        }) => slot_singleton(existing_entry_id),
+        }) if slot == PluginSlot::Shape => slot_singleton(existing_entry_id),
         Err(error) => storage_error(error),
     }
 }

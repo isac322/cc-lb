@@ -288,7 +288,7 @@ async fn chain_insert_unknown_principal_returns_400() {
 }
 
 #[tokio::test]
-async fn insert_chain_duplicate_router_returns_409_slot_singleton() {
+async fn insert_chain_duplicate_router_returns_201_and_lists_both_entries() {
     let (_dir, storage) = temp_storage();
     let principal_id = seed_principal(&storage, "principal-router-singleton").await;
     let entry = seed_registry(&storage, 22, "plugin-router-singleton").await;
@@ -303,16 +303,40 @@ async fn insert_chain_duplicate_router_returns_409_slot_singleton() {
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (status, _, body, _) = authed_json(
-        app,
+        app.clone(),
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
         Some(json!({ "slot": "Router", "wasm_registry_id": entry.id, "position": "last" })),
     )
     .await;
 
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"], "slot_singleton");
-    assert_eq!(body["existing_entry_id"], first.id.to_string());
+    assert_eq!(status, StatusCode::CREATED);
+    let second_id = body["id"].as_str().unwrap().to_owned();
+    assert_ne!(second_id, first.id.to_string());
+    assert_eq!(body["slot"], "router");
+    assert_eq!(body["order"], sparse_order::STEP * 2);
+
+    let (status, _, chain, _) = authed_json(
+        app,
+        "GET",
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain?slot=Router"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = chain["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    let first_id = first.id.to_string();
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["id"].as_str() == Some(first_id.as_str()))
+    );
+    assert!(
+        entries
+            .iter()
+            .any(|entry| entry["id"].as_str() == Some(second_id.as_str()))
+    );
 }
 
 #[tokio::test]
