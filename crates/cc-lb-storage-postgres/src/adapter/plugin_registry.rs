@@ -671,7 +671,7 @@ fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEn
 }
 
 fn is_singleton_slot(slot: PluginSlot) -> bool {
-    matches!(slot, PluginSlot::Router | PluginSlot::Shape)
+    matches!(slot, PluginSlot::Shape)
 }
 
 fn chain_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PluginChainEntry> {
