@@ -9,6 +9,7 @@ use cc_lb_storage_api::{
     types::AuditEntry,
     validate_identifier,
 };
+use serde_json::json;
 use uuid::Uuid;
 
 use crate::harness::{ConformanceBackend, ConformanceFixture};
@@ -30,6 +31,7 @@ where
     allowed_models_persist_raw(Arc::clone(&backend)).await?;
     principal_allowed_upstreams_roundtrip(Arc::clone(&backend)).await?;
     default_limits_roundtrip(Arc::clone(&backend)).await?;
+    router_terminal_strategy_roundtrip(Arc::clone(&backend)).await?;
     soft_delete_excludes_default_list(Arc::clone(&backend)).await?;
     hard_delete_removes_unreferenced(Arc::clone(&backend)).await?;
     hard_delete_referenced_by_audit_conflicts(Arc::clone(&backend)).await?;
@@ -116,6 +118,7 @@ where
                 allowed_models: None,
                 allowed_upstreams: None,
                 default_limits: None,
+                router_terminal_strategy: None,
             },
             BASE_TS + 1,
         )
@@ -250,6 +253,48 @@ where
             .await?
             .unwrap();
         ensure!(fetched.default_limits == limits());
+        Ok(())
+    })
+    .await
+}
+
+pub async fn router_terminal_strategy_roundtrip<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: AuditStore + PrincipalStore,
+{
+    with_fixture(backend, |storage| async move {
+        let record = PrincipalStore::create(&*storage, principal_create(15), BASE_TS).await?;
+        ensure!(
+            serde_json::to_value(&record.router_terminal_strategy)? == json!("first-pick"),
+            "default terminal strategy is first-pick"
+        );
+
+        let random_strategy = serde_json::from_value(json!("random"))?;
+        let updated = PrincipalStore::update(
+            &*storage,
+            record.id,
+            record.revision,
+            PrincipalUpdate {
+                router_terminal_strategy: Some(random_strategy),
+                ..PrincipalUpdate::default()
+            },
+            BASE_TS + 1,
+        )
+        .await?
+        .expect("record should exist");
+        ensure!(
+            serde_json::to_value(&updated.router_terminal_strategy)? == json!("random"),
+            "updated terminal strategy is random"
+        );
+
+        let fetched = PrincipalStore::get_by_id(&*storage, record.id)
+            .await?
+            .expect("record should exist");
+        ensure!(
+            serde_json::to_value(&fetched.router_terminal_strategy)? == json!("random"),
+            "terminal strategy persists"
+        );
         Ok(())
     })
     .await

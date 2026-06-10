@@ -157,4 +157,6 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../cc-lb-storage-postgres/migrations/0011_config_draft.sql"),
     include_str!("../../cc-lb-storage-postgres/migrations/0012_config_history.sql"),
     include_str!("../../cc-lb-storage-postgres/migrations/0016_principals.sql"),
+    include_str!("../../cc-lb-storage-postgres/migrations/0019_principal_allowed_upstreams.sql"),
+    include_str!("../../cc-lb-storage-postgres/migrations/0033_router_pipeline.sql"),
 ];

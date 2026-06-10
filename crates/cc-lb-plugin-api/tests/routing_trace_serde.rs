@@ -1,7 +1,7 @@
 use cc_lb_plugin_api::types::{
-    InternalError, InternalErrorKind, InternalErrorStage, PerCandidateReason, PassthroughCause,
-    RoutingTrace, StageDecision, TerminalDecision, TerminalStrategy, MAX_ERROR_MESSAGE_LEN,
-    MAX_ROUTING_TRACE_STAGES, MAX_STAGE_NAME_LEN,
+    InternalError, InternalErrorKind, InternalErrorStage, MAX_ERROR_MESSAGE_LEN,
+    MAX_ROUTING_TRACE_STAGES, MAX_STAGE_NAME_LEN, PassthroughCause, PerCandidateReason,
+    RoutingTrace, StageDecision, TerminalDecision, TerminalStrategy,
 };
 use uuid::Uuid;
 
@@ -40,6 +40,7 @@ fn per_candidate_reason_serde_roundtrip() {
 fn terminal_strategy_serde_roundtrip_and_default() {
     let strategies = vec![
         TerminalStrategy::FirstPick,
+        TerminalStrategy::Random,
         TerminalStrategy::RoundRobin,
         TerminalStrategy::LeastConnections,
     ];

@@ -627,6 +627,8 @@ pub enum PerCandidateReason {
 pub enum TerminalStrategy {
     /// Select first available upstream.
     FirstPick,
+    /// Select a router plugin at random.
+    Random,
     /// Round-robin selection.
     RoundRobin,
     /// Least connections strategy.
