@@ -32,7 +32,11 @@ fn filter_plugin_happy_path_maps_wire_v3_response() {
     let mut fixture = common::fixture(
         "filter-happy",
         &filter_module_requiring_input_markers(
-            &[b"principal-test", accepted_id.as_bytes(), rejected_id.as_bytes()],
+            &[
+                b"principal-test",
+                accepted_id.as_bytes(),
+                rejected_id.as_bytes(),
+            ],
             &response,
             r#"{"_v":1,"results":[]}"#,
         ),
@@ -40,10 +44,15 @@ fn filter_plugin_happy_path_maps_wire_v3_response() {
     );
     fixture.manifest.wire_version = Some(3);
     let runtime = ExtismRuntime::new();
-    let plugin_id = Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
-        .expect("fixture UUID parses");
+    let plugin_id =
+        Uuid::parse_str("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa").expect("fixture UUID parses");
     let (filter, staged) = runtime
-        .instantiate_filter_for("principal-test", plugin_id, "filter-happy", &fixture.manifest)
+        .instantiate_filter_for(
+            "principal-test",
+            plugin_id,
+            "filter-happy",
+            &fixture.manifest,
+        )
         .expect("filter plugin instantiates");
     runtime
         .commit_staged(vec![staged])
@@ -78,7 +87,11 @@ fn filter_plugin_maps_wasm_trap_to_filter_trap() {
         .expect("filter plugin instantiates");
 
     let error = filter
-        .filter(&common::ctx(), &common::principal(), &[common::candidate_wire()])
+        .filter(
+            &common::ctx(),
+            &common::principal(),
+            &[common::candidate_wire()],
+        )
         .expect_err("trap maps to FilterError::Trap");
 
     assert!(matches!(error, FilterError::Trap { .. }));
@@ -98,7 +111,11 @@ fn filter_plugin_maps_invalid_encoding_to_filter_runtime() {
         .expect("filter plugin instantiates");
 
     let error = filter
-        .filter(&common::ctx(), &common::principal(), &[common::candidate_wire()])
+        .filter(
+            &common::ctx(),
+            &common::principal(),
+            &[common::candidate_wire()],
+        )
         .expect_err("malformed output maps to FilterError::Runtime");
 
     assert!(matches!(error, FilterError::Runtime { .. }));

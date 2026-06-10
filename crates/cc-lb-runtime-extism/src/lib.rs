@@ -25,9 +25,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use crate::host_functions::{HostFunctionContext, HostState};
-use crate::plugin_wrap::{
-    ExtismDialectPlugin, ExtismFilterPlugin, ExtismRouterPlugin, ExtismSignerFactory,
-};
+use crate::plugin_wrap::{ExtismDialectPlugin, ExtismFilterPlugin, ExtismSignerFactory};
 use crate::sse_batch::ExtismObservabilityHook;
 
 const DEFAULT_MEMORY_MAX_PAGES: u32 = 32;
@@ -276,12 +274,11 @@ impl ExtismRuntime {
 
     pub fn instantiate_router_for(
         &self,
-        principal_id: &str,
-        plugin_name: &str,
-        manifest: &PluginManifest,
+        _principal_id: &str,
+        _plugin_name: &str,
+        _manifest: &PluginManifest,
     ) -> Result<(Arc<dyn RouterPlugin>, StagedSlot), RuntimeError> {
-        let (slot, staged) = self.stage_slot(principal_id, plugin_name, manifest, "route")?;
-        Ok((Arc::new(ExtismRouterPlugin::new(slot)), staged))
+        Err(router_wire_removed_error())
     }
 
     pub fn instantiate_filter_for(
@@ -402,13 +399,19 @@ impl Default for ExtismRuntime {
     }
 }
 
+fn router_wire_removed_error() -> RuntimeError {
+    RuntimeError::InstantiateFailed {
+        reason: "router wire v1/v2 plugins are no longer supported; use wire v3 filter plugins"
+            .to_owned(),
+    }
+}
+
 impl PluginRuntime for ExtismRuntime {
     fn instantiate_router(
         &self,
-        manifest: &PluginManifest,
+        _manifest: &PluginManifest,
     ) -> Result<Arc<dyn RouterPlugin>, RuntimeError> {
-        let slot = self.instantiate_slot(manifest, "route")?;
-        Ok(Arc::new(ExtismRouterPlugin::new(slot)))
+        Err(router_wire_removed_error())
     }
 
     fn instantiate_dialect(
@@ -752,17 +755,17 @@ mod tests {
 
     #[test]
     fn slots_with_same_plugin_name_and_different_principals_coexist() {
-        let fixture = wasm_manifest("router", router_module());
+        let fixture = wasm_manifest("shape", noroute_module());
         let runtime = ExtismRuntime::new();
-        let alice_key = SlotKey::new("alice", "router");
-        let bob_key = SlotKey::new("bob", "router");
+        let alice_key = SlotKey::new("alice", "shape");
+        let bob_key = SlotKey::new("bob", "shape");
 
         let alice_slot = runtime
             .register_slot_for_key(alice_key.clone(), &fixture.manifest)
-            .expect("alice router slot registers");
+            .expect("alice shape slot registers");
         let bob_slot = runtime
             .register_slot_for_key(bob_key.clone(), &fixture.manifest)
-            .expect("bob router slot registers");
+            .expect("bob shape slot registers");
 
         assert!(!Arc::ptr_eq(&alice_slot, &bob_slot));
         let instances = runtime
@@ -775,12 +778,17 @@ mod tests {
     }
 
     #[test]
-    fn instantiate_router_for_stages_without_touching_live_maps() {
-        let fixture = wasm_manifest("router", router_module());
+    fn instantiate_filter_for_stages_without_touching_live_maps() {
+        let fixture = wasm_manifest("filter", filter_module());
         let runtime = ExtismRuntime::new();
 
         let (_handle, staged) = runtime
-            .instantiate_router_for("alice", "alice-router", &fixture.manifest)
+            .instantiate_filter_for(
+                "alice",
+                Uuid::from_u128(0x11111111111111111111111111111111),
+                "alice-filter",
+                &fixture.manifest,
+            )
             .expect("staging succeeds");
 
         assert!(
@@ -796,21 +804,30 @@ mod tests {
         assert_eq!(keys.len(), 1);
         assert_eq!(
             keys[0],
-            ("alice".to_owned(), "alice-router".to_owned()),
+            ("alice".to_owned(), "alice-filter".to_owned()),
             "committed key uses (principal_id, plugin_name) pair"
         );
     }
 
     #[test]
     fn commit_staged_registers_both_principal_and_global_in_one_batch() {
-        let fixture = wasm_manifest("router", router_module());
+        let fixture = wasm_manifest("filter", filter_module());
         let runtime = ExtismRuntime::new();
 
         let (_global_handle, global_staged) = runtime
-            .instantiate_router_global("shared", &fixture.manifest)
+            .instantiate_filter_global(
+                Uuid::from_u128(0x22222222222222222222222222222222),
+                "shared",
+                &fixture.manifest,
+            )
             .expect("global staging");
         let (_alice_handle, alice_staged) = runtime
-            .instantiate_router_for("alice", "shared", &fixture.manifest)
+            .instantiate_filter_for(
+                "alice",
+                Uuid::from_u128(0x33333333333333333333333333333333),
+                "shared",
+                &fixture.manifest,
+            )
             .expect("alice staging");
 
         assert!(runtime.registered_slot_keys().is_empty());
@@ -832,18 +849,18 @@ mod tests {
     }
 
     #[test]
-    fn instantiate_router_for_with_missing_export_returns_err_without_staging() {
-        let fixture = wasm_manifest("noroute", noroute_module());
+    fn instantiate_router_for_returns_removed_error_without_staging() {
+        let fixture = wasm_manifest("router", router_module());
         let runtime = ExtismRuntime::new();
 
-        let err = runtime
-            .instantiate_router_for("alice", "noroute", &fixture.manifest)
-            .map(|_| ())
-            .expect_err("missing 'route' export must fail");
+        let err = match runtime.instantiate_router_for("alice", "router", &fixture.manifest) {
+            Ok(_) => panic!("router wire v1/v2 unexpectedly staged"),
+            Err(error) => error,
+        };
         let message = format!("{err:?}");
         assert!(
-            message.contains("does not export route"),
-            "error must surface missing-export cause, got: {message}"
+            message.contains("router wire v1/v2 plugins are no longer supported"),
+            "error must surface router removal cause, got: {message}"
         );
         assert!(
             runtime.registered_slot_keys().is_empty(),
@@ -853,15 +870,20 @@ mod tests {
 
     #[test]
     fn evict_slot_removes_committed_entry() {
-        let fixture = wasm_manifest("router", router_module());
+        let fixture = wasm_manifest("filter", filter_module());
         let runtime = ExtismRuntime::new();
         let (_handle, staged) = runtime
-            .instantiate_router_for("alice", "alice-router", &fixture.manifest)
+            .instantiate_filter_for(
+                "alice",
+                Uuid::from_u128(0x44444444444444444444444444444444),
+                "alice-filter",
+                &fixture.manifest,
+            )
             .expect("staging");
         runtime.commit_staged(vec![staged]).expect("commit");
         assert_eq!(runtime.registered_slot_keys().len(), 1);
 
-        runtime.evict_slot("alice", "alice-router");
+        runtime.evict_slot("alice", "alice-filter");
 
         assert!(
             runtime.registered_slot_keys().is_empty(),
@@ -891,6 +913,10 @@ mod tests {
 
     fn observe_module() -> &'static str {
         r#"(module (func (export "observe") (result i32) (i32.const 0)))"#
+    }
+
+    fn filter_module() -> &'static str {
+        r#"(module (func (export "filter") (result i32) (i32.const 0)))"#
     }
 
     struct WasmManifestFixture {

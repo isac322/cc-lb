@@ -10,7 +10,6 @@ use cc_lb_plugin_wire::v1::build_signer::BuildSignerFn;
 use cc_lb_plugin_wire::v1::normalize_error::NormalizeErrorFn;
 use cc_lb_plugin_wire::v1::observe::ObserveFn;
 use cc_lb_plugin_wire::v1::on_unauthorized::OnUnauthorizedFn;
-use cc_lb_plugin_wire::v1::route::RouteFn;
 use cc_lb_plugin_wire::v1::shape::ShapeFn;
 use cc_lb_plugin_wire::v1::sign::SignFn;
 use cc_lb_plugin_wire::wire_function::{FallbackPolicy, WireFunction};
@@ -46,7 +45,6 @@ fn dispatch_missing_version_uses_each_wire_function_const() {
     assert_dispatch_fallback::<BuildSignerFn>(&mut plugin, &metadata, FallbackPolicy::FailRequest);
     assert_dispatch_fallback::<ShapeFn>(&mut plugin, &metadata, FallbackPolicy::FailRequest);
     assert_dispatch_fallback::<ObserveFn>(&mut plugin, &metadata, FallbackPolicy::SilentSkip);
-    assert_dispatch_fallback::<RouteFn>(&mut plugin, &metadata, FallbackPolicy::UseDefault);
     assert_dispatch_fallback::<NormalizeErrorFn>(
         &mut plugin,
         &metadata,

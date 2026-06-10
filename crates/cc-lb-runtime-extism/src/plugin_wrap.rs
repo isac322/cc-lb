@@ -9,30 +9,25 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
     DialectError, FilterError, FilterOutput, FilterPlugin, PerCandidateReason, Principal,
-    RequestContext, RetryDecision, RouteDecision, RouteError, RouterPlugin, ShapedRequest,
-    ShapedRequestBuilder, SignedRequest, Signer, SignerError, SignerFactory, SigningCapability,
-    SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, Upstream, UpstreamCandidate,
-    UpstreamDialect, UpstreamError,
+    RequestContext, RetryDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer,
+    SignerError, SignerFactory, SigningCapability, SubscriptionQuotaCandidateSnapshot,
+    SubscriptionQuotaDataState, Upstream, UpstreamCandidate, UpstreamDialect, UpstreamError,
 };
 use cc_lb_plugin_wire::augmented_metadata::AugmentedMetadata;
 use cc_lb_plugin_wire::identity::{CC_LB_PLUGIN_MAGIC, PluginIdentity};
-use cc_lb_plugin_wire::v1::CandidateWire;
 use cc_lb_plugin_wire::v1::build_signer::{BuildSignerFn, BuildSignerRequest};
 use cc_lb_plugin_wire::v1::common::{
-    DialectBinding, HeaderWire, Principal as PrincipalWire, RateLimitObservationWire, RequestWire,
-    ShapedRequestWire, SubscriptionQuotaCandidateSnapshotWire, UpstreamErrorCategory,
+    HeaderWire, Principal as PrincipalWire, RequestWire, ShapedRequestWire, UpstreamErrorCategory,
     UpstreamErrorWire, UpstreamWire,
 };
 use cc_lb_plugin_wire::v1::normalize_error::{NormalizeErrorFn, NormalizeErrorRequest};
 use cc_lb_plugin_wire::v1::observe::ObserveFn;
 use cc_lb_plugin_wire::v1::on_unauthorized::{OnUnauthorizedFn, OnUnauthorizedRequest};
-use cc_lb_plugin_wire::v1::route::{RouteFn, RouteRequest};
 use cc_lb_plugin_wire::v1::shape::{ShapeFn, ShapeRequest};
 use cc_lb_plugin_wire::v1::sign::{SignFn, SignRequest};
 use cc_lb_plugin_wire::v2::common::{
     self as v2_common, CandidateWire as UpstreamCandidateWire, Principal as FilterPrincipalWire,
 };
-use cc_lb_plugin_wire::v2::route::{RouteFn as RouteFnV2, RouteRequest as RouteRequestV2};
 use cc_lb_plugin_wire::v2::shape::{ShapeFn as ShapeFnV2, ShapeRequest as ShapeRequestV2};
 use cc_lb_plugin_wire::v3::filter::{
     FilterFn, FilterRequest, FilterResponse, PerCandidateReasonWire,
@@ -40,7 +35,6 @@ use cc_lb_plugin_wire::v3::filter::{
 use cc_lb_plugin_wire::wire_function::{FallbackPolicy, WireFunction};
 use http::header::{HeaderName, HeaderValue};
 use http::{HeaderMap, Method, StatusCode};
-use serde::Serialize;
 use serde_json::Value;
 use tokio::sync::oneshot;
 use url::Url;
@@ -48,122 +42,6 @@ use uuid::Uuid;
 
 use crate::dispatch::{DispatchOutcome, dispatch_wire_call};
 use crate::{PluginCell, PluginSlot, ResourceLimits};
-
-#[derive(Clone)]
-pub(crate) struct ExtismRouterPlugin {
-    slot: Arc<PluginSlot>,
-}
-
-impl ExtismRouterPlugin {
-    pub(crate) fn new(slot: Arc<PluginSlot>) -> Self {
-        Self { slot }
-    }
-
-    fn route_v1(
-        &self,
-        ctx: &RequestContext,
-        principal: &Principal,
-        candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        let request = route_request_to_wire(ctx, principal, candidates);
-        let response = match self.slot.dispatch_wire_call_sync::<RouteFn>(request) {
-            DispatchOutcome::Ok(response) => response,
-            DispatchOutcome::Fallback(FallbackPolicy::UseDefault) => {
-                return Ok(default_route_decision(self.slot.clone()));
-            }
-            DispatchOutcome::Fallback(policy) => return Err(route_unexpected_fallback(policy)),
-        };
-        let dialect: Arc<dyn UpstreamDialect> = match response.dialect {
-            DialectBinding::SelfReferenced => Arc::new(ExtismDialectPlugin::new(self.slot.clone())),
-        };
-        let upstream = upstream_from_wire(response.upstream).map_err(route_runtime_message)?;
-        let upstream_id = response
-            .upstream_id
-            .map(|upstream_id| Uuid::parse_str(&upstream_id))
-            .transpose()
-            .map_err(|source| RouteError::Runtime {
-                reason: format!("plugin returned invalid upstream_id: {source}"),
-            })?;
-        Ok(RouteDecision {
-            upstream_id,
-            upstream,
-            dialect,
-        })
-    }
-
-    fn route_v2(
-        &self,
-        ctx: &RequestContext,
-        principal: &Principal,
-        candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        let request = route_request_to_wire_v2(ctx, principal, candidates);
-        let response = match self.slot.dispatch_wire_call_sync::<RouteFnV2>(request) {
-            DispatchOutcome::Ok(response) => response,
-            DispatchOutcome::Fallback(FallbackPolicy::UseDefault) => {
-                return Ok(default_route_decision(self.slot.clone()));
-            }
-            DispatchOutcome::Fallback(policy) => return Err(route_unexpected_fallback(policy)),
-        };
-        let upstream = upstream_from_wire_v2(response.upstream).map_err(route_runtime_message)?;
-        let upstream_id = response
-            .upstream_id
-            .map(|upstream_id| Uuid::parse_str(&upstream_id))
-            .transpose()
-            .map_err(|source| RouteError::Runtime {
-                reason: format!("plugin returned invalid upstream_id: {source}"),
-            })?;
-        let chosen_base_url = upstream_id
-            .and_then(|id| {
-                candidates
-                    .iter()
-                    .find(|candidate| candidate.upstream_id == id)
-            })
-            .and_then(|candidate| candidate.base_url.clone());
-        let dialect: Arc<dyn UpstreamDialect> = match response.dialect {
-            v2_common::DialectBinding::SelfReferenced => Arc::new(
-                ExtismDialectPlugin::with_base_url(self.slot.clone(), chosen_base_url),
-            ),
-        };
-        Ok(RouteDecision {
-            upstream_id,
-            upstream,
-            dialect,
-        })
-    }
-}
-
-impl RouterPlugin for ExtismRouterPlugin {
-    fn route(
-        &self,
-        ctx: &RequestContext,
-        principal: &Principal,
-        candidates: &[UpstreamCandidate],
-    ) -> Result<RouteDecision, RouteError> {
-        match self.slot.negotiated_wire_version() {
-            Ok(1) => self.route_v1(ctx, principal, candidates),
-            Ok(2) => self.route_v2(ctx, principal, candidates),
-            Ok(other) => {
-                tracing::warn!(
-                    plugin = %self.slot.name,
-                    wire_version = other,
-                    "plugin {} has unsupported wire_version {}, falling back to v1",
-                    self.slot.name,
-                    other,
-                );
-                self.route_v1(ctx, principal, candidates)
-            }
-            Err(source) => {
-                tracing::warn!(
-                    plugin = %self.slot.name,
-                    error = %source,
-                    "plugin wire_version unavailable, falling back to v1"
-                );
-                self.route_v1(ctx, principal, candidates)
-            }
-        }
-    }
-}
 
 #[derive(Clone)]
 pub struct ExtismFilterPlugin {
@@ -210,10 +88,6 @@ impl ExtismDialectPlugin {
             slot,
             base_url: None,
         }
-    }
-
-    pub(crate) fn with_base_url(slot: Arc<PluginSlot>, base_url: Option<String>) -> Self {
-        Self { slot, base_url }
     }
 }
 
@@ -536,8 +410,8 @@ impl PluginSlot {
             .limits_for_dispatch()
             .ok_or_else(|| filter_runtime_error("slot_metadata", "unavailable"))?;
         let started = Instant::now();
-        let outcome = dispatch_filter_with_timeout(cell, metadata, request, limits.max_call_duration)
-            .await;
+        let outcome =
+            dispatch_filter_with_timeout(cell, metadata, request, limits.max_call_duration).await;
         metrics::histogram!(
             "cc_lb_extism_call_duration_seconds",
             "plugin" => self.name.clone(),
@@ -703,9 +577,9 @@ fn dispatch_filter_call_inner(
             "response envelope was not a JSON object",
         ));
     };
-    let response_version = response_map.remove("_v").ok_or_else(|| {
-        filter_runtime_error("response_envelope", "response envelope missing _v")
-    })?;
+    let response_version = response_map
+        .remove("_v")
+        .ok_or_else(|| filter_runtime_error("response_envelope", "response envelope missing _v"))?;
     let actual_version = response_version.as_u64().ok_or_else(|| {
         filter_runtime_error(
             "response_envelope",
@@ -791,7 +665,6 @@ fn legacy_dispatch_metadata(plugin_name: &str) -> AugmentedMetadata {
             plugin_version: "legacy".to_owned(),
         },
         negotiated_functions: BTreeMap::from([
-            function_version::<RouteFn>(),
             function_version::<ShapeFn>(),
             function_version::<NormalizeErrorFn>(),
             function_version::<BuildSignerFn>(),
@@ -815,36 +688,6 @@ fn function_version<F: WireFunction>() -> (String, u32) {
         .max()
         .unwrap_or_default();
     (F::NAME.to_owned(), version)
-}
-
-fn candidates_to_wire(candidates: &[UpstreamCandidate]) -> Vec<CandidateWire> {
-    candidates
-        .iter()
-        .map(|candidate| CandidateWire {
-            upstream_id: candidate.upstream_id.to_string(),
-            name: candidate.name.clone(),
-            kind: candidate.kind.as_str().to_owned(),
-            observed_rate_limits: candidate
-                .observed_rate_limits
-                .iter()
-                .map(|observation| RateLimitObservationWire {
-                    kind: observation.kind.as_str().to_owned(),
-                    window: observation.window.clone(),
-                    limit: observation.limit,
-                    remaining: observation.remaining,
-                    reset: observation.reset.clone(),
-                })
-                .collect(),
-            subscription_quotas: candidate
-                .subscription_quotas
-                .iter()
-                .map(|snapshot| {
-                    subscription_quota_to_wire(snapshot, candidate.observed_at_unix_secs)
-                })
-                .collect(),
-            observed_at_unix_secs: candidate.observed_at_unix_secs,
-        })
-        .collect()
 }
 
 fn candidates_to_wire_v2(candidates: &[UpstreamCandidate]) -> Vec<v2_common::CandidateWire> {
@@ -894,30 +737,6 @@ fn candidates_to_wire_v3(candidates: &[UpstreamCandidate]) -> Vec<UpstreamCandid
     candidates_to_wire_v2(candidates)
 }
 
-fn subscription_quota_to_wire(
-    snapshot: &SubscriptionQuotaCandidateSnapshot,
-    observed_at_unix_secs: u64,
-) -> SubscriptionQuotaCandidateSnapshotWire {
-    SubscriptionQuotaCandidateSnapshotWire {
-        window: snapshot.window.clone(),
-        source: snapshot
-            .source
-            .clone()
-            .unwrap_or_else(|| "missing".to_owned()),
-        data_state: subscription_quota_data_state_to_wire(snapshot.state).to_owned(),
-        utilization: snapshot.utilization,
-        status: snapshot.status.clone(),
-        resets_at_unix_secs: snapshot.resets_at_unix_secs,
-        surpassed_threshold: snapshot.surpassed_threshold,
-        representative_claim: snapshot.representative_claim.clone(),
-        disabled_reason: snapshot.disabled_reason.clone(),
-        observed_at_unix_millis: snapshot.observed_at_unix_millis,
-        age_secs: snapshot
-            .observed_at_unix_millis
-            .map(|observed_at| observed_at_unix_secs.saturating_sub(observed_at / 1_000)),
-    }
-}
-
 fn subscription_quota_to_wire_v2(
     snapshot: &SubscriptionQuotaCandidateSnapshot,
     observed_at_unix_secs: u64,
@@ -958,55 +777,6 @@ pub(crate) fn request_to_wire(ctx: &RequestContext) -> RequestWire {
         path: ctx.path.clone(),
         query: ctx.query.clone(),
         body_base64: BASE64.encode(&ctx.body_bytes),
-    }
-}
-
-fn route_request_to_wire(
-    ctx: &RequestContext,
-    principal: &Principal,
-    candidates: &[UpstreamCandidate],
-) -> RouteRequest {
-    RouteRequest {
-        request_id: ctx.request_id.clone(),
-        headers: request_headers_to_wire(ctx),
-        method: ctx.method.as_str().to_owned(),
-        path: ctx.path.clone(),
-        query: ctx.query.clone(),
-        body_base64: BASE64.encode(&ctx.body_bytes),
-        principal: principal_to_wire(principal),
-        candidates: candidates_to_wire(candidates),
-    }
-}
-
-fn route_request_to_wire_v2(
-    ctx: &RequestContext,
-    principal: &Principal,
-    candidates: &[UpstreamCandidate],
-) -> RouteRequestV2 {
-    RouteRequestV2 {
-        request_id: ctx.request_id.clone(),
-        headers: request_headers_to_wire_v2(ctx),
-        method: ctx.method.as_str().to_owned(),
-        path: ctx.path.clone(),
-        query: ctx.query.clone(),
-        body_base64: BASE64.encode(&ctx.body_bytes),
-        principal: principal_to_wire_v2(principal),
-        candidates: candidates_to_wire_v2(candidates),
-        cache_breakpoints: ctx
-            .cache_breakpoints
-            .iter()
-            .map(|breakpoint| v2_common::CacheBreakpointWire {
-                block_index: breakpoint.block_index,
-                source: cache_breakpoint_source_to_wire_v2(&breakpoint.source),
-                path: breakpoint.path.clone(),
-                message_index: breakpoint.message_index,
-                prefix_hash: breakpoint.prefix_hash.clone(),
-                prefix_token_count: breakpoint.prefix_token_count,
-                requested_ttl: ttl_class_to_wire_v2(&breakpoint.requested_ttl),
-                origin: breakpoint_origin_to_wire_v2(&breakpoint.origin),
-            })
-            .collect(),
-        canonical_model_id: ctx.canonical_model_id.clone(),
     }
 }
 
@@ -1069,11 +839,10 @@ fn filter_response_to_output(response: FilterResponse) -> Result<FilterOutput, F
     let mut reasons = Vec::new();
 
     for result in response.results {
-        let upstream_id = Uuid::parse_str(&result.upstream_id).map_err(|source| {
-            FilterError::Runtime {
+        let upstream_id =
+            Uuid::parse_str(&result.upstream_id).map_err(|source| FilterError::Runtime {
                 reason: format!("plugin returned invalid upstream_id: {source}"),
-            }
-        })?;
+            })?;
         if result.decision == "accept" {
             kept_upstream_ids.push(upstream_id);
         } else {
@@ -1109,60 +878,6 @@ fn per_candidate_reason_from_wire(result: &PerCandidateReasonWire) -> PerCandida
     }
 }
 
-fn ttl_class_to_wire_v2(ttl: &impl Serialize) -> v2_common::TtlClassWire {
-    match serialized_enum_name(ttl).as_deref() {
-        Some("ephemeral1h" | "ephemeral_1h") => v2_common::TtlClassWire::Ephemeral1h,
-        Some("ephemeral5m" | "ephemeral_5m") => v2_common::TtlClassWire::Ephemeral5m,
-        Some(other) => {
-            tracing::warn!(
-                ttl_class = other,
-                "unknown cache TTL class, falling back to ephemeral_5m"
-            );
-            v2_common::TtlClassWire::Ephemeral5m
-        }
-        None => v2_common::TtlClassWire::Ephemeral5m,
-    }
-}
-
-fn breakpoint_origin_to_wire_v2(origin: &impl Serialize) -> v2_common::BreakpointOriginWire {
-    match serialized_enum_name(origin).as_deref() {
-        Some("auto_cache_inferred") => v2_common::BreakpointOriginWire::AutoCacheInferred,
-        Some("explicit") => v2_common::BreakpointOriginWire::Explicit,
-        Some(other) => {
-            tracing::warn!(
-                origin = other,
-                "unknown cache breakpoint origin, falling back to explicit"
-            );
-            v2_common::BreakpointOriginWire::Explicit
-        }
-        None => v2_common::BreakpointOriginWire::Explicit,
-    }
-}
-
-fn cache_breakpoint_source_to_wire_v2(
-    source: &impl Serialize,
-) -> v2_common::CacheBreakpointSourceWire {
-    match serialized_enum_name(source).as_deref() {
-        Some("tools") => v2_common::CacheBreakpointSourceWire::Tools,
-        Some("system") => v2_common::CacheBreakpointSourceWire::System,
-        Some("message") => v2_common::CacheBreakpointSourceWire::Message,
-        Some(other) => {
-            tracing::warn!(
-                source = other,
-                "unknown cache breakpoint source, falling back to message"
-            );
-            v2_common::CacheBreakpointSourceWire::Message
-        }
-        None => v2_common::CacheBreakpointSourceWire::Message,
-    }
-}
-
-fn serialized_enum_name(value: &impl Serialize) -> Option<String> {
-    serde_json::to_value(value)
-        .ok()
-        .and_then(|value| value.as_str().map(ToOwned::to_owned))
-}
-
 fn principal_kind_to_wire(principal: &Principal) -> String {
     serde_json::to_value(&principal.kind)
         .ok()
@@ -1173,18 +888,6 @@ fn principal_kind_to_wire(principal: &Principal) -> String {
 pub(crate) fn upstream_to_wire(upstream: &Upstream) -> UpstreamWire {
     match upstream {
         Upstream::AnthropicDirect => UpstreamWire::AnthropicDirect,
-    }
-}
-
-fn upstream_from_wire(upstream: UpstreamWire) -> Result<Upstream, WireError> {
-    match upstream {
-        UpstreamWire::AnthropicDirect => Ok(Upstream::AnthropicDirect),
-    }
-}
-
-fn upstream_from_wire_v2(upstream: v2_common::UpstreamWire) -> Result<Upstream, WireError> {
-    match upstream {
-        v2_common::UpstreamWire::AnthropicDirect => Ok(Upstream::AnthropicDirect),
     }
 }
 
@@ -1331,26 +1034,6 @@ impl fmt::Display for WireError {
 
 impl std::error::Error for WireError {}
 
-fn route_runtime_message(source: WireError) -> RouteError {
-    RouteError::Runtime {
-        reason: source.to_string(),
-    }
-}
-
-fn default_route_decision(slot: Arc<PluginSlot>) -> RouteDecision {
-    RouteDecision {
-        upstream_id: None,
-        upstream: Upstream::AnthropicDirect,
-        dialect: Arc::new(ExtismDialectPlugin::new(slot)),
-    }
-}
-
-fn route_unexpected_fallback(policy: FallbackPolicy) -> RouteError {
-    RouteError::Runtime {
-        reason: format!("unexpected plugin route fallback policy: {policy:?}"),
-    }
-}
-
 fn dialect_unexpected_fallback(policy: FallbackPolicy) -> DialectError {
     DialectError::UnsupportedRequest {
         reason: format!("unexpected plugin dialect fallback policy: {policy:?}"),
@@ -1410,52 +1093,6 @@ mod tests {
         }
     }
 
-    fn test_principal() -> Principal {
-        Principal {
-            id: "principal-test".to_owned(),
-            kind: PrincipalKind::ApiKey,
-            claims: serde_json::Map::new(),
-        }
-    }
-
-    fn test_request_context() -> RequestContext {
-        RequestContext {
-            request_id: "req-test".to_owned(),
-            downstream_headers: HeaderMap::new(),
-            method: Method::POST,
-            path: "/v1/messages".to_owned(),
-            query: None,
-            body_bytes: Bytes::from_static(br#"{"model":"claude-test"}"#),
-            cache_breakpoints: Vec::new(),
-            canonical_model_id: String::new(),
-        }
-    }
-
-    fn add_cache_fields(ctx: &mut RequestContext) {
-        ctx.cache_breakpoints = serde_json::from_value(json!([{
-            "block_index": 7,
-            "source": "message",
-            "path": "messages.0.content.1",
-            "message_index": 0,
-            "prefix_hash": "prefix-hash-123",
-            "prefix_token_count": 2048,
-            "requested_ttl": "ephemeral1h",
-            "origin": "auto_cache_inferred"
-        }]))
-        .expect("cache breakpoint fixture deserializes");
-        ctx.canonical_model_id = "claude-sonnet-4-5-20250929".to_owned();
-    }
-
-    #[test]
-    fn candidates_to_wire_versioned_v1_wire_omits_cache_score() {
-        let candidates = vec![test_candidate_without_cache_score()];
-
-        let wire = candidates_to_wire(&candidates);
-        let json = serde_json::to_value(&wire[0]).expect("v1 candidate serializes");
-
-        assert!(json.get("cache_score").is_none());
-    }
-
     #[test]
     fn candidates_to_wire_versioned_v2_wire_includes_cache_score() {
         let candidates = vec![test_candidate_with_cache_score()];
@@ -1483,50 +1120,5 @@ mod tests {
 
         let json = serde_json::to_value(&wire[0]).expect("v2 candidate serializes");
         assert!(json.get("cache_score").is_some());
-    }
-
-    #[test]
-    fn candidates_to_wire_versioned_v1_route_request_omits_cache_fields() {
-        let mut ctx = test_request_context();
-        add_cache_fields(&mut ctx);
-
-        let request = route_request_to_wire(&ctx, &test_principal(), &[]);
-        let json = serde_json::to_value(&request).expect("v1 route request serializes");
-
-        assert!(json.get("cache_breakpoints").is_none());
-        assert!(json.get("canonical_model_id").is_none());
-    }
-
-    #[test]
-    fn candidates_to_wire_versioned_v2_route_request_includes_cache_fields() {
-        let mut ctx = test_request_context();
-        add_cache_fields(&mut ctx);
-
-        let request = route_request_to_wire_v2(&ctx, &test_principal(), &[]);
-
-        assert_eq!(request.canonical_model_id, ctx.canonical_model_id);
-        assert_eq!(request.cache_breakpoints.len(), 1);
-        let breakpoint = &request.cache_breakpoints[0];
-        assert_eq!(breakpoint.block_index, 7);
-        assert_eq!(
-            breakpoint.source,
-            v2_common::CacheBreakpointSourceWire::Message
-        );
-        assert_eq!(breakpoint.path, "messages.0.content.1");
-        assert_eq!(breakpoint.message_index, Some(0));
-        assert_eq!(breakpoint.prefix_hash, "prefix-hash-123");
-        assert_eq!(breakpoint.prefix_token_count, 2_048);
-        assert_eq!(
-            breakpoint.requested_ttl,
-            v2_common::TtlClassWire::Ephemeral1h
-        );
-        assert_eq!(
-            breakpoint.origin,
-            v2_common::BreakpointOriginWire::AutoCacheInferred
-        );
-
-        let json = serde_json::to_value(&request).expect("v2 route request serializes");
-        assert!(json.get("cache_breakpoints").is_some());
-        assert!(json.get("canonical_model_id").is_some());
     }
 }
