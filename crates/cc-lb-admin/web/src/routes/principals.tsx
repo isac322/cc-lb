@@ -64,6 +64,8 @@ import {
   useSetAllowedModels,
   useTogglePrincipal,
   useUpstreamNameMap,
+  useRouterTerminalStrategy,
+  useUpdateRouterTerminalStrategy,
 } from '../lib/queries';
 
 const principalSearchSchema = z.object({ selectedId: z.string().optional() });
@@ -594,135 +596,213 @@ function SlotRadioCard({
   );
 }
 
-function RouterSlotEditor({ principalId }: { principalId: string }) {
+export function RouterSlotEditor({ principalId }: { principalId: string }) {
   const slot = 'router';
   const label = 'Router';
-  const desc = 'Picks the upstream';
+  const desc = 'Filters candidates and picks the upstream. Executed in order.';
   const chain = usePluginChain(principalId, slot);
   const registry = usePluginRegistry();
+  const reorder = useReorderChain();
   const insert = useInsertChainEntry();
   const del = useDeleteChainEntry();
+  const terminalStrategy = useRouterTerminalStrategy(principalId);
+  const updateTerminalStrategy = useUpdateRouterTerminalStrategy();
+
+  const [addOpen, setAddOpen] = useState(false);
+  const [selectedPluginId, setSelectedPluginId] = useState<string>('');
+  const [pendingRemove, setPendingRemove] = useState<{
+    id: string;
+    revision: number;
+    name: string;
+  } | null>(null);
+
+  const sensors = useSensors(
+    useSensor(PointerSensor),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
+  );
 
   const entries = useMemo(
     () => [...(chain.data?.entries ?? [])].sort((a, b) => a.order - b.order),
     [chain.data],
   );
 
-  const activeEntry = entries[0];
-  const hasMultiple = entries.length > 1;
-
-  const [mutatingId, setMutatingId] = useState<string | null>(null);
-
-  const handleSelect = async (pluginId: string | null) => {
-    if (mutatingId) return;
-    const currentPluginId = activeEntry?.wasm_registry_id ?? null;
-    if (pluginId === currentPluginId) return;
-
-    setMutatingId(pluginId ?? 'default');
-
-    try {
-      let currentEntries = entries;
-      let retryCount = 0;
-
-      while (retryCount < 2) {
-        try {
-          for (const entry of currentEntries) {
-            await del.mutateAsync({ id: entry.id, revision: entry.revision });
-          }
-
-          if (pluginId) {
-            await insert.mutateAsync({
-              pid: principalId,
-              body: { slot, wasm_registry_id: pluginId, order: 100 },
-            });
-          }
-
-          const pluginName =
-            registry.data?.entries.find((e) => e.id === pluginId)?.name ??
-            pluginId;
-          toast.success(
-            pluginId
-              ? `Router set to ${pluginName}`
-              : 'Router reset to system default',
-          );
-          break;
-        } catch (err) {
-          const error = err as {
-            status?: number;
-            message?: string;
-            error?: string;
-          };
-          const isConflict =
-            error?.status === 409 ||
-            error?.message?.includes('revision_conflict') ||
-            error?.message?.includes('slot_singleton') ||
-            error?.error === 'slot_singleton';
-          if (isConflict && retryCount === 0) {
-            retryCount++;
-            const freshChain = await chain.refetch();
-            currentEntries = [...(freshChain.data?.entries ?? [])].sort(
-              (a, b) => a.order - b.order,
-            );
-            continue;
-          }
-          throw err;
-        }
-      }
-    } catch (err) {
-      const error = err as { message?: string };
-      toast.error(
-        `Failed to update router: ${error.message || 'Unknown error'}`,
-      );
-    } finally {
-      setMutatingId(null);
-    }
+  const onDragEnd = (e: DragEndEvent) => {
+    if (!e.over || e.over.id === e.active.id) return;
+    const ids = entries.map((x) => x.id);
+    const oldIx = ids.indexOf(String(e.active.id));
+    const newIx = ids.indexOf(String(e.over.id));
+    if (oldIx < 0 || newIx < 0) return;
+    const reordered = [...entries];
+    const [moved] = reordered.splice(oldIx, 1);
+    reordered.splice(newIx, 0, moved!);
+    reorder.mutate(
+      {
+        pid: principalId,
+        entries: reordered.map((x, i) => ({
+          id: x.id,
+          order: (i + 1) * 100,
+          expected_revision: x.revision,
+        })),
+      },
+      { onSuccess: () => toast.success('Chain reordered') },
+    );
   };
-
-  const candidates = registry.data?.entries ?? [];
 
   return (
     <div>
-      <div className="flex items-end justify-between mb-3">
+      <div className="flex items-end justify-between mb-2">
         <div>
-          <div className="flex items-center gap-2">
-            <div className="text-sm font-medium text-text">{label}</div>
-            {hasMultiple && (
-              <Hint label="Database invariant violated: multiple router entries detected. Selecting a new option will clear them.">
-                <Badge tone="warn">Multiple entries detected</Badge>
-              </Hint>
-            )}
-          </div>
+          <div className="text-sm font-medium text-text">{label}</div>
           <div className="text-[11px] text-text-faint">{desc}</div>
         </div>
+        <Button
+          size="sm"
+          iconLeft={<Plus className="w-3 h-3" />}
+          onClick={() => setAddOpen(true)}
+        >
+          Add
+        </Button>
       </div>
-      <ul
-        className="space-y-2"
-        role="radiogroup"
-        aria-busy={mutatingId !== null}
+      
+      <DndContext
+        sensors={sensors}
+        collisionDetection={closestCenter}
+        onDragEnd={onDragEnd}
       >
-        <SlotRadioCard
-          name="System default"
-          desc="DbRouter — picks the first eligible upstream candidate."
-          isActive={!activeEntry}
-          isMutating={mutatingId === 'default'}
-          isMutatingOther={mutatingId !== null && mutatingId !== 'default'}
-          isDefault
-          badge="Default"
-          onClick={() => handleSelect(null)}
-        />
-        {/* TODO(slot-filter): once usePluginStatus carries slot metadata reliably, filter candidates by slot. */}
-        {candidates.map((p) => (
-          <SlotRadioCard
-            key={p.id}
-            name={p.name}
-            desc={p.label || 'Custom router plugin'}
-            isActive={activeEntry?.wasm_registry_id === p.id}
-            isMutating={mutatingId === p.id}
-            isMutatingOther={mutatingId !== null && mutatingId !== p.id}
-            onClick={() => handleSelect(p.id)}
-          />
-        ))}
-      </ul>
+        <SortableContext
+          items={entries.map((e) => e.id)}
+          strategy={verticalListSortingStrategy}
+        >
+          <ul className="space-y-1.5">
+            {entries.map((e) => {
+              const reg = registry.data?.entries.find(
+                (r) => r.id === e.wasm_registry_id,
+              );
+              return (
+                <SortableChainItem
+                  key={e.id}
+                  id={e.id}
+                  order={e.order}
+                  name={reg?.name ?? e.wasm_registry_id}
+                  onDelete={() =>
+                    setPendingRemove({
+                      id: e.id,
+                      revision: e.revision,
+                      name: reg?.name ?? e.wasm_registry_id,
+                    })
+                  }
+                />
+              );
+            })}
+            
+            {/* Locked Terminal Row */}
+            <li className="flex items-center gap-2 p-2 border border-subtle rounded-sm bg-overlay-2">
+              <div className="w-4 h-4 flex items-center justify-center text-text-faint">
+                <span className="w-1.5 h-1.5 rounded-full border border-text-faint" />
+              </div>
+              <Badge tone="mono">Terminal</Badge>
+              <span className="flex-1 text-sm font-medium truncate text-text-faint">
+                Final upstream selection
+              </span>
+              <select
+                aria-label="Terminal strategy"
+                className={cx(INPUT_CLASS, 'w-auto py-1 text-xs')}
+                value={terminalStrategy.data?.strategy ?? 'first-pick'}
+                disabled={terminalStrategy.isLoading || updateTerminalStrategy.isPending}
+                onChange={(e) => {
+                  if (!terminalStrategy.data) return;
+                  updateTerminalStrategy.mutate(
+                    {
+                      id: principalId,
+                      strategy: e.target.value,
+                      revision: terminalStrategy.data.revision,
+                    },
+                    { onSuccess: () => toast.success('Terminal strategy updated') }
+                  );
+                }}
+              >
+                <option value="first-pick">First-pick</option>
+                <option value="random">Random</option>
+              </select>
+            </li>
+          </ul>
+        </SortableContext>
+      </DndContext>
+
+      <Modal
+        open={addOpen}
+        onOpenChange={setAddOpen}
+        title={`Add plugin to ${label}`}
+        footer={
+          <>
+            <Button onClick={() => setAddOpen(false)}>Cancel</Button>
+            <Button
+              variant="primary"
+              disabled={!selectedPluginId}
+              onClick={() =>
+                insert.mutate(
+                  {
+                    pid: principalId,
+                    body: { slot, wasm_registry_id: selectedPluginId, order: (entries.length + 1) * 100 },
+                  },
+                  {
+                    onSuccess: () => {
+                      toast.success('Plugin added');
+                      setAddOpen(false);
+                      setSelectedPluginId('');
+                    },
+                  },
+                )
+              }
+            >
+              Add
+            </Button>
+          </>
+        }
+      >
+        <Field label="Plugin" required>
+          <select
+            className={INPUT_CLASS}
+            value={selectedPluginId}
+            onChange={(e) => setSelectedPluginId(e.target.value)}
+          >
+            <option value="">— select —</option>
+            {registry.data?.entries.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </Modal>
+
+      <ConfirmDialog
+        open={pendingRemove !== null}
+        onOpenChange={(o) => {
+          if (!o) setPendingRemove(null);
+        }}
+        title="Remove plugin from chain?"
+        description={
+          pendingRemove ? (
+            <>
+              <span className="font-mono">{pendingRemove.name}</span> will be
+              removed from the {label} chain. You can re-add it later.
+            </>
+          ) : null
+        }
+        confirmLabel="Remove"
+        destructive
+        onConfirm={() => {
+          if (!pendingRemove) return;
+          del.mutate(
+            { id: pendingRemove.id, revision: pendingRemove.revision },
+            { onSuccess: () => toast.success('Plugin removed from chain') },
+          );
+          setPendingRemove(null);
+        }}
+      />
     </div>
   );
 }
