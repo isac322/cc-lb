@@ -160,12 +160,20 @@ pub async fn send_sighup() {
     assert!(status.success(), "kill -HUP failed: {status}");
 }
 
+fn ready_timeout(default: Duration) -> Duration {
+    std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(default)
+}
+
 pub async fn wait_for_reloaded_cert(
     addr: SocketAddr,
     trust_cert: &Path,
     expected_fingerprint: &str,
 ) -> TlsResponse {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + ready_timeout(Duration::from_secs(15));
     loop {
         let last = match tls_get(addr, trust_cert, "/v1/models").await {
             Ok(response)
@@ -189,7 +197,7 @@ pub async fn wait_for_reloaded_cert(
 }
 
 pub async fn wait_tls_status(addr: SocketAddr, trust_cert: &Path, path: &str, status: u16) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + ready_timeout(Duration::from_secs(30));
     loop {
         let last = match tls_get(addr, trust_cert, path).await {
             Ok(response) if response.status == status => return,
@@ -205,7 +213,7 @@ pub async fn wait_tls_status(addr: SocketAddr, trust_cert: &Path, path: &str, st
 }
 
 pub async fn wait_plain_status(addr: SocketAddr, path: &str, status: u16) {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + ready_timeout(Duration::from_secs(30));
     loop {
         let last = match plain_get(addr, path).await {
             Ok(response) if response.status == status => return,

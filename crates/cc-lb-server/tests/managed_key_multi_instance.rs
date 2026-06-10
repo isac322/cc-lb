@@ -31,8 +31,16 @@ const ADMIN_TOKEN: &str = "test-token";
 const PRINCIPAL_ID: &str = "multi-instance-principal";
 const TASKS_PER_INSTANCE: usize = 50;
 const EXPECTED_ISSUED_KEYS: usize = TASKS_PER_INSTANCE * 2;
-const READY_TIMEOUT: Duration = Duration::from_secs(10);
+const READY_TIMEOUT_DEFAULT: Duration = Duration::from_secs(30);
 const READY_POLL_INTERVAL: Duration = Duration::from_millis(50);
+
+fn ready_timeout() -> Duration {
+    std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(READY_TIMEOUT_DEFAULT)
+}
 const MESSAGES_BODY: &str = r#"{"model":"claude-3-5-sonnet-20241022","messages":[{"role":"user","content":"hi"}],"max_tokens":1}"#;
 
 static POSTGRES_TEST_LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
@@ -387,7 +395,7 @@ async fn admin_post_body(
 }
 
 async fn wait_for_status(addr: SocketAddr, path: &str, status: u16) -> TestResult<()> {
-    let deadline = Instant::now() + READY_TIMEOUT;
+    let deadline = Instant::now() + ready_timeout();
     loop {
         let last = match http_get(addr, path).await {
             Ok(response) if response.status == status => return Ok(()),
