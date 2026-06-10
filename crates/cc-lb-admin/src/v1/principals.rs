@@ -6,6 +6,7 @@ use axum::{
     routing::{get, post, put},
 };
 use cc_lb_core::{AuditEntry, AuditPayload};
+use cc_lb_plugin_api::TerminalStrategy;
 use cc_lb_storage_api::principal::Limit;
 use cc_lb_storage_api::{
     PluginSlot, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate,
@@ -36,6 +37,10 @@ pub fn router() -> Router<AdminState> {
         )
         .route("/admin/v1/principals/{id}/enable", post(enable_principal))
         .route("/admin/v1/principals/{id}/disable", post(disable_principal))
+        .route(
+            "/admin/v1/principals/{id}/router-terminal",
+            get(get_router_terminal).put(update_router_terminal),
+        )
         .route(
             "/admin/v1/principals/{id}/allowed_models",
             put(update_allowed_models),
@@ -74,6 +79,11 @@ struct AllowedModelsBody {
     expected_revision: u64,
 }
 
+#[derive(Debug, Deserialize)]
+struct RouterTerminalBody {
+    strategy: String,
+}
+
 #[derive(Debug, Serialize)]
 struct PrincipalResponse {
     id: String,
@@ -92,6 +102,12 @@ struct PrincipalSummaryResponse {
     name: String,
     kind: PrincipalKind,
     enabled: bool,
+    revision: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct RouterTerminalResponse {
+    strategy: TerminalStrategy,
     revision: u64,
 }
 
@@ -349,6 +365,75 @@ async fn update_allowed_models(
     .await
 }
 
+async fn get_router_terminal(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    let Some(storage) = state.storage.as_deref() else {
+        return storage_unavailable();
+    };
+    let Ok(id) = id.parse() else {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_principal_id");
+    };
+
+    match PrincipalStore::get_by_id(storage, id).await {
+        Ok(Some(record)) if record.deleted_at_unix_secs.is_none() => {
+            router_terminal_with_etag(record)
+        }
+        Ok(_) => error_response(StatusCode::NOT_FOUND, "unknown_principal"),
+        Err(error) => storage_error(error),
+    }
+}
+
+async fn update_router_terminal(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+    Json(body): Json<RouterTerminalBody>,
+) -> axum::response::Response {
+    let Some(expected_revision) = if_match_revision(&headers) else {
+        return error_response(StatusCode::PRECONDITION_REQUIRED, "if_match_required");
+    };
+    let strategy = match parse_router_terminal_strategy(&body.strategy) {
+        Ok(strategy) => strategy,
+        Err(response) => return response,
+    };
+    let Some(storage) = state.storage.as_deref() else {
+        return storage_unavailable();
+    };
+    let Ok(id) = id.parse() else {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_principal_id");
+    };
+
+    match PrincipalStore::update(
+        storage,
+        id,
+        expected_revision,
+        PrincipalUpdate {
+            router_terminal_strategy: Some(strategy),
+            ..PrincipalUpdate::default()
+        },
+        unix_now_secs(),
+    )
+    .await
+    {
+        Ok(Some(record)) => {
+            emit_audit(
+                &state,
+                AuditPayload::PrincipalUpdate {
+                    principal_id: record.id.to_string(),
+                    fields_changed: vec!["router_terminal_strategy"],
+                },
+            );
+            let mut response = router_terminal_with_etag(record);
+            add_dynamic_rebind_headers(&mut response, &state).await;
+            response
+        }
+        Ok(None) => error_response(StatusCode::NOT_FOUND, "unknown_principal"),
+        Err(error) => storage_mutation_error(error),
+    }
+}
+
 async fn update_principal_record(
     state: AdminState,
     id: String,
@@ -385,6 +470,16 @@ fn respond_with_etag(record: PrincipalRecord) -> axum::response::Response {
     let mut headers = HeaderMap::new();
     insert_header(&mut headers, header::ETAG, &etag(record.revision));
     (headers, Json(principal_response(record))).into_response()
+}
+
+fn router_terminal_with_etag(record: PrincipalRecord) -> axum::response::Response {
+    let mut headers = HeaderMap::new();
+    insert_header(&mut headers, header::ETAG, &etag(record.revision));
+    let response = RouterTerminalResponse {
+        strategy: record.router_terminal_strategy,
+        revision: record.revision,
+    };
+    (headers, Json(response)).into_response()
 }
 
 fn principal_response(record: PrincipalRecord) -> PrincipalResponse {
@@ -425,6 +520,23 @@ fn update_fields_changed(body: &UpdatePrincipalBody) -> Vec<&'static str> {
         fields.push("default_limits");
     }
     fields
+}
+
+fn parse_router_terminal_strategy(
+    value: &str,
+) -> Result<TerminalStrategy, axum::response::Response> {
+    match value {
+        "first-pick" => Ok(TerminalStrategy::FirstPick),
+        "random" => Ok(TerminalStrategy::Random),
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "invalid_router_terminal_strategy",
+                "allowed": ["first-pick", "random"]
+            })),
+        )
+            .into_response()),
+    }
 }
 
 fn if_match_revision(headers: &HeaderMap) -> Option<u64> {
