@@ -5,17 +5,81 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use bytes::Bytes;
 use http::StatusCode;
+use uuid::Uuid;
 
 use crate::errors::{
     DialectError, ObservabilityError, RouteError, RuntimeError, SignerError, UpstreamError,
 };
 use crate::types::{
-    ObserveEvent, PluginManifest, Principal, RequestContext, RetryDecision, RouteDecision,
-    ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, Upstream,
-    UpstreamCandidate,
+    ObserveEvent, PerCandidateReason, PluginManifest, Principal, RequestContext, RetryDecision,
+    RouteDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability,
+    Upstream, UpstreamCandidate,
 };
 
+/// Filter plugin output containing upstream selection results and per-candidate reasons.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FilterOutput {
+    /// Upstream IDs that passed the filter.
+    pub kept_upstream_ids: Vec<Uuid>,
+    /// Human-readable reason for the filtering decision.
+    pub reason: String,
+    /// Per-candidate filtering reasons.
+    pub per_candidate_reasons: Vec<PerCandidateReason>,
+}
+
+/// Filter plugin errors returned by [`FilterPlugin`].
+#[derive(Debug)]
+pub enum FilterError {
+    /// Runtime error during filtering.
+    Runtime {
+        /// Redacted runtime error reason.
+        reason: String,
+    },
+    /// Trap error (plugin crashed or returned invalid state).
+    Trap {
+        /// Redacted trap error reason.
+        reason: String,
+    },
+}
+
+impl std::fmt::Display for FilterError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FilterError::Runtime { reason } => write!(f, "filter runtime error: {}", reason),
+            FilterError::Trap { reason } => write!(f, "filter trap error: {}", reason),
+        }
+    }
+}
+
+impl std::error::Error for FilterError {}
+
+/// Filter plugin boundary for upstream candidate filtering and decision-making.
+///
+/// Filter plugins evaluate requests against custom criteria and decide which upstream
+/// candidates are acceptable. They have access to the request context, authenticated
+/// principal, and list of available upstream candidates, and return a filtered set
+/// of acceptable upstreams along with per-candidate reasoning.
+pub trait FilterPlugin: Send + Sync {
+    /// Filters upstream candidates based on request and principal.
+    ///
+    /// Returns a [`FilterOutput`] containing the kept upstream IDs and per-candidate
+    /// reasons, or a [`FilterError`] if filtering fails.
+    fn filter(
+        &self,
+        ctx: &RequestContext,
+        principal: &Principal,
+        candidates: &[UpstreamCandidate],
+    ) -> Result<FilterOutput, FilterError>;
+
+    /// Returns the stable plugin identifier.
+    fn plugin_id(&self) -> Uuid;
+
+    /// Returns the human-readable plugin name.
+    fn plugin_name(&self) -> &str;
+}
+
 /// Router plugin boundary.
+#[deprecated(since = "0.2.0", note = "Use FilterPlugin via wire v3")]
 pub trait RouterPlugin: Send + Sync {
     /// Selects the upstream and dialect for an authenticated request.
     ///
