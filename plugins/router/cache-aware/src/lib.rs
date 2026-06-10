@@ -1,17 +1,56 @@
-use cc_lb_plugin_wire::v2::{
-    common::{CacheScoreWire, CandidateWire, DialectBinding, UpstreamWire},
-    route::RouteResponse,
+use cc_lb_plugin_wire::guest::run_string_export;
+use cc_lb_plugin_wire::handshake::{HandshakeAccept, HandshakeOffer};
+use cc_lb_plugin_wire::self_check::{
+    SelfCheckFailure, SelfCheckRequest, SelfCheckResponse, SelfCheckStage, SelfCheckStatus,
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
+use cc_lb_plugin_wire::serde_json::{self, Value};
+use cc_lb_plugin_wire::v2::common::{CacheScoreWire, CandidateWire};
+use cc_lb_plugin_wire::v3::filter::{
+    FilterFn, FilterRequest, FilterResponse, PerCandidateReasonWire,
+};
+use cc_lb_plugin_wire::wire_function::WireFunction;
+use std::collections::{BTreeMap, BTreeSet};
+use std::convert::Infallible;
 
-static COUNTER: AtomicUsize = AtomicUsize::new(0);
+const DEFAULT_KEEP_K: usize = 1;
+const ACCEPT_DECISION: &str = "accept";
+const REJECT_DECISION: &str = "reject";
+const ACCEPT_REASON: &str = "top-K by cache_score";
+const REJECT_REASON: &str = "below K by cache_score";
+const PLUGIN_METADATA_JSON: &[u8; 103] = b"{\"magic\":[204,27,112,16,0,1,0,0],\"abi_envelope\":1,\"plugin_name\":\"cache-aware\",\"plugin_version\":\"0.1.0\"}";
 
-pub fn round_robin_index(counter: &AtomicUsize, candidate_count: usize) -> Option<usize> {
-    if candidate_count == 0 {
-        return None;
+#[used]
+#[unsafe(link_section = "cc_lb.plugin.v1")]
+static CC_LB_PLUGIN_METADATA: [u8; PLUGIN_METADATA_JSON.len()] = *PLUGIN_METADATA_JSON;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CacheAwareConfig {
+    keep_k: usize,
+}
+
+impl CacheAwareConfig {
+    pub fn new(keep_k: usize) -> Self {
+        Self {
+            keep_k: keep_k.max(DEFAULT_KEEP_K),
+        }
     }
-    let current = counter.fetch_add(1, Ordering::Relaxed);
-    Some(current % candidate_count)
+
+    pub fn keep_k(self) -> usize {
+        self.keep_k
+    }
+
+    pub fn from_keep_k_value(value: Option<&str>) -> Self {
+        let keep_k = value
+            .and_then(|value| value.parse::<usize>().ok())
+            .unwrap_or(DEFAULT_KEEP_K);
+        Self::new(keep_k)
+    }
+}
+
+impl Default for CacheAwareConfig {
+    fn default() -> Self {
+        Self::new(DEFAULT_KEEP_K)
+    }
 }
 
 pub fn cache_score(cache_score: Option<&CacheScoreWire>) -> u32 {
@@ -27,256 +66,201 @@ pub fn predicted_cache_read_tokens(cache_score: Option<&CacheScoreWire>) -> u32 
         .unwrap_or(0)
 }
 
-pub fn select_candidate_index(
-    counter: &AtomicUsize,
-    candidates: &[CandidateWire],
-) -> Option<usize> {
-    if candidates.is_empty() {
-        return None;
-    }
-
-    let max_score = candidates
-        .iter()
-        .map(|candidate| cache_score(candidate.cache_score.as_ref()))
-        .max()
-        .unwrap_or(0);
-
-    if max_score == 0 {
-        return round_robin_index(counter, candidates.len());
-    }
-
-    let max_read_tokens = candidates
-        .iter()
-        .filter(|candidate| cache_score(candidate.cache_score.as_ref()) == max_score)
-        .map(|candidate| predicted_cache_read_tokens(candidate.cache_score.as_ref()))
-        .max()
-        .unwrap_or(0);
-
-    let tied_indices: Vec<usize> = candidates
-        .iter()
-        .enumerate()
-        .filter(|(_, candidate)| {
-            cache_score(candidate.cache_score.as_ref()) == max_score
-                && predicted_cache_read_tokens(candidate.cache_score.as_ref()) == max_read_tokens
-        })
-        .map(|(index, _)| index)
-        .collect();
-
-    if tied_indices.len() == 1 {
-        return tied_indices.first().copied();
-    }
-
-    round_robin_index(counter, tied_indices.len()).map(|index| tied_indices[index])
+pub fn kept_candidate_indices(candidates: &[CandidateWire], keep_k: usize) -> Vec<usize> {
+    let mut ranked: Vec<usize> = (0..candidates.len()).collect();
+    ranked.sort_by(|left, right| {
+        let left_candidate = &candidates[*left];
+        let right_candidate = &candidates[*right];
+        cache_score(right_candidate.cache_score.as_ref())
+            .cmp(&cache_score(left_candidate.cache_score.as_ref()))
+            .then_with(|| {
+                predicted_cache_read_tokens(right_candidate.cache_score.as_ref()).cmp(
+                    &predicted_cache_read_tokens(left_candidate.cache_score.as_ref()),
+                )
+            })
+    });
+    ranked
+        .into_iter()
+        .take(keep_k.max(DEFAULT_KEEP_K))
+        .collect()
 }
 
-fn route_response(upstream_id: Option<String>) -> RouteResponse {
-    RouteResponse {
-        upstream_id,
-        dialect: DialectBinding::SelfReferenced,
-        upstream: UpstreamWire::AnthropicDirect,
+pub fn filter_candidates(request: FilterRequest, config: CacheAwareConfig) -> FilterResponse {
+    let kept_indices = kept_candidate_indices(&request.candidates, config.keep_k());
+    let mut keep_mask = vec![false; request.candidates.len()];
+    for index in kept_indices {
+        keep_mask[index] = true;
+    }
+
+    FilterResponse {
+        results: request
+            .candidates
+            .iter()
+            .enumerate()
+            .map(|(index, candidate)| candidate_result(candidate, keep_mask[index]))
+            .collect(),
     }
 }
 
-#[cc_lb_pdk::plugin(name = "cache-aware", version = "0.1.0")]
-mod plugin {
-    use super::{COUNTER, route_response, select_candidate_index};
-    use cc_lb_plugin_wire::v2::{
-        common::UpstreamWire,
-        normalize_error::{NormalizeErrorRequest, NormalizeErrorResponse},
-        route::{RouteRequest, RouteResponse},
-        shape::{ShapeRequest, ShapeResponse},
-    };
-    use std::convert::Infallible;
+pub fn filter_handler(request: FilterRequest) -> Result<FilterResponse, Infallible> {
+    Ok(filter_candidates(request, host_config()))
+}
 
-    #[cc_lb_pdk::handler(name = "route", versions = [1])]
-    pub(super) fn route_handler(request: RouteRequest) -> Result<RouteResponse, Infallible> {
-        let upstream_id = select_candidate_index(&COUNTER, &request.candidates)
-            .map(|idx| request.candidates[idx].upstream_id.clone());
-
-        Ok(route_response(upstream_id))
+fn candidate_result(candidate: &CandidateWire, keep: bool) -> PerCandidateReasonWire {
+    PerCandidateReasonWire {
+        upstream_id: candidate.upstream_id.clone(),
+        decision: if keep {
+            ACCEPT_DECISION
+        } else {
+            REJECT_DECISION
+        }
+        .to_owned(),
+        reason: if keep { ACCEPT_REASON } else { REJECT_REASON }.to_owned(),
     }
+}
 
-    #[cc_lb_pdk::handler(name = "shape", versions = [1])]
-    pub(super) fn shape_handler(request: ShapeRequest) -> Result<ShapeResponse, Infallible> {
-        let base_url = match (&request.upstream, &request.upstream_base_url) {
-            (UpstreamWire::AnthropicDirect, Some(host_base_url)) => {
-                host_base_url.trim_end_matches('/').to_string()
+fn host_config() -> CacheAwareConfig {
+    CacheAwareConfig::from_keep_k_value(host_keep_k().as_deref())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn host_keep_k() -> Option<String> {
+    extism_pdk::config::get("keep_k").ok().flatten()
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn host_keep_k() -> Option<String> {
+    None
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn filter() -> i32 {
+    run_string_export(handle_filter_export)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn cc_lb_handshake() -> i32 {
+    run_string_export(handle_handshake_export)
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn cc_lb_self_check() -> i32 {
+    run_string_export(handle_self_check_export)
+}
+
+fn handle_filter_export(input: String) -> Result<String, String> {
+    let envelope: Value = serde_json::from_str(&input).map_err(|error| error.to_string())?;
+    let envelope_version = envelope
+        .get("_v")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| "plugin envelope missing numeric _v".to_owned())?;
+
+    match envelope_version {
+        1 => {
+            let mut payload_envelope = envelope;
+            if let Value::Object(object) = &mut payload_envelope {
+                object.remove("_v");
             }
-            (UpstreamWire::AnthropicDirect, None) => "https://api.anthropic.com".to_string(),
-        };
-        let query_part = request
-            .request
-            .query
-            .as_ref()
-            .map(|query| format!("?{}", query))
-            .unwrap_or_default();
-
-        Ok(ShapeResponse {
-            url: format!("{}{}{}", base_url, request.request.path, query_part),
-            method: request.request.method,
-            headers: request.request.headers,
-            body_base64: request.request.body_base64,
-        })
-    }
-
-    #[cc_lb_pdk::handler(name = "normalize_error", versions = [1])]
-    pub(super) fn normalize_error_handler(
-        _request: NormalizeErrorRequest,
-    ) -> Result<NormalizeErrorResponse, Infallible> {
-        Ok(NormalizeErrorResponse { body_base64: None })
+            let payload: FilterRequest =
+                serde_json::from_value(payload_envelope).map_err(|error| error.to_string())?;
+            let result = filter_handler(payload).map_err(|error| format!("{error:?}"))?;
+            let mut out = serde_json::to_value(&result).map_err(|error| error.to_string())?;
+            out["_v"] = Value::from(1_u64);
+            serde_json::to_string(&out).map_err(|error| error.to_string())
+        }
+        unsupported_version => Err(format!(
+            "unsupported plugin envelope _v: {unsupported_version}"
+        )),
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use cc_lb_plugin_api::PluginManifest;
-    use cc_lb_plugin_wire::v2::{
-        common::{CacheScoreWire, CandidateWire, Principal, UpstreamWire},
-        route::RouteRequest,
+fn handle_handshake_export(input: String) -> Result<String, String> {
+    let offer: HandshakeOffer = serde_json::from_str(&input).map_err(|error| error.to_string())?;
+    offer.validate().map_err(|error| error.to_string())?;
+
+    let mut plugin_supported = BTreeMap::new();
+    plugin_supported.insert(
+        FilterFn::NAME.to_owned(),
+        FilterFn::SUPPORTED_VERSIONS.to_vec(),
+    );
+
+    let implemented_functions = BTreeSet::from([FilterFn::NAME.to_owned()]);
+    let required_capabilities = BTreeSet::new();
+    let mut chosen_versions = BTreeMap::new();
+    if let Some(chosen) = offer
+        .function_versions
+        .get(FilterFn::NAME)
+        .and_then(|offered_versions| {
+            offered_versions
+                .iter()
+                .filter(|version| FilterFn::SUPPORTED_VERSIONS.contains(version))
+                .max()
+                .copied()
+        })
+    {
+        chosen_versions.insert(FilterFn::NAME.to_owned(), chosen);
+    }
+
+    let accept = HandshakeAccept {
+        handshake_schema_version: offer.handshake_schema_version,
+        envelope_version: offer.envelope_version,
+        chosen_versions,
+        plugin_supported,
+        implemented_functions,
+        required_capabilities,
     };
-    use std::collections::BTreeMap;
-    use std::sync::Mutex;
-    use std::sync::atomic::AtomicUsize;
+    accept
+        .validate_against_offer(&offer)
+        .map_err(|error| error.to_string())?;
+    serde_json::to_string(&accept).map_err(|error| error.to_string())
+}
 
-    static TEST_LOCK: Mutex<()> = Mutex::new(());
+fn handle_self_check_export(input: String) -> Result<String, String> {
+    let request: SelfCheckRequest =
+        serde_json::from_str(&input).map_err(|error| error.to_string())?;
+    request.validate().map_err(|error| error.to_string())?;
 
-    #[test]
-    fn route_picks_warm_candidate() {
-        let _guard = TEST_LOCK.lock().expect("test lock");
-        COUNTER.store(0, Ordering::Relaxed);
-
-        let response = plugin::route_handler(route_request(vec![
-            candidate("cold", None),
-            candidate("warm", Some(4096)),
-        ]))
-        .expect("route ok");
-
-        assert_eq!(response.upstream_id.as_deref(), Some("warm"));
-        assert_eq!(response.dialect, DialectBinding::SelfReferenced);
-        assert_eq!(response.upstream, UpstreamWire::AnthropicDirect);
-        assert_eq!(COUNTER.load(Ordering::Relaxed), 0);
+    let mut failures = Vec::new();
+    if let Err(message) = filter_wire_roundtrip_check() {
+        failures.push(SelfCheckFailure {
+            stage: SelfCheckStage::WireFunctionTest,
+            message,
+        });
     }
 
-    #[test]
-    fn route_falls_through_to_rr_when_all_cold() {
-        let _guard = TEST_LOCK.lock().expect("test lock");
-        COUNTER.store(0, Ordering::Relaxed);
+    let response = SelfCheckResponse {
+        status: if failures.is_empty() {
+            SelfCheckStatus::Success
+        } else {
+            SelfCheckStatus::Failure
+        },
+        failures,
+        completed_at: request.initiated_at,
+    };
+    response.validate().map_err(|error| error.to_string())?;
+    serde_json::to_string(&response).map_err(|error| error.to_string())
+}
 
-        let first = plugin::route_handler(route_request(vec![
-            candidate("cold-1", None),
-            candidate("cold-2", Some(0)),
-        ]))
-        .expect("route ok");
-        let second = plugin::route_handler(route_request(vec![
-            candidate("cold-1", None),
-            candidate("cold-2", Some(0)),
-        ]))
-        .expect("route ok");
+fn filter_wire_roundtrip_check() -> Result<(), String> {
+    let sample = FilterFn::dry_run_request();
+    let bytes = serde_json::to_vec(&sample)
+        .map_err(|error| format!("filter@1 request serialize failed: {error}"))?;
+    let decoded: FilterRequest = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("filter@1 request deserialize failed: {error}"))?;
+    let bytes = serde_json::to_vec(&decoded)
+        .map_err(|error| format!("filter@1 request reserialize failed: {error}"))?;
+    let _: <FilterFn as WireFunction>::Request = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("filter@1 request wire decode failed: {error}"))?;
 
-        assert_eq!(first.upstream_id.as_deref(), Some("cold-1"));
-        assert_eq!(second.upstream_id.as_deref(), Some("cold-2"));
-        assert_eq!(COUNTER.load(Ordering::Relaxed), 2);
-    }
+    let sample = FilterFn::dry_run_response();
+    let bytes = serde_json::to_vec(&sample)
+        .map_err(|error| format!("filter@1 response serialize failed: {error}"))?;
+    let decoded: FilterResponse = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("filter@1 response deserialize failed: {error}"))?;
+    let bytes = serde_json::to_vec(&decoded)
+        .map_err(|error| format!("filter@1 response reserialize failed: {error}"))?;
+    let _: <FilterFn as WireFunction>::Response = serde_json::from_slice(&bytes)
+        .map_err(|error| format!("filter@1 response wire decode failed: {error}"))?;
 
-    #[test]
-    fn route_tiebreak_by_predicted_read_tokens() {
-        let _guard = TEST_LOCK.lock().expect("test lock");
-        COUNTER.store(0, Ordering::Relaxed);
-
-        let response = plugin::route_handler(route_request(vec![
-            candidate("small-read", Some(512)),
-            candidate("large-read", Some(8192)),
-        ]))
-        .expect("route ok");
-
-        assert_eq!(response.upstream_id.as_deref(), Some("large-read"));
-        assert_eq!(COUNTER.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn route_round_robins_exact_cache_ties() {
-        let _guard = TEST_LOCK.lock().expect("test lock");
-        COUNTER.store(0, Ordering::Relaxed);
-
-        let first = plugin::route_handler(route_request(vec![
-            candidate("warm-1", Some(2048)),
-            candidate("warm-2", Some(2048)),
-        ]))
-        .expect("route ok");
-        let second = plugin::route_handler(route_request(vec![
-            candidate("warm-1", Some(2048)),
-            candidate("warm-2", Some(2048)),
-        ]))
-        .expect("route ok");
-
-        assert_eq!(first.upstream_id.as_deref(), Some("warm-1"));
-        assert_eq!(second.upstream_id.as_deref(), Some("warm-2"));
-        assert_eq!(COUNTER.load(Ordering::Relaxed), 2);
-    }
-
-    #[test]
-    fn handshake_declares_wire_version_2() {
-        let manifest = PluginManifest {
-            name: "cache-aware".to_owned(),
-            artifact: "target/wasm32-unknown-unknown/release/cache_aware_router.wasm".to_owned(),
-            wire_version: Some(2),
-            config: cc_lb_plugin_wire::serde_json::json!({}),
-            metadata: BTreeMap::new(),
-        };
-
-        assert_eq!(manifest.wire_version, Some(2));
-    }
-
-    #[test]
-    fn select_candidate_index_empty_returns_none() {
-        let counter = AtomicUsize::new(0);
-
-        assert_eq!(select_candidate_index(&counter, &[]), None);
-        assert_eq!(counter.load(Ordering::Relaxed), 0);
-    }
-
-    fn route_request(candidates: Vec<CandidateWire>) -> RouteRequest {
-        RouteRequest {
-            request_id: "req-route".to_string(),
-            headers: Vec::new(),
-            method: "POST".to_string(),
-            path: "/v1/messages".to_string(),
-            query: None,
-            body_base64: "e30=".to_string(),
-            principal: Principal::dry_run_sample(),
-            candidates,
-            cache_breakpoints: Vec::new(),
-            canonical_model_id: "claude-sonnet-4-5-20250929".to_string(),
-        }
-    }
-
-    fn candidate(upstream_id: &str, predicted_cache_read_tokens: Option<u32>) -> CandidateWire {
-        CandidateWire {
-            upstream_id: upstream_id.to_string(),
-            name: upstream_id.to_string(),
-            kind: "anthropic_api_key".to_string(),
-            observed_rate_limits: Vec::new(),
-            subscription_quotas: Vec::new(),
-            observed_at_unix_secs: 0,
-            cache_score: predicted_cache_read_tokens.map(cache_score_wire),
-        }
-    }
-
-    fn cache_score_wire(predicted_cache_read_tokens: u32) -> CacheScoreWire {
-        CacheScoreWire {
-            predicted_cache_read_tokens,
-            predicted_cache_creation_tokens_5m: 0,
-            predicted_cache_creation_tokens_1h: 0,
-            predicted_uncached_input_tokens: 0,
-            predicted_expires_at_unix_secs: None,
-            matched_breakpoint_index: if predicted_cache_read_tokens > 0 {
-                Some(0)
-            } else {
-                None
-            },
-            confidence: 1.0,
-            ambiguity_reason: None,
-        }
-    }
+    Ok(())
 }
