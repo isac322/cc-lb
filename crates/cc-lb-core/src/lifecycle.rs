@@ -9,15 +9,15 @@ use axum::body::Body as AxumBody;
 use bytes::Bytes;
 use cc_lb_config::PromptCacheShadowConfig;
 use cc_lb_plugin_api::types::{
-    BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheScore, StageDecision, TtlClass,
-    WarmCacheEntry,
+    BreakpointOrigin, CacheBreakpoint, CacheBreakpointSource, CacheScore, StageDecision,
+    TerminalDecision, TtlClass, WarmCacheEntry,
 };
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, FilterError, FilterOutput, InternalError, InternalErrorKind,
     InternalErrorStage, ObservabilityHook, ObserveEvent, Principal, PrincipalKind, RequestContext,
     RetryDecision, RouterPlugin, RoutingTrace, SignedRequest, SubscriptionQuotaCandidateSnapshot,
-    Upstream, UpstreamCandidate, UpstreamError, UpstreamKind as CandidateUpstreamKind,
-    shape_request, sign_request,
+    TerminalStrategy, Upstream, UpstreamCandidate, UpstreamError,
+    UpstreamKind as CandidateUpstreamKind, shape_request, sign_request,
 };
 use cc_lb_pricing::{PricingStatus, global_catalog, virtual_cost_micros_full};
 use cc_lb_storage_api::{
@@ -36,6 +36,7 @@ use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -733,6 +734,7 @@ pub struct Lifecycle {
     subscription_quota_sink: Option<SubscriptionQuotaSink>,
     subscription_metadata_hook: Option<MetadataHookHandle>,
     subscription_quota_cache: Option<Arc<dyn SubscriptionQuotaCacheLike>>,
+    rng: Mutex<StdRng>,
 }
 
 impl Lifecycle {
@@ -766,6 +768,7 @@ impl Lifecycle {
             subscription_quota_sink: None,
             subscription_metadata_hook: None,
             subscription_quota_cache: None,
+            rng: Mutex::new(rand::make_rng()),
         }
     }
 
@@ -786,7 +789,13 @@ impl Lifecycle {
             subscription_quota_sink: None,
             subscription_metadata_hook: None,
             subscription_quota_cache: None,
+            rng: Mutex::new(rand::make_rng()),
         }
+    }
+
+    pub fn with_terminal_rng_seed(mut self, seed: [u8; 32]) -> Self {
+        self.rng = Mutex::new(StdRng::from_seed(seed));
+        self
     }
 
     pub fn with_error_normalizer(self, error_normalizer: Arc<ErrorNormalizer>) -> Self {
@@ -862,6 +871,31 @@ impl Lifecycle {
         self.limit_engine = Some(limit_engine);
         self.limit_subject_provider = Some(limit_subject_provider);
         self
+    }
+
+    fn select_terminal_upstream(
+        &self,
+        strategy: TerminalStrategy,
+        candidates: &[UpstreamCandidate],
+    ) -> TerminalDecision {
+        let upstream_id = match strategy {
+            TerminalStrategy::Random if !candidates.is_empty() => {
+                let mut rng = self.rng.lock().expect("terminal rng lock");
+                let index = rng.random_range(..candidates.len());
+                Some(candidates[index].upstream_id)
+            }
+            TerminalStrategy::FirstPick
+            | TerminalStrategy::Random
+            | TerminalStrategy::RoundRobin
+            | TerminalStrategy::LeastConnections => {
+                candidates.first().map(|candidate| candidate.upstream_id)
+            }
+        };
+
+        TerminalDecision {
+            upstream_id,
+            strategy,
+        }
     }
 
     pub fn with_static_limit_subject(
@@ -1064,6 +1098,10 @@ impl Lifecycle {
             candidates,
             hooks,
         );
+        let terminal_decision = self.select_terminal_upstream(
+            router_pipeline.terminal.clone(),
+            &pipeline_result.candidates,
+        );
 
         let route = match router.route(&ctx, &principal, &pipeline_result.candidates) {
             Ok(route) => route,
@@ -1085,11 +1123,7 @@ impl Lifecycle {
             }
         };
 
-        let fallback_upstream_id = pipeline_result
-            .candidates
-            .first()
-            .map(|candidate| candidate.upstream_id);
-        let resolved_upstream_id = match route.upstream_id.or(fallback_upstream_id) {
+        let resolved_upstream_id = match route.upstream_id.or(terminal_decision.upstream_id) {
             Some(upstream_id)
                 if pipeline_result
                     .candidates
@@ -1395,7 +1429,7 @@ impl Lifecycle {
                     proxy_setup_ms: Some(proxy_setup_ms),
                     stage_timings: attempt_timings,
                     cache_metadata,
-                    routing_trace: pipeline_result.routing_trace(),
+                    routing_trace: Some(pipeline_result.routing_trace(terminal_decision.clone())),
                     internal_errors: pipeline_result.internal_errors,
                 },
                 prompt_cache_observation_context,
@@ -2258,11 +2292,11 @@ struct FilterPipelineResult {
 }
 
 impl FilterPipelineResult {
-    fn routing_trace(&self) -> Option<RoutingTrace> {
-        (!self.stages.is_empty()).then(|| RoutingTrace {
+    fn routing_trace(&self, terminal_decision: TerminalDecision) -> RoutingTrace {
+        RoutingTrace {
             stages: self.stages.clone(),
-            terminal_decision: None,
-        })
+            terminal_decision: Some(terminal_decision),
+        }
     }
 }
 
