@@ -1,10 +1,10 @@
 //! Tests for FilterPlugin trait, FilterOutput, and FilterError.
 
+use bytes::Bytes;
 use cc_lb_plugin_api::{
     FilterError, FilterOutput, FilterPlugin, Principal, PrincipalKind, RequestContext,
     TerminalStrategy, UpstreamCandidate, UpstreamKind,
 };
-use bytes::Bytes;
 use http::Method;
 use uuid::Uuid;
 
@@ -362,14 +362,15 @@ fn terminal_strategy_equality() {
     let first2 = TerminalStrategy::FirstPick;
     assert_eq!(first1, first2);
 
-    let round_robin = TerminalStrategy::RoundRobin;
-    assert_ne!(first1, round_robin);
+    let random = TerminalStrategy::Random;
+    assert_ne!(first1, random);
 }
 
 #[test]
 fn terminal_strategy_serialization() {
     let strategies = vec![
         TerminalStrategy::FirstPick,
+        TerminalStrategy::Random,
         TerminalStrategy::RoundRobin,
         TerminalStrategy::LeastConnections,
     ];
@@ -388,6 +389,10 @@ fn terminal_strategy_serialization_format() {
     let json = serde_json::to_string(&first_pick).unwrap();
     assert_eq!(json, "\"first-pick\"");
 
+    let random = TerminalStrategy::Random;
+    let json = serde_json::to_string(&random).unwrap();
+    assert_eq!(json, "\"random\"");
+
     let round_robin = TerminalStrategy::RoundRobin;
     let json = serde_json::to_string(&round_robin).unwrap();
     assert_eq!(json, "\"round-robin\"");
@@ -403,6 +408,10 @@ fn terminal_strategy_deserialization_from_kebab_case() {
     let strategy: TerminalStrategy = serde_json::from_str(json).unwrap();
     assert_eq!(strategy, TerminalStrategy::FirstPick);
 
+    let json = "\"random\"";
+    let strategy: TerminalStrategy = serde_json::from_str(json).unwrap();
+    assert_eq!(strategy, TerminalStrategy::Random);
+
     let json = "\"round-robin\"";
     let strategy: TerminalStrategy = serde_json::from_str(json).unwrap();
     assert_eq!(strategy, TerminalStrategy::RoundRobin);
@@ -417,6 +426,10 @@ fn terminal_strategy_debug_formatting() {
     let first = TerminalStrategy::FirstPick;
     let debug_str = format!("{:?}", first);
     assert_eq!(debug_str, "FirstPick");
+
+    let random = TerminalStrategy::Random;
+    let debug_str = format!("{:?}", random);
+    assert_eq!(debug_str, "Random");
 
     let round_robin = TerminalStrategy::RoundRobin;
     let debug_str = format!("{:?}", round_robin);

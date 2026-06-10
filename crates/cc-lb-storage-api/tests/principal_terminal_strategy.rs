@@ -63,7 +63,7 @@ fn principal_record_router_terminal_strategy_serialization_roundtrip() {
         revision: 42,
         created_at_unix_secs: 1000,
         updated_at_unix_secs: 2000,
-        router_terminal_strategy: TerminalStrategy::RoundRobin,
+        router_terminal_strategy: TerminalStrategy::Random,
     };
 
     let json_str = serde_json::to_string(&original).expect("should serialize");
@@ -73,7 +73,7 @@ fn principal_record_router_terminal_strategy_serialization_roundtrip() {
     assert_eq!(original, deserialized);
     assert_eq!(
         deserialized.router_terminal_strategy,
-        TerminalStrategy::RoundRobin
+        TerminalStrategy::Random
     );
 }
 
@@ -81,6 +81,7 @@ fn principal_record_router_terminal_strategy_serialization_roundtrip() {
 fn principal_record_router_terminal_strategy_all_variants() {
     let strategies = vec![
         TerminalStrategy::FirstPick,
+        TerminalStrategy::Random,
         TerminalStrategy::RoundRobin,
         TerminalStrategy::LeastConnections,
     ];
@@ -127,10 +128,9 @@ fn principal_record_router_terminal_strategy_json_format() {
         "revision": 1,
         "created_at_unix_secs": 1000,
         "updated_at_unix_secs": 1000,
-        "router_terminal_strategy": "round-robin"
+        "router_terminal_strategy": "random"
     });
 
-    let record: PrincipalRecord =
-        serde_json::from_value(json_value).expect("should deserialize");
-    assert_eq!(record.router_terminal_strategy, TerminalStrategy::RoundRobin);
+    let record: PrincipalRecord = serde_json::from_value(json_value).expect("should deserialize");
+    assert_eq!(record.router_terminal_strategy, TerminalStrategy::Random);
 }

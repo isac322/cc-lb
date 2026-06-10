@@ -66,6 +66,8 @@ pub struct PrincipalUpdate {
     pub allowed_models: Option<Vec<String>>,
     pub allowed_upstreams: Option<Vec<Uuid>>,
     pub default_limits: Option<Vec<Limit>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub router_terminal_strategy: Option<cc_lb_plugin_api::TerminalStrategy>,
 }
 
 #[async_trait]
