@@ -66,6 +66,7 @@ pub fn all_wire_functions() -> &'static [&'static str] {
         "sign",
         "on_unauthorized",
         "observe",
+        "filter",
     ]
 }
 
@@ -96,8 +97,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_seven_functions_listed() {
-        assert_eq!(all_wire_functions().len(), 7);
+    fn all_eight_functions_listed() {
+        assert_eq!(all_wire_functions().len(), 8);
         let funcs = all_wire_functions();
         assert!(funcs.contains(&"route"));
         assert!(funcs.contains(&"shape"));
@@ -106,6 +107,7 @@ mod tests {
         assert!(funcs.contains(&"sign"));
         assert!(funcs.contains(&"on_unauthorized"));
         assert!(funcs.contains(&"observe"));
+        assert!(funcs.contains(&"filter"));
     }
 
     #[test]
