@@ -36,15 +36,16 @@ import {
   cx,
   EmptyState,
   Field,
+  Hint,
   INPUT_CLASS,
   Modal,
   Skeleton,
+  Spinner,
   StatusBadge,
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import {
-  type ChainSlot,
   type Principal,
   useCreatePrincipal,
   useDeleteChainEntry,
@@ -71,16 +72,6 @@ export const Route = createFileRoute('/principals')({
   validateSearch: principalSearchSchema,
   component: PrincipalsPage,
 });
-
-const SLOTS: { id: ChainSlot; label: string; desc: string }[] = [
-  { id: 'router', label: 'Router', desc: 'Picks the upstream' },
-  {
-    id: 'observability_hook',
-    label: 'Observability',
-    desc: 'SSE / audit hooks',
-  },
-  { id: 'shape', label: 'Shape', desc: 'Request/response transform' },
-];
 
 function PrincipalsPage() {
   const { selectedId } = Route.useSearch();
@@ -528,34 +519,349 @@ function PluginChainCard({ principal }: { principal: Principal }) {
     <Card>
       <CardHeader
         title="Plugin Chain"
-        subtitle="Three slots: router, observability hooks, shape. Drag to reorder."
+        subtitle="Router runs DbRouter by default; Shape inherits the router's dialect when unset; Observability hooks are chained in order."
       />
       <CardBody className="space-y-5">
-        {SLOTS.map((slot) => (
-          <SlotEditor
-            key={slot.id}
-            principalId={principal.id}
-            slot={slot.id}
-            label={slot.label}
-            desc={slot.desc}
-          />
-        ))}
+        <RouterSlotEditor principalId={principal.id} />
+        <ObservabilityHookEditor principalId={principal.id} />
+        <ShapeSlotEditor principalId={principal.id} />
       </CardBody>
     </Card>
   );
 }
 
-function SlotEditor({
-  principalId,
-  slot,
-  label,
+function SlotRadioCard({
+  name,
   desc,
+  isActive,
+  isMutating,
+  isMutatingOther,
+  isDefault,
+  isNone,
+  badge,
+  onClick,
 }: {
-  principalId: string;
-  slot: ChainSlot;
-  label: string;
+  name: string;
   desc: string;
+  isActive: boolean;
+  isMutating: boolean;
+  isMutatingOther: boolean;
+  isDefault?: boolean;
+  isNone?: boolean;
+  badge?: string;
+  onClick: () => void;
 }) {
+  return (
+    <li role="radio" aria-checked={isActive}>
+      <label
+        className={cx(
+          'flex items-start gap-3 p-3 border rounded-md cursor-pointer transition-colors',
+          isActive
+            ? cx(
+                'border-accent bg-[color-mix(in_srgb,var(--color-accent)_8%,transparent)]',
+                isNone && 'border-dashed',
+              )
+            : 'border-subtle hover:bg-overlay-3',
+          isMutatingOther ? 'pointer-events-none opacity-50' : '',
+        )}
+      >
+        <input
+          type="radio"
+          className="hidden"
+          checked={isActive}
+          onChange={onClick}
+        />
+        <div className="mt-1 flex items-center justify-center w-4 h-4 shrink-0">
+          {isMutating ? (
+            <Spinner className="w-3 h-3 text-accent" />
+          ) : isNone ? (
+            <span className="text-text-faint text-xs leading-none">⊘</span>
+          ) : isDefault ? (
+            <span className="w-1.5 h-1.5 rounded-full border border-text-faint" />
+          ) : (
+            <span className={cx('status-dot', isActive ? 'ok' : 'neutral')} />
+          )}
+        </div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="font-medium text-sm truncate">{name}</span>
+            {badge && <Badge tone="mono">{badge}</Badge>}
+          </div>
+          <div className="text-xs text-text-faint mt-0.5">{desc}</div>
+        </div>
+      </label>
+    </li>
+  );
+}
+
+function RouterSlotEditor({ principalId }: { principalId: string }) {
+  const slot = 'router';
+  const label = 'Router';
+  const desc = 'Picks the upstream';
+  const chain = usePluginChain(principalId, slot);
+  const registry = usePluginRegistry();
+  const insert = useInsertChainEntry();
+  const del = useDeleteChainEntry();
+
+  const entries = useMemo(
+    () => [...(chain.data?.entries ?? [])].sort((a, b) => a.order - b.order),
+    [chain.data],
+  );
+
+  const activeEntry = entries[0];
+  const hasMultiple = entries.length > 1;
+
+  const [mutatingId, setMutatingId] = useState<string | null>(null);
+
+  const handleSelect = async (pluginId: string | null) => {
+    if (mutatingId) return;
+    const currentPluginId = activeEntry?.wasm_registry_id ?? null;
+    if (pluginId === currentPluginId) return;
+
+    setMutatingId(pluginId ?? 'default');
+
+    try {
+      let currentEntries = entries;
+      let retryCount = 0;
+
+      while (retryCount < 2) {
+        try {
+          for (const entry of currentEntries) {
+            await del.mutateAsync({ id: entry.id, revision: entry.revision });
+          }
+
+          if (pluginId) {
+            await insert.mutateAsync({
+              pid: principalId,
+              body: { slot, wasm_registry_id: pluginId, order: 100 },
+            });
+          }
+
+          const pluginName =
+            registry.data?.entries.find((e) => e.id === pluginId)?.name ??
+            pluginId;
+          toast.success(
+            pluginId
+              ? `Router set to ${pluginName}`
+              : 'Router reset to system default',
+          );
+          break;
+        } catch (err) {
+          const error = err as {
+            status?: number;
+            message?: string;
+            error?: string;
+          };
+          const isConflict =
+            error?.status === 409 ||
+            error?.message?.includes('revision_conflict') ||
+            error?.message?.includes('slot_singleton') ||
+            error?.error === 'slot_singleton';
+          if (isConflict && retryCount === 0) {
+            retryCount++;
+            const freshChain = await chain.refetch();
+            currentEntries = [...(freshChain.data?.entries ?? [])].sort(
+              (a, b) => a.order - b.order,
+            );
+            continue;
+          }
+          throw err;
+        }
+      }
+    } catch (err) {
+      const error = err as { message?: string };
+      toast.error(
+        `Failed to update router: ${error.message || 'Unknown error'}`,
+      );
+    } finally {
+      setMutatingId(null);
+    }
+  };
+
+  const candidates = registry.data?.entries ?? [];
+
+  return (
+    <div>
+      <div className="flex items-end justify-between mb-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <div className="text-sm font-medium text-text">{label}</div>
+            {hasMultiple && (
+              <Hint label="Database invariant violated: multiple router entries detected. Selecting a new option will clear them.">
+                <Badge tone="warn">Multiple entries detected</Badge>
+              </Hint>
+            )}
+          </div>
+          <div className="text-[11px] text-text-faint">{desc}</div>
+        </div>
+      </div>
+      <ul
+        className="space-y-2"
+        role="radiogroup"
+        aria-busy={mutatingId !== null}
+      >
+        <SlotRadioCard
+          name="System default"
+          desc="DbRouter — picks the first eligible upstream candidate."
+          isActive={!activeEntry}
+          isMutating={mutatingId === 'default'}
+          isMutatingOther={mutatingId !== null && mutatingId !== 'default'}
+          isDefault
+          badge="Default"
+          onClick={() => handleSelect(null)}
+        />
+        {/* TODO(slot-filter): once usePluginStatus carries slot metadata reliably, filter candidates by slot. */}
+        {candidates.map((p) => (
+          <SlotRadioCard
+            key={p.id}
+            name={p.name}
+            desc={p.label || 'Custom router plugin'}
+            isActive={activeEntry?.wasm_registry_id === p.id}
+            isMutating={mutatingId === p.id}
+            isMutatingOther={mutatingId !== null && mutatingId !== p.id}
+            onClick={() => handleSelect(p.id)}
+          />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ShapeSlotEditor({ principalId }: { principalId: string }) {
+  const slot = 'shape';
+  const label = 'Shape';
+  const desc = 'Request/response transform';
+  const chain = usePluginChain(principalId, slot);
+  const registry = usePluginRegistry();
+  const insert = useInsertChainEntry();
+  const del = useDeleteChainEntry();
+
+  const entries = useMemo(
+    () => [...(chain.data?.entries ?? [])].sort((a, b) => a.order - b.order),
+    [chain.data],
+  );
+
+  const activeEntry = entries[0];
+  const hasMultiple = entries.length > 1;
+
+  const [mutatingId, setMutatingId] = useState<string | null>(null);
+
+  const handleSelect = async (pluginId: string | null) => {
+    if (mutatingId) return;
+    const currentPluginId = activeEntry?.wasm_registry_id ?? null;
+    if (pluginId === currentPluginId) return;
+
+    setMutatingId(pluginId ?? 'none');
+
+    try {
+      let currentEntries = entries;
+      let retryCount = 0;
+
+      while (retryCount < 2) {
+        try {
+          for (const entry of currentEntries) {
+            await del.mutateAsync({ id: entry.id, revision: entry.revision });
+          }
+
+          if (pluginId) {
+            await insert.mutateAsync({
+              pid: principalId,
+              body: { slot, wasm_registry_id: pluginId, order: 100 },
+            });
+          }
+
+          const pluginName =
+            registry.data?.entries.find((e) => e.id === pluginId)?.name ??
+            pluginId;
+          toast.success(
+            pluginId ? `Shape set to ${pluginName}` : 'Shape disabled',
+          );
+          break;
+        } catch (err) {
+          const error = err as {
+            status?: number;
+            message?: string;
+            error?: string;
+          };
+          const isConflict =
+            error?.status === 409 ||
+            error?.message?.includes('revision_conflict') ||
+            error?.message?.includes('slot_singleton') ||
+            error?.error === 'slot_singleton';
+          if (isConflict && retryCount === 0) {
+            retryCount++;
+            const freshChain = await chain.refetch();
+            currentEntries = [...(freshChain.data?.entries ?? [])].sort(
+              (a, b) => a.order - b.order,
+            );
+            continue;
+          }
+          throw err;
+        }
+      }
+    } catch (err) {
+      const error = err as { message?: string };
+      toast.error(
+        `Failed to update shape: ${error.message || 'Unknown error'}`,
+      );
+    } finally {
+      setMutatingId(null);
+    }
+  };
+
+  const candidates = registry.data?.entries ?? [];
+
+  return (
+    <div>
+      <div className="flex items-end justify-between mb-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <div className="text-sm font-medium text-text">{label}</div>
+            {hasMultiple && (
+              <Hint label="Database invariant violated: multiple shape entries detected. Selecting a new option will clear them.">
+                <Badge tone="warn">Multiple entries detected</Badge>
+              </Hint>
+            )}
+          </div>
+          <div className="text-[11px] text-text-faint">{desc}</div>
+        </div>
+      </div>
+      <ul
+        className="space-y-2"
+        role="radiogroup"
+        aria-busy={mutatingId !== null}
+      >
+        <SlotRadioCard
+          name="None"
+          desc="Inherits the dialect returned by the router (typically anthropic-direct)."
+          isActive={!activeEntry}
+          isMutating={mutatingId === 'none'}
+          isMutatingOther={mutatingId !== null && mutatingId !== 'none'}
+          isNone
+          badge="Off"
+          onClick={() => handleSelect(null)}
+        />
+        {/* TODO(slot-filter): once usePluginStatus carries slot metadata reliably, filter candidates by slot. */}
+        {candidates.map((p) => (
+          <SlotRadioCard
+            key={p.id}
+            name={p.name}
+            desc={p.label || 'Custom shape plugin'}
+            isActive={activeEntry?.wasm_registry_id === p.id}
+            isMutating={mutatingId === p.id}
+            isMutatingOther={mutatingId !== null && mutatingId !== p.id}
+            onClick={() => handleSelect(p.id)}
+          />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function ObservabilityHookEditor({ principalId }: { principalId: string }) {
+  const slot = 'observability_hook';
+  const label = 'Observability';
+  const desc = 'SSE / audit hooks. Executed in order. Multiple allowed.';
   const chain = usePluginChain(principalId, slot);
   const registry = usePluginRegistry();
   const reorder = useReorderChain();
