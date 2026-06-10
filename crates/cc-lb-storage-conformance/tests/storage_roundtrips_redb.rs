@@ -309,12 +309,20 @@ plugin_registry_redb_test!(
     insert_chain_entry_rejects_unknown_principal
 );
 plugin_registry_redb_test!(
-    plugin_registry_insert_chain_entry_rejects_duplicate_for_router_slot_redb,
-    insert_chain_entry_rejects_duplicate_for_router_slot
+    plugin_registry_router_multi_entry_ordered_redb,
+    router_multi_entry_ordered
 );
 plugin_registry_redb_test!(
     plugin_registry_insert_chain_entry_rejects_duplicate_for_shape_slot_redb,
     insert_chain_entry_rejects_duplicate_for_shape_slot
+);
+plugin_registry_redb_test!(
+    plugin_registry_router_reorder_preserves_invariants_redb,
+    router_reorder_preserves_invariants
+);
+plugin_registry_redb_test!(
+    plugin_registry_shape_singleton_preserved_redb,
+    shape_singleton_preserved
 );
 plugin_registry_redb_test!(
     plugin_registry_insert_chain_entry_allows_multi_for_observability_hook_redb,
