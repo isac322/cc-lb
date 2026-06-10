@@ -1012,7 +1012,8 @@ impl Lifecycle {
             );
             return Ok(response);
         };
-        let router = cached.resolved_router(&view.global_router);
+        let _router_pipeline = cached.resolved_pipeline(None);
+        let router = &view.global_router;
         let hooks = cached.resolved_hooks(&view.global_observability_hooks);
         let stream_hooks = StreamHooks::new(hooks);
         let principal = Principal {
