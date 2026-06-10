@@ -150,10 +150,10 @@ fn plugin_registry_same_sha_metadata_mismatch_conflicts_postgres() {
 }
 
 #[test]
-fn plugin_registry_insert_chain_entry_rejects_duplicate_for_router_slot_postgres() {
+fn plugin_registry_router_multi_entry_ordered_postgres() {
     run_postgres_scenario(
-        "insert_chain_entry_rejects_duplicate_for_router_slot",
-        plugin_registry_store::insert_chain_entry_rejects_duplicate_for_router_slot,
+        "router_multi_entry_ordered",
+        plugin_registry_store::router_multi_entry_ordered,
     );
 }
 
@@ -162,6 +162,22 @@ fn plugin_registry_insert_chain_entry_rejects_duplicate_for_shape_slot_postgres(
     run_postgres_scenario(
         "insert_chain_entry_rejects_duplicate_for_shape_slot",
         plugin_registry_store::insert_chain_entry_rejects_duplicate_for_shape_slot,
+    );
+}
+
+#[test]
+fn plugin_registry_router_reorder_preserves_invariants_postgres() {
+    run_postgres_scenario(
+        "router_reorder_preserves_invariants",
+        plugin_registry_store::router_reorder_preserves_invariants,
+    );
+}
+
+#[test]
+fn plugin_registry_shape_singleton_preserved_postgres() {
+    run_postgres_scenario(
+        "shape_singleton_preserved",
+        plugin_registry_store::shape_singleton_preserved,
     );
 }
 
