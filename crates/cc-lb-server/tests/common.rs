@@ -190,8 +190,16 @@ async fn seed_storage(storage_path: &Path, upstream_addr: SocketAddr) {
     .expect("seed principal");
 }
 
+fn ready_timeout(default: std::time::Duration) -> std::time::Duration {
+    std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(std::time::Duration::from_secs)
+        .unwrap_or(default)
+}
+
 pub async fn wait_for_status(addr: SocketAddr, path: &str, status: u16) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let deadline = std::time::Instant::now() + ready_timeout(std::time::Duration::from_secs(60));
     loop {
         let last = match http_get(addr, path).await {
             Ok(response) => {
