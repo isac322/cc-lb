@@ -1,7 +1,7 @@
 use std::str::FromStr;
 
 use anyhow::Result;
-use cc_lb_storage_api::{BackendKind, MetaStore, PluginChainEntryInput, PluginSlot};
+use cc_lb_storage_api::{BackendKind, MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlot};
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
 use uuid::Uuid;
@@ -76,7 +76,6 @@ async fn run_test(url: &str) -> Result<()> {
         sse_per_event: false,
         batched_events_per_flush: 32,
         batched_flush_ms: 100,
-        uploaded_at_unix_secs: 0,
         wire_version: None,
     };
 
@@ -100,7 +99,6 @@ async fn run_test(url: &str) -> Result<()> {
         sse_per_event: false,
         batched_events_per_flush: 32,
         batched_flush_ms: 100,
-        uploaded_at_unix_secs: 0,
         wire_version: None,
     };
 
@@ -117,7 +115,6 @@ async fn run_test(url: &str) -> Result<()> {
         sse_per_event: false,
         batched_events_per_flush: 32,
         batched_flush_ms: 100,
-        uploaded_at_unix_secs: 0,
         wire_version: None,
     };
 

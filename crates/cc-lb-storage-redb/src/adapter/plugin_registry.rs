@@ -756,7 +756,7 @@ fn principal_exists(
 }
 
 fn is_singleton_slot(slot: PluginSlot) -> bool {
-    matches!(slot, PluginSlot::Router | PluginSlot::Shape)
+    matches!(slot, PluginSlot::Shape)
 }
 
 fn existing_chain_entry_for_slot(
