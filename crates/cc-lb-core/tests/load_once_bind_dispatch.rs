@@ -65,7 +65,7 @@ fn limit_engine_reserve_accepts_bound_principal_view() {
 }
 
 #[tokio::test]
-async fn lifecycle_per_principal_dispatch_uses_global_router_and_explicit_hook()
+async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
 -> Result<(), Box<dyn std::error::Error>> {
     let global_router_hits = Arc::new(Mutex::new(Vec::new()));
     let explicit_hook_events = Arc::new(Mutex::new(Vec::new()));
@@ -122,17 +122,17 @@ async fn lifecycle_per_principal_dispatch_uses_global_router_and_explicit_hook()
         .await?;
     let (status, _headers, _body) = collect_body(response).await;
 
-    assert_eq!(status, StatusCode::OK);
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
     assert_eq!(
         global_router_hits.lock().unwrap().as_slice(),
-        &["global:principal-a".to_owned()]
+        &[] as &[String]
     );
     assert!(
         explicit_hook_events
             .lock()
             .unwrap()
             .iter()
-            .any(|event| event == "explicit:AuthnComplete")
+            .any(|event| event == "explicit:Error")
     );
     assert!(
         global_hook_events

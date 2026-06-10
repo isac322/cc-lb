@@ -10,7 +10,7 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, PromptCacheShadowConfig};
 use cc_lb_core::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
-    RouterPluginCache,
+    RouterPipelineCache,
 };
 use cc_lb_core::clock::SystemClock;
 use cc_lb_core::{
@@ -387,46 +387,20 @@ async fn build_principal_chains(
 
         let router = if let Some(entry) = router_entries.into_iter().min_by_key(|entry| entry.order)
         {
-            let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
-            })?;
-            let registry_entry = stores
-                .plugin_registry
-                .get_registry_entry_by_sha(registry_entry.sha256)
-                .await?
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotFound, "plugin registry sha not found")
-                })?;
-            let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
-            let manifest = PluginManifest {
-                name: registry_entry.name,
-                artifact: wasm_path.to_string_lossy().into_owned(),
-                wire_version: entry.wire_version,
-                config: entry.config,
-                metadata: bridged_metadata(
-                    stores.plugin_registry_repo.as_ref(),
-                    registry_entry.sha256,
-                )
-                .await,
-            };
-            match runtime.instantiate_router_for(&principal.name, &manifest.name, &manifest) {
-                Ok((handle, slot)) => {
-                    staged.push(slot);
-                    RouterPluginCache::Explicit(handle)
-                }
-                Err(error) => {
-                    tracing::error!(
-                        principal = %principal.name,
-                        plugin = %manifest.name,
-                        chain_entry_id = %entry.id,
-                        %error,
-                        "skipping router chain entry: instantiation failed; principal falls back to global router",
-                    );
-                    RouterPluginCache::Inherit
-                }
-            }
+            tracing::error!(
+                principal = %principal.name,
+                chain_entry_id = %entry.id,
+                "router chain entry cannot be instantiated until filter pipeline builder is enabled; principal fails closed",
+            );
+            Some(Arc::new(RouterPipelineCache {
+                user_filters: Vec::new(),
+                terminal: principal.router_terminal_strategy.clone(),
+                instantiation_error: Some(Arc::<str>::from(
+                    "router pipeline builder is not enabled",
+                )),
+            }))
         } else {
-            RouterPluginCache::Inherit
+            None
         };
 
         let mut hooks = Vec::new();
