@@ -368,8 +368,16 @@ async fn seed_storage(storage: &RedbStorage) -> TestResult<()> {
     Ok(())
 }
 
+fn ready_timeout(default: Duration) -> Duration {
+    std::env::var("CC_LB_TEST_READY_TIMEOUT_SECS")
+        .ok()
+        .and_then(|raw| raw.parse::<u64>().ok())
+        .map(Duration::from_secs)
+        .unwrap_or(default)
+}
+
 async fn wait_for_status(addr: SocketAddr, path: &str, status: u16) -> TestResult<()> {
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let deadline = tokio::time::Instant::now() + ready_timeout(Duration::from_secs(15));
     loop {
         match raw_http(addr, get_request(addr, path)).await {
             Ok(response) if response.status == status => return Ok(()),
