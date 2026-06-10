@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 use std::fmt::Write as _;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
@@ -53,6 +53,9 @@ use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::rate_limit_headers::{
     parse_anthropic_rate_limit_headers, parse_anthropic_unified_headers,
+};
+use crate::request_timing::{
+    REQUEST_STAGE_TIMINGS, RequestStageTimings, finalize_connection_reused_if_unset,
 };
 use crate::sse_relay;
 use crate::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
@@ -945,6 +948,7 @@ impl Lifecycle {
             },
         );
 
+        let auth_start = Instant::now();
         let success = if let Some(success) = self
             .authn
             .authenticate_none_mode(&ctx.downstream_headers)
@@ -986,6 +990,7 @@ impl Lifecycle {
                 }
             }
         };
+        let auth_ms = duration_to_ms(auth_start.elapsed());
         let principal_id = success.principal_id.clone();
         let Some(cached) = principal_view.get(&principal_id) else {
             tracing::error!(%principal_id, "authenticated principal missing from principal view");
@@ -1024,6 +1029,7 @@ impl Lifecycle {
             },
         );
 
+        let route_start = Instant::now();
         let candidates = build_candidates(
             &view,
             &principal.id,
@@ -1130,6 +1136,7 @@ impl Lifecycle {
             upstream: route_upstream,
             dialect,
         };
+        let route_ms = duration_to_ms(route_start.elapsed());
         let metric_context = ApiKeyMetricContext::new(&success, &route.upstream, &ctx.body_bytes);
         let predicted_cache_read_tokens = candidates
             .iter()
@@ -1152,6 +1159,7 @@ impl Lifecycle {
             },
         );
 
+        let limit_reserve_start = Instant::now();
         let mut active_limit = match self
             .reserve_limit(&principal_view, &ctx, &principal, &route, &success)
             .await
@@ -1168,6 +1176,7 @@ impl Lifecycle {
                 return Ok(response);
             }
         };
+        let limit_reserve_ms = duration_to_ms(limit_reserve_start.elapsed());
 
         let signer_factory = view.signer_factory.with_router_choice(
             success.api_key.clone().unwrap_or_default(),
@@ -1201,7 +1210,12 @@ impl Lifecycle {
 
         let dispatch_started = Instant::now();
         let proxy_setup_ms = duration_to_ms(dispatch_started.saturating_duration_since(started));
-        let mut attempt_timings = AttemptTimings::default();
+        let mut attempt_timings = AttemptTimings {
+            auth_ms: Some(auth_ms),
+            route_ms: Some(route_ms),
+            limit_reserve_ms: Some(limit_reserve_ms),
+            ..Default::default()
+        };
         let mut response = match self
             .attempt(
                 view.dispatcher.as_ref(),
@@ -1236,8 +1250,7 @@ impl Lifecycle {
                 body: Some(unauthorized.body.clone()),
             };
             if let RetryDecision::Refresh { new_signer } = signer.on_unauthorized(&err).await {
-                // Reset stage timings; the retry's timings are the ones the operator cares about.
-                attempt_timings = AttemptTimings::default();
+                attempt_timings.reset_attempt_stages();
                 response = match self
                     .attempt(
                         view.dispatcher.as_ref(),
@@ -1508,7 +1521,8 @@ impl Lifecycle {
                 PromptCacheUsage::from(&usage),
             );
         }
-        if usage.present {
+        let observability_post_ms = if usage.present {
+            let observability_post_start = Instant::now();
             observe_many(
                 hooks,
                 ObserveEvent::RequestFinished {
@@ -1520,7 +1534,10 @@ impl Lifecycle {
                     duration_ms: duration_to_ms(duration),
                 },
             );
-        }
+            Some(duration_to_ms(observability_post_start.elapsed()))
+        } else {
+            None
+        };
         if status == StatusCode::OK && !event_ctx.cache_metadata.cache_breakpoints.is_empty() {
             let upstream = event_ctx.upstream_name.as_deref().unwrap_or("unknown");
             let model = &event_ctx.cache_metadata.canonical_model_id;
@@ -1555,6 +1572,27 @@ impl Lifecycle {
             (0, CostBreakdownOptions::default())
         };
 
+        let mut limit_reconcile_ms = None;
+        if let (Some(limit_engine), Some(active_limit)) =
+            (self.limit_engine.as_ref(), active_limit.as_mut())
+            && let Some(reservation) = active_limit.reservation.take()
+        {
+            let limit_reconcile_start = Instant::now();
+            limit_engine.reconcile(
+                reservation,
+                usage.input_tokens,
+                usage.output_tokens,
+                cost_micros as i64,
+            );
+            limit_reconcile_ms = Some(duration_to_ms(limit_reconcile_start.elapsed()));
+            attach_limit_headers_from_engine(
+                &mut parts.headers,
+                limit_engine.as_ref(),
+                &active_limit.subject.key_id,
+                &active_limit.subject.principal_id,
+            );
+        }
+
         if let (Some(storage), Some(active_limit)) =
             (self.request_event_storage.as_ref(), active_limit.as_ref())
         {
@@ -1582,6 +1620,15 @@ impl Lifecycle {
                 cost_cache_creation_5m_micros: cost_breakdown_opts.cache_creation_5m,
                 cost_cache_creation_1h_micros: cost_breakdown_opts.cache_creation_1h,
                 cost_cache_read_micros: cost_breakdown_opts.cache_read,
+                auth_ms: event_ctx.stage_timings.auth_ms,
+                route_ms: event_ctx.stage_timings.route_ms,
+                limit_reserve_ms: event_ctx.stage_timings.limit_reserve_ms,
+                bulkhead_wait_ms: event_ctx.stage_timings.bulkhead_wait_ms,
+                dns_ms: event_ctx.stage_timings.dns_ms,
+                connect_ms: event_ctx.stage_timings.connect_ms,
+                connection_reused: event_ctx.stage_timings.connection_reused,
+                limit_reconcile_ms,
+                observability_post_ms,
                 duration_ms: total_ms,
                 proxy_setup_ms: event_ctx.proxy_setup_ms,
                 shape_ms: event_ctx.stage_timings.shape_ms,
@@ -1598,27 +1645,6 @@ impl Lifecycle {
             if let Err(error) = storage.append_request_event(&event).await {
                 tracing::warn!(%error, "failed to append api key request event");
             }
-        }
-
-        if let (Some(limit_engine), Some(active_limit)) =
-            (self.limit_engine.as_ref(), active_limit.as_mut())
-        {
-            let Some(reservation) = active_limit.reservation.take() else {
-                return Response::from_parts(parts, Body::from(body));
-            };
-            let cost_micros = cost_micros as i64;
-            limit_engine.reconcile(
-                reservation,
-                usage.input_tokens,
-                usage.output_tokens,
-                cost_micros,
-            );
-            attach_limit_headers_from_engine(
-                &mut parts.headers,
-                limit_engine.as_ref(),
-                &active_limit.subject.key_id,
-                &active_limit.subject.principal_id,
-            );
         }
         Response::from_parts(parts, Body::from(body))
     }
@@ -1774,7 +1800,20 @@ impl Lifecycle {
         );
 
         let dispatch_start = Instant::now();
-        let response = dispatcher.dispatch(signed).await.map_err(|source| {
+        let stage_timings_carrier = Arc::new(Mutex::new(RequestStageTimings::default()));
+        let dispatch_result = REQUEST_STAGE_TIMINGS
+            .scope(stage_timings_carrier.clone(), async {
+                let result = dispatcher.dispatch(signed).await;
+                finalize_connection_reused_if_unset();
+                result
+            })
+            .await;
+        let connection_snapshot = stage_timings_carrier.lock().unwrap().clone();
+        timings.bulkhead_wait_ms = connection_snapshot.bulkhead_wait_ms;
+        timings.dns_ms = connection_snapshot.dns_ms;
+        timings.connect_ms = connection_snapshot.connect_ms;
+        timings.connection_reused = connection_snapshot.connection_reused;
+        let response = dispatch_result.map_err(|source| {
             observe_error(
                 hooks,
                 "upstream_dispatch_error",
@@ -1973,6 +2012,19 @@ impl Lifecycle {
             } else {
                 (None, None)
             };
+            let total_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
+            let observability_post_start = Instant::now();
+            observe_many(hooks.as_slice(), ObserveEvent::RequestFinished {
+                status,
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens: usage
+                    .present
+                    .then_some(usage.cache_creation_input_tokens),
+                cache_read_input_tokens: usage.present.then_some(usage.cache_read_input_tokens),
+                duration_ms: total_duration_ms,
+            });
+            let observability_post_ms = Some(duration_to_ms(observability_post_start.elapsed()));
             let elapsed_ms = |to: Option<Instant>| {
                 to.map(|t| duration_to_ms(t.saturating_duration_since(relay_start)))
             };
@@ -2001,7 +2053,6 @@ impl Lifecycle {
                 total_bytes = total_bytes,
                 "stream latency breakdown"
             );
-            let total_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
             if let Some(mut active_limit) = active_limit {
                 let (cost_micros, cost_breakdown_opts) = if usage.present {
                     let cost_model = active_limit.request.model.as_str();
@@ -2023,6 +2074,19 @@ impl Lifecycle {
                 } else {
                     (0, CostBreakdownOptions::default())
                 };
+                let mut limit_reconcile_ms = None;
+                if let (Some(limit_engine), Some(reservation)) =
+                    (limit_engine.as_ref(), active_limit.reservation.take())
+                {
+                    let limit_reconcile_start = Instant::now();
+                    limit_engine.reconcile(
+                        reservation,
+                        usage.input_tokens,
+                        usage.output_tokens,
+                        cost_micros as i64,
+                    );
+                    limit_reconcile_ms = Some(duration_to_ms(limit_reconcile_start.elapsed()));
+                }
                 if let Some(storage) = storage.as_ref() {
                     let now_ms = unix_now_ms();
                     let mut event = RequestEvent {
@@ -2047,6 +2111,15 @@ impl Lifecycle {
                         cost_cache_creation_5m_micros: cost_breakdown_opts.cache_creation_5m,
                         cost_cache_creation_1h_micros: cost_breakdown_opts.cache_creation_1h,
                         cost_cache_read_micros: cost_breakdown_opts.cache_read,
+                        auth_ms: event_ctx.stage_timings.auth_ms,
+                        route_ms: event_ctx.stage_timings.route_ms,
+                        limit_reserve_ms: event_ctx.stage_timings.limit_reserve_ms,
+                        bulkhead_wait_ms: event_ctx.stage_timings.bulkhead_wait_ms,
+                        dns_ms: event_ctx.stage_timings.dns_ms,
+                        connect_ms: event_ctx.stage_timings.connect_ms,
+                        connection_reused: event_ctx.stage_timings.connection_reused,
+                        limit_reconcile_ms,
+                        observability_post_ms,
                         duration_ms: total_duration_ms,
                         proxy_setup_ms: event_ctx.proxy_setup_ms,
                         shape_ms: event_ctx.stage_timings.shape_ms,
@@ -2075,27 +2148,7 @@ impl Lifecycle {
                         tracing::warn!(%error, "failed to append streaming request event");
                     }
                 }
-                if let (Some(limit_engine), Some(reservation)) =
-                    (limit_engine.as_ref(), active_limit.reservation.take())
-                {
-                    limit_engine.reconcile(
-                        reservation,
-                        usage.input_tokens,
-                        usage.output_tokens,
-                        cost_micros as i64,
-                    );
-                }
             }
-            observe_many(hooks.as_slice(), ObserveEvent::RequestFinished {
-                status,
-                input_tokens,
-                output_tokens,
-                cache_creation_input_tokens: usage
-                    .present
-                    .then_some(usage.cache_creation_input_tokens),
-                cache_read_input_tokens: usage.present.then_some(usage.cache_read_input_tokens),
-                duration_ms: total_duration_ms,
-            });
         };
         Response::from_parts(parts, Body::from_stream(stream))
     }
@@ -2460,9 +2513,28 @@ fn plugin_ttl_class(ttl: Option<&str>) -> TtlClass {
 
 #[derive(Clone, Copy, Default)]
 struct AttemptTimings {
+    auth_ms: Option<u64>,
+    route_ms: Option<u64>,
+    limit_reserve_ms: Option<u64>,
+    bulkhead_wait_ms: Option<u64>,
+    dns_ms: Option<u64>,
+    connect_ms: Option<u64>,
+    connection_reused: Option<bool>,
     shape_ms: Option<u64>,
     sign_ms: Option<u64>,
     upstream_ttfb_ms: Option<u64>,
+}
+
+impl AttemptTimings {
+    fn reset_attempt_stages(&mut self) {
+        self.bulkhead_wait_ms = None;
+        self.dns_ms = None;
+        self.connect_ms = None;
+        self.connection_reused = None;
+        self.shape_ms = None;
+        self.sign_ms = None;
+        self.upstream_ttfb_ms = None;
+    }
 }
 
 fn principal_kind_as_str(kind: &PrincipalKind) -> &'static str {

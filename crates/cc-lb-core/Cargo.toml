@@ -32,7 +32,7 @@ cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
 dashmap.workspace = true
 eventsource-stream.workspace = true
 futures-core = "0.3"
-hickory-resolver = { workspace = true, features = ["tokio"] }
+hickory-resolver = { workspace = true, features = ["tokio", "system-config"] }
 http.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["client", "http1", "http2"] }
@@ -59,6 +59,7 @@ tower.workspace = true
 [dev-dependencies]
 insta.workspace = true
 tempfile.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
 tower = { workspace = true, features = ["util"] }
 
 [target.'cfg(loom)'.dependencies]

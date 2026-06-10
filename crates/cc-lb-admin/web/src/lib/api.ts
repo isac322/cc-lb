@@ -378,6 +378,15 @@ export interface RequestEvent {
   sign_ms?: number;
   upstream_ttfb_ms?: number;
   upstream_body_ms?: number;
+  auth_ms?: number;
+  route_ms?: number;
+  limit_reserve_ms?: number;
+  bulkhead_wait_ms?: number;
+  dns_ms?: number;
+  connect_ms?: number;
+  connection_reused?: boolean;
+  limit_reconcile_ms?: number;
+  observability_post_ms?: number;
   first_body_chunk_ms?: number;
   body_chunk_count?: number;
   body_bytes?: number;
