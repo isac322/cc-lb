@@ -1,7 +1,9 @@
 //! Integration tests for v3 filter wire protocol roundtrip serialization.
 
-use cc_lb_plugin_wire::v3::filter::{FilterFn, FilterRequest, FilterResponse, PerCandidateReasonWire};
 use cc_lb_plugin_wire::v2::common::{CandidateWire, HeaderWire, Principal};
+use cc_lb_plugin_wire::v3::filter::{
+    FilterFn, FilterRequest, FilterResponse, PerCandidateReasonWire,
+};
 use cc_lb_plugin_wire::wire_function::WireFunction;
 
 #[test]
@@ -172,9 +174,7 @@ fn filter_response_with_mixed_decisions_roundtrip() {
 
 #[test]
 fn filter_response_empty_results_roundtrip() {
-    let response = FilterResponse {
-        results: vec![],
-    };
+    let response = FilterResponse { results: vec![] };
 
     let json = serde_json::to_string(&response).expect("failed to encode JSON");
     let parsed: FilterResponse = serde_json::from_str(&json).expect("failed to parse JSON");

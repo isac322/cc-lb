@@ -2,7 +2,6 @@ use cc_lb_plugin_wire::v1::build_signer::BuildSignerFn;
 use cc_lb_plugin_wire::v1::normalize_error::NormalizeErrorFn;
 use cc_lb_plugin_wire::v1::observe::ObserveFn;
 use cc_lb_plugin_wire::v1::on_unauthorized::OnUnauthorizedFn;
-use cc_lb_plugin_wire::v1::route::RouteFn;
 use cc_lb_plugin_wire::v1::shape::ShapeFn;
 use cc_lb_plugin_wire::v1::sign::SignFn;
 use cc_lb_plugin_wire::wire_function::{FallbackPolicy, WireFunction};
@@ -39,10 +38,6 @@ const_assert!(
     FallbackPolicy::SilentSkip,
 );
 const_assert!(
-    <RouteFn as WireFunction>::FALLBACK,
-    FallbackPolicy::UseDefault,
-);
-const_assert!(
     <NormalizeErrorFn as WireFunction>::FALLBACK,
     FallbackPolicy::PassThrough,
 );
@@ -71,10 +66,6 @@ fn fallback_policy_matrix_matches_protocol_contract() {
             <ObserveFn as WireFunction>::FALLBACK,
         ),
         (
-            <RouteFn as WireFunction>::NAME,
-            <RouteFn as WireFunction>::FALLBACK,
-        ),
-        (
             <NormalizeErrorFn as WireFunction>::NAME,
             <NormalizeErrorFn as WireFunction>::FALLBACK,
         ),
@@ -91,7 +82,6 @@ fn fallback_policy_matrix_matches_protocol_contract() {
             ("build_signer", FallbackPolicy::FailRequest),
             ("shape", FallbackPolicy::FailRequest),
             ("observe", FallbackPolicy::SilentSkip),
-            ("route", FallbackPolicy::UseDefault),
             ("normalize_error", FallbackPolicy::PassThrough),
             ("on_unauthorized", FallbackPolicy::PassThrough),
         ]

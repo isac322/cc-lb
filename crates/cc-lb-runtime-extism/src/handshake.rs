@@ -10,7 +10,7 @@ use cc_lb_plugin_wire::limits::{
 };
 use cc_lb_plugin_wire::v1::{
     build_signer::BuildSignerFn, normalize_error::NormalizeErrorFn, observe::ObserveFn,
-    on_unauthorized::OnUnauthorizedFn, route::RouteFn, shape::ShapeFn, sign::SignFn,
+    on_unauthorized::OnUnauthorizedFn, shape::ShapeFn, sign::SignFn,
 };
 use cc_lb_plugin_wire::v3::filter::FilterFn;
 use cc_lb_plugin_wire::wire_function::{WireFunction, all_wire_functions};
@@ -97,12 +97,8 @@ fn classify_call_error(reason: String) -> HandshakeExecutionError {
     }
 }
 
-fn wire_function_versions() -> [(&'static str, &'static [u32]); 8] {
+fn wire_function_versions() -> [(&'static str, &'static [u32]); 7] {
     [
-        (
-            <RouteFn as WireFunction>::NAME,
-            <RouteFn as WireFunction>::SUPPORTED_VERSIONS,
-        ),
         (
             <ShapeFn as WireFunction>::NAME,
             <ShapeFn as WireFunction>::SUPPORTED_VERSIONS,
@@ -286,17 +282,17 @@ mod tests {
     fn execute_handshake_accepts_valid_plugin_and_checks_export() {
         let offer = build_offer(&BTreeSet::from(["streaming".to_owned()]));
         let accept = accept_json(
-            &["route"],
-            &[("route", &[1])],
-            &[("route", 1)],
+            &["shape"],
+            &[("shape", &[1])],
+            &[("shape", 1)],
             &["streaming"],
         );
-        let wasm = handshake_module(&accept, &["route"], false);
+        let wasm = handshake_module(&accept, &["shape"], false);
 
         let actual = execute_handshake(&wasm, &offer).expect("handshake succeeds");
 
-        assert!(actual.implemented_functions.contains("route"));
-        assert_eq!(actual.chosen_versions.get("route"), Some(&1));
+        assert!(actual.implemented_functions.contains("shape"));
+        assert_eq!(actual.chosen_versions.get("shape"), Some(&1));
     }
 
     #[test]
@@ -304,9 +300,9 @@ mod tests {
         let mut offer = build_offer(&BTreeSet::new());
         offer
             .function_versions
-            .insert("route".to_owned(), vec![1, 2, 3]);
-        let accept = accept_json(&["route"], &[("route", &[1, 2, 3])], &[("route", 1)], &[]);
-        let wasm = handshake_module(&accept, &["route"], false);
+            .insert("shape".to_owned(), vec![1, 2, 3]);
+        let accept = accept_json(&["shape"], &[("shape", &[1, 2, 3])], &[("shape", 1)], &[]);
+        let wasm = handshake_module(&accept, &["shape"], false);
 
         let err = execute_handshake(&wasm, &offer).expect_err("downgrade rejected");
 
@@ -319,14 +315,14 @@ mod tests {
     #[test]
     fn execute_handshake_rejects_implemented_function_without_export() {
         let offer = build_offer(&BTreeSet::new());
-        let accept = accept_json(&["route"], &[("route", &[1])], &[("route", 1)], &[]);
+        let accept = accept_json(&["shape"], &[("shape", &[1])], &[("shape", 1)], &[]);
         let wasm = handshake_module(&accept, &[], false);
 
         let err = execute_handshake(&wasm, &offer).expect_err("missing export rejected");
 
         match err {
             HandshakeExecutionError::DeclaredFunctionMissing { function } => {
-                assert_eq!(function, "route");
+                assert_eq!(function, "shape");
             }
             other => panic!("expected missing export, got {other:?}"),
         }

@@ -140,9 +140,9 @@ impl RegistryLifecycle for CountingLifecycle {
         let accept = HandshakeAccept {
             handshake_schema_version: HANDSHAKE_SCHEMA_VERSION_V1,
             envelope_version: 1,
-            chosen_versions: BTreeMap::from([("route".to_owned(), 1)]),
-            plugin_supported: BTreeMap::from([("route".to_owned(), vec![1])]),
-            implemented_functions: BTreeSet::from(["route".to_owned()]),
+            chosen_versions: BTreeMap::from([("shape".to_owned(), 1)]),
+            plugin_supported: BTreeMap::from([("shape".to_owned(), vec![1])]),
+            implemented_functions: BTreeSet::from(["shape".to_owned()]),
             required_capabilities: BTreeSet::new(),
         };
         accept.validate_against_offer(offer)?;

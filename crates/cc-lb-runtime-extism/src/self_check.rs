@@ -167,7 +167,7 @@ mod tests {
 
     #[test]
     fn execute_self_check_rejects_missing_export() {
-        let wasm = wat::parse_str(r#"(module (func (export "route") (result i32) (i32.const 0)))"#)
+        let wasm = wat::parse_str(r#"(module (func (export "shape") (result i32) (i32.const 0)))"#)
             .expect("wat parses");
 
         let err = execute_self_check(&wasm).expect_err("missing export rejected");
