@@ -17,14 +17,17 @@ use std::time::Duration;
 
 use arc_swap::ArcSwap;
 use cc_lb_plugin_api::{
-    ObservabilityHook, PluginManifest, PluginRuntime, RouterPlugin, RuntimeError, SignerFactory,
-    UpstreamDialect,
+    FilterPlugin, ObservabilityHook, PluginManifest, PluginRuntime, RouterPlugin, RuntimeError,
+    SignerFactory, UpstreamDialect,
 };
 use extism::{Manifest, Plugin, PluginBuilder, Wasm};
 use serde_json::Value;
+use uuid::Uuid;
 
 use crate::host_functions::{HostFunctionContext, HostState};
-use crate::plugin_wrap::{ExtismDialectPlugin, ExtismRouterPlugin, ExtismSignerFactory};
+use crate::plugin_wrap::{
+    ExtismDialectPlugin, ExtismFilterPlugin, ExtismRouterPlugin, ExtismSignerFactory,
+};
 use crate::sse_batch::ExtismObservabilityHook;
 
 const DEFAULT_MEMORY_MAX_PAGES: u32 = 32;
@@ -36,6 +39,7 @@ const DEFAULT_OBSERVE_FLUSH_MS: u64 = 100;
 const GLOBAL_PRINCIPAL: &str = "__global__";
 const WIRE_VERSION_V1: u8 = 1;
 const WIRE_VERSION_V2: u8 = 2;
+const WIRE_VERSION_V3: u8 = 3;
 
 // Guardrail exemption: per-principal plugin overrides require runtime slots to be
 // keyed by both principal and plugin so same-name plugins do not collide.
@@ -280,6 +284,17 @@ impl ExtismRuntime {
         Ok((Arc::new(ExtismRouterPlugin::new(slot)), staged))
     }
 
+    pub fn instantiate_filter_for(
+        &self,
+        principal_id: &str,
+        plugin_id: Uuid,
+        plugin_name: &str,
+        manifest: &PluginManifest,
+    ) -> Result<(Arc<dyn FilterPlugin>, StagedSlot), RuntimeError> {
+        let (slot, staged) = self.stage_slot(principal_id, plugin_name, manifest, "filter")?;
+        Ok((Arc::new(ExtismFilterPlugin::new(slot, plugin_id)), staged))
+    }
+
     pub fn instantiate_observability_for(
         &self,
         principal_id: &str,
@@ -299,6 +314,15 @@ impl ExtismRuntime {
         self.instantiate_router_for(GLOBAL_PRINCIPAL, plugin_name, manifest)
     }
 
+    pub fn instantiate_filter_global(
+        &self,
+        plugin_id: Uuid,
+        plugin_name: &str,
+        manifest: &PluginManifest,
+    ) -> Result<(Arc<dyn FilterPlugin>, StagedSlot), RuntimeError> {
+        self.instantiate_filter_for(GLOBAL_PRINCIPAL, plugin_id, plugin_name, manifest)
+    }
+
     pub fn instantiate_observability_global(
         &self,
         plugin_name: &str,
@@ -316,6 +340,17 @@ impl ExtismRuntime {
         let scope = format!("principal:{principal_id}");
         let (slot, staged) = self.stage_slot(&scope, plugin_name, manifest, "shape")?;
         Ok((Arc::new(ExtismDialectPlugin::new(slot)), staged))
+    }
+
+    pub fn instantiate_filter(
+        &self,
+        manifest: &PluginManifest,
+    ) -> Result<Arc<dyn FilterPlugin>, RuntimeError> {
+        let slot = self.instantiate_slot(manifest, "filter")?;
+        Ok(Arc::new(ExtismFilterPlugin::new(
+            slot,
+            plugin_id_from_manifest(manifest),
+        )))
     }
 
     pub fn commit_staged(&self, staged: Vec<StagedSlot>) -> Result<(), RuntimeError> {
@@ -436,7 +471,7 @@ impl PluginEntry {
 
 fn negotiate_wire_version(manifest: &PluginManifest) -> u8 {
     match manifest.wire_version {
-        Some(version @ WIRE_VERSION_V1..=WIRE_VERSION_V2) => version,
+        Some(version @ (WIRE_VERSION_V1 | WIRE_VERSION_V2 | WIRE_VERSION_V3)) => version,
         None => WIRE_VERSION_V1,
         Some(version) => {
             tracing::warn!(
@@ -450,6 +485,15 @@ fn negotiate_wire_version(manifest: &PluginManifest) -> u8 {
             WIRE_VERSION_V1
         }
     }
+}
+
+fn plugin_id_from_manifest(manifest: &PluginManifest) -> Uuid {
+    manifest
+        .metadata
+        .get("plugin_id")
+        .and_then(Value::as_str)
+        .and_then(|value| Uuid::parse_str(value).ok())
+        .unwrap_or_else(Uuid::nil)
 }
 
 pub(crate) struct PluginSlot {
@@ -668,6 +712,23 @@ mod tests {
                 slot.negotiated_wire_version()
                     .expect("wire version is readable"),
                 WIRE_VERSION_V2
+            );
+        }
+
+        #[test]
+        fn wire_version_v3_for_marked_plugin() {
+            let mut fixture = wasm_manifest("wire-version-v3", noroute_module());
+            fixture.manifest.wire_version = Some(WIRE_VERSION_V3);
+            let runtime = ExtismRuntime::new();
+
+            let slot = runtime
+                .register_slot(&fixture.manifest)
+                .expect("slot registers with v3 wire version");
+
+            assert_eq!(
+                slot.negotiated_wire_version()
+                    .expect("wire version is readable"),
+                WIRE_VERSION_V3
             );
         }
 
