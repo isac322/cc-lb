@@ -21,7 +21,11 @@ pub use init::{
     metric_definitions, panic_total, register_metrics,
 };
 pub use panic_hook::install_panic_hook;
-pub use redaction::{REDACTED, RedactingMakeWriter, RedactionLayer, RedactionPolicy};
+pub use redaction::{
+    REDACTED, ROUTING_REASON_MAX_BYTES, ROUTING_TRACE_SIZE_CAP_BYTES, RedactingMakeWriter,
+    RedactionLayer, RedactionPolicy, enforce_routing_trace_caps, redact_internal_errors,
+    redact_routing_trace, truncate_reason,
+};
 pub use trace_layer::{ObservabilityTraceLayer, trace_layer};
 
 pub mod cache_observation_dropped_reason {

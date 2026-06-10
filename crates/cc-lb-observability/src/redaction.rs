@@ -2,6 +2,11 @@ use std::borrow::Cow;
 use std::fmt;
 use std::io::{self, Write};
 
+use cc_lb_plugin_api::types::{
+    MAX_ERROR_MESSAGE_LEN, MAX_ROUTING_TRACE_STAGES, MAX_STAGE_NAME_LEN, StageDecision,
+    TerminalDecision,
+};
+use cc_lb_plugin_api::{InternalError, RoutingTrace, TerminalStrategy};
 use once_cell::sync::Lazy;
 use regex::{Captures, Regex, RegexSet};
 use tracing::field::{Field, Visit};
@@ -11,6 +16,11 @@ use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
 pub const REDACTED: &str = "[REDACTED]";
+pub const ROUTING_TRACE_SIZE_CAP_BYTES: usize = 4 * 1024;
+pub const ROUTING_REASON_MAX_BYTES: usize = MAX_ERROR_MESSAGE_LEN;
+
+const TRUNCATED_SUFFIX: &str = "...[truncated]";
+const ROUTING_TRACE_TRUNCATED_STAGE: &str = "routing_trace_truncated";
 
 const SECRET_PATTERNS: [&str; 8] = [
     r"sk-ant-[a-zA-Z0-9_-]+",
@@ -23,10 +33,11 @@ const SECRET_PATTERNS: [&str; 8] = [
     r"-----BEGIN (?:.* )?PRIVATE KEY-----[\s\S]*?-----END (?:.* )?PRIVATE KEY-----",
 ];
 
-const SENSITIVE_FIELDS: [&str; 8] = [
+const SENSITIVE_FIELDS: [&str; 9] = [
     "authorization",
     "x-api-key",
     "api_key",
+    "token",
     "refresh_token",
     "access_token",
     "client_secret",
@@ -48,13 +59,13 @@ static SECRET_REGEXES: Lazy<Result<Vec<Regex>, regex::Error>> = Lazy::new(|| {
 
 static SENSITIVE_JSON_FIELD_REGEX: Lazy<Result<Regex, regex::Error>> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)("(?:authorization|x-api-key|api_key|refresh_token|access_token|client_secret|private_key|aws_secret_access_key)"\s*:\s*)("(?:[^"\\]|\\.)*"|null|true|false|-?\d+(?:\.\d+)?)"#,
+        r#"(?i)("(?:authorization|x-api-key|api_key|token|refresh_token|access_token|client_secret|private_key|aws_secret_access_key)"\s*:\s*)("(?:[^"\\]|\\.)*"|null|true|false|-?\d+(?:\.\d+)?)"#,
     )
 });
 
 static SENSITIVE_TEXT_FIELD_REGEX: Lazy<Result<Regex, regex::Error>> = Lazy::new(|| {
     Regex::new(
-        r#"(?i)\b(authorization|x-api-key|api_key|refresh_token|access_token|client_secret|private_key|aws_secret_access_key)\b(\s*[:=]\s*)("[^"]*"|'[^']*'|\S+)"#,
+        r#"(?i)\b(authorization|x-api-key|api_key|token|refresh_token|access_token|client_secret|private_key|aws_secret_access_key)\b(\s*[:=]\s*)("[^"]*"|'[^']*'|\S+)"#,
     )
 });
 
@@ -110,6 +121,63 @@ impl Default for RedactionPolicy {
     fn default() -> Self {
         Self::new(false)
     }
+}
+
+pub fn redact_routing_trace(trace: &RoutingTrace) -> RoutingTrace {
+    let policy = RedactionPolicy::default();
+    let mut redacted = trace.clone();
+
+    for stage in &mut redacted.stages {
+        stage.stage_name = truncate_plain_text(&stage.stage_name, MAX_STAGE_NAME_LEN);
+        if let Some(reason) = &stage.reason {
+            stage.reason = Some(truncate_reason(&policy.redact_text(reason)));
+        }
+    }
+
+    redacted
+}
+
+pub fn redact_internal_errors(errors: &[InternalError]) -> Vec<InternalError> {
+    let policy = RedactionPolicy::default();
+
+    errors
+        .iter()
+        .cloned()
+        .map(|mut error| {
+            if let Some(message) = &error.message {
+                error.message = Some(truncate_reason(&policy.redact_text(message)));
+            }
+            error
+        })
+        .collect()
+}
+
+pub fn enforce_routing_trace_caps(trace: &RoutingTrace) -> RoutingTrace {
+    let mut capped = trace.clone();
+    normalize_trace_fields(&mut capped);
+
+    let mut removed_stages = 0;
+    if capped.stages.len() > MAX_ROUTING_TRACE_STAGES {
+        removed_stages += capped.stages.len() - MAX_ROUTING_TRACE_STAGES + 1;
+        capped
+            .stages
+            .truncate(MAX_ROUTING_TRACE_STAGES.saturating_sub(1));
+        upsert_truncation_marker(&mut capped, removed_stages);
+    }
+
+    while routing_trace_json_len(&capped) > ROUTING_TRACE_SIZE_CAP_BYTES {
+        if !remove_last_original_stage(&mut capped) {
+            break;
+        }
+        removed_stages += 1;
+        upsert_truncation_marker(&mut capped, removed_stages);
+    }
+
+    capped
+}
+
+pub fn truncate_reason(reason: &str) -> String {
+    truncate_with_suffix(reason, ROUTING_REASON_MAX_BYTES)
 }
 
 #[derive(Clone, Debug)]
@@ -334,6 +402,156 @@ fn redact_text_fields(value: &str, regex: &Lazy<Result<Regex, regex::Error>>) ->
             .into_owned(),
         Err(_) => value.to_owned(),
     }
+}
+
+fn normalize_trace_fields(trace: &mut RoutingTrace) {
+    for stage in &mut trace.stages {
+        stage.stage_name = truncate_plain_text(&stage.stage_name, MAX_STAGE_NAME_LEN);
+        if let Some(reason) = &stage.reason {
+            stage.reason = Some(truncate_reason(reason));
+        }
+    }
+}
+
+fn upsert_truncation_marker(trace: &mut RoutingTrace, removed_stages: usize) {
+    let marker = StageDecision {
+        stage_name: ROUTING_TRACE_TRUNCATED_STAGE.to_owned(),
+        upstream_id: None,
+        reason: Some(format!(
+            "routing trace truncated; removed {removed_stages} stage(s)"
+        )),
+    };
+
+    if trace
+        .stages
+        .last()
+        .is_some_and(|stage| stage.stage_name == ROUTING_TRACE_TRUNCATED_STAGE)
+    {
+        let last_index = trace.stages.len() - 1;
+        trace.stages[last_index] = marker;
+    } else {
+        trace.stages.push(marker);
+    }
+}
+
+fn remove_last_original_stage(trace: &mut RoutingTrace) -> bool {
+    if trace.stages.is_empty() {
+        return false;
+    }
+
+    if trace
+        .stages
+        .last()
+        .is_some_and(|stage| stage.stage_name == ROUTING_TRACE_TRUNCATED_STAGE)
+    {
+        if trace.stages.len() == 1 {
+            return false;
+        }
+        trace.stages.remove(trace.stages.len() - 2);
+        true
+    } else {
+        trace.stages.pop();
+        true
+    }
+}
+
+fn routing_trace_json_len(trace: &RoutingTrace) -> usize {
+    let mut len = "{\"stages\":[".len();
+
+    for (index, stage) in trace.stages.iter().enumerate() {
+        if index > 0 {
+            len += 1;
+        }
+        len += stage_json_len(stage);
+    }
+
+    len += "]".len();
+    if let Some(terminal_decision) = &trace.terminal_decision {
+        len += ",\"terminal_decision\":".len() + terminal_decision_json_len(terminal_decision);
+    }
+    len + "}".len()
+}
+
+fn stage_json_len(stage: &StageDecision) -> usize {
+    let mut len = "{\"stage_name\":".len() + json_string_len(&stage.stage_name);
+
+    if let Some(upstream_id) = stage.upstream_id {
+        len += ",\"upstream_id\":".len() + json_string_len(&upstream_id.to_string());
+    }
+    if let Some(reason) = &stage.reason {
+        len += ",\"reason\":".len() + json_string_len(reason);
+    }
+
+    len + "}".len()
+}
+
+fn terminal_decision_json_len(terminal_decision: &TerminalDecision) -> usize {
+    let mut len = "{".len();
+    let mut needs_comma = false;
+
+    if let Some(upstream_id) = terminal_decision.upstream_id {
+        len += "\"upstream_id\":".len() + json_string_len(&upstream_id.to_string());
+        needs_comma = true;
+    }
+
+    if needs_comma {
+        len += 1;
+    }
+    len += "\"strategy\":".len()
+        + json_string_len(terminal_strategy_json(&terminal_decision.strategy));
+
+    len + "}".len()
+}
+
+fn terminal_strategy_json(strategy: &TerminalStrategy) -> &'static str {
+    match strategy {
+        TerminalStrategy::FirstPick => "first-pick",
+        TerminalStrategy::Random => "random",
+        TerminalStrategy::RoundRobin => "round-robin",
+        TerminalStrategy::LeastConnections => "least-connections",
+    }
+}
+
+fn json_string_len(value: &str) -> usize {
+    value.chars().fold(2, |len, ch| {
+        len + match ch {
+            '"' | '\\' => 2,
+            '\u{08}' | '\u{0c}' | '\n' | '\r' | '\t' => 2,
+            '\u{00}'..='\u{1f}' => 6,
+            ch => ch.len_utf8(),
+        }
+    })
+}
+
+fn truncate_with_suffix(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+
+    if max_bytes <= TRUNCATED_SUFFIX.len() {
+        return TRUNCATED_SUFFIX[..max_bytes].to_owned();
+    }
+
+    let value_limit = max_bytes - TRUNCATED_SUFFIX.len();
+    let end = floor_char_boundary(value, value_limit);
+    format!("{}{}", &value[..end], TRUNCATED_SUFFIX)
+}
+
+fn truncate_plain_text(value: &str, max_bytes: usize) -> String {
+    if value.len() <= max_bytes {
+        return value.to_owned();
+    }
+
+    let end = floor_char_boundary(value, max_bytes);
+    value[..end].to_owned()
+}
+
+fn floor_char_boundary(value: &str, max_bytes: usize) -> usize {
+    let mut end = max_bytes.min(value.len());
+    while end > 0 && !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
 }
 
 fn is_sensitive_field(field_name: &str) -> bool {
