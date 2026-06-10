@@ -26,7 +26,6 @@ async fn dispatch_fallbacks_apply_per_function_policies_with_metrics_and_tracing
     build_signer_fail_request_fallback().await;
     shape_fail_request_fallback();
     observe_silent_skip_fallback();
-    route_use_default_fallback();
     normalize_error_pass_through_fallback();
     on_unauthorized_pass_through_fallback().await;
 }
@@ -118,24 +117,6 @@ fn observe_silent_skip_fallback() {
     capture().assert_dispatch_fallback("observe", "SilentSkip");
     capture().assert_counter_total("cc_lb_plugin_observe_batches_dropped_total", 1);
     capture().assert_counter_total("cc_lb_plugin_observe_events_dropped_total", 1);
-}
-
-fn route_use_default_fallback() {
-    let wat = module_with_panicking_export("route", &[]);
-    let fixture = common::fixture("route-fallback", &wat, common::metadata(&[]));
-    let runtime = ExtismRuntime::new();
-    let router = runtime
-        .instantiate_router(&fixture.manifest)
-        .expect("router instantiates");
-
-    capture().reset();
-    let route = router
-        .route(&common::ctx(), &common::principal(), &[])
-        .expect("route UseDefault returns a default route");
-
-    assert_eq!(route.upstream_id, None);
-    assert!(matches!(route.upstream, Upstream::AnthropicDirect));
-    capture().assert_dispatch_fallback("route", "UseDefault");
 }
 
 fn normalize_error_pass_through_fallback() {

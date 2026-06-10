@@ -71,7 +71,6 @@ mod tests {
 
     fn function_name_strategy() -> impl Strategy<Value = String> {
         prop_oneof![
-            Just("route".to_string()),
             Just("shape".to_string()),
             Just("normalize_error".to_string()),
             Just("build_signer".to_string()),

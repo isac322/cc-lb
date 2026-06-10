@@ -7,7 +7,6 @@ const CASES: u32 = 1_000;
 
 fn function_name_strategy() -> impl Strategy<Value = String> {
     prop_oneof![
-        Just("route".to_owned()),
         Just("shape".to_owned()),
         Just("normalize_error".to_owned()),
         Just("build_signer".to_owned()),

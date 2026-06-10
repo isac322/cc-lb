@@ -424,7 +424,7 @@ pub(crate) mod tests {
             "test-plugin"
         );
         assert_eq!(
-            record.augmented_metadata.negotiated_functions.get("route"),
+            record.augmented_metadata.negotiated_functions.get("shape"),
             Some(&1)
         );
         assert!(registry.get_metadata(&sha).is_some());
@@ -653,9 +653,9 @@ pub(crate) mod tests {
         let accept = HandshakeAccept {
             handshake_schema_version: HANDSHAKE_SCHEMA_VERSION_V1,
             envelope_version: 1,
-            chosen_versions: BTreeMap::from([("route".to_owned(), 1)]),
-            plugin_supported: BTreeMap::from([("route".to_owned(), vec![1])]),
-            implemented_functions: BTreeSet::from(["route".to_owned()]),
+            chosen_versions: BTreeMap::from([("shape".to_owned(), 1)]),
+            plugin_supported: BTreeMap::from([("shape".to_owned(), vec![1])]),
+            implemented_functions: BTreeSet::from(["shape".to_owned()]),
             required_capabilities: BTreeSet::new(),
         };
         let handshake_output = serde_json::to_string(&accept).expect("accept serializes");
@@ -679,7 +679,7 @@ pub(crate) mod tests {
   (func (export "cc_lb_self_check") (result i32)
     (call $output_set (call $self_check_out) (i64.const {self_check_len}))
     (i32.const 0))
-  (func (export "route") (result i32)
+  (func (export "shape") (result i32)
     (i32.const 0))
 )
 "#,
