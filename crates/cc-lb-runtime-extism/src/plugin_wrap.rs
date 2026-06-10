@@ -8,10 +8,11 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use bytes::Bytes;
 use cc_lb_plugin_api::{
-    DialectError, Principal, RequestContext, RetryDecision, RouteDecision, RouteError,
-    RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest, Signer, SignerError,
-    SignerFactory, SigningCapability, SubscriptionQuotaCandidateSnapshot,
-    SubscriptionQuotaDataState, Upstream, UpstreamCandidate, UpstreamDialect, UpstreamError,
+    DialectError, FilterError, FilterOutput, FilterPlugin, PerCandidateReason, Principal,
+    RequestContext, RetryDecision, RouteDecision, RouteError, RouterPlugin, ShapedRequest,
+    ShapedRequestBuilder, SignedRequest, Signer, SignerError, SignerFactory, SigningCapability,
+    SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, Upstream, UpstreamCandidate,
+    UpstreamDialect, UpstreamError,
 };
 use cc_lb_plugin_wire::augmented_metadata::AugmentedMetadata;
 use cc_lb_plugin_wire::identity::{CC_LB_PLUGIN_MAGIC, PluginIdentity};
@@ -28,9 +29,14 @@ use cc_lb_plugin_wire::v1::on_unauthorized::{OnUnauthorizedFn, OnUnauthorizedReq
 use cc_lb_plugin_wire::v1::route::{RouteFn, RouteRequest};
 use cc_lb_plugin_wire::v1::shape::{ShapeFn, ShapeRequest};
 use cc_lb_plugin_wire::v1::sign::{SignFn, SignRequest};
-use cc_lb_plugin_wire::v2::common as v2_common;
+use cc_lb_plugin_wire::v2::common::{
+    self as v2_common, CandidateWire as UpstreamCandidateWire, Principal as FilterPrincipalWire,
+};
 use cc_lb_plugin_wire::v2::route::{RouteFn as RouteFnV2, RouteRequest as RouteRequestV2};
 use cc_lb_plugin_wire::v2::shape::{ShapeFn as ShapeFnV2, ShapeRequest as ShapeRequestV2};
+use cc_lb_plugin_wire::v3::filter::{
+    FilterFn, FilterRequest, FilterResponse, PerCandidateReasonWire,
+};
 use cc_lb_plugin_wire::wire_function::{FallbackPolicy, WireFunction};
 use http::header::{HeaderName, HeaderValue};
 use http::{HeaderMap, Method, StatusCode};
@@ -156,6 +162,39 @@ impl RouterPlugin for ExtismRouterPlugin {
                 self.route_v1(ctx, principal, candidates)
             }
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct ExtismFilterPlugin {
+    slot: Arc<PluginSlot>,
+    plugin_id: Uuid,
+}
+
+impl ExtismFilterPlugin {
+    pub(crate) fn new(slot: Arc<PluginSlot>, plugin_id: Uuid) -> Self {
+        Self { slot, plugin_id }
+    }
+}
+
+impl FilterPlugin for ExtismFilterPlugin {
+    fn filter(
+        &self,
+        ctx: &RequestContext,
+        principal: &Principal,
+        candidates: &[UpstreamCandidate],
+    ) -> Result<FilterOutput, FilterError> {
+        let request = filter_request_to_wire(ctx, principal, candidates);
+        let response = self.slot.dispatch_filter_call_sync(request)?;
+        filter_response_to_output(response)
+    }
+
+    fn plugin_id(&self) -> Uuid {
+        self.plugin_id
+    }
+
+    fn plugin_name(&self) -> &str {
+        &self.slot.name
     }
 }
 
@@ -464,6 +503,50 @@ impl PluginSlot {
         outcome
     }
 
+    pub(crate) fn dispatch_filter_call_sync(
+        self: &Arc<Self>,
+        request: FilterRequest,
+    ) -> Result<FilterResponse, FilterError> {
+        let slot = self.clone();
+        let thread = std::thread::Builder::new()
+            .name(format!("cc-lb-extism-{}", FilterFn::NAME))
+            .spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_time()
+                    .build();
+                match runtime {
+                    Ok(runtime) => runtime.block_on(slot.dispatch_filter_call_async(request)),
+                    Err(source) => Err(filter_runtime_error("runtime_build", source.to_string())),
+                }
+            })
+            .map_err(|source| filter_runtime_error("thread_spawn", source.to_string()))?;
+        match thread.join() {
+            Ok(outcome) => outcome,
+            Err(_) => Err(filter_trap_error("thread_join", "panic")),
+        }
+    }
+
+    async fn dispatch_filter_call_async(
+        &self,
+        request: FilterRequest,
+    ) -> Result<FilterResponse, FilterError> {
+        let cell = self.current.load_full();
+        let metadata = self.dispatch_metadata();
+        let limits = self
+            .limits_for_dispatch()
+            .ok_or_else(|| filter_runtime_error("slot_metadata", "unavailable"))?;
+        let started = Instant::now();
+        let outcome = dispatch_filter_with_timeout(cell, metadata, request, limits.max_call_duration)
+            .await;
+        metrics::histogram!(
+            "cc_lb_extism_call_duration_seconds",
+            "plugin" => self.name.clone(),
+            "hook" => FilterFn::NAME.to_owned(),
+        )
+        .record(started.elapsed().as_secs_f64());
+        outcome
+    }
+
     fn limits_for_dispatch(&self) -> Option<ResourceLimits> {
         self.entry.read().ok().map(|entry| entry.limits.clone())
     }
@@ -548,6 +631,157 @@ where
     DispatchOutcome::Fallback(F::FALLBACK)
 }
 
+async fn dispatch_filter_with_timeout(
+    cell: Arc<PluginCell>,
+    metadata: AugmentedMetadata,
+    request: FilterRequest,
+    timeout_duration: Duration,
+) -> Result<FilterResponse, FilterError> {
+    let (cancel_tx, cancel_rx) = oneshot::channel();
+    let task = tokio::task::spawn_blocking(move || {
+        let mut plugin = cell
+            .plugin
+            .lock()
+            .map_err(|_| filter_runtime_error("plugin_lock", "poisoned"))?;
+        let _ = cancel_tx.send(plugin.cancel_handle());
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            dispatch_filter_call_inner(&mut plugin, &metadata, request)
+        })) {
+            Ok(outcome) => outcome,
+            Err(_) => Err(filter_trap_error("panic", "dispatch panicked")),
+        }
+    });
+
+    let cancel_handle = tokio::time::timeout(Duration::from_millis(25), cancel_rx)
+        .await
+        .ok()
+        .and_then(Result::ok);
+
+    match tokio::time::timeout(timeout_duration, task).await {
+        Ok(Ok(outcome)) => outcome,
+        Ok(Err(source)) => Err(filter_trap_error("task_join", source.to_string())),
+        Err(_) => {
+            if let Some(cancel_handle) = cancel_handle {
+                let _ = cancel_handle.cancel();
+            }
+            Err(filter_trap_error("timeout", "plugin hook timed out"))
+        }
+    }
+}
+
+fn dispatch_filter_call_inner(
+    plugin: &mut extism::Plugin,
+    metadata: &AugmentedMetadata,
+    request: FilterRequest,
+) -> Result<FilterResponse, FilterError> {
+    let negotiated_version = *metadata
+        .negotiated_functions
+        .get(FilterFn::NAME)
+        .ok_or_else(|| filter_runtime_error("version_lookup", "negotiated version missing"))?;
+
+    let request_value = serde_json::to_value(request)
+        .map_err(|source| filter_runtime_error("request_envelope", source.to_string()))?;
+    let Value::Object(mut request_map) = request_value else {
+        return Err(filter_runtime_error(
+            "request_envelope",
+            "request serialized to non-object JSON",
+        ));
+    };
+    request_map.insert("_v".to_owned(), Value::from(negotiated_version));
+
+    let input = serde_json::to_string(&Value::Object(request_map))
+        .map_err(|source| filter_runtime_error("serialize_request", source.to_string()))?;
+    let output = plugin
+        .call::<String, String>(FilterFn::NAME, input)
+        .map_err(|source| filter_plugin_call_error(source.to_string()))?;
+
+    let response_value: Value = serde_json::from_str(&output)
+        .map_err(|source| filter_runtime_error("deserialize_response", source.to_string()))?;
+    let Value::Object(mut response_map) = response_value else {
+        return Err(filter_runtime_error(
+            "response_envelope",
+            "response envelope was not a JSON object",
+        ));
+    };
+    let response_version = response_map.remove("_v").ok_or_else(|| {
+        filter_runtime_error("response_envelope", "response envelope missing _v")
+    })?;
+    let actual_version = response_version.as_u64().ok_or_else(|| {
+        filter_runtime_error(
+            "response_envelope",
+            "response envelope _v was not an unsigned integer",
+        )
+    })?;
+    if actual_version != u64::from(negotiated_version) {
+        return Err(filter_runtime_error(
+            "response_envelope",
+            format!(
+                "response envelope version mismatch: expected {negotiated_version}, actual {actual_version}"
+            ),
+        ));
+    }
+
+    serde_json::from_value(Value::Object(response_map))
+        .map_err(|source| filter_runtime_error("response_decode", source.to_string()))
+}
+
+fn filter_plugin_call_error(reason: String) -> FilterError {
+    if is_wasm_trap(&reason) {
+        filter_trap_error("plugin_call", reason)
+    } else {
+        filter_runtime_error("plugin_call", reason)
+    }
+}
+
+fn is_wasm_trap(reason: &str) -> bool {
+    let reason = reason.to_ascii_lowercase();
+    reason.contains("trap")
+        || reason.contains("unreachable")
+        || reason.contains("wasm backtrace")
+        || reason.contains("fuel")
+        || reason.contains("timeout")
+        || reason.contains("timed out")
+}
+
+fn filter_runtime_error(stage: &'static str, reason: impl fmt::Display) -> FilterError {
+    filter_error_metric(stage);
+    let reason = reason.to_string();
+    tracing::warn!(
+        target: "cc_lb_plugin.dispatch",
+        function = FilterFn::NAME,
+        stage,
+        reason = %reason,
+        "filter dispatch runtime error"
+    );
+    FilterError::Runtime {
+        reason: format!("{stage}: {reason}"),
+    }
+}
+
+fn filter_trap_error(stage: &'static str, reason: impl fmt::Display) -> FilterError {
+    filter_error_metric(stage);
+    let reason = reason.to_string();
+    tracing::warn!(
+        target: "cc_lb_plugin.dispatch",
+        function = FilterFn::NAME,
+        stage,
+        reason = %reason,
+        "filter dispatch trap error"
+    );
+    FilterError::Trap {
+        reason: format!("{stage}: {reason}"),
+    }
+}
+
+fn filter_error_metric(stage: &'static str) {
+    metrics::counter!(
+        "cc_lb_plugin_dispatch_errors_total",
+        "function" => FilterFn::NAME,
+        "stage" => stage,
+    )
+    .increment(1);
+}
+
 fn legacy_dispatch_metadata(plugin_name: &str) -> AugmentedMetadata {
     AugmentedMetadata {
         identity: PluginIdentity {
@@ -564,6 +798,7 @@ fn legacy_dispatch_metadata(plugin_name: &str) -> AugmentedMetadata {
             function_version::<SignFn>(),
             function_version::<OnUnauthorizedFn>(),
             function_version::<ObserveFn>(),
+            function_version::<FilterFn>(),
         ]),
         negotiated_capabilities: BTreeSet::new(),
         handshake_completed_at: 1,
@@ -653,6 +888,10 @@ fn candidates_to_wire_v2(candidates: &[UpstreamCandidate]) -> Vec<v2_common::Can
                 }),
         })
         .collect()
+}
+
+fn candidates_to_wire_v3(candidates: &[UpstreamCandidate]) -> Vec<UpstreamCandidateWire> {
+    candidates_to_wire_v2(candidates)
 }
 
 fn subscription_quota_to_wire(
@@ -771,6 +1010,23 @@ fn route_request_to_wire_v2(
     }
 }
 
+fn filter_request_to_wire(
+    ctx: &RequestContext,
+    principal: &Principal,
+    candidates: &[UpstreamCandidate],
+) -> FilterRequest {
+    FilterRequest {
+        request_id: ctx.request_id.clone(),
+        headers: request_headers_to_wire_v2(ctx),
+        method: ctx.method.as_str().to_owned(),
+        path: ctx.path.clone(),
+        query: ctx.query.clone(),
+        body_base64: BASE64.encode(&ctx.body_bytes),
+        principal: principal_to_wire_v3(principal),
+        candidates: candidates_to_wire_v3(candidates),
+    }
+}
+
 fn request_headers_to_wire(ctx: &RequestContext) -> Vec<HeaderWire> {
     let mut headers = ctx.downstream_headers.clone();
     headers.remove(http::header::HOST);
@@ -800,6 +1056,56 @@ fn principal_to_wire_v2(principal: &Principal) -> v2_common::Principal {
         id: principal.id.clone(),
         kind: principal_kind_to_wire(principal),
         claims: principal.claims.clone(),
+    }
+}
+
+fn principal_to_wire_v3(principal: &Principal) -> FilterPrincipalWire {
+    principal_to_wire_v2(principal)
+}
+
+fn filter_response_to_output(response: FilterResponse) -> Result<FilterOutput, FilterError> {
+    let mut kept_upstream_ids = Vec::new();
+    let mut per_candidate_reasons = Vec::new();
+    let mut reasons = Vec::new();
+
+    for result in response.results {
+        let upstream_id = Uuid::parse_str(&result.upstream_id).map_err(|source| {
+            FilterError::Runtime {
+                reason: format!("plugin returned invalid upstream_id: {source}"),
+            }
+        })?;
+        if result.decision == "accept" {
+            kept_upstream_ids.push(upstream_id);
+        } else {
+            per_candidate_reasons.push(per_candidate_reason_from_wire(&result));
+        }
+        if !result.reason.is_empty() {
+            reasons.push(format!("{}: {}", result.upstream_id, result.reason));
+        }
+    }
+
+    Ok(FilterOutput {
+        kept_upstream_ids,
+        reason: reasons.join("; "),
+        per_candidate_reasons,
+    })
+}
+
+fn per_candidate_reason_from_wire(result: &PerCandidateReasonWire) -> PerCandidateReason {
+    let label = if result.decision == "accept" {
+        result.reason.as_str()
+    } else {
+        result.decision.as_str()
+    };
+    let label = label.replace('-', "_").to_ascii_lowercase();
+    if label.contains("rate_limit") || label.contains("rate_limited") {
+        PerCandidateReason::RateLimited
+    } else if label.contains("quota") {
+        PerCandidateReason::InsufficientQuota
+    } else if label.contains("unhealthy") {
+        PerCandidateReason::Unhealthy
+    } else {
+        PerCandidateReason::RejectedByPlugin
     }
 }
 
