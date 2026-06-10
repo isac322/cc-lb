@@ -349,6 +349,33 @@ export interface DashboardUsageResponse {
   observed: boolean;
 }
 
+export type TerminalStrategy = 'first-pick' | 'round-robin' | 'least-connections';
+
+export interface StageDecision {
+  stage_name: string;
+  upstream_id: string;
+  reason: string;
+}
+
+export interface TerminalDecision {
+  upstream_id: string;
+  strategy: TerminalStrategy;
+}
+
+export interface RoutingTrace {
+  stages: StageDecision[];
+  terminal: TerminalDecision;
+}
+
+export type InternalErrorStage = 'authn' | 'router' | 'shape' | 'signer' | 'relay';
+export type InternalErrorKind = 'plugin_error' | 'config_error' | 'timeout' | 'unavailable';
+
+export interface InternalError {
+  stage: InternalErrorStage;
+  kind: InternalErrorKind;
+  message?: string;
+}
+
 export interface RequestEvent {
   ts: number | null;
   ts_ms?: number | null;
@@ -402,6 +429,8 @@ export interface RequestEvent {
   ping_count?: number;
   inter_token_avg_ms?: number;
   error_code?: string;
+  routing_trace?: RoutingTrace;
+  internal_errors?: InternalError[];
 }
 
 export interface RecentEventsPayload {
