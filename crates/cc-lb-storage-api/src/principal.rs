@@ -46,6 +46,8 @@ pub struct PrincipalRecord {
     pub revision: u64,
     pub created_at_unix_secs: u64,
     pub updated_at_unix_secs: u64,
+    #[serde(default)]
+    pub router_terminal_strategy: cc_lb_plugin_api::TerminalStrategy,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
