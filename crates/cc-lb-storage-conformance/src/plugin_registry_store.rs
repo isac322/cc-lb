@@ -41,8 +41,10 @@ where
     registry_label_update_with_stale_revision_conflicts(storage).await?;
     chain_insert_preserves_sparse_order(storage).await?;
     list_chain_for_principal_returns_ordered(storage).await?;
-    insert_chain_entry_rejects_duplicate_for_router_slot_on_storage(storage).await?;
+    router_multi_entry_ordered_on_storage(storage).await?;
     insert_chain_entry_rejects_duplicate_for_shape_slot_on_storage(storage).await?;
+    router_reorder_preserves_invariants_on_storage(storage).await?;
+    shape_singleton_preserved_on_storage(storage).await?;
     insert_chain_entry_allows_multi_for_observability_hook_on_storage(storage).await?;
     refcount_increment_on_chain_insert(storage).await?;
     update_chain_entry_bumps_revision(storage).await?;
@@ -312,16 +314,14 @@ pub async fn list_chain_for_principal_returns_ordered<S: PluginRegistryStore + P
 }
 
 plugin_registry_scenario!(
-    insert_chain_entry_rejects_duplicate_for_router_slot,
-    insert_chain_entry_rejects_duplicate_for_router_slot_on_storage
+    router_multi_entry_ordered,
+    router_multi_entry_ordered_on_storage
 );
 
-async fn insert_chain_entry_rejects_duplicate_for_router_slot_on_storage<
-    S: PluginRegistryStore + PrincipalStore,
->(
+async fn router_multi_entry_ordered_on_storage<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
 ) -> Result<()> {
-    let (principal, plugin) = principal_and_plugin(storage, 37, "plugin-router-singleton").await?;
+    let (principal, plugin) = principal_and_plugin(storage, 37, "plugin-router-multi").await?;
     let first = storage
         .insert_chain_entry(chain_with_slot(
             principal,
@@ -330,15 +330,104 @@ async fn insert_chain_entry_rejects_duplicate_for_router_slot_on_storage<
             sparse_order::STEP,
         ))
         .await?;
-    let err = storage
+    let second = storage
         .insert_chain_entry(chain_with_slot(
             principal,
             PluginSlot::Router,
             plugin.id,
             sparse_order::STEP * 2,
         ))
+        .await?;
+    let listed = storage
+        .list_chain_for_principal(principal, PluginSlot::Router)
+        .await?;
+    ensure!(
+        listed.len() == 2,
+        "router slot allows multiple entries"
+    );
+    ensure!(
+        listed[0].order < listed[1].order,
+        "router entries are properly ordered"
+    );
+    ensure!(
+        listed[0].id == first.id && listed[1].id == second.id,
+        "entries appear in insertion order"
+    );
+    Ok(())
+}
+
+plugin_registry_scenario!(
+    router_reorder_preserves_invariants,
+    router_reorder_preserves_invariants_on_storage
+);
+
+async fn router_reorder_preserves_invariants_on_storage<S: PluginRegistryStore + PrincipalStore>(
+    storage: &S,
+) -> Result<()> {
+    let (principal, plugin) = principal_and_plugin(storage, 40, "plugin-router-reorder").await?;
+    let first = storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::Router,
+            plugin.id,
+            100,
+        ))
+        .await?;
+    let second = storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::Router,
+            plugin.id,
+            200,
+        ))
+        .await?;
+    let reordered = storage
+        .reorder_chain(
+            principal,
+            PluginSlot::Router,
+            vec![
+                (first.id, 150, first.revision),
+                (second.id, 250, second.revision),
+            ],
+        )
+        .await?;
+    ensure!(
+        reordered[0].order == 150 && reordered[1].order == 250,
+        "router entries can be reordered"
+    );
+    ensure!(
+        reordered[0].order < reordered[1].order,
+        "reordering preserves order invariant"
+    );
+    Ok(())
+}
+
+plugin_registry_scenario!(
+    shape_singleton_preserved,
+    shape_singleton_preserved_on_storage
+);
+
+async fn shape_singleton_preserved_on_storage<S: PluginRegistryStore + PrincipalStore>(
+    storage: &S,
+) -> Result<()> {
+    let (principal, plugin) = principal_and_plugin(storage, 41, "plugin-shape-still-singleton").await?;
+    let first = storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::Shape,
+            plugin.id,
+            sparse_order::STEP,
+        ))
+        .await?;
+    let err = storage
+        .insert_chain_entry(chain_with_slot(
+            principal,
+            PluginSlot::Shape,
+            plugin.id,
+            sparse_order::STEP * 2,
+        ))
         .await
-        .expect_err("duplicate router slot insert conflicts");
+        .expect_err("shape slot must remain singleton");
     ensure!(
         matches!(
             err,
@@ -346,7 +435,7 @@ async fn insert_chain_entry_rejects_duplicate_for_router_slot_on_storage<
                 reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id }
             } if existing_entry_id == first.id
         ),
-        "duplicate router slot returns typed singleton conflict"
+        "shape slot singleton constraint preserved"
     );
     Ok(())
 }
