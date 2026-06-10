@@ -94,6 +94,7 @@ mod principal_view_swap {
             revision: 1,
             created_at_unix_secs: Duration::ZERO.as_secs(),
             updated_at_unix_secs: Duration::ZERO.as_secs(),
+            router_terminal_strategy: Default::default(),
         }];
 
         let mut principal_chains = HashMap::new();

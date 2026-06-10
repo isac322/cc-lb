@@ -47,7 +47,7 @@ impl PrincipalStore for PostgresStorage {
     }
 
     async fn get_by_id(&self, id: Uuid) -> StorageResult<Option<PrincipalRecord>> {
-        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at FROM principals_v1 WHERE id = $1")
+        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at, router_terminal_strategy FROM principals_v1 WHERE id = $1")
             .bind(id)
             .fetch_optional(&self.pool)
             .await
@@ -56,7 +56,7 @@ impl PrincipalStore for PostgresStorage {
     }
 
     async fn get_by_name(&self, name: &str) -> StorageResult<Option<PrincipalRecord>> {
-        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at FROM principals_v1 WHERE name = $1")
+        let row = sqlx::query("SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at, router_terminal_strategy FROM principals_v1 WHERE name = $1")
             .bind(name)
             .fetch_optional(&self.pool)
             .await
@@ -74,7 +74,7 @@ impl PrincipalStore for PostgresStorage {
             return Ok(Vec::new());
         }
         let rows = sqlx::query(
-            "SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at FROM principals_v1 WHERE ($1 OR deleted_at IS NULL) ORDER BY name ASC OFFSET $2 LIMIT $3",
+            "SELECT id, name, kind, allowed_models, allowed_upstreams, default_limits, enabled, last_apply_error, last_apply_at, deleted_at, revision, created_at, updated_at, router_terminal_strategy FROM principals_v1 WHERE ($1 OR deleted_at IS NULL) ORDER BY name ASC OFFSET $2 LIMIT $3",
         )
         .bind(include_deleted)
         .bind(u64_to_i64(offset as u64, "principal.offset")?)
@@ -110,15 +110,20 @@ impl PrincipalStore for PostgresStorage {
             .allowed_upstreams
             .unwrap_or(current.allowed_upstreams);
         let default_limits = update.default_limits.unwrap_or(current.default_limits);
+        let router_terminal_strategy = update
+            .router_terminal_strategy
+            .unwrap_or(current.router_terminal_strategy);
+        let router_terminal_strategy = terminal_strategy_to_db_value(&router_terminal_strategy)?;
         let now = unix_secs_to_datetime(now_unix_secs, "principal.updated_at")?;
         let row = sqlx::query(
-            "UPDATE principals_v1 SET name = $2, allowed_models = $3, allowed_upstreams = $4, default_limits = $5, revision = revision + 1, updated_at = $6 WHERE id = $1 AND revision = $7 RETURNING *",
+            "UPDATE principals_v1 SET name = $2, allowed_models = $3, allowed_upstreams = $4, default_limits = $5, router_terminal_strategy = $6, revision = revision + 1, updated_at = $7 WHERE id = $1 AND revision = $8 RETURNING *",
         )
         .bind(id)
         .bind(name)
         .bind(serde_json::to_value(allowed_models)?)
         .bind(&allowed_upstreams)
         .bind(serde_json::to_value(default_limits)?)
+        .bind(router_terminal_strategy)
         .bind(now)
         .bind(u64_to_i64(expected_revision, "principal.revision")?)
         .fetch_one(&self.pool)
@@ -296,6 +301,9 @@ fn principal_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PrincipalReco
     let last_apply_at: Option<DateTime<Utc>> =
         row.try_get("last_apply_at").map_err(map_sqlx_error)?;
     let deleted_at: Option<DateTime<Utc>> = row.try_get("deleted_at").map_err(map_sqlx_error)?;
+    let router_terminal_strategy: String = row
+        .try_get("router_terminal_strategy")
+        .map_err(map_sqlx_error)?;
     Ok(PrincipalRecord {
         id: row.try_get("id").map_err(map_sqlx_error)?,
         name: row.try_get("name").map_err(map_sqlx_error)?,
@@ -321,7 +329,24 @@ fn principal_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PrincipalReco
         )?,
         created_at_unix_secs: datetime_to_unix_secs(created_at, "principal.created_at")?,
         updated_at_unix_secs: datetime_to_unix_secs(updated_at, "principal.updated_at")?,
+        router_terminal_strategy: serde_json::from_value(Value::String(
+            router_terminal_strategy.clone(),
+        ))
+        .map_err(|error| StorageError::Corrupted {
+            message: format!(
+                "invalid principal router_terminal_strategy {router_terminal_strategy}: {error}"
+            ),
+        })?,
     })
+}
+
+fn terminal_strategy_to_db_value(strategy: &impl serde::Serialize) -> StorageResult<String> {
+    match serde_json::to_value(strategy)? {
+        Value::String(value) => Ok(value),
+        value => Err(StorageError::Fatal {
+            message: format!("router_terminal_strategy serialized to non-string value {value}"),
+        }),
+    }
 }
 
 fn principal_kind_to_str(kind: PrincipalKind) -> &'static str {

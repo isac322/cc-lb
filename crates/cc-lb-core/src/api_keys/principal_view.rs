@@ -77,6 +77,7 @@ impl PrincipalView {
             revision: 1,
             created_at_unix_secs: 0,
             updated_at_unix_secs: 0,
+            router_terminal_strategy: Default::default(),
         };
         principal_chains.entry(principal_id.to_owned()).or_insert((
             RouterPluginCache::Inherit,

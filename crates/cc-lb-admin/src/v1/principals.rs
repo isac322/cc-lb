@@ -215,6 +215,7 @@ async fn update_principal(
             allowed_models: body.allowed_models,
             allowed_upstreams: body.allowed_upstreams,
             default_limits: body.default_limits,
+            router_terminal_strategy: None,
         },
         fields_changed,
     )
