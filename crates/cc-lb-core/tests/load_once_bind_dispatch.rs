@@ -10,14 +10,15 @@ use cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_core::api_keys::key_store::KeyStore;
 use cc_lb_core::api_keys::limit_engine::LimitEngine;
 use cc_lb_core::api_keys::principal_view::{
-    DialectCache, ObservabilityHooksCache, PrincipalView, RouterPluginCache,
+    DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
 };
 use cc_lb_core::{
     DynamicViewBuilder, DynamicViewHolder, ErrorNormalizer, Lifecycle, LifecycleConfig,
 };
 use cc_lb_plugin_api::{
-    ObservabilityError, ObservabilityHook, ObserveEvent, Principal, RequestContext, RouteDecision,
-    RouteError, RouterPlugin, Upstream, UpstreamCandidate,
+    FilterError, FilterOutput, FilterPlugin, ObservabilityError, ObservabilityHook, ObserveEvent,
+    Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, TerminalStrategy, Upstream,
+    UpstreamCandidate,
 };
 use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
@@ -64,20 +65,20 @@ fn limit_engine_reserve_accepts_bound_principal_view() {
 }
 
 #[tokio::test]
-async fn lifecycle_per_principal_dispatch_hits_correct_router_and_hook()
+async fn lifecycle_per_principal_dispatch_uses_global_router_and_explicit_hook()
 -> Result<(), Box<dyn std::error::Error>> {
-    let explicit_router_hits = Arc::new(Mutex::new(Vec::new()));
     let global_router_hits = Arc::new(Mutex::new(Vec::new()));
     let explicit_hook_events = Arc::new(Mutex::new(Vec::new()));
     let global_hook_events = Arc::new(Mutex::new(Vec::new()));
 
-    let explicit_router: Arc<dyn RouterPlugin> = Arc::new(RecordingRouter {
-        name: "explicit",
-        hits: explicit_router_hits.clone(),
-    });
     let global_router: Arc<dyn RouterPlugin> = Arc::new(RecordingRouter {
         name: "global",
         hits: global_router_hits.clone(),
+    });
+    let explicit_pipeline = Arc::new(RouterPipelineCache {
+        user_filters: vec![Arc::new(RecordingFilter { name: "explicit" })],
+        terminal: TerminalStrategy::Random,
+        instantiation_error: None,
     });
     let explicit_hook: Arc<dyn ObservabilityHook> = Arc::new(RecordingNamedHook {
         name: "explicit",
@@ -90,7 +91,7 @@ async fn lifecycle_per_principal_dispatch_hits_correct_router_and_hook()
     let view = principal_view(
         "principal-a",
         Some((
-            RouterPluginCache::Explicit(explicit_router),
+            explicit_pipeline,
             ObservabilityHooksCache::Explicit(vec![explicit_hook]),
         )),
     );
@@ -124,11 +125,7 @@ async fn lifecycle_per_principal_dispatch_hits_correct_router_and_hook()
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         global_router_hits.lock().unwrap().as_slice(),
-        &[] as &[String]
-    );
-    assert_eq!(
-        explicit_router_hits.lock().unwrap().as_slice(),
-        &["explicit:principal-a".to_owned()]
+        &["global:principal-a".to_owned()]
     );
     assert!(
         explicit_hook_events
@@ -157,13 +154,13 @@ async fn lifecycle_per_principal_dispatch_hits_correct_router_and_hook()
 // TODO(Task-35-followup): replace TOML config consumption with DB store read
 fn principal_view(
     principal_id: &str,
-    chain: Option<(RouterPluginCache, ObservabilityHooksCache)>,
+    chain: Option<(Arc<RouterPipelineCache>, ObservabilityHooksCache)>,
 ) -> Arc<PrincipalView> {
     let mut chains = HashMap::new();
     if let Some((router, obs)) = chain {
         chains.insert(
             principal_id.to_owned(),
-            (router, obs, DialectCache::Inherit),
+            (Some(router), obs, DialectCache::Inherit),
         );
     }
     Arc::new(PrincipalView::for_tests(
@@ -259,6 +256,29 @@ impl RouterPlugin for RecordingRouter {
 struct RecordingNamedHook {
     name: &'static str,
     events: Arc<Mutex<Vec<String>>>,
+}
+
+struct RecordingFilter {
+    name: &'static str,
+}
+
+impl FilterPlugin for RecordingFilter {
+    fn filter(
+        &self,
+        _ctx: &RequestContext,
+        _principal: &Principal,
+        _candidates: &[UpstreamCandidate],
+    ) -> Result<FilterOutput, FilterError> {
+        unimplemented!("RecordingFilter({}) is only cached in this test", self.name)
+    }
+
+    fn plugin_id(&self) -> uuid::Uuid {
+        uuid::Uuid::nil()
+    }
+
+    fn plugin_name(&self) -> &str {
+        self.name
+    }
 }
 
 impl ObservabilityHook for RecordingNamedHook {
