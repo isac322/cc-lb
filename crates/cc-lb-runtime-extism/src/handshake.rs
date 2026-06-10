@@ -12,6 +12,7 @@ use cc_lb_plugin_wire::v1::{
     build_signer::BuildSignerFn, normalize_error::NormalizeErrorFn, observe::ObserveFn,
     on_unauthorized::OnUnauthorizedFn, route::RouteFn, shape::ShapeFn, sign::SignFn,
 };
+use cc_lb_plugin_wire::v3::filter::FilterFn;
 use cc_lb_plugin_wire::wire_function::{WireFunction, all_wire_functions};
 use extism::{Manifest, PluginBuilder, Wasm};
 use thiserror::Error;
@@ -96,7 +97,7 @@ fn classify_call_error(reason: String) -> HandshakeExecutionError {
     }
 }
 
-fn wire_function_versions() -> [(&'static str, &'static [u32]); 7] {
+fn wire_function_versions() -> [(&'static str, &'static [u32]); 8] {
     [
         (
             <RouteFn as WireFunction>::NAME,
@@ -125,6 +126,10 @@ fn wire_function_versions() -> [(&'static str, &'static [u32]); 7] {
         (
             <ObserveFn as WireFunction>::NAME,
             <ObserveFn as WireFunction>::SUPPORTED_VERSIONS,
+        ),
+        (
+            <FilterFn as WireFunction>::NAME,
+            <FilterFn as WireFunction>::SUPPORTED_VERSIONS,
         ),
     ]
 }
