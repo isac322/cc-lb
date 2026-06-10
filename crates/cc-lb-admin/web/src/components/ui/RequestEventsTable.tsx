@@ -117,29 +117,11 @@ export function RequestEventsTable({
                     DASH}
                 </td>
               )}
-              {showUpstream && (
-                <td className="px-3 py-2 whitespace-nowrap truncate max-w-[180px]">
-                  {upstreamNameMap.get(e.upstream ?? '') ??
-                    e.upstream_name ??
-                    e.upstream ??
-                    DASH}
-                </td>
-              )}
+              {showUpstream && <UpstreamCell event={e} upstreamNameMap={upstreamNameMap} />}
               <td className="px-3 py-2 text-text-muted truncate max-w-[260px]">
                 {e.model ?? DASH}
               </td>
-              <td
-                className={cx(
-                  'px-3 py-2 text-right tabular-nums whitespace-nowrap',
-                  e.status >= 500
-                    ? 'text-red-400'
-                    : e.status >= 400
-                      ? 'text-amber-400'
-                      : 'text-green-400',
-                )}
-              >
-                {e.status}
-              </td>
+              <StatusCell event={e} />
               <LatencyCell event={e} />
               {showTokens && <TokenCell event={e} />}
               {showCost && <CostCell event={e} />}
@@ -174,6 +156,138 @@ export function RequestEventsTable({
         )}
       </tbody>
     </table>
+  );
+}
+
+// ─── Upstream cell ─────────────────────────────────────────────────────────────
+
+function UpstreamCell({
+  event,
+  upstreamNameMap,
+}: {
+  event: RequestEvent;
+  upstreamNameMap: Map<string, string>;
+}) {
+  const name =
+    upstreamNameMap.get(event.upstream ?? '') ??
+    event.upstream_name ??
+    event.upstream ??
+    DASH;
+
+  if (!event.routing_trace) {
+    return (
+      <td className="px-3 py-2 whitespace-nowrap truncate max-w-[180px]">
+        {name}
+      </td>
+    );
+  }
+
+  const popover = (
+    <div className="min-w-[240px] font-mono">
+      <div className="text-[10px] uppercase tracking-wider text-text-faint mb-1.5">
+        Routing Trace
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {event.routing_trace.stages.map((s, i) => (
+          <div key={i} className="flex flex-col gap-0.5 text-[11px]">
+            <div className="flex items-center justify-between">
+              <span className="text-text-muted">{s.stage_name}</span>
+              <span className="text-text truncate max-w-[120px]">
+                {s.upstream_id}
+              </span>
+            </div>
+            <div className="text-text-faint text-[10px]">{s.reason}</div>
+          </div>
+        ))}
+        <div className="border-t border-subtle mt-1 pt-1.5 flex flex-col gap-0.5 text-[11px]">
+          <div className="flex items-center justify-between">
+            <span className="text-text-muted">Terminal</span>
+            <span className="text-text truncate max-w-[120px]">
+              {event.routing_trace.terminal.upstream_id}
+            </span>
+          </div>
+          <div className="text-text-faint text-[10px]">
+            Strategy: {event.routing_trace.terminal.strategy}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <td
+      className="p-0 whitespace-nowrap truncate max-w-[180px]"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <Hint label={popover}>
+        <div className="px-3 py-2 cursor-help block truncate">{name}</div>
+      </Hint>
+    </td>
+  );
+}
+
+// ─── Status cell ───────────────────────────────────────────────────────────────
+
+function StatusCell({ event }: { event: RequestEvent }) {
+  const statusClass =
+    event.status >= 500
+      ? 'text-red-400'
+      : event.status >= 400
+        ? 'text-amber-400'
+        : 'text-green-400';
+
+  if (!event.internal_errors || event.internal_errors.length === 0) {
+    return (
+      <td
+        className={cx(
+          'px-3 py-2 text-right tabular-nums whitespace-nowrap',
+          statusClass,
+        )}
+      >
+        {event.status}
+      </td>
+    );
+  }
+
+  const popover = (
+    <div className="min-w-[240px] font-mono">
+      <div className="text-[10px] uppercase tracking-wider text-text-faint mb-1.5">
+        Internal Errors
+      </div>
+      <div className="flex flex-col gap-1.5">
+        {event.internal_errors.map((err, i) => (
+          <div key={i} className="flex flex-col gap-0.5 text-[11px]">
+            <div className="flex items-center justify-between">
+              <span className="text-text-muted">{err.stage}</span>
+              <span className="text-red-400">{err.kind}</span>
+            </div>
+            {err.message && (
+              <div className="text-text-faint text-[10px] whitespace-pre-wrap">
+                {err.message}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+
+  return (
+    <td
+      className="p-0 text-right whitespace-nowrap"
+      onClick={(e) => e.stopPropagation()}
+    >
+      <Hint label={popover}>
+        <div
+          className={cx(
+            'px-3 py-2 cursor-help block tabular-nums',
+            statusClass,
+          )}
+        >
+          {event.status}
+        </div>
+      </Hint>
+    </td>
   );
 }
 
