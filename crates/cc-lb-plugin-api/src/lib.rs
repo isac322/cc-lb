@@ -29,11 +29,12 @@ pub use traits::{
     PluginRuntime, RouterPlugin, Signer, SignerFactory, UpstreamDialect,
 };
 pub use types::{
-    CredentialStrategy, ObserveEvent, PerCandidateReason, PluginManifest, Principal,
-    PrincipalKind, PrincipalQuotas, RateLimitKind, RateLimitObservation, RequestContext,
-    RetryDecision, RouteDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest,
-    SigningCapability, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
-    TerminalStrategy, Upstream, UpstreamCandidate, UpstreamKind, shape_request, sign_request,
+    CredentialStrategy, InternalError, InternalErrorKind, InternalErrorStage, ObserveEvent,
+    PerCandidateReason, PluginManifest, Principal, PrincipalKind, PrincipalQuotas,
+    RateLimitKind, RateLimitObservation, RequestContext, RetryDecision, RouteDecision,
+    RoutingTrace, ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability,
+    SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, TerminalStrategy, Upstream,
+    UpstreamCandidate, UpstreamKind, shape_request, sign_request,
 };
 
 mod private {
