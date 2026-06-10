@@ -25,15 +25,15 @@ pub use errors::{
     DialectError, ObservabilityError, RouteError, RuntimeError, SignerError, UpstreamError,
 };
 pub use traits::{
-    ApiKeyAwareSignerFactory, ObservabilityHook, PluginRuntime, RouterPlugin, Signer,
-    SignerFactory, UpstreamDialect,
+    ApiKeyAwareSignerFactory, FilterError, FilterOutput, FilterPlugin, ObservabilityHook,
+    PluginRuntime, RouterPlugin, Signer, SignerFactory, UpstreamDialect,
 };
 pub use types::{
-    CredentialStrategy, ObserveEvent, PluginManifest, Principal, PrincipalKind, PrincipalQuotas,
-    RateLimitKind, RateLimitObservation, RequestContext, RetryDecision, RouteDecision,
-    ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability,
-    SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, Upstream, UpstreamCandidate,
-    UpstreamKind, shape_request, sign_request,
+    CredentialStrategy, ObserveEvent, PerCandidateReason, PluginManifest, Principal,
+    PrincipalKind, PrincipalQuotas, RateLimitKind, RateLimitObservation, RequestContext,
+    RetryDecision, RouteDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest,
+    SigningCapability, SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState,
+    TerminalStrategy, Upstream, UpstreamCandidate, UpstreamKind, shape_request, sign_request,
 };
 
 mod private {
