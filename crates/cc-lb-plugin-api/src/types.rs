@@ -587,6 +587,165 @@ pub struct PluginManifest {
     pub metadata: BTreeMap<String, serde_json::Value>,
 }
 
+// Routing trace cap constants
+/// Maximum number of stages in a routing trace.
+pub const MAX_ROUTING_TRACE_STAGES: usize = 100;
+/// Maximum length of a stage name.
+pub const MAX_STAGE_NAME_LEN: usize = 256;
+/// Maximum length of an error message in internal errors.
+pub const MAX_ERROR_MESSAGE_LEN: usize = 1024;
+
+/// Reason for a passthrough routing decision.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PassthroughCause {
+    /// Upstream is healthy and available.
+    HealthyUpstream,
+    /// No alternative upstream available.
+    NoAlternative,
+    /// Plugin returned passthrough decision.
+    PluginDecision,
+}
+
+/// Per-candidate evaluation reason.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PerCandidateReason {
+    /// Candidate hit rate limit.
+    RateLimited,
+    /// Candidate has insufficient quota.
+    InsufficientQuota,
+    /// Candidate is unhealthy.
+    Unhealthy,
+    /// Candidate rejected by plugin.
+    RejectedByPlugin,
+}
+
+/// Strategy for selecting a terminal upstream.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum TerminalStrategy {
+    /// Select first available upstream.
+    FirstPick,
+    /// Round-robin selection.
+    RoundRobin,
+    /// Least connections strategy.
+    LeastConnections,
+}
+
+impl Default for TerminalStrategy {
+    fn default() -> Self {
+        TerminalStrategy::FirstPick
+    }
+}
+
+/// Decision made at a single routing stage.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StageDecision {
+    /// Name of the routing stage.
+    pub stage_name: String,
+    /// Upstream candidate identifier if applicable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_id: Option<Uuid>,
+    /// Reason for this stage's decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// Terminal routing decision selecting an upstream.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TerminalDecision {
+    /// Selected upstream identifier.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upstream_id: Option<Uuid>,
+    /// Strategy used for selection.
+    pub strategy: TerminalStrategy,
+}
+
+impl Default for TerminalDecision {
+    fn default() -> Self {
+        TerminalDecision {
+            upstream_id: None,
+            strategy: TerminalStrategy::default(),
+        }
+    }
+}
+
+/// Complete routing trace for a request through all decision stages.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RoutingTrace {
+    /// Sequence of stage decisions made during routing.
+    #[serde(default)]
+    pub stages: Vec<StageDecision>,
+    /// Final terminal routing decision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_decision: Option<TerminalDecision>,
+}
+
+/// Stage where an internal error occurred.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InternalErrorStage {
+    /// Authentication stage.
+    Authn,
+    /// Routing stage.
+    Router,
+    /// Request shaping stage.
+    Shape,
+    /// Request signing stage.
+    Signer,
+    /// Request relay stage.
+    Relay,
+}
+
+impl Default for InternalErrorStage {
+    fn default() -> Self {
+        InternalErrorStage::Router
+    }
+}
+
+/// Kind of internal error that occurred.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InternalErrorKind {
+    /// Plugin crashed or returned an error.
+    PluginError,
+    /// Configuration error.
+    ConfigError,
+    /// Timeout error.
+    Timeout,
+    /// Resource unavailable.
+    Unavailable,
+}
+
+impl Default for InternalErrorKind {
+    fn default() -> Self {
+        InternalErrorKind::PluginError
+    }
+}
+
+/// Internal error information with stage and kind details.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InternalError {
+    /// Stage where the error occurred.
+    pub stage: InternalErrorStage,
+    /// Kind of error.
+    pub kind: InternalErrorKind,
+    /// Optional error message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+impl Default for InternalError {
+    fn default() -> Self {
+        InternalError {
+            stage: InternalErrorStage::default(),
+            kind: InternalErrorKind::default(),
+            message: None,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
