@@ -11,3 +11,8 @@ cc-lb is a Rust workspace for an Anthropic-compatible multi-principal reverse pr
 5. Add upstreams, principals, and plugin chains via the dashboard
 
 See [docs/runtime-management.md](docs/runtime-management.md) for the full API and architecture.
+
+## Operator Guides
+
+- [Upstream warm-up](./docs/upstream-warmup.md): keep Anthropic 5h windows ticking
+
