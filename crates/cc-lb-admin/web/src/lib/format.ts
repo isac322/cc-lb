@@ -70,3 +70,13 @@ export function fmtUsdCompact(micros: number | null | undefined): string {
   const usd = micros / 1_000_000;
   return `$${usd.toFixed(4)}`;
 }
+
+export function fmtMsCompact(ms: number | null | undefined): {
+  value: string;
+  unit: string;
+} {
+  if (ms == null) return { value: '—', unit: '' };
+  if (ms < 1000) return { value: String(Math.round(ms)), unit: 'ms' };
+  if (ms < 60_000) return { value: (ms / 1000).toFixed(1), unit: 's' };
+  return { value: (ms / 60_000).toFixed(1), unit: 'm' };
+}

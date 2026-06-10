@@ -29,6 +29,8 @@ mod error_normalizer;
 #[cfg(not(loom))]
 mod hop_by_hop;
 #[cfg(not(loom))]
+pub mod instrumented_connector;
+#[cfg(not(loom))]
 pub mod lifecycle;
 #[cfg(not(loom))]
 pub mod model_resolution;
@@ -37,6 +39,8 @@ pub mod poll_schedule_estimator;
 #[cfg(not(loom))]
 #[allow(dead_code)]
 mod rate_limit_headers;
+#[cfg(not(loom))]
+pub mod request_timing;
 #[cfg(not(loom))]
 mod sse_error_frame;
 #[cfg(not(loom))]

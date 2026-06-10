@@ -1,6 +1,7 @@
 import type React from 'react';
 import { eventTime, type RequestEvent } from '../../lib/api';
 import { fmtUsd, fmtUsdCompact, splitNum } from '../../lib/format';
+import { LatencyCell } from './latency/LatencyCell';
 import { cx, Hint, SkeletonRow } from './primitives';
 import { RelativeTime } from './RelativeTime';
 
@@ -139,9 +140,7 @@ export function RequestEventsTable({
               >
                 {e.status}
               </td>
-              <td className="px-3 py-2 text-right tabular-nums whitespace-nowrap">
-                {e.duration_ms}ms
-              </td>
+              <LatencyCell event={e} />
               {showTokens && <TokenCell event={e} />}
               {showCost && <CostCell event={e} />}
             </tr>
@@ -424,12 +423,12 @@ function CostCell({ event }: { event: RequestEvent }) {
 
 // ─── Sparkline ───────────────────────────────────────────────────────────────
 
-interface SparkSegment {
+export interface SparkSegment {
   value: number;
   color: string;
 }
 
-function Sparkline({ segments }: { segments: SparkSegment[] }) {
+export function Sparkline({ segments }: { segments: SparkSegment[] }) {
   const total = segments.reduce((a, s) => a + Math.max(0, s.value), 0);
   if (total <= 0) {
     return <div className="mt-1 h-1 rounded-full bg-overlay-1" />;
