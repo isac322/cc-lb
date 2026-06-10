@@ -291,6 +291,16 @@ export function usePluginChain(principalId: string | null, slot?: ChainSlot) {
     enabled: !!principalId,
   });
 }
+export function useRouterTerminalStrategy(principalId: string | null) {
+  return useQuery({
+    queryKey: ['router-terminal', principalId ?? ''],
+    queryFn: () =>
+      getJson<{ strategy: string; revision: number }>(
+        `/admin/v1/principals/${principalId}/router-terminal`,
+      ),
+    enabled: !!principalId,
+  });
+}
 export function useRecentEvents(filters: Record<string, string | undefined>) {
   const params = new URLSearchParams();
   for (const [k, v] of Object.entries(filters)) if (v) params.set(k, v);
@@ -829,6 +839,30 @@ export function useDeleteChainEntry() {
     mutationFn: ({ id, revision }: { id: string; revision: number }) =>
       deleteJson(`/admin/v1/plugin-chain-entries/${id}`, { ifMatch: revision }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['plugin-chain'] }),
+  });
+}
+export function useUpdateRouterTerminalStrategy() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      strategy,
+      revision,
+    }: {
+      id: string;
+      strategy: string;
+      revision: number;
+    }) =>
+      putJson<
+        { strategy: string; revision: number },
+        { strategy: string }
+      >(
+        `/admin/v1/principals/${id}/router-terminal`,
+        { strategy },
+        { ifMatch: revision },
+      ),
+    onSuccess: (_d, vars) =>
+      qc.invalidateQueries({ queryKey: ['router-terminal', vars.id] }),
   });
 }
 export function useKillswitch() {
