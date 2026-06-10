@@ -5,17 +5,14 @@ mod principal_view_swap {
     use std::time::Duration;
 
     use arc_swap::ArcSwap;
-    use bytes::Bytes;
     use cc_lb_core::api_keys::principal_view::{
-        ObservabilityHooksCache, PrincipalView, RouterPluginCache,
+        DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
     };
     use cc_lb_plugin_api::{
-        DialectError, ObservabilityError, ObservabilityHook, ObserveEvent, Principal,
-        PrincipalKind, RequestContext, RouteDecision, RouteError, RouterPlugin, ShapedRequest,
-        ShapedRequestBuilder, Upstream, UpstreamCandidate, UpstreamDialect,
+        FilterError, FilterOutput, FilterPlugin, ObservabilityError, ObservabilityHook,
+        ObserveEvent, Principal, RequestContext, TerminalStrategy, UpstreamCandidate,
     };
     use cc_lb_storage_api::{PrincipalKind as DbPrincipalKind, PrincipalRecord};
-    use http::{HeaderMap, Method, StatusCode};
     use loom::sync::Arc;
 
     const PRINCIPAL_ID: &str = "principal-a";
@@ -36,32 +33,28 @@ mod principal_view_swap {
                     let view = reader_view.load_full();
                     loom::thread::yield_now();
 
-                    let global_router: StdArc<dyn RouterPlugin> = StdArc::new(StubRouter::new(0));
+                    let global_pipeline =
+                        StdArc::new(RouterPipelineCache::empty(TerminalStrategy::FirstPick));
                     let global_hooks: Vec<StdArc<dyn ObservabilityHook>> =
                         vec![StdArc::new(StubHook::new(0))];
-                    let principal = principal();
-                    let ctx = request_context();
 
                     let cached = view
                         .get(PRINCIPAL_ID)
                         .expect("principal exists in loaded view snapshot");
-                    let router = cached.resolved_router(&global_router);
+                    let pipeline = cached.resolved_pipeline(Some(&global_pipeline));
                     let hooks = cached.resolved_hooks(&global_hooks);
 
-                    assert!(StdArc::strong_count(router) > 0);
+                    assert!(StdArc::strong_count(&pipeline) > 0);
+                    assert_eq!(pipeline.user_filters.len(), 1);
                     assert_eq!(hooks.len(), 1);
                     assert!(StdArc::strong_count(&hooks[0]) > 0);
 
-                    let route = router
-                        .route(&ctx, &principal, &[])
-                        .expect("stub router always returns a route");
-                    loom::thread::yield_now();
-
                     for hook in hooks {
-                        hook.observe(ObserveEvent::UpstreamChosen {
-                            upstream: route.upstream.clone(),
+                        hook.observe(ObserveEvent::AuthnComplete {
+                            principal_id: PRINCIPAL_ID.to_owned(),
+                            kind: cc_lb_plugin_api::PrincipalKind::ApiKey,
                         })
-                        .expect("stub hook accepts matching route generation");
+                        .expect("stub hook accepts authn event");
                     }
                 })
                 .expect("reader thread spawns");
@@ -101,60 +94,48 @@ mod principal_view_swap {
         principal_chains.insert(
             PRINCIPAL_ID.to_owned(),
             (
-                RouterPluginCache::Explicit(StdArc::new(StubRouter::new(generation))),
+                Some(StdArc::new(RouterPipelineCache {
+                    user_filters: vec![StdArc::new(StubFilter::new(generation))],
+                    terminal: TerminalStrategy::FirstPick,
+                    instantiation_error: None,
+                })),
                 ObservabilityHooksCache::Explicit(vec![StdArc::new(StubHook::new(generation))]),
+                DialectCache::Inherit,
             ),
         );
 
         StdArc::new(PrincipalView::from_db(&principals, principal_chains))
     }
 
-    fn principal() -> Principal {
-        Principal {
-            id: PRINCIPAL_ID.to_owned(),
-            kind: PrincipalKind::ApiKey,
-            claims: serde_json::Map::new(),
-        }
-    }
-
-    fn request_context() -> RequestContext {
-        RequestContext {
-            request_id: "req-loom".to_owned(),
-            downstream_headers: HeaderMap::new(),
-            method: Method::POST,
-            path: "/v1/messages".to_owned(),
-            query: None,
-            body_bytes: Bytes::from_static(b"{}"),
-            cache_breakpoints: Vec::new(),
-            canonical_model_id: String::new(),
-        }
-    }
-
-    struct StubRouter {
+    struct StubFilter {
         generation: u8,
     }
 
-    impl StubRouter {
+    impl StubFilter {
         fn new(generation: u8) -> Self {
             Self { generation }
         }
     }
 
-    impl RouterPlugin for StubRouter {
-        fn route(
+    impl FilterPlugin for StubFilter {
+        fn filter(
             &self,
             _ctx: &RequestContext,
-            principal: &Principal,
+            _principal: &Principal,
             _candidates: &[UpstreamCandidate],
-        ) -> Result<RouteDecision, RouteError> {
-            assert_eq!(principal.id, PRINCIPAL_ID);
-            assert!(matches!(self.generation, 1 | 2));
+        ) -> Result<FilterOutput, FilterError> {
+            unimplemented!(
+                "StubFilter({}) is for identity comparison only",
+                self.generation
+            )
+        }
 
-            Ok(RouteDecision {
-                upstream_id: None,
-                upstream: Upstream::AnthropicDirect,
-                dialect: StdArc::new(StubDialect),
-            })
+        fn plugin_id(&self) -> uuid::Uuid {
+            uuid::Uuid::nil()
+        }
+
+        fn plugin_name(&self) -> &str {
+            "stub-filter"
         }
     }
 
@@ -170,45 +151,9 @@ mod principal_view_swap {
 
     impl ObservabilityHook for StubHook {
         fn observe(&self, event: ObserveEvent) -> Result<(), ObservabilityError> {
-            assert!(matches!(
-                event,
-                ObserveEvent::UpstreamChosen {
-                    upstream: Upstream::AnthropicDirect,
-                }
-            ));
+            assert!(matches!(event, ObserveEvent::AuthnComplete { .. }));
             let _ = self.generation;
             Ok(())
         }
-    }
-
-    struct StubDialect;
-
-    impl UpstreamDialect for StubDialect {
-        fn shape(
-            &self,
-            ctx: &RequestContext,
-            upstream: &Upstream,
-            _principal: &Principal,
-            builder: &mut ShapedRequestBuilder,
-        ) -> Result<ShapedRequest, DialectError> {
-            let _ = upstream;
-
-            Ok(builder.shaped_request(
-                generation_url(1),
-                ctx.method.clone(),
-                HeaderMap::new(),
-                Bytes::new(),
-            ))
-        }
-
-        fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
-            None
-        }
-    }
-
-    fn generation_url(generation: u8) -> url::Url {
-        format!("https://generation-{generation}.example.test")
-            .parse()
-            .expect("generation URL is valid")
     }
 }
