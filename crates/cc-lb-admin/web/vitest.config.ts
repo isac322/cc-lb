@@ -4,11 +4,26 @@ import react from '@vitejs/plugin-react';
 export default defineConfig({
   plugins: [react()],
   test: {
-    environment: 'jsdom',
-    setupFiles: ['./vitest.setup.ts'],
-    include: [
-      'src/lib/hooks/__tests__/**/*.test.ts',
-      'src/components/__tests__/**/*.test.tsx'
+    projects: [
+      {
+        test: {
+          name: 'lib',
+          environment: 'node',
+          include: ['src/lib/**/*.test.ts', 'src/components/ui/latency/**/*.test.ts', 'src/routes/**/*.test.ts'],
+        },
+      },
+      {
+        plugins: [react()],
+        test: {
+          name: 'components',
+          environment: 'jsdom',
+          setupFiles: ['./vitest.setup.ts'],
+          include: [
+            'src/lib/hooks/__tests__/**/*.test.ts',
+            'src/components/__tests__/**/*.test.tsx',
+          ],
+        },
+      },
     ],
   },
 });

@@ -53,16 +53,23 @@ pub trait DnsResolver: Send + Sync + 'static {
 }
 
 pub fn make_resolver(config: &DnsResolverConfig) -> Result<Arc<TokioResolver>, DnsCacheError> {
-    make_resolver_with_factory(config, |resolver_config, opts, provider| {
-        let mut builder = TokioResolver::builder_with_config(resolver_config, provider);
-        *builder.options_mut() = opts;
-        builder
-            .build()
-            .map(Arc::new)
-            .map_err(|source| DnsCacheError::Build {
-                message: source.to_string(),
-            })
-    })
+    // Read /etc/resolv.conf (or platform equivalent) so the resolver honors the host's DNS
+    // setup (split-horizon DNS, VPN/WARP local stubs at 127.0.x.x, corporate internal zones,
+    // etc.). `ResolverConfig::default()` hardcodes Cloudflare public DNS which fails in any
+    // environment where outbound DNS to 1.1.1.1 is blocked or rewritten.
+    let resolver_config = hickory_resolver::system_conf::read_system_conf()
+        .map(|(cfg, _)| cfg)
+        .unwrap_or_else(|_| ResolverConfig::default());
+    let opts = resolver_opts(config);
+    let mut builder =
+        TokioResolver::builder_with_config(resolver_config, TokioRuntimeProvider::default());
+    *builder.options_mut() = opts;
+    builder
+        .build()
+        .map(Arc::new)
+        .map_err(|source| DnsCacheError::Build {
+            message: source.to_string(),
+        })
 }
 
 #[doc(hidden)]
@@ -129,9 +136,9 @@ impl CachingDnsConnector {
             metric_cache: Arc::new(DashMap::new()),
             metric_ttl: config.cache_ttl_ceiling,
         };
-        Self {
-            inner: HttpConnector::new_with_resolver(metric_resolver),
-        }
+        let mut inner = HttpConnector::new_with_resolver(metric_resolver);
+        inner.enforce_http(false);
+        Self { inner }
     }
 }
 
@@ -170,6 +177,7 @@ impl Service<Name> for MetricDnsResolver {
         let resolver = Arc::clone(&self.resolver);
         let metric_cache = Arc::clone(&self.metric_cache);
         let metric_ttl = self.metric_ttl;
+        let start = Instant::now();
 
         Box::pin(async move {
             let now = Instant::now();
@@ -181,6 +189,7 @@ impl Service<Name> for MetricDnsResolver {
             let ips = resolver.resolve(host.clone()).await;
             match ips {
                 Ok(ips) => {
+                    crate::request_timing::record_dns(start.elapsed());
                     emit_dns_metric(if was_hit { "hit" } else { "miss" });
                     metric_cache.insert(host, Instant::now() + metric_ttl);
                     Ok(ips
@@ -211,4 +220,122 @@ fn register_dns_metrics() {
             "DNS resolution outcomes for the caching connector. hit and miss are heuristic counts based on the local TTL shim; hickory remains authoritative for correctness."
         );
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+    use std::net::{IpAddr, Ipv4Addr};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    use dashmap::DashMap;
+    use hyper::Uri;
+    use tokio::net::TcpListener;
+    use tower_service::Service;
+
+    use super::*;
+    use crate::request_timing::with_timings;
+
+    struct StubResolver<F> {
+        resolve: F,
+    }
+
+    impl<F> StubResolver<F> {
+        fn new(resolve: F) -> Self {
+            Self { resolve }
+        }
+    }
+
+    impl<F, Fut> DnsResolver for StubResolver<F>
+    where
+        F: Fn(String) -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = Result<Vec<IpAddr>, DnsCacheError>> + Send + 'static,
+    {
+        fn resolve(&self, name: String) -> DnsResolveFuture<'_> {
+            Box::pin((self.resolve)(name))
+        }
+    }
+
+    fn metric_resolver(resolver: impl DnsResolver) -> MetricDnsResolver {
+        MetricDnsResolver {
+            resolver: Arc::new(resolver),
+            metric_cache: Arc::new(DashMap::new()),
+            metric_ttl: Duration::from_secs(300),
+        }
+    }
+
+    #[tokio::test]
+    async fn dns_resolver_writes_dns_ms_inside_scope() {
+        let stub = StubResolver::new(|_name| async {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            Ok(vec![IpAddr::from(Ipv4Addr::LOCALHOST)])
+        });
+        let mut resolver = metric_resolver(stub);
+
+        let (_, timings) = with_timings(async {
+            let name: Name = "example.com".parse().unwrap();
+            let _ = resolver.call(name).await;
+        })
+        .await;
+
+        assert!(
+            timings.dns_ms.is_some_and(|dns_ms| dns_ms >= 100),
+            "expected dns_ms >= 100, got {:?}",
+            timings.dns_ms
+        );
+    }
+
+    #[tokio::test]
+    async fn dns_resolver_outside_scope_silent_noop() {
+        let stub = StubResolver::new(|_name| async { Ok(vec![IpAddr::from(Ipv4Addr::LOCALHOST)]) });
+        let mut resolver = metric_resolver(stub);
+        let name: Name = "example.com".parse().unwrap();
+
+        let _ = resolver.call(name).await;
+    }
+
+    #[tokio::test]
+    async fn dns_resolver_failure_does_not_record() {
+        let stub = StubResolver::new(|name| async move {
+            Err(DnsCacheError::Resolve {
+                host: name,
+                message: "boom".to_owned(),
+            })
+        });
+        let mut resolver = metric_resolver(stub);
+
+        let (_, timings) = with_timings(async {
+            let name: Name = "example.com".parse().unwrap();
+            let _ = resolver.call(name).await;
+        })
+        .await;
+
+        assert_eq!(timings.dns_ms, None);
+    }
+
+    #[tokio::test]
+    async fn caching_dns_connector_accepts_https_uri() {
+        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))
+            .await
+            .expect("bind local listener");
+        let port = listener.local_addr().expect("local addr").port();
+        let mut connector = CachingDnsConnector::new(&DnsResolverConfig::default())
+            .expect("build caching dns connector");
+        let uri: Uri = format!("https://127.0.0.1:{port}")
+            .parse()
+            .expect("https URI");
+
+        let result = connector.call(uri).await;
+
+        if let Err(err) = result {
+            let message = err.to_string();
+            assert!(
+                !message.contains("invalid URL")
+                    && !message.contains("URL scheme")
+                    && !message.contains("scheme is not http"),
+                "connector rejected HTTPS scheme: {message}"
+            );
+        }
+    }
 }
