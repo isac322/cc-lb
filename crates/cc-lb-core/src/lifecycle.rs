@@ -1012,8 +1012,6 @@ impl Lifecycle {
             );
             return Ok(response);
         };
-        let _router_pipeline = cached.resolved_pipeline(None);
-        let router = &view.global_router;
         let hooks = cached.resolved_hooks(&view.global_observability_hooks);
         let stream_hooks = StreamHooks::new(hooks);
         let principal = Principal {
@@ -1021,6 +1019,46 @@ impl Lifecycle {
             kind: PrincipalKind::ApiKey,
             claims: serde_json::Map::new(),
         };
+
+        let router_pipeline = cached.resolved_pipeline(None);
+        if let Some(error) = router_pipeline.instantiation_error.as_deref() {
+            observe_error(hooks, "router_pipeline_unavailable", error, "router");
+            let response = anthropic_error_response(
+                StatusCode::BAD_GATEWAY,
+                "route_not_configured",
+                "router pipeline is unavailable for this request",
+            );
+            observe_finished_for_principal(
+                hooks,
+                StatusCode::BAD_GATEWAY,
+                started,
+                &principal,
+                &ctx.body_bytes,
+            );
+            return Ok(response);
+        }
+        if !router_pipeline.user_filters.is_empty() {
+            observe_error(
+                hooks,
+                "router_pipeline_unavailable",
+                "router pipeline execution is not enabled",
+                "router",
+            );
+            let response = anthropic_error_response(
+                StatusCode::BAD_GATEWAY,
+                "route_not_configured",
+                "router pipeline execution is not enabled",
+            );
+            observe_finished_for_principal(
+                hooks,
+                StatusCode::BAD_GATEWAY,
+                started,
+                &principal,
+                &ctx.body_bytes,
+            );
+            return Ok(response);
+        }
+        let router = &view.global_router;
 
         observe_many(
             hooks,
