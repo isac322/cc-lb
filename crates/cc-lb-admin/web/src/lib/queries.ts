@@ -793,6 +793,7 @@ export function useInsertChainEntry() {
       body: {
         slot: ChainSlot;
         wasm_registry_id: string;
+        order?: number;
         config?: unknown;
         sse_per_event?: boolean;
         batched_events_per_flush?: number;
