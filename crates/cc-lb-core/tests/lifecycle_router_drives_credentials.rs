@@ -9,7 +9,7 @@ use common::{collect_body, messages_request};
 use router_lifecycle_support::{RouterLifecycleState, api_key_record, lifecycle_with_records};
 
 #[tokio::test]
-async fn router_upstream_id_drives_credentials_and_dispatch_upstream() {
+async fn terminal_upstream_id_drives_credentials_and_dispatch_upstream() {
     let first = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
     let second = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let state = RouterLifecycleState::default();
@@ -33,14 +33,6 @@ async fn router_upstream_id_drives_credentials_and_dispatch_upstream() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         state
-            .router_candidates
-            .lock()
-            .expect("router candidates lock")
-            .as_slice(),
-        &[vec![first]]
-    );
-    assert_eq!(
-        state
             .router_choice_names
             .lock()
             .expect("router choices lock")
@@ -53,6 +45,6 @@ async fn router_upstream_id_drives_credentials_and_dispatch_upstream() {
             .lock()
             .expect("dispatched URLs lock")
             .as_slice(),
-        &["https://api.anthropic.com/v1/messages".to_owned()]
+        &["http://first.local/v1/messages".to_owned()]
     );
 }

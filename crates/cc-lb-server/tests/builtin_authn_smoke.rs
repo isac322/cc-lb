@@ -23,7 +23,7 @@ use url::Url;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn none_mode_router_parity() {
+async fn none_mode_terminal_selects_bound_principal_upstream() {
     let first_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
     let second_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let state = Arc::new(ParityState::default());
@@ -68,19 +68,16 @@ async fn none_mode_router_parity() {
         .await
         .expect("lifecycle responds");
 
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    assert_eq!(state.principals.lock().unwrap().as_slice(), &["team-X"]);
-    assert_eq!(
-        state.candidates.lock().unwrap().as_slice(),
-        &[vec![first_id]]
-    );
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(state.principals.lock().unwrap().is_empty());
+    assert!(state.candidates.lock().unwrap().is_empty());
     assert_eq!(
         state.signer_choices.lock().unwrap().as_slice(),
-        &[] as &[String]
+        &["first".to_owned()]
     );
     assert_eq!(
         state.dispatched_urls.lock().unwrap().as_slice(),
-        &[] as &[String]
+        &["http://first.local/v1/messages".to_owned()]
     );
 }
 

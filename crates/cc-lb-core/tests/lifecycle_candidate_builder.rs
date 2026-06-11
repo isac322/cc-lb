@@ -135,7 +135,7 @@ fn build_candidates_filters_by_principal_enabled_deleted_kind_and_sorts() {
 }
 
 #[tokio::test]
-async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal()
+async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal_strategy()
 -> Result<(), Box<dyn std::error::Error>> {
     let first = Uuid::from_u128(1);
     let second = Uuid::from_u128(2);
@@ -212,10 +212,9 @@ async fn lifecycle_filters_built_candidates_through_pipeline_before_terminal()
         filter_calls.lock().expect("filter calls lock").as_slice(),
         &[vec![first, second, third]],
     );
-    assert_eq!(
-        router_calls.lock().expect("router calls lock").as_slice(),
-        &[vec![second]],
-        "terminal FirstPick must narrow the post-filter survivors before routing"
+    assert!(
+        router_calls.lock().expect("router calls lock").is_empty(),
+        "terminal strategy must not invoke the legacy router"
     );
     Ok(())
 }
