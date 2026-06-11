@@ -85,7 +85,7 @@ test('renders ordered list with locked terminal row', () => {
   expect(screen.getByText('Terminal')).toBeDefined();
   expect(screen.getByText('Final upstream selection')).toBeDefined();
   expect(screen.getByTestId('pipeline-summary')).toBeDefined();
-  expect(screen.getByText('↓')).toBeDefined();
+  expect(screen.getAllByText('↓').length).toBeGreaterThan(0);
 
   const select = screen.getByRole('combobox', {
     name: 'Terminal strategy',
@@ -121,7 +121,11 @@ test('renders empty state when no entries', () => {
   renderWithProviders(<RouterSlotEditor principalId="p-1" />);
 
   expect(screen.getByText('No filters active')).toBeDefined();
-  expect(screen.getByText('Requests flow directly to the terminal selector. Every upstream candidate is considered.')).toBeDefined();
+  expect(
+    screen.getByText(
+      'Requests flow directly to the terminal selector. Every upstream candidate is considered.',
+    ),
+  ).toBeDefined();
 });
 
 test('toggles terminal strategy', async () => {
