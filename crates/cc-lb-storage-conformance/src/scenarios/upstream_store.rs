@@ -63,7 +63,7 @@ where
     claim_after_ttl_expiry(Arc::clone(&backend)).await?;
     complete_refresh_requires_holder_match(Arc::clone(&backend)).await?;
     complete_refresh_stores_tokens_and_clears_lease(Arc::clone(&backend)).await?;
-    release_lease_on_failure_holds_lease(Arc::clone(&backend)).await?;
+    release_lease_on_failure_clears_lease(Arc::clone(&backend)).await?;
     set_last_apply_error_roundtrip(Arc::clone(&backend)).await?;
     soft_delete_sets_deleted_at(Arc::clone(&backend)).await?;
     hard_delete_removes_row(Arc::clone(&backend)).await?;
@@ -326,7 +326,7 @@ scenario!(
     }
 );
 
-scenario!(release_lease_on_failure_holds_lease, |store| async move {
+scenario!(release_lease_on_failure_clears_lease, |store| async move {
     let record = create_named(store.as_ref(), "upstream-release-failure").await?;
     let holder = Uuid::new_v4();
     store.claim_refresh_lease(record.id, holder, 60).await?;
@@ -334,19 +334,20 @@ scenario!(release_lease_on_failure_holds_lease, |store| async move {
         .release_lease_on_failure(record.id, holder, "network".to_owned())
         .await?;
     let stored = store.get_by_id(record.id).await?.expect("record");
+    ensure!(stored.refresh_lease_holder.is_none(), "holder should clear");
     ensure!(
-        stored.refresh_lease_holder == Some(holder),
-        "holder should remain"
+        stored.refresh_lease_until_unix_secs.is_none(),
+        "ttl should clear"
     );
     ensure!(
         stored.last_apply_error == Some("network".to_owned()),
         "reason mismatch"
     );
     ensure!(
-        !store
+        store
             .claim_refresh_lease(record.id, Uuid::new_v4(), 60)
             .await?,
-        "lease should still block"
+        "lease should no longer block"
     );
     Ok(())
 });
@@ -414,6 +415,12 @@ scenario!(validate_identifier_rejects_bad_name, |store| async move {
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
+            warmup_enabled: false,
+            next_warmup_at: None,
+            last_warmup_cycle_key: None,
+            warmup_lease_holder: None,
+            warmup_lease_until_unix_secs: None,
+            warmup_dialect_plugin: None,
         })
         .await
         .expect_err("reserved prefix should fail");
@@ -444,6 +451,12 @@ async fn create_named(store: &dyn UpstreamStore, name: &str) -> Result<UpstreamR
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
+            warmup_enabled: false,
+            next_warmup_at: None,
+            last_warmup_cycle_key: None,
+            warmup_lease_holder: None,
+            warmup_lease_until_unix_secs: None,
+            warmup_dialect_plugin: None,
         })
         .await?)
 }
