@@ -503,11 +503,14 @@ dependencies = [
  "cc-lb-config",
  "cc-lb-core",
  "cc-lb-plugin-api",
+ "cc-lb-runtime-extism",
  "cc-lb-signer-anthropic-oauth",
  "cc-lb-storage-api",
  "cc-lb-storage-redb",
+ "chrono",
  "extism",
  "fake-anthropic",
+ "hex",
  "http",
  "http-body-util",
  "humantime",
@@ -528,6 +531,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2 0.11.0",
+ "siphasher",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -814,6 +818,7 @@ dependencies = [
  "chrono",
  "clap",
  "fake-anthropic",
+ "hex",
  "http",
  "http-body-util",
  "hyper",
@@ -832,6 +837,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "siphasher",
  "sqlx",
  "tempfile",
  "thiserror 2.0.18",
@@ -878,6 +884,7 @@ dependencies = [
  "cc-lb-aead",
  "cc-lb-plugin-api",
  "cc-lb-storage-api",
+ "chrono",
  "dashmap",
  "http",
  "http-body-util",
@@ -977,6 +984,7 @@ dependencies = [
  "cc-lb-storage-api",
  "cc-lb-storage-conformance",
  "chacha20poly1305",
+ "chrono",
  "redb",
  "ring",
  "serde",
@@ -4522,6 +4530,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
 
 [[package]]
+name = "siphasher"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
+
+[[package]]
 name = "sized-chunks"
 version = "0.6.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4865,7 +4879,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

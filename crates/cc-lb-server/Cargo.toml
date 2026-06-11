@@ -55,6 +55,7 @@ cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres", optional = true }
 clap = { workspace = true, features = ["derive"] }
 http.workspace = true
 http-body-util.workspace = true
+hex.workspace = true
 hyper = { workspace = true, features = ["client", "http1", "http2"] }
 hyper-rustls.workspace = true
 hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
@@ -68,7 +69,8 @@ rustls = { workspace = true, default-features = false, features = ["std", "ring"
 rustls-pemfile = "2"
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
-sha2 = "0.11"
+sha2.workspace = true
+siphasher = "1"
 sqlx = { workspace = true, optional = true }
 tempfile.workspace = true
 thiserror.workspace = true
@@ -84,10 +86,12 @@ toml.workspace = true
 
 [dev-dependencies]
 base64.workspace = true
+cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 metrics-exporter-prometheus.workspace = true
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", features = ["debug-endpoints"] }
 jemalloc_ctl = { package = "tikv-jemalloc-ctl", version = "0.7", features = ["stats"] }
 redb.workspace = true
+sqlx.workspace = true
 tikv-jemallocator = "0.7"
 tracing-subscriber.workspace = true
 wat.workspace = true

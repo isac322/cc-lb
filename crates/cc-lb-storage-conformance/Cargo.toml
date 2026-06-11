@@ -20,6 +20,7 @@ tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "ti
 futures = "0.3"
 proptest = { workspace = true }
 anyhow = { workspace = true }
+chrono = { workspace = true }
 serde_json = { workspace = true }
 cc-lb-storage-redb = { path = "../cc-lb-storage-redb", optional = true }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres", optional = true }
@@ -32,6 +33,5 @@ uuid = { workspace = true }
 [dev-dependencies]
 cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
-chrono = { workspace = true }
 tempfile = { workspace = true }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-ring"] }
