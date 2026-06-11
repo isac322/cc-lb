@@ -635,7 +635,7 @@ function PluginDetailDrawer({
           <Drawer.Description className="sr-only">
             Detail view of a plugin
           </Drawer.Description>
-          
+
           <div className="p-4 border-b border-subtle flex items-start justify-between gap-3">
             <div className="min-w-0">
               <div className="flex items-center gap-2 mb-1">
@@ -660,13 +660,16 @@ function PluginDetailDrawer({
             {plugin.metadata ? (
               <>
                 <section data-testid="plugin-purpose">
-                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">Purpose</h3>
+                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">
+                    Purpose
+                  </h3>
                   <p className="text-text">{plugin.metadata.purpose}</p>
                 </section>
-                
+
                 <section data-testid="plugin-keeps">
                   <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2 flex items-center gap-1">
-                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" /> Keeps
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />{' '}
+                    Keeps
                   </h3>
                   <p className="text-text">{plugin.metadata.keeps}</p>
                 </section>
@@ -679,12 +682,16 @@ function PluginDetailDrawer({
                 </section>
 
                 <section data-testid="plugin-empty-behavior">
-                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">Empty behavior</h3>
+                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">
+                    Empty behavior
+                  </h3>
                   <p className="text-text">{plugin.metadata.empty_behavior}</p>
                 </section>
 
                 <section data-testid="plugin-examples">
-                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">Examples</h3>
+                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">
+                    Examples
+                  </h3>
                   <ul className="list-disc pl-4 space-y-1 text-text">
                     {plugin.metadata.examples.map((ex, i) => (
                       <li key={i}>{ex}</li>
@@ -695,15 +702,22 @@ function PluginDetailDrawer({
             ) : (
               <Card>
                 <CardBody>
-                  <p className="text-text-faint italic">Built by operator. No description was supplied with this plugin.</p>
+                  <p className="text-text-faint italic">
+                    Built by operator. No description was supplied with this
+                    plugin.
+                  </p>
                 </CardBody>
               </Card>
             )}
 
             <section className="pt-4 border-t border-subtle">
-              <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">Technicals</h3>
+              <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">
+                Technicals
+              </h3>
               <div className="space-y-1.5 text-xs font-mono text-text-faint">
-                {plugin.wire_version !== undefined && <div>wire_version: {plugin.wire_version}</div>}
+                {plugin.wire_version !== undefined && (
+                  <div>wire_version: {plugin.wire_version}</div>
+                )}
                 <div>sha256: {plugin.sha256_hex.slice(0, 16)}...</div>
                 <div className="flex items-center gap-2">
                   id: {plugin.id}
@@ -754,7 +768,7 @@ function RouterChainItem({
     transition,
     opacity: isDragging ? 0.5 : 1,
   } as React.CSSProperties;
-  
+
   return (
     <li
       ref={setNodeRef}
@@ -775,13 +789,17 @@ function RouterChainItem({
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
           {plugin.kind && <Badge tone="accent">[{plugin.kind}]</Badge>}
-          <span className="text-sm font-medium truncate">
-            {plugin.name}
-          </span>
+          <span className="text-sm font-medium truncate">{plugin.name}</span>
           {plugin.is_builtin && <Badge tone="accent">Built-in</Badge>}
         </div>
         <div className="text-[11px] text-text-faint truncate mt-0.5">
-          {plugin.metadata ? plugin.metadata.purpose : <span className="italic">User-uploaded filter (no description supplied).</span>}
+          {plugin.metadata ? (
+            plugin.metadata.purpose
+          ) : (
+            <span className="italic">
+              User-uploaded filter (no description supplied).
+            </span>
+          )}
         </div>
       </div>
       <div className="flex items-center gap-2 shrink-0">
@@ -856,10 +874,12 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
     const reordered = [...entries];
     const [moved] = reordered.splice(oldIx, 1);
     reordered.splice(newIx, 0, moved!);
-    
+
     const movedPluginId = moved!.wasm_registry_id;
-    const movedPluginName = registry.data?.entries.find(r => r.id === movedPluginId)?.name ?? movedPluginId;
-    
+    const movedPluginName =
+      registry.data?.entries.find((r) => r.id === movedPluginId)?.name ??
+      movedPluginId;
+
     reorder.mutate(
       {
         pid: principalId,
@@ -869,17 +889,26 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
           expected_revision: x.revision,
         })),
       },
-      { onSuccess: () => {
+      {
+        onSuccess: () => {
           if (newIx === 0) {
-            toast.success(`Reordered: ${movedPluginName} is now first in chain.`);
+            toast.success(
+              `Reordered: ${movedPluginName} is now first in chain.`,
+            );
           } else if (newIx === reordered.length - 1) {
-            toast.success(`Reordered: ${movedPluginName} is now last filter (runs right before terminal).`);
+            toast.success(
+              `Reordered: ${movedPluginName} is now last filter (runs right before terminal).`,
+            );
           } else {
             const nextPluginId = reordered[newIx + 1]!.wasm_registry_id;
-            const nextPluginName = registry.data?.entries.find(r => r.id === nextPluginId)?.name ?? nextPluginId;
-            toast.success(`Reordered: ${movedPluginName} now executes before ${nextPluginName}.`);
+            const nextPluginName =
+              registry.data?.entries.find((r) => r.id === nextPluginId)?.name ??
+              nextPluginId;
+            toast.success(
+              `Reordered: ${movedPluginName} now executes before ${nextPluginName}.`,
+            );
           }
-        } 
+        },
       },
     );
   };
@@ -900,9 +929,14 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
         </Button>
       </div>
 
-      <div data-testid="pipeline-summary" className="mb-4 p-3 border border-subtle rounded-sm bg-overlay-1 font-mono text-xs text-text-faint">
+      <div
+        data-testid="pipeline-summary"
+        className="mb-4 p-3 border border-subtle rounded-sm bg-overlay-1 font-mono text-xs text-text-faint"
+      >
         <div className="text-text mb-1">Pipeline</div>
-        <div>N upstreams enter → {entries.length} filters → Terminal selector</div>
+        <div>
+          N upstreams enter → {entries.length} filters → Terminal selector
+        </div>
       </div>
 
       {entries.length === 0 ? (
@@ -912,7 +946,11 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
             title="No filters active"
             description="Requests flow directly to the terminal selector. Every upstream candidate is considered."
             action={
-              <Button size="sm" variant="primary" onClick={() => setAddOpen(true)}>
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() => setAddOpen(true)}
+              >
                 Add
               </Button>
             }
@@ -938,7 +976,20 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                     <RouterChainItem
                       id={e.id}
                       order={e.order}
-                      plugin={reg ?? { id: e.wasm_registry_id, name: e.wasm_registry_id, sha256_hex: '', original_filename: '', label: null, size_bytes: 0, refcount: 0, revision: 0, uploaded_at_unix_secs: 0, metadata: null }}
+                      plugin={
+                        reg ?? {
+                          id: e.wasm_registry_id,
+                          name: e.wasm_registry_id,
+                          sha256_hex: '',
+                          original_filename: '',
+                          label: null,
+                          size_bytes: 0,
+                          refcount: 0,
+                          revision: 0,
+                          uploaded_at_unix_secs: 0,
+                          metadata: null,
+                        }
+                      }
                       onDelete={() =>
                         setPendingRemove({
                           id: e.id,
@@ -948,7 +999,13 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                       }
                       onInfo={() => setDetailPlugin(reg ?? null)}
                     />
-                    <FlowConnector caption={i === entries.length - 1 ? "remaining candidates" : "passes to next filter"} />
+                    <FlowConnector
+                      caption={
+                        i === entries.length - 1
+                          ? 'remaining candidates'
+                          : 'passes to next filter'
+                      }
+                    />
                   </React.Fragment>
                 );
               })}
@@ -986,8 +1043,7 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                   revision: terminalStrategy.data.revision,
                 },
                 {
-                  onSuccess: () =>
-                    toast.success('Terminal strategy updated'),
+                  onSuccess: () => toast.success('Terminal strategy updated'),
                 },
               );
             }}
@@ -997,7 +1053,9 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
           </select>
         </div>
         <div className="text-[11px] text-text-faint italic ml-8">
-          {terminalStrategy.data?.strategy === 'random' ? 'Picks one survivor uniformly at random.' : 'Always picks the first survivor (deterministic).'}
+          {terminalStrategy.data?.strategy === 'random'
+            ? 'Picks one survivor uniformly at random.'
+            : 'Always picks the first survivor (deterministic).'}
         </div>
       </div>
       <FlowConnector caption="1 upstream → dispatched" />
