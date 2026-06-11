@@ -1,5 +1,5 @@
 import { createFileRoute } from '@tanstack/react-router';
-import { Copy, Trash2, UploadCloud } from 'lucide-react';
+import { Copy, Edit2, Trash2, UploadCloud } from 'lucide-react';
 import { useRef, useState } from 'react';
 import { toast } from 'sonner';
 import {
@@ -10,6 +10,7 @@ import {
   ConfirmDialog,
   cx,
   Hint,
+  INPUT_CLASS,
   PageContainer,
   Section,
   Skeleton,
@@ -18,6 +19,7 @@ import { RelativeTime } from '../components/ui/RelativeTime';
 import {
   useDeletePlugin,
   useGcPlugins,
+  usePatchPlugin,
   usePluginRegistry,
   usePluginStatus,
   usePrincipals,
@@ -219,12 +221,26 @@ function RegistryTab() {
 
   const handleFile = (file: File | null | undefined) => {
     if (!file || upload.isPending) return;
+    const name = file.name.replace(/\.wasm$/, '');
+    if (name === 'cache-affinity') {
+      toast.error(
+        "Plugin name 'cache-affinity' is reserved for the built-in filter",
+      );
+      return;
+    }
     upload.mutate(file, {
       onSuccess: (data) => {
         const suffix = data.idempotent ? ' (already in registry)' : '';
         toast.success(`Uploaded ${data.original_filename}${suffix}`);
       },
-      onError: (e) => toast.error(e instanceof Error ? e.message : String(e)),
+      onError: (e) => {
+        const msg = e instanceof Error ? e.message : String(e);
+        if (msg.includes('builtin_plugin_immutable')) {
+          toast.error('Cannot modify built-in plugin');
+        } else {
+          toast.error(msg);
+        }
+      },
     });
   };
 
@@ -306,6 +322,8 @@ function RegistryTab() {
             <thead className="table-header sticky top-0 z-10">
               <tr className="text-[10px] uppercase tracking-wider">
                 <th className="text-left px-4 py-2">Name</th>
+                <th className="text-left px-4 py-2">Kind</th>
+                <th className="text-left px-4 py-2">Version</th>
                 <th className="text-left px-4 py-2">SHA256</th>
                 <th className="text-right px-4 py-2 tabular-nums">Size</th>
                 <th className="text-center px-4 py-2 tabular-nums">Refs</th>
@@ -317,104 +335,30 @@ function RegistryTab() {
               {reg.isLoading ? (
                 Array.from({ length: 3 }).map((_, i) => (
                   <tr key={i}>
-                    <td colSpan={6} className="px-4 py-2">
+                    <td colSpan={8} className="px-4 py-2">
                       <Skeleton />
                     </td>
                   </tr>
                 ))
               ) : reg.data?.entries.length ? (
                 reg.data.entries.map((p) => (
-                  <tr
+                  <PluginRow
                     key={p.id}
-                    className="border-b border-row hover:bg-overlay-1"
-                  >
-                    <td className="px-4 py-2 max-w-[260px]">
-                      <div
-                        className="text-sm font-medium font-sans truncate"
-                        title={p.name}
-                      >
-                        {p.name}
-                      </div>
-                      {p.label ? (
-                        <div
-                          className="text-[11px] text-text-faint truncate"
-                          title={p.label}
-                        >
-                          {p.label}
-                        </div>
-                      ) : null}
-                    </td>
-                    <td className="px-4 py-2">
-                      <div className="flex items-center gap-1">
-                        <Hint label={p.sha256_hex}>
-                          <code className="cursor-help">
-                            {p.sha256_hex.slice(0, 12)}…
-                          </code>
-                        </Hint>
-                        <button
-                          type="button"
-                          aria-label="Copy SHA256"
-                          className="text-text-faint hover:text-text"
-                          onClick={() => {
-                            navigator.clipboard.writeText(p.sha256_hex);
-                            toast.success('SHA256 copied');
-                          }}
-                        >
-                          <Copy className="w-3 h-3" />
-                        </button>
-                      </div>
-                    </td>
-                    <td className="px-4 py-2 text-right tabular-nums">
-                      {(p.size_bytes / 1024).toFixed(1)} KB
-                    </td>
-                    <td className="px-4 py-2 text-center">
-                      <Badge tone={p.refcount > 0 ? 'accent' : 'neutral'}>
-                        {p.refcount}
-                      </Badge>
-                    </td>
-                    <td className="px-4 py-2">
-                      <RelativeTime
-                        ts={new Date(p.uploaded_at_unix_secs * 1000)}
-                      />
-                    </td>
-                    <td className="px-4 py-2 text-right">
-                      <button
-                        type="button"
-                        aria-label={
-                          p.refcount > 0
-                            ? 'Cannot delete — plugin is referenced'
-                            : 'Delete plugin'
-                        }
-                        title={
-                          p.refcount > 0
-                            ? `In use by ${p.refcount} chain entr${p.refcount === 1 ? 'y' : 'ies'}`
-                            : 'Delete plugin'
-                        }
-                        disabled={p.refcount > 0}
-                        className={cx(
-                          'transition-colors',
-                          p.refcount > 0
-                            ? 'text-text-faint/40 cursor-not-allowed'
-                            : 'text-text-faint hover:text-red-400',
-                        )}
-                        onClick={() => {
-                          if (p.refcount > 0) return;
-                          setPendingDelete({
-                            id: p.id,
-                            revision: p.revision,
-                            name: p.name,
-                          });
-                        }}
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </button>
-                    </td>
-                  </tr>
+                    p={p}
+                    onDelete={() => {
+                      if (p.is_builtin || p.refcount > 0) return;
+                      setPendingDelete({
+                        id: p.id,
+                        revision: p.revision,
+                        name: p.name,
+                      });
+                    }}
+                  />
                 ))
               ) : (
                 <tr>
                   <td
-                    colSpan={6}
+                    colSpan={8}
                     className="px-4 py-8 text-center text-text-faint text-xs"
                   >
                     No plugins uploaded.
@@ -455,6 +399,178 @@ function RegistryTab() {
         }}
       />
     </div>
+  );
+}
+
+function PluginRow({
+  p,
+  onDelete,
+}: {
+  p: import('../lib/queries').PluginEntry;
+  onDelete: () => void;
+}) {
+  const patch = usePatchPlugin();
+  const [editingLabel, setEditingLabel] = useState(false);
+  const [labelInput, setLabelInput] = useState(p.label || '');
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  const handleSaveLabel = () => {
+    if (p.is_builtin) return;
+    const trimmed = labelInput.trim();
+    const newLabel = trimmed || null;
+    if (newLabel !== p.label) {
+      patch.mutate(
+        { id: p.id, label: newLabel, revision: p.revision },
+        {
+          onSuccess: () => {
+            toast.success('Label updated');
+            setEditingLabel(false);
+          },
+          onError: (e) => {
+            const msg = e instanceof Error ? e.message : String(e);
+            if (msg.includes('builtin_plugin_immutable')) {
+              toast.error('Cannot modify built-in plugin');
+            } else {
+              toast.error(msg);
+            }
+            setLabelInput(p.label || '');
+            setEditingLabel(false);
+          },
+        },
+      );
+    } else {
+      setEditingLabel(false);
+    }
+  };
+
+  return (
+    <tr className="border-b border-row hover:bg-overlay-1">
+      <td className="px-4 py-2 max-w-[260px]">
+        <div className="flex items-center gap-2">
+          <div
+            className="text-sm font-medium font-sans truncate"
+            title={p.name}
+          >
+            {p.name}
+          </div>
+          {p.is_builtin && <Badge tone="accent">Built-in</Badge>}
+        </div>
+        {editingLabel ? (
+          <div className="flex items-center gap-1 mt-1">
+            <input
+              ref={inputRef}
+              type="text"
+              className={cx(INPUT_CLASS, 'text-[11px] py-0.5 px-1 h-auto')}
+              value={labelInput}
+              onChange={(e) => setLabelInput(e.target.value)}
+              onBlur={handleSaveLabel}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter') handleSaveLabel();
+                if (e.key === 'Escape') {
+                  setLabelInput(p.label || '');
+                  setEditingLabel(false);
+                }
+              }}
+              autoFocus
+            />
+          </div>
+        ) : (
+          <div className="flex items-center gap-1 group/label mt-0.5">
+            <div
+              className={cx(
+                'text-[11px] truncate',
+                p.label ? 'text-text-faint' : 'text-text-faint/40 italic',
+              )}
+              title={p.label || 'No label'}
+            >
+              {p.label || 'No label'}
+            </div>
+            {!p.is_builtin && (
+              <button
+                type="button"
+                className="opacity-0 group-hover/label:opacity-100 text-text-faint hover:text-text transition-opacity"
+                onClick={() => {
+                  setLabelInput(p.label || '');
+                  setEditingLabel(true);
+                }}
+              >
+                <Edit2 className="w-3 h-3" />
+              </button>
+            )}
+          </div>
+        )}
+      </td>
+      <td className="px-4 py-2">
+        {p.kind ? (
+          <Badge tone="mono">{p.kind}</Badge>
+        ) : (
+          <span className="text-text-faint">—</span>
+        )}
+      </td>
+      <td className="px-4 py-2">
+        {p.wire_version ? (
+          <Badge tone="mono">v{p.wire_version}</Badge>
+        ) : (
+          <span className="text-text-faint">—</span>
+        )}
+      </td>
+      <td className="px-4 py-2">
+        <div className="flex items-center gap-1">
+          <Hint label={p.sha256_hex}>
+            <code className="cursor-help">{p.sha256_hex.slice(0, 12)}…</code>
+          </Hint>
+          <button
+            type="button"
+            aria-label="Copy SHA256"
+            className="text-text-faint hover:text-text"
+            onClick={() => {
+              navigator.clipboard.writeText(p.sha256_hex);
+              toast.success('SHA256 copied');
+            }}
+          >
+            <Copy className="w-3 h-3" />
+          </button>
+        </div>
+      </td>
+      <td className="px-4 py-2 text-right tabular-nums">
+        {(p.size_bytes / 1024).toFixed(1)} KB
+      </td>
+      <td className="px-4 py-2 text-center">
+        <Badge tone={p.refcount > 0 ? 'accent' : 'neutral'}>{p.refcount}</Badge>
+      </td>
+      <td className="px-4 py-2">
+        <RelativeTime ts={new Date(p.uploaded_at_unix_secs * 1000)} />
+      </td>
+      <td className="px-4 py-2 text-right">
+        <button
+          type="button"
+          aria-label={
+            p.is_builtin
+              ? 'Built-in plugin cannot be removed from registry'
+              : p.refcount > 0
+                ? 'Cannot delete — plugin is referenced'
+                : 'Delete plugin'
+          }
+          title={
+            p.is_builtin
+              ? 'Built-in plugin cannot be removed from registry'
+              : p.refcount > 0
+                ? `In use by ${p.refcount} chain entr${p.refcount === 1 ? 'y' : 'ies'}`
+                : 'Delete plugin'
+          }
+          disabled={p.is_builtin || p.refcount > 0}
+          className={cx(
+            'transition-colors',
+            p.is_builtin || p.refcount > 0
+              ? 'text-text-faint/40 cursor-not-allowed'
+              : 'text-text-faint hover:text-red-400',
+          )}
+          onClick={onDelete}
+        >
+          <Trash2 className="w-3.5 h-3.5" />
+        </button>
+      </td>
+    </tr>
   );
 }
 
