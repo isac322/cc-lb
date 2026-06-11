@@ -16,15 +16,21 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import {
+  CheckCircle2,
   ChevronLeft,
   Copy,
+  Filter,
   GripVertical,
+  Info,
   KeyRound,
   Plus,
   Trash2,
+  X,
+  XCircle,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { toast } from 'sonner';
+import { Drawer } from 'vaul';
 import { z } from 'zod';
 import {
   Badge,
@@ -46,6 +52,7 @@ import {
 import { RelativeTime } from '../components/ui/RelativeTime';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import {
+  type PluginEntry,
   type Principal,
   useCreatePrincipal,
   useDeleteChainEntry,
@@ -596,6 +603,217 @@ function SlotRadioCard({
   );
 }
 
+function FlowConnector({ caption }: { caption: string }) {
+  return (
+    <div className="flex flex-col items-center justify-center py-1">
+      <div className="w-px h-3 bg-subtle" />
+      <div className="text-[10px] text-text-faint flex items-center gap-1">
+        <span className="text-[8px]">↓</span> {caption}
+      </div>
+      <div className="w-px h-3 bg-subtle" />
+    </div>
+  );
+}
+
+function PluginDetailDrawer({
+  plugin,
+  open,
+  onOpenChange,
+}: {
+  plugin: PluginEntry | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  if (!plugin) return null;
+
+  return (
+    <Drawer.Root open={open} onOpenChange={onOpenChange} direction="right">
+      <Drawer.Portal>
+        <Drawer.Overlay className="fixed inset-0 z-40 bg-drawer-backdrop" />
+        <Drawer.Content className="fixed right-0 top-0 bottom-0 w-full max-w-lg bg-bg-sub border-l border-subtle z-50 flex flex-col">
+          <Drawer.Title className="sr-only">Plugin detail</Drawer.Title>
+          <Drawer.Description className="sr-only">
+            Detail view of a plugin
+          </Drawer.Description>
+          
+          <div className="p-4 border-b border-subtle flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <h2 className="text-lg font-medium text-text truncate">
+                  {plugin.name}
+                </h2>
+                {plugin.kind && <Badge tone="accent">[{plugin.kind}]</Badge>}
+                {plugin.is_builtin && <Badge tone="accent">Built-in</Badge>}
+              </div>
+            </div>
+            <button
+              type="button"
+              aria-label="Close"
+              onClick={() => onOpenChange(false)}
+              className="text-text-muted hover:text-text shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4 pb-8 space-y-6 text-sm">
+            {plugin.metadata ? (
+              <>
+                <section data-testid="plugin-purpose">
+                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">Purpose</h3>
+                  <p className="text-text">{plugin.metadata.purpose}</p>
+                </section>
+                
+                <section data-testid="plugin-keeps">
+                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2 flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" /> Keeps
+                  </h3>
+                  <p className="text-text">{plugin.metadata.keeps}</p>
+                </section>
+
+                <section data-testid="plugin-drops">
+                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2 flex items-center gap-1">
+                    <XCircle className="w-3.5 h-3.5 text-red-400" /> Drops
+                  </h3>
+                  <p className="text-text">{plugin.metadata.drops}</p>
+                </section>
+
+                <section data-testid="plugin-empty-behavior">
+                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">Empty behavior</h3>
+                  <p className="text-text">{plugin.metadata.empty_behavior}</p>
+                </section>
+
+                <section data-testid="plugin-examples">
+                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">Examples</h3>
+                  <ul className="list-disc pl-4 space-y-1 text-text">
+                    {plugin.metadata.examples.map((ex, i) => (
+                      <li key={i}>{ex}</li>
+                    ))}
+                  </ul>
+                </section>
+              </>
+            ) : (
+              <Card>
+                <CardBody>
+                  <p className="text-text-faint italic">Built by operator. No description was supplied with this plugin.</p>
+                </CardBody>
+              </Card>
+            )}
+
+            <section className="pt-4 border-t border-subtle">
+              <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">Technicals</h3>
+              <div className="space-y-1.5 text-xs font-mono text-text-faint">
+                {plugin.wire_version !== undefined && <div>wire_version: {plugin.wire_version}</div>}
+                <div>sha256: {plugin.sha256_hex.slice(0, 16)}...</div>
+                <div className="flex items-center gap-2">
+                  id: {plugin.id}
+                  <button
+                    type="button"
+                    aria-label="Copy plugin id"
+                    className="hover:text-text"
+                    onClick={() => {
+                      navigator.clipboard.writeText(plugin.id);
+                      toast.success('Plugin ID copied');
+                    }}
+                  >
+                    <Copy className="w-3 h-3" />
+                  </button>
+                </div>
+              </div>
+            </section>
+          </div>
+        </Drawer.Content>
+      </Drawer.Portal>
+    </Drawer.Root>
+  );
+}
+
+function RouterChainItem({
+  id,
+  order,
+  plugin,
+  onDelete,
+  onInfo,
+}: {
+  id: string;
+  order: number;
+  plugin: PluginEntry;
+  onDelete: () => void;
+  onInfo: () => void;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  } as React.CSSProperties;
+  
+  return (
+    <li
+      ref={setNodeRef}
+      style={style}
+      data-testid={`chain-row-${id}`}
+      className="flex items-center gap-3 p-3 border border-subtle rounded-sm bg-overlay-1"
+    >
+      <button
+        type="button"
+        {...attributes}
+        {...listeners}
+        aria-label="Drag to reorder"
+        className="text-text-faint hover:text-text cursor-grab active:cursor-grabbing shrink-0"
+      >
+        <GripVertical className="w-4 h-4" />
+      </button>
+      <Badge tone="mono">#{Math.floor(order)}</Badge>
+      <div className="flex-1 min-w-0">
+        <div className="flex items-center gap-2">
+          {plugin.kind && <Badge tone="accent">[{plugin.kind}]</Badge>}
+          <span className="text-sm font-medium truncate">
+            {plugin.name}
+          </span>
+          {plugin.is_builtin && <Badge tone="accent">Built-in</Badge>}
+        </div>
+        <div className="text-[11px] text-text-faint truncate mt-0.5">
+          {plugin.metadata ? plugin.metadata.purpose : <span className="italic">User-uploaded filter (no description supplied).</span>}
+        </div>
+      </div>
+      <div className="flex items-center gap-2 shrink-0">
+        <button
+          type="button"
+          aria-label="Plugin details"
+          className="text-text-faint hover:text-text"
+          onClick={onInfo}
+        >
+          <Info className="w-4 h-4" />
+        </button>
+        <Hint
+          label={
+            plugin.is_builtin
+              ? "Removing only affects this principal's chain. Registry entry remains."
+              : 'Remove plugin'
+          }
+        >
+          <button
+            type="button"
+            aria-label="Remove plugin"
+            className="text-text-faint hover:text-red-400"
+            onClick={onDelete}
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        </Hint>
+      </div>
+    </li>
+  );
+}
+
 export function RouterSlotEditor({ principalId }: { principalId: string }) {
   const slot = 'router';
   const label = 'Router';
@@ -615,6 +833,7 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
     revision: number;
     name: string;
   } | null>(null);
+  const [detailPlugin, setDetailPlugin] = useState<PluginEntry | null>(null);
 
   const sensors = useSensors(
     useSensor(PointerSensor),
@@ -637,6 +856,10 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
     const reordered = [...entries];
     const [moved] = reordered.splice(oldIx, 1);
     reordered.splice(newIx, 0, moved!);
+    
+    const movedPluginId = moved!.wasm_registry_id;
+    const movedPluginName = registry.data?.entries.find(r => r.id === movedPluginId)?.name ?? movedPluginId;
+    
     reorder.mutate(
       {
         pid: principalId,
@@ -646,13 +869,24 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
           expected_revision: x.revision,
         })),
       },
-      { onSuccess: () => toast.success('Chain reordered') },
+      { onSuccess: () => {
+          if (newIx === 0) {
+            toast.success(`Reordered: ${movedPluginName} is now first in chain.`);
+          } else if (newIx === reordered.length - 1) {
+            toast.success(`Reordered: ${movedPluginName} is now last filter (runs right before terminal).`);
+          } else {
+            const nextPluginId = reordered[newIx + 1]!.wasm_registry_id;
+            const nextPluginName = registry.data?.entries.find(r => r.id === nextPluginId)?.name ?? nextPluginId;
+            toast.success(`Reordered: ${movedPluginName} now executes before ${nextPluginName}.`);
+          }
+        } 
+      },
     );
   };
 
   return (
     <div>
-      <div className="flex items-end justify-between mb-2">
+      <div className="flex items-end justify-between mb-4">
         <div>
           <div className="text-sm font-medium text-text">{label}</div>
           <div className="text-[11px] text-text-faint">{desc}</div>
@@ -666,76 +900,115 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
         </Button>
       </div>
 
-      <DndContext
-        sensors={sensors}
-        collisionDetection={closestCenter}
-        onDragEnd={onDragEnd}
-      >
-        <SortableContext
-          items={entries.map((e) => e.id)}
-          strategy={verticalListSortingStrategy}
-        >
-          <ul className="space-y-1.5">
-            {entries.map((e) => {
-              const reg = registry.data?.entries.find(
-                (r) => r.id === e.wasm_registry_id,
-              );
-              return (
-                <SortableChainItem
-                  key={e.id}
-                  id={e.id}
-                  order={e.order}
-                  name={reg?.name ?? e.wasm_registry_id}
-                  isBuiltin={reg?.is_builtin}
-                  onDelete={() =>
-                    setPendingRemove({
-                      id: e.id,
-                      revision: e.revision,
-                      name: reg?.name ?? e.wasm_registry_id,
-                    })
-                  }
-                />
-              );
-            })}
+      <div data-testid="pipeline-summary" className="mb-4 p-3 border border-subtle rounded-sm bg-overlay-1 font-mono text-xs text-text-faint">
+        <div className="text-text mb-1">Pipeline</div>
+        <div>N upstreams enter → {entries.length} filters → Terminal selector</div>
+      </div>
 
-            {/* Locked Terminal Row */}
-            <li className="flex items-center gap-2 p-2 border border-subtle rounded-sm bg-overlay-2">
-              <div className="w-4 h-4 flex items-center justify-center text-text-faint">
-                <span className="w-1.5 h-1.5 rounded-full border border-text-faint" />
-              </div>
-              <Badge tone="mono">Terminal</Badge>
-              <span className="flex-1 text-sm font-medium truncate text-text-faint">
-                Final upstream selection
-              </span>
-              <select
-                aria-label="Terminal strategy"
-                className={cx(INPUT_CLASS, 'w-auto py-1 text-xs')}
-                value={terminalStrategy.data?.strategy ?? 'first-pick'}
-                disabled={
-                  terminalStrategy.isLoading || updateTerminalStrategy.isPending
-                }
-                onChange={(e) => {
-                  if (!terminalStrategy.data) return;
-                  updateTerminalStrategy.mutate(
-                    {
-                      id: principalId,
-                      strategy: e.target.value,
-                      revision: terminalStrategy.data.revision,
-                    },
-                    {
-                      onSuccess: () =>
-                        toast.success('Terminal strategy updated'),
-                    },
-                  );
-                }}
-              >
-                <option value="first-pick">First-pick</option>
-                <option value="random">Random</option>
-              </select>
-            </li>
-          </ul>
-        </SortableContext>
-      </DndContext>
+      {entries.length === 0 ? (
+        <div className="mb-4">
+          <EmptyState
+            icon={<Filter className="w-6 h-6 text-text-faint" />}
+            title="No filters active"
+            description="Requests flow directly to the terminal selector. Every upstream candidate is considered."
+            action={
+              <Button size="sm" variant="primary" onClick={() => setAddOpen(true)}>
+                Add
+              </Button>
+            }
+          />
+        </div>
+      ) : (
+        <DndContext
+          sensors={sensors}
+          collisionDetection={closestCenter}
+          onDragEnd={onDragEnd}
+        >
+          <SortableContext
+            items={entries.map((e) => e.id)}
+            strategy={verticalListSortingStrategy}
+          >
+            <ul className="space-y-0">
+              {entries.map((e, i) => {
+                const reg = registry.data?.entries.find(
+                  (r) => r.id === e.wasm_registry_id,
+                );
+                return (
+                  <React.Fragment key={e.id}>
+                    <RouterChainItem
+                      id={e.id}
+                      order={e.order}
+                      plugin={reg ?? { id: e.wasm_registry_id, name: e.wasm_registry_id, sha256_hex: '', original_filename: '', label: null, size_bytes: 0, refcount: 0, revision: 0, uploaded_at_unix_secs: 0, metadata: null }}
+                      onDelete={() =>
+                        setPendingRemove({
+                          id: e.id,
+                          revision: e.revision,
+                          name: reg?.name ?? e.wasm_registry_id,
+                        })
+                      }
+                      onInfo={() => setDetailPlugin(reg ?? null)}
+                    />
+                    <FlowConnector caption={i === entries.length - 1 ? "remaining candidates" : "passes to next filter"} />
+                  </React.Fragment>
+                );
+              })}
+            </ul>
+          </SortableContext>
+        </DndContext>
+      )}
+
+      {/* Locked Terminal Row */}
+      <div className="flex flex-col gap-2 p-3 border border-subtle rounded-sm bg-overlay-2">
+        <div className="flex items-center gap-2">
+          <div className="w-4 h-4 flex items-center justify-center text-text-faint">
+            <span className="w-1.5 h-1.5 rounded-full border border-text-faint" />
+          </div>
+          <Badge tone="mono">Terminal</Badge>
+          <span className="flex-1 text-sm font-medium truncate text-text-faint flex items-center gap-2">
+            Final upstream selection
+            <Hint label="The terminal stage chooses the final upstream from whatever candidates remain after all filters.">
+              <Info className="w-3.5 h-3.5" />
+            </Hint>
+          </span>
+          <select
+            aria-label="Terminal strategy"
+            className={cx(INPUT_CLASS, 'w-auto py-1 text-xs')}
+            value={terminalStrategy.data?.strategy ?? 'first-pick'}
+            disabled={
+              terminalStrategy.isLoading || updateTerminalStrategy.isPending
+            }
+            onChange={(e) => {
+              if (!terminalStrategy.data) return;
+              updateTerminalStrategy.mutate(
+                {
+                  id: principalId,
+                  strategy: e.target.value,
+                  revision: terminalStrategy.data.revision,
+                },
+                {
+                  onSuccess: () =>
+                    toast.success('Terminal strategy updated'),
+                },
+              );
+            }}
+          >
+            <option value="first-pick">First-pick</option>
+            <option value="random">Random</option>
+          </select>
+        </div>
+        <div className="text-[11px] text-text-faint italic ml-8">
+          {terminalStrategy.data?.strategy === 'random' ? 'Picks one survivor uniformly at random.' : 'Always picks the first survivor (deterministic).'}
+        </div>
+      </div>
+      <FlowConnector caption="1 upstream → dispatched" />
+
+      <PluginDetailDrawer
+        plugin={detailPlugin}
+        open={detailPlugin !== null}
+        onOpenChange={(open) => {
+          if (!open) setDetailPlugin(null);
+        }}
+      />
 
       <Modal
         open={addOpen}
