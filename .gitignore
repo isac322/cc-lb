@@ -359,3 +359,6 @@ graphify-out/
 
 # Local mockup / agent-browser captures
 mockup/
+
+# Sisyphus / OMO orchestrator local artifacts
+.omo/
