@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
+use cc_lb_storage_api::{PluginChainEntry, PluginSlot};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 mod legacy_upstreams;
@@ -137,12 +138,39 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
     if stored_version.is_some_and(|version| version < 4) {
         migrate_upstreams_v3_to_v4(&write_txn)?;
     }
+    if stored_version.is_none_or(|version| version < 6) {
+        drop_incompatible_router_chain_entries(&write_txn)?;
+    }
     {
         let mut schema = write_txn.open_table(SCHEMA_VERSION_V1)?;
         schema.insert(SCHEMA_VERSION_KEY, &CURRENT_SCHEMA_VERSION)?;
     }
 
     write_txn.commit()?;
+    Ok(())
+}
+
+fn drop_incompatible_router_chain_entries(
+    write_txn: &redb::WriteTransaction,
+) -> Result<(), StorageError> {
+    let mut keys_to_drop = Vec::new();
+    {
+        let chains = write_txn.open_table(PLUGIN_CHAINS_V2)?;
+        for row in chains.iter()? {
+            let (key, value) = row?;
+            let entry: PluginChainEntry = serde_json::from_slice(value.value())?;
+            if entry.slot == PluginSlot::Router && entry.wire_version != Some(3) {
+                keys_to_drop.push(key.value().to_vec());
+            }
+        }
+    }
+
+    if !keys_to_drop.is_empty() {
+        let mut chains = write_txn.open_table(PLUGIN_CHAINS_V2)?;
+        for key in keys_to_drop {
+            chains.remove(key.as_slice())?;
+        }
+    }
     Ok(())
 }
 
