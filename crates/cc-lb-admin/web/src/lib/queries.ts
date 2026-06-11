@@ -87,6 +87,9 @@ export interface PluginEntry {
   refcount: number;
   revision: number;
   uploaded_at_unix_secs: number;
+  is_builtin?: boolean;
+  kind?: string;
+  wire_version?: number;
 }
 interface PluginListResp {
   entries: PluginEntry[];
