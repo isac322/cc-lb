@@ -62,6 +62,12 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
             kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
             api_key_ciphertext: Some(vec![1, 2, 3]),
+            warmup_enabled: false,
+            next_warmup_at: None,
+            last_warmup_cycle_key: None,
+            warmup_lease_holder: None,
+            warmup_lease_until_unix_secs: None,
+            warmup_dialect_plugin: None,
         },
     )
     .await
@@ -74,6 +80,12 @@ async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
             kind: UpstreamKind::AnthropicApiKey,
             base_url: Some(Url::parse("http://target.invalid").expect("target base_url parses")),
             api_key_ciphertext: Some(vec![1, 2, 3]),
+            warmup_enabled: false,
+            next_warmup_at: None,
+            last_warmup_cycle_key: None,
+            warmup_lease_holder: None,
+            warmup_lease_until_unix_secs: None,
+            warmup_dialect_plugin: None,
         },
     )
     .await
@@ -306,6 +318,44 @@ impl UpstreamStore for NameSortedUpstreamStore {
 
     async fn hard_delete(&self, id: Uuid) -> StorageResult<()> {
         UpstreamStore::hard_delete(self.inner.as_ref(), id).await
+    }
+
+    async fn claim_warmup_lease(
+        &self,
+        upstream_id: Uuid,
+        holder: &str,
+        ttl_secs: i64,
+    ) -> StorageResult<bool> {
+        UpstreamStore::claim_warmup_lease(self.inner.as_ref(), upstream_id, holder, ttl_secs).await
+    }
+
+    async fn write_warmup_cycle_key(
+        &self,
+        upstream_id: Uuid,
+        holder: &str,
+        new_cycle_key: i64,
+        next_warmup_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> StorageResult<bool> {
+        UpstreamStore::write_warmup_cycle_key(
+            self.inner.as_ref(),
+            upstream_id,
+            holder,
+            new_cycle_key,
+            next_warmup_at,
+        )
+        .await
+    }
+
+    async fn release_warmup_lease(&self, id: Uuid, holder: &str) -> StorageResult<bool> {
+        UpstreamStore::release_warmup_lease(self.inner.as_ref(), id, holder).await
+    }
+
+    async fn clear_warmup_dialect_plugin(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+    ) -> StorageResult<Option<UpstreamRecord>> {
+        UpstreamStore::clear_warmup_dialect_plugin(self.inner.as_ref(), id, expected_revision).await
     }
 }
 

@@ -117,6 +117,12 @@ impl Fixture {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url,
                 api_key_ciphertext: None,
+                warmup_enabled: false,
+                next_warmup_at: None,
+                last_warmup_cycle_key: None,
+                warmup_lease_holder: None,
+                warmup_lease_until_unix_secs: None,
+                warmup_dialect_plugin: None,
             })
             .await
             .expect("upstream created");
@@ -313,7 +319,7 @@ async fn two_replicas_race_only_one_calls_token_endpoint() {
 }
 
 #[tokio::test]
-async fn failed_refresh_holds_lease_for_full_ttl_acting_as_backoff() {
+async fn failed_refresh_clears_lease_after_failure_marker() {
     let fixture = Fixture::new().await;
     let record = fixture
         .storage
@@ -322,6 +328,12 @@ async fn failed_refresh_holds_lease_for_full_ttl_acting_as_backoff() {
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
+            warmup_enabled: false,
+            next_warmup_at: None,
+            last_warmup_cycle_key: None,
+            warmup_lease_holder: None,
+            warmup_lease_until_unix_secs: None,
+            warmup_dialect_plugin: None,
         })
         .await
         .expect("upstream created");
@@ -357,12 +369,8 @@ async fn failed_refresh_holds_lease_for_full_ttl_acting_as_backoff() {
         .await
         .expect("get")
         .expect("record");
-    assert_eq!(updated.refresh_lease_holder, Some(replica_id));
-    assert!(
-        updated
-            .refresh_lease_until_unix_secs
-            .is_some_and(|until| until > now_secs() + 80)
-    );
+    assert_eq!(updated.refresh_lease_holder, None);
+    assert_eq!(updated.refresh_lease_until_unix_secs, None);
     assert!(
         updated
             .last_apply_error
@@ -414,6 +422,12 @@ async fn metric_counter_increments_per_outcome() {
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
+            warmup_enabled: false,
+            next_warmup_at: None,
+            last_warmup_cycle_key: None,
+            warmup_lease_holder: None,
+            warmup_lease_until_unix_secs: None,
+            warmup_dialect_plugin: None,
         })
         .await
         .expect("upstream created");
@@ -459,6 +473,12 @@ async fn audit_redaction_clean_no_token_literals_in_audit_db() {
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
+            warmup_enabled: false,
+            next_warmup_at: None,
+            last_warmup_cycle_key: None,
+            warmup_lease_holder: None,
+            warmup_lease_until_unix_secs: None,
+            warmup_dialect_plugin: None,
         })
         .await
         .expect("upstream created");

@@ -161,6 +161,9 @@ async fn create_upstream_rebinds_dynamic_view_before_response_returns() {
         config: Arc::new(TestCurrentConfig { config, rebinder }),
         admin_token: Some("test-token".to_owned()),
         lazy_refresher: None,
+        runtime: None,
+        data_dir: None,
+        warmup_dialect_dispatcher: None,
         subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
     };
