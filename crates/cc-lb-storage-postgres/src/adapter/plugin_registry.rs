@@ -750,6 +750,7 @@ fn registry_from_row(row: sqlx::postgres::PgRow) -> StorageResult<WasmRegistryEn
         kind: "filter".to_owned(),
         wire_version: BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
         is_builtin: false,
+        metadata: None,
     })
 }
 

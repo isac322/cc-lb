@@ -10,7 +10,7 @@ use axum::{
 use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_storage_api::{
     PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
-    PluginSlot, Storage, StorageError, WasmRegistryEntry, sparse_order,
+    PluginMetadata, PluginSlot, Storage, StorageError, WasmRegistryEntry, sparse_order,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -122,6 +122,7 @@ struct RegistryEntryResponse {
     kind: String,
     wire_version: u8,
     is_builtin: bool,
+    metadata: Option<PluginMetadata>,
 }
 
 #[derive(Debug, Serialize)]
@@ -575,6 +576,7 @@ fn registry_response(entry: WasmRegistryEntry, size_bytes: u64) -> RegistryEntry
         kind: entry.kind,
         wire_version: entry.wire_version,
         is_builtin: entry.is_builtin,
+        metadata: entry.metadata,
     }
 }
 
