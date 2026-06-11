@@ -832,8 +832,8 @@ function RouterChainItem({
   );
 }
 
-export function RouterSlotEditor({ principalId }: { principalId: string }) {
-  const slot = 'router';
+export function useRouterChainController(principalId: string) {
+  const slot = 'router' as const;
   const label = 'Router';
   const desc = 'Filters candidates and picks the upstream. Executed in order.';
   const chain = usePluginChain(principalId, slot);
@@ -913,17 +913,48 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
     );
   };
 
+  return {
+    principalId,
+    slot,
+    label,
+    desc,
+    chain,
+    registry,
+    reorder,
+    insert,
+    del,
+    terminalStrategy,
+    updateTerminalStrategy,
+    addOpen,
+    setAddOpen,
+    selectedPluginId,
+    setSelectedPluginId,
+    pendingRemove,
+    setPendingRemove,
+    detailPlugin,
+    setDetailPlugin,
+    sensors,
+    entries,
+    onDragEnd,
+  };
+}
+
+function RouterChainVariantA_Compact({
+  ctrl,
+}: {
+  ctrl: ReturnType<typeof useRouterChainController>;
+}) {
   return (
     <div>
       <div className="flex items-end justify-between mb-4">
         <div>
-          <div className="text-sm font-medium text-text">{label}</div>
-          <div className="text-[11px] text-text-faint">{desc}</div>
+          <div className="text-sm font-medium text-text">{ctrl.label}</div>
+          <div className="text-[11px] text-text-faint">{ctrl.desc}</div>
         </div>
         <Button
           size="sm"
           iconLeft={<Plus className="w-3 h-3" />}
-          onClick={() => setAddOpen(true)}
+          onClick={() => ctrl.setAddOpen(true)}
         >
           Add
         </Button>
@@ -935,11 +966,11 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
       >
         <div className="text-text mb-1">Pipeline</div>
         <div>
-          N upstreams enter → {entries.length} filters → Terminal selector
+          N upstreams enter → {ctrl.entries.length} filters → Terminal selector
         </div>
       </div>
 
-      {entries.length === 0 ? (
+      {ctrl.entries.length === 0 ? (
         <div className="mb-4">
           <EmptyState
             icon={<Filter className="w-6 h-6 text-text-faint" />}
@@ -949,7 +980,7 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
               <Button
                 size="sm"
                 variant="primary"
-                onClick={() => setAddOpen(true)}
+                onClick={() => ctrl.setAddOpen(true)}
               >
                 Add
               </Button>
@@ -958,17 +989,17 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
         </div>
       ) : (
         <DndContext
-          sensors={sensors}
+          sensors={ctrl.sensors}
           collisionDetection={closestCenter}
-          onDragEnd={onDragEnd}
+          onDragEnd={ctrl.onDragEnd}
         >
           <SortableContext
-            items={entries.map((e) => e.id)}
+            items={ctrl.entries.map((e) => e.id)}
             strategy={verticalListSortingStrategy}
           >
             <ul className="space-y-0">
-              {entries.map((e, i) => {
-                const reg = registry.data?.entries.find(
+              {ctrl.entries.map((e, i) => {
+                const reg = ctrl.registry.data?.entries.find(
                   (r) => r.id === e.wasm_registry_id,
                 );
                 return (
@@ -991,17 +1022,17 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                         }
                       }
                       onDelete={() =>
-                        setPendingRemove({
+                        ctrl.setPendingRemove({
                           id: e.id,
                           revision: e.revision,
                           name: reg?.name ?? e.wasm_registry_id,
                         })
                       }
-                      onInfo={() => setDetailPlugin(reg ?? null)}
+                      onInfo={() => ctrl.setDetailPlugin(reg ?? null)}
                     />
                     <FlowConnector
                       caption={
-                        i === entries.length - 1
+                        i === ctrl.entries.length - 1
                           ? 'remaining candidates'
                           : 'passes to next filter'
                       }
@@ -1030,17 +1061,18 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
           <select
             aria-label="Terminal strategy"
             className={cx(INPUT_CLASS, 'w-auto py-1 text-xs')}
-            value={terminalStrategy.data?.strategy ?? 'first-pick'}
+            value={ctrl.terminalStrategy.data?.strategy ?? 'first-pick'}
             disabled={
-              terminalStrategy.isLoading || updateTerminalStrategy.isPending
+              ctrl.terminalStrategy.isLoading ||
+              ctrl.updateTerminalStrategy.isPending
             }
             onChange={(e) => {
-              if (!terminalStrategy.data) return;
-              updateTerminalStrategy.mutate(
+              if (!ctrl.terminalStrategy.data) return;
+              ctrl.updateTerminalStrategy.mutate(
                 {
-                  id: principalId,
+                  id: ctrl.principalId,
                   strategy: e.target.value,
-                  revision: terminalStrategy.data.revision,
+                  revision: ctrl.terminalStrategy.data.revision,
                 },
                 {
                   onSuccess: () => toast.success('Terminal strategy updated'),
@@ -1053,46 +1085,751 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
           </select>
         </div>
         <div className="text-[11px] text-text-faint italic ml-8">
-          {terminalStrategy.data?.strategy === 'random'
+          {ctrl.terminalStrategy.data?.strategy === 'random'
             ? 'Picks one survivor uniformly at random.'
             : 'Always picks the first survivor (deterministic).'}
         </div>
       </div>
       <FlowConnector caption="1 upstream → dispatched" />
+    </div>
+  );
+}
+
+function RouterChainVariantB_Verbose({
+  ctrl,
+}: {
+  ctrl: ReturnType<typeof useRouterChainController>;
+}) {
+  return (
+    <div className="space-y-4">
+      <div className="flex items-end justify-between">
+        <div>
+          <div className="text-sm font-medium text-text">{ctrl.label}</div>
+          <div className="text-[11px] text-text-faint">{ctrl.desc}</div>
+        </div>
+        <Button
+          size="sm"
+          iconLeft={<Plus className="w-3 h-3" />}
+          onClick={() => ctrl.setAddOpen(true)}
+        >
+          Add
+        </Button>
+      </div>
+
+      {ctrl.entries.length === 0 ? (
+        <EmptyState
+          icon={<Filter className="w-6 h-6 text-text-faint" />}
+          title="No filters active"
+          description="Requests flow directly to the terminal selector. Every upstream candidate is considered."
+          action={
+            <Button
+              size="sm"
+              variant="primary"
+              onClick={() => ctrl.setAddOpen(true)}
+            >
+              Add
+            </Button>
+          }
+        />
+      ) : (
+        <DndContext
+          sensors={ctrl.sensors}
+          collisionDetection={closestCenter}
+          onDragEnd={ctrl.onDragEnd}
+        >
+          <SortableContext
+            items={ctrl.entries.map((e) => e.id)}
+            strategy={verticalListSortingStrategy}
+          >
+            <ul className="space-y-4">
+              {ctrl.entries.map((e) => {
+                const reg = ctrl.registry.data?.entries.find(
+                  (r) => r.id === e.wasm_registry_id,
+                );
+                const plugin = reg ?? {
+                  id: e.wasm_registry_id,
+                  name: e.wasm_registry_id,
+                  sha256_hex: '',
+                  original_filename: '',
+                  label: null,
+                  size_bytes: 0,
+                  refcount: 0,
+                  revision: 0,
+                  uploaded_at_unix_secs: 0,
+                  metadata: null,
+                };
+                return (
+                  <VerboseChainItem
+                    key={e.id}
+                    id={e.id}
+                    order={e.order}
+                    plugin={plugin}
+                    onDelete={() =>
+                      ctrl.setPendingRemove({
+                        id: e.id,
+                        revision: e.revision,
+                        name: plugin.name,
+                      })
+                    }
+                  />
+                );
+              })}
+            </ul>
+          </SortableContext>
+        </DndContext>
+      )}
+
+      <Card>
+        <CardHeader title="Terminal" subtitle="Final upstream selection" />
+        <CardBody>
+          <div className="flex items-center gap-4">
+            <select
+              aria-label="Terminal strategy"
+              className={cx(INPUT_CLASS, 'w-auto py-1 text-xs')}
+              value={ctrl.terminalStrategy.data?.strategy ?? 'first-pick'}
+              disabled={
+                ctrl.terminalStrategy.isLoading ||
+                ctrl.updateTerminalStrategy.isPending
+              }
+              onChange={(e) => {
+                if (!ctrl.terminalStrategy.data) return;
+                ctrl.updateTerminalStrategy.mutate(
+                  {
+                    id: ctrl.principalId,
+                    strategy: e.target.value,
+                    revision: ctrl.terminalStrategy.data.revision,
+                  },
+                  {
+                    onSuccess: () => toast.success('Terminal strategy updated'),
+                  },
+                );
+              }}
+            >
+              <option value="first-pick">First-pick</option>
+              <option value="random">Random</option>
+            </select>
+            <div className="text-[11px] text-text-faint italic">
+              {ctrl.terminalStrategy.data?.strategy === 'random'
+                ? 'Picks one survivor uniformly at random.'
+                : 'Always picks the first survivor (deterministic).'}
+            </div>
+          </div>
+        </CardBody>
+      </Card>
+    </div>
+  );
+}
+
+function VerboseChainItem({
+  id,
+  order,
+  plugin,
+  onDelete,
+}: {
+  id: string;
+  order: number;
+  plugin: PluginEntry;
+  onDelete: () => void;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  } as React.CSSProperties;
+
+  return (
+    <li ref={setNodeRef} style={style} data-testid={`chain-row-${id}`}>
+      <Card>
+        <div className="p-4 border-b border-subtle flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <button
+              type="button"
+              {...attributes}
+              {...listeners}
+              aria-label="Drag to reorder"
+              className="text-text-faint hover:text-text cursor-grab active:cursor-grabbing"
+            >
+              <GripVertical className="w-4 h-4" />
+            </button>
+            <Badge tone="mono">#{Math.floor(order)}</Badge>
+            {plugin.kind && <Badge tone="accent">[{plugin.kind}]</Badge>}
+            <span className="font-medium">{plugin.name}</span>
+            {plugin.is_builtin && <Badge tone="accent">Built-in</Badge>}
+          </div>
+          <Hint
+            label={
+              plugin.is_builtin
+                ? "Removing only affects this principal's chain. Registry entry remains."
+                : 'Remove plugin'
+            }
+          >
+            <button
+              type="button"
+              aria-label="Remove plugin"
+              className="text-text-faint hover:text-red-400"
+              onClick={onDelete}
+            >
+              <Trash2 className="w-4 h-4" />
+            </button>
+          </Hint>
+        </div>
+        <CardBody className="space-y-4 text-sm">
+          {plugin.metadata ? (
+            <>
+              <div>
+                <span className="text-xs font-medium text-text-faint uppercase tracking-wider mr-2">
+                  Purpose
+                </span>
+                <span className="text-text">{plugin.metadata.purpose}</span>
+              </div>
+              <div>
+                <span className="text-xs font-medium text-text-faint uppercase tracking-wider mr-2">
+                  Keeps
+                </span>
+                <span className="text-text">{plugin.metadata.keeps}</span>
+              </div>
+              <div>
+                <span className="text-xs font-medium text-text-faint uppercase tracking-wider mr-2">
+                  Drops
+                </span>
+                <span className="text-text">{plugin.metadata.drops}</span>
+              </div>
+              <div>
+                <span className="text-xs font-medium text-text-faint uppercase tracking-wider mr-2">
+                  Empty behavior
+                </span>
+                <span className="text-text">
+                  {plugin.metadata.empty_behavior}
+                </span>
+              </div>
+            </>
+          ) : (
+            <p className="text-text-faint italic">
+              Built by operator. No description was supplied with this plugin.
+            </p>
+          )}
+        </CardBody>
+        <div className="px-4 py-2 bg-overlay-1 border-t border-subtle text-[10px] font-mono text-text-faint flex items-center gap-4">
+          {plugin.wire_version !== undefined && (
+            <span>wire_version: {plugin.wire_version}</span>
+          )}
+          <span>sha256: {plugin.sha256_hex.slice(0, 12)}</span>
+        </div>
+      </Card>
+    </li>
+  );
+}
+
+function RouterChainVariantC_Flow({
+  ctrl,
+}: {
+  ctrl: ReturnType<typeof useRouterChainController>;
+}) {
+  return (
+    <div className="space-y-2">
+      <div className="flex items-end justify-between mb-4">
+        <div>
+          <div className="text-sm font-medium text-text">{ctrl.label}</div>
+          <div className="text-[11px] text-text-faint">{ctrl.desc}</div>
+        </div>
+        <Button
+          size="sm"
+          iconLeft={<Plus className="w-3 h-3" />}
+          onClick={() => ctrl.setAddOpen(true)}
+        >
+          Add
+        </Button>
+      </div>
+
+      <div className="flex justify-center mb-2">
+        <Badge tone="mono">[N in]</Badge>
+      </div>
+
+      {ctrl.entries.length === 0 ? (
+        <div className="flex justify-center py-4">
+          <span className="text-xs text-text-faint italic">No filters</span>
+        </div>
+      ) : (
+        <DndContext
+          sensors={ctrl.sensors}
+          collisionDetection={closestCenter}
+          onDragEnd={ctrl.onDragEnd}
+        >
+          <SortableContext
+            items={ctrl.entries.map((e) => e.id)}
+            strategy={verticalListSortingStrategy}
+          >
+            <ul className="space-y-0">
+              {ctrl.entries.map((e) => {
+                const reg = ctrl.registry.data?.entries.find(
+                  (r) => r.id === e.wasm_registry_id,
+                );
+                const plugin = reg ?? {
+                  id: e.wasm_registry_id,
+                  name: e.wasm_registry_id,
+                  sha256_hex: '',
+                  original_filename: '',
+                  label: null,
+                  size_bytes: 0,
+                  refcount: 0,
+                  revision: 0,
+                  uploaded_at_unix_secs: 0,
+                  metadata: null,
+                };
+
+                // Heuristic for keep fraction
+                const keepFraction =
+                  plugin.name === 'cache-affinity' ? 0.5 : 1.0;
+
+                return (
+                  <React.Fragment key={e.id}>
+                    <FlowChainItem
+                      id={e.id}
+                      plugin={plugin}
+                      keepFraction={keepFraction}
+                      onDelete={() =>
+                        ctrl.setPendingRemove({
+                          id: e.id,
+                          revision: e.revision,
+                          name: plugin.name,
+                        })
+                      }
+                      onInfo={() => ctrl.setDetailPlugin(reg ?? null)}
+                    />
+                    <div className="flex justify-center py-1 text-text-faint text-[10px]">
+                      ▼
+                    </div>
+                  </React.Fragment>
+                );
+              })}
+            </ul>
+          </SortableContext>
+        </DndContext>
+      )}
+
+      <div className="flex flex-col items-center gap-2 p-3 border border-subtle rounded-sm bg-overlay-2">
+        <div className="flex items-center gap-2 w-full">
+          <Badge tone="mono">Terminal</Badge>
+          <select
+            aria-label="Terminal strategy"
+            className={cx(INPUT_CLASS, 'flex-1 py-1 text-xs')}
+            value={ctrl.terminalStrategy.data?.strategy ?? 'first-pick'}
+            disabled={
+              ctrl.terminalStrategy.isLoading ||
+              ctrl.updateTerminalStrategy.isPending
+            }
+            onChange={(e) => {
+              if (!ctrl.terminalStrategy.data) return;
+              ctrl.updateTerminalStrategy.mutate(
+                {
+                  id: ctrl.principalId,
+                  strategy: e.target.value,
+                  revision: ctrl.terminalStrategy.data.revision,
+                },
+                {
+                  onSuccess: () => toast.success('Terminal strategy updated'),
+                },
+              );
+            }}
+          >
+            <option value="first-pick">First-pick</option>
+            <option value="random">Random</option>
+          </select>
+        </div>
+      </div>
+
+      <div className="flex justify-center mt-2">
+        <Badge tone="mono">[1 out]</Badge>
+      </div>
+    </div>
+  );
+}
+
+function FlowChainItem({
+  id,
+  plugin,
+  keepFraction,
+  onDelete,
+  onInfo,
+}: {
+  id: string;
+  plugin: PluginEntry;
+  keepFraction: number;
+  onDelete: () => void;
+  onInfo: () => void;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id });
+  const style = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.5 : 1,
+  } as React.CSSProperties;
+
+  return (
+    <li
+      ref={setNodeRef}
+      style={style}
+      data-testid={`chain-row-${id}`}
+      className="border border-subtle rounded-sm bg-overlay-1 p-3"
+    >
+      <div className="flex items-center justify-between mb-2">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            {...attributes}
+            {...listeners}
+            aria-label="Drag to reorder"
+            className="text-text-faint hover:text-text cursor-grab active:cursor-grabbing"
+          >
+            <GripVertical className="w-4 h-4" />
+          </button>
+          <span className="font-medium text-sm">{plugin.name}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onInfo}
+            className="text-text-faint hover:text-text"
+          >
+            <Info className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            onClick={onDelete}
+            className="text-text-faint hover:text-red-400"
+          >
+            <Trash2 className="w-4 h-4" />
+          </button>
+        </div>
+      </div>
+      <div className="h-2 w-full bg-overlay-3 rounded-full overflow-hidden flex">
+        <div
+          className="h-full bg-accent"
+          style={{ width: `${keepFraction * 100}%` }}
+        />
+      </div>
+      <div className="text-[10px] text-text-faint mt-1 text-center">
+        ~{keepFraction === 1 ? 'M' : 'M/2'} kept
+      </div>
+    </li>
+  );
+}
+
+function RouterChainVariantD_Narrative({
+  ctrl,
+}: {
+  ctrl: ReturnType<typeof useRouterChainController>;
+}) {
+  const moveUp = (index: number) => {
+    if (index === 0) return;
+    const reordered = [...ctrl.entries];
+    const temp = reordered[index - 1];
+    reordered[index - 1] = reordered[index]!;
+    reordered[index] = temp!;
+
+    ctrl.reorder.mutate({
+      pid: ctrl.principalId,
+      entries: reordered.map((x, i) => ({
+        id: x.id,
+        order: (i + 1) * 100,
+        expected_revision: x.revision,
+      })),
+    });
+  };
+
+  const moveDown = (index: number) => {
+    if (index === ctrl.entries.length - 1) return;
+    const reordered = [...ctrl.entries];
+    const temp = reordered[index + 1];
+    reordered[index + 1] = reordered[index]!;
+    reordered[index] = temp!;
+
+    ctrl.reorder.mutate({
+      pid: ctrl.principalId,
+      entries: reordered.map((x, i) => ({
+        id: x.id,
+        order: (i + 1) * 100,
+        expected_revision: x.revision,
+      })),
+    });
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-end justify-between">
+        <div>
+          <div className="text-sm font-medium text-text">{ctrl.label}</div>
+          <div className="text-[11px] text-text-faint">{ctrl.desc}</div>
+        </div>
+        <Button
+          size="sm"
+          iconLeft={<Plus className="w-3 h-3" />}
+          onClick={() => ctrl.setAddOpen(true)}
+        >
+          Add
+        </Button>
+      </div>
+
+      <Card>
+        <CardBody className="text-sm leading-relaxed space-y-2">
+          <p>
+            When a request arrives, <strong>N upstream candidates</strong> are
+            considered.
+          </p>
+
+          {ctrl.entries.length === 0 ? (
+            <p>There are no filters active.</p>
+          ) : (
+            <ul className="space-y-2">
+              {ctrl.entries.map((e, i) => {
+                const reg = ctrl.registry.data?.entries.find(
+                  (r) => r.id === e.wasm_registry_id,
+                );
+                const plugin = reg ?? {
+                  id: e.wasm_registry_id,
+                  name: e.wasm_registry_id,
+                  sha256_hex: '',
+                  original_filename: '',
+                  label: null,
+                  size_bytes: 0,
+                  refcount: 0,
+                  revision: 0,
+                  uploaded_at_unix_secs: 0,
+                  metadata: null,
+                };
+
+                return (
+                  <li
+                    key={e.id}
+                    className="flex items-center gap-2 flex-wrap"
+                    data-testid={`chain-row-${e.id}`}
+                  >
+                    <span>Step {i + 1} &middot;</span>
+                    <button
+                      type="button"
+                      className="font-bold text-accent hover:underline"
+                      onClick={() => ctrl.setDetailPlugin(reg ?? null)}
+                    >
+                      {plugin.name}
+                    </button>
+                    <span>
+                      {plugin.metadata?.purpose ??
+                        'User-uploaded filter (no description supplied).'}
+                    </span>
+                    <div className="flex items-center gap-1 ml-auto">
+                      <button
+                        type="button"
+                        className="text-[10px] px-1.5 py-0.5 border border-subtle rounded hover:bg-overlay-3 disabled:opacity-30"
+                        onClick={() => moveUp(i)}
+                        disabled={i === 0}
+                      >
+                        ↑
+                      </button>
+                      <button
+                        type="button"
+                        className="text-[10px] px-1.5 py-0.5 border border-subtle rounded hover:bg-overlay-3 disabled:opacity-30"
+                        onClick={() => moveDown(i)}
+                        disabled={i === ctrl.entries.length - 1}
+                      >
+                        ↓
+                      </button>
+                      <button
+                        type="button"
+                        className="text-[10px] px-1.5 py-0.5 border border-red-900/30 text-red-400 rounded hover:bg-red-900/20"
+                        onClick={() =>
+                          ctrl.setPendingRemove({
+                            id: e.id,
+                            revision: e.revision,
+                            name: plugin.name,
+                          })
+                        }
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+
+          <div className="flex items-center gap-2 flex-wrap pt-2">
+            <span>Finally, the</span>
+            <select
+              aria-label="Terminal strategy"
+              className={cx(
+                INPUT_CLASS,
+                'w-auto py-0.5 px-2 text-xs font-bold',
+              )}
+              value={ctrl.terminalStrategy.data?.strategy ?? 'first-pick'}
+              disabled={
+                ctrl.terminalStrategy.isLoading ||
+                ctrl.updateTerminalStrategy.isPending
+              }
+              onChange={(e) => {
+                if (!ctrl.terminalStrategy.data) return;
+                ctrl.updateTerminalStrategy.mutate(
+                  {
+                    id: ctrl.principalId,
+                    strategy: e.target.value,
+                    revision: ctrl.terminalStrategy.data.revision,
+                  },
+                  {
+                    onSuccess: () => toast.success('Terminal strategy updated'),
+                  },
+                );
+              }}
+            >
+              <option value="first-pick">first-pick</option>
+              <option value="random">random</option>
+            </select>
+            <span>terminal picks one and dispatches.</span>
+          </div>
+        </CardBody>
+      </Card>
+    </div>
+  );
+}
+
+export function RouterChainVariantSwitcher({
+  variant,
+  setVariant,
+}: {
+  variant: string;
+  setVariant: (v: string) => void;
+}) {
+  return (
+    <div className="flex items-center gap-1 p-1 bg-overlay-1 border border-subtle rounded-md w-fit mb-4">
+      <Hint label="Compact: 1-line row + drawer + locked terminal row + summary header">
+        <button
+          type="button"
+          className={cx(
+            'px-3 py-1 text-xs rounded-sm transition-colors',
+            variant === 'A'
+              ? 'bg-overlay-3 text-text shadow-sm'
+              : 'text-text-faint hover:text-text',
+          )}
+          onClick={() => setVariant('A')}
+        >
+          Compact
+        </button>
+      </Hint>
+      <Hint label="Verbose: Each entry is a Card with inline details">
+        <button
+          type="button"
+          className={cx(
+            'px-3 py-1 text-xs rounded-sm transition-colors',
+            variant === 'B'
+              ? 'bg-overlay-3 text-text shadow-sm'
+              : 'text-text-faint hover:text-text',
+          )}
+          onClick={() => setVariant('B')}
+        >
+          Verbose
+        </button>
+      </Hint>
+      <Hint label="Flow: Column layout with funnel bars and connectors">
+        <button
+          type="button"
+          className={cx(
+            'px-3 py-1 text-xs rounded-sm transition-colors',
+            variant === 'C'
+              ? 'bg-overlay-3 text-text shadow-sm'
+              : 'text-text-faint hover:text-text',
+          )}
+          onClick={() => setVariant('C')}
+        >
+          Flow
+        </button>
+      </Hint>
+      <Hint label="Narrative: Prose paragraph(s) inside a single Card">
+        <button
+          type="button"
+          className={cx(
+            'px-3 py-1 text-xs rounded-sm transition-colors',
+            variant === 'D'
+              ? 'bg-overlay-3 text-text shadow-sm'
+              : 'text-text-faint hover:text-text',
+          )}
+          onClick={() => setVariant('D')}
+        >
+          Narrative
+        </button>
+      </Hint>
+    </div>
+  );
+}
+
+export function RouterSlotEditor({ principalId }: { principalId: string }) {
+  const [variant, setVariant] = useState(() => {
+    if (typeof window !== 'undefined') {
+      return localStorage.getItem('cc-lb.router-chain-variant') || 'A';
+    }
+    return 'A';
+  });
+
+  useEffect(() => {
+    localStorage.setItem('cc-lb.router-chain-variant', variant);
+  }, [variant]);
+
+  const ctrl = useRouterChainController(principalId);
+
+  return (
+    <div>
+      <RouterChainVariantSwitcher variant={variant} setVariant={setVariant} />
+      {variant === 'A' && <RouterChainVariantA_Compact ctrl={ctrl} />}
+      {variant === 'B' && <RouterChainVariantB_Verbose ctrl={ctrl} />}
+      {variant === 'C' && <RouterChainVariantC_Flow ctrl={ctrl} />}
+      {variant === 'D' && <RouterChainVariantD_Narrative ctrl={ctrl} />}
 
       <PluginDetailDrawer
-        plugin={detailPlugin}
-        open={detailPlugin !== null}
+        plugin={ctrl.detailPlugin}
+        open={ctrl.detailPlugin !== null}
         onOpenChange={(open) => {
-          if (!open) setDetailPlugin(null);
+          if (!open) ctrl.setDetailPlugin(null);
         }}
       />
 
       <Modal
-        open={addOpen}
-        onOpenChange={setAddOpen}
-        title={`Add plugin to ${label}`}
+        open={ctrl.addOpen}
+        onOpenChange={ctrl.setAddOpen}
+        title={`Add plugin to ${ctrl.label}`}
         footer={
           <>
-            <Button onClick={() => setAddOpen(false)}>Cancel</Button>
+            <Button onClick={() => ctrl.setAddOpen(false)}>Cancel</Button>
             <Button
               variant="primary"
-              disabled={!selectedPluginId}
+              disabled={!ctrl.selectedPluginId}
               onClick={() =>
-                insert.mutate(
+                ctrl.insert.mutate(
                   {
-                    pid: principalId,
+                    pid: ctrl.principalId,
                     body: {
-                      slot,
-                      wasm_registry_id: selectedPluginId,
-                      order: (entries.length + 1) * 100,
+                      slot: ctrl.slot,
+                      wasm_registry_id: ctrl.selectedPluginId,
+                      order: (ctrl.entries.length + 1) * 100,
                     },
                   },
                   {
                     onSuccess: () => {
                       toast.success('Plugin added');
-                      setAddOpen(false);
-                      setSelectedPluginId('');
+                      ctrl.setAddOpen(false);
+                      ctrl.setSelectedPluginId('');
                     },
                   },
                 )
@@ -1106,11 +1843,11 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
         <Field label="Plugin" required>
           <select
             className={INPUT_CLASS}
-            value={selectedPluginId}
-            onChange={(e) => setSelectedPluginId(e.target.value)}
+            value={ctrl.selectedPluginId}
+            onChange={(e) => ctrl.setSelectedPluginId(e.target.value)}
           >
             <option value="">— select —</option>
-            {registry.data?.entries.map((p) => (
+            {ctrl.registry.data?.entries.map((p) => (
               <option key={p.id} value={p.id}>
                 {p.name}
               </option>
@@ -1120,34 +1857,36 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
       </Modal>
 
       <ConfirmDialog
-        open={pendingRemove !== null}
+        open={ctrl.pendingRemove !== null}
         onOpenChange={(o) => {
-          if (!o) setPendingRemove(null);
+          if (!o) ctrl.setPendingRemove(null);
         }}
         title="Remove plugin from chain?"
         description={
-          pendingRemove ? (
+          ctrl.pendingRemove ? (
             <>
-              <span className="font-mono">{pendingRemove.name}</span> will be
-              removed from the {label} chain. You can re-add it later.
+              <span className="font-mono">{ctrl.pendingRemove.name}</span> will
+              be removed from the {ctrl.label} chain. You can re-add it later.
             </>
           ) : null
         }
         confirmLabel="Remove"
         destructive
         onConfirm={() => {
-          if (!pendingRemove) return;
-          del.mutate(
-            { id: pendingRemove.id, revision: pendingRemove.revision },
+          if (!ctrl.pendingRemove) return;
+          ctrl.del.mutate(
+            {
+              id: ctrl.pendingRemove.id,
+              revision: ctrl.pendingRemove.revision,
+            },
             { onSuccess: () => toast.success('Plugin removed from chain') },
           );
-          setPendingRemove(null);
+          ctrl.setPendingRemove(null);
         }}
       />
     </div>
   );
 }
-
 function ShapeSlotEditor({ principalId }: { principalId: string }) {
   const slot = 'shape';
   const label = 'Shape';

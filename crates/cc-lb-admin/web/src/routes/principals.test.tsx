@@ -58,7 +58,20 @@ test('renders ordered list with locked terminal row', () => {
   } as unknown as ReturnType<typeof queries.usePluginChain>);
   vi.mocked(queries.usePluginRegistry).mockReturnValue({
     data: {
-      entries: [{ id: 'plugin-1', name: 'My Plugin', metadata: null }],
+      entries: [
+        {
+          id: 'plugin-1',
+          name: 'My Plugin',
+          metadata: {
+            purpose: 'Purpose',
+            keeps: 'Keeps',
+            drops: 'Drops',
+            empty_behavior: 'Empty behavior',
+            examples: [],
+          },
+          sha256_hex: '',
+        },
+      ],
     },
   } as unknown as ReturnType<typeof queries.usePluginRegistry>);
   vi.mocked(queries.useRouterTerminalStrategy).mockReturnValue({
@@ -164,5 +177,81 @@ test('toggles terminal strategy', async () => {
       { id: 'p-1', strategy: 'random', revision: 1 },
       expect.anything(),
     );
+  });
+});
+
+test('renders all variants via switcher', async () => {
+  vi.mocked(queries.usePluginChain).mockReturnValue({
+    data: {
+      entries: [
+        {
+          id: 'entry-1',
+          order: 100,
+          wasm_registry_id: 'plugin-1',
+          revision: 1,
+        },
+      ],
+    },
+  } as unknown as ReturnType<typeof queries.usePluginChain>);
+  vi.mocked(queries.usePluginRegistry).mockReturnValue({
+    data: {
+      entries: [
+        {
+          id: 'plugin-1',
+          name: 'My Plugin',
+          metadata: {
+            purpose: 'Purpose',
+            keeps: 'Keeps',
+            drops: 'Drops',
+            empty_behavior: 'Empty behavior',
+            examples: [],
+          },
+          sha256_hex: '',
+        },
+      ],
+    },
+  } as unknown as ReturnType<typeof queries.usePluginRegistry>);
+  vi.mocked(queries.useRouterTerminalStrategy).mockReturnValue({
+    data: { strategy: 'first-pick', revision: 1 },
+    isLoading: false,
+  } as unknown as ReturnType<typeof queries.useRouterTerminalStrategy>);
+  vi.mocked(queries.useUpdateRouterTerminalStrategy).mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as unknown as ReturnType<typeof queries.useUpdateRouterTerminalStrategy>);
+  vi.mocked(queries.useReorderChain).mockReturnValue({
+    mutate: vi.fn(),
+  } as unknown as ReturnType<typeof queries.useReorderChain>);
+  vi.mocked(queries.useInsertChainEntry).mockReturnValue({
+    mutate: vi.fn(),
+  } as unknown as ReturnType<typeof queries.useInsertChainEntry>);
+  vi.mocked(queries.useDeleteChainEntry).mockReturnValue({
+    mutate: vi.fn(),
+  } as unknown as ReturnType<typeof queries.useDeleteChainEntry>);
+
+  renderWithProviders(<RouterSlotEditor principalId="p-1" />);
+
+  // Default is Compact (A)
+  expect(screen.getByText('Compact')).toBeDefined();
+  expect(screen.getByTestId('pipeline-summary')).toBeDefined();
+
+  // Switch to Verbose (B)
+  fireEvent.click(screen.getByText('Verbose'));
+  await waitFor(() => {
+    expect(screen.getAllByText('Purpose').length).toBeGreaterThan(0);
+  });
+
+  // Switch to Flow (C)
+  fireEvent.click(screen.getByText('Flow'));
+  await waitFor(() => {
+    expect(screen.getByText('[N in]')).toBeDefined();
+    expect(screen.getByText('[1 out]')).toBeDefined();
+  });
+
+  // Switch to Narrative (D)
+  fireEvent.click(screen.getByText('Narrative'));
+  await waitFor(() => {
+    expect(screen.getByText(/When a request arrives/)).toBeDefined();
+    expect(screen.getByText(/Step 1/)).toBeDefined();
   });
 });
