@@ -502,16 +502,16 @@ mod tests {
 
     #[test]
     fn handler_versions_array() {
-        let args: HandlerArgs = parse_str(r#"name = "route", versions = [1, 2, 3]"#).unwrap();
+        let args: HandlerArgs = parse_str(r#"name = "filter", versions = [1, 2, 3]"#).unwrap();
         let versions = validate_versions(&args.versions).unwrap();
 
-        assert_eq!(args.name.value(), "route");
+        assert_eq!(args.name.value(), "filter");
         assert_eq!(versions, [1, 2, 3]);
     }
 
     #[test]
     fn rejects_empty_handler_versions() {
-        let args: HandlerArgs = parse_str(r#"name = "route", versions = []"#).unwrap();
+        let args: HandlerArgs = parse_str(r#"name = "filter", versions = []"#).unwrap();
         let error = validate_versions(&args.versions).unwrap_err();
 
         assert!(error.to_string().contains("at least one version"));
@@ -530,13 +530,13 @@ mod tests {
     #[test]
     fn plugin_descriptor_extracts_handler_metadata() {
         let args: PluginArgs =
-            parse_str(r#"name = "sample-router", version = "1.0.0", requires = ["log"]"#).unwrap();
+            parse_str(r#"name = "sample-filter", version = "1.0.0", requires = ["log"]"#).unwrap();
         let module: ItemMod = parse_quote! {
             mod plugin {
-                #[handler(name = "route", versions = [1])]
-                pub fn route(
-                    request: cc_lb_plugin_wire::v1::route::RouteRequest
-                ) -> extism_pdk::FnResult<cc_lb_plugin_wire::v1::route::RouteResponse> {
+                #[handler(name = "filter", versions = [1])]
+                pub fn filter(
+                    request: cc_lb_plugin_wire::v3::filter::FilterRequest
+                ) -> extism_pdk::FnResult<cc_lb_plugin_wire::v3::filter::FilterResponse> {
                     todo!()
                 }
             }
@@ -544,26 +544,26 @@ mod tests {
 
         let descriptor = parse_plugin_descriptor(&args, &module).unwrap();
 
-        assert_eq!(descriptor.plugin_name, "sample-router");
+        assert_eq!(descriptor.plugin_name, "sample-filter");
         assert_eq!(descriptor.plugin_version, "1.0.0");
         assert_eq!(descriptor.required_capabilities, ["log"]);
         assert_eq!(descriptor.handlers.len(), 1);
-        assert_eq!(descriptor.handlers[0].name, "route");
+        assert_eq!(descriptor.handlers[0].name, "filter");
         assert_eq!(descriptor.handlers[0].versions, [1]);
-        assert_eq!(descriptor.handlers[0].fn_ident, "route");
+        assert_eq!(descriptor.handlers[0].fn_ident, "filter");
         assert_eq!(
             type_to_string(&descriptor.handlers[0].request_type),
-            "cc_lb_plugin_wire :: v1 :: route :: RouteRequest"
+            "cc_lb_plugin_wire :: v3 :: filter :: FilterRequest"
         );
         assert_eq!(
             type_to_string(&descriptor.handlers[0].response_type),
-            "cc_lb_plugin_wire :: v1 :: route :: RouteResponse"
+            "cc_lb_plugin_wire :: v3 :: filter :: FilterResponse"
         );
     }
 
     #[test]
     fn plugin_descriptor_accepts_qualified_handler_attribute() {
-        let args: PluginArgs = parse_str(r#"name = "sample-router", version = "1.0.0""#).unwrap();
+        let args: PluginArgs = parse_str(r#"name = "sample-plugin", version = "1.0.0""#).unwrap();
         let module: ItemMod = parse_quote! {
             mod plugin {
                 #[cc_lb_pdk::handler(name = "shape", versions = [1])]
@@ -584,7 +584,7 @@ mod tests {
 
     #[test]
     fn rejects_module_without_handlers() {
-        let args: PluginArgs = parse_str(r#"name = "sample-router", version = "1.0.0""#).unwrap();
+        let args: PluginArgs = parse_str(r#"name = "sample-plugin", version = "1.0.0""#).unwrap();
         let module: ItemMod = parse_quote! {
             mod plugin {
                 pub fn helper() {}
@@ -601,7 +601,7 @@ mod tests {
 
     #[test]
     fn rejects_handler_without_response_type() {
-        let args: PluginArgs = parse_str(r#"name = "sample-router", version = "1.0.0""#).unwrap();
+        let args: PluginArgs = parse_str(r#"name = "sample-plugin", version = "1.0.0""#).unwrap();
         let module: ItemMod = parse_quote! {
             mod plugin {
                 #[handler(name = "route", versions = [1])]
