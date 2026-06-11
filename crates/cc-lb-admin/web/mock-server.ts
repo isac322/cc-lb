@@ -116,6 +116,13 @@ const plugins: any[] = [
     kind: "filter",
     wire_version: 3,
     is_builtin: true,
+    metadata: {
+      purpose: "Prefer upstreams whose prompt cache is already warm for this request.",
+      keeps: "Candidates with a positive prefill_cache_score (the upstream has already cached the prefix).",
+      drops: "Candidates with zero cache score — only when at least one candidate is a cache hit; otherwise nothing is dropped.",
+      empty_behavior: "Never drops everything. Falls back to passing all candidates through when no cache hit exists.",
+      examples: ["5 candidates, 2 with positive cache score → keep the 2 hits.", "5 candidates, all with zero cache score → pass all 5 through.", "Exactly 1 candidate → no change."],
+    },
   },
   {
     id: "pl-rate-limiter",
@@ -127,6 +134,7 @@ const plugins: any[] = [
     refcount: 3,
     revision: 4,
     uploaded_at_unix_secs: NOW() - 86400 * 14,
+    metadata: null,
   },
   {
     id: "pl-audit-logger",
@@ -138,6 +146,7 @@ const plugins: any[] = [
     refcount: 5,
     revision: 2,
     uploaded_at_unix_secs: NOW() - 86400 * 30,
+    metadata: null,
   },
   {
     id: "pl-cost-tracker",
@@ -149,6 +158,7 @@ const plugins: any[] = [
     refcount: 2,
     revision: 1,
     uploaded_at_unix_secs: NOW() - 86400 * 3,
+    metadata: null,
   },
   {
     id: "pl-shape-llama",
@@ -160,6 +170,7 @@ const plugins: any[] = [
     refcount: 1,
     revision: 3,
     uploaded_at_unix_secs: NOW() - 86400 * 7,
+    metadata: null,
   },
   {
     id: "pl-routing-canary",
@@ -171,6 +182,7 @@ const plugins: any[] = [
     refcount: 1,
     revision: 1,
     uploaded_at_unix_secs: NOW() - 86400 * 2,
+    metadata: null,
   },
 ];
 

@@ -77,6 +77,14 @@ interface PrincipalListResp {
   principals: Principal[];
 }
 
+export type PluginMetadata = {
+  purpose: string;
+  keeps: string;
+  drops: string;
+  empty_behavior: string;
+  examples: string[];
+};
+
 export interface PluginEntry {
   id: string;
   sha256_hex: string;
@@ -90,6 +98,7 @@ export interface PluginEntry {
   is_builtin?: boolean;
   kind?: string;
   wire_version?: number;
+  metadata: PluginMetadata | null;
 }
 interface PluginListResp {
   entries: PluginEntry[];
