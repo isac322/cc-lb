@@ -179,3 +179,57 @@ test.describe('Router Pipeline', () => {
     await expect(deleteBtn).toBeDisabled();
   });
 });
+
+  test('switch through all 4 variants', async ({ page }) => {
+    await page.goto('/principals');
+    
+    const isAuthRequired = await Promise.race([
+      page.waitForSelector('text=Admin token required').then(() => true),
+      page.waitForSelector('text=Principals').then(() => false)
+    ]);
+
+    if (isAuthRequired) {
+      await page.locator('input[type="password"]').fill('mock-token');
+      await page.locator('button:has-text("Sign in")').click();
+      await expect(page.locator('h1', { hasText: 'Principals' })).toBeVisible();
+    }
+
+    await page.locator('button:has-text("admin")').first().click();
+    await expect(page.locator('text=Plugin Chain')).toBeVisible();
+
+    // Add echo-passthrough if not present
+    const pluginList = page.locator('ul').first();
+    const hasEcho = await pluginList.locator('li').count() > 1;
+    if (!hasEcho) {
+      await page.locator('button:has-text("Add")').first().click();
+      const modal = page.locator('[role="dialog"]');
+      await expect(modal).toBeVisible();
+      await modal.locator('select').selectOption({ label: 'echo-passthrough' });
+      await modal.locator('button:has-text("Add")').click();
+      await expect(modal).not.toBeVisible();
+    }
+
+    // Compact (A)
+    await page.locator('button:has-text("Compact")').click();
+    await expect(page.locator('text=Pipeline')).toBeVisible();
+    await expect(page.locator('li').filter({ hasText: 'cache-affinity' }).first()).toBeVisible();
+    await expect(page.locator('li').nth(1)).toBeVisible();
+
+    // Verbose (B)
+    await page.locator('button:has-text("Verbose")').click();
+    await expect(page.locator('text=Purpose').first()).toBeVisible();
+    await expect(page.locator('li').filter({ hasText: 'cache-affinity' }).first()).toBeVisible();
+    await expect(page.locator('li').nth(1)).toBeVisible();
+
+    // Flow (C)
+    await page.locator('button:has-text("Flow")').click();
+    await expect(page.locator('text=[N in]')).toBeVisible();
+    await expect(page.locator('li').filter({ hasText: 'cache-affinity' }).first()).toBeVisible();
+    await expect(page.locator('li').nth(1)).toBeVisible();
+
+    // Narrative (D)
+    await page.locator('button:has-text("Narrative")').click();
+    await expect(page.locator('text=When a request arrives')).toBeVisible();
+    await expect(page.locator('li').filter({ hasText: 'cache-affinity' }).first()).toBeVisible();
+    await expect(page.locator('li').nth(1)).toBeVisible();
+  });
