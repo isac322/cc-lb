@@ -1,10 +1,9 @@
 //! Integration tests for v3 filter wire protocol roundtrip serialization.
 
 use cc_lb_plugin_wire::v2::common::{CandidateWire, HeaderWire, Principal};
-use cc_lb_plugin_wire::v3::filter::{
-    FilterFn, FilterRequest, FilterResponse, PerCandidateReasonWire,
-};
+use cc_lb_plugin_wire::v3::filter::{FilterFn, FilterRequest, FilterResponse, PerCandidateReason};
 use cc_lb_plugin_wire::wire_function::WireFunction;
+use uuid::Uuid;
 
 #[test]
 fn filter_fn_implements_wire_function() {
@@ -71,16 +70,20 @@ fn filter_request_json_complex_roundtrip() {
 
 #[test]
 fn filter_response_json_complex_roundtrip() {
+    let kept_id = Uuid::from_u128(1);
+    let rejected_id = Uuid::from_u128(2);
     let response = FilterResponse {
-        results: vec![
-            PerCandidateReasonWire {
-                upstream_id: String::from("upstream-us-east-1"),
-                decision: String::from("accept"),
+        kept_upstream_ids: vec![kept_id],
+        reason: String::from("quota available"),
+        per_candidate_reasons: vec![
+            PerCandidateReason {
+                upstream_id: kept_id,
+                kept: true,
                 reason: String::from("quota available, no rate limits"),
             },
-            PerCandidateReasonWire {
-                upstream_id: String::from("upstream-eu-west-1"),
-                decision: String::from("reject"),
+            PerCandidateReason {
+                upstream_id: rejected_id,
+                kept: false,
                 reason: String::from("rate limit window exceeded"),
             },
         ],
@@ -147,21 +150,26 @@ fn filter_request_with_multiple_candidates_roundtrip() {
 
 #[test]
 fn filter_response_with_mixed_decisions_roundtrip() {
+    let id_1 = Uuid::from_u128(1);
+    let id_2 = Uuid::from_u128(2);
+    let id_3 = Uuid::from_u128(3);
     let response = FilterResponse {
-        results: vec![
-            PerCandidateReasonWire {
-                upstream_id: String::from("id-1"),
-                decision: String::from("accept"),
+        kept_upstream_ids: vec![id_1, id_3],
+        reason: String::from("mixed decisions"),
+        per_candidate_reasons: vec![
+            PerCandidateReason {
+                upstream_id: id_1,
+                kept: true,
                 reason: String::from("all checks pass"),
             },
-            PerCandidateReasonWire {
-                upstream_id: String::from("id-2"),
-                decision: String::from("reject"),
+            PerCandidateReason {
+                upstream_id: id_2,
+                kept: false,
                 reason: String::from("failed filter A"),
             },
-            PerCandidateReasonWire {
-                upstream_id: String::from("id-3"),
-                decision: String::from("accept"),
+            PerCandidateReason {
+                upstream_id: id_3,
+                kept: true,
                 reason: String::from("all checks pass"),
             },
         ],
@@ -174,7 +182,11 @@ fn filter_response_with_mixed_decisions_roundtrip() {
 
 #[test]
 fn filter_response_empty_results_roundtrip() {
-    let response = FilterResponse { results: vec![] };
+    let response = FilterResponse {
+        kept_upstream_ids: vec![],
+        reason: String::new(),
+        per_candidate_reasons: vec![],
+    };
 
     let json = serde_json::to_string(&response).expect("failed to encode JSON");
     let parsed: FilterResponse = serde_json::from_str(&json).expect("failed to parse JSON");
@@ -184,12 +196,12 @@ fn filter_response_empty_results_roundtrip() {
 #[test]
 fn per_candidate_reason_wire_deny_unknown_fields() {
     let json = r#"{
-        "upstream_id": "test-id",
-        "decision": "accept",
+        "upstream_id": "00000000-0000-0000-0000-000000000001",
+        "kept": true,
         "reason": "test",
         "unknown_field": "value"
     }"#;
-    let result: Result<PerCandidateReasonWire, _> = serde_json::from_str(json);
+    let result: Result<PerCandidateReason, _> = serde_json::from_str(json);
     assert!(result.is_err(), "should reject unknown fields");
 }
 
@@ -217,7 +229,9 @@ fn filter_request_deny_unknown_fields() {
 #[test]
 fn filter_response_deny_unknown_fields() {
     let json = r#"{
-        "results": [],
+        "kept_upstream_ids": [],
+        "reason": "",
+        "per_candidate_reasons": [],
         "unknown_field": "should_fail"
     }"#;
     let result: Result<FilterResponse, _> = serde_json::from_str(json);

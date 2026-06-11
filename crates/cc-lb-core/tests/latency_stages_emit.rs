@@ -1,5 +1,6 @@
 mod common;
 
+use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use std::time::Duration;
@@ -8,10 +9,17 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_core::api_keys::limit_engine::LimitEngine;
+use cc_lb_core::api_keys::principal_view::{
+    DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
+};
 use cc_lb_core::instrumented_connector::InstrumentedHttpsConnector;
 use cc_lb_core::{
     Body, BulkheadConfig, BulkheadDispatch, BulkheadRegistry, CachingDnsConnector, DispatchError,
     DnsResolveFuture, DnsResolver, DnsResolverConfig, Lifecycle, UpstreamDispatch,
+};
+use cc_lb_plugin_api::{
+    FilterError, FilterOutput, FilterPlugin, Principal, RequestContext, RouteDecision, RouteError,
+    RouterPlugin, TerminalStrategy, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::types::{KeyStatus, RequestEvent, StoredApiKeyRecord};
 use cc_lb_storage_api::{RequestEventStore, Storage as StorageTrait};
@@ -26,8 +34,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use url::Url;
+use uuid::Uuid;
 
-use common::{TestAuthn, TestRouter, TestState, lifecycle_with_parts, messages_request};
+use common::{PassthroughDialect, TestAuthn, TestState, lifecycle_with_parts, messages_request};
+
+const DEFAULT_UPSTREAM_ID: &str = "00000000-0000-0000-0000-000000000001";
 
 #[tokio::test]
 async fn cold_request_populates_all_connection_stages_ip_upstream() {
@@ -51,6 +62,35 @@ async fn cold_request_populates_all_connection_stages_ip_upstream() {
     assert!(event.dns_ms.is_none() || event.dns_ms.is_some());
     assert!(event.observability_post_ms.is_some());
     assert!(event.limit_reconcile_ms.is_some());
+}
+
+#[tokio::test]
+async fn routing_trace_stage_duration_sum_matches_route_ms() {
+    let upstream = MockUpstream::start(Duration::ZERO).await;
+    let dispatcher = instrumented_bulkhead_dispatcher(None, 8, 8);
+    let harness = lifecycle_for_with_filters(
+        &upstream.ip_base_url(),
+        dispatcher,
+        vec![
+            Arc::new(SleepingFilter::new(
+                "latency-stage-a",
+                Duration::from_millis(25),
+            )),
+            Arc::new(SleepingFilter::new(
+                "latency-stage-b",
+                Duration::from_millis(25),
+            )),
+        ],
+    );
+
+    send_message(&harness.lifecycle).await;
+
+    let event = single_event(&harness.storage).await;
+    let trace = event.routing_trace.as_ref().expect("routing_trace emitted");
+    assert_eq!(trace.stages.len(), 2, "routing trace: {trace:?}");
+    assert_eq!(trace.stages[0].stage_name, "latency-stage-a");
+    assert_eq!(trace.stages[1].stage_name, "latency-stage-b");
+    assert_stage_durations_match_route_ms(&event);
 }
 
 #[tokio::test]
@@ -139,15 +179,23 @@ struct LifecycleHarness {
 }
 
 fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) -> LifecycleHarness {
+    lifecycle_for_with_filters(base_url, dispatcher, Vec::new())
+}
+
+fn lifecycle_for_with_filters(
+    base_url: &str,
+    dispatcher: Arc<dyn UpstreamDispatch>,
+    filters: Vec<Arc<dyn FilterPlugin>>,
+) -> LifecycleHarness {
     let state = TestState::default();
-    let authn = TestAuthn::new(state);
+    let authn = TestAuthn::with_principal_view(state, principal_view_with_filters(filters));
     let dir = tempfile::tempdir().expect("request event storage tempdir");
     let storage = Arc::new(
         RedbStorage::open(&dir.path().join("latency-stages.redb"), [17; 32])
             .expect("request event storage opens"),
     );
     let limit_engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()));
-    let router = Arc::new(TestRouter {
+    let router = Arc::new(SelectingRouter {
         base_url: Url::parse(base_url).expect("test base URL parses"),
     });
     let lifecycle = lifecycle_with_parts(
@@ -170,6 +218,30 @@ fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) -> Lifec
         storage,
         _dir: dir,
     }
+}
+
+fn principal_view_with_filters(filters: Vec<Arc<dyn FilterPlugin>>) -> Arc<PrincipalView> {
+    let pipeline = Arc::new(RouterPipelineCache {
+        user_filters: filters,
+        terminal: TerminalStrategy::FirstPick,
+        instantiation_error: None,
+    });
+    let mut chains = HashMap::new();
+    chains.insert(
+        "principal-test".to_owned(),
+        (
+            Some(pipeline),
+            ObservabilityHooksCache::Inherit,
+            DialectCache::Inherit,
+        ),
+    );
+    Arc::new(PrincipalView::for_tests(
+        "principal-test",
+        true,
+        vec!["*".to_owned()],
+        Vec::new(),
+        chains,
+    ))
 }
 
 fn active_record() -> StoredApiKeyRecord {
@@ -218,6 +290,86 @@ fn assert_bulkhead_wait_under(value: Option<u64>, max_ms: u64) {
         wait_ms <= max_ms,
         "expected bulkhead wait <= {max_ms}ms, got {wait_ms}ms"
     );
+}
+
+fn assert_stage_durations_match_route_ms(event: &RequestEvent) {
+    let route_us = event.route_ms.expect("route_ms emitted") * 1_000;
+    let trace = event.routing_trace.as_ref().expect("routing_trace emitted");
+    let stage_duration_us: u64 = trace.stages.iter().map(|stage| stage.duration_us).sum();
+    let tolerance_us = (route_us / 10).max(1_000);
+    let diff_us = stage_duration_us.abs_diff(route_us);
+
+    assert!(
+        stage_duration_us > 0,
+        "expected non-zero per-stage durations: {trace:?}"
+    );
+    assert!(
+        diff_us <= tolerance_us,
+        "expected routing trace stage durations ({stage_duration_us}us) to be within 10% of route_ms ({route_us}us), diff={diff_us}us tolerance={tolerance_us}us trace={trace:?}"
+    );
+}
+
+struct SelectingRouter {
+    base_url: Url,
+}
+
+impl RouterPlugin for SelectingRouter {
+    fn route(
+        &self,
+        _ctx: &RequestContext,
+        _principal: &Principal,
+        _candidates: &[UpstreamCandidate],
+    ) -> Result<RouteDecision, RouteError> {
+        Ok(RouteDecision {
+            upstream_id: Some(default_upstream_id()),
+            upstream: Upstream::AnthropicDirect,
+            dialect: Arc::new(PassthroughDialect {
+                base_url: self.base_url.clone(),
+            }),
+        })
+    }
+}
+
+struct SleepingFilter {
+    name: &'static str,
+    delay: Duration,
+}
+
+impl SleepingFilter {
+    fn new(name: &'static str, delay: Duration) -> Self {
+        Self { name, delay }
+    }
+}
+
+impl FilterPlugin for SleepingFilter {
+    fn filter(
+        &self,
+        _ctx: &RequestContext,
+        _principal: &Principal,
+        candidates: &[UpstreamCandidate],
+    ) -> Result<FilterOutput, FilterError> {
+        std::thread::sleep(self.delay);
+        Ok(FilterOutput {
+            kept_upstream_ids: candidates
+                .iter()
+                .map(|candidate| candidate.upstream_id)
+                .collect(),
+            reason: format!("{} kept all candidates", self.name),
+            per_candidate_reasons: Vec::new(),
+        })
+    }
+
+    fn plugin_id(&self) -> Uuid {
+        Uuid::nil()
+    }
+
+    fn plugin_name(&self) -> &str {
+        self.name
+    }
+}
+
+fn default_upstream_id() -> Uuid {
+    Uuid::parse_str(DEFAULT_UPSTREAM_ID).expect("default upstream id parses")
 }
 
 fn instrumented_bulkhead_dispatcher(

@@ -5,16 +5,13 @@ use cc_lb_plugin_wire::self_check::{
 };
 use cc_lb_plugin_wire::serde_json::{self, Value};
 use cc_lb_plugin_wire::v2::common::{CacheScoreWire, CandidateWire};
-use cc_lb_plugin_wire::v3::filter::{
-    FilterFn, FilterRequest, FilterResponse, PerCandidateReasonWire,
-};
+use cc_lb_plugin_wire::v3::filter::{FilterFn, FilterRequest, FilterResponse, PerCandidateReason};
 use cc_lb_plugin_wire::wire_function::WireFunction;
 use std::collections::{BTreeMap, BTreeSet};
 use std::convert::Infallible;
+use uuid::Uuid;
 
 const DEFAULT_KEEP_K: usize = 1;
-const ACCEPT_DECISION: &str = "accept";
-const REJECT_DECISION: &str = "reject";
 const ACCEPT_REASON: &str = "top-K by cache_score";
 const REJECT_REASON: &str = "below K by cache_score";
 const PLUGIN_METADATA_JSON: &[u8; 103] = b"{\"magic\":[204,27,112,16,0,1,0,0],\"abi_envelope\":1,\"plugin_name\":\"cache-aware\",\"plugin_version\":\"0.1.0\"}";
@@ -91,9 +88,20 @@ pub fn filter_candidates(request: FilterRequest, config: CacheAwareConfig) -> Fi
     for index in kept_indices {
         keep_mask[index] = true;
     }
+    let kept_upstream_ids = request
+        .candidates
+        .iter()
+        .zip(keep_mask.iter())
+        .filter(|(_candidate, kept)| **kept)
+        .map(|(candidate, _kept)| candidate_uuid(candidate))
+        .collect::<Vec<_>>();
+    let kept_count = kept_upstream_ids.len();
+    let candidate_count = request.candidates.len();
 
     FilterResponse {
-        results: request
+        kept_upstream_ids,
+        reason: format!("kept {kept_count} of {candidate_count} by cache_score"),
+        per_candidate_reasons: request
             .candidates
             .iter()
             .enumerate()
@@ -106,17 +114,16 @@ pub fn filter_handler(request: FilterRequest) -> Result<FilterResponse, Infallib
     Ok(filter_candidates(request, host_config()))
 }
 
-fn candidate_result(candidate: &CandidateWire, keep: bool) -> PerCandidateReasonWire {
-    PerCandidateReasonWire {
-        upstream_id: candidate.upstream_id.clone(),
-        decision: if keep {
-            ACCEPT_DECISION
-        } else {
-            REJECT_DECISION
-        }
-        .to_owned(),
+fn candidate_result(candidate: &CandidateWire, keep: bool) -> PerCandidateReason {
+    PerCandidateReason {
+        upstream_id: candidate_uuid(candidate),
+        kept: keep,
         reason: if keep { ACCEPT_REASON } else { REJECT_REASON }.to_owned(),
     }
+}
+
+fn candidate_uuid(candidate: &CandidateWire) -> Uuid {
+    Uuid::parse_str(&candidate.upstream_id).expect("host candidate upstream_id must be a UUID")
 }
 
 fn host_config() -> CacheAwareConfig {

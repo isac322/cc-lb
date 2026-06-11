@@ -1,6 +1,6 @@
 # extism-echo-plugin
 
-Tiny Extism fixture that exports `route` and echoes its input.
+Tiny Extism fixture that exports `filter` and echoes its input.
 
 Build it with:
 

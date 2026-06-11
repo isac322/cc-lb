@@ -1,7 +1,8 @@
 use cc_lb_plugin_api::types::{
-    InternalError, InternalErrorKind, InternalErrorStage, MAX_ERROR_MESSAGE_LEN,
-    MAX_ROUTING_TRACE_STAGES, MAX_STAGE_NAME_LEN, PassthroughCause, PerCandidateReason,
-    RoutingTrace, StageDecision, TerminalDecision, TerminalStrategy,
+    INTERNAL_ERROR_MESSAGE_MAX_BYTES, INTERNAL_ERRORS_MAX_COUNT, InternalError, InternalErrorKind,
+    InternalErrorStage, PassthroughCause, PerCandidateReason, ROUTING_TRACE_MAX_BYTES,
+    RoutingTrace, STAGE_COUNT_MAX, STAGE_REASON_MAX_BYTES, StageDecision, TerminalDecision,
+    TerminalStrategy,
 };
 use uuid::Uuid;
 
@@ -22,28 +23,20 @@ fn passthrough_cause_serde_roundtrip() {
 
 #[test]
 fn per_candidate_reason_serde_roundtrip() {
-    let reasons = vec![
-        PerCandidateReason::RateLimited,
-        PerCandidateReason::InsufficientQuota,
-        PerCandidateReason::Unhealthy,
-        PerCandidateReason::RejectedByPlugin,
-    ];
+    let reason = PerCandidateReason {
+        upstream_id: Uuid::new_v4(),
+        kept: false,
+        reason: "plugin policy".to_owned(),
+    };
 
-    for reason in reasons {
-        let json = serde_json::to_string(&reason).unwrap();
-        let decoded: PerCandidateReason = serde_json::from_str(&json).unwrap();
-        assert_eq!(decoded, reason);
-    }
+    let json = serde_json::to_string(&reason).unwrap();
+    let decoded: PerCandidateReason = serde_json::from_str(&json).unwrap();
+    assert_eq!(decoded, reason);
 }
 
 #[test]
 fn terminal_strategy_serde_roundtrip_and_default() {
-    let strategies = vec![
-        TerminalStrategy::FirstPick,
-        TerminalStrategy::Random,
-        TerminalStrategy::RoundRobin,
-        TerminalStrategy::LeastConnections,
-    ];
+    let strategies = vec![TerminalStrategy::FirstPick, TerminalStrategy::Random];
 
     for strategy in strategies {
         let json = serde_json::to_string(&strategy).unwrap();
@@ -81,6 +74,7 @@ fn internal_error_kind_serde_roundtrip() {
     let kinds = vec![
         InternalErrorKind::PluginError,
         InternalErrorKind::ConfigError,
+        InternalErrorKind::Other,
         InternalErrorKind::Timeout,
         InternalErrorKind::Unavailable,
     ];
@@ -101,6 +95,7 @@ fn stage_decision_serde_roundtrip() {
         stage_name: "routing".to_owned(),
         upstream_id: Some(upstream_id),
         reason: Some("selected_by_policy".to_owned()),
+        duration_us: 123,
     };
 
     let json = serde_json::to_string(&decision).unwrap();
@@ -108,6 +103,7 @@ fn stage_decision_serde_roundtrip() {
     assert_eq!(decoded.stage_name, decision.stage_name);
     assert_eq!(decoded.upstream_id, decision.upstream_id);
     assert_eq!(decoded.reason, decision.reason);
+    assert_eq!(decoded.duration_us, decision.duration_us);
 }
 
 #[test]
@@ -116,6 +112,7 @@ fn stage_decision_with_none_fields() {
         stage_name: "authn".to_owned(),
         upstream_id: None,
         reason: None,
+        duration_us: 0,
     };
 
     let json = serde_json::to_string(&decision).unwrap();
@@ -123,24 +120,25 @@ fn stage_decision_with_none_fields() {
     assert_eq!(decoded.stage_name, "authn");
     assert!(decoded.upstream_id.is_none());
     assert!(decoded.reason.is_none());
+    assert_eq!(decoded.duration_us, 0);
 }
 
 #[test]
-fn terminal_decision_serde_roundtrip() {
+fn terminal_serde_roundtrip() {
     let upstream_id = Uuid::new_v4();
     let decision = TerminalDecision {
         upstream_id: Some(upstream_id),
-        strategy: TerminalStrategy::RoundRobin,
+        strategy: TerminalStrategy::Random,
     };
 
     let json = serde_json::to_string(&decision).unwrap();
     let decoded: TerminalDecision = serde_json::from_str(&json).unwrap();
     assert_eq!(decoded.upstream_id, Some(upstream_id));
-    assert_eq!(decoded.strategy, TerminalStrategy::RoundRobin);
+    assert_eq!(decoded.strategy, TerminalStrategy::Random);
 }
 
 #[test]
-fn terminal_decision_default() {
+fn terminal_default() {
     let decision = TerminalDecision::default();
     assert!(decision.upstream_id.is_none());
     assert_eq!(decision.strategy, TerminalStrategy::FirstPick);
@@ -157,14 +155,16 @@ fn routing_trace_serde_roundtrip() {
                 stage_name: "authn".to_owned(),
                 upstream_id: None,
                 reason: None,
+                duration_us: 10,
             },
             StageDecision {
                 stage_name: "router".to_owned(),
                 upstream_id: Some(upstream_id_1),
                 reason: Some("healthy".to_owned()),
+                duration_us: 20,
             },
         ],
-        terminal_decision: Some(TerminalDecision {
+        terminal: Some(TerminalDecision {
             upstream_id: Some(upstream_id_2),
             strategy: TerminalStrategy::FirstPick,
         }),
@@ -174,19 +174,17 @@ fn routing_trace_serde_roundtrip() {
     let decoded: RoutingTrace = serde_json::from_str(&json).unwrap();
     assert_eq!(decoded.stages.len(), 2);
     assert_eq!(decoded.stages[0].stage_name, "authn");
+    assert_eq!(decoded.stages[0].duration_us, 10);
     assert_eq!(decoded.stages[1].upstream_id, Some(upstream_id_1));
-    assert!(decoded.terminal_decision.is_some());
-    assert_eq!(
-        decoded.terminal_decision.unwrap().upstream_id,
-        Some(upstream_id_2)
-    );
+    assert!(decoded.terminal.is_some());
+    assert_eq!(decoded.terminal.unwrap().upstream_id, Some(upstream_id_2));
 }
 
 #[test]
 fn routing_trace_default() {
     let trace = RoutingTrace::default();
     assert!(trace.stages.is_empty());
-    assert!(trace.terminal_decision.is_none());
+    assert!(trace.terminal.is_none());
 }
 
 #[test]
@@ -229,13 +227,11 @@ fn internal_error_default() {
 
 #[test]
 fn cap_constants_defined() {
-    assert!(MAX_ROUTING_TRACE_STAGES > 0);
-    assert!(MAX_STAGE_NAME_LEN > 0);
-    assert!(MAX_ERROR_MESSAGE_LEN > 0);
-
-    assert_eq!(MAX_ROUTING_TRACE_STAGES, 100);
-    assert_eq!(MAX_STAGE_NAME_LEN, 256);
-    assert_eq!(MAX_ERROR_MESSAGE_LEN, 1024);
+    assert_eq!(STAGE_REASON_MAX_BYTES, 256);
+    assert_eq!(ROUTING_TRACE_MAX_BYTES, 4 * 1024);
+    assert_eq!(STAGE_COUNT_MAX, 16);
+    assert_eq!(INTERNAL_ERRORS_MAX_COUNT, 8);
+    assert_eq!(INTERNAL_ERROR_MESSAGE_MAX_BYTES, 256);
 }
 
 #[test]
@@ -243,27 +239,29 @@ fn complex_routing_trace_with_multiple_stages() {
     let upstream_ids: Vec<_> = (0..3).map(|_| Uuid::new_v4()).collect();
 
     let mut stages = Vec::new();
-    for i in 0..3 {
+    for (i, upstream_id) in upstream_ids.iter().enumerate().take(3) {
         stages.push(StageDecision {
             stage_name: format!("stage_{}", i),
-            upstream_id: Some(upstream_ids[i]),
+            upstream_id: Some(*upstream_id),
             reason: Some(format!("reason_{}", i)),
+            duration_us: i as u64,
         });
     }
 
     let trace = RoutingTrace {
         stages,
-        terminal_decision: Some(TerminalDecision {
+        terminal: Some(TerminalDecision {
             upstream_id: Some(upstream_ids[2]),
-            strategy: TerminalStrategy::LeastConnections,
+            strategy: TerminalStrategy::Random,
         }),
     };
 
     let json = serde_json::to_string(&trace).unwrap();
     let decoded: RoutingTrace = serde_json::from_str(&json).unwrap();
     assert_eq!(decoded.stages.len(), 3);
-    for i in 0..3 {
+    for (i, upstream_id) in upstream_ids.iter().enumerate().take(3) {
         assert_eq!(decoded.stages[i].stage_name, format!("stage_{}", i));
-        assert_eq!(decoded.stages[i].upstream_id, Some(upstream_ids[i]));
+        assert_eq!(decoded.stages[i].upstream_id, Some(*upstream_id));
+        assert_eq!(decoded.stages[i].duration_us, i as u64);
     }
 }

@@ -210,6 +210,8 @@ let configDraft: { draft: unknown | null; revision: number; last_validated_revis
   saved_at_unix_secs: null,
 };
 
+const terminalStrategies: Record<string, { strategy: string; revision: number }> = {};
+
 const configHistory = Array.from({ length: 8 }).map((_, i) => ({
   revision: configRevision - i,
   applied_at_unix_secs: NOW() - 3600 * (i * 18 + 4),
@@ -665,6 +667,21 @@ async function handle(req: Request, url: URL): Promise<Response> {
   }
 
   // ── Plugin chain
+  {
+    const mm = path.match(/^\/admin\/v1\/principals\/([^/]+)\/router-terminal$/);
+    if (mm) {
+      const pid = mm[1]!;
+      if (m === "GET") {
+        return ok(terminalStrategies[pid] ?? { strategy: "first-pick", revision: 1 });
+      }
+      if (m === "PUT") {
+        const body = await readJson<any>(req);
+        const next = { strategy: body.strategy, revision: (body.revision ?? 0) + 1 };
+        terminalStrategies[pid] = next;
+        return ok(next);
+      }
+    }
+  }
   {
     const mm = path.match(/^\/admin\/v1\/principals\/([^/]+)\/plugin-chain$/);
     if (mm) {

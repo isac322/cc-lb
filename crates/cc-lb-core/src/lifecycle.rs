@@ -67,7 +67,10 @@ use crate::sse_relay;
 use crate::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::upstream_rate_limit_events::UpstreamRateLimitSink;
-use cc_lb_observability::{inc_cache_hit, inc_cache_miss, redact_internal_errors, truncate_reason};
+use cc_lb_observability::{
+    enforce_routing_trace_caps, inc_cache_hit, inc_cache_miss, redact_internal_errors,
+    redact_routing_trace, truncate_reason,
+};
 
 pub type Body = AxumBody;
 
@@ -888,10 +891,7 @@ impl Lifecycle {
                 let index = rng.random_range(..candidates.len());
                 Some(candidates[index].upstream_id)
             }
-            TerminalStrategy::FirstPick
-            | TerminalStrategy::Random
-            | TerminalStrategy::RoundRobin
-            | TerminalStrategy::LeastConnections => {
+            TerminalStrategy::FirstPick | TerminalStrategy::Random => {
                 candidates.first().map(|candidate| candidate.upstream_id)
             }
         };
@@ -1102,19 +1102,38 @@ impl Lifecycle {
             candidates,
             hooks,
         );
-        let terminal_decision = self.select_terminal_upstream(
-            router_pipeline.terminal.clone(),
-            &pipeline_result.candidates,
-        );
-        if pipeline_result.candidates.is_empty() {
+        let terminal =
+            self.select_terminal_upstream(router_pipeline.terminal, &pipeline_result.candidates);
+
+        let routed_candidates = terminal_candidates(&pipeline_result.candidates, &terminal);
+
+        if routed_candidates.is_empty() {
+            observe_error(
+                hooks,
+                "route_no_upstream_after_filter",
+                "no upstream candidate survived the router pipeline filters",
+                "router",
+            );
+            let response = anthropic_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "route_no_upstream_after_filter",
+                "no upstream candidate survived the router pipeline filters",
+            );
+            observe_finished_for_principal(
+                hooks,
+                StatusCode::SERVICE_UNAVAILABLE,
+                started,
+                &principal,
+                &ctx.body_bytes,
+            );
             let route_ms = duration_to_ms(route_start.elapsed());
-            let message = "no upstream candidates remain after routing filters";
-            observe_error(hooks, "route_no_upstream_after_filter", message, "router");
             let mut internal_errors = pipeline_result.internal_errors.clone();
             internal_errors.push(InternalError {
-                stage: InternalErrorStage::Router,
-                kind: InternalErrorKind::ConfigError,
-                message: Some(message.to_owned()),
+                message: Some(
+                    "no upstream candidate survived the router pipeline filters".to_owned(),
+                ),
+                kind: InternalErrorKind::Other,
+                stage: InternalErrorStage::RouterFilter,
             });
             self.emit_routing_failure_event(
                 &ctx,
@@ -1125,27 +1144,12 @@ impl Lifecycle {
                 started.elapsed(),
                 StatusCode::SERVICE_UNAVAILABLE,
                 "route_no_upstream_after_filter",
-                Some(pipeline_result.routing_trace(terminal_decision.clone())),
+                Some(pipeline_result.routing_trace(terminal.clone())),
                 internal_errors,
             )
             .await;
-            let response = anthropic_error_response(
-                StatusCode::SERVICE_UNAVAILABLE,
-                "route_no_upstream_after_filter",
-                message,
-            );
-            observe_finished_for_principal(
-                hooks,
-                StatusCode::SERVICE_UNAVAILABLE,
-                started,
-                &principal,
-                &ctx.body_bytes,
-            );
             return Ok(response);
         }
-
-        let routed_candidates =
-            terminal_candidates(&pipeline_result.candidates, &terminal_decision);
 
         let route = match router.route(&ctx, &principal, &routed_candidates) {
             Ok(route) => route,
@@ -1196,10 +1200,27 @@ impl Lifecycle {
                 );
                 return Ok(response);
             }
-            None => routed_candidates
-                .first()
-                .map(|candidate| candidate.upstream_id)
-                .expect("non-empty routed candidates after terminal selection"),
+            None => {
+                observe_error(
+                    hooks,
+                    "route_not_configured",
+                    "router did not select an upstream",
+                    "router",
+                );
+                let response = anthropic_error_response(
+                    StatusCode::BAD_GATEWAY,
+                    "route_not_configured",
+                    "no upstream route is configured for this request",
+                );
+                observe_finished_for_principal(
+                    hooks,
+                    StatusCode::BAD_GATEWAY,
+                    started,
+                    &principal,
+                    &ctx.body_bytes,
+                );
+                return Ok(response);
+            }
         };
         let Some(resolved_record) = view
             .upstreams_snapshot()
@@ -1482,7 +1503,7 @@ impl Lifecycle {
                     proxy_setup_ms: Some(proxy_setup_ms),
                     stage_timings: attempt_timings,
                     cache_metadata,
-                    routing_trace: Some(pipeline_result.routing_trace(terminal_decision.clone())),
+                    routing_trace: Some(pipeline_result.routing_trace(terminal.clone())),
                     internal_errors,
                 },
                 prompt_cache_observation_context,
@@ -1764,8 +1785,8 @@ impl Lifecycle {
                 body_chunk_count: Some(body_chunk_count),
                 body_bytes: Some(body.len() as u64),
                 status: status.as_u16(),
-                routing_trace: event_ctx.routing_trace.clone(),
-                internal_errors: event_ctx.internal_errors.clone(),
+                routing_trace: event_ctx.routing_trace.as_ref().map(sanitize_routing_trace),
+                internal_errors: redact_internal_errors(&event_ctx.internal_errors),
                 ..Default::default()
             };
             event_ctx.cache_metadata.apply_to(&mut event, &usage);
@@ -1809,8 +1830,8 @@ impl Lifecycle {
             duration_ms: duration_to_ms(duration),
             status: status.as_u16(),
             error_code: Some(error_code.to_owned()),
-            routing_trace,
-            internal_errors,
+            routing_trace: routing_trace.as_ref().map(sanitize_routing_trace),
+            internal_errors: redact_internal_errors(&internal_errors),
             ..Default::default()
         };
         if let Err(error) = storage.append_request_event(&event).await {
@@ -2389,10 +2410,10 @@ struct FilterPipelineResult {
 }
 
 impl FilterPipelineResult {
-    fn routing_trace(&self, terminal_decision: TerminalDecision) -> RoutingTrace {
+    fn routing_trace(&self, terminal: TerminalDecision) -> RoutingTrace {
         RoutingTrace {
             stages: self.stages.clone(),
-            terminal_decision: Some(terminal_decision),
+            terminal: Some(terminal),
         }
     }
 }
@@ -2542,11 +2563,18 @@ fn validate_filter_output(
         }
     }
 
-    let mut per_candidate_reasons = out.per_candidate_reasons.clone();
-    if !per_candidate_reasons.is_empty() && per_candidate_reasons.len() != input.len() {
-        if per_candidate_reasons.len() > input.len() {
-            per_candidate_reasons.truncate(input.len());
-        }
+    let mut reason_ids = HashSet::with_capacity(out.per_candidate_reasons.len());
+    let per_candidate_reasons = out
+        .per_candidate_reasons
+        .iter()
+        .filter(|reason| input_ids.contains(&reason.upstream_id))
+        .filter(|reason| reason_ids.insert(reason.upstream_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    if !out.per_candidate_reasons.is_empty()
+        && (per_candidate_reasons.len() != input.len()
+            || per_candidate_reasons.len() != out.per_candidate_reasons.len())
+    {
         internal_errors.push(InternalError {
             stage: InternalErrorStage::RouterFilter,
             kind: InternalErrorKind::InvalidOutput,
@@ -2572,11 +2600,15 @@ fn keep_filter_candidates(
         .collect()
 }
 
+fn sanitize_routing_trace(trace: &RoutingTrace) -> RoutingTrace {
+    enforce_routing_trace_caps(&redact_routing_trace(trace))
+}
+
 fn terminal_candidates(
     candidates: &[UpstreamCandidate],
-    terminal_decision: &TerminalDecision,
+    terminal: &TerminalDecision,
 ) -> Vec<UpstreamCandidate> {
-    terminal_decision
+    terminal
         .upstream_id
         .and_then(|upstream_id| {
             candidates

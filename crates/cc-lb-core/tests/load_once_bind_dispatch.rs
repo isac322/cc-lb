@@ -78,7 +78,7 @@ async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
     let explicit_pipeline = Arc::new(RouterPipelineCache {
         user_filters: vec![Arc::new(RecordingFilter { name: "explicit" })],
         terminal: TerminalStrategy::Random,
-        instantiation_error: None,
+        instantiation_error: Some("instantiation failed".into()),
     });
     let explicit_hook: Arc<dyn ObservabilityHook> = Arc::new(RecordingNamedHook {
         name: "explicit",

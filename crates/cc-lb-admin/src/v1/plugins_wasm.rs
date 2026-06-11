@@ -382,18 +382,21 @@ fn validate_extism(bytes: &[u8]) -> Result<(), Response> {
         }
         json_error(StatusCode::BAD_REQUEST, "invalid_wasm", message)
     })?;
-    reject_removed_router_wire(&plugin)
+    if let Some(response) = removed_router_wire_response(&plugin) {
+        return Err(response);
+    }
+    Ok(())
 }
 
-fn reject_removed_router_wire(plugin: &Plugin) -> Result<(), Response> {
+fn removed_router_wire_response(plugin: &Plugin) -> Option<Response> {
     if plugin.function_exists("route") {
-        return Err(json_error(
+        return Some(json_error(
             StatusCode::BAD_REQUEST,
             "unsupported_wire_version",
             "router wire v1/v2 plugins are no longer supported; use wire v3 filter plugins",
         ));
     }
-    Ok(())
+    None
 }
 
 async fn materialize_cache(state: &AdminState, sha256_hex: &str, bytes: &[u8]) -> io::Result<()> {

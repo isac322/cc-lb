@@ -574,7 +574,7 @@ async fn build_router_pipeline(
     if router_entries.len() > MAX_ROUTER_CHAIN_DEPTH {
         return Ok(Some(Arc::new(RouterPipelineCache {
             user_filters: Vec::new(),
-            terminal: principal.router_terminal_strategy.clone(),
+            terminal: principal.router_terminal_strategy,
             instantiation_error: Some(Arc::<str>::from(format!(
                 "router chain depth {} exceeds maximum {}",
                 router_entries.len(),
@@ -598,7 +598,7 @@ async fn build_router_pipeline(
                 );
                 return Ok(Some(Arc::new(RouterPipelineCache {
                     user_filters: Vec::new(),
-                    terminal: principal.router_terminal_strategy.clone(),
+                    terminal: principal.router_terminal_strategy,
                     instantiation_error: Some(Arc::<str>::from(format!(
                         "router pipeline instantiation failed: {error}"
                     ))),
@@ -620,7 +620,7 @@ async fn build_router_pipeline(
                 );
                 return Ok(Some(Arc::new(RouterPipelineCache {
                     user_filters: Vec::new(),
-                    terminal: principal.router_terminal_strategy.clone(),
+                    terminal: principal.router_terminal_strategy,
                     instantiation_error: Some(Arc::<str>::from(format!(
                         "router pipeline instantiation failed: {error}"
                     ))),
@@ -632,7 +632,7 @@ async fn build_router_pipeline(
     staged.extend(router_staged);
     Ok(Some(Arc::new(RouterPipelineCache {
         user_filters: filters,
-        terminal: principal.router_terminal_strategy.clone(),
+        terminal: principal.router_terminal_strategy,
         instantiation_error: None,
     })))
 }

@@ -4,6 +4,7 @@ extern crate alloc;
 
 use alloc::{string::String, vec::Vec};
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 use crate::v2::common::{CandidateWire, HeaderWire, Principal};
 use crate::wire_function::{FallbackPolicy, WireFunction};
@@ -38,17 +39,17 @@ impl FilterRequest {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub struct PerCandidateReasonWire {
-    pub upstream_id: String,
-    pub decision: String,
+pub struct PerCandidateReason {
+    pub upstream_id: Uuid,
+    pub kept: bool,
     pub reason: String,
 }
 
-impl PerCandidateReasonWire {
+impl PerCandidateReason {
     pub fn dry_run_sample() -> Self {
         Self {
-            upstream_id: String::from("00000000-0000-0000-0000-000000000000"),
-            decision: String::from("accept"),
+            upstream_id: Uuid::nil(),
+            kept: true,
             reason: String::new(),
         }
     }
@@ -57,13 +58,17 @@ impl PerCandidateReasonWire {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct FilterResponse {
-    pub results: Vec<PerCandidateReasonWire>,
+    pub kept_upstream_ids: Vec<Uuid>,
+    pub reason: String,
+    pub per_candidate_reasons: Vec<PerCandidateReason>,
 }
 
 impl FilterResponse {
     pub fn dry_run_sample() -> Self {
         Self {
-            results: alloc::vec![PerCandidateReasonWire::dry_run_sample()],
+            kept_upstream_ids: alloc::vec![Uuid::nil()],
+            reason: String::new(),
+            per_candidate_reasons: alloc::vec![PerCandidateReason::dry_run_sample()],
         }
     }
 }
@@ -109,15 +114,19 @@ mod tests {
     #[test]
     fn filter_response_roundtrip() {
         let mut response = FilterResponse::dry_run_sample();
-        response.results = alloc::vec![
-            PerCandidateReasonWire {
-                upstream_id: String::from("upstream-1"),
-                decision: String::from("accept"),
+        let upstream_1 = Uuid::from_u128(1);
+        let upstream_2 = Uuid::from_u128(2);
+        response.kept_upstream_ids = alloc::vec![upstream_1];
+        response.reason = String::from("quota available");
+        response.per_candidate_reasons = alloc::vec![
+            PerCandidateReason {
+                upstream_id: upstream_1,
+                kept: true,
                 reason: String::from("quota available"),
             },
-            PerCandidateReasonWire {
-                upstream_id: String::from("upstream-2"),
-                decision: String::from("reject"),
+            PerCandidateReason {
+                upstream_id: upstream_2,
+                kept: false,
                 reason: String::from("rate limit exceeded"),
             },
         ];
@@ -129,14 +138,14 @@ mod tests {
 
     #[test]
     fn per_candidate_reason_wire_roundtrip() {
-        let reason = PerCandidateReasonWire {
-            upstream_id: String::from("test-upstream-id"),
-            decision: String::from("accept"),
+        let reason = PerCandidateReason {
+            upstream_id: Uuid::from_u128(1),
+            kept: true,
             reason: String::from("all checks passed"),
         };
 
         let json = serde_json::to_string(&reason).unwrap();
-        let parsed: PerCandidateReasonWire = serde_json::from_str(&json).unwrap();
+        let parsed: PerCandidateReason = serde_json::from_str(&json).unwrap();
         assert_eq!(reason, parsed);
     }
 
@@ -151,7 +160,9 @@ mod tests {
     #[test]
     fn filter_response_empty_results() {
         let response = FilterResponse {
-            results: Vec::new(),
+            kept_upstream_ids: Vec::new(),
+            reason: String::new(),
+            per_candidate_reasons: Vec::new(),
         };
         let json = serde_json::to_string(&response).unwrap();
         let parsed: FilterResponse = serde_json::from_str(&json).unwrap();

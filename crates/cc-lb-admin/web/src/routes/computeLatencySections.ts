@@ -33,6 +33,15 @@ export function computeLatencySections(e: RequestEvent): {
     ['Shape', e.shape_ms],
     ['Sign', e.sign_ms],
   ]);
+  if (e.routing_trace?.stages && e.routing_trace.stages.length > 0) {
+    push(
+      'Routing pipeline',
+      e.routing_trace.stages.map((s) => [
+        s.stage_name,
+        s.duration_us !== undefined ? s.duration_us / 1000 : undefined,
+      ]),
+    );
+  }
   push('Wait', [
     ['Bulkhead wait', e.bulkhead_wait_ms],
     ['DNS', e.dns_ms],

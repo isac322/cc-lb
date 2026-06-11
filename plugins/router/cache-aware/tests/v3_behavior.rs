@@ -2,74 +2,72 @@ use cache_aware_router::{CacheAwareConfig, filter_candidates};
 use cc_lb_plugin_wire::v2::common::{CacheScoreWire, CandidateWire, Principal};
 use cc_lb_plugin_wire::v3::filter::{FilterRequest, FilterResponse};
 use std::collections::BTreeMap;
+use uuid::Uuid;
 
 #[test]
 fn default_config_keeps_one_candidate_for_v2_single_pick_compatibility() {
     let response = filter_candidates(
-        request(vec![candidate("cold", None), candidate("warm", Some(4096))]),
+        request(vec![candidate(1, None), candidate(2, Some(4096))]),
         CacheAwareConfig::default(),
     );
 
-    assert_accepts(&response, &["warm"]);
-    assert_reason(&response, "warm", "top-K by cache_score");
-    assert_reason(&response, "cold", "below K by cache_score");
+    assert_accepts(&response, &[2]);
+    assert_reason(&response, 2, "top-K by cache_score");
+    assert_reason(&response, 1, "below K by cache_score");
 }
 
 #[test]
 fn keep_k_override_keeps_top_three_by_cache_score_and_read_tokens() {
     let response = filter_candidates(
         request(vec![
-            candidate("cold-missing", None),
-            candidate("warm-small", Some(512)),
-            candidate("warm-large", Some(8192)),
-            candidate("cold-zero", Some(0)),
-            candidate("warm-medium", Some(4096)),
+            candidate(1, None),
+            candidate(2, Some(512)),
+            candidate(3, Some(8192)),
+            candidate(4, Some(0)),
+            candidate(5, Some(4096)),
         ]),
         CacheAwareConfig::new(3),
     );
 
-    assert_accepts(&response, &["warm-small", "warm-large", "warm-medium"]);
-    assert_rejects(&response, &["cold-missing", "cold-zero"]);
+    assert_accepts(&response, &[2, 3, 5]);
+    assert_rejects(&response, &[1, 4]);
 }
 
 #[test]
 fn equal_scores_keep_first_candidates_in_input_order() {
     let response = filter_candidates(
         request(vec![
-            candidate("first", Some(1024)),
-            candidate("second", Some(1024)),
-            candidate("third", Some(1024)),
-            candidate("fourth", Some(1024)),
+            candidate(1, Some(1024)),
+            candidate(2, Some(1024)),
+            candidate(3, Some(1024)),
+            candidate(4, Some(1024)),
         ]),
         CacheAwareConfig::new(3),
     );
 
-    assert_accepts(&response, &["first", "second", "third"]);
-    assert_rejects(&response, &["fourth"]);
+    assert_accepts(&response, &[1, 2, 3]);
+    assert_rejects(&response, &[4]);
 }
 
 #[test]
 fn keep_k_zero_clamps_to_one() {
     let response = filter_candidates(
-        request(vec![
-            candidate("smaller", Some(10)),
-            candidate("larger", Some(20)),
-        ]),
+        request(vec![candidate(1, Some(10)), candidate(2, Some(20))]),
         CacheAwareConfig::new(0),
     );
 
-    assert_accepts(&response, &["larger"]);
-    assert_rejects(&response, &["smaller"]);
+    assert_accepts(&response, &[2]);
+    assert_rejects(&response, &[1]);
 }
 
 #[test]
 fn keep_k_larger_than_candidates_keeps_all() {
     let response = filter_candidates(
-        request(vec![candidate("a", None), candidate("b", Some(1))]),
+        request(vec![candidate(1, None), candidate(2, Some(1))]),
         CacheAwareConfig::new(99),
     );
 
-    assert_accepts(&response, &["a", "b"]);
+    assert_accepts(&response, &[1, 2]);
     assert_rejects(&response, &[]);
 }
 
@@ -77,7 +75,8 @@ fn keep_k_larger_than_candidates_keeps_all() {
 fn empty_candidate_request_returns_empty_results() {
     let response = filter_candidates(request(vec![]), CacheAwareConfig::default());
 
-    assert!(response.results.is_empty());
+    assert!(response.kept_upstream_ids.is_empty());
+    assert!(response.per_candidate_reasons.is_empty());
 }
 
 #[test]
@@ -87,31 +86,28 @@ fn string_config_parser_defaults_and_clamps() {
     assert_eq!(CacheAwareConfig::from_keep_k_value(Some("3")).keep_k(), 3);
 }
 
-fn assert_accepts(response: &FilterResponse, expected: &[&str]) {
-    let accepted: Vec<&str> = response
-        .results
-        .iter()
-        .filter(|result| result.decision == "accept")
-        .map(|result| result.upstream_id.as_str())
-        .collect();
+fn assert_accepts(response: &FilterResponse, expected: &[u128]) {
+    let accepted = response.kept_upstream_ids.clone();
+    let expected = expected.iter().copied().map(uuid).collect::<Vec<_>>();
     assert_eq!(accepted, expected);
 }
 
-fn assert_rejects(response: &FilterResponse, expected: &[&str]) {
-    let rejected: Vec<&str> = response
-        .results
+fn assert_rejects(response: &FilterResponse, expected: &[u128]) {
+    let rejected: Vec<Uuid> = response
+        .per_candidate_reasons
         .iter()
-        .filter(|result| result.decision == "reject")
-        .map(|result| result.upstream_id.as_str())
+        .filter(|result| !result.kept)
+        .map(|result| result.upstream_id)
         .collect();
+    let expected = expected.iter().copied().map(uuid).collect::<Vec<_>>();
     assert_eq!(rejected, expected);
 }
 
-fn assert_reason(response: &FilterResponse, upstream_id: &str, expected: &str) {
+fn assert_reason(response: &FilterResponse, upstream_id: u128, expected: &str) {
     let result = response
-        .results
+        .per_candidate_reasons
         .iter()
-        .find(|result| result.upstream_id == upstream_id)
+        .find(|result| result.upstream_id == uuid(upstream_id))
         .expect("result for upstream");
     assert_eq!(result.reason, expected);
 }
@@ -129,10 +125,10 @@ fn request(candidates: Vec<CandidateWire>) -> FilterRequest {
     }
 }
 
-fn candidate(upstream_id: &str, predicted_cache_read_tokens: Option<u32>) -> CandidateWire {
+fn candidate(upstream_id: u128, predicted_cache_read_tokens: Option<u32>) -> CandidateWire {
     CandidateWire {
-        upstream_id: upstream_id.to_owned(),
-        name: upstream_id.to_owned(),
+        upstream_id: uuid(upstream_id).to_string(),
+        name: format!("candidate-{upstream_id}"),
         kind: "anthropic_api_key".to_owned(),
         observed_rate_limits: Vec::new(),
         subscription_quotas: Vec::new(),
@@ -158,22 +154,26 @@ fn cache_score_wire(predicted_cache_read_tokens: u32) -> CacheScoreWire {
     }
 }
 
-fn decisions_by_upstream(response: &FilterResponse) -> BTreeMap<&str, &str> {
+fn decisions_by_upstream(response: &FilterResponse) -> BTreeMap<Uuid, bool> {
     response
-        .results
+        .per_candidate_reasons
         .iter()
-        .map(|result| (result.upstream_id.as_str(), result.decision.as_str()))
+        .map(|result| (result.upstream_id, result.kept))
         .collect()
 }
 
 #[test]
 fn response_contains_one_decision_for_each_candidate() {
     let response = filter_candidates(
-        request(vec![candidate("a", Some(1)), candidate("b", None)]),
+        request(vec![candidate(1, Some(1)), candidate(2, None)]),
         CacheAwareConfig::default(),
     );
 
     assert_eq!(decisions_by_upstream(&response).len(), 2);
-    assert!(decisions_by_upstream(&response).contains_key("a"));
-    assert!(decisions_by_upstream(&response).contains_key("b"));
+    assert!(decisions_by_upstream(&response).contains_key(&uuid(1)));
+    assert!(decisions_by_upstream(&response).contains_key(&uuid(2)));
+}
+
+fn uuid(value: u128) -> Uuid {
+    Uuid::from_u128(value)
 }

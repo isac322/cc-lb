@@ -101,14 +101,14 @@ async fn unsupported_strategy_update_is_rejected(storage: &PostgresStorage) -> R
         1_900_000_020,
     )
     .await?;
-    let round_robin_strategy = serde_json::from_value(json!("round-robin"))?;
+    let unsupported_strategy = serde_json::from_value(json!("unsupported"))?;
 
     let error = PrincipalStore::update(
         storage,
         record.id,
         record.revision,
         PrincipalUpdate {
-            router_terminal_strategy: Some(round_robin_strategy),
+            router_terminal_strategy: Some(unsupported_strategy),
             ..PrincipalUpdate::default()
         },
         1_900_000_021,

@@ -509,9 +509,9 @@ assert_upstream_active_on_b
 
 for index in 1 2 3 4 5 6 7 8 9 10; do
   if [ $((index % 2)) -eq 1 ]; then
-    proxy_request "$PROXY_A_PORT" "round-robin-$index-A"
+    proxy_request "$PROXY_A_PORT" "replica-alternate-$index-A"
   else
-    proxy_request "$PROXY_B_PORT" "round-robin-$index-B"
+    proxy_request "$PROXY_B_PORT" "replica-alternate-$index-B"
   fi
 done
 assert_audit_entries_landed

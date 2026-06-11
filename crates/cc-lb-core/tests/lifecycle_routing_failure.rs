@@ -12,8 +12,9 @@ use cc_lb_core::{
     DynamicViewBuilder, DynamicViewHolder, ErrorNormalizer, Lifecycle, LifecycleConfig,
 };
 use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, Principal, RequestContext, RouteDecision, RouteError,
-    RouterPlugin, TerminalStrategy, Upstream, UpstreamCandidate,
+    FilterError, FilterOutput, FilterPlugin, InternalErrorKind, InternalErrorStage, Principal,
+    RequestContext, RouteDecision, RouteError, RouterPlugin, TerminalStrategy, Upstream,
+    UpstreamCandidate,
 };
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{RequestEventStore, Storage as StorageTrait};
@@ -85,13 +86,16 @@ async fn no_candidates_after_filters_returns_503_and_logs_request_event()
     assert_eq!(trace.stages[0].upstream_id, None);
     assert_eq!(
         trace
-            .terminal_decision
+            .terminal
             .as_ref()
             .and_then(|decision| decision.upstream_id),
         None
     );
     assert!(event.internal_errors.iter().any(|error| {
-        error.message.as_deref() == Some("no upstream candidates remain after routing filters")
+        error.stage == InternalErrorStage::RouterFilter
+            && error.kind == InternalErrorKind::Other
+            && error.message.as_deref()
+                == Some("no upstream candidate survived the router pipeline filters")
     }));
     Ok(())
 }

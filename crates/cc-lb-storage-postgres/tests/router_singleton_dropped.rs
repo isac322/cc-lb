@@ -1,7 +1,9 @@
 use std::str::FromStr;
 
 use anyhow::Result;
-use cc_lb_storage_api::{BackendKind, MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlot};
+use cc_lb_storage_api::{
+    BackendKind, MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlot,
+};
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
 use uuid::Uuid;
@@ -33,14 +35,12 @@ async fn run_test(url: &str) -> Result<()> {
 
     // Create a principal
     let principal_id = Uuid::new_v4();
-    sqlx::query(
-        "INSERT INTO principals_v1 (id, name, api_key_hash) VALUES ($1, $2, $3)",
-    )
-    .bind(principal_id)
-    .bind("test-principal")
-    .bind("hash123")
-    .execute(&fixture.pool)
-    .await?;
+    sqlx::query("INSERT INTO principals_v1 (id, name, api_key_hash) VALUES ($1, $2, $3)")
+        .bind(principal_id)
+        .bind("test-principal")
+        .bind("hash123")
+        .execute(&fixture.pool)
+        .await?;
 
     // Create a dummy wasm registry entry for testing
     let registry_id = Uuid::new_v4();
@@ -84,10 +84,7 @@ async fn run_test(url: &str) -> Result<()> {
 
     // Attempting to insert another Shape plugin should fail
     let result = storage.insert_chain_entry(input1).await;
-    assert!(
-        result.is_err(),
-        "Shape slot should still be singleton"
-    );
+    assert!(result.is_err(), "Shape slot should still be singleton");
 
     // Test 2: Verify Router slot is NO LONGER singleton
     let input_router1 = PluginChainEntryInput {
@@ -120,19 +117,23 @@ async fn run_test(url: &str) -> Result<()> {
 
     let entry_router2 = storage.insert_chain_entry(input_router2).await?;
     assert_eq!(entry_router2.slot, PluginSlot::Router);
-    assert_ne!(entry_router1.id, entry_router2.id, "Should be distinct router entries");
+    assert_ne!(
+        entry_router1.id, entry_router2.id,
+        "Should be distinct router entries"
+    );
 
     // Test 3: Verify router_terminal_strategy column exists
-    let strategy: String = sqlx::query_scalar(
-        "SELECT router_terminal_strategy FROM principals_v1 WHERE id = $1",
-    )
-    .bind(principal_id)
-    .fetch_one(&fixture.pool)
-    .await?;
-    assert_eq!(strategy, "first-pick", "Default strategy should be first-pick");
+    let strategy: String =
+        sqlx::query_scalar("SELECT router_terminal_strategy FROM principals_v1 WHERE id = $1")
+            .bind(principal_id)
+            .fetch_one(&fixture.pool)
+            .await?;
+    assert_eq!(
+        strategy, "first-pick",
+        "Default strategy should be first-pick"
+    );
 
-    let teardown = fixture.drop_schema().await;
-    teardown
+    fixture.drop_schema().await
 }
 
 struct Fixture {
@@ -144,10 +145,7 @@ struct Fixture {
 impl Fixture {
     async fn create(url: &str) -> Result<Self> {
         let schema = format!("router_singleton_{}", Uuid::new_v4().simple());
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(url)
-            .await?;
+        let admin_pool = PgPoolOptions::new().max_connections(1).connect(url).await?;
         sqlx::query(AssertSqlSafe(format!(
             "CREATE SCHEMA {}",
             quote_ident(&schema)

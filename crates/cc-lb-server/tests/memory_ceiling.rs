@@ -6,6 +6,7 @@ use std::path::PathBuf;
 use cc_lb_plugin_api::PluginManifest;
 use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
 use serde_json::json;
+use uuid::Uuid;
 
 const PRINCIPAL_COUNT: usize = 200;
 const PLUGINS_PER_PRINCIPAL: usize = 3;
@@ -43,14 +44,18 @@ fn boot_and_measure(
 ) -> Result<(ExtismRuntime, u64), Box<dyn std::error::Error>> {
     let runtime = ExtismRuntime::new();
     if include_plugins {
-        let router_manifest = fixture.router_manifest();
+        let filter_manifest = fixture.filter_manifest();
         let observe_manifest = fixture.observe_manifest();
         let mut staged = Vec::<StagedSlot>::with_capacity(EXPECTED_SLOT_COUNT);
         for principal_index in 0..PRINCIPAL_COUNT {
             let principal = format!("principal_{principal_index:03}");
-            let (_router, router_staged) =
-                runtime.instantiate_router_for(&principal, "router", &router_manifest)?;
-            staged.push(router_staged);
+            let (_filter, filter_staged) = runtime.instantiate_filter_for(
+                &principal,
+                Uuid::nil(),
+                "filter",
+                &filter_manifest,
+            )?;
+            staged.push(filter_staged);
             let (_observe_a, observe_a_staged) = runtime.instantiate_observability_for(
                 &principal,
                 "observe-a",
@@ -71,29 +76,29 @@ fn boot_and_measure(
 
 struct StubWasms {
     _dir: tempfile::TempDir,
-    router_path: PathBuf,
+    filter_path: PathBuf,
     observe_path: PathBuf,
 }
 
 impl StubWasms {
     fn new() -> Result<Self, Box<dyn std::error::Error>> {
         let dir = tempfile::tempdir()?;
-        let router_path = dir.path().join("router.wasm");
+        let filter_path = dir.path().join("filter.wasm");
         let observe_path = dir.path().join("observe.wasm");
-        fs::write(&router_path, wat::parse_str(router_module())?)?;
+        fs::write(&filter_path, wat::parse_str(filter_module())?)?;
         fs::write(&observe_path, wat::parse_str(observe_module())?)?;
         Ok(Self {
             _dir: dir,
-            router_path,
+            filter_path,
             observe_path,
         })
     }
 
-    fn router_manifest(&self) -> PluginManifest {
+    fn filter_manifest(&self) -> PluginManifest {
         PluginManifest {
-            name: "router".to_owned(),
-            artifact: self.router_path.to_string_lossy().into_owned(),
-            wire_version: None,
+            name: "filter".to_owned(),
+            artifact: self.filter_path.to_string_lossy().into_owned(),
+            wire_version: Some(3),
             config: json!({}),
             metadata: BTreeMap::new(),
         }
@@ -121,8 +126,8 @@ fn vmrss_kib() -> io::Result<u64> {
         .ok_or_else(|| io::Error::other("VmRSS missing from /proc/self/status"))
 }
 
-fn router_module() -> &'static str {
-    r#"(module (func (export "route") (result i32) (i32.const 0)))"#
+fn filter_module() -> &'static str {
+    r#"(module (func (export "filter") (result i32) (i32.const 0)))"#
 }
 
 fn observe_module() -> &'static str {

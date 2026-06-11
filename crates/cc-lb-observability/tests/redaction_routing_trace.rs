@@ -14,8 +14,9 @@ fn routing_trace_reason_secrets_are_redacted() {
             stage_name: "router-filter".to_owned(),
             upstream_id: None,
             reason: Some("selected after token=plain-secret and sk-ant-oat01-deadbeef".to_owned()),
+            duration_us: 42,
         }],
-        terminal_decision: Some(TerminalDecision {
+        terminal: Some(TerminalDecision {
             upstream_id: None,
             strategy: TerminalStrategy::FirstPick,
         }),
@@ -81,9 +82,10 @@ fn routing_trace_cap_removes_tail_stages_and_adds_marker() {
                 stage_name: format!("stage-{index}"),
                 upstream_id: None,
                 reason: Some(format!("decision-{index}-{}", "x".repeat(350))),
+                duration_us: index,
             })
             .collect(),
-        terminal_decision: Some(TerminalDecision {
+        terminal: Some(TerminalDecision {
             upstream_id: None,
             strategy: TerminalStrategy::FirstPick,
         }),

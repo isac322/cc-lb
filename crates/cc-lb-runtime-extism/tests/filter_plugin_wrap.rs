@@ -13,15 +13,17 @@ fn filter_plugin_happy_path_maps_wire_v3_response() {
     let rejected = candidate_with_id("22222222-2222-2222-2222-222222222222");
     let response = json!({
         "_v": 1,
-        "results": [
+        "kept_upstream_ids": [accepted.upstream_id],
+        "reason": "quota available; plugin policy",
+        "per_candidate_reasons": [
             {
                 "upstream_id": accepted.upstream_id.to_string(),
-                "decision": "accept",
+                "kept": true,
                 "reason": "quota available"
             },
             {
                 "upstream_id": rejected.upstream_id.to_string(),
-                "decision": "reject",
+                "kept": false,
                 "reason": "plugin policy"
             }
         ]
@@ -38,7 +40,7 @@ fn filter_plugin_happy_path_maps_wire_v3_response() {
                 rejected_id.as_bytes(),
             ],
             &response,
-            r#"{"_v":1,"results":[]}"#,
+            r#"{"_v":1,"kept_upstream_ids":[],"reason":"","per_candidate_reasons":[]}"#,
         ),
         BTreeMap::new(),
     );
@@ -62,7 +64,7 @@ fn filter_plugin_happy_path_maps_wire_v3_response() {
         .filter(
             &common::ctx(),
             &common::principal(),
-            &[accepted.clone(), rejected],
+            &[accepted.clone(), rejected.clone()],
         )
         .expect("filter call succeeds");
 
@@ -71,10 +73,20 @@ fn filter_plugin_happy_path_maps_wire_v3_response() {
     assert_eq!(output.kept_upstream_ids, vec![accepted.upstream_id]);
     assert_eq!(
         output.per_candidate_reasons,
-        vec![PerCandidateReason::RejectedByPlugin]
+        vec![
+            PerCandidateReason {
+                upstream_id: accepted.upstream_id,
+                kept: true,
+                reason: "quota available".to_owned(),
+            },
+            PerCandidateReason {
+                upstream_id: rejected.upstream_id,
+                kept: false,
+                reason: "plugin policy".to_owned(),
+            }
+        ]
     );
-    assert!(output.reason.contains("quota available"));
-    assert!(output.reason.contains("plugin policy"));
+    assert_eq!(output.reason, "quota available; plugin policy");
 }
 
 #[test]

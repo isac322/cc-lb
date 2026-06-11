@@ -8,7 +8,8 @@ afterEach(() => {
 });
 
 vi.mock('../components/ui/primitives', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../components/ui/primitives')>();
+  const actual =
+    await importOriginal<typeof import('../components/ui/primitives')>();
   return {
     ...actual,
     Hint: ({ label, children }: any) => (
@@ -36,7 +37,7 @@ test('renders upstream without routing trace', () => {
       events={[mockEvent]}
       principalNameMap={new Map()}
       upstreamNameMap={new Map()}
-    />
+    />,
   );
   expect(screen.getAllByText('Upstream 1').length).toBeGreaterThan(0);
 });
@@ -57,7 +58,7 @@ test('renders upstream with routing trace hover panel', async () => {
       events={[eventWithTrace]}
       principalNameMap={new Map()}
       upstreamNameMap={new Map()}
-    />
+    />,
   );
 
   const upstreamCell = screen.getAllByText('Upstream 1')[0];
@@ -76,7 +77,7 @@ test('renders status without internal errors', () => {
       events={[mockEvent]}
       principalNameMap={new Map()}
       upstreamNameMap={new Map()}
-    />
+    />,
   );
   expect(screen.getAllByText('200').length).toBeGreaterThan(0);
 });
@@ -95,7 +96,7 @@ test('renders status with internal errors hover panel', async () => {
       events={[eventWithErrors]}
       principalNameMap={new Map()}
       upstreamNameMap={new Map()}
-    />
+    />,
   );
 
   const statusCell = screen.getAllByText('500')[0];

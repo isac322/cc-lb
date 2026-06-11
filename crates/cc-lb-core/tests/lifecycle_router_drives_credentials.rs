@@ -1,16 +1,12 @@
 mod common;
 mod router_lifecycle_support;
 
-use std::sync::Arc;
-
 use bytes::Bytes;
 use http::StatusCode;
 use uuid::Uuid;
 
 use common::{collect_body, messages_request};
-use router_lifecycle_support::{
-    RouterLifecycleState, SelectingRouter, api_key_record, lifecycle_with_records, plugin_upstream,
-};
+use router_lifecycle_support::{RouterLifecycleState, api_key_record, lifecycle_with_records};
 
 #[tokio::test]
 async fn router_upstream_id_drives_credentials_and_dispatch_upstream() {
@@ -22,11 +18,7 @@ async fn router_upstream_id_drives_credentials_and_dispatch_upstream() {
             api_key_record(first, "first", "http://first.local/"),
             api_key_record(second, "second", "http://second.local/"),
         ],
-        Arc::new(SelectingRouter {
-            selected_id: Some(second),
-            state: state.clone(),
-            plugin_upstream: plugin_upstream("http://plugin.local/"),
-        }),
+        vec![],
         state.clone(),
     );
 
@@ -45,7 +37,7 @@ async fn router_upstream_id_drives_credentials_and_dispatch_upstream() {
             .lock()
             .expect("router candidates lock")
             .as_slice(),
-        &[vec![first, second]]
+        &[vec![first]]
     );
     assert_eq!(
         state
@@ -53,7 +45,7 @@ async fn router_upstream_id_drives_credentials_and_dispatch_upstream() {
             .lock()
             .expect("router choices lock")
             .as_slice(),
-        &["second".to_owned()]
+        &["first".to_owned()]
     );
     assert_eq!(
         state

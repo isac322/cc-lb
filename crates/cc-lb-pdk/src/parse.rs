@@ -471,9 +471,9 @@ mod tests {
 
     #[test]
     fn plugin_args_basic() {
-        let args: PluginArgs = parse_str(r#"name = "round-robin", version = "1.2.3""#).unwrap();
+        let args: PluginArgs = parse_str(r#"name = "sample-router", version = "1.2.3""#).unwrap();
 
-        assert_eq!(args.name.value(), "round-robin");
+        assert_eq!(args.name.value(), "sample-router");
         assert_eq!(args.version.value(), "1.2.3");
         assert!(args.requires.is_empty());
     }
@@ -481,7 +481,7 @@ mod tests {
     #[test]
     fn plugin_args_requires_array() {
         let args: PluginArgs =
-            parse_str(r#"name = "round-robin", version = "1.2.3", requires = ["log", "clock"]"#)
+            parse_str(r#"name = "sample-router", version = "1.2.3", requires = ["log", "clock"]"#)
                 .unwrap();
 
         assert_eq!(
@@ -530,7 +530,7 @@ mod tests {
     #[test]
     fn plugin_descriptor_extracts_handler_metadata() {
         let args: PluginArgs =
-            parse_str(r#"name = "round-robin", version = "1.0.0", requires = ["log"]"#).unwrap();
+            parse_str(r#"name = "sample-router", version = "1.0.0", requires = ["log"]"#).unwrap();
         let module: ItemMod = parse_quote! {
             mod plugin {
                 #[handler(name = "route", versions = [1])]
@@ -544,7 +544,7 @@ mod tests {
 
         let descriptor = parse_plugin_descriptor(&args, &module).unwrap();
 
-        assert_eq!(descriptor.plugin_name, "round-robin");
+        assert_eq!(descriptor.plugin_name, "sample-router");
         assert_eq!(descriptor.plugin_version, "1.0.0");
         assert_eq!(descriptor.required_capabilities, ["log"]);
         assert_eq!(descriptor.handlers.len(), 1);
@@ -563,7 +563,7 @@ mod tests {
 
     #[test]
     fn plugin_descriptor_accepts_qualified_handler_attribute() {
-        let args: PluginArgs = parse_str(r#"name = "round-robin", version = "1.0.0""#).unwrap();
+        let args: PluginArgs = parse_str(r#"name = "sample-router", version = "1.0.0""#).unwrap();
         let module: ItemMod = parse_quote! {
             mod plugin {
                 #[cc_lb_pdk::handler(name = "shape", versions = [1])]
@@ -584,7 +584,7 @@ mod tests {
 
     #[test]
     fn rejects_module_without_handlers() {
-        let args: PluginArgs = parse_str(r#"name = "round-robin", version = "1.0.0""#).unwrap();
+        let args: PluginArgs = parse_str(r#"name = "sample-router", version = "1.0.0""#).unwrap();
         let module: ItemMod = parse_quote! {
             mod plugin {
                 pub fn helper() {}
@@ -601,7 +601,7 @@ mod tests {
 
     #[test]
     fn rejects_handler_without_response_type() {
-        let args: PluginArgs = parse_str(r#"name = "round-robin", version = "1.0.0""#).unwrap();
+        let args: PluginArgs = parse_str(r#"name = "sample-router", version = "1.0.0""#).unwrap();
         let module: ItemMod = parse_quote! {
             mod plugin {
                 #[handler(name = "route", versions = [1])]

@@ -1,5 +1,9 @@
 use cc_lb_core::{DashboardBroadcaster, record_dashboard_sse_lagged};
 use cc_lb_observability::dropped_events_total;
+use cc_lb_plugin_api::types::{StageDecision, TerminalDecision};
+use cc_lb_plugin_api::{
+    InternalError, InternalErrorKind, InternalErrorStage, RoutingTrace, TerminalStrategy,
+};
 use cc_lb_storage_api::{RequestEvent, RequestEventUpstream};
 use tokio::sync::broadcast::error::RecvError;
 
@@ -7,11 +11,14 @@ use tokio::sync::broadcast::error::RecvError;
 async fn subscriber_receives_published_event() {
     let broadcaster = DashboardBroadcaster::with_capacity(8);
     let mut receiver = broadcaster.subscribe();
+    let published = event("req-1");
 
-    broadcaster.publish(event("req-1"));
+    broadcaster.publish(published.clone());
 
     let received = receiver.recv().await.expect("event is delivered");
     assert_eq!(received.request_id, "req-1");
+    assert_eq!(received.routing_trace, published.routing_trace);
+    assert_eq!(received.internal_errors, published.internal_errors);
 }
 
 #[tokio::test]
@@ -73,6 +80,27 @@ fn event(request_id: &str) -> RequestEvent {
         cost_usd_micros: None,
         duration_ms: 3,
         error_code: None,
+        routing_trace: Some(routing_trace()),
+        internal_errors: vec![InternalError {
+            stage: InternalErrorStage::Router,
+            kind: InternalErrorKind::PluginError,
+            message: Some("dashboard-test-internal-error".to_owned()),
+        }],
         ..Default::default()
+    }
+}
+
+fn routing_trace() -> RoutingTrace {
+    RoutingTrace {
+        stages: vec![StageDecision {
+            stage_name: "dashboard-filter".to_owned(),
+            upstream_id: None,
+            reason: Some("kept candidate for dashboard broadcast".to_owned()),
+            duration_us: 7_500,
+        }],
+        terminal: Some(TerminalDecision {
+            upstream_id: None,
+            strategy: TerminalStrategy::FirstPick,
+        }),
     }
 }

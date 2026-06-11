@@ -1,6 +1,6 @@
 use cc_lb_storage_api::{
-    PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalStore, WasmBlob,
-    WasmRegistryEntryInput, PrincipalCreate, PrincipalKind,
+    PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
+    PrincipalStore, WasmBlob, WasmRegistryEntryInput,
     principal::{Limit, LimitKind},
 };
 use cc_lb_storage_redb::RedbStorage;
@@ -14,30 +14,23 @@ async fn setup_storage() -> anyhow::Result<RedbStorage> {
     Ok(storage)
 }
 
-async fn create_test_principal(
-    storage: &RedbStorage,
-) -> anyhow::Result<Uuid> {
+async fn create_test_principal(storage: &RedbStorage) -> anyhow::Result<Uuid> {
     let principal_create = PrincipalCreate {
         name: "test-principal".to_string(),
         kind: PrincipalKind::Human,
         allowed_models: vec![],
         allowed_upstreams: vec![],
-        default_limits: vec![
-            Limit {
-                kind: LimitKind::Requests,
-                window_secs: 60,
-                cap_micros: 1_000_000,
-            },
-        ],
+        default_limits: vec![Limit {
+            kind: LimitKind::Requests,
+            window_secs: 60,
+            cap_micros: 1_000_000,
+        }],
     };
     let principal = storage.create(principal_create, 1000).await?;
     Ok(principal.id)
 }
 
-async fn upload_wasm_plugin(
-    storage: &RedbStorage,
-    name: &str,
-) -> anyhow::Result<Uuid> {
+async fn upload_wasm_plugin(storage: &RedbStorage, name: &str) -> anyhow::Result<Uuid> {
     let blob = WasmBlob {
         sha256: [1; 32],
         bytes: b"wasm code".to_vec(),
@@ -93,7 +86,9 @@ async fn router_allows_multiple_entries_per_principal() -> anyhow::Result<()> {
     assert_ne!(entry1.id, entry2.id);
 
     // Verify both entries exist for the Router slot
-    let entries = storage.list_chain_for_principal(principal_id, PluginSlot::Router).await?;
+    let entries = storage
+        .list_chain_for_principal(principal_id, PluginSlot::Router)
+        .await?;
     assert_eq!(entries.len(), 2);
     assert!(entries.iter().any(|e| e.id == entry1.id));
     assert!(entries.iter().any(|e| e.id == entry2.id));
@@ -141,12 +136,14 @@ async fn shape_remains_singleton() -> anyhow::Result<()> {
     match result.unwrap_err() {
         cc_lb_storage_api::StorageError::PluginChainConflict {
             reason: cc_lb_storage_api::PluginChainConflictReason::SlotIsSingleton { .. },
-        } => {},
+        } => {}
         other => panic!("expected SlotIsSingleton error, got: {:?}", other),
     }
 
     // Verify only one Shape entry exists
-    let entries = storage.list_chain_for_principal(principal_id, PluginSlot::Shape).await?;
+    let entries = storage
+        .list_chain_for_principal(principal_id, PluginSlot::Shape)
+        .await?;
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].id, entry1.id);
 
@@ -190,11 +187,15 @@ async fn router_and_shape_coexist_independently() -> anyhow::Result<()> {
     storage.insert_chain_entry(shape_input).await?;
 
     // Verify 3 routers exist
-    let routers = storage.list_chain_for_principal(principal_id, PluginSlot::Router).await?;
+    let routers = storage
+        .list_chain_for_principal(principal_id, PluginSlot::Router)
+        .await?;
     assert_eq!(routers.len(), 3);
 
     // Verify 1 shape exists
-    let shapes = storage.list_chain_for_principal(principal_id, PluginSlot::Shape).await?;
+    let shapes = storage
+        .list_chain_for_principal(principal_id, PluginSlot::Shape)
+        .await?;
     assert_eq!(shapes.len(), 1);
 
     // Verify observability hook slot is also not enforced as singleton
@@ -212,7 +213,9 @@ async fn router_and_shape_coexist_independently() -> anyhow::Result<()> {
     storage.insert_chain_entry(obs_input.clone()).await?;
     storage.insert_chain_entry(obs_input).await?;
 
-    let obs_hooks = storage.list_chain_for_principal(principal_id, PluginSlot::ObservabilityHook).await?;
+    let obs_hooks = storage
+        .list_chain_for_principal(principal_id, PluginSlot::ObservabilityHook)
+        .await?;
     assert_eq!(obs_hooks.len(), 2);
 
     Ok(())

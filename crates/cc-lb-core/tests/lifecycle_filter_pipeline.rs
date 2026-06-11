@@ -144,7 +144,7 @@ async fn empty_stage_output_propagates_to_later_stages_and_router()
         .await?;
     let (status, _headers, _body) = collect_body(response).await;
 
-    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 0);
     assert_eq!(
         empty_filter_calls.lock().unwrap().as_slice(),
@@ -154,10 +154,7 @@ async fn empty_stage_output_propagates_to_later_stages_and_router()
         later_filter_calls.lock().unwrap().as_slice(),
         &[Vec::<Uuid>::new()]
     );
-    assert_eq!(
-        router_calls.lock().unwrap().as_slice(),
-        &[Vec::<Uuid>::new()]
-    );
+    assert!(router_calls.lock().unwrap().is_empty());
     Ok(())
 }
 

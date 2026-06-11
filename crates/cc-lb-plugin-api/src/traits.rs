@@ -12,8 +12,8 @@ use crate::errors::{
 };
 use crate::types::{
     ObserveEvent, PerCandidateReason, PluginManifest, Principal, RequestContext, RetryDecision,
-    RouteDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability,
-    Upstream, UpstreamCandidate,
+    RouteDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, Upstream,
+    UpstreamCandidate,
 };
 
 /// Filter plugin output containing upstream selection results and per-candidate reasons.
@@ -79,7 +79,6 @@ pub trait FilterPlugin: Send + Sync {
 }
 
 /// Router plugin boundary.
-#[deprecated(since = "0.2.0", note = "Use FilterPlugin via wire v3")]
 pub trait RouterPlugin: Send + Sync {
     /// Selects the upstream and dialect for an authenticated request.
     ///

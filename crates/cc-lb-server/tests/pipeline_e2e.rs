@@ -54,8 +54,18 @@ async fn random_terminal_distribution_is_uniform_after_two_filters() -> TestResu
         |_| Vec::new(),
         |upstreams| {
             vec![
-                filter_plugin("keep-first-3", first_n_ids(upstreams, 3), "keep first 3"),
-                filter_plugin("keep-first-2", first_n_ids(upstreams, 2), "keep first 2"),
+                filter_plugin(
+                    "keep-first-3",
+                    all_ids(upstreams),
+                    first_n_ids(upstreams, 3),
+                    "keep first 3",
+                ),
+                filter_plugin(
+                    "keep-first-2",
+                    first_n_ids(upstreams, 3),
+                    first_n_ids(upstreams, 2),
+                    "keep first 2",
+                ),
             ]
         },
         |_| None,
@@ -125,8 +135,18 @@ async fn first_pick_selects_single_candidate_after_two_filters() -> TestResult<(
         |_| Vec::new(),
         |upstreams| {
             vec![
-                filter_plugin("keep-first-3", first_n_ids(upstreams, 3), "keep first 3"),
-                filter_plugin("keep-first-2", first_n_ids(upstreams, 2), "keep first 2"),
+                filter_plugin(
+                    "keep-first-3",
+                    all_ids(upstreams),
+                    first_n_ids(upstreams, 3),
+                    "keep first 3",
+                ),
+                filter_plugin(
+                    "keep-first-2",
+                    first_n_ids(upstreams, 3),
+                    first_n_ids(upstreams, 2),
+                    "keep first 2",
+                ),
             ]
         },
         |_| None,
@@ -171,7 +191,12 @@ async fn drop_all_chain_returns_503_with_routing_trace() -> TestResult<()> {
         3,
         TerminalStrategy::Random,
         |_| Vec::new(),
-        |_| vec![drop_all_plugin("drop-all-a"), drop_all_plugin("drop-all-b")],
+        |upstreams| {
+            vec![
+                drop_all_plugin("drop-all-a", all_ids(upstreams)),
+                drop_all_plugin("drop-all-b", Vec::new()),
+            ]
+        },
         |_| None,
     )
     .await?;
@@ -193,12 +218,10 @@ async fn drop_all_chain_returns_503_with_routing_trace() -> TestResult<()> {
     );
     assert_eq!(terminal_upstream_id(event), None);
     assert!(event.internal_errors.iter().any(|error| {
-        error.stage == InternalErrorStage::Router
-            && error.kind == InternalErrorKind::ConfigError
-            && error
-                .message
-                .as_deref()
-                .is_some_and(|message| message.contains("no upstream candidates remain"))
+        error.stage == InternalErrorStage::RouterFilter
+            && error.kind == InternalErrorKind::Other
+            && error.message.as_deref()
+                == Some("no upstream candidate survived the router pipeline filters")
     }));
 
     harness.write_evidence(
@@ -221,7 +244,12 @@ async fn trapping_filter_passes_through_to_keep_first_two_then_random() -> TestR
         |upstreams| {
             vec![
                 trap_filter_plugin("trapping-filter"),
-                filter_plugin("keep-first-2", first_n_ids(upstreams, 2), "keep first 2"),
+                filter_plugin(
+                    "keep-first-2",
+                    all_ids(upstreams),
+                    first_n_ids(upstreams, 2),
+                    "keep first 2",
+                ),
             ]
         },
         |_| None,
@@ -741,18 +769,29 @@ struct PluginFixture {
     wire_version: Option<u8>,
 }
 
-fn filter_plugin(name: &str, kept_upstream_ids: Vec<Uuid>, reason: &str) -> PluginFixture {
-    let results = kept_upstream_ids
+fn filter_plugin(
+    name: &str,
+    input_upstream_ids: Vec<Uuid>,
+    kept_upstream_ids: Vec<Uuid>,
+    reason: &str,
+) -> PluginFixture {
+    let per_candidate_reasons = input_upstream_ids
         .iter()
         .map(|upstream_id| {
             json!({
-                "upstream_id": upstream_id.to_string(),
-                "decision": "accept",
+                "upstream_id": upstream_id,
+                "kept": kept_upstream_ids.contains(upstream_id),
                 "reason": reason,
             })
         })
         .collect::<Vec<_>>();
-    let output = json!({ "_v": 1, "results": results }).to_string();
+    let output = json!({
+        "_v": 1,
+        "kept_upstream_ids": kept_upstream_ids,
+        "reason": reason,
+        "per_candidate_reasons": per_candidate_reasons,
+    })
+    .to_string();
     PluginFixture {
         name: name.to_owned(),
         wat: output_wat(name, "filter", &output),
@@ -760,8 +799,8 @@ fn filter_plugin(name: &str, kept_upstream_ids: Vec<Uuid>, reason: &str) -> Plug
     }
 }
 
-fn drop_all_plugin(name: &str) -> PluginFixture {
-    filter_plugin(name, Vec::new(), "drop all")
+fn drop_all_plugin(name: &str, input_upstream_ids: Vec<Uuid>) -> PluginFixture {
+    filter_plugin(name, input_upstream_ids, Vec::new(), "drop all")
 }
 
 fn trap_filter_plugin(name: &str) -> PluginFixture {
@@ -773,11 +812,8 @@ fn trap_filter_plugin(name: &str) -> PluginFixture {
 }
 
 fn invalid_unknown_plugin(name: &str) -> PluginFixture {
-    filter_plugin(
-        name,
-        vec![Uuid::from_u128(0xffff_ffff_ffff_ffff_ffff_ffff_ffff_2828)],
-        "unknown",
-    )
+    let unknown_id = Uuid::from_u128(0xffff_ffff_ffff_ffff_ffff_ffff_ffff_2828);
+    filter_plugin(name, vec![unknown_id], vec![unknown_id], "unknown")
 }
 
 fn shape_trap_plugin(name: &str) -> PluginFixture {
@@ -861,6 +897,10 @@ fn first_n_ids(upstreams: &[SeededUpstream], n: usize) -> Vec<Uuid> {
         .collect()
 }
 
+fn all_ids(upstreams: &[SeededUpstream]) -> Vec<Uuid> {
+    upstreams.iter().map(|upstream| upstream.id).collect()
+}
+
 fn survivor_names(upstreams: &[SeededUpstream]) -> Vec<String> {
     upstreams
         .iter()
@@ -892,10 +932,7 @@ fn assert_trace(event: &RequestEvent, stages: &[&str], terminal: TerminalStrateg
         .collect::<Vec<_>>();
     assert_eq!(actual_stages, stages, "event={event:?}");
     assert_eq!(
-        trace
-            .terminal_decision
-            .as_ref()
-            .map(|decision| decision.strategy.clone()),
+        trace.terminal.as_ref().map(|decision| decision.strategy),
         Some(terminal),
         "event={event:?}"
     );
@@ -905,7 +942,7 @@ fn terminal_upstream_id(event: &RequestEvent) -> Option<Uuid> {
     event
         .routing_trace
         .as_ref()
-        .and_then(|trace| trace.terminal_decision.as_ref())
+        .and_then(|trace| trace.terminal.as_ref())
         .and_then(|decision| decision.upstream_id)
 }
 

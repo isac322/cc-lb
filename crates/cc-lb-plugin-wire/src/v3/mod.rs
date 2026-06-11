@@ -2,4 +2,4 @@
 
 pub mod filter;
 
-pub use filter::{FilterRequest, FilterResponse, PerCandidateReasonWire};
+pub use filter::{FilterRequest, FilterResponse, PerCandidateReason};
