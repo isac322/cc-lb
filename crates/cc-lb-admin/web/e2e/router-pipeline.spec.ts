@@ -64,13 +64,12 @@ test.describe('Router Pipeline', () => {
     const firstBox = await first.boundingBox();
     const secondBox = await second.boundingBox();
     if (firstBox && secondBox) {
-      await page.mouse.move(firstBox.x + firstBox.width / 2, firstBox.y + firstBox.height / 2);
+      const startX = firstBox.x + firstBox.width / 2;
+      const startY = firstBox.y + firstBox.height / 2;
+      await page.mouse.move(startX, startY);
       await page.mouse.down();
-      // Use expect.poll to wait for dnd-kit sensor to activate
-      await expect.poll(async () => {
-        const bodyClass = await page.evaluate(() => document.body.className);
-        return bodyClass.includes('active') || true; // Just a small delay
-      }).toBeTruthy();
+      // dnd-kit PointerSensor activates after an 8px drag; nudge past the threshold first
+      await page.mouse.move(startX, startY + 12, { steps: 4 });
       await page.mouse.move(secondBox.x + secondBox.width / 2, secondBox.y + secondBox.height / 2 + 10, { steps: 10 });
       await page.mouse.up();
     }
