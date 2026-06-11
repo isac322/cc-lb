@@ -126,7 +126,7 @@ pub use subscription_metadata_hook::{
 #[cfg(not(loom))]
 pub use subscription_quota_events::{
     SubscriptionQuotaEnqueueError, SubscriptionQuotaSink, SubscriptionQuotaWriterConfig,
-    start_subscription_quota_writer,
+    start_subscription_quota_writer, unified_observation_to_record,
 };
 #[cfg(not(loom))]
 pub use upstream_rate_limit_events::{
