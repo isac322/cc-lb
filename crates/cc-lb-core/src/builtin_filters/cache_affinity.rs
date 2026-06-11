@@ -2,10 +2,31 @@ use cc_lb_plugin_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, FilterError, FilterOutput,
     FilterPlugin, PerCandidateReason, Principal, RequestContext, UpstreamCandidate,
 };
+use cc_lb_storage_api::PluginMetadata;
 use uuid::Uuid;
+
+pub const PURPOSE: &str = "Prefer upstreams whose prompt cache is already warm for this request.";
+pub const KEEPS: &str =
+    "Candidates with a positive prefill_cache_score (the upstream has already cached the prefix).";
+pub const DROPS: &str = "Candidates with zero cache score — only when at least one candidate is a cache hit; otherwise nothing is dropped.";
+pub const EMPTY_BEHAVIOR: &str = "Never drops everything. Falls back to passing all candidates through when no cache hit exists.";
 
 const HIT_REASON: &str = "cache-hit-keep";
 const MISS_REASON: &str = "cache-miss-passthrough";
+
+pub fn metadata() -> PluginMetadata {
+    PluginMetadata {
+        purpose: PURPOSE.to_owned(),
+        keeps: KEEPS.to_owned(),
+        drops: DROPS.to_owned(),
+        empty_behavior: EMPTY_BEHAVIOR.to_owned(),
+        examples: vec![
+            "5 candidates, 2 with positive cache score → keep the 2 hits.".to_owned(),
+            "5 candidates, all with zero cache score → pass all 5 through.".to_owned(),
+            "Exactly 1 candidate → no change.".to_owned(),
+        ],
+    }
+}
 
 #[derive(Clone, Debug, Default)]
 pub struct CacheAffinityFilter;

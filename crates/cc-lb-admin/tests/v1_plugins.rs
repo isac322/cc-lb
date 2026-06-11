@@ -34,6 +34,7 @@ async fn registry_list_paginates() {
 #[tokio::test]
 async fn registry_list_exposes_builtin_cache_affinity() {
     let (_dir, storage) = temp_storage();
+    let uploaded = seed_registry(&storage, 24, "plugin-metadata-null").await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (status, _, body) =
@@ -50,6 +51,37 @@ async fn registry_list_exposes_builtin_cache_affinity() {
     assert_eq!(builtin["kind"], "filter");
     assert_eq!(builtin["wire_version"], 3);
     assert_eq!(builtin["is_builtin"], true);
+    assert_eq!(
+        builtin["metadata"]["purpose"],
+        "Prefer upstreams whose prompt cache is already warm for this request."
+    );
+    assert_eq!(
+        builtin["metadata"]["keeps"],
+        "Candidates with a positive prefill_cache_score (the upstream has already cached the prefix)."
+    );
+    assert_eq!(
+        builtin["metadata"]["drops"],
+        "Candidates with zero cache score — only when at least one candidate is a cache hit; otherwise nothing is dropped."
+    );
+    assert_eq!(
+        builtin["metadata"]["empty_behavior"],
+        "Never drops everything. Falls back to passing all candidates through when no cache hit exists."
+    );
+    assert_eq!(
+        builtin["metadata"]["examples"],
+        json!([
+            "5 candidates, 2 with positive cache score → keep the 2 hits.",
+            "5 candidates, all with zero cache score → pass all 5 through.",
+            "Exactly 1 candidate → no change."
+        ])
+    );
+    let uploaded_entry = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == uploaded.id.to_string())
+        .expect("uploaded plugin entry is listed");
+    assert!(uploaded_entry.get("metadata").is_none_or(Value::is_null));
 }
 
 #[tokio::test]

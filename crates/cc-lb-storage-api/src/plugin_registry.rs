@@ -37,6 +37,16 @@ pub struct WasmRegistryEntryInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginMetadata {
+    pub purpose: String,
+    pub keeps: String,
+    pub drops: String,
+    pub empty_behavior: String,
+    #[serde(default)]
+    pub examples: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WasmRegistryEntry {
     pub id: Uuid,
     pub sha256: [u8; 32],
@@ -53,6 +63,8 @@ pub struct WasmRegistryEntry {
     pub wire_version: u8,
     #[serde(default)]
     pub is_builtin: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<PluginMetadata>,
 }
 
 impl WasmRegistryEntry {
@@ -70,6 +82,7 @@ impl WasmRegistryEntry {
             kind: BUILTIN_PLUGIN_KIND_FILTER.to_owned(),
             wire_version: BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
             is_builtin: true,
+            metadata: Some(builtin_metadata_for_cache_affinity()),
         }
     }
 
@@ -84,6 +97,20 @@ fn default_plugin_kind() -> String {
 
 fn default_wire_version() -> u8 {
     1
+}
+
+fn builtin_metadata_for_cache_affinity() -> PluginMetadata {
+    PluginMetadata {
+        purpose: "Prefer upstreams whose prompt cache is already warm for this request.".to_owned(),
+        keeps: "Candidates with a positive prefill_cache_score (the upstream has already cached the prefix).".to_owned(),
+        drops: "Candidates with zero cache score — only when at least one candidate is a cache hit; otherwise nothing is dropped.".to_owned(),
+        empty_behavior: "Never drops everything. Falls back to passing all candidates through when no cache hit exists.".to_owned(),
+        examples: vec![
+            "5 candidates, 2 with positive cache score → keep the 2 hits.".to_owned(),
+            "5 candidates, all with zero cache score → pass all 5 through.".to_owned(),
+            "Exactly 1 candidate → no change.".to_owned(),
+        ],
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
