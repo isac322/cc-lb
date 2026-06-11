@@ -6,6 +6,7 @@ use cc_lb_storage_api::{
     StorageError as ApiStorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore,
     UpstreamUpdate, validate_identifier,
 };
+use chrono::{DateTime, Utc};
 use redb::{ReadableDatabase, ReadableTable};
 use uuid::Uuid;
 
@@ -178,6 +179,82 @@ impl UpstreamStore for RedbStorage {
             .map_err(map_join_err)?
             .map_err(map_redb_err)
     }
+
+    async fn claim_warmup_lease(
+        &self,
+        id: Uuid,
+        holder: &str,
+        ttl_secs: i64,
+    ) -> StorageResult<bool> {
+        let storage = self.clone();
+        let holder = holder.to_owned();
+        tokio::task::spawn_blocking(move || {
+            claim_warmup_lease_sync(&storage, id, &holder, ttl_secs)
+        })
+        .await
+        .map_err(map_join_err)?
+        .map_err(map_redb_err)
+    }
+
+    async fn write_warmup_cycle_key(
+        &self,
+        id: Uuid,
+        holder: &str,
+        new_cycle_key: i64,
+        next_warmup_at: Option<DateTime<Utc>>,
+    ) -> StorageResult<bool> {
+        let storage = self.clone();
+        let holder = holder.to_owned();
+        tokio::task::spawn_blocking(move || {
+            write_warmup_cycle_key_sync(&storage, id, &holder, new_cycle_key, next_warmup_at)
+        })
+        .await
+        .map_err(map_join_err)?
+        .map_err(map_redb_err)
+    }
+
+    async fn release_warmup_lease(&self, id: Uuid, holder: &str) -> StorageResult<bool> {
+        let storage = self.clone();
+        let holder = holder.to_owned();
+        tokio::task::spawn_blocking(move || release_warmup_lease_sync(&storage, id, &holder))
+            .await
+            .map_err(map_join_err)?
+            .map_err(map_redb_err)
+    }
+
+    async fn warmup_now_unix_secs(&self) -> StorageResult<i64> {
+        Ok(i64::try_from(now_unix_secs()).unwrap_or(i64::MAX))
+    }
+
+    async fn write_warmup_next_at(
+        &self,
+        id: Uuid,
+        holder: &str,
+        next_warmup_at: DateTime<Utc>,
+    ) -> StorageResult<bool> {
+        let storage = self.clone();
+        let holder = holder.to_owned();
+        tokio::task::spawn_blocking(move || {
+            write_warmup_next_at_sync(&storage, id, &holder, next_warmup_at)
+        })
+        .await
+        .map_err(map_join_err)?
+        .map_err(map_redb_err)
+    }
+
+    async fn clear_warmup_dialect_plugin(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+    ) -> StorageResult<Option<UpstreamRecord>> {
+        let storage = self.clone();
+        tokio::task::spawn_blocking(move || {
+            clear_warmup_dialect_plugin_sync(&storage, id, expected_revision)
+        })
+        .await
+        .map_err(map_join_err)?
+        .map_err(map_redb_err)
+    }
 }
 
 fn create_sync(
@@ -201,6 +278,12 @@ fn create_sync(
         revision: 1,
         created_at_unix_secs: now,
         updated_at_unix_secs: now,
+        warmup_enabled: create.warmup_enabled,
+        next_warmup_at: create.next_warmup_at,
+        last_warmup_cycle_key: create.last_warmup_cycle_key,
+        warmup_lease_holder: create.warmup_lease_holder,
+        warmup_lease_until_unix_secs: create.warmup_lease_until_unix_secs,
+        warmup_dialect_plugin: None,
     };
 
     let write_txn = storage.db.begin_write()?;
@@ -289,6 +372,21 @@ fn update_sync(
         if update.api_key_ciphertext.is_some() {
             record.api_key_ciphertext = update.api_key_ciphertext;
         }
+        if let Some(warmup_enabled) = update.warmup_enabled {
+            record.warmup_enabled = warmup_enabled;
+        }
+        if update.next_warmup_at.is_some() {
+            record.next_warmup_at = update.next_warmup_at;
+        }
+        if update.last_warmup_cycle_key.is_some() {
+            record.last_warmup_cycle_key = update.last_warmup_cycle_key;
+        }
+        if update.warmup_lease_holder.is_some() {
+            record.warmup_lease_holder = update.warmup_lease_holder;
+        }
+        if update.warmup_lease_until_unix_secs.is_some() {
+            record.warmup_lease_until_unix_secs = update.warmup_lease_until_unix_secs;
+        }
         Ok(())
     })
 }
@@ -349,9 +447,12 @@ fn release_lease_on_failure_sync(
             serde_json::from_slice(&stored)?
         };
         if record.refresh_lease_holder == Some(holder) {
+            let now = now_unix_secs();
             record.last_apply_error = Some(reason);
-            record.last_apply_at_unix_secs = Some(now_unix_secs());
-            record.updated_at_unix_secs = now_unix_secs();
+            record.last_apply_at_unix_secs = Some(now);
+            record.refresh_lease_holder = None;
+            record.refresh_lease_until_unix_secs = None;
+            record.updated_at_unix_secs = now;
             record.revision = record.revision.saturating_add(1);
             table.insert(
                 id.as_bytes().as_slice(),
@@ -513,4 +614,404 @@ fn now_unix_secs() -> u64 {
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn claim_warmup_lease_sync(
+    storage: &RedbStorage,
+    id: Uuid,
+    holder: &str,
+    ttl_secs: i64,
+) -> Result<bool, crate::StorageError> {
+    let write_txn = storage.db.begin_write()?;
+    let claimed = {
+        let mut table = write_txn.open_table(UPSTREAMS_V2)?;
+        let mut record: UpstreamRecord = {
+            let Some(stored) = table.get(id.as_bytes().as_slice())? else {
+                return Ok(false);
+            };
+            let stored = stored.value().to_vec();
+            serde_json::from_slice(&stored)?
+        };
+        let now = now_unix_secs();
+        let now_i64 = i64::try_from(now).unwrap_or(i64::MAX);
+        if record
+            .warmup_lease_until_unix_secs
+            .is_some_and(|until| until > now_i64)
+            && record.warmup_lease_holder.as_deref() != Some(holder)
+        {
+            false
+        } else {
+            record.warmup_lease_holder = Some(holder.to_owned());
+            record.warmup_lease_until_unix_secs = Some(now_i64.saturating_add(ttl_secs));
+            record.updated_at_unix_secs = now;
+            record.revision = record.revision.saturating_add(1);
+            table.insert(
+                id.as_bytes().as_slice(),
+                serde_json::to_vec(&record)?.as_slice(),
+            )?;
+            true
+        }
+    };
+    write_txn.commit()?;
+    Ok(claimed)
+}
+
+fn write_warmup_cycle_key_sync(
+    storage: &RedbStorage,
+    id: Uuid,
+    holder: &str,
+    new_cycle_key: i64,
+    next_warmup_at: Option<DateTime<Utc>>,
+) -> Result<bool, crate::StorageError> {
+    let write_txn = storage.db.begin_write()?;
+    let updated = {
+        let mut table = write_txn.open_table(UPSTREAMS_V2)?;
+        let mut record: UpstreamRecord = {
+            let Some(stored) = table.get(id.as_bytes().as_slice())? else {
+                return Ok(false);
+            };
+            let stored = stored.value().to_vec();
+            serde_json::from_slice(&stored)?
+        };
+        let now = now_unix_secs();
+        let now_i64 = i64::try_from(now).unwrap_or(i64::MAX);
+        // Holder match is required; on success the cycle key and lease clear happen atomically.
+        if record.deleted_at_unix_secs.is_some()
+            || record.warmup_lease_holder.as_deref() != Some(holder)
+            || record
+                .warmup_lease_until_unix_secs
+                .is_none_or(|until| until <= now_i64)
+            || record.last_warmup_cycle_key == Some(new_cycle_key)
+        {
+            false
+        } else {
+            record.last_warmup_cycle_key = Some(new_cycle_key);
+            record.next_warmup_at = next_warmup_at;
+            record.warmup_lease_holder = None;
+            record.warmup_lease_until_unix_secs = None;
+            record.updated_at_unix_secs = now;
+            record.revision = record.revision.saturating_add(1);
+            table.insert(
+                id.as_bytes().as_slice(),
+                serde_json::to_vec(&record)?.as_slice(),
+            )?;
+            true
+        }
+    };
+    write_txn.commit()?;
+    Ok(updated)
+}
+
+fn release_warmup_lease_sync(
+    storage: &RedbStorage,
+    id: Uuid,
+    holder: &str,
+) -> Result<bool, crate::StorageError> {
+    let write_txn = storage.db.begin_write()?;
+    let released = {
+        let mut table = write_txn.open_table(UPSTREAMS_V2)?;
+        let mut record: UpstreamRecord = {
+            let Some(stored) = table.get(id.as_bytes().as_slice())? else {
+                return Ok(false);
+            };
+            let stored = stored.value().to_vec();
+            serde_json::from_slice(&stored)?
+        };
+        if record.deleted_at_unix_secs.is_some()
+            || record.warmup_lease_holder.as_deref() != Some(holder)
+        {
+            false
+        } else {
+            record.warmup_lease_holder = None;
+            record.warmup_lease_until_unix_secs = None;
+            record.updated_at_unix_secs = now_unix_secs();
+            record.revision = record.revision.saturating_add(1);
+            table.insert(
+                id.as_bytes().as_slice(),
+                serde_json::to_vec(&record)?.as_slice(),
+            )?;
+            true
+        }
+    };
+    write_txn.commit()?;
+    Ok(released)
+}
+
+fn write_warmup_next_at_sync(
+    storage: &RedbStorage,
+    id: Uuid,
+    holder: &str,
+    next_warmup_at: DateTime<Utc>,
+) -> Result<bool, crate::StorageError> {
+    let write_txn = storage.db.begin_write()?;
+    let updated = {
+        let mut table = write_txn.open_table(UPSTREAMS_V2)?;
+        let mut record: UpstreamRecord = {
+            let Some(stored) = table.get(id.as_bytes().as_slice())? else {
+                return Ok(false);
+            };
+            let stored = stored.value().to_vec();
+            serde_json::from_slice(&stored)?
+        };
+        let now = now_unix_secs();
+        let now_i64 = i64::try_from(now).unwrap_or(i64::MAX);
+        if record.deleted_at_unix_secs.is_some()
+            || record.warmup_lease_holder.as_deref() != Some(holder)
+            || record
+                .warmup_lease_until_unix_secs
+                .is_none_or(|until| until <= now_i64)
+        {
+            false
+        } else {
+            record.next_warmup_at = Some(next_warmup_at);
+            record.updated_at_unix_secs = now;
+            record.revision = record.revision.saturating_add(1);
+            table.insert(
+                id.as_bytes().as_slice(),
+                serde_json::to_vec(&record)?.as_slice(),
+            )?;
+            true
+        }
+    };
+    write_txn.commit()?;
+    Ok(updated)
+}
+
+fn clear_warmup_dialect_plugin_sync(
+    storage: &RedbStorage,
+    id: Uuid,
+    expected_revision: u64,
+) -> Result<Option<UpstreamRecord>, crate::StorageError> {
+    let write_txn = storage.db.begin_write()?;
+    let updated = {
+        let mut table = write_txn.open_table(UPSTREAMS_V2)?;
+        let mut record: UpstreamRecord = {
+            let Some(stored) = table.get(id.as_bytes().as_slice())? else {
+                return Ok(None);
+            };
+            let stored = stored.value().to_vec();
+            serde_json::from_slice(&stored)?
+        };
+        if record.deleted_at_unix_secs.is_some() || record.revision != expected_revision {
+            return Ok(None);
+        }
+        record.warmup_dialect_plugin = None;
+        record.revision += 1;
+        record.updated_at_unix_secs = now_unix_secs();
+        let bytes = serde_json::to_vec(&record)?;
+        table.insert(id.as_bytes().as_slice(), bytes.as_slice())?;
+        Some(record)
+    };
+    write_txn.commit()?;
+    Ok(updated)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::future::Future;
+
+    use super::*;
+    use cc_lb_storage_api::upstream::UpstreamKind;
+    use chrono::TimeZone;
+
+    type TestResult<T = ()> = Result<T, Box<dyn std::error::Error>>;
+
+    fn run_async(future: impl Future<Output = TestResult>) -> TestResult {
+        tokio::runtime::Runtime::new()?.block_on(future)
+    }
+
+    fn temp_storage() -> TestResult<(tempfile::TempDir, RedbStorage)> {
+        let dir = tempfile::tempdir()?;
+        let path = dir.path().join("upstreams.redb");
+        let storage = RedbStorage::open(&path, [29; 32])?;
+        Ok((dir, storage))
+    }
+
+    async fn create_warmup_upstream(storage: &RedbStorage) -> TestResult<UpstreamRecord> {
+        let record = storage
+            .create(UpstreamCreate {
+                name: format!("upstream-{}", Uuid::new_v4().simple()),
+                kind: UpstreamKind::AnthropicOauth,
+                base_url: None,
+                api_key_ciphertext: None,
+                warmup_enabled: true,
+                next_warmup_at: None,
+                last_warmup_cycle_key: None,
+                warmup_lease_holder: None,
+                warmup_lease_until_unix_secs: None,
+                warmup_dialect_plugin: None,
+            })
+            .await?;
+        Ok(record)
+    }
+
+    #[test]
+    fn claim_warmup_lease_succeeds_when_free() -> TestResult {
+        run_async(async {
+            let (_dir, storage) = temp_storage()?;
+            let record = create_warmup_upstream(&storage).await?;
+
+            assert!(
+                storage
+                    .claim_warmup_lease(record.id, "replica-a", 60)
+                    .await?
+            );
+
+            let stored = storage.get_by_id(record.id).await?.expect("upstream");
+            assert_eq!(stored.warmup_lease_holder.as_deref(), Some("replica-a"));
+            assert!(stored.warmup_lease_until_unix_secs.is_some_and(|until| until
+                > i64::try_from(now_unix_secs()).unwrap_or(i64::MAX)));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn claim_warmup_lease_fails_when_held_by_other() -> TestResult {
+        run_async(async {
+            let (_dir, storage) = temp_storage()?;
+            let record = create_warmup_upstream(&storage).await?;
+
+            assert!(
+                storage
+                    .claim_warmup_lease(record.id, "replica-a", 60)
+                    .await?
+            );
+            assert!(
+                !storage
+                    .claim_warmup_lease(record.id, "replica-b", 60)
+                    .await?
+            );
+
+            let stored = storage.get_by_id(record.id).await?.expect("upstream");
+            assert_eq!(stored.warmup_lease_holder.as_deref(), Some("replica-a"));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn write_warmup_cycle_key_fails_with_wrong_holder() -> TestResult {
+        run_async(async {
+            let (_dir, storage) = temp_storage()?;
+            let record = create_warmup_upstream(&storage).await?;
+            let next_warmup_at = Utc.timestamp_opt(1_700_018_030, 0).single();
+
+            assert!(
+                storage
+                    .claim_warmup_lease(record.id, "replica-a", 60)
+                    .await?
+            );
+            assert!(
+                !storage
+                    .write_warmup_cycle_key(record.id, "replica-b", 1_700_000_000, next_warmup_at)
+                    .await?
+            );
+
+            let stored = storage.get_by_id(record.id).await?.expect("upstream");
+            assert_eq!(stored.last_warmup_cycle_key, None);
+            assert_eq!(stored.next_warmup_at, None);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn write_warmup_cycle_key_fails_when_lease_expired() -> TestResult {
+        run_async(async {
+            let (_dir, storage) = temp_storage()?;
+            let record = create_warmup_upstream(&storage).await?;
+            let next_warmup_at = Utc.timestamp_opt(1_700_018_030, 0).single();
+
+            assert!(
+                storage
+                    .claim_warmup_lease(record.id, "replica-a", 0)
+                    .await?
+            );
+            assert!(
+                !storage
+                    .write_warmup_cycle_key(record.id, "replica-a", 1_700_000_000, next_warmup_at)
+                    .await?
+            );
+
+            let stored = storage.get_by_id(record.id).await?.expect("upstream");
+            assert_eq!(stored.last_warmup_cycle_key, None);
+            assert_eq!(stored.next_warmup_at, None);
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn write_warmup_cycle_key_fails_when_cycle_key_unchanged() -> TestResult {
+        run_async(async {
+            let (_dir, storage) = temp_storage()?;
+            let record = create_warmup_upstream(&storage).await?;
+            let first_next_warmup_at = Utc.timestamp_opt(1_700_018_030, 0).single();
+            let second_next_warmup_at = Utc.timestamp_opt(1_700_018_060, 0).single();
+
+            assert!(
+                storage
+                    .claim_warmup_lease(record.id, "replica-a", 60)
+                    .await?
+            );
+            assert!(
+                storage
+                    .write_warmup_cycle_key(
+                        record.id,
+                        "replica-a",
+                        1_700_000_000,
+                        first_next_warmup_at,
+                    )
+                    .await?
+            );
+            let stored = storage.get_by_id(record.id).await?.expect("upstream");
+            assert_eq!(stored.warmup_lease_holder, None);
+            assert_eq!(stored.warmup_lease_until_unix_secs, None);
+            assert!(
+                storage
+                    .claim_warmup_lease(record.id, "replica-a", 60)
+                    .await?
+            );
+            assert!(
+                !storage
+                    .write_warmup_cycle_key(
+                        record.id,
+                        "replica-a",
+                        1_700_000_000,
+                        second_next_warmup_at,
+                    )
+                    .await?
+            );
+
+            let stored = storage.get_by_id(record.id).await?.expect("upstream");
+            assert_eq!(stored.last_warmup_cycle_key, Some(1_700_000_000));
+            assert_eq!(stored.next_warmup_at, first_next_warmup_at);
+            assert_eq!(stored.warmup_lease_holder.as_deref(), Some("replica-a"));
+            Ok(())
+        })
+    }
+
+    #[test]
+    fn write_warmup_cycle_key_succeeds_when_all_predicates_hold() -> TestResult {
+        run_async(async {
+            let (_dir, storage) = temp_storage()?;
+            let record = create_warmup_upstream(&storage).await?;
+            let next_warmup_at = Utc.timestamp_opt(1_700_018_030, 0).single();
+
+            assert!(
+                storage
+                    .claim_warmup_lease(record.id, "replica-a", 60)
+                    .await?
+            );
+            assert!(
+                storage
+                    .write_warmup_cycle_key(record.id, "replica-a", 1_700_000_000, next_warmup_at)
+                    .await?
+            );
+
+            let stored = storage.get_by_id(record.id).await?.expect("upstream");
+            assert_eq!(stored.last_warmup_cycle_key, Some(1_700_000_000));
+            assert_eq!(stored.next_warmup_at, next_warmup_at);
+            assert_eq!(stored.warmup_lease_holder, None);
+            assert_eq!(stored.warmup_lease_until_unix_secs, None);
+            Ok(())
+        })
+    }
 }

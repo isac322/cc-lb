@@ -23,6 +23,7 @@ use crate::{
 
 const USAGE_ROLLUPS_V1: TableDefinition<&[u8], &[u8]> = TableDefinition::new("USAGE_ROLLUPS_V1");
 const REQUEST_EVENT_CHECKPOINT_KEY: &str = "request_events_v1_high_water";
+const LEGACY_UPSTREAM_WARMUP_ENABLED: bool = false;
 
 pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> {
     let write_txn = db.begin_write()?;
@@ -138,6 +139,9 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
     {
         write_txn.open_table(PLUGIN_CHAINS_V2)?;
     }
+    // Schema v5 -> v6: UpstreamRecord gained `warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>`
+    // which uses `#[serde(default)]`. No table migration required — existing JSON deserializes
+    // with None and new writes round-trip through redb's existing JSON serde path.
     if stored_version.is_some_and(|version| version < 4) {
         migrate_upstreams_v3_to_v4(&write_txn)?;
     }
@@ -264,6 +268,12 @@ fn migrate_upstreams_v3_to_v4(write_txn: &redb::WriteTransaction) -> Result<(), 
                     revision: legacy.revision,
                     created_at_unix_secs: legacy.created_at_unix_secs,
                     updated_at_unix_secs: legacy.updated_at_unix_secs,
+                    warmup_enabled: LEGACY_UPSTREAM_WARMUP_ENABLED,
+                    next_warmup_at: None,
+                    last_warmup_cycle_key: None,
+                    warmup_lease_holder: None,
+                    warmup_lease_until_unix_secs: None,
+                    warmup_dialect_plugin: None,
                 };
                 rewritten.push((key, serde_json::to_vec(&record)?));
             }
@@ -290,6 +300,12 @@ fn migrate_upstreams_v3_to_v4(write_txn: &redb::WriteTransaction) -> Result<(), 
                 revision: legacy.revision,
                 created_at_unix_secs: legacy.created_at_unix_secs,
                 updated_at_unix_secs: legacy.updated_at_unix_secs,
+                warmup_enabled: LEGACY_UPSTREAM_WARMUP_ENABLED,
+                next_warmup_at: None,
+                last_warmup_cycle_key: None,
+                warmup_lease_holder: None,
+                warmup_lease_until_unix_secs: None,
+                warmup_dialect_plugin: None,
             };
             rewritten.push((key, serde_json::to_vec(&record)?));
         }
