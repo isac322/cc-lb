@@ -7,6 +7,7 @@ import {
   waitFor,
 } from '@testing-library/react';
 import { afterEach, beforeEach, expect, test, vi } from 'vitest';
+import { z } from 'zod';
 import * as queries from '../lib/queries';
 import { RouterSlotEditor } from './principals';
 
@@ -44,6 +45,7 @@ afterEach(() => {
 });
 
 test('renders ordered list with locked terminal row', () => {
+  expect(z).toBeDefined();
   vi.mocked(queries.usePluginChain).mockReturnValue({
     data: {
       entries: [
