@@ -2,8 +2,8 @@ use std::sync::Arc;
 
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{
-    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_WIRE_VERSION, PluginChainEntry, PluginSlot,
-    PrincipalRecord, sparse_order,
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_WIRE_VERSION, BUILTIN_PLUGIN_KIND_FILTER,
+    PluginChainEntry, PluginSlot, PrincipalRecord, WasmRegistryEntry, sparse_order,
 };
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
@@ -144,6 +144,9 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
     if stored_version.is_none_or(|version| version < 6) {
         prepend_cache_affinity_to_existing_principals(&write_txn)?;
     }
+    if stored_version.is_none_or(|version| version < 7) {
+        drop_incompatible_router_chain_entries(&write_txn)?;
+    }
     {
         let mut schema = write_txn.open_table(SCHEMA_VERSION_V1)?;
         schema.insert(SCHEMA_VERSION_KEY, &CURRENT_SCHEMA_VERSION)?;
@@ -209,6 +212,45 @@ fn prepend_cache_affinity_to_existing_principals(
             entry.id.as_bytes().as_slice(),
             serde_json::to_vec(&entry)?.as_slice(),
         )?;
+    }
+    Ok(())
+}
+
+fn drop_incompatible_router_chain_entries(
+    write_txn: &redb::WriteTransaction,
+) -> Result<(), StorageError> {
+    let mut compatible_registry_ids = std::collections::HashSet::new();
+    compatible_registry_ids.insert(BUILTIN_CACHE_AFFINITY_ID);
+    {
+        let registry = write_txn.open_table(WASM_REGISTRY_V2)?;
+        for row in registry.iter()? {
+            let (_, value) = row?;
+            let entry: WasmRegistryEntry = serde_json::from_slice(value.value())?;
+            if entry.kind == BUILTIN_PLUGIN_KIND_FILTER && entry.wire_version == 3 {
+                compatible_registry_ids.insert(entry.id);
+            }
+        }
+    }
+
+    let mut keys_to_drop = Vec::new();
+    {
+        let chains = write_txn.open_table(PLUGIN_CHAINS_V2)?;
+        for row in chains.iter()? {
+            let (key, value) = row?;
+            let entry: PluginChainEntry = serde_json::from_slice(value.value())?;
+            if entry.slot == PluginSlot::Router
+                && !compatible_registry_ids.contains(&entry.wasm_registry_id)
+            {
+                keys_to_drop.push(key.value().to_vec());
+            }
+        }
+    }
+
+    if !keys_to_drop.is_empty() {
+        let mut chains = write_txn.open_table(PLUGIN_CHAINS_V2)?;
+        for key in keys_to_drop {
+            chains.remove(key.as_slice())?;
+        }
     }
     Ok(())
 }
