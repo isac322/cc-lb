@@ -366,6 +366,18 @@ function generateEvent(seq: number, forceUpstreamId?: string) {
   const costCc1h = cc1h * 6;
   const costCr = Math.floor(cr * 0.3);
   const costMicros = costInput + costOutput + costCc5m + costCc1h + costCr;
+
+  const hasTrace = rng() < 0.33;
+  const routing_trace = hasTrace ? {
+    stages: [
+      { plugin_id: "pl-rate-limiter", plugin_name: "rate-limiter", kept_upstream_ids: [upstream.id], reason: "Allowed", per_candidate_reasons: [], duration_us: 150, passthrough: null }
+    ],
+    terminal: { strategy: "random", chosen: upstream.id }
+  } : undefined;
+  const internal_errors = hasTrace && rng() < 0.5 ? [
+    { stage: "RouterFilter", index: 0, kind: "Other", message: "Mock internal error" }
+  ] : undefined;
+
   return {
     ts: NOW() - Math.floor(rng() * 600),
     request_id: `req_${seq.toString(36)}${Math.floor(rng() * 0xffff).toString(36)}`,
@@ -396,6 +408,8 @@ function generateEvent(seq: number, forceUpstreamId?: string) {
     agent_label: rng() < 0.4 ? "claude-code" : rng() < 0.7 ? "opencode" : "manual",
     kind: status >= 500 ? "error" : status === 429 ? "rate_limit" : "request",
     payload: {},
+    routing_trace,
+    internal_errors,
   };
 }
 const RECENT_EVENTS = Array.from({ length: 220 }).map((_, i) => generateEvent(i + 1)).filter((e): e is NonNullable<typeof e> => e !== null).sort((a, b) => b.ts - a.ts);
