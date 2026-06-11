@@ -686,6 +686,7 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                   id={e.id}
                   order={e.order}
                   name={reg?.name ?? e.wasm_registry_id}
+                  isBuiltin={reg?.is_builtin}
                   onDelete={() =>
                     setPendingRemove({
                       id: e.id,
@@ -1137,11 +1138,13 @@ function SortableChainItem({
   id,
   order,
   name,
+  isBuiltin,
   onDelete,
 }: {
   id: string;
   order: number;
   name: string;
+  isBuiltin?: boolean;
   onDelete: () => void;
 }) {
   const {
@@ -1173,15 +1176,26 @@ function SortableChainItem({
         <GripVertical className="w-4 h-4" />
       </button>
       <Badge tone="mono">#{Math.floor(order)}</Badge>
-      <span className="flex-1 text-sm font-medium truncate">{name}</span>
-      <button
-        type="button"
-        aria-label="Remove plugin"
-        className="text-text-faint hover:text-red-400"
-        onClick={onDelete}
+      <span className="flex-1 text-sm font-medium truncate flex items-center gap-2">
+        {name}
+        {isBuiltin && <Badge tone="accent">Built-in</Badge>}
+      </span>
+      <Hint
+        label={
+          isBuiltin
+            ? "Removing only affects this principal's chain. Registry entry remains."
+            : 'Remove plugin'
+        }
       >
-        <Trash2 className="w-4 h-4" />
-      </button>
+        <button
+          type="button"
+          aria-label="Remove plugin"
+          className="text-text-faint hover:text-red-400"
+          onClick={onDelete}
+        >
+          <Trash2 className="w-4 h-4" />
+        </button>
+      </Hint>
     </li>
   );
 }
