@@ -2,9 +2,11 @@ use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    MAX_WASM_BLOB_BYTES, PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput,
-    PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, StorageError, StorageResult, WasmBlob,
-    WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, BUILTIN_CACHE_AFFINITY_SHA256,
+    BUILTIN_CACHE_AFFINITY_WIRE_VERSION, MAX_WASM_BLOB_BYTES, PluginChainConflictReason,
+    PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore,
+    PluginSlot, StorageError, StorageResult, WasmBlob, WasmBlobRecord, WasmRegistryEntry,
+    WasmRegistryEntryInput, sparse_order, validate_identifier,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -27,6 +29,12 @@ impl PluginRegistryStore for PostgresStorage {
         input: WasmRegistryEntryInput,
     ) -> StorageResult<(WasmRegistryEntry, bool)> {
         validate_identifier("plugin.name", &input.name)?;
+        if input.name == BUILTIN_CACHE_AFFINITY_NAME {
+            return Err(StorageError::PluginRegistryConflict {
+                message: "plugin registry name collides with builtin plugin: cache-affinity"
+                    .to_owned(),
+            });
+        }
         if blob.size_bytes > MAX_WASM_BLOB_BYTES || blob.bytes.len() as u64 > MAX_WASM_BLOB_BYTES {
             return Err(StorageError::InvalidInput {
                 field: "wasm_blob.bytes".to_owned(),
@@ -130,21 +138,41 @@ impl PluginRegistryStore for PostgresStorage {
         if limit == 0 {
             return Ok(Vec::new());
         }
+        let mut entries = Vec::new();
+        if after.is_none_or(|after| BUILTIN_CACHE_AFFINITY_ID > after) {
+            entries.push(self.builtin_cache_affinity_entry().await?);
+        }
+        let remaining = limit.saturating_sub(entries.len());
+        if remaining == 0 {
+            return Ok(entries);
+        }
         let rows = sqlx::query("SELECT r.*, COALESCE((SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id), 0)::BIGINT AS refcount FROM wasm_registry_v2 r WHERE ($1::uuid IS NULL OR r.id > $1) ORDER BY r.id ASC LIMIT $2")
-            .bind(after).bind(u64_to_i64(limit as u64, "plugin_registry.limit")?).fetch_all(&self.pool).await.map_err(map_sqlx_error)?;
-        rows.into_iter().map(registry_from_row).collect()
+            .bind(after).bind(u64_to_i64(remaining as u64, "plugin_registry.limit")?).fetch_all(&self.pool).await.map_err(map_sqlx_error)?;
+        entries.extend(
+            rows.into_iter()
+                .map(registry_from_row)
+                .collect::<StorageResult<Vec<_>>>()?,
+        );
+        entries.sort_by_key(|entry| entry.id);
+        Ok(entries)
     }
 
     async fn get_registry_entry_by_sha(
         &self,
         sha256: [u8; 32],
     ) -> StorageResult<Option<WasmRegistryEntry>> {
+        if sha256 == BUILTIN_CACHE_AFFINITY_SHA256 {
+            return Ok(Some(self.builtin_cache_affinity_entry().await?));
+        }
         let row = sqlx::query("SELECT r.*, COALESCE((SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id), 0)::BIGINT AS refcount FROM wasm_registry_v2 r WHERE r.sha256 = $1")
             .bind(sha256.as_slice()).fetch_optional(&self.pool).await.map_err(map_sqlx_error)?;
         row.map(registry_from_row).transpose()
     }
 
     async fn get_registry_entry_by_id(&self, id: Uuid) -> StorageResult<Option<WasmRegistryEntry>> {
+        if id == BUILTIN_CACHE_AFFINITY_ID {
+            return Ok(Some(self.builtin_cache_affinity_entry().await?));
+        }
         let row = sqlx::query("SELECT r.*, COALESCE((SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id), 0)::BIGINT AS refcount FROM wasm_registry_v2 r WHERE r.id = $1")
             .bind(id).fetch_optional(&self.pool).await.map_err(map_sqlx_error)?;
         row.map(registry_from_row).transpose()
@@ -156,6 +184,9 @@ impl PluginRegistryStore for PostgresStorage {
         expected_revision: u64,
         label: Option<String>,
     ) -> StorageResult<WasmRegistryEntry> {
+        if id == BUILTIN_CACHE_AFFINITY_ID {
+            return Err(StorageError::BuiltinPluginImmutable);
+        }
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let current_revision: Option<i64> =
             sqlx::query_scalar("SELECT revision FROM wasm_registry_v2 WHERE id = $1 FOR UPDATE")
@@ -189,6 +220,9 @@ impl PluginRegistryStore for PostgresStorage {
         id: Uuid,
         expected_revision: u64,
     ) -> StorageResult<Option<WasmRegistryEntry>> {
+        if id == BUILTIN_CACHE_AFFINITY_ID {
+            return Err(StorageError::BuiltinPluginImmutable);
+        }
         let mut tx = begin_repeatable_read(&self.pool).await?;
         let row = sqlx::query("SELECT r.*, COALESCE((SELECT COUNT(*) FROM plugin_chains_v2 c WHERE c.wasm_registry_id = r.id), 0)::BIGINT AS refcount FROM wasm_registry_v2 r WHERE r.id = $1 FOR UPDATE")
             .bind(id).fetch_optional(&mut *tx).await.map_err(map_sqlx_error)?;
@@ -251,6 +285,23 @@ impl PluginRegistryStore for PostgresStorage {
         input: PluginChainEntryInput,
     ) -> StorageResult<PluginChainEntry> {
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        if input.wasm_registry_id == BUILTIN_CACHE_AFFINITY_ID {
+            if input.slot != PluginSlot::Router {
+                return Err(StorageError::InvalidInput {
+                    field: "plugin_chain.slot".to_owned(),
+                    reason: "builtin cache-affinity is a router filter".to_owned(),
+                });
+            }
+            validate_chain_insert_principal_and_slot(&mut tx, &input).await?;
+            let row = insert_chain_row_in_tx(&mut tx, &input).await?;
+            sqlx::query("SELECT pg_notify('cclb_plugin_chain_changed', $1)")
+                .bind(input.principal_id.to_string())
+                .execute(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+            tx.commit().await.map_err(map_sqlx_error)?;
+            return chain_from_row(row);
+        }
         let sha: Vec<u8> =
             sqlx::query_scalar("SELECT sha256 FROM wasm_registry_v2 WHERE id = $1 FOR UPDATE")
                 .bind(input.wasm_registry_id)
@@ -271,40 +322,13 @@ impl PluginRegistryStore for PostgresStorage {
                 message: "missing wasm blob".to_owned(),
             });
         }
-        let principal_exists: Option<i32> =
-            sqlx::query_scalar("SELECT 1 FROM principals_v1 WHERE id = $1")
-                .bind(input.principal_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(map_sqlx_error)?;
-        if principal_exists.is_none() {
-            return Err(StorageError::PrincipalNotFound {
-                id: input.principal_id.to_string(),
-            });
-        }
-        if is_singleton_slot(input.slot)
-            && let Some(existing_entry_id) = sqlx::query_scalar::<_, Uuid>(
-                "SELECT id FROM plugin_chains_v2 WHERE principal_id = $1 AND slot = $2 ORDER BY id ASC LIMIT 1",
-            )
-            .bind(input.principal_id)
-            .bind(input.slot.as_str())
-            .fetch_optional(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?
-        {
-            return Err(StorageError::PluginChainConflict {
-                reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id },
-            });
-        }
+        validate_chain_insert_principal_and_slot(&mut tx, &input).await?;
         sqlx::query("UPDATE wasm_blobs_v2 SET refcount = refcount + 1 WHERE sha256 = $1")
             .bind(&sha)
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
-        let id = Uuid::new_v4();
-        let row = sqlx::query("INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision, wire_version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0,$10) RETURNING *")
-            .bind(id).bind(input.principal_id).bind(input.slot.as_str()).bind(input.order).bind(input.wasm_registry_id).bind(input.config).bind(input.sse_per_event).bind(i32::try_from(input.batched_events_per_flush).map_err(|_| StorageError::Fatal { message: "batched_events_per_flush exceeds i32".to_owned() })?).bind(u64_to_i64(input.batched_flush_ms, "plugin_chain.batched_flush_ms")?).bind(input.wire_version.map(i16::from))
-            .fetch_one(&mut *tx).await.map_err(map_sqlx_error)?;
+        let row = insert_chain_row_in_tx(&mut tx, &input).await?;
         sqlx::query("SELECT pg_notify('cclb_plugin_chain_changed', $1)")
             .bind(input.principal_id.to_string())
             .execute(&mut *tx)
@@ -489,12 +513,19 @@ impl PluginRegistryStore for PostgresStorage {
                 current: entry.revision,
             });
         }
-        let sha =
-            sqlx::query_scalar::<_, Vec<u8>>("SELECT sha256 FROM wasm_registry_v2 WHERE id = $1")
+        let sha = if entry.wasm_registry_id == BUILTIN_CACHE_AFFINITY_ID {
+            None
+        } else {
+            Some(
+                sqlx::query_scalar::<_, Vec<u8>>(
+                    "SELECT sha256 FROM wasm_registry_v2 WHERE id = $1",
+                )
                 .bind(entry.wasm_registry_id)
                 .fetch_one(&mut *tx)
                 .await
-                .map_err(map_sqlx_error)?;
+                .map_err(map_sqlx_error)?,
+            )
+        };
         let result = sqlx::query("DELETE FROM plugin_chains_v2 WHERE id = $1 AND revision = $2")
             .bind(id)
             .bind(u64_to_i64(expected_revision, "plugin_chain.revision")?)
@@ -506,7 +537,9 @@ impl PluginRegistryStore for PostgresStorage {
                 current: entry.revision,
             });
         }
-        decrement_blob_in_tx(&mut tx, sha_to_array(&sha)?).await?;
+        if let Some(sha) = sha {
+            decrement_blob_in_tx(&mut tx, sha_to_array(&sha)?).await?;
+        }
         sqlx::query("SELECT pg_notify('cclb_plugin_chain_changed', $1)")
             .bind(entry.principal_id.to_string())
             .execute(&mut *tx)
@@ -550,6 +583,17 @@ impl PostgresStorage {
         row.map(registry_from_row).transpose()
     }
 
+    async fn builtin_cache_affinity_entry(&self) -> StorageResult<WasmRegistryEntry> {
+        let refcount = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE((SELECT COUNT(*) FROM plugin_chains_v2 WHERE wasm_registry_id = $1), 0)::BIGINT",
+        )
+        .bind(BUILTIN_CACHE_AFFINITY_ID)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(map_sqlx_error)?;
+        Ok(WasmRegistryEntry::builtin_cache_affinity(refcount))
+    }
+
     async fn get_chain_in_tx(
         &self,
         tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
@@ -562,6 +606,48 @@ impl PostgresStorage {
             .map_err(map_sqlx_error)?;
         row.map(chain_from_row).transpose()
     }
+}
+
+async fn validate_chain_insert_principal_and_slot(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: &PluginChainEntryInput,
+) -> StorageResult<()> {
+    let principal_exists: Option<i32> =
+        sqlx::query_scalar("SELECT 1 FROM principals_v1 WHERE id = $1")
+            .bind(input.principal_id)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?;
+    if principal_exists.is_none() {
+        return Err(StorageError::PrincipalNotFound {
+            id: input.principal_id.to_string(),
+        });
+    }
+    if is_singleton_slot(input.slot)
+        && let Some(existing_entry_id) = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM plugin_chains_v2 WHERE principal_id = $1 AND slot = $2 ORDER BY id ASC LIMIT 1",
+        )
+        .bind(input.principal_id)
+        .bind(input.slot.as_str())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?
+    {
+        return Err(StorageError::PluginChainConflict {
+            reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id },
+        });
+    }
+    Ok(())
+}
+
+async fn insert_chain_row_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    input: &PluginChainEntryInput,
+) -> StorageResult<sqlx::postgres::PgRow> {
+    let id = Uuid::new_v4();
+    sqlx::query("INSERT INTO plugin_chains_v2 (id, principal_id, slot, order_value, wasm_registry_id, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision, wire_version) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,0,$10) RETURNING *")
+        .bind(id).bind(input.principal_id).bind(input.slot.as_str()).bind(input.order).bind(input.wasm_registry_id).bind(input.config.clone()).bind(input.sse_per_event).bind(i32::try_from(input.batched_events_per_flush).map_err(|_| StorageError::Fatal { message: "batched_events_per_flush exceeds i32".to_owned() })?).bind(u64_to_i64(input.batched_flush_ms, "plugin_chain.batched_flush_ms")?).bind(input.wire_version.map(i16::from))
+        .fetch_one(&mut **tx).await.map_err(map_sqlx_error)
 }
 
 async fn insert_blob_in_tx(
@@ -661,6 +747,9 @@ fn registry_from_row(row: sqlx::postgres::PgRow) -> StorageResult<WasmRegistryEn
             row.try_get("revision").map_err(map_sqlx_error)?,
             "wasm_registry.revision",
         )?,
+        kind: "filter".to_owned(),
+        wire_version: BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
+        is_builtin: false,
     })
 }
 

@@ -7,8 +7,8 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use cc_lb_config::Config;
 use cc_lb_core::spawn_audit_writer;
 use cc_lb_storage_api::{
-    PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
-    PrincipalStore, WasmBlob, WasmRegistryEntryInput, sparse_order,
+    BUILTIN_CACHE_AFFINITY_ID, PluginChainEntryInput, PluginRegistryStore, PluginSlot,
+    PrincipalCreate, PrincipalKind, PrincipalStore, WasmBlob, WasmRegistryEntryInput, sparse_order,
 };
 use config_admin_common::{TOKEN, app, authed_json, temp_storage, test_state};
 use http_body_util::BodyExt;
@@ -27,8 +27,57 @@ async fn registry_list_paginates() {
         request_json(app, "GET", "/admin/v1/plugins/registry?limit=1", None, None).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(headers.get("x-total-count").unwrap(), "2");
+    assert_eq!(headers.get("x-total-count").unwrap(), "3");
     assert_eq!(body["entries"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn registry_list_exposes_builtin_cache_affinity() {
+    let (_dir, storage) = temp_storage();
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body) =
+        request_json(app, "GET", "/admin/v1/plugins/registry", None, None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let builtin = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == BUILTIN_CACHE_AFFINITY_ID.to_string())
+        .expect("builtin cache-affinity entry is listed");
+    assert_eq!(builtin["name"], "cache-affinity");
+    assert_eq!(builtin["kind"], "filter");
+    assert_eq!(builtin["wire_version"], 3);
+    assert_eq!(builtin["is_builtin"], true);
+}
+
+#[tokio::test]
+async fn builtin_registry_update_and_delete_return_409() {
+    let (_dir, storage) = temp_storage();
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (patch_status, _, patch_body) = request_json(
+        app.clone(),
+        "PATCH",
+        &format!("/admin/v1/plugins/registry/{BUILTIN_CACHE_AFFINITY_ID}"),
+        Some(json!({ "label": "nope" })),
+        Some("W/\"0\""),
+    )
+    .await;
+    let (delete_status, _, delete_body) = request_json(
+        app,
+        "DELETE",
+        &format!("/admin/v1/plugins/registry/{BUILTIN_CACHE_AFFINITY_ID}"),
+        None,
+        Some("W/\"0\""),
+    )
+    .await;
+
+    assert_eq!(patch_status, StatusCode::CONFLICT);
+    assert_eq!(patch_body["error"], "builtin_plugin_immutable");
+    assert_eq!(delete_status, StatusCode::CONFLICT);
+    assert_eq!(delete_body["error"], "builtin_plugin_immutable");
 }
 
 #[tokio::test]

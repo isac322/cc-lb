@@ -12,6 +12,7 @@ use cc_lb_core::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
     RouterPipelineCache,
 };
+use cc_lb_core::builtin_filters::cache_affinity::CacheAffinityFilter;
 use cc_lb_core::clock::SystemClock;
 use cc_lb_core::{
     ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamRateLimitCache,
@@ -19,16 +20,16 @@ use cc_lb_core::{
 };
 use cc_lb_dialect_anthropic::AnthropicDirectDialect;
 use cc_lb_plugin_api::{
-    PluginManifest, Principal, RateLimitObservation, RequestContext, RouteDecision, RouteError,
-    RouterPlugin, Signer, SignerError, SignerFactory, Upstream, UpstreamCandidate,
+    FilterPlugin, PluginManifest, Principal, RateLimitObservation, RequestContext, RouteDecision,
+    RouteError, RouterPlugin, Signer, SignerError, SignerFactory, Upstream, UpstreamCandidate,
 };
 use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    AnthropicCompatibilityKvStore, AuditStore, PluginRegistryRepo, PluginRegistryStore, PluginSlot,
-    PrincipalRecord, PrincipalStore, PromptCacheObservationStore, RateLimitKind, StorageError,
-    StorageResult, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord,
-    UpstreamStore, UpstreamSubscriptionQuotaStore,
+    AnthropicCompatibilityKvStore, AuditStore, BUILTIN_CACHE_AFFINITY_ID, PluginRegistryRepo,
+    PluginRegistryStore, PluginSlot, PrincipalRecord, PrincipalStore, PromptCacheObservationStore,
+    RateLimitKind, StorageError, StorageResult, UpstreamRateLimitObservationRecord,
+    UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore, UpstreamSubscriptionQuotaStore,
 };
 use parking_lot::RwLock;
 use thiserror::Error;
@@ -584,9 +585,13 @@ async fn build_router_pipeline(
     }
 
     router_entries.sort_by_key(|entry| entry.order);
-    let mut filters = Vec::with_capacity(router_entries.len());
+    let mut filters: Vec<Arc<dyn FilterPlugin>> = Vec::with_capacity(router_entries.len());
     let mut router_staged = Vec::with_capacity(router_entries.len());
     for entry in router_entries {
+        if entry.wasm_registry_id == BUILTIN_CACHE_AFFINITY_ID {
+            filters.push(Arc::new(CacheAffinityFilter::new()));
+            continue;
+        }
         let manifest = match manifest_for_chain_entry(stores, data_dir, registry, &entry).await {
             Ok(manifest) => manifest,
             Err(error) => {

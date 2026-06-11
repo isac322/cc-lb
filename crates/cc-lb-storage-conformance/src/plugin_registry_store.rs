@@ -2,6 +2,7 @@ use std::{any::Any, sync::Arc};
 
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
     PluginChainConflictReason, PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore,
     PluginSlot, PrincipalStore, StorageError, WasmBlob, WasmRegistryEntryInput,
     principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind},
@@ -36,6 +37,9 @@ where
     persist_wasm_upload_records_parse_validated_at(storage).await?;
     get_blob_bytes_returns_persisted_blob(storage).await?;
     registry_list_paginates(storage).await?;
+    registry_list_and_get_include_builtin_cache_affinity(storage).await?;
+    builtin_cache_affinity_is_immutable(storage).await?;
+    upload_name_collision_with_builtin_conflicts(storage).await?;
     get_registry_entry_by_sha_returns_entry(storage).await?;
     registry_label_update_with_correct_revision_bumps_and_persists(storage).await?;
     registry_label_update_with_stale_revision_conflicts(storage).await?;
@@ -54,6 +58,7 @@ where
     rebalance_chain_evenly_spaces(storage).await?;
     sparse_order_between_integration(storage).await?;
     delete_chain_entry_decrements_refcount(storage).await?;
+    delete_chain_entry_allows_builtin_cache_affinity(storage).await?;
     delete_chain_entry_missing_is_false(storage).await?;
     decrement_blob_refcount_or_delete_missing_is_false(storage).await?;
     list_orphan_blobs_returns_blobs_without_registry_on_storage(storage).await?;
@@ -237,6 +242,72 @@ pub async fn registry_list_paginates<S: PluginRegistryStore>(storage: &S) -> Res
     ensure!(
         storage.list_registry(None, 1).await?.len() == 1,
         "limit applies"
+    );
+    Ok(())
+}
+
+pub async fn registry_list_and_get_include_builtin_cache_affinity<S: PluginRegistryStore>(
+    storage: &S,
+) -> Result<()> {
+    let listed = storage.list_registry(None, 10).await?;
+    let builtin = listed
+        .iter()
+        .find(|entry| entry.id == BUILTIN_CACHE_AFFINITY_ID)
+        .expect("builtin cache-affinity is listed");
+    ensure!(builtin.name == BUILTIN_CACHE_AFFINITY_NAME, "builtin name");
+    ensure!(builtin.is_builtin, "builtin marker");
+    ensure!(builtin.kind == "filter", "builtin kind");
+    ensure!(
+        builtin.wire_version == BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
+        "builtin wire version"
+    );
+
+    let by_id = storage
+        .get_registry_entry_by_id(BUILTIN_CACHE_AFFINITY_ID)
+        .await?
+        .expect("builtin lookup by id");
+    ensure!(by_id.is_builtin, "id lookup returns builtin");
+    Ok(())
+}
+
+pub async fn builtin_cache_affinity_is_immutable<S: PluginRegistryStore>(
+    storage: &S,
+) -> Result<()> {
+    let update = storage
+        .update_registry_label(BUILTIN_CACHE_AFFINITY_ID, 0, Some("nope".to_owned()))
+        .await
+        .expect_err("builtin update is immutable");
+    let delete = storage
+        .delete_registry_entry(BUILTIN_CACHE_AFFINITY_ID, 0)
+        .await
+        .expect_err("builtin delete is immutable");
+    ensure!(
+        matches!(update, StorageError::BuiltinPluginImmutable),
+        "update immutable"
+    );
+    ensure!(
+        matches!(delete, StorageError::BuiltinPluginImmutable),
+        "delete immutable"
+    );
+    Ok(())
+}
+
+pub async fn upload_name_collision_with_builtin_conflicts<S: PluginRegistryStore>(
+    storage: &S,
+) -> Result<()> {
+    let err = storage
+        .persist_wasm_upload(
+            blob(91, b"builtin-name".to_vec()),
+            entry(BUILTIN_CACHE_AFFINITY_NAME),
+        )
+        .await
+        .expect_err("builtin name collision conflicts");
+    ensure!(
+        matches!(
+            err,
+            StorageError::Conflict { .. } | StorageError::PluginRegistryConflict { .. }
+        ),
+        "name conflict"
     );
     Ok(())
 }
@@ -652,6 +723,42 @@ pub async fn delete_chain_entry_decrements_refcount<S: PluginRegistryStore + Pri
             .await?
             .is_some(),
         "delete returns entry"
+    );
+    Ok(())
+}
+
+pub async fn delete_chain_entry_allows_builtin_cache_affinity<
+    S: PluginRegistryStore + PrincipalStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let principal = storage.create(principal_create(92), BASE_TS).await?.id;
+    let created = storage
+        .insert_chain_entry(PluginChainEntryInput {
+            principal_id: principal,
+            slot: PluginSlot::Router,
+            order: sparse_order::STEP,
+            wasm_registry_id: BUILTIN_CACHE_AFFINITY_ID,
+            config: json!({}),
+            sse_per_event: false,
+            batched_events_per_flush: 1,
+            batched_flush_ms: 100,
+            wire_version: Some(BUILTIN_CACHE_AFFINITY_WIRE_VERSION),
+        })
+        .await?;
+    ensure!(
+        storage
+            .delete_chain_entry(created.id, created.revision)
+            .await?
+            .is_some(),
+        "builtin chain row delete succeeds"
+    );
+    ensure!(
+        storage
+            .get_registry_entry_by_id(BUILTIN_CACHE_AFFINITY_ID)
+            .await?
+            .is_some(),
+        "builtin registry entry remains"
     );
     Ok(())
 }

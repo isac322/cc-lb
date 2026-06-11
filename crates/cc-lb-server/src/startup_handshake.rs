@@ -361,6 +361,9 @@ pub async fn bridge_legacy_wasm_registry(
         let last_id = page.last().map(|entry| entry.id);
 
         for entry in page {
+            if entry.is_builtin {
+                continue;
+            }
             report.scanned += 1;
             bridge_single_entry(plugin_registry, legacy_store, &entry, &mut report).await;
         }

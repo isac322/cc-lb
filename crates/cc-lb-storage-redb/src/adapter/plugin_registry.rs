@@ -2,6 +2,7 @@ use std::collections::HashSet;
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, BUILTIN_CACHE_AFFINITY_SHA256,
     MAX_WASM_BLOB_BYTES, PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput,
     PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, StorageError as ApiStorageError,
     StorageResult, WasmBlob, WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput,
@@ -219,6 +220,12 @@ impl RedbStorage {
         input: WasmRegistryEntryInput,
     ) -> Result<(WasmRegistryEntry, bool), StorageError> {
         let write_txn = self.db.begin_write()?;
+        if input.name == BUILTIN_CACHE_AFFINITY_NAME {
+            return Err(StorageError::PluginRegistryConflict {
+                message: "plugin registry name collides with builtin plugin: cache-affinity"
+                    .to_owned(),
+            });
+        }
         let (sha_match, name_conflict) =
             scan_registry_for_upload(&write_txn, blob.sha256, &input.name)?;
         if let Some(existing) = sha_match {
@@ -260,6 +267,9 @@ impl RedbStorage {
             uploaded_by_admin_id: input.uploaded_by_admin_id,
             refcount: 0,
             revision: 0,
+            kind: "filter".to_owned(),
+            wire_version: cc_lb_storage_api::BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
+            is_builtin: false,
         };
         {
             let mut registry = write_txn.open_table(WASM_REGISTRY_V2)?;
@@ -330,6 +340,11 @@ impl RedbStorage {
             entries.push(entry);
         }
         entries.sort_by_key(|entry| entry.id);
+        if after.is_none_or(|after| BUILTIN_CACHE_AFFINITY_ID > after) {
+            let builtin_refcount = chain_refcount(&read_txn, BUILTIN_CACHE_AFFINITY_ID)?;
+            entries.push(WasmRegistryEntry::builtin_cache_affinity(builtin_refcount));
+            entries.sort_by_key(|entry| entry.id);
+        }
         let skip = after
             .and_then(|id| {
                 entries
@@ -346,6 +361,11 @@ impl RedbStorage {
         sha256: [u8; 32],
     ) -> Result<Option<WasmRegistryEntry>, StorageError> {
         let read_txn = self.db.begin_read()?;
+        if sha256 == BUILTIN_CACHE_AFFINITY_SHA256 {
+            return Ok(Some(WasmRegistryEntry::builtin_cache_affinity(
+                chain_refcount(&read_txn, BUILTIN_CACHE_AFFINITY_ID)?,
+            )));
+        }
         registry_by_sha_read(&read_txn, sha256)
     }
 
@@ -354,6 +374,11 @@ impl RedbStorage {
         id: Uuid,
     ) -> Result<Option<WasmRegistryEntry>, StorageError> {
         let read_txn = self.db.begin_read()?;
+        if id == BUILTIN_CACHE_AFFINITY_ID {
+            return Ok(Some(WasmRegistryEntry::builtin_cache_affinity(
+                chain_refcount(&read_txn, BUILTIN_CACHE_AFFINITY_ID)?,
+            )));
+        }
         let registry = read_txn.open_table(WASM_REGISTRY_V2)?;
         let blobs = read_txn.open_table(WASM_BLOBS_V2)?;
         registry
@@ -373,6 +398,9 @@ impl RedbStorage {
         label: Option<String>,
     ) -> Result<WasmRegistryEntry, StorageError> {
         let write_txn = self.db.begin_write()?;
+        if id == BUILTIN_CACHE_AFFINITY_ID {
+            return Err(StorageError::BuiltinPluginImmutable);
+        }
         let mut found = None;
         {
             let registry = write_txn.open_table(WASM_REGISTRY_V2)?;
@@ -417,6 +445,9 @@ impl RedbStorage {
         expected_revision: u64,
     ) -> Result<Option<WasmRegistryEntry>, StorageError> {
         let write_txn = self.db.begin_write()?;
+        if id == BUILTIN_CACHE_AFFINITY_ID {
+            return Err(StorageError::BuiltinPluginImmutable);
+        }
         let deleted = {
             let registry = write_txn.open_table(WASM_REGISTRY_V2)?;
             let Some(value) = registry.get(id.as_bytes().as_slice())? else {
@@ -502,12 +533,22 @@ impl RedbStorage {
                 reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id },
             });
         }
-        let registry = registry_by_id(&write_txn, input.wasm_registry_id)?.ok_or_else(|| {
-            StorageError::PluginRegistryConflict {
-                message: "unknown plugin registry entry".to_owned(),
+        if input.wasm_registry_id == BUILTIN_CACHE_AFFINITY_ID {
+            if input.slot != PluginSlot::Router {
+                return Err(StorageError::InvalidInput {
+                    field: "plugin_chain.slot".to_owned(),
+                    reason: "builtin cache-affinity is a router filter".to_owned(),
+                });
             }
-        })?;
-        increment_blob(&write_txn, registry.sha256)?;
+        } else {
+            let registry =
+                registry_by_id(&write_txn, input.wasm_registry_id)?.ok_or_else(|| {
+                    StorageError::PluginRegistryConflict {
+                        message: "unknown plugin registry entry".to_owned(),
+                    }
+                })?;
+            increment_blob(&write_txn, registry.sha256)?;
+        }
         let record = PluginChainEntry {
             id: Uuid::new_v4(),
             principal_id: input.principal_id,
@@ -639,12 +680,15 @@ impl RedbStorage {
                 current: entry.revision,
             });
         }
-        let registry = registry_by_id(&write_txn, entry.wasm_registry_id)?.ok_or_else(|| {
-            StorageError::PluginRegistryConflict {
-                message: "missing plugin registry entry".to_owned(),
-            }
-        })?;
-        decrement_blob(&write_txn, registry.sha256)?;
+        if entry.wasm_registry_id != BUILTIN_CACHE_AFFINITY_ID {
+            let registry =
+                registry_by_id(&write_txn, entry.wasm_registry_id)?.ok_or_else(|| {
+                    StorageError::PluginRegistryConflict {
+                        message: "missing plugin registry entry".to_owned(),
+                    }
+                })?;
+            decrement_blob(&write_txn, registry.sha256)?;
+        }
         {
             let mut chains = write_txn.open_table(PLUGIN_CHAINS_V2)?;
             chains.remove(id.as_bytes().as_slice())?;
@@ -743,6 +787,22 @@ fn registry_is_referenced_by_chain(
         }
     }
     Ok(false)
+}
+
+fn chain_refcount(
+    read_txn: &redb::ReadTransaction,
+    registry_id: Uuid,
+) -> Result<i64, StorageError> {
+    let chains = read_txn.open_table(PLUGIN_CHAINS_V2)?;
+    let mut count = 0;
+    for row in chains.iter()? {
+        let (_, value) = row?;
+        let entry: PluginChainEntry = serde_json::from_slice(value.value())?;
+        if entry.wasm_registry_id == registry_id {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 fn principal_exists(

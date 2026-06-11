@@ -5,6 +5,13 @@ use uuid::Uuid;
 
 use crate::StorageResult;
 
+pub use cc_lb_plugin_api::{
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
+};
+
+pub const BUILTIN_PLUGIN_KIND_FILTER: &str = "filter";
+pub const BUILTIN_CACHE_AFFINITY_SHA256: [u8; 32] = [0; 32];
+
 pub const MAX_WASM_BLOB_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,6 +47,43 @@ pub struct WasmRegistryEntry {
     pub uploaded_by_admin_id: Uuid,
     pub refcount: i64,
     pub revision: u64,
+    #[serde(default = "default_plugin_kind")]
+    pub kind: String,
+    #[serde(default = "default_wire_version")]
+    pub wire_version: u8,
+    #[serde(default)]
+    pub is_builtin: bool,
+}
+
+impl WasmRegistryEntry {
+    pub fn builtin_cache_affinity(refcount: i64) -> Self {
+        Self {
+            id: BUILTIN_CACHE_AFFINITY_ID,
+            sha256: BUILTIN_CACHE_AFFINITY_SHA256,
+            name: BUILTIN_CACHE_AFFINITY_NAME.to_owned(),
+            original_filename: "builtin://cache-affinity".to_owned(),
+            label: Some("Built-in cache affinity filter".to_owned()),
+            uploaded_at_unix_secs: 0,
+            uploaded_by_admin_id: Uuid::nil(),
+            refcount,
+            revision: 0,
+            kind: BUILTIN_PLUGIN_KIND_FILTER.to_owned(),
+            wire_version: BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
+            is_builtin: true,
+        }
+    }
+
+    pub fn is_cache_affinity_builtin(&self) -> bool {
+        self.id == BUILTIN_CACHE_AFFINITY_ID
+    }
+}
+
+fn default_plugin_kind() -> String {
+    BUILTIN_PLUGIN_KIND_FILTER.to_owned()
+}
+
+fn default_wire_version() -> u8 {
+    1
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

@@ -30,7 +30,7 @@ pub use oauth::{api_key_storage_key, oauth_key};
 pub use plugin_registry::{RedbPluginBlobRepo, RedbPluginRegistryRepo};
 pub use price_catalog::PriceSnapshot;
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 5;
+pub const CURRENT_SCHEMA_VERSION: u32 = 6;
 
 pub const OAUTH_CREDENTIALS_V1: TableDefinition<&[u8], &[u8]> =
     TableDefinition::new("OAUTH_CREDENTIALS_V1");
@@ -163,6 +163,8 @@ pub enum StorageError {
     PrincipalReferencedByAudit { id: String },
     #[error("plugin registry conflict: {message}")]
     PluginRegistryConflict { message: String },
+    #[error("builtin plugin is immutable")]
+    BuiltinPluginImmutable,
     #[error("plugin chain conflict: {reason}")]
     PluginChainConflict {
         reason: cc_lb_storage_api::PluginChainConflictReason,
