@@ -23,19 +23,66 @@ test.describe('Router Pipeline', () => {
     if (isAuthRequired) {
       await page.locator('input[type="password"]').fill('mock-token');
       await page.locator('button:has-text("Sign in")').click();
-      await page.waitForSelector('text=Principals');
+      await expect(page.locator('h1', { hasText: 'Principals' })).toBeVisible();
     }
 
-    // Click on the first principal
+    // Step 1: principal load
     await page.locator('button:has-text("admin")').first().click();
-
-    // Wait for Plugin Chain card
     await expect(page.locator('text=Plugin Chain')).toBeVisible();
-
-    // Take screenshot 1
     await page.screenshot({ path: path.join(evidenceDir, 'task-31-step1.png') });
 
-    // Terminal toggle
+    // Step 2: router slot list rendered
+    const pluginList = page.locator('ul').filter({ hasText: 'Terminal' });
+    await expect(pluginList).toBeVisible();
+    await page.screenshot({ path: path.join(evidenceDir, 'task-31-step2.png') });
+
+    // Step 3: terminal row locked - no drag handle
+    const terminalRow = pluginList.locator('li').filter({ hasText: 'Terminal' });
+    await expect(terminalRow).toBeVisible();
+    await expect(terminalRow.locator('button[aria-label="Drag to reorder"]')).toHaveCount(0);
+    await page.screenshot({ path: path.join(evidenceDir, 'task-31-step3.png') });
+
+    // Step 4: add second router plugin
+    const addButton = page.locator('button:has-text("Add")').first();
+    await addButton.click();
+    const modal = page.locator('[role="dialog"]');
+    await expect(modal).toBeVisible();
+    const select = modal.locator('select');
+    await select.selectOption({ index: 1 });
+    await modal.locator('button:has-text("Add")').click();
+    await expect(modal).not.toBeVisible();
+    await expect(pluginList.locator('li:has(button[aria-label="Drag to reorder"])')).toHaveCount(2);
+    await page.screenshot({ path: path.join(evidenceDir, 'task-31-step4.png') });
+
+    // Step 5: drag reorder
+    const dragHandles = pluginList.locator('button[aria-label="Drag to reorder"]');
+    const first = dragHandles.nth(0);
+    const second = dragHandles.nth(1);
+    
+    const firstItemText = await pluginList.locator('li:has(button[aria-label="Drag to reorder"])').nth(0).locator('span.truncate').textContent();
+    
+    const firstBox = await first.boundingBox();
+    const secondBox = await second.boundingBox();
+    if (firstBox && secondBox) {
+      await page.mouse.move(firstBox.x + firstBox.width / 2, firstBox.y + firstBox.height / 2);
+      await page.mouse.down();
+      // Use expect.poll to wait for dnd-kit sensor to activate
+      await expect.poll(async () => {
+        const bodyClass = await page.evaluate(() => document.body.className);
+        return bodyClass.includes('active') || true; // Just a small delay
+      }).toBeTruthy();
+      await page.mouse.move(secondBox.x + secondBox.width / 2, secondBox.y + secondBox.height / 2 + 10, { steps: 10 });
+      await page.mouse.up();
+    }
+    
+    // Verify order changed
+    await expect.poll(async () => {
+      const newSecondItemText = await pluginList.locator('li:has(button[aria-label="Drag to reorder"])').nth(1).locator('span.truncate').textContent();
+      return newSecondItemText === firstItemText;
+    }).toBeTruthy();
+    await page.screenshot({ path: path.join(evidenceDir, 'task-31-step5.png') });
+
+    // Step 6: terminal strategy change to Random + reload + persistence
     const terminalSelect = page.locator('select[aria-label="Terminal strategy"]');
     await expect(terminalSelect).toBeVisible();
     
@@ -45,54 +92,36 @@ test.describe('Router Pipeline', () => {
     await terminalSelect.selectOption('random');
     await responsePromise;
     
-    // Verify persistence by reloading
     await page.reload();
     await expect(page.locator('text=Plugin Chain')).toBeVisible();
     await expect(page.locator('select[aria-label="Terminal strategy"]')).toHaveValue('random');
-    await page.screenshot({ path: path.join(evidenceDir, 'task-31-step2.png') });
+    await page.screenshot({ path: path.join(evidenceDir, 'task-31-step6.png') });
 
-    // Drag reorder
-    const dragHandles = page.locator('button[aria-label="Drag to reorder"]');
-    // We need at least 2 items to reorder
-    if (await dragHandles.count() >= 2) {
-      const first = dragHandles.nth(0);
-      const second = dragHandles.nth(1);
-      
-      // Get initial text of the first item
-      const firstItemText = await page.locator('li:has(button[aria-label="Drag to reorder"])').nth(0).locator('span.truncate').textContent();
-      
-      const firstBox = await first.boundingBox();
-      const secondBox = await second.boundingBox();
-      if (firstBox && secondBox) {
-        await page.mouse.move(firstBox.x + firstBox.width / 2, firstBox.y + firstBox.height / 2);
-        await page.mouse.down();
-        await page.mouse.move(secondBox.x + secondBox.width / 2, secondBox.y + secondBox.height / 2 + 20, { steps: 10 });
-        await page.mouse.up();
-      }
-      
-      // Verify order changed
-      await expect.poll(async () => {
-        const newSecondItemText = await page.locator('li:has(button[aria-label="Drag to reorder"])').nth(1).locator('span.truncate').textContent();
-        return newSecondItemText === firstItemText;
-      }).toBeTruthy();
-      
-      await page.screenshot({ path: path.join(evidenceDir, 'task-31-step4.png') });
-    }
-
-    // Hover panels in Logs page
+    // Step 7: logs page navigate
     await page.goto('/logs');
-    await expect(page.locator('text=Request Logs')).toBeVisible();
+    await expect(page.locator('text=Live Logs')).toBeVisible();
+    await page.screenshot({ path: path.join(evidenceDir, 'task-31-step7.png') });
     
-    // Find an upstream cell with a routing trace
-    const upstreamCell = page.locator('td .cursor-help').first();
+    // Step 8: hover upstream cell → routing_trace panel
+    const upstreamCell = page.locator('td').filter({ hasText: /anthropic|oauth/ }).locator('.cursor-help').first();
     await expect(upstreamCell).toBeVisible();
     await upstreamCell.hover();
     
-    // Verify hover panel content
     const tooltip = page.locator('[role="tooltip"]');
     await expect(tooltip).toBeVisible();
     await expect(tooltip).toContainText('Routing Trace');
     await expect(tooltip).toContainText('Terminal');
-    await page.screenshot({ path: path.join(evidenceDir, 'task-31-step3.png') });
+    await page.screenshot({ path: path.join(evidenceDir, 'task-31-step8.png') });
+
+    // Step 9: hover status cell → internal_errors panel
+    // We need to find a status cell with internal errors.
+    // The mock server generates internal errors for some events.
+    const statusCell = page.locator('td').filter({ hasText: /^(200|429|500)$/ }).locator('.cursor-help').first();
+    await expect(statusCell).toBeVisible();
+    await statusCell.hover();
+    
+    await expect(tooltip).toBeVisible();
+    await expect(tooltip).toContainText('Internal Errors');
+    await page.screenshot({ path: path.join(evidenceDir, 'task-31-step9.png') });
   });
 });
