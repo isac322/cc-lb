@@ -25,7 +25,7 @@ use common::{
 };
 
 #[tokio::test]
-async fn pipeline_filters_candidates_before_terminal_router()
+async fn pipeline_filters_candidates_before_terminal_strategy()
 -> Result<(), Box<dyn std::error::Error>> {
     let upstream_id = default_upstream_id();
     let filter_calls = Arc::new(Mutex::new(Vec::new()));
@@ -52,10 +52,7 @@ async fn pipeline_filters_candidates_before_terminal_router()
         filter_calls.lock().unwrap().as_slice(),
         &[vec![upstream_id]]
     );
-    assert_eq!(
-        router_calls.lock().unwrap().as_slice(),
-        &[vec![upstream_id]]
-    );
+    assert!(router_calls.lock().unwrap().is_empty());
     Ok(())
 }
 
@@ -101,10 +98,7 @@ async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn
             keep_filter_calls.lock().unwrap().as_slice(),
             &[vec![upstream_id]]
         );
-        assert_eq!(
-            router_calls.lock().unwrap().as_slice(),
-            &[vec![upstream_id]]
-        );
+        assert!(router_calls.lock().unwrap().is_empty());
         assert!(hook.events.lock().unwrap().iter().any(|event| matches!(
             event,
             cc_lb_plugin_api::ObserveEvent::Error { code, source, .. }
@@ -115,7 +109,7 @@ async fn trap_and_runtime_errors_pass_candidates_through() -> Result<(), Box<dyn
 }
 
 #[tokio::test]
-async fn empty_stage_output_propagates_to_later_stages_and_router()
+async fn empty_stage_output_propagates_to_later_stages_and_terminal_strategy()
 -> Result<(), Box<dyn std::error::Error>> {
     let upstream_id = default_upstream_id();
     let empty_filter_calls = Arc::new(Mutex::new(Vec::new()));

@@ -96,40 +96,6 @@ async fn no_candidates_after_filters_returns_503_and_logs_request_event()
     Ok(())
 }
 
-#[tokio::test]
-async fn router_none_decision_does_not_fall_back_to_first_candidate()
--> Result<(), Box<dyn std::error::Error>> {
-    let upstream_id = upstream_id(1);
-    let router_calls = Arc::new(Mutex::new(Vec::new()));
-    let state = TestState::default();
-    let lifecycle = lifecycle_with_pipeline(
-        Vec::new(),
-        vec![upstream_record(upstream_id, "first")],
-        Arc::new(RecordingRouter {
-            calls: Arc::clone(&router_calls),
-            selected_id: None,
-        }),
-        state.clone(),
-    );
-
-    let response = lifecycle
-        .handle(messages_request(Bytes::from_static(
-            br#"{"model":"claude-test","messages":[],"max_tokens":16}"#,
-        )))
-        .await?;
-    let (status, _headers, body) = collect_body(response).await;
-
-    assert_eq!(status, StatusCode::BAD_GATEWAY);
-    let body: Value = serde_json::from_slice(&body)?;
-    assert_eq!(body["error"]["type"], "route_not_configured");
-    assert_eq!(state.upstream_calls.load(Ordering::Relaxed), 0);
-    assert_eq!(
-        router_calls.lock().expect("router calls lock").as_slice(),
-        &[vec![upstream_id]]
-    );
-    Ok(())
-}
-
 fn lifecycle_with_pipeline(
     filters: Vec<Arc<dyn FilterPlugin>>,
     records: Vec<UpstreamRecord>,
