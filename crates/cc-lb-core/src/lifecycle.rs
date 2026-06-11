@@ -1102,6 +1102,43 @@ impl Lifecycle {
             router_pipeline.terminal.clone(),
             &pipeline_result.candidates,
         );
+        if pipeline_result.candidates.is_empty() {
+            let route_ms = duration_to_ms(route_start.elapsed());
+            let message = "no upstream candidates remain after routing filters";
+            observe_error(hooks, "route_no_upstream_after_filter", message, "router");
+            let mut internal_errors = pipeline_result.internal_errors.clone();
+            internal_errors.push(InternalError {
+                stage: InternalErrorStage::Router,
+                kind: InternalErrorKind::ConfigError,
+                message: Some(message.to_owned()),
+            });
+            self.emit_routing_failure_event(
+                &ctx,
+                &success,
+                &principal,
+                auth_ms,
+                route_ms,
+                started.elapsed(),
+                StatusCode::SERVICE_UNAVAILABLE,
+                "route_no_upstream_after_filter",
+                Some(pipeline_result.routing_trace(terminal_decision.clone())),
+                internal_errors,
+            )
+            .await;
+            let response = anthropic_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "route_no_upstream_after_filter",
+                message,
+            );
+            observe_finished_for_principal(
+                hooks,
+                StatusCode::SERVICE_UNAVAILABLE,
+                started,
+                &principal,
+                &ctx.body_bytes,
+            );
+            return Ok(response);
+        }
 
         let route = match router.route(&ctx, &principal, &pipeline_result.candidates) {
             Ok(route) => route,
@@ -1123,7 +1160,7 @@ impl Lifecycle {
             }
         };
 
-        let resolved_upstream_id = match route.upstream_id.or(terminal_decision.upstream_id) {
+        let resolved_upstream_id = match route.upstream_id {
             Some(upstream_id)
                 if pipeline_result
                     .candidates
@@ -1721,6 +1758,48 @@ impl Lifecycle {
             }
         }
         Response::from_parts(parts, Body::from(body))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn emit_routing_failure_event(
+        &self,
+        ctx: &RequestContext,
+        authn_success: &AuthnSuccess,
+        principal: &Principal,
+        auth_ms: u64,
+        route_ms: u64,
+        duration: Duration,
+        status: StatusCode,
+        error_code: &str,
+        routing_trace: Option<RoutingTrace>,
+        internal_errors: Vec<InternalError>,
+    ) {
+        let Some(storage) = self.request_event_storage.as_ref() else {
+            return;
+        };
+        let now_ms = unix_now_ms();
+        let event = RequestEvent {
+            ts: now_ms / 1_000,
+            ts_ms: Some(now_ms),
+            request_id: ctx.request_id.clone(),
+            principal_id: Some(authn_success.principal_id.clone()),
+            key_id: Some(authn_success.key_id.clone()),
+            principal_kind: Some(principal_kind_as_str(&principal.kind).to_owned()),
+            model: extract_model(&ctx.body_bytes).or_else(|| {
+                (!ctx.canonical_model_id.is_empty()).then(|| ctx.canonical_model_id.clone())
+            }),
+            auth_ms: Some(auth_ms),
+            route_ms: Some(route_ms),
+            duration_ms: duration_to_ms(duration),
+            status: status.as_u16(),
+            error_code: Some(error_code.to_owned()),
+            routing_trace,
+            internal_errors,
+            ..Default::default()
+        };
+        if let Err(error) = storage.append_request_event(&event).await {
+            tracing::warn!(%error, "failed to append routing failure request event");
+        }
     }
 
     fn attach_limit_headers(
