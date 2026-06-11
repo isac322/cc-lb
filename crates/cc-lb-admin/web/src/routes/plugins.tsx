@@ -218,12 +218,14 @@ function RegistryTab() {
     revision: number;
     name: string;
   } | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
 
   const handleFile = (file: File | null | undefined) => {
     if (!file || upload.isPending) return;
+    setUploadError(null);
     const name = file.name.replace(/\.wasm$/, '');
     if (name === 'cache-affinity') {
-      toast.error(
+      setUploadError(
         "Plugin name 'cache-affinity' is reserved for the built-in filter",
       );
       return;
@@ -297,6 +299,15 @@ function RegistryTab() {
           <div className="text-[11px] text-text-faint mt-1">
             Drag and drop or click to browse. Max 32 MiB.
           </div>
+          {uploadError ? (
+            <div
+              role="alert"
+              data-testid="upload-error"
+              className="mt-3 text-[12px] text-[color:var(--color-danger)]"
+            >
+              {uploadError}
+            </div>
+          ) : null}
           <input
             id="btn-upload-wasm"
             ref={fileRef}
