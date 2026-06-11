@@ -592,7 +592,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
     if (principals.find((p) => p.name === body.name)) return err(409, "conflict");
     const np = { id: `pr-${Date.now().toString(36)}`, name: body.name, kind: body.kind ?? "human", enabled: true, revision: 1, allowed_models: body.allowed_models ?? [], allowed_upstreams: body.allowed_upstreams ?? [], default_limits: body.default_limits ?? [] };
     principals.push(np);
-    chainEntries.push({ id: `pce-${++chainEntryAutoId}`, principal_id: np.id, slot: "router", order: 1000, wasm_registry_id: BUILTIN_CACHE_AFFINITY_ID, config: {}, sse_per_event: false, batched_events_per_flush: 1, batched_flush_ms: 100, revision: 0, wire_version: 3 });
+    chainEntries.push({ id: `pce-${++chainEntryAutoId}`, principal_id: np.id, slot: "router", order: 0, wasm_registry_id: BUILTIN_CACHE_AFFINITY_ID, config: {}, sse_per_event: false, batched_events_per_flush: 1, batched_flush_ms: 100, revision: 0, wire_version: 3 });
     return created(withRouterChain(np), { etag: `"${np.revision}"`, location: `/admin/v1/principals/${np.id}` });
   }
   {
