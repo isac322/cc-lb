@@ -652,6 +652,13 @@ pub struct StageDecision {
     /// Reason for this stage's decision.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
+    /// Time spent executing this routing stage, in microseconds.
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub duration_us: u64,
+}
+
+fn is_zero_u64(value: &u64) -> bool {
+    *value == 0
 }
 
 /// Terminal routing decision selecting an upstream.
@@ -692,6 +699,8 @@ pub enum InternalErrorStage {
     Authn,
     /// Routing stage.
     Router,
+    /// Router filter stage.
+    RouterFilter,
     /// Request shaping stage.
     Shape,
     /// Request signing stage.
@@ -712,6 +721,10 @@ impl Default for InternalErrorStage {
 pub enum InternalErrorKind {
     /// Plugin crashed or returned an error.
     PluginError,
+    /// Plugin returned invalid output.
+    InvalidOutput,
+    /// Plugin trapped during execution.
+    Trap,
     /// Configuration error.
     ConfigError,
     /// Timeout error.

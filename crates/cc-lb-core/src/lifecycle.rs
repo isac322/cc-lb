@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::convert::Infallible;
 use std::fmt::Write as _;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -14,9 +15,10 @@ use cc_lb_plugin_api::types::{
 };
 use cc_lb_plugin_api::{
     ApiKeyAwareSignerFactory, FilterError, FilterOutput, InternalError, InternalErrorKind,
-    InternalErrorStage, ObservabilityHook, ObserveEvent, Principal, PrincipalKind, RequestContext,
-    RetryDecision, RouterPlugin, RoutingTrace, SignedRequest, SubscriptionQuotaCandidateSnapshot,
-    TerminalStrategy, Upstream, UpstreamCandidate, UpstreamError,
+    InternalErrorStage, ObservabilityHook, ObserveEvent, PerCandidateReason, Principal,
+    PrincipalKind, RequestContext, RetryDecision, RouterPlugin, RoutingTrace, ShapedRequest,
+    ShapedRequestBuilder, SignedRequest, SubscriptionQuotaCandidateSnapshot, TerminalStrategy,
+    Upstream, UpstreamCandidate, UpstreamDialect, UpstreamError,
     UpstreamKind as CandidateUpstreamKind, shape_request, sign_request,
 };
 use cc_lb_pricing::{PricingStatus, global_catalog, virtual_cost_micros_full};
@@ -40,6 +42,7 @@ use rand::{RngExt, SeedableRng, rngs::StdRng};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use url::Url;
 use uuid::Uuid;
 
 use crate::api_keys::builtin_authn::{AuthnSuccess, BuiltinAuthError, BuiltinAuthn};
@@ -64,7 +67,7 @@ use crate::sse_relay;
 use crate::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
 use crate::upstream_rate_limit_events::UpstreamRateLimitSink;
-use cc_lb_observability::{inc_cache_hit, inc_cache_miss};
+use cc_lb_observability::{inc_cache_hit, inc_cache_miss, redact_internal_errors, truncate_reason};
 
 pub type Body = AxumBody;
 
@@ -73,6 +76,7 @@ pub const HASH_SCHEMA_VERSION: u8 = 2;
 const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
 const PROMPT_CACHE_TTL_GRACE_SECS: u64 = 30;
+const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -1140,7 +1144,10 @@ impl Lifecycle {
             return Ok(response);
         }
 
-        let route = match router.route(&ctx, &principal, &pipeline_result.candidates) {
+        let routed_candidates =
+            terminal_candidates(&pipeline_result.candidates, &terminal_decision);
+
+        let route = match router.route(&ctx, &principal, &routed_candidates) {
             Ok(route) => route,
             Err(source) => {
                 observe_error(hooks, "route_not_configured", &source.to_string(), "router");
@@ -1162,14 +1169,13 @@ impl Lifecycle {
 
         let resolved_upstream_id = match route.upstream_id {
             Some(upstream_id)
-                if pipeline_result
-                    .candidates
+                if routed_candidates
                     .iter()
                     .any(|c| c.upstream_id == upstream_id) =>
             {
                 upstream_id
             }
-            _ => {
+            Some(_) => {
                 observe_error(
                     hooks,
                     "route_not_configured",
@@ -1190,6 +1196,10 @@ impl Lifecycle {
                 );
                 return Ok(response);
             }
+            None => routed_candidates
+                .first()
+                .map(|candidate| candidate.upstream_id)
+                .expect("non-empty routed candidates after terminal selection"),
         };
         let Some(resolved_record) = view
             .upstreams_snapshot()
@@ -1217,6 +1227,7 @@ impl Lifecycle {
             return Ok(response);
         };
         let router_chosen_upstream_name = resolved_record.name.clone();
+        let raw_passthrough_base_url = resolved_record.base_url.clone();
         let route_upstream = match upstream_for_record(resolved_record) {
             Ok(upstream) => upstream,
             Err(reason) => {
@@ -1323,6 +1334,7 @@ impl Lifecycle {
             limit_reserve_ms: Some(limit_reserve_ms),
             ..Default::default()
         };
+        let mut internal_errors = pipeline_result.internal_errors.clone();
         let mut response = match self
             .attempt(
                 view.dispatcher.as_ref(),
@@ -1330,8 +1342,10 @@ impl Lifecycle {
                 &ctx,
                 &principal,
                 &route,
+                raw_passthrough_base_url.as_ref(),
                 signer.clone(),
                 &mut attempt_timings,
+                &mut internal_errors,
             )
             .await
         {
@@ -1365,8 +1379,10 @@ impl Lifecycle {
                         &ctx,
                         &principal,
                         &route,
+                        raw_passthrough_base_url.as_ref(),
                         new_signer,
                         &mut attempt_timings,
+                        &mut internal_errors,
                     )
                     .await
                 {
@@ -1467,7 +1483,7 @@ impl Lifecycle {
                     stage_timings: attempt_timings,
                     cache_metadata,
                     routing_trace: Some(pipeline_result.routing_trace(terminal_decision.clone())),
-                    internal_errors: pipeline_result.internal_errors,
+                    internal_errors,
                 },
                 prompt_cache_observation_context,
             )
@@ -1908,20 +1924,22 @@ impl Lifecycle {
         ctx: &RequestContext,
         principal: &Principal,
         route: &cc_lb_plugin_api::RouteDecision,
+        raw_passthrough_base_url: Option<&Url>,
         signer: Arc<dyn cc_lb_plugin_api::Signer>,
         timings: &mut AttemptTimings,
+        internal_errors: &mut Vec<InternalError>,
     ) -> Result<Response<Body>, Box<Response<Body>>> {
         let shape_start = Instant::now();
-        let shaped = shape_request(route.dialect.as_ref(), ctx, &route.upstream, principal)
-            .map_err(|source| {
-                tracing::error!(%source, "shape_request failed");
-                observe_error(hooks, "shape_error", &source.to_string(), "dialect");
-                Box::new(anthropic_error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "api_error",
-                    "failed to shape upstream request",
-                ))
-            })?;
+        let shaped = match shape_request(route.dialect.as_ref(), ctx, &route.upstream, principal) {
+            Ok(shaped) => shaped,
+            Err(source) => {
+                let message = source.to_string();
+                tracing::warn!(%source, "shape_request failed; falling back to raw passthrough");
+                observe_error(hooks, "shape_error", &message, "dialect");
+                push_shape_internal_error(internal_errors, &message);
+                raw_passthrough_request(raw_passthrough_base_url, ctx, principal)?
+            }
+        };
         timings.shape_ms = Some(duration_to_ms(shape_start.elapsed()));
 
         let sign_start = Instant::now();
@@ -2390,13 +2408,44 @@ fn execute_filter_pipeline(
     let mut stages = Vec::with_capacity(filters.len());
     let mut internal_errors = Vec::new();
 
-    for filter in filters {
+    for (stage_index, filter) in filters.iter().enumerate() {
         let stage_name = filter.plugin_name().to_owned();
         let stage_started = Instant::now();
         match filter.filter(ctx, principal, &current) {
             Ok(output) => {
-                let output = validate_filter_output_stub(output);
-                let duration_ms = duration_to_ms(stage_started.elapsed());
+                let stage_elapsed = stage_started.elapsed();
+                let duration_ms = duration_to_ms(stage_elapsed);
+                let stage_idx = u8::try_from(stage_index).unwrap_or(u8::MAX);
+                let output = match validate_filter_output(
+                    &output,
+                    &current,
+                    stage_idx,
+                    &mut internal_errors,
+                ) {
+                    Ok(output) => output,
+                    Err(error) => {
+                        let message = format!("filter output validation failed: {error}");
+                        tracing::warn!(
+                            stage = stage_name.as_str(),
+                            duration_ms,
+                            error = message.as_str(),
+                            "router filter returned invalid output; passing candidates through"
+                        );
+                        observe_error(hooks, "router_filter_invalid_output", &message, "router");
+                        stages.push(StageDecision {
+                            stage_name,
+                            upstream_id: current.first().map(|candidate| candidate.upstream_id),
+                            reason: Some(message.clone()),
+                            duration_us: duration_to_us(stage_elapsed),
+                        });
+                        internal_errors.push(InternalError {
+                            stage: InternalErrorStage::RouterFilter,
+                            kind: InternalErrorKind::InvalidOutput,
+                            message: Some(message),
+                        });
+                        continue;
+                    }
+                };
                 tracing::debug!(
                     stage = stage_name.as_str(),
                     duration_ms,
@@ -2408,11 +2457,13 @@ fn execute_filter_pipeline(
                     stage_name,
                     upstream_id: output.kept_upstream_ids.first().copied(),
                     reason: Some(output.reason.clone()),
+                    duration_us: duration_to_us(stage_elapsed),
                 });
                 current = keep_filter_candidates(&current, &output.kept_upstream_ids);
             }
             Err(error @ (FilterError::Trap { .. } | FilterError::Runtime { .. })) => {
-                let duration_ms = duration_to_ms(stage_started.elapsed());
+                let stage_elapsed = stage_started.elapsed();
+                let duration_ms = duration_to_ms(stage_elapsed);
                 let message = error.to_string();
                 tracing::warn!(
                     stage = stage_name.as_str(),
@@ -2425,6 +2476,7 @@ fn execute_filter_pipeline(
                     stage_name,
                     upstream_id: current.first().map(|candidate| candidate.upstream_id),
                     reason: Some(message.clone()),
+                    duration_us: duration_to_us(stage_elapsed),
                 });
                 internal_errors.push(InternalError {
                     stage: InternalErrorStage::Router,
@@ -2442,8 +2494,71 @@ fn execute_filter_pipeline(
     }
 }
 
-fn validate_filter_output_stub(output: FilterOutput) -> FilterOutput {
-    output
+struct ValidatedOutput {
+    kept_upstream_ids: Vec<Uuid>,
+    reason: String,
+    #[allow(dead_code)]
+    per_candidate_reasons: Vec<PerCandidateReason>,
+}
+
+#[derive(Debug, Error, PartialEq, Eq)]
+enum ValidationError {
+    #[error("unknown upstream id {unknown_id}")]
+    Unknown { unknown_id: Uuid },
+    #[error("duplicate upstream id {id}")]
+    Duplicate { id: Uuid },
+    #[error("kept output length {kept_len} exceeds input length {input_len}")]
+    Superset { kept_len: usize, input_len: usize },
+}
+
+fn validate_filter_output(
+    out: &FilterOutput,
+    input: &[UpstreamCandidate],
+    stage_idx: u8,
+    internal_errors: &mut Vec<InternalError>,
+) -> Result<ValidatedOutput, ValidationError> {
+    let _ = stage_idx;
+    let mut seen = HashSet::with_capacity(out.kept_upstream_ids.len());
+    for id in &out.kept_upstream_ids {
+        if !seen.insert(*id) {
+            return Err(ValidationError::Duplicate { id: *id });
+        }
+    }
+
+    if out.kept_upstream_ids.len() > input.len() {
+        return Err(ValidationError::Superset {
+            kept_len: out.kept_upstream_ids.len(),
+            input_len: input.len(),
+        });
+    }
+
+    let input_ids = input
+        .iter()
+        .map(|candidate| candidate.upstream_id)
+        .collect::<HashSet<_>>();
+    for id in &out.kept_upstream_ids {
+        if !input_ids.contains(id) {
+            return Err(ValidationError::Unknown { unknown_id: *id });
+        }
+    }
+
+    let mut per_candidate_reasons = out.per_candidate_reasons.clone();
+    if !per_candidate_reasons.is_empty() && per_candidate_reasons.len() != input.len() {
+        if per_candidate_reasons.len() > input.len() {
+            per_candidate_reasons.truncate(input.len());
+        }
+        internal_errors.push(InternalError {
+            stage: InternalErrorStage::RouterFilter,
+            kind: InternalErrorKind::InvalidOutput,
+            message: Some("per_candidate_reasons sanitized".to_owned()),
+        });
+    }
+
+    Ok(ValidatedOutput {
+        kept_upstream_ids: out.kept_upstream_ids.clone(),
+        reason: out.reason.clone(),
+        per_candidate_reasons,
+    })
 }
 
 fn keep_filter_candidates(
@@ -2454,6 +2569,22 @@ fn keep_filter_candidates(
         .iter()
         .filter(|candidate| kept_upstream_ids.contains(&candidate.upstream_id))
         .cloned()
+        .collect()
+}
+
+fn terminal_candidates(
+    candidates: &[UpstreamCandidate],
+    terminal_decision: &TerminalDecision,
+) -> Vec<UpstreamCandidate> {
+    terminal_decision
+        .upstream_id
+        .and_then(|upstream_id| {
+            candidates
+                .iter()
+                .find(|candidate| candidate.upstream_id == upstream_id)
+        })
+        .cloned()
+        .into_iter()
         .collect()
 }
 
@@ -2582,6 +2713,75 @@ fn copy_headers(source: HeaderMap, target: Option<&mut HeaderMap>) {
         if let Some(name) = name {
             target.append(name, value);
         }
+    }
+}
+
+fn push_shape_internal_error(internal_errors: &mut Vec<InternalError>, message: &str) {
+    let errors = redact_internal_errors(&[InternalError {
+        stage: InternalErrorStage::Shape,
+        kind: InternalErrorKind::Trap,
+        message: Some(truncate_reason(message)),
+    }]);
+    internal_errors.extend(errors);
+}
+
+fn raw_passthrough_request(
+    base_url: Option<&Url>,
+    ctx: &RequestContext,
+    principal: &Principal,
+) -> Result<ShapedRequest, Box<Response<Body>>> {
+    let base_url = match base_url {
+        Some(base_url) => base_url.clone(),
+        None => Url::parse(DEFAULT_ANTHROPIC_BASE_URL).map_err(|source| {
+            tracing::error!(%source, "default raw passthrough base URL failed to parse");
+            Box::new(anthropic_error_response(
+                StatusCode::BAD_GATEWAY,
+                "api_error",
+                "failed to prepare raw upstream request",
+            ))
+        })?,
+    };
+    shape_request(
+        &RawPassthroughDialect { base_url },
+        ctx,
+        &Upstream::AnthropicDirect,
+        principal,
+    )
+    .map_err(|source| {
+        tracing::error!(%source, "raw passthrough request failed");
+        Box::new(anthropic_error_response(
+            StatusCode::BAD_GATEWAY,
+            "api_error",
+            "failed to prepare raw upstream request",
+        ))
+    })
+}
+
+struct RawPassthroughDialect {
+    base_url: Url,
+}
+
+impl UpstreamDialect for RawPassthroughDialect {
+    fn shape(
+        &self,
+        ctx: &RequestContext,
+        _upstream: &Upstream,
+        _principal: &Principal,
+        builder: &mut ShapedRequestBuilder,
+    ) -> Result<ShapedRequest, cc_lb_plugin_api::DialectError> {
+        let mut url = self.base_url.clone();
+        url.set_path(ctx.path.trim_start_matches('/'));
+        url.set_query(ctx.query.as_deref());
+        Ok(builder.shaped_request(
+            url,
+            ctx.method.clone(),
+            ctx.downstream_headers.clone(),
+            ctx.body_bytes.clone(),
+        ))
+    }
+
+    fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
+        None
     }
 }
 
@@ -3197,6 +3397,10 @@ fn unix_now_ms() -> u64 {
 
 fn duration_to_ms(duration: Duration) -> u64 {
     duration.as_millis().min(u128::from(u64::MAX)) as u64
+}
+
+fn duration_to_us(duration: Duration) -> u64 {
+    duration.as_micros().min(u128::from(u64::MAX)) as u64
 }
 
 fn record_api_key_request_metric(context: &ApiKeyMetricContext, status: StatusCode) {
