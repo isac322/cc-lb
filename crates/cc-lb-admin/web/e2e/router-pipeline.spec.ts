@@ -123,4 +123,39 @@ test.describe('Router Pipeline', () => {
     await expect(tooltip).toContainText('Internal Errors');
     await page.screenshot({ path: path.join(evidenceDir, 'task-31-step9.png') });
   });
+
+  test('built-in plugin behaviors', async ({ page }) => {
+    await page.goto('/principals');
+    
+    const isAuthRequired = await Promise.race([
+      page.waitForSelector('text=Admin token required').then(() => true),
+      page.waitForSelector('text=Principals').then(() => false)
+    ]);
+
+    if (isAuthRequired) {
+      await page.locator('input[type="password"]').fill('mock-token');
+      await page.locator('button:has-text("Sign in")').click();
+      await expect(page.locator('h1', { hasText: 'Principals' })).toBeVisible();
+    }
+
+    await page.locator('button:has-text("engineering-shared")').first().click();
+    await expect(page.locator('text=Plugin Chain')).toBeVisible();
+    
+    const pluginList = page.locator('ul').filter({ hasText: 'Terminal' });
+    await expect(pluginList).toBeVisible();
+    
+    const firstItem = pluginList.locator('li').first();
+    await expect(firstItem).toContainText('cache-affinity');
+    await expect(firstItem).toContainText('Built-in');
+
+    await page.goto('/plugins');
+    await expect(page.locator('h3', { hasText: 'Registry' })).toBeVisible();
+
+    const builtinRow = page.locator('tr').filter({ hasText: 'cache-affinity' });
+    await expect(builtinRow).toBeVisible();
+    await expect(builtinRow).toContainText('Built-in');
+    
+    const deleteBtn = builtinRow.locator('button[aria-label="Built-in plugin cannot be removed from registry"]');
+    await expect(deleteBtn).toBeDisabled();
+  });
 });
