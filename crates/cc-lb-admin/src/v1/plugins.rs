@@ -119,6 +119,9 @@ struct RegistryEntryResponse {
     refcount: i64,
     revision: u64,
     uploaded_at_unix_secs: u64,
+    kind: String,
+    wire_version: u8,
+    is_builtin: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -211,6 +214,7 @@ async fn patch_registry(
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
         }
+        Err(StorageError::BuiltinPluginImmutable) => builtin_plugin_immutable(),
         Err(error) => storage_mutation_error(error),
     }
 }
@@ -240,6 +244,7 @@ async fn delete_registry(
             response
         }
         Ok(None) => error(StatusCode::NOT_FOUND, "unknown_registry_entry"),
+        Err(StorageError::BuiltinPluginImmutable) => builtin_plugin_immutable(),
         Err(StorageError::PluginRegistryReferenced { id }) => plugin_registry_referenced(id),
         Err(StorageError::StalePluginRegistryRevision { current }) => stale_revision(current),
         Err(error) => storage_mutation_error(error),
@@ -546,6 +551,9 @@ fn chain_with_etag(entry: PluginChainEntry) -> axum::response::Response {
 }
 
 async fn registry_size_bytes(storage: &dyn Storage, sha256: [u8; 32]) -> Result<u64, StorageError> {
+    if sha256 == cc_lb_storage_api::BUILTIN_CACHE_AFFINITY_SHA256 {
+        return Ok(0);
+    }
     Ok(storage
         .get_blob_bytes(sha256)
         .await?
@@ -564,6 +572,9 @@ fn registry_response(entry: WasmRegistryEntry, size_bytes: u64) -> RegistryEntry
         refcount: entry.refcount,
         revision: entry.revision,
         uploaded_at_unix_secs: entry.uploaded_at_unix_secs,
+        kind: entry.kind,
+        wire_version: entry.wire_version,
+        is_builtin: entry.is_builtin,
     }
 }
 
@@ -661,6 +672,10 @@ fn plugin_registry_referenced(id: String) -> axum::response::Response {
         Json(json!({ "error": "plugin_registry_referenced", "id": id })),
     )
         .into_response()
+}
+
+fn builtin_plugin_immutable() -> axum::response::Response {
+    error(StatusCode::CONFLICT, "builtin_plugin_immutable")
 }
 
 fn stale_revision(current: u64) -> axum::response::Response {

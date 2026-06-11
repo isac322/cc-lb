@@ -24,7 +24,7 @@ The canonical sources are the crates under `crates/cc-lb-pdk` (proc-macros) and 
 
 ## Quick start
 
-The reference implementation is the cache-aware filter at `plugins/router/cache-aware/src/lib.rs`. Minimal plugin skeleton:
+Minimal router filter plugin skeleton:
 
 ```rust
 use cc_lb_plugin_wire::v3::filter::{FilterRequest, FilterResponse, PerCandidateReason};
@@ -124,7 +124,7 @@ mod plugin { ... }
 
 Arguments:
 
-- `name` (required): plugin identity name. Must match `^[a-z][a-z0-9_-]*$` and be at most 64 bytes.
+- `name` (required): plugin identity name. Must match `^[a-z][a-z0-9_-]*$` and be at most 64 bytes. Do not use `cache-affinity`; that name is reserved for the built-in filter.
 - `version` (required): plugin identity version. Free-form string up to 32 bytes; semver is conventional but not enforced.
 - `requires` (optional): array of host capability names this plugin needs at runtime. Each name matches `^[a-z][a-z0-9_]*$`, max 64 bytes, deduplicated, and is sent as part of the handshake `required_capabilities`.
 
@@ -411,7 +411,7 @@ When this guide and the code disagree, prefer the code.
 | Limits and guardrails | [crates/cc-lb-plugin-wire/src/limits.rs](../crates/cc-lb-plugin-wire/src/limits.rs) |
 | Admin upload / list / delete API | [crates/cc-lb-server/src/admin_plugins.rs](../crates/cc-lb-server/src/admin_plugins.rs) |
 | Startup re-handshake loop + freshness fast path | [crates/cc-lb-server/src/startup_handshake.rs](../crates/cc-lb-server/src/startup_handshake.rs) |
-| Reference plugin implementation | [plugins/router/cache-aware/src/lib.rs](../plugins/router/cache-aware/src/lib.rs) |
+| Router filter contract | [crates/cc-lb-plugin-wire/src/v3/filter.rs](../crates/cc-lb-plugin-wire/src/v3/filter.rs) |
 | Static identity reader (host side) | [crates/cc-lb-runtime-extism/src/identity.rs](../crates/cc-lb-runtime-extism/src/identity.rs) |
 | Dispatch + catch-and-skip + metrics | [crates/cc-lb-runtime-extism/src/dispatch.rs](../crates/cc-lb-runtime-extism/src/dispatch.rs) |
 | Registry orchestration (L1-L4) | [crates/cc-lb-runtime-extism/src/registry.rs](../crates/cc-lb-runtime-extism/src/registry.rs) |

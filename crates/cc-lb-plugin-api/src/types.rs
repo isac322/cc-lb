@@ -812,13 +812,13 @@ mod tests {
         assert!(manifest.metadata.is_empty());
 
         let manifest: PluginManifest = serde_json::from_value(serde_json::json!({
-            "name": "cache-aware",
+            "name": "router-filter",
             "artifact": "plugin.wasm",
-            "wire_version": 2,
+            "wire_version": 3,
             "config": {}
         }))
         .unwrap();
-        assert_eq!(manifest.wire_version, Some(2));
+        assert_eq!(manifest.wire_version, Some(3));
     }
 
     #[test]

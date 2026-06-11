@@ -9,8 +9,9 @@ use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_plugin_api::TerminalStrategy;
 use cc_lb_storage_api::principal::Limit;
 use cc_lb_storage_api::{
-    PluginSlot, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate,
-    StorageError,
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_WIRE_VERSION, PluginChainEntry,
+    PluginChainEntryInput, PluginSlot, PrincipalCreate, PrincipalKind, PrincipalRecord,
+    PrincipalStore, PrincipalUpdate, Storage, StorageError, sparse_order,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -94,6 +95,7 @@ struct PrincipalResponse {
     allowed_models: Vec<String>,
     allowed_upstreams: Vec<Uuid>,
     default_limits: Vec<Limit>,
+    router_chain: Vec<PluginChainEntry>,
 }
 
 #[derive(Debug, Serialize)]
@@ -103,6 +105,7 @@ struct PrincipalSummaryResponse {
     kind: PrincipalKind,
     enabled: bool,
     revision: u64,
+    router_chain: Vec<PluginChainEntry>,
 }
 
 #[derive(Debug, Serialize)]
@@ -140,6 +143,10 @@ async fn create_principal(
 
     match PrincipalStore::create(storage, input, unix_now_secs()).await {
         Ok(record) => {
+            let router_chain = match ensure_cache_affinity_first(storage, record.id).await {
+                Ok(router_chain) => router_chain,
+                Err(error) => return storage_error(error),
+            };
             emit_audit(
                 &state,
                 AuditPayload::PrincipalCreate {
@@ -151,8 +158,12 @@ async fn create_principal(
             let mut headers = HeaderMap::new();
             insert_header(&mut headers, header::LOCATION, &location);
             insert_header(&mut headers, header::ETAG, &etag(record.revision));
-            let mut response =
-                (StatusCode::CREATED, headers, Json(summary_response(record))).into_response();
+            let mut response = (
+                StatusCode::CREATED,
+                headers,
+                Json(summary_response(record, router_chain)),
+            )
+                .into_response();
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
         }
@@ -176,15 +187,20 @@ async fn list_principals(
     };
     match PrincipalStore::list(storage, offset, limit, false).await {
         Ok(records) => {
+            let mut principals = Vec::with_capacity(records.len());
+            for record in records {
+                let router_chain = match storage
+                    .list_chain_for_principal(record.id, PluginSlot::Router)
+                    .await
+                {
+                    Ok(router_chain) => router_chain,
+                    Err(error) => return storage_error(error),
+                };
+                principals.push(principal_response(record, router_chain));
+            }
             let mut headers = HeaderMap::new();
             insert_header(&mut headers, "x-total-count", &total.to_string());
-            (
-                headers,
-                Json(ListResponse {
-                    principals: records.into_iter().map(principal_response).collect(),
-                }),
-            )
-                .into_response()
+            (headers, Json(ListResponse { principals })).into_response()
         }
         Err(error) => storage_error(error),
     }
@@ -203,9 +219,16 @@ async fn get_principal(
 
     match PrincipalStore::get_by_id(storage, id).await {
         Ok(Some(record)) if record.deleted_at_unix_secs.is_none() => {
+            let router_chain = match storage
+                .list_chain_for_principal(id, PluginSlot::Router)
+                .await
+            {
+                Ok(router_chain) => router_chain,
+                Err(error) => return storage_error(error),
+            };
             let mut headers = HeaderMap::new();
             insert_header(&mut headers, header::ETAG, &etag(record.revision));
-            (headers, Json(principal_response(record))).into_response()
+            (headers, Json(principal_response(record, router_chain))).into_response()
         }
         Ok(_) => error_response(StatusCode::NOT_FOUND, "unknown_principal"),
         Err(error) => storage_error(error),
@@ -274,6 +297,13 @@ async fn set_enabled(
         .await
     {
         Ok(Some(record)) => {
+            let router_chain = match storage
+                .list_chain_for_principal(record.id, PluginSlot::Router)
+                .await
+            {
+                Ok(router_chain) => router_chain,
+                Err(error) => return storage_error(error),
+            };
             emit_audit(
                 &state,
                 AuditPayload::PrincipalUpdate {
@@ -281,7 +311,7 @@ async fn set_enabled(
                     fields_changed: vec!["enabled"],
                 },
             );
-            let mut response = respond_with_etag(record);
+            let mut response = respond_with_etag(record, router_chain);
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
         }
@@ -306,16 +336,27 @@ async fn delete_principal(
     };
 
     let mut references = Vec::new();
+    let mut builtin_router_entries = Vec::new();
     for slot in [
         PluginSlot::Router,
         PluginSlot::ObservabilityHook,
         PluginSlot::Shape,
     ] {
         match storage.list_chain_for_principal(id, slot).await {
-            Ok(entries) => references.extend(entries.into_iter().map(|entry| ReferenceResponse {
-                kind: "plugin_chain",
-                id: entry.id.to_string(),
-            })),
+            Ok(entries) => {
+                for entry in entries {
+                    if entry.slot == PluginSlot::Router
+                        && entry.wasm_registry_id == BUILTIN_CACHE_AFFINITY_ID
+                    {
+                        builtin_router_entries.push(entry);
+                    } else {
+                        references.push(ReferenceResponse {
+                            kind: "plugin_chain",
+                            id: entry.id.to_string(),
+                        });
+                    }
+                }
+            }
             Err(error) => return storage_error(error),
         }
     }
@@ -328,6 +369,13 @@ async fn delete_principal(
             })),
         )
             .into_response();
+    }
+
+    for entry in builtin_router_entries {
+        match storage.delete_chain_entry(entry.id, entry.revision).await {
+            Ok(_) => {}
+            Err(error) => return storage_mutation_error(error),
+        }
     }
 
     match PrincipalStore::soft_delete(storage, id, expected_revision, unix_now_secs()).await {
@@ -450,6 +498,13 @@ async fn update_principal_record(
 
     match PrincipalStore::update(storage, id, expected_revision, update, unix_now_secs()).await {
         Ok(Some(record)) => {
+            let router_chain = match storage
+                .list_chain_for_principal(record.id, PluginSlot::Router)
+                .await
+            {
+                Ok(router_chain) => router_chain,
+                Err(error) => return storage_error(error),
+            };
             emit_audit(
                 &state,
                 AuditPayload::PrincipalUpdate {
@@ -457,7 +512,7 @@ async fn update_principal_record(
                     fields_changed,
                 },
             );
-            let mut response = respond_with_etag(record);
+            let mut response = respond_with_etag(record, router_chain);
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
         }
@@ -466,10 +521,13 @@ async fn update_principal_record(
     }
 }
 
-fn respond_with_etag(record: PrincipalRecord) -> axum::response::Response {
+fn respond_with_etag(
+    record: PrincipalRecord,
+    router_chain: Vec<PluginChainEntry>,
+) -> axum::response::Response {
     let mut headers = HeaderMap::new();
     insert_header(&mut headers, header::ETAG, &etag(record.revision));
-    (headers, Json(principal_response(record))).into_response()
+    (headers, Json(principal_response(record, router_chain))).into_response()
 }
 
 fn router_terminal_with_etag(record: PrincipalRecord) -> axum::response::Response {
@@ -482,7 +540,10 @@ fn router_terminal_with_etag(record: PrincipalRecord) -> axum::response::Respons
     (headers, Json(response)).into_response()
 }
 
-fn principal_response(record: PrincipalRecord) -> PrincipalResponse {
+fn principal_response(
+    record: PrincipalRecord,
+    router_chain: Vec<PluginChainEntry>,
+) -> PrincipalResponse {
     PrincipalResponse {
         id: record.id.to_string(),
         name: record.name,
@@ -492,17 +553,59 @@ fn principal_response(record: PrincipalRecord) -> PrincipalResponse {
         allowed_models: record.allowed_models,
         allowed_upstreams: record.allowed_upstreams,
         default_limits: record.default_limits,
+        router_chain,
     }
 }
 
-fn summary_response(record: PrincipalRecord) -> PrincipalSummaryResponse {
+fn summary_response(
+    record: PrincipalRecord,
+    router_chain: Vec<PluginChainEntry>,
+) -> PrincipalSummaryResponse {
     PrincipalSummaryResponse {
         id: record.id.to_string(),
         name: record.name,
         kind: record.kind,
         enabled: record.enabled,
         revision: record.revision,
+        router_chain,
     }
+}
+
+async fn ensure_cache_affinity_first(
+    storage: &dyn Storage,
+    principal_id: Uuid,
+) -> Result<Vec<PluginChainEntry>, StorageError> {
+    let existing = storage
+        .list_chain_for_principal(principal_id, PluginSlot::Router)
+        .await?;
+    if existing
+        .iter()
+        .any(|entry| entry.wasm_registry_id == BUILTIN_CACHE_AFFINITY_ID)
+    {
+        return Ok(existing);
+    }
+    let order = existing
+        .iter()
+        .map(|entry| entry.order)
+        .min()
+        .map(|order| order - sparse_order::STEP)
+        .unwrap_or(sparse_order::STEP);
+    storage
+        .insert_chain_entry(PluginChainEntryInput {
+            principal_id,
+            slot: PluginSlot::Router,
+            order,
+            wasm_registry_id: BUILTIN_CACHE_AFFINITY_ID,
+            config: json!({}),
+            sse_per_event: false,
+            batched_events_per_flush: 1,
+            batched_flush_ms: 100,
+            wire_version: Some(BUILTIN_CACHE_AFFINITY_WIRE_VERSION),
+        })
+        .await?;
+    storage
+        .list_chain_for_principal(principal_id, PluginSlot::Router)
+        .await
 }
 
 fn update_fields_changed(body: &UpdatePrincipalBody) -> Vec<&'static str> {

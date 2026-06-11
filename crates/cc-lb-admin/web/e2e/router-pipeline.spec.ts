@@ -51,7 +51,7 @@ test.describe('Router Pipeline', () => {
     await select.selectOption({ index: 1 });
     await modal.locator('button:has-text("Add")').click();
     await expect(modal).not.toBeVisible();
-    await expect(pluginList.locator('li:has(button[aria-label="Drag to reorder"])')).toHaveCount(2);
+    await expect(pluginList.locator('li:has(button[aria-label="Drag to reorder"])')).toHaveCount(3);
     await page.screenshot({ path: path.join(evidenceDir, 'task-31-step4.png') });
 
     // Step 5: drag reorder

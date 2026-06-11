@@ -51,6 +51,8 @@ pub enum StorageError {
     InvalidInput { field: String, reason: String },
     #[error("plugin registry conflict: {message}")]
     PluginRegistryConflict { message: String },
+    #[error("builtin plugin is immutable")]
+    BuiltinPluginImmutable,
     #[error("plugin registry row is referenced by plugin chain: {id}")]
     PluginRegistryReferenced { id: String },
     #[error("stale plugin registry revision; current revision is {current}")]

@@ -4,7 +4,8 @@ use std::time::{Duration, Instant};
 
 use axum::http::{StatusCode, header};
 use cc_lb_storage_api::{
-    PluginChainEntryInput, PluginRegistryStore, PluginSlot, WasmBlob, WasmRegistryEntryInput,
+    BUILTIN_CACHE_AFFINITY_ID, PluginChainEntryInput, PluginRegistryStore, PluginSlot, WasmBlob,
+    WasmRegistryEntryInput,
 };
 use serde_json::{Value, json};
 
@@ -30,6 +31,11 @@ async fn create_201_with_etag_and_location() {
     assert_eq!(body["kind"], "machine");
     assert_eq!(body["enabled"], true);
     assert_eq!(body["revision"], 0);
+    assert_eq!(
+        body["router_chain"][0]["wasm_registry_id"],
+        BUILTIN_CACHE_AFFINITY_ID.to_string()
+    );
+    assert_eq!(body["router_chain"][0]["wire_version"], 3);
     let id = body["id"].as_str().unwrap();
     assert_eq!(
         server

@@ -1,6 +1,10 @@
 use std::sync::Arc;
 
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamRecord};
+use cc_lb_storage_api::{
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_WIRE_VERSION, PluginChainEntry, PluginSlot,
+    PrincipalRecord, sparse_order,
+};
 use redb::{Database, ReadableDatabase, ReadableTable, TableDefinition};
 
 mod legacy_upstreams;
@@ -137,6 +141,9 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
     if stored_version.is_some_and(|version| version < 4) {
         migrate_upstreams_v3_to_v4(&write_txn)?;
     }
+    if stored_version.is_none_or(|version| version < 6) {
+        prepend_cache_affinity_to_existing_principals(&write_txn)?;
+    }
     {
         let mut schema = write_txn.open_table(SCHEMA_VERSION_V1)?;
         schema.insert(SCHEMA_VERSION_KEY, &CURRENT_SCHEMA_VERSION)?;
@@ -144,6 +151,76 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
 
     write_txn.commit()?;
     Ok(())
+}
+
+fn prepend_cache_affinity_to_existing_principals(
+    write_txn: &redb::WriteTransaction,
+) -> Result<(), StorageError> {
+    let principals = {
+        let table = write_txn.open_table(PRINCIPALS_V2)?;
+        table
+            .iter()?
+            .map(|row| {
+                let (_, value) = row?;
+                serde_json::from_slice::<PrincipalRecord>(value.value()).map_err(StorageError::from)
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?
+    };
+
+    for principal in principals {
+        if principal.deleted_at_unix_secs.is_some() {
+            continue;
+        }
+        let mut has_builtin = false;
+        let mut min_order = None;
+        {
+            let chains = write_txn.open_table(PLUGIN_CHAINS_V2)?;
+            for row in chains.iter()? {
+                let (_, value) = row?;
+                let entry: PluginChainEntry = serde_json::from_slice(value.value())?;
+                if entry.principal_id == principal.id && entry.slot == PluginSlot::Router {
+                    has_builtin |= entry.wasm_registry_id == BUILTIN_CACHE_AFFINITY_ID;
+                    min_order =
+                        Some(min_order.map_or(entry.order, |order: i64| order.min(entry.order)));
+                }
+            }
+        }
+        if has_builtin {
+            continue;
+        }
+        let order = min_order
+            .map(|order| order - sparse_order::STEP)
+            .unwrap_or(sparse_order::STEP);
+        let entry = PluginChainEntry {
+            id: deterministic_cache_affinity_chain_id(principal.id),
+            principal_id: principal.id,
+            slot: PluginSlot::Router,
+            order,
+            wasm_registry_id: BUILTIN_CACHE_AFFINITY_ID,
+            config: serde_json::json!({}),
+            sse_per_event: false,
+            batched_events_per_flush: 1,
+            batched_flush_ms: 100,
+            revision: 0,
+            wire_version: Some(BUILTIN_CACHE_AFFINITY_WIRE_VERSION),
+        };
+        let mut chains = write_txn.open_table(PLUGIN_CHAINS_V2)?;
+        chains.insert(
+            entry.id.as_bytes().as_slice(),
+            serde_json::to_vec(&entry)?.as_slice(),
+        )?;
+    }
+    Ok(())
+}
+
+fn deterministic_cache_affinity_chain_id(principal_id: uuid::Uuid) -> uuid::Uuid {
+    let digest = ring::digest::digest(
+        &ring::digest::SHA256,
+        format!("{principal_id}:builtin/cache-affinity").as_bytes(),
+    );
+    let mut bytes = [0_u8; 16];
+    bytes.copy_from_slice(&digest.as_ref()[..16]);
+    uuid::Uuid::from_bytes(bytes)
 }
 
 fn migrate_upstreams_v3_to_v4(write_txn: &redb::WriteTransaction) -> Result<(), StorageError> {

@@ -74,6 +74,7 @@ pub(crate) fn map_redb_err(error: StorageError) -> ApiStorageError {
             ApiStorageError::PluginChainConflict { reason }
         }
         StorageError::PluginRegistryConflict { message } => ApiStorageError::Conflict { message },
+        StorageError::BuiltinPluginImmutable => ApiStorageError::BuiltinPluginImmutable,
         StorageError::StalePluginRegistryRevision { current } => {
             ApiStorageError::StalePluginRegistryRevision { current }
         }

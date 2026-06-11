@@ -104,6 +104,7 @@ All administrative operations are authenticated via a Bearer token in the `Autho
   "enabled": true,
   "revision": 1,
   "allowed_models": ["claude-3-5-sonnet-20241022"],
+  "router_chain": [{ "wasm_registry_id": "00000000-0000-0000-0000-000000000001", "slot": "router", "wire_version": 3 }],
   "default_limits": []
 }
 ```
@@ -114,14 +115,20 @@ All administrative operations are authenticated via a Bearer token in the `Autho
 |---|---|---|---|---|---|
 | GET | `/admin/v1/plugins/registry` | Bearer | None | RegistryListResponse | None |
 | GET | `/admin/v1/plugins/registry/{id}` | Bearer | None | RegistryEntryResponse | `unknown_registry_entry` |
-| PATCH | `/admin/v1/plugins/registry/{id}` | Bearer | PatchRegistryBody | RegistryEntryResponse | `stale_revision` |
-| DELETE | `/admin/v1/plugins/registry/{id}` | Bearer | None | None | `referenced_by` |
+| PATCH | `/admin/v1/plugins/registry/{id}` | Bearer | PatchRegistryBody | RegistryEntryResponse | `stale_revision`, `builtin_plugin_immutable` |
+| DELETE | `/admin/v1/plugins/registry/{id}` | Bearer | None | None | `referenced_by`, `builtin_plugin_immutable` |
 | GET | `/admin/v1/principals/{principal_id}/plugin-chain` | Bearer | None | ChainListResponse | None |
 | POST | `/admin/v1/principals/{principal_id}/plugin-chain` | Bearer | InsertChainBody | PluginChainEntry | `conflict` |
 | POST | `/admin/v1/principals/{principal_id}/plugin-chain/reorder` | Bearer | ReorderBody | None | `stale_revision` |
 | POST | `/admin/v1/principals/{principal_id}/plugin-chain/rebalance` | Bearer | None | None | None |
 | PUT | `/admin/v1/plugin-chain-entries/{id}` | Bearer | PluginChainEntryUpdate | PluginChainEntry | `stale_revision` |
 | DELETE | `/admin/v1/plugin-chain-entries/{id}` | Bearer | None | None | `stale_revision` |
+
+### Built-in Filters
+
+`cache-affinity` is built into the `cc-lb` binary as a host-side Rust filter. It is always present in `/admin/v1/plugins/registry` with id `00000000-0000-0000-0000-000000000001`, `kind = "filter"`, `wire_version = 3`, and `is_builtin = true`. Registry `PATCH` and `DELETE` for this id return `409` with `error = "builtin_plugin_immutable"`; plugin uploads using the same name are rejected with `409`.
+
+The filter keeps only upstream candidates whose predicted cache read tokens are greater than zero. If no candidate has a cache hit, it passes all candidates through. New principals get this filter inserted as the first router chain entry automatically, and migration `0034_prepend_cache_affinity.sql` does the same for existing Postgres principals. Redb performs the same idempotent migration during schema initialization. Operators may still delete the principal chain entry to run a principal with no cache-affinity filter; deleting that chain row does not delete the built-in registry entry.
 
 #### InsertChainBody
 
