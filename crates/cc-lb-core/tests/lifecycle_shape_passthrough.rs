@@ -1,5 +1,6 @@
 mod common;
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -7,14 +8,17 @@ use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_core::api_keys::limit_engine::LimitEngine;
+use cc_lb_core::api_keys::principal_view::{
+    DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
+};
 use cc_lb_core::{
     DispatchError, DynamicViewBuilder, DynamicViewHolder, ErrorNormalizer, Lifecycle,
     LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_plugin_api::{
     DialectError, InternalErrorKind, InternalErrorStage, Principal, RequestContext, RouteDecision,
-    RouteError, RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest, Upstream,
-    UpstreamCandidate, UpstreamDialect,
+    RouteError, RouterPlugin, ShapedRequest, ShapedRequestBuilder, SignedRequest, TerminalStrategy,
+    Upstream, UpstreamCandidate, UpstreamDialect,
 };
 use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
@@ -33,7 +37,8 @@ async fn shape_error_falls_back_to_raw_passthrough_and_records_internal_error()
     let upstream_id = Uuid::from_u128(1);
     let state = TestState::default();
     let dispatch = Arc::new(RecordingDispatch::default());
-    let authn = TestAuthn::new(state.clone());
+    let principal_view = principal_view_with_failing_shape();
+    let authn = TestAuthn::with_principal_view(state.clone(), principal_view.clone());
     let _dir = tempfile::tempdir()?;
     let storage = Arc::new(RedbStorage::open(
         &_dir.path().join("lifecycle-shape-passthrough.redb"),
@@ -41,11 +46,11 @@ async fn shape_error_falls_back_to_raw_passthrough_and_records_internal_error()
     )?);
     let view = DynamicViewBuilder::new(0)
         .signer_factory(Arc::new(authn.clone()))
-        .global_router(Arc::new(FailingShapeRouter { upstream_id }))
+        .global_router(Arc::new(UnusedRouter))
         .dispatcher(dispatch.clone())
         .global_observability_hooks(Vec::new())
         .error_normalizer(Arc::new(ErrorNormalizer::new()))
-        .principal_view(authn.principal_view.clone())
+        .principal_view(principal_view)
         .upstream_records(vec![upstream_record(upstream_id)])
         .build();
     let lifecycle = Lifecycle::new_with_dynamic_view(
@@ -125,22 +130,38 @@ fn active_record() -> StoredApiKeyRecord {
     }
 }
 
-struct FailingShapeRouter {
-    upstream_id: Uuid,
+fn principal_view_with_failing_shape() -> Arc<PrincipalView> {
+    let dialect: Arc<dyn UpstreamDialect> = Arc::new(FailingShapeDialect);
+    let mut chains = HashMap::new();
+    chains.insert(
+        "principal-test".to_owned(),
+        (
+            Some(Arc::new(RouterPipelineCache::empty(
+                TerminalStrategy::FirstPick,
+            ))),
+            ObservabilityHooksCache::Inherit,
+            DialectCache::Explicit(dialect),
+        ),
+    );
+    Arc::new(PrincipalView::for_tests(
+        "principal-test",
+        true,
+        vec!["*".to_owned()],
+        Vec::new(),
+        chains,
+    ))
 }
 
-impl RouterPlugin for FailingShapeRouter {
+struct UnusedRouter;
+
+impl RouterPlugin for UnusedRouter {
     fn route(
         &self,
         _ctx: &RequestContext,
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
-        Ok(RouteDecision {
-            upstream_id: Some(self.upstream_id),
-            upstream: Upstream::AnthropicDirect,
-            dialect: Arc::new(FailingShapeDialect),
-        })
+        panic!("terminal strategy selects upstream before legacy router")
     }
 }
 

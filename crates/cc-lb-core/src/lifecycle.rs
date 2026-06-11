@@ -1077,8 +1077,6 @@ impl Lifecycle {
             );
             return Ok(response);
         }
-        let router = &view.global_router;
-
         observe_many(
             hooks,
             ObserveEvent::AuthnComplete {
@@ -1151,77 +1149,10 @@ impl Lifecycle {
             return Ok(response);
         }
 
-        let route = match router.route(&ctx, &principal, &routed_candidates) {
-            Ok(route) => route,
-            Err(source) => {
-                observe_error(hooks, "route_not_configured", &source.to_string(), "router");
-                let response = anthropic_error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "route_not_configured",
-                    "no upstream route is configured for this request",
-                );
-                observe_finished_for_principal(
-                    hooks,
-                    StatusCode::BAD_GATEWAY,
-                    started,
-                    &principal,
-                    &ctx.body_bytes,
-                );
-                return Ok(response);
-            }
-        };
-
-        let resolved_upstream_id = match route.upstream_id {
-            Some(upstream_id)
-                if routed_candidates
-                    .iter()
-                    .any(|c| c.upstream_id == upstream_id) =>
-            {
-                upstream_id
-            }
-            Some(_) => {
-                observe_error(
-                    hooks,
-                    "route_not_configured",
-                    "router selected an upstream outside the candidate set",
-                    "router",
-                );
-                let response = anthropic_error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "route_not_configured",
-                    "router selected an upstream outside the candidate set",
-                );
-                observe_finished_for_principal(
-                    hooks,
-                    StatusCode::BAD_GATEWAY,
-                    started,
-                    &principal,
-                    &ctx.body_bytes,
-                );
-                return Ok(response);
-            }
-            None => {
-                observe_error(
-                    hooks,
-                    "route_not_configured",
-                    "router did not select an upstream",
-                    "router",
-                );
-                let response = anthropic_error_response(
-                    StatusCode::BAD_GATEWAY,
-                    "route_not_configured",
-                    "no upstream route is configured for this request",
-                );
-                observe_finished_for_principal(
-                    hooks,
-                    StatusCode::BAD_GATEWAY,
-                    started,
-                    &principal,
-                    &ctx.body_bytes,
-                );
-                return Ok(response);
-            }
-        };
+        let resolved_upstream_id = routed_candidates
+            .first()
+            .expect("routed candidates are non-empty after empty check")
+            .upstream_id;
         let Some(resolved_record) = view
             .upstreams_snapshot()
             .iter()
@@ -1249,6 +1180,11 @@ impl Lifecycle {
         };
         let router_chosen_upstream_name = resolved_record.name.clone();
         let raw_passthrough_base_url = resolved_record.base_url.clone();
+        let route_dialect: Arc<dyn UpstreamDialect> = Arc::new(RawPassthroughDialect {
+            base_url: raw_passthrough_base_url
+                .clone()
+                .unwrap_or_else(default_anthropic_base_url),
+        });
         let route_upstream = match upstream_for_record(resolved_record) {
             Ok(upstream) => upstream,
             Err(reason) => {
@@ -1268,7 +1204,7 @@ impl Lifecycle {
                 return Ok(response);
             }
         };
-        let dialect = cached.resolved_dialect(&route.dialect).clone();
+        let dialect = cached.resolved_dialect(&route_dialect).clone();
         let route = cc_lb_plugin_api::RouteDecision {
             upstream_id: Some(resolved_upstream_id),
             upstream: route_upstream,
@@ -2755,6 +2691,10 @@ fn push_shape_internal_error(internal_errors: &mut Vec<InternalError>, message: 
         message: Some(truncate_reason(message)),
     }]);
     internal_errors.extend(errors);
+}
+
+fn default_anthropic_base_url() -> Url {
+    Url::parse(DEFAULT_ANTHROPIC_BASE_URL).expect("default Anthropic base URL parses")
 }
 
 fn raw_passthrough_request(

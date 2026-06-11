@@ -62,11 +62,11 @@ async fn invalid_kept_ids_pass_candidates_through_and_log_invalid_output()
         assert_eq!(status, StatusCode::OK);
         assert_eq!(
             state
-                .router_candidates
+                .router_choice_names
                 .lock()
-                .expect("router candidates lock")
+                .expect("router choice names lock")
                 .as_slice(),
-            &[vec![first]],
+            &["first".to_owned()],
             "{kind:?} invalid output passes through to terminal strategy"
         );
         assert_eq!(
@@ -121,11 +121,11 @@ async fn reason_count_mismatch_is_sanitized_without_rejecting_valid_kept_ids()
     assert_eq!(status, StatusCode::OK);
     assert_eq!(
         state
-            .router_candidates
+            .router_choice_names
             .lock()
-            .expect("router candidates lock")
+            .expect("router choice names lock")
             .as_slice(),
-        &[vec![second]],
+        &["second".to_owned()],
     );
     let event = single_request_event(storage.as_ref()).await?;
     assert!(event.internal_errors.iter().any(|error| {

@@ -153,13 +153,12 @@ async fn lifecycle_helper_runs_filter_pipeline_and_dispatches_first_survivor() {
     let (status, _headers, _body) = collect_body(response).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
+    assert!(
         state
             .router_candidates
             .lock()
             .expect("router candidates lock")
-            .as_slice(),
-        &[vec![first]]
+            .is_empty()
     );
     assert_eq!(
         state
@@ -175,7 +174,7 @@ async fn lifecycle_helper_runs_filter_pipeline_and_dispatches_first_survivor() {
             .lock()
             .expect("dispatched URLs lock")
             .as_slice(),
-        &["https://api.anthropic.com/v1/messages".to_owned()]
+        &["http://first.local/v1/messages".to_owned()]
     );
 }
 
