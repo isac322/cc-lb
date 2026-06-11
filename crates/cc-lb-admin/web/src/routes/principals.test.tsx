@@ -58,7 +58,7 @@ test('renders ordered list with locked terminal row', () => {
   } as unknown as ReturnType<typeof queries.usePluginChain>);
   vi.mocked(queries.usePluginRegistry).mockReturnValue({
     data: {
-      entries: [{ id: 'plugin-1', name: 'My Plugin' }],
+      entries: [{ id: 'plugin-1', name: 'My Plugin', metadata: null }],
     },
   } as unknown as ReturnType<typeof queries.usePluginRegistry>);
   vi.mocked(queries.useRouterTerminalStrategy).mockReturnValue({
@@ -84,11 +84,44 @@ test('renders ordered list with locked terminal row', () => {
   expect(screen.getByText('My Plugin')).toBeDefined();
   expect(screen.getByText('Terminal')).toBeDefined();
   expect(screen.getByText('Final upstream selection')).toBeDefined();
+  expect(screen.getByTestId('pipeline-summary')).toBeDefined();
+  expect(screen.getByText('↓')).toBeDefined();
 
   const select = screen.getByRole('combobox', {
     name: 'Terminal strategy',
   }) as HTMLSelectElement;
   expect(select.value).toBe('first-pick');
+});
+
+test('renders empty state when no entries', () => {
+  vi.mocked(queries.usePluginChain).mockReturnValue({
+    data: { entries: [] },
+  } as unknown as ReturnType<typeof queries.usePluginChain>);
+  vi.mocked(queries.usePluginRegistry).mockReturnValue({
+    data: { entries: [] },
+  } as unknown as ReturnType<typeof queries.usePluginRegistry>);
+  vi.mocked(queries.useRouterTerminalStrategy).mockReturnValue({
+    data: { strategy: 'first-pick', revision: 1 },
+    isLoading: false,
+  } as unknown as ReturnType<typeof queries.useRouterTerminalStrategy>);
+  vi.mocked(queries.useUpdateRouterTerminalStrategy).mockReturnValue({
+    mutate: vi.fn(),
+    isPending: false,
+  } as unknown as ReturnType<typeof queries.useUpdateRouterTerminalStrategy>);
+  vi.mocked(queries.useReorderChain).mockReturnValue({
+    mutate: vi.fn(),
+  } as unknown as ReturnType<typeof queries.useReorderChain>);
+  vi.mocked(queries.useInsertChainEntry).mockReturnValue({
+    mutate: vi.fn(),
+  } as unknown as ReturnType<typeof queries.useInsertChainEntry>);
+  vi.mocked(queries.useDeleteChainEntry).mockReturnValue({
+    mutate: vi.fn(),
+  } as unknown as ReturnType<typeof queries.useDeleteChainEntry>);
+
+  renderWithProviders(<RouterSlotEditor principalId="p-1" />);
+
+  expect(screen.getByText('No filters active')).toBeDefined();
+  expect(screen.getByText('Requests flow directly to the terminal selector. Every upstream candidate is considered.')).toBeDefined();
 });
 
 test('toggles terminal strategy', async () => {

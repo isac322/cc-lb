@@ -32,12 +32,12 @@ test.describe('Router Pipeline', () => {
     await page.screenshot({ path: path.join(evidenceDir, 'task-31-step1.png') });
 
     // Step 2: router slot list rendered
-    const pluginList = page.locator('ul').filter({ hasText: 'Terminal' });
+    const pluginList = page.locator('ul').first();
     await expect(pluginList).toBeVisible();
     await page.screenshot({ path: path.join(evidenceDir, 'task-31-step2.png') });
 
     // Step 3: terminal row locked - no drag handle
-    const terminalRow = pluginList.locator('li').filter({ hasText: 'Terminal' });
+    const terminalRow = page.locator('div.bg-overlay-2').filter({ hasText: 'Terminal' }).first();
     await expect(terminalRow).toBeVisible();
     await expect(terminalRow.locator('button[aria-label="Drag to reorder"]')).toHaveCount(0);
     await page.screenshot({ path: path.join(evidenceDir, 'task-31-step3.png') });
@@ -60,6 +60,7 @@ test.describe('Router Pipeline', () => {
     const second = dragHandles.nth(1);
     
     const firstItemText = await pluginList.locator('li:has(button[aria-label="Drag to reorder"])').nth(0).locator('span.truncate').textContent();
+    const secondItemText = await pluginList.locator('li:has(button[aria-label="Drag to reorder"])').nth(1).locator('span.truncate').textContent();
     
     const firstBox = await first.boundingBox();
     const secondBox = await second.boundingBox();
@@ -79,7 +80,26 @@ test.describe('Router Pipeline', () => {
       const newSecondItemText = await pluginList.locator('li:has(button[aria-label="Drag to reorder"])').nth(1).locator('span.truncate').textContent();
       return newSecondItemText === firstItemText;
     }).toBeTruthy();
+    
+    const toast = page.locator('[data-sonner-toast]').filter({ hasText: 'Reordered' }).first();
+    await expect(toast).toBeVisible();
+    await expect(toast).toContainText(firstItemText!);
+    
     await page.screenshot({ path: path.join(evidenceDir, 'task-31-step5.png') });
+
+    const infoButton = pluginList.locator('li').filter({ hasText: 'cache-affinity' }).first().locator('button[aria-label="Plugin details"]');
+    await infoButton.click();
+    
+    const drawer = page.locator('[role="dialog"]');
+    await expect(drawer).toBeVisible();
+    await expect(drawer.locator('[data-testid="plugin-purpose"]')).toBeVisible();
+    await expect(drawer.locator('[data-testid="plugin-keeps"]')).toBeVisible();
+    await expect(drawer.locator('[data-testid="plugin-drops"]')).toBeVisible();
+    await expect(drawer.locator('[data-testid="plugin-empty-behavior"]')).toBeVisible();
+    await expect(drawer.locator('[data-testid="plugin-examples"]')).toBeVisible();
+    
+    await drawer.locator('button[aria-label="Close"]').click();
+    await expect(drawer).not.toBeVisible();
 
     // Step 6: terminal strategy change to Random + reload + persistence
     const terminalSelect = page.locator('select[aria-label="Terminal strategy"]');
@@ -141,7 +161,7 @@ test.describe('Router Pipeline', () => {
     await page.locator('button:has-text("engineering-shared")').first().click();
     await expect(page.locator('text=Plugin Chain')).toBeVisible();
     
-    const pluginList = page.locator('ul').filter({ hasText: 'Terminal' });
+    const pluginList = page.locator('ul').first();
     await expect(pluginList).toBeVisible();
     
     const firstItem = pluginList.locator('li').first();
