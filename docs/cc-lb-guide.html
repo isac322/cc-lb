@@ -580,42 +580,33 @@ log_redaction = true</code></pre><button class="copy">복사</button></div>
     <h4>현실 (꼭 읽기)</h4>
     <div class="callout info">
       <span class="label">안내</span>
-      <b>cc-lb는 WASM 플러그인을 사용해서 동적 라우팅을 처리합니다.</b> 라우터 플러그인을 지정하지 않으면 첫 번째 upstream으로 요청이 갑니다. 하지만 제공되는 라우터 플러그인을 등록하면 여러 upstream으로 요청을 균등하게 나눌 수 있습니다. 비즈니스 요구사항에 맞춰 가중치 기반이나 최소 연결 수 기반의 커스텀 라우터도 직접 작성해서 적용할 수 있습니다.
+      <b>cc-lb는 filter chain과 terminal strategy로 upstream을 선택합니다.</b> filter plugin은 후보를 검증하거나 줄이고, terminal strategy는 남은 후보 중 최종 upstream을 고릅니다. 별도 filter가 없으면 principal의 allowed upstream 목록과 terminal strategy만으로 동작합니다.
     </div>
 
-    <h4>추천 해결책: WASM 라우터 플러그인 사용</h4>
-    <p>가장 권장하는 방법은 <code>cc-lb-router-round-robin</code> WASM 플러그인을 사용하는 것입니다. 이 플러그인은 등록된 upstream 후보 목록을 받아 라운드 로빈 방식으로 요청을 분산합니다. WASM 플러그인을 사용하면 프록시 코어를 수정하지 않고도 안전하고 격리된 환경에서 라우팅 로직을 실행할 수 있습니다.</p>
+    <h4>추천 해결책: random terminal strategy 사용</h4>
+    <p>여러 키에 트래픽을 나누는 가장 단순한 방법은 여러 upstream을 등록한 뒤 principal의 terminal strategy를 <code>random</code>으로 설정하는 것입니다. 고급 정책이 필요하면 wire v3 filter plugin으로 후보를 먼저 줄이고 같은 terminal 단계로 최종 선택을 맡기세요.</p>
 
-    <h4>라우터 플러그인 설정 예시</h4>
-    <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code># POST /admin/v1/upstreams 로 여러 upstream 등록 (예: anthropic_pool_a, anthropic_pool_b)
-# POST /admin/v1/plugins/wasm 으로 cc_lb_router_round_robin.wasm 업로드
-# POST /admin/v1/principals/{principal_id}/plugin-chain 으로 업로드한 플러그인 연결</code></pre><button class="copy">복사</button></div>
-
-    <h4>라운드 로빈 라우터 플러그인 구현</h4>
-    <p>라운드 로빈 라우터 플러그인의 전체 구현 코드는 <a href="../plugins/router/round-robin/src/lib.rs">plugins/router/round-robin/src/lib.rs</a>에서 확인할 수 있습니다. 이 플러그인은 <code>AtomicUsize</code> 기반 원자 카운터를 사용해서 들어오는 요청을 사용 가능한 upstream 후보들에게 순서대로 분산합니다. 후보 풀은 <code>principal.allowed_upstreams</code>로 정의되며 (빈 배열이면 모든 enabled upstream), 라우터는 그 안에서만 선택합니다.</p>
-
-    <h4>빌드 + 등록</h4>
-    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 1. WASM 타겟 추가 및 플러그인 빌드
-rustup target add wasm32-wasip1
-cargo build --manifest-path plugins/router/round-robin/Cargo.toml --target wasm32-wasip1 --release
-
-# 2. 빌드된 WASM 플러그인을 cc-lb 관리자 API를 통해 업로드
-curl -X POST http://127.0.0.1:9090/admin/v1/plugins/wasm \
+    <h4>terminal strategy 설정 예시</h4>
+    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># POST /admin/v1/upstreams 로 여러 upstream 등록 (예: anthropic_pool_a, anthropic_pool_b)
+# PUT /admin/v1/principals/{principal_id}/router-terminal 로 최종 선택 전략 설정
+curl -X PUT http://127.0.0.1:9090/admin/v1/principals/api-key/router-terminal \
   -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
-  -F &quot;name=cc-lb-router-round-robin&quot; \
-  -F &quot;original_filename=cc_lb_router_round_robin.wasm&quot; \
-  -F &quot;bytes=@plugins/router/round-robin/target/wasm32-wasip1/release/cc_lb_router_round_robin.wasm&quot;</code></pre><button class="copy">복사</button></div>
+  -H &quot;Content-Type: application/json&quot; \
+  -d '{&quot;strategy&quot;:&quot;random&quot;}'</code></pre><button class="copy">복사</button></div>
+
+    <h4>필터 플러그인이 필요한 경우</h4>
+    <p>캐시 상태, quota, 조직별 정책처럼 단순 무작위 선택 전에 후보를 줄여야 하는 조건은 filter plugin에서 처리합니다. filter는 사용 가능한 upstream 후보 목록을 받아 유지할 후보 ID만 반환하고, terminal strategy는 그 결과 위에서 최종 upstream을 선택합니다.</p>
 
     <h4>확인</h4>
-    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 1. 업로드된 플러그인이 정상적으로 등록되었는지 확인
-curl -s http://127.0.0.1:9090/admin/v1/plugins/wasm \
-  -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; | grep cc_lb_router_round_robin.wasm
+    <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code># 1. principal의 terminal strategy 확인
+curl -s http://127.0.0.1:9090/admin/v1/principals/api-key/router-terminal \
+  -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot;
 
-# 2. 서로 다른 요청을 여러 번 호출하여 라운드 로빈 분산 확인
+# 2. 서로 다른 요청을 여러 번 호출하여 upstream 선택이 바뀌는지 확인
 curl -s http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: keyA&quot; ...
 curl -s http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: keyB&quot; ...
 
-# 3. 메트릭에서 각 upstream 별로 요청이 분산되었는지 확인
+# 3. 메트릭에서 각 upstream 별 요청 수 확인
 curl -s http://127.0.0.1:9091/metrics | grep cc_lb_requests_total</code></pre><button class="copy">복사</button></div>
 
     <h2 id="uc-mix-provider">Use Case ③ · Anthropic + Bedrock + Vertex 혼합</h2>
@@ -631,7 +622,7 @@ curl -s http://127.0.0.1:9091/metrics | grep cc_lb_requests_total</code></pre><b
       <li>4가지 signer가 자동 처리됩니다: <code>api_key</code>, <code>anthropic_oauth</code>, <code>aws_sigv4</code>, <code>gcp_oauth</code>. <span class="pill ok">검증됨</span></li>
       <li>Bedrock 응답의 AWS event-stream은 cc-lb가 Anthropic SSE 형식으로 자동 변환합니다.</li>
       <li>Bedrock/Vertex의 에러 JSON도 Anthropic 에러 형식으로 자동 normalize됩니다 (성공 응답은 그대로 passthrough).</li>
-      <li>여전히 빌트인 router 한계 적용 — 모델별 라우팅은 router plugin 필요. 하지만 <code>principals.<name>.allowed_models</code>로 거절은 가능.</li>
+      <li>모델별 허용/거절은 <code>principals.<name>.allowed_models</code>로 처리하고, upstream 후보 조정은 filter plugin 또는 terminal strategy로 처리합니다.</li>
     </ul>
 
     <h4>최소 config 발췌</h4>
@@ -976,7 +967,7 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
 
     <h2 id="caveats">알려진 한계</h2>
     <ul>
-      <li><b>빌트인 라우팅은 first-upstream 고정</b> — round-robin/weighted/least-conn은 router plugin 필요. <a href="#uc-multi-key">Use Case ②</a> 참고.</li>
+      <li><b>terminal strategy는 단순 선택만 담당</b> — 가중치, 연결 수, 외부 상태 기반 정책은 filter plugin으로 후보를 줄인 뒤 적용해야 합니다. <a href="#uc-multi-key">Use Case ②</a> 참고.</li>
       <li><b>Anthropic Direct / Bedrock / Vertex dialect의 base_url 무시</b> — production hardcoded URL을 사용합니다. 로컬 e2e fixture는 <code>kind = "custom"</code>으로만 가능.</li>
       <li><b>모델명 자동 변환 없음</b> — Bedrock/Vertex 모델 ID는 본문 <code>model</code>에 provider 형식 그대로 보내야 합니다.</li>
       <li><b>cross-LLM 변환 없음</b> — Anthropic Messages API 형식만 지원. OpenAI/Gemini 형식 변환은 scope 밖.</li>
