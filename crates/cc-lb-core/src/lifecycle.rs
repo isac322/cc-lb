@@ -80,6 +80,7 @@ const DEFAULT_MESSAGES_CAP_BYTES: usize = 32 * 1024 * 1024;
 const DEFAULT_FILES_CAP_BYTES: usize = 100 * 1024 * 1024;
 const PROMPT_CACHE_TTL_GRACE_SECS: u64 = 30;
 const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
+const DEFAULT_MAX_INPUT_ESTIMATE: i64 = 4000;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -1472,7 +1473,7 @@ impl Lifecycle {
         };
         let limit_request = LimitRequest::from_body(&ctx.body_bytes);
         let upstream_kind = pricing_upstream_kind(&route.upstream);
-        let max_input_estimate = 4000_i64; // TODO(later): heuristic from messages length
+        let max_input_estimate = DEFAULT_MAX_INPUT_ESTIMATE;
         let cost_estimate = global_catalog()
             .estimate_max(
                 &limit_request.model,
