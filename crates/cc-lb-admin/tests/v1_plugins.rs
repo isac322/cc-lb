@@ -7,8 +7,9 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use cc_lb_config::Config;
 use cc_lb_core::spawn_audit_writer;
 use cc_lb_storage_api::{
-    PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
-    PrincipalStore, WasmBlob, WasmRegistryEntryInput, sparse_order,
+    BUILTIN_CACHE_AFFINITY_ID, PluginChainEntryInput, PluginRegistryStore, PluginSlot,
+    PrincipalCreate, PrincipalKind, PrincipalStore, WasmBlob, WasmRegistryEntryInput,
+    sparse_order,
 };
 use config_admin_common::{TOKEN, app, authed_json, temp_storage, test_state};
 use http_body_util::BodyExt;
@@ -29,6 +30,87 @@ async fn registry_list_paginates() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(headers.get("x-total-count").unwrap(), "2");
     assert_eq!(body["entries"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn registry_list_exposes_builtin_cache_affinity() {
+    let (_dir, storage) = temp_storage();
+    let uploaded = seed_registry(&storage, 24, "plugin-metadata-null").await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body) =
+        request_json(app, "GET", "/admin/v1/plugins/registry", None, None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let builtin = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == BUILTIN_CACHE_AFFINITY_ID.to_string())
+        .expect("builtin cache-affinity entry is listed");
+    assert_eq!(builtin["name"], "cache-affinity");
+    assert_eq!(builtin["kind"], "filter");
+    assert_eq!(builtin["wire_version"], 3);
+    assert_eq!(builtin["is_builtin"], true);
+    assert_eq!(
+        builtin["metadata"]["purpose"],
+        "Prefer upstreams whose prompt cache is already warm for this request."
+    );
+    assert_eq!(
+        builtin["metadata"]["keeps"],
+        "Candidates with a positive prefill_cache_score (the upstream has already cached the prefix)."
+    );
+    assert_eq!(
+        builtin["metadata"]["drops"],
+        "Candidates with zero cache score — only when at least one candidate is a cache hit; otherwise nothing is dropped."
+    );
+    assert_eq!(
+        builtin["metadata"]["empty_behavior"],
+        "Never drops everything. Falls back to passing all candidates through when no cache hit exists."
+    );
+    assert_eq!(
+        builtin["metadata"]["examples"],
+        json!([
+            "5 candidates, 2 with positive cache score → keep the 2 hits.",
+            "5 candidates, all with zero cache score → pass all 5 through.",
+            "Exactly 1 candidate → no change."
+        ])
+    );
+    let uploaded_entry = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == uploaded.id.to_string())
+        .expect("uploaded plugin entry is listed");
+    assert!(uploaded_entry.get("metadata").is_none_or(Value::is_null));
+}
+
+#[tokio::test]
+async fn builtin_registry_update_and_delete_return_409() {
+    let (_dir, storage) = temp_storage();
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (patch_status, _, patch_body) = request_json(
+        app.clone(),
+        "PATCH",
+        &format!("/admin/v1/plugins/registry/{BUILTIN_CACHE_AFFINITY_ID}"),
+        Some(json!({ "label": "nope" })),
+        Some("W/\"0\""),
+    )
+    .await;
+    let (delete_status, _, delete_body) = request_json(
+        app,
+        "DELETE",
+        &format!("/admin/v1/plugins/registry/{BUILTIN_CACHE_AFFINITY_ID}"),
+        None,
+        Some("W/\"0\""),
+    )
+    .await;
+
+    assert_eq!(patch_status, StatusCode::CONFLICT);
+    assert_eq!(patch_body["error"], "builtin_plugin_immutable");
+    assert_eq!(delete_status, StatusCode::CONFLICT);
+    assert_eq!(delete_body["error"], "builtin_plugin_immutable");
 }
 
 #[tokio::test]

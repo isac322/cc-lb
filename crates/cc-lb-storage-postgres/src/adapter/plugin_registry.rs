@@ -661,6 +661,10 @@ fn registry_from_row(row: sqlx::postgres::PgRow) -> StorageResult<WasmRegistryEn
             row.try_get("revision").map_err(map_sqlx_error)?,
             "wasm_registry.revision",
         )?,
+        kind: "filter".to_owned(),
+        wire_version: BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
+        is_builtin: false,
+        metadata: None,
     })
 }
 

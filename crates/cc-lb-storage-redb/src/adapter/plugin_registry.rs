@@ -260,6 +260,10 @@ impl RedbStorage {
             uploaded_by_admin_id: input.uploaded_by_admin_id,
             refcount: 0,
             revision: 0,
+            kind: "filter".to_owned(),
+            wire_version: cc_lb_storage_api::BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
+            is_builtin: false,
+            metadata: None,
         };
         {
             let mut registry = write_txn.open_table(WASM_REGISTRY_V2)?;
