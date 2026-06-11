@@ -53,6 +53,37 @@ describe('computeLatencySections', () => {
     ]);
   });
 
+  it('includes Routing pipeline when routing_trace is present', () => {
+    const r = computeLatencySections({
+      duration_ms: 100,
+      request_id: 'r',
+      status: 200,
+      routing_trace: {
+        stages: [
+          {
+            stage_name: 'plugin-a',
+            upstream_id: 'u1',
+            reason: 'ok',
+            duration_us: 1500,
+          },
+          {
+            stage_name: 'plugin-b',
+            upstream_id: 'u2',
+            reason: 'ok',
+            duration_us: 2000,
+          },
+        ],
+        terminal: { upstream_id: 'u2', strategy: 'first-pick' },
+      },
+    } as RequestEvent);
+    expect(
+      r.sections.find((s) => s.title === 'Routing pipeline')?.rows,
+    ).toEqual([
+      { label: 'plugin-a', value: 1.5 },
+      { label: 'plugin-b', value: 2.0 },
+    ]);
+  });
+
   it('clamps unaccounted to zero when sum exceeds duration', () => {
     const r = computeLatencySections({
       duration_ms: 100,

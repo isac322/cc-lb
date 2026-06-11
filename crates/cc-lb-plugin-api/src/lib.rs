@@ -30,9 +30,9 @@ pub use traits::{
 };
 pub use types::{
     CredentialStrategy, InternalError, InternalErrorKind, InternalErrorStage, ObserveEvent,
-    PerCandidateReason, PluginManifest, Principal, PrincipalKind, PrincipalQuotas,
-    RateLimitKind, RateLimitObservation, RequestContext, RetryDecision, RouteDecision,
-    RoutingTrace, ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability,
+    PerCandidateReason, PluginManifest, Principal, PrincipalKind, PrincipalQuotas, RateLimitKind,
+    RateLimitObservation, RequestContext, RetryDecision, RouteDecision, RoutingTrace,
+    ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability,
     SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, TerminalStrategy, Upstream,
     UpstreamCandidate, UpstreamKind, shape_request, sign_request,
 };

@@ -3,8 +3,8 @@ use std::fmt;
 use std::io::{self, Write};
 
 use cc_lb_plugin_api::types::{
-    MAX_ERROR_MESSAGE_LEN, MAX_ROUTING_TRACE_STAGES, MAX_STAGE_NAME_LEN, StageDecision,
-    TerminalDecision,
+    INTERNAL_ERROR_MESSAGE_MAX_BYTES, ROUTING_TRACE_MAX_BYTES, STAGE_COUNT_MAX,
+    STAGE_REASON_MAX_BYTES, StageDecision, TerminalDecision,
 };
 use cc_lb_plugin_api::{InternalError, RoutingTrace, TerminalStrategy};
 use once_cell::sync::Lazy;
@@ -16,8 +16,8 @@ use tracing_subscriber::layer::{Context, Layer};
 use tracing_subscriber::registry::LookupSpan;
 
 pub const REDACTED: &str = "[REDACTED]";
-pub const ROUTING_TRACE_SIZE_CAP_BYTES: usize = 4 * 1024;
-pub const ROUTING_REASON_MAX_BYTES: usize = MAX_ERROR_MESSAGE_LEN;
+pub const ROUTING_TRACE_SIZE_CAP_BYTES: usize = ROUTING_TRACE_MAX_BYTES;
+pub const ROUTING_REASON_MAX_BYTES: usize = INTERNAL_ERROR_MESSAGE_MAX_BYTES;
 
 const TRUNCATED_SUFFIX: &str = "...[truncated]";
 const ROUTING_TRACE_TRUNCATED_STAGE: &str = "routing_trace_truncated";
@@ -128,7 +128,7 @@ pub fn redact_routing_trace(trace: &RoutingTrace) -> RoutingTrace {
     let mut redacted = trace.clone();
 
     for stage in &mut redacted.stages {
-        stage.stage_name = truncate_plain_text(&stage.stage_name, MAX_STAGE_NAME_LEN);
+        stage.stage_name = truncate_plain_text(&stage.stage_name, STAGE_REASON_MAX_BYTES);
         if let Some(reason) = &stage.reason {
             stage.reason = Some(truncate_reason(&policy.redact_text(reason)));
         }
@@ -157,11 +157,9 @@ pub fn enforce_routing_trace_caps(trace: &RoutingTrace) -> RoutingTrace {
     normalize_trace_fields(&mut capped);
 
     let mut removed_stages = 0;
-    if capped.stages.len() > MAX_ROUTING_TRACE_STAGES {
-        removed_stages += capped.stages.len() - MAX_ROUTING_TRACE_STAGES + 1;
-        capped
-            .stages
-            .truncate(MAX_ROUTING_TRACE_STAGES.saturating_sub(1));
+    if capped.stages.len() > STAGE_COUNT_MAX {
+        removed_stages += capped.stages.len() - STAGE_COUNT_MAX + 1;
+        capped.stages.truncate(STAGE_COUNT_MAX.saturating_sub(1));
         upsert_truncation_marker(&mut capped, removed_stages);
     }
 
@@ -406,7 +404,7 @@ fn redact_text_fields(value: &str, regex: &Lazy<Result<Regex, regex::Error>>) ->
 
 fn normalize_trace_fields(trace: &mut RoutingTrace) {
     for stage in &mut trace.stages {
-        stage.stage_name = truncate_plain_text(&stage.stage_name, MAX_STAGE_NAME_LEN);
+        stage.stage_name = truncate_plain_text(&stage.stage_name, STAGE_REASON_MAX_BYTES);
         if let Some(reason) = &stage.reason {
             stage.reason = Some(truncate_reason(reason));
         }
@@ -420,6 +418,7 @@ fn upsert_truncation_marker(trace: &mut RoutingTrace, removed_stages: usize) {
         reason: Some(format!(
             "routing trace truncated; removed {removed_stages} stage(s)"
         )),
+        duration_us: 0,
     };
 
     if trace
@@ -466,8 +465,8 @@ fn routing_trace_json_len(trace: &RoutingTrace) -> usize {
     }
 
     len += "]".len();
-    if let Some(terminal_decision) = &trace.terminal_decision {
-        len += ",\"terminal_decision\":".len() + terminal_decision_json_len(terminal_decision);
+    if let Some(terminal) = &trace.terminal {
+        len += ",\"terminal\":".len() + terminal_json_len(terminal);
     }
     len + "}".len()
 }
@@ -481,15 +480,18 @@ fn stage_json_len(stage: &StageDecision) -> usize {
     if let Some(reason) = &stage.reason {
         len += ",\"reason\":".len() + json_string_len(reason);
     }
+    if stage.duration_us != 0 {
+        len += ",\"duration_us\":".len() + stage.duration_us.to_string().len();
+    }
 
     len + "}".len()
 }
 
-fn terminal_decision_json_len(terminal_decision: &TerminalDecision) -> usize {
+fn terminal_json_len(terminal: &TerminalDecision) -> usize {
     let mut len = "{".len();
     let mut needs_comma = false;
 
-    if let Some(upstream_id) = terminal_decision.upstream_id {
+    if let Some(upstream_id) = terminal.upstream_id {
         len += "\"upstream_id\":".len() + json_string_len(&upstream_id.to_string());
         needs_comma = true;
     }
@@ -497,8 +499,7 @@ fn terminal_decision_json_len(terminal_decision: &TerminalDecision) -> usize {
     if needs_comma {
         len += 1;
     }
-    len += "\"strategy\":".len()
-        + json_string_len(terminal_strategy_json(&terminal_decision.strategy));
+    len += "\"strategy\":".len() + json_string_len(terminal_strategy_json(&terminal.strategy));
 
     len + "}".len()
 }
@@ -507,8 +508,6 @@ fn terminal_strategy_json(strategy: &TerminalStrategy) -> &'static str {
     match strategy {
         TerminalStrategy::FirstPick => "first-pick",
         TerminalStrategy::Random => "random",
-        TerminalStrategy::RoundRobin => "round-robin",
-        TerminalStrategy::LeastConnections => "least-connections",
     }
 }
 

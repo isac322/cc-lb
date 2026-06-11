@@ -124,7 +124,7 @@ impl RouterPlugin for TestRouter {
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
         Ok(RouteDecision {
-            upstream_id: None,
+            upstream_id: _candidates.first().map(|c| c.upstream_id),
             upstream: Upstream::AnthropicDirect,
             dialect: Arc::new(PassthroughDialect {
                 base_url: self.base_url.clone(),

@@ -142,7 +142,7 @@ mod tests {
 
     fn plugin_descriptor() -> PluginDescriptor {
         PluginDescriptor {
-            plugin_name: "round-robin".to_owned(),
+            plugin_name: "sample-router".to_owned(),
             plugin_version: "1.0.0".to_owned(),
             required_capabilities: vec!["streaming".to_owned(), "storage".to_owned()],
             handlers: vec![

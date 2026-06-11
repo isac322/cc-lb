@@ -85,9 +85,9 @@ async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dy
     assert_eq!(trace.stages[0].stage_name, "keep-terminal-candidates");
     assert_eq!(
         trace
-            .terminal_decision
+            .terminal
             .as_ref()
-            .map(|decision| (decision.upstream_id, decision.strategy.clone(),)),
+            .map(|decision| (decision.upstream_id, decision.strategy)),
         Some((Some(second), TerminalStrategy::FirstPick))
     );
     Ok(())
@@ -266,7 +266,7 @@ impl RouterPlugin for NullRouter {
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
         Ok(RouteDecision {
-            upstream_id: None,
+            upstream_id: _candidates.first().map(|c| c.upstream_id),
             upstream: Upstream::AnthropicDirect,
             dialect: Arc::new(NullDialect),
         })

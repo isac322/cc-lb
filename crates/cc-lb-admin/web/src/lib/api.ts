@@ -349,26 +349,40 @@ export interface DashboardUsageResponse {
   observed: boolean;
 }
 
-export type TerminalStrategy = 'first-pick' | 'round-robin' | 'least-connections';
+export type TerminalStrategy = 'first-pick' | 'random';
 
 export interface StageDecision {
   stage_name: string;
-  upstream_id: string;
-  reason: string;
+  upstream_id?: string | null;
+  reason?: string | null;
+  duration_us?: number;
 }
 
 export interface TerminalDecision {
-  upstream_id: string;
+  upstream_id?: string | null;
   strategy: TerminalStrategy;
 }
 
 export interface RoutingTrace {
   stages: StageDecision[];
-  terminal: TerminalDecision;
+  terminal?: TerminalDecision | null;
 }
 
-export type InternalErrorStage = 'authn' | 'router' | 'shape' | 'signer' | 'relay';
-export type InternalErrorKind = 'plugin_error' | 'config_error' | 'timeout' | 'unavailable';
+export type InternalErrorStage =
+  | 'authn'
+  | 'router'
+  | 'router_filter'
+  | 'shape'
+  | 'signer'
+  | 'relay';
+export type InternalErrorKind =
+  | 'plugin_error'
+  | 'invalid_output'
+  | 'trap'
+  | 'config_error'
+  | 'timeout'
+  | 'unavailable'
+  | 'other';
 
 export interface InternalError {
   stage: InternalErrorStage;

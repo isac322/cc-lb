@@ -7,14 +7,14 @@ use cc_lb_runtime_extism::ExtismRuntime;
 use serde_json::json;
 
 #[test]
-fn wire_compat_round_robin_v1_router_snapshot_is_rejected() {
+fn wire_compat_v1_router_snapshot_is_rejected() {
     let snapshot_path = concat!(
         env!("CARGO_MANIFEST_DIR"),
         "/tests/snapshots/router_round_robin_pre_v2.wasm"
     );
 
     let manifest = PluginManifest {
-        name: "round-robin-compat".to_owned(),
+        name: "legacy-router-compat".to_owned(),
         artifact: snapshot_path.to_owned(),
         wire_version: None,
         config: json!({}),

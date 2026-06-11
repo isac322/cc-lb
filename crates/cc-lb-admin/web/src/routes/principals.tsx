@@ -61,11 +61,11 @@ import {
   useRecentEvents,
   useReorderChain,
   useRevokeKey,
+  useRouterTerminalStrategy,
   useSetAllowedModels,
   useTogglePrincipal,
-  useUpstreamNameMap,
-  useRouterTerminalStrategy,
   useUpdateRouterTerminalStrategy,
+  useUpstreamNameMap,
 } from '../lib/queries';
 
 const principalSearchSchema = z.object({ selectedId: z.string().optional() });
@@ -665,7 +665,7 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
           Add
         </Button>
       </div>
-      
+
       <DndContext
         sensors={sensors}
         collisionDetection={closestCenter}
@@ -696,7 +696,7 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                 />
               );
             })}
-            
+
             {/* Locked Terminal Row */}
             <li className="flex items-center gap-2 p-2 border border-subtle rounded-sm bg-overlay-2">
               <div className="w-4 h-4 flex items-center justify-center text-text-faint">
@@ -710,7 +710,9 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                 aria-label="Terminal strategy"
                 className={cx(INPUT_CLASS, 'w-auto py-1 text-xs')}
                 value={terminalStrategy.data?.strategy ?? 'first-pick'}
-                disabled={terminalStrategy.isLoading || updateTerminalStrategy.isPending}
+                disabled={
+                  terminalStrategy.isLoading || updateTerminalStrategy.isPending
+                }
                 onChange={(e) => {
                   if (!terminalStrategy.data) return;
                   updateTerminalStrategy.mutate(
@@ -719,7 +721,10 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                       strategy: e.target.value,
                       revision: terminalStrategy.data.revision,
                     },
-                    { onSuccess: () => toast.success('Terminal strategy updated') }
+                    {
+                      onSuccess: () =>
+                        toast.success('Terminal strategy updated'),
+                    },
                   );
                 }}
               >
@@ -745,7 +750,11 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                 insert.mutate(
                   {
                     pid: principalId,
-                    body: { slot, wasm_registry_id: selectedPluginId, order: (entries.length + 1) * 100 },
+                    body: {
+                      slot,
+                      wasm_registry_id: selectedPluginId,
+                      order: (entries.length + 1) * 100,
+                    },
                   },
                   {
                     onSuccess: () => {

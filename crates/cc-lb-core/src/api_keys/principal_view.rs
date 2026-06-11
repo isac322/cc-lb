@@ -144,7 +144,7 @@ impl PrincipalView {
                         DialectCache::Inherit,
                     ));
                 let default_router_pipeline = Arc::new(RouterPipelineCache::empty(
-                    principal.router_terminal_strategy.clone(),
+                    principal.router_terminal_strategy,
                 ));
 
                 let cached = PrincipalSpecCached {

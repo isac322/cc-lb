@@ -368,12 +368,7 @@ fn terminal_strategy_equality() {
 
 #[test]
 fn terminal_strategy_serialization() {
-    let strategies = vec![
-        TerminalStrategy::FirstPick,
-        TerminalStrategy::Random,
-        TerminalStrategy::RoundRobin,
-        TerminalStrategy::LeastConnections,
-    ];
+    let strategies = vec![TerminalStrategy::FirstPick, TerminalStrategy::Random];
 
     for strategy in strategies {
         let json = serde_json::to_string(&strategy).expect("serialization failed");
@@ -388,18 +383,9 @@ fn terminal_strategy_serialization_format() {
     let first_pick = TerminalStrategy::FirstPick;
     let json = serde_json::to_string(&first_pick).unwrap();
     assert_eq!(json, "\"first-pick\"");
-
     let random = TerminalStrategy::Random;
     let json = serde_json::to_string(&random).unwrap();
     assert_eq!(json, "\"random\"");
-
-    let round_robin = TerminalStrategy::RoundRobin;
-    let json = serde_json::to_string(&round_robin).unwrap();
-    assert_eq!(json, "\"round-robin\"");
-
-    let least_conn = TerminalStrategy::LeastConnections;
-    let json = serde_json::to_string(&least_conn).unwrap();
-    assert_eq!(json, "\"least-connections\"");
 }
 
 #[test]
@@ -412,13 +398,13 @@ fn terminal_strategy_deserialization_from_kebab_case() {
     let strategy: TerminalStrategy = serde_json::from_str(json).unwrap();
     assert_eq!(strategy, TerminalStrategy::Random);
 
-    let json = "\"round-robin\"";
-    let strategy: TerminalStrategy = serde_json::from_str(json).unwrap();
-    assert_eq!(strategy, TerminalStrategy::RoundRobin);
+    let json = "\"unsupported-a\"";
+    let result: Result<TerminalStrategy, _> = serde_json::from_str(json);
+    assert!(result.is_err());
 
-    let json = "\"least-connections\"";
-    let strategy: TerminalStrategy = serde_json::from_str(json).unwrap();
-    assert_eq!(strategy, TerminalStrategy::LeastConnections);
+    let json = "\"unsupported-b\"";
+    let result: Result<TerminalStrategy, _> = serde_json::from_str(json);
+    assert!(result.is_err());
 }
 
 #[test]
@@ -430,21 +416,16 @@ fn terminal_strategy_debug_formatting() {
     let random = TerminalStrategy::Random;
     let debug_str = format!("{:?}", random);
     assert_eq!(debug_str, "Random");
-
-    let round_robin = TerminalStrategy::RoundRobin;
-    let debug_str = format!("{:?}", round_robin);
-    assert_eq!(debug_str, "RoundRobin");
-
-    let least_conn = TerminalStrategy::LeastConnections;
-    let debug_str = format!("{:?}", least_conn);
-    assert_eq!(debug_str, "LeastConnections");
 }
 
 #[test]
 fn terminal_strategy_copy_clone() {
+    fn assert_copy_clone<T: Copy + Clone>() {}
+
+    assert_copy_clone::<TerminalStrategy>();
     let first = TerminalStrategy::FirstPick;
-    let cloned = first.clone();
     let copied = first;
-    assert_eq!(cloned, copied);
+    let still_available = first;
+    assert_eq!(still_available, copied);
     assert_eq!(copied, TerminalStrategy::FirstPick);
 }

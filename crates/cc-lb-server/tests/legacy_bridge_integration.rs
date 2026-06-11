@@ -19,9 +19,9 @@ use uuid::Uuid;
 #[tokio::test]
 async fn bridge_registers_legacy_uploads_missing_from_plugin_registry() {
     let (dir, storage, plugin_registry, lifecycle) = setup();
-    let wasm = plugin_wasm("legacy-router", "0.1.0");
+    let wasm = plugin_wasm("legacy-shape", "0.1.0");
     let sha = sha256(&wasm);
-    seed_legacy_upload(&storage, &wasm, "legacy-router").await;
+    seed_legacy_upload(&storage, &wasm, "legacy-shape").await;
 
     let report = bridge_legacy_wasm_registry(&plugin_registry, storage.as_ref()).await;
 
@@ -36,7 +36,7 @@ async fn bridge_registers_legacy_uploads_missing_from_plugin_registry() {
         .await
         .expect("registry query succeeds")
         .expect("bridged record is present");
-    assert_eq!(record.plugin_name, "legacy-router");
+    assert_eq!(record.plugin_name, "legacy-shape");
     assert_eq!(record.plugin_version, "0.1.0");
     drop(dir);
 }
@@ -44,8 +44,8 @@ async fn bridge_registers_legacy_uploads_missing_from_plugin_registry() {
 #[tokio::test]
 async fn second_bridge_call_is_idempotent_no_extra_handshake() {
     let (dir, storage, plugin_registry, lifecycle) = setup();
-    let wasm = plugin_wasm("legacy-router", "0.1.0");
-    seed_legacy_upload(&storage, &wasm, "legacy-router").await;
+    let wasm = plugin_wasm("legacy-shape", "0.1.0");
+    seed_legacy_upload(&storage, &wasm, "legacy-shape").await;
     bridge_legacy_wasm_registry(&plugin_registry, storage.as_ref()).await;
     assert_eq!(lifecycle.handshake_count(), 1);
 
@@ -139,9 +139,9 @@ impl RegistryLifecycle for CountingLifecycle {
         let accept = HandshakeAccept {
             handshake_schema_version: HANDSHAKE_SCHEMA_VERSION_V1,
             envelope_version: 1,
-            chosen_versions: BTreeMap::from([("route".to_owned(), 1)]),
-            plugin_supported: BTreeMap::from([("route".to_owned(), vec![1])]),
-            implemented_functions: BTreeSet::from(["route".to_owned()]),
+            chosen_versions: BTreeMap::from([("shape".to_owned(), 1)]),
+            plugin_supported: BTreeMap::from([("shape".to_owned(), vec![1])]),
+            implemented_functions: BTreeSet::from(["shape".to_owned()]),
             required_capabilities: BTreeSet::new(),
         };
         accept.validate_against_offer(offer)?;

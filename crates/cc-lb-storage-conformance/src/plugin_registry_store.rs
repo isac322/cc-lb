@@ -341,10 +341,7 @@ async fn router_multi_entry_ordered_on_storage<S: PluginRegistryStore + Principa
     let listed = storage
         .list_chain_for_principal(principal, PluginSlot::Router)
         .await?;
-    ensure!(
-        listed.len() == 2,
-        "router slot allows multiple entries"
-    );
+    ensure!(listed.len() == 2, "router slot allows multiple entries");
     ensure!(
         listed[0].order < listed[1].order,
         "router entries are properly ordered"
@@ -410,7 +407,8 @@ plugin_registry_scenario!(
 async fn shape_singleton_preserved_on_storage<S: PluginRegistryStore + PrincipalStore>(
     storage: &S,
 ) -> Result<()> {
-    let (principal, plugin) = principal_and_plugin(storage, 41, "plugin-shape-still-singleton").await?;
+    let (principal, plugin) =
+        principal_and_plugin(storage, 41, "plugin-shape-still-singleton").await?;
     let first = storage
         .insert_chain_entry(chain_with_slot(
             principal,

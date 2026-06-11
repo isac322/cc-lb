@@ -114,6 +114,39 @@ fn connection_drop_mid_commit() {
         .expect("connection drop crash recovery test");
 }
 
+#[test]
+fn request_event_payload_roundtrip_preserves_routing_trace_and_internal_errors() {
+    let original = seeded_request_event(0);
+    let encoded = serde_json::to_vec(&original).expect("serialize request event");
+    let decoded: RequestEvent =
+        serde_json::from_slice(&encoded).expect("deserialize request event");
+    let original_payload = serde_json::to_value(&original).expect("original event to json");
+    let decoded_payload = serde_json::to_value(&decoded).expect("decoded event to json");
+
+    assert_eq!(
+        decoded_payload.get("routing_trace"),
+        original_payload.get("routing_trace")
+    );
+    assert_eq!(
+        decoded_payload.get("internal_errors"),
+        original_payload.get("internal_errors")
+    );
+    assert_eq!(
+        decoded_payload["routing_trace"]["stages"][0]["duration_us"],
+        serde_json::json!(1_000u64)
+    );
+
+    let mut old_payload = original_payload;
+    let old_object = old_payload.as_object_mut().expect("event payload object");
+    old_object.remove("routing_trace");
+    old_object.remove("internal_errors");
+    let old_event: RequestEvent =
+        serde_json::from_value(old_payload).expect("deserialize old request event payload");
+
+    assert_eq!(old_event.routing_trace, None);
+    assert!(old_event.internal_errors.is_empty());
+}
+
 #[derive(Clone)]
 struct CrashFixture {
     url: String,
@@ -310,29 +343,65 @@ async fn install_checkpoint_sleep_trigger(
 async fn seed_request_events(storage: &PostgresStorage) -> Result<(), Box<dyn std::error::Error>> {
     for index in 0..EVENTS_PER_ITERATION {
         storage
-            .append_request_event(&RequestEvent {
-                ts: 1_800_000_000,
-                request_id: format!("crash-recovery-{index}"),
-                principal_id: Some("crash-recovery-principal".to_owned()),
-                principal_kind: Some("account".to_owned()),
-                upstream: Some(RequestEventUpstream::AnthropicDirect),
-                upstream_id: Some(Uuid::nil()),
-                upstream_name: Some("anthropic_direct".to_owned()),
-                model: Some("claude-sonnet-4-5".to_owned()),
-                status: 200,
-                input_tokens: Some(10 + index),
-                output_tokens: Some(20 + index),
-                cache_creation_input_tokens: None,
-                cache_read_input_tokens: None,
-                cost_usd_micros: None,
-                duration_ms: 30 + index,
-                error_code: None,
-                ..Default::default()
-            })
+            .append_request_event(&seeded_request_event(index))
             .await?;
     }
 
     Ok(())
+}
+
+fn seeded_request_event(index: u64) -> RequestEvent {
+    let event = RequestEvent {
+        ts: 1_800_000_000,
+        request_id: format!("crash-recovery-{index}"),
+        principal_id: Some("crash-recovery-principal".to_owned()),
+        principal_kind: Some("account".to_owned()),
+        upstream: Some(RequestEventUpstream::AnthropicDirect),
+        upstream_id: Some(Uuid::nil()),
+        upstream_name: Some("anthropic_direct".to_owned()),
+        model: Some("claude-sonnet-4-5".to_owned()),
+        status: 200,
+        input_tokens: Some(10 + index),
+        output_tokens: Some(20 + index),
+        cache_creation_input_tokens: None,
+        cache_read_input_tokens: None,
+        cost_usd_micros: None,
+        duration_ms: 30 + index,
+        error_code: None,
+        ..Default::default()
+    };
+
+    let mut payload = serde_json::to_value(event).expect("seed event to json");
+    let payload_object = payload.as_object_mut().expect("seed event object");
+    payload_object.insert(
+        "routing_trace".to_owned(),
+        serde_json::json!({
+            "stages": [
+                {
+                    "stage_name": "crash-recovery-filter",
+                    "upstream_id": Uuid::nil().to_string(),
+                    "reason": "seeded request event keeps new routing fields",
+                    "duration_us": 1_000u64 + index,
+                }
+            ],
+            "terminal": {
+                "upstream_id": Uuid::nil().to_string(),
+                "strategy": "first-pick",
+            }
+        }),
+    );
+    payload_object.insert(
+        "internal_errors".to_owned(),
+        serde_json::json!([
+            {
+                "stage": "router",
+                "kind": "plugin_error",
+                "message": "seeded crash recovery internal error",
+            }
+        ]),
+    );
+
+    serde_json::from_value(payload).expect("seed event with routing fields")
 }
 
 fn expected_rollups_visible(rollups: &[UsageRollup]) -> bool {

@@ -68,16 +68,19 @@ async fn none_mode_router_parity() {
         .await
         .expect("lifecycle responds");
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
     assert_eq!(state.principals.lock().unwrap().as_slice(), &["team-X"]);
     assert_eq!(
         state.candidates.lock().unwrap().as_slice(),
-        &[vec![first_id, second_id]]
+        &[vec![first_id]]
     );
-    assert_eq!(state.signer_choices.lock().unwrap().as_slice(), &["first"]);
+    assert_eq!(
+        state.signer_choices.lock().unwrap().as_slice(),
+        &[] as &[String]
+    );
     assert_eq!(
         state.dispatched_urls.lock().unwrap().as_slice(),
-        &["http://router-choice-is-advisory.local/v1/messages"]
+        &[] as &[String]
     );
 }
 

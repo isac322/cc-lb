@@ -118,7 +118,7 @@ async fn put_router_terminal_rejects_unsupported_strategy() {
         .client
         .put_json(
             &format!("/admin/v1/principals/{id}/router-terminal"),
-            json!({ "strategy": "round-robin" }),
+            json!({ "strategy": "unsupported" }),
             Some(&etag),
         )
         .await;

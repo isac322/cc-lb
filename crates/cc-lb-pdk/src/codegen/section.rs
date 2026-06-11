@@ -63,7 +63,7 @@ mod tests {
 
         assert_eq!(identity.magic, CC_LB_PLUGIN_MAGIC);
         assert_eq!(identity.abi_envelope, ABI_ENVELOPE_VERSION);
-        assert_eq!(identity.plugin_name, "round-robin");
+        assert_eq!(identity.plugin_name, "sample-router");
         assert_eq!(identity.plugin_version, "1.0.0");
     }
 
@@ -98,7 +98,7 @@ mod tests {
 
     fn plugin_descriptor() -> PluginDescriptor {
         PluginDescriptor {
-            plugin_name: "round-robin".to_owned(),
+            plugin_name: "sample-router".to_owned(),
             plugin_version: "1.0.0".to_owned(),
             required_capabilities: vec!["log".to_owned()],
             handlers: vec![HandlerDescriptor {

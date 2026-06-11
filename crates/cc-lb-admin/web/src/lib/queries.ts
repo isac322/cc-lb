@@ -853,10 +853,7 @@ export function useUpdateRouterTerminalStrategy() {
       strategy: string;
       revision: number;
     }) =>
-      putJson<
-        { strategy: string; revision: number },
-        { strategy: string }
-      >(
+      putJson<{ strategy: string; revision: number }, { strategy: string }>(
         `/admin/v1/principals/${id}/router-terminal`,
         { strategy },
         { ifMatch: revision },

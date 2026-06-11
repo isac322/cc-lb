@@ -1,6 +1,6 @@
 # Cache-Aware Router Filter Plugin
 
-A router filter plugin for cc-lb that consumes v3 `filter` wire data populated by the host and keeps the upstream candidates predicted to have the best prompt-cache reuse. Cache observations and scoring inputs live in the host; the plugin only reads each candidate's `cache_score` and returns per-candidate accept/reject decisions.
+A router filter plugin for cc-lb that consumes v3 `filter` wire data populated by the host and keeps the upstream candidates predicted to have the best prompt-cache reuse. Cache observations and scoring inputs live in the host; the plugin only reads each candidate's `cache_score` and returns kept upstream IDs plus optional per-candidate reasons.
 
 For the protocol-level reference (PDK macros, lifecycle, wire types, registration, limits, anti-patterns), see [docs/plugin-author-guide.md](../../../docs/plugin-author-guide.md).
 
@@ -44,7 +44,7 @@ Pseudocode:
 
 ```text
 if candidates is empty:
-    return no per-candidate results
+    return no kept upstream IDs and no per-candidate reasons
 
 k = max(config.keep_k or 1, 1)
 rank candidates by:
@@ -53,9 +53,10 @@ rank candidates by:
     3. stable input order
 
 keep the top min(k, candidates.len()) candidates
-return one result for each input candidate:
-    kept candidate: decision = "accept", reason = "top-K by cache_score"
-    dropped candidate: decision = "reject", reason = "below K by cache_score"
+return kept_upstream_ids for kept candidates
+return one per_candidate_reasons entry for each input candidate:
+    kept candidate: kept = true, reason = "top-K by cache_score"
+    dropped candidate: kept = false, reason = "below K by cache_score"
 ```
 
 The response preserves input candidate order. Ranking is used only to decide membership in the kept set; the plugin does not emulate or replace host terminal strategy.
@@ -70,7 +71,7 @@ Given five candidates and `keep_k = 3`:
 - Upstream D: `predicted_cache_read_tokens = 0`, so `score = 0`.
 - Upstream E: `predicted_cache_read_tokens = 4096`, so `score = 1`.
 
-The kept set is C, E, and B. The emitted response still has one result per input candidate, in input order.
+The kept set is C, E, and B. The emitted response still has one per-candidate reason per input candidate, in input order.
 
 ## Build
 

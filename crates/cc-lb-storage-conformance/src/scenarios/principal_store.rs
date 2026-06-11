@@ -266,7 +266,7 @@ where
     with_fixture(backend, |storage| async move {
         let record = PrincipalStore::create(&*storage, principal_create(15), BASE_TS).await?;
         ensure!(
-            serde_json::to_value(&record.router_terminal_strategy)? == json!("first-pick"),
+            serde_json::to_value(record.router_terminal_strategy)? == json!("first-pick"),
             "default terminal strategy is first-pick"
         );
 
@@ -284,7 +284,7 @@ where
         .await?
         .expect("record should exist");
         ensure!(
-            serde_json::to_value(&updated.router_terminal_strategy)? == json!("random"),
+            serde_json::to_value(updated.router_terminal_strategy)? == json!("random"),
             "updated terminal strategy is random"
         );
 
@@ -292,7 +292,7 @@ where
             .await?
             .expect("record should exist");
         ensure!(
-            serde_json::to_value(&fetched.router_terminal_strategy)? == json!("random"),
+            serde_json::to_value(fetched.router_terminal_strategy)? == json!("random"),
             "terminal strategy persists"
         );
         Ok(())

@@ -36,3 +36,27 @@ curl -X POST http://127.0.0.1:9091/admin/plugins \
 ```
 
 The host validates identity, handshake, and self-check before the record is persisted. To then route traffic through the plugin, attach it to a principal's chain via the admin API documented in [docs/runtime-management.md](../docs/runtime-management.md).
+
+## Reference Implementation: Cache-Aware Filter
+
+The `cache-aware` plugin serves as the canonical reference implementation for routing and replaces the removed legacy router plugin.
+
+This plugin implements the wire v3 filter contract. It does not select a final upstream candidate itself. Instead, it filters the list of available candidates based on predicted prompt-cache warmth and returns kept upstream IDs with optional candidate-level reasons.
+
+### Wire v3 Filter Contract
+
+A filter plugin must export the `filter` function. The host calls this function with a serialized `FilterRequest` containing:
+
+- `request_id`: A unique identifier for the request.
+- `headers`: The request headers.
+- `method`, `path`, `query`, `body_base64`: The HTTP request details.
+- `principal`: The authenticated principal.
+- `candidates`: The list of available upstream candidates.
+
+The plugin must return a `FilterResponse` containing:
+
+- `kept_upstream_ids`: The IDs of candidates that survived the filter.
+- `reason`: A human-readable summary for the filtering decision.
+- `per_candidate_reasons`: Optional candidate-level reasons. Each item includes `upstream_id`, `kept`, and `reason`.
+
+The host keeps only `kept_upstream_ids` before running terminal selection. If a plugin fails, the host defaults to accepting all candidates.

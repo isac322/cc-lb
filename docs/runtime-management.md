@@ -133,7 +133,8 @@ All administrative operations are authenticated via a Bearer token in the `Autho
   "sse_per_event": false,
   "batched_events_per_flush": 0,
   "batched_flush_ms": 0,
-  "position": null
+  "position": null,
+  "wire_version": 3
 }
 ```
 
@@ -246,6 +247,29 @@ Response:
 - **Extism Validation**: The server instantiates the plugin using Extism to validate that it compiles and runs correctly.
 - **SHA-256 Deduplication**: The server computes the SHA-256 hash of the bytes to deduplicate uploads. If the blob already exists, the server updates the registry metadata without duplicating the file on disk.
 - **Reference Counting**: The server tracks references to each plugin blob. If you attempt to delete a registry entry that is currently referenced by a principal's plugin chain, the delete operation is blocked with a `referenced_by` conflict error.
+
+## Router Pipeline and Terminal Strategy
+
+The proxy uses an ordered pipeline of filter plugins to route requests, followed by a terminal selection strategy. This design replaces the legacy single-router model. It allows you to chain multiple routing filters together for a single principal.
+
+### Filter Pipeline
+
+Each principal can configure multiple router plugins in their chain. These plugins execute sequentially in the order of their configured position. They must implement the wire v3 filter contract.
+
+When a request arrives, the host builds a `FilterRequest` containing the request context, the principal, and the list of available upstream candidates. Each filter plugin evaluates these candidates and returns a `FilterResponse` with `kept_upstream_ids`, a summary `reason`, and optional `per_candidate_reasons` entries containing `upstream_id`, `kept`, and `reason`.
+
+If a filter plugin fails or times out, the host falls back to accepting all candidates. This graceful degradation ensures that transient plugin errors don't block traffic. However, if the filters successfully run and empty the candidate list, the proxy fails closed. It returns a `503 Service Unavailable` response with the error code `route_no_upstream_after_filter`.
+
+### Terminal Strategy
+
+Once the filter pipeline completes, the host selects a single upstream from the remaining candidates. This selection follows the principal's configured terminal strategy.
+
+You can configure the strategy per principal. A database check constraint enforces the allowed values. The supported strategies are:
+
+- `first-pick`: The host selects the first candidate in the filtered list.
+- `random`: The host selects a candidate at random from the filtered list.
+
+You can manage this strategy using the admin API. The endpoint `PUT /admin/v1/principals/{id}/router-terminal` updates the strategy with optimistic locking.
 
 ## Multi-Replica Operations
 

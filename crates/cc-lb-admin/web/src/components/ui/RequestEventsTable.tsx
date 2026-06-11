@@ -117,7 +117,9 @@ export function RequestEventsTable({
                     DASH}
                 </td>
               )}
-              {showUpstream && <UpstreamCell event={e} upstreamNameMap={upstreamNameMap} />}
+              {showUpstream && (
+                <UpstreamCell event={e} upstreamNameMap={upstreamNameMap} />
+              )}
               <td className="px-3 py-2 text-text-muted truncate max-w-[260px]">
                 {e.model ?? DASH}
               </td>
@@ -203,11 +205,11 @@ function UpstreamCell({
           <div className="flex items-center justify-between">
             <span className="text-text-muted">Terminal</span>
             <span className="text-text truncate max-w-[120px]">
-              {event.routing_trace.terminal.upstream_id}
+              {event.routing_trace.terminal?.upstream_id}
             </span>
           </div>
           <div className="text-text-faint text-[10px]">
-            Strategy: {event.routing_trace.terminal.strategy}
+            Strategy: {event.routing_trace.terminal?.strategy}
           </div>
         </div>
       </div>

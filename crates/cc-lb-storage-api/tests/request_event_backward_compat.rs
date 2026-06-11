@@ -31,7 +31,7 @@ fn request_event_with_new_fields_round_trips() {
         request_id: "req_new_fields".to_owned(),
         routing_trace: Some(cc_lb_plugin_api::RoutingTrace {
             stages: vec![],
-            terminal_decision: Default::default(),
+            terminal: Default::default(),
         }),
         internal_errors: vec![InternalError {
             stage: InternalErrorStage::Router,
@@ -72,7 +72,7 @@ fn request_event_includes_populated_new_fields() {
         request_id: "req_with_trace".to_owned(),
         routing_trace: Some(RoutingTrace {
             stages: vec![],
-            terminal_decision: Default::default(),
+            terminal: Default::default(),
         }),
         internal_errors: vec![InternalError {
             stage: InternalErrorStage::Router,
@@ -101,7 +101,7 @@ fn request_event_mixed_old_and_new_fields() {
         "route_ms": 30u64,
         "routing_trace": {
             "stages": [],
-            "terminal_decision": {
+            "terminal": {
                 "upstream_id": null,
                 "strategy": "first-pick"
             }

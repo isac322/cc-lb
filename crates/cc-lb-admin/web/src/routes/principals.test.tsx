@@ -1,11 +1,18 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
-import { render, screen, fireEvent, waitFor, cleanup } from '@testing-library/react';
-import { expect, test, vi, beforeEach, afterEach } from 'vitest';
-import { RouterSlotEditor } from './principals';
+import {
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from '@testing-library/react';
+import { afterEach, beforeEach, expect, test, vi } from 'vitest';
 import * as queries from '../lib/queries';
+import { RouterSlotEditor } from './principals';
 
 vi.mock('../lib/queries', async () => {
-  const actual = await vi.importActual<typeof import('../lib/queries')>('../lib/queries');
+  const actual =
+    await vi.importActual<typeof import('../lib/queries')>('../lib/queries');
   return {
     ...actual,
     usePluginChain: vi.fn(),
@@ -24,7 +31,7 @@ const queryClient = new QueryClient({
 
 function renderWithProviders(ui: React.ReactElement) {
   return render(
-    <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>
+    <QueryClientProvider client={queryClient}>{ui}</QueryClientProvider>,
   );
 }
 
@@ -40,7 +47,12 @@ test('renders ordered list with locked terminal row', () => {
   vi.mocked(queries.usePluginChain).mockReturnValue({
     data: {
       entries: [
-        { id: 'entry-1', order: 100, wasm_registry_id: 'plugin-1', revision: 1 },
+        {
+          id: 'entry-1',
+          order: 100,
+          wasm_registry_id: 'plugin-1',
+          revision: 1,
+        },
       ],
     },
   } as any);
@@ -57,23 +69,35 @@ test('renders ordered list with locked terminal row', () => {
     mutate: vi.fn(),
     isPending: false,
   } as any);
-  vi.mocked(queries.useReorderChain).mockReturnValue({ mutate: vi.fn() } as any);
-  vi.mocked(queries.useInsertChainEntry).mockReturnValue({ mutate: vi.fn() } as any);
-  vi.mocked(queries.useDeleteChainEntry).mockReturnValue({ mutate: vi.fn() } as any);
+  vi.mocked(queries.useReorderChain).mockReturnValue({
+    mutate: vi.fn(),
+  } as any);
+  vi.mocked(queries.useInsertChainEntry).mockReturnValue({
+    mutate: vi.fn(),
+  } as any);
+  vi.mocked(queries.useDeleteChainEntry).mockReturnValue({
+    mutate: vi.fn(),
+  } as any);
 
   renderWithProviders(<RouterSlotEditor principalId="p-1" />);
 
   expect(screen.getByText('My Plugin')).toBeDefined();
   expect(screen.getByText('Terminal')).toBeDefined();
   expect(screen.getByText('Final upstream selection')).toBeDefined();
-  
-  const select = screen.getByRole('combobox', { name: 'Terminal strategy' }) as HTMLSelectElement;
+
+  const select = screen.getByRole('combobox', {
+    name: 'Terminal strategy',
+  }) as HTMLSelectElement;
   expect(select.value).toBe('first-pick');
 });
 
 test('toggles terminal strategy', async () => {
-  vi.mocked(queries.usePluginChain).mockReturnValue({ data: { entries: [] } } as any);
-  vi.mocked(queries.usePluginRegistry).mockReturnValue({ data: { entries: [] } } as any);
+  vi.mocked(queries.usePluginChain).mockReturnValue({
+    data: { entries: [] },
+  } as any);
+  vi.mocked(queries.usePluginRegistry).mockReturnValue({
+    data: { entries: [] },
+  } as any);
   const mutateMock = vi.fn();
   vi.mocked(queries.useRouterTerminalStrategy).mockReturnValue({
     data: { strategy: 'first-pick', revision: 1 },
@@ -83,9 +107,15 @@ test('toggles terminal strategy', async () => {
     mutate: mutateMock,
     isPending: false,
   } as any);
-  vi.mocked(queries.useReorderChain).mockReturnValue({ mutate: vi.fn() } as any);
-  vi.mocked(queries.useInsertChainEntry).mockReturnValue({ mutate: vi.fn() } as any);
-  vi.mocked(queries.useDeleteChainEntry).mockReturnValue({ mutate: vi.fn() } as any);
+  vi.mocked(queries.useReorderChain).mockReturnValue({
+    mutate: vi.fn(),
+  } as any);
+  vi.mocked(queries.useInsertChainEntry).mockReturnValue({
+    mutate: vi.fn(),
+  } as any);
+  vi.mocked(queries.useDeleteChainEntry).mockReturnValue({
+    mutate: vi.fn(),
+  } as any);
 
   renderWithProviders(<RouterSlotEditor principalId="p-1" />);
 
@@ -95,7 +125,7 @@ test('toggles terminal strategy', async () => {
   await waitFor(() => {
     expect(mutateMock).toHaveBeenCalledWith(
       { id: 'p-1', strategy: 'random', revision: 1 },
-      expect.anything()
+      expect.anything(),
     );
   });
 });

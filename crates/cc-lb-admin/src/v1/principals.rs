@@ -395,8 +395,8 @@ async fn update_router_terminal(
         return error_response(StatusCode::PRECONDITION_REQUIRED, "if_match_required");
     };
     let strategy = match parse_router_terminal_strategy(&body.strategy) {
-        Ok(strategy) => strategy,
-        Err(response) => return response,
+        Some(strategy) => strategy,
+        None => return invalid_router_terminal_strategy(),
     };
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
@@ -522,21 +522,23 @@ fn update_fields_changed(body: &UpdatePrincipalBody) -> Vec<&'static str> {
     fields
 }
 
-fn parse_router_terminal_strategy(
-    value: &str,
-) -> Result<TerminalStrategy, axum::response::Response> {
+fn parse_router_terminal_strategy(value: &str) -> Option<TerminalStrategy> {
     match value {
-        "first-pick" => Ok(TerminalStrategy::FirstPick),
-        "random" => Ok(TerminalStrategy::Random),
-        _ => Err((
-            StatusCode::BAD_REQUEST,
-            Json(json!({
-                "error": "invalid_router_terminal_strategy",
-                "allowed": ["first-pick", "random"]
-            })),
-        )
-            .into_response()),
+        "first-pick" => Some(TerminalStrategy::FirstPick),
+        "random" => Some(TerminalStrategy::Random),
+        _ => None,
     }
+}
+
+fn invalid_router_terminal_strategy() -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": "invalid_router_terminal_strategy",
+            "allowed": ["first-pick", "random"]
+        })),
+    )
+        .into_response()
 }
 
 fn if_match_revision(headers: &HeaderMap) -> Option<u64> {

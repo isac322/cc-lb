@@ -30,7 +30,7 @@ use cc_lb_plugin_wire::v2::common::{
 };
 use cc_lb_plugin_wire::v2::shape::{ShapeFn as ShapeFnV2, ShapeRequest as ShapeRequestV2};
 use cc_lb_plugin_wire::v3::filter::{
-    FilterFn, FilterRequest, FilterResponse, PerCandidateReasonWire,
+    FilterFn, FilterRequest, FilterResponse, PerCandidateReason as WirePerCandidateReason,
 };
 use cc_lb_plugin_wire::wire_function::{FallbackPolicy, WireFunction};
 use http::header::{HeaderName, HeaderValue};
@@ -834,47 +834,22 @@ fn principal_to_wire_v3(principal: &Principal) -> FilterPrincipalWire {
 }
 
 fn filter_response_to_output(response: FilterResponse) -> Result<FilterOutput, FilterError> {
-    let mut kept_upstream_ids = Vec::new();
-    let mut per_candidate_reasons = Vec::new();
-    let mut reasons = Vec::new();
-
-    for result in response.results {
-        let upstream_id =
-            Uuid::parse_str(&result.upstream_id).map_err(|source| FilterError::Runtime {
-                reason: format!("plugin returned invalid upstream_id: {source}"),
-            })?;
-        if result.decision == "accept" {
-            kept_upstream_ids.push(upstream_id);
-        } else {
-            per_candidate_reasons.push(per_candidate_reason_from_wire(&result));
-        }
-        if !result.reason.is_empty() {
-            reasons.push(format!("{}: {}", result.upstream_id, result.reason));
-        }
-    }
-
     Ok(FilterOutput {
-        kept_upstream_ids,
-        reason: reasons.join("; "),
-        per_candidate_reasons,
+        kept_upstream_ids: response.kept_upstream_ids,
+        reason: response.reason,
+        per_candidate_reasons: response
+            .per_candidate_reasons
+            .iter()
+            .map(per_candidate_reason_from_wire)
+            .collect(),
     })
 }
 
-fn per_candidate_reason_from_wire(result: &PerCandidateReasonWire) -> PerCandidateReason {
-    let label = if result.decision == "accept" {
-        result.reason.as_str()
-    } else {
-        result.decision.as_str()
-    };
-    let label = label.replace('-', "_").to_ascii_lowercase();
-    if label.contains("rate_limit") || label.contains("rate_limited") {
-        PerCandidateReason::RateLimited
-    } else if label.contains("quota") {
-        PerCandidateReason::InsufficientQuota
-    } else if label.contains("unhealthy") {
-        PerCandidateReason::Unhealthy
-    } else {
-        PerCandidateReason::RejectedByPlugin
+fn per_candidate_reason_from_wire(result: &WirePerCandidateReason) -> PerCandidateReason {
+    PerCandidateReason {
+        upstream_id: result.upstream_id,
+        kept: result.kept,
+        reason: result.reason.clone(),
     }
 }
 
@@ -1048,9 +1023,7 @@ fn signer_unexpected_fallback(policy: FallbackPolicy) -> SignerError {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
-    use cc_lb_plugin_api::{PrincipalKind, RateLimitKind, RateLimitObservation, UpstreamKind};
-    use http::{HeaderMap, Method};
+    use cc_lb_plugin_api::{RateLimitKind, RateLimitObservation, UpstreamKind};
     use serde_json::json;
     use uuid::Uuid;
 

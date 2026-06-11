@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use cc_lb_plugin_api;
+use cc_lb_plugin_api::TerminalStrategy;
 use cc_lb_storage_api::{
     PrincipalCreate, PrincipalRecord, PrincipalStore, PrincipalUpdate, StorageResult,
     validate_identifier,
@@ -158,7 +158,7 @@ impl RedbStorage {
             revision: 0,
             created_at_unix_secs: now_unix_secs,
             updated_at_unix_secs: now_unix_secs,
-            router_terminal_strategy: cc_lb_plugin_api::TerminalStrategy::FirstPick,
+            router_terminal_strategy: TerminalStrategy::FirstPick,
         };
         {
             let name_index = write_txn.open_table(PRINCIPALS_V2_BY_NAME)?;

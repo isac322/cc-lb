@@ -1,32 +1,33 @@
-//! E2E hit-rate comparison: cache-aware vs round-robin router plugins.
+//! E2E hit-rate comparison: cache-aware filter vs no-filter Random terminal.
 //!
 //! Run with:
-//!   cargo test -p cc-lb-server --release --test e2e_cache_aware_vs_round_robin -- --ignored --nocapture
+//!   cargo test -p cc-lb-server --test e2e_cache_aware_vs_random -- --nocapture
 //!
 //! Architecture
 //! ------------
-//! The test exercises the cache-aware plugin via `cc-lb-runtime-extism` and the
-//! production `PromptCacheObservationCache` directly, rather than through
-//! `cc_lb_core::Lifecycle::handle`. It now parses the request through the real
-//! `cc_lb_core::parse_request_cache_breakpoints` helper, so the `prefix_hash`
-//! and `prefix_token_count` driving the cache-aware plugin are produced by
-//! production code rather than synthesised.
+//! The test exercises the cache-aware plugin via `cc-lb-runtime-extism` as a v3
+//! router filter, then applies the host Random terminal strategy directly. It
+//! parses the request through the real `cc_lb_core::parse_request_cache_breakpoints`
+//! helper, so the `prefix_hash` and `prefix_token_count` driving the cache-aware
+//! plugin are produced by production code rather than synthesised.
 //!
 //! The test exercises:
 //!   - production cache-breakpoint extraction + tokenization
 //!     (`parse_request_cache_breakpoints`),
 //!   - the production prompt cache (`PromptCacheObservationCache`),
-//!   - the production extism runtime (`ExtismRuntime`), which compiles and
-//!     loads the released wasm artefacts for both router plugins,
-//!   - the production wire dispatch (v1 for round-robin, v2 for cache-aware),
+//!   - the production extism runtime (`ExtismRuntime`), which compiles and loads
+//!     the released wasm artefact for the cache-aware filter,
+//!   - production wire dispatch for the v3 cache-aware filter,
+//!   - host-equivalent Random terminal selection with a fixed RNG seed,
 //!   - real HTTP traffic to three `fake-anthropic` instances with the T27
 //!     `__inject_cache_stats` endpoint controlling which upstream reports a
 //!     cache read on its `/v1/messages` responses.
 //!
-//! For the cache-aware phase, the test upserts a warm observation into the
-//! production cache after each response that comes back with
-//! `cache_read_input_tokens > 0`. This mirrors what the production response
-//! decoder does for the same scenario.
+//! The no-filter phase uses an empty `user_filters` chain and the same seeded
+//! Random terminal, so all upstream candidates remain eligible. The cache-aware
+//! phase runs one v3 filter with `keep_k = 1`; once upstream A reports a cache
+//! read, the production cache observation makes the filter keep upstream A and
+//! Random chooses from that one-candidate set.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -43,13 +44,14 @@ use cc_lb_core::clock::{ClockHandle, TestClock};
 use cc_lb_core::parse_request_cache_breakpoints;
 use cc_lb_plugin_api::types::{CacheBreakpoint, CacheScore, TtlClass, WarmCacheEntry};
 use cc_lb_plugin_api::{
-    PluginManifest, PluginRuntime, Principal, PrincipalKind, RequestContext, UpstreamCandidate,
-    UpstreamKind,
+    FilterPlugin, PluginManifest, Principal, PrincipalKind, RequestContext, TerminalStrategy,
+    UpstreamCandidate, UpstreamKind,
 };
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_server::prompt_cache_observation_cache::PromptCacheObservationCache;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use http::{HeaderMap, Method};
+use rand::{RngExt, SeedableRng, rngs::StdRng};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -66,26 +68,20 @@ const ONE_HOUR_SECS: u64 = 3_600;
 const TEST_MODEL: &str = "claude-sonnet-4-5-20250929";
 const INJECTED_CACHE_READ_TOKENS: u64 = 4_096;
 const INJECTED_CACHE_CREATION_TOKENS: u64 = 4_096;
-const RR_HIT_RATE_MAX: f64 = 0.40;
+const CACHE_AWARE_KEEP_K: usize = 1;
+const NO_FILTER_HIT_RATE_MAX: f64 = 0.40;
 const CACHE_AWARE_HIT_RATE_MIN: f64 = 0.80;
+const TERMINAL_RNG_SEED: [u8; 32] = [0x5a; 32];
+const PLUGIN_WASM_TARGET: &str = "wasm32-unknown-unknown";
 
 #[tokio::test]
-#[ignore = "release-only e2e: builds wasm32-wasip1 plugins and spins up three fake-anthropic upstreams"]
-async fn e2e_cache_aware_beats_round_robin() -> TestResult<()> {
-    let Some(round_robin_wasm) = build_plugin_wasm(
-        "plugins/router/round-robin/Cargo.toml",
-        "cc_lb_router_round_robin",
-    )?
-    else {
-        eprintln!("skipped: wasm32-wasip1 toolchain missing");
-        return Ok(());
-    };
+async fn e2e_cache_aware_beats_no_filter_random_terminal() -> TestResult<()> {
     let Some(cache_aware_wasm) = build_plugin_wasm(
         "plugins/router/cache-aware/Cargo.toml",
         "cache_aware_router",
     )?
     else {
-        eprintln!("skipped: wasm32-wasip1 toolchain missing");
+        eprintln!("skipped: {PLUGIN_WASM_TARGET} toolchain missing");
         return Ok(());
     };
 
@@ -103,35 +99,39 @@ async fn e2e_cache_aware_beats_round_robin() -> TestResult<()> {
     )
     .await?;
 
-    let rr_hits = run_phase(
-        "round-robin",
-        round_robin_wasm,
-        /*wire_version=*/ Some(1),
+    let no_filter_hits = run_phase(
+        "no-filter-random",
+        Vec::new(),
+        TerminalStrategy::Random,
         &upstreams,
         &body_bytes,
     )
     .await?;
-    let rr_hit_rate = rr_hits as f64 / REQUEST_COUNT as f64;
+    let no_filter_hit_rate = no_filter_hits as f64 / REQUEST_COUNT as f64;
 
+    let runtime = ExtismRuntime::new();
+    let cache_aware_filter = instantiate_cache_aware_filter(&runtime, cache_aware_wasm)?;
     let cache_aware_hits = run_phase(
-        "cache-aware",
-        cache_aware_wasm,
-        /*wire_version=*/ Some(2),
+        "cache-aware-random",
+        vec![cache_aware_filter],
+        TerminalStrategy::Random,
         &upstreams,
         &body_bytes,
     )
     .await?;
     let cache_aware_hit_rate = cache_aware_hits as f64 / REQUEST_COUNT as f64;
 
-    println!("round_robin={rr_hit_rate:.2} cache_aware={cache_aware_hit_rate:.2}");
+    println!(
+        "no_filter_random={no_filter_hit_rate:.2} cache_aware_random={cache_aware_hit_rate:.2}"
+    );
 
     assert!(
-        rr_hit_rate <= RR_HIT_RATE_MAX,
-        "RR baseline should be ~33%, got {rr_hit_rate}"
+        no_filter_hit_rate <= NO_FILTER_HIT_RATE_MAX,
+        "no-filter Random baseline should be ~33%, got {no_filter_hit_rate}"
     );
     assert!(
         cache_aware_hit_rate >= CACHE_AWARE_HIT_RATE_MIN,
-        "cache-aware should be ≥80%, got {cache_aware_hit_rate}"
+        "cache-aware filter + Random terminal should be ≥80%, got {cache_aware_hit_rate}"
     );
 
     Ok(())
@@ -139,8 +139,8 @@ async fn e2e_cache_aware_beats_round_robin() -> TestResult<()> {
 
 async fn run_phase(
     label: &str,
-    wasm_path: PathBuf,
-    wire_version: Option<u8>,
+    user_filters: Vec<Arc<dyn FilterPlugin>>,
+    terminal: TerminalStrategy,
     upstreams: &[Upstream],
     body_bytes: &[u8],
 ) -> TestResult<usize> {
@@ -154,18 +154,7 @@ async fn run_phase(
         /*warm_set_cap=*/ 32,
         /*refresh_debounce_secs=*/ 60,
     ));
-
-    let manifest = PluginManifest {
-        name: format!("{label}-e2e"),
-        artifact: wasm_path.to_string_lossy().into_owned(),
-        wire_version,
-        config: json!({}),
-        metadata: BTreeMap::new(),
-    };
-    let runtime = ExtismRuntime::new();
-    let router = runtime
-        .instantiate_router(&manifest)
-        .map_err(|err| io_err(format!("instantiate {label} router: {err}")))?;
+    let mut terminal_rng = StdRng::from_seed(TERMINAL_RNG_SEED);
 
     let request_breakpoints =
         parse_request_cache_breakpoints(&HeaderMap::new(), &Bytes::copy_from_slice(body_bytes));
@@ -192,7 +181,7 @@ async fn run_phase(
     let mut hits = 0_usize;
     for _ in 0..REQUEST_COUNT {
         let now = clock.now_unix_secs();
-        let candidates: Vec<UpstreamCandidate> = upstreams
+        let mut candidates: Vec<UpstreamCandidate> = upstreams
             .iter()
             .map(|upstream| {
                 let warm = cache.snapshot_for_upstream(
@@ -214,16 +203,26 @@ async fn run_phase(
             })
             .collect();
 
-        let decision = router
-            .route(&ctx, &principal, &candidates)
-            .map_err(|err| io_err(format!("{label} route() failed: {err}")))?;
-        let picked_upstream_id = decision
-            .upstream_id
-            .ok_or_else(|| io_err(format!("{label} plugin returned no upstream_id")))?;
+        for filter in &user_filters {
+            let output = filter
+                .filter(&ctx, &principal, &candidates)
+                .map_err(|err| {
+                    io_err(format!(
+                        "{label} filter {} failed: {err}",
+                        filter.plugin_name()
+                    ))
+                })?;
+            candidates
+                .retain(|candidate| output.kept_upstream_ids.contains(&candidate.upstream_id));
+        }
+
+        let picked_upstream_id =
+            select_terminal_upstream(&mut terminal_rng, &terminal, &candidates)
+                .ok_or_else(|| io_err(format!("{label} terminal had no candidates")))?;
         let picked = upstreams
             .iter()
             .find(|upstream| upstream.id == picked_upstream_id)
-            .ok_or_else(|| io_err(format!("{label} plugin returned unknown upstream")))?;
+            .ok_or_else(|| io_err(format!("{label} terminal returned unknown upstream")))?;
 
         let response = post_json(picked.addr, "/v1/messages", body_bytes).await?;
         let cache_read = response
@@ -245,6 +244,38 @@ async fn run_phase(
     }
 
     Ok(hits)
+}
+
+fn instantiate_cache_aware_filter(
+    runtime: &ExtismRuntime,
+    wasm_path: PathBuf,
+) -> TestResult<Arc<dyn FilterPlugin>> {
+    let manifest = PluginManifest {
+        name: "cache-aware-e2e".to_owned(),
+        artifact: wasm_path.to_string_lossy().into_owned(),
+        wire_version: Some(3),
+        config: json!({ "keep_k": CACHE_AWARE_KEEP_K }),
+        metadata: BTreeMap::new(),
+    };
+    runtime
+        .instantiate_filter(&manifest)
+        .map_err(|err| io_err(format!("instantiate cache-aware filter: {err}")).into())
+}
+
+fn select_terminal_upstream(
+    rng: &mut StdRng,
+    terminal: &TerminalStrategy,
+    candidates: &[UpstreamCandidate],
+) -> Option<Uuid> {
+    match terminal {
+        TerminalStrategy::Random if !candidates.is_empty() => {
+            let index = rng.random_range(..candidates.len());
+            Some(candidates[index].upstream_id)
+        }
+        TerminalStrategy::FirstPick | TerminalStrategy::Random => {
+            candidates.first().map(|candidate| candidate.upstream_id)
+        }
+    }
 }
 
 /// Mirrors `lifecycle::build_cache_score` without depending on its private
@@ -433,12 +464,12 @@ fn build_plugin_wasm(manifest_path: &str, artifact_name: &str) -> TestResult<Opt
             "--manifest-path",
             manifest_path,
             "--target",
-            "wasm32-wasip1",
+            PLUGIN_WASM_TARGET,
             "--release",
         ])
         .status()?;
     if !status.success() {
-        if !wasm32_wasip1_target_installed() {
+        if !rustup_target_installed(PLUGIN_WASM_TARGET) {
             return Ok(None);
         }
         return Err(io_err(format!("{manifest_path} wasm build failed: {status}")).into());
@@ -459,14 +490,14 @@ fn wasm_candidates(root: &Path, manifest_path: &str, artifact_name: &str) -> Vec
     if let Ok(target_dir) = std::env::var("CARGO_TARGET_DIR") {
         candidates.push(
             PathBuf::from(target_dir)
-                .join("wasm32-wasip1")
+                .join(PLUGIN_WASM_TARGET)
                 .join("release")
                 .join(format!("{artifact_name}.wasm")),
         );
     }
     candidates.push(
         root.join("target")
-            .join("wasm32-wasip1")
+            .join(PLUGIN_WASM_TARGET)
             .join("release")
             .join(format!("{artifact_name}.wasm")),
     );
@@ -474,7 +505,7 @@ fn wasm_candidates(root: &Path, manifest_path: &str, artifact_name: &str) -> Vec
         candidates.push(
             root.join(plugin_dir)
                 .join("target")
-                .join("wasm32-wasip1")
+                .join(PLUGIN_WASM_TARGET)
                 .join("release")
                 .join(format!("{artifact_name}.wasm")),
         );
@@ -482,7 +513,7 @@ fn wasm_candidates(root: &Path, manifest_path: &str, artifact_name: &str) -> Vec
     candidates
 }
 
-fn wasm32_wasip1_target_installed() -> bool {
+fn rustup_target_installed(target: &str) -> bool {
     Command::new("rustup")
         .args(["target", "list", "--installed"])
         .output()
@@ -491,7 +522,7 @@ fn wasm32_wasip1_target_installed() -> bool {
         .map(|output| {
             String::from_utf8_lossy(&output.stdout)
                 .lines()
-                .any(|line| line.trim() == "wasm32-wasip1")
+                .any(|line| line.trim() == target)
         })
         .unwrap_or(false)
 }

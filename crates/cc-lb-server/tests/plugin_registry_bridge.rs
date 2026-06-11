@@ -75,17 +75,17 @@ impl PluginRegistryRepo for StubRepo {
 fn sample_record(sha256: [u8; 32], plugin_version: &str) -> PluginRegistryRecord {
     PluginRegistryRecord {
         sha256,
-        plugin_name: "round-robin".to_owned(),
+        plugin_name: "metadata-plugin".to_owned(),
         plugin_version: plugin_version.to_owned(),
         abi_envelope: 1,
         augmented_metadata: AugmentedMetadata {
             identity: PluginIdentity {
                 magic: CC_LB_PLUGIN_MAGIC,
                 abi_envelope: 1,
-                plugin_name: "round-robin".to_owned(),
+                plugin_name: "metadata-plugin".to_owned(),
                 plugin_version: plugin_version.to_owned(),
             },
-            negotiated_functions: BTreeMap::from([("route".to_owned(), 1_u32)]),
+            negotiated_functions: BTreeMap::from([("shape".to_owned(), 1_u32)]),
             negotiated_capabilities: BTreeSet::new(),
             handshake_completed_at: 100,
             self_check_passed: true,
@@ -118,7 +118,7 @@ async fn bridge_injects_augmented_metadata_when_record_present() {
         parsed.identity.plugin_version, "legacy",
         "bridge must NOT produce the legacy_dispatch_metadata sentinel",
     );
-    assert_eq!(parsed.negotiated_functions.get("route").copied(), Some(1));
+    assert_eq!(parsed.negotiated_functions.get("shape").copied(), Some(1));
 }
 
 #[tokio::test]
@@ -203,9 +203,9 @@ impl RegistryLifecycle for StubLifecycle {
         let accept = HandshakeAccept {
             handshake_schema_version: HANDSHAKE_SCHEMA_VERSION_V1,
             envelope_version: 1,
-            chosen_versions: BTreeMap::from([("route".to_owned(), 1)]),
-            plugin_supported: BTreeMap::from([("route".to_owned(), vec![1])]),
-            implemented_functions: BTreeSet::from(["route".to_owned()]),
+            chosen_versions: BTreeMap::from([("shape".to_owned(), 1)]),
+            plugin_supported: BTreeMap::from([("shape".to_owned(), vec![1])]),
+            implemented_functions: BTreeSet::from(["shape".to_owned()]),
             required_capabilities: BTreeSet::new(),
         };
         accept.validate_against_offer(offer)?;

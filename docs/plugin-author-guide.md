@@ -24,29 +24,38 @@ The canonical sources are the crates under `crates/cc-lb-pdk` (proc-macros) and 
 
 ## Quick start
 
-The reference implementation is the round-robin router at `plugins/router/round-robin/src/lib.rs`. Minimal plugin skeleton:
+The reference implementation is the cache-aware filter at `plugins/router/cache-aware/src/lib.rs`. Minimal plugin skeleton:
 
 ```rust
-use cc_lb_plugin_wire::v1::{
-    common::{DialectBinding, UpstreamWire},
-    route::{RouteRequest, RouteResponse},
-};
+use cc_lb_plugin_wire::v3::filter::{FilterRequest, FilterResponse, PerCandidateReason};
 use std::convert::Infallible;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
-static COUNTER: AtomicUsize = AtomicUsize::new(0);
+use uuid::Uuid;
 
 #[cc_lb_pdk::plugin(name = "my-router", version = "0.1.0")]
 mod plugin {
     use super::*;
 
-    #[cc_lb_pdk::handler(name = "route", versions = [1])]
-    pub(super) fn route(request: RouteRequest) -> Result<RouteResponse, Infallible> {
-        let idx = COUNTER.fetch_add(1, Ordering::Relaxed) % request.candidates.len().max(1);
-        Ok(RouteResponse {
-            upstream_id: request.candidates.get(idx).map(|c| c.upstream_id.clone()),
-            dialect: DialectBinding::SelfReferenced,
-            upstream: UpstreamWire::AnthropicDirect,
+    #[cc_lb_pdk::handler(name = "filter", versions = [1])]
+    pub(super) fn filter(request: FilterRequest) -> Result<FilterResponse, Infallible> {
+        let kept_upstream_ids = request
+            .candidates
+            .iter()
+            .filter_map(|candidate| Uuid::parse_str(&candidate.upstream_id).ok())
+            .collect::<Vec<_>>();
+        Ok(FilterResponse {
+            kept_upstream_ids,
+            reason: "accept all candidates".to_owned(),
+            per_candidate_reasons: request
+                .candidates
+                .iter()
+                .filter_map(|candidate| {
+                    Some(PerCandidateReason {
+                        upstream_id: Uuid::parse_str(&candidate.upstream_id).ok()?,
+                        kept: true,
+                        reason: "accepted by example filter".to_owned(),
+                    })
+                })
+                .collect(),
         })
     }
 }
@@ -139,7 +148,7 @@ Signature constraints (enforced by the macro):
 
 - Exactly one parameter, whose type is the wire function's `Request` (see [Wire functions reference](#wire-functions-reference)).
 - Return type `Result<Response, E>` where `E: std::fmt::Display`. The handler's error is converted to a wire-level error by the generated envelope wrapper.
-- Free function, no `&self`. Module-level statics for state (see the round-robin counter) are allowed.
+- Free function, no `&self`. Module-level statics for state are allowed.
 
 You may declare multiple `#[handler]` functions in one `#[plugin]` module; each registers an additional wire function in the handshake.
 
@@ -276,7 +285,7 @@ All wire types use `#[serde(deny_unknown_fields)]`; do not add fields locally, f
 
 The `FALLBACK` constant on each `WireFunction` impl is enforced by the host at runtime; it is not configurable. The four policies (`crates/cc-lb-plugin-wire/src/wire_function.rs`):
 
-- `UseDefault` — the host runs its built-in default for that function (e.g. round-robin among candidates for `route`).
+- `UseDefault` — the host runs its built-in default for that function (e.g. accepting all candidates for `filter`).
 - `FailRequest` — the host aborts the request with a 5xx and surfaces the failure in observability. Used for everything where silent failure would be a security or correctness violation (`shape`, `sign`, `build_signer`).
 - `PassThrough` — the host proceeds as if the plugin returned an "unchanged" response (`normalize_error`: keep the original error body; `on_unauthorized`: surface the 401 to the downstream).
 - `SilentSkip` — used by `observe` only; lossy event delivery is acceptable.
@@ -311,7 +320,7 @@ Per-request dispatch enforces these too; the host catches the timeout / fuel-exh
 
 ## Building the wasm artifact
 
-The PDK targets either `wasm32-unknown-unknown` (lighter, no WASI) or `wasm32-wasip1` (compatible with the `cc-lb-router-round-robin` legacy README). Both are accepted by the host. The `wasm32-unknown-unknown` toolchain is the recommended default because the plugin-wire crate is `no_std`-friendly and does not require WASI.
+The PDK targets either `wasm32-unknown-unknown` (lighter, no WASI) or `wasm32-wasip1`. Both are accepted by the host. The `wasm32-unknown-unknown` toolchain is the recommended default because the plugin-wire crate is `no_std`-friendly and does not require WASI.
 
 ```bash
 rustup target add wasm32-unknown-unknown
@@ -402,7 +411,7 @@ When this guide and the code disagree, prefer the code.
 | Limits and guardrails | [crates/cc-lb-plugin-wire/src/limits.rs](../crates/cc-lb-plugin-wire/src/limits.rs) |
 | Admin upload / list / delete API | [crates/cc-lb-server/src/admin_plugins.rs](../crates/cc-lb-server/src/admin_plugins.rs) |
 | Startup re-handshake loop + freshness fast path | [crates/cc-lb-server/src/startup_handshake.rs](../crates/cc-lb-server/src/startup_handshake.rs) |
-| Reference plugin implementation | [plugins/router/round-robin/src/lib.rs](../plugins/router/round-robin/src/lib.rs) |
+| Reference plugin implementation | [plugins/router/cache-aware/src/lib.rs](../plugins/router/cache-aware/src/lib.rs) |
 | Static identity reader (host side) | [crates/cc-lb-runtime-extism/src/identity.rs](../crates/cc-lb-runtime-extism/src/identity.rs) |
 | Dispatch + catch-and-skip + metrics | [crates/cc-lb-runtime-extism/src/dispatch.rs](../crates/cc-lb-runtime-extism/src/dispatch.rs) |
 | Registry orchestration (L1-L4) | [crates/cc-lb-runtime-extism/src/registry.rs](../crates/cc-lb-runtime-extism/src/registry.rs) |
