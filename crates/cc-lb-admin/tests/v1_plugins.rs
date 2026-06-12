@@ -27,7 +27,7 @@ async fn registry_list_paginates() {
         request_json(app, "GET", "/admin/v1/plugins/registry?limit=1", None, None).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(headers.get("x-total-count").unwrap(), "2");
+    assert_eq!(headers.get("x-total-count").unwrap(), "3");
     assert_eq!(body["entries"].as_array().unwrap().len(), 1);
 }
 

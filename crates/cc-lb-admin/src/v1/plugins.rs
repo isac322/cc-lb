@@ -154,10 +154,13 @@ async fn list_registry(
         return storage_unavailable();
     };
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
-    let all = match all_registry_entries(storage).await {
+    let storage_entries = match all_registry_entries(storage).await {
         Ok(entries) => entries,
         Err(error) => return storage_error(error),
     };
+    let mut all = Vec::with_capacity(storage_entries.len() + 1);
+    all.push(WasmRegistryEntry::builtin_cache_affinity(0));
+    all.extend(storage_entries);
     let total = all.len();
     let start = query
         .after
