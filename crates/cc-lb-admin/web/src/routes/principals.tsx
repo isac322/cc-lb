@@ -55,8 +55,10 @@ import {
 import { RelativeTime } from '../components/ui/RelativeTime';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import {
+  type LimitKind,
   type PluginEntry,
   type Principal,
+  type PrincipalDefaultLimit,
   useCreatePrincipal,
   useDeleteChainEntry,
   useDeletePrincipal,
@@ -65,7 +67,6 @@ import {
   usePluginChain,
   usePluginRegistry,
   usePrincipalKeys,
-  usePrincipalLimits,
   usePrincipalNameMap,
   usePrincipals,
   useRecentEvents,
@@ -74,6 +75,7 @@ import {
   useRouterTerminalStrategy,
   useSetAllowedModels,
   useTogglePrincipal,
+  useUpdatePrincipalDefaultLimits,
   useUpdateRouterTerminalStrategy,
   useUpstreamNameMap,
 } from '../lib/queries';
@@ -315,7 +317,6 @@ function PrincipalDetail({
       <div className="flex-1 overflow-y-auto p-4 md:p-6 pb-8 md:pb-12 space-y-6">
         <AllowedModelsCard principal={principal} />
         <DefaultLimitsCard principal={principal} />
-        <LiveLimitsCard principal={principal} />
         <RecentRequestsCard principal={principal} />
         <RouterSlotEditor principalId={principal.id} />
         <ObservabilityHookEditor principalId={principal.id} />
@@ -441,32 +442,242 @@ function AllowedModelsCard({ principal }: { principal: Principal }) {
   );
 }
 
+const LIMIT_KIND_OPTIONS: { value: LimitKind; label: string }[] = [
+  { value: 'requests', label: 'Requests' },
+  { value: 'input_tokens', label: 'Input tokens' },
+  { value: 'output_tokens', label: 'Output tokens' },
+  { value: 'total_tokens', label: 'Total tokens' },
+  { value: 'cost_usd', label: 'Cost (USD)' },
+  { value: 'concurrent', label: 'Concurrent' },
+];
+
+const LIMIT_KIND_LABEL: Record<LimitKind, string> = LIMIT_KIND_OPTIONS.reduce(
+  (acc, opt) => {
+    acc[opt.value] = opt.label;
+    return acc;
+  },
+  {} as Record<LimitKind, string>,
+);
+
+function formatWindowSecs(secs: number): string {
+  if (!Number.isFinite(secs) || secs <= 0) return `${secs}s`;
+  if (secs % 86400 === 0) return `${secs / 86400}d`;
+  if (secs % 3600 === 0) return `${secs / 3600}h`;
+  if (secs % 60 === 0) return `${secs / 60}m`;
+  return `${secs}s`;
+}
+
+function formatLimitCap(limit: PrincipalDefaultLimit): string {
+  if (limit.kind === 'cost_usd') {
+    const usd = limit.cap_micros / 1_000_000;
+    return `$${usd.toLocaleString(undefined, {
+      minimumFractionDigits: 2,
+      maximumFractionDigits: 6,
+    })}`;
+  }
+  return limit.cap_micros.toLocaleString();
+}
+
+function LimitsEditor({
+  value,
+  onChange,
+}: {
+  value: PrincipalDefaultLimit[];
+  onChange: (next: PrincipalDefaultLimit[]) => void;
+}) {
+  const updateRow = (idx: number, patch: Partial<PrincipalDefaultLimit>) => {
+    const next = value.map((row, i) =>
+      i === idx ? { ...row, ...patch } : row,
+    );
+    onChange(next);
+  };
+  const removeRow = (idx: number) => {
+    onChange(value.filter((_, i) => i !== idx));
+  };
+  const addRow = () => {
+    onChange([...value, { kind: 'requests', window_secs: 60, cap_micros: 0 }]);
+  };
+
+  return (
+    <div className="space-y-2">
+      {value.length === 0 ? (
+        <p className="text-xs text-text-faint">No limits. Add one below.</p>
+      ) : null}
+      {value.map((row, idx) => {
+        const isCost = row.kind === 'cost_usd';
+        const capDisplay = isCost
+          ? (row.cap_micros / 1_000_000).toString()
+          : row.cap_micros.toString();
+        return (
+          <div
+            key={idx}
+            className="flex flex-wrap items-end gap-2 border border-subtle rounded-md p-2"
+          >
+            <div className="w-40">
+              <Field label="Kind">
+                <select
+                  className={INPUT_CLASS}
+                  value={row.kind}
+                  onChange={(e) =>
+                    updateRow(idx, { kind: e.target.value as LimitKind })
+                  }
+                >
+                  {LIMIT_KIND_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>
+                      {opt.label}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            </div>
+            <div className="w-32">
+              <Field label="Window (sec)">
+                <input
+                  type="number"
+                  min={1}
+                  step={1}
+                  className={INPUT_CLASS}
+                  value={row.window_secs}
+                  onChange={(e) =>
+                    updateRow(idx, {
+                      window_secs: Math.max(
+                        1,
+                        Math.floor(Number(e.target.value) || 0),
+                      ),
+                    })
+                  }
+                />
+              </Field>
+            </div>
+            <div className="w-40">
+              <Field label={isCost ? 'Cap (USD)' : 'Cap'}>
+                <input
+                  type="number"
+                  min={0}
+                  step={isCost ? '0.01' : '1'}
+                  className={INPUT_CLASS}
+                  value={capDisplay}
+                  onChange={(e) => {
+                    const raw = Number(e.target.value);
+                    if (!Number.isFinite(raw) || raw < 0) {
+                      updateRow(idx, { cap_micros: 0 });
+                      return;
+                    }
+                    updateRow(idx, {
+                      cap_micros: isCost
+                        ? Math.round(raw * 1_000_000)
+                        : Math.floor(raw),
+                    });
+                  }}
+                />
+              </Field>
+            </div>
+            <Button
+              size="sm"
+              variant="danger"
+              iconLeft={<Trash2 className="w-3 h-3" />}
+              onClick={() => removeRow(idx)}
+            >
+              Remove
+            </Button>
+          </div>
+        );
+      })}
+      <Button
+        size="sm"
+        iconLeft={<Plus className="w-3 h-3" />}
+        onClick={addRow}
+      >
+        Add limit
+      </Button>
+    </div>
+  );
+}
+
 function DefaultLimitsCard({ principal }: { principal: Principal }) {
+  const update = useUpdatePrincipalDefaultLimits();
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState<PrincipalDefaultLimit[]>(
+    principal.default_limits,
+  );
+  useEffect(() => {
+    if (!editing) setDraft(principal.default_limits);
+  }, [editing, principal.default_limits]);
+
   return (
     <Card>
       <CardHeader
         title="Default Limits"
-        subtitle="Per-model RPM / TPM defaults baked into spec"
+        subtitle="Per-principal rate caps applied to every API key"
+        action={
+          editing ? (
+            <div className="flex items-center gap-2">
+              <Button
+                size="sm"
+                onClick={() => {
+                  setEditing(false);
+                  setDraft(principal.default_limits);
+                }}
+              >
+                Cancel
+              </Button>
+              <Button
+                size="sm"
+                variant="primary"
+                onClick={() =>
+                  update.mutate(
+                    {
+                      id: principal.id,
+                      default_limits: draft,
+                      expected_revision: principal.revision,
+                    },
+                    {
+                      onSuccess: () => {
+                        toast.success('Default limits updated');
+                        setEditing(false);
+                      },
+                    },
+                  )
+                }
+              >
+                Save
+              </Button>
+            </div>
+          ) : (
+            <Button size="sm" onClick={() => setEditing(true)}>
+              Edit
+            </Button>
+          )
+        }
       />
-      {principal.default_limits.length ? (
+      {editing ? (
+        <CardBody>
+          <LimitsEditor value={draft} onChange={setDraft} />
+        </CardBody>
+      ) : principal.default_limits.length ? (
         <div className="overflow-x-auto">
           <table className="w-full font-mono text-xs">
             <thead className="table-header sticky top-0 z-10">
               <tr className="text-[10px] uppercase tracking-wider">
-                <th className="text-left px-4 py-2">Model</th>
-                <th className="text-right px-4 py-2">RPM</th>
-                <th className="text-right px-4 py-2">TPM</th>
+                <th className="text-left px-4 py-2">Kind</th>
+                <th className="text-right px-4 py-2">Window</th>
+                <th className="text-right px-4 py-2">Cap</th>
               </tr>
             </thead>
             <tbody>
-              {principal.default_limits.map((l) => (
-                <tr key={l.model} className="border-b border-row">
-                  <td className="px-4 py-2">{l.model}</td>
-                  <td className="px-4 py-2 text-right tabular-nums">
-                    {l.rpm.toLocaleString()}
+              {principal.default_limits.map((l, idx) => (
+                <tr
+                  key={`${l.kind}-${l.window_secs}-${idx}`}
+                  className="border-b border-row"
+                >
+                  <td className="px-4 py-2">
+                    {LIMIT_KIND_LABEL[l.kind] ?? l.kind}
                   </td>
                   <td className="px-4 py-2 text-right tabular-nums">
-                    {l.tpm.toLocaleString()}
+                    {formatWindowSecs(l.window_secs)}
+                  </td>
+                  <td className="px-4 py-2 text-right tabular-nums">
+                    {formatLimitCap(l)}
                   </td>
                 </tr>
               ))}
@@ -480,50 +691,6 @@ function DefaultLimitsCard({ principal }: { principal: Principal }) {
           </p>
         </CardBody>
       )}
-    </Card>
-  );
-}
-
-function LiveLimitsCard({ principal }: { principal: Principal }) {
-  const limits = usePrincipalLimits(principal.id);
-  return (
-    <Card>
-      <CardHeader
-        title="Live Limit Snapshots"
-        subtitle="Observed rate-limit headers from upstream"
-      />
-      <CardBody>
-        {limits.isLoading ? (
-          <Skeleton className="h-12" />
-        ) : limits.data ? (
-          <div className="space-y-3">
-            {limits.data.identities.flatMap((id) =>
-              id.windows.flatMap((w) =>
-                w.snapshots.map((s, i) => (
-                  <div
-                    key={`${w.window}-${i}`}
-                    className="flex items-center justify-between text-xs"
-                  >
-                    <div className="flex items-center gap-2">
-                      <Badge tone="mono">{w.window}</Badge>
-                      <span className="text-text font-mono">
-                        {(s as { model?: string }).model ?? s.kind ?? 'unknown'}
-                      </span>
-                    </div>
-                    <span className="font-mono tabular-nums text-text">
-                      {s.remaining ?? '—'} / {s.limit ?? '—'}
-                    </span>
-                  </div>
-                )),
-              ),
-            )}
-          </div>
-        ) : (
-          <p className="text-xs text-text-faint">
-            No live limit data observed.
-          </p>
-        )}
-      </CardBody>
     </Card>
   );
 }
@@ -2019,9 +2186,13 @@ function CreatePrincipalModal({
   const create = useCreatePrincipal();
   const [name, setName] = useState('');
   const [kind, setKind] = useState<'machine' | 'human' | 'admin'>('human');
+  const [defaultLimits, setDefaultLimits] = useState<PrincipalDefaultLimit[]>(
+    [],
+  );
   const reset = () => {
     setName('');
     setKind('human');
+    setDefaultLimits([]);
   };
   return (
     <Modal
@@ -2039,7 +2210,7 @@ function CreatePrincipalModal({
             disabled={!name.trim()}
             onClick={() =>
               create.mutate(
-                { name, kind },
+                { name, kind, default_limits: defaultLimits },
                 {
                   onSuccess: () => {
                     toast.success('Principal created');
@@ -2075,6 +2246,15 @@ function CreatePrincipalModal({
             <option value="admin">admin</option>
           </select>
         </Field>
+        <div className="flex flex-col gap-1.5">
+          <span className="text-[11px] uppercase tracking-wider text-text-faint">
+            Default limits
+          </span>
+          <LimitsEditor value={defaultLimits} onChange={setDefaultLimits} />
+          <span className="text-[11px] text-text-faint">
+            Optional. Applied to every API key issued for this principal.
+          </span>
+        </div>
       </div>
     </Modal>
   );
