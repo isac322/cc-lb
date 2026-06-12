@@ -1312,6 +1312,7 @@ fn unix_now_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    #![allow(deprecated)]
     use std::collections::HashMap;
 
     use async_trait::async_trait;

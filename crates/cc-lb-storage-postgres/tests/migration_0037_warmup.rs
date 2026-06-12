@@ -47,12 +47,12 @@ const MIGRATIONS_TO_0032: &[&str] = &[
     include_str!("../migrations/0031_plugin_chain_wire_version.sql"),
     include_str!("../migrations/0032_drop_custom_upstream_kind.sql"),
 ];
-const MIGRATION_0033: &str = include_str!("../migrations/0033_upstream_warmup.sql");
+const MIGRATION_0037: &str = include_str!("../migrations/0037_upstream_warmup.sql");
 
 type TestResult<T = ()> = Result<T, Box<dyn Error + Send + Sync>>;
 
 #[tokio::test]
-async fn migration_0033_on_populated_upstreams_is_fast_and_backfills_defaults() -> TestResult {
+async fn migration_0037_on_populated_upstreams_is_fast_and_backfills_defaults() -> TestResult {
     let Some(fixture) = Fixture::create().await? else {
         return Ok(());
     };
@@ -78,7 +78,7 @@ impl Fixture {
             return Ok(None);
         };
 
-        let schema = format!("test_migration_0033_{}", Uuid::new_v4().simple());
+        let schema = format!("test_migration_0037_{}", Uuid::new_v4().simple());
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
             .connect_with(PgConnectOptions::from_str(&url)?)
@@ -135,13 +135,13 @@ async fn run_migration_assertions(fixture: &Fixture) -> TestResult {
     assert_seeded_rows(&fixture.pool).await?;
 
     let started_at = Instant::now();
-    sqlx::raw_sql(MIGRATION_0033).execute(&fixture.pool).await?;
+    sqlx::raw_sql(MIGRATION_0037).execute(&fixture.pool).await?;
     let elapsed = started_at.elapsed();
 
     eprintln!("migration_elapsed_secs={:.6}", elapsed.as_secs_f64());
     assert!(
         elapsed < MAX_MIGRATION_ELAPSED,
-        "migration 0033 took {elapsed:?}, expected < {MAX_MIGRATION_ELAPSED:?}"
+        "migration 0037 took {elapsed:?}, expected < {MAX_MIGRATION_ELAPSED:?}"
     );
 
     let counts = warmup_default_counts(&fixture.pool).await?;
@@ -195,7 +195,7 @@ async fn require_postgres_11(pool: &PgPool) -> TestResult {
 
     assert!(
         server_version_num >= MIN_POSTGRES_VERSION_NUM,
-        "PostgreSQL server_version_num={server_version_num}; migration 0033 timing test requires PostgreSQL 11+ metadata-only ADD COLUMN behavior"
+        "PostgreSQL server_version_num={server_version_num}; migration 0037 timing test requires PostgreSQL 11+ metadata-only ADD COLUMN behavior"
     );
 
     Ok(())
@@ -217,7 +217,7 @@ async fn seed_upstreams(pool: &PgPool) -> TestResult {
          )
          SELECT
              ('00000000-0000-0000-0000-' || lpad(to_hex(row_number), 12, '0'))::uuid,
-             'migration-0033-warmup-' || row_number::text,
+             'migration-0037-warmup-' || row_number::text,
              CASE
                  WHEN row_number % 2 = 0 THEN 'anthropic_api_key'
                  ELSE 'anthropic_oauth'
@@ -258,7 +258,7 @@ async fn assert_seeded_rows(pool: &PgPool) -> TestResult {
     assert_eq!(
         row.try_get::<i64, _>("total")?,
         ROW_COUNT,
-        "seed should happen before migration 0033"
+        "seed should happen before migration 0037"
     );
     assert_eq!(row.try_get::<i64, _>("api_key_rows")?, ROW_COUNT / 2);
     assert_eq!(row.try_get::<i64, _>("oauth_rows")?, ROW_COUNT / 2);
