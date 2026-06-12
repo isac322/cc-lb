@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 mod common;
 
 use std::sync::Arc;
