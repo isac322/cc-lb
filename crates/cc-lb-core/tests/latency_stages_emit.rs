@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 mod common;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -11,9 +13,14 @@ use cc_lb_core::api_keys::limit_engine::LimitEngine;
 use cc_lb_core::instrumented_connector::InstrumentedHttpsConnector;
 use cc_lb_core::{
     Body, BulkheadConfig, BulkheadDispatch, BulkheadRegistry, CachingDnsConnector, DispatchError,
-    DnsResolveFuture, DnsResolver, DnsResolverConfig, Lifecycle, UpstreamDispatch,
+    DnsResolveFuture, DnsResolver, DnsResolverConfig, DynamicViewBuilder, DynamicViewHolder,
+    ErrorNormalizer, Lifecycle, LifecycleConfig, UpstreamDispatch,
+};
+use cc_lb_plugin_api::{
+    Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, UpstreamCandidate,
 };
 use cc_lb_storage_api::types::{KeyStatus, RequestEvent, StoredApiKeyRecord};
+use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
 use cc_lb_storage_api::{RequestEventStore, Storage as StorageTrait};
 use cc_lb_storage_redb::Storage as RedbStorage;
 use http::{HeaderMap, Request, Response, StatusCode};
@@ -26,8 +33,11 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use url::Url;
+use uuid::Uuid;
 
-use common::{TestAuthn, TestRouter, TestState, lifecycle_with_parts, messages_request};
+use common::{TestAuthn, TestState, messages_request};
+
+const DEFAULT_UPSTREAM_ID: &str = "00000000-0000-0000-0000-000000000001";
 
 #[tokio::test]
 async fn cold_request_populates_all_connection_stages_ip_upstream() {
@@ -147,15 +157,20 @@ fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) -> Lifec
             .expect("request event storage opens"),
     );
     let limit_engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()));
-    let router = Arc::new(TestRouter {
-        base_url: Url::parse(base_url).expect("test base URL parses"),
-    });
-    let lifecycle = lifecycle_with_parts(
-        authn,
-        router,
-        dispatcher,
-        Vec::new(),
-        cc_lb_core::LifecycleConfig::default(),
+    let base_url = Url::parse(base_url).expect("test base URL parses");
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(authn.clone()))
+        .global_router(Arc::new(SelectingRouter))
+        .dispatcher(dispatcher)
+        .global_observability_hooks(Vec::new())
+        .error_normalizer(Arc::new(ErrorNormalizer::new()))
+        .principal_view(authn.principal_view.clone())
+        .upstream_records(vec![upstream_record(base_url)])
+        .build();
+    let lifecycle = Lifecycle::new_with_dynamic_view(
+        authn.authn.clone(),
+        Arc::new(DynamicViewHolder::new(view)),
+        LifecycleConfig::default(),
     )
     .with_request_event_storage(Arc::clone(&storage) as Arc<dyn StorageTrait>)
     .with_static_limit_subject(
@@ -177,6 +192,26 @@ fn active_record() -> StoredApiKeyRecord {
         key_hash_b64: "key-test".to_owned(),
         status: KeyStatus::Active,
         ..StoredApiKeyRecord::default()
+    }
+}
+
+fn upstream_record(base_url: Url) -> UpstreamRecord {
+    UpstreamRecord {
+        id: default_upstream_id(),
+        name: "test-upstream".to_owned(),
+        kind: StorageUpstreamKind::AnthropicApiKey,
+        base_url: Some(base_url),
+        enabled: true,
+        oauth_credentials: None,
+        api_key_ciphertext: Some(Vec::new()),
+        refresh_lease_holder: None,
+        refresh_lease_until_unix_secs: None,
+        last_apply_error: None,
+        last_apply_at_unix_secs: None,
+        deleted_at_unix_secs: None,
+        revision: 1,
+        created_at_unix_secs: 0,
+        updated_at_unix_secs: 0,
     }
 }
 
@@ -218,6 +253,23 @@ fn assert_bulkhead_wait_under(value: Option<u64>, max_ms: u64) {
         wait_ms <= max_ms,
         "expected bulkhead wait <= {max_ms}ms, got {wait_ms}ms"
     );
+}
+
+struct SelectingRouter;
+
+impl RouterPlugin for SelectingRouter {
+    fn route(
+        &self,
+        _ctx: &RequestContext,
+        _principal: &Principal,
+        _candidates: &[UpstreamCandidate],
+    ) -> Result<RouteDecision, RouteError> {
+        panic!("terminal strategy selects upstream before legacy router")
+    }
+}
+
+fn default_upstream_id() -> Uuid {
+    Uuid::parse_str(DEFAULT_UPSTREAM_ID).expect("default upstream id parses")
 }
 
 fn instrumented_bulkhead_dispatcher(

@@ -2,9 +2,10 @@ use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    MAX_WASM_BLOB_BYTES, PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput,
-    PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, StorageError, StorageResult, WasmBlob,
-    WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_WIRE_VERSION, MAX_WASM_BLOB_BYTES,
+    PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
+    PluginRegistryStore, PluginSlot, StorageError, StorageResult, WasmBlob, WasmBlobRecord,
+    WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -642,9 +643,15 @@ async fn decrement_blob_in_tx(
 }
 
 fn registry_from_row(row: sqlx::postgres::PgRow) -> StorageResult<WasmRegistryEntry> {
+    let id = row.try_get("id").map_err(map_sqlx_error)?;
+    let refcount = row.try_get("refcount").map_err(map_sqlx_error)?;
+    if id == BUILTIN_CACHE_AFFINITY_ID {
+        return Ok(WasmRegistryEntry::builtin_cache_affinity(refcount));
+    }
+
     let uploaded_at: DateTime<Utc> = row.try_get("uploaded_at").map_err(map_sqlx_error)?;
     Ok(WasmRegistryEntry {
-        id: row.try_get("id").map_err(map_sqlx_error)?,
+        id,
         sha256: sha_to_array(
             &row.try_get::<Vec<u8>, _>("sha256")
                 .map_err(map_sqlx_error)?,
@@ -656,11 +663,15 @@ fn registry_from_row(row: sqlx::postgres::PgRow) -> StorageResult<WasmRegistryEn
         uploaded_by_admin_id: row
             .try_get("uploaded_by_admin_id")
             .map_err(map_sqlx_error)?,
-        refcount: row.try_get("refcount").map_err(map_sqlx_error)?,
+        refcount,
         revision: i64_to_u64(
             row.try_get("revision").map_err(map_sqlx_error)?,
             "wasm_registry.revision",
         )?,
+        kind: "filter".to_owned(),
+        wire_version: BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
+        is_builtin: false,
+        metadata: None,
     })
 }
 
@@ -671,7 +682,7 @@ fn same_wasm_entry_metadata(existing: &WasmRegistryEntry, input: &WasmRegistryEn
 }
 
 fn is_singleton_slot(slot: PluginSlot) -> bool {
-    matches!(slot, PluginSlot::Router | PluginSlot::Shape)
+    matches!(slot, PluginSlot::Shape)
 }
 
 fn chain_from_row(row: sqlx::postgres::PgRow) -> StorageResult<PluginChainEntry> {

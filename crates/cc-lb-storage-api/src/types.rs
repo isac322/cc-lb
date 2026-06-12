@@ -186,6 +186,10 @@ pub struct RequestEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub inter_token_avg_ms: Option<u64>,
     pub error_code: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_trace: Option<cc_lb_plugin_api::RoutingTrace>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub internal_errors: Vec<cc_lb_plugin_api::InternalError>,
 }
 
 fn is_zero(value: &u64) -> bool {

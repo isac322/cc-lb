@@ -76,7 +76,7 @@ mod tests {
         let generated = emit_handler_wrapper(&descriptor());
         let item: ItemFn = syn::parse2(generated).expect("generated handler wrapper parses");
 
-        assert_eq!(item.sig.ident, "route");
+        assert_eq!(item.sig.ident, "filter");
         assert!(item.sig.abi.is_some());
         assert!(item.sig.inputs.is_empty());
         assert_eq!(item.sig.output.to_token_stream().to_string(), "-> i32");
@@ -105,7 +105,7 @@ mod tests {
         assert!(generated.contains("payload_envelope"));
         assert!(generated.contains(r#"object . remove ("_v")"#));
         assert!(generated.contains("cc_lb_plugin_wire :: serde_json :: from_value"));
-        assert!(generated.contains("RouteRequest"));
+        assert!(generated.contains("FilterRequest"));
     }
 
     #[test]
@@ -130,9 +130,9 @@ mod tests {
     fn calls_user_handler() {
         let generated = emit_handler_wrapper(&descriptor()).to_string();
 
-        assert!(generated.contains("route_handler (payload)"));
+        assert!(generated.contains("filter_handler (payload)"));
         assert!(
-            generated.contains("let result : cc_lb_plugin_wire :: v1 :: route :: RouteResponse")
+            generated.contains("let result : cc_lb_plugin_wire :: v3 :: filter :: FilterResponse")
         );
     }
 
@@ -146,11 +146,11 @@ mod tests {
 
     fn descriptor() -> HandlerDescriptor {
         HandlerDescriptor {
-            name: "route".to_owned(),
+            name: "filter".to_owned(),
             versions: vec![1, 2],
-            fn_ident: Ident::new("route_handler", proc_macro2::Span::call_site()),
-            request_type: parse_quote!(cc_lb_plugin_wire::v1::route::RouteRequest),
-            response_type: parse_quote!(cc_lb_plugin_wire::v1::route::RouteResponse),
+            fn_ident: Ident::new("filter_handler", proc_macro2::Span::call_site()),
+            request_type: parse_quote!(cc_lb_plugin_wire::v3::filter::FilterRequest),
+            response_type: parse_quote!(cc_lb_plugin_wire::v3::filter::FilterResponse),
         }
     }
 }

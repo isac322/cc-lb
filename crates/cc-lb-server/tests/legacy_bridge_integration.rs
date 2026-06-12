@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-use cc_lb_plugin_wire::handshake::{HANDSHAKE_SCHEMA_VERSION_V1, HandshakeAccept, HandshakeOffer};
+use cc_lb_plugin_wire::handshake::{HandshakeAccept, HandshakeOffer};
 use cc_lb_plugin_wire::identity::{CC_LB_PLUGIN_MAGIC, CC_LB_PLUGIN_SECTION_NAME};
 use cc_lb_plugin_wire::self_check::{SelfCheckResponse, SelfCheckStatus};
 use cc_lb_runtime_extism::handshake::{HandshakeExecutionError, build_offer};
@@ -137,11 +137,18 @@ impl RegistryLifecycle for CountingLifecycle {
     ) -> Result<HandshakeAccept, HandshakeExecutionError> {
         self.handshakes.fetch_add(1, Ordering::SeqCst);
         let accept = HandshakeAccept {
-            handshake_schema_version: HANDSHAKE_SCHEMA_VERSION_V1,
-            envelope_version: 1,
-            chosen_versions: BTreeMap::from([("route".to_owned(), 1)]),
-            plugin_supported: BTreeMap::from([("route".to_owned(), vec![1])]),
-            implemented_functions: BTreeSet::from(["route".to_owned()]),
+            handshake_schema_version: offer.handshake_schema_version,
+            envelope_version: offer.envelope_version,
+            chosen_versions: offer
+                .function_versions
+                .iter()
+                .map(|(function, versions)| {
+                    let chosen = versions.iter().copied().max().unwrap_or(1);
+                    (function.clone(), chosen)
+                })
+                .collect(),
+            plugin_supported: offer.function_versions.clone(),
+            implemented_functions: offer.function_versions.keys().cloned().collect(),
             required_capabilities: BTreeSet::new(),
         };
         accept.validate_against_offer(offer)?;

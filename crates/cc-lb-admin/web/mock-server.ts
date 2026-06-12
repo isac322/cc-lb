@@ -5,12 +5,11 @@
 import { serve } from "bun";
 
 type Json = Record<string, unknown> | unknown[];
-type UpstreamKind = "anthropic_api_key" | "anthropic_oauth";
-type PrincipalKind = "machine" | "human" | "admin";
 type ChainSlot = "router" | "observability_hook" | "shape";
 
 const NOW = () => Math.floor(Date.now() / 1000);
 const startedAt = NOW();
+const BUILTIN_CACHE_AFFINITY_ID = "00000000-0000-0000-0000-000000000001";
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Seed data
@@ -105,6 +104,27 @@ const principals: any[] = [
 
 const plugins: any[] = [
   {
+    id: BUILTIN_CACHE_AFFINITY_ID,
+    sha256_hex: "0000000000000000000000000000000000000000000000000000000000000000",
+    name: "cache-affinity",
+    original_filename: "builtin://cache-affinity",
+    label: "Built-in cache affinity filter",
+    size_bytes: 0,
+    refcount: 5,
+    revision: 0,
+    uploaded_at_unix_secs: 0,
+    kind: "filter",
+    wire_version: 3,
+    is_builtin: true,
+    metadata: {
+      purpose: "Prefer upstreams whose prompt cache is already warm for this request.",
+      keeps: "Candidates with a positive prefill_cache_score (the upstream has already cached the prefix).",
+      drops: "Candidates with zero cache score — only when at least one candidate is a cache hit; otherwise nothing is dropped.",
+      empty_behavior: "Never drops everything. Falls back to passing all candidates through when no cache hit exists.",
+      examples: ["5 candidates, 2 with positive cache score → keep the 2 hits.", "5 candidates, all with zero cache score → pass all 5 through.", "Exactly 1 candidate → no change."],
+    },
+  },
+  {
     id: "pl-rate-limiter",
     sha256_hex: "9f2c6c0e8b3f5d1e7a4b9c2e0f1d3a5b7c9e1f0a2d4b6c8e0f1d3a5b7c9e1f0a",
     name: "rate-limiter",
@@ -114,6 +134,7 @@ const plugins: any[] = [
     refcount: 3,
     revision: 4,
     uploaded_at_unix_secs: NOW() - 86400 * 14,
+    metadata: null,
   },
   {
     id: "pl-audit-logger",
@@ -125,6 +146,7 @@ const plugins: any[] = [
     refcount: 5,
     revision: 2,
     uploaded_at_unix_secs: NOW() - 86400 * 30,
+    metadata: null,
   },
   {
     id: "pl-cost-tracker",
@@ -136,6 +158,7 @@ const plugins: any[] = [
     refcount: 2,
     revision: 1,
     uploaded_at_unix_secs: NOW() - 86400 * 3,
+    metadata: null,
   },
   {
     id: "pl-shape-llama",
@@ -147,6 +170,7 @@ const plugins: any[] = [
     refcount: 1,
     revision: 3,
     uploaded_at_unix_secs: NOW() - 86400 * 7,
+    metadata: null,
   },
   {
     id: "pl-routing-canary",
@@ -158,24 +182,34 @@ const plugins: any[] = [
     refcount: 1,
     revision: 1,
     uploaded_at_unix_secs: NOW() - 86400 * 2,
+    metadata: null,
   },
 ];
 
 let chainEntryAutoId = 1000;
 const chainEntries: any[] = [
+  { id: `pce-${++chainEntryAutoId}`, principal_id: "pr-admin", slot: "router", order: 0, wasm_registry_id: BUILTIN_CACHE_AFFINITY_ID, config: {}, sse_per_event: false, batched_events_per_flush: 1, batched_flush_ms: 100, revision: 0, wire_version: 3 },
   // pr-admin
   { id: `pce-${++chainEntryAutoId}`, principal_id: "pr-admin", slot: "router", order: 1, wasm_registry_id: "pl-rate-limiter", config: { tier: "admin" }, sse_per_event: false, batched_events_per_flush: 0, batched_flush_ms: 0, revision: 2 },
   { id: `pce-${++chainEntryAutoId}`, principal_id: "pr-admin", slot: "observability_hook", order: 1, wasm_registry_id: "pl-audit-logger", config: {}, sse_per_event: true, batched_events_per_flush: 0, batched_flush_ms: 0, revision: 1 },
   { id: `pce-${++chainEntryAutoId}`, principal_id: "pr-admin", slot: "observability_hook", order: 2, wasm_registry_id: "pl-cost-tracker", config: {}, sse_per_event: false, batched_events_per_flush: 50, batched_flush_ms: 1000, revision: 1 },
+  { id: `pce-${++chainEntryAutoId}`, principal_id: "pr-dev-team", slot: "router", order: 0, wasm_registry_id: BUILTIN_CACHE_AFFINITY_ID, config: {}, sse_per_event: false, batched_events_per_flush: 1, batched_flush_ms: 100, revision: 0, wire_version: 3 },
   // pr-dev-team
   { id: `pce-${++chainEntryAutoId}`, principal_id: "pr-dev-team", slot: "router", order: 1, wasm_registry_id: "pl-rate-limiter", config: { tier: "dev" }, sse_per_event: false, batched_events_per_flush: 0, batched_flush_ms: 0, revision: 1 },
   { id: `pce-${++chainEntryAutoId}`, principal_id: "pr-dev-team", slot: "observability_hook", order: 1, wasm_registry_id: "pl-cost-tracker", config: {}, sse_per_event: false, batched_events_per_flush: 50, batched_flush_ms: 1000, revision: 1 },
+  { id: `pce-${++chainEntryAutoId}`, principal_id: "pr-prod-app", slot: "router", order: 0, wasm_registry_id: BUILTIN_CACHE_AFFINITY_ID, config: {}, sse_per_event: false, batched_events_per_flush: 1, batched_flush_ms: 100, revision: 0, wire_version: 3 },
   // pr-prod-app
   { id: `pce-${++chainEntryAutoId}`, principal_id: "pr-prod-app", slot: "router", order: 1, wasm_registry_id: "pl-routing-canary", config: { canary_percent: 10 }, sse_per_event: false, batched_events_per_flush: 0, batched_flush_ms: 0, revision: 1 },
   { id: `pce-${++chainEntryAutoId}`, principal_id: "pr-prod-app", slot: "observability_hook", order: 1, wasm_registry_id: "pl-audit-logger", config: {}, sse_per_event: true, batched_events_per_flush: 0, batched_flush_ms: 0, revision: 1 },
+  { id: `pce-${++chainEntryAutoId}`, principal_id: "pr-ci", slot: "router", order: 0, wasm_registry_id: BUILTIN_CACHE_AFFINITY_ID, config: {}, sse_per_event: false, batched_events_per_flush: 1, batched_flush_ms: 100, revision: 0, wire_version: 3 },
   // pr-ci
   { id: `pce-${++chainEntryAutoId}`, principal_id: "pr-ci", slot: "shape", order: 1, wasm_registry_id: "pl-shape-llama", config: {}, sse_per_event: false, batched_events_per_flush: 0, batched_flush_ms: 0, revision: 1 },
 ];
+for (const principal of principals) {
+  if (!chainEntries.some((entry) => entry.principal_id === principal.id && entry.slot === "router" && entry.wasm_registry_id === BUILTIN_CACHE_AFFINITY_ID)) {
+    chainEntries.push({ id: `pce-${++chainEntryAutoId}`, principal_id: principal.id, slot: "router", order: 0, wasm_registry_id: BUILTIN_CACHE_AFFINITY_ID, config: {}, sse_per_event: false, batched_events_per_flush: 1, batched_flush_ms: 100, revision: 0, wire_version: 3 });
+  }
+}
 
 // API keys per principal (separate from principal CRUD)
 let keyAutoId = 100;
@@ -209,6 +243,8 @@ let configDraft: { draft: unknown | null; revision: number; last_validated_revis
   last_validation_error: null,
   saved_at_unix_secs: null,
 };
+
+const terminalStrategies: Record<string, { strategy: string; revision: number }> = {};
 
 const configHistory = Array.from({ length: 8 }).map((_, i) => ({
   revision: configRevision - i,
@@ -261,6 +297,14 @@ function listResponse<T>(items: T[], url: URL, getId: (item: T) => string | numb
   return ok({ [key]: slice } as Json, { "x-total-count": String(total), "X-Total-Count": String(total) });
 }
 function readJson<T = any>(req: Request): Promise<T> { return req.json() as Promise<T>; }
+function withRouterChain(principal: any) {
+  return {
+    ...principal,
+    router_chain: chainEntries
+      .filter((entry) => entry.principal_id === principal.id && entry.slot === "router")
+      .sort((a, b) => a.order - b.order),
+  };
+}
 
 function randomSeed(seed: number): () => number {
   let s = seed >>> 0 || 1;
@@ -364,6 +408,18 @@ function generateEvent(seq: number, forceUpstreamId?: string) {
   const costCc1h = cc1h * 6;
   const costCr = Math.floor(cr * 0.3);
   const costMicros = costInput + costOutput + costCc5m + costCc1h + costCr;
+
+  const hasTrace = rng() < 0.33;
+  const routing_trace = hasTrace ? {
+    stages: [
+      { plugin_id: "pl-rate-limiter", plugin_name: "rate-limiter", kept_upstream_ids: [upstream.id], reason: "Allowed", per_candidate_reasons: [], duration_us: 150, passthrough: null }
+    ],
+    terminal: { strategy: "random", chosen: upstream.id }
+  } : undefined;
+  const internal_errors = hasTrace && rng() < 0.5 ? [
+    { stage: "RouterFilter", index: 0, kind: "Other", message: "Mock internal error" }
+  ] : undefined;
+
   return {
     ts: NOW() - Math.floor(rng() * 600),
     request_id: `req_${seq.toString(36)}${Math.floor(rng() * 0xffff).toString(36)}`,
@@ -394,6 +450,8 @@ function generateEvent(seq: number, forceUpstreamId?: string) {
     agent_label: rng() < 0.4 ? "claude-code" : rng() < 0.7 ? "opencode" : "manual",
     kind: status >= 500 ? "error" : status === 429 ? "rate_limit" : "request",
     payload: {},
+    routing_trace,
+    internal_errors,
   };
 }
 const RECENT_EVENTS = Array.from({ length: 220 }).map((_, i) => generateEvent(i + 1)).filter((e): e is NonNullable<typeof e> => e !== null).sort((a, b) => b.ts - a.ts);
@@ -468,6 +526,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
       start(controller) {
         const send = () => {
           const ev = generateEvent(++seq);
+          if (!ev) return;
           ev.ts = NOW();
           controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify(ev)}\n\n`));
         };
@@ -535,14 +594,18 @@ async function handle(req: Request, url: URL): Promise<Response> {
   }
 
   // ── Principals CRUD
-  if (path === "/admin/v1/principals" && m === "GET") return listResponse(principals, url, (p) => p.id, "principals");
+  if (path === "/admin/v1/principals" && m === "GET") {
+    const { slice, total } = paginate(principals, url, (p) => p.id);
+    return ok({ principals: slice.map(withRouterChain) }, { "x-total-count": String(total), "X-Total-Count": String(total) });
+  }
   if (path === "/admin/v1/principals" && m === "POST") {
     const body = await readJson<any>(req);
     if (!body.name) return err(400, "invalid_input", "name required");
     if (principals.find((p) => p.name === body.name)) return err(409, "conflict");
     const np = { id: `pr-${Date.now().toString(36)}`, name: body.name, kind: body.kind ?? "human", enabled: true, revision: 1, allowed_models: body.allowed_models ?? [], allowed_upstreams: body.allowed_upstreams ?? [], default_limits: body.default_limits ?? [] };
     principals.push(np);
-    return created(np, { etag: `"${np.revision}"`, location: `/admin/v1/principals/${np.id}` });
+    chainEntries.push({ id: `pce-${++chainEntryAutoId}`, principal_id: np.id, slot: "router", order: 0, wasm_registry_id: BUILTIN_CACHE_AFFINITY_ID, config: {}, sse_per_event: false, batched_events_per_flush: 1, batched_flush_ms: 100, revision: 0, wire_version: 3 });
+    return created(withRouterChain(np), { etag: `"${np.revision}"`, location: `/admin/v1/principals/${np.id}` });
   }
   {
     const mm = path.match(/^\/admin\/v1\/principals\/([^/]+)$/);
@@ -550,12 +613,12 @@ async function handle(req: Request, url: URL): Promise<Response> {
       const id = mm[1]!;
       const p = principals.find((x) => x.id === id);
       if (!p) return notFound("unknown_principal");
-      if (m === "GET") return ok(p, { etag: `"${p.revision}"` });
+      if (m === "GET") return ok(withRouterChain(p), { etag: `"${p.revision}"` });
       if (m === "PUT") {
         const body = await readJson<any>(req);
         Object.assign(p, body);
         p.revision++;
-        return ok(p, { etag: `"${p.revision}"` });
+        return ok(withRouterChain(p), { etag: `"${p.revision}"` });
       }
       if (m === "DELETE") {
         const ix = principals.indexOf(p);
@@ -571,7 +634,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
       if (!p) return notFound("unknown_principal");
       p.enabled = mm[2] === "enable";
       p.revision++;
-      return ok(p, { etag: `"${p.revision}"` });
+      return ok(withRouterChain(p), { etag: `"${p.revision}"` });
     }
   }
   {
@@ -651,12 +714,14 @@ async function handle(req: Request, url: URL): Promise<Response> {
       if (!p) return notFound("unknown_registry_entry");
       if (m === "GET") return ok(p, { etag: `"${p.revision}"` });
       if (m === "PATCH") {
+        if (p.is_builtin) return err(409, "builtin_plugin_immutable");
         const body = await readJson<any>(req);
         if (body.label !== undefined) p.label = body.label;
         p.revision++;
         return ok(p, { etag: `"${p.revision}"` });
       }
       if (m === "DELETE") {
+        if (p.is_builtin) return err(409, "builtin_plugin_immutable");
         if (p.refcount > 0) return err(409, "referenced_by", `${p.refcount} chain entries reference this plugin`);
         plugins.splice(plugins.indexOf(p), 1);
         return ok(null);
@@ -666,12 +731,29 @@ async function handle(req: Request, url: URL): Promise<Response> {
 
   // ── Plugin chain
   {
+    const mm = path.match(/^\/admin\/v1\/principals\/([^/]+)\/router-terminal$/);
+    if (mm) {
+      const pid = mm[1]!;
+      if (m === "GET") {
+        return ok(terminalStrategies[pid] ?? { strategy: "first-pick", revision: 1 });
+      }
+      if (m === "PUT") {
+        const body = await readJson<any>(req);
+        const next = { strategy: body.strategy, revision: (body.revision ?? 0) + 1 };
+        terminalStrategies[pid] = next;
+        return ok(next);
+      }
+    }
+  }
+  {
     const mm = path.match(/^\/admin\/v1\/principals\/([^/]+)\/plugin-chain$/);
     if (mm) {
       const pid = mm[1]!;
       const slot = url.searchParams.get("slot") as ChainSlot | null;
       if (m === "GET") {
-        const entries = chainEntries.filter((e) => e.principal_id === pid && (!slot || e.slot === slot));
+        const entries = chainEntries
+          .filter((e) => e.principal_id === pid && (!slot || e.slot === slot))
+          .sort((a, b) => a.order - b.order);
         return ok({ entries });
       }
       if (m === "POST") {
@@ -836,7 +918,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
   }
   if (path === "/admin/oauth/status" && m === "GET") {
     return ok({
-      credentials: upstreams.filter((u) => u.kind === "anthropic_oauth").map((u) => ({ principal_id: null, provider: "anthropic", has_credentials: true, expires_at_unix_secs: NOW() + 3600 * 8, refresh_token_present: true, last_updated_unix_secs: NOW() - 1800, status: "active", scopes: ["org:create_api_key", "user:profile", "user:inference"] })),
+      credentials: upstreams.filter((u) => u.kind === "anthropic_oauth").map(() => ({ principal_id: null, provider: "anthropic", has_credentials: true, expires_at_unix_secs: NOW() + 3600 * 8, refresh_token_present: true, last_updated_unix_secs: NOW() - 1800, status: "active", scopes: ["org:create_api_key", "user:profile", "user:inference"] })),
       observed: true,
     });
   }

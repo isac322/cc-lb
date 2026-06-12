@@ -95,7 +95,6 @@ fn emit_handler_check(handler: &HandlerDescriptor) -> TokenStream {
 
 fn wire_function_type(name: &str) -> Option<TokenStream> {
     match name {
-        "route" => Some(quote!(cc_lb_plugin_wire::v1::route::RouteFn)),
         "shape" => Some(quote!(cc_lb_plugin_wire::v1::shape::ShapeFn)),
         "normalize_error" => Some(quote!(
             cc_lb_plugin_wire::v1::normalize_error::NormalizeErrorFn
@@ -106,6 +105,7 @@ fn wire_function_type(name: &str) -> Option<TokenStream> {
             cc_lb_plugin_wire::v1::on_unauthorized::OnUnauthorizedFn
         )),
         "observe" => Some(quote!(cc_lb_plugin_wire::v1::observe::ObserveFn)),
+        "filter" => Some(quote!(cc_lb_plugin_wire::v3::filter::FilterFn)),
         _ => None,
     }
 }
@@ -122,11 +122,11 @@ mod tests {
             plugin_version: "1.0.0".to_string(),
             required_capabilities: Vec::new(),
             handlers: vec![HandlerDescriptor {
-                name: "route".to_string(),
+                name: "filter".to_string(),
                 versions: vec![1],
-                fn_ident: Ident::new("route_handler", proc_macro2::Span::call_site()),
-                request_type: parse_quote!(cc_lb_plugin_wire::v1::route::RouteRequest),
-                response_type: parse_quote!(cc_lb_plugin_wire::v1::route::RouteResponse),
+                fn_ident: Ident::new("filter_handler", proc_macro2::Span::call_site()),
+                request_type: parse_quote!(cc_lb_plugin_wire::v3::filter::FilterRequest),
+                response_type: parse_quote!(cc_lb_plugin_wire::v3::filter::FilterResponse),
             }],
         }
     }
@@ -156,7 +156,7 @@ mod tests {
     fn handler_not_called() {
         let tokens = emit_self_check_export(&descriptor()).to_string();
 
-        assert!(!tokens.contains("route_handler"));
+        assert!(!tokens.contains("filter_handler"));
     }
 
     #[test]
@@ -172,8 +172,8 @@ mod tests {
     fn uses_registered_handler_types() {
         let tokens = emit_self_check_export(&descriptor()).to_string();
 
-        assert!(tokens.contains("RouteRequest"));
-        assert!(tokens.contains("RouteResponse"));
+        assert!(tokens.contains("FilterRequest"));
+        assert!(tokens.contains("FilterResponse"));
     }
 
     #[test]
@@ -193,16 +193,9 @@ mod tests {
     }
 
     #[test]
-    fn supports_all_v1_wire_function_names() {
+    fn supports_current_wire_function_names() {
         let mut plugin = descriptor();
         plugin.handlers = vec![
-            HandlerDescriptor {
-                name: "route".to_string(),
-                versions: vec![1],
-                fn_ident: Ident::new("route_handler", proc_macro2::Span::call_site()),
-                request_type: parse_quote!(cc_lb_plugin_wire::v1::route::RouteRequest),
-                response_type: parse_quote!(cc_lb_plugin_wire::v1::route::RouteResponse),
-            },
             HandlerDescriptor {
                 name: "shape".to_string(),
                 versions: vec![1],
@@ -255,16 +248,23 @@ mod tests {
                 request_type: parse_quote!(cc_lb_plugin_wire::v1::observe::ObserveRequest),
                 response_type: parse_quote!(cc_lb_plugin_wire::v1::observe::ObserveResponse),
             },
+            HandlerDescriptor {
+                name: "filter".to_string(),
+                versions: vec![1],
+                fn_ident: Ident::new("filter_handler", proc_macro2::Span::call_site()),
+                request_type: parse_quote!(cc_lb_plugin_wire::v3::filter::FilterRequest),
+                response_type: parse_quote!(cc_lb_plugin_wire::v3::filter::FilterResponse),
+            },
         ];
 
         let tokens = emit_self_check_export(&plugin).to_string();
 
-        assert!(tokens.contains("RouteFn"));
         assert!(tokens.contains("ShapeFn"));
         assert!(tokens.contains("NormalizeErrorFn"));
         assert!(tokens.contains("BuildSignerFn"));
         assert!(tokens.contains("SignFn"));
         assert!(tokens.contains("OnUnauthorizedFn"));
         assert!(tokens.contains("ObserveFn"));
+        assert!(tokens.contains("FilterFn"));
     }
 }

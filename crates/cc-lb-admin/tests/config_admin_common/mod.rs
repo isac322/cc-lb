@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code, deprecated)]
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};

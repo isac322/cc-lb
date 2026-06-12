@@ -662,9 +662,9 @@ mod tests {
         let accept = HandshakeAccept {
             handshake_schema_version: HANDSHAKE_SCHEMA_VERSION_V1,
             envelope_version: 1,
-            chosen_versions: BTreeMap::from([("route".to_owned(), 1)]),
-            plugin_supported: BTreeMap::from([("route".to_owned(), vec![1])]),
-            implemented_functions: BTreeSet::from(["route".to_owned()]),
+            chosen_versions: BTreeMap::from([("filter".to_owned(), 1)]),
+            plugin_supported: BTreeMap::from([("filter".to_owned(), vec![1])]),
+            implemented_functions: BTreeSet::from(["filter".to_owned()]),
             required_capabilities: BTreeSet::new(),
         };
         let handshake_output = serde_json::to_string(&accept).expect("accept serializes");
@@ -686,11 +686,11 @@ mod tests {
     (call $output_set (call $handshake_out) (i64.const {handshake_len}))
     (i32.const 0))
   (func (export "cc_lb_self_check") (result i32)
-    (call $output_set (call $self_check_out) (i64.const {self_check_len}))
-    (i32.const 0))
-  (func (export "route") (result i32)
-    (i32.const 0))
-)
+     (call $output_set (call $self_check_out) (i64.const {self_check_len}))
+     (i32.const 0))
+   (func (export "filter") (result i32)
+     (i32.const 0))
+ )
 "#,
             handshake_helper = bytes_helper("handshake_out", handshake_output.as_bytes()),
             self_check_helper = bytes_helper("self_check_out", self_check_output.as_bytes()),

@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 mod common;
 
 use std::sync::Arc;
@@ -128,6 +130,7 @@ fn principal(name: &str, allowed_upstreams: Vec<Uuid>) -> PrincipalRecord {
         revision: 1,
         created_at_unix_secs: 0,
         updated_at_unix_secs: 0,
+        router_terminal_strategy: Default::default(),
     }
 }
 

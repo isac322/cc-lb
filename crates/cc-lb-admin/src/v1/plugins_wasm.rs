@@ -375,15 +375,26 @@ fn validate_wasm_bytes(bytes: &[u8]) -> Result<(), Response> {
 #[allow(clippy::result_large_err)]
 fn validate_extism(bytes: &[u8]) -> Result<(), Response> {
     let manifest = Manifest::new([Wasm::data(bytes.to_vec())]);
-    Plugin::new(&manifest, [], true)
-        .map(|_| ())
-        .map_err(|error| {
-            let mut message = error.to_string();
-            if message.len() > 500 {
-                message.truncate(500);
-            }
-            json_error(StatusCode::BAD_REQUEST, "invalid_wasm", message)
-        })
+    let plugin = Plugin::new(&manifest, [], true).map_err(|error| {
+        let mut message = error.to_string();
+        if message.len() > 500 {
+            message.truncate(500);
+        }
+        json_error(StatusCode::BAD_REQUEST, "invalid_wasm", message)
+    })?;
+    reject_removed_router_wire(&plugin)
+}
+
+#[allow(clippy::result_large_err)]
+fn reject_removed_router_wire(plugin: &Plugin) -> Result<(), Response> {
+    if plugin.function_exists("route") {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "unsupported_wire_version",
+            "router wire v1/v2 plugins are no longer supported; use wire v3 filter plugins",
+        ));
+    }
+    Ok(())
 }
 
 async fn materialize_cache(state: &AdminState, sha256_hex: &str, bytes: &[u8]) -> io::Result<()> {

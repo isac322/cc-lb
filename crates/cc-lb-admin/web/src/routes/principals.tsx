@@ -16,15 +16,24 @@ import {
 import { CSS } from '@dnd-kit/utilities';
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import {
+  ArrowDown,
+  ArrowUp,
+  CheckCircle2,
+  ChevronDown,
   ChevronLeft,
   Copy,
   GripVertical,
   KeyRound,
+  Lock,
   Plus,
   Trash2,
+  X,
+  XCircle,
 } from 'lucide-react';
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { toast } from 'sonner';
+import { Drawer } from 'vaul';
 import { z } from 'zod';
 import {
   Badge,
@@ -46,6 +55,7 @@ import {
 import { RelativeTime } from '../components/ui/RelativeTime';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import {
+  type PluginEntry,
   type Principal,
   useCreatePrincipal,
   useDeleteChainEntry,
@@ -61,8 +71,10 @@ import {
   useRecentEvents,
   useReorderChain,
   useRevokeKey,
+  useRouterTerminalStrategy,
   useSetAllowedModels,
   useTogglePrincipal,
+  useUpdateRouterTerminalStrategy,
   useUpstreamNameMap,
 } from '../lib/queries';
 
@@ -594,135 +606,845 @@ function SlotRadioCard({
   );
 }
 
-function RouterSlotEditor({ principalId }: { principalId: string }) {
-  const slot = 'router';
-  const label = 'Router';
-  const desc = 'Picks the upstream';
+function PluginDetailDrawer({
+  plugin,
+  open,
+  onOpenChange,
+}: {
+  plugin: PluginEntry | null;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  if (!plugin) return null;
+
+  return (
+    <Drawer.Root open={open} onOpenChange={onOpenChange} direction="right">
+      <Drawer.Portal>
+        <Drawer.Overlay className="fixed inset-0 z-40 bg-drawer-backdrop" />
+        <Drawer.Content className="fixed right-0 top-0 bottom-0 w-full max-w-lg bg-bg-sub border-l border-subtle z-50 flex flex-col">
+          <Drawer.Title className="sr-only">Plugin detail</Drawer.Title>
+          <Drawer.Description className="sr-only">
+            Detail view of a plugin
+          </Drawer.Description>
+
+          <div className="p-4 border-b border-subtle flex items-start justify-between gap-3">
+            <div className="min-w-0">
+              <div className="flex items-center gap-2 mb-1">
+                <h2 className="text-lg font-medium text-text truncate">
+                  {plugin.name}
+                </h2>
+                {plugin.kind && <Badge tone="accent">[{plugin.kind}]</Badge>}
+                {plugin.is_builtin && <Badge tone="accent">Built-in</Badge>}
+              </div>
+            </div>
+            <button
+              type="button"
+              aria-label="Close"
+              onClick={() => onOpenChange(false)}
+              className="text-text-muted hover:text-text shrink-0"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          <div className="flex-1 overflow-y-auto p-4 pb-8 space-y-6 text-sm">
+            {plugin.metadata ? (
+              <>
+                <section data-testid="plugin-purpose">
+                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">
+                    Purpose
+                  </h3>
+                  <p className="text-text">{plugin.metadata.purpose}</p>
+                </section>
+
+                <section data-testid="plugin-keeps">
+                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2 flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-500" />{' '}
+                    Keeps
+                  </h3>
+                  <p className="text-text">{plugin.metadata.keeps}</p>
+                </section>
+
+                <section data-testid="plugin-drops">
+                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2 flex items-center gap-1">
+                    <XCircle className="w-3.5 h-3.5 text-red-400" /> Drops
+                  </h3>
+                  <p className="text-text">{plugin.metadata.drops}</p>
+                </section>
+
+                <section data-testid="plugin-empty-behavior">
+                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">
+                    Empty behavior
+                  </h3>
+                  <p className="text-text">{plugin.metadata.empty_behavior}</p>
+                </section>
+
+                <section data-testid="plugin-examples">
+                  <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">
+                    Examples
+                  </h3>
+                  <ul className="list-disc pl-4 space-y-1 text-text">
+                    {plugin.metadata.examples.map((ex, i) => (
+                      <li key={i}>{ex}</li>
+                    ))}
+                  </ul>
+                </section>
+              </>
+            ) : (
+              <Card>
+                <CardBody>
+                  <p className="text-text-faint italic">
+                    Built by operator. No description was supplied with this
+                    plugin.
+                  </p>
+                </CardBody>
+              </Card>
+            )}
+
+            <section className="pt-4 border-t border-subtle">
+              <h3 className="text-xs font-medium text-text-faint uppercase tracking-wider mb-2">
+                Technicals
+              </h3>
+              <div className="space-y-1.5 text-xs font-mono text-text-faint">
+                {plugin.wire_version !== undefined && (
+                  <div>wire_version: {plugin.wire_version}</div>
+                )}
+                <div>sha256: {plugin.sha256_hex.slice(0, 16)}...</div>
+                <div className="flex items-center gap-2">
+                  id: {plugin.id}
+                  <button
+                    type="button"
+                    aria-label="Copy plugin id"
+                    className="hover:text-text"
+                    onClick={() => {
+                      navigator.clipboard.writeText(plugin.id);
+                      toast.success('Plugin ID copied');
+                    }}
+                  >
+                    <Copy className="w-3 h-3" />
+                  </button>
+                </div>
+              </div>
+            </section>
+          </div>
+        </Drawer.Content>
+      </Drawer.Portal>
+    </Drawer.Root>
+  );
+}
+
+function useFlipReorder(
+  listRef: React.RefObject<HTMLUListElement | null>,
+  items: unknown[],
+) {
+  const oldRects = React.useRef<Record<string, DOMRect>>({});
+
+  // biome-ignore lint/correctness/useExhaustiveDependencies: items is the trigger
+  React.useLayoutEffect(() => {
+    if (!listRef.current) return;
+    const children = Array.from(listRef.current.children) as HTMLElement[];
+
+    children.forEach((child) => {
+      const key = child.dataset.key;
+      if (!key) return;
+
+      const oldRect = oldRects.current[key];
+      const newRect = child.getBoundingClientRect();
+
+      if (oldRect) {
+        const deltaY = oldRect.top - newRect.top;
+        if (deltaY !== 0) {
+          child.style.transform = `translateY(${deltaY}px)`;
+          child.style.transition = 'none';
+
+          requestAnimationFrame(() => {
+            child.style.transform = '';
+            child.style.transition =
+              'transform 220ms cubic-bezier(0.4, 0, 0.2, 1)';
+          });
+        }
+      } else {
+        // New element
+        child.style.opacity = '0';
+        child.style.transform = 'translateY(10px)';
+        child.style.transition = 'none';
+        requestAnimationFrame(() => {
+          child.style.opacity = '1';
+          child.style.transform = '';
+          child.style.transition = 'all 220ms cubic-bezier(0.4, 0, 0.2, 1)';
+        });
+      }
+    });
+
+    // Update old rects for next render
+    oldRects.current = {};
+    children.forEach((child) => {
+      const key = child.dataset.key;
+      if (key) {
+        oldRects.current[key] = child.getBoundingClientRect();
+      }
+    });
+  }, [items]);
+}
+
+export function RouterSlotEditor({ principalId }: { principalId: string }) {
+  const slot = 'router' as const;
   const chain = usePluginChain(principalId, slot);
   const registry = usePluginRegistry();
+  const reorder = useReorderChain();
   const insert = useInsertChainEntry();
   const del = useDeleteChainEntry();
+  const terminalStrategy = useRouterTerminalStrategy(principalId);
+  const updateTerminalStrategy = useUpdateRouterTerminalStrategy();
 
   const entries = useMemo(
     () => [...(chain.data?.entries ?? [])].sort((a, b) => a.order - b.order),
     [chain.data],
   );
 
-  const activeEntry = entries[0];
-  const hasMultiple = entries.length > 1;
+  const cacheAffinityPlugin = registry.data?.entries.find(
+    (e) => e.name === 'cache-affinity',
+  );
+  const cacheAffinityEntry = entries.find(
+    (e) => e.wasm_registry_id === cacheAffinityPlugin?.id,
+  );
 
-  const [mutatingId, setMutatingId] = useState<string | null>(null);
+  const isComplex = useMemo(() => {
+    if (!cacheAffinityPlugin) return false;
+    const hasOther = entries.some(
+      (e) => e.wasm_registry_id !== cacheAffinityPlugin.id,
+    );
+    const cacheNotFirst =
+      cacheAffinityEntry && entries[0]?.id !== cacheAffinityEntry.id;
+    return hasOther || cacheNotFirst;
+  }, [entries, cacheAffinityPlugin, cacheAffinityEntry]);
 
-  const handleSelect = async (pluginId: string | null) => {
-    if (mutatingId) return;
-    const currentPluginId = activeEntry?.wasm_registry_id ?? null;
-    if (pluginId === currentPluginId) return;
+  const [detailPlugin, setDetailPlugin] = useState<PluginEntry | null>(null);
+  const [activeTab, setActiveTab] = useState<'basic' | 'advanced'>(
+    isComplex ? 'advanced' : 'basic',
+  );
+  const [showMobileNotice, setShowMobileNotice] = useState(false);
 
-    setMutatingId(pluginId ?? 'default');
+  useEffect(() => {
+    if (isComplex && activeTab === 'basic') {
+      setActiveTab('advanced');
+    }
+  }, [isComplex, activeTab]);
 
-    try {
-      let currentEntries = entries;
-      let retryCount = 0;
+  const isSticky = !!cacheAffinityEntry;
 
-      while (retryCount < 2) {
-        try {
-          for (const entry of currentEntries) {
-            await del.mutateAsync({ id: entry.id, revision: entry.revision });
-          }
-
-          if (pluginId) {
-            await insert.mutateAsync({
-              pid: principalId,
-              body: { slot, wasm_registry_id: pluginId, order: 100 },
-            });
-          }
-
-          const pluginName =
-            registry.data?.entries.find((e) => e.id === pluginId)?.name ??
-            pluginId;
-          toast.success(
-            pluginId
-              ? `Router set to ${pluginName}`
-              : 'Router reset to system default',
-          );
-          break;
-        } catch (err) {
-          const error = err as {
-            status?: number;
-            message?: string;
-            error?: string;
-          };
-          const isConflict =
-            error?.status === 409 ||
-            error?.message?.includes('revision_conflict') ||
-            error?.message?.includes('slot_singleton') ||
-            error?.error === 'slot_singleton';
-          if (isConflict && retryCount === 0) {
-            retryCount++;
-            const freshChain = await chain.refetch();
-            currentEntries = [...(freshChain.data?.entries ?? [])].sort(
-              (a, b) => a.order - b.order,
-            );
-            continue;
-          }
-          throw err;
-        }
+  const toggleSticky = () => {
+    if (!cacheAffinityPlugin) return;
+    if (isSticky) {
+      if (cacheAffinityEntry) {
+        del.mutate({
+          id: cacheAffinityEntry.id,
+          revision: cacheAffinityEntry.revision,
+        });
       }
-    } catch (err) {
-      const error = err as { message?: string };
-      toast.error(
-        `Failed to update router: ${error.message || 'Unknown error'}`,
-      );
-    } finally {
-      setMutatingId(null);
+    } else {
+      insert.mutate({
+        pid: principalId,
+        body: {
+          slot,
+          wasm_registry_id: cacheAffinityPlugin.id,
+          order: 0,
+        },
+      });
     }
   };
 
-  const candidates = registry.data?.entries ?? [];
+  const setStrategy = (strategy: string) => {
+    if (!terminalStrategy.data) return;
+    updateTerminalStrategy.mutate(
+      {
+        id: principalId,
+        strategy,
+        revision: terminalStrategy.data.revision,
+      },
+      {
+        onSuccess: () => toast.success('Terminal strategy updated'),
+      },
+    );
+  };
+
+  const handleTabClick = (tab: 'basic' | 'advanced') => {
+    if (tab === 'basic' && isComplex) {
+      setShowMobileNotice(true);
+      setTimeout(() => setShowMobileNotice(false), 4000);
+      return;
+    }
+    setActiveTab(tab);
+    setShowMobileNotice(false);
+  };
+
+  const listRef = React.useRef<HTMLUListElement>(null);
+  useFlipReorder(listRef, entries);
+
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [pickerAnchor, setPickerAnchor] = useState<DOMRect | null>(null);
+  const placeholderRef = React.useRef<HTMLLIElement>(null);
+
+  const togglePicker = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    if (pickerOpen) {
+      setPickerOpen(false);
+    } else {
+      if (placeholderRef.current) {
+        setPickerAnchor(placeholderRef.current.getBoundingClientRect());
+      }
+      setPickerOpen(true);
+    }
+  };
+
+  useEffect(() => {
+    const handleClickOutside = () => setPickerOpen(false);
+    if (pickerOpen) {
+      document.addEventListener('click', handleClickOutside);
+    }
+    return () => document.removeEventListener('click', handleClickOutside);
+  }, [pickerOpen]);
+
+  const moveUp = (index: number) => {
+    if (index === 0) return;
+    const reordered = [...entries];
+    const temp = reordered[index - 1];
+    reordered[index - 1] = reordered[index]!;
+    reordered[index] = temp!;
+
+    reorder.mutate({
+      pid: principalId,
+      entries: reordered.map((x, i) => ({
+        id: x.id,
+        order: (i + 1) * 100,
+        expected_revision: x.revision,
+      })),
+    });
+  };
+
+  const moveDown = (index: number) => {
+    if (index === entries.length - 1) return;
+    const reordered = [...entries];
+    const temp = reordered[index + 1];
+    reordered[index + 1] = reordered[index]!;
+    reordered[index] = temp!;
+
+    reorder.mutate({
+      pid: principalId,
+      entries: reordered.map((x, i) => ({
+        id: x.id,
+        order: (i + 1) * 100,
+        expected_revision: x.revision,
+      })),
+    });
+  };
+
+  const addFilter = (pluginId: string) => {
+    insert.mutate({
+      pid: principalId,
+      body: {
+        slot,
+        wasm_registry_id: pluginId,
+        order: (entries.length + 1) * 100,
+      },
+    });
+    setPickerOpen(false);
+  };
+
+  const removeFilter = (id: string, revision: number) => {
+    del.mutate({ id, revision });
+  };
+
+  const strategy = terminalStrategy.data?.strategy ?? 'first-pick';
 
   return (
-    <div>
-      <div className="flex items-end justify-between mb-3">
-        <div>
-          <div className="flex items-center gap-2">
-            <div className="text-sm font-medium text-text">{label}</div>
-            {hasMultiple && (
-              <Hint label="Database invariant violated: multiple router entries detected. Selecting a new option will clear them.">
-                <Badge tone="warn">Multiple entries detected</Badge>
-              </Hint>
-            )}
+    <div className="glass rounded-sm">
+      <div className="flex flex-col px-4 pt-3 border-b border-subtle relative">
+        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-4 mb-3">
+          <div className="min-w-0">
+            <h3 className="text-sm font-medium text-text">Router</h3>
+            <p className="mt-0.5 text-xs text-text-faint">
+              Pick which upstream serves each request. Returning users stick to
+              the upstream they hit before unless you turn that off; new users
+              go to the first eligible upstream by default.
+            </p>
           </div>
-          <div className="text-[11px] text-text-faint">{desc}</div>
         </div>
+        <div className="flex items-center gap-1 w-fit" role="tablist">
+          <Hint
+            label={
+              isComplex
+                ? "Basic can't show this chain without losing the extra filters. Open Advanced to edit the full chain."
+                : ''
+            }
+          >
+            <button
+              role="tab"
+              aria-selected={activeTab === 'basic'}
+              aria-disabled={isComplex}
+              className={cx(
+                'px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors',
+                activeTab === 'basic'
+                  ? 'border-accent text-text'
+                  : 'border-transparent text-text-faint hover:text-text',
+                isComplex && 'opacity-50 cursor-not-allowed',
+              )}
+              onClick={() => handleTabClick('basic')}
+            >
+              Basic
+            </button>
+          </Hint>
+          <button
+            role="tab"
+            aria-selected={activeTab === 'advanced'}
+            className={cx(
+              'px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors',
+              activeTab === 'advanced'
+                ? 'border-accent text-text'
+                : 'border-transparent text-text-faint hover:text-text',
+            )}
+            onClick={() => handleTabClick('advanced')}
+          >
+            Advanced
+          </button>
+        </div>
+        {showMobileNotice && (
+          <div className="absolute left-4 top-full mt-2 z-10 text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-sm px-3 py-2 text-xs shadow-lg flex items-start gap-2 max-w-xs">
+            <span>
+              Basic can't show this chain without losing the extra filters. Open
+              Advanced to edit the full chain.
+            </span>
+            <button
+              onClick={() => setShowMobileNotice(false)}
+              className="text-amber-300 hover:text-amber-100 shrink-0"
+            >
+              &times;
+            </button>
+          </div>
+        )}
       </div>
-      <ul
-        className="space-y-2"
-        role="radiogroup"
-        aria-busy={mutatingId !== null}
-      >
-        <SlotRadioCard
-          name="System default"
-          desc="DbRouter — picks the first eligible upstream candidate."
-          isActive={!activeEntry}
-          isMutating={mutatingId === 'default'}
-          isMutatingOther={mutatingId !== null && mutatingId !== 'default'}
-          isDefault
-          badge="Default"
-          onClick={() => handleSelect(null)}
-        />
-        {/* TODO(slot-filter): once usePluginStatus carries slot metadata reliably, filter candidates by slot. */}
-        {candidates.map((p) => (
-          <SlotRadioCard
-            key={p.id}
-            name={p.name}
-            desc={p.label || 'Custom router plugin'}
-            isActive={activeEntry?.wasm_registry_id === p.id}
-            isMutating={mutatingId === p.id}
-            isMutatingOther={mutatingId !== null && mutatingId !== p.id}
-            onClick={() => handleSelect(p.id)}
-          />
-        ))}
-      </ul>
+      <div className="p-4">
+        {activeTab === 'basic' && (
+          <div role="tabpanel" className="space-y-5">
+            <div className="flex items-center justify-between p-3 border border-subtle rounded-sm bg-overlay-1">
+              <div>
+                <div className="text-sm font-medium text-text">
+                  Keep prompt cache warm by reusing upstreams
+                </div>
+                <div className="text-xs text-text-faint">
+                  Requests with similar prompts get routed to the upstream that
+                  already served them, so the prompt cache hits stay high.
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={isSticky}
+                className="group inline-flex items-center gap-2 h-7 px-2 rounded-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-overlay-3"
+                onClick={toggleSticky}
+                disabled={
+                  !cacheAffinityPlugin || insert.isPending || del.isPending
+                }
+              >
+                <div
+                  className={cx(
+                    'relative inline-flex h-4 w-8 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out border',
+                    isSticky
+                      ? 'bg-emerald-500 border-emerald-500'
+                      : 'bg-overlay-5 border-subtle-strong group-hover:border-text-muted',
+                  )}
+                >
+                  <span
+                    className={cx(
+                      'pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
+                      isSticky ? 'translate-x-4' : 'translate-x-0.5',
+                    )}
+                  />
+                </div>
+              </button>
+            </div>
+
+            <div>
+              <div className="text-sm font-medium text-text mb-3">
+                When multiple upstreams qualify, pick
+              </div>
+              <ul
+                className="grid grid-cols-1 sm:grid-cols-2 gap-3"
+                role="radiogroup"
+              >
+                <li
+                  role="radio"
+                  aria-checked={strategy === 'first-pick'}
+                  className="h-full"
+                >
+                  <label
+                    className={cx(
+                      'flex items-start gap-3 p-3 border rounded-md cursor-pointer transition-colors h-full',
+                      strategy === 'first-pick'
+                        ? 'border-accent bg-[color-mix(in_srgb,var(--color-accent)_8%,transparent)]'
+                        : 'border-subtle hover:bg-overlay-3',
+                    )}
+                  >
+                    <input
+                      type="radio"
+                      name="strategy"
+                      value="first-pick"
+                      className="hidden"
+                      checked={strategy === 'first-pick'}
+                      onChange={() => setStrategy('first-pick')}
+                    />
+                    <div className="mt-1 flex items-center justify-center w-4 h-4 shrink-0">
+                      <span
+                        className={cx(
+                          'status-dot',
+                          strategy === 'first-pick' ? 'ok' : 'neutral',
+                        )}
+                      />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-sm truncate">
+                          First eligible
+                        </span>
+                      </div>
+                      <div className="text-xs text-text-faint mt-0.5">
+                        Always pick the first upstream in the candidate list.
+                        Predictable, easy to reason about.
+                      </div>
+                    </div>
+                  </label>
+                </li>
+                <li
+                  role="radio"
+                  aria-checked={strategy === 'random'}
+                  className="h-full"
+                >
+                  <label
+                    className={cx(
+                      'flex items-start gap-3 p-3 border rounded-md cursor-pointer transition-colors h-full',
+                      strategy === 'random'
+                        ? 'border-accent bg-[color-mix(in_srgb,var(--color-accent)_8%,transparent)]'
+                        : 'border-subtle hover:bg-overlay-3',
+                    )}
+                  >
+                    <input
+                      type="radio"
+                      name="strategy"
+                      value="random"
+                      className="hidden"
+                      checked={strategy === 'random'}
+                      onChange={() => setStrategy('random')}
+                    />
+                    <div className="mt-1 flex items-center justify-center w-4 h-4 shrink-0">
+                      <span
+                        className={cx(
+                          'status-dot',
+                          strategy === 'random' ? 'ok' : 'neutral',
+                        )}
+                      />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-2">
+                        <span className="font-medium text-sm truncate">
+                          Random
+                        </span>
+                      </div>
+                      <div className="text-xs text-text-faint mt-0.5">
+                        Pick a random upstream from the candidate list. Helps
+                        spread load when many are equivalent.
+                      </div>
+                    </div>
+                  </label>
+                </li>
+              </ul>
+            </div>
+          </div>
+        )}
+
+        {activeTab === 'advanced' && (
+          <div role="tabpanel" className="space-y-4">
+            {entries.length === 0 && (
+              <div className="p-4 border border-subtle rounded-sm bg-overlay-1 text-center mb-4">
+                <p className="text-sm text-text mb-1">No filters yet.</p>
+                <p className="text-xs text-text-faint">
+                  Incoming requests will go straight to the terminal step. Add a
+                  filter to narrow candidates by some property (cache prefix,
+                  cost, region, ...).
+                </p>
+              </div>
+            )}
+
+            <ul ref={listRef} className="space-y-0">
+              {entries.map((e, idx) => {
+                const reg = registry.data?.entries.find(
+                  (r) => r.id === e.wasm_registry_id,
+                );
+                const isPinnedCache =
+                  !isComplex && isSticky && reg?.name === 'cache-affinity';
+
+                return (
+                  <React.Fragment key={e.id}>
+                    {idx > 0 && (
+                      <li
+                        className="flex flex-col items-center"
+                        data-key={`connector-${idx}`}
+                      >
+                        <div className="w-px h-4 bg-subtle"></div>
+                        <ChevronDown className="w-3 h-3 text-text-faint -mt-1 mb-1" />
+                      </li>
+                    )}
+                    <li
+                      className="flex items-center gap-3 p-3 border border-subtle rounded-sm bg-overlay-1"
+                      data-key={e.id}
+                    >
+                      <div className="text-[10px] tabular-nums text-text-faint w-8 shrink-0">
+                        Step {idx + 1}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            className="text-sm font-medium text-text truncate hover:underline"
+                            onClick={() => setDetailPlugin(reg ?? null)}
+                          >
+                            {reg?.name ?? e.wasm_registry_id}
+                          </button>
+                        </div>
+                        <div className="text-xs text-text-faint truncate mt-0.5">
+                          {reg?.metadata?.purpose ??
+                            'User-uploaded filter (no description supplied).'}
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1 shrink-0">
+                        {isPinnedCache ? (
+                          <div
+                            className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint"
+                            title="Pinned by Basic settings"
+                          >
+                            <Lock className="w-4 h-4" />
+                          </div>
+                        ) : (
+                          <>
+                            <button
+                              onClick={() => moveUp(idx)}
+                              className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
+                              disabled={idx === 0}
+                            >
+                              <ArrowUp className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => moveDown(idx)}
+                              className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
+                              disabled={idx === entries.length - 1}
+                            >
+                              <ArrowDown className="w-4 h-4" />
+                            </button>
+                            <button
+                              onClick={() => removeFilter(e.id, e.revision)}
+                              className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-red-400 hover:bg-overlay-3"
+                            >
+                              <Trash2 className="w-4 h-4" />
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </li>
+                  </React.Fragment>
+                );
+              })}
+
+              {entries.length > 0 && (
+                <li
+                  className="flex flex-col items-center"
+                  data-key="connector-end"
+                >
+                  <div className="w-px h-4 bg-subtle"></div>
+                  <ChevronDown className="w-3 h-3 text-text-faint -mt-1 mb-1" />
+                </li>
+              )}
+
+              <li
+                ref={placeholderRef}
+                className="flex items-center justify-center p-3 border border-dashed border-subtle-strong rounded-sm bg-overlay-1/50 hover:bg-overlay-2 cursor-pointer transition-colors"
+                onClick={togglePicker}
+                data-key="add-filter-placeholder"
+              >
+                <div className="flex items-center gap-2 text-text-muted hover:text-text">
+                  <Plus className="w-4 h-4" />
+                  <span className="text-sm font-medium">Add filter</span>
+                </div>
+              </li>
+            </ul>
+
+            <div className="flex flex-col gap-3 p-3 border border-subtle border-l-2 border-l-accent rounded-sm bg-overlay-1 mt-4">
+              <div className="flex items-center gap-3">
+                <div className="text-[10px] tabular-nums text-text-faint w-8 shrink-0 flex items-center gap-1">
+                  <ChevronDown className="w-3 h-3" />
+                  Final
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-sm font-medium text-text truncate">
+                      Terminal step
+                    </span>
+                  </div>
+                  <div className="text-xs text-text-faint truncate mt-0.5">
+                    Picks the upstream that will serve the request.
+                  </div>
+                </div>
+              </div>
+              <div className="pl-11">
+                <ul
+                  className="grid grid-cols-1 sm:grid-cols-2 gap-3"
+                  role="radiogroup"
+                >
+                  <li
+                    role="radio"
+                    aria-checked={strategy === 'first-pick'}
+                    className="h-full"
+                  >
+                    <label
+                      className={cx(
+                        'flex items-start gap-3 p-3 border rounded-md cursor-pointer transition-colors h-full',
+                        strategy === 'first-pick'
+                          ? 'border-accent bg-[color-mix(in_srgb,var(--color-accent)_8%,transparent)]'
+                          : 'border-subtle hover:bg-overlay-3',
+                      )}
+                    >
+                      <input
+                        type="radio"
+                        name="term-strategy"
+                        value="first-pick"
+                        className="hidden"
+                        checked={strategy === 'first-pick'}
+                        onChange={() => setStrategy('first-pick')}
+                      />
+                      <div className="mt-1 flex items-center justify-center w-4 h-4 shrink-0">
+                        <span
+                          className={cx(
+                            'status-dot',
+                            strategy === 'first-pick' ? 'ok' : 'neutral',
+                          )}
+                        />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-sm truncate">
+                            First eligible
+                          </span>
+                        </div>
+                        <div className="text-xs text-text-faint mt-0.5">
+                          Always pick the first upstream in the candidate list.
+                          Predictable, easy to reason about.
+                        </div>
+                      </div>
+                    </label>
+                  </li>
+                  <li
+                    role="radio"
+                    aria-checked={strategy === 'random'}
+                    className="h-full"
+                  >
+                    <label
+                      className={cx(
+                        'flex items-start gap-3 p-3 border rounded-md cursor-pointer transition-colors h-full',
+                        strategy === 'random'
+                          ? 'border-accent bg-[color-mix(in_srgb,var(--color-accent)_8%,transparent)]'
+                          : 'border-subtle hover:bg-overlay-3',
+                      )}
+                    >
+                      <input
+                        type="radio"
+                        name="term-strategy"
+                        value="random"
+                        className="hidden"
+                        checked={strategy === 'random'}
+                        onChange={() => setStrategy('random')}
+                      />
+                      <div className="mt-1 flex items-center justify-center w-4 h-4 shrink-0">
+                        <span
+                          className={cx(
+                            'status-dot',
+                            strategy === 'random' ? 'ok' : 'neutral',
+                          )}
+                        />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium text-sm truncate">
+                            Random
+                          </span>
+                        </div>
+                        <div className="text-xs text-text-faint mt-0.5">
+                          Pick a random upstream from the candidate list. Helps
+                          spread load when many are equivalent.
+                        </div>
+                      </div>
+                    </label>
+                  </li>
+                </ul>
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+
+      {pickerOpen &&
+        pickerAnchor &&
+        createPortal(
+          <div
+            className="absolute w-64 bg-bg-sub border border-subtle rounded-sm shadow-lg z-50 py-1"
+            style={{
+              top: pickerAnchor.bottom + window.scrollY + 4,
+              left: pickerAnchor.left + window.scrollX,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {registry.data?.entries.map((p) => {
+              const inChain = entries.some((e) => e.wasm_registry_id === p.id);
+              const isPinnedCache =
+                !isComplex && isSticky && p.name === 'cache-affinity';
+              const disabled = inChain || isPinnedCache;
+
+              return (
+                <button
+                  key={p.id}
+                  className={cx(
+                    'w-full text-left px-3 py-2 text-sm flex flex-col gap-0.5',
+                    disabled
+                      ? 'opacity-50 cursor-not-allowed'
+                      : 'hover:bg-overlay-3',
+                  )}
+                  disabled={disabled}
+                  onClick={() => addFilter(p.id)}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className="font-medium text-text">{p.name}</span>
+                    {disabled && (
+                      <span className="text-[10px] text-text-faint">
+                        {isPinnedCache
+                          ? 'Pinned by Sticky'
+                          : 'Already in chain'}
+                      </span>
+                    )}
+                  </div>
+                  <span className="text-xs text-text-faint truncate">
+                    {p.metadata?.purpose ?? 'Custom filter'}
+                  </span>
+                </button>
+              );
+            })}
+          </div>,
+          document.body,
+        )}
+
+      <PluginDetailDrawer
+        plugin={detailPlugin}
+        open={detailPlugin !== null}
+        onOpenChange={(open) => {
+          if (!open) setDetailPlugin(null);
+        }}
+      />
     </div>
   );
 }

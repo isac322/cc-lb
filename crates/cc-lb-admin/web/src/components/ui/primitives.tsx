@@ -315,7 +315,6 @@ export function ConfirmDialog({
       open={open}
       onOpenChange={onOpenChange}
       title={title}
-      description={description}
       size="sm"
       footer={
         <>
@@ -334,7 +333,11 @@ export function ConfirmDialog({
         </>
       }
     >
-      {null}
+      {description ? (
+        <div className="text-sm leading-relaxed text-text-muted">
+          {description}
+        </div>
+      ) : null}
     </Modal>
   );
 }
