@@ -9,8 +9,9 @@ use axum::{
 };
 use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_storage_api::{
-    PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
-    PluginMetadata, PluginSlot, Storage, StorageError, WasmRegistryEntry, sparse_order,
+    BUILTIN_CACHE_AFFINITY_ID, PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput,
+    PluginChainEntryUpdate, PluginMetadata, PluginSlot, Storage, StorageError, WasmRegistryEntry,
+    sparse_order,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -206,6 +207,9 @@ async fn patch_registry(
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
+    if id == BUILTIN_CACHE_AFFINITY_ID {
+        return builtin_plugin_immutable();
+    }
     match storage
         .update_registry_label(id, expected_revision, body.label)
         .await
@@ -230,6 +234,9 @@ async fn delete_registry(
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
+    if id == BUILTIN_CACHE_AFFINITY_ID {
+        return builtin_plugin_immutable();
+    }
     match storage.delete_registry_entry(id, expected_revision).await {
         Ok(Some(deleted)) => {
             remove_wasm_cache_file(&state, deleted.sha256).await;
@@ -661,6 +668,14 @@ async fn remove_wasm_cache_file(state: &AdminState, sha256: [u8; 32]) {
             tracing::warn!(%error, path = %cache_path.display(), sha256 = %sha256_hex, "failed to remove wasm cache file after registry delete")
         }
     }
+}
+
+fn builtin_plugin_immutable() -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({ "error": "builtin_plugin_immutable" })),
+    )
+        .into_response()
 }
 
 fn plugin_registry_referenced(id: String) -> axum::response::Response {
