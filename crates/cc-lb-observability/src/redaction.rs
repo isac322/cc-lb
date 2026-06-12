@@ -420,6 +420,7 @@ fn upsert_truncation_marker(trace: &mut RoutingTrace, removed_stages: usize) {
         reason: Some(format!(
             "routing trace truncated; removed {removed_stages} stage(s)"
         )),
+        duration_us: 0,
     };
 
     if trace
@@ -480,6 +481,9 @@ fn stage_json_len(stage: &StageDecision) -> usize {
     }
     if let Some(reason) = &stage.reason {
         len += ",\"reason\":".len() + json_string_len(reason);
+    }
+    if stage.duration_us != 0 {
+        len += ",\"duration_us\":".len() + stage.duration_us.to_string().len();
     }
 
     len + "}".len()

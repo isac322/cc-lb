@@ -1,6 +1,6 @@
 use cc_lb_plugin_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, FilterError, FilterOutput,
-    FilterPlugin, PerCandidateReason, Principal, RequestContext, UpstreamCandidate,
+    FilterPlugin, Principal, RequestContext, UpstreamCandidate,
 };
 use cc_lb_storage_api::PluginMetadata;
 use uuid::Uuid;
@@ -51,19 +51,10 @@ impl FilterPlugin for CacheAffinityFilter {
             .filter(|candidate| !has_hit || is_cache_hit(candidate))
             .map(|candidate| candidate.upstream_id)
             .collect::<Vec<_>>();
-        let per_candidate_reasons = candidates
-            .iter()
-            .map(|candidate| PerCandidateReason {
-                upstream_id: candidate.upstream_id,
-                kept: !has_hit || is_cache_hit(candidate),
-                reason: reason.to_owned(),
-            })
-            .collect();
-
         Ok(FilterOutput {
             kept_upstream_ids,
             reason: reason.to_owned(),
-            per_candidate_reasons,
+            per_candidate_reasons: Vec::new(),
         })
     }
 
@@ -100,15 +91,7 @@ mod tests {
 
         assert_eq!(output.kept_upstream_ids, vec![warm.upstream_id]);
         assert_eq!(output.reason, HIT_REASON);
-        assert_eq!(output.per_candidate_reasons.len(), 2);
-        assert!(output.per_candidate_reasons[0].kept);
-        assert!(!output.per_candidate_reasons[1].kept);
-        assert!(
-            output
-                .per_candidate_reasons
-                .iter()
-                .all(|reason| reason.reason == HIT_REASON)
-        );
+        assert!(output.per_candidate_reasons.is_empty());
     }
 
     #[test]
@@ -122,18 +105,7 @@ mod tests {
             vec![first.upstream_id, second.upstream_id]
         );
         assert_eq!(output.reason, MISS_REASON);
-        assert!(
-            output
-                .per_candidate_reasons
-                .iter()
-                .all(|reason| reason.kept)
-        );
-        assert!(
-            output
-                .per_candidate_reasons
-                .iter()
-                .all(|reason| reason.reason == MISS_REASON)
-        );
+        assert!(output.per_candidate_reasons.is_empty());
     }
 
     #[test]
@@ -156,12 +128,7 @@ mod tests {
             vec![first.upstream_id, second.upstream_id]
         );
         assert_eq!(output.reason, HIT_REASON);
-        assert!(
-            output
-                .per_candidate_reasons
-                .iter()
-                .all(|reason| reason.kept)
-        );
+        assert!(output.per_candidate_reasons.is_empty());
     }
 
     fn filter(candidates: &[UpstreamCandidate]) -> FilterOutput {
