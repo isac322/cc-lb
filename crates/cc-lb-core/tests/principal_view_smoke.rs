@@ -28,6 +28,7 @@ fn sample_principals(enabled: bool) -> Vec<PrincipalRecord> {
         revision: 1,
         created_at_unix_secs: 1,
         updated_at_unix_secs: 1,
+        router_terminal_strategy: Default::default(),
     }]
 }
 

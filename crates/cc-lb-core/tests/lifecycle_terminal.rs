@@ -1,0 +1,381 @@
+#![allow(deprecated)]
+
+mod common;
+
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
+
+use async_trait::async_trait;
+use bytes::Bytes;
+use cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager;
+use cc_lb_core::api_keys::limit_engine::LimitEngine;
+use cc_lb_core::api_keys::principal_view::{
+    DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
+    RouterPipelineCache,
+};
+use cc_lb_core::{
+    ApiKeyAwareSignerFactory, DynamicViewBuilder, DynamicViewHolder, ErrorNormalizer, Lifecycle,
+    LifecycleConfig,
+};
+use cc_lb_plugin_api::{
+    DialectError, FilterError, FilterOutput, FilterPlugin, Principal, RequestContext,
+    RetryDecision, RouteDecision, RouteError, RouterPlugin, ShapedRequest, ShapedRequestBuilder,
+    SignedRequest, Signer, SignerError, SignerFactory, SigningCapability, TerminalStrategy,
+    Upstream, UpstreamCandidate, UpstreamDialect,
+};
+use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
+use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
+use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
+use cc_lb_storage_api::{RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_redb::Storage as RedbStorage;
+use http::StatusCode;
+use url::Url;
+use uuid::Uuid;
+
+use common::{DispatchMode, MockDispatch, TestAuthn, TestState, collect_body, messages_request};
+
+#[tokio::test]
+async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dyn std::error::Error>>
+{
+    let first = upstream_id(1);
+    let second = upstream_id(2);
+    let third = upstream_id(3);
+    let choices = Arc::new(Mutex::new(Vec::new()));
+    let filter_calls = Arc::new(Mutex::new(Vec::new()));
+    let _dir = tempfile::tempdir()?;
+    let storage = Arc::new(RedbStorage::open(
+        &_dir.path().join("lifecycle-terminal.redb"),
+        [18; 32],
+    )?);
+    let lifecycle = lifecycle_with_terminal(
+        TerminalStrategy::FirstPick,
+        vec![Arc::new(KeepFilter {
+            kept_upstream_ids: vec![second, third],
+            calls: Arc::clone(&filter_calls),
+        })],
+        vec![
+            upstream_record(first, "first"),
+            upstream_record(second, "second"),
+            upstream_record(third, "third"),
+        ],
+        Arc::clone(&choices),
+    )
+    .with_request_event_storage(Arc::clone(&storage) as Arc<dyn StorageTrait>)
+    .with_static_limit_subject(
+        LimitEngine::new(Arc::new(KeyConcurrencyManager::new())),
+        "principal-test".to_owned(),
+        "key-test".to_owned(),
+        active_record(),
+    );
+
+    send_message(&lifecycle).await?;
+
+    assert_eq!(
+        filter_calls.lock().expect("filter calls lock").as_slice(),
+        &[vec![first, second, third]]
+    );
+    assert_eq!(
+        choices.lock().expect("choices lock").as_slice(),
+        &["second".to_owned()]
+    );
+    let events = RequestEventStore::query_request_events(storage.as_ref(), 0, u64::MAX, 10).await?;
+    let trace = events
+        .first()
+        .and_then(|event| event.routing_trace.as_ref())
+        .expect("routing trace is recorded");
+    assert_eq!(trace.stages.len(), 1);
+    assert_eq!(trace.stages[0].stage_name, "keep-terminal-candidates");
+    assert_eq!(
+        trace
+            .terminal_decision
+            .as_ref()
+            .map(|decision| (decision.upstream_id, decision.strategy.clone(),)),
+        Some((Some(second), TerminalStrategy::FirstPick))
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn random_terminal_uses_seeded_rng_and_distributes_choices()
+-> Result<(), Box<dyn std::error::Error>> {
+    let first = upstream_id(1);
+    let second = upstream_id(2);
+    let third = upstream_id(3);
+    let records = vec![
+        upstream_record(first, "first"),
+        upstream_record(second, "second"),
+        upstream_record(third, "third"),
+    ];
+
+    let first_run = random_sequence([7; 32], records.clone()).await?;
+    let second_run = random_sequence([7; 32], records).await?;
+
+    assert_eq!(first_run, second_run);
+    assert!(
+        first_run.contains(&"first".to_owned()),
+        "choices: {first_run:?}"
+    );
+    assert!(
+        first_run.contains(&"second".to_owned()),
+        "choices: {first_run:?}"
+    );
+    assert!(
+        first_run.contains(&"third".to_owned()),
+        "choices: {first_run:?}"
+    );
+    Ok(())
+}
+
+async fn random_sequence(
+    seed: [u8; 32],
+    records: Vec<UpstreamRecord>,
+) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let choices = Arc::new(Mutex::new(Vec::new()));
+    let lifecycle = lifecycle_with_terminal(
+        TerminalStrategy::Random,
+        Vec::new(),
+        records,
+        Arc::clone(&choices),
+    )
+    .with_terminal_rng_seed(seed);
+
+    for _ in 0..24 {
+        send_message(&lifecycle).await?;
+    }
+
+    Ok(choices.lock().expect("choices lock").clone())
+}
+
+async fn send_message(lifecycle: &Lifecycle) -> Result<(), Box<dyn std::error::Error>> {
+    let response = lifecycle
+        .handle(messages_request(Bytes::from_static(
+            br#"{"model":"claude-test","messages":[],"max_tokens":16}"#,
+        )))
+        .await?;
+    let (status, _headers, _body) = collect_body(response).await;
+    assert_eq!(status, StatusCode::OK);
+    Ok(())
+}
+
+fn lifecycle_with_terminal(
+    terminal: TerminalStrategy,
+    filters: Vec<Arc<dyn FilterPlugin>>,
+    records: Vec<UpstreamRecord>,
+    choices: Arc<Mutex<Vec<String>>>,
+) -> Lifecycle {
+    let principal_view = principal_view(terminal, filters);
+    let state = TestState::default();
+    let authn = TestAuthn::with_principal_view(state.clone(), Arc::clone(&principal_view));
+    let view = DynamicViewBuilder::new(0)
+        .signer_factory(Arc::new(RecordingSignerFactory { choices }))
+        .global_router(Arc::new(NullRouter))
+        .dispatcher(Arc::new(MockDispatch {
+            state,
+            mode: DispatchMode::Statuses(Arc::new(Mutex::new(vec![StatusCode::OK].into()))),
+        }))
+        .global_observability_hooks(Vec::new())
+        .error_normalizer(Arc::new(ErrorNormalizer::new()))
+        .principal_view(principal_view)
+        .upstream_records(records)
+        .build();
+
+    Lifecycle::new_with_dynamic_view(
+        authn.authn.clone(),
+        Arc::new(DynamicViewHolder::new(view)),
+        LifecycleConfig::default(),
+    )
+}
+
+fn principal_view(
+    terminal: TerminalStrategy,
+    filters: Vec<Arc<dyn FilterPlugin>>,
+) -> Arc<PrincipalView> {
+    let pipeline = Arc::new(RouterPipelineCache {
+        user_filters: filters,
+        terminal,
+        instantiation_error: None,
+    });
+    let mut chains: HashMap<String, PrincipalRoutingArtifacts> = HashMap::new();
+    chains.insert(
+        "principal-test".to_owned(),
+        (
+            Some(pipeline),
+            ObservabilityHooksCache::Inherit,
+            DialectCache::Inherit,
+        ),
+    );
+    Arc::new(PrincipalView::from_db(&[principal()], chains))
+}
+
+fn principal() -> PrincipalRecord {
+    PrincipalRecord {
+        id: Uuid::new_v4(),
+        name: "principal-test".to_owned(),
+        kind: PrincipalKind::Machine,
+        allowed_models: Vec::new(),
+        allowed_upstreams: Vec::new(),
+        default_limits: Vec::new(),
+        enabled: true,
+        last_apply_error: None,
+        last_apply_at_unix_secs: None,
+        deleted_at_unix_secs: None,
+        revision: 1,
+        created_at_unix_secs: 0,
+        updated_at_unix_secs: 0,
+        router_terminal_strategy: TerminalStrategy::FirstPick,
+    }
+}
+
+fn active_record() -> StoredApiKeyRecord {
+    StoredApiKeyRecord {
+        key_hash_b64: "key-test".to_owned(),
+        status: KeyStatus::Active,
+        ..StoredApiKeyRecord::default()
+    }
+}
+
+fn upstream_record(id: Uuid, name: &str) -> UpstreamRecord {
+    UpstreamRecord {
+        id,
+        name: name.to_owned(),
+        kind: StorageUpstreamKind::AnthropicApiKey,
+        base_url: Some(Url::parse("http://upstream.local/").expect("test URL parses")),
+        enabled: true,
+        oauth_credentials: None,
+        api_key_ciphertext: Some(Vec::new()),
+        refresh_lease_holder: None,
+        refresh_lease_until_unix_secs: None,
+        last_apply_error: None,
+        last_apply_at_unix_secs: None,
+        deleted_at_unix_secs: None,
+        revision: 1,
+        created_at_unix_secs: 0,
+        updated_at_unix_secs: 0,
+    }
+}
+
+fn upstream_id(index: u128) -> Uuid {
+    Uuid::from_u128(index)
+}
+
+struct NullRouter;
+
+impl RouterPlugin for NullRouter {
+    fn route(
+        &self,
+        _ctx: &RequestContext,
+        _principal: &Principal,
+        _candidates: &[UpstreamCandidate],
+    ) -> Result<RouteDecision, RouteError> {
+        Ok(RouteDecision {
+            upstream_id: None,
+            upstream: Upstream::AnthropicDirect,
+            dialect: Arc::new(NullDialect),
+        })
+    }
+}
+
+struct NullDialect;
+
+impl UpstreamDialect for NullDialect {
+    fn shape(
+        &self,
+        ctx: &RequestContext,
+        upstream: &Upstream,
+        _principal: &Principal,
+        builder: &mut ShapedRequestBuilder,
+    ) -> Result<ShapedRequest, DialectError> {
+        let _ = upstream;
+        let mut url = Url::parse("http://upstream.local/")?;
+        url.set_path(ctx.path.trim_start_matches('/'));
+        url.set_query(ctx.query.as_deref());
+        Ok(builder.shaped_request(
+            url,
+            ctx.method.clone(),
+            ctx.downstream_headers.clone(),
+            ctx.body_bytes.clone(),
+        ))
+    }
+
+    fn normalize_error(&self, _status: StatusCode, _body: &Bytes) -> Option<Bytes> {
+        None
+    }
+}
+
+struct RecordingSignerFactory {
+    choices: Arc<Mutex<Vec<String>>>,
+}
+
+impl ApiKeyAwareSignerFactory for RecordingSignerFactory {
+    fn with_router_choice(
+        &self,
+        _api_key: String,
+        router_chosen_upstream_name: String,
+    ) -> Arc<dyn SignerFactory> {
+        self.choices
+            .lock()
+            .expect("choices lock")
+            .push(router_chosen_upstream_name);
+        Arc::new(RecordingSignerFactoryInner)
+    }
+}
+
+struct RecordingSignerFactoryInner;
+
+#[async_trait]
+impl SignerFactory for RecordingSignerFactoryInner {
+    async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
+        Ok(Arc::new(RecordingSigner))
+    }
+}
+
+struct RecordingSigner;
+
+#[async_trait]
+impl Signer for RecordingSigner {
+    async fn sign(
+        &self,
+        shaped: ShapedRequest,
+        capability: &mut SigningCapability,
+    ) -> Result<SignedRequest, SignerError> {
+        Ok(SignedRequest::from_shaped(shaped, capability))
+    }
+
+    async fn on_unauthorized(&self, _err: &cc_lb_plugin_api::UpstreamError) -> RetryDecision {
+        RetryDecision::Fail
+    }
+}
+
+struct KeepFilter {
+    kept_upstream_ids: Vec<Uuid>,
+    calls: Arc<Mutex<Vec<Vec<Uuid>>>>,
+}
+
+impl FilterPlugin for KeepFilter {
+    fn filter(
+        &self,
+        _ctx: &RequestContext,
+        _principal: &Principal,
+        candidates: &[UpstreamCandidate],
+    ) -> Result<FilterOutput, FilterError> {
+        self.calls.lock().expect("filter calls lock").push(
+            candidates
+                .iter()
+                .map(|candidate| candidate.upstream_id)
+                .collect(),
+        );
+        Ok(FilterOutput {
+            kept_upstream_ids: self.kept_upstream_ids.clone(),
+            reason: "kept terminal candidates".to_owned(),
+            per_candidate_reasons: Vec::new(),
+        })
+    }
+
+    fn plugin_id(&self) -> Uuid {
+        Uuid::nil()
+    }
+
+    fn plugin_name(&self) -> &str {
+        "keep-terminal-candidates"
+    }
+}

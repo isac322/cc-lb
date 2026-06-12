@@ -3,7 +3,6 @@ pub mod common;
 pub mod normalize_error;
 pub mod observe;
 pub mod on_unauthorized;
-pub mod route;
 pub mod shape;
 pub mod sign;
 
@@ -38,8 +37,7 @@ mod tests {
     }
 
     #[test]
-    fn seven_impls() {
-        assert_eq!(<route::RouteFn as WireFunction>::NAME, "route");
+    fn six_impls() {
         assert_eq!(<shape::ShapeFn as WireFunction>::NAME, "shape");
         assert_eq!(
             <normalize_error::NormalizeErrorFn as WireFunction>::NAME,
@@ -56,7 +54,6 @@ mod tests {
         );
         assert_eq!(<observe::ObserveFn as WireFunction>::NAME, "observe");
 
-        assert_v1::<route::RouteFn>();
         assert_v1::<shape::ShapeFn>();
         assert_v1::<normalize_error::NormalizeErrorFn>();
         assert_v1::<build_signer::BuildSignerFn>();
@@ -67,8 +64,6 @@ mod tests {
 
     #[test]
     fn dry_run_round_trip() {
-        round_trip(<route::RouteFn as WireFunction>::dry_run_request());
-        round_trip(<route::RouteFn as WireFunction>::dry_run_response());
         round_trip(<shape::ShapeFn as WireFunction>::dry_run_request());
         round_trip(<shape::ShapeFn as WireFunction>::dry_run_response());
         round_trip(<normalize_error::NormalizeErrorFn as WireFunction>::dry_run_request());
@@ -97,8 +92,6 @@ mod tests {
         round_trip(UpstreamErrorCategory::dry_run_sample());
         round_trip(UpstreamErrorWire::dry_run_sample());
         round_trip(ObserveEventWire::dry_run_sample());
-        round_trip(route::RouteRequest::dry_run_sample());
-        round_trip(route::RouteResponse::dry_run_sample());
         round_trip(shape::ShapeRequest::dry_run_sample());
         round_trip(shape::ShapeResponse::dry_run_sample());
         round_trip(normalize_error::NormalizeErrorRequest::dry_run_sample());
@@ -142,14 +135,6 @@ mod tests {
     }
 
     #[test]
-    fn route_is_use_default() {
-        assert_eq!(
-            <route::RouteFn as WireFunction>::FALLBACK,
-            FallbackPolicy::UseDefault
-        );
-    }
-
-    #[test]
     fn normalize_on_unauthorized_pass_through() {
         assert_eq!(
             <normalize_error::NormalizeErrorFn as WireFunction>::FALLBACK,
@@ -163,9 +148,6 @@ mod tests {
 
     #[test]
     fn deny_unknown_fields_on_wire_structs() {
-        let route = r#"{"request_id":"dry","headers":[],"method":"POST","path":"/v1/messages","query":null,"body_base64":"","principal":{"id":"p","kind":"api_key","claims":{}},"candidates":[],"extra":true}"#;
-        assert!(serde_json::from_str::<route::RouteRequest>(route).is_err());
-
         let header = r#"{"name":"x-test","value_base64":"","extra":true}"#;
         assert!(serde_json::from_str::<HeaderWire>(header).is_err());
 

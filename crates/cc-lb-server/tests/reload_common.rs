@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code, deprecated)]
 
 use std::io::{self, Write};
 use std::net::SocketAddr;

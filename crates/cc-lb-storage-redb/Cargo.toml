@@ -16,6 +16,7 @@ base64.workspace = true
 bincode.workspace = true
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-aead = { path = "../cc-lb-aead" }
+cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 chacha20poly1305.workspace = true
 redb.workspace = true
 ring.workspace = true

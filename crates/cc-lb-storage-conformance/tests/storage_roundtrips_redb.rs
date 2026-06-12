@@ -281,6 +281,14 @@ macro_rules! plugin_registry_redb_test {
 }
 
 plugin_registry_redb_test!(
+    plugin_registry_registry_by_id_returns_seeded_builtin_cache_affinity_redb,
+    registry_by_id_returns_seeded_builtin_cache_affinity
+);
+plugin_registry_redb_test!(
+    plugin_registry_insert_chain_entry_with_builtin_cache_affinity_succeeds_redb,
+    insert_chain_entry_with_builtin_cache_affinity_succeeds
+);
+plugin_registry_redb_test!(
     plugin_registry_list_orphan_blobs_returns_blobs_without_registry_redb,
     list_orphan_blobs_returns_blobs_without_registry
 );
@@ -309,12 +317,20 @@ plugin_registry_redb_test!(
     insert_chain_entry_rejects_unknown_principal
 );
 plugin_registry_redb_test!(
-    plugin_registry_insert_chain_entry_rejects_duplicate_for_router_slot_redb,
-    insert_chain_entry_rejects_duplicate_for_router_slot
+    plugin_registry_router_multi_entry_ordered_redb,
+    router_multi_entry_ordered
 );
 plugin_registry_redb_test!(
     plugin_registry_insert_chain_entry_rejects_duplicate_for_shape_slot_redb,
     insert_chain_entry_rejects_duplicate_for_shape_slot
+);
+plugin_registry_redb_test!(
+    plugin_registry_router_reorder_preserves_invariants_redb,
+    router_reorder_preserves_invariants
+);
+plugin_registry_redb_test!(
+    plugin_registry_shape_singleton_preserved_redb,
+    shape_singleton_preserved
 );
 plugin_registry_redb_test!(
     plugin_registry_insert_chain_entry_allows_multi_for_observability_hook_redb,

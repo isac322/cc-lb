@@ -157,6 +157,7 @@ impl RedbStorage {
             revision: 0,
             created_at_unix_secs: now_unix_secs,
             updated_at_unix_secs: now_unix_secs,
+            router_terminal_strategy: cc_lb_plugin_api::TerminalStrategy::FirstPick,
         };
         {
             let name_index = write_txn.open_table(PRINCIPALS_V2_BY_NAME)?;
@@ -248,6 +249,7 @@ impl RedbStorage {
             allowed_models,
             allowed_upstreams,
             default_limits,
+            router_terminal_strategy,
         } = update;
         let allowed_upstreams_update = allowed_upstreams.clone();
         self.mutate_principal(id, expected_revision, allowed_upstreams_update, |record| {
@@ -262,6 +264,9 @@ impl RedbStorage {
             }
             if let Some(default_limits) = default_limits {
                 record.default_limits = default_limits;
+            }
+            if let Some(router_terminal_strategy) = router_terminal_strategy {
+                record.router_terminal_strategy = router_terminal_strategy;
             }
             record.updated_at_unix_secs = now_unix_secs;
             Ok(())

@@ -22,12 +22,12 @@ fn handler_panic_does_not_affect_self_check() {
         output: success_response().as_bytes(),
         import_user_host: false,
         include_self_check: true,
-        route_panics: true,
+        shape_panics: true,
         verify_checked_functions: true,
         infinite_loop: false,
     });
 
-    let response = execute_self_check(&wasm).expect("self-check succeeds without calling route");
+    let response = execute_self_check(&wasm).expect("self-check succeeds without calling shape");
 
     assert_eq!(response.status, SelfCheckStatus::Success);
     assert!(response.failures.is_empty());
@@ -40,7 +40,7 @@ fn host_fn_call_during_self_check_is_rejected() {
         output: output.as_bytes(),
         import_user_host: true,
         include_self_check: true,
-        route_panics: false,
+        shape_panics: false,
         verify_checked_functions: false,
         infinite_loop: false,
     });
@@ -59,7 +59,7 @@ fn self_check_timeout_is_rejected() {
         output: b"",
         import_user_host: false,
         include_self_check: true,
-        route_panics: false,
+        shape_panics: false,
         verify_checked_functions: false,
         infinite_loop: true,
     });
@@ -87,7 +87,7 @@ fn self_check_output_too_large_is_rejected() {
         output: output.as_bytes(),
         import_user_host: false,
         include_self_check: true,
-        route_panics: false,
+        shape_panics: false,
         verify_checked_functions: false,
         infinite_loop: false,
     });
@@ -109,7 +109,7 @@ fn missing_self_check_export_is_rejected() {
         output: b"",
         import_user_host: false,
         include_self_check: false,
-        route_panics: false,
+        shape_panics: false,
         verify_checked_functions: false,
         infinite_loop: false,
     });
@@ -158,7 +158,7 @@ struct SelfCheckModule<'a> {
     output: &'a [u8],
     import_user_host: bool,
     include_self_check: bool,
-    route_panics: bool,
+    shape_panics: bool,
     verify_checked_functions: bool,
     infinite_loop: bool,
 }
@@ -175,15 +175,14 @@ fn self_check_module(options: SelfCheckModule<'_>) -> Vec<u8> {
     } else {
         ""
     };
-    let route_body = if options.route_panics {
+    let shape_body = if options.shape_panics {
         "unreachable"
     } else {
         "i32.const 0"
     };
     let checked_helpers = if options.verify_checked_functions {
         format!(
-            "{}{}{}",
-            contains_helper("contains_route", br#""route""#),
+            "{}{}",
             contains_helper("contains_shape", br#""shape""#),
             contains_helper("contains_normalize_error", br#""normalize_error""#),
         )
@@ -192,7 +191,6 @@ fn self_check_module(options: SelfCheckModule<'_>) -> Vec<u8> {
     };
     let checked_verification = if options.verify_checked_functions {
         r#"
-    (if (i32.eqz (call $contains_route)) (then unreachable))
     (if (i32.eqz (call $contains_shape)) (then unreachable))
     (if (i32.eqz (call $contains_normalize_error)) (then unreachable))"#
     } else {
@@ -233,8 +231,8 @@ fn self_check_module(options: SelfCheckModule<'_>) -> Vec<u8> {
   {output_helper}
   {checked_helpers}
   {self_check_export}
-  (func (export "route") (result i32)
-    {route_body}))
+  (func (export "shape") (result i32)
+    {shape_body}))
 "#,
     );
     wat::parse_str(&wat).expect("self-check wat parses")
@@ -244,9 +242,9 @@ fn registry_plugin_wasm(self_check_output: &str) -> Vec<u8> {
     let accept = HandshakeAccept {
         handshake_schema_version: HANDSHAKE_SCHEMA_VERSION_V1,
         envelope_version: 1,
-        chosen_versions: BTreeMap::from([("route".to_owned(), 1)]),
-        plugin_supported: BTreeMap::from([("route".to_owned(), vec![1])]),
-        implemented_functions: BTreeSet::from(["route".to_owned()]),
+        chosen_versions: BTreeMap::from([("shape".to_owned(), 1)]),
+        plugin_supported: BTreeMap::from([("shape".to_owned(), vec![1])]),
+        implemented_functions: BTreeSet::from(["shape".to_owned()]),
         required_capabilities: BTreeSet::new(),
     };
     let handshake_output = serde_json::to_string(&accept).expect("accept serializes");
@@ -264,7 +262,7 @@ fn registry_plugin_wasm(self_check_output: &str) -> Vec<u8> {
   (func (export "cc_lb_self_check") (result i32)
     (call $output_set (call $self_check_out) (i64.const {self_check_len}))
     (i32.const 0))
-  (func (export "route") (result i32)
+  (func (export "shape") (result i32)
     (i32.const 0)))
 "#,
         handshake_helper = bytes_helper("handshake_out", handshake_output.as_bytes()),

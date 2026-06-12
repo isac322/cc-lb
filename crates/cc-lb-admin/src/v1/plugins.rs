@@ -9,8 +9,9 @@ use axum::{
 };
 use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_storage_api::{
-    PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
-    PluginSlot, Storage, StorageError, WasmRegistryEntry, sparse_order,
+    BUILTIN_CACHE_AFFINITY_ID, PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput,
+    PluginChainEntryUpdate, PluginMetadata, PluginSlot, Storage, StorageError, WasmRegistryEntry,
+    sparse_order,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -119,6 +120,10 @@ struct RegistryEntryResponse {
     refcount: i64,
     revision: u64,
     uploaded_at_unix_secs: u64,
+    kind: String,
+    wire_version: u8,
+    is_builtin: bool,
+    metadata: Option<PluginMetadata>,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,10 +154,18 @@ async fn list_registry(
         return storage_unavailable();
     };
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
-    let all = match all_registry_entries(storage).await {
+    let storage_entries = match all_registry_entries(storage).await {
         Ok(entries) => entries,
         Err(error) => return storage_error(error),
     };
+    let mut all = storage_entries;
+    if !all
+        .iter()
+        .any(|entry| entry.id == BUILTIN_CACHE_AFFINITY_ID)
+    {
+        all.push(WasmRegistryEntry::builtin_cache_affinity(0));
+    }
+    all.sort_by_key(|entry| entry.id);
     let total = all.len();
     let start = query
         .after
@@ -202,6 +215,9 @@ async fn patch_registry(
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
+    if id == BUILTIN_CACHE_AFFINITY_ID {
+        return builtin_plugin_immutable();
+    }
     match storage
         .update_registry_label(id, expected_revision, body.label)
         .await
@@ -226,6 +242,9 @@ async fn delete_registry(
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
+    if id == BUILTIN_CACHE_AFFINITY_ID {
+        return builtin_plugin_immutable();
+    }
     match storage.delete_registry_entry(id, expected_revision).await {
         Ok(Some(deleted)) => {
             remove_wasm_cache_file(&state, deleted.sha256).await;
@@ -311,7 +330,7 @@ async fn insert_chain(
         }) => invalid_order(),
         Err(StorageError::PluginChainConflict {
             reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id },
-        }) => slot_singleton(existing_entry_id),
+        }) if slot == PluginSlot::Shape => slot_singleton(existing_entry_id),
         Err(error) => storage_error(error),
     }
 }
@@ -564,6 +583,10 @@ fn registry_response(entry: WasmRegistryEntry, size_bytes: u64) -> RegistryEntry
         refcount: entry.refcount,
         revision: entry.revision,
         uploaded_at_unix_secs: entry.uploaded_at_unix_secs,
+        kind: entry.kind,
+        wire_version: entry.wire_version,
+        is_builtin: entry.is_builtin,
+        metadata: entry.metadata,
     }
 }
 
@@ -653,6 +676,14 @@ async fn remove_wasm_cache_file(state: &AdminState, sha256: [u8; 32]) {
             tracing::warn!(%error, path = %cache_path.display(), sha256 = %sha256_hex, "failed to remove wasm cache file after registry delete")
         }
     }
+}
+
+fn builtin_plugin_immutable() -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({ "error": "builtin_plugin_immutable" })),
+    )
+        .into_response()
 }
 
 fn plugin_registry_referenced(id: String) -> axum::response::Response {

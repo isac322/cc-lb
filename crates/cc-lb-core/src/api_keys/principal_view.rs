@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use cc_lb_plugin_api::{ObservabilityHook, RouterPlugin, UpstreamDialect};
+use cc_lb_plugin_api::{FilterPlugin, ObservabilityHook, TerminalStrategy, UpstreamDialect};
 use cc_lb_storage_api::principal::{Limit as DbLimit, LimitKind as DbLimitKind};
 use cc_lb_storage_api::{PrincipalKind as DbPrincipalKind, PrincipalRecord};
 use globset::{Glob, GlobSet, GlobSetBuilder};
@@ -17,9 +17,20 @@ pub enum PrincipalStatus {
 }
 
 #[derive(Clone)]
-pub enum RouterPluginCache {
-    Inherit,
-    Explicit(Arc<dyn RouterPlugin>),
+pub struct RouterPipelineCache {
+    pub user_filters: Vec<Arc<dyn FilterPlugin>>,
+    pub terminal: TerminalStrategy,
+    pub instantiation_error: Option<Arc<str>>,
+}
+
+impl RouterPipelineCache {
+    pub fn empty(terminal: TerminalStrategy) -> Self {
+        Self {
+            user_filters: Vec::new(),
+            terminal,
+            instantiation_error: None,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -34,7 +45,11 @@ pub enum DialectCache {
     Explicit(Arc<dyn UpstreamDialect>),
 }
 
-pub type PrincipalRoutingArtifacts = (RouterPluginCache, ObservabilityHooksCache, DialectCache);
+pub type PrincipalRoutingArtifacts = (
+    Option<Arc<RouterPipelineCache>>,
+    ObservabilityHooksCache,
+    DialectCache,
+);
 
 #[derive(Debug)]
 pub struct PrincipalView {
@@ -50,7 +65,8 @@ pub struct PrincipalSpecCached {
     allowed_upstreams: Vec<Uuid>,
     default_limits: Vec<Limit>,
     enabled: bool,
-    router_plugin: RouterPluginCache,
+    router_pipeline: Option<Arc<RouterPipelineCache>>,
+    default_router_pipeline: Arc<RouterPipelineCache>,
     observability_hooks: ObservabilityHooksCache,
     dialect: DialectCache,
 }
@@ -77,9 +93,10 @@ impl PrincipalView {
             revision: 1,
             created_at_unix_secs: 0,
             updated_at_unix_secs: 0,
+            router_terminal_strategy: Default::default(),
         };
         principal_chains.entry(principal_id.to_owned()).or_insert((
-            RouterPluginCache::Inherit,
+            None,
             ObservabilityHooksCache::Inherit,
             DialectCache::Inherit,
         ));
@@ -120,12 +137,15 @@ impl PrincipalView {
                 });
                 let principal_id = principal.name.clone();
                 name_aliases.insert(principal.id.to_string(), principal_id.clone());
-                let (router_plugin, observability_hooks, dialect) =
+                let (router_pipeline, observability_hooks, dialect) =
                     principal_chains.remove(&principal_id).unwrap_or((
-                        RouterPluginCache::Inherit,
+                        None,
                         ObservabilityHooksCache::Inherit,
                         DialectCache::Inherit,
                     ));
+                let default_router_pipeline = Arc::new(RouterPipelineCache::empty(
+                    principal.router_terminal_strategy.clone(),
+                ));
 
                 let cached = PrincipalSpecCached {
                     id: principal_id.clone(),
@@ -140,7 +160,8 @@ impl PrincipalView {
                         .map(Into::into)
                         .collect(),
                     enabled: principal.enabled,
-                    router_plugin,
+                    router_pipeline,
+                    default_router_pipeline,
                     observability_hooks,
                     dialect,
                 };
@@ -224,14 +245,14 @@ impl PrincipalSpecCached {
         &self.allowed_upstreams
     }
 
-    pub fn resolved_router<'a>(
-        &'a self,
-        global: &'a Arc<dyn RouterPlugin>,
-    ) -> &'a Arc<dyn RouterPlugin> {
-        match &self.router_plugin {
-            RouterPluginCache::Inherit => global,
-            RouterPluginCache::Explicit(handle) => handle,
-        }
+    pub fn resolved_pipeline(
+        &self,
+        global: Option<&Arc<RouterPipelineCache>>,
+    ) -> Arc<RouterPipelineCache> {
+        self.router_pipeline
+            .clone()
+            .or_else(|| global.cloned())
+            .unwrap_or_else(|| Arc::clone(&self.default_router_pipeline))
     }
 
     pub fn resolved_hooks<'a>(
@@ -295,19 +316,27 @@ fn is_glob_pattern(model: &str) -> bool {
 mod tests {
     use super::*;
     use cc_lb_plugin_api::{
-        ObservabilityError, ObserveEvent, Principal, RequestContext, RouteDecision, RouteError,
+        FilterError, FilterOutput, ObservabilityError, ObserveEvent, Principal, RequestContext,
         UpstreamCandidate,
     };
 
-    struct StubRouter(&'static str);
-    impl RouterPlugin for StubRouter {
-        fn route(
+    struct StubFilter(&'static str);
+    impl FilterPlugin for StubFilter {
+        fn filter(
             &self,
             _: &RequestContext,
             _: &Principal,
             _: &[UpstreamCandidate],
-        ) -> Result<RouteDecision, RouteError> {
-            unimplemented!("StubRouter({}) is for identity comparison only", self.0)
+        ) -> Result<FilterOutput, FilterError> {
+            unimplemented!("StubFilter({}) is for identity comparison only", self.0)
+        }
+
+        fn plugin_id(&self) -> Uuid {
+            Uuid::nil()
+        }
+
+        fn plugin_name(&self) -> &str {
+            self.0
         }
     }
 
@@ -318,7 +347,10 @@ mod tests {
         }
     }
 
-    fn cached(router: RouterPluginCache, hooks: ObservabilityHooksCache) -> PrincipalSpecCached {
+    fn cached(
+        pipeline: Option<Arc<RouterPipelineCache>>,
+        hooks: ObservabilityHooksCache,
+    ) -> PrincipalSpecCached {
         PrincipalSpecCached {
             id: "test".to_owned(),
             principal_type: PrincipalType::Machine,
@@ -327,45 +359,53 @@ mod tests {
             allowed_upstreams: Vec::new(),
             default_limits: Vec::new(),
             enabled: true,
-            router_plugin: router,
+            router_pipeline: pipeline,
+            default_router_pipeline: Arc::new(RouterPipelineCache::empty(
+                TerminalStrategy::FirstPick,
+            )),
             observability_hooks: hooks,
             dialect: DialectCache::Inherit,
         }
     }
 
     #[test]
-    fn principal_spec_cached_inherit_resolves_to_global() {
-        let global: Arc<dyn RouterPlugin> = Arc::new(StubRouter("global"));
-        let spec = cached(RouterPluginCache::Inherit, ObservabilityHooksCache::Inherit);
+    fn principal_spec_cached_inherit_resolves_to_global_pipeline() {
+        let global = Arc::new(RouterPipelineCache {
+            user_filters: vec![Arc::new(StubFilter("global"))],
+            terminal: TerminalStrategy::FirstPick,
+            instantiation_error: None,
+        });
+        let spec = cached(None, ObservabilityHooksCache::Inherit);
 
-        let resolved = spec.resolved_router(&global);
+        let resolved = spec.resolved_pipeline(Some(&global));
 
         assert!(
-            Arc::ptr_eq(resolved, &global),
-            "Inherit must yield the borrowed global handle by identity"
+            Arc::ptr_eq(&resolved, &global),
+            "inherit must yield the global pipeline handle by identity"
         );
     }
 
     #[test]
-    fn principal_spec_cached_explicit_router_overrides_global() {
-        let global: Arc<dyn RouterPlugin> = Arc::new(StubRouter("global"));
-        let explicit: Arc<dyn RouterPlugin> = Arc::new(StubRouter("explicit"));
-        let spec = cached(
-            RouterPluginCache::Explicit(explicit.clone()),
-            ObservabilityHooksCache::Inherit,
-        );
+    fn principal_spec_cached_explicit_pipeline_overrides_global() {
+        let global = Arc::new(RouterPipelineCache::empty(TerminalStrategy::FirstPick));
+        let explicit = Arc::new(RouterPipelineCache {
+            user_filters: vec![Arc::new(StubFilter("explicit"))],
+            terminal: TerminalStrategy::Random,
+            instantiation_error: None,
+        });
+        let spec = cached(Some(explicit.clone()), ObservabilityHooksCache::Inherit);
 
-        let resolved = spec.resolved_router(&global);
+        let resolved = spec.resolved_pipeline(Some(&global));
 
-        assert!(Arc::ptr_eq(resolved, &explicit));
-        assert!(!Arc::ptr_eq(resolved, &global));
+        assert!(Arc::ptr_eq(&resolved, &explicit));
+        assert!(!Arc::ptr_eq(&resolved, &global));
     }
 
     #[test]
     fn principal_spec_cached_inherit_hooks_returns_global_slice() {
         let global: Vec<Arc<dyn ObservabilityHook>> =
             vec![Arc::new(StubHook("g1")), Arc::new(StubHook("g2"))];
-        let spec = cached(RouterPluginCache::Inherit, ObservabilityHooksCache::Inherit);
+        let spec = cached(None, ObservabilityHooksCache::Inherit);
 
         let resolved = spec.resolved_hooks(&global);
 
@@ -378,10 +418,7 @@ mod tests {
     fn principal_spec_cached_explicit_empty_hooks_returns_empty() {
         let global: Vec<Arc<dyn ObservabilityHook>> =
             vec![Arc::new(StubHook("g1")), Arc::new(StubHook("g2"))];
-        let spec = cached(
-            RouterPluginCache::Inherit,
-            ObservabilityHooksCache::Explicit(Vec::new()),
-        );
+        let spec = cached(None, ObservabilityHooksCache::Explicit(Vec::new()));
 
         let resolved = spec.resolved_hooks(&global);
 

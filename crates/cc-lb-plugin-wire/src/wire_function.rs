@@ -8,7 +8,7 @@ pub enum FallbackPolicy {
     FailRequest,
     /// Silently skip the function call (used for observability hooks).
     SilentSkip,
-    /// Use the default/fallback response (used for routing decisions).
+    /// Use the default/fallback response.
     UseDefault,
     /// Pass through to the next handler (used for error normalization).
     PassThrough,
@@ -16,7 +16,7 @@ pub enum FallbackPolicy {
 
 /// Type-level specification for a wire function exported by a plugin.
 pub trait WireFunction: 'static {
-    /// Name of the wire function (e.g., "route", "sign", "observe").
+    /// Name of the wire function (e.g., "sign", "observe").
     const NAME: &'static str;
 
     /// Compile-time fallback policy for this function. Must never be runtime-configurable
@@ -46,8 +46,6 @@ pub trait WireFunction: 'static {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginKind {
-    /// Request routing plugin (implements `route`).
-    Router,
     /// Request/response dialect plugin (implements `shape`).
     Dialect,
     /// API key signing plugin (implements `build_signer`, `sign`).
@@ -59,20 +57,19 @@ pub enum PluginKind {
 /// List of all valid wire function names in the system.
 pub fn all_wire_functions() -> &'static [&'static str] {
     &[
-        "route",
         "shape",
         "normalize_error",
         "build_signer",
         "sign",
         "on_unauthorized",
         "observe",
+        "filter",
     ]
 }
 
 /// Returns the set of wire functions REQUIRED for a plugin of the given kind.
 pub fn required_functions_for_kind(kind: PluginKind) -> &'static [&'static str] {
     match kind {
-        PluginKind::Router => &["route"],
         PluginKind::Dialect => &["shape"],
         PluginKind::SignerFactory => &["build_signer", "sign"],
         PluginKind::Observability => &["observe"],
@@ -84,7 +81,6 @@ pub fn required_functions_for_kind(kind: PluginKind) -> &'static [&'static str] 
 /// it must implement all required functions.
 pub fn allowed_functions_for_kind(kind: PluginKind) -> &'static [&'static str] {
     match kind {
-        PluginKind::Router => &["route"],
         PluginKind::Dialect => &["shape", "normalize_error"],
         PluginKind::SignerFactory => &["build_signer", "sign", "on_unauthorized"],
         PluginKind::Observability => &["observe"],
@@ -99,13 +95,13 @@ mod tests {
     fn all_seven_functions_listed() {
         assert_eq!(all_wire_functions().len(), 7);
         let funcs = all_wire_functions();
-        assert!(funcs.contains(&"route"));
         assert!(funcs.contains(&"shape"));
         assert!(funcs.contains(&"normalize_error"));
         assert!(funcs.contains(&"build_signer"));
         assert!(funcs.contains(&"sign"));
         assert!(funcs.contains(&"on_unauthorized"));
         assert!(funcs.contains(&"observe"));
+        assert!(funcs.contains(&"filter"));
     }
 
     #[test]
@@ -113,7 +109,6 @@ mod tests {
         // sign and build_signer must fail the request on error
         // (signing cannot be skipped without breaking security)
         // observe must silently skip
-        // route must use default
         // normalize_error and on_unauthorized must pass through
         // These are compile-time constants baked into each WireFunction impl.
         // This test documents the expected mapping.
@@ -121,15 +116,6 @@ mod tests {
         assert_eq!(FallbackPolicy::SilentSkip, FallbackPolicy::SilentSkip);
         assert_eq!(FallbackPolicy::UseDefault, FallbackPolicy::UseDefault);
         assert_eq!(FallbackPolicy::PassThrough, FallbackPolicy::PassThrough);
-    }
-
-    #[test]
-    fn required_subset_allowed_router() {
-        let required = required_functions_for_kind(PluginKind::Router);
-        let allowed = allowed_functions_for_kind(PluginKind::Router);
-        for req in required {
-            assert!(allowed.contains(req), "{} not in allowed", req);
-        }
     }
 
     #[test]
@@ -197,7 +183,6 @@ mod tests {
     #[test]
     fn plugin_kind_serde() {
         let kinds = [
-            PluginKind::Router,
             PluginKind::Dialect,
             PluginKind::SignerFactory,
             PluginKind::Observability,
@@ -211,10 +196,6 @@ mod tests {
 
     #[test]
     fn plugin_kind_snake_case_names() {
-        assert_eq!(
-            serde_json::to_string(&PluginKind::Router).unwrap(),
-            "\"router\""
-        );
         assert_eq!(
             serde_json::to_string(&PluginKind::Dialect).unwrap(),
             "\"dialect\""
@@ -232,7 +213,6 @@ mod tests {
     #[test]
     fn kind_allowed_and_required_nonempty() {
         let kinds = [
-            PluginKind::Router,
             PluginKind::Dialect,
             PluginKind::SignerFactory,
             PluginKind::Observability,

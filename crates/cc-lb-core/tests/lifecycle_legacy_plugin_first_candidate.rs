@@ -39,13 +39,13 @@ async fn legacy_router_without_upstream_id_uses_first_candidate() {
     let (status, _headers, _body) = collect_body(response).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(
+    assert!(
         state
             .router_candidates
             .lock()
             .expect("router candidates lock")
-            .as_slice(),
-        &[vec![first, second]]
+            .is_empty(),
+        "legacy global_router is no longer called in the new pipeline routing flow"
     );
     assert_eq!(
         state
@@ -61,6 +61,6 @@ async fn legacy_router_without_upstream_id_uses_first_candidate() {
             .lock()
             .expect("dispatched URLs lock")
             .as_slice(),
-        &["https://api.anthropic.com/v1/messages".to_owned()]
+        &["http://first.local/v1/messages".to_owned()]
     );
 }

@@ -382,9 +382,8 @@ checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 name = "cache-aware-router"
 version = "0.1.0"
 dependencies = [
- "cc-lb-pdk",
- "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
+ "extism-pdk",
 ]
 
 [[package]]
@@ -758,14 +757,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cc-lb-router-round-robin"
-version = "0.1.0"
-dependencies = [
- "cc-lb-pdk",
- "cc-lb-plugin-wire",
-]
-
-[[package]]
 name = "cc-lb-runtime-extism"
 version = "0.1.0"
 dependencies = [
@@ -982,6 +973,7 @@ dependencies = [
  "base64",
  "bincode",
  "cc-lb-aead",
+ "cc-lb-plugin-api",
  "cc-lb-storage-api",
  "cc-lb-storage-conformance",
  "chacha20poly1305",

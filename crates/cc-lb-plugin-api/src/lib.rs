@@ -24,17 +24,29 @@ pub mod types;
 pub use errors::{
     DialectError, ObservabilityError, RouteError, RuntimeError, SignerError, UpstreamError,
 };
+#[allow(deprecated)]
+pub use traits::RouterPlugin;
 pub use traits::{
-    ApiKeyAwareSignerFactory, ObservabilityHook, PluginRuntime, RouterPlugin, Signer,
-    SignerFactory, UpstreamDialect,
+    ApiKeyAwareSignerFactory, FilterError, FilterOutput, FilterPlugin, ObservabilityHook,
+    PluginRuntime, Signer, SignerFactory, UpstreamDialect,
 };
 pub use types::{
-    CredentialStrategy, ObserveEvent, PluginManifest, Principal, PrincipalKind, PrincipalQuotas,
-    RateLimitKind, RateLimitObservation, RequestContext, RetryDecision, RouteDecision,
+    CredentialStrategy, InternalError, InternalErrorKind, InternalErrorStage, ObserveEvent,
+    PerCandidateReason, PluginManifest, Principal, PrincipalKind, PrincipalQuotas, RateLimitKind,
+    RateLimitObservation, RequestContext, RetryDecision, RouteDecision, RoutingTrace,
     ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability,
-    SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, Upstream, UpstreamCandidate,
-    UpstreamKind, shape_request, sign_request,
+    SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, TerminalStrategy, Upstream,
+    UpstreamCandidate, UpstreamKind, shape_request, sign_request,
 };
+
+/// Stable registry id for the built-in cache-affinity router filter.
+pub const BUILTIN_CACHE_AFFINITY_ID: uuid::Uuid = uuid::Uuid::from_u128(1);
+
+/// Stable registry name for the built-in cache-affinity router filter.
+pub const BUILTIN_CACHE_AFFINITY_NAME: &str = "cache-affinity";
+
+/// Wire version exposed by the built-in cache-affinity router filter.
+pub const BUILTIN_CACHE_AFFINITY_WIRE_VERSION: u8 = 3;
 
 mod private {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
