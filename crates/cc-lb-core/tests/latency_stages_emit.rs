@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 mod common;
 
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -15,8 +17,7 @@ use cc_lb_core::{
     ErrorNormalizer, Lifecycle, LifecycleConfig, UpstreamDispatch,
 };
 use cc_lb_plugin_api::{
-    FilterError, FilterOutput, FilterPlugin, Principal, RequestContext, RouteDecision, RouteError,
-    RouterPlugin, TerminalStrategy, UpstreamCandidate,
+    Principal, RequestContext, RouteDecision, RouteError, RouterPlugin, UpstreamCandidate,
 };
 use cc_lb_storage_api::types::{KeyStatus, RequestEvent, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
@@ -32,6 +33,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::Notify;
 use url::Url;
+use uuid::Uuid;
 
 use common::{TestAuthn, TestState, messages_request};
 
@@ -253,23 +255,6 @@ fn assert_bulkhead_wait_under(value: Option<u64>, max_ms: u64) {
     );
 }
 
-fn assert_stage_durations_match_route_ms(event: &RequestEvent) {
-    let route_us = event.route_ms.expect("route_ms emitted") * 1_000;
-    let trace = event.routing_trace.as_ref().expect("routing_trace emitted");
-    let stage_duration_us: u64 = trace.stages.iter().map(|stage| stage.duration_us).sum();
-    let tolerance_us = (route_us / 10).max(1_000);
-    let diff_us = stage_duration_us.abs_diff(route_us);
-
-    assert!(
-        stage_duration_us > 0,
-        "expected non-zero per-stage durations: {trace:?}"
-    );
-    assert!(
-        diff_us <= tolerance_us,
-        "expected routing trace stage durations ({stage_duration_us}us) to be within 10% of route_ms ({route_us}us), diff={diff_us}us tolerance={tolerance_us}us trace={trace:?}"
-    );
-}
-
 struct SelectingRouter;
 
 impl RouterPlugin for SelectingRouter {
@@ -280,44 +265,6 @@ impl RouterPlugin for SelectingRouter {
         _candidates: &[UpstreamCandidate],
     ) -> Result<RouteDecision, RouteError> {
         panic!("terminal strategy selects upstream before legacy router")
-    }
-}
-
-struct SleepingFilter {
-    name: &'static str,
-    delay: Duration,
-}
-
-impl SleepingFilter {
-    fn new(name: &'static str, delay: Duration) -> Self {
-        Self { name, delay }
-    }
-}
-
-impl FilterPlugin for SleepingFilter {
-    fn filter(
-        &self,
-        _ctx: &RequestContext,
-        _principal: &Principal,
-        candidates: &[UpstreamCandidate],
-    ) -> Result<FilterOutput, FilterError> {
-        std::thread::sleep(self.delay);
-        Ok(FilterOutput {
-            kept_upstream_ids: candidates
-                .iter()
-                .map(|candidate| candidate.upstream_id)
-                .collect(),
-            reason: format!("{} kept all candidates", self.name),
-            per_candidate_reasons: Vec::new(),
-        })
-    }
-
-    fn plugin_id(&self) -> Uuid {
-        Uuid::nil()
-    }
-
-    fn plugin_name(&self) -> &str {
-        self.name
     }
 }
 
