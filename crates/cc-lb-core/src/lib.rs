@@ -7,9 +7,9 @@ pub mod anthropic_metadata;
 pub mod api_keys;
 pub mod audit_payload;
 #[cfg(not(loom))]
-pub mod builtin_filters;
-#[cfg(not(loom))]
 pub mod audit_writer;
+#[cfg(not(loom))]
+pub mod builtin_filters;
 #[cfg(not(loom))]
 mod bulkhead;
 #[cfg(not(loom))]
