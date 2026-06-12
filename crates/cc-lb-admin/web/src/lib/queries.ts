@@ -77,6 +77,14 @@ interface PrincipalListResp {
   principals: Principal[];
 }
 
+export type PluginMetadata = {
+  purpose: string;
+  keeps: string;
+  drops: string;
+  empty_behavior: string;
+  examples: string[];
+};
+
 export interface PluginEntry {
   id: string;
   sha256_hex: string;
@@ -87,6 +95,10 @@ export interface PluginEntry {
   refcount: number;
   revision: number;
   uploaded_at_unix_secs: number;
+  is_builtin?: boolean;
+  kind?: string;
+  wire_version?: number;
+  metadata: PluginMetadata | null;
 }
 interface PluginListResp {
   entries: PluginEntry[];
@@ -288,6 +300,16 @@ export function usePluginChain(principalId: string | null, slot?: ChainSlot) {
         `/admin/v1/principals/${principalId}/plugin-chain${q}`,
       );
     },
+    enabled: !!principalId,
+  });
+}
+export function useRouterTerminalStrategy(principalId: string | null) {
+  return useQuery({
+    queryKey: ['router-terminal', principalId ?? ''],
+    queryFn: () =>
+      getJson<{ strategy: string; revision: number }>(
+        `/admin/v1/principals/${principalId}/router-terminal`,
+      ),
     enabled: !!principalId,
   });
 }
@@ -829,6 +851,27 @@ export function useDeleteChainEntry() {
     mutationFn: ({ id, revision }: { id: string; revision: number }) =>
       deleteJson(`/admin/v1/plugin-chain-entries/${id}`, { ifMatch: revision }),
     onSuccess: () => qc.invalidateQueries({ queryKey: ['plugin-chain'] }),
+  });
+}
+export function useUpdateRouterTerminalStrategy() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      strategy,
+      revision,
+    }: {
+      id: string;
+      strategy: string;
+      revision: number;
+    }) =>
+      putJson<{ strategy: string; revision: number }, { strategy: string }>(
+        `/admin/v1/principals/${id}/router-terminal`,
+        { strategy },
+        { ifMatch: revision },
+      ),
+    onSuccess: (_d, vars) =>
+      qc.invalidateQueries({ queryKey: ['router-terminal', vars.id] }),
   });
 }
 export function useKillswitch() {

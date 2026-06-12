@@ -196,7 +196,7 @@ mod tests {
             <SignFn as WireFunction>::NAME,
             r#"{"_v":1,"url":null,"method":null,"headers":null,"body_base64":null}"#,
         );
-        let metadata = metadata_with_function("route");
+        let metadata = metadata_with_function("shape");
 
         let outcome = dispatch_wire_call::<SignFn>(
             &mut plugin,
@@ -241,7 +241,7 @@ mod tests {
             <SignFn as WireFunction>::NAME,
             r#"{"_v":1,"url":null,"method":null,"headers":null,"body_base64":null}"#,
         );
-        let metadata = metadata_with_function("route");
+        let metadata = metadata_with_function("shape");
 
         let outcome = metrics::with_local_recorder(&metrics, || {
             tracing::subscriber::with_default(logs, || {

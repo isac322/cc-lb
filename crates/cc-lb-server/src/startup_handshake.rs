@@ -8,8 +8,8 @@ use cc_lb_plugin_wire::limits::{
 };
 use cc_lb_runtime_extism::registry::{PluginRegistry, RegistryError};
 use cc_lb_storage_api::{
-    PluginRegistryRecord, PluginRegistryRepo, PluginRegistryStatus, PluginRegistryStore, RepoError,
-    WasmRegistryEntry,
+    BUILTIN_CACHE_AFFINITY_ID, PluginRegistryRecord, PluginRegistryRepo, PluginRegistryStatus,
+    PluginRegistryStore, RepoError, WasmRegistryEntry,
 };
 use thiserror::Error;
 use tokio::sync::{Semaphore, watch};
@@ -361,6 +361,9 @@ pub async fn bridge_legacy_wasm_registry(
         let last_id = page.last().map(|entry| entry.id);
 
         for entry in page {
+            if entry.is_builtin || entry.id == BUILTIN_CACHE_AFFINITY_ID {
+                continue;
+            }
             report.scanned += 1;
             bridge_single_entry(plugin_registry, legacy_store, &entry, &mut report).await;
         }

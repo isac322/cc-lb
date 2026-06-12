@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 //! E2E hit-rate comparison: cache-aware vs round-robin router plugins.
 //!
 //! Run with:

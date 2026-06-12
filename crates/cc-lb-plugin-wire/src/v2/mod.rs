@@ -5,7 +5,6 @@ pub mod common;
 pub mod normalize_error;
 pub mod observe;
 pub mod on_unauthorized;
-pub mod route;
 pub mod shape;
 pub mod sign;
 

@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
@@ -23,7 +25,7 @@ use url::Url;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn none_mode_router_parity() {
+async fn none_mode_terminal_selects_bound_principal_upstream() {
     let first_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap();
     let second_id = Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap();
     let state = Arc::new(ParityState::default());
@@ -69,15 +71,15 @@ async fn none_mode_router_parity() {
         .expect("lifecycle responds");
 
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(state.principals.lock().unwrap().as_slice(), &["team-X"]);
+    assert!(state.principals.lock().unwrap().is_empty());
+    assert!(state.candidates.lock().unwrap().is_empty());
     assert_eq!(
-        state.candidates.lock().unwrap().as_slice(),
-        &[vec![first_id, second_id]]
+        state.signer_choices.lock().unwrap().as_slice(),
+        &["first".to_owned()]
     );
-    assert_eq!(state.signer_choices.lock().unwrap().as_slice(), &["first"]);
     assert_eq!(
         state.dispatched_urls.lock().unwrap().as_slice(),
-        &["http://router-choice-is-advisory.local/v1/messages"]
+        &["http://first.local/v1/messages".to_owned()]
     );
 }
 
@@ -228,6 +230,7 @@ fn principal(name: &str, allowed_upstreams: Vec<Uuid>) -> PrincipalRecord {
         revision: 1,
         created_at_unix_secs: 0,
         updated_at_unix_secs: 0,
+        router_terminal_strategy: Default::default(),
     }
 }
 

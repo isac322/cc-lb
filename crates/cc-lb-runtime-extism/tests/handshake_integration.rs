@@ -12,12 +12,12 @@ fn pdk_macro_shaped_plugin_returns_handshake_accept() {
     let offer = offer_with_caps(&["streaming"]);
     let accept = accept(
         HANDSHAKE_SCHEMA_VERSION_V1,
-        &["route"],
-        &[("route", &[1])],
-        &[("route", 1)],
+        &["shape"],
+        &[("shape", &[1])],
+        &[("shape", 1)],
         &["streaming"],
     );
-    let wasm = handshake_module(&accept_json(&accept), &["route", "cc_lb_self_check"], false);
+    let wasm = handshake_module(&accept_json(&accept), &["shape", "cc_lb_self_check"], false);
 
     let actual = execute_handshake(&wasm, &offer).expect("handshake succeeds");
 
@@ -46,15 +46,15 @@ fn downgrade_attack_rejected() {
     let mut offer = offer_with_caps(&[]);
     offer
         .function_versions
-        .insert("route".to_owned(), vec![1, 2]);
+        .insert("shape".to_owned(), vec![1, 2]);
     let accept = accept(
         HANDSHAKE_SCHEMA_VERSION_V1,
-        &["route"],
-        &[("route", &[1, 2])],
-        &[("route", 1)],
+        &["shape"],
+        &[("shape", &[1, 2])],
+        &[("shape", 1)],
         &[],
     );
-    let wasm = handshake_module(&accept_json(&accept), &["route"], false);
+    let wasm = handshake_module(&accept_json(&accept), &["shape"], false);
 
     let err = execute_handshake(&wasm, &offer).expect_err("downgrade is rejected");
 
@@ -64,7 +64,7 @@ fn downgrade_attack_rejected() {
             chosen,
             max_intersection,
         }) => {
-            assert_eq!(function, "route");
+            assert_eq!(function, "shape");
             assert_eq!(chosen, 1);
             assert_eq!(max_intersection, 2);
         }
@@ -99,12 +99,12 @@ fn unsupported_chosen_version_rejected() {
     let offer = offer_with_caps(&[]);
     let accept = accept(
         HANDSHAKE_SCHEMA_VERSION_V1,
-        &["route"],
-        &[("route", &[2])],
-        &[("route", 2)],
+        &["shape"],
+        &[("shape", &[2])],
+        &[("shape", 2)],
         &[],
     );
-    let wasm = handshake_module(&accept_json(&accept), &["route"], false);
+    let wasm = handshake_module(&accept_json(&accept), &["shape"], false);
 
     let err = execute_handshake(&wasm, &offer).expect_err("unsupported chosen version rejected");
 
@@ -113,7 +113,7 @@ fn unsupported_chosen_version_rejected() {
             function,
             version,
         }) => {
-            assert_eq!(function, "route");
+            assert_eq!(function, "shape");
             assert_eq!(version, 2);
         }
         other => panic!("expected ChosenVersionNotOffered, got {other:?}"),
@@ -125,9 +125,9 @@ fn declared_function_missing_export_rejected() {
     let offer = offer_with_caps(&[]);
     let accept = accept(
         HANDSHAKE_SCHEMA_VERSION_V1,
-        &["route"],
-        &[("route", &[1])],
-        &[("route", 1)],
+        &["shape"],
+        &[("shape", &[1])],
+        &[("shape", 1)],
         &[],
     );
     let wasm = handshake_module(&accept_json(&accept), &[], false);
@@ -136,7 +136,7 @@ fn declared_function_missing_export_rejected() {
 
     match err {
         HandshakeExecutionError::DeclaredFunctionMissing { function } => {
-            assert_eq!(function, "route");
+            assert_eq!(function, "shape");
         }
         other => panic!("expected DeclaredFunctionMissing, got {other:?}"),
     }
@@ -147,18 +147,18 @@ fn undeclared_export_rejected() {
     let offer = offer_with_caps(&[]);
     let accept = accept(
         HANDSHAKE_SCHEMA_VERSION_V1,
-        &["route"],
-        &[("route", &[1])],
-        &[("route", 1)],
+        &["shape"],
+        &[("shape", &[1])],
+        &[("shape", 1)],
         &[],
     );
-    let wasm = handshake_module(&accept_json(&accept), &["route", "shape"], false);
+    let wasm = handshake_module(&accept_json(&accept), &["shape", "observe"], false);
 
     let err = execute_handshake(&wasm, &offer).expect_err("undeclared export rejected");
 
     match err {
         HandshakeExecutionError::UndeclaredExport { function } => {
-            assert_eq!(function, "shape");
+            assert_eq!(function, "observe");
         }
         other => panic!("expected UndeclaredExport, got {other:?}"),
     }

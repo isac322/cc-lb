@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Write};
@@ -10,7 +12,7 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, PromptCacheShadowConfig};
 use cc_lb_core::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
-    RouterPluginCache,
+    RouterPipelineCache,
 };
 use cc_lb_core::clock::SystemClock;
 use cc_lb_core::{
@@ -20,7 +22,7 @@ use cc_lb_core::{
 use cc_lb_dialect_anthropic::AnthropicDirectDialect;
 use cc_lb_plugin_api::{
     PluginManifest, Principal, RateLimitObservation, RequestContext, RouteDecision, RouteError,
-    RouterPlugin, Signer, SignerError, SignerFactory, Upstream, UpstreamCandidate, UpstreamDialect,
+    RouterPlugin, Signer, SignerError, SignerFactory, Upstream, UpstreamCandidate,
 };
 use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -32,6 +34,7 @@ use cc_lb_storage_api::{
 };
 use parking_lot::RwLock;
 use thiserror::Error;
+use url::Url;
 use uuid::Uuid;
 
 use cc_lb_core::lifecycle::PromptCacheObservationSinkLike;
@@ -42,6 +45,8 @@ use crate::prompt_cache_observation_sink::{
 };
 use crate::reconcile::collect_revision_hash;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
+
+const MAX_ROUTER_CHAIN_DEPTH: usize = 16;
 
 pub struct Stores {
     pub upstreams: Arc<dyn UpstreamStore>,
@@ -247,9 +252,9 @@ pub async fn build_dynamic_view(
         build_principal_chains(stores, runtime, data_dir, &principals, &mut staged).await?;
     let principal_view = Arc::new(PrincipalView::from_db(&principals, principal_chains));
     let now = unix_now_secs();
-    let (routes, statuses) = apply_upstreams(stores, &upstreams, oauth_anthropic, now).await?;
+    let statuses = apply_upstreams(stores, &upstreams, oauth_anthropic, now).await?;
     let revision_hash = collect_revision_hash(stores).await?;
-    let global_router = Arc::new(DbRouter::new(routes));
+    let global_router = Arc::new(FirstCandidateRouter);
     let signer_factory = Arc::new(DbCompositeSignerFactory::new(
         upstreams.clone(),
         stores.upstreams.clone(),
@@ -385,49 +390,16 @@ async fn build_principal_chains(
             .list_chain_for_principal(principal.id, PluginSlot::Shape)
             .await?;
 
-        let router = if let Some(entry) = router_entries.into_iter().min_by_key(|entry| entry.order)
-        {
-            let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
-                io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
-            })?;
-            let registry_entry = stores
-                .plugin_registry
-                .get_registry_entry_by_sha(registry_entry.sha256)
-                .await?
-                .ok_or_else(|| {
-                    io::Error::new(io::ErrorKind::NotFound, "plugin registry sha not found")
-                })?;
-            let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
-            let manifest = PluginManifest {
-                name: registry_entry.name,
-                artifact: wasm_path.to_string_lossy().into_owned(),
-                wire_version: entry.wire_version,
-                config: entry.config,
-                metadata: bridged_metadata(
-                    stores.plugin_registry_repo.as_ref(),
-                    registry_entry.sha256,
-                )
-                .await,
-            };
-            match runtime.instantiate_router_for(&principal.name, &manifest.name, &manifest) {
-                Ok((handle, slot)) => {
-                    staged.push(slot);
-                    RouterPluginCache::Explicit(handle)
-                }
-                Err(error) => {
-                    tracing::error!(
-                        principal = %principal.name,
-                        plugin = %manifest.name,
-                        chain_entry_id = %entry.id,
-                        %error,
-                        "skipping router chain entry: instantiation failed; principal falls back to global router",
-                    );
-                    RouterPluginCache::Inherit
-                }
-            }
-        } else {
-            RouterPluginCache::Inherit
-        };
+        let router = build_router_pipeline(
+            stores,
+            runtime,
+            data_dir,
+            principal,
+            router_entries,
+            &registry,
+            staged,
+        )
+        .await?;
 
         let mut hooks = Vec::new();
         let mut hook_entries = hook_entries;
@@ -564,13 +536,115 @@ async fn materialize_wasm(
     ensure_wasm_cached(data_dir, sha256, || Ok(bytes)).map_err(RebindError::Io)
 }
 
+async fn manifest_for_chain_entry(
+    stores: &Stores,
+    data_dir: &Path,
+    registry: &HashMap<Uuid, cc_lb_storage_api::WasmRegistryEntry>,
+    entry: &cc_lb_storage_api::PluginChainEntry,
+) -> Result<PluginManifest, RebindError> {
+    let registry_entry = registry.get(&entry.wasm_registry_id).ok_or_else(|| {
+        io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found")
+    })?;
+    let registry_entry = stores
+        .plugin_registry
+        .get_registry_entry_by_sha(registry_entry.sha256)
+        .await?
+        .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "plugin registry sha not found"))?;
+    let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
+    Ok(PluginManifest {
+        name: registry_entry.name,
+        artifact: wasm_path.to_string_lossy().into_owned(),
+        wire_version: entry.wire_version,
+        config: entry.config.clone(),
+        metadata: bridged_metadata(stores.plugin_registry_repo.as_ref(), registry_entry.sha256)
+            .await,
+    })
+}
+
+async fn build_router_pipeline(
+    stores: &Stores,
+    runtime: &ExtismRuntime,
+    data_dir: &Path,
+    principal: &PrincipalRecord,
+    mut router_entries: Vec<cc_lb_storage_api::PluginChainEntry>,
+    registry: &HashMap<Uuid, cc_lb_storage_api::WasmRegistryEntry>,
+    staged: &mut Vec<StagedSlot>,
+) -> Result<Option<Arc<RouterPipelineCache>>, RebindError> {
+    if router_entries.is_empty() {
+        return Ok(None);
+    }
+    if router_entries.len() > MAX_ROUTER_CHAIN_DEPTH {
+        return Ok(Some(Arc::new(RouterPipelineCache {
+            user_filters: Vec::new(),
+            terminal: principal.router_terminal_strategy.clone(),
+            instantiation_error: Some(Arc::<str>::from(format!(
+                "router chain depth {} exceeds maximum {}",
+                router_entries.len(),
+                MAX_ROUTER_CHAIN_DEPTH
+            ))),
+        })));
+    }
+
+    router_entries.sort_by_key(|entry| entry.order);
+    let mut filters = Vec::with_capacity(router_entries.len());
+    let mut router_staged = Vec::with_capacity(router_entries.len());
+    for entry in router_entries {
+        let manifest = match manifest_for_chain_entry(stores, data_dir, registry, &entry).await {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                tracing::error!(
+                    principal = %principal.name,
+                    chain_entry_id = %entry.id,
+                    %error,
+                    "router chain entry failed to materialize; principal fails closed",
+                );
+                return Ok(Some(Arc::new(RouterPipelineCache {
+                    user_filters: Vec::new(),
+                    terminal: principal.router_terminal_strategy.clone(),
+                    instantiation_error: Some(Arc::<str>::from(format!(
+                        "router pipeline instantiation failed: {error}"
+                    ))),
+                })));
+            }
+        };
+        match runtime.instantiate_filter_for(&principal.name, entry.id, &manifest.name, &manifest) {
+            Ok((handle, slot)) => {
+                filters.push(handle);
+                router_staged.push(slot);
+            }
+            Err(error) => {
+                tracing::error!(
+                    principal = %principal.name,
+                    plugin = %manifest.name,
+                    chain_entry_id = %entry.id,
+                    %error,
+                    "router filter chain entry instantiation failed; principal fails closed",
+                );
+                return Ok(Some(Arc::new(RouterPipelineCache {
+                    user_filters: Vec::new(),
+                    terminal: principal.router_terminal_strategy.clone(),
+                    instantiation_error: Some(Arc::<str>::from(format!(
+                        "router pipeline instantiation failed: {error}"
+                    ))),
+                })));
+            }
+        }
+    }
+
+    staged.extend(router_staged);
+    Ok(Some(Arc::new(RouterPipelineCache {
+        user_filters: filters,
+        terminal: principal.router_terminal_strategy.clone(),
+        instantiation_error: None,
+    })))
+}
+
 async fn apply_upstreams(
     stores: &Stores,
     upstreams: &[UpstreamRecord],
     _oauth_anthropic: &AnthropicOAuthConfig,
     now: u64,
-) -> StorageResult<(Vec<DbRoute>, HashMap<String, UpstreamStatusEntry>)> {
-    let mut routes = Vec::new();
+) -> StorageResult<HashMap<String, UpstreamStatusEntry>> {
     let mut statuses = HashMap::new();
     for upstream in upstreams {
         if !upstream.enabled {
@@ -589,30 +663,26 @@ async fn apply_upstreams(
             continue;
         }
 
-        let route = match validate_upstream(upstream) {
-            Ok(route) => route,
-            Err(message) => {
-                stores
-                    .upstreams
-                    .set_last_apply_error(upstream.id, Some(message.clone()))
-                    .await?;
-                statuses.insert(
-                    upstream.name.clone(),
-                    UpstreamStatusEntry {
-                        status: ApplyStatus::Error,
-                        last_apply_error: Some(message),
-                        last_apply_at_unix_secs: now,
-                    },
-                );
-                continue;
-            }
-        };
+        if let Err(message) = validate_upstream(upstream) {
+            stores
+                .upstreams
+                .set_last_apply_error(upstream.id, Some(message.clone()))
+                .await?;
+            statuses.insert(
+                upstream.name.clone(),
+                UpstreamStatusEntry {
+                    status: ApplyStatus::Error,
+                    last_apply_error: Some(message),
+                    last_apply_at_unix_secs: now,
+                },
+            );
+            continue;
+        }
 
         stores
             .upstreams
             .set_last_apply_error(upstream.id, None)
             .await?;
-        routes.push(route);
         statuses.insert(
             upstream.name.clone(),
             UpstreamStatusEntry {
@@ -622,18 +692,10 @@ async fn apply_upstreams(
             },
         );
     }
-    Ok((routes, statuses))
+    Ok(statuses)
 }
 
-fn validate_upstream(upstream: &UpstreamRecord) -> Result<DbRoute, String> {
-    let upstream_target = match upstream.kind {
-        UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth => Upstream::AnthropicDirect,
-    };
-    let dialect: Arc<dyn UpstreamDialect> = match upstream.kind {
-        UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth => Arc::new(
-            AnthropicDirectDialect::with_base_url(upstream.base_url.clone()),
-        ),
-    };
+fn validate_upstream(upstream: &UpstreamRecord) -> Result<(), String> {
     match upstream.kind {
         UpstreamKind::AnthropicApiKey if upstream.api_key_ciphertext.is_none() => {
             return Err("anthropic api-key upstream missing api_key_ciphertext".to_owned());
@@ -650,33 +712,12 @@ fn validate_upstream(upstream: &UpstreamRecord) -> Result<DbRoute, String> {
         }
         _ => {}
     }
-    Ok(DbRoute {
-        id: upstream.id,
-        name: upstream.name.clone(),
-        upstream: upstream_target,
-        dialect,
-    })
+    Ok(())
 }
 
-#[derive(Clone)]
-struct DbRoute {
-    id: Uuid,
-    name: String,
-    upstream: Upstream,
-    dialect: Arc<dyn UpstreamDialect>,
-}
+struct FirstCandidateRouter;
 
-struct DbRouter {
-    routes: Vec<DbRoute>,
-}
-
-impl DbRouter {
-    fn new(routes: Vec<DbRoute>) -> Self {
-        Self { routes }
-    }
-}
-
-impl RouterPlugin for DbRouter {
+impl RouterPlugin for FirstCandidateRouter {
     fn route(
         &self,
         _ctx: &RequestContext,
@@ -686,25 +727,23 @@ impl RouterPlugin for DbRouter {
         let candidate = candidates.first().ok_or_else(|| RouteError::NoRoute {
             reason: "no eligible upstream candidates for principal".to_owned(),
         })?;
-        let route = self
-            .routes
-            .iter()
-            .find(|route| route.id == candidate.upstream_id)
-            .ok_or_else(|| RouteError::NoRoute {
-                reason: format!(
-                    "candidate upstream {} is not present in active routes",
-                    candidate.upstream_id
-                ),
+        let base_url = candidate
+            .base_url
+            .as_deref()
+            .map(Url::parse)
+            .transpose()
+            .map_err(|source| RouteError::NoRoute {
+                reason: format!("candidate upstream has invalid base_url: {source}"),
             })?;
         tracing::debug!(
-            upstream = route.name.as_str(),
-            upstream_id = %route.id,
-            "dynamic route selected",
+            upstream = candidate.name.as_str(),
+            upstream_id = %candidate.upstream_id,
+            "first candidate route selected",
         );
         Ok(RouteDecision {
-            upstream_id: Some(route.id),
-            upstream: route.upstream.clone(),
-            dialect: route.dialect.clone(),
+            upstream_id: Some(candidate.upstream_id),
+            upstream: Upstream::AnthropicDirect,
+            dialect: Arc::new(AnthropicDirectDialect::with_base_url(base_url)),
         })
     }
 }

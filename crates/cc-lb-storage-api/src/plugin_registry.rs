@@ -5,6 +5,13 @@ use uuid::Uuid;
 
 use crate::StorageResult;
 
+pub use cc_lb_plugin_api::{
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
+};
+
+pub const BUILTIN_PLUGIN_KIND_FILTER: &str = "filter";
+pub const BUILTIN_CACHE_AFFINITY_SHA256: [u8; 32] = [0; 32];
+
 pub const MAX_WASM_BLOB_BYTES: u64 = 32 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -30,6 +37,16 @@ pub struct WasmRegistryEntryInput {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PluginMetadata {
+    pub purpose: String,
+    pub keeps: String,
+    pub drops: String,
+    pub empty_behavior: String,
+    #[serde(default)]
+    pub examples: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WasmRegistryEntry {
     pub id: Uuid,
     pub sha256: [u8; 32],
@@ -40,6 +57,60 @@ pub struct WasmRegistryEntry {
     pub uploaded_by_admin_id: Uuid,
     pub refcount: i64,
     pub revision: u64,
+    #[serde(default = "default_plugin_kind")]
+    pub kind: String,
+    #[serde(default = "default_wire_version")]
+    pub wire_version: u8,
+    #[serde(default)]
+    pub is_builtin: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<PluginMetadata>,
+}
+
+impl WasmRegistryEntry {
+    pub fn builtin_cache_affinity(refcount: i64) -> Self {
+        Self {
+            id: BUILTIN_CACHE_AFFINITY_ID,
+            sha256: BUILTIN_CACHE_AFFINITY_SHA256,
+            name: BUILTIN_CACHE_AFFINITY_NAME.to_owned(),
+            original_filename: "builtin://cache-affinity".to_owned(),
+            label: Some("Built-in cache affinity filter".to_owned()),
+            uploaded_at_unix_secs: 0,
+            uploaded_by_admin_id: Uuid::nil(),
+            refcount,
+            revision: 0,
+            kind: BUILTIN_PLUGIN_KIND_FILTER.to_owned(),
+            wire_version: BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
+            is_builtin: true,
+            metadata: Some(builtin_metadata_for_cache_affinity()),
+        }
+    }
+
+    pub fn is_cache_affinity_builtin(&self) -> bool {
+        self.id == BUILTIN_CACHE_AFFINITY_ID
+    }
+}
+
+fn default_plugin_kind() -> String {
+    BUILTIN_PLUGIN_KIND_FILTER.to_owned()
+}
+
+fn default_wire_version() -> u8 {
+    1
+}
+
+fn builtin_metadata_for_cache_affinity() -> PluginMetadata {
+    PluginMetadata {
+        purpose: "Prefer upstreams whose prompt cache is already warm for this request.".to_owned(),
+        keeps: "Candidates with a positive prefill_cache_score (the upstream has already cached the prefix).".to_owned(),
+        drops: "Candidates with zero cache score — only when at least one candidate is a cache hit; otherwise nothing is dropped.".to_owned(),
+        empty_behavior: "Never drops everything. Falls back to passing all candidates through when no cache hit exists.".to_owned(),
+        examples: vec![
+            "5 candidates, 2 with positive cache score → keep the 2 hits.".to_owned(),
+            "5 candidates, all with zero cache score → pass all 5 through.".to_owned(),
+            "Exactly 1 candidate → no change.".to_owned(),
+        ],
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]

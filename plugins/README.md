@@ -11,28 +11,28 @@ Plugins are grouped by category. Each plugin is its own crate excluded from the 
 ```
 plugins/
 ├── router/
-│   └── round-robin/        # reference router implementation
+│   └── cache-aware/        # cache-aware router implementation
 ├── dialect/
 ├── signer/
 ├── observability/
 └── README.md (this file)
 ```
 
-Plugin crate names follow `cc-lb-<category>-<name>` (for example `cc-lb-router-round-robin`).
+Plugin crate names follow `cc-lb-<category>-<name>` (for example `cc-lb-router-cache-aware`).
 
 ## Quick build + register
 
 ```bash
 # Build
 rustup target add wasm32-unknown-unknown
-cargo build -p cc-lb-router-round-robin --target wasm32-unknown-unknown --release
+cargo build -p cc-lb-router-cache-aware --target wasm32-unknown-unknown --release
 
 # Register against a running cc-lb
 curl -X POST http://127.0.0.1:9091/admin/plugins \
   -H "Authorization: Bearer $CC_LB_ADMIN_TOKEN" \
-  -F bytes=@target/wasm32-unknown-unknown/release/cc_lb_router_round_robin.wasm \
-  -F name=round-robin \
-  -F original_filename=cc_lb_router_round_robin.wasm
+  -F bytes=@target/wasm32-unknown-unknown/release/cc_lb_router_cache_aware.wasm \
+  -F name=cache-aware \
+  -F original_filename=cc_lb_router_cache_aware.wasm
 ```
 
 The host validates identity, handshake, and self-check before the record is persisted. To then route traffic through the plugin, attach it to a principal's chain via the admin API documented in [docs/runtime-management.md](../docs/runtime-management.md).
