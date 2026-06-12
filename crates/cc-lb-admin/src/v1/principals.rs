@@ -522,6 +522,7 @@ fn update_fields_changed(body: &UpdatePrincipalBody) -> Vec<&'static str> {
     fields
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_router_terminal_strategy(
     value: &str,
 ) -> Result<TerminalStrategy, axum::response::Response> {

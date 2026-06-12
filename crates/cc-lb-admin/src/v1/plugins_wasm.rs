@@ -385,6 +385,7 @@ fn validate_extism(bytes: &[u8]) -> Result<(), Response> {
     reject_removed_router_wire(&plugin)
 }
 
+#[allow(clippy::result_large_err)]
 fn reject_removed_router_wire(plugin: &Plugin) -> Result<(), Response> {
     if plugin.function_exists("route") {
         return Err(json_error(
