@@ -53,8 +53,8 @@ const principals: any[] = [
     allowed_models: ["claude-opus-4-5-20251104", "claude-sonnet-4-5-20251002", "claude-haiku-4-5-20251015"],
     allowed_upstreams: ["us-anthropic-primary", "us-oauth-provider"],
     default_limits: [
-      { model: "claude-opus-4-5-20251104", rpm: 200, tpm: 100000 },
-      { model: "claude-sonnet-4-5-20251002", rpm: 1000, tpm: 400000 },
+      { kind: "requests", window_secs: 60, cap_micros: 1000 },
+      { kind: "total_tokens", window_secs: 60, cap_micros: 400000 },
     ],
   },
   {
@@ -65,7 +65,10 @@ const principals: any[] = [
     revision: 9,
     allowed_models: ["claude-sonnet-4-5-20251002", "claude-haiku-4-5-20251015"],
     allowed_upstreams: ["us-anthropic-primary"],
-    default_limits: [{ model: "claude-haiku-4-5-20251015", rpm: 3000, tpm: 1000000 }],
+    default_limits: [
+      { kind: "requests", window_secs: 60, cap_micros: 3000 },
+      { kind: "total_tokens", window_secs: 60, cap_micros: 1000000 },
+    ],
   },
   {
     id: "pr-ci",
@@ -75,7 +78,11 @@ const principals: any[] = [
     revision: 12,
     allowed_models: ["claude-haiku-4-5-20251015"],
     allowed_upstreams: ["us-anthropic-primary"],
-    default_limits: [{ model: "claude-haiku-4-5-20251015", rpm: 600, tpm: 200000 }],
+    default_limits: [
+      { kind: "requests", window_secs: 60, cap_micros: 600 },
+      { kind: "total_tokens", window_secs: 60, cap_micros: 200000 },
+      { kind: "cost_usd", window_secs: 86400, cap_micros: 50_000_000 },
+    ],
   },
   {
     id: "pr-prod-app",
@@ -86,8 +93,9 @@ const principals: any[] = [
     allowed_models: ["claude-sonnet-4-5-20251002", "claude-opus-4-5-20251104"],
     allowed_upstreams: ["us-oauth-provider"],
     default_limits: [
-      { model: "claude-sonnet-4-5-20251002", rpm: 5000, tpm: 2000000 },
-      { model: "claude-opus-4-5-20251104", rpm: 1000, tpm: 400000 },
+      { kind: "requests", window_secs: 60, cap_micros: 5000 },
+      { kind: "total_tokens", window_secs: 60, cap_micros: 2000000 },
+      { kind: "concurrent", window_secs: 1, cap_micros: 32 },
     ],
   },
   {
@@ -614,7 +622,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
       const p = principals.find((x) => x.id === id);
       if (!p) return notFound("unknown_principal");
       if (m === "GET") return ok(withRouterChain(p), { etag: `"${p.revision}"` });
-      if (m === "PUT") {
+      if (m === "PUT" || m === "PATCH") {
         const body = await readJson<any>(req);
         Object.assign(p, body);
         p.revision++;
@@ -657,10 +665,18 @@ async function handle(req: Request, url: URL): Promise<Response> {
         principal_id: p.id, observed: true,
         identities: [
           { identity_kind: "principal", identity_value: p.id, account_observed: true,
-            windows: [
-              { window: "rpm", snapshots: p.default_limits.map((l: any) => ({ kind: "model", model: l.model, limit: l.rpm, remaining: Math.floor(l.rpm * 0.62), reset: NOW() + 45, observed_at_unix_secs: NOW(), stored_at_unix_secs: NOW() - 5, observed: true })) },
-              { window: "tpm", snapshots: p.default_limits.map((l: any) => ({ kind: "model", model: l.model, limit: l.tpm, remaining: Math.floor(l.tpm * 0.78), reset: NOW() + 45, observed_at_unix_secs: NOW(), stored_at_unix_secs: NOW() - 5, observed: true })) },
-            ],
+            windows: p.default_limits.map((l: any) => ({
+              window: `${l.window_secs}s`,
+              snapshots: [{
+                kind: l.kind,
+                limit: l.cap_micros,
+                remaining: Math.floor(l.cap_micros * 0.62),
+                reset: NOW() + 45,
+                observed_at_unix_secs: NOW(),
+                stored_at_unix_secs: NOW() - 5,
+                observed: true,
+              }],
+            })),
           },
         ],
       });

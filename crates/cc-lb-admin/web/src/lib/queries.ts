@@ -58,10 +58,18 @@ interface UpstreamListResp {
   upstreams: Upstream[];
 }
 
-interface PrincipalDefaultLimit {
-  model: string;
-  rpm: number;
-  tpm: number;
+export type LimitKind =
+  | 'requests'
+  | 'input_tokens'
+  | 'output_tokens'
+  | 'total_tokens'
+  | 'cost_usd'
+  | 'concurrent';
+
+export interface PrincipalDefaultLimit {
+  kind: LimitKind;
+  window_secs: number;
+  cap_micros: number;
 }
 export interface Principal {
   id: string;
@@ -721,6 +729,29 @@ export function useSetAllowedModels() {
       putJson<Principal, { models: string[]; expected_revision: number }>(
         `/admin/v1/principals/${id}/allowed_models`,
         { models, expected_revision },
+      ),
+    onSuccess: (_d, vars) => {
+      qc.invalidateQueries({ queryKey: qk.principal(vars.id) });
+      qc.invalidateQueries({ queryKey: qk.principals });
+    },
+  });
+}
+export function useUpdatePrincipalDefaultLimits() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      id,
+      default_limits,
+      expected_revision,
+    }: {
+      id: string;
+      default_limits: PrincipalDefaultLimit[];
+      expected_revision: number;
+    }) =>
+      patchJson<Principal, { default_limits: PrincipalDefaultLimit[] }>(
+        `/admin/v1/principals/${id}`,
+        { default_limits },
+        { ifMatch: expected_revision },
       ),
     onSuccess: (_d, vars) => {
       qc.invalidateQueries({ queryKey: qk.principal(vars.id) });
