@@ -101,6 +101,7 @@ fn stage_decision_serde_roundtrip() {
         stage_name: "routing".to_owned(),
         upstream_id: Some(upstream_id),
         reason: Some("selected_by_policy".to_owned()),
+        duration_us: 42,
     };
 
     let json = serde_json::to_string(&decision).unwrap();
@@ -116,6 +117,7 @@ fn stage_decision_with_none_fields() {
         stage_name: "authn".to_owned(),
         upstream_id: None,
         reason: None,
+        duration_us: 0,
     };
 
     let json = serde_json::to_string(&decision).unwrap();
@@ -157,11 +159,13 @@ fn routing_trace_serde_roundtrip() {
                 stage_name: "authn".to_owned(),
                 upstream_id: None,
                 reason: None,
+                duration_us: 0,
             },
             StageDecision {
                 stage_name: "router".to_owned(),
                 upstream_id: Some(upstream_id_1),
                 reason: Some("healthy".to_owned()),
+                duration_us: 7,
             },
         ],
         terminal_decision: Some(TerminalDecision {
@@ -229,10 +233,6 @@ fn internal_error_default() {
 
 #[test]
 fn cap_constants_defined() {
-    assert!(MAX_ROUTING_TRACE_STAGES > 0);
-    assert!(MAX_STAGE_NAME_LEN > 0);
-    assert!(MAX_ERROR_MESSAGE_LEN > 0);
-
     assert_eq!(MAX_ROUTING_TRACE_STAGES, 100);
     assert_eq!(MAX_STAGE_NAME_LEN, 256);
     assert_eq!(MAX_ERROR_MESSAGE_LEN, 1024);
@@ -243,11 +243,12 @@ fn complex_routing_trace_with_multiple_stages() {
     let upstream_ids: Vec<_> = (0..3).map(|_| Uuid::new_v4()).collect();
 
     let mut stages = Vec::new();
-    for i in 0..3 {
+    for (i, upstream_id) in upstream_ids.iter().copied().enumerate().take(3) {
         stages.push(StageDecision {
             stage_name: format!("stage_{}", i),
-            upstream_id: Some(upstream_ids[i]),
+            upstream_id: Some(upstream_id),
             reason: Some(format!("reason_{}", i)),
+            duration_us: i as u64,
         });
     }
 
@@ -262,8 +263,8 @@ fn complex_routing_trace_with_multiple_stages() {
     let json = serde_json::to_string(&trace).unwrap();
     let decoded: RoutingTrace = serde_json::from_str(&json).unwrap();
     assert_eq!(decoded.stages.len(), 3);
-    for i in 0..3 {
+    for (i, upstream_id) in upstream_ids.iter().copied().enumerate().take(3) {
         assert_eq!(decoded.stages[i].stage_name, format!("stage_{}", i));
-        assert_eq!(decoded.stages[i].upstream_id, Some(upstream_ids[i]));
+        assert_eq!(decoded.stages[i].upstream_id, Some(upstream_id));
     }
 }
