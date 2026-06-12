@@ -1,5 +1,4 @@
 use async_trait::async_trait;
-use cc_lb_plugin_api;
 use cc_lb_storage_api::{
     PrincipalCreate, PrincipalRecord, PrincipalStore, PrincipalUpdate, StorageResult,
     validate_identifier,
