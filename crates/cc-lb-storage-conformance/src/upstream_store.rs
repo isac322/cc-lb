@@ -41,6 +41,12 @@ impl UpstreamStore for MemoryUpstreamStore {
             revision: 1,
             created_at_unix_secs: now,
             updated_at_unix_secs: now,
+            warmup_enabled: create.warmup_enabled,
+            next_warmup_at: create.next_warmup_at,
+            last_warmup_cycle_key: create.last_warmup_cycle_key,
+            warmup_lease_holder: create.warmup_lease_holder,
+            warmup_lease_until_unix_secs: create.warmup_lease_until_unix_secs,
+            warmup_dialect_plugin: None,
         };
         records.push(record.clone());
         Ok(record)
@@ -105,6 +111,21 @@ impl UpstreamStore for MemoryUpstreamStore {
             }
             if let Some(api_key_ciphertext) = update.api_key_ciphertext {
                 record.api_key_ciphertext = Some(api_key_ciphertext);
+            }
+            if let Some(warmup_enabled) = update.warmup_enabled {
+                record.warmup_enabled = warmup_enabled;
+            }
+            if update.next_warmup_at.is_some() {
+                record.next_warmup_at = update.next_warmup_at;
+            }
+            if let Some(last_warmup_cycle_key) = update.last_warmup_cycle_key {
+                record.last_warmup_cycle_key = Some(last_warmup_cycle_key);
+            }
+            if let Some(warmup_lease_holder) = update.warmup_lease_holder {
+                record.warmup_lease_holder = Some(warmup_lease_holder);
+            }
+            if let Some(warmup_lease_until_unix_secs) = update.warmup_lease_until_unix_secs {
+                record.warmup_lease_until_unix_secs = Some(warmup_lease_until_unix_secs);
             }
             Ok(())
         })
@@ -191,6 +212,8 @@ impl UpstreamStore for MemoryUpstreamStore {
             }
             record.last_apply_error = Some(reason);
             record.last_apply_at_unix_secs = Some(now_unix_secs());
+            record.refresh_lease_holder = None;
+            record.refresh_lease_until_unix_secs = None;
             Ok(())
         })
         .await?;
@@ -219,6 +242,78 @@ impl UpstreamStore for MemoryUpstreamStore {
     async fn hard_delete(&self, id: Uuid) -> StorageResult<()> {
         self.records.lock().await.retain(|record| record.id != id);
         Ok(())
+    }
+
+    async fn claim_warmup_lease(
+        &self,
+        id: Uuid,
+        holder: &str,
+        ttl_secs: i64,
+    ) -> StorageResult<bool> {
+        let now = i64::try_from(now_unix_secs()).unwrap_or(i64::MAX);
+        let mut records = self.records.lock().await;
+        let Some(record) = records.iter_mut().find(|record| record.id == id) else {
+            return Ok(false);
+        };
+        if record
+            .warmup_lease_until_unix_secs
+            .is_some_and(|until| until > now)
+            && record.warmup_lease_holder.as_deref() != Some(holder)
+        {
+            return Ok(false);
+        }
+        record.warmup_lease_holder = Some(holder.to_owned());
+        record.warmup_lease_until_unix_secs = Some(now.saturating_add(ttl_secs));
+        record.revision += 1;
+        record.updated_at_unix_secs = now_unix_secs();
+        Ok(true)
+    }
+
+    async fn write_warmup_cycle_key(
+        &self,
+        id: Uuid,
+        holder: &str,
+        new_cycle_key: i64,
+        next_warmup_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> StorageResult<bool> {
+        let now = i64::try_from(now_unix_secs()).unwrap_or(i64::MAX);
+        let mut records = self.records.lock().await;
+        let Some(record) = records.iter_mut().find(|record| record.id == id) else {
+            return Ok(false);
+        };
+        if record.deleted_at_unix_secs.is_some()
+            || record.warmup_lease_holder.as_deref() != Some(holder)
+            || record
+                .warmup_lease_until_unix_secs
+                .is_none_or(|until| until <= now)
+            || record.last_warmup_cycle_key == Some(new_cycle_key)
+        {
+            return Ok(false);
+        }
+        record.last_warmup_cycle_key = Some(new_cycle_key);
+        record.next_warmup_at = next_warmup_at;
+        record.warmup_lease_holder = None;
+        record.warmup_lease_until_unix_secs = None;
+        record.revision += 1;
+        record.updated_at_unix_secs = now_unix_secs();
+        Ok(true)
+    }
+
+    async fn release_warmup_lease(&self, id: Uuid, holder: &str) -> StorageResult<bool> {
+        let mut records = self.records.lock().await;
+        let Some(record) = records.iter_mut().find(|record| record.id == id) else {
+            return Ok(false);
+        };
+        if record.deleted_at_unix_secs.is_some()
+            || record.warmup_lease_holder.as_deref() != Some(holder)
+        {
+            return Ok(false);
+        }
+        record.warmup_lease_holder = None;
+        record.warmup_lease_until_unix_secs = None;
+        record.revision += 1;
+        record.updated_at_unix_secs = now_unix_secs();
+        Ok(true)
     }
 }
 
@@ -266,6 +361,12 @@ async fn create_default(store: &MemoryUpstreamStore, name: &str) -> UpstreamReco
             kind: UpstreamKind::AnthropicOauth,
             base_url: Some(Url::parse("https://api.anthropic.com").unwrap()),
             api_key_ciphertext: None,
+            warmup_enabled: false,
+            next_warmup_at: None,
+            last_warmup_cycle_key: None,
+            warmup_lease_holder: None,
+            warmup_lease_until_unix_secs: None,
+            warmup_dialect_plugin: None,
         })
         .await
         .unwrap()
@@ -337,8 +438,8 @@ scenario!(
                 r.revision,
                 UpstreamUpdate {
                     name: Some("renamed".to_owned()),
-                    base_url: None,
                     api_key_ciphertext: Some(vec![1, 2, 3]),
+                    ..UpstreamUpdate::default()
                 },
             )
             .await
@@ -366,8 +467,7 @@ scenario!(upstream_store_08_update_duplicate_name_conflicts, async {
             left.revision,
             UpstreamUpdate {
                 name: Some("right".to_owned()),
-                base_url: None,
-                api_key_ciphertext: None,
+                ..UpstreamUpdate::default()
             },
         )
         .await
@@ -484,7 +584,7 @@ scenario!(upstream_store_16_complete_refresh_clears_lease, async {
     );
 });
 scenario!(
-    upstream_store_17_release_lease_on_failure_keeps_lease_and_sets_error,
+    upstream_store_17_release_lease_on_failure_clears_lease_and_sets_error,
     async {
         let s = store();
         let r = create_default(&s, "primary").await;
@@ -494,7 +594,8 @@ scenario!(
             .await
             .unwrap();
         let failed = s.get_by_id(r.id).await.unwrap().unwrap();
-        assert_eq!(failed.refresh_lease_holder, Some(h));
+        assert_eq!(failed.refresh_lease_holder, None);
+        assert_eq!(failed.refresh_lease_until_unix_secs, None);
         assert_eq!(failed.last_apply_error.as_deref(), Some("network"));
     }
 );
@@ -555,6 +656,12 @@ scenario!(
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: None,
                 api_key_ciphertext: None,
+                warmup_enabled: false,
+                next_warmup_at: None,
+                last_warmup_cycle_key: None,
+                warmup_lease_holder: None,
+                warmup_lease_until_unix_secs: None,
+                warmup_dialect_plugin: None,
             })
             .await
             .unwrap_err();

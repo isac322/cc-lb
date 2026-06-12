@@ -28,6 +28,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         slow_mode_bps: args.slow_mode_bps,
         files_cap_bytes: args.files_cap_bytes,
         tokens_expire_in: args.tokens_expire_in,
+        ..AppConfig::default()
     });
     axum::serve(listener, app).await?;
 

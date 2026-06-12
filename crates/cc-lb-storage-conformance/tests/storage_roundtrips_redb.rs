@@ -12,7 +12,7 @@ use cc_lb_storage_conformance::{
         plugin_registry_store, principal_store, prompt_cache_observation_store, storage_roundtrips,
         storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
         upstream_rate_limit_store, upstream_subscription_metadata_store,
-        upstream_subscription_quota_store,
+        upstream_subscription_quota_store, warmup_lease,
     },
 };
 use cc_lb_storage_redb::RedbStorage;
@@ -123,6 +123,11 @@ fn upstream_rate_limit_empty_list_for_unknown_id_redb() {
         "upstream_rate_limit_empty_list_for_unknown_id",
         upstream_rate_limit_store::empty_list_for_unknown_id,
     );
+}
+
+#[test]
+fn warmup_lease_redb() {
+    run_redb_scenario("warmup_lease", warmup_lease::run_all);
 }
 
 macro_rules! anthropic_compatibility_kv_redb_test {

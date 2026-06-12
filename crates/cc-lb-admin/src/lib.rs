@@ -14,10 +14,12 @@ pub mod status;
 pub mod subscription_quotas;
 pub mod v1;
 
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use axum::Router;
+use axum::http::{HeaderMap, StatusCode};
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, RestartRequiredField};
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
@@ -27,7 +29,45 @@ use cc_lb_core::{
     AuditWriterSink, DynamicView, DynamicViewHolder, Lifecycle, MetadataHookHandle,
     api_keys::{key_store::KeyStore, limit_engine::LimitEngine},
 };
-use cc_lb_storage_api::Storage;
+use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_storage_api::{Storage, UpstreamRecord};
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum WarmupDialectDispatchErrorKind {
+    Transient,
+    Permanent,
+}
+
+#[derive(Debug, Clone)]
+pub struct WarmupDialectDispatchError {
+    pub kind: WarmupDialectDispatchErrorKind,
+    pub detail: String,
+}
+
+impl WarmupDialectDispatchError {
+    pub fn new(kind: WarmupDialectDispatchErrorKind, detail: impl Into<String>) -> Self {
+        Self {
+            kind,
+            detail: detail.into(),
+        }
+    }
+}
+
+#[derive(Debug)]
+pub struct WarmupDialectDispatchOutcome {
+    pub status: StatusCode,
+    pub headers: HeaderMap,
+}
+
+#[async_trait]
+pub trait WarmupDialectDispatcher: Send + Sync {
+    async fn dispatch_warmup_with_dialect(
+        &self,
+        runtime: &ExtismRuntime,
+        data_dir: &Path,
+        upstream: &UpstreamRecord,
+    ) -> Result<WarmupDialectDispatchOutcome, WarmupDialectDispatchError>;
+}
 
 #[async_trait]
 pub trait DynamicViewRebinder: Send + Sync {
@@ -46,6 +86,9 @@ pub struct AdminState {
     pub lifecycle: Option<Arc<Lifecycle>>,
     pub subscription_metadata_hook: Option<MetadataHookHandle>,
     pub lazy_refresher: Option<Arc<dyn LazyRefreshHandle>>,
+    pub runtime: Option<Arc<ExtismRuntime>>,
+    pub data_dir: Option<PathBuf>,
+    pub warmup_dialect_dispatcher: Option<Arc<dyn WarmupDialectDispatcher>>,
     pub audit_sink: Option<Arc<AuditWriterSink>>,
     pub dynamic_view: Arc<DynamicViewHolder>,
     pub config: Arc<dyn CurrentConfig>,

@@ -27,3 +27,4 @@ pub mod upstream_rate_limit_store;
 pub mod upstream_store;
 pub mod upstream_subscription_metadata_store;
 pub mod upstream_subscription_quota_store;
+pub mod warmup_lease;

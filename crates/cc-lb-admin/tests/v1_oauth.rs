@@ -56,6 +56,9 @@ impl Fixture {
             lifecycle: None,
             subscription_metadata_hook: None,
             lazy_refresher: None,
+            runtime: None,
+            data_dir: None,
+            warmup_dialect_dispatcher: None,
             audit_sink: Some(Arc::new(audit_sink)),
             dynamic_view: admin_test_common::dynamic_view_holder(&config),
             config: Arc::new(config),
@@ -82,6 +85,12 @@ impl Fixture {
                 kind,
                 base_url: None,
                 api_key_ciphertext: None,
+                warmup_enabled: false,
+                next_warmup_at: None,
+                last_warmup_cycle_key: None,
+                warmup_lease_holder: None,
+                warmup_lease_until_unix_secs: None,
+                warmup_dialect_plugin: None,
             })
             .await
             .expect("create upstream")

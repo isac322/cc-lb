@@ -84,6 +84,7 @@ pub async fn start_tls_app(slow_mode_bps: u64) -> RunningTlsApp {
         slow_mode_bps,
         files_cap_bytes: 104_857_600,
         tokens_expire_in: 3600,
+        ..AppConfig::default()
     };
     let fake =
         tokio::spawn(

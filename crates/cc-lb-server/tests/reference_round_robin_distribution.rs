@@ -172,6 +172,9 @@ impl Harness {
             config: current_config,
             admin_token: Some(ADMIN_TOKEN.to_owned()),
             lazy_refresher: None,
+            runtime: None,
+            data_dir: None,
+            warmup_dialect_dispatcher: None,
             subscription_metadata_hook: None,
             start_time: Instant::now(),
         });
@@ -528,6 +531,12 @@ async fn seed_oauth_upstreams(
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: Some(Url::parse(&format!("http://{name}.invalid"))?),
                 api_key_ciphertext: None,
+                warmup_enabled: false,
+                next_warmup_at: None,
+                last_warmup_cycle_key: None,
+                warmup_lease_holder: None,
+                warmup_lease_until_unix_secs: None,
+                warmup_dialect_plugin: None,
             },
         )
         .await?;

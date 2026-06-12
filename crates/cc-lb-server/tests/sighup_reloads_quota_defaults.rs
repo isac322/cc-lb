@@ -39,6 +39,9 @@ async fn sighup_reloads_body_defaults() {
         config: watcher.clone(),
         admin_token: Some("test-token".to_string()),
         lazy_refresher: None,
+        runtime: None,
+        data_dir: None,
+        warmup_dialect_dispatcher: None,
         subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
     });

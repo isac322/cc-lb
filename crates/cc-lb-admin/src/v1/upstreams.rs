@@ -1,40 +1,61 @@
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, UNIX_EPOCH};
 
 use axum::{
     Json, Router,
     extract::{Path, Query, State},
     http::{
-        HeaderMap, HeaderValue, StatusCode,
+        HeaderMap, HeaderValue, Method, Request, StatusCode,
         header::{ETAG, IF_MATCH},
     },
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{delete, get, post},
 };
+use bytes::Bytes;
 use cc_lb_aead::{AeadEncryptedField, OAuthTokenBundle};
 use cc_lb_core::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
 };
-use cc_lb_core::{AuditEntry, AuditPayload, make_metadata_http_client, run_metadata_refresh};
-use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_api::{
-    OrganizationMetadataRecord, Storage, StorageError, UpstreamCreate, UpstreamRecord,
-    UpstreamStore, UpstreamSubscriptionMetadataRecord, UpstreamUpdate,
+use cc_lb_core::{
+    AuditEntry, AuditPayload, UnifiedQuotaObservation, make_metadata_http_client,
+    observe_subscription_quota_headers, parse_anthropic_unified_headers, run_metadata_refresh,
 };
+use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
+use cc_lb_storage_api::{
+    OrganizationMetadataRecord, Storage, StorageError, SubscriptionQuotaLatestRecord,
+    SubscriptionQuotaWindow, UpstreamCreate, UpstreamRecord, UpstreamStore,
+    UpstreamSubscriptionMetadataRecord, UpstreamUpdate,
+};
+use chrono::{DateTime, TimeZone, Utc};
+use http_body_util::Full;
+use hyper_rustls::HttpsConnectorBuilder;
+use hyper_util::client::legacy::{Client, connect::HttpConnector};
+use hyper_util::rt::TokioExecutor;
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
 
 use super::add_dynamic_rebind_headers;
-use crate::AdminState;
+use crate::{AdminState, WarmupDialectDispatchErrorKind};
 
 const DEFAULT_LIMIT: usize = 100;
 const MAX_LIMIT: usize = 1000;
 const STORE_PAGE_LIMIT: usize = 1000;
 const METADATA_REFRESH_LOOKAHEAD_SECS: u64 = 60;
 const METADATA_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
+const FIRE_NOW_LEASE_TTL_SECS: i64 = 120;
+const FIRE_NOW_REQUEST_TIMEOUT_SECS: u64 = 30;
+const FIRE_NOW_POST_RESET_GUARD_SECS: i64 = 30;
+const FIRE_NOW_JITTER_SPREAD_MS: u64 = 30_000;
+const FIVE_HOURS_SECS: i64 = 5 * 60 * 60;
+const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
+const WARMUP_MODEL: &str = "claude-haiku-4-5-20251001";
+const WARMUP_MAX_TOKENS: u32 = 1;
+const WARMUP_ANTHROPIC_BETA: &str = "oauth-2025-04-20";
+
+type WarmupHttpClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
 
 pub fn router() -> Router<AdminState> {
     Router::new()
@@ -46,6 +67,7 @@ pub fn router() -> Router<AdminState> {
             "/admin/v1/upstreams/{id}",
             get(get_upstream)
                 .put(update_upstream)
+                .patch(update_upstream)
                 .delete(delete_upstream),
         )
         .route(
@@ -55,6 +77,14 @@ pub fn router() -> Router<AdminState> {
         .route(
             "/admin/v1/upstreams/{id}/subscription-metadata/refresh",
             post(refresh_upstream_subscription_metadata),
+        )
+        .route(
+            "/admin/v1/upstreams/{id}/warmup/fire-now",
+            post(fire_now_upstream_warmup),
+        )
+        .route(
+            "/admin/v1/upstreams/{id}/warmup-dialect-plugin",
+            delete(delete_upstream_warmup_dialect_plugin),
         )
         .route("/admin/v1/upstreams/{id}/enable", post(enable_upstream))
         .route("/admin/v1/upstreams/{id}/disable", post(disable_upstream))
@@ -70,6 +100,10 @@ struct UpstreamCreateBody {
     api_key_env: Option<String>,
     #[serde(default)]
     api_key_value: Option<String>,
+    #[serde(default)]
+    warmup_enabled: bool,
+    #[serde(default)]
+    warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -82,6 +116,10 @@ struct UpstreamUpdateBody {
     api_key_env: Option<String>,
     #[serde(default)]
     api_key_value: Option<String>,
+    #[serde(default)]
+    warmup_enabled: Option<bool>,
+    #[serde(default)]
+    warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -96,6 +134,10 @@ struct UpstreamResponse {
     name: String,
     kind: UpstreamKind,
     enabled: bool,
+    warmup_enabled: bool,
+    warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
+    next_warmup_at: Option<DateTime<Utc>>,
+    last_warmup_cycle_key: Option<i64>,
     revision: u64,
 }
 
@@ -118,6 +160,7 @@ enum UpstreamError {
     RefreshUnavailable,
     RefreshFailed { detail: String },
     MetadataRefreshTimeout,
+    Internal { detail: String },
     Storage(StorageError),
 }
 
@@ -179,6 +222,11 @@ impl IntoResponse for UpstreamError {
                 Json(json!({ "error": "metadata_refresh_timeout" })),
             )
                 .into_response(),
+            Self::Internal { detail } => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json!({ "error": "internal_error", "detail": detail })),
+            )
+                .into_response(),
             Self::Storage(error) => {
                 tracing::error!(error = %error, "admin v1 upstream storage operation failed");
                 StatusCode::INTERNAL_SERVER_ERROR.into_response()
@@ -210,6 +258,12 @@ async fn create_upstream(
             kind,
             base_url: body.base_url,
             api_key_ciphertext,
+            warmup_enabled: body.warmup_enabled,
+            warmup_dialect_plugin: body.warmup_dialect_plugin,
+            next_warmup_at: None,
+            last_warmup_cycle_key: None,
+            warmup_lease_holder: None,
+            warmup_lease_until_unix_secs: None,
         },
     )
     .await?;
@@ -336,6 +390,400 @@ async fn refresh_upstream_subscription_metadata(
         .map(Json)
 }
 
+async fn fire_now_upstream_warmup(
+    State(state): State<AdminState>,
+    Path(upstream_id): Path<Uuid>,
+) -> Result<Response, UpstreamError> {
+    let storage = storage_arc(&state)?;
+    let upstream = UpstreamStore::get_by_id(storage.as_ref(), upstream_id)
+        .await?
+        .ok_or(UpstreamError::NotFound)?;
+    if upstream.kind != UpstreamKind::AnthropicOauth {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": "warmup_unsupported_for_kind",
+                "kind": upstream.kind.as_str(),
+            })),
+        )
+            .into_response());
+    }
+    if !upstream.warmup_enabled {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(json!({ "error": "warmup_disabled" })),
+        )
+            .into_response());
+    }
+
+    let holder = format!("fire-now:{}", Uuid::new_v4());
+    let claimed = storage
+        .claim_warmup_lease(upstream_id, &holder, FIRE_NOW_LEASE_TTL_SECS)
+        .await?;
+    if !claimed {
+        let held_by = UpstreamStore::get_by_id(storage.as_ref(), upstream_id)
+            .await?
+            .ok_or(UpstreamError::NotFound)?
+            .warmup_lease_holder
+            .unwrap_or_default();
+        return Ok((
+            StatusCode::ACCEPTED,
+            Json(json!({
+                "fired": false,
+                "reason": "lease_held",
+                "held_by": held_by,
+            })),
+        )
+            .into_response());
+    }
+    let db_now_unix_secs = storage.warmup_now_unix_secs().await?;
+    let lease_until = Utc
+        .timestamp_opt(db_now_unix_secs.saturating_add(FIRE_NOW_LEASE_TTL_SECS), 0)
+        .single()
+        .ok_or_else(|| UpstreamError::Internal {
+            detail: "invalid lease timestamp".to_owned(),
+        })?;
+    tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, lease_until = ?lease_until, action = "lease_claimed");
+
+    let latest = latest_five_hour_quota(storage.as_ref(), upstream_id).await?;
+    let cycle_key = latest
+        .as_ref()
+        .and_then(cycle_key_from_latest_observation)
+        .unwrap_or(db_now_unix_secs);
+    let jitter_ms = fire_now_stable_jitter_ms(upstream_id, u64::try_from(cycle_key).unwrap_or(0));
+    let dialect_dispatch_bundle = upstream.warmup_dialect_plugin.as_ref().and_then(|_| {
+        let runtime = state.runtime.as_deref()?;
+        let data_dir = state.data_dir.as_deref()?;
+        let dispatcher = state.warmup_dialect_dispatcher.as_deref()?;
+        Some((runtime, data_dir, dispatcher))
+    });
+    let dialect_plugin_used = dialect_dispatch_bundle.is_some();
+    tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, cycle_key = %cycle_key, jitter_ms = %jitter_ms, dialect_plugin_used = dialect_plugin_used, action = "dispatch_start");
+    let (status, headers, dispatch_error_kind, dispatch_error_detail) =
+        if let Some((runtime, data_dir, dispatcher)) = dialect_dispatch_bundle {
+            match tokio::time::timeout(
+                Duration::from_secs(FIRE_NOW_REQUEST_TIMEOUT_SECS),
+                dispatcher.dispatch_warmup_with_dialect(runtime, data_dir, &upstream),
+            )
+            .await
+            {
+                Ok(Ok(outcome)) => (outcome.status, outcome.headers, None, None),
+                Ok(Err(error)) => {
+                    let status = match error.kind {
+                        WarmupDialectDispatchErrorKind::Transient => {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        }
+                        WarmupDialectDispatchErrorKind::Permanent => StatusCode::BAD_GATEWAY,
+                    };
+                    (
+                        status,
+                        HeaderMap::new(),
+                        Some(error.kind),
+                        Some(error.detail),
+                    )
+                }
+                Err(_) => (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    HeaderMap::new(),
+                    Some(WarmupDialectDispatchErrorKind::Transient),
+                    Some("warmup dispatch timed out".to_owned()),
+                ),
+            }
+        } else {
+            let bundle = decrypt_oauth_bundle(&state, &upstream)?;
+            let access_token =
+                fresh_enough_access_token(&state, storage.clone(), &upstream, bundle).await?;
+            let base_url = upstream_base_url(&upstream)?;
+            let client = warmup_http_client();
+            let (status, headers) = tokio::time::timeout(
+                Duration::from_secs(FIRE_NOW_REQUEST_TIMEOUT_SECS),
+                dispatch_fire_now_warmup(&client, &access_token, &base_url, &holder),
+            )
+            .await
+            .unwrap_or_else(|_| (StatusCode::BAD_GATEWAY, HeaderMap::new()));
+            (status, headers, None, None)
+        };
+    record_fire_now_subscription_quota_observations(
+        &state,
+        storage.as_ref(),
+        upstream_id,
+        &headers,
+    )
+    .await?;
+    let observations = parse_anthropic_unified_headers(&headers);
+    let outcome = match dispatch_error_kind {
+        Some(WarmupDialectDispatchErrorKind::Transient) => FireNowWarmupResult::RetryableTransient,
+        Some(WarmupDialectDispatchErrorKind::Permanent) => {
+            FireNowWarmupResult::AbandonCyclePermanent(FireNowAbandonReason::DialectPlugin)
+        }
+        None => classify_fire_now_response(status, &observations, cycle_key),
+    };
+    tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, status = %status, outcome = ?outcome, dispatch_error = dispatch_error_detail.as_deref(), action = "dispatch_result");
+
+    match outcome {
+        FireNowWarmupResult::Success { cycle_key }
+        | FireNowWarmupResult::WindowAlreadyActive { cycle_key } => {
+            let next_warmup_at = fire_now_next_warmup_at(upstream_id, cycle_key)?;
+            let written = storage
+                .write_warmup_cycle_key(upstream_id, &holder, cycle_key, Some(next_warmup_at))
+                .await?;
+            if written {
+                tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, cycle_key = %cycle_key, next_warmup_at = ?next_warmup_at, action = "cycle_key_written");
+            }
+            Ok(Json(json!({ "fired": true, "cycle_key": cycle_key })).into_response())
+        }
+        FireNowWarmupResult::AbandonCyclePermanent(reason) => {
+            tracing::warn!(target: "warmup", upstream_id = %upstream_id, reason = %reason.as_str(), action = "cycle_abandoned");
+            release_fire_now_warmup_lease(storage.as_ref(), upstream_id, &holder).await;
+            Ok((
+                StatusCode::BAD_GATEWAY,
+                Json(json!({ "fired": false, "reason": reason.as_str() })),
+            )
+                .into_response())
+        }
+        FireNowWarmupResult::RetryableTransient => {
+            release_fire_now_warmup_lease(storage.as_ref(), upstream_id, &holder).await;
+            Ok((
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(json!({ "fired": false, "reason": "transient" })),
+            )
+                .into_response())
+        }
+    }
+}
+
+async fn release_fire_now_warmup_lease(storage: &dyn Storage, upstream_id: Uuid, holder: &str) {
+    let _ = storage.release_warmup_lease(upstream_id, holder).await.ok();
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FireNowWarmupResult {
+    Success { cycle_key: i64 },
+    RetryableTransient,
+    AbandonCyclePermanent(FireNowAbandonReason),
+    WindowAlreadyActive { cycle_key: i64 },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FireNowAbandonReason {
+    AuthFailed,
+    Forbidden,
+    BadRequest,
+    NotFound,
+    DialectPlugin,
+}
+
+impl FireNowAbandonReason {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::AuthFailed => "auth_failed",
+            Self::Forbidden => "forbidden",
+            Self::BadRequest => "bad_request",
+            Self::NotFound => "not_found",
+            Self::DialectPlugin => "dialect_plugin_failed",
+        }
+    }
+}
+
+async fn latest_five_hour_quota(
+    storage: &dyn Storage,
+    upstream_id: Uuid,
+) -> Result<Option<SubscriptionQuotaLatestRecord>, UpstreamError> {
+    let latest = storage
+        .list_latest_subscription_quota_for_upstreams(&[upstream_id])
+        .await?;
+    Ok(latest
+        .into_iter()
+        .filter(|record| record.window == SubscriptionQuotaWindow::FiveHour)
+        .max_by_key(|record| record.observed_at_unix_millis))
+}
+
+fn cycle_key_from_latest_observation(latest: &SubscriptionQuotaLatestRecord) -> Option<i64> {
+    latest
+        .resets_at_unix_secs
+        .and_then(|resets_at| i64::try_from(resets_at).ok())
+}
+
+async fn dispatch_fire_now_warmup(
+    client: &WarmupHttpClient,
+    access_token: &str,
+    base_url: &Url,
+    holder: &str,
+) -> (StatusCode, HeaderMap) {
+    let request = match build_fire_now_warmup_request(access_token, base_url, holder) {
+        Ok(request) => request,
+        Err(_error) => return (StatusCode::INTERNAL_SERVER_ERROR, HeaderMap::new()),
+    };
+    match client.request(request).await {
+        Ok(response) => (response.status(), response.headers().clone()),
+        Err(_error) => (StatusCode::BAD_GATEWAY, HeaderMap::new()),
+    }
+}
+
+fn build_fire_now_warmup_request(
+    access_token: &str,
+    base_url: &Url,
+    _holder: &str,
+) -> Result<Request<Full<Bytes>>, String> {
+    let url = base_url
+        .join("v1/messages")
+        .map_err(|error| format!("failed to build warmup URL: {error}"))?;
+    let body_bytes = warmup_body_bytes()?;
+    Request::builder()
+        .method(Method::POST)
+        .uri(url.as_str())
+        .header("authorization", format!("Bearer {access_token}"))
+        .header("content-type", "application/json")
+        .header("anthropic-version", "2023-06-01")
+        .header("anthropic-beta", WARMUP_ANTHROPIC_BETA)
+        .body(Full::new(Bytes::from(body_bytes)))
+        .map_err(|error| format!("failed to build warmup request: {error}"))
+}
+
+fn warmup_body_bytes() -> Result<Vec<u8>, String> {
+    serde_json::to_string(&warmup_body())
+        .map(String::into_bytes)
+        .map_err(|error| format!("failed to serialize warmup body: {error}"))
+}
+
+fn warmup_body() -> Value {
+    json!({
+        "model": WARMUP_MODEL,
+        "max_tokens": WARMUP_MAX_TOKENS,
+        "messages": [{"role": "user", "content": "."}]
+    })
+}
+
+async fn record_fire_now_subscription_quota_observations(
+    state: &AdminState,
+    storage: &dyn Storage,
+    upstream_id: Uuid,
+    headers: &HeaderMap,
+) -> Result<(), UpstreamError> {
+    if headers.is_empty() {
+        return Ok(());
+    }
+    let observed_at_unix_millis = warmup_now_unix_millis(storage).await?;
+    if let Some(lifecycle) = &state.lifecycle {
+        let observed_at = UNIX_EPOCH
+            .checked_add(Duration::from_millis(observed_at_unix_millis))
+            .ok_or_else(|| invalid_warmup_state("warmup observed timestamp overflow"))?;
+        lifecycle.record_subscription_quota_observations(headers, upstream_id, observed_at);
+        return Ok(());
+    }
+    let records = observe_subscription_quota_headers(headers, upstream_id, observed_at_unix_millis);
+    if !records.is_empty() {
+        storage.put_subscription_quota_batch(&records).await?;
+    }
+    Ok(())
+}
+
+async fn warmup_now_unix_millis(storage: &dyn Storage) -> Result<u64, UpstreamError> {
+    let now = storage.warmup_now_unix_secs().await?;
+    let millis = now
+        .checked_mul(1_000)
+        .ok_or_else(|| invalid_warmup_state("warmup db timestamp overflow"))?;
+    u64::try_from(millis).map_err(|_| invalid_warmup_state("warmup db timestamp is negative"))
+}
+
+fn classify_fire_now_response(
+    status: StatusCode,
+    parsed_headers: &[UnifiedQuotaObservation],
+    candidate_cycle_key: i64,
+) -> FireNowWarmupResult {
+    if status.is_success() {
+        return FireNowWarmupResult::Success {
+            cycle_key: five_hour_cycle_key(parsed_headers).unwrap_or(candidate_cycle_key),
+        };
+    }
+    match status {
+        StatusCode::TOO_MANY_REQUESTS => match five_hour_cycle_key(parsed_headers) {
+            Some(cycle_key) if cycle_key > candidate_cycle_key => {
+                FireNowWarmupResult::WindowAlreadyActive { cycle_key }
+            }
+            _ => FireNowWarmupResult::RetryableTransient,
+        },
+        StatusCode::UNAUTHORIZED => {
+            FireNowWarmupResult::AbandonCyclePermanent(FireNowAbandonReason::AuthFailed)
+        }
+        StatusCode::FORBIDDEN => {
+            FireNowWarmupResult::AbandonCyclePermanent(FireNowAbandonReason::Forbidden)
+        }
+        StatusCode::BAD_REQUEST => {
+            FireNowWarmupResult::AbandonCyclePermanent(FireNowAbandonReason::BadRequest)
+        }
+        StatusCode::NOT_FOUND => {
+            FireNowWarmupResult::AbandonCyclePermanent(FireNowAbandonReason::NotFound)
+        }
+        _ => FireNowWarmupResult::RetryableTransient,
+    }
+}
+
+fn five_hour_cycle_key(parsed_headers: &[UnifiedQuotaObservation]) -> Option<i64> {
+    parsed_headers
+        .iter()
+        .find(|observation| observation.window == SubscriptionQuotaWindow::FiveHour)
+        .and_then(|observation| observation.resets_at_unix_secs)
+        .and_then(|resets_at| i64::try_from(resets_at).ok())
+}
+
+fn fire_now_next_warmup_at(
+    upstream_id: Uuid,
+    cycle_key: i64,
+) -> Result<DateTime<Utc>, UpstreamError> {
+    let next_reset = cycle_key.saturating_add(FIVE_HOURS_SECS);
+    let next_reset_u64 = u64::try_from(next_reset)
+        .map_err(|_| invalid_warmup_state("warmup cycle key is negative"))?;
+    let jitter_ms = fire_now_stable_jitter_ms(upstream_id, next_reset_u64);
+    let base = Utc
+        .timestamp_opt(next_reset, 0)
+        .single()
+        .ok_or_else(|| invalid_warmup_state("invalid warmup cycle timestamp"))?;
+    base.checked_add_signed(chrono::Duration::seconds(FIRE_NOW_POST_RESET_GUARD_SECS))
+        .and_then(|value| {
+            value.checked_add_signed(chrono::Duration::milliseconds(jitter_ms as i64))
+        })
+        .ok_or_else(|| invalid_warmup_state("warmup next timestamp overflow"))
+}
+
+/// Stable jitter mirroring `cc_lb_server::warmup::helpers::stable_jitter_ms`.
+/// Uses SipHasher13 with the same fixed all-zero 16-byte key to guarantee that
+/// fire-now and the warm-up loop derive the same `next_warmup_at` for the same
+/// `(upstream_id, resets_at)` pair across replicas.
+fn fire_now_stable_jitter_ms(upstream_id: Uuid, candidate_resets_at_unix_secs: u64) -> u64 {
+    use std::hash::Hasher;
+    const SIPHASH_K0: u64 = 0;
+    const SIPHASH_K1: u64 = 0;
+    let mut hasher = siphasher::sip::SipHasher13::new_with_keys(SIPHASH_K0, SIPHASH_K1);
+    hasher.write(upstream_id.as_bytes());
+    hasher.write(&candidate_resets_at_unix_secs.to_le_bytes());
+    hasher.finish() % FIRE_NOW_JITTER_SPREAD_MS
+}
+
+fn upstream_base_url(upstream: &UpstreamRecord) -> Result<Url, UpstreamError> {
+    match upstream.base_url.clone() {
+        Some(base_url) => Ok(base_url),
+        None => Url::parse(DEFAULT_ANTHROPIC_BASE_URL)
+            .map_err(|error| invalid_warmup_state(&format!("invalid default warmup URL: {error}"))),
+    }
+}
+
+fn warmup_http_client() -> WarmupHttpClient {
+    let connector = HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_http1()
+        .enable_http2()
+        .build();
+    Client::builder(TokioExecutor::new()).build(connector)
+}
+
+fn invalid_warmup_state(message: &str) -> UpstreamError {
+    UpstreamError::Storage(StorageError::Fatal {
+        message: message.to_owned(),
+    })
+}
+
 async fn update_upstream(
     State(state): State<AdminState>,
     Path(id): Path<String>,
@@ -363,6 +811,13 @@ async fn update_upstream(
             name: body.name,
             base_url: body.base_url,
             api_key_ciphertext,
+            warmup_enabled: body.warmup_enabled,
+            warmup_dialect_plugin: body.warmup_dialect_plugin,
+            // per A2 outcome: wait-for-observation branch — no bootstrap mutation here; loop picks up rows once oauth_usage_poller observes the first 5h reset.
+            next_warmup_at: None,
+            last_warmup_cycle_key: None,
+            warmup_lease_holder: None,
+            warmup_lease_until_unix_secs: None,
         },
     )
     .await
@@ -436,6 +891,42 @@ async fn delete_upstream(
             stale_or_conflict(&state, &id, expected_revision, message).await
         }
         Err(error) => Err(error.into()),
+    }
+}
+
+async fn delete_upstream_warmup_dialect_plugin(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, UpstreamError> {
+    let expected_revision = parse_if_match(&headers)?;
+    let storage = storage(&state)?;
+    UpstreamStore::get_by_id(storage, id)
+        .await?
+        .ok_or(UpstreamError::NotFound)?;
+
+    match storage
+        .clear_warmup_dialect_plugin(id, expected_revision)
+        .await?
+    {
+        Some(updated) => {
+            enqueue_upstream_audit(
+                &state,
+                &updated,
+                AuditPayload::UpstreamUpdate {
+                    upstream_id: updated.id.to_string(),
+                    fields_changed: vec!["warmup_dialect_plugin"],
+                },
+            );
+            let mut response = Json(upstream_response(&updated)).into_response();
+            add_dynamic_rebind_headers(&mut response, &state).await;
+            Ok(response)
+        }
+        None => Ok((
+            StatusCode::PRECONDITION_FAILED,
+            Json(json!({ "error": "revision_mismatch" })),
+        )
+            .into_response()),
     }
 }
 
@@ -595,6 +1086,10 @@ fn upstream_response(record: &UpstreamRecord) -> UpstreamResponse {
         name: record.name.clone(),
         kind: record.kind,
         enabled: record.enabled,
+        warmup_enabled: record.warmup_enabled,
+        warmup_dialect_plugin: record.warmup_dialect_plugin.clone(),
+        next_warmup_at: record.next_warmup_at,
+        last_warmup_cycle_key: record.last_warmup_cycle_key,
         revision: record.revision,
     }
 }
@@ -754,6 +1249,12 @@ fn changed_fields(body: &UpstreamUpdateBody) -> Vec<&'static str> {
     if body.api_key_env.is_some() || body.api_key_value.is_some() {
         fields.push("api_key_ciphertext");
     }
+    if body.warmup_enabled.is_some() {
+        fields.push("warmup_enabled");
+    }
+    if body.warmup_dialect_plugin.is_some() {
+        fields.push("warmup_dialect_plugin");
+    }
     fields
 }
 
@@ -806,8 +1307,458 @@ fn enqueue_upstream_audit(state: &AdminState, upstream: &UpstreamRecord, payload
 }
 
 fn unix_now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
+    u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(deprecated)]
+    use std::collections::HashMap;
+
+    use async_trait::async_trait;
+    use axum::body::{Body as AxumBody, to_bytes};
+    use cc_lb_aead::AeadService;
+    use cc_lb_config::Config;
+    use cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager;
+    use cc_lb_core::api_keys::limit_engine::LimitEngine;
+    use cc_lb_core::api_keys::principal_view::PrincipalView;
+    use cc_lb_core::{
+        Body as CoreBody, DispatchError, DynamicView, DynamicViewBuilder, DynamicViewHolder,
+        ErrorNormalizer, UpstreamDispatch, UpstreamStatusSnapshot,
+    };
+    use cc_lb_plugin_api::{
+        ApiKeyAwareSignerFactory, ObservabilityError, ObservabilityHook, ObserveEvent, Principal,
+        RequestContext, RouteDecision, RouteError, RouterPlugin, ShapedRequest, SignedRequest,
+        Signer, SignerError, SignerFactory, SigningCapability, Upstream, UpstreamCandidate,
+    };
+    use cc_lb_storage_api::UpstreamStore;
+    use http_body_util::BodyExt;
+    use tokio::net::TcpListener;
+    use tower::ServiceExt;
+
+    use super::*;
+
+    type TestStorage = cc_lb_storage_redb::Storage;
+
+    const TEST_FIRE_NOW_HOLDER: &str = "fire-now:00000000-0000-4000-8000-000000000000";
+
+    fn fire_now_warmup_request(holder: &str) -> Request<Full<Bytes>> {
+        let base_url = Url::parse("https://api.anthropic.com/").expect("valid URL");
+        build_fire_now_warmup_request("test-token", &base_url, holder)
+            .expect("request builds successfully")
+    }
+
+    async fn fire_now_warmup_body_from_request(holder: &str) -> Value {
+        let bytes = fire_now_warmup_request(holder)
+            .into_body()
+            .collect()
+            .await
+            .expect("body collects")
+            .to_bytes();
+        serde_json::from_slice(&bytes).expect("valid json body")
+    }
+
+    #[test]
+    fn fire_now_request_shape_includes_minimal_headers() {
+        let request = fire_now_warmup_request(TEST_FIRE_NOW_HOLDER);
+
+        assert_eq!(request.uri().path(), "/v1/messages");
+        assert_eq!(request.method(), Method::POST);
+        assert_eq!(
+            request.headers().get("anthropic-version"),
+            Some(&HeaderValue::from_static("2023-06-01"))
+        );
+        assert_eq!(
+            request.headers().get("anthropic-beta"),
+            Some(&HeaderValue::from_static(WARMUP_ANTHROPIC_BETA))
+        );
+    }
+
+    #[tokio::test]
+    async fn fire_now_request_shape_has_no_system_or_tools_or_stream() {
+        let body = fire_now_warmup_body_from_request(TEST_FIRE_NOW_HOLDER).await;
+
+        assert!(body.get("system").is_none());
+        assert_eq!(body.get("max_tokens"), Some(&json!(1)));
+        assert!(body.get("tools").is_none());
+        assert!(body.get("stream").is_none());
+    }
+
+    #[tokio::test]
+    async fn fire_now_request_shape_has_no_metadata() {
+        let body = fire_now_warmup_body_from_request(TEST_FIRE_NOW_HOLDER).await;
+
+        assert!(body.get("metadata").is_none());
+    }
+
+    #[test]
+    fn fire_now_request_body_matches_locked_json_byte_for_byte() {
+        let expected = br#"{"max_tokens":1,"messages":[{"content":".","role":"user"}],"model":"claude-haiku-4-5-20251001"}"#;
+
+        assert_eq!(
+            warmup_body_bytes().expect("body serializes"),
+            expected.to_vec()
+        );
+    }
+
+    struct TestContext {
+        state: AdminState,
+        storage: Arc<TestStorage>,
+        aead: Arc<AeadService>,
+    }
+
+    struct TestSignerFactory;
+
+    impl ApiKeyAwareSignerFactory for TestSignerFactory {
+        fn with_router_choice(
+            &self,
+            _api_key: String,
+            _router_chosen_upstream_name: String,
+        ) -> Arc<dyn SignerFactory> {
+            Arc::new(TestSignerFactory)
+        }
+    }
+
+    #[async_trait]
+    impl SignerFactory for TestSignerFactory {
+        async fn build(&self, _upstream: &Upstream) -> Result<Arc<dyn Signer>, SignerError> {
+            Ok(Arc::new(TestSigner))
+        }
+    }
+
+    struct TestSigner;
+
+    #[async_trait]
+    impl Signer for TestSigner {
+        async fn sign(
+            &self,
+            shaped: ShapedRequest,
+            capability: &mut SigningCapability,
+        ) -> Result<SignedRequest, SignerError> {
+            Ok(SignedRequest::from_shaped(shaped, capability))
+        }
+
+        async fn on_unauthorized(
+            &self,
+            _err: &cc_lb_plugin_api::UpstreamError,
+        ) -> cc_lb_plugin_api::RetryDecision {
+            cc_lb_plugin_api::RetryDecision::Fail
+        }
+    }
+
+    struct TestRouter;
+
+    impl RouterPlugin for TestRouter {
+        fn route(
+            &self,
+            _ctx: &RequestContext,
+            _principal: &Principal,
+            _candidates: &[UpstreamCandidate],
+        ) -> Result<RouteDecision, RouteError> {
+            Err(RouteError::NoRoute {
+                reason: "test router has no route".to_owned(),
+            })
+        }
+    }
+
+    struct TestDispatcher;
+
+    #[async_trait]
+    impl UpstreamDispatch for TestDispatcher {
+        async fn dispatch(
+            &self,
+            _request: SignedRequest,
+        ) -> Result<axum::http::Response<CoreBody>, DispatchError> {
+            Ok(axum::http::Response::builder()
+                .status(StatusCode::OK)
+                .body(CoreBody::from(Bytes::new()))
+                .expect("test response builds"))
+        }
+    }
+
+    struct TestHook;
+
+    impl ObservabilityHook for TestHook {
+        fn observe(&self, _event: ObserveEvent) -> Result<(), ObservabilityError> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn fire_now_rejects_non_oauth_400() {
+        let context = test_context();
+        let upstream = create_api_key_upstream(context.storage.as_ref(), true).await;
+
+        let (status, body) = fire_now_response(context.state, upstream.id).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "warmup_unsupported_for_kind");
+        assert_eq!(body["kind"], "anthropic_api_key");
+    }
+
+    #[tokio::test]
+    async fn fire_now_rejects_warmup_disabled_400() {
+        let context = test_context();
+        let upstream =
+            create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), false, None)
+                .await;
+
+        let (status, body) = fire_now_response(context.state, upstream.id).await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"], "warmup_disabled");
+    }
+
+    #[tokio::test]
+    async fn fire_now_returns_202_when_lease_held() {
+        let context = test_context();
+        let upstream =
+            create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), true, None)
+                .await;
+        assert!(
+            context
+                .storage
+                .claim_warmup_lease(upstream.id, "replica-a", FIRE_NOW_LEASE_TTL_SECS)
+                .await
+                .expect("lease claim succeeds")
+        );
+
+        let (status, body) = fire_now_response(context.state, upstream.id).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(body["fired"], false);
+        assert_eq!(body["reason"], "lease_held");
+        assert_eq!(body["held_by"], "replica-a");
+    }
+
+    #[tokio::test]
+    async fn fire_now_returns_200_on_success_and_writes_cycle_key() {
+        let context = test_context();
+        let (base_url, server) = spawn_warmup_server(StatusCode::OK).await;
+        let upstream = create_oauth_upstream(
+            context.storage.as_ref(),
+            context.aead.as_ref(),
+            true,
+            Some(base_url),
+        )
+        .await;
+
+        let (status, body) = fire_now_response(context.state, upstream.id).await;
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["fired"], true);
+        let cycle_key = body["cycle_key"].as_i64().expect("cycle key is i64");
+        let stored = context
+            .storage
+            .get_by_id(upstream.id)
+            .await
+            .expect("read succeeds")
+            .expect("upstream exists");
+        assert_eq!(stored.last_warmup_cycle_key, Some(cycle_key));
+        assert!(stored.next_warmup_at.is_some());
+        assert_eq!(stored.warmup_lease_holder, None);
+        assert_eq!(stored.warmup_lease_until_unix_secs, None);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn fire_now_returns_502_on_permanent_abandon() {
+        let context = test_context();
+        let (base_url, server) = spawn_warmup_server(StatusCode::UNAUTHORIZED).await;
+        let upstream = create_oauth_upstream(
+            context.storage.as_ref(),
+            context.aead.as_ref(),
+            true,
+            Some(base_url),
+        )
+        .await;
+
+        let (status, body) = fire_now_response(context.state, upstream.id).await;
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert_eq!(body["fired"], false);
+        assert_eq!(body["reason"], "auth_failed");
+        let stored = context
+            .storage
+            .get_by_id(upstream.id)
+            .await
+            .expect("read succeeds")
+            .expect("upstream exists");
+        assert_eq!(stored.last_warmup_cycle_key, None);
+        assert_eq!(stored.warmup_lease_holder, None);
+        assert_eq!(stored.warmup_lease_until_unix_secs, None);
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn fire_now_returns_503_on_transient() {
+        let context = test_context();
+        let (base_url, server) = spawn_warmup_server(StatusCode::INTERNAL_SERVER_ERROR).await;
+        let upstream = create_oauth_upstream(
+            context.storage.as_ref(),
+            context.aead.as_ref(),
+            true,
+            Some(base_url),
+        )
+        .await;
+
+        let (status, body) = fire_now_response(context.state, upstream.id).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["fired"], false);
+        assert_eq!(body["reason"], "transient");
+        let stored = context
+            .storage
+            .get_by_id(upstream.id)
+            .await
+            .expect("read succeeds")
+            .expect("upstream exists");
+        assert_eq!(stored.last_warmup_cycle_key, None);
+        assert_eq!(stored.warmup_lease_holder, None);
+        assert_eq!(stored.warmup_lease_until_unix_secs, None);
+        server.abort();
+    }
+
+    fn test_context() -> TestContext {
+        let storage = Arc::new(TestStorage::open_in_memory([7; 32]).expect("storage opens"));
+        let aead = Arc::new(AeadService::from_master_key([8; 32]));
+        let state = AdminState {
+            storage: Some(storage.clone()),
+            key_store: None,
+            aead: aead.clone(),
+            limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new())),
+            lifecycle: None,
+            subscription_metadata_hook: None,
+            lazy_refresher: None,
+            runtime: None,
+            data_dir: None,
+            warmup_dialect_dispatcher: None,
+            audit_sink: None,
+            dynamic_view: Arc::new(DynamicViewHolder::new(test_view())),
+            config: Arc::new(Config::default()),
+            admin_token: None,
+            start_time: std::time::Instant::now(),
+        };
+        TestContext {
+            state,
+            storage,
+            aead,
+        }
+    }
+
+    fn test_view() -> Arc<DynamicView> {
+        let principal_view = Arc::new(PrincipalView::from_db(&[], HashMap::new()));
+        DynamicViewBuilder::new(0)
+            .signer_factory(Arc::new(TestSignerFactory))
+            .global_router(Arc::new(TestRouter))
+            .dispatcher(Arc::new(TestDispatcher))
+            .global_observability_hooks(vec![Arc::new(TestHook)])
+            .error_normalizer(Arc::new(ErrorNormalizer::new()))
+            .principal_view(principal_view)
+            .upstream_status_snapshot(Arc::new(UpstreamStatusSnapshot::default()))
+            .build()
+    }
+
+    async fn create_api_key_upstream(
+        storage: &TestStorage,
+        warmup_enabled: bool,
+    ) -> UpstreamRecord {
+        storage
+            .create(UpstreamCreate {
+                name: format!("api-key-{}", Uuid::new_v4().simple()),
+                kind: UpstreamKind::AnthropicApiKey,
+                base_url: None,
+                api_key_ciphertext: Some(vec![1, 2, 3]),
+                warmup_enabled,
+                warmup_dialect_plugin: None,
+                next_warmup_at: None,
+                last_warmup_cycle_key: None,
+                warmup_lease_holder: None,
+                warmup_lease_until_unix_secs: None,
+            })
+            .await
+            .expect("upstream create succeeds")
+    }
+
+    async fn create_oauth_upstream(
+        storage: &TestStorage,
+        aead: &AeadService,
+        warmup_enabled: bool,
+        base_url: Option<Url>,
+    ) -> UpstreamRecord {
+        create_oauth_upstream_with_plugin(storage, aead, warmup_enabled, base_url, None).await
+    }
+
+    async fn create_oauth_upstream_with_plugin(
+        storage: &TestStorage,
+        aead: &AeadService,
+        warmup_enabled: bool,
+        base_url: Option<Url>,
+        warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
+    ) -> UpstreamRecord {
+        let created = storage
+            .create(UpstreamCreate {
+                name: format!("oauth-{}", Uuid::new_v4().simple()),
+                kind: UpstreamKind::AnthropicOauth,
+                base_url,
+                api_key_ciphertext: None,
+                warmup_enabled,
+                warmup_dialect_plugin,
+                next_warmup_at: None,
+                last_warmup_cycle_key: None,
+                warmup_lease_holder: None,
+                warmup_lease_until_unix_secs: None,
+            })
+            .await
+            .expect("upstream create succeeds");
+        let bundle = OAuthTokenBundle {
+            access_token: "test-access-token".to_owned(),
+            refresh_token: "test-refresh-token".to_owned(),
+            expires_at_unix_secs: u64::MAX / 2,
+            scopes: Vec::new(),
+        };
+        let encrypted =
+            AeadEncryptedField::<OAuthTokenBundle>::encrypt(aead, &bundle, created.id.as_bytes())
+                .expect("token encryption succeeds");
+        storage
+            .store_oauth_tokens(created.id, created.revision, encrypted)
+            .await
+            .expect("token store succeeds")
+    }
+
+    async fn fire_now_response(state: AdminState, upstream_id: Uuid) -> (StatusCode, Value) {
+        let response = router()
+            .with_state(state)
+            .oneshot(
+                Request::builder()
+                    .method(Method::POST)
+                    .uri(format!("/admin/v1/upstreams/{upstream_id}/warmup/fire-now"))
+                    .body(AxumBody::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        let status = response.status();
+        let bytes = to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body read succeeds");
+        let body = serde_json::from_slice(&bytes).expect("response body is json");
+        (status, body)
+    }
+
+    async fn spawn_warmup_server(status: StatusCode) -> (Url, tokio::task::JoinHandle<()>) {
+        let app = Router::new().route(
+            "/v1/messages",
+            post(move || async move { status.into_response() }),
+        );
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener binds");
+        let addr = listener.local_addr().expect("local addr is available");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("server runs");
+        });
+        let base_url = Url::parse(&format!("http://{addr}/")).expect("base URL parses");
+        (base_url, server)
+    }
 }

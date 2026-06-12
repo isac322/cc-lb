@@ -95,6 +95,12 @@ async fn create_upstream(storage: &Storage, name: &str) -> UpstreamRecord {
             kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
             api_key_ciphertext: Some(vec![1, 2, 3]),
+            warmup_enabled: false,
+            next_warmup_at: None,
+            last_warmup_cycle_key: None,
+            warmup_lease_holder: None,
+            warmup_lease_until_unix_secs: None,
+            warmup_dialect_plugin: None,
         },
     )
     .await
@@ -426,6 +432,37 @@ impl UpstreamStore for BlockingUpstreamStore {
     }
 
     async fn hard_delete(&self, _id: Uuid) -> StorageResult<()> {
+        unimplemented!()
+    }
+
+    async fn claim_warmup_lease(
+        &self,
+        _upstream_id: Uuid,
+        _holder: &str,
+        _ttl_secs: i64,
+    ) -> StorageResult<bool> {
+        unimplemented!()
+    }
+
+    async fn write_warmup_cycle_key(
+        &self,
+        _upstream_id: Uuid,
+        _holder: &str,
+        _new_cycle_key: i64,
+        _next_warmup_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> StorageResult<bool> {
+        unimplemented!()
+    }
+
+    async fn release_warmup_lease(&self, _id: Uuid, _holder: &str) -> StorageResult<bool> {
+        unimplemented!()
+    }
+
+    async fn clear_warmup_dialect_plugin(
+        &self,
+        _id: Uuid,
+        _expected_revision: u64,
+    ) -> StorageResult<Option<UpstreamRecord>> {
         unimplemented!()
     }
 }
