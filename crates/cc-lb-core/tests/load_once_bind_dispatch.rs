@@ -124,7 +124,7 @@ async fn lifecycle_explicit_pipeline_fails_closed_and_uses_explicit_hook()
         .await?;
     let (status, _headers, _body) = collect_body(response).await;
 
-    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
         global_router_hits.lock().unwrap().as_slice(),
         &[] as &[String]
@@ -271,7 +271,11 @@ impl FilterPlugin for RecordingFilter {
         _principal: &Principal,
         _candidates: &[UpstreamCandidate],
     ) -> Result<FilterOutput, FilterError> {
-        unimplemented!("RecordingFilter({}) is only cached in this test", self.name)
+        Ok(FilterOutput {
+            kept_upstream_ids: vec![],
+            reason: format!("{} rejected all candidates", self.name),
+            per_candidate_reasons: vec![],
+        })
     }
 
     fn plugin_id(&self) -> uuid::Uuid {

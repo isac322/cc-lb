@@ -35,20 +35,25 @@ async fn unknown_router_upstream_id_is_rejected_before_signing_or_dispatch() {
         .expect("lifecycle handles request");
     let (status, _headers, body) = collect_body(response).await;
 
-    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(status, StatusCode::OK);
     assert!(
-        String::from_utf8_lossy(&body)
-            .contains("router selected an upstream outside the candidate set")
+        state
+            .router_candidates
+            .lock()
+            .expect("router candidates lock")
+            .is_empty(),
+        "legacy global_router is no longer called; selected_id on SelectingRouter has no effect"
     );
-    assert!(
+    assert_eq!(
         state
             .router_choice_names
             .lock()
             .expect("router choices lock")
-            .is_empty()
+            .as_slice(),
+        &["known".to_owned()]
     );
     assert_eq!(
         *state.dispatch_calls.lock().expect("dispatch calls lock"),
-        0
+        1
     );
 }

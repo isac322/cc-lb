@@ -30,15 +30,18 @@ async fn no_candidates_are_passed_to_router_and_return_route_error() {
         .expect("lifecycle handles request");
     let (status, _headers, body) = collect_body(response).await;
 
-    assert_eq!(status, StatusCode::BAD_GATEWAY);
-    assert!(String::from_utf8_lossy(&body).contains("no upstream route is configured"));
-    assert_eq!(
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert!(
+        String::from_utf8_lossy(&body)
+            .contains("no upstream candidates remain after routing filters")
+    );
+    assert!(
         state
             .router_candidates
             .lock()
             .expect("router candidates lock")
-            .as_slice(),
-        &[Vec::<uuid::Uuid>::new()]
+            .is_empty(),
+        "legacy global_router is no longer called when candidates are empty"
     );
     assert_eq!(
         *state.dispatch_calls.lock().expect("dispatch calls lock"),
