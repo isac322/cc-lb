@@ -2,8 +2,10 @@ use std::{any::Any, sync::Arc};
 
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
-    PluginChainConflictReason, PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore,
-    PluginSlot, PrincipalStore, StorageError, WasmBlob, WasmRegistryEntryInput,
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, BUILTIN_CACHE_AFFINITY_SHA256,
+    BUILTIN_CACHE_AFFINITY_WIRE_VERSION, PluginChainConflictReason, PluginChainEntryInput,
+    PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, PrincipalStore, StorageError,
+    WasmBlob, WasmRegistryEntryInput,
     principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind},
     sparse_order,
 };
@@ -37,6 +39,8 @@ where
     get_blob_bytes_returns_persisted_blob(storage).await?;
     registry_list_paginates(storage).await?;
     get_registry_entry_by_sha_returns_entry(storage).await?;
+    registry_by_id_returns_seeded_builtin_cache_affinity_on_storage(storage).await?;
+    insert_chain_entry_with_builtin_cache_affinity_succeeds_on_storage(storage).await?;
     registry_label_update_with_correct_revision_bumps_and_persists(storage).await?;
     registry_label_update_with_stale_revision_conflicts(storage).await?;
     chain_insert_preserves_sparse_order(storage).await?;
@@ -255,6 +259,102 @@ pub async fn get_registry_entry_by_sha_returns_entry<S: PluginRegistryStore>(
             == Some(created.id),
         "sha lookup works"
     );
+    Ok(())
+}
+
+plugin_registry_scenario!(
+    registry_by_id_returns_seeded_builtin_cache_affinity,
+    registry_by_id_returns_seeded_builtin_cache_affinity_on_storage
+);
+
+pub async fn registry_by_id_returns_seeded_builtin_cache_affinity_on_storage<
+    S: PluginRegistryStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let entry = storage
+        .get_registry_entry_by_id(BUILTIN_CACHE_AFFINITY_ID)
+        .await?
+        .expect("builtin cache-affinity registry row is seeded");
+    ensure!(entry.id == BUILTIN_CACHE_AFFINITY_ID, "builtin id matches");
+    ensure!(
+        entry.sha256 == BUILTIN_CACHE_AFFINITY_SHA256,
+        "builtin sha matches"
+    );
+    ensure!(
+        entry.name == BUILTIN_CACHE_AFFINITY_NAME,
+        "builtin name matches"
+    );
+    ensure!(
+        entry.original_filename == "builtin://cache-affinity",
+        "builtin filename matches"
+    );
+    ensure!(
+        entry.uploaded_by_admin_id == Uuid::nil(),
+        "builtin uploader is nil"
+    );
+    ensure!(
+        entry.wire_version == BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
+        "builtin wire version matches"
+    );
+    ensure!(entry.is_builtin, "builtin flag is persisted");
+    ensure!(entry.metadata.is_some(), "builtin metadata is persisted");
+    ensure!(
+        storage
+            .get_blob_bytes(BUILTIN_CACHE_AFFINITY_SHA256)
+            .await?
+            .is_some_and(|bytes| bytes.is_empty()),
+        "builtin zero-hash blob row is seeded"
+    );
+    Ok(())
+}
+
+plugin_registry_scenario!(
+    insert_chain_entry_with_builtin_cache_affinity_succeeds,
+    insert_chain_entry_with_builtin_cache_affinity_succeeds_on_storage
+);
+
+pub async fn insert_chain_entry_with_builtin_cache_affinity_succeeds_on_storage<
+    S: PluginRegistryStore + PrincipalStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let principal = PrincipalStore::create(storage, principal_create(42), BASE_TS + 42).await?;
+    let inserted = storage
+        .insert_chain_entry(PluginChainEntryInput {
+            principal_id: principal.id,
+            slot: PluginSlot::Router,
+            order: sparse_order::STEP,
+            wasm_registry_id: BUILTIN_CACHE_AFFINITY_ID,
+            config: json!({}),
+            sse_per_event: false,
+            batched_events_per_flush: 1,
+            batched_flush_ms: 100,
+            wire_version: Some(BUILTIN_CACHE_AFFINITY_WIRE_VERSION),
+        })
+        .await?;
+
+    ensure!(
+        inserted.wasm_registry_id == BUILTIN_CACHE_AFFINITY_ID,
+        "chain entry references builtin cache-affinity"
+    );
+    ensure!(
+        inserted.wire_version == Some(BUILTIN_CACHE_AFFINITY_WIRE_VERSION),
+        "chain entry preserves builtin wire version"
+    );
+    let listed = storage
+        .list_chain_for_principal(principal.id, PluginSlot::Router)
+        .await?;
+    ensure!(listed.len() == 1, "builtin chain insert is listed");
+    ensure!(
+        listed[0].id == inserted.id,
+        "listed chain is the inserted row"
+    );
+    let registry = storage
+        .get_registry_entry_by_id(BUILTIN_CACHE_AFFINITY_ID)
+        .await?
+        .expect("builtin remains registered after chain insert");
+    ensure!(registry.refcount == 1, "builtin refcount increments");
     Ok(())
 }
 

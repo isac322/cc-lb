@@ -281,6 +281,14 @@ macro_rules! plugin_registry_redb_test {
 }
 
 plugin_registry_redb_test!(
+    plugin_registry_registry_by_id_returns_seeded_builtin_cache_affinity_redb,
+    registry_by_id_returns_seeded_builtin_cache_affinity
+);
+plugin_registry_redb_test!(
+    plugin_registry_insert_chain_entry_with_builtin_cache_affinity_succeeds_redb,
+    insert_chain_entry_with_builtin_cache_affinity_succeeds
+);
+plugin_registry_redb_test!(
     plugin_registry_list_orphan_blobs_returns_blobs_without_registry_redb,
     list_orphan_blobs_returns_blobs_without_registry
 );

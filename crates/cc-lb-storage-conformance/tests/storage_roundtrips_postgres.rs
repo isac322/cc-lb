@@ -134,6 +134,22 @@ fn plugin_registry_store_postgres() {
 }
 
 #[test]
+fn plugin_registry_registry_by_id_returns_seeded_builtin_cache_affinity_postgres() {
+    run_postgres_scenario(
+        "registry_by_id_returns_seeded_builtin_cache_affinity",
+        plugin_registry_store::registry_by_id_returns_seeded_builtin_cache_affinity,
+    );
+}
+
+#[test]
+fn plugin_registry_insert_chain_entry_with_builtin_cache_affinity_succeeds_postgres() {
+    run_postgres_scenario(
+        "insert_chain_entry_with_builtin_cache_affinity_succeeds",
+        plugin_registry_store::insert_chain_entry_with_builtin_cache_affinity_succeeds,
+    );
+}
+
+#[test]
 fn plugin_registry_list_orphan_blobs_returns_blobs_without_registry_postgres() {
     run_postgres_scenario(
         "list_orphan_blobs_returns_blobs_without_registry",
