@@ -1048,9 +1048,7 @@ fn signer_unexpected_fallback(policy: FallbackPolicy) -> SignerError {
 
 #[cfg(test)]
 mod tests {
-    use bytes::Bytes;
-    use cc_lb_plugin_api::{PrincipalKind, RateLimitKind, RateLimitObservation, UpstreamKind};
-    use http::{HeaderMap, Method};
+    use cc_lb_plugin_api::{RateLimitKind, RateLimitObservation, UpstreamKind};
     use serde_json::json;
     use uuid::Uuid;
 

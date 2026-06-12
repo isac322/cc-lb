@@ -16,9 +16,11 @@ use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use arc_swap::ArcSwap;
+#[allow(deprecated)]
+use cc_lb_plugin_api::RouterPlugin;
 use cc_lb_plugin_api::{
-    FilterPlugin, ObservabilityHook, PluginManifest, PluginRuntime, RouterPlugin, RuntimeError,
-    SignerFactory, UpstreamDialect,
+    FilterPlugin, ObservabilityHook, PluginManifest, PluginRuntime, RuntimeError, SignerFactory,
+    UpstreamDialect,
 };
 use extism::{Manifest, Plugin, PluginBuilder, Wasm};
 use serde_json::Value;
@@ -272,6 +274,7 @@ impl ExtismRuntime {
         Ok((slot.clone(), StagedSlot { key, entry, slot }))
     }
 
+    #[allow(deprecated)]
     pub fn instantiate_router_for(
         &self,
         _principal_id: &str,
@@ -303,6 +306,7 @@ impl ExtismRuntime {
         Ok((Arc::new(ExtismObservabilityHook::new(slot, limits)), staged))
     }
 
+    #[allow(deprecated)]
     pub fn instantiate_router_global(
         &self,
         plugin_name: &str,
@@ -407,6 +411,7 @@ fn router_wire_removed_error() -> RuntimeError {
 }
 
 impl PluginRuntime for ExtismRuntime {
+    #[allow(deprecated)]
     fn instantiate_router(
         &self,
         _manifest: &PluginManifest,
