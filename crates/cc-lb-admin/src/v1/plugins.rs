@@ -158,9 +158,14 @@ async fn list_registry(
         Ok(entries) => entries,
         Err(error) => return storage_error(error),
     };
-    let mut all = Vec::with_capacity(storage_entries.len() + 1);
-    all.push(WasmRegistryEntry::builtin_cache_affinity(0));
-    all.extend(storage_entries);
+    let mut all = storage_entries;
+    if !all
+        .iter()
+        .any(|entry| entry.id == BUILTIN_CACHE_AFFINITY_ID)
+    {
+        all.push(WasmRegistryEntry::builtin_cache_affinity(0));
+    }
+    all.sort_by_key(|entry| entry.id);
     let total = all.len();
     let start = query
         .after
