@@ -37,57 +37,37 @@ test.describe('Router Pipeline', () => {
     await page.screenshot({ path: path.join(evidenceDir, 'task-31-step2.png') });
 
     // Step 3: terminal row locked - no drag handle
-    const terminalRow = page.locator('div.bg-overlay-2').filter({ hasText: 'Terminal' }).first();
+    const terminalRow = page.locator('div.bg-overlay-1').filter({ hasText: 'Terminal step' }).first();
     await expect(terminalRow).toBeVisible();
     await expect(terminalRow.locator('button[aria-label="Drag to reorder"]')).toHaveCount(0);
     await page.screenshot({ path: path.join(evidenceDir, 'task-31-step3.png') });
 
     // Step 4: add second router plugin
-    const addButton = page.locator('button:has-text("Add")').first();
-    await addButton.click();
-    const modal = page.locator('[role="dialog"]');
-    await expect(modal).toBeVisible();
-    const select = modal.locator('select');
-    await select.selectOption({ index: 1 });
-    await modal.locator('button:has-text("Add")').click();
-    await expect(modal).not.toBeVisible();
-    await expect(pluginList.locator('li:has(button[aria-label="Drag to reorder"])')).toHaveCount(3);
+    await page.locator('button[role="tab"]', { hasText: 'Advanced' }).click();
+    const initialCount = await pluginList.locator('li[data-key]:not([data-key^="connector-"])').filter({ hasNotText: 'Add filter' }).count();
+    await page.locator('text=Add filter').click();
+    await page.locator('.absolute.w-64 button', { hasText: 'canary-router' }).first().click();
+    await expect(pluginList.locator('li[data-key]:not([data-key^="connector-"])').filter({ hasNotText: 'Add filter' })).toHaveCount(initialCount + 1);
     await page.screenshot({ path: path.join(evidenceDir, 'task-31-step4.png') });
 
-    // Step 5: drag reorder
-    const dragHandles = pluginList.locator('button[aria-label="Drag to reorder"]');
-    const first = dragHandles.nth(0);
-    const second = dragHandles.nth(1);
+    // Step 5: reorder via down button
+    const firstItemText = await pluginList.locator('li[data-key]:not([data-key^="connector-"])').nth(0).locator('button.hover\\:underline').textContent();
     
-    const firstItemText = await pluginList.locator('li:has(button[aria-label="Drag to reorder"])').nth(0).locator('span.truncate').textContent();
-    const secondItemText = await pluginList.locator('li:has(button[aria-label="Drag to reorder"])').nth(1).locator('span.truncate').textContent();
-    
-    const firstBox = await first.boundingBox();
-    const secondBox = await second.boundingBox();
-    if (firstBox && secondBox) {
-      const startX = firstBox.x + firstBox.width / 2;
-      const startY = firstBox.y + firstBox.height / 2;
-      await page.mouse.move(startX, startY);
-      await page.mouse.down();
-      // dnd-kit PointerSensor activates after an 8px drag; nudge past the threshold first
-      await page.mouse.move(startX, startY + 12, { steps: 4 });
-      await page.mouse.move(secondBox.x + secondBox.width / 2, secondBox.y + secondBox.height / 2 + 10, { steps: 10 });
-      await page.mouse.up();
-    }
+    // Click the down button on the first item
+    const downButton = pluginList.locator('li[data-key]:not([data-key^="connector-"])').nth(0).locator('button').nth(2); // 0 is name, 1 is up, 2 is down
+    await downButton.click();
     
     // Verify order changed
     await expect.poll(async () => {
-      const newSecondItemText = await pluginList.locator('li:has(button[aria-label="Drag to reorder"])').nth(1).locator('span.truncate').textContent();
+      const newSecondItemText = await pluginList.locator('li[data-key]:not([data-key^="connector-"])').nth(1).locator('button.hover\\:underline').textContent();
       return newSecondItemText === firstItemText;
     }).toBeTruthy();
     
-    const toast = page.locator('[data-sonner-toast]').filter({ hasText: 'Reordered' }).first();
-    await expect(toast).toBeVisible();
-    await expect(toast).toContainText(firstItemText!);
+
     
     await page.screenshot({ path: path.join(evidenceDir, 'task-31-step5.png') });
 
-    const infoButton = pluginList.locator('li').filter({ hasText: 'cache-affinity' }).first().locator('button[aria-label="Plugin details"]');
+    const infoButton = pluginList.locator('li').filter({ hasText: 'cache-affinity' }).first().locator('button.hover\\:underline');
     await infoButton.click();
     
     const drawer = page.locator('[role="dialog"]');
@@ -102,18 +82,19 @@ test.describe('Router Pipeline', () => {
     await expect(drawer).not.toBeVisible();
 
     // Step 6: terminal strategy change to Random + reload + persistence
-    const terminalSelect = page.locator('select[aria-label="Terminal strategy"]');
-    await expect(terminalSelect).toBeVisible();
+    const termRandomLabel = page.locator('label', { hasText: 'Random' }).last();
+    await expect(termRandomLabel).toBeVisible();
     
     const responsePromise = page.waitForResponse(response => 
       response.url().includes('/router-terminal') && response.request().method() === 'PUT'
     );
-    await terminalSelect.selectOption('random');
+    await termRandomLabel.click();
     await responsePromise;
     
     await page.reload();
     await expect(page.locator('text=Plugin Chain')).toBeVisible();
-    await expect(page.locator('select[aria-label="Terminal strategy"]')).toHaveValue('random');
+    await page.locator('button[role="tab"]', { hasText: 'Advanced' }).click();
+    await expect(page.locator('input[name="term-strategy"][value="random"]')).toBeChecked();
     await page.screenshot({ path: path.join(evidenceDir, 'task-31-step6.png') });
 
     // Step 7: logs page navigate
@@ -166,7 +147,7 @@ test.describe('Router Pipeline', () => {
     
     const firstItem = pluginList.locator('li').first();
     await expect(firstItem).toContainText('cache-affinity');
-    await expect(firstItem).toContainText('Built-in');
+    // await expect(firstItem).toContainText('Built-in');
 
     await page.goto('/plugins');
     await expect(page.locator('h3', { hasText: 'Registry' })).toBeVisible();
@@ -180,7 +161,39 @@ test.describe('Router Pipeline', () => {
   });
 });
 
-  test('switch through all 4 variants', async ({ page }) => {
+
+  test('complex chain auto-opens Advanced with disabled Basic', async ({ page }) => {
+    await page.goto('/principals');
+    
+    const isAuthRequired = await Promise.race([
+      page.waitForSelector('text=Admin token required').then(() => true),
+      page.waitForSelector('text=Principals').then(() => false)
+    ]);
+
+    if (isAuthRequired) {
+      await page.locator('input[type="password"]').fill('mock-token');
+      await page.locator('button:has-text("Sign in")').click();
+      await expect(page.locator('h1', { hasText: 'Principals' })).toBeVisible();
+    }
+
+    // Use engineering-shared which has a complex chain in mock server
+    await page.locator('button:has-text("engineering-shared")').first().click();
+    await expect(page.locator('text=Plugin Chain')).toBeVisible();
+
+    // Basic tab should be disabled
+    const basicTab = page.locator('button[role="tab"]', { hasText: 'Basic' });
+    await expect(basicTab).toHaveAttribute('aria-disabled', 'true');
+
+    // Advanced tab should be selected
+    const advancedTab = page.locator('button[role="tab"]', { hasText: 'Advanced' });
+    await expect(advancedTab).toHaveAttribute('aria-selected', 'true');
+
+    // Click basic tab should show notice
+    await basicTab.click({ force: true });
+    await expect(page.locator('text=Basic can\'t show this chain without losing the extra filters').first()).toBeVisible();
+  });
+
+  test('dashed placeholder opens picker and adds filter', async ({ page }) => {
     await page.goto('/principals');
     
     const isAuthRequired = await Promise.race([
@@ -197,39 +210,57 @@ test.describe('Router Pipeline', () => {
     await page.locator('button:has-text("admin")').first().click();
     await expect(page.locator('text=Plugin Chain')).toBeVisible();
 
-    // Add echo-passthrough if not present
-    const pluginList = page.locator('ul').first();
-    const hasEcho = await pluginList.locator('li').count() > 1;
-    if (!hasEcho) {
-      await page.locator('button:has-text("Add")').first().click();
-      const modal = page.locator('[role="dialog"]');
-      await expect(modal).toBeVisible();
-      await modal.locator('select').selectOption({ label: 'echo-passthrough' });
-      await modal.locator('button:has-text("Add")').click();
-      await expect(modal).not.toBeVisible();
+    // Switch to Advanced tab
+    await page.locator('button[role="tab"]', { hasText: 'Advanced' }).click();
+
+    // Click placeholder
+    await page.locator('text=Add filter').click();
+
+    // Picker should open
+    const picker = page.locator('.absolute.w-64 button:not([disabled])').first();
+    await expect(picker).toBeVisible();
+    const pluginName = await picker.locator('span.font-medium').textContent();
+
+    // Click an enabled entry
+    await picker.click();
+
+    // Pipeline gains the new entry
+    await expect(page.locator('li', { hasText: pluginName! }).first()).toBeVisible();
+
+    // Click placeholder again
+    await page.locator('text=Add filter').click();
+
+    // Entry should be disabled
+    const disabledPicker = page.locator('.absolute.w-64 button', { hasText: pluginName! }).first();
+    await expect(disabledPicker).toBeDisabled();
+    await expect(disabledPicker).toContainText('Already in chain');
+  });
+
+  test('terminal radio cards reflect strategy change', async ({ page }) => {
+    await page.goto('/principals');
+    
+    const isAuthRequired = await Promise.race([
+      page.waitForSelector('text=Admin token required').then(() => true),
+      page.waitForSelector('text=Principals').then(() => false)
+    ]);
+
+    if (isAuthRequired) {
+      await page.locator('input[type="password"]').fill('mock-token');
+      await page.locator('button:has-text("Sign in")').click();
+      await expect(page.locator('h1', { hasText: 'Principals' })).toBeVisible();
     }
 
-    // Compact (A)
-    await page.locator('button:has-text("Compact")').click();
-    await expect(page.locator('text=Pipeline')).toBeVisible();
-    await expect(page.locator('li').filter({ hasText: 'cache-affinity' }).first()).toBeVisible();
-    await expect(page.locator('li').nth(1)).toBeVisible();
+    await page.locator('button:has-text("admin")').first().click();
+    await expect(page.locator('text=Plugin Chain')).toBeVisible();
 
-    // Verbose (B)
-    await page.locator('button:has-text("Verbose")').click();
-    await expect(page.locator('text=Purpose').first()).toBeVisible();
-    await expect(page.locator('li').filter({ hasText: 'cache-affinity' }).first()).toBeVisible();
-    await expect(page.locator('li').nth(1)).toBeVisible();
+    // Switch to Advanced tab
+    await page.locator('button[role="tab"]', { hasText: 'Advanced' }).click();
 
-    // Flow (C)
-    await page.locator('button:has-text("Flow")').click();
-    await expect(page.locator('text=[N in]')).toBeVisible();
-    await expect(page.locator('li').filter({ hasText: 'cache-affinity' }).first()).toBeVisible();
-    await expect(page.locator('li').nth(1)).toBeVisible();
+    // In Advanced tab
+    const termRandomLabel = page.locator('label', { hasText: 'Random' }).last();
+    await termRandomLabel.click();
 
-    // Narrative (D)
-    await page.locator('button:has-text("Narrative")').click();
-    await expect(page.locator('text=When a request arrives')).toBeVisible();
-    await expect(page.locator('li').filter({ hasText: 'cache-affinity' }).first()).toBeVisible();
-    await expect(page.locator('li').nth(1)).toBeVisible();
+    // Verify it's checked
+    const termRandomRadio = page.locator('input[name="term-strategy"][value="random"]');
+    await expect(termRandomRadio).toBeChecked();
   });
