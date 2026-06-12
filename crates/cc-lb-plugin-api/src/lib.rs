@@ -24,15 +24,17 @@ pub mod types;
 pub use errors::{
     DialectError, ObservabilityError, RouteError, RuntimeError, SignerError, UpstreamError,
 };
+#[allow(deprecated)]
+pub use traits::RouterPlugin;
 pub use traits::{
     ApiKeyAwareSignerFactory, FilterError, FilterOutput, FilterPlugin, ObservabilityHook,
-    PluginRuntime, RouterPlugin, Signer, SignerFactory, UpstreamDialect,
+    PluginRuntime, Signer, SignerFactory, UpstreamDialect,
 };
 pub use types::{
     CredentialStrategy, InternalError, InternalErrorKind, InternalErrorStage, ObserveEvent,
-    PerCandidateReason, PluginManifest, Principal, PrincipalKind, PrincipalQuotas,
-    RateLimitKind, RateLimitObservation, RequestContext, RetryDecision, RouteDecision,
-    RoutingTrace, ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability,
+    PerCandidateReason, PluginManifest, Principal, PrincipalKind, PrincipalQuotas, RateLimitKind,
+    RateLimitObservation, RequestContext, RetryDecision, RouteDecision, RoutingTrace,
+    ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability,
     SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState, TerminalStrategy, Upstream,
     UpstreamCandidate, UpstreamKind, shape_request, sign_request,
 };

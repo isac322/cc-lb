@@ -12,8 +12,8 @@ use crate::errors::{
 };
 use crate::types::{
     ObserveEvent, PerCandidateReason, PluginManifest, Principal, RequestContext, RetryDecision,
-    RouteDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability,
-    Upstream, UpstreamCandidate,
+    RouteDecision, ShapedRequest, ShapedRequestBuilder, SignedRequest, SigningCapability, Upstream,
+    UpstreamCandidate,
 };
 
 /// Filter plugin output containing upstream selection results and per-candidate reasons.
@@ -149,6 +149,7 @@ pub trait ObservabilityHook: Send + Sync {
 /// Runtime abstraction for concrete plugin systems such as Extism.
 pub trait PluginRuntime: Send + Sync {
     /// Instantiates a router plugin.
+    #[allow(deprecated)]
     fn instantiate_router(
         &self,
         manifest: &PluginManifest,
