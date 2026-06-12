@@ -349,6 +349,49 @@ async fn chain_insert_position_first_uses_min_minus_step() {
 }
 
 #[tokio::test]
+async fn chain_insert_accepts_builtin_cache_affinity_registry_id() {
+    let (_dir, storage) = temp_storage();
+    let principal_id = seed_principal(&storage, "principal-builtin-cache-affinity").await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body, _) = authed_json(
+        app.clone(),
+        "POST",
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
+        Some(json!({
+            "slot": "Router",
+            "wasm_registry_id": BUILTIN_CACHE_AFFINITY_ID,
+            "wire_version": 3
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["slot"], "router");
+    assert_eq!(
+        body["wasm_registry_id"],
+        BUILTIN_CACHE_AFFINITY_ID.to_string()
+    );
+    assert_eq!(body["wire_version"], 3);
+
+    let (status, _, chain, _) = authed_json(
+        app,
+        "GET",
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain?slot=Router"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = chain["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["id"], body["id"]);
+    assert_eq!(
+        entries[0]["wasm_registry_id"],
+        BUILTIN_CACHE_AFFINITY_ID.to_string()
+    );
+}
+
+#[tokio::test]
 async fn chain_insert_unknown_principal_returns_400() {
     let (_dir, storage) = temp_storage();
     let entry = seed_registry(&storage, 19, "plugin-unknown-principal").await;
