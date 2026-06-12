@@ -433,7 +433,7 @@ pub mod tests {
     use cc_lb_runtime_extism::handshake::build_offer;
     use cc_lb_runtime_extism::registry::RegistryLifecycle;
     use cc_lb_runtime_extism::self_check::SelfCheckExecutionError;
-    use cc_lb_storage_api::{BUILTIN_CACHE_AFFINITY_ID, PluginBlobRepo, RepoError};
+    use cc_lb_storage_api::{PluginBlobRepo, RepoError};
     use serde_json::json;
     use tokio::sync::{Mutex, Notify};
 
