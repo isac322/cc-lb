@@ -19,6 +19,20 @@ pub struct UnifiedQuotaObservation {
     pub disabled_reason: Option<String>,
 }
 
+impl Default for UnifiedQuotaObservation {
+    fn default() -> Self {
+        Self {
+            window: SubscriptionQuotaWindow::FiveHour,
+            utilization: None,
+            status: None,
+            resets_at_unix_secs: None,
+            surpassed_threshold: None,
+            representative_claim: None,
+            disabled_reason: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum LimitIdentity {
     Account(String),

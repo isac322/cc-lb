@@ -87,6 +87,14 @@ impl PollScheduleEstimator {
             .map(|state| state.next_poll_at)
     }
 
+    pub fn last_success_at(&self, upstream_id: Uuid) -> Option<SystemTime> {
+        self.state
+            .lock()
+            .expect("poll estimator state lock poisoned")
+            .get(&upstream_id)
+            .and_then(|state| state.last_success_at)
+    }
+
     pub fn is_due(&self, upstream_id: Uuid, now: SystemTime) -> bool {
         self.next_poll_at(upstream_id)
             .is_none_or(|next| next <= now)
@@ -153,6 +161,14 @@ impl PollScheduleEstimator {
     }
 
     pub fn record_network_failure(&self, upstream_id: Uuid, now: SystemTime) {
+        self.record_failure(upstream_id, now);
+    }
+
+    pub fn record_status_failure(&self, upstream_id: Uuid, now: SystemTime, _status: u16) {
+        self.record_failure(upstream_id, now);
+    }
+
+    fn record_failure(&self, upstream_id: Uuid, now: SystemTime) {
         let mut state = self
             .state
             .lock()
@@ -289,6 +305,17 @@ mod tests {
     }
 
     #[test]
+    fn status_failure_uses_network_failure_backoff() {
+        let estimator = PollScheduleEstimator::new(config());
+        let upstream_id = Uuid::new_v4();
+
+        estimator.record_status_failure(upstream_id, at(100), 401);
+        assert_eq!(next_secs(&estimator, upstream_id), 110);
+        estimator.record_status_failure(upstream_id, at(200), 403);
+        assert_eq!(next_secs(&estimator, upstream_id), 220);
+    }
+
+    #[test]
     fn qps_inferred_steady_state_uses_median_and_safety_factor() {
         let estimator = PollScheduleEstimator::new(config());
         let upstream_id = Uuid::new_v4();
@@ -326,6 +353,22 @@ mod tests {
 
         assert!(!estimator.is_due(upstream_id, at(109)));
         assert!(estimator.is_due(upstream_id, at(110)));
+    }
+
+    #[test]
+    fn last_success_at_reports_last_recorded_success() {
+        let estimator = PollScheduleEstimator::new(config());
+        let upstream_id = Uuid::new_v4();
+
+        assert_eq!(estimator.last_success_at(upstream_id), None);
+        estimator.record_network_failure(upstream_id, at(100));
+        assert_eq!(estimator.last_success_at(upstream_id), None);
+
+        estimator.record_success(upstream_id, at(200));
+        assert_eq!(estimator.last_success_at(upstream_id), Some(at(200)));
+
+        estimator.record_success(upstream_id, at(300));
+        assert_eq!(estimator.last_success_at(upstream_id), Some(at(300)));
     }
 
     #[test]

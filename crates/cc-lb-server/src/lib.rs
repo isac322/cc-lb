@@ -32,8 +32,10 @@ pub mod storage_factory;
 pub mod subscription_quota_cache;
 pub mod subscription_quota_gc;
 pub mod tls;
+pub mod upstream_warmup_loop;
 pub mod validate;
 pub mod version;
+pub mod warmup;
 
 pub use anthropic_compat_poller::{AnthropicCompatPoller, spawn_anthropic_compat_poller};
 pub use app::{App, BuildError, build_app, build_app_with_path, run_serve};

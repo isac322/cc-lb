@@ -12,6 +12,7 @@ async fn slow_mode_rate_limits_first_sse_frame() {
         slow_mode_bps: 512,
         files_cap_bytes: 104_857_600,
         tokens_expire_in: 3600,
+        ..AppConfig::default()
     })
     .oneshot(
         Request::builder()

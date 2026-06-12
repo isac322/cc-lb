@@ -650,6 +650,12 @@ async fn spawn_seeded_upstreams(storage: &RedbStorage) -> TestResult<Vec<SeededU
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: Some(Url::parse(&format!("http://{addr}"))?),
                 api_key_ciphertext: Some(vec![1, 2, 3]),
+                warmup_enabled: false,
+                warmup_dialect_plugin: None,
+                next_warmup_at: None,
+                last_warmup_cycle_key: None,
+                warmup_lease_holder: None,
+                warmup_lease_until_unix_secs: None,
             },
         )
         .await?;

@@ -44,6 +44,8 @@ use cc_lb_storage_api::{
     ManagedKeyStore, PluginBlobRepo, PluginRegistryRepo, RuntimeChangeNotifier, Storage,
 };
 use http_body_util::BodyExt;
+use hyper_rustls::HttpsConnectorBuilder;
+use hyper_util::rt::TokioExecutor;
 use serde::Serialize;
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -77,7 +79,10 @@ use crate::storage_factory;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 use crate::subscription_quota_gc::spawn_subscription_quota_gc;
 use crate::tls::{ReloadableListener, TlsState};
-use cc_lb_admin::{AdminState, ConfigDraftError, CurrentConfig, DynamicViewRebinder};
+use cc_lb_admin::{
+    AdminState, ConfigDraftError, CurrentConfig, DynamicViewRebinder, WarmupDialectDispatchError,
+    WarmupDialectDispatchErrorKind, WarmupDialectDispatchOutcome, WarmupDialectDispatcher,
+};
 
 const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_millis(500);
 
@@ -494,6 +499,12 @@ pub async fn seed_app_testing_storage(
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: upstream_base_url,
                 api_key_ciphertext: Some(Vec::new()),
+                warmup_enabled: false,
+                next_warmup_at: None,
+                last_warmup_cycle_key: None,
+                warmup_lease_holder: None,
+                warmup_lease_until_unix_secs: None,
+                warmup_dialect_plugin: None,
             },
         )
         .await
@@ -953,6 +964,26 @@ async fn build_app_with_storage_inner(
         );
         spawn_reconcile_shutdown(signals.subscribe(), cancel);
     }
+    if let (Some(replica_id), Some(lazy_refresher)) = (replica_id, lazy_refresher_concrete.clone())
+    {
+        let cancel = CancellationToken::new();
+        let warmup_loop = Arc::new(crate::upstream_warmup_loop::UpstreamWarmupLoop::new(
+            stores.clone(),
+            aead.clone(),
+            lazy_refresher,
+            subscription_quota_sink.clone(),
+            replica_id,
+            Some(runtime.clone()),
+            data_dir.clone(),
+        ));
+        tracing::info!(
+            target: "warmup",
+            replica_id = %replica_id,
+            action = "loop_spawned"
+        );
+        tokio::spawn(warmup_loop.run(cancel.clone()));
+        spawn_reconcile_shutdown(signals.subscribe(), cancel);
+    }
     let state = ProxyState {
         lifecycle: lifecycle.clone(),
         breaker_registry,
@@ -978,6 +1009,15 @@ async fn build_app_with_storage_inner(
         lifecycle: Some(lifecycle.clone()),
         subscription_metadata_hook: Some(subscription_metadata_hook),
         lazy_refresher: lazy_refresher.clone(),
+        runtime: Some(runtime.clone()),
+        data_dir: Some(data_dir.clone()),
+        warmup_dialect_dispatcher: lazy_refresher_concrete.clone().map(|lazy_refresher| {
+            Arc::new(ServerWarmupDialectDispatcher {
+                stores: stores.clone(),
+                aead: aead.clone(),
+                lazy_refresher,
+            }) as Arc<dyn WarmupDialectDispatcher>
+        }),
         audit_sink: audit_sink.clone(),
         dynamic_view: dynamic_view.clone(),
         config: admin_config,
@@ -1009,6 +1049,72 @@ async fn build_app_with_storage_inner(
         tls_state,
         server_state,
     })
+}
+
+struct ServerWarmupDialectDispatcher {
+    stores: Arc<DynamicStores>,
+    aead: Arc<AeadService>,
+    lazy_refresher: Arc<LazyRefresher>,
+}
+
+#[async_trait]
+impl WarmupDialectDispatcher for ServerWarmupDialectDispatcher {
+    async fn dispatch_warmup_with_dialect(
+        &self,
+        runtime: &ExtismRuntime,
+        data_dir: &Path,
+        upstream: &cc_lb_storage_api::UpstreamRecord,
+    ) -> Result<WarmupDialectDispatchOutcome, WarmupDialectDispatchError> {
+        let http = warmup_dialect_http_client();
+        let outcome = crate::warmup::dialect::dispatch_warmup_with_dialect(
+            runtime,
+            self.stores.as_ref(),
+            data_dir,
+            self.aead.clone(),
+            self.lazy_refresher.clone(),
+            upstream,
+            &http,
+        )
+        .await
+        .map_err(map_warmup_dialect_error)?;
+
+        Ok(WarmupDialectDispatchOutcome {
+            status: outcome.status,
+            headers: outcome.headers,
+        })
+    }
+}
+
+fn warmup_dialect_http_client() -> crate::warmup::request::WarmupHttpClient {
+    let connector = HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_http1()
+        .enable_http2()
+        .build();
+    hyper_util::client::legacy::Client::builder(TokioExecutor::new()).build(connector)
+}
+
+fn map_warmup_dialect_error(
+    error: crate::warmup::dialect::WarmupDispatchError,
+) -> WarmupDialectDispatchError {
+    let kind = match &error {
+        crate::warmup::dialect::WarmupDispatchError::Storage(_)
+        | crate::warmup::dialect::WarmupDispatchError::Http(_) => {
+            WarmupDialectDispatchErrorKind::Transient
+        }
+        crate::warmup::dialect::WarmupDispatchError::MissingPlugin
+        | crate::warmup::dialect::WarmupDispatchError::RegistryNotFound(_)
+        | crate::warmup::dialect::WarmupDispatchError::Materialize(_)
+        | crate::warmup::dialect::WarmupDispatchError::Instantiate(_)
+        | crate::warmup::dialect::WarmupDispatchError::BodySerialize(_)
+        | crate::warmup::dialect::WarmupDispatchError::Shape(_)
+        | crate::warmup::dialect::WarmupDispatchError::Signer(_)
+        | crate::warmup::dialect::WarmupDispatchError::RequestBuild(_) => {
+            WarmupDialectDispatchErrorKind::Permanent
+        }
+    };
+    WarmupDialectDispatchError::new(kind, error.to_string())
 }
 
 #[allow(clippy::too_many_arguments)]

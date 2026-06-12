@@ -565,3 +565,53 @@ fn now_unix_secs() -> u64 {
         .unwrap_or_default()
         .as_secs()
 }
+
+#[cfg(test)]
+mod tests {
+    use cc_lb_storage_api::upstream::UpstreamKind;
+    use cc_lb_storage_api::{UpstreamCreate, UpstreamStore};
+    use cc_lb_storage_redb::Storage;
+    use uuid::Uuid;
+
+    #[tokio::test]
+    async fn release_lease_on_failure_clears_refresh_lease() {
+        let storage = Storage::open_in_memory([41; 32]).expect("storage opens");
+        let record = storage
+            .create(UpstreamCreate {
+                name: "failure-clear".to_owned(),
+                kind: UpstreamKind::AnthropicOauth,
+                base_url: None,
+                api_key_ciphertext: None,
+                warmup_enabled: false,
+                next_warmup_at: None,
+                last_warmup_cycle_key: None,
+                warmup_lease_holder: None,
+                warmup_lease_until_unix_secs: None,
+                warmup_dialect_plugin: None,
+            })
+            .await
+            .expect("upstream created");
+        let holder = Uuid::new_v4();
+        assert!(
+            storage
+                .claim_refresh_lease(record.id, holder, 60)
+                .await
+                .expect("lease claimed")
+        );
+
+        storage
+            .release_lease_on_failure(record.id, holder, "status_401".to_owned())
+            .await
+            .expect("failure marker written");
+
+        let stored = storage
+            .get_by_id(record.id)
+            .await
+            .expect("read upstream")
+            .expect("upstream exists");
+        assert_eq!(stored.refresh_lease_holder, None);
+        assert_eq!(stored.refresh_lease_until_unix_secs, None);
+        assert_eq!(stored.last_apply_error.as_deref(), Some("status_401"));
+        assert!(stored.last_apply_at_unix_secs.is_some());
+    }
+}
