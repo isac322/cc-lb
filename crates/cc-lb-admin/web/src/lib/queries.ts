@@ -643,7 +643,17 @@ export function useOAuthComplete() {
         },
         { state_token: string; code: string }
       >(`/admin/v1/upstreams/${id}/oauth/complete`, { state_token, code }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.upstreams }),
+    // Only complete() success means the backend's OAuth credential changed.
+    // useOAuthStart() intentionally invalidates nothing: clicking "Reconnect"
+    // and then bailing out of the modal must NOT flip the OAuth Status card.
+    onSuccess: (_data, { id }) => {
+      qc.invalidateQueries({ queryKey: qk.upstreams });
+      qc.invalidateQueries({ queryKey: qk.status });
+      qc.invalidateQueries({ queryKey: qk.upstreamOauthStatus(id) });
+      qc.invalidateQueries({
+        queryKey: qk.upstreamSubscriptionMetadata(id),
+      });
+    },
     onError: (error) => {
       const message =
         error instanceof ApiError

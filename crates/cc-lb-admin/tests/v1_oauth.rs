@@ -14,7 +14,7 @@ use axum::{
     http::{Request, StatusCode},
 };
 use cc_lb_admin::{AdminState, router};
-use cc_lb_aead::{AeadService, OAuthTokenBundle};
+use cc_lb_aead::{AeadEncryptedField, AeadService, OAuthTokenBundle};
 use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_core::spawn_audit_writer;
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -155,6 +155,53 @@ impl Fixture {
             .expect("request succeeds");
         json_response(response).await
     }
+
+    async fn get_oauth_status(&self, upstream_id: Uuid) -> (StatusCode, Value) {
+        let response = self
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("GET")
+                    .uri(format!("/admin/v1/upstreams/{upstream_id}/oauth/status"))
+                    .header("Authorization", "Bearer test-token")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request succeeds");
+        json_response(response).await
+    }
+
+    async fn seed_expired_credentials(
+        &self,
+        upstream: &cc_lb_storage_api::UpstreamRecord,
+    ) -> cc_lb_storage_api::UpstreamRecord {
+        let expired_at = now_unix_secs().saturating_sub(3600);
+        let bundle = OAuthTokenBundle {
+            access_token: "sk-ant-oat01-expired-seed".to_owned(),
+            refresh_token: "sk-ant-ort01-expired-seed".to_owned(),
+            expires_at_unix_secs: expired_at,
+            scopes: vec!["org:profile".to_owned()],
+        };
+        let encrypted = AeadEncryptedField::<OAuthTokenBundle>::encrypt(
+            self.aead.as_ref(),
+            &bundle,
+            upstream.id.as_bytes(),
+        )
+        .expect("encrypt expired bundle");
+        self.storage
+            .store_oauth_tokens(upstream.id, upstream.revision, encrypted)
+            .await
+            .expect("seed expired tokens")
+    }
+}
+
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_secs()
 }
 
 #[tokio::test]
@@ -386,6 +433,108 @@ async fn create_from_incomplete_draft_returns_invalid_state() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "invalid_state");
+}
+
+#[tokio::test]
+async fn oauth_status_reflects_completion_realtime() {
+    let fixture = Fixture::new().await;
+    let upstream = fixture
+        .create_upstream("realtime-status", UpstreamKind::AnthropicOauth)
+        .await;
+
+    let (status, before) = fixture.get_oauth_status(upstream.id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(before["has_credentials"], false);
+    assert_eq!(before["status"], "missing");
+    assert!(before["expires_at_unix_secs"].is_null());
+
+    let (status, start) = fixture.start(upstream.id).await;
+    assert_eq!(status, StatusCode::OK);
+    let code = authorize_code(start["authorize_url"].as_str().expect("authorize_url")).await;
+    let state_token = start["state_token"].as_str().expect("state_token");
+    let (status, _complete) = fixture.complete(upstream.id, state_token, &code).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, after) = fixture.get_oauth_status(upstream.id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(after["has_credentials"], true);
+    assert_eq!(after["status"], "active");
+    let expires = after["expires_at_unix_secs"]
+        .as_u64()
+        .expect("expires_at_unix_secs present after complete");
+    assert!(
+        expires > now_unix_secs(),
+        "expires_at_unix_secs {expires} should be in the future"
+    );
+    assert_eq!(after["refresh_token_present"], true);
+}
+
+#[tokio::test]
+async fn oauth_status_unchanged_when_only_start_called() {
+    let fixture = Fixture::new().await;
+    let upstream = fixture
+        .create_upstream("start-only-no-flip", UpstreamKind::AnthropicOauth)
+        .await;
+
+    let (status, before) = fixture.get_oauth_status(upstream.id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(before["has_credentials"], false);
+    assert_eq!(before["status"], "missing");
+
+    let (status, start) = fixture.start(upstream.id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(start["authorize_url"].as_str().is_some());
+
+    let (status, after) = fixture.get_oauth_status(upstream.id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        before, after,
+        "/oauth/status must be byte-identical when /oauth/complete has not run"
+    );
+}
+
+#[tokio::test]
+async fn oauth_status_flips_from_expired_to_active_after_reconnect() {
+    let fixture = Fixture::new().await;
+    let upstream = fixture
+        .create_upstream("reconnect-expired", UpstreamKind::AnthropicOauth)
+        .await;
+    let seeded = fixture.seed_expired_credentials(&upstream).await;
+
+    let (status, before) = fixture.get_oauth_status(upstream.id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(before["has_credentials"], true);
+    assert_eq!(before["status"], "expired");
+    let before_expires = before["expires_at_unix_secs"]
+        .as_u64()
+        .expect("seeded expiry");
+    assert!(
+        before_expires < now_unix_secs(),
+        "seeded expiry {before_expires} must be in the past"
+    );
+
+    let (status, start) = fixture.start(seeded.id).await;
+    assert_eq!(status, StatusCode::OK);
+    let code = authorize_code(start["authorize_url"].as_str().expect("authorize_url")).await;
+    let state_token = start["state_token"].as_str().expect("state_token");
+    let (status, _complete) = fixture.complete(seeded.id, state_token, &code).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, after) = fixture.get_oauth_status(seeded.id).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(after["has_credentials"], true);
+    assert_eq!(after["status"], "active");
+    let after_expires = after["expires_at_unix_secs"]
+        .as_u64()
+        .expect("expiry after reconnect");
+    assert!(
+        after_expires > now_unix_secs(),
+        "post-reconnect expiry {after_expires} must be in the future"
+    );
+    assert_ne!(
+        before_expires, after_expires,
+        "expiry must change once new tokens land"
+    );
 }
 
 fn test_config(oauth_addr: SocketAddr) -> Config {
