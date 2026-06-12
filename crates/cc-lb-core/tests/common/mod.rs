@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code, deprecated)]
 
 use std::collections::VecDeque;
 use std::convert::Infallible;
