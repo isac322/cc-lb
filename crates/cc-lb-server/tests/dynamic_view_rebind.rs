@@ -64,6 +64,12 @@ async fn create_api_key_upstream(
             kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
             api_key_ciphertext: Some(vec![1, 2, 3]),
+            warmup_enabled: false,
+            next_warmup_at: None,
+            last_warmup_cycle_key: None,
+            warmup_lease_holder: None,
+            warmup_lease_until_unix_secs: None,
+            warmup_dialect_plugin: None,
         },
     )
     .await
@@ -141,6 +147,12 @@ async fn corrupt_oauth_upstream_is_error_while_other_upstreams_stay_active() {
             kind: UpstreamKind::AnthropicOauth,
             base_url: None,
             api_key_ciphertext: None,
+            warmup_enabled: false,
+            next_warmup_at: None,
+            last_warmup_cycle_key: None,
+            warmup_lease_holder: None,
+            warmup_lease_until_unix_secs: None,
+            warmup_dialect_plugin: None,
         },
     )
     .await

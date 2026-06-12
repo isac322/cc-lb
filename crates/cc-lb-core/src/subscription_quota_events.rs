@@ -4,13 +4,46 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_storage_api::{
-    Storage, SubscriptionQuotaObservationRecord, SubscriptionQuotaSource, SubscriptionQuotaWindow,
+    Storage, SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaSource, SubscriptionQuotaWindow,
 };
 use thiserror::Error;
 use tokio::sync::mpsc::{self, Receiver, Sender, error::TrySendError};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+use crate::rate_limit_headers::UnifiedQuotaObservation;
+
+/// Build a header-sourced `SubscriptionQuotaObservationRecord` from a parsed
+/// unified quota observation. Mirrors the pass-through performed by
+/// `lifecycle.rs::record_subscription_quota_observations` and avoids
+/// duplicating field-by-field construction in callers (e.g. warm-up loop,
+/// fire-now admin handler).
+pub fn unified_observation_to_record(
+    upstream_id: Uuid,
+    observation: UnifiedQuotaObservation,
+    observed_at_unix_millis: u64,
+) -> SubscriptionQuotaObservationRecord {
+    SubscriptionQuotaObservationRecord {
+        upstream_id,
+        window: observation.window,
+        source: SubscriptionQuotaSource::Header,
+        sample_kind: SubscriptionQuotaSampleKind::Sample,
+        observed_at_unix_millis,
+        sample_id: Uuid::new_v4(),
+        utilization: observation.utilization,
+        status: observation.status,
+        resets_at_unix_secs: observation.resets_at_unix_secs,
+        surpassed_threshold: observation.surpassed_threshold,
+        representative_claim: observation.representative_claim,
+        disabled_reason: observation.disabled_reason,
+        extra_usage_enabled: None,
+        extra_usage_monthly_limit: None,
+        extra_usage_used_credits: None,
+        ingested_at_unix_millis: observed_at_unix_millis,
+    }
+}
 
 pub const DEFAULT_SUBSCRIPTION_QUOTA_CHANNEL_CAPACITY: usize = 4096;
 

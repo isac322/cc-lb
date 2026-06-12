@@ -17,6 +17,7 @@ async-trait.workspace = true
 async-stream.workspace = true
 arc-swap.workspace = true
 axum = { workspace = true, features = ["multipart"] }
+chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 schemars.workspace = true
@@ -30,10 +31,12 @@ cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-core = { path = "../cc-lb-core" }
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
+cc-lb-runtime-extism = { path = "../cc-lb-runtime-extism" }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
 tracing.workspace = true
 http.workspace = true
 http-body-util.workspace = true
+hex.workspace = true
 humantime = "2.3"
 bytes.workspace = true
 base64.workspace = true
@@ -42,7 +45,8 @@ hyper-rustls.workspace = true
 hyper-util = { workspace = true, features = ["client", "client-legacy", "http1", "tokio"] }
 oauth2.workspace = true
 secrecy.workspace = true
-sha2 = "0.11"
+sha2.workspace = true
+siphasher = "1"
 extism.workspace = true
 tower.workspace = true
 thiserror.workspace = true

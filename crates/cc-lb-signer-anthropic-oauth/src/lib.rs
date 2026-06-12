@@ -958,6 +958,12 @@ mod tests {
                 revision: 1,
                 created_at_unix_secs: now,
                 updated_at_unix_secs: now,
+                warmup_enabled: create.warmup_enabled,
+                next_warmup_at: create.next_warmup_at,
+                last_warmup_cycle_key: create.last_warmup_cycle_key,
+                warmup_lease_holder: create.warmup_lease_holder,
+                warmup_lease_until_unix_secs: create.warmup_lease_until_unix_secs,
+                warmup_dialect_plugin: None,
             };
             records.push(record.clone());
             Ok(record)
@@ -1103,6 +1109,41 @@ mod tests {
         async fn hard_delete(&self, id: UpstreamRecordId) -> StorageResult<()> {
             self.records.lock().await.retain(|record| record.id != id);
             Ok(())
+        }
+
+        async fn claim_warmup_lease(
+            &self,
+            _upstream_id: UpstreamRecordId,
+            _holder: &str,
+            _ttl_secs: i64,
+        ) -> StorageResult<bool> {
+            Ok(true)
+        }
+
+        async fn write_warmup_cycle_key(
+            &self,
+            _upstream_id: UpstreamRecordId,
+            _holder: &str,
+            _new_cycle_key: i64,
+            _next_warmup_at: Option<chrono::DateTime<chrono::Utc>>,
+        ) -> StorageResult<bool> {
+            Ok(true)
+        }
+
+        async fn release_warmup_lease(
+            &self,
+            _id: UpstreamRecordId,
+            _holder: &str,
+        ) -> StorageResult<bool> {
+            Ok(true)
+        }
+
+        async fn clear_warmup_dialect_plugin(
+            &self,
+            _id: Uuid,
+            _expected_revision: u64,
+        ) -> StorageResult<Option<UpstreamRecord>> {
+            Ok(None)
         }
     }
 
@@ -1558,6 +1599,12 @@ mod tests {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: None,
                 api_key_ciphertext: None,
+                warmup_enabled: false,
+                next_warmup_at: None,
+                last_warmup_cycle_key: None,
+                warmup_lease_holder: None,
+                warmup_lease_until_unix_secs: None,
+                warmup_dialect_plugin: None,
             })
             .await
             .unwrap()
