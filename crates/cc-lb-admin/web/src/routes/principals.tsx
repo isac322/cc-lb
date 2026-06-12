@@ -317,7 +317,9 @@ function PrincipalDetail({
         <DefaultLimitsCard principal={principal} />
         <LiveLimitsCard principal={principal} />
         <RecentRequestsCard principal={principal} />
-        <PluginChainCard principal={principal} />
+        <RouterSlotEditor principalId={principal.id} />
+        <ObservabilityHookEditor principalId={principal.id} />
+        <ShapeSlotEditor principalId={principal.id} />
         <ApiKeysCard principal={principal} />
       </div>
     </>
@@ -521,22 +523,6 @@ function LiveLimitsCard({ principal }: { principal: Principal }) {
             No live limit data observed.
           </p>
         )}
-      </CardBody>
-    </Card>
-  );
-}
-
-function PluginChainCard({ principal }: { principal: Principal }) {
-  return (
-    <Card>
-      <CardHeader
-        title="Plugin Chain"
-        subtitle="Router runs DbRouter by default; Shape inherits the router's dialect when unset; Observability hooks are chained in order."
-      />
-      <CardBody className="space-y-5">
-        <RouterSlotEditor principalId={principal.id} />
-        <ObservabilityHookEditor principalId={principal.id} />
-        <ShapeSlotEditor principalId={principal.id} />
       </CardBody>
     </Card>
   );
@@ -958,19 +944,14 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
   const strategy = terminalStrategy.data?.strategy ?? 'first-pick';
 
   return (
-    <div className="glass rounded-sm">
-      <div className="flex flex-col px-4 pt-3 border-b border-subtle relative">
-        <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-4 mb-3">
-          <div className="min-w-0">
-            <h3 className="text-sm font-medium text-text">Router</h3>
-            <p className="mt-0.5 text-xs text-text-faint">
-              Pick which upstream serves each request. Returning users stick to
-              the upstream they hit before unless you turn that off; new users
-              go to the first eligible upstream by default.
-            </p>
-          </div>
-        </div>
-        <div className="flex items-center gap-1 w-fit" role="tablist">
+    <Card>
+      <CardHeader
+        title="Router"
+        subtitle="Pick which upstream serves each request. Returning users stick to the upstream they hit before unless you turn that off; new users go to the first eligible upstream by default."
+        className="border-b-0 pb-0"
+      />
+      <div className="flex flex-col px-4 border-b border-subtle relative">
+        <div className="flex items-center gap-1 w-fit mt-3" role="tablist">
           <Hint
             label={
               isComplex
@@ -1023,7 +1004,7 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
           </div>
         )}
       </div>
-      <div className="p-4">
+      <CardBody>
         {activeTab === 'basic' && (
           <div role="tabpanel" className="space-y-5">
             <div className="flex items-center justify-between p-3 border border-subtle rounded-sm bg-overlay-1">
@@ -1387,7 +1368,7 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
             </div>
           </div>
         )}
-      </div>
+      </CardBody>
 
       {pickerOpen &&
         pickerAnchor &&
@@ -1445,14 +1426,12 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
           if (!open) setDetailPlugin(null);
         }}
       />
-    </div>
+    </Card>
   );
 }
 
 function ShapeSlotEditor({ principalId }: { principalId: string }) {
   const slot = 'shape';
-  const label = 'Shape';
-  const desc = 'Request/response transform';
   const chain = usePluginChain(principalId, slot);
   const registry = usePluginRegistry();
   const insert = useInsertChainEntry();
@@ -1534,56 +1513,57 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
   const candidates = registry.data?.entries ?? [];
 
   return (
-    <div>
-      <div className="flex items-end justify-between mb-3">
-        <div>
+    <Card>
+      <CardHeader
+        title={
           <div className="flex items-center gap-2">
-            <div className="text-sm font-medium text-text">{label}</div>
+            Shape
             {hasMultiple && (
               <Hint label="Database invariant violated: multiple shape entries detected. Selecting a new option will clear them.">
                 <Badge tone="warn">Multiple entries detected</Badge>
               </Hint>
             )}
           </div>
-          <div className="text-[11px] text-text-faint">{desc}</div>
-        </div>
-      </div>
-      <ul
-        className="space-y-2"
-        role="radiogroup"
-        aria-busy={mutatingId !== null}
-      >
-        <SlotRadioCard
-          name="None"
-          desc="Inherits the dialect returned by the router (typically anthropic-direct)."
-          isActive={!activeEntry}
-          isMutating={mutatingId === 'none'}
-          isMutatingOther={mutatingId !== null && mutatingId !== 'none'}
-          isNone
-          badge="Off"
-          onClick={() => handleSelect(null)}
-        />
-        {/* TODO(slot-filter): once usePluginStatus carries slot metadata reliably, filter candidates by slot. */}
-        {candidates.map((p) => (
+        }
+        subtitle="Request / response transform. Inherits the dialect returned by the router when unset."
+      />
+      <CardBody>
+        <ul
+          className="space-y-2"
+          role="radiogroup"
+          aria-busy={mutatingId !== null}
+        >
           <SlotRadioCard
-            key={p.id}
-            name={p.name}
-            desc={p.label || 'Custom shape plugin'}
-            isActive={activeEntry?.wasm_registry_id === p.id}
-            isMutating={mutatingId === p.id}
-            isMutatingOther={mutatingId !== null && mutatingId !== p.id}
-            onClick={() => handleSelect(p.id)}
+            name="None"
+            desc="Inherits the dialect returned by the router (typically anthropic-direct)."
+            isActive={!activeEntry}
+            isMutating={mutatingId === 'none'}
+            isMutatingOther={mutatingId !== null && mutatingId !== 'none'}
+            isNone
+            badge="Off"
+            onClick={() => handleSelect(null)}
           />
-        ))}
-      </ul>
-    </div>
+          {/* TODO(slot-filter): once usePluginStatus carries slot metadata reliably, filter candidates by slot. */}
+          {candidates.map((p) => (
+            <SlotRadioCard
+              key={p.id}
+              name={p.name}
+              desc={p.label || 'Custom shape plugin'}
+              isActive={activeEntry?.wasm_registry_id === p.id}
+              isMutating={mutatingId === p.id}
+              isMutatingOther={mutatingId !== null && mutatingId !== p.id}
+              onClick={() => handleSelect(p.id)}
+            />
+          ))}
+        </ul>
+      </CardBody>
+    </Card>
   );
 }
 
 function ObservabilityHookEditor({ principalId }: { principalId: string }) {
   const slot = 'observability_hook';
   const label = 'Observability';
-  const desc = 'SSE / audit hooks. Executed in order. Multiple allowed.';
   const chain = usePluginChain(principalId, slot);
   const registry = usePluginRegistry();
   const reorder = useReorderChain();
@@ -1632,137 +1612,139 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
   };
 
   return (
-    <div>
-      <div className="flex items-end justify-between mb-2">
-        <div>
-          <div className="text-sm font-medium text-text">{label}</div>
-          <div className="text-[11px] text-text-faint">{desc}</div>
-        </div>
-        <Button
-          size="sm"
-          iconLeft={<Plus className="w-3 h-3" />}
-          onClick={() => setAddOpen(true)}
-        >
-          Add
-        </Button>
-      </div>
-      {entries.length ? (
-        <DndContext
-          sensors={sensors}
-          collisionDetection={closestCenter}
-          onDragEnd={onDragEnd}
-        >
-          <SortableContext
-            items={entries.map((e) => e.id)}
-            strategy={verticalListSortingStrategy}
+    <Card>
+      <CardHeader
+        title="Observability"
+        subtitle="SSE / audit hooks. Executed in order. Multiple allowed."
+        action={
+          <Button
+            size="sm"
+            iconLeft={<Plus className="w-3 h-3" />}
+            onClick={() => setAddOpen(true)}
           >
-            <ul className="space-y-1.5">
-              {entries.map((e) => {
-                const reg = registry.data?.entries.find(
-                  (r) => r.id === e.wasm_registry_id,
-                );
-                return (
-                  <SortableChainItem
-                    key={e.id}
-                    id={e.id}
-                    order={e.order}
-                    name={reg?.name ?? e.wasm_registry_id}
-                    onDelete={() =>
-                      setPendingRemove({
-                        id: e.id,
-                        revision: e.revision,
-                        name: reg?.name ?? e.wasm_registry_id,
-                      })
-                    }
-                  />
-                );
-              })}
-            </ul>
-          </SortableContext>
-        </DndContext>
-      ) : (
-        <button
-          type="button"
-          className="w-full border border-dashed border-subtle rounded-sm py-4 text-xs text-text-faint hover:text-text hover:border-[color:var(--color-border-strong)]"
-          onClick={() => setAddOpen(true)}
-        >
-          + Set {label.toLowerCase()} plugin
-        </button>
-      )}
-
-      <Modal
-        open={addOpen}
-        onOpenChange={setAddOpen}
-        title={`Add plugin to ${label}`}
-        footer={
-          <>
-            <Button onClick={() => setAddOpen(false)}>Cancel</Button>
-            <Button
-              variant="primary"
-              disabled={!selectedPluginId}
-              onClick={() =>
-                insert.mutate(
-                  {
-                    pid: principalId,
-                    body: { slot, wasm_registry_id: selectedPluginId },
-                  },
-                  {
-                    onSuccess: () => {
-                      toast.success('Plugin added');
-                      setAddOpen(false);
-                      setSelectedPluginId('');
-                    },
-                  },
-                )
-              }
-            >
-              Add
-            </Button>
-          </>
+            Add
+          </Button>
         }
-      >
-        <Field label="Plugin" required>
-          <select
-            className={INPUT_CLASS}
-            value={selectedPluginId}
-            onChange={(e) => setSelectedPluginId(e.target.value)}
-          >
-            <option value="">— select —</option>
-            {registry.data?.entries.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-              </option>
-            ))}
-          </select>
-        </Field>
-      </Modal>
-
-      <ConfirmDialog
-        open={pendingRemove !== null}
-        onOpenChange={(o) => {
-          if (!o) setPendingRemove(null);
-        }}
-        title="Remove plugin from chain?"
-        description={
-          pendingRemove ? (
-            <>
-              <span className="font-mono">{pendingRemove.name}</span> will be
-              removed from the {label} chain. You can re-add it later.
-            </>
-          ) : null
-        }
-        confirmLabel="Remove"
-        destructive
-        onConfirm={() => {
-          if (!pendingRemove) return;
-          del.mutate(
-            { id: pendingRemove.id, revision: pendingRemove.revision },
-            { onSuccess: () => toast.success('Plugin removed from chain') },
-          );
-          setPendingRemove(null);
-        }}
       />
-    </div>
+      <CardBody>
+        {entries.length ? (
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={onDragEnd}
+          >
+            <SortableContext
+              items={entries.map((e) => e.id)}
+              strategy={verticalListSortingStrategy}
+            >
+              <ul className="space-y-1.5">
+                {entries.map((e) => {
+                  const reg = registry.data?.entries.find(
+                    (r) => r.id === e.wasm_registry_id,
+                  );
+                  return (
+                    <SortableChainItem
+                      key={e.id}
+                      id={e.id}
+                      order={e.order}
+                      name={reg?.name ?? e.wasm_registry_id}
+                      onDelete={() =>
+                        setPendingRemove({
+                          id: e.id,
+                          revision: e.revision,
+                          name: reg?.name ?? e.wasm_registry_id,
+                        })
+                      }
+                    />
+                  );
+                })}
+              </ul>
+            </SortableContext>
+          </DndContext>
+        ) : (
+          <button
+            type="button"
+            className="w-full border border-dashed border-subtle rounded-sm py-4 text-xs text-text-faint hover:text-text hover:border-[color:var(--color-border-strong)]"
+            onClick={() => setAddOpen(true)}
+          >
+            + Set {label.toLowerCase()} plugin
+          </button>
+        )}
+
+        <Modal
+          open={addOpen}
+          onOpenChange={setAddOpen}
+          title={`Add plugin to ${label}`}
+          footer={
+            <>
+              <Button onClick={() => setAddOpen(false)}>Cancel</Button>
+              <Button
+                variant="primary"
+                disabled={!selectedPluginId}
+                onClick={() =>
+                  insert.mutate(
+                    {
+                      pid: principalId,
+                      body: { slot, wasm_registry_id: selectedPluginId },
+                    },
+                    {
+                      onSuccess: () => {
+                        toast.success('Plugin added');
+                        setAddOpen(false);
+                        setSelectedPluginId('');
+                      },
+                    },
+                  )
+                }
+              >
+                Add
+              </Button>
+            </>
+          }
+        >
+          <Field label="Plugin" required>
+            <select
+              className={INPUT_CLASS}
+              value={selectedPluginId}
+              onChange={(e) => setSelectedPluginId(e.target.value)}
+            >
+              <option value="">— select —</option>
+              {registry.data?.entries.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+          </Field>
+        </Modal>
+
+        <ConfirmDialog
+          open={pendingRemove !== null}
+          onOpenChange={(o) => {
+            if (!o) setPendingRemove(null);
+          }}
+          title="Remove plugin from chain?"
+          description={
+            pendingRemove ? (
+              <>
+                <span className="font-mono">{pendingRemove.name}</span> will be
+                removed from the {label} chain. You can re-add it later.
+              </>
+            ) : null
+          }
+          confirmLabel="Remove"
+          destructive
+          onConfirm={() => {
+            if (!pendingRemove) return;
+            del.mutate(
+              { id: pendingRemove.id, revision: pendingRemove.revision },
+              { onSuccess: () => toast.success('Plugin removed from chain') },
+            );
+            setPendingRemove(null);
+          }}
+        />
+      </CardBody>
+    </Card>
   );
 }
 
