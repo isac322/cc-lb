@@ -1,0 +1,14 @@
+[package]
+name = "conformance-plugin-router"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+cc-lb-pdk = { path = "../../../../cc-lb-pdk" }
+cc-lb-plugin-wire = { path = "../../../../cc-lb-plugin-wire" }
+
+[workspace]

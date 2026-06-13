@@ -22,7 +22,12 @@ members = [
     "tests/multi-replica",
     "tests/real-client",
 ]
-exclude = ["fuzz"]
+exclude = [
+    "fuzz",
+    "crates/cc-lb-plugin-conformance/tests/fixtures/conformance-plugin-observe",
+    "crates/cc-lb-plugin-conformance/tests/fixtures/conformance-plugin-router",
+    "crates/cc-lb-plugin-conformance/tests/fixtures/conformance-plugin-shape",
+]
 resolver = "2"
 
 [workspace.package]
