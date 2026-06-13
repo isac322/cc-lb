@@ -1174,9 +1174,9 @@ fn log_startup_handshake_report(report: &StartupHandshakeReport) {
     }
 }
 
-async fn backfill_supported_slots(storage: &dyn Storage) {
+pub async fn backfill_supported_slots(storage: &dyn Storage) {
     use cc_lb_runtime_extism::handshake::{
-        build_offer, execute_handshake, slot_set_from_handshake,
+        build_offer, execute_handshake, slot_set_from_extism_exports, slot_set_from_handshake,
     };
     use cc_lb_storage_api::{BUILTIN_CACHE_AFFINITY_ID, PluginSlot};
 
@@ -1226,11 +1226,28 @@ async fn backfill_supported_slots(storage: &dyn Storage) {
             }
         };
         let offer_for_task = offer.clone();
-        let accept =
-            tokio::task::spawn_blocking(move || execute_handshake(&bytes, &offer_for_task)).await;
-        let accept = match accept {
-            Ok(Ok(accept)) => accept,
-            Ok(Err(error)) => {
+        let bytes_for_task = bytes.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            match execute_handshake(&bytes_for_task, &offer_for_task) {
+                Ok(accept) => Ok(slot_set_from_handshake(&accept.implemented_functions)),
+                Err(handshake_err) => {
+                    Err((handshake_err, slot_set_from_extism_exports(&bytes_for_task)))
+                }
+            }
+        })
+        .await;
+        let slots = match outcome {
+            Ok(Ok(slots)) => slots,
+            Ok(Err((handshake_err, fallback))) if !fallback.is_empty() => {
+                tracing::warn!(
+                    error = %handshake_err,
+                    sha256 = %hex_sha256_bytes(&entry.sha256),
+                    fallback_slots = ?fallback,
+                    "supported_slots backfill: handshake failed; using extism export fallback (legacy plugin)"
+                );
+                fallback
+            }
+            Ok(Err((error, _))) => {
                 tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "supported_slots backfill: handshake failed");
                 failed += 1;
                 continue;
@@ -1241,7 +1258,6 @@ async fn backfill_supported_slots(storage: &dyn Storage) {
                 continue;
             }
         };
-        let slots = slot_set_from_handshake(&accept.implemented_functions);
         if slots.is_empty() {
             continue;
         }

@@ -412,6 +412,47 @@ async fn chain_insert_unknown_principal_returns_400() {
 }
 
 #[tokio::test]
+async fn chain_insert_rejects_plugin_not_advertising_target_slot() {
+    let (_dir, storage) = temp_storage();
+    let principal_id = seed_principal(&storage, "principal-unsupported-slot").await;
+    let shape_only =
+        seed_registry_with_slots(&storage, 77, "shape-only-plugin", vec![PluginSlot::Shape]).await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body, _) = authed_json(
+        app,
+        "POST",
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
+        Some(json!({ "slot": "Router", "wasm_registry_id": shape_only.id })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "unsupported_slot");
+    assert_eq!(body["plugin_name"], "shape-only-plugin");
+    assert_eq!(body["slot"], "router");
+}
+
+#[tokio::test]
+async fn chain_insert_allows_plugin_with_empty_supported_slots_for_backfill_grace() {
+    let (_dir, storage) = temp_storage();
+    let principal_id = seed_principal(&storage, "principal-empty-slots").await;
+    let legacy = seed_registry(&storage, 78, "legacy-no-slots").await;
+    assert!(legacy.supported_slots.is_empty());
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, _, _) = authed_json(
+        app,
+        "POST",
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
+        Some(json!({ "slot": "Router", "wasm_registry_id": legacy.id })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+}
+
+#[tokio::test]
 async fn insert_chain_duplicate_router_returns_201_and_lists_both_entries() {
     let (_dir, storage) = temp_storage();
     let principal_id = seed_principal(&storage, "principal-router-singleton").await;
@@ -840,6 +881,22 @@ async fn seed_principal(storage: &cc_lb_storage_redb::RedbStorage, name: &str) -
         .await
         .unwrap()
         .id
+}
+
+async fn seed_registry_with_slots(
+    storage: &cc_lb_storage_redb::RedbStorage,
+    seed: u8,
+    name: &str,
+    slots: Vec<PluginSlot>,
+) -> cc_lb_storage_api::WasmRegistryEntry {
+    let entry = seed_registry(storage, seed, name).await;
+    storage
+        .update_supported_slots(entry.id, slots.clone())
+        .await
+        .unwrap();
+    let mut entry = entry;
+    entry.supported_slots = slots;
+    entry
 }
 
 async fn seed_registry(

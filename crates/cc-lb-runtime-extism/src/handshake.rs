@@ -43,6 +43,39 @@ fn wire_function_to_slot(name: &str) -> Option<PluginSlot> {
     }
 }
 
+/// Falls back to scanning extism exports when handshake validation fails
+/// (e.g. legacy wire v1/v2 plugins exporting `route`). Returns the slot set
+/// inferred from raw function exports, empty if none of the known wire
+/// function names are exported.
+pub fn slot_set_from_extism_exports(plugin_bytes: &[u8]) -> Vec<PluginSlot> {
+    use extism::{Manifest, PluginBuilder, Wasm};
+
+    let manifest = Manifest::new([Wasm::data(plugin_bytes.to_vec())])
+        .with_timeout(std::time::Duration::from_millis(HANDSHAKE_WALL_MS))
+        .disallow_all_hosts();
+    let Ok(plugin) = PluginBuilder::new(&manifest)
+        .with_wasi(false)
+        .with_cache_disabled()
+        .with_fuel_limit(HANDSHAKE_FUEL)
+        .build()
+    else {
+        return Vec::new();
+    };
+    let mut slots = BTreeSet::new();
+    for name in ["filter", "route", "shape", "observe"] {
+        if plugin.function_exists(name) {
+            let slot = match name {
+                "filter" | "route" => PluginSlot::Router,
+                "shape" => PluginSlot::Shape,
+                "observe" => PluginSlot::ObservabilityHook,
+                _ => unreachable!(),
+            };
+            slots.insert(slot);
+        }
+    }
+    slots.into_iter().collect()
+}
+
 pub fn build_offer(host_caps: &BTreeSet<String>) -> HandshakeOffer {
     let mut function_versions = BTreeMap::new();
     for (name, versions) in wire_function_versions() {
