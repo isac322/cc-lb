@@ -1579,7 +1579,9 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
             {registry.data?.entries
               .filter((p) => pluginSupportsSlot(p, 'router'))
               .map((p) => {
-                const inChain = entries.some((e) => e.wasm_registry_id === p.id);
+                const inChain = entries.some(
+                  (e) => e.wasm_registry_id === p.id,
+                );
                 const isPinnedCache =
                   !isComplex && isSticky && p.name === 'cache-affinity';
                 const disabled = inChain || isPinnedCache;
