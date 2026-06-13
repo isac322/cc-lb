@@ -1,0 +1,60 @@
+name: publish-check
+
+# PR-stage validation that plugin trio crates remain publish-ready.
+# Catches manifest regressions (missing description/license/repository,
+# excluded source files, broken workspace inheritance) before they reach
+# the release workflow.
+
+on:
+  pull_request:
+    paths:
+      - 'crates/cc-lb-pdk/**'
+      - 'crates/cc-lb-plugin-wire/**'
+      - 'crates/cc-lb-plugin-api/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'release-plz.toml'
+      - '.github/workflows/publish-check.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: publish-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  dry-run:
+    name: ${{ matrix.crate }}
+    runs-on: oracle4-cc-lb
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Leaf crates with no internal deps — full `cargo publish --dry-run`
+          # is deterministic and catches every manifest issue.
+          - crate: cc-lb-plugin-wire
+            mode: publish
+          - crate: cc-lb-plugin-api
+            mode: publish
+          # cc-lb-pdk depends on cc-lb-plugin-wire pinned at an exact version,
+          # so `cargo publish --dry-run` can only resolve once plugin-wire is
+          # already on crates.io at that exact version. That never holds for
+          # release PRs (both bumped together) nor for the first release.
+          # Fall back to `cargo check`; manifest-shape regressions still
+          # surface in the leaf jobs above since all three crates share the
+          # same workspace inheritance pattern.
+          - crate: cc-lb-pdk
+            mode: check
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust-cache
+
+      - name: cargo publish --dry-run
+        if: matrix.mode == 'publish'
+        run: cargo publish --dry-run -p ${{ matrix.crate }}
+
+      - name: cargo check
+        if: matrix.mode == 'check'
+        run: cargo check -p ${{ matrix.crate }} --all-targets
