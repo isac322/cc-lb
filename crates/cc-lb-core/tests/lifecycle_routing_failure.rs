@@ -199,7 +199,7 @@ impl RouterPlugin for RecordingRouter {
         );
         Ok(RouteDecision {
             upstream_id: self.selected_id,
-            upstream: Upstream::AnthropicDirect,
+            upstream: Upstream::AnthropicDirect { base_url: None },
             dialect: Arc::new(common::PassthroughDialect {
                 base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
             }),

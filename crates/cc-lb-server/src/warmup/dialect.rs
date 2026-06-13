@@ -110,7 +110,9 @@ pub async fn dispatch_warmup_with_dialect(
         kind: PrincipalKind::ApiKey,
         claims: serde_json::Map::new(),
     };
-    let upstream_api = Upstream::AnthropicDirect;
+    let upstream_api = Upstream::AnthropicDirect {
+        base_url: upstream.base_url.clone(),
+    };
 
     let shaped = shape_request(dialect.as_ref(), &ctx, &upstream_api, &principal)
         .map_err(|error| WarmupDispatchError::Shape(error.to_string()))?;

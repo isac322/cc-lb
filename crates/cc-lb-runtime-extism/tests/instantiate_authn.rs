@@ -16,7 +16,7 @@ fn instantiate_dialect_wrapper() {
     let shaped = shape_request(
         dialect.as_ref(),
         &common::ctx(),
-        &Upstream::AnthropicDirect,
+        &Upstream::AnthropicDirect { base_url: None },
         &common::principal(),
     )
     .expect("dialect shapes request");

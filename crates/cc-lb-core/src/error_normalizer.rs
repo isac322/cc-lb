@@ -19,7 +19,7 @@ pub enum UpstreamKind {
 impl From<&Upstream> for UpstreamKind {
     fn from(upstream: &Upstream) -> Self {
         match upstream {
-            Upstream::AnthropicDirect => Self::AnthropicDirect,
+            Upstream::AnthropicDirect { .. } => Self::AnthropicDirect,
         }
     }
 }
