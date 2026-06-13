@@ -79,15 +79,11 @@ impl FilterPlugin for ExtismFilterPlugin {
 #[derive(Clone)]
 pub(crate) struct ExtismDialectPlugin {
     slot: Arc<PluginSlot>,
-    base_url: Option<String>,
 }
 
 impl ExtismDialectPlugin {
     pub(crate) fn new(slot: Arc<PluginSlot>) -> Self {
-        Self {
-            slot,
-            base_url: None,
-        }
+        Self { slot }
     }
 }
 
@@ -101,11 +97,14 @@ impl UpstreamDialect for ExtismDialectPlugin {
     ) -> Result<ShapedRequest, DialectError> {
         let use_v2 = matches!(self.slot.negotiated_wire_version(), Ok(2));
         let response = if use_v2 {
+            let upstream_base_url = match upstream {
+                Upstream::AnthropicDirect { base_url } => base_url.as_ref().map(Url::to_string),
+            };
             let request = ShapeRequestV2 {
                 request: request_to_wire_v2(ctx),
                 upstream: v2_upstream_to_wire(upstream),
                 principal: principal_to_wire_v2(principal),
-                upstream_base_url: self.base_url.clone(),
+                upstream_base_url,
             };
             match self.slot.dispatch_wire_call_sync::<ShapeFnV2>(request) {
                 DispatchOutcome::Ok(response) => v2_shape_response_to_v1(response),
@@ -887,7 +886,7 @@ fn principal_kind_to_wire(principal: &Principal) -> String {
 
 pub(crate) fn upstream_to_wire(upstream: &Upstream) -> UpstreamWire {
     match upstream {
-        Upstream::AnthropicDirect => UpstreamWire::AnthropicDirect,
+        Upstream::AnthropicDirect { .. } => UpstreamWire::AnthropicDirect,
     }
 }
 
@@ -953,7 +952,7 @@ fn request_to_wire_v2(ctx: &RequestContext) -> v2_common::RequestWire {
 
 fn v2_upstream_to_wire(upstream: &Upstream) -> v2_common::UpstreamWire {
     match upstream {
-        Upstream::AnthropicDirect => v2_common::UpstreamWire::AnthropicDirect,
+        Upstream::AnthropicDirect { .. } => v2_common::UpstreamWire::AnthropicDirect,
     }
 }
 

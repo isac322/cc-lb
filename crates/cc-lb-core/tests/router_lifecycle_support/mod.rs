@@ -161,7 +161,7 @@ impl RouterPlugin for RejectingEmptyRouter {
 
 pub fn plugin_upstream(base_url: &str) -> Upstream {
     let _ = base_url;
-    Upstream::AnthropicDirect
+    Upstream::AnthropicDirect { base_url: None }
 }
 
 struct RecordingSignerFactory {
@@ -244,7 +244,7 @@ impl UpstreamDialect for UniversalDialect {
         builder: &mut ShapedRequestBuilder,
     ) -> Result<ShapedRequest, DialectError> {
         let mut url = match upstream {
-            Upstream::AnthropicDirect => Url::parse("https://api.anthropic.com/")?,
+            Upstream::AnthropicDirect { .. } => Url::parse("https://api.anthropic.com/")?,
         };
         url.set_path(ctx.path.trim_start_matches('/'));
         url.set_query(ctx.query.as_deref());

@@ -9,7 +9,7 @@ use http::{HeaderMap, Method, StatusCode};
 
 #[test]
 fn upstream_variants_and_principal_serde_compile() {
-    let variants = [Upstream::AnthropicDirect];
+    let variants = [Upstream::AnthropicDirect { base_url: None }];
 
     assert_eq!(variants.len(), 1);
 

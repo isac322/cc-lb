@@ -231,8 +231,13 @@ pub fn shaped_request() -> ShapedRequest {
         kind: PrincipalKind::OAuthSubject,
         claims: serde_json::Map::new(),
     };
-    shape_request(&DirectDialect, &ctx, &Upstream::AnthropicDirect, &principal)
-        .expect("shape request")
+    shape_request(
+        &DirectDialect,
+        &ctx,
+        &Upstream::AnthropicDirect { base_url: None },
+        &principal,
+    )
+    .expect("shape request")
 }
 
 struct DirectDialect;
