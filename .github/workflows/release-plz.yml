@@ -1,0 +1,71 @@
+name: release-plz
+
+# Single source of truth for releases. Runs only on master pushes (post-merge),
+# never on PRs. Local execution of release-plz is prohibited — see
+# release-plz.toml policy header.
+#
+# Flow:
+#   1. `release-pr` job opens/updates a "chore: release" PR with version bumps
+#      and CHANGELOG entries for any crate touched since the last release.
+#   2. On merge of that PR, the `release` job runs again, detects new versions
+#      in Cargo.toml, creates git tags + GitHub releases, and publishes the
+#      plugin trio (cc-lb-pdk / cc-lb-plugin-wire / cc-lb-plugin-api) to
+#      crates.io via trusted publishing (OIDC). Other crates skip publish
+#      because their Cargo.toml carries `publish = false`.
+
+on:
+  push:
+    branches: [master]
+
+permissions: {}
+
+concurrency:
+  group: release-plz-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: release-plz release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Authenticate to crates.io (trusted publishing)
+        id: crates-io-auth
+        uses: rust-lang/crates-io-auth-action@v1
+
+      - name: Run release-plz release
+        uses: MarcoIeni/release-plz-action@v0.5
+        with:
+          command: release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.crates-io-auth.outputs.token }}
+
+  release-pr:
+    name: release-plz release-pr
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Run release-plz release-pr
+        uses: MarcoIeni/release-plz-action@v0.5
+        with:
+          command: release-pr
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
