@@ -1,4 +1,4 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use cc_lb_plugin_wire::limits::{
     IMPLEMENTED_FUNCTIONS_MAX, SELF_CHECK_FUEL, SELF_CHECK_OUTPUT_MAX_BYTES, SELF_CHECK_WALL_MS,
@@ -7,24 +7,22 @@ use cc_lb_plugin_wire::self_check::{
     SelfCheckError, SelfCheckRequest, SelfCheckResponse, SelfCheckStatus,
 };
 use cc_lb_plugin_wire::wire_function::all_wire_functions;
-use extism::{Manifest, PluginBuilder, Wasm};
 use thiserror::Error;
+
+use crate::handshake::{BuildPluginError, build_plugin};
 
 const SELF_CHECK_EXPORT: &str = "cc_lb_self_check";
 
 pub fn execute_self_check(
     plugin_bytes: &[u8],
 ) -> Result<SelfCheckResponse, SelfCheckExecutionError> {
-    let manifest = Manifest::new([Wasm::data(plugin_bytes.to_vec())])
-        .with_timeout(Duration::from_millis(SELF_CHECK_WALL_MS))
-        .disallow_all_hosts();
-    let mut plugin = PluginBuilder::new(&manifest)
-        .with_wasi(false)
-        .with_cache_disabled()
-        .with_fuel_limit(SELF_CHECK_FUEL)
-        .build()
-        .map_err(|source| SelfCheckExecutionError::Instantiate {
-            reason: source.to_string(),
+    let mut plugin =
+        build_plugin(plugin_bytes, SELF_CHECK_WALL_MS, SELF_CHECK_FUEL).map_err(|source| {
+            match source {
+                BuildPluginError::Instantiate { reason } => {
+                    SelfCheckExecutionError::Instantiate { reason }
+                }
+            }
         })?;
 
     if !plugin.function_exists(SELF_CHECK_EXPORT) {
