@@ -2,7 +2,7 @@ mod upstream_warmup_harness;
 
 use upstream_warmup_harness::{WarmupFixture, assert_locked_warmup_request, ok_response};
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn wait_for_observation_branch_does_not_bootstrap_before_quota_observation() {
     let fixture = WarmupFixture::new().await;
     let upstream_id = fixture.create_due_oauth_upstream("registration-wait").await;
@@ -40,7 +40,7 @@ async fn wait_for_observation_branch_does_not_bootstrap_before_quota_observation
     assert_eq!(record.last_warmup_cycle_key, Some(cycle_key));
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn future_first_observation_schedules_without_bootstrap_fire() {
     let fixture = WarmupFixture::new().await;
     let upstream_id = fixture
