@@ -1,0 +1,28 @@
+# release-plz config — https://release-plz.dev/docs/config
+#
+# Policy:
+#   * Plugin trio (cc-lb-pdk / cc-lb-plugin-wire / cc-lb-plugin-api) is the only
+#     public surface. Published to crates.io via trusted publishing.
+#   * All other crates have `publish = false` in their Cargo.toml, so release-plz
+#     still bumps · tags · creates GitHub releases for them but skips
+#     `cargo publish`.
+#
+# CI-only: releases run exclusively via .github/workflows/release-plz.yml.
+# Do NOT run `release-plz release` or `release-plz release-pr` locally.
+
+[workspace]
+semver_check = false
+git_release_enable = true
+changelog_update = true
+
+[[package]]
+name = "cc-lb-pdk"
+semver_check = true
+
+[[package]]
+name = "cc-lb-plugin-wire"
+semver_check = true
+
+[[package]]
+name = "cc-lb-plugin-api"
+semver_check = true
