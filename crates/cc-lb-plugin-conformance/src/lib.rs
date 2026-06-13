@@ -9,8 +9,6 @@
 
 #![forbid(unsafe_code)]
 
-use std::collections::BTreeSet;
-
 #[cfg(feature = "dispatch")]
 pub mod dispatch;
 mod errors;
@@ -19,47 +17,12 @@ pub mod handshake;
 pub mod identity;
 pub mod prelude;
 pub mod self_check;
+#[cfg(feature = "dispatch")]
 pub mod verify;
 
 pub use errors::{ExtraInfo, LayerResult, VerifyError, VerifyReport};
-
-pub fn verify_router_plugin(_wasm: &[u8]) -> Result<VerifyReport, VerifyError> {
-    Err(errors::verify_not_implemented("verify_router_plugin"))
-}
-
-pub fn verify_router_plugin_with_caps(
-    _wasm: &[u8],
-    _host_capabilities: &BTreeSet<String>,
-) -> Result<VerifyReport, VerifyError> {
-    Err(errors::verify_not_implemented(
-        "verify_router_plugin_with_caps",
-    ))
-}
-
-pub fn verify_shape_plugin(_wasm: &[u8]) -> Result<VerifyReport, VerifyError> {
-    Err(errors::verify_not_implemented("verify_shape_plugin"))
-}
-
-pub fn verify_shape_plugin_with_caps(
-    _wasm: &[u8],
-    _host_capabilities: &BTreeSet<String>,
-) -> Result<VerifyReport, VerifyError> {
-    Err(errors::verify_not_implemented(
-        "verify_shape_plugin_with_caps",
-    ))
-}
-
-pub fn verify_observability_plugin(_wasm: &[u8]) -> Result<VerifyReport, VerifyError> {
-    Err(errors::verify_not_implemented(
-        "verify_observability_plugin",
-    ))
-}
-
-pub fn verify_observability_plugin_with_caps(
-    _wasm: &[u8],
-    _host_capabilities: &BTreeSet<String>,
-) -> Result<VerifyReport, VerifyError> {
-    Err(errors::verify_not_implemented(
-        "verify_observability_plugin_with_caps",
-    ))
-}
+#[cfg(feature = "dispatch")]
+pub use verify::{
+    verify_observability_plugin, verify_observability_plugin_with_caps, verify_router_plugin,
+    verify_router_plugin_with_caps, verify_shape_plugin, verify_shape_plugin_with_caps,
+};

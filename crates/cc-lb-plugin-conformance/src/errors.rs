@@ -1,14 +1,18 @@
 use thiserror::Error;
 
+use cc_lb_plugin_wire::wire_function::FallbackPolicy;
+
+use crate::{handshake, identity, self_check};
+
 #[non_exhaustive]
-#[derive(Debug, Clone, Error)]
+#[derive(Debug, Error)]
 pub enum VerifyError {
     #[error("identity verification failed: {0}")]
-    Identity(#[from] IdentityError),
+    Identity(#[from] identity::IdentityError),
     #[error("handshake verification failed: {0}")]
-    Handshake(#[from] HandshakeError),
+    Handshake(#[from] handshake::HandshakeError),
     #[error("self-check verification failed: {0}")]
-    SelfCheck(#[from] SelfCheckError),
+    SelfCheck(#[from] self_check::SelfCheckError),
     #[error("dispatch verification failed: {0}")]
     Dispatch(#[from] DispatchError),
 }
@@ -41,35 +45,15 @@ pub struct ExtraInfo {
 #[doc(hidden)]
 #[non_exhaustive]
 #[derive(Debug, Clone, Error)]
-pub enum IdentityError {
-    #[error("{reason}")]
-    NotImplemented { reason: String },
-}
-
-#[doc(hidden)]
-#[non_exhaustive]
-#[derive(Debug, Clone, Error)]
-pub enum HandshakeError {
-    #[error("{reason}")]
-    NotImplemented { reason: String },
-}
-
-#[doc(hidden)]
-#[non_exhaustive]
-#[derive(Debug, Clone, Error)]
-pub enum SelfCheckError {
-    #[error("{reason}")]
-    NotImplemented { reason: String },
-}
-
-#[doc(hidden)]
-#[non_exhaustive]
-#[derive(Debug, Clone, Error)]
 pub enum DispatchError {
-    #[error("{function} is not implemented yet")]
-    NotImplemented { function: &'static str },
-}
-
-pub(crate) fn verify_not_implemented(function: &'static str) -> VerifyError {
-    VerifyError::Dispatch(DispatchError::NotImplemented { function })
+    #[error("{function} dispatch fell back with policy {policy:?}")]
+    Fallback {
+        function: &'static str,
+        policy: FallbackPolicy,
+    },
+    #[error("{function} response failed conformance check: {reason}")]
+    InvalidResponse {
+        function: &'static str,
+        reason: String,
+    },
 }
