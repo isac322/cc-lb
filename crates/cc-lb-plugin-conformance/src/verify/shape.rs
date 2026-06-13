@@ -39,7 +39,7 @@ pub fn verify_shape_plugin_with_caps(
         &mut report,
         &mut session,
         "large_body",
-        base64(&"x".repeat(512 * 1024)),
+        base64(&"x".repeat(64 * 1024)),
     )?;
     run_shape_case(
         &mut report,

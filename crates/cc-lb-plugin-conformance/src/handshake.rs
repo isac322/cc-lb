@@ -87,7 +87,7 @@ impl From<HandshakeExecutionError> for HandshakeError {
             | HandshakeExecutionError::DecodeAccept { reason } => {
                 HandshakeError::Serialization { reason }
             }
-            HandshakeExecutionError::Call { reason } => HandshakeError::WasmTrap { reason },
+            HandshakeExecutionError::Call { reason } => map_call_error(reason),
             HandshakeExecutionError::Timeout => HandshakeError::WasmTrap { reason },
             HandshakeExecutionError::OutputTooLarge { .. } => {
                 HandshakeError::Serialization { reason }
@@ -154,6 +154,19 @@ impl From<IdentityReadError> for HandshakeError {
             reason: error.to_string(),
         }
     }
+}
+
+fn map_call_error(reason: String) -> HandshakeError {
+    if let Some(name) = reason
+        .strip_prefix("required capability '")
+        .and_then(|rest| rest.strip_suffix("' not available in host capabilities"))
+    {
+        return HandshakeError::MissingCapability {
+            name: name.to_owned(),
+        };
+    }
+
+    HandshakeError::WasmTrap { reason }
 }
 
 fn map_wire_handshake_error(error: WireHandshakeError, reason: String) -> HandshakeError {
