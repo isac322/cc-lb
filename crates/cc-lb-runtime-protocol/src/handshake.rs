@@ -101,6 +101,7 @@ pub fn build_plugin(
         })
 }
 
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum BuildPluginError {
     #[error("failed to instantiate plugin: {reason}")]
@@ -280,6 +281,7 @@ fn cross_check_implemented_exports(
     Ok(())
 }
 
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum HandshakeExecutionError {
     #[error("handshake validation failed: {0}")]

@@ -5,7 +5,7 @@ use cc_lb_runtime_protocol::self_check::{SelfCheckExecutionError, execute_self_c
 use thiserror::Error;
 
 pub fn run(wasm: &[u8]) -> Result<SelfCheckReport, SelfCheckError> {
-    let response = execute_self_check(wasm)?;
+    let response = execute_self_check(wasm).map_err(SelfCheckError::from_protocol)?;
 
     Ok(SelfCheckReport {
         status: response.status.into(),
@@ -58,8 +58,8 @@ pub enum SelfCheckError {
     WasmTrap { reason: String },
 }
 
-impl From<SelfCheckExecutionError> for SelfCheckError {
-    fn from(error: SelfCheckExecutionError) -> Self {
+impl SelfCheckError {
+    pub(crate) fn from_protocol(error: SelfCheckExecutionError) -> Self {
         let reason = error.to_string();
         match error {
             SelfCheckExecutionError::Instantiate { reason } => {
@@ -75,6 +75,7 @@ impl From<SelfCheckExecutionError> for SelfCheckError {
             | SelfCheckExecutionError::SuccessWithFailures { .. }
             | SelfCheckExecutionError::FailureWithoutFailures
             | SelfCheckExecutionError::Clock { .. } => SelfCheckError::Output { reason },
+            _ => unreachable!(),
         }
     }
 }

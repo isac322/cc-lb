@@ -7,6 +7,7 @@ use ring::rand::{SecureRandom, SystemRandom};
 
 const RANDOM_BYTES_MAX: u64 = 65_536;
 
+#[non_exhaustive]
 #[derive(Debug, Default)]
 pub struct HostState {
     storage: Mutex<HashMap<String, Vec<u8>>>,
@@ -60,6 +61,7 @@ impl HostState {
     }
 }
 
+#[non_exhaustive]
 #[derive(Clone)]
 pub struct HostFunctionContext {
     plugin_name: String,

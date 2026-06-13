@@ -22,7 +22,8 @@ pub fn run<F: WireFunction>(
     wasm: &[u8],
     request: F::Request,
 ) -> Result<DispatchOutcome<F::Response>, RunError> {
-    let plugin = build_plugin(wasm, HANDSHAKE_WALL_MS, HANDSHAKE_FUEL)?;
+    let plugin = build_plugin(wasm, HANDSHAKE_WALL_MS, HANDSHAKE_FUEL)
+        .map_err(RunError::from_build_error)?;
     let metadata = metadata_from_handshake(wasm, &BTreeSet::new()).map_err(RunError::Handshake)?;
     let mut session = PluginSession { plugin, metadata };
 
@@ -53,7 +54,8 @@ impl PluginSession {
         wasm: &[u8],
         host_capabilities: &BTreeSet<String>,
     ) -> Result<Self, HandshakeError> {
-        let plugin = build_plugin(wasm, HANDSHAKE_WALL_MS, HANDSHAKE_FUEL)?;
+        let plugin = build_plugin(wasm, HANDSHAKE_WALL_MS, HANDSHAKE_FUEL)
+            .map_err(HandshakeError::from_build_error)?;
         let metadata = metadata_from_handshake(wasm, host_capabilities)?;
 
         Ok(Self { plugin, metadata })
@@ -67,12 +69,11 @@ impl PluginSession {
         &mut self,
         request: F::Request,
     ) -> DispatchOutcome<F::Response> {
-        cc_lb_runtime_protocol::dispatch::dispatch_wire_call::<F>(
+        DispatchOutcome::from_protocol(cc_lb_runtime_protocol::dispatch::dispatch_wire_call::<F>(
             &mut self.plugin,
             &self.metadata,
             request,
-        )
-        .into()
+        ))
     }
 }
 
@@ -86,13 +87,16 @@ pub enum DispatchOutcome<R> {
     Fallback(FallbackPolicy),
 }
 
-impl<R> From<cc_lb_runtime_protocol::dispatch::DispatchOutcome<R>> for DispatchOutcome<R> {
-    fn from(value: cc_lb_runtime_protocol::dispatch::DispatchOutcome<R>) -> Self {
+impl<R> DispatchOutcome<R> {
+    pub(crate) fn from_protocol(
+        value: cc_lb_runtime_protocol::dispatch::DispatchOutcome<R>,
+    ) -> Self {
         match value {
             cc_lb_runtime_protocol::dispatch::DispatchOutcome::Ok(response) => Self::Ok(response),
             cc_lb_runtime_protocol::dispatch::DispatchOutcome::Fallback(policy) => {
                 Self::Fallback(policy)
             }
+            _ => unreachable!(),
         }
     }
 }
@@ -109,18 +113,20 @@ pub enum RunError {
     Handshake(HandshakeError),
 }
 
-impl From<BuildPluginError> for RunError {
-    fn from(value: BuildPluginError) -> Self {
+impl RunError {
+    pub(crate) fn from_build_error(value: BuildPluginError) -> Self {
         match value {
             BuildPluginError::Instantiate { reason } => Self::Build { reason },
+            _ => unreachable!(),
         }
     }
 }
 
-impl From<BuildPluginError> for HandshakeError {
-    fn from(value: BuildPluginError) -> Self {
+impl HandshakeError {
+    pub(crate) fn from_build_error(value: BuildPluginError) -> Self {
         match value {
             BuildPluginError::Instantiate { reason } => Self::Instantiate { reason },
+            _ => unreachable!(),
         }
     }
 }
@@ -130,7 +136,8 @@ fn metadata_from_handshake(
     host_capabilities: &BTreeSet<String>,
 ) -> Result<AugmentedMetadata, HandshakeError> {
     let offer = cc_lb_runtime_protocol::handshake::build_offer(host_capabilities);
-    let accept = cc_lb_runtime_protocol::handshake::execute_handshake(wasm, &offer)?;
+    let accept = cc_lb_runtime_protocol::handshake::execute_handshake(wasm, &offer)
+        .map_err(HandshakeError::from_protocol)?;
     let identity = cc_lb_runtime_protocol::identity::read_identity(wasm).map_err(|source| {
         HandshakeError::InvalidIdentity {
             field: "custom_section",

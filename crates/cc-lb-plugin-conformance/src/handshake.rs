@@ -15,8 +15,8 @@ pub fn run_with_caps(
     host_capabilities: &BTreeSet<String>,
 ) -> Result<HandshakeReport, HandshakeError> {
     let offer = build_offer(host_capabilities);
-    let accept = execute_handshake(wasm, &offer)?;
-    let identity = read_identity(wasm)?;
+    let accept = execute_handshake(wasm, &offer).map_err(HandshakeError::from_protocol)?;
+    let identity = read_identity(wasm).map_err(HandshakeError::from_identity_error)?;
 
     Ok(HandshakeReport {
         chosen_versions: accept.chosen_versions,
@@ -74,8 +74,8 @@ pub enum HandshakeError {
     WasmTrap { reason: String },
 }
 
-impl From<HandshakeExecutionError> for HandshakeError {
-    fn from(error: HandshakeExecutionError) -> Self {
+impl HandshakeError {
+    pub(crate) fn from_protocol(error: HandshakeExecutionError) -> Self {
         let reason = error.to_string();
         match error {
             HandshakeExecutionError::Validation(error) => map_wire_handshake_error(error, reason),
@@ -127,12 +127,11 @@ impl From<HandshakeExecutionError> for HandshakeError {
                 field: "implemented_functions",
                 reason,
             },
+            _ => unreachable!(),
         }
     }
-}
 
-impl From<IdentityReadError> for HandshakeError {
-    fn from(error: IdentityReadError) -> Self {
+    pub(crate) fn from_identity_error(error: IdentityReadError) -> Self {
         let field = match &error {
             IdentityReadError::WasmParseError(_) => "wasm",
             IdentityReadError::MissingCustomSection
@@ -147,6 +146,7 @@ impl From<IdentityReadError> for HandshakeError {
             IdentityReadError::Validation(
                 WireIdentityError::PluginVersionEmpty | WireIdentityError::PluginVersionTooLong,
             ) => "version",
+            _ => unreachable!(),
         };
 
         HandshakeError::InvalidIdentity {

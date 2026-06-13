@@ -105,6 +105,7 @@ fn validate_status_failures(response: &SelfCheckResponse) -> Result<(), SelfChec
     }
 }
 
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum SelfCheckExecutionError {
     #[error("self-check validation failed: {0}")]

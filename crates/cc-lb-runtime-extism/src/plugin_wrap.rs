@@ -117,6 +117,7 @@ impl UpstreamDialect for ExtismDialectPlugin {
                 DispatchOutcome::Fallback(policy) => {
                     return Err(dialect_unexpected_fallback(policy));
                 }
+                _ => unreachable!(),
             }
         } else {
             let request = ShapeRequest {
@@ -134,6 +135,7 @@ impl UpstreamDialect for ExtismDialectPlugin {
                 DispatchOutcome::Fallback(policy) => {
                     return Err(dialect_unexpected_fallback(policy));
                 }
+                _ => unreachable!(),
             }
         };
         let url =
@@ -171,6 +173,7 @@ impl UpstreamDialect for ExtismDialectPlugin {
             DispatchOutcome::Ok(response) => response,
             DispatchOutcome::Fallback(FallbackPolicy::PassThrough) => return None,
             DispatchOutcome::Fallback(_) => return None,
+            _ => unreachable!(),
         };
         response
             .body_base64
@@ -213,6 +216,7 @@ impl SignerFactory for ExtismSignerFactory {
                 });
             }
             DispatchOutcome::Fallback(policy) => return Err(signer_unexpected_fallback(policy)),
+            _ => unreachable!(),
         };
         Ok(Arc::new(ExtismSigner {
             slot: self.slot.clone(),
@@ -245,6 +249,7 @@ impl Signer for ExtismSigner {
                 });
             }
             DispatchOutcome::Fallback(policy) => return Err(signer_unexpected_fallback(policy)),
+            _ => unreachable!(),
         };
         if let Some(url) = response.url {
             shaped.set_url(
@@ -296,6 +301,7 @@ impl Signer for ExtismSigner {
             DispatchOutcome::Ok(response) => response,
             DispatchOutcome::Fallback(FallbackPolicy::PassThrough) => return RetryDecision::Fail,
             DispatchOutcome::Fallback(_) => return RetryDecision::Fail,
+            _ => unreachable!(),
         };
         match response.decision.as_str() {
             "refresh" => RetryDecision::Refresh {

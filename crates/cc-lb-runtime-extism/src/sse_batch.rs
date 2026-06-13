@@ -37,6 +37,7 @@ impl ExtismObservabilityHook {
                 record_observe_batch_drop(event_count);
                 Ok(())
             }
+            _ => unreachable!(),
         }
     }
 }

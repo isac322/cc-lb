@@ -12,7 +12,8 @@ const IDENTITY_FIELDS: [&str; 4] = ["abi_envelope", "magic", "plugin_name", "plu
 
 pub fn read(wasm: &[u8]) -> Result<IdentityReport, IdentityError> {
     let static_checks = run_static_checks(wasm);
-    let identity = cc_lb_runtime_protocol::identity::read_identity(wasm)?;
+    let identity = cc_lb_runtime_protocol::identity::read_identity(wasm)
+        .map_err(|err| IdentityError::Read(IdentityReadError::new(err)))?;
 
     Ok(IdentityReport {
         identity,
@@ -41,11 +42,21 @@ pub enum StaticCheck {
     NoWasiImports { pass: bool, detail: Option<String> },
 }
 
+#[derive(Debug, Error)]
+#[error(transparent)]
+pub struct IdentityReadError(pub(crate) cc_lb_runtime_protocol::identity::IdentityReadError);
+
+impl IdentityReadError {
+    pub(crate) fn new(err: cc_lb_runtime_protocol::identity::IdentityReadError) -> Self {
+        Self(err)
+    }
+}
+
 #[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum IdentityError {
     #[error(transparent)]
-    Read(#[from] cc_lb_runtime_protocol::identity::IdentityReadError),
+    Read(#[from] IdentityReadError),
 }
 
 #[derive(Default)]

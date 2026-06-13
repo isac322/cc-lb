@@ -11,8 +11,6 @@ impl<R: core::cmp::PartialEq> core::cmp::PartialEq for cc_lb_plugin_conformance:
 pub fn cc_lb_plugin_conformance::dispatch::DispatchOutcome<R>::eq(&self, &cc_lb_plugin_conformance::dispatch::DispatchOutcome<R>) -> bool
 impl<R: core::fmt::Debug> core::fmt::Debug for cc_lb_plugin_conformance::dispatch::DispatchOutcome<R>
 pub fn cc_lb_plugin_conformance::dispatch::DispatchOutcome<R>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl<R> core::convert::From<cc_lb_runtime_protocol::dispatch::DispatchOutcome<R>> for cc_lb_plugin_conformance::dispatch::DispatchOutcome<R>
-pub fn cc_lb_plugin_conformance::dispatch::DispatchOutcome<R>::from(cc_lb_runtime_protocol::dispatch::DispatchOutcome<R>) -> Self
 impl<R> core::marker::StructuralPartialEq for cc_lb_plugin_conformance::dispatch::DispatchOutcome<R>
 impl<R> core::marker::Freeze for cc_lb_plugin_conformance::dispatch::DispatchOutcome<R> where R: core::marker::Freeze
 impl<R> core::marker::Send for cc_lb_plugin_conformance::dispatch::DispatchOutcome<R> where R: core::marker::Send
@@ -77,8 +75,6 @@ pub fn cc_lb_plugin_conformance::dispatch::DispatchOutcome<R>::vzip(self) -> V
 pub cc_lb_plugin_conformance::dispatch::RunError::Build
 pub cc_lb_plugin_conformance::dispatch::RunError::Build::reason: alloc::string::String
 pub cc_lb_plugin_conformance::dispatch::RunError::Handshake(cc_lb_plugin_conformance::handshake::HandshakeError)
-impl core::convert::From<cc_lb_runtime_protocol::handshake::BuildPluginError> for cc_lb_plugin_conformance::dispatch::RunError
-pub fn cc_lb_plugin_conformance::dispatch::RunError::from(cc_lb_runtime_protocol::handshake::BuildPluginError) -> Self
 impl core::error::Error for cc_lb_plugin_conformance::dispatch::RunError
 impl core::fmt::Debug for cc_lb_plugin_conformance::dispatch::RunError
 pub fn cc_lb_plugin_conformance::dispatch::RunError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -386,12 +382,6 @@ impl core::cmp::PartialEq for cc_lb_plugin_conformance::handshake::HandshakeErro
 pub fn cc_lb_plugin_conformance::handshake::HandshakeError::eq(&self, &cc_lb_plugin_conformance::handshake::HandshakeError) -> bool
 impl core::convert::From<cc_lb_plugin_conformance::handshake::HandshakeError> for cc_lb_plugin_conformance::VerifyError
 pub fn cc_lb_plugin_conformance::VerifyError::from(cc_lb_plugin_conformance::handshake::HandshakeError) -> Self
-impl core::convert::From<cc_lb_runtime_protocol::handshake::BuildPluginError> for cc_lb_plugin_conformance::handshake::HandshakeError
-pub fn cc_lb_plugin_conformance::handshake::HandshakeError::from(cc_lb_runtime_protocol::handshake::BuildPluginError) -> Self
-impl core::convert::From<cc_lb_runtime_protocol::handshake::HandshakeExecutionError> for cc_lb_plugin_conformance::handshake::HandshakeError
-pub fn cc_lb_plugin_conformance::handshake::HandshakeError::from(cc_lb_runtime_protocol::handshake::HandshakeExecutionError) -> Self
-impl core::convert::From<cc_lb_runtime_protocol::identity::IdentityReadError> for cc_lb_plugin_conformance::handshake::HandshakeError
-pub fn cc_lb_plugin_conformance::handshake::HandshakeError::from(cc_lb_runtime_protocol::identity::IdentityReadError) -> Self
 impl core::error::Error for cc_lb_plugin_conformance::handshake::HandshakeError
 impl core::fmt::Debug for cc_lb_plugin_conformance::handshake::HandshakeError
 pub fn cc_lb_plugin_conformance::handshake::HandshakeError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -606,11 +596,11 @@ pub fn cc_lb_plugin_conformance::handshake::run(&[u8]) -> core::result::Result<c
 pub fn cc_lb_plugin_conformance::handshake::run_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>) -> core::result::Result<cc_lb_plugin_conformance::handshake::HandshakeReport, cc_lb_plugin_conformance::handshake::HandshakeError>
 pub mod cc_lb_plugin_conformance::identity
 #[non_exhaustive] pub enum cc_lb_plugin_conformance::identity::IdentityError
-pub cc_lb_plugin_conformance::identity::IdentityError::Read(cc_lb_runtime_protocol::identity::IdentityReadError)
+pub cc_lb_plugin_conformance::identity::IdentityError::Read(cc_lb_plugin_conformance::identity::IdentityReadError)
 impl core::convert::From<cc_lb_plugin_conformance::identity::IdentityError> for cc_lb_plugin_conformance::VerifyError
 pub fn cc_lb_plugin_conformance::VerifyError::from(cc_lb_plugin_conformance::identity::IdentityError) -> Self
-impl core::convert::From<cc_lb_runtime_protocol::identity::IdentityReadError> for cc_lb_plugin_conformance::identity::IdentityError
-pub fn cc_lb_plugin_conformance::identity::IdentityError::from(cc_lb_runtime_protocol::identity::IdentityReadError) -> Self
+impl core::convert::From<cc_lb_plugin_conformance::identity::IdentityReadError> for cc_lb_plugin_conformance::identity::IdentityError
+pub fn cc_lb_plugin_conformance::identity::IdentityError::from(cc_lb_plugin_conformance::identity::IdentityReadError) -> Self
 impl core::error::Error for cc_lb_plugin_conformance::identity::IdentityError
 pub fn cc_lb_plugin_conformance::identity::IdentityError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
 impl core::fmt::Debug for cc_lb_plugin_conformance::identity::IdentityError
@@ -761,6 +751,64 @@ pub fn cc_lb_plugin_conformance::identity::StaticCheck::debug(<T as wiggle::Poin
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for cc_lb_plugin_conformance::identity::StaticCheck where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for cc_lb_plugin_conformance::identity::StaticCheck where V: ppv_lite86::types::MultiLane<T>
 pub fn cc_lb_plugin_conformance::identity::StaticCheck::vzip(self) -> V
+pub struct cc_lb_plugin_conformance::identity::IdentityReadError(_)
+impl core::convert::From<cc_lb_plugin_conformance::identity::IdentityReadError> for cc_lb_plugin_conformance::identity::IdentityError
+pub fn cc_lb_plugin_conformance::identity::IdentityError::from(cc_lb_plugin_conformance::identity::IdentityReadError) -> Self
+impl core::error::Error for cc_lb_plugin_conformance::identity::IdentityReadError
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for cc_lb_plugin_conformance::identity::IdentityReadError
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for cc_lb_plugin_conformance::identity::IdentityReadError
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for cc_lb_plugin_conformance::identity::IdentityReadError
+impl core::marker::Send for cc_lb_plugin_conformance::identity::IdentityReadError
+impl core::marker::Sync for cc_lb_plugin_conformance::identity::IdentityReadError
+impl core::marker::Unpin for cc_lb_plugin_conformance::identity::IdentityReadError
+impl core::marker::UnsafeUnpin for cc_lb_plugin_conformance::identity::IdentityReadError
+impl !core::panic::unwind_safe::RefUnwindSafe for cc_lb_plugin_conformance::identity::IdentityReadError
+impl !core::panic::unwind_safe::UnwindSafe for cc_lb_plugin_conformance::identity::IdentityReadError
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for cc_lb_plugin_conformance::identity::IdentityReadError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for cc_lb_plugin_conformance::identity::IdentityReadError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for cc_lb_plugin_conformance::identity::IdentityReadError where U: core::convert::From<T>
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for cc_lb_plugin_conformance::identity::IdentityReadError where U: core::convert::Into<T>
+pub type cc_lb_plugin_conformance::identity::IdentityReadError::Error = core::convert::Infallible
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for cc_lb_plugin_conformance::identity::IdentityReadError where U: core::convert::TryFrom<T>
+pub type cc_lb_plugin_conformance::identity::IdentityReadError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for cc_lb_plugin_conformance::identity::IdentityReadError where T: core::fmt::Display + ?core::marker::Sized
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for cc_lb_plugin_conformance::identity::IdentityReadError where T: 'static + ?core::marker::Sized
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for cc_lb_plugin_conformance::identity::IdentityReadError where T: ?core::marker::Sized
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for cc_lb_plugin_conformance::identity::IdentityReadError where T: ?core::marker::Sized
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for cc_lb_plugin_conformance::identity::IdentityReadError
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for cc_lb_plugin_conformance::identity::IdentityReadError
+pub type cc_lb_plugin_conformance::identity::IdentityReadError::Init = T
+pub const cc_lb_plugin_conformance::identity::IdentityReadError::ALIGN: usize
+pub unsafe fn cc_lb_plugin_conformance::identity::IdentityReadError::deref<'a>(usize) -> &'a T
+pub unsafe fn cc_lb_plugin_conformance::identity::IdentityReadError::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn cc_lb_plugin_conformance::identity::IdentityReadError::drop(usize)
+pub unsafe fn cc_lb_plugin_conformance::identity::IdentityReadError::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for cc_lb_plugin_conformance::identity::IdentityReadError
+impl<T> system_interface::fs::fd_flags::GetSetFdFlags for cc_lb_plugin_conformance::identity::IdentityReadError
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::get_fd_flags(&self) -> core::result::Result<system_interface::fs::fd_flags::FdFlags, std::io::error::Error> where T: io_lifetimes::portability::AsFilelike
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::new_set_fd_flags(&self, system_interface::fs::fd_flags::FdFlags) -> core::result::Result<system_interface::fs::fd_flags::SetFdFlags<T>, std::io::error::Error> where T: io_lifetimes::portability::AsFilelike
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::set_fd_flags(&mut self, system_interface::fs::fd_flags::SetFdFlags<T>) -> core::result::Result<(), std::io::error::Error> where T: core::marker::Sized + io_lifetimes::portability::AsFilelike
+impl<T> tracing::instrument::Instrument for cc_lb_plugin_conformance::identity::IdentityReadError
+impl<T> tracing::instrument::WithSubscriber for cc_lb_plugin_conformance::identity::IdentityReadError
+impl<T> typenum::type_operators::Same for cc_lb_plugin_conformance::identity::IdentityReadError
+pub type cc_lb_plugin_conformance::identity::IdentityReadError::Output = T
+impl<T> wiggle::Pointee for cc_lb_plugin_conformance::identity::IdentityReadError
+pub type cc_lb_plugin_conformance::identity::IdentityReadError::Pointer = u32
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::debug(<T as wiggle::Pointee>::Pointer, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for cc_lb_plugin_conformance::identity::IdentityReadError where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for cc_lb_plugin_conformance::identity::IdentityReadError where V: ppv_lite86::types::MultiLane<T>
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::vzip(self) -> V
 #[non_exhaustive] pub struct cc_lb_plugin_conformance::identity::IdentityReport
 pub cc_lb_plugin_conformance::identity::IdentityReport::identity: cc_lb_plugin_wire::identity::PluginIdentity
 pub cc_lb_plugin_conformance::identity::IdentityReport::static_checks: alloc::vec::Vec<cc_lb_plugin_conformance::identity::StaticCheck>
@@ -850,8 +898,6 @@ impl<R: core::cmp::PartialEq> core::cmp::PartialEq for cc_lb_plugin_conformance:
 pub fn cc_lb_plugin_conformance::dispatch::DispatchOutcome<R>::eq(&self, &cc_lb_plugin_conformance::dispatch::DispatchOutcome<R>) -> bool
 impl<R: core::fmt::Debug> core::fmt::Debug for cc_lb_plugin_conformance::dispatch::DispatchOutcome<R>
 pub fn cc_lb_plugin_conformance::dispatch::DispatchOutcome<R>::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
-impl<R> core::convert::From<cc_lb_runtime_protocol::dispatch::DispatchOutcome<R>> for cc_lb_plugin_conformance::dispatch::DispatchOutcome<R>
-pub fn cc_lb_plugin_conformance::dispatch::DispatchOutcome<R>::from(cc_lb_runtime_protocol::dispatch::DispatchOutcome<R>) -> Self
 impl<R> core::marker::StructuralPartialEq for cc_lb_plugin_conformance::dispatch::DispatchOutcome<R>
 impl<R> core::marker::Freeze for cc_lb_plugin_conformance::dispatch::DispatchOutcome<R> where R: core::marker::Freeze
 impl<R> core::marker::Send for cc_lb_plugin_conformance::dispatch::DispatchOutcome<R> where R: core::marker::Send
@@ -916,8 +962,6 @@ pub fn cc_lb_plugin_conformance::dispatch::DispatchOutcome<R>::vzip(self) -> V
 pub cc_lb_plugin_conformance::prelude::dispatch::RunError::Build
 pub cc_lb_plugin_conformance::prelude::dispatch::RunError::Build::reason: alloc::string::String
 pub cc_lb_plugin_conformance::prelude::dispatch::RunError::Handshake(cc_lb_plugin_conformance::handshake::HandshakeError)
-impl core::convert::From<cc_lb_runtime_protocol::handshake::BuildPluginError> for cc_lb_plugin_conformance::dispatch::RunError
-pub fn cc_lb_plugin_conformance::dispatch::RunError::from(cc_lb_runtime_protocol::handshake::BuildPluginError) -> Self
 impl core::error::Error for cc_lb_plugin_conformance::dispatch::RunError
 impl core::fmt::Debug for cc_lb_plugin_conformance::dispatch::RunError
 pub fn cc_lb_plugin_conformance::dispatch::RunError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -1225,12 +1269,6 @@ impl core::cmp::PartialEq for cc_lb_plugin_conformance::handshake::HandshakeErro
 pub fn cc_lb_plugin_conformance::handshake::HandshakeError::eq(&self, &cc_lb_plugin_conformance::handshake::HandshakeError) -> bool
 impl core::convert::From<cc_lb_plugin_conformance::handshake::HandshakeError> for cc_lb_plugin_conformance::VerifyError
 pub fn cc_lb_plugin_conformance::VerifyError::from(cc_lb_plugin_conformance::handshake::HandshakeError) -> Self
-impl core::convert::From<cc_lb_runtime_protocol::handshake::BuildPluginError> for cc_lb_plugin_conformance::handshake::HandshakeError
-pub fn cc_lb_plugin_conformance::handshake::HandshakeError::from(cc_lb_runtime_protocol::handshake::BuildPluginError) -> Self
-impl core::convert::From<cc_lb_runtime_protocol::handshake::HandshakeExecutionError> for cc_lb_plugin_conformance::handshake::HandshakeError
-pub fn cc_lb_plugin_conformance::handshake::HandshakeError::from(cc_lb_runtime_protocol::handshake::HandshakeExecutionError) -> Self
-impl core::convert::From<cc_lb_runtime_protocol::identity::IdentityReadError> for cc_lb_plugin_conformance::handshake::HandshakeError
-pub fn cc_lb_plugin_conformance::handshake::HandshakeError::from(cc_lb_runtime_protocol::identity::IdentityReadError) -> Self
 impl core::error::Error for cc_lb_plugin_conformance::handshake::HandshakeError
 impl core::fmt::Debug for cc_lb_plugin_conformance::handshake::HandshakeError
 pub fn cc_lb_plugin_conformance::handshake::HandshakeError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -1445,11 +1483,11 @@ pub fn cc_lb_plugin_conformance::prelude::handshake::run(&[u8]) -> core::result:
 pub fn cc_lb_plugin_conformance::prelude::handshake::run_with_caps(&[u8], &alloc::collections::btree::set::BTreeSet<alloc::string::String>) -> core::result::Result<cc_lb_plugin_conformance::handshake::HandshakeReport, cc_lb_plugin_conformance::handshake::HandshakeError>
 pub mod cc_lb_plugin_conformance::prelude::identity
 #[non_exhaustive] pub enum cc_lb_plugin_conformance::prelude::identity::IdentityError
-pub cc_lb_plugin_conformance::prelude::identity::IdentityError::Read(cc_lb_runtime_protocol::identity::IdentityReadError)
+pub cc_lb_plugin_conformance::prelude::identity::IdentityError::Read(cc_lb_plugin_conformance::identity::IdentityReadError)
 impl core::convert::From<cc_lb_plugin_conformance::identity::IdentityError> for cc_lb_plugin_conformance::VerifyError
 pub fn cc_lb_plugin_conformance::VerifyError::from(cc_lb_plugin_conformance::identity::IdentityError) -> Self
-impl core::convert::From<cc_lb_runtime_protocol::identity::IdentityReadError> for cc_lb_plugin_conformance::identity::IdentityError
-pub fn cc_lb_plugin_conformance::identity::IdentityError::from(cc_lb_runtime_protocol::identity::IdentityReadError) -> Self
+impl core::convert::From<cc_lb_plugin_conformance::identity::IdentityReadError> for cc_lb_plugin_conformance::identity::IdentityError
+pub fn cc_lb_plugin_conformance::identity::IdentityError::from(cc_lb_plugin_conformance::identity::IdentityReadError) -> Self
 impl core::error::Error for cc_lb_plugin_conformance::identity::IdentityError
 pub fn cc_lb_plugin_conformance::identity::IdentityError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
 impl core::fmt::Debug for cc_lb_plugin_conformance::identity::IdentityError
@@ -1600,6 +1638,64 @@ pub fn cc_lb_plugin_conformance::identity::StaticCheck::debug(<T as wiggle::Poin
 impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for cc_lb_plugin_conformance::identity::StaticCheck where T: ?core::marker::Sized
 impl<V, T> ppv_lite86::types::VZip<V> for cc_lb_plugin_conformance::identity::StaticCheck where V: ppv_lite86::types::MultiLane<T>
 pub fn cc_lb_plugin_conformance::identity::StaticCheck::vzip(self) -> V
+pub struct cc_lb_plugin_conformance::prelude::identity::IdentityReadError(_)
+impl core::convert::From<cc_lb_plugin_conformance::identity::IdentityReadError> for cc_lb_plugin_conformance::identity::IdentityError
+pub fn cc_lb_plugin_conformance::identity::IdentityError::from(cc_lb_plugin_conformance::identity::IdentityReadError) -> Self
+impl core::error::Error for cc_lb_plugin_conformance::identity::IdentityReadError
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::source(&self) -> core::option::Option<&(dyn core::error::Error + 'static)>
+impl core::fmt::Debug for cc_lb_plugin_conformance::identity::IdentityReadError
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::fmt::Display for cc_lb_plugin_conformance::identity::IdentityReadError
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
+impl core::marker::Freeze for cc_lb_plugin_conformance::identity::IdentityReadError
+impl core::marker::Send for cc_lb_plugin_conformance::identity::IdentityReadError
+impl core::marker::Sync for cc_lb_plugin_conformance::identity::IdentityReadError
+impl core::marker::Unpin for cc_lb_plugin_conformance::identity::IdentityReadError
+impl core::marker::UnsafeUnpin for cc_lb_plugin_conformance::identity::IdentityReadError
+impl !core::panic::unwind_safe::RefUnwindSafe for cc_lb_plugin_conformance::identity::IdentityReadError
+impl !core::panic::unwind_safe::UnwindSafe for cc_lb_plugin_conformance::identity::IdentityReadError
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Initialized, zerocopy::pointer::invariant::Initialized> for cc_lb_plugin_conformance::identity::IdentityReadError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<ST, DT> zerocopy::pointer::invariant::CastableFrom<ST, zerocopy::pointer::invariant::Uninit, zerocopy::pointer::invariant::Uninit> for cc_lb_plugin_conformance::identity::IdentityReadError where ST: ?core::marker::Sized, DT: ?core::marker::Sized
+impl<T, U> core::convert::Into<U> for cc_lb_plugin_conformance::identity::IdentityReadError where U: core::convert::From<T>
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::into(self) -> U
+impl<T, U> core::convert::TryFrom<U> for cc_lb_plugin_conformance::identity::IdentityReadError where U: core::convert::Into<T>
+pub type cc_lb_plugin_conformance::identity::IdentityReadError::Error = core::convert::Infallible
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::try_from(U) -> core::result::Result<T, <T as core::convert::TryFrom<U>>::Error>
+impl<T, U> core::convert::TryInto<U> for cc_lb_plugin_conformance::identity::IdentityReadError where U: core::convert::TryFrom<T>
+pub type cc_lb_plugin_conformance::identity::IdentityReadError::Error = <U as core::convert::TryFrom<T>>::Error
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::try_into(self) -> core::result::Result<U, <U as core::convert::TryFrom<T>>::Error>
+impl<T> alloc::string::ToString for cc_lb_plugin_conformance::identity::IdentityReadError where T: core::fmt::Display + ?core::marker::Sized
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::to_string(&self) -> alloc::string::String
+impl<T> core::any::Any for cc_lb_plugin_conformance::identity::IdentityReadError where T: 'static + ?core::marker::Sized
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::type_id(&self) -> core::any::TypeId
+impl<T> core::borrow::Borrow<T> for cc_lb_plugin_conformance::identity::IdentityReadError where T: ?core::marker::Sized
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::borrow(&self) -> &T
+impl<T> core::borrow::BorrowMut<T> for cc_lb_plugin_conformance::identity::IdentityReadError where T: ?core::marker::Sized
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::borrow_mut(&mut self) -> &mut T
+impl<T> core::convert::From<T> for cc_lb_plugin_conformance::identity::IdentityReadError
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::from(T) -> T
+impl<T> crossbeam_epoch::atomic::Pointable for cc_lb_plugin_conformance::identity::IdentityReadError
+pub type cc_lb_plugin_conformance::identity::IdentityReadError::Init = T
+pub const cc_lb_plugin_conformance::identity::IdentityReadError::ALIGN: usize
+pub unsafe fn cc_lb_plugin_conformance::identity::IdentityReadError::deref<'a>(usize) -> &'a T
+pub unsafe fn cc_lb_plugin_conformance::identity::IdentityReadError::deref_mut<'a>(usize) -> &'a mut T
+pub unsafe fn cc_lb_plugin_conformance::identity::IdentityReadError::drop(usize)
+pub unsafe fn cc_lb_plugin_conformance::identity::IdentityReadError::init(<T as crossbeam_epoch::atomic::Pointable>::Init) -> usize
+impl<T> either::into_either::IntoEither for cc_lb_plugin_conformance::identity::IdentityReadError
+impl<T> system_interface::fs::fd_flags::GetSetFdFlags for cc_lb_plugin_conformance::identity::IdentityReadError
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::get_fd_flags(&self) -> core::result::Result<system_interface::fs::fd_flags::FdFlags, std::io::error::Error> where T: io_lifetimes::portability::AsFilelike
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::new_set_fd_flags(&self, system_interface::fs::fd_flags::FdFlags) -> core::result::Result<system_interface::fs::fd_flags::SetFdFlags<T>, std::io::error::Error> where T: io_lifetimes::portability::AsFilelike
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::set_fd_flags(&mut self, system_interface::fs::fd_flags::SetFdFlags<T>) -> core::result::Result<(), std::io::error::Error> where T: core::marker::Sized + io_lifetimes::portability::AsFilelike
+impl<T> tracing::instrument::Instrument for cc_lb_plugin_conformance::identity::IdentityReadError
+impl<T> tracing::instrument::WithSubscriber for cc_lb_plugin_conformance::identity::IdentityReadError
+impl<T> typenum::type_operators::Same for cc_lb_plugin_conformance::identity::IdentityReadError
+pub type cc_lb_plugin_conformance::identity::IdentityReadError::Output = T
+impl<T> wiggle::Pointee for cc_lb_plugin_conformance::identity::IdentityReadError
+pub type cc_lb_plugin_conformance::identity::IdentityReadError::Pointer = u32
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::debug(<T as wiggle::Pointee>::Pointer, &mut core::fmt::Formatter<'_>) -> core::result::Result<(), core::fmt::Error>
+impl<T> zerocopy::pointer::invariant::Read<zerocopy::pointer::invariant::Exclusive, zerocopy::pointer::invariant::BecauseExclusive> for cc_lb_plugin_conformance::identity::IdentityReadError where T: ?core::marker::Sized
+impl<V, T> ppv_lite86::types::VZip<V> for cc_lb_plugin_conformance::identity::IdentityReadError where V: ppv_lite86::types::MultiLane<T>
+pub fn cc_lb_plugin_conformance::identity::IdentityReadError::vzip(self) -> V
 #[non_exhaustive] pub struct cc_lb_plugin_conformance::prelude::identity::IdentityReport
 pub cc_lb_plugin_conformance::prelude::identity::IdentityReport::identity: cc_lb_plugin_wire::identity::PluginIdentity
 pub cc_lb_plugin_conformance::prelude::identity::IdentityReport::static_checks: alloc::vec::Vec<cc_lb_plugin_conformance::identity::StaticCheck>
@@ -1688,8 +1784,6 @@ impl core::cmp::PartialEq for cc_lb_plugin_conformance::self_check::SelfCheckErr
 pub fn cc_lb_plugin_conformance::self_check::SelfCheckError::eq(&self, &cc_lb_plugin_conformance::self_check::SelfCheckError) -> bool
 impl core::convert::From<cc_lb_plugin_conformance::self_check::SelfCheckError> for cc_lb_plugin_conformance::VerifyError
 pub fn cc_lb_plugin_conformance::VerifyError::from(cc_lb_plugin_conformance::self_check::SelfCheckError) -> Self
-impl core::convert::From<cc_lb_runtime_protocol::self_check::SelfCheckExecutionError> for cc_lb_plugin_conformance::self_check::SelfCheckError
-pub fn cc_lb_plugin_conformance::self_check::SelfCheckError::from(cc_lb_runtime_protocol::self_check::SelfCheckExecutionError) -> Self
 impl core::error::Error for cc_lb_plugin_conformance::self_check::SelfCheckError
 impl core::fmt::Debug for cc_lb_plugin_conformance::self_check::SelfCheckError
 pub fn cc_lb_plugin_conformance::self_check::SelfCheckError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
@@ -2245,8 +2339,6 @@ impl core::cmp::PartialEq for cc_lb_plugin_conformance::self_check::SelfCheckErr
 pub fn cc_lb_plugin_conformance::self_check::SelfCheckError::eq(&self, &cc_lb_plugin_conformance::self_check::SelfCheckError) -> bool
 impl core::convert::From<cc_lb_plugin_conformance::self_check::SelfCheckError> for cc_lb_plugin_conformance::VerifyError
 pub fn cc_lb_plugin_conformance::VerifyError::from(cc_lb_plugin_conformance::self_check::SelfCheckError) -> Self
-impl core::convert::From<cc_lb_runtime_protocol::self_check::SelfCheckExecutionError> for cc_lb_plugin_conformance::self_check::SelfCheckError
-pub fn cc_lb_plugin_conformance::self_check::SelfCheckError::from(cc_lb_runtime_protocol::self_check::SelfCheckExecutionError) -> Self
 impl core::error::Error for cc_lb_plugin_conformance::self_check::SelfCheckError
 impl core::fmt::Debug for cc_lb_plugin_conformance::self_check::SelfCheckError
 pub fn cc_lb_plugin_conformance::self_check::SelfCheckError::fmt(&self, &mut core::fmt::Formatter<'_>) -> core::fmt::Result
