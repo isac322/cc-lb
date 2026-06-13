@@ -293,7 +293,9 @@ async fn empty_router_choice_errors() {
     let signer_factory = view
         .signer_factory
         .with_router_choice("sk-ant-downstream".to_owned(), String::new());
-    let result = signer_factory.build(&Upstream::AnthropicDirect { base_url: None }).await;
+    let result = signer_factory
+        .build(&Upstream::AnthropicDirect { base_url: None })
+        .await;
 
     match result {
         Err(SignerError::MissingCredentials { reason }) => {
@@ -321,7 +323,9 @@ async fn missing_oauth_credentials_returns_proper_signer_error() {
         "oauth-missing",
     );
 
-    let result = factory.build(&Upstream::AnthropicDirect { base_url: None }).await;
+    let result = factory
+        .build(&Upstream::AnthropicDirect { base_url: None })
+        .await;
 
     match result {
         Err(SignerError::MissingCredentials { reason }) => {
@@ -378,7 +382,13 @@ fn shaped_request() -> ShapedRequest {
         kind: PrincipalKind::OAuthSubject,
         claims: serde_json::Map::new(),
     };
-    shape_request(&DirectDialect, &ctx, &Upstream::AnthropicDirect { base_url: None }, &principal).expect("shape")
+    shape_request(
+        &DirectDialect,
+        &ctx,
+        &Upstream::AnthropicDirect { base_url: None },
+        &principal,
+    )
+    .expect("shape")
 }
 
 struct DirectDialect;

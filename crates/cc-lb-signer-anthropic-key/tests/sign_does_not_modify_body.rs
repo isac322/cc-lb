@@ -48,9 +48,13 @@ async fn sign_does_not_modify_body() {
         kind: PrincipalKind::ApiKey,
         claims: serde_json::Map::new(),
     };
-    let shaped =
-        cc_lb_plugin_api::shape_request(&BodyDialect, &ctx, &Upstream::AnthropicDirect { base_url: None }, &principal)
-            .expect("shape request");
+    let shaped = cc_lb_plugin_api::shape_request(
+        &BodyDialect,
+        &ctx,
+        &Upstream::AnthropicDirect { base_url: None },
+        &principal,
+    )
+    .expect("shape request");
 
     let signer = AnthropicKeySignerFactory::new("sk-ant-test-key")
         .build(&Upstream::AnthropicDirect { base_url: None })

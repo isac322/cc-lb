@@ -64,7 +64,10 @@ async fn build_signer_fail_request_fallback() {
         .expect("signer factory instantiates");
 
     capture().reset();
-    let error = match factory.build(&Upstream::AnthropicDirect { base_url: None }).await {
+    let error = match factory
+        .build(&Upstream::AnthropicDirect { base_url: None })
+        .await
+    {
         Ok(_) => panic!("build_signer fallback unexpectedly succeeded"),
         Err(error) => error,
     };

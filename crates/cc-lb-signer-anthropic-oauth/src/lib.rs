@@ -1274,7 +1274,10 @@ mod tests {
             .await
             .unwrap();
         let factory = AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary");
-        let signer = factory.build(&Upstream::AnthropicDirect { base_url: None }).await.unwrap();
+        let signer = factory
+            .build(&Upstream::AnthropicDirect { base_url: None })
+            .await
+            .unwrap();
 
         let error = sign_request(signer.as_ref(), shaped_request())
             .await
@@ -1320,7 +1323,10 @@ mod tests {
             .await
             .unwrap();
         let factory = AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary");
-        let signer = factory.build(&Upstream::AnthropicDirect { base_url: None }).await.unwrap();
+        let signer = factory
+            .build(&Upstream::AnthropicDirect { base_url: None })
+            .await
+            .unwrap();
 
         let signed = sign_request(signer.as_ref(), shaped_request())
             .await
@@ -1449,7 +1455,10 @@ mod tests {
             .await
             .unwrap();
         let factory = AnthropicOAuthSignerFactory::for_upstream_name(store, service, "primary");
-        factory.build(&Upstream::AnthropicDirect { base_url: None }).await.unwrap()
+        factory
+            .build(&Upstream::AnthropicDirect { base_url: None })
+            .await
+            .unwrap()
     }
 
     async fn store_live_credentials(
@@ -1518,7 +1527,10 @@ mod tests {
             refresh_handle.clone(),
             record.id,
         );
-        let signer = factory.build(&Upstream::AnthropicDirect { base_url: None }).await.unwrap();
+        let signer = factory
+            .build(&Upstream::AnthropicDirect { base_url: None })
+            .await
+            .unwrap();
 
         let new_signer = match signer.on_unauthorized(&unauthorized_error()).await {
             RetryDecision::Refresh { new_signer } => new_signer,
@@ -1653,7 +1665,13 @@ mod tests {
             kind: cc_lb_plugin_api::PrincipalKind::OAuthSubject,
             claims: serde_json::Map::new(),
         };
-        shape_request(&DirectDialect, &ctx, &Upstream::AnthropicDirect { base_url: None }, &principal).unwrap()
+        shape_request(
+            &DirectDialect,
+            &ctx,
+            &Upstream::AnthropicDirect { base_url: None },
+            &principal,
+        )
+        .unwrap()
     }
 
     struct DirectDialect;
@@ -1686,7 +1704,10 @@ mod tests {
     }
 
     async fn build_error(factory: &AnthropicOAuthSignerFactory) -> SignerError {
-        match factory.build(&Upstream::AnthropicDirect { base_url: None }).await {
+        match factory
+            .build(&Upstream::AnthropicDirect { base_url: None })
+            .await
+        {
             Ok(_) => panic!("expected signer build error"),
             Err(error) => error,
         }
