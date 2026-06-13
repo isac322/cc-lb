@@ -698,6 +698,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-lb-plugin-conformance"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bytes",
+ "cc-lb-plugin-api",
+ "cc-lb-plugin-wire",
+ "cc-lb-runtime-protocol",
+ "extism",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "wasmparser 0.252.0",
+]
+
+[[package]]
 name = "cc-lb-plugin-lifecycle-tests"
 version = "0.1.0"
 dependencies = [
@@ -787,6 +804,26 @@ dependencies = [
  "uuid",
  "wasmparser 0.252.0",
  "wat",
+]
+
+[[package]]
+name = "cc-lb-runtime-protocol"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "bytes",
+ "cc-lb-plugin-api",
+ "cc-lb-plugin-wire",
+ "extism",
+ "http",
+ "metrics",
+ "ring",
+ "serde",
+ "serde_json",
+ "tracing",
+ "wasmparser 0.252.0",
 ]
 
 [[package]]
