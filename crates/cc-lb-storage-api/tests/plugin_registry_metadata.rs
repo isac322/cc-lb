@@ -1,6 +1,4 @@
-use cc_lb_storage_api::{
-    BUILTIN_CACHE_AFFINITY_ID, PluginMetadata, PluginSlot, WasmRegistryEntry,
-};
+use cc_lb_storage_api::{BUILTIN_CACHE_AFFINITY_ID, PluginMetadata, PluginSlot, WasmRegistryEntry};
 use serde_json::json;
 use uuid::Uuid;
 

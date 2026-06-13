@@ -279,6 +279,10 @@ fn fixture_wasm() -> &'static [u8] {
             .join("../../target/wasm32-unknown-unknown/release/extism_echo_plugin.wasm");
         if !path.exists() {
             let status = Command::new("cargo")
+                .env_remove("RUSTFLAGS")
+                .env_remove("CARGO_ENCODED_RUSTFLAGS")
+                .env_remove("RUSTC_WORKSPACE_WRAPPER")
+                .env_remove("LLVM_PROFILE_FILE")
                 .args([
                     "build",
                     "-p",

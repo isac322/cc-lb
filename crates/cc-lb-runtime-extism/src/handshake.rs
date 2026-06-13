@@ -305,7 +305,10 @@ mod tests {
     #[test]
     fn slot_set_from_handshake_handles_partial_exports() {
         let only_shape: BTreeSet<String> = ["shape".to_owned()].into_iter().collect();
-        assert_eq!(slot_set_from_handshake(&only_shape), vec![PluginSlot::Shape]);
+        assert_eq!(
+            slot_set_from_handshake(&only_shape),
+            vec![PluginSlot::Shape]
+        );
 
         let only_filter: BTreeSet<String> = ["filter".to_owned()].into_iter().collect();
         assert_eq!(

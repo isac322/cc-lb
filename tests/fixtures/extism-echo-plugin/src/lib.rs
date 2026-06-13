@@ -3,8 +3,8 @@ use cc_lb_plugin_wire::handshake::{HandshakeAccept, HandshakeOffer};
 use cc_lb_plugin_wire::serde_json;
 use cc_lb_plugin_wire::v3::filter::FilterFn;
 use cc_lb_plugin_wire::wire_function::WireFunction;
-use std::collections::{BTreeMap, BTreeSet};
 use extism_pdk::{FnResult, plugin_fn};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[plugin_fn]
 pub fn filter(input: String) -> FnResult<String> {

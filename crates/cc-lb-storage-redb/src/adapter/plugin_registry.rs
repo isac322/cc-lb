@@ -116,10 +116,12 @@ impl PluginRegistryStore for RedbStorage {
         supported_slots: Vec<PluginSlot>,
     ) -> StorageResult<()> {
         let storage = self.clone();
-        tokio::task::spawn_blocking(move || storage.update_supported_slots_sync(id, supported_slots))
-            .await
-            .map_err(map_join_err)?
-            .map_err(map_redb_err)
+        tokio::task::spawn_blocking(move || {
+            storage.update_supported_slots_sync(id, supported_slots)
+        })
+        .await
+        .map_err(map_join_err)?
+        .map_err(map_redb_err)
     }
 
     async fn delete_registry_entry(

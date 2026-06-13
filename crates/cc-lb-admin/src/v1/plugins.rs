@@ -292,7 +292,10 @@ async fn insert_chain(
         return storage_unavailable();
     };
     let slot = body.slot.0;
-    match storage.get_registry_entry_by_id(body.wasm_registry_id).await {
+    match storage
+        .get_registry_entry_by_id(body.wasm_registry_id)
+        .await
+    {
         Ok(Some(entry)) => {
             if !entry.supported_slots.is_empty() && !entry.supported_slots.contains(&slot) {
                 return unsupported_slot(&entry.name, slot);

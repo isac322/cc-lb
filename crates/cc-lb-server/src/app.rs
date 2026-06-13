@@ -1175,7 +1175,9 @@ fn log_startup_handshake_report(report: &StartupHandshakeReport) {
 }
 
 async fn backfill_supported_slots(storage: &dyn Storage) {
-    use cc_lb_runtime_extism::handshake::{build_offer, execute_handshake, slot_set_from_handshake};
+    use cc_lb_runtime_extism::handshake::{
+        build_offer, execute_handshake, slot_set_from_handshake,
+    };
     use cc_lb_storage_api::{BUILTIN_CACHE_AFFINITY_ID, PluginSlot};
 
     let entries = match storage.list_registry(None, usize::MAX).await {
@@ -1224,8 +1226,8 @@ async fn backfill_supported_slots(storage: &dyn Storage) {
             }
         };
         let offer_for_task = offer.clone();
-        let accept = tokio::task::spawn_blocking(move || execute_handshake(&bytes, &offer_for_task))
-            .await;
+        let accept =
+            tokio::task::spawn_blocking(move || execute_handshake(&bytes, &offer_for_task)).await;
         let accept = match accept {
             Ok(Ok(accept)) => accept,
             Ok(Err(error)) => {
@@ -1251,11 +1253,7 @@ async fn backfill_supported_slots(storage: &dyn Storage) {
         updated += 1;
     }
     if updated > 0 || failed > 0 {
-        tracing::info!(
-            updated,
-            failed,
-            "supported_slots backfill completed",
-        );
+        tracing::info!(updated, failed, "supported_slots backfill completed",);
     }
 }
 
