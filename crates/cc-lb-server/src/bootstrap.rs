@@ -640,6 +640,7 @@ plugins = ["missing-plugin"]
                     label: None,
                     uploaded_at_unix_secs: 1_800_000_000,
                     uploaded_by_admin_id: Uuid::new_v4(),
+                    supported_slots: Vec::new(),
                 },
             )
             .await

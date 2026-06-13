@@ -39,6 +39,30 @@ async fn happy_upload_returns_201_with_sha_and_cache_file_exists() {
 }
 
 #[tokio::test]
+async fn upload_persists_supported_slots_for_filter_exporting_plugin() {
+    let harness = Harness::new();
+    let wasm = fixture_wasm();
+    let upload = harness.upload("echo-slots", "echo-slots.wasm", wasm).await;
+    assert_eq!(upload.status, StatusCode::CREATED);
+    let id = upload.json["id"].as_str().unwrap().to_owned();
+
+    let registry = harness.list_registry().await;
+    let entry = registry.json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"].as_str() == Some(&id))
+        .expect("uploaded entry visible in registry");
+    let slots: Vec<String> = entry["supported_slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(slots, vec!["router".to_owned()]);
+}
+
+#[tokio::test]
 async fn idempotent_duplicate_upload_returns_200_same_sha() {
     let harness = Harness::new();
     let wasm = fixture_wasm();
@@ -186,6 +210,16 @@ impl Harness {
             .unwrap();
         send(self.app.clone(), request).await
     }
+
+    async fn list_registry(&self) -> TestResponse {
+        let request = Request::builder()
+            .method("GET")
+            .uri("/admin/v1/plugins/registry")
+            .header("Authorization", format!("Bearer {TOKEN}"))
+            .body(Body::empty())
+            .unwrap();
+        send(self.app.clone(), request).await
+    }
 }
 
 struct TestResponse {
@@ -242,7 +276,7 @@ fn push_text_part(body: &mut Vec<u8>, boundary: &str, name: &str, value: &[u8]) 
 fn fixture_wasm() -> &'static [u8] {
     let path = FIXTURE_WASM.get_or_init(|| {
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/wasm32-wasip1/release/extism_echo_plugin.wasm");
+            .join("../../target/wasm32-unknown-unknown/release/extism_echo_plugin.wasm");
         if !path.exists() {
             let status = Command::new("cargo")
                 .args([
@@ -250,7 +284,7 @@ fn fixture_wasm() -> &'static [u8] {
                     "-p",
                     "extism-echo-plugin",
                     "--target",
-                    "wasm32-wasip1",
+                    "wasm32-unknown-unknown",
                     "--release",
                 ])
                 .status()

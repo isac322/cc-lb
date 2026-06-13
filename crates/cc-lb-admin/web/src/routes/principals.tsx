@@ -55,6 +55,7 @@ import {
 import { RelativeTime } from '../components/ui/RelativeTime';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import {
+  type ChainSlot,
   type LimitKind,
   type PluginEntry,
   type Principal,
@@ -81,6 +82,25 @@ import {
 } from '../lib/queries';
 
 const principalSearchSchema = z.object({ selectedId: z.string().optional() });
+
+function pluginSupportsSlot(plugin: PluginEntry, slot: ChainSlot): boolean {
+  const slots = plugin.supported_slots;
+  if (!slots || slots.length === 0) {
+    return true;
+  }
+  return slots.includes(slot);
+}
+
+function slotLabel(slot: ChainSlot): string {
+  switch (slot) {
+    case 'router':
+      return 'Router';
+    case 'shape':
+      return 'Shape';
+    case 'observability_hook':
+      return 'Observability';
+  }
+}
 
 export const Route = createFileRoute('/principals')({
   validateSearch: principalSearchSchema,
@@ -782,12 +802,20 @@ function PluginDetailDrawer({
 
           <div className="p-4 border-b border-subtle flex items-start justify-between gap-3">
             <div className="min-w-0">
-              <div className="flex items-center gap-2 mb-1">
+              <div className="flex items-center gap-2 mb-1 flex-wrap">
                 <h2 className="text-lg font-medium text-text truncate">
                   {plugin.name}
                 </h2>
-                {plugin.kind && <Badge tone="accent">[{plugin.kind}]</Badge>}
                 {plugin.is_builtin && <Badge tone="accent">Built-in</Badge>}
+                {plugin.supported_slots && plugin.supported_slots.length > 0 ? (
+                  plugin.supported_slots.map((slot) => (
+                    <Badge key={slot} tone="accent">
+                      {slotLabel(slot)}
+                    </Badge>
+                  ))
+                ) : (
+                  <Badge tone="warn">Unknown slot</Badge>
+                )}
               </div>
             </div>
             <button
@@ -1548,40 +1576,47 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
             }}
             onClick={(e) => e.stopPropagation()}
           >
-            {registry.data?.entries.map((p) => {
-              const inChain = entries.some((e) => e.wasm_registry_id === p.id);
-              const isPinnedCache =
-                !isComplex && isSticky && p.name === 'cache-affinity';
-              const disabled = inChain || isPinnedCache;
+            {registry.data?.entries
+              .filter((p) => pluginSupportsSlot(p, 'router'))
+              .map((p) => {
+                const inChain = entries.some((e) => e.wasm_registry_id === p.id);
+                const isPinnedCache =
+                  !isComplex && isSticky && p.name === 'cache-affinity';
+                const disabled = inChain || isPinnedCache;
+                const slotUnknown = !p.supported_slots?.length;
 
-              return (
-                <button
-                  key={p.id}
-                  className={cx(
-                    'w-full text-left px-3 py-2 text-sm flex flex-col gap-0.5',
-                    disabled
-                      ? 'opacity-50 cursor-not-allowed'
-                      : 'hover:bg-overlay-3',
-                  )}
-                  disabled={disabled}
-                  onClick={() => addFilter(p.id)}
-                >
-                  <div className="flex items-center justify-between">
-                    <span className="font-medium text-text">{p.name}</span>
-                    {disabled && (
-                      <span className="text-[10px] text-text-faint">
-                        {isPinnedCache
-                          ? 'Pinned by Sticky'
-                          : 'Already in chain'}
-                      </span>
+                return (
+                  <button
+                    key={p.id}
+                    className={cx(
+                      'w-full text-left px-3 py-2 text-sm flex flex-col gap-0.5',
+                      disabled
+                        ? 'opacity-50 cursor-not-allowed'
+                        : 'hover:bg-overlay-3',
                     )}
-                  </div>
-                  <span className="text-xs text-text-faint truncate">
-                    {p.metadata?.purpose ?? 'Custom filter'}
-                  </span>
-                </button>
-              );
-            })}
+                    disabled={disabled}
+                    onClick={() => addFilter(p.id)}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="font-medium text-text">{p.name}</span>
+                      {disabled ? (
+                        <span className="text-[10px] text-text-faint">
+                          {isPinnedCache
+                            ? 'Pinned by Sticky'
+                            : 'Already in chain'}
+                        </span>
+                      ) : slotUnknown ? (
+                        <span className="text-[10px] text-amber-500">
+                          Unknown slot
+                        </span>
+                      ) : null}
+                    </div>
+                    <span className="text-xs text-text-faint truncate">
+                      {p.metadata?.purpose ?? 'Custom filter'}
+                    </span>
+                  </button>
+                );
+              })}
           </div>,
           document.body,
         )}
@@ -1710,18 +1745,25 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
             badge="Off"
             onClick={() => handleSelect(null)}
           />
-          {/* TODO(slot-filter): once usePluginStatus carries slot metadata reliably, filter candidates by slot. */}
-          {candidates.map((p) => (
-            <SlotRadioCard
-              key={p.id}
-              name={p.name}
-              desc={p.label || 'Custom shape plugin'}
-              isActive={activeEntry?.wasm_registry_id === p.id}
-              isMutating={mutatingId === p.id}
-              isMutatingOther={mutatingId !== null && mutatingId !== p.id}
-              onClick={() => handleSelect(p.id)}
-            />
-          ))}
+          {candidates
+            .filter((p) => pluginSupportsSlot(p, 'shape'))
+            .map((p) => {
+              const slotUnknown = !p.supported_slots?.length;
+              const desc = slotUnknown
+                ? `${p.label || 'Custom shape plugin'} (slot not yet known)`
+                : p.label || 'Custom shape plugin';
+              return (
+                <SlotRadioCard
+                  key={p.id}
+                  name={p.name}
+                  desc={desc}
+                  isActive={activeEntry?.wasm_registry_id === p.id}
+                  isMutating={mutatingId === p.id}
+                  isMutatingOther={mutatingId !== null && mutatingId !== p.id}
+                  onClick={() => handleSelect(p.id)}
+                />
+              );
+            })}
         </ul>
       </CardBody>
     </Card>
@@ -1876,11 +1918,15 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
               onChange={(e) => setSelectedPluginId(e.target.value)}
             >
               <option value="">— select —</option>
-              {registry.data?.entries.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.name}
-                </option>
-              ))}
+              {registry.data?.entries
+                .filter((p) => pluginSupportsSlot(p, 'observability_hook'))
+                .map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.supported_slots?.length
+                      ? p.name
+                      : `${p.name} (slot not yet known)`}
+                  </option>
+                ))}
             </select>
           </Field>
         </Modal>

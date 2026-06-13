@@ -709,6 +709,7 @@ async fn insert_plugin(
                 label: None,
                 uploaded_at_unix_secs: now_secs(),
                 uploaded_by_admin_id: Uuid::new_v4(),
+                            supported_slots: Vec::new(),
             },
         )
         .await?;

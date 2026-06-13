@@ -306,6 +306,7 @@ function RegistryTab() {
             <thead className="table-header sticky top-0 z-10">
               <tr className="text-[10px] uppercase tracking-wider">
                 <th className="text-left px-4 py-2">Name</th>
+                <th className="text-left px-4 py-2">Slots</th>
                 <th className="text-left px-4 py-2">SHA256</th>
                 <th className="text-right px-4 py-2 tabular-nums">Size</th>
                 <th className="text-center px-4 py-2 tabular-nums">Refs</th>
@@ -317,7 +318,7 @@ function RegistryTab() {
               {reg.isLoading ? (
                 Array.from({ length: 3 }).map((_, i) => (
                   <tr key={i}>
-                    <td colSpan={6} className="px-4 py-2">
+                    <td colSpan={7} className="px-4 py-2">
                       <Skeleton />
                     </td>
                   </tr>
@@ -343,6 +344,19 @@ function RegistryTab() {
                           {p.label}
                         </div>
                       ) : null}
+                    </td>
+                    <td className="px-4 py-2">
+                      <div className="flex flex-wrap gap-1">
+                        {p.supported_slots && p.supported_slots.length > 0 ? (
+                          p.supported_slots.map((slot) => (
+                            <Badge key={slot} tone="accent">
+                              {SLOTS.find((s) => s.id === slot)?.label ?? slot}
+                            </Badge>
+                          ))
+                        ) : (
+                          <Badge tone="warn">Unknown</Badge>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-2">
                       <div className="flex items-center gap-1">
@@ -414,7 +428,7 @@ function RegistryTab() {
               ) : (
                 <tr>
                   <td
-                    colSpan={6}
+                    colSpan={7}
                     className="px-4 py-8 text-center text-text-faint text-xs"
                   >
                     No plugins uploaded.

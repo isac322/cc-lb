@@ -26,25 +26,25 @@ async fn router_wire_v1_v2_upload_is_rejected() {
 }
 
 #[tokio::test]
-async fn shape_wire_v1_v2_upload_still_succeeds() {
+async fn shape_plugin_without_handshake_export_is_rejected() {
     let harness = Harness::new();
     let response = harness
         .upload("shape", "shape.wasm", &minimal_wasm_export("shape"))
         .await;
 
-    assert_eq!(response.status, StatusCode::CREATED);
-    assert_eq!(response.json["idempotent"], false);
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert_eq!(response.json["error"], "handshake_failed");
 }
 
 #[tokio::test]
-async fn observability_wire_v1_v2_upload_still_succeeds() {
+async fn observability_plugin_without_handshake_export_is_rejected() {
     let harness = Harness::new();
     let response = harness
         .upload("observe", "observe.wasm", &minimal_wasm_export("observe"))
         .await;
 
-    assert_eq!(response.status, StatusCode::CREATED);
-    assert_eq!(response.json["idempotent"], false);
+    assert_eq!(response.status, StatusCode::BAD_REQUEST);
+    assert_eq!(response.json["error"], "handshake_failed");
 }
 
 struct Harness {

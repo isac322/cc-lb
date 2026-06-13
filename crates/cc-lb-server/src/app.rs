@@ -759,6 +759,7 @@ async fn build_app_with_storage_inner(
             "startup interrupted by shutdown signal".to_owned(),
         ));
     }
+    backfill_supported_slots(storage.as_ref()).await;
     if let Some((_, error)) = startup_report
         .errors
         .iter()
@@ -1169,6 +1170,91 @@ fn log_startup_handshake_report(report: &StartupHandshakeReport) {
             sha256 = %hex_sha256_bytes(sha256),
             error = %error,
             "startup plugin re-handshake disabled or skipped a plugin",
+        );
+    }
+}
+
+async fn backfill_supported_slots(storage: &dyn Storage) {
+    use cc_lb_runtime_extism::handshake::{build_offer, execute_handshake, slot_set_from_handshake};
+    use cc_lb_storage_api::{BUILTIN_CACHE_AFFINITY_ID, PluginSlot};
+
+    let entries = match storage.list_registry(None, usize::MAX).await {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(%error, "supported_slots backfill: list_registry failed");
+            return;
+        }
+    };
+    let host_caps = std::collections::BTreeSet::new();
+    let offer = build_offer(&host_caps);
+    let mut updated = 0_usize;
+    let mut failed = 0_usize;
+    for entry in entries {
+        if !entry.supported_slots.is_empty() {
+            continue;
+        }
+        if entry.id == BUILTIN_CACHE_AFFINITY_ID {
+            if let Err(error) = storage
+                .update_supported_slots(entry.id, vec![PluginSlot::Router])
+                .await
+            {
+                tracing::warn!(%error, "supported_slots backfill: cache-affinity builtin update failed");
+                failed += 1;
+            } else {
+                updated += 1;
+            }
+            continue;
+        }
+        if entry.is_builtin {
+            continue;
+        }
+        let bytes = match storage.get_blob_bytes(entry.sha256).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                tracing::warn!(
+                    sha256 = %hex_sha256_bytes(&entry.sha256),
+                    "supported_slots backfill: blob missing",
+                );
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "supported_slots backfill: get_blob failed");
+                failed += 1;
+                continue;
+            }
+        };
+        let offer_for_task = offer.clone();
+        let accept = tokio::task::spawn_blocking(move || execute_handshake(&bytes, &offer_for_task))
+            .await;
+        let accept = match accept {
+            Ok(Ok(accept)) => accept,
+            Ok(Err(error)) => {
+                tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "supported_slots backfill: handshake failed");
+                failed += 1;
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "supported_slots backfill: handshake worker panicked");
+                failed += 1;
+                continue;
+            }
+        };
+        let slots = slot_set_from_handshake(&accept.implemented_functions);
+        if slots.is_empty() {
+            continue;
+        }
+        if let Err(error) = storage.update_supported_slots(entry.id, slots).await {
+            tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "supported_slots backfill: update failed");
+            failed += 1;
+            continue;
+        }
+        updated += 1;
+    }
+    if updated > 0 || failed > 0 {
+        tracing::info!(
+            updated,
+            failed,
+            "supported_slots backfill completed",
         );
     }
 }

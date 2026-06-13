@@ -14,11 +14,34 @@ use cc_lb_plugin_wire::v1::{
 };
 use cc_lb_plugin_wire::v3::filter::FilterFn;
 use cc_lb_plugin_wire::wire_function::{WireFunction, all_wire_functions};
+use cc_lb_storage_api::PluginSlot;
 use extism::{Manifest, PluginBuilder, Wasm};
 use thiserror::Error;
 
 const HANDSHAKE_EXPORT: &str = "cc_lb_handshake";
 const ENVELOPE_VERSION_V1: u32 = 1;
+
+/// Returns the slots whose wire function the plugin claims to implement.
+/// The result is deterministically sorted, deduplicated, and ignores unknown
+/// function names so newer plugins remain forward-compatible with this host.
+pub fn slot_set_from_handshake(implemented_functions: &BTreeSet<String>) -> Vec<PluginSlot> {
+    let mut slots = BTreeSet::new();
+    for name in implemented_functions {
+        if let Some(slot) = wire_function_to_slot(name) {
+            slots.insert(slot);
+        }
+    }
+    slots.into_iter().collect()
+}
+
+fn wire_function_to_slot(name: &str) -> Option<PluginSlot> {
+    match name {
+        "filter" => Some(PluginSlot::Router),
+        "shape" => Some(PluginSlot::Shape),
+        "observe" => Some(PluginSlot::ObservabilityHook),
+        _ => None,
+    }
+}
 
 pub fn build_offer(host_caps: &BTreeSet<String>) -> HandshakeOffer {
     let mut function_versions = BTreeMap::new();
@@ -262,6 +285,54 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn slot_set_from_handshake_maps_filter_shape_observe() {
+        let fns: BTreeSet<String> = ["filter", "shape", "observe"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(
+            slot_set_from_handshake(&fns),
+            vec![
+                PluginSlot::Router,
+                PluginSlot::ObservabilityHook,
+                PluginSlot::Shape,
+            ],
+        );
+    }
+
+    #[test]
+    fn slot_set_from_handshake_handles_partial_exports() {
+        let only_shape: BTreeSet<String> = ["shape".to_owned()].into_iter().collect();
+        assert_eq!(slot_set_from_handshake(&only_shape), vec![PluginSlot::Shape]);
+
+        let only_filter: BTreeSet<String> = ["filter".to_owned()].into_iter().collect();
+        assert_eq!(
+            slot_set_from_handshake(&only_filter),
+            vec![PluginSlot::Router],
+        );
+    }
+
+    #[test]
+    fn slot_set_from_handshake_is_empty_when_no_slot_functions_exported() {
+        let empty: BTreeSet<String> = BTreeSet::new();
+        assert!(slot_set_from_handshake(&empty).is_empty());
+
+        let unrelated: BTreeSet<String> = ["sign".to_owned(), "build_signer".to_owned()]
+            .into_iter()
+            .collect();
+        assert!(slot_set_from_handshake(&unrelated).is_empty());
+    }
+
+    #[test]
+    fn slot_set_from_handshake_ignores_unknown_function_names_for_forward_compat() {
+        let mixed: BTreeSet<String> = ["filter", "future_slot_v9000"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        assert_eq!(slot_set_from_handshake(&mixed), vec![PluginSlot::Router]);
+    }
 
     #[test]
     fn build_offer_lists_v1_wire_functions_and_host_capabilities() {
