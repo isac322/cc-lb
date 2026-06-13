@@ -59,6 +59,7 @@ pub struct UpstreamWarmupLoop {
     pub data_dir: PathBuf,
     pub client: WarmupHttpClient,
     pub backoffs: Mutex<HashMap<Uuid, BackoffSchedule>>,
+    pub enable_jitter: bool,
 }
 
 impl UpstreamWarmupLoop {
@@ -81,6 +82,19 @@ impl UpstreamWarmupLoop {
             data_dir,
             client: warmup_http_client(),
             backoffs: Mutex::new(HashMap::new()),
+            enable_jitter: true,
+        }
+    }
+
+    pub fn set_jitter_enabled(&mut self, enabled: bool) {
+        self.enable_jitter = enabled;
+    }
+
+    fn warmup_jitter_ms(&self, upstream_id: Uuid, cycle_key: u64) -> u64 {
+        if self.enable_jitter {
+            stable_jitter_ms(upstream_id, cycle_key)
+        } else {
+            0
         }
     }
 
@@ -158,7 +172,9 @@ impl UpstreamWarmupLoop {
 
         let now = self.db_now_unix_secs().await?;
         if cycle_key > now {
-            let next_warmup_at = schedule_for_cycle(upstream.id, cycle_key)?;
+            let jitter_ms =
+                self.warmup_jitter_ms(upstream.id, u64::try_from(cycle_key).unwrap_or(0));
+            let next_warmup_at = schedule_for_cycle(cycle_key, jitter_ms)?;
             self.write_warmup_next_at(upstream.id, next_warmup_at)
                 .await?;
             return Ok(());
@@ -265,7 +281,7 @@ impl UpstreamWarmupLoop {
         cancel: &CancellationToken,
     ) -> Result<WarmupDispatchResult, WarmupLoopError> {
         let jitter_ms =
-            stable_jitter_ms(upstream.id, u64::try_from(candidate_cycle_key).unwrap_or(0));
+            self.warmup_jitter_ms(upstream.id, u64::try_from(candidate_cycle_key).unwrap_or(0));
         let dialect_runtime = upstream
             .warmup_dialect_plugin
             .as_ref()
@@ -384,8 +400,9 @@ impl UpstreamWarmupLoop {
         upstream_id: Uuid,
         cycle_key: i64,
     ) -> Result<(), WarmupLoopError> {
-        let next_warmup_at =
-            schedule_for_cycle(upstream_id, cycle_key.saturating_add(FIVE_HOURS_SECS))?;
+        let next_cycle = cycle_key.saturating_add(FIVE_HOURS_SECS);
+        let jitter_ms = self.warmup_jitter_ms(upstream_id, u64::try_from(next_cycle).unwrap_or(0));
+        let next_warmup_at = schedule_for_cycle(next_cycle, jitter_ms)?;
         let written = self
             .stores
             .upstreams
@@ -425,8 +442,9 @@ impl UpstreamWarmupLoop {
         upstream_id: Uuid,
         cycle_key: i64,
     ) -> Result<(), WarmupLoopError> {
-        let next_warmup_at =
-            schedule_for_cycle(upstream_id, cycle_key.saturating_add(FIVE_HOURS_SECS))?;
+        let next_cycle = cycle_key.saturating_add(FIVE_HOURS_SECS);
+        let jitter_ms = self.warmup_jitter_ms(upstream_id, u64::try_from(next_cycle).unwrap_or(0));
+        let next_warmup_at = schedule_for_cycle(next_cycle, jitter_ms)?;
         self.write_warmup_next_at(upstream_id, next_warmup_at)
             .await?;
         Ok(())
@@ -459,10 +477,11 @@ impl UpstreamWarmupLoop {
         cancel: &CancellationToken,
     ) -> Result<(), WarmupLoopError> {
         let cycle_key = u64::try_from(cycle_key).map_err(|_| WarmupLoopError::InvalidCycleKey)?;
-        let sleep = tokio::time::sleep(Duration::from_millis(stable_jitter_ms(
-            upstream_id,
-            cycle_key,
-        )));
+        let jitter_ms = self.warmup_jitter_ms(upstream_id, cycle_key);
+        if jitter_ms == 0 {
+            return Ok(());
+        }
+        let sleep = tokio::time::sleep(Duration::from_millis(jitter_ms));
         tokio::pin!(sleep);
         tokio::select! {
             _ = cancel.cancelled() => Err(WarmupLoopError::Cancelled),
@@ -556,12 +575,9 @@ fn decrypt_bundle(
 }
 
 fn schedule_for_cycle(
-    upstream_id: Uuid,
     resets_at_unix_secs: i64,
+    jitter_ms: u64,
 ) -> Result<DateTime<Utc>, WarmupLoopError> {
-    let resets_at =
-        u64::try_from(resets_at_unix_secs).map_err(|_| WarmupLoopError::InvalidCycleKey)?;
-    let jitter_ms = stable_jitter_ms(upstream_id, resets_at);
     let base = unix_secs_datetime(resets_at_unix_secs)?;
     base.checked_add_signed(chrono::Duration::seconds(
         WARMUP_POST_RESET_GUARD_SECS as i64,
