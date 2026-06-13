@@ -75,7 +75,7 @@ jobs:
       - name: Clean coverage artifacts
         run: cargo llvm-cov clean --workspace
       - name: Build Extism echo fixture
-        run: cargo build -p extism-echo-plugin --target wasm32-wasip1 --release
+        run: cargo build -p extism-echo-plugin --target wasm32-unknown-unknown --release
       - name: Build handshake spike fixture
         run: cargo build -p plugin-handshake-spike --target wasm32-unknown-unknown --release
 

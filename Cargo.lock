@@ -1805,6 +1805,7 @@ dependencies = [
 name = "extism-echo-plugin"
 version = "0.1.0"
 dependencies = [
+ "cc-lb-plugin-wire",
  "extism-pdk",
 ]
 
