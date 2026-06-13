@@ -355,6 +355,56 @@ mod tests {
     }
 
     #[test]
+    fn slot_set_from_extism_exports_maps_only_route_to_router() {
+        let wasm = wat::parse_str(r#"(module (func (export "route") (result i32) (i32.const 0)))"#)
+            .expect("route-only wat parses");
+        assert_eq!(
+            slot_set_from_extism_exports(&wasm),
+            vec![PluginSlot::Router],
+        );
+    }
+
+    #[test]
+    fn slot_set_from_extism_exports_ignores_filter_shape_observe_exports() {
+        for export in ["filter", "shape", "observe"] {
+            let wat = format!(r#"(module (func (export "{export}") (result i32) (i32.const 0)))"#,);
+            let wasm = wat::parse_str(&wat).expect("single-export wat parses");
+            assert!(
+                slot_set_from_extism_exports(&wasm).is_empty(),
+                "fallback must not trust {export} export without handshake validation",
+            );
+        }
+    }
+
+    #[test]
+    fn slot_set_from_extism_exports_returns_router_for_route_plus_shape_legacy() {
+        let wasm = wat::parse_str(
+            r#"(module
+                (func (export "route") (result i32) (i32.const 0))
+                (func (export "shape") (result i32) (i32.const 0)))"#,
+        )
+        .expect("legacy route+shape wat parses");
+        assert_eq!(
+            slot_set_from_extism_exports(&wasm),
+            vec![PluginSlot::Router],
+            "shape must not promote without handshake; only route -> Router is trusted",
+        );
+    }
+
+    #[test]
+    fn slot_set_from_extism_exports_is_empty_for_module_without_known_exports() {
+        let wasm = wat::parse_str(r#"(module (func (export "noop") (result i32) (i32.const 0)))"#)
+            .expect("noop wat parses");
+        assert!(slot_set_from_extism_exports(&wasm).is_empty());
+    }
+
+    #[test]
+    fn slot_set_from_extism_exports_is_empty_for_corrupt_bytes() {
+        let bytes = vec![0u8; 16];
+        assert!(slot_set_from_extism_exports(&bytes).is_empty());
+    }
+
+    #[test]
     fn slot_set_from_handshake_ignores_unknown_function_names_for_forward_compat() {
         let mixed: BTreeSet<String> = ["filter", "future_slot_v9000"]
             .into_iter()

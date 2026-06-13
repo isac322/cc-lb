@@ -197,12 +197,19 @@ async fn upload_wasm_inner(
         label: None,
         uploaded_at_unix_secs: unix_now_secs(),
         uploaded_by_admin_id: admin_id,
-        supported_slots,
+        supported_slots: supported_slots.clone(),
     };
-    let (entry, existed) = storage
+    let (mut entry, existed) = storage
         .persist_wasm_upload(blob, entry_input)
         .await
         .map_err(storage_response)?;
+    if existed && entry.supported_slots.is_empty() && !supported_slots.is_empty() {
+        storage
+            .update_supported_slots(entry.id, supported_slots.clone())
+            .await
+            .map_err(storage_response)?;
+        entry.supported_slots = supported_slots;
+    }
     materialize_cache(state, &sha256_hex, &bytes)
         .await
         .map_err(|error| {

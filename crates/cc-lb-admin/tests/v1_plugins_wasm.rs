@@ -63,6 +63,55 @@ async fn upload_persists_supported_slots_for_filter_exporting_plugin() {
 }
 
 #[tokio::test]
+async fn reupload_heals_empty_supported_slots_on_existing_entry() {
+    use cc_lb_storage_api::PluginRegistryStore;
+
+    let harness = Harness::new();
+    let wasm = fixture_wasm();
+    let first = harness.upload("echo-heal", "echo-heal.wasm", wasm).await;
+    assert_eq!(first.status, StatusCode::CREATED);
+    let id: uuid::Uuid = first.json["id"].as_str().unwrap().parse().unwrap();
+
+    harness
+        .storage
+        .update_supported_slots(id, Vec::new())
+        .await
+        .unwrap();
+    let drift = harness.list_registry().await;
+    let drift_entry = drift.json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"].as_str() == Some(&id.to_string()))
+        .expect("entry visible after slot drift");
+    assert!(
+        drift_entry["supported_slots"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let second = harness.upload("echo-heal", "echo-heal.wasm", wasm).await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert_eq!(second.json["idempotent"], true);
+
+    let healed = harness.list_registry().await;
+    let healed_entry = healed.json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"].as_str() == Some(&id.to_string()))
+        .expect("entry visible after heal");
+    let slots: Vec<String> = healed_entry["supported_slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(slots, vec!["router".to_owned()]);
+}
+
+#[tokio::test]
 async fn idempotent_duplicate_upload_returns_200_same_sha() {
     let harness = Harness::new();
     let wasm = fixture_wasm();
@@ -169,6 +218,7 @@ struct Harness {
     app: axum::Router,
     _dir: tempfile::TempDir,
     data_dir: PathBuf,
+    storage: std::sync::Arc<cc_lb_storage_redb::RedbStorage>,
 }
 
 impl Harness {
@@ -177,11 +227,12 @@ impl Harness {
         let data_dir = dir.path().join("data");
         let mut config = Config::default();
         config.runtime.data_dir = Some(data_dir.clone());
-        let app = router(test_state(config, Some(storage)));
+        let app = router(test_state(config, Some(storage.clone())));
         Self {
             app,
             _dir: dir,
             data_dir,
+            storage,
         }
     }
 
