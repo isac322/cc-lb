@@ -1,10 +1,12 @@
 [package]
 name = "cc-lb-plugin-api"
-version.workspace = true
+# Plugin trio (see crates/cc-lb-pdk/Cargo.toml for policy).
+version = "0.1.0"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
-publish = false
+description = "cc-lb plugin API — public traits and types for built-in plugin authoring."
+repository = "https://github.com/isac322/cc-lb"
 
 [dependencies]
 async-trait.workspace = true
