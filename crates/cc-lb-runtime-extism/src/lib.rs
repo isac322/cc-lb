@@ -1,12 +1,11 @@
 #![forbid(unsafe_code)]
 
-pub mod dispatch;
-pub mod handshake;
-mod host_functions;
-pub mod identity;
+pub use cc_lb_runtime_protocol::{
+    BuildPluginError, build_plugin, dispatch, handshake, host_functions, identity, self_check,
+};
+
 mod plugin_wrap;
 pub mod registry;
-pub mod self_check;
 mod sse_batch;
 
 use std::collections::HashMap;
@@ -26,7 +25,8 @@ use extism::{Manifest, Plugin, PluginBuilder, Wasm};
 use serde_json::Value;
 use uuid::Uuid;
 
-use crate::host_functions::{HostFunctionContext, HostState};
+use cc_lb_runtime_protocol::host_functions::{HostFunctionContext, HostState};
+
 use crate::plugin_wrap::{ExtismDialectPlugin, ExtismFilterPlugin, ExtismSignerFactory};
 use crate::sse_batch::ExtismObservabilityHook;
 

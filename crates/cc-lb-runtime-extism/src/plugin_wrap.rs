@@ -40,7 +40,8 @@ use tokio::sync::oneshot;
 use url::Url;
 use uuid::Uuid;
 
-use crate::dispatch::{DispatchOutcome, dispatch_wire_call};
+use cc_lb_runtime_protocol::dispatch::{DispatchOutcome, dispatch_wire_call};
+
 use crate::{PluginCell, PluginSlot, ResourceLimits};
 
 #[derive(Clone)]

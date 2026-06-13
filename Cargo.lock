@@ -787,6 +787,7 @@ dependencies = [
  "bytes",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
+ "cc-lb-runtime-protocol",
  "cc-lb-storage-api",
  "dashmap",
  "extism",
@@ -822,8 +823,10 @@ dependencies = [
  "ring",
  "serde",
  "serde_json",
+ "thiserror 2.0.18",
  "tracing",
  "wasmparser 0.252.0",
+ "wat",
 ]
 
 [[package]]
