@@ -275,14 +275,18 @@ fn push_text_part(body: &mut Vec<u8>, boundary: &str, name: &str, value: &[u8]) 
 
 fn fixture_wasm() -> &'static [u8] {
     let path = FIXTURE_WASM.get_or_init(|| {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/wasm32-unknown-unknown/release/extism_echo_plugin.wasm");
+        let workspace_target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let fixture_target = workspace_target.join("fixture-wasm");
+        let path = fixture_target.join("wasm32-unknown-unknown/release/extism_echo_plugin.wasm");
         if !path.exists() {
             let status = Command::new("cargo")
                 .env_remove("RUSTFLAGS")
                 .env_remove("CARGO_ENCODED_RUSTFLAGS")
                 .env_remove("RUSTC_WORKSPACE_WRAPPER")
+                .env_remove("RUSTC_WRAPPER")
                 .env_remove("LLVM_PROFILE_FILE")
+                .env_remove("CARGO_BUILD_RUSTFLAGS")
+                .env("CARGO_TARGET_DIR", &fixture_target)
                 .args([
                     "build",
                     "-p",
