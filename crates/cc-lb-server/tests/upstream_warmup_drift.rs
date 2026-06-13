@@ -3,11 +3,11 @@ mod upstream_warmup_harness;
 use std::time::Duration;
 
 use upstream_warmup_harness::{
-    WarmupFixture, assert_locked_warmup_request, delayed_ok_response,
-    drive_time_until_message_count, ok_response,
+    WarmupFixture, assert_locked_warmup_request, delayed_ok_response, ok_response,
+    wait_for_message_count,
 };
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn drift_observation_reschedules_and_fires_after_new_reset() {
     let fixture = WarmupFixture::new().await;
     let initial_cycle_key = fixture.now_unix_secs() - 60;
@@ -60,7 +60,7 @@ async fn drift_observation_reschedules_and_fires_after_new_reset() {
     assert_eq!(record.last_warmup_cycle_key, Some(drifted_cycle_key));
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn container_restart_mid_fire_double_fires_same_cycle() {
     let fixture = WarmupFixture::new().await;
     let cycle_key = fixture.now_unix_secs() - 60;
@@ -71,7 +71,7 @@ async fn container_restart_mid_fire_double_fires_same_cycle() {
     fixture
         .fake
         .messages
-        .push_response(delayed_ok_response(Duration::from_secs(5)));
+        .push_response(delayed_ok_response(Duration::from_millis(500)));
     let replica_id = fixture.replica_id;
     let cancel = tokio_util::sync::CancellationToken::new();
     let warmup_loop = fixture.warmup_loop(replica_id, cancel.clone());
@@ -79,7 +79,7 @@ async fn container_restart_mid_fire_double_fires_same_cycle() {
     let task = tokio::spawn(async move { warmup_loop.scan_and_fire_once(&task_cancel).await });
 
     assert!(
-        drive_time_until_message_count(&fixture.fake.messages, 1).await,
+        wait_for_message_count(&fixture.fake.messages, 1).await,
         "first request did not reach fake Anthropic before cancellation"
     );
     cancel.cancel();

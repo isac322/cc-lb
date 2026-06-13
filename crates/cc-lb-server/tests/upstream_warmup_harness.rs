@@ -45,7 +45,6 @@ use url::Url;
 use uuid::Uuid;
 
 const MASTER_KEY: [u8; 32] = [31; 32];
-const WARMUP_JITTER_ADVANCE: Duration = Duration::from_secs(31);
 
 pub struct WarmupFixture {
     _dir: tempfile::TempDir,
@@ -231,7 +230,6 @@ impl WarmupFixture {
         let cancel = CancellationToken::new();
         let loop_handle = self.warmup_loop(replica_id, cancel.clone());
         let task = tokio::spawn(async move { loop_handle.scan_and_fire_once(&cancel).await });
-        advance_warmup_jitter().await;
         task.await
             .expect("warmup scan task")
             .expect("warmup scan succeeds");
@@ -250,7 +248,7 @@ impl WarmupFixture {
             None,
             refresh_cancel,
         ));
-        Arc::new(UpstreamWarmupLoop::new(
+        let mut warmup_loop = UpstreamWarmupLoop::new(
             self.stores.clone(),
             self.aead.clone(),
             lazy_refresher,
@@ -258,7 +256,9 @@ impl WarmupFixture {
             replica_id,
             None,
             self._dir.path().to_path_buf(),
-        ))
+        );
+        warmup_loop.set_jitter_enabled(false);
+        Arc::new(warmup_loop)
     }
 
     pub async fn refresh_history_len(&self) -> usize {
@@ -266,35 +266,13 @@ impl WarmupFixture {
     }
 }
 
-pub async fn advance_warmup_jitter() {
-    tokio::task::yield_now().await;
-    tokio::time::advance(WARMUP_JITTER_ADVANCE).await;
-    tokio::task::yield_now().await;
-}
-
 pub async fn wait_for_message_count(script: &MessageScript, expected: usize) -> bool {
-    for _ in 0..100_000 {
-        if script.request_count() >= expected {
-            return true;
-        }
-        tokio::task::yield_now().await;
-    }
-    false
-}
-
-pub async fn drive_time_until_message_count(script: &MessageScript, expected: usize) -> bool {
     let deadline = Instant::now() + Duration::from_secs(5);
     while Instant::now() < deadline {
         if script.request_count() >= expected {
             return true;
         }
-        tokio::time::advance(Duration::from_secs(1)).await;
-        for _ in 0..256 {
-            if script.request_count() >= expected {
-                return true;
-            }
-            tokio::task::yield_now().await;
-        }
+        tokio::time::sleep(Duration::from_millis(1)).await;
     }
     script.request_count() >= expected
 }
