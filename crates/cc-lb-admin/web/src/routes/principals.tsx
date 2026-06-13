@@ -86,7 +86,7 @@ const principalSearchSchema = z.object({ selectedId: z.string().optional() });
 function pluginSupportsSlot(plugin: PluginEntry, slot: ChainSlot): boolean {
   const slots = plugin.supported_slots;
   if (!slots || slots.length === 0) {
-    return true;
+    return false;
   }
   return slots.includes(slot);
 }
@@ -1585,7 +1585,6 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                 const isPinnedCache =
                   !isComplex && isSticky && p.name === 'cache-affinity';
                 const disabled = inChain || isPinnedCache;
-                const slotUnknown = !p.supported_slots?.length;
 
                 return (
                   <button
@@ -1606,10 +1605,6 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                           {isPinnedCache
                             ? 'Pinned by Sticky'
                             : 'Already in chain'}
-                        </span>
-                      ) : slotUnknown ? (
-                        <span className="text-[10px] text-amber-500">
-                          Unknown slot
                         </span>
                       ) : null}
                     </div>
@@ -1749,23 +1744,17 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
           />
           {candidates
             .filter((p) => pluginSupportsSlot(p, 'shape'))
-            .map((p) => {
-              const slotUnknown = !p.supported_slots?.length;
-              const desc = slotUnknown
-                ? `${p.label || 'Custom shape plugin'} (slot not yet known)`
-                : p.label || 'Custom shape plugin';
-              return (
-                <SlotRadioCard
-                  key={p.id}
-                  name={p.name}
-                  desc={desc}
-                  isActive={activeEntry?.wasm_registry_id === p.id}
-                  isMutating={mutatingId === p.id}
-                  isMutatingOther={mutatingId !== null && mutatingId !== p.id}
-                  onClick={() => handleSelect(p.id)}
-                />
-              );
-            })}
+            .map((p) => (
+              <SlotRadioCard
+                key={p.id}
+                name={p.name}
+                desc={p.label || 'Custom shape plugin'}
+                isActive={activeEntry?.wasm_registry_id === p.id}
+                isMutating={mutatingId === p.id}
+                isMutatingOther={mutatingId !== null && mutatingId !== p.id}
+                onClick={() => handleSelect(p.id)}
+              />
+            ))}
         </ul>
       </CardBody>
     </Card>
@@ -1924,9 +1913,7 @@ function ObservabilityHookEditor({ principalId }: { principalId: string }) {
                 .filter((p) => pluginSupportsSlot(p, 'observability_hook'))
                 .map((p) => (
                   <option key={p.id} value={p.id}>
-                    {p.supported_slots?.length
-                      ? p.name
-                      : `${p.name} (slot not yet known)`}
+                    {p.name}
                   </option>
                 ))}
             </select>

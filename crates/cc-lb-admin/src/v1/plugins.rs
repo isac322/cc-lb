@@ -297,16 +297,11 @@ async fn insert_chain(
         .await
     {
         Ok(Some(entry)) => {
+            if entry.supported_slots.is_empty() && !entry.is_builtin {
+                return slot_metadata_unknown(&entry.name);
+            }
             if !entry.supported_slots.is_empty() && !entry.supported_slots.contains(&slot) {
                 return unsupported_slot(&entry.name, slot);
-            }
-            if entry.supported_slots.is_empty() && !entry.is_builtin {
-                tracing::warn!(
-                    plugin_id = %entry.id,
-                    plugin_name = %entry.name,
-                    target_slot = slot.as_str(),
-                    "chain insert: registry entry has empty supported_slots; allowing insert pending backfill"
-                );
             }
         }
         Ok(None) => {}
@@ -763,6 +758,18 @@ fn unsupported_slot(plugin_name: &str, slot: PluginSlot) -> axum::response::Resp
             "error": "unsupported_slot",
             "plugin_name": plugin_name,
             "slot": slot.as_str(),
+        })),
+    )
+        .into_response()
+}
+
+fn slot_metadata_unknown(plugin_name: &str) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": "slot_metadata_unknown",
+            "plugin_name": plugin_name,
+            "hint": "re-upload the plugin or restart the server so supported_slots can be backfilled",
         })),
     )
         .into_response()

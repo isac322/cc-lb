@@ -257,7 +257,13 @@ async fn registry_delete_stale_if_match_returns_412_with_current_revision() {
 async fn chain_insert_position_last_uses_next_after() {
     let (_dir, storage) = temp_storage();
     let principal_id = seed_principal(&storage, "principal-last").await;
-    let entry = seed_registry(&storage, 8, "plugin-last").await;
+    let entry = seed_registry_with_slots(
+        &storage,
+        8,
+        "plugin-last",
+        vec![PluginSlot::ObservabilityHook],
+    )
+    .await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (_, _, first, _) = authed_json(
@@ -434,14 +440,14 @@ async fn chain_insert_rejects_plugin_not_advertising_target_slot() {
 }
 
 #[tokio::test]
-async fn chain_insert_allows_plugin_with_empty_supported_slots_for_backfill_grace() {
+async fn chain_insert_rejects_plugin_with_empty_supported_slots_as_slot_metadata_unknown() {
     let (_dir, storage) = temp_storage();
     let principal_id = seed_principal(&storage, "principal-empty-slots").await;
-    let legacy = seed_registry(&storage, 78, "legacy-no-slots").await;
+    let legacy = seed_registry_raw(&storage, 78, "legacy-no-slots").await;
     assert!(legacy.supported_slots.is_empty());
     let app = app(test_state(Config::default(), Some(storage)));
 
-    let (status, _, _, _) = authed_json(
+    let (status, _, body, _) = authed_json(
         app,
         "POST",
         &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
@@ -449,7 +455,9 @@ async fn chain_insert_allows_plugin_with_empty_supported_slots_for_backfill_grac
     )
     .await;
 
-    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "slot_metadata_unknown");
+    assert_eq!(body["plugin_name"], "legacy-no-slots");
 }
 
 #[tokio::test]
@@ -889,7 +897,7 @@ async fn seed_registry_with_slots(
     name: &str,
     slots: Vec<PluginSlot>,
 ) -> cc_lb_storage_api::WasmRegistryEntry {
-    let entry = seed_registry(storage, seed, name).await;
+    let entry = seed_registry_raw(storage, seed, name).await;
     storage
         .update_supported_slots(entry.id, slots.clone())
         .await
@@ -900,6 +908,24 @@ async fn seed_registry_with_slots(
 }
 
 async fn seed_registry(
+    storage: &cc_lb_storage_redb::RedbStorage,
+    seed: u8,
+    name: &str,
+) -> cc_lb_storage_api::WasmRegistryEntry {
+    seed_registry_with_slots(
+        storage,
+        seed,
+        name,
+        vec![
+            PluginSlot::Router,
+            PluginSlot::Shape,
+            PluginSlot::ObservabilityHook,
+        ],
+    )
+    .await
+}
+
+async fn seed_registry_raw(
     storage: &cc_lb_storage_redb::RedbStorage,
     seed: u8,
     name: &str,
