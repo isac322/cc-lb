@@ -45,7 +45,13 @@ pub enum PrincipalKind {
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum Upstream {
     /// Direct Anthropic API endpoint.
-    AnthropicDirect,
+    AnthropicDirect {
+        /// Operator-configured base URL override for this upstream, resolved
+        /// from the upstream record at routing time. `None` indicates the
+        /// canonical Anthropic endpoint should be used.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base_url: Option<Url>,
+    },
 }
 
 /// Upstream record kind exposed to router plugins for candidate selection.
@@ -795,7 +801,7 @@ mod tests {
 
     #[test]
     fn upstream_and_manifest_serde_round_trip() {
-        let upstreams = vec![Upstream::AnthropicDirect];
+        let upstreams = vec![Upstream::AnthropicDirect { base_url: None }];
 
         for upstream in upstreams {
             let json = serde_json::to_string(&upstream).unwrap();
@@ -854,7 +860,7 @@ mod tests {
                 kind: PrincipalKind::InternalKey,
             },
             ObserveEvent::UpstreamChosen {
-                upstream: Upstream::AnthropicDirect,
+                upstream: Upstream::AnthropicDirect { base_url: None },
             },
             ObserveEvent::Chunk {
                 batch_index: 1,

@@ -89,11 +89,11 @@ async fn sign_loads_api_key_from_storage_key() {
         kind: PrincipalKind::InternalKey,
         claims: serde_json::Map::new(),
     };
-    let shaped = shape_request(&DirectDialect, &ctx, &Upstream::AnthropicDirect, &principal)
+    let shaped = shape_request(&DirectDialect, &ctx, &Upstream::AnthropicDirect { base_url: None }, &principal)
         .expect("shape request");
     let signer =
         AnthropicKeySignerFactory::from_storage(storage_key.to_owned(), signer_storage, aead)
-            .build(&Upstream::AnthropicDirect)
+            .build(&Upstream::AnthropicDirect { base_url: None })
             .await
             .expect("signer");
     let signed = sign_request(signer.as_ref(), shaped)

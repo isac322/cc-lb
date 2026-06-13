@@ -28,13 +28,11 @@ impl UpstreamDialect for AnthropicDirectDialect {
         _principal: &Principal,
         builder: &mut ShapedRequestBuilder,
     ) -> Result<ShapedRequest, DialectError> {
-        if !matches!(upstream, Upstream::AnthropicDirect) {
-            return Err(DialectError::UnsupportedRequest {
-                reason: "AnthropicDirectDialect requires Upstream::AnthropicDirect".to_owned(),
-            });
-        }
+        let upstream_base_url = match upstream {
+            Upstream::AnthropicDirect { base_url } => base_url.as_ref(),
+        };
 
-        let base_url = match &self.base_url {
+        let base_url = match upstream_base_url.or(self.base_url.as_ref()) {
             Some(base_url) => base_url.clone(),
             None => Url::parse(ANTHROPIC_API_BASE_URL)
                 .map_err(|source| DialectError::InvalidUrl { source })?,

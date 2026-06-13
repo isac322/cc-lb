@@ -225,7 +225,7 @@ async fn expired_before_sweep_lazy_fires_and_retry_succeeds() {
         "lazy",
     );
     let factory = AnthropicOAuthSignerFactoryWithLazyRefresh::new(base, lazy, upstream_id);
-    let signer = cc_lb_plugin_api::SignerFactory::build(&factory, &Upstream::AnthropicDirect)
+    let signer = cc_lb_plugin_api::SignerFactory::build(&factory, &Upstream::AnthropicDirect { base_url: None })
         .await
         .expect("signer");
 
@@ -782,7 +782,7 @@ fn shaped_request() -> ShapedRequest {
         kind: cc_lb_plugin_api::PrincipalKind::OAuthSubject,
         claims: serde_json::Map::new(),
     };
-    shape_request(&DirectDialect, &ctx, &Upstream::AnthropicDirect, &principal).expect("shape")
+    shape_request(&DirectDialect, &ctx, &Upstream::AnthropicDirect { base_url: None }, &principal).expect("shape")
 }
 
 fn message_request() -> Request<Bytes> {

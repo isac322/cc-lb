@@ -487,7 +487,7 @@ mod tests {
     }
 
     async fn signed_request() -> SignedRequest {
-        let upstream = Upstream::AnthropicDirect;
+        let upstream = Upstream::AnthropicDirect { base_url: None };
         let ctx = RequestContext {
             request_id: "test-request".to_owned(),
             downstream_headers: HeaderMap::new(),

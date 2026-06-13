@@ -21,7 +21,7 @@ fn direct_shape_body_identity_for_relay_to_fake_anthropic() {
     let shaped = shape_request(
         &AnthropicDirectDialect::default(),
         &ctx,
-        &Upstream::AnthropicDirect,
+        &Upstream::AnthropicDirect { base_url: None },
         &common::principal(),
     )
     .expect("direct shape should succeed");

@@ -49,11 +49,11 @@ async fn sign_does_not_modify_body() {
         claims: serde_json::Map::new(),
     };
     let shaped =
-        cc_lb_plugin_api::shape_request(&BodyDialect, &ctx, &Upstream::AnthropicDirect, &principal)
+        cc_lb_plugin_api::shape_request(&BodyDialect, &ctx, &Upstream::AnthropicDirect { base_url: None }, &principal)
             .expect("shape request");
 
     let signer = AnthropicKeySignerFactory::new("sk-ant-test-key")
-        .build(&Upstream::AnthropicDirect)
+        .build(&Upstream::AnthropicDirect { base_url: None })
         .await
         .expect("signer");
     let signed = sign_request(signer.as_ref(), shaped)

@@ -41,7 +41,7 @@ async fn sign_fail_request_fallback() {
         .instantiate_signer_factory(&fixture.manifest)
         .expect("signer factory instantiates");
     let signer = factory
-        .build(&Upstream::AnthropicDirect)
+        .build(&Upstream::AnthropicDirect { base_url: None })
         .await
         .expect("build_signer succeeds before sign fallback");
     let shaped = shaped_request();
@@ -64,7 +64,7 @@ async fn build_signer_fail_request_fallback() {
         .expect("signer factory instantiates");
 
     capture().reset();
-    let error = match factory.build(&Upstream::AnthropicDirect).await {
+    let error = match factory.build(&Upstream::AnthropicDirect { base_url: None }).await {
         Ok(_) => panic!("build_signer fallback unexpectedly succeeded"),
         Err(error) => error,
     };
@@ -85,7 +85,7 @@ fn shape_fail_request_fallback() {
     let error = shape_request(
         dialect.as_ref(),
         &common::ctx(),
-        &Upstream::AnthropicDirect,
+        &Upstream::AnthropicDirect { base_url: None },
         &common::principal(),
     )
     .expect_err("shape fallback fails request");
@@ -152,7 +152,7 @@ async fn on_unauthorized_pass_through_fallback() {
         .instantiate_signer_factory(&fixture.manifest)
         .expect("signer factory instantiates");
     let signer = factory
-        .build(&Upstream::AnthropicDirect)
+        .build(&Upstream::AnthropicDirect { base_url: None })
         .await
         .expect("build_signer succeeds before on_unauthorized fallback");
 
@@ -172,7 +172,7 @@ fn shaped_request() -> ShapedRequest {
     shape_request(
         &DirectDialect,
         &common::ctx(),
-        &Upstream::AnthropicDirect,
+        &Upstream::AnthropicDirect { base_url: None },
         &common::principal(),
     )
     .expect("direct dialect shapes request")

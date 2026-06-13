@@ -125,7 +125,7 @@ impl RouterPlugin for TestRouter {
     ) -> Result<RouteDecision, RouteError> {
         Ok(RouteDecision {
             upstream_id: None,
-            upstream: Upstream::AnthropicDirect,
+            upstream: Upstream::AnthropicDirect { base_url: None },
             dialect: Arc::new(PassthroughDialect {
                 base_url: self.base_url.clone(),
             }),
@@ -359,7 +359,7 @@ pub async fn collect_body(response: Response<Body>) -> (StatusCode, HeaderMap, B
 }
 
 pub async fn signed_request(base_url: &str) -> SignedRequest {
-    let upstream = Upstream::AnthropicDirect;
+    let upstream = Upstream::AnthropicDirect { base_url: None };
     let ctx = RequestContext {
         request_id: "test-request".to_owned(),
         downstream_headers: HeaderMap::new(),

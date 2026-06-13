@@ -175,7 +175,7 @@ async fn oauth_upstream_routes_to_oauth_signer() {
     );
 
     let signer = factory
-        .build(&Upstream::AnthropicDirect)
+        .build(&Upstream::AnthropicDirect { base_url: None })
         .await
         .expect("signer built for oauth upstream");
 
@@ -204,7 +204,7 @@ async fn apikey_upstream_routes_to_key_signer() {
     );
 
     let signer = factory
-        .build(&Upstream::AnthropicDirect)
+        .build(&Upstream::AnthropicDirect { base_url: None })
         .await
         .expect("signer built for apikey upstream");
 
@@ -253,7 +253,7 @@ async fn router_choice_selects_matching_oauth_upstream() {
         .signer_factory
         .with_router_choice("sk-ant-downstream".to_owned(), "oauth-bob".to_owned());
     let signer = signer_factory
-        .build(&Upstream::AnthropicDirect)
+        .build(&Upstream::AnthropicDirect { base_url: None })
         .await
         .expect("signer built for router choice");
     let signed = sign_request(signer.as_ref(), shaped_request())
@@ -293,7 +293,7 @@ async fn empty_router_choice_errors() {
     let signer_factory = view
         .signer_factory
         .with_router_choice("sk-ant-downstream".to_owned(), String::new());
-    let result = signer_factory.build(&Upstream::AnthropicDirect).await;
+    let result = signer_factory.build(&Upstream::AnthropicDirect { base_url: None }).await;
 
     match result {
         Err(SignerError::MissingCredentials { reason }) => {
@@ -321,7 +321,7 @@ async fn missing_oauth_credentials_returns_proper_signer_error() {
         "oauth-missing",
     );
 
-    let result = factory.build(&Upstream::AnthropicDirect).await;
+    let result = factory.build(&Upstream::AnthropicDirect { base_url: None }).await;
 
     match result {
         Err(SignerError::MissingCredentials { reason }) => {
@@ -378,7 +378,7 @@ fn shaped_request() -> ShapedRequest {
         kind: PrincipalKind::OAuthSubject,
         claims: serde_json::Map::new(),
     };
-    shape_request(&DirectDialect, &ctx, &Upstream::AnthropicDirect, &principal).expect("shape")
+    shape_request(&DirectDialect, &ctx, &Upstream::AnthropicDirect { base_url: None }, &principal).expect("shape")
 }
 
 struct DirectDialect;

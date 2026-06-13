@@ -253,7 +253,7 @@ impl RouterPlugin for RecordingRouter {
             .push(format!("{}:{}", self.name, principal.id));
         Ok(RouteDecision {
             upstream_id: None,
-            upstream: Upstream::AnthropicDirect,
+            upstream: Upstream::AnthropicDirect { base_url: None },
             dialect: Arc::new(common::PassthroughDialect {
                 base_url: Url::parse("http://upstream.local/").expect("test URL parses"),
             }),

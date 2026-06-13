@@ -2701,10 +2701,13 @@ fn raw_passthrough_request(
             ))
         })?,
     };
+    let upstream = Upstream::AnthropicDirect {
+        base_url: Some(base_url.clone()),
+    };
     shape_request(
         &RawPassthroughDialect { base_url },
         ctx,
-        &Upstream::AnthropicDirect,
+        &upstream,
         principal,
     )
     .map_err(|source| {
@@ -3778,20 +3781,22 @@ fn limit_kind_name(kind: LimitKind) -> &'static str {
 
 fn audit_upstream_name(upstream: &Upstream) -> &'static str {
     match upstream {
-        Upstream::AnthropicDirect => "anthropic_direct",
+        Upstream::AnthropicDirect { .. } => "anthropic_direct",
     }
 }
 
 fn pricing_upstream_kind(upstream: &Upstream) -> Option<cc_lb_pricing::UpstreamKind> {
     match upstream {
-        Upstream::AnthropicDirect => Some(cc_lb_pricing::UpstreamKind::AnthropicKey),
+        Upstream::AnthropicDirect { .. } => Some(cc_lb_pricing::UpstreamKind::AnthropicKey),
     }
 }
 
 fn upstream_for_record(record: &UpstreamRecord) -> Result<Upstream, String> {
     match record.kind {
         StorageUpstreamKind::AnthropicApiKey | StorageUpstreamKind::AnthropicOauth => {
-            Ok(Upstream::AnthropicDirect)
+            Ok(Upstream::AnthropicDirect {
+                base_url: record.base_url.clone(),
+            })
         }
     }
 }

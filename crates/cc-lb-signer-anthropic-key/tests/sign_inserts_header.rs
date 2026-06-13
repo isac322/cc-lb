@@ -55,13 +55,13 @@ async fn sign_inserts_header() {
     let shaped = cc_lb_plugin_api::shape_request(
         &DirectDialect,
         &ctx,
-        &Upstream::AnthropicDirect,
+        &Upstream::AnthropicDirect { base_url: None },
         &principal,
     )
     .expect("shape request");
 
     let signer = AnthropicKeySignerFactory::new("sk-ant-test-key")
-        .build(&Upstream::AnthropicDirect)
+        .build(&Upstream::AnthropicDirect { base_url: None })
         .await
         .expect("signer");
     let signed = sign_request(signer.as_ref(), shaped)

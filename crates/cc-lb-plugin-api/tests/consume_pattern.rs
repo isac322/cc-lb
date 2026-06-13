@@ -74,14 +74,14 @@ fn signer_seals_by_consuming_shaped_request() {
         claims: serde_json::Map::new(),
     };
     let shaped =
-        shape_request(&DummyDialect, &ctx, &Upstream::AnthropicDirect, &principal).unwrap();
+        shape_request(&DummyDialect, &ctx, &Upstream::AnthropicDirect { base_url: None }, &principal).unwrap();
 
     let signer = DummySigner;
     let future = sign_request(&signer, shaped);
     drop(future);
 
     let shaped =
-        shape_request(&DummyDialect, &ctx, &Upstream::AnthropicDirect, &principal).unwrap();
+        shape_request(&DummyDialect, &ctx, &Upstream::AnthropicDirect { base_url: None }, &principal).unwrap();
     assert_eq!(shaped.method(), Method::POST);
     assert_eq!(shaped.body(), &Bytes::from_static(b"{}"));
 }
@@ -128,7 +128,7 @@ fn controlled_builder_cannot_be_fabricated_by_normal_callers() {
     };
 
     let shaped =
-        shape_request(&DirectDialect, &ctx, &Upstream::AnthropicDirect, &principal).unwrap();
+        shape_request(&DirectDialect, &ctx, &Upstream::AnthropicDirect { base_url: None }, &principal).unwrap();
     assert_eq!(
         shaped.url().as_str(),
         "https://api.anthropic.com/v1/messages"

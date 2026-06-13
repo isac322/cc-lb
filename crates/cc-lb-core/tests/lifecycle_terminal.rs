@@ -275,7 +275,7 @@ impl RouterPlugin for NullRouter {
     ) -> Result<RouteDecision, RouteError> {
         Ok(RouteDecision {
             upstream_id: None,
-            upstream: Upstream::AnthropicDirect,
+            upstream: Upstream::AnthropicDirect { base_url: None },
             dialect: Arc::new(NullDialect),
         })
     }
