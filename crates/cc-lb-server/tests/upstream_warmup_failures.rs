@@ -6,7 +6,7 @@ use upstream_warmup_harness::{
     error_response, ok_response,
 };
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn unauthorized_refreshes_once_then_success_writes_cycle_key() {
     let fixture = WarmupFixture::new().await;
     let cycle_key = fixture.now_unix_secs() - 60;
@@ -30,7 +30,7 @@ async fn unauthorized_refreshes_once_then_success_writes_cycle_key() {
     assert_eq!(record.last_warmup_cycle_key, Some(cycle_key));
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn persistent_unauthorized_refreshes_once_then_abandons_without_cycle_key() {
     let logs = capture_logs();
     let fixture = WarmupFixture::new().await;
@@ -63,22 +63,22 @@ async fn persistent_unauthorized_refreshes_once_then_abandons_without_cycle_key(
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn forbidden_abandons_without_retry_or_cycle_key() {
     permanent_failure_abandons_without_retry(StatusCode::FORBIDDEN, "forbidden").await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn bad_request_abandons_without_retry_or_cycle_key() {
     permanent_failure_abandons_without_retry(StatusCode::BAD_REQUEST, "bad_request").await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn not_found_abandons_without_retry_or_cycle_key() {
     permanent_failure_abandons_without_retry(StatusCode::NOT_FOUND, "not_found").await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn rate_limit_with_active_five_hour_header_writes_cycle_key_without_retry() {
     let fixture = WarmupFixture::new().await;
     let candidate_cycle_key = fixture.now_unix_secs() - 60;
@@ -100,7 +100,7 @@ async fn rate_limit_with_active_five_hour_header_writes_cycle_key_without_retry(
     assert_eq!(record.last_warmup_cycle_key, Some(active_cycle_key));
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn transient_rate_limit_backs_off_then_eventually_writes_cycle_key() {
     let fixture = WarmupFixture::new().await;
     let cycle_key = fixture.now_unix_secs() - 60;

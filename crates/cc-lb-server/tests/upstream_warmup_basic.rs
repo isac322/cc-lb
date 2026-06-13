@@ -4,7 +4,7 @@ use upstream_warmup_harness::{
     WarmupFixture, assert_locked_warmup_request, assert_next_warmup_after_cycle, ok_response,
 };
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn basic_posts_once_and_writes_matching_cycle_key() {
     let fixture = WarmupFixture::new().await;
     let cycle_key = fixture.now_unix_secs() - 60;
@@ -25,7 +25,7 @@ async fn basic_posts_once_and_writes_matching_cycle_key() {
     assert_next_warmup_after_cycle(&record, cycle_key);
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn same_observation_cycle_does_not_fire_again() {
     let fixture = WarmupFixture::new().await;
     let cycle_key = fixture.now_unix_secs() - 60;
