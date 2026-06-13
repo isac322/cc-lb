@@ -357,7 +357,7 @@ impl RouterPlugin for RecordingRouter {
         })?;
         Ok(RouteDecision {
             upstream_id: Some(candidate.upstream_id),
-            upstream: Upstream::AnthropicDirect,
+            upstream: Upstream::AnthropicDirect { base_url: None },
             dialect: Arc::new(PassthroughDialect),
         })
     }

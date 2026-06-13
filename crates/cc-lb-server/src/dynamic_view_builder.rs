@@ -742,7 +742,9 @@ impl RouterPlugin for FirstCandidateRouter {
         );
         Ok(RouteDecision {
             upstream_id: Some(candidate.upstream_id),
-            upstream: Upstream::AnthropicDirect,
+            upstream: Upstream::AnthropicDirect {
+                base_url: base_url.clone(),
+            },
             dialect: Arc::new(AnthropicDirectDialect::with_base_url(base_url)),
         })
     }
@@ -862,7 +864,7 @@ fn upstream_matches(record: &UpstreamRecord, upstream: &Upstream) -> bool {
         (&record.kind, upstream),
         (
             UpstreamKind::AnthropicApiKey | UpstreamKind::AnthropicOauth,
-            Upstream::AnthropicDirect
+            Upstream::AnthropicDirect { .. }
         )
     )
 }

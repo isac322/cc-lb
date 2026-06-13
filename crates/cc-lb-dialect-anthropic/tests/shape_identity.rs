@@ -21,7 +21,7 @@ fn direct_shape_preserves_method_headers_and_body_bytes() {
     let shaped = shape_request(
         &AnthropicDirectDialect::default(),
         &ctx,
-        &Upstream::AnthropicDirect,
+        &Upstream::AnthropicDirect { base_url: None },
         &common::principal(),
     )
     .expect("direct shape should succeed");
