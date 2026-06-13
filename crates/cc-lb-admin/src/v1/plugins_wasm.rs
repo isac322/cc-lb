@@ -164,7 +164,6 @@ async fn upload_wasm_inner(
     })?;
     validate_wasm_bytes(&bytes)?;
     validate_extism(&bytes)?;
-    let supported_slots = derive_supported_slots(&bytes).await?;
 
     let sha256 = tokio::task::spawn_blocking({
         let bytes = bytes.clone();
@@ -180,6 +179,11 @@ async fn upload_wasm_inner(
         )
     })?;
     let sha256_hex = hex_sha256(sha256);
+    let supported_slots = match storage.get_registry_entry_by_sha(sha256).await {
+        Ok(Some(existing)) if !existing.supported_slots.is_empty() => existing.supported_slots,
+        Ok(_) => derive_supported_slots(&bytes).await?,
+        Err(error) => return Err(storage_response(error)),
+    };
     let admin_id = admin_id_from_headers(headers);
     let blob = WasmBlob {
         sha256,
