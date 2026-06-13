@@ -185,6 +185,24 @@ impl PluginRegistryStore for PostgresStorage {
             .ok_or_else(|| conflict("updated plugin registry row disappeared"))
     }
 
+    async fn update_supported_slots(
+        &self,
+        id: Uuid,
+        supported_slots: Vec<PluginSlot>,
+    ) -> StorageResult<()> {
+        let slots: Vec<String> = supported_slots
+            .iter()
+            .map(|slot| slot.as_str().to_owned())
+            .collect();
+        sqlx::query("UPDATE wasm_registry_v2 SET supported_slots = $1 WHERE id = $2")
+            .bind(&slots)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
     async fn delete_registry_entry(
         &self,
         id: Uuid,
@@ -593,7 +611,12 @@ async fn insert_registry_in_tx(
     input: &WasmRegistryEntryInput,
     uploaded_at: DateTime<Utc>,
 ) -> StorageResult<Option<WasmRegistryEntry>> {
-    let row = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, revision) VALUES ($1, $2, $3, $4, $5, $6, $7, 0) ON CONFLICT (sha256) DO NOTHING RETURNING id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, 0::BIGINT AS refcount, revision")
+    let supported_slots: Vec<String> = input
+        .supported_slots
+        .iter()
+        .map(|slot| slot.as_str().to_owned())
+        .collect();
+    let row = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, revision, supported_slots) VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8) ON CONFLICT (sha256) DO NOTHING RETURNING id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, 0::BIGINT AS refcount, revision, supported_slots")
         .bind(id)
         .bind(sha256.as_slice())
         .bind(&input.name)
@@ -601,6 +624,7 @@ async fn insert_registry_in_tx(
         .bind(&input.label)
         .bind(uploaded_at)
         .bind(input.uploaded_by_admin_id)
+        .bind(&supported_slots)
         .fetch_optional(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -672,6 +696,12 @@ fn registry_from_row(row: sqlx::postgres::PgRow) -> StorageResult<WasmRegistryEn
         wire_version: BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
         is_builtin: false,
         metadata: None,
+        supported_slots: row
+            .try_get::<Vec<String>, _>("supported_slots")
+            .map_err(map_sqlx_error)?
+            .into_iter()
+            .filter_map(|s| PluginSlot::parse(&s))
+            .collect(),
     })
 }
 

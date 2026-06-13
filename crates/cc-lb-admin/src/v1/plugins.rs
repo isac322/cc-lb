@@ -124,6 +124,7 @@ struct RegistryEntryResponse {
     wire_version: u8,
     is_builtin: bool,
     metadata: Option<PluginMetadata>,
+    supported_slots: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -291,6 +292,21 @@ async fn insert_chain(
         return storage_unavailable();
     };
     let slot = body.slot.0;
+    match storage
+        .get_registry_entry_by_id(body.wasm_registry_id)
+        .await
+    {
+        Ok(Some(entry)) => {
+            if entry.supported_slots.is_empty() && !entry.is_builtin {
+                return slot_metadata_unknown(&entry.name);
+            }
+            if !entry.supported_slots.is_empty() && !entry.supported_slots.contains(&slot) {
+                return unsupported_slot(&entry.name, slot);
+            }
+        }
+        Ok(None) => {}
+        Err(error) => return storage_error(error),
+    }
     let existing = match storage.list_chain_for_principal(principal_id, slot).await {
         Ok(entries) => entries,
         Err(error) => return storage_error(error),
@@ -573,6 +589,11 @@ async fn registry_size_bytes(storage: &dyn Storage, sha256: [u8; 32]) -> Result<
 }
 
 fn registry_response(entry: WasmRegistryEntry, size_bytes: u64) -> RegistryEntryResponse {
+    let supported_slots = entry
+        .supported_slots
+        .iter()
+        .map(|slot| slot.as_str().to_owned())
+        .collect();
     RegistryEntryResponse {
         id: entry.id,
         sha256_hex: hex_sha256(entry.sha256),
@@ -587,6 +608,7 @@ fn registry_response(entry: WasmRegistryEntry, size_bytes: u64) -> RegistryEntry
         wire_version: entry.wire_version,
         is_builtin: entry.is_builtin,
         metadata: entry.metadata,
+        supported_slots,
     }
 }
 
@@ -724,6 +746,30 @@ fn slot_singleton(existing_entry_id: Uuid) -> axum::response::Response {
         Json(json!({
             "error": "slot_singleton",
             "existing_entry_id": existing_entry_id.to_string()
+        })),
+    )
+        .into_response()
+}
+
+fn unsupported_slot(plugin_name: &str, slot: PluginSlot) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": "unsupported_slot",
+            "plugin_name": plugin_name,
+            "slot": slot.as_str(),
+        })),
+    )
+        .into_response()
+}
+
+fn slot_metadata_unknown(plugin_name: &str) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": "slot_metadata_unknown",
+            "plugin_name": plugin_name,
+            "hint": "re-upload the plugin or restart the server so supported_slots can be backfilled",
         })),
     )
         .into_response()

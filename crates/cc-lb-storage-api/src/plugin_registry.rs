@@ -34,6 +34,11 @@ pub struct WasmRegistryEntryInput {
     pub label: Option<String>,
     pub uploaded_at_unix_secs: u64,
     pub uploaded_by_admin_id: Uuid,
+    /// Slots the plugin exports a wire function for, derived from
+    /// `HandshakeAccept.implemented_functions`. Empty preserves legacy uploads
+    /// that did not supply this metadata.
+    #[serde(default)]
+    pub supported_slots: Vec<PluginSlot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +70,10 @@ pub struct WasmRegistryEntry {
     pub is_builtin: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<PluginMetadata>,
+    /// Slots the plugin exports a wire function for. Empty when a legacy
+    /// entry has not yet been backfilled by `run_startup_handshake`.
+    #[serde(default)]
+    pub supported_slots: Vec<PluginSlot>,
 }
 
 impl WasmRegistryEntry {
@@ -83,6 +92,7 @@ impl WasmRegistryEntry {
             wire_version: BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
             is_builtin: true,
             metadata: Some(builtin_metadata_for_cache_affinity()),
+            supported_slots: vec![PluginSlot::Router],
         }
     }
 
@@ -113,7 +123,7 @@ fn builtin_metadata_for_cache_affinity() -> PluginMetadata {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PluginSlot {
     Router,
@@ -217,6 +227,12 @@ pub trait PluginRegistryStore: Send + Sync {
         expected_revision: u64,
         label: Option<String>,
     ) -> StorageResult<WasmRegistryEntry>;
+
+    async fn update_supported_slots(
+        &self,
+        id: Uuid,
+        supported_slots: Vec<PluginSlot>,
+    ) -> StorageResult<()>;
 
     async fn delete_registry_entry(
         &self,

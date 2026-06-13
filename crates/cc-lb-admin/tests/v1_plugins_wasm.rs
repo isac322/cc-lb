@@ -39,6 +39,79 @@ async fn happy_upload_returns_201_with_sha_and_cache_file_exists() {
 }
 
 #[tokio::test]
+async fn upload_persists_supported_slots_for_filter_exporting_plugin() {
+    let harness = Harness::new();
+    let wasm = fixture_wasm();
+    let upload = harness.upload("echo-slots", "echo-slots.wasm", wasm).await;
+    assert_eq!(upload.status, StatusCode::CREATED);
+    let id = upload.json["id"].as_str().unwrap().to_owned();
+
+    let registry = harness.list_registry().await;
+    let entry = registry.json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"].as_str() == Some(&id))
+        .expect("uploaded entry visible in registry");
+    let slots: Vec<String> = entry["supported_slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(slots, vec!["router".to_owned()]);
+}
+
+#[tokio::test]
+async fn reupload_heals_empty_supported_slots_on_existing_entry() {
+    use cc_lb_storage_api::PluginRegistryStore;
+
+    let harness = Harness::new();
+    let wasm = fixture_wasm();
+    let first = harness.upload("echo-heal", "echo-heal.wasm", wasm).await;
+    assert_eq!(first.status, StatusCode::CREATED);
+    let id: uuid::Uuid = first.json["id"].as_str().unwrap().parse().unwrap();
+
+    harness
+        .storage
+        .update_supported_slots(id, Vec::new())
+        .await
+        .unwrap();
+    let drift = harness.list_registry().await;
+    let drift_entry = drift.json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"].as_str() == Some(&id.to_string()))
+        .expect("entry visible after slot drift");
+    assert!(
+        drift_entry["supported_slots"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+
+    let second = harness.upload("echo-heal", "echo-heal.wasm", wasm).await;
+    assert_eq!(second.status, StatusCode::OK);
+    assert_eq!(second.json["idempotent"], true);
+
+    let healed = harness.list_registry().await;
+    let healed_entry = healed.json["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"].as_str() == Some(&id.to_string()))
+        .expect("entry visible after heal");
+    let slots: Vec<String> = healed_entry["supported_slots"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|value| value.as_str().unwrap().to_owned())
+        .collect();
+    assert_eq!(slots, vec!["router".to_owned()]);
+}
+
+#[tokio::test]
 async fn idempotent_duplicate_upload_returns_200_same_sha() {
     let harness = Harness::new();
     let wasm = fixture_wasm();
@@ -145,6 +218,7 @@ struct Harness {
     app: axum::Router,
     _dir: tempfile::TempDir,
     data_dir: PathBuf,
+    storage: std::sync::Arc<cc_lb_storage_redb::RedbStorage>,
 }
 
 impl Harness {
@@ -153,11 +227,12 @@ impl Harness {
         let data_dir = dir.path().join("data");
         let mut config = Config::default();
         config.runtime.data_dir = Some(data_dir.clone());
-        let app = router(test_state(config, Some(storage)));
+        let app = router(test_state(config, Some(storage.clone())));
         Self {
             app,
             _dir: dir,
             data_dir,
+            storage,
         }
     }
 
@@ -181,6 +256,16 @@ impl Harness {
         let request = Request::builder()
             .method("POST")
             .uri("/admin/v1/plugins/wasm/gc")
+            .header("Authorization", format!("Bearer {TOKEN}"))
+            .body(Body::empty())
+            .unwrap();
+        send(self.app.clone(), request).await
+    }
+
+    async fn list_registry(&self) -> TestResponse {
+        let request = Request::builder()
+            .method("GET")
+            .uri("/admin/v1/plugins/registry")
             .header("Authorization", format!("Bearer {TOKEN}"))
             .body(Body::empty())
             .unwrap();
@@ -241,16 +326,24 @@ fn push_text_part(body: &mut Vec<u8>, boundary: &str, name: &str, value: &[u8]) 
 
 fn fixture_wasm() -> &'static [u8] {
     let path = FIXTURE_WASM.get_or_init(|| {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../target/wasm32-wasip1/release/extism_echo_plugin.wasm");
+        let workspace_target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
+        let fixture_target = workspace_target.join("fixture-wasm");
+        let path = fixture_target.join("wasm32-unknown-unknown/release/extism_echo_plugin.wasm");
         if !path.exists() {
             let status = Command::new("cargo")
+                .env_remove("RUSTFLAGS")
+                .env_remove("CARGO_ENCODED_RUSTFLAGS")
+                .env_remove("RUSTC_WORKSPACE_WRAPPER")
+                .env_remove("RUSTC_WRAPPER")
+                .env_remove("LLVM_PROFILE_FILE")
+                .env_remove("CARGO_BUILD_RUSTFLAGS")
+                .env("CARGO_TARGET_DIR", &fixture_target)
                 .args([
                     "build",
                     "-p",
                     "extism-echo-plugin",
                     "--target",
-                    "wasm32-wasip1",
+                    "wasm32-unknown-unknown",
                     "--release",
                 ])
                 .status()
