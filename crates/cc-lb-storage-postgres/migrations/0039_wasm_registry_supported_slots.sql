@@ -1,0 +1,2 @@
+ALTER TABLE wasm_registry_v2
+    ADD COLUMN IF NOT EXISTS supported_slots TEXT[] NOT NULL DEFAULT ARRAY[]::TEXT[];

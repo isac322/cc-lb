@@ -1,4 +1,4 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -12,7 +12,10 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::post;
 use axum::{Json, Router};
 use cc_lb_core::{AuditEntry, AuditPayload};
-use cc_lb_storage_api::{MAX_WASM_BLOB_BYTES, StorageError, WasmBlob, WasmRegistryEntryInput};
+use cc_lb_runtime_extism::handshake::{build_offer, execute_handshake, slot_set_from_handshake};
+use cc_lb_storage_api::{
+    MAX_WASM_BLOB_BYTES, PluginSlot, StorageError, WasmBlob, WasmRegistryEntryInput,
+};
 use extism::{Manifest, Plugin, Wasm};
 use serde::Serialize;
 use serde_json::json;
@@ -176,6 +179,11 @@ async fn upload_wasm_inner(
         )
     })?;
     let sha256_hex = hex_sha256(sha256);
+    let supported_slots = match storage.get_registry_entry_by_sha(sha256).await {
+        Ok(Some(existing)) if !existing.supported_slots.is_empty() => existing.supported_slots,
+        Ok(_) => derive_supported_slots(&bytes).await?,
+        Err(error) => return Err(storage_response(error)),
+    };
     let admin_id = admin_id_from_headers(headers);
     let blob = WasmBlob {
         sha256,
@@ -189,11 +197,19 @@ async fn upload_wasm_inner(
         label: None,
         uploaded_at_unix_secs: unix_now_secs(),
         uploaded_by_admin_id: admin_id,
+        supported_slots: supported_slots.clone(),
     };
-    let (entry, existed) = storage
+    let (mut entry, existed) = storage
         .persist_wasm_upload(blob, entry_input)
         .await
         .map_err(storage_response)?;
+    if existed && entry.supported_slots.is_empty() && !supported_slots.is_empty() {
+        storage
+            .update_supported_slots(entry.id, supported_slots.clone())
+            .await
+            .map_err(storage_response)?;
+        entry.supported_slots = supported_slots;
+    }
     materialize_cache(state, &sha256_hex, &bytes)
         .await
         .map_err(|error| {
@@ -383,6 +399,40 @@ fn validate_extism(bytes: &[u8]) -> Result<(), Response> {
         json_error(StatusCode::BAD_REQUEST, "invalid_wasm", message)
     })?;
     reject_removed_router_wire(&plugin)
+}
+
+async fn derive_supported_slots(bytes: &[u8]) -> Result<Vec<PluginSlot>, Response> {
+    let bytes = bytes.to_vec();
+    let accept = tokio::task::spawn_blocking(move || {
+        let offer = build_offer(&BTreeSet::new());
+        execute_handshake(&bytes, &offer)
+    })
+    .await
+    .map_err(|error| {
+        tracing::error!(%error, "wasm handshake worker failed");
+        json_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "handshake_worker_failed",
+            "handshake worker panicked",
+        )
+    })?
+    .map_err(|error| {
+        let mut message = error.to_string();
+        if message.len() > 500 {
+            message.truncate(500);
+        }
+        json_error(StatusCode::BAD_REQUEST, "handshake_failed", message)
+    })?;
+
+    let slots = slot_set_from_handshake(&accept.implemented_functions);
+    if slots.is_empty() {
+        return Err(json_error(
+            StatusCode::BAD_REQUEST,
+            "no_supported_slot",
+            "plugin does not export any of: filter, shape, observe",
+        ));
+    }
+    Ok(slots)
 }
 
 #[allow(clippy::result_large_err)]

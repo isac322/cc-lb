@@ -9,4 +9,5 @@ license.workspace = true
 crate-type = ["cdylib"]
 
 [dependencies]
+cc-lb-plugin-wire = { path = "../../../crates/cc-lb-plugin-wire" }
 extism-pdk = { workspace = true }

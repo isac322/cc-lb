@@ -107,6 +107,7 @@ export interface PluginEntry {
   kind?: string;
   wire_version?: number;
   metadata: PluginMetadata | null;
+  supported_slots?: ChainSlot[];
 }
 interface PluginListResp {
   entries: PluginEntry[];

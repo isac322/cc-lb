@@ -110,6 +110,20 @@ impl PluginRegistryStore for RedbStorage {
         .map_err(map_redb_err)
     }
 
+    async fn update_supported_slots(
+        &self,
+        id: Uuid,
+        supported_slots: Vec<PluginSlot>,
+    ) -> StorageResult<()> {
+        let storage = self.clone();
+        tokio::task::spawn_blocking(move || {
+            storage.update_supported_slots_sync(id, supported_slots)
+        })
+        .await
+        .map_err(map_join_err)?
+        .map_err(map_redb_err)
+    }
+
     async fn delete_registry_entry(
         &self,
         id: Uuid,
@@ -264,6 +278,7 @@ impl RedbStorage {
             wire_version: cc_lb_storage_api::BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
             is_builtin: false,
             metadata: None,
+            supported_slots: input.supported_slots,
         };
         {
             let mut registry = write_txn.open_table(WASM_REGISTRY_V2)?;
@@ -413,6 +428,37 @@ impl RedbStorage {
         }
         write_txn.commit()?;
         Ok(entry)
+    }
+
+    fn update_supported_slots_sync(
+        &self,
+        id: Uuid,
+        supported_slots: Vec<PluginSlot>,
+    ) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        let mut updated = None;
+        {
+            let registry = write_txn.open_table(WASM_REGISTRY_V2)?;
+            for row in registry.iter()? {
+                let (_key, value) = row?;
+                let mut entry: WasmRegistryEntry = serde_json::from_slice(value.value())?;
+                if entry.id == id {
+                    entry.supported_slots = supported_slots.clone();
+                    updated = Some(entry);
+                    break;
+                }
+            }
+        }
+        let Some(entry) = updated else {
+            return Ok(());
+        };
+        {
+            let mut registry = write_txn.open_table(WASM_REGISTRY_V2)?;
+            let payload = serde_json::to_vec(&entry)?;
+            registry.insert(entry.id.as_bytes().as_slice(), payload.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
     }
 
     fn delete_registry_entry_sync(
