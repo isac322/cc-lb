@@ -300,6 +300,7 @@ export function ConfirmDialog({
   cancelLabel = 'Cancel',
   destructive = false,
   onConfirm,
+  confirmDisabled = false,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -309,6 +310,7 @@ export function ConfirmDialog({
   cancelLabel?: string;
   destructive?: boolean;
   onConfirm: () => void;
+  confirmDisabled?: boolean;
 }) {
   return (
     <Modal
@@ -323,6 +325,7 @@ export function ConfirmDialog({
           </Button>
           <Button
             variant={destructive ? 'danger' : 'primary'}
+            disabled={confirmDisabled}
             onClick={() => {
               onConfirm();
               onOpenChange(false);
