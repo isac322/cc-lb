@@ -235,11 +235,7 @@ impl PollScheduleEstimator {
         );
         let cutoff = now.checked_sub(expiry_window);
         if let Some(cutoff) = cutoff {
-            while state
-                .success_history
-                .front()
-                .is_some_and(|ts| *ts < cutoff)
-            {
+            while state.success_history.front().is_some_and(|ts| *ts < cutoff) {
                 state.success_history.pop_front();
             }
         }
@@ -260,10 +256,7 @@ impl PollScheduleEstimator {
         let unlock_at = oldest
             + Duration::from_secs(self.config.rate_limit_window_secs)
             + Duration::from_secs(self.config.rate_limit_safety_secs);
-        unlock_at
-            .duration_since(now)
-            .unwrap_or_default()
-            .as_secs()
+        unlock_at.duration_since(now).unwrap_or_default().as_secs()
     }
 
     fn bootstrap_backoff(&self, attempt_count: u32) -> u64 {
