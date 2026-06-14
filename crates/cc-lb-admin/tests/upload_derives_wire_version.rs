@@ -35,7 +35,7 @@ async fn upload_derives_wire_version_from_handshake_chosen_versions() {
 }
 
 #[tokio::test]
-async fn idempotent_reupload_updates_drifted_wire_version() {
+async fn idempotent_reupload_skips_handshake_and_preserves_stored_wire_version() {
     let harness = Harness::new();
     let wasm = handshake_wasm_with_filter_v3_shape_v2();
 
@@ -45,6 +45,9 @@ async fn idempotent_reupload_updates_drifted_wire_version() {
     assert_eq!(first.status, StatusCode::CREATED);
     let id: Uuid = first.json["id"].as_str().unwrap().parse().unwrap();
 
+    // Simulate disk-level wire_version drift. Idempotent re-upload must take the
+    // existing supported_slots/wire_version fast path and skip the (slow) handshake;
+    // drift recovery is the startup re-handshake's job, not the upload handler's.
     harness.storage.update_wire_version(id, 1).await.unwrap();
     let drifted = harness
         .storage
@@ -60,13 +63,16 @@ async fn idempotent_reupload_updates_drifted_wire_version() {
     assert_eq!(second.status, StatusCode::OK);
     assert_eq!(second.json["idempotent"], true);
 
-    let healed = harness
+    let after = harness
         .storage
         .get_registry_entry_by_id(id)
         .await
         .unwrap()
-        .expect("healed entry is stored");
-    assert_eq!(healed.wire_version, 3);
+        .expect("entry still stored after re-upload");
+    assert_eq!(
+        after.wire_version, 1,
+        "idempotent re-upload must not re-handshake; drift recovery is startup's job",
+    );
 }
 
 struct Harness {
