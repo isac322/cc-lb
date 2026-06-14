@@ -1178,7 +1178,7 @@ fn log_startup_handshake_report(report: &StartupHandshakeReport) {
 
 pub async fn backfill_supported_slots(storage: &dyn Storage) {
     use cc_lb_runtime_extism::handshake::{
-        build_offer, execute_handshake, slot_set_from_extism_exports, slot_set_from_handshake,
+        build_offer, execute_handshake, slot_set_from_handshake,
     };
     use cc_lb_storage_api::{BUILTIN_CACHE_AFFINITY_ID, PluginSlot};
 
@@ -1228,28 +1228,15 @@ pub async fn backfill_supported_slots(storage: &dyn Storage) {
             }
         };
         let offer_for_task = offer.clone();
-        let bytes_for_task = bytes.clone();
+        let bytes_for_task = bytes;
         let outcome = tokio::task::spawn_blocking(move || {
-            match execute_handshake(&bytes_for_task, &offer_for_task) {
-                Ok(accept) => Ok(slot_set_from_handshake(&accept.implemented_functions)),
-                Err(handshake_err) => {
-                    Err((handshake_err, slot_set_from_extism_exports(&bytes_for_task)))
-                }
-            }
+            execute_handshake(&bytes_for_task, &offer_for_task)
+                .map(|accept| slot_set_from_handshake(&accept.implemented_functions))
         })
         .await;
         let slots = match outcome {
             Ok(Ok(slots)) => slots,
-            Ok(Err((handshake_err, fallback))) if !fallback.is_empty() => {
-                tracing::warn!(
-                    error = %handshake_err,
-                    sha256 = %hex_sha256_bytes(&entry.sha256),
-                    fallback_slots = ?fallback,
-                    "supported_slots backfill: handshake failed; using extism export fallback (legacy plugin)"
-                );
-                fallback
-            }
-            Ok(Err((error, _))) => {
+            Ok(Err(error)) => {
                 tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "supported_slots backfill: handshake failed");
                 failed += 1;
                 continue;

@@ -45,7 +45,7 @@ async fn backfill_skips_entries_already_populated_and_is_idempotent() {
 }
 
 #[tokio::test]
-async fn backfill_recovers_legacy_route_plugin_via_extism_export_scan() {
+async fn backfill_legacy_route_plugin_stays_empty() {
     let (_dir, storage) = open_storage();
     let entry = seed_legacy_route_plugin(&storage, "legacy-route").await;
     assert!(entry.supported_slots.is_empty());
@@ -57,7 +57,7 @@ async fn backfill_recovers_legacy_route_plugin_via_extism_export_scan() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(after.supported_slots, vec![PluginSlot::Router]);
+    assert!(after.supported_slots.is_empty());
 }
 
 #[tokio::test]
