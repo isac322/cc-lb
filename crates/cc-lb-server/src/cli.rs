@@ -38,6 +38,10 @@ pub enum Command {
         #[command(subcommand)]
         command: ConfigCommand,
     },
+    Doctor {
+        #[command(subcommand)]
+        command: DoctorCommand,
+    },
 }
 
 #[cfg(test)]
@@ -98,4 +102,9 @@ pub enum ConfigCommand {
         #[arg(long, value_name = "PATH")]
         data_dir: Option<PathBuf>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum DoctorCommand {
+    ListAbandonedChainEntries,
 }
