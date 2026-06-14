@@ -2,9 +2,12 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 fn main() {
+    // GIT_SHA is the canonical override. GITHUB_SHA / CI_COMMIT_SHA are only
+    // consulted as fallbacks when GIT_SHA is unset, and they are GitHub Actions
+    // protected variables that cannot be stabilized via env: or $GITHUB_ENV,
+    // so wiring them into cargo's fingerprint would invalidate build.rs every
+    // CI run even when the source tree is unchanged.
     println!("cargo:rerun-if-env-changed=GIT_SHA");
-    println!("cargo:rerun-if-env-changed=GITHUB_SHA");
-    println!("cargo:rerun-if-env-changed=CI_COMMIT_SHA");
     println!("cargo:rerun-if-env-changed=SOURCE_DATE_EPOCH");
 
     emit("CC_LB_VERSION", env!("CARGO_PKG_VERSION").to_owned());
