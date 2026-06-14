@@ -292,6 +292,7 @@ async fn delete_cascade_blocks_when_plugin_chain_exists_else_soft_deletes() {
                 label: None,
                 uploaded_at_unix_secs: 1,
                 uploaded_by_admin_id: principal_id,
+                wire_version: 1,
                 supported_slots: Vec::new(),
             },
         )

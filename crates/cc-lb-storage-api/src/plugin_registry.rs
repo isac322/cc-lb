@@ -35,6 +35,8 @@ pub struct WasmRegistryEntryInput {
     pub label: Option<String>,
     pub uploaded_at_unix_secs: u64,
     pub uploaded_by_admin_id: Uuid,
+    #[serde(default = "default_wire_version")]
+    pub wire_version: u8,
     /// Slots the plugin exports a wire function for, derived from
     /// `HandshakeAccept.implemented_functions`. Empty preserves legacy uploads
     /// that did not supply this metadata.
@@ -106,7 +108,7 @@ fn default_plugin_kind() -> String {
     BUILTIN_PLUGIN_KIND_FILTER.to_owned()
 }
 
-fn default_wire_version() -> u8 {
+pub fn default_wire_version() -> u8 {
     1
 }
 
@@ -207,6 +209,8 @@ pub trait PluginRegistryStore: Send + Sync {
         id: Uuid,
         supported_slots: Vec<PluginSlot>,
     ) -> StorageResult<()>;
+
+    async fn update_wire_version(&self, id: Uuid, wire_version: u8) -> StorageResult<()>;
 
     async fn delete_registry_entry(
         &self,

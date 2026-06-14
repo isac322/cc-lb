@@ -45,7 +45,7 @@ async fn backfill_skips_entries_already_populated_and_is_idempotent() {
 }
 
 #[tokio::test]
-async fn backfill_recovers_legacy_route_plugin_via_extism_export_scan() {
+async fn backfill_legacy_route_plugin_stays_empty() {
     let (_dir, storage) = open_storage();
     let entry = seed_legacy_route_plugin(&storage, "legacy-route").await;
     assert!(entry.supported_slots.is_empty());
@@ -57,7 +57,7 @@ async fn backfill_recovers_legacy_route_plugin_via_extism_export_scan() {
         .await
         .unwrap()
         .unwrap();
-    assert_eq!(after.supported_slots, vec![PluginSlot::Router]);
+    assert!(after.supported_slots.is_empty());
 }
 
 #[tokio::test]
@@ -112,6 +112,7 @@ async fn seed_legacy_route_plugin(storage: &Arc<Storage>, name: &str) -> WasmReg
                 label: None,
                 uploaded_at_unix_secs: 1_800_000_000,
                 uploaded_by_admin_id: Uuid::new_v4(),
+                wire_version: 1,
                 supported_slots: Vec::new(),
             },
         )
@@ -158,6 +159,7 @@ async fn seed_legacy_entry(storage: &Arc<Storage>, seed: u8, name: &str) -> Wasm
                 label: None,
                 uploaded_at_unix_secs: 1_800_000_000,
                 uploaded_by_admin_id: Uuid::new_v4(),
+                wire_version: 1,
                 supported_slots: Vec::new(),
             },
         )

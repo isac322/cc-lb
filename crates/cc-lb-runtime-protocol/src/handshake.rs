@@ -43,32 +43,6 @@ fn wire_function_to_slot(name: &str) -> Option<PluginSlot> {
     }
 }
 
-/// Narrowly recovers slot metadata for legacy wire-v1/v2 router plugins that
-/// export `route`. Restricted to the `route` -> `Router` migration so we do
-/// not bypass the handshake's `implemented_functions` source of truth for
-/// other slots; new uploads and shape / observe plugins must come through
-/// the handshake gate.
-pub fn slot_set_from_extism_exports(plugin_bytes: &[u8]) -> Vec<PluginSlot> {
-    use extism::{Manifest, PluginBuilder, Wasm};
-
-    let manifest = Manifest::new([Wasm::data(plugin_bytes.to_vec())])
-        .with_timeout(std::time::Duration::from_millis(HANDSHAKE_WALL_MS))
-        .disallow_all_hosts();
-    let Ok(plugin) = PluginBuilder::new(&manifest)
-        .with_wasi(false)
-        .with_cache_disabled()
-        .with_fuel_limit(HANDSHAKE_FUEL)
-        .build()
-    else {
-        return Vec::new();
-    };
-    if plugin.function_exists("route") {
-        vec![PluginSlot::Router]
-    } else {
-        Vec::new()
-    }
-}
-
 pub fn build_offer(host_caps: &BTreeSet<String>) -> HandshakeOffer {
     let mut function_versions = BTreeMap::new();
     for (name, versions) in wire_function_versions() {
@@ -374,56 +348,6 @@ mod tests {
             .into_iter()
             .collect();
         assert!(slot_set_from_handshake(&unrelated).is_empty());
-    }
-
-    #[test]
-    fn slot_set_from_extism_exports_maps_only_route_to_router() {
-        let wasm = wat::parse_str(r#"(module (func (export "route") (result i32) (i32.const 0)))"#)
-            .expect("route-only wat parses");
-        assert_eq!(
-            slot_set_from_extism_exports(&wasm),
-            vec![PluginSlot::Router],
-        );
-    }
-
-    #[test]
-    fn slot_set_from_extism_exports_ignores_filter_shape_observe_exports() {
-        for export in ["filter", "shape", "observe"] {
-            let wat = format!(r#"(module (func (export "{export}") (result i32) (i32.const 0)))"#,);
-            let wasm = wat::parse_str(&wat).expect("single-export wat parses");
-            assert!(
-                slot_set_from_extism_exports(&wasm).is_empty(),
-                "fallback must not trust {export} export without handshake validation",
-            );
-        }
-    }
-
-    #[test]
-    fn slot_set_from_extism_exports_returns_router_for_route_plus_shape_legacy() {
-        let wasm = wat::parse_str(
-            r#"(module
-                (func (export "route") (result i32) (i32.const 0))
-                (func (export "shape") (result i32) (i32.const 0)))"#,
-        )
-        .expect("legacy route+shape wat parses");
-        assert_eq!(
-            slot_set_from_extism_exports(&wasm),
-            vec![PluginSlot::Router],
-            "shape must not promote without handshake; only route -> Router is trusted",
-        );
-    }
-
-    #[test]
-    fn slot_set_from_extism_exports_is_empty_for_module_without_known_exports() {
-        let wasm = wat::parse_str(r#"(module (func (export "noop") (result i32) (i32.const 0)))"#)
-            .expect("noop wat parses");
-        assert!(slot_set_from_extism_exports(&wasm).is_empty());
-    }
-
-    #[test]
-    fn slot_set_from_extism_exports_is_empty_for_corrupt_bytes() {
-        let bytes = vec![0u8; 16];
-        assert!(slot_set_from_extism_exports(&bytes).is_empty());
     }
 
     #[test]
