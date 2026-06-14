@@ -10,6 +10,12 @@ inputs:
     description: Whether to restore/save the workspace target/ directory.
     required: false
     default: "true"
+  target-paths:
+    description: Newline-separated paths to cache when cache-targets is true.
+    required: false
+    default: |
+      target
+      crates/cc-lb-admin/web/dist
   stable-build-metadata:
     description: Whether to stabilize build metadata for better compiler cache reuse.
     required: false
@@ -134,9 +140,7 @@ runs:
       if: inputs.cache-targets == 'true'
       uses: actions/cache@v5
       with:
-        path: |
-          target
-          crates/cc-lb-admin/web/dist
+        path: ${{ inputs.target-paths }}
         key: target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
         restore-keys: |
           target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-
