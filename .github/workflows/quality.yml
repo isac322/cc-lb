@@ -170,17 +170,6 @@ jobs:
           cargo llvm-cov report --package cc-lb-server                --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov report --package cc-lb-storage-redb          --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
 
-      - name: Show target subdirectory sizes
-        if: always()
-        run: |
-          set +e
-          echo '--- target/ top-level (depth 2) ---'
-          command du -shc target/* target/llvm-cov-target/* 2>/dev/null | sort -rh | head -40 || true
-          echo '--- target/llvm-cov-target/debug/* ---'
-          command du -shc target/llvm-cov-target/debug/* 2>/dev/null | sort -rh | head -20 || true
-          echo '--- 5 largest files anywhere in target/llvm-cov-target/debug/deps ---'
-          command find target/llvm-cov-target/debug/deps -type f -printf '%s\t%p\n' 2>/dev/null | sort -rn | head -5 || true
-
       - name: Show sccache stats
         if: always()
         run: |
