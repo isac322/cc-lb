@@ -42,6 +42,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
+      - name: Install wasm target for conformance fixtures
+        run: rustup target add wasm32-unknown-unknown
       - uses: ./.github/actions/setup-rust-cache
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Show sccache stats
