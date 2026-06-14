@@ -1,12 +1,12 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use cc_lb_plugin_api::PluginSlot;
 use cc_lb_plugin_wire::limits::{
     IMPLEMENTED_FUNCTIONS_MAX, SELF_CHECK_FUEL, SELF_CHECK_OUTPUT_MAX_BYTES, SELF_CHECK_WALL_MS,
 };
 use cc_lb_plugin_wire::self_check::{
     SelfCheckError, SelfCheckRequest, SelfCheckResponse, SelfCheckStatus,
 };
-use cc_lb_plugin_api::PluginSlot;
 use thiserror::Error;
 
 use crate::handshake::{BuildPluginError, build_plugin, slot_to_wire_function};

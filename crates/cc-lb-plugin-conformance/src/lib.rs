@@ -33,7 +33,7 @@
 //!
 //! #[test]
 //! fn self_check_clean() {
-//!     let report = self_check::run(WASM).unwrap();
+//!     let report = self_check::run(WASM, &[]).unwrap();
 //!     assert!(matches!(report.status, self_check::SelfCheckStatus::Success));
 //!     assert!(report.failures.is_empty());
 //! }

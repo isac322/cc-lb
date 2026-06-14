@@ -13,7 +13,9 @@ use dashmap::DashMap;
 use ring::digest::{SHA256, digest};
 use thiserror::Error;
 
-use cc_lb_runtime_protocol::handshake::{HandshakeExecutionError, execute_handshake, slot_set_from_handshake};
+use cc_lb_runtime_protocol::handshake::{
+    HandshakeExecutionError, execute_handshake, slot_set_from_handshake,
+};
 use cc_lb_runtime_protocol::identity::{IdentityReadError, read_identity};
 use cc_lb_runtime_protocol::self_check::{SelfCheckExecutionError, execute_self_check};
 
