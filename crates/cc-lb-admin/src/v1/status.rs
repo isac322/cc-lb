@@ -112,6 +112,7 @@ struct ExportRegistryEntry {
     label: Option<String>,
     size_bytes: u64,
     refcount: i64,
+    supported_slots: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -417,6 +418,11 @@ fn export_registry_entry(entry: WasmRegistryEntry, size_bytes: u64) -> ExportReg
         label: entry.label,
         size_bytes,
         refcount: entry.refcount,
+        supported_slots: entry
+            .supported_slots
+            .into_iter()
+            .map(|slot| slot.as_str().to_owned())
+            .collect(),
     }
 }
 
