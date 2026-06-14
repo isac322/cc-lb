@@ -80,3 +80,7 @@ export function fmtMsCompact(ms: number | null | undefined): {
   if (ms < 60_000) return { value: (ms / 1000).toFixed(1), unit: 's' };
   return { value: (ms / 60_000).toFixed(1), unit: 'm' };
 }
+
+export function formatRelativeUnixSeconds(seconds: number): Date {
+  return new Date(seconds * 1000);
+}

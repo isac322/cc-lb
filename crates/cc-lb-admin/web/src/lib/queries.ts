@@ -53,7 +53,18 @@ export interface Upstream {
   revision: number;
   base_url?: string | null;
   api_key_env?: string | null;
+  warmup_enabled: boolean;
+  warmup_dialect_plugin: UpstreamWarmupDialectPlugin | null;
+  next_warmup_at: string | null;
+  last_warmup_cycle_key: number | null;
 }
+
+export interface UpstreamWarmupDialectPlugin {
+  wasm_registry_id: string;
+  config: Record<string, unknown>;
+  wire_version?: number;
+}
+
 interface UpstreamListResp {
   upstreams: Upstream[];
 }
@@ -600,6 +611,25 @@ export interface UpdateUpstreamRequest {
   api_key_env?: string | null;
   api_key_value?: string | null;
 }
+
+export interface UpdateUpstreamWarmupSettingsRequest {
+  warmup_enabled?: boolean;
+  warmup_dialect_plugin?: UpstreamWarmupDialectPlugin | null;
+}
+
+export type FireNowErrorReason =
+  | 'auth_failed'
+  | 'forbidden'
+  | 'bad_request'
+  | 'not_found'
+  | 'dialect_plugin_failed'
+  | 'transient';
+
+export type FireNowResponse =
+  | { fired: true; cycle_key: number }
+  | { fired: false; reason: 'lease_held'; held_by: string }
+  | { fired: false; reason: FireNowErrorReason };
+
 export function useUpdateUpstream() {
   const qc = useQueryClient();
   return useMutation({
@@ -620,6 +650,83 @@ export function useUpdateUpstream() {
     onSuccess: (_d, vars) => {
       qc.invalidateQueries({ queryKey: qk.upstreams });
       qc.invalidateQueries({ queryKey: qk.upstream(vars.id) });
+    },
+  });
+}
+export function useFireNowUpstreamWarmup() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: ['upstreams', 'fire-now'],
+    mutationFn: async (id: string): Promise<FireNowResponse> => {
+      try {
+        const res = await fetchWithAuth(
+          `/admin/v1/upstreams/${id}/warmup/fire-now`,
+          { method: 'POST' },
+        );
+        if (res.status === 200 || res.status === 202) {
+          return (await res.json()) as FireNowResponse;
+        }
+        throw new ApiError(
+          res.status,
+          null,
+          null,
+          res.statusText || `Request failed (${res.status})`,
+        );
+      } catch (error) {
+        if (
+          error instanceof ApiError &&
+          (error.status === 502 || error.status === 503)
+        ) {
+          return error.body as FireNowResponse;
+        }
+        throw error;
+      }
+    },
+    onSuccess: async (response, id) => {
+      if (response.fired) {
+        await qc.invalidateQueries({ queryKey: qk.upstream(id) });
+        await qc.invalidateQueries({ queryKey: qk.upstreams });
+      }
+    },
+  });
+}
+export function useClearUpstreamWarmupDialectPlugin() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: ['upstreams', 'clear-warmup-dialect-plugin'],
+    mutationFn: ({ id, revision }: { id: string; revision: number }) =>
+      deleteJson<Upstream>(`/admin/v1/upstreams/${id}/warmup-dialect-plugin`, {
+        ifMatch: revision,
+      }),
+    onSuccess: async (serverResponse, { id }) => {
+      qc.setQueryData(qk.upstream(id), serverResponse);
+      await qc.invalidateQueries({ queryKey: qk.upstream(id) });
+      await qc.invalidateQueries({ queryKey: qk.upstreams });
+    },
+  });
+}
+export function useUpdateUpstreamWarmupSettings() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationKey: ['upstreams', 'update-warmup-settings'],
+    mutationFn: ({
+      id,
+      body,
+      revision,
+    }: {
+      id: string;
+      body: UpdateUpstreamWarmupSettingsRequest;
+      revision: number;
+    }) =>
+      patchJson<Upstream, UpdateUpstreamWarmupSettingsRequest>(
+        `/admin/v1/upstreams/${id}`,
+        body,
+        { ifMatch: revision },
+      ),
+    onSuccess: async (serverResponse, { id }) => {
+      qc.setQueryData(qk.upstream(id), serverResponse);
+      await qc.invalidateQueries({ queryKey: qk.upstream(id) });
+      await qc.invalidateQueries({ queryKey: qk.upstreams });
     },
   });
 }
