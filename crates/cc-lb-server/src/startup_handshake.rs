@@ -6,10 +6,13 @@ use cc_lb_plugin_wire::limits::{
     SKIP_HANDSHAKE_IF_FRESH_TTL_SECS, STARTUP_HANDSHAKE_PARALLEL_MAX,
     STARTUP_HANDSHAKE_TOTAL_BUDGET_MS,
 };
-use cc_lb_runtime_extism::registry::{PluginRegistry, RegistryError};
+use cc_lb_runtime_extism::{
+    handshake::slot_set_from_handshake,
+    registry::{PluginRegistry, RegistryError},
+};
 use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, PluginRegistryRecord, PluginRegistryRepo, PluginRegistryStatus,
-    PluginRegistryStore, RepoError, WasmRegistryEntry,
+    PluginRegistryStore, RepoError, Storage, WasmRegistryEntry,
 };
 use thiserror::Error;
 use tokio::sync::{Semaphore, watch};
@@ -71,10 +74,30 @@ enum RecordOutcome {
     },
 }
 
-#[allow(clippy::manual_clamp)]
 pub async fn run_startup_handshake(
     registry: &PluginRegistry,
     repo: &dyn PluginRegistryRepo,
+    opts: StartupHandshakeOpts,
+    shutdown: ShutdownSignal,
+) -> StartupHandshakeReport {
+    run_startup_handshake_inner(registry, repo, None, opts, shutdown).await
+}
+
+pub async fn run_startup_handshake_with_slot_store(
+    registry: &PluginRegistry,
+    repo: &dyn PluginRegistryRepo,
+    slot_store: Arc<dyn Storage>,
+    opts: StartupHandshakeOpts,
+    shutdown: ShutdownSignal,
+) -> StartupHandshakeReport {
+    run_startup_handshake_inner(registry, repo, Some(slot_store), opts, shutdown).await
+}
+
+#[allow(clippy::manual_clamp)]
+async fn run_startup_handshake_inner(
+    registry: &PluginRegistry,
+    repo: &dyn PluginRegistryRepo,
+    slot_store: Option<Arc<dyn Storage>>,
     opts: StartupHandshakeOpts,
     mut shutdown: ShutdownSignal,
 ) -> StartupHandshakeReport {
@@ -115,13 +138,22 @@ pub async fn run_startup_handshake(
         pending.insert(record.sha256);
         let registry = registry.clone();
         let semaphore = semaphore.clone();
+        let slot_store = slot_store.clone();
         let force_rehandshake = opts.force || stale_after_shutdown(&record, shutdown_marker);
         join_set.spawn(async move {
             let _permit = semaphore
                 .acquire_owned()
                 .await
                 .expect("startup handshake semaphore is not closed");
-            process_record(registry, record, opts.skip_if_fresh, force_rehandshake, now).await
+            process_record(
+                registry,
+                record,
+                slot_store,
+                opts.skip_if_fresh,
+                force_rehandshake,
+                now,
+            )
+            .await
         });
     }
 
@@ -158,6 +190,7 @@ pub async fn run_startup_handshake(
 async fn process_record(
     registry: PluginRegistry,
     record: PluginRegistryRecord,
+    slot_store: Option<Arc<dyn Storage>>,
     skip_if_fresh: bool,
     force_rehandshake: bool,
     now: i64,
@@ -170,13 +203,49 @@ async fn process_record(
     }
 
     match registry.re_handshake_by_sha256(&record.sha256).await {
-        Ok(record) => RecordOutcome::ReHandshaked {
-            sha256: record.sha256,
-        },
+        Ok(record) => {
+            if let Some(storage) = slot_store.as_deref() {
+                reconcile_supported_slots_drift(storage, &record).await;
+            }
+            RecordOutcome::ReHandshaked {
+                sha256: record.sha256,
+            }
+        }
         Err(error) => RecordOutcome::Failed {
             sha256: record.sha256,
             error,
         },
+    }
+}
+
+async fn reconcile_supported_slots_drift(storage: &dyn Storage, record: &PluginRegistryRecord) {
+    let entry = match storage.get_registry_entry_by_sha(record.sha256).await {
+        Ok(Some(entry)) => entry,
+        Ok(None) => return,
+        Err(error) => {
+            tracing::warn!(target: "cc_lb_server::drift", %error, "supported_slots drift lookup failed");
+            return;
+        }
+    };
+    if entry.id == BUILTIN_CACHE_AFFINITY_ID {
+        return;
+    }
+
+    let implemented_functions = record
+        .augmented_metadata
+        .negotiated_functions
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let fresh = slot_set_from_handshake(&implemented_functions);
+    let stored = entry.supported_slots;
+    if stored == fresh {
+        return;
+    }
+
+    tracing::warn!(target: "cc_lb_server::drift", stored = ?stored, fresh = ?fresh, "supported_slots drift on re-handshake");
+    if let Err(error) = storage.update_supported_slots(entry.id, fresh).await {
+        tracing::warn!(target: "cc_lb_server::drift", %error, id = %entry.id, "supported_slots drift update failed");
     }
 }
 

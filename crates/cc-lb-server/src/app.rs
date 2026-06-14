@@ -72,7 +72,7 @@ use crate::replica;
 use crate::signal;
 use crate::startup_handshake::{
     LegacyBridgeReport, StartupHandshakeOpts, StartupHandshakeReport, bridge_legacy_wasm_registry,
-    run_startup_handshake,
+    run_startup_handshake_with_slot_store,
 };
 use crate::state_machine::{ServerState, ServerStateHandle};
 use crate::storage_factory;
@@ -744,9 +744,10 @@ async fn build_app_with_storage_inner(
         cc_lb_runtime_extism::handshake::build_offer(&BTreeSet::new()),
     )
     .map_err(|error| BuildError::StartupHandshake(error.to_string()))?;
-    let startup_report = run_startup_handshake(
+    let startup_report = run_startup_handshake_with_slot_store(
         &plugin_registry,
         plugin_registry_repo.as_ref(),
+        storage.clone(),
         startup_handshake_opts,
         startup_shutdown,
     )

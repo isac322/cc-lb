@@ -1,10 +1,12 @@
 use std::fmt;
+
+use serde::Serialize;
 use uuid::Uuid;
 
 use crate::AuditEntry;
 
 #[non_exhaustive]
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum AuditPayload {
     PrincipalCreate {
         principal_id: String,
@@ -68,6 +70,9 @@ pub enum AuditPayload {
     PluginChainUpdate {
         principal_id: String,
         slots_changed: Vec<&'static str>,
+        wasm_registry_id: String,
+        sha256_hex: String,
+        supported_slots: Vec<String>,
     },
     KillswitchOn,
     KillswitchOff,
@@ -177,6 +182,7 @@ impl fmt::Display for AuditPayload {
             AuditPayload::PluginChainUpdate {
                 principal_id,
                 slots_changed,
+                ..
             } => write!(
                 f,
                 "plugin_chain_update(principal={}, slots={})",
@@ -201,6 +207,7 @@ impl From<AuditPayload> for AuditEntry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn audit_payload_serializes_without_secret_fields() {
@@ -246,5 +253,35 @@ mod tests {
         let display_str = format!("{}", payload);
 
         assert_eq!(display_str, "principal_create(id=user-1, kind=api_key)");
+    }
+
+    #[test]
+    fn plugin_chain_update_serializes_registry_metadata() {
+        let payload = AuditPayload::PluginChainUpdate {
+            principal_id: "principal-1".to_owned(),
+            slots_changed: vec!["router", "observability_hook"],
+            wasm_registry_id: "registry-1".to_owned(),
+            sha256_hex: "abc123".to_owned(),
+            supported_slots: vec!["router".to_owned(), "shape".to_owned()],
+        };
+
+        let value = serde_json::to_value(payload).unwrap();
+        let payload = value
+            .get("PluginChainUpdate")
+            .and_then(|value| value.as_object())
+            .expect("plugin chain update payload serializes as an object");
+
+        assert_eq!(payload.get("principal_id"), Some(&json!("principal-1")));
+        assert_eq!(
+            payload.get("slots_changed"),
+            Some(&json!(["router", "observability_hook"]))
+        );
+        assert_eq!(payload.get("wasm_registry_id"), Some(&json!("registry-1")));
+        assert_eq!(payload.get("sha256_hex"), Some(&json!("abc123")));
+        assert_eq!(
+            payload.get("supported_slots"),
+            Some(&json!(["router", "shape"]))
+        );
+        assert_eq!(payload.len(), 5);
     }
 }
