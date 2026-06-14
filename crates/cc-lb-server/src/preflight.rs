@@ -9,6 +9,7 @@ use cc_lb_config::{Config, DEFAULT_REDB_PATH, StorageConfig, TlsConfig};
 use cc_lb_core::LifecycleConfig;
 use cc_lb_storage_api::{
     PluginChainEntry, PluginSlot, PrincipalRecord, StorageError as ApiStorageError, UpstreamRecord,
+    WasmRegistryEntry,
 };
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -219,6 +220,17 @@ async fn check_plugin_chain_entry(
         return Ok(());
     };
 
+    if registry_entry_unsupported_slot(&registry_entry, entry.slot) {
+        report.warnings.push(format!(
+            "plugin chain entry {}: registry entry {} ({}) unsupported slot {}; supported slots: {}",
+            entry.id,
+            registry_entry.id,
+            registry_entry.name.as_str(),
+            entry.slot.as_str(),
+            supported_slot_names(&registry_entry).join(", ")
+        ));
+    }
+
     if stores
         .plugin_registry
         .get_blob(registry_entry.sha256)
@@ -261,6 +273,20 @@ async fn check_plugin_chain_entry(
     }
 
     Ok(())
+}
+
+fn registry_entry_unsupported_slot(registry_entry: &WasmRegistryEntry, slot: PluginSlot) -> bool {
+    !registry_entry.is_builtin
+        && !registry_entry.supported_slots.is_empty()
+        && !registry_entry.supported_slots.contains(&slot)
+}
+
+fn supported_slot_names(registry_entry: &WasmRegistryEntry) -> Vec<&'static str> {
+    registry_entry
+        .supported_slots
+        .iter()
+        .map(|slot| slot.as_str())
+        .collect()
 }
 
 fn push_plugin_warning(report: &mut PreflightReport, warning: String) {

@@ -11,7 +11,8 @@ use cc_lb_runtime_extism::handshake::build_offer;
 use cc_lb_runtime_extism::registry::{PluginRegistry, RegistryError};
 use cc_lb_runtime_extism::self_check::{SelfCheckExecutionError, execute_self_check};
 use cc_lb_storage_api::{
-    PluginBlobRepo, PluginRegistryRecord, PluginRegistryRepo, PluginRegistryStatus, RepoError,
+    PluginBlobRepo, PluginRegistryRecord, PluginRegistryRepo, PluginRegistryStatus, PluginSlot,
+    RepoError,
 };
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -27,7 +28,8 @@ fn handler_panic_does_not_affect_self_check() {
         infinite_loop: false,
     });
 
-    let response = execute_self_check(&wasm).expect("self-check succeeds without calling shape");
+    let response = execute_self_check(&wasm, &[PluginSlot::Shape])
+        .expect("self-check succeeds without calling shape");
 
     assert_eq!(response.status, SelfCheckStatus::Success);
     assert!(response.failures.is_empty());
@@ -45,7 +47,8 @@ fn host_fn_call_during_self_check_is_rejected() {
         infinite_loop: false,
     });
 
-    let error = execute_self_check(&wasm).expect_err("host import is rejected or traps");
+    let error = execute_self_check(&wasm, &[PluginSlot::Shape])
+        .expect_err("host import is rejected or traps");
 
     match error {
         SelfCheckExecutionError::Instantiate { .. } | SelfCheckExecutionError::Call { .. } => {}
@@ -64,7 +67,8 @@ fn self_check_timeout_is_rejected() {
         infinite_loop: true,
     });
 
-    let error = execute_self_check(&wasm).expect_err("infinite loop is rejected");
+    let error =
+        execute_self_check(&wasm, &[PluginSlot::Shape]).expect_err("infinite loop is rejected");
 
     match error {
         SelfCheckExecutionError::Call { reason } => {
@@ -92,7 +96,8 @@ fn self_check_output_too_large_is_rejected() {
         infinite_loop: false,
     });
 
-    let error = execute_self_check(&wasm).expect_err("oversized output is rejected");
+    let error =
+        execute_self_check(&wasm, &[PluginSlot::Shape]).expect_err("oversized output is rejected");
 
     match error {
         SelfCheckExecutionError::OutputTooLarge { bytes, max } => {
@@ -114,7 +119,8 @@ fn missing_self_check_export_is_rejected() {
         infinite_loop: false,
     });
 
-    let error = execute_self_check(&wasm).expect_err("missing export is rejected");
+    let error =
+        execute_self_check(&wasm, &[PluginSlot::Shape]).expect_err("missing export is rejected");
 
     match error {
         SelfCheckExecutionError::MissingSelfCheckExport => {}
@@ -181,18 +187,13 @@ fn self_check_module(options: SelfCheckModule<'_>) -> Vec<u8> {
         "i32.const 0"
     };
     let checked_helpers = if options.verify_checked_functions {
-        format!(
-            "{}{}",
-            contains_helper("contains_shape", br#""shape""#),
-            contains_helper("contains_normalize_error", br#""normalize_error""#),
-        )
+        contains_helper("contains_shape", br#""shape""#)
     } else {
         String::new()
     };
     let checked_verification = if options.verify_checked_functions {
         r#"
-    (if (i32.eqz (call $contains_shape)) (then unreachable))
-    (if (i32.eqz (call $contains_normalize_error)) (then unreachable))"#
+    (if (i32.eqz (call $contains_shape)) (then unreachable))"#
     } else {
         ""
     };
