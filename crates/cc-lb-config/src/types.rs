@@ -506,6 +506,12 @@ pub struct OAuthUsagePollerConfig {
     pub request_timeout_secs: u64,
     #[serde(default = "default_oauth_usage_poller_lease_ttl_secs")]
     pub lease_ttl_secs: u64,
+    #[serde(default = "default_oauth_usage_poller_rate_limit_window_secs")]
+    pub rate_limit_window_secs: u64,
+    #[serde(default = "default_oauth_usage_poller_rate_limit_capacity")]
+    pub rate_limit_capacity: u32,
+    #[serde(default = "default_oauth_usage_poller_rate_limit_safety_secs")]
+    pub rate_limit_safety_secs: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub user_agent_override: Option<String>,
 }
@@ -514,17 +520,20 @@ impl Default for OAuthUsagePollerConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            bootstrap_attempts: 5,
-            bootstrap_default_interval_secs: 900,
-            safety_divisor: 2,
+            bootstrap_attempts: 0,
+            bootstrap_default_interval_secs: 60,
+            safety_divisor: 1,
             min_interval_secs: 60,
             max_interval_secs: 3600,
-            fallback_interval_secs: 900,
+            fallback_interval_secs: 60,
             history_capacity: 8,
-            throttle_ladder_secs: vec![30, 60, 120, 240, 300],
+            throttle_ladder_secs: vec![300, 300, 300, 300, 300],
             stagger_ms: 1500,
             request_timeout_secs: 10,
             lease_ttl_secs: 90,
+            rate_limit_window_secs: 300,
+            rate_limit_capacity: 5,
+            rate_limit_safety_secs: 5,
             user_agent_override: None,
         }
     }
@@ -959,6 +968,18 @@ fn default_oauth_usage_poller_request_timeout_secs() -> u64 {
 
 fn default_oauth_usage_poller_lease_ttl_secs() -> u64 {
     OAuthUsagePollerConfig::default().lease_ttl_secs
+}
+
+fn default_oauth_usage_poller_rate_limit_window_secs() -> u64 {
+    OAuthUsagePollerConfig::default().rate_limit_window_secs
+}
+
+fn default_oauth_usage_poller_rate_limit_capacity() -> u32 {
+    OAuthUsagePollerConfig::default().rate_limit_capacity
+}
+
+fn default_oauth_usage_poller_rate_limit_safety_secs() -> u64 {
+    OAuthUsagePollerConfig::default().rate_limit_safety_secs
 }
 
 fn default_anthropic_compat_poller_tick_interval_secs() -> u64 {

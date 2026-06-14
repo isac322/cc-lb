@@ -97,7 +97,7 @@ Initial testing validated the warm-up configuration. The table below lists the v
 |---|---|
 | **A1 Model** | `claude-haiku-4-5-20251001` |
 | **A2 Branch** | `wait-for-observation` |
-| **A5 Estimator Note** | `PASS, cadence=900s, hint-required=YES, hint implemented in oauth_usage_poller.rs` |
+| **A5 Estimator Note** | `PASS, cadence=60s sustained (sliding window 5 reqs/300s per token, measured against /api/oauth/usage), hint-required=NO, enforced by PollScheduleEstimator in poll_schedule_estimator.rs` |
 
 ## Limitations
 
