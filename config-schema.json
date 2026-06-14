@@ -87,22 +87,25 @@
       "$ref": "#/$defs/OAuthConfig",
       "default": {
         "usage_poller": {
-          "bootstrap_attempts": 5,
-          "bootstrap_default_interval_secs": 900,
+          "bootstrap_attempts": 0,
+          "bootstrap_default_interval_secs": 60,
           "enabled": true,
-          "fallback_interval_secs": 900,
+          "fallback_interval_secs": 60,
           "history_capacity": 8,
           "lease_ttl_secs": 90,
           "max_interval_secs": 3600,
           "min_interval_secs": 60,
+          "rate_limit_capacity": 5,
+          "rate_limit_safety_secs": 5,
+          "rate_limit_window_secs": 300,
           "request_timeout_secs": 10,
-          "safety_divisor": 2,
+          "safety_divisor": 1,
           "stagger_ms": 1500,
           "throttle_ladder_secs": [
-            30,
-            60,
-            120,
-            240,
+            300,
+            300,
+            300,
+            300,
             300
           ]
         }
@@ -487,22 +490,25 @@
         "usage_poller": {
           "$ref": "#/$defs/OAuthUsagePollerConfig",
           "default": {
-            "bootstrap_attempts": 5,
-            "bootstrap_default_interval_secs": 900,
+            "bootstrap_attempts": 0,
+            "bootstrap_default_interval_secs": 60,
             "enabled": true,
-            "fallback_interval_secs": 900,
+            "fallback_interval_secs": 60,
             "history_capacity": 8,
             "lease_ttl_secs": 90,
             "max_interval_secs": 3600,
             "min_interval_secs": 60,
+            "rate_limit_capacity": 5,
+            "rate_limit_safety_secs": 5,
+            "rate_limit_window_secs": 300,
             "request_timeout_secs": 10,
-            "safety_divisor": 2,
+            "safety_divisor": 1,
             "stagger_ms": 1500,
             "throttle_ladder_secs": [
-              30,
-              60,
-              120,
-              240,
+              300,
+              300,
+              300,
+              300,
               300
             ]
           }
@@ -515,13 +521,13 @@
         "bootstrap_attempts": {
           "type": "integer",
           "format": "uint32",
-          "default": 5,
+          "default": 0,
           "minimum": 0
         },
         "bootstrap_default_interval_secs": {
           "type": "integer",
           "format": "uint64",
-          "default": 900,
+          "default": 60,
           "minimum": 0
         },
         "enabled": {
@@ -531,7 +537,7 @@
         "fallback_interval_secs": {
           "type": "integer",
           "format": "uint64",
-          "default": 900,
+          "default": 60,
           "minimum": 0
         },
         "history_capacity": {
@@ -558,6 +564,24 @@
           "default": 60,
           "minimum": 0
         },
+        "rate_limit_capacity": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 5,
+          "minimum": 0
+        },
+        "rate_limit_safety_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 5,
+          "minimum": 0
+        },
+        "rate_limit_window_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "minimum": 0
+        },
         "request_timeout_secs": {
           "type": "integer",
           "format": "uint64",
@@ -568,7 +592,7 @@
           "description": "CATEGORY-3 CROSS-CRATE INVARIANT: server code converts this divisor into\na fractional safety factor as `1.0 / safety_divisor`.",
           "type": "integer",
           "format": "uint32",
-          "default": 2,
+          "default": 1,
           "minimum": 0
         },
         "stagger_ms": {
@@ -580,10 +604,10 @@
         "throttle_ladder_secs": {
           "type": "array",
           "default": [
-            30,
-            60,
-            120,
-            240,
+            300,
+            300,
+            300,
+            300,
             300
           ],
           "items": {
