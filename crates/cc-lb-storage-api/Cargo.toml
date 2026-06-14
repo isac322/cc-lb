@@ -13,8 +13,8 @@ async-trait = { workspace = true }
 bytes = { workspace = true }
 chrono = { workspace = true }
 cc-lb-aead = { version = "0.1.0", path = "../cc-lb-aead" }
-cc-lb-plugin-api = { version = "0.1.0", path = "../cc-lb-plugin-api" }
-cc-lb-plugin-wire = { version = "0.1.0", path = "../cc-lb-plugin-wire" }
+cc-lb-plugin-api = { version = "0.1.1", path = "../cc-lb-plugin-api" }
+cc-lb-plugin-wire = { version = "0.1.1", path = "../cc-lb-plugin-wire" }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 thiserror = { workspace = true }
