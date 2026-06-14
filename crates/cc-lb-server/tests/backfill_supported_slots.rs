@@ -112,6 +112,7 @@ async fn seed_legacy_route_plugin(storage: &Arc<Storage>, name: &str) -> WasmReg
                 label: None,
                 uploaded_at_unix_secs: 1_800_000_000,
                 uploaded_by_admin_id: Uuid::new_v4(),
+                wire_version: 1,
                 supported_slots: Vec::new(),
             },
         )
@@ -158,6 +159,7 @@ async fn seed_legacy_entry(storage: &Arc<Storage>, seed: u8, name: &str) -> Wasm
                 label: None,
                 uploaded_at_unix_secs: 1_800_000_000,
                 uploaded_by_admin_id: Uuid::new_v4(),
+                wire_version: 1,
                 supported_slots: Vec::new(),
             },
         )
