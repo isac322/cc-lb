@@ -245,6 +245,15 @@ async fn apply_plugin_chain(
             );
             return Ok(());
         };
+        if registry_entry_unsupported_slot(&registry_entry, slot) {
+            return Err(BootstrapError::InvalidSpec(format!(
+                "plugin {} ({}) unsupported slot {}; supported slots: {}",
+                registry_entry.name.as_str(),
+                registry_entry.id,
+                slot.as_str(),
+                supported_slot_names(&registry_entry).join(", ")
+            )));
+        }
         resolved.push((plugin, slot, registry_entry));
     }
 
@@ -333,6 +342,20 @@ async fn resolve_wasm_registry_entry(
         }
         after = entries.last().map(|entry| entry.id);
     }
+}
+
+fn registry_entry_unsupported_slot(registry_entry: &WasmRegistryEntry, slot: PluginSlot) -> bool {
+    !registry_entry.is_builtin
+        && !registry_entry.supported_slots.is_empty()
+        && !registry_entry.supported_slots.contains(&slot)
+}
+
+fn supported_slot_names(registry_entry: &WasmRegistryEntry) -> Vec<&'static str> {
+    registry_entry
+        .supported_slots
+        .iter()
+        .map(|slot| slot.as_str())
+        .collect()
 }
 
 impl BootstrapPluginRef {

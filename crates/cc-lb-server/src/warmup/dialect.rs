@@ -11,7 +11,7 @@ use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh, LazyRefreshHandle,
 };
-use cc_lb_storage_api::{StorageError, UpstreamRecord};
+use cc_lb_storage_api::{PluginSlot, StorageError, UpstreamRecord, WasmRegistryEntry};
 use http::{HeaderMap, Method, Request, StatusCode};
 use http_body_util::Full;
 use serde_json::json;
@@ -33,6 +33,14 @@ pub enum WarmupDispatchError {
     MissingPlugin,
     #[error("wasm registry entry {0} not found")]
     RegistryNotFound(Uuid),
+    #[error(
+        "wasm registry entry {wasm_registry_id} ({plugin_name}) does not support slot {slot:?}"
+    )]
+    RegistryUnsupportedSlot {
+        wasm_registry_id: Uuid,
+        plugin_name: String,
+        slot: PluginSlot,
+    },
     #[error("storage error: {0}")]
     Storage(#[from] StorageError),
     #[error("wasm materialize failed: {0}")]
@@ -72,6 +80,14 @@ pub async fn dispatch_warmup_with_dialect(
         .ok_or(WarmupDispatchError::RegistryNotFound(
             plugin_ref.wasm_registry_id,
         ))?;
+    let slot = PluginSlot::Shape;
+    if registry_entry_unsupported_slot(&registry_entry, slot) {
+        return Err(WarmupDispatchError::RegistryUnsupportedSlot {
+            wasm_registry_id: registry_entry.id,
+            plugin_name: registry_entry.name.clone(),
+            slot,
+        });
+    }
 
     let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256)
         .await
@@ -151,4 +167,10 @@ pub async fn dispatch_warmup_with_dialect(
         status: response.status(),
         headers: response.headers().clone(),
     })
+}
+
+fn registry_entry_unsupported_slot(registry_entry: &WasmRegistryEntry, slot: PluginSlot) -> bool {
+    !registry_entry.is_builtin
+        && !registry_entry.supported_slots.is_empty()
+        && !registry_entry.supported_slots.contains(&slot)
 }
