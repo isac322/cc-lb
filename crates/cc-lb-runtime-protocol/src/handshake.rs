@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
 
+use cc_lb_plugin_api::PluginSlot;
 use cc_lb_plugin_wire::handshake::{
     HANDSHAKE_SCHEMA_VERSION_V1, HandshakeAccept, HandshakeError, HandshakeOffer,
 };
@@ -14,7 +15,6 @@ use cc_lb_plugin_wire::v1::{
 };
 use cc_lb_plugin_wire::v3::filter::FilterFn;
 use cc_lb_plugin_wire::wire_function::{WireFunction, all_wire_functions};
-use cc_lb_storage_api::PluginSlot;
 use extism::{Manifest, PluginBuilder, Wasm};
 use thiserror::Error;
 
@@ -83,6 +83,31 @@ pub fn build_offer(host_caps: &BTreeSet<String>) -> HandshakeOffer {
     }
 }
 
+pub fn build_plugin(
+    wasm: &[u8],
+    wall_ms: u64,
+    fuel: u64,
+) -> Result<extism::Plugin, BuildPluginError> {
+    let manifest = Manifest::new([Wasm::data(wasm.to_vec())])
+        .with_timeout(Duration::from_millis(wall_ms))
+        .disallow_all_hosts();
+    PluginBuilder::new(&manifest)
+        .with_wasi(false)
+        .with_cache_disabled()
+        .with_fuel_limit(fuel)
+        .build()
+        .map_err(|source| BuildPluginError::Instantiate {
+            reason: source.to_string(),
+        })
+}
+
+#[non_exhaustive]
+#[derive(Debug, Error)]
+pub enum BuildPluginError {
+    #[error("failed to instantiate plugin: {reason}")]
+    Instantiate { reason: String },
+}
+
 pub fn execute_handshake(
     plugin_bytes: &[u8],
     offer: &HandshakeOffer,
@@ -90,17 +115,13 @@ pub fn execute_handshake(
     offer.validate()?;
     metrics::counter!("cc_lb_plugin_handshake_total").increment(1);
 
-    let manifest = Manifest::new([Wasm::data(plugin_bytes.to_vec())])
-        .with_timeout(Duration::from_millis(HANDSHAKE_WALL_MS))
-        .disallow_all_hosts();
-    let mut plugin = PluginBuilder::new(&manifest)
-        .with_wasi(false)
-        .with_cache_disabled()
-        .with_fuel_limit(HANDSHAKE_FUEL)
-        .build()
-        .map_err(|source| HandshakeExecutionError::Instantiate {
-            reason: source.to_string(),
-        })?;
+    let mut plugin = build_plugin(plugin_bytes, HANDSHAKE_WALL_MS, HANDSHAKE_FUEL).map_err(
+        |source| match source {
+            BuildPluginError::Instantiate { reason } => {
+                HandshakeExecutionError::Instantiate { reason }
+            }
+        },
+    )?;
 
     if !plugin.function_exists(HANDSHAKE_EXPORT) {
         return Err(HandshakeExecutionError::MissingHandshakeExport);
@@ -260,6 +281,7 @@ fn cross_check_implemented_exports(
     Ok(())
 }
 
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum HandshakeExecutionError {
     #[error("handshake validation failed: {0}")]

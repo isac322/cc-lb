@@ -3,7 +3,7 @@ name = "cc-lb-pdk"
 # Plugin trio runs on its own SemVer line, decoupled from workspace version.
 # Lockstep with cc-lb-plugin-wire / cc-lb-plugin-api via `=` pin in
 # workspace.dependencies.
-version = "0.1.0"
+version = "0.1.1"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true

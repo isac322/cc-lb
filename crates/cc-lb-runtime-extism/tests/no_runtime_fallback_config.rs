@@ -98,7 +98,8 @@ fn runtime_sources_do_not_define_fallback_policy_config_or_maps() {
 
 #[test]
 fn runtime_fallback_helpers_return_wire_function_const() {
-    let dispatch_source = compact_source(include_str!("../src/dispatch.rs"));
+    let dispatch_source =
+        compact_source(include_str!("../../cc-lb-runtime-protocol/src/dispatch.rs"));
     let plugin_wrap_source = compact_source(include_str!("../src/plugin_wrap.rs"));
 
     assert!(dispatch_source.contains("DispatchOutcome::Fallback(F::FALLBACK)"));

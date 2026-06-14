@@ -674,7 +674,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-pdk"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "cc-lb-plugin-wire",
  "proc-macro2",
@@ -685,7 +685,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-plugin-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "bytes",
@@ -695,6 +695,23 @@ dependencies = [
  "thiserror 2.0.18",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "cc-lb-plugin-conformance"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bytes",
+ "cc-lb-plugin-api",
+ "cc-lb-plugin-wire",
+ "cc-lb-runtime-protocol",
+ "extism",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "wasmparser 0.252.0",
 ]
 
 [[package]]
@@ -711,7 +728,7 @@ dependencies = [
 
 [[package]]
 name = "cc-lb-plugin-wire"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "proptest",
  "serde",
@@ -770,6 +787,7 @@ dependencies = [
  "bytes",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
+ "cc-lb-runtime-protocol",
  "cc-lb-storage-api",
  "dashmap",
  "extism",
@@ -785,6 +803,28 @@ dependencies = [
  "tracing",
  "url",
  "uuid",
+ "wasmparser 0.252.0",
+ "wat",
+]
+
+[[package]]
+name = "cc-lb-runtime-protocol"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "base64",
+ "bytes",
+ "cc-lb-plugin-api",
+ "cc-lb-plugin-wire",
+ "extism",
+ "http",
+ "metrics",
+ "ring",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
  "wasmparser 0.252.0",
  "wat",
 ]

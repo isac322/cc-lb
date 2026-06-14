@@ -47,7 +47,7 @@ pub const SKIP_HANDSHAKE_IF_FRESH_TTL_SECS: u64 = 7 * 24 * 3600;
 
 // Regex patterns (compile-time strings)
 pub const PLUGIN_NAME_PATTERN: &str = r"^[a-z][a-z0-9_-]*$";
-pub const CAPABILITY_PATTERN: &str = r"^[a-z][a-z0-9_]*$";
+pub const CAPABILITY_PATTERN: &str = r"^[a-z][a-z0-9_]*(?::[a-z][a-z0-9_]*)*$";
 
 #[cfg(test)]
 #[allow(clippy::assertions_on_constants)]
