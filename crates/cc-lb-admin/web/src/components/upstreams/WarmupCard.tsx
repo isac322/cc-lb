@@ -10,7 +10,10 @@ import {
 } from '../../lib/copy/warmup';
 import { formatRelativeUnixSeconds } from '../../lib/format';
 import {
+  type FireNowResponse,
+  type PluginEntry,
   type Upstream,
+  useClearUpstreamWarmupDialectPlugin,
   useFireNowUpstreamWarmup,
   usePluginRegistry,
   useUpdateUpstreamWarmupSettings,
@@ -28,18 +31,65 @@ import {
 import { RelativeTime, ResetCountdown } from '../ui/RelativeTime';
 
 function pluginSupportsSlot(
-  p: { supported_slots?: string[] },
+  p: { supported_slots?: string[]; slot?: string },
   slot: string,
 ): boolean {
-  return p.supported_slots?.includes(slot) ?? false;
+  return p.supported_slots?.includes(slot) ?? p.slot === slot;
+}
+
+function isStaleRevisionError(err: unknown): boolean {
+  const maybe = err as {
+    status?: number;
+    code?: string | null;
+    body?: unknown;
+  };
+  if (maybe.status === 412) return true;
+  if (maybe.status !== 409) return false;
+  if (maybe.code === 'stale_revision') return true;
+  const body = maybe.body;
+  return (
+    typeof body === 'object' &&
+    body !== null &&
+    'error' in body &&
+    (body as { error?: unknown }).error === 'stale_revision'
+  );
+}
+
+function errorMessage(err: unknown, fallback: string): string {
+  return err instanceof Error && err.message ? err.message : fallback;
+}
+
+function currentRevisionFromError(err: unknown): number | null {
+  const body = (err as { body?: unknown }).body;
+  if (typeof body !== 'object' || body === null) return null;
+  const current = Number(
+    (body as { current_revision?: unknown }).current_revision,
+  );
+  return Number.isFinite(current) ? current : null;
 }
 
 export function WarmupCard({ upstream }: { upstream: Upstream }) {
+  if (upstream.kind !== 'anthropic_oauth') {
+    return null;
+  }
+
+  const stateKey = `${upstream.id}:${upstream.revision}:${
+    upstream.warmup_dialect_plugin?.wasm_registry_id ?? ''
+  }`;
+  return <WarmupCardInner key={stateKey} upstream={upstream} />;
+}
+
+function WarmupCardInner({ upstream }: { upstream: Upstream }) {
   const updateSettings = useUpdateUpstreamWarmupSettings();
+  const clearPlugin = useClearUpstreamWarmupDialectPlugin();
   const fireWarmup = useFireNowUpstreamWarmup();
   const registry = usePluginRegistry();
 
   const [staleRevisionVisible, setStaleRevisionVisible] = useState(false);
+  const [revisionOverride, setRevisionOverride] = useState<number | null>(null);
+  const [pendingPluginValue, setPendingPluginValue] = useState<string | null>(
+    null,
+  );
   const [leasePanel, setLeasePanel] = useState<{ heldBy: string } | null>(null);
   const [errorPanel, setErrorPanel] = useState<{
     reason: FireErrorReason;
@@ -48,6 +98,9 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
 
   const [confirmFireOpen, setConfirmFireOpen] = useState(false);
   const [confirmClearPluginOpen, setConfirmClearPluginOpen] = useState(false);
+
+  const storedPluginId = upstream.warmup_dialect_plugin?.wasm_registry_id ?? '';
+  const selectedPluginValue = pendingPluginValue ?? storedPluginId;
 
   // Auto-dismiss lease panel
   useEffect(() => {
@@ -58,10 +111,6 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
     );
     return () => clearTimeout(timer);
   }, [leasePanel]);
-
-  if (upstream.kind !== 'anthropic_oauth') {
-    return null;
-  }
 
   const handleToggle = () => {
     updateSettings.mutate(
@@ -80,12 +129,12 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
             { duration: TOAST_DURATIONS.success },
           );
         },
-        // biome-ignore lint/suspicious/noExplicitAny: error type
-        onError: (err: any) => {
-          if (err?.status === 412) {
+        onError: (err: unknown) => {
+          if (isStaleRevisionError(err)) {
             setStaleRevisionVisible(true);
+            setRevisionOverride(currentRevisionFromError(err));
           } else {
-            toast.error(err?.message || 'Failed to update warmup settings');
+            toast.error(errorMessage(err, 'Failed to update warmup settings'));
           }
         },
       },
@@ -95,11 +144,12 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
   const handlePluginChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const val = e.target.value;
     if (!val) return;
+    setPendingPluginValue(val);
 
     updateSettings.mutate(
       {
         id: upstream.id,
-        revision: upstream.revision,
+        revision: revisionOverride ?? upstream.revision,
         body: {
           warmup_dialect_plugin: {
             wasm_registry_id: val,
@@ -109,17 +159,20 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
       },
       {
         onSuccess: () => {
+          setPendingPluginValue(null);
           setStaleRevisionVisible(false);
+          setRevisionOverride(null);
           toast.success(COPY.dialectPluginSaveSuccess, {
             duration: TOAST_DURATIONS.success,
           });
         },
-        // biome-ignore lint/suspicious/noExplicitAny: error type
-        onError: (err: any) => {
-          if (err?.status === 412) {
+        onError: (err: unknown) => {
+          if (isStaleRevisionError(err)) {
             setStaleRevisionVisible(true);
+            setRevisionOverride(currentRevisionFromError(err));
           } else {
-            toast.error(err?.message || 'Failed to update dialect plugin');
+            setPendingPluginValue(null);
+            toast.error(errorMessage(err, 'Failed to update dialect plugin'));
           }
         },
       },
@@ -127,27 +180,25 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
   };
 
   const handleClearPlugin = () => {
-    updateSettings.mutate(
-      {
-        id: upstream.id,
-        revision: upstream.revision,
-        body: { warmup_dialect_plugin: null },
-      },
+    clearPlugin.mutate(
+      { id: upstream.id, revision: revisionOverride ?? upstream.revision },
       {
         onSuccess: () => {
+          setPendingPluginValue(null);
           setStaleRevisionVisible(false);
+          setRevisionOverride(null);
           setConfirmClearPluginOpen(false);
           toast.success(COPY.dialectPluginClearSuccess, {
             duration: TOAST_DURATIONS.success,
           });
         },
-        // biome-ignore lint/suspicious/noExplicitAny: error type
-        onError: (err: any) => {
-          if (err?.status === 412) {
+        onError: (err: unknown) => {
+          if (isStaleRevisionError(err)) {
             setStaleRevisionVisible(true);
+            setRevisionOverride(currentRevisionFromError(err));
             setConfirmClearPluginOpen(false);
           } else {
-            toast.error(err?.message || 'Failed to clear dialect plugin');
+            toast.error(errorMessage(err, 'Failed to clear dialect plugin'));
           }
         },
       },
@@ -158,8 +209,7 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
     setLeasePanel(null);
     setErrorPanel(null);
     fireWarmup.mutate(upstream.id, {
-      // biome-ignore lint/suspicious/noExplicitAny: response type
-      onSuccess: (res: any) => {
+      onSuccess: (res: FireNowResponse) => {
         setConfirmFireOpen(false);
         if (res.fired) {
           toast.success(COPY.fireSuccess, {
@@ -173,20 +223,38 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
           setErrorPanel({ reason: res.reason });
         }
       },
-      // biome-ignore lint/suspicious/noExplicitAny: error type
-      onError: (err: any) => {
-        toast.error(err?.message || 'Failed to fire warmup');
+      onError: (err: unknown) => {
+        toast.error(errorMessage(err, 'Failed to fire warmup'));
       },
     });
   };
 
-  // biome-ignore lint/suspicious/noExplicitAny: plugin type
+  const handleConfirmFireOpenChange = (open: boolean) => {
+    setConfirmFireOpen(open);
+    if (!open) {
+      window.setTimeout(
+        () =>
+          document
+            .querySelector<HTMLButtonElement>('[data-testid="warmup-fire-now"]')
+            ?.focus(),
+        0,
+      );
+    }
+  };
+
   const shapePlugins =
-    registry.data?.entries.filter((p: any) => pluginSupportsSlot(p, 'shape')) ??
-    [];
+    registry.data?.entries.filter((p: PluginEntry) =>
+      pluginSupportsSlot(p, 'shape'),
+    ) ?? [];
+  const selectedPluginKnown =
+    !selectedPluginValue ||
+    shapePlugins.some((p) => p.id === selectedPluginValue);
+  const showPluginSelect =
+    shapePlugins.length > 0 || upstream.warmup_dialect_plugin !== null;
+  const settingsPending = updateSettings.isPending || clearPlugin.isPending;
 
   return (
-    <Card data-testid="warmup-card" className="space-y-4">
+    <Card data-testid="warmup-card" tabIndex={-1} className="space-y-4">
       {staleRevisionVisible && (
         <div
           role="status"
@@ -208,8 +276,9 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
           <button
             type="button"
             role="switch"
+            data-testid="warmup-switch"
             aria-checked={upstream.warmup_enabled}
-            disabled={updateSettings.isPending}
+            disabled={settingsPending}
             onClick={handleToggle}
             className="group inline-flex items-center gap-2 h-7 px-2 rounded-sm transition-colors focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-overlay-3"
           >
@@ -232,7 +301,7 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
               className={cx(
                 'text-[11px] font-mono uppercase tracking-wider',
                 upstream.warmup_enabled
-                  ? 'text-emerald-400'
+                  ? 'text-text'
                   : 'text-text-muted group-hover:text-text',
               )}
             >
@@ -248,8 +317,9 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
             action={
               <Button
                 variant="primary"
+                data-testid="warmup-enable-btn"
                 onClick={handleToggle}
-                disabled={updateSettings.isPending}
+                disabled={settingsPending}
               >
                 {COPY.enableButtonLabel}
               </Button>
@@ -262,7 +332,7 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
                 <div className="text-xs text-text-muted mb-1">
                   {COPY.nextWarmupLabel}
                 </div>
-                <div className="text-sm">
+                <div className="text-sm" data-testid="warmup-next">
                   {upstream.next_warmup_at ? (
                     <ResetCountdown ts={new Date(upstream.next_warmup_at)} />
                   ) : (
@@ -274,7 +344,7 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
                 <div className="text-xs text-text-muted mb-1">
                   {COPY.lastCycleLabel}
                 </div>
-                <div className="text-sm">
+                <div className="text-sm" data-testid="warmup-last">
                   {upstream.last_warmup_cycle_key ? (
                     <RelativeTime
                       ts={formatRelativeUnixSeconds(
@@ -289,42 +359,58 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
             </div>
 
             <div className="space-y-2">
-              <label
-                htmlFor="dialect-plugin-select"
-                className="block text-xs text-text-muted"
-              >
-                {COPY.dialectPluginLabel}
-              </label>
-              <div className="flex items-center gap-2">
-                <select
-                  id="dialect-plugin-select"
-                  className={INPUT_CLASS}
-                  value={upstream.warmup_dialect_plugin?.wasm_registry_id ?? ''}
-                  onChange={handlePluginChange}
-                  disabled={updateSettings.isPending}
-                >
-                  <option value="">{COPY.defaultPluginOption}</option>
-                  {/* biome-ignore lint/suspicious/noExplicitAny: plugin type */}
-                  {shapePlugins.map((p: any) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
-                  ))}
-                </select>
-                {upstream.warmup_dialect_plugin !== null && (
-                  <Button
-                    variant="danger"
-                    size="sm"
-                    onClick={() => setConfirmClearPluginOpen(true)}
-                    disabled={updateSettings.isPending}
+              {showPluginSelect && (
+                <>
+                  <label
+                    htmlFor="dialect-plugin-select"
+                    className="block text-xs text-text-muted"
                   >
-                    {COPY.clearPluginButtonLabel}
-                  </Button>
-                )}
-              </div>
+                    {COPY.dialectPluginLabel}
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <select
+                      id="dialect-plugin-select"
+                      data-testid="warmup-plugin-select"
+                      className={INPUT_CLASS}
+                      value={selectedPluginValue}
+                      onChange={handlePluginChange}
+                      disabled={settingsPending}
+                    >
+                      <option value="">{COPY.defaultPluginOption}</option>
+                      {selectedPluginValue && !selectedPluginKnown && (
+                        <option value={selectedPluginValue}>
+                          {COPY.unknownPluginTemplate.replace(
+                            '{id}',
+                            selectedPluginValue,
+                          )}
+                        </option>
+                      )}
+                      {shapePlugins.map((p: PluginEntry) => (
+                        <option key={p.id} value={p.id}>
+                          {p.name}
+                        </option>
+                      ))}
+                    </select>
+                    {upstream.warmup_dialect_plugin !== null && (
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        data-testid="warmup-plugin-clear"
+                        onClick={() => setConfirmClearPluginOpen(true)}
+                        disabled={settingsPending}
+                      >
+                        {COPY.clearPluginButtonLabel}
+                      </Button>
+                    )}
+                  </div>
+                </>
+              )}
               {shapePlugins.length === 0 && (
                 <div className="text-xs text-text-muted mt-1">
-                  {COPY.noShapePluginsAvailable}
+                  <span>{COPY.noShapePluginsAvailable}</span>{' '}
+                  <a href="/plugins" className="text-accent hover:underline">
+                    Plugins
+                  </a>
                 </div>
               )}
             </div>
@@ -337,6 +423,7 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
           <div>
             <Button
               variant="primary"
+              data-testid="warmup-fire-now"
               onClick={() => setConfirmFireOpen(true)}
               disabled={fireWarmup.isPending || fireCooldown}
             >
@@ -351,28 +438,19 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
               aria-live="polite"
               className="text-xs text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded p-2"
             >
-              {COPY.leaseHeldTemplate.replace(
-                '{heldBy}',
-                leasePanel.heldBy.substring(0, 8),
-              )}
+              {COPY.leaseHeldTemplate.replace('{heldBy}', leasePanel.heldBy)}
             </div>
           )}
 
           {errorPanel && (
             <div
               data-testid="warmup-error-panel"
+              data-reason={errorPanel.reason}
               role="alert"
               aria-live="polite"
-              className="text-xs text-red-200 bg-red-500/10 border border-red-500/30 rounded p-2 flex justify-between items-start"
+              className="text-xs text-red-200 bg-red-500/10 border border-red-500/30 rounded p-2"
             >
-              <span>{COPY.fireErrorReasons[errorPanel.reason]}</span>
-              <button
-                type="button"
-                onClick={() => setErrorPanel(null)}
-                className="text-red-400 hover:text-red-200 ml-2"
-              >
-                ×
-              </button>
+              {COPY.fireErrorReasons[errorPanel.reason]}
             </div>
           )}
         </div>
@@ -380,7 +458,7 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
 
       <ConfirmDialog
         open={confirmFireOpen}
-        onOpenChange={setConfirmFireOpen}
+        onOpenChange={handleConfirmFireOpenChange}
         title={COPY.confirmFireTitle}
         description={COPY.confirmFireBody.replace(
           '{upstreamName}',
@@ -399,7 +477,7 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
         description={COPY.confirmClearPluginBody}
         confirmLabel={COPY.confirmClearPluginConfirmLabel}
         onConfirm={handleClearPlugin}
-        confirmDisabled={updateSettings.isPending}
+        confirmDisabled={clearPlugin.isPending}
         destructive={true}
       />
     </Card>
