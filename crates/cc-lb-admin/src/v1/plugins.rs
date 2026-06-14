@@ -135,6 +135,12 @@ struct ChainListResponse {
 #[derive(Debug, Clone, Copy)]
 struct SlotParam(PluginSlot);
 
+struct PluginChainAuditMetadata {
+    wasm_registry_id: String,
+    sha256_hex: String,
+    supported_slots: Vec<String>,
+}
+
 impl<'de> Deserialize<'de> for SlotParam {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
@@ -292,7 +298,7 @@ async fn insert_chain(
         return storage_unavailable();
     };
     let slot = body.slot.0;
-    match storage
+    let audit_metadata = match storage
         .get_registry_entry_by_id(body.wasm_registry_id)
         .await
     {
@@ -303,10 +309,11 @@ async fn insert_chain(
             if !entry.supported_slots.is_empty() && !entry.supported_slots.contains(&slot) {
                 return unsupported_slot(&entry.name, slot);
             }
+            Some(plugin_chain_audit_metadata(&entry))
         }
-        Ok(None) => {}
+        Ok(None) => None,
         Err(error) => return storage_error(error),
-    }
+    };
     let existing = match storage.list_chain_for_principal(principal_id, slot).await {
         Ok(entries) => entries,
         Err(error) => return storage_error(error),
@@ -328,7 +335,16 @@ async fn insert_chain(
     };
     match storage.insert_chain_entry(input).await {
         Ok(entry) => {
-            emit_chain_audit(&state, principal_id, slot);
+            let audit_metadata = audit_metadata
+                .unwrap_or_else(|| empty_plugin_chain_audit_metadata(entry.wasm_registry_id));
+            emit_chain_audit(
+                &state,
+                principal_id,
+                slot,
+                audit_metadata.wasm_registry_id,
+                audit_metadata.sha256_hex,
+                audit_metadata.supported_slots,
+            );
             let mut headers = HeaderMap::new();
             insert_header(
                 &mut headers,
@@ -368,7 +384,19 @@ async fn update_chain(
         .await
     {
         Ok(Some(entry)) => {
-            emit_chain_audit(&state, entry.principal_id, entry.slot);
+            let audit_metadata =
+                match fetch_plugin_chain_audit_metadata(storage, entry.wasm_registry_id).await {
+                    Ok(metadata) => metadata,
+                    Err(error) => return storage_error(error),
+                };
+            emit_chain_audit(
+                &state,
+                entry.principal_id,
+                entry.slot,
+                audit_metadata.wasm_registry_id,
+                audit_metadata.sha256_hex,
+                audit_metadata.supported_slots,
+            );
             let mut response = chain_with_etag(entry);
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
@@ -409,7 +437,18 @@ async fn reorder_chain(
         .collect();
     match storage.reorder_chain(principal_id, slot, new_orders).await {
         Ok(entries) => {
-            emit_chain_audit(&state, principal_id, slot);
+            let audit_metadata = match first_plugin_chain_audit_metadata(storage, &entries).await {
+                Ok(metadata) => metadata,
+                Err(error) => return storage_error(error),
+            };
+            emit_chain_audit(
+                &state,
+                principal_id,
+                slot,
+                audit_metadata.wasm_registry_id,
+                audit_metadata.sha256_hex,
+                audit_metadata.supported_slots,
+            );
             let mut response = Json(ChainListResponse { entries }).into_response();
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
@@ -431,7 +470,18 @@ async fn rebalance_chain(
     };
     match storage.rebalance_chain(principal_id, query.slot.0).await {
         Ok(entries) => {
-            emit_chain_audit(&state, principal_id, query.slot.0);
+            let audit_metadata = match first_plugin_chain_audit_metadata(storage, &entries).await {
+                Ok(metadata) => metadata,
+                Err(error) => return storage_error(error),
+            };
+            emit_chain_audit(
+                &state,
+                principal_id,
+                query.slot.0,
+                audit_metadata.wasm_registry_id,
+                audit_metadata.sha256_hex,
+                audit_metadata.supported_slots,
+            );
             let mut response = Json(ChainListResponse { entries }).into_response();
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
@@ -457,7 +507,19 @@ async fn delete_chain(
     };
     match storage.delete_chain_entry(id, expected_revision).await {
         Ok(Some(entry)) => {
-            emit_chain_audit(&state, entry.principal_id, entry.slot);
+            let audit_metadata =
+                match fetch_plugin_chain_audit_metadata(storage, entry.wasm_registry_id).await {
+                    Ok(metadata) => metadata,
+                    Err(error) => return storage_error(error),
+                };
+            emit_chain_audit(
+                &state,
+                entry.principal_id,
+                entry.slot,
+                audit_metadata.wasm_registry_id,
+                audit_metadata.sha256_hex,
+                audit_metadata.supported_slots,
+            );
             let mut response = StatusCode::NO_CONTENT.into_response();
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
@@ -589,11 +651,7 @@ async fn registry_size_bytes(storage: &dyn Storage, sha256: [u8; 32]) -> Result<
 }
 
 fn registry_response(entry: WasmRegistryEntry, size_bytes: u64) -> RegistryEntryResponse {
-    let supported_slots = entry
-        .supported_slots
-        .iter()
-        .map(|slot| slot.as_str().to_owned())
-        .collect();
+    let supported_slots = supported_slot_strings(&entry.supported_slots);
     RegistryEntryResponse {
         id: entry.id,
         sha256_hex: hex_sha256(entry.sha256),
@@ -610,6 +668,46 @@ fn registry_response(entry: WasmRegistryEntry, size_bytes: u64) -> RegistryEntry
         metadata: entry.metadata,
         supported_slots,
     }
+}
+
+async fn fetch_plugin_chain_audit_metadata(
+    storage: &dyn Storage,
+    wasm_registry_id: Uuid,
+) -> Result<PluginChainAuditMetadata, StorageError> {
+    let Some(entry) = storage.get_registry_entry_by_id(wasm_registry_id).await? else {
+        return Ok(empty_plugin_chain_audit_metadata(wasm_registry_id));
+    };
+    Ok(plugin_chain_audit_metadata(&entry))
+}
+
+async fn first_plugin_chain_audit_metadata(
+    storage: &dyn Storage,
+    entries: &[PluginChainEntry],
+) -> Result<PluginChainAuditMetadata, StorageError> {
+    let Some(entry) = entries.first() else {
+        return Ok(empty_plugin_chain_audit_metadata(Uuid::nil()));
+    };
+    fetch_plugin_chain_audit_metadata(storage, entry.wasm_registry_id).await
+}
+
+fn plugin_chain_audit_metadata(entry: &WasmRegistryEntry) -> PluginChainAuditMetadata {
+    PluginChainAuditMetadata {
+        wasm_registry_id: entry.id.to_string(),
+        sha256_hex: hex_sha256(entry.sha256),
+        supported_slots: supported_slot_strings(&entry.supported_slots),
+    }
+}
+
+fn empty_plugin_chain_audit_metadata(wasm_registry_id: Uuid) -> PluginChainAuditMetadata {
+    PluginChainAuditMetadata {
+        wasm_registry_id: wasm_registry_id.to_string(),
+        sha256_hex: String::new(),
+        supported_slots: Vec::new(),
+    }
+}
+
+fn supported_slot_strings(slots: &[PluginSlot]) -> Vec<String> {
+    slots.iter().map(|slot| slot.as_str().to_owned()).collect()
 }
 
 fn parse_slot(value: &str) -> Option<PluginSlot> {
@@ -807,12 +905,22 @@ fn error(status: StatusCode, code: &str) -> axum::response::Response {
     (status, Json(json!({ "error": code }))).into_response()
 }
 
-fn emit_chain_audit(state: &AdminState, principal_id: Uuid, slot: PluginSlot) {
+fn emit_chain_audit(
+    state: &AdminState,
+    principal_id: Uuid,
+    slot: PluginSlot,
+    wasm_registry_id: String,
+    sha256_hex: String,
+    supported_slots: Vec<String>,
+) {
     emit_audit(
         state,
         AuditPayload::PluginChainUpdate {
             principal_id: principal_id.to_string(),
             slots_changed: vec![slot.as_str()],
+            wasm_registry_id,
+            sha256_hex,
+            supported_slots,
         },
     );
 }
