@@ -2,6 +2,8 @@
 members = [
     "crates/cc-lb-pricing",
     "crates/cc-lb-plugin-wire",
+    "crates/cc-lb-runtime-protocol",
+    "crates/cc-lb-plugin-conformance",
     "crates/cc-lb-*",
     "benches/extism_sse_overhead",
     "plugins/router/cache-aware",
@@ -20,7 +22,12 @@ members = [
     "tests/multi-replica",
     "tests/real-client",
 ]
-exclude = ["fuzz"]
+exclude = [
+    "fuzz",
+    "crates/cc-lb-plugin-conformance/tests/fixtures/conformance-plugin-observe",
+    "crates/cc-lb-plugin-conformance/tests/fixtures/conformance-plugin-router",
+    "crates/cc-lb-plugin-conformance/tests/fixtures/conformance-plugin-shape",
+]
 resolver = "2"
 
 [workspace.package]
@@ -32,9 +39,11 @@ rust-version = "1.95.0"
 [workspace.dependencies]
 # Plugin trio — public crates.io surface. Lockstep via exact-version pin.
 # Bumping any of these requires bumping all three together.
-cc-lb-pdk         = { path = "crates/cc-lb-pdk",         version = "=0.1.0" }
-cc-lb-plugin-wire = { path = "crates/cc-lb-plugin-wire", version = "=0.1.0" }
-cc-lb-plugin-api  = { path = "crates/cc-lb-plugin-api",  version = "=0.1.0" }
+cc-lb-pdk         = { path = "crates/cc-lb-pdk",         version = "=0.1.1" }
+cc-lb-plugin-wire = { path = "crates/cc-lb-plugin-wire", version = "=0.1.1" }
+cc-lb-plugin-api  = { path = "crates/cc-lb-plugin-api",  version = "=0.1.1" }
+cc-lb-runtime-protocol  = { path = "crates/cc-lb-runtime-protocol",  version = "=0.1.0" }
+cc-lb-plugin-conformance = { path = "crates/cc-lb-plugin-conformance", version = "=0.1.0" }
 
 anyhow = "1"
 arc-swap = "1"

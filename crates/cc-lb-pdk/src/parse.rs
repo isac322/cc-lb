@@ -443,6 +443,10 @@ fn matches_plugin_name(value: &str) -> bool {
 }
 
 fn matches_capability_name(value: &str) -> bool {
+    value.split(':').all(matches_capability_segment)
+}
+
+fn matches_capability_segment(value: &str) -> bool {
     let mut bytes = value.bytes();
     let Some(first) = bytes.next() else {
         return false;
@@ -480,14 +484,21 @@ mod tests {
 
     #[test]
     fn plugin_args_requires_array() {
-        let args: PluginArgs =
-            parse_str(r#"name = "round-robin", version = "1.2.3", requires = ["log", "clock"]"#)
-                .unwrap();
+        let args: PluginArgs = parse_str(
+            r#"name = "round-robin", version = "1.2.3", requires = ["log", "observability:emit"]"#,
+        )
+        .unwrap();
 
         assert_eq!(
             args.requires.iter().map(LitStr::value).collect::<Vec<_>>(),
-            ["log", "clock"]
+            ["log", "observability:emit"]
         );
+    }
+
+    #[test]
+    fn rejects_empty_capability_namespace_segment() {
+        assert!(!matches_capability_name("observability:"));
+        assert!(!matches_capability_name("observability::emit"));
     }
 
     #[test]

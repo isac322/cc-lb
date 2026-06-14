@@ -7,6 +7,7 @@ use crate::StorageResult;
 
 pub use cc_lb_plugin_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
+    PluginSlot,
 };
 
 pub const BUILTIN_PLUGIN_KIND_FILTER: &str = "filter";
@@ -120,33 +121,6 @@ fn builtin_metadata_for_cache_affinity() -> PluginMetadata {
             "5 candidates, all with zero cache score → pass all 5 through.".to_owned(),
             "Exactly 1 candidate → no change.".to_owned(),
         ],
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum PluginSlot {
-    Router,
-    ObservabilityHook,
-    Shape,
-}
-
-impl PluginSlot {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Router => "router",
-            Self::ObservabilityHook => "observability_hook",
-            Self::Shape => "shape",
-        }
-    }
-
-    pub fn parse(value: &str) -> Option<Self> {
-        match value {
-            "router" => Some(Self::Router),
-            "observability_hook" => Some(Self::ObservabilityHook),
-            "shape" => Some(Self::Shape),
-            _ => None,
-        }
     }
 }
 

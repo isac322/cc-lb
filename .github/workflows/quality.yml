@@ -84,6 +84,7 @@ jobs:
           cargo llvm-cov nextest \
             --workspace \
             --exclude cc-lb-loadgen \
+            --exclude cc-lb-plugin-conformance \
             --exclude cc-lb-plugin-lifecycle-tests \
             --exclude plugin-api-key \
             --exclude plugin-oauth-anthropic-pro \

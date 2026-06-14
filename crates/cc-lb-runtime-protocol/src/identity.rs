@@ -41,6 +41,7 @@ fn read_section_payload(data: &[u8]) -> Result<PluginIdentity, IdentityReadError
     Ok(identity)
 }
 
+#[non_exhaustive]
 #[derive(Debug, Error)]
 pub enum IdentityReadError {
     #[error("invalid wasm: {0}")]

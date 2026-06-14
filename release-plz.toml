@@ -28,3 +28,13 @@ semver_check = true
 name = "cc-lb-plugin-api"
 release = true
 semver_check = true
+
+[[package]]
+name = "cc-lb-runtime-protocol"
+release = true
+semver_check = true
+
+[[package]]
+name = "cc-lb-plugin-conformance"
+release = true
+semver_check = true

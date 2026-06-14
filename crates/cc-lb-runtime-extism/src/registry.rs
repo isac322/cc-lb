@@ -12,9 +12,9 @@ use dashmap::DashMap;
 use ring::digest::{SHA256, digest};
 use thiserror::Error;
 
-use crate::handshake::{HandshakeExecutionError, execute_handshake};
-use crate::identity::{IdentityReadError, read_identity};
-use crate::self_check::{SelfCheckExecutionError, execute_self_check};
+use cc_lb_runtime_protocol::handshake::{HandshakeExecutionError, execute_handshake};
+use cc_lb_runtime_protocol::identity::{IdentityReadError, read_identity};
+use cc_lb_runtime_protocol::self_check::{SelfCheckExecutionError, execute_self_check};
 
 pub struct PluginRegistry {
     registry_repo: Arc<dyn PluginRegistryRepo>,
@@ -542,7 +542,7 @@ pub(crate) mod tests {
         PluginRegistry::new(
             registry_repo,
             blob_repo,
-            crate::handshake::build_offer(&BTreeSet::new()),
+            cc_lb_runtime_protocol::handshake::build_offer(&BTreeSet::new()),
         )
         .expect("registry builds")
     }
