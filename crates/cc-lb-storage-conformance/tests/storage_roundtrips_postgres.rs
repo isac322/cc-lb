@@ -381,6 +381,7 @@ async fn concurrent_upload_returns_existed_once_on_fixture(
         label: None,
         uploaded_at_unix_secs: 1_800_000_100,
         uploaded_by_admin_id: uuid::Uuid::new_v4(),
+        wire_version: 1,
         supported_slots: Vec::new(),
     };
 

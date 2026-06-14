@@ -761,6 +761,7 @@ async fn build_app_with_storage_inner(
         ));
     }
     backfill_supported_slots(storage.as_ref()).await;
+    backfill_wire_version(storage.as_ref()).await;
     if let Some((_, error)) = startup_report
         .errors
         .iter()
@@ -1177,7 +1178,7 @@ fn log_startup_handshake_report(report: &StartupHandshakeReport) {
 
 pub async fn backfill_supported_slots(storage: &dyn Storage) {
     use cc_lb_runtime_extism::handshake::{
-        build_offer, execute_handshake, slot_set_from_extism_exports, slot_set_from_handshake,
+        build_offer, execute_handshake, slot_set_from_handshake,
     };
     use cc_lb_storage_api::{BUILTIN_CACHE_AFFINITY_ID, PluginSlot};
 
@@ -1227,28 +1228,15 @@ pub async fn backfill_supported_slots(storage: &dyn Storage) {
             }
         };
         let offer_for_task = offer.clone();
-        let bytes_for_task = bytes.clone();
+        let bytes_for_task = bytes;
         let outcome = tokio::task::spawn_blocking(move || {
-            match execute_handshake(&bytes_for_task, &offer_for_task) {
-                Ok(accept) => Ok(slot_set_from_handshake(&accept.implemented_functions)),
-                Err(handshake_err) => {
-                    Err((handshake_err, slot_set_from_extism_exports(&bytes_for_task)))
-                }
-            }
+            execute_handshake(&bytes_for_task, &offer_for_task)
+                .map(|accept| slot_set_from_handshake(&accept.implemented_functions))
         })
         .await;
         let slots = match outcome {
             Ok(Ok(slots)) => slots,
-            Ok(Err((handshake_err, fallback))) if !fallback.is_empty() => {
-                tracing::warn!(
-                    error = %handshake_err,
-                    sha256 = %hex_sha256_bytes(&entry.sha256),
-                    fallback_slots = ?fallback,
-                    "supported_slots backfill: handshake failed; using extism export fallback (legacy plugin)"
-                );
-                fallback
-            }
-            Ok(Err((error, _))) => {
+            Ok(Err(error)) => {
                 tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "supported_slots backfill: handshake failed");
                 failed += 1;
                 continue;
@@ -1272,6 +1260,109 @@ pub async fn backfill_supported_slots(storage: &dyn Storage) {
     if updated > 0 || failed > 0 {
         tracing::info!(updated, failed, "supported_slots backfill completed",);
     }
+}
+
+pub async fn backfill_wire_version(storage: &dyn Storage) {
+    use cc_lb_runtime_extism::handshake::{build_offer, execute_handshake};
+    use cc_lb_storage_api::{BUILTIN_CACHE_AFFINITY_ID, default_wire_version};
+
+    let entries = match storage.list_registry(None, usize::MAX).await {
+        Ok(entries) => entries,
+        Err(error) => {
+            tracing::warn!(%error, "wire_version backfill: list_registry failed");
+            return;
+        }
+    };
+    let host_caps = BTreeSet::new();
+    let mut offer = build_offer(&host_caps);
+    extend_offer_versions(&mut offer.function_versions, "filter", &[1, 2, 3]);
+    extend_offer_versions(&mut offer.function_versions, "shape", &[1, 2]);
+    let mut updated = 0_usize;
+    let mut failed = 0_usize;
+    for entry in entries {
+        if entry.id == BUILTIN_CACHE_AFFINITY_ID {
+            continue;
+        }
+        if entry.is_builtin {
+            continue;
+        }
+        if entry.wire_version != default_wire_version() {
+            continue;
+        }
+
+        let bytes = match storage.get_blob_bytes(entry.sha256).await {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => {
+                tracing::warn!(
+                    sha256 = %hex_sha256_bytes(&entry.sha256),
+                    "wire_version backfill: blob missing",
+                );
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "wire_version backfill: get_blob failed");
+                failed += 1;
+                continue;
+            }
+        };
+        let offer_for_task = offer.clone();
+        let bytes_for_task = bytes.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            execute_handshake(&bytes_for_task, &offer_for_task)
+        })
+        .await;
+        let fresh = match outcome {
+            Ok(Ok(accept)) => match accept.chosen_versions.values().copied().max() {
+                Some(fresh) => match u8::try_from(fresh) {
+                    Ok(fresh) => fresh,
+                    Err(error) => {
+                        tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), fresh, "wire_version backfill: chosen wire version out of range");
+                        failed += 1;
+                        continue;
+                    }
+                },
+                None => {
+                    tracing::warn!(sha256 = %hex_sha256_bytes(&entry.sha256), "wire_version backfill: handshake returned no chosen wire versions");
+                    failed += 1;
+                    continue;
+                }
+            },
+            Ok(Err(error)) => {
+                tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "wire_version backfill: handshake failed");
+                failed += 1;
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "wire_version backfill: handshake worker panicked");
+                failed += 1;
+                continue;
+            }
+        };
+
+        if let Err(error) = storage.update_wire_version(entry.id, fresh).await {
+            tracing::warn!(%error, sha256 = %hex_sha256_bytes(&entry.sha256), "wire_version backfill: update failed");
+            failed += 1;
+            continue;
+        }
+        updated += 1;
+    }
+    if updated > 0 || failed > 0 {
+        tracing::info!(updated, failed, "wire_version backfill completed",);
+    }
+}
+
+fn extend_offer_versions(
+    function_versions: &mut std::collections::BTreeMap<String, Vec<u32>>,
+    function: &str,
+    versions: &[u32],
+) {
+    let entry = function_versions.entry(function.to_owned()).or_default();
+    for version in versions {
+        if !entry.contains(version) {
+            entry.push(*version);
+        }
+    }
+    entry.sort_unstable();
 }
 
 fn log_legacy_bridge_report(report: &LegacyBridgeReport) {

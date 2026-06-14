@@ -1374,6 +1374,7 @@ fn entry(name: &str) -> WasmRegistryEntryInput {
         label: None,
         uploaded_at_unix_secs: 1_800_000_100,
         uploaded_by_admin_id: Uuid::new_v4(),
+        wire_version: 1,
         supported_slots: Vec::new(),
     }
 }
