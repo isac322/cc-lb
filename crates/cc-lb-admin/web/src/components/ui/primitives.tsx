@@ -2,7 +2,7 @@ import * as Dialog from '@radix-ui/react-dialog';
 import * as Tooltip from '@radix-ui/react-tooltip';
 import { X } from 'lucide-react';
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from 'react';
-import { useState } from 'react';
+import { forwardRef, useState } from 'react';
 import { Area, AreaChart, ResponsiveContainer } from 'recharts';
 
 import { getWindowColor } from '../../lib/colors';
@@ -81,36 +81,42 @@ const BTN_SIZES: Record<ButtonSize, string> = {
   sm: 'h-7 px-2.5 text-xs gap-1.5',
   md: 'h-9 px-3 text-sm gap-2',
 };
-export function Button({
-  variant = 'secondary',
-  size = 'md',
-  fullWidth,
-  iconLeft,
-  iconRight,
-  className,
-  children,
-  ...rest
-}: ButtonProps) {
-  return (
-    <button
-      type="button"
-      className={cx(
-        'inline-flex items-center justify-center rounded-sm font-medium transition-colors select-none',
-        'disabled:cursor-not-allowed disabled:opacity-50',
-        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
-        BTN_VARIANTS[variant],
-        BTN_SIZES[size],
-        fullWidth ? 'w-full' : '',
-        className,
-      )}
-      {...rest}
-    >
-      {iconLeft}
-      {children}
-      {iconRight}
-    </button>
-  );
-}
+export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
+  function Button(
+    {
+      variant = 'secondary',
+      size = 'md',
+      fullWidth,
+      iconLeft,
+      iconRight,
+      className,
+      children,
+      ...rest
+    },
+    ref,
+  ) {
+    return (
+      <button
+        ref={ref}
+        type="button"
+        className={cx(
+          'inline-flex items-center justify-center rounded-sm font-medium transition-colors select-none',
+          'disabled:cursor-not-allowed disabled:opacity-50',
+          'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
+          BTN_VARIANTS[variant],
+          BTN_SIZES[size],
+          fullWidth ? 'w-full' : '',
+          className,
+        )}
+        {...rest}
+      >
+        {iconLeft}
+        {children}
+        {iconRight}
+      </button>
+    );
+  },
+);
 
 // ─── IconButton (44px touch target on mobile) ────────────────────────────────
 export function IconButton({
@@ -300,6 +306,7 @@ export function ConfirmDialog({
   cancelLabel = 'Cancel',
   destructive = false,
   onConfirm,
+  confirmDisabled = false,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -309,6 +316,7 @@ export function ConfirmDialog({
   cancelLabel?: string;
   destructive?: boolean;
   onConfirm: () => void;
+  confirmDisabled?: boolean;
 }) {
   return (
     <Modal
@@ -323,6 +331,8 @@ export function ConfirmDialog({
           </Button>
           <Button
             variant={destructive ? 'danger' : 'primary'}
+            disabled={confirmDisabled}
+            autoFocus
             onClick={() => {
               onConfirm();
               onOpenChange(false);

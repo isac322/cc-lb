@@ -46,6 +46,7 @@ import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { ApiUsageCard } from '../components/upstreams/ApiUsageCard';
 import { InlineNameEditor } from '../components/upstreams/InlineNameEditor';
 import { SettingsCard } from '../components/upstreams/SettingsCard';
+import { WarmupCard } from '../components/upstreams/WarmupCard';
 import { ApiError } from '../lib/api';
 import { getWindowColor, WINDOW_DURATION_SECS } from '../lib/colors';
 import { DEFAULT_ANTHROPIC_BASE_URL } from '../lib/constants';
@@ -1590,6 +1591,8 @@ function DetailView({
             />
           </Section>
         )}
+
+        <WarmupCard upstream={upstream} />
 
         {!isOauth && <SettingsCard upstream={upstream} />}
 

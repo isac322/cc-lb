@@ -143,7 +143,7 @@ export function ApiUsageCard({
   );
 
   return (
-    <Card>
+    <Card data-testid="api-usage-card">
       <CardHeader
         title="API Usage"
         subtitle="Token + cost breakdown by model"
