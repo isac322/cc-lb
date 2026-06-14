@@ -23,6 +23,10 @@ const upstreams: any[] = [
     revision: 7,
     base_url: "https://api.anthropic.com",
     api_key_env: "ANTHROPIC_API_KEY",
+    warmup_enabled: false,
+    warmup_dialect_plugin: null,
+    next_warmup_at: null,
+    last_warmup_cycle_key: null,
   },
   {
     id: "us-anthropic-secondary",
@@ -32,14 +36,34 @@ const upstreams: any[] = [
     revision: 3,
     base_url: "https://api.anthropic.com",
     api_key_env: "ANTHROPIC_API_KEY_2",
+    warmup_enabled: false,
+    warmup_dialect_plugin: null,
+    next_warmup_at: null,
+    last_warmup_cycle_key: null,
   },
   {
-    id: "us-oauth-provider",
-    name: "oauth-claude-code",
+    id: "us-oauth-healthy",
+    name: "oauth-healthy",
     kind: "anthropic_oauth",
     enabled: true,
     revision: 4,
     base_url: "https://api.anthropic.com",
+    warmup_enabled: true,
+    warmup_dialect_plugin: null,
+    next_warmup_at: "2026-06-14T23:04:12Z",
+    last_warmup_cycle_key: 1718380800,
+  },
+  {
+    id: "us-oauth-disabled",
+    name: "oauth-disabled",
+    kind: "anthropic_oauth",
+    enabled: false,
+    revision: 2,
+    base_url: "https://api.anthropic.com",
+    warmup_enabled: false,
+    warmup_dialect_plugin: null,
+    next_warmup_at: null,
+    last_warmup_cycle_key: null,
   },
 ];
 
@@ -124,6 +148,7 @@ const plugins: any[] = [
     kind: "filter",
     wire_version: 3,
     is_builtin: true,
+    slot: "router",
     metadata: {
       purpose: "Prefer upstreams whose prompt cache is already warm for this request.",
       keeps: "Candidates with a positive prefill_cache_score (the upstream has already cached the prefix).",
@@ -142,6 +167,7 @@ const plugins: any[] = [
     refcount: 3,
     revision: 4,
     uploaded_at_unix_secs: NOW() - 86400 * 14,
+    slot: "router",
     metadata: null,
   },
   {
@@ -154,6 +180,7 @@ const plugins: any[] = [
     refcount: 5,
     revision: 2,
     uploaded_at_unix_secs: NOW() - 86400 * 30,
+    slot: "observability_hook",
     metadata: null,
   },
   {
@@ -166,6 +193,7 @@ const plugins: any[] = [
     refcount: 2,
     revision: 1,
     uploaded_at_unix_secs: NOW() - 86400 * 3,
+    slot: "observability_hook",
     metadata: null,
   },
   {
@@ -178,6 +206,7 @@ const plugins: any[] = [
     refcount: 1,
     revision: 3,
     uploaded_at_unix_secs: NOW() - 86400 * 7,
+    slot: "shape",
     metadata: null,
   },
   {
@@ -190,6 +219,33 @@ const plugins: any[] = [
     refcount: 1,
     revision: 1,
     uploaded_at_unix_secs: NOW() - 86400 * 2,
+    slot: "router",
+    metadata: null,
+  },
+  {
+    id: "pl-anthropic-shape-v2",
+    sha256_hex: "2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b",
+    name: "anthropic-shape-v2",
+    original_filename: "anthropic-shape-v2.wasm",
+    label: "Anthropic shape translator v2 with enhanced caching",
+    size_bytes: 285_440,
+    refcount: 0,
+    revision: 2,
+    uploaded_at_unix_secs: NOW() - 86400 * 5,
+    slot: "shape",
+    metadata: null,
+  },
+  {
+    id: "pl-claude-edge-shape",
+    sha256_hex: "4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d",
+    name: "claude-edge-shape",
+    original_filename: "claude-edge-shape.wasm",
+    label: "Claude edge-optimized shape converter",
+    size_bytes: 201_728,
+    refcount: 0,
+    revision: 1,
+    uploaded_at_unix_secs: NOW() - 86400 * 1,
+    slot: "shape",
     metadata: null,
   },
 ];
@@ -552,7 +608,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
     const body = await readJson<any>(req);
     if (!body.name) return err(400, "invalid_input", "name required");
     if (upstreams.find((u) => u.name === body.name)) return err(409, "conflict", "name already exists");
-    const newU = { id: `us-${Date.now().toString(36)}`, name: body.name, kind: body.kind ?? "anthropic_api_key", enabled: true, revision: 1, base_url: body.base_url ?? "https://api.anthropic.com", api_key_env: body.api_key_env ?? null };
+    const newU = { id: `us-${Date.now().toString(36)}`, name: body.name, kind: body.kind ?? "anthropic_api_key", enabled: true, revision: 1, base_url: body.base_url ?? "https://api.anthropic.com", api_key_env: body.api_key_env ?? null, warmup_enabled: false, warmup_dialect_plugin: null, next_warmup_at: null, last_warmup_cycle_key: null };
     upstreams.push(newU);
     return created(newU, { etag: `"${newU.revision}"`, location: `/admin/v1/upstreams/${newU.id}` });
   }
@@ -569,6 +625,17 @@ async function handle(req: Request, url: URL): Promise<Response> {
         u.revision++;
         return ok(u, { etag: `"${u.revision}"` });
       }
+      if (m === "PATCH") {
+        const ifMatch = req.headers.get("If-Match");
+        if (!ifMatch) return err(428, "precondition_required", "If-Match header required");
+        const expectedEtag = `W/"${u.revision}"`;
+        if (ifMatch !== expectedEtag && ifMatch !== `"${u.revision}"`) return err(412, "precondition_failed");
+        const body = await readJson<any>(req);
+        if (body.warmup_enabled !== undefined) u.warmup_enabled = body.warmup_enabled;
+        if (body.warmup_dialect_plugin !== undefined) u.warmup_dialect_plugin = body.warmup_dialect_plugin;
+        u.revision++;
+        return ok(u, { etag: `"${u.revision}"` });
+      }
       if (m === "DELETE") {
         const ix = upstreams.indexOf(u);
         upstreams.splice(ix, 1);
@@ -582,6 +649,41 @@ async function handle(req: Request, url: URL): Promise<Response> {
       const u = upstreams.find((x) => x.id === mm[1]);
       if (!u) return notFound("upstream_not_found");
       u.enabled = mm[2] === "enable";
+      u.revision++;
+      return ok(u, { etag: `"${u.revision}"` });
+    }
+  }
+  {
+    const mm = path.match(/^\/admin\/v1\/upstreams\/([^/]+)\/warmup\/fire-now$/);
+    if (mm && m === "POST") {
+      const u = upstreams.find((x) => x.id === mm[1]);
+      if (!u) return notFound("upstream_not_found");
+      const outcome = url.searchParams.get("mock_outcome") ?? "success";
+      if (outcome === "success") {
+        return ok({ fired: true, cycle_key: 1718380800 });
+      }
+      if (outcome === "lease_held") {
+        return new Response(JSON.stringify({ fired: false, reason: "lease_held", held_by: "replica-2" }), { status: 202, headers: { "Content-Type": "application/json", ...CORS } });
+      }
+      if (["auth_failed", "forbidden", "bad_request", "not_found", "dialect_plugin_failed"].includes(outcome)) {
+        return new Response(JSON.stringify({ fired: false, reason: outcome }), { status: 502, headers: { "Content-Type": "application/json", ...CORS } });
+      }
+      if (outcome === "transient") {
+        return new Response(JSON.stringify({ fired: false, reason: "transient" }), { status: 503, headers: { "Content-Type": "application/json", ...CORS } });
+      }
+      return ok({ fired: true, cycle_key: 1718380800 });
+    }
+  }
+  {
+    const mm = path.match(/^\/admin\/v1\/upstreams\/([^/]+)\/warmup-dialect-plugin$/);
+    if (mm && m === "DELETE") {
+      const u = upstreams.find((x) => x.id === mm[1]);
+      if (!u) return notFound("upstream_not_found");
+      const ifMatch = req.headers.get("If-Match");
+      if (!ifMatch) return err(428, "precondition_required", "If-Match header required");
+      const expectedEtag = `W/"${u.revision}"`;
+      if (ifMatch !== expectedEtag && ifMatch !== `"${u.revision}"`) return err(412, "precondition_failed");
+      u.warmup_dialect_plugin = null;
       u.revision++;
       return ok(u, { etag: `"${u.revision}"` });
     }
@@ -709,7 +811,18 @@ async function handle(req: Request, url: URL): Promise<Response> {
   }
 
   // ── Plugins registry
-  if (path === "/admin/v1/plugins/registry" && m === "GET") return listResponse(plugins, url, (p) => p.id, "entries");
+  if (path === "/admin/v1/plugins/registry" && m === "GET") {
+    const slot = url.searchParams.get("slot");
+    const noPlugins = (globalThis as any).Bun?.env?.MOCK_NO_PLUGINS === "1" || (globalThis as any).process?.env?.MOCK_NO_PLUGINS === "1";
+    let filtered = plugins;
+    if (slot) {
+      filtered = plugins.filter((p) => p.slot === slot);
+    }
+    if (noPlugins && slot === "shape") {
+      filtered = [];
+    }
+    return listResponse(filtered, url, (p) => p.id, "entries");
+  }
   if (path === "/admin/v1/plugins/wasm" && m === "POST") {
     // multipart, but we don't strictly parse — just return mock success
     const id = `pl-${Date.now().toString(36)}`;
