@@ -53,7 +53,18 @@ export interface Upstream {
   revision: number;
   base_url?: string | null;
   api_key_env?: string | null;
+  warmup_enabled: boolean;
+  warmup_dialect_plugin: UpstreamWarmupDialectPlugin | null;
+  next_warmup_at: string | null;
+  last_warmup_cycle_key: number | null;
 }
+
+export interface UpstreamWarmupDialectPlugin {
+  wasm_registry_id: string;
+  config: Record<string, unknown>;
+  wire_version?: number;
+}
+
 interface UpstreamListResp {
   upstreams: Upstream[];
 }
@@ -600,6 +611,25 @@ export interface UpdateUpstreamRequest {
   api_key_env?: string | null;
   api_key_value?: string | null;
 }
+
+export interface UpdateUpstreamWarmupSettingsRequest {
+  warmup_enabled?: boolean;
+  warmup_dialect_plugin?: UpstreamWarmupDialectPlugin | null;
+}
+
+export type FireNowErrorReason =
+  | 'auth_failed'
+  | 'forbidden'
+  | 'bad_request'
+  | 'not_found'
+  | 'dialect_plugin_failed'
+  | 'transient';
+
+export type FireNowResponse =
+  | { fired: true; cycle_key: number }
+  | { fired: false; reason: 'lease_held'; held_by: string }
+  | { fired: false; reason: FireNowErrorReason };
+
 export function useUpdateUpstream() {
   const qc = useQueryClient();
   return useMutation({
