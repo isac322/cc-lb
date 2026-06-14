@@ -91,14 +91,17 @@ jobs:
           rust-cache-key: coverage-v2-${{ steps.inv.outputs.hash }}
           cache-targets: true
           # Slim target paths so tar+zstd has less data to compress on save and
-          # less to decompress on restore. cargo-llvm-cov runs in
-          # target/llvm-cov-target/debug; the two fixtures build into
-          # target/wasm32-*/release. Everything else in target/ (default debug
-          # build artifacts, doc, tmp, CACHEDIR.TAG metadata, etc.) is unused
-          # by this job and cargo regenerates the missing top-level files on
-          # the next run.
+          # less to decompress on restore. From diagnostic data:
+          # target/llvm-cov-target/debug/{deps,build,.fingerprint} are required
+          # for cargo Fresh fingerprint detection; examples/ (304 MB) and the
+          # top-level cc-lb binary (285 MB) are produced but never run by
+          # cargo-llvm-cov nextest, so they're excluded. Fixtures go to
+          # target/wasm32-*/release. cargo regenerates missing CACHEDIR.TAG /
+          # .rustc_info.json on the next run.
           target-paths: |
-            target/llvm-cov-target/debug
+            target/llvm-cov-target/debug/.fingerprint
+            target/llvm-cov-target/debug/deps
+            target/llvm-cov-target/debug/build
             target/wasm32-wasip1/release
             target/wasm32-unknown-unknown/release
             crates/cc-lb-admin/web/dist
