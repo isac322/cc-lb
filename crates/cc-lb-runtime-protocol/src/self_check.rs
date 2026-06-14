@@ -1,20 +1,21 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use cc_lb_plugin_api::PluginSlot;
 use cc_lb_plugin_wire::limits::{
     IMPLEMENTED_FUNCTIONS_MAX, SELF_CHECK_FUEL, SELF_CHECK_OUTPUT_MAX_BYTES, SELF_CHECK_WALL_MS,
 };
 use cc_lb_plugin_wire::self_check::{
     SelfCheckError, SelfCheckRequest, SelfCheckResponse, SelfCheckStatus,
 };
-use cc_lb_plugin_wire::wire_function::all_wire_functions;
 use thiserror::Error;
 
-use crate::handshake::{BuildPluginError, build_plugin};
+use crate::handshake::{BuildPluginError, build_plugin, slot_to_wire_function};
 
 const SELF_CHECK_EXPORT: &str = "cc_lb_self_check";
 
 pub fn execute_self_check(
     plugin_bytes: &[u8],
+    supported_slots: &[PluginSlot],
 ) -> Result<SelfCheckResponse, SelfCheckExecutionError> {
     let mut plugin =
         build_plugin(plugin_bytes, SELF_CHECK_WALL_MS, SELF_CHECK_FUEL).map_err(|source| {
@@ -29,7 +30,17 @@ pub fn execute_self_check(
         return Err(SelfCheckExecutionError::MissingSelfCheckExport);
     }
 
-    let request = build_request()?;
+    if supported_slots.is_empty() {
+        let response = SelfCheckResponse {
+            status: SelfCheckStatus::Success,
+            failures: Vec::new(),
+            completed_at: unix_timestamp()?,
+        };
+        response.validate()?;
+        return Ok(response);
+    }
+
+    let request = build_request(supported_slots)?;
     let request = serde_json::to_string(&request).map_err(|source| {
         SelfCheckExecutionError::SerializeRequest {
             reason: source.to_string(),
@@ -59,33 +70,42 @@ pub fn execute_self_check(
     Ok(response)
 }
 
-fn build_request() -> Result<SelfCheckRequest, SelfCheckExecutionError> {
-    let functions = all_wire_functions();
+fn build_request(
+    supported_slots: &[PluginSlot],
+) -> Result<SelfCheckRequest, SelfCheckExecutionError> {
+    let functions: Vec<_> = supported_slots
+        .iter()
+        .copied()
+        .map(slot_to_wire_function)
+        .map(str::to_owned)
+        .collect();
     if functions.len() > IMPLEMENTED_FUNCTIONS_MAX {
         return Err(SelfCheckExecutionError::Validation(
             SelfCheckError::TooManyFunctions,
         ));
     }
 
-    let initiated_at = SystemTime::now()
+    let initiated_at = unix_timestamp()?;
+    let request = SelfCheckRequest {
+        functions_to_test: functions,
+        initiated_at,
+    };
+    if !request.functions_to_test.is_empty() {
+        request.validate()?;
+    }
+    Ok(request)
+}
+
+fn unix_timestamp() -> Result<i64, SelfCheckExecutionError> {
+    let seconds = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|source| SelfCheckExecutionError::Clock {
             reason: source.to_string(),
         })?
         .as_secs();
-    let initiated_at =
-        i64::try_from(initiated_at).map_err(|source| SelfCheckExecutionError::Clock {
-            reason: source.to_string(),
-        })?;
-    let request = SelfCheckRequest {
-        functions_to_test: functions
-            .iter()
-            .map(|function| (*function).to_owned())
-            .collect(),
-        initiated_at,
-    };
-    request.validate()?;
-    Ok(request)
+    i64::try_from(seconds).map_err(|source| SelfCheckExecutionError::Clock {
+        reason: source.to_string(),
+    })
 }
 
 fn validate_status_failures(response: &SelfCheckResponse) -> Result<(), SelfCheckExecutionError> {
@@ -136,6 +156,12 @@ pub enum SelfCheckExecutionError {
 mod tests {
     use super::*;
 
+    const TEST_SUPPORTED_SLOTS: &[PluginSlot] = &[
+        PluginSlot::Router,
+        PluginSlot::Shape,
+        PluginSlot::ObservabilityHook,
+    ];
+
     #[test]
     fn execute_self_check_accepts_success_response() {
         let wasm = self_check_module(
@@ -143,7 +169,8 @@ mod tests {
             false,
         );
 
-        let response = execute_self_check(&wasm).expect("self-check succeeds");
+        let response =
+            execute_self_check(&wasm, TEST_SUPPORTED_SLOTS).expect("self-check succeeds");
 
         assert_eq!(response.status, SelfCheckStatus::Success);
         assert!(response.failures.is_empty());
@@ -156,7 +183,8 @@ mod tests {
             false,
         );
 
-        let err = execute_self_check(&wasm).expect_err("failure status rejected at executor level");
+        let err = execute_self_check(&wasm, TEST_SUPPORTED_SLOTS)
+            .expect_err("failure status rejected at executor level");
 
         match err {
             SelfCheckExecutionError::FailureStatus { failures } => assert_eq!(failures, 1),
@@ -169,7 +197,8 @@ mod tests {
         let wasm = wat::parse_str(r#"(module (func (export "shape") (result i32) (i32.const 0)))"#)
             .expect("wat parses");
 
-        let err = execute_self_check(&wasm).expect_err("missing export rejected");
+        let err =
+            execute_self_check(&wasm, TEST_SUPPORTED_SLOTS).expect_err("missing export rejected");
 
         match err {
             SelfCheckExecutionError::MissingSelfCheckExport => {}
@@ -184,7 +213,8 @@ mod tests {
             true,
         );
 
-        let err = execute_self_check(&wasm).expect_err("host import rejected");
+        let err =
+            execute_self_check(&wasm, TEST_SUPPORTED_SLOTS).expect_err("host import rejected");
 
         match err {
             SelfCheckExecutionError::Instantiate { .. } | SelfCheckExecutionError::Call { .. } => {}
@@ -197,7 +227,8 @@ mod tests {
         let output = "x".repeat(SELF_CHECK_OUTPUT_MAX_BYTES + 1);
         let wasm = self_check_module(&output, false);
 
-        let err = execute_self_check(&wasm).expect_err("oversized response rejected");
+        let err = execute_self_check(&wasm, TEST_SUPPORTED_SLOTS)
+            .expect_err("oversized response rejected");
 
         match err {
             SelfCheckExecutionError::OutputTooLarge { bytes, max } => {
@@ -215,7 +246,8 @@ mod tests {
             false,
         );
 
-        let err = execute_self_check(&wasm).expect_err("status/failures mismatch rejected");
+        let err = execute_self_check(&wasm, TEST_SUPPORTED_SLOTS)
+            .expect_err("status/failures mismatch rejected");
 
         match err {
             SelfCheckExecutionError::SuccessWithFailures { count } => assert_eq!(count, 1),
@@ -230,7 +262,8 @@ mod tests {
             false,
         );
 
-        let err = execute_self_check(&wasm).expect_err("status/failures mismatch rejected");
+        let err = execute_self_check(&wasm, TEST_SUPPORTED_SLOTS)
+            .expect_err("status/failures mismatch rejected");
 
         match err {
             SelfCheckExecutionError::FailureWithoutFailures => {}
@@ -245,7 +278,8 @@ mod tests {
             false,
         );
 
-        let err = execute_self_check(&wasm).expect_err("invalid response rejected");
+        let err =
+            execute_self_check(&wasm, TEST_SUPPORTED_SLOTS).expect_err("invalid response rejected");
 
         match err {
             SelfCheckExecutionError::Validation(SelfCheckError::InvalidTimestamp(_)) => {}

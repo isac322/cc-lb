@@ -10,8 +10,8 @@ use axum::{
 use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_storage_api::{
     BUILTIN_CACHE_AFFINITY_ID, PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput,
-    PluginChainEntryUpdate, PluginMetadata, PluginSlot, Storage, StorageError, WasmRegistryEntry,
-    sparse_order,
+    PluginChainEntryUpdate, PluginMetadata, PluginSlot, PrincipalStore, Storage, StorageError,
+    WasmRegistryEntry, sparse_order,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -384,6 +384,32 @@ async fn update_chain(
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
+    if plugin_chain_update_empty(&update) {
+        return error(StatusCode::BAD_REQUEST, "empty_update");
+    }
+    let current_entry = match find_chain_entry(storage, id).await {
+        Ok(Some(entry)) => entry,
+        Ok(None) => return error(StatusCode::NOT_FOUND, "unknown_plugin_chain_entry"),
+        Err(error) => return storage_error(error),
+    };
+    if current_entry.revision != expected_revision {
+        return stale_revision(current_entry.revision);
+    }
+    match storage
+        .get_registry_entry_by_id(current_entry.wasm_registry_id)
+        .await
+    {
+        Ok(Some(registry_entry)) => {
+            if registry_entry.supported_slots.is_empty() && !registry_entry.is_builtin {
+                return slot_metadata_unknown(&registry_entry.name);
+            }
+            if registry_entry_unsupported_slot(&registry_entry, current_entry.slot) {
+                return unsupported_slot(&registry_entry.name, current_entry.slot);
+            }
+        }
+        Ok(None) => {}
+        Err(error) => return storage_error(error),
+    }
     match storage
         .update_chain_entry(id, expected_revision, update)
         .await
@@ -431,10 +457,13 @@ async fn reorder_chain(
     if sparse_order::needs_rebalance(&orders) {
         return needs_rebalance();
     }
-    let slot = match infer_reorder_slot(storage, principal_id, &body.entries).await {
-        Ok(slot) => slot,
+    let (slot, existing) = match infer_reorder_chain(storage, principal_id, &body.entries).await {
+        Ok(result) => result,
         Err(response) => return response,
     };
+    if let Err(response) = revalidate_chain_registry_slots(storage, principal_id, &existing).await {
+        return response;
+    }
     let new_orders = body
         .entries
         .into_iter()
@@ -473,6 +502,16 @@ async fn rebalance_chain(
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
+    let existing = match storage
+        .list_chain_for_principal(principal_id, query.slot.0)
+        .await
+    {
+        Ok(entries) => entries,
+        Err(error) => return storage_error(error),
+    };
+    if let Err(response) = revalidate_chain_registry_slots(storage, principal_id, &existing).await {
+        return response;
+    }
     match storage.rebalance_chain(principal_id, query.slot.0).await {
         Ok(entries) => {
             let audit_metadata = match first_plugin_chain_audit_metadata(storage, &entries).await {
@@ -551,11 +590,50 @@ async fn all_registry_entries(
     Ok(all)
 }
 
-async fn infer_reorder_slot(
+async fn find_chain_entry(
+    storage: &dyn Storage,
+    id: Uuid,
+) -> Result<Option<PluginChainEntry>, StorageError> {
+    let mut offset = 0;
+    loop {
+        let principals = PrincipalStore::list(storage, offset, DEFAULT_LIMIT, true).await?;
+        if principals.is_empty() {
+            return Ok(None);
+        }
+        offset += principals.len();
+        for principal in principals {
+            for slot in [
+                PluginSlot::Router,
+                PluginSlot::ObservabilityHook,
+                PluginSlot::Shape,
+            ] {
+                let entries = storage.list_chain_for_principal(principal.id, slot).await?;
+                if let Some(entry) = entries.into_iter().find(|entry| entry.id == id) {
+                    return Ok(Some(entry));
+                }
+            }
+        }
+    }
+}
+
+fn plugin_chain_update_empty(update: &PluginChainEntryUpdate) -> bool {
+    update.config.is_none()
+        && update.sse_per_event.is_none()
+        && update.batched_events_per_flush.is_none()
+        && update.batched_flush_ms.is_none()
+}
+
+fn registry_entry_unsupported_slot(registry_entry: &WasmRegistryEntry, slot: PluginSlot) -> bool {
+    !registry_entry.is_builtin
+        && !registry_entry.supported_slots.is_empty()
+        && !registry_entry.supported_slots.contains(&slot)
+}
+
+async fn infer_reorder_chain(
     storage: &dyn Storage,
     principal_id: Uuid,
     entries: &[ReorderEntry],
-) -> Result<PluginSlot, axum::response::Response> {
+) -> Result<(PluginSlot, Vec<PluginChainEntry>), axum::response::Response> {
     for slot in [
         PluginSlot::Router,
         PluginSlot::ObservabilityHook,
@@ -569,10 +647,32 @@ async fn infer_reorder_slot(
             .iter()
             .all(|entry| chain.iter().any(|candidate| candidate.id == entry.id))
         {
-            return Ok(slot);
+            return Ok((slot, chain));
         }
     }
     Err(error(StatusCode::BAD_REQUEST, "entry_not_in_chain"))
+}
+
+async fn revalidate_chain_registry_slots(
+    storage: &dyn Storage,
+    principal_id: Uuid,
+    entries: &[PluginChainEntry],
+) -> Result<(), axum::response::Response> {
+    for entry in entries {
+        match storage
+            .get_registry_entry_by_id(entry.wasm_registry_id)
+            .await
+        {
+            Ok(Some(registry_entry)) => {
+                if registry_entry_unsupported_slot(&registry_entry, entry.slot) {
+                    return Err(chain_drift_detected(principal_id, entry, &registry_entry));
+                }
+            }
+            Ok(None) => {}
+            Err(error) => return Err(storage_error(error)),
+        }
+    }
+    Ok(())
 }
 
 fn compute_order(
@@ -849,6 +949,24 @@ fn slot_singleton(existing_entry_id: Uuid) -> axum::response::Response {
         Json(json!({
             "error": "slot_singleton",
             "existing_entry_id": existing_entry_id.to_string()
+        })),
+    )
+        .into_response()
+}
+
+fn chain_drift_detected(
+    principal_id: Uuid,
+    entry: &PluginChainEntry,
+    registry_entry: &WasmRegistryEntry,
+) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": "chain_drift_detected",
+            "principal_id": principal_id,
+            "wasm_registry_id": entry.wasm_registry_id,
+            "chain_slot": entry.slot.as_str(),
+            "supported_slots": supported_slot_strings(&registry_entry.supported_slots),
         })),
     )
         .into_response()

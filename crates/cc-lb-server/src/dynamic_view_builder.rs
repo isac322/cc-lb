@@ -30,7 +30,7 @@ use cc_lb_storage_api::{
     AnthropicCompatibilityKvStore, AuditStore, PluginRegistryRepo, PluginRegistryStore, PluginSlot,
     PrincipalRecord, PrincipalStore, PromptCacheObservationStore, RateLimitKind, StorageError,
     StorageResult, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord,
-    UpstreamStore, UpstreamSubscriptionQuotaStore,
+    UpstreamStore, UpstreamSubscriptionQuotaStore, WasmRegistryEntry,
 };
 use parking_lot::RwLock;
 use thiserror::Error;
@@ -367,6 +367,12 @@ async fn list_principals(stores: &Stores) -> StorageResult<Vec<PrincipalRecord>>
     Ok(all)
 }
 
+fn registry_entry_unsupported_slot(registry_entry: &WasmRegistryEntry, slot: PluginSlot) -> bool {
+    !registry_entry.is_builtin
+        && !registry_entry.supported_slots.is_empty()
+        && !registry_entry.supported_slots.contains(&slot)
+}
+
 async fn build_principal_chains(
     stores: &Stores,
     runtime: &ExtismRuntime,
@@ -415,6 +421,19 @@ async fn build_principal_chains(
                 .ok_or_else(|| {
                     io::Error::new(io::ErrorKind::NotFound, "plugin registry sha not found")
                 })?;
+            if registry_entry_unsupported_slot(&registry_entry, PluginSlot::ObservabilityHook) {
+                tracing::warn!(
+                    target: "cc_lb_server::drift",
+                    principal = %principal.name,
+                    plugin = registry_entry.name.as_str(),
+                    chain_entry_id = %entry.id,
+                    wasm_registry_id = %registry_entry.id,
+                    requested_slot = PluginSlot::ObservabilityHook.as_str(),
+                    supported_slots = ?registry_entry.supported_slots,
+                    "skipping observability_hook chain entry: registry entry does not support requested slot",
+                );
+                continue;
+            }
             let wasm_path = materialize_wasm(stores, data_dir, registry_entry.sha256).await?;
             let manifest = PluginManifest {
                 name: registry_entry.name,
