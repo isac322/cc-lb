@@ -185,19 +185,9 @@ async fn upload_wasm_inner(
         )
     })?;
     let sha256_hex = hex_sha256(sha256);
-    let existing = storage
-        .get_registry_entry_by_sha(sha256)
-        .await
-        .map_err(storage_response)?;
-    let (supported_slots, fresh_wire_version) = match &existing {
-        Some(entry) if !entry.supported_slots.is_empty() => {
-            (entry.supported_slots.clone(), entry.wire_version)
-        }
-        _ => {
-            let metadata = derive_handshake_metadata(&bytes).await?;
-            (metadata.slots, metadata.wire_version)
-        }
-    };
+    let metadata = derive_handshake_metadata(&bytes).await?;
+    let supported_slots = metadata.slots.clone();
+    let fresh_wire_version = metadata.wire_version;
     let admin_id = admin_id_from_headers(headers);
     let blob = WasmBlob {
         sha256,
