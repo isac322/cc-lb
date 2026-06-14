@@ -33,7 +33,10 @@ expression: body
         "original_filename": "builtin://cache-affinity",
         "refcount": 0,
         "sha256_hex": "0000000000000000000000000000000000000000000000000000000000000000",
-        "size_bytes": 0
+        "size_bytes": 0,
+        "supported_slots": [
+          "router"
+        ]
       },
       {
         "label": "fixture",
@@ -41,7 +44,8 @@ expression: body
         "original_filename": "plugin-alpha.wasm",
         "refcount": 1,
         "sha256_hex": "0909090909090909090909090909090909090909090909090909090909090909",
-        "size_bytes": 9
+        "size_bytes": 9,
+        "supported_slots": []
       }
     ]
   },
