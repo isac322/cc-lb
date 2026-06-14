@@ -1108,6 +1108,7 @@ fn map_warmup_dialect_error(
         }
         crate::warmup::dialect::WarmupDispatchError::MissingPlugin
         | crate::warmup::dialect::WarmupDispatchError::RegistryNotFound(_)
+        | crate::warmup::dialect::WarmupDispatchError::RegistryUnsupportedSlot { .. }
         | crate::warmup::dialect::WarmupDispatchError::Materialize(_)
         | crate::warmup::dialect::WarmupDispatchError::Instantiate(_)
         | crate::warmup::dialect::WarmupDispatchError::BodySerialize(_)

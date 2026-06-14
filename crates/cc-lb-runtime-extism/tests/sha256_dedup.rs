@@ -152,6 +152,7 @@ impl RegistryLifecycle for CountingLifecycle {
     fn execute_self_check(
         &self,
         _plugin_bytes: &[u8],
+        _supported_slots: &[cc_lb_storage_api::PluginSlot],
     ) -> Result<SelfCheckResponse, SelfCheckExecutionError> {
         self.self_checks.fetch_add(1, Ordering::SeqCst);
         Ok(SelfCheckResponse {

@@ -740,6 +740,7 @@ pub mod tests {
         fn execute_self_check(
             &self,
             _plugin_bytes: &[u8],
+            _supported_slots: &[cc_lb_storage_api::PluginSlot],
         ) -> Result<SelfCheckResponse, SelfCheckExecutionError> {
             Ok(SelfCheckResponse {
                 status: SelfCheckStatus::Success,

@@ -4,12 +4,26 @@ pub mod shape;
 
 use std::collections::BTreeMap;
 
+use cc_lb_plugin_api::types::PluginSlot;
 use cc_lb_plugin_wire::wire_function::WireFunction;
 
 use crate::dispatch::{DispatchOutcome, PluginSession};
 use crate::errors::DispatchError;
 use crate::handshake::{HandshakeError, HandshakeReport};
 use crate::{ExtraInfo, LayerResult, VerifyError, VerifyReport, identity, self_check};
+
+fn slot_set_from_negotiated(chosen_versions: &BTreeMap<String, u32>) -> Vec<PluginSlot> {
+    let mut slots = Vec::new();
+    for name in chosen_versions.keys() {
+        match name.as_str() {
+            "filter" => slots.push(PluginSlot::Router),
+            "shape" => slots.push(PluginSlot::Shape),
+            "observe" => slots.push(PluginSlot::ObservabilityHook),
+            _ => {}
+        }
+    }
+    slots
+}
 
 pub use observability::{verify_observability_plugin, verify_observability_plugin_with_caps};
 pub use router::{verify_router_plugin, verify_router_plugin_with_caps};
@@ -21,7 +35,8 @@ pub(crate) fn begin_report(
     required_function: &'static str,
 ) -> Result<VerifyReport, VerifyError> {
     let identity = identity::read(wasm)?;
-    self_check::run(wasm)?;
+    let supported_slots = slot_set_from_negotiated(&handshake.chosen_versions);
+    self_check::run(wasm, &supported_slots)?;
 
     Ok(VerifyReport {
         identity: LayerResult {
