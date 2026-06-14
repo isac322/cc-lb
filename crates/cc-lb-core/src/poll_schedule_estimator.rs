@@ -14,6 +14,12 @@ pub struct EstimatorConfig {
     pub fallback_interval_secs: u64,
     pub history_capacity: usize,
     pub throttle_ladder_secs: Vec<u64>,
+    /// Sliding-window rate limit (measured: 5 reqs / 300s on /api/oauth/usage).
+    /// When `rate_limit_capacity > 0`, next_poll >= oldest_success + window + safety.
+    /// Capacity = 0 disables and falls back to the legacy throttle-median path.
+    pub rate_limit_window_secs: u64,
+    pub rate_limit_capacity: usize,
+    pub rate_limit_safety_secs: u64,
 }
 
 impl Default for EstimatorConfig {
@@ -27,6 +33,9 @@ impl Default for EstimatorConfig {
             fallback_interval_secs: 300,
             history_capacity: 32,
             throttle_ladder_secs: vec![60, 300, 900, 1_800, 3_600],
+            rate_limit_window_secs: 0,
+            rate_limit_capacity: 0,
+            rate_limit_safety_secs: 0,
         }
     }
 }
@@ -53,6 +62,7 @@ struct EstimatorState {
     successes_since_throttle: u32,
     consecutive_throttles: u32,
     observations: VecDeque<ThrottleObservation>,
+    success_history: VecDeque<SystemTime>,
     next_poll_at: SystemTime,
 }
 
@@ -66,6 +76,7 @@ impl EstimatorState {
             successes_since_throttle: 0,
             consecutive_throttles: 0,
             observations: VecDeque::new(),
+            success_history: VecDeque::new(),
             next_poll_at: now,
         }
     }
@@ -133,7 +144,8 @@ impl PollScheduleEstimator {
         state.last_success_at = Some(now);
         state.successes_since_throttle = state.successes_since_throttle.saturating_add(1);
         state.consecutive_throttles = 0;
-        let interval = self.compute_normal_interval(state);
+        self.update_success_history(state, now);
+        let interval = self.compute_normal_interval(state, now);
         state.next_poll_at = now + Duration::from_secs(interval);
     }
 
@@ -185,24 +197,73 @@ impl PollScheduleEstimator {
         state.next_poll_at = now + Duration::from_secs(interval);
     }
 
-    fn compute_normal_interval(&self, state: &EstimatorState) -> u64 {
-        if state.attempt_count < self.config.bootstrap_attempts {
-            return self.bootstrap_backoff(state.attempt_count);
-        }
+    fn compute_normal_interval(&self, state: &EstimatorState, now: SystemTime) -> u64 {
+        let base = if self.config.rate_limit_capacity > 0 {
+            self.config
+                .min_interval_secs
+                .max(self.sliding_window_constraint(state, now))
+        } else if state.attempt_count < self.config.bootstrap_attempts {
+            self.bootstrap_backoff(state.attempt_count)
+        } else {
+            let mut intervals = state
+                .observations
+                .iter()
+                .filter(|observation| observation.capacity > 0)
+                .map(|observation| observation.window_secs as f64 / observation.capacity as f64)
+                .collect::<Vec<_>>();
+            if intervals.is_empty() || self.config.safety_factor <= 0.0 {
+                self.config.fallback_interval_secs
+            } else {
+                intervals.sort_by(|left, right| left.total_cmp(right));
+                let median = intervals[intervals.len() / 2];
+                (median / self.config.safety_factor).ceil() as u64
+            }
+        };
+        self.clamp_interval(base)
+    }
 
-        let mut intervals = state
-            .observations
-            .iter()
-            .filter(|observation| observation.capacity > 0)
-            .map(|observation| observation.window_secs as f64 / observation.capacity as f64)
-            .collect::<Vec<_>>();
-        if intervals.is_empty() || self.config.safety_factor <= 0.0 {
-            return self.clamp_interval(self.config.fallback_interval_secs);
+    fn update_success_history(&self, state: &mut EstimatorState, now: SystemTime) {
+        let capacity = self.config.rate_limit_capacity;
+        if capacity == 0 {
+            state.success_history.clear();
+            return;
         }
+        let expiry_window = Duration::from_secs(
+            self.config
+                .rate_limit_window_secs
+                .saturating_add(self.config.rate_limit_safety_secs),
+        );
+        let cutoff = now.checked_sub(expiry_window);
+        if let Some(cutoff) = cutoff {
+            while state
+                .success_history
+                .front()
+                .is_some_and(|ts| *ts < cutoff)
+            {
+                state.success_history.pop_front();
+            }
+        }
+        state.success_history.push_back(now);
+        while state.success_history.len() > capacity {
+            state.success_history.pop_front();
+        }
+    }
 
-        intervals.sort_by(|left, right| left.total_cmp(right));
-        let median = intervals[intervals.len() / 2];
-        self.clamp_interval((median / self.config.safety_factor).ceil() as u64)
+    fn sliding_window_constraint(&self, state: &EstimatorState, now: SystemTime) -> u64 {
+        let capacity = self.config.rate_limit_capacity;
+        if capacity == 0 || state.success_history.len() < capacity {
+            return 0;
+        }
+        let Some(oldest) = state.success_history.front().copied() else {
+            return 0;
+        };
+        let unlock_at = oldest
+            + Duration::from_secs(self.config.rate_limit_window_secs)
+            + Duration::from_secs(self.config.rate_limit_safety_secs);
+        unlock_at
+            .duration_since(now)
+            .unwrap_or_default()
+            .as_secs()
     }
 
     fn bootstrap_backoff(&self, attempt_count: u32) -> u64 {
@@ -250,6 +311,25 @@ mod tests {
             fallback_interval_secs: 100,
             history_capacity: 8,
             throttle_ladder_secs: vec![5, 20, 60],
+            rate_limit_window_secs: 0,
+            rate_limit_capacity: 0,
+            rate_limit_safety_secs: 0,
+        }
+    }
+
+    fn rate_limit_aware_config() -> EstimatorConfig {
+        EstimatorConfig {
+            bootstrap_attempts: 0,
+            bootstrap_default_interval_secs: 10,
+            safety_factor: 1.0,
+            min_interval_secs: 60,
+            max_interval_secs: 1_000,
+            fallback_interval_secs: 60,
+            history_capacity: 8,
+            throttle_ladder_secs: vec![300, 300, 300, 300, 300],
+            rate_limit_window_secs: 300,
+            rate_limit_capacity: 5,
+            rate_limit_safety_secs: 5,
         }
     }
 
@@ -422,6 +502,67 @@ mod tests {
         estimator.record_success(upstream_id, at(400));
 
         assert_eq!(next_secs(&estimator, upstream_id), 500);
+    }
+
+    #[test]
+    fn sliding_window_blocks_sixth_success_until_window_slides() {
+        let estimator = PollScheduleEstimator::new(rate_limit_aware_config());
+        let upstream_id = Uuid::new_v4();
+
+        estimator.record_success(upstream_id, at(0));
+        estimator.record_success(upstream_id, at(60));
+        estimator.record_success(upstream_id, at(120));
+        estimator.record_success(upstream_id, at(180));
+        estimator.record_success(upstream_id, at(240));
+
+        assert_eq!(next_secs(&estimator, upstream_id), 305);
+    }
+
+    #[test]
+    fn sliding_window_yields_to_existing_logic_when_below_capacity() {
+        let estimator = PollScheduleEstimator::new(rate_limit_aware_config());
+        let upstream_id = Uuid::new_v4();
+
+        estimator.record_success(upstream_id, at(0));
+        estimator.record_success(upstream_id, at(60));
+        estimator.record_success(upstream_id, at(120));
+        estimator.record_success(upstream_id, at(180));
+
+        assert_eq!(next_secs(&estimator, upstream_id), 240);
+    }
+
+    #[test]
+    fn record_throttle_then_recovery_returns_to_sustained_one_per_minute() {
+        let estimator = PollScheduleEstimator::new(rate_limit_aware_config());
+        let upstream_id = Uuid::new_v4();
+
+        estimator.record_throttle(upstream_id, throttle(at(0), 300, 1));
+        assert_eq!(next_secs(&estimator, upstream_id), 300);
+
+        estimator.record_success(upstream_id, at(300));
+        assert_eq!(next_secs(&estimator, upstream_id), 360);
+        estimator.record_success(upstream_id, at(360));
+        assert_eq!(next_secs(&estimator, upstream_id), 420);
+        estimator.record_success(upstream_id, at(420));
+        assert_eq!(next_secs(&estimator, upstream_id), 480);
+        estimator.record_success(upstream_id, at(480));
+        assert_eq!(next_secs(&estimator, upstream_id), 540);
+        estimator.record_success(upstream_id, at(540));
+
+        assert_eq!(next_secs(&estimator, upstream_id), 605);
+    }
+
+    #[test]
+    fn throttle_ladder_is_flat_three_hundred() {
+        let estimator = PollScheduleEstimator::new(rate_limit_aware_config());
+        let upstream_id = Uuid::new_v4();
+
+        estimator.record_throttle(upstream_id, throttle(at(0), 300, 1));
+        assert_eq!(next_secs(&estimator, upstream_id), 300);
+        estimator.record_throttle(upstream_id, throttle(at(300), 300, 1));
+        assert_eq!(next_secs(&estimator, upstream_id), 600);
+        estimator.record_throttle(upstream_id, throttle(at(600), 300, 1));
+        assert_eq!(next_secs(&estimator, upstream_id), 900);
     }
 
     fn throttle(observed_at: SystemTime, window_secs: u64, capacity: u64) -> ThrottleObservation {
