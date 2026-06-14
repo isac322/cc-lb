@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io;
 use std::path::Path;
 use std::sync::Arc;
@@ -15,6 +15,7 @@ use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_runtime_extism::handshake::{build_offer, execute_handshake, slot_set_from_handshake};
 use cc_lb_storage_api::{
     MAX_WASM_BLOB_BYTES, PluginSlot, StorageError, WasmBlob, WasmRegistryEntryInput,
+    default_wire_version,
 };
 use extism::{Manifest, Plugin, Wasm};
 use serde::Serialize;
@@ -53,6 +54,11 @@ struct UploadParts {
     bytes: Option<Vec<u8>>,
     name: Option<String>,
     original_filename: Option<String>,
+}
+
+struct HandshakeMetadata {
+    slots: Vec<PluginSlot>,
+    wire_version: u8,
 }
 
 pub fn router() -> Router<AdminState> {
@@ -179,11 +185,9 @@ async fn upload_wasm_inner(
         )
     })?;
     let sha256_hex = hex_sha256(sha256);
-    let supported_slots = match storage.get_registry_entry_by_sha(sha256).await {
-        Ok(Some(existing)) if !existing.supported_slots.is_empty() => existing.supported_slots,
-        Ok(_) => derive_supported_slots(&bytes).await?,
-        Err(error) => return Err(storage_response(error)),
-    };
+    let metadata = derive_handshake_metadata(&bytes).await?;
+    let supported_slots = metadata.slots.clone();
+    let fresh_wire_version = metadata.wire_version;
     let admin_id = admin_id_from_headers(headers);
     let blob = WasmBlob {
         sha256,
@@ -197,6 +201,7 @@ async fn upload_wasm_inner(
         label: None,
         uploaded_at_unix_secs: unix_now_secs(),
         uploaded_by_admin_id: admin_id,
+        wire_version: fresh_wire_version,
         supported_slots: supported_slots.clone(),
     };
     let (mut entry, existed) = storage
@@ -209,6 +214,13 @@ async fn upload_wasm_inner(
             .await
             .map_err(storage_response)?;
         entry.supported_slots = supported_slots;
+    }
+    if existed && entry.wire_version != fresh_wire_version {
+        storage
+            .update_wire_version(entry.id, fresh_wire_version)
+            .await
+            .map_err(storage_response)?;
+        entry.wire_version = fresh_wire_version;
     }
     materialize_cache(state, &sha256_hex, &bytes)
         .await
@@ -401,10 +413,12 @@ fn validate_extism(bytes: &[u8]) -> Result<(), Response> {
     reject_removed_router_wire(&plugin)
 }
 
-async fn derive_supported_slots(bytes: &[u8]) -> Result<Vec<PluginSlot>, Response> {
+async fn derive_handshake_metadata(bytes: &[u8]) -> Result<HandshakeMetadata, Response> {
     let bytes = bytes.to_vec();
     let accept = tokio::task::spawn_blocking(move || {
-        let offer = build_offer(&BTreeSet::new());
+        let mut offer = build_offer(&BTreeSet::new());
+        extend_offer_versions(&mut offer.function_versions, "filter", &[1, 2, 3]);
+        extend_offer_versions(&mut offer.function_versions, "shape", &[1, 2]);
         execute_handshake(&bytes, &offer)
     })
     .await
@@ -432,7 +446,34 @@ async fn derive_supported_slots(bytes: &[u8]) -> Result<Vec<PluginSlot>, Respons
             "plugin does not export any of: filter, shape, observe",
         ));
     }
-    Ok(slots)
+    let wire_version = match accept.chosen_versions.values().copied().max() {
+        Some(version) => u8::try_from(version).map_err(|_| {
+            json_error(
+                StatusCode::BAD_REQUEST,
+                "unsupported_wire_version",
+                format!("chosen wire version {version} exceeds registry maximum"),
+            )
+        })?,
+        None => default_wire_version(),
+    };
+    Ok(HandshakeMetadata {
+        slots,
+        wire_version,
+    })
+}
+
+fn extend_offer_versions(
+    function_versions: &mut BTreeMap<String, Vec<u32>>,
+    function: &str,
+    versions: &[u32],
+) {
+    let entry = function_versions.entry(function.to_owned()).or_default();
+    for version in versions {
+        if !entry.contains(version) {
+            entry.push(*version);
+        }
+    }
+    entry.sort_unstable();
 }
 
 #[allow(clippy::result_large_err)]

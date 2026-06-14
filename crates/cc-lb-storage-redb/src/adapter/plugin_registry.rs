@@ -124,6 +124,14 @@ impl PluginRegistryStore for RedbStorage {
         .map_err(map_redb_err)
     }
 
+    async fn update_wire_version(&self, id: Uuid, wire_version: u8) -> StorageResult<()> {
+        let storage = self.clone();
+        tokio::task::spawn_blocking(move || storage.update_wire_version_sync(id, wire_version))
+            .await
+            .map_err(map_join_err)?
+            .map_err(map_redb_err)
+    }
+
     async fn delete_registry_entry(
         &self,
         id: Uuid,
@@ -275,7 +283,7 @@ impl RedbStorage {
             refcount: 0,
             revision: 0,
             kind: "filter".to_owned(),
-            wire_version: cc_lb_storage_api::BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
+            wire_version: input.wire_version,
             is_builtin: false,
             metadata: None,
             supported_slots: input.supported_slots,
@@ -444,6 +452,37 @@ impl RedbStorage {
                 let mut entry: WasmRegistryEntry = serde_json::from_slice(value.value())?;
                 if entry.id == id {
                     entry.supported_slots = supported_slots.clone();
+                    updated = Some(entry);
+                    break;
+                }
+            }
+        }
+        let Some(entry) = updated else {
+            return Ok(());
+        };
+        {
+            let mut registry = write_txn.open_table(WASM_REGISTRY_V2)?;
+            let payload = serde_json::to_vec(&entry)?;
+            registry.insert(entry.id.as_bytes().as_slice(), payload.as_slice())?;
+        }
+        write_txn.commit()?;
+        Ok(())
+    }
+
+    fn update_wire_version_sync(&self, id: Uuid, wire_version: u8) -> Result<(), StorageError> {
+        let write_txn = self.db.begin_write()?;
+        let mut updated = None;
+        {
+            let registry = write_txn.open_table(WASM_REGISTRY_V2)?;
+            for row in registry.iter()? {
+                let (_key, value) = row?;
+                let mut entry: WasmRegistryEntry = serde_json::from_slice(value.value())?;
+                if entry.id == id {
+                    entry.wire_version = wire_version;
+                    entry.revision = entry
+                        .revision
+                        .checked_add(1)
+                        .ok_or(StorageError::PluginRegistryRevisionOverflow)?;
                     updated = Some(entry);
                     break;
                 }

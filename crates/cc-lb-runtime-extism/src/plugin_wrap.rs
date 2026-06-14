@@ -363,6 +363,21 @@ impl PluginSlot {
         F::Request: Send + 'static,
         F::Response: Send + 'static,
     {
+        match self.wire_version_mismatch_reason(F::NAME) {
+            Ok(Some(reason)) => {
+                return runtime_dispatch_fallback::<F, F::Response>(
+                    "wire_version_mismatch",
+                    reason,
+                );
+            }
+            Err(source) => {
+                return runtime_dispatch_fallback::<F, F::Response>(
+                    "slot_metadata",
+                    source.to_string(),
+                );
+            }
+            Ok(None) => {}
+        }
         let cell = self.current.load_full();
         let metadata = self.dispatch_metadata();
         let limits = match self.limits_for_dispatch() {
@@ -410,6 +425,13 @@ impl PluginSlot {
         &self,
         request: FilterRequest,
     ) -> Result<FilterResponse, FilterError> {
+        match self.wire_version_mismatch_reason(FilterFn::NAME) {
+            Ok(Some(reason)) => return Err(filter_runtime_error("wire_version_mismatch", reason)),
+            Err(source) => {
+                return Err(filter_runtime_error("slot_metadata", source.to_string()));
+            }
+            Ok(None) => {}
+        }
         let cell = self.current.load_full();
         let metadata = self.dispatch_metadata();
         let limits = self

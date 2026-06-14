@@ -2,10 +2,10 @@ use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_WIRE_VERSION, MAX_WASM_BLOB_BYTES,
-    PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
-    PluginRegistryStore, PluginSlot, StorageError, StorageResult, WasmBlob, WasmBlobRecord,
-    WasmRegistryEntry, WasmRegistryEntryInput, sparse_order, validate_identifier,
+    BUILTIN_CACHE_AFFINITY_ID, MAX_WASM_BLOB_BYTES, PluginChainConflictReason, PluginChainEntry,
+    PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, StorageError,
+    StorageResult, WasmBlob, WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput,
+    default_wire_version, sparse_order, validate_identifier,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -196,6 +196,16 @@ impl PluginRegistryStore for PostgresStorage {
             .collect();
         sqlx::query("UPDATE wasm_registry_v2 SET supported_slots = $1 WHERE id = $2")
             .bind(&slots)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(map_sqlx_error)?;
+        Ok(())
+    }
+
+    async fn update_wire_version(&self, id: Uuid, wire_version: u8) -> StorageResult<()> {
+        sqlx::query("UPDATE wasm_registry_v2 SET wire_version = $1 WHERE id = $2")
+            .bind(i16::from(wire_version))
             .bind(id)
             .execute(&self.pool)
             .await
@@ -616,7 +626,7 @@ async fn insert_registry_in_tx(
         .iter()
         .map(|slot| slot.as_str().to_owned())
         .collect();
-    let row = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, revision, supported_slots) VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8) ON CONFLICT (sha256) DO NOTHING RETURNING id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, 0::BIGINT AS refcount, revision, supported_slots")
+    let row = sqlx::query("INSERT INTO wasm_registry_v2 (id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, revision, wire_version, supported_slots) VALUES ($1, $2, $3, $4, $5, $6, $7, 0, $8, $9) ON CONFLICT (sha256) DO NOTHING RETURNING id, sha256, name, original_filename, label, uploaded_at, uploaded_by_admin_id, 0::BIGINT AS refcount, revision, wire_version, supported_slots")
         .bind(id)
         .bind(sha256.as_slice())
         .bind(&input.name)
@@ -624,6 +634,7 @@ async fn insert_registry_in_tx(
         .bind(&input.label)
         .bind(uploaded_at)
         .bind(input.uploaded_by_admin_id)
+        .bind(i16::from(input.wire_version))
         .bind(&supported_slots)
         .fetch_optional(&mut **tx)
         .await
@@ -693,7 +704,11 @@ fn registry_from_row(row: sqlx::postgres::PgRow) -> StorageResult<WasmRegistryEn
             "wasm_registry.revision",
         )?,
         kind: "filter".to_owned(),
-        wire_version: BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
+        wire_version: row
+            .try_get::<Option<i16>, _>("wire_version")
+            .map_err(map_sqlx_error)?
+            .map(|value| value.clamp(0, i16::from(u8::MAX)) as u8)
+            .unwrap_or_else(default_wire_version),
         is_builtin: false,
         metadata: None,
         supported_slots: row
