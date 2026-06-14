@@ -1,0 +1,16 @@
+[workspace]
+members = []
+
+[package]
+name = "conformance-plugin-shape"
+version = "0.0.0-test"
+edition = "2024"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+cc-lb-pdk = { path = "../../../../../crates/cc-lb-pdk" }
+cc-lb-plugin-wire = { path = "../../../../../crates/cc-lb-plugin-wire" }
+
+[lib]
+crate-type = ["cdylib"]

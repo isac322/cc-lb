@@ -6,6 +6,7 @@ use extism::Plugin;
 use serde_json::Value;
 use thiserror::Error;
 
+#[non_exhaustive]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum DispatchOutcome<R> {
     Ok(R),

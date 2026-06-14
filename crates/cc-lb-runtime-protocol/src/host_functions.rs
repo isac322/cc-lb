@@ -7,13 +7,14 @@ use ring::rand::{SecureRandom, SystemRandom};
 
 const RANDOM_BYTES_MAX: u64 = 65_536;
 
+#[non_exhaustive]
 #[derive(Debug, Default)]
-pub(crate) struct HostState {
+pub struct HostState {
     storage: Mutex<HashMap<String, Vec<u8>>>,
 }
 
 impl HostState {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
@@ -60,19 +61,16 @@ impl HostState {
     }
 }
 
+#[non_exhaustive]
 #[derive(Clone)]
-pub(crate) struct HostFunctionContext {
+pub struct HostFunctionContext {
     plugin_name: String,
     storage_quota_bytes: usize,
     state: Arc<HostState>,
 }
 
 impl HostFunctionContext {
-    pub(crate) fn new(
-        plugin_name: String,
-        storage_quota_bytes: usize,
-        state: Arc<HostState>,
-    ) -> Self {
+    pub fn new(plugin_name: String, storage_quota_bytes: usize, state: Arc<HostState>) -> Self {
         Self {
             plugin_name,
             storage_quota_bytes,
@@ -81,7 +79,7 @@ impl HostFunctionContext {
     }
 }
 
-pub(crate) fn functions(context: HostFunctionContext) -> Vec<Function> {
+pub fn functions(context: HostFunctionContext) -> Vec<Function> {
     let user_data = UserData::new(context);
     vec![
         Function::new("cc_lb_log", [PTR, PTR], [], user_data.clone(), cc_lb_log),

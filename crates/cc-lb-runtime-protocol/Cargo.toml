@@ -1,0 +1,31 @@
+[package]
+name = "cc-lb-runtime-protocol"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "cc-lb plugin protocol runtime — handshake, self-check, dispatch, identity, host functions for Extism plugins targeting the cc-lb host."
+repository = "https://github.com/isac322/cc-lb"
+readme = "README.md"
+keywords = ["cc-lb", "extism", "wasm", "plugin", "protocol"]
+categories = ["wasm", "development-tools"]
+
+[dependencies]
+cc-lb-plugin-wire = { workspace = true }
+cc-lb-plugin-api  = { workspace = true }
+extism.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_json.workspace = true
+thiserror.workspace = true
+base64.workspace = true
+bytes.workspace = true
+http.workspace = true
+metrics.workspace = true
+tracing.workspace = true
+ring.workspace = true
+async-trait.workspace = true
+wasmparser = "0.252.0"
+
+[dev-dependencies]
+anyhow.workspace = true
+wat.workspace = true

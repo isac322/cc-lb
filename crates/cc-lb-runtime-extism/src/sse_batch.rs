@@ -5,7 +5,8 @@ use cc_lb_plugin_api::{ObservabilityError, ObservabilityHook, ObserveEvent};
 use cc_lb_plugin_wire::v1::ObserveEventWire;
 use cc_lb_plugin_wire::v1::observe::{ObserveFn, ObserveRequest};
 
-use crate::dispatch::DispatchOutcome;
+use cc_lb_runtime_protocol::dispatch::DispatchOutcome;
+
 use crate::plugin_wrap::upstream_to_wire;
 use crate::{PluginSlot, ResourceLimits};
 
@@ -36,6 +37,7 @@ impl ExtismObservabilityHook {
                 record_observe_batch_drop(event_count);
                 Ok(())
             }
+            _ => unreachable!(),
         }
     }
 }
