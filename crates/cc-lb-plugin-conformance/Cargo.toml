@@ -9,6 +9,11 @@ repository = "https://github.com/isac322/cc-lb"
 readme = "README.md"
 keywords = ["cc-lb", "plugin", "conformance", "wasm", "testing"]
 categories = ["wasm", "development-tools::testing"]
+exclude = [
+    "build.rs",
+    "tests/**",
+    "public-api.txt",
+]
 
 [features]
 default = ["dispatch"]
