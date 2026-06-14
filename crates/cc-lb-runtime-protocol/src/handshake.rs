@@ -36,10 +36,20 @@ pub fn slot_set_from_handshake(implemented_functions: &BTreeSet<String>) -> Vec<
 
 fn wire_function_to_slot(name: &str) -> Option<PluginSlot> {
     match name {
-        "filter" => Some(PluginSlot::Router),
-        "shape" => Some(PluginSlot::Shape),
-        "observe" => Some(PluginSlot::ObservabilityHook),
+        name if name == slot_to_wire_function(PluginSlot::Router) => Some(PluginSlot::Router),
+        name if name == slot_to_wire_function(PluginSlot::Shape) => Some(PluginSlot::Shape),
+        name if name == slot_to_wire_function(PluginSlot::ObservabilityHook) => {
+            Some(PluginSlot::ObservabilityHook)
+        }
         _ => None,
+    }
+}
+
+pub(crate) fn slot_to_wire_function(slot: PluginSlot) -> &'static str {
+    match slot {
+        PluginSlot::Router => "filter",
+        PluginSlot::Shape => "shape",
+        PluginSlot::ObservabilityHook => "observe",
     }
 }
 

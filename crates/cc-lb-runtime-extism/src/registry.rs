@@ -6,13 +6,14 @@ use cc_lb_plugin_wire::handshake::{CanonicalError, HandshakeAccept, HandshakeOff
 use cc_lb_plugin_wire::limits::SKIP_HANDSHAKE_IF_FRESH_TTL_SECS;
 use cc_lb_plugin_wire::self_check::SelfCheckResponse;
 use cc_lb_storage_api::{
-    PluginBlobRepo, PluginRegistryRecord, PluginRegistryRepo, PluginRegistryStatus, RepoError,
+    PluginBlobRepo, PluginRegistryRecord, PluginRegistryRepo, PluginRegistryStatus, PluginSlot,
+    RepoError,
 };
 use dashmap::DashMap;
 use ring::digest::{SHA256, digest};
 use thiserror::Error;
 
-use cc_lb_runtime_protocol::handshake::{HandshakeExecutionError, execute_handshake};
+use cc_lb_runtime_protocol::handshake::{HandshakeExecutionError, execute_handshake, slot_set_from_handshake};
 use cc_lb_runtime_protocol::identity::{IdentityReadError, read_identity};
 use cc_lb_runtime_protocol::self_check::{SelfCheckExecutionError, execute_self_check};
 
@@ -36,6 +37,7 @@ pub trait RegistryLifecycle: Send + Sync {
     fn execute_self_check(
         &self,
         plugin_bytes: &[u8],
+        supported_slots: &[PluginSlot],
     ) -> Result<SelfCheckResponse, SelfCheckExecutionError>;
 }
 
@@ -53,8 +55,9 @@ impl RegistryLifecycle for ExtismRegistryLifecycle {
     fn execute_self_check(
         &self,
         plugin_bytes: &[u8],
+        supported_slots: &[PluginSlot],
     ) -> Result<SelfCheckResponse, SelfCheckExecutionError> {
-        execute_self_check(plugin_bytes)
+        execute_self_check(plugin_bytes, supported_slots)
     }
 }
 
@@ -279,7 +282,10 @@ impl PluginRegistry {
             .lifecycle
             .execute_handshake(wasm_bytes, &self.host_offer)?;
         let handshake_completed_at = unix_now()?;
-        let self_check = self.lifecycle.execute_self_check(wasm_bytes)?;
+        let supported_slots = slot_set_from_handshake(&accept.implemented_functions);
+        let self_check = self
+            .lifecycle
+            .execute_self_check(wasm_bytes, &supported_slots)?;
 
         let augmented_metadata = AugmentedMetadata::from_handshake_and_self_check(
             identity.clone(),
