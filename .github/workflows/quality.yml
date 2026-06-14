@@ -60,26 +60,58 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-llvm-cov,cargo-nextest
-      # Registry-only: target/ must not be shared across branches. The
-      # Swatinem cache key hashes Cargo.lock/Cargo.toml but not the test
-      # file set, so a branch like oauth-refresh-cadence-tuning leaks its
-      # tests/oauth_refresh_cadence-* binary into target/llvm-cov-target/
-      # debug/deps/ and cargo invokes it on restore against a source tree
-      # that never contained that file.
+      # We share target/ across runs to let cargo's incremental fingerprint
+      # skip third-party deps and unchanged cc-lb crates. The orphan-binary
+      # leak this comment used to describe (tests/<file>-<hash> surviving a
+      # branch switch) is prevented by hashing the implicit-built file set
+      # (tests/, benches/, examples/, build.rs) into the cache key below,
+      # so any add/remove/rename in those paths invalidates the cache.
+      - name: Compute implicit-built file inventory hash
+        id: inv
+        shell: bash
+        run: |
+          set -euo pipefail
+          inv_hash=$(
+            command find . \
+              \( -path './target' -o -path './node_modules' -o -path './.git' \) -prune -o \
+              \( \
+                -path '*/tests/*.rs' \
+                -o -path '*/benches/*.rs' \
+                -o -path '*/examples/*.rs' \
+                -o -name 'build.rs' \
+              \) \
+              -type f -print 2>/dev/null \
+            | sort \
+            | sha256sum \
+            | cut -c1-16
+          )
+          echo "hash=$inv_hash" >> "$GITHUB_OUTPUT"
       - uses: ./.github/actions/setup-rust-cache
         with:
-          rust-cache-key: coverage
-          cache-targets: false
+          rust-cache-key: coverage-v2-${{ steps.inv.outputs.hash }}
+          cache-targets: true
           stable-build-metadata: "true"
 
-      - name: Clean coverage artifacts
-        run: cargo llvm-cov clean --workspace
+      # --profraw-only keeps build artifacts so cargo's fingerprint can skip
+      # unchanged crates on cache hit. Only .profraw / .profdata are cleared.
+      - name: Clean coverage profraw files
+        run: cargo llvm-cov clean --workspace --profraw-only
+
+      - name: Ensure cc-lb-admin SPA placeholder exists
+        run: |
+          DIST=crates/cc-lb-admin/web/dist
+          if [ ! -f "$DIST/index.html" ]; then
+            echo "web/dist missing; invalidating cc-lb-admin build script fingerprint to force regeneration"
+            find target -path '*/.fingerprint/cc-lb-admin-*' -type d -exec rm -rf {} + 2>/dev/null || true
+          fi
       - name: Build Extism echo fixture
         run: cargo build -p extism-echo-plugin --target wasm32-wasip1 --release
       - name: Build handshake spike fixture
         run: cargo build -p plugin-handshake-spike --target wasm32-unknown-unknown --release
 
       - name: Run tests with coverage instrumentation
+        env:
+          CARGO_LOG: cargo::core::compiler::fingerprint=info
         run: |
           cargo llvm-cov nextest \
             --workspace \
@@ -90,7 +122,16 @@ jobs:
             --exclude plugin-internal-key-mapping \
             --exclude extism-pdk \
             --exclude extism-pdk-macros \
-            --no-report
+            --no-report \
+            2>&1 | tee /tmp/cargo-verbose.log
+
+      - name: Upload cargo verbose log for fingerprint analysis
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: cargo-verbose-log
+          path: /tmp/cargo-verbose.log
+          if-no-files-found: warn
 
       - name: Generate workspace lcov report
         run: |

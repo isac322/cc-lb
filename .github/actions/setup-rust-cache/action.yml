@@ -3,11 +3,11 @@ description: Restore Cargo caches and enable persisted sccache compiler artifact
 
 inputs:
   rust-cache-key:
-    description: Extra key segment for Swatinem/rust-cache.
+    description: Extra key segment shared by sccache and target/ caches.
     required: false
     default: ""
   cache-targets:
-    description: Whether Swatinem/rust-cache should restore/save target directories.
+    description: Whether to restore/save the workspace target/ directory.
     required: false
     default: "true"
   stable-build-metadata:
@@ -18,6 +18,92 @@ inputs:
 runs:
   using: composite
   steps:
+    # actions/checkout defaults to fetch-depth: 1, which sets every file's
+    # mtime to checkout time. Cargo's fingerprint then sees source mtime
+    # newer than cached artifact mtime and recompiles every workspace
+    # crate even on an empty commit. We unshallow and replay each file's
+    # last actual-content commit time so cargo's mtime check stays stable.
+    # Empty commits are safe because git log --raw only lists files whose
+    # content actually changed.
+    - name: Restore source file mtimes from git history
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ "$(git rev-parse --is-shallow-repository 2>/dev/null || echo false)" = "true" ]; then
+          git fetch --unshallow --no-tags --prune --no-recurse-submodules origin "$(git rev-parse HEAD)" 2>&1 | tail -3 || \
+            git fetch --unshallow --no-tags --prune --no-recurse-submodules 2>&1 | tail -3
+        fi
+        python3 - <<'PY'
+        import os, subprocess, sys
+        try:
+            files = set(subprocess.check_output(['git', 'ls-files']).decode('utf-8').splitlines())
+        except subprocess.CalledProcessError as e:
+            print(f"git ls-files failed: {e}", file=sys.stderr)
+            sys.exit(0)
+        if not files:
+            sys.exit(0)
+        file_mtimes = {}
+        proc = subprocess.Popen(
+            ['git', 'log', '--raw', '--no-show-signature', '--pretty=%at', '--no-merges'],
+            stdout=subprocess.PIPE, text=True,
+        )
+        current_time = None
+        remaining = set(files)
+        for line in proc.stdout:
+            line = line.rstrip('\n')
+            if not line:
+                continue
+            if line.startswith(':'):
+                parts = line.split('\t')
+                if len(parts) >= 2 and current_time is not None:
+                    candidates = parts[-2:] if len(parts) >= 3 else parts[1:]
+                    for filename in candidates:
+                        if filename in remaining:
+                            file_mtimes[filename] = current_time
+                            remaining.discard(filename)
+            else:
+                try:
+                    current_time = int(line)
+                except ValueError:
+                    pass
+            if not remaining:
+                break
+        proc.terminate()
+        touched_files = 0
+        for filename, ts in file_mtimes.items():
+            try:
+                os.utime(filename, (ts, ts))
+                touched_files += 1
+            except OSError:
+                pass
+        # Directory mtimes: cargo's rerun-if-changed=<dir> checks the
+        # directory's own mtime which gets reset by git checkout. Restore
+        # each tracked directory's mtime to the max of its contained
+        # files' mtimes so directory-based rerun checks see no change.
+        dir_max = {}
+        for filename, ts in file_mtimes.items():
+            d = os.path.dirname(filename)
+            while d:
+                if dir_max.get(d, 0) < ts:
+                    dir_max[d] = ts
+                parent = os.path.dirname(d)
+                if parent == d:
+                    break
+                d = parent
+        touched_dirs = 0
+        for d in sorted(dir_max.keys(), key=len, reverse=True):
+            ts = dir_max[d]
+            try:
+                os.utime(d, (ts, ts))
+                touched_dirs += 1
+            except OSError:
+                pass
+        print(f"restored mtimes for {touched_files} files, {touched_dirs} directories; {len(remaining)} files had no log entry", flush=True)
+        if remaining:
+            sample = sorted(remaining)[:5]
+            print(f"  sample untouched: {sample}", flush=True)
+        PY
+
     - name: Run sccache-cache
       id: sccache-setup
       uses: mozilla-actions/sccache-action@v0.0.10
@@ -31,6 +117,29 @@ runs:
         key: sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
         restore-keys: |
           sccache-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-
+
+    # Cache target/ ourselves with actions/cache instead of letting Swatinem
+    # do it, because Swatinem's cleanProfileTarget strips workspace member
+    # rlibs and fingerprints from target/<profile>/{deps,build,.fingerprint}/
+    # before saving (only third-party deps are kept), which forces cargo to
+    # recompile every cc-lb crate on restore even when the source tree is
+    # unchanged.
+    #
+    # crates/cc-lb-admin/web/dist is gitignored and produced as a side effect
+    # of cc-lb-admin's build.rs (it writes a SPA placeholder there when
+    # CC_LB_ADMIN_SKIP_SPA=1). With the build.rs fingerprint preserved by
+    # target/ caching, the script does not re-run, so the dist must travel
+    # with the cache to keep cc-lb-admin's static-assets tests green.
+    - name: Restore target directory
+      if: inputs.cache-targets == 'true'
+      uses: actions/cache@v5
+      with:
+        path: |
+          target
+          crates/cc-lb-admin/web/dist
+        key: target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+        restore-keys: |
+          target-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}-${{ inputs.rust-cache-key }}-${{ github.job }}-
 
     - name: Export Rust compiler cache env
       if: steps.sccache-setup.outcome == 'success'
@@ -58,8 +167,20 @@ runs:
         EOF
         echo "EXTISM_CACHE_CONFIG=$GITHUB_WORKSPACE/.extism-cache.toml" >> "$GITHUB_ENV"
 
-    - uses: Swatinem/rust-cache@v2
+    # We previously used Swatinem/rust-cache to handle ~/.cargo, but its
+    # post-job cleanup step strips workspace rlibs/fingerprints from target/
+    # before our actions/cache@v5 target save runs, which forces every
+    # workspace crate to recompile on the next run. Swap to a direct
+    # actions/cache for the cargo registry so no foreign cleanup touches
+    # target/ between tests and the target save step.
+    - name: Restore cargo registry and git index
+      uses: actions/cache@v5
       with:
-        cache-on-failure: true
-        cache-targets: ${{ inputs.cache-targets }}
-        key: ${{ inputs.rust-cache-key }}
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+          ~/.cargo/git/db
+        key: cargo-registry-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-${{ inputs.rust-cache-key }}
+        restore-keys: |
+          cargo-registry-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock') }}-
+          cargo-registry-${{ runner.os }}-${{ runner.arch }}-
