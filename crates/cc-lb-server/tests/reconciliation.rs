@@ -122,6 +122,7 @@ async fn seed_registry(storage: &Storage, seed: u8, name: &str) -> WasmRegistryE
                 label: None,
                 uploaded_at_unix_secs: 1_800_000_000,
                 uploaded_by_admin_id: Uuid::new_v4(),
+                wire_version: 1,
                 supported_slots: Vec::new(),
             },
         )
@@ -680,6 +681,9 @@ impl PluginRegistryStore for EmptyPluginRegistryStore {
         _id: Uuid,
         _supported_slots: Vec<PluginSlot>,
     ) -> StorageResult<()> {
+        Ok(())
+    }
+    async fn update_wire_version(&self, _id: Uuid, _wire_version: u8) -> StorageResult<()> {
         Ok(())
     }
     async fn delete_registry_entry(

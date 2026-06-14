@@ -110,6 +110,7 @@ async fn register_plugin(storage: &Storage, name: &str, wat: impl AsRef<str>) ->
         label: None,
         uploaded_at_unix_secs: 1,
         uploaded_by_admin_id: Uuid::new_v4(),
+        wire_version: 3,
         supported_slots: Vec::new(),
     };
     storage

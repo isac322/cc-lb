@@ -21,6 +21,7 @@ use cc_lb_plugin_api::{
     FilterPlugin, ObservabilityHook, PluginManifest, PluginRuntime, RuntimeError, SignerFactory,
     UpstreamDialect,
 };
+use cc_lb_plugin_wire::augmented_metadata::AugmentedMetadata;
 use extism::{Manifest, Plugin, PluginBuilder, Wasm};
 use serde_json::Value;
 use uuid::Uuid;
@@ -252,6 +253,7 @@ impl ExtismRuntime {
                 reason: format!("plugin {} does not export {hook}", manifest.name),
             });
         }
+        slot.validate_wire_version_for_hook(hook)?;
         Ok(slot)
     }
 
@@ -271,6 +273,7 @@ impl ExtismRuntime {
                 reason: format!("plugin {} does not export {hook}", manifest.name),
             });
         }
+        slot.validate_wire_version_for_hook(hook)?;
         Ok((slot.clone(), StagedSlot { key, entry, slot }))
     }
 
@@ -546,6 +549,38 @@ impl PluginSlot {
             .read()
             .map_err(|_| runtime_error("plugin entry lock poisoned"))?
             .negotiated_wire_version)
+    }
+
+    fn validate_wire_version_for_hook(&self, hook: &str) -> Result<(), RuntimeError> {
+        if let Some(reason) = self.wire_version_mismatch_reason(hook)? {
+            return Err(RuntimeError::InstantiateFailed { reason });
+        }
+        Ok(())
+    }
+
+    pub(crate) fn wire_version_mismatch_reason(
+        &self,
+        hook: &str,
+    ) -> Result<Option<String>, RuntimeError> {
+        let entry = self
+            .entry
+            .read()
+            .map_err(|_| runtime_error("plugin entry lock poisoned"))?;
+        let requested = u32::from(entry.negotiated_wire_version);
+        let negotiated = entry
+            .original
+            .metadata
+            .get("augmented_metadata")
+            .cloned()
+            .and_then(|value| serde_json::from_value::<AugmentedMetadata>(value).ok())
+            .and_then(|metadata| metadata.negotiated_functions.get(hook).copied());
+        Ok(negotiated
+            .filter(|negotiated| *negotiated != requested)
+            .map(|negotiated| {
+                format!(
+                    "wire version mismatch for {hook}: requested {requested}, negotiated {negotiated}"
+                )
+            }))
     }
 
     fn log_negotiated_wire_version(&self) {

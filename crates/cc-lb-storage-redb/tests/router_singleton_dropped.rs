@@ -43,6 +43,7 @@ async fn upload_wasm_plugin(storage: &RedbStorage, name: &str) -> anyhow::Result
         label: Some("test".to_string()),
         uploaded_at_unix_secs: 1000,
         uploaded_by_admin_id: Uuid::nil(),
+        wire_version: 1,
         supported_slots: Vec::new(),
     };
     let (reg_entry, _) = storage.persist_wasm_upload(blob, entry).await?;

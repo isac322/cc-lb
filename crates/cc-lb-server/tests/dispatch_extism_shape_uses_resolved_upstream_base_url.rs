@@ -227,6 +227,7 @@ async fn attach_shape_plugin(storage: &Storage, principal_id: Uuid) -> Result<()
             label: None,
             uploaded_at_unix_secs: now_secs(),
             uploaded_by_admin_id: Uuid::new_v4(),
+            wire_version: 2,
             supported_slots: Vec::new(),
         },
     )

@@ -309,6 +309,11 @@ async fn insert_chain(
             if !entry.supported_slots.is_empty() && !entry.supported_slots.contains(&slot) {
                 return unsupported_slot(&entry.name, slot);
             }
+            if let Some(requested) = body.wire_version
+                && requested > entry.wire_version
+            {
+                return unsupported_wire_version(&entry.name, requested, entry.wire_version);
+            }
             Some(plugin_chain_audit_metadata(&entry))
         }
         Ok(None) => None,
@@ -868,6 +873,19 @@ fn slot_metadata_unknown(plugin_name: &str) -> axum::response::Response {
             "error": "slot_metadata_unknown",
             "plugin_name": plugin_name,
             "hint": "re-upload the plugin or restart the server so supported_slots can be backfilled",
+        })),
+    )
+        .into_response()
+}
+
+fn unsupported_wire_version(name: &str, requested: u8, max: u8) -> axum::response::Response {
+    (
+        StatusCode::BAD_REQUEST,
+        Json(json!({
+            "error": "unsupported_wire_version",
+            "plugin_name": name,
+            "requested": requested,
+            "max_supported": max,
         })),
     )
         .into_response()

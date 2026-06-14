@@ -3,6 +3,7 @@ use std::str::FromStr;
 use anyhow::Result;
 use cc_lb_storage_api::{
     BackendKind, MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlot,
+    PrincipalCreate, PrincipalKind, PrincipalStore, WasmBlob, WasmRegistryEntryInput,
 };
 use cc_lb_storage_postgres::PostgresStorage;
 use sqlx::{AssertSqlSafe, PgPool, postgres::PgConnectOptions, postgres::PgPoolOptions};
@@ -33,38 +34,40 @@ async fn run_test(url: &str) -> Result<()> {
     let storage = PostgresStorage::new(fixture.pool.clone());
     storage.initialize(BackendKind::Postgres).await?;
 
-    // Create a principal
-    let principal_id = Uuid::new_v4();
-    sqlx::query("INSERT INTO principals_v1 (id, name, api_key_hash) VALUES ($1, $2, $3)")
-        .bind(principal_id)
-        .bind("test-principal")
-        .bind("hash123")
-        .execute(&fixture.pool)
+    let principal = storage
+        .create(
+            PrincipalCreate {
+                name: "test-principal".to_owned(),
+                kind: PrincipalKind::Machine,
+                allowed_models: Vec::new(),
+                allowed_upstreams: Vec::new(),
+                default_limits: Vec::new(),
+            },
+            1_800_000_000,
+        )
         .await?;
+    let principal_id = principal.id;
 
-    // Create a dummy wasm registry entry for testing
-    let registry_id = Uuid::new_v4();
-    let sha256 = [42u8; 32];
-    sqlx::query(
-        "INSERT INTO wasm_registry_v2 (id, sha256, name, original_filename, uploaded_by_admin_id, revision) VALUES ($1, $2, $3, $4, $5, 0)",
-    )
-    .bind(registry_id)
-    .bind(sha256.as_slice())
-    .bind("test-plugin")
-    .bind("test.wasm")
-    .bind(Uuid::new_v4())
-    .execute(&fixture.pool)
-    .await?;
-
-    sqlx::query(
-        "INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, refcount) VALUES ($1, $2, $3, $4)",
-    )
-    .bind(sha256.as_slice())
-    .bind(b"fake wasm bytes")
-    .bind(14i64)
-    .bind(0i64)
-    .execute(&fixture.pool)
-    .await?;
+    let (registry_entry, _) = storage
+        .persist_wasm_upload(
+            WasmBlob {
+                sha256: [42u8; 32],
+                bytes: b"fake wasm bytes".to_vec(),
+                size_bytes: b"fake wasm bytes".len() as u64,
+                parse_validated_at_unix_secs: 1_800_000_000,
+            },
+            WasmRegistryEntryInput {
+                name: "test-plugin".to_owned(),
+                original_filename: "test.wasm".to_owned(),
+                label: None,
+                uploaded_at_unix_secs: 1_800_000_000,
+                uploaded_by_admin_id: Uuid::new_v4(),
+                wire_version: 1,
+                supported_slots: Vec::new(),
+            },
+        )
+        .await?;
+    let registry_id = registry_entry.id;
 
     // Test 1: Verify Shape slot is still singleton
     let input1 = PluginChainEntryInput {
