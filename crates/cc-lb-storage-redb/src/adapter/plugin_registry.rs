@@ -4,15 +4,16 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{
     MAX_WASM_BLOB_BYTES, PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput,
     PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, StorageError as ApiStorageError,
-    StorageResult, WasmBlob, WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput,
-    sparse_order, validate_identifier,
+    StorageResult, UpstreamRecord, WasmBlob, WasmBlobRecord, WasmRegistryEntry,
+    WasmRegistryEntryInput, sparse_order, validate_identifier,
 };
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    PLUGIN_CHAINS_V2, PRINCIPALS_V2, RedbStorage, StorageError, WASM_BLOBS_V2, WASM_REGISTRY_V2,
+    PLUGIN_CHAINS_V2, PRINCIPALS_V2, RedbStorage, StorageError, UPSTREAMS_V2, WASM_BLOBS_V2,
+    WASM_REGISTRY_V2,
 };
 
 use crate::error_map::{map_join_err, map_redb_err};
@@ -522,6 +523,11 @@ impl RedbStorage {
             if registry_is_referenced_by_chain(&write_txn, id)? {
                 return Err(StorageError::PluginRegistryReferenced { id: id.to_string() });
             }
+            if let Some(upstream_id) = registry_is_referenced_by_warmup_dialect(&write_txn, id)? {
+                return Err(StorageError::PluginRegistryReferenced {
+                    id: upstream_id.to_string(),
+                });
+            }
             let mut blobs = write_txn.open_table(WASM_BLOBS_V2)?;
             entry.refcount = blob_refcount_from_write(&blobs, entry.sha256)?;
             blobs.remove(entry.sha256.as_slice())?;
@@ -834,6 +840,26 @@ fn registry_is_referenced_by_chain(
     Ok(false)
 }
 
+fn registry_is_referenced_by_warmup_dialect(
+    write_txn: &redb::WriteTransaction,
+    registry_id: Uuid,
+) -> Result<Option<Uuid>, StorageError> {
+    let upstreams = write_txn.open_table(UPSTREAMS_V2)?;
+    for row in upstreams.iter()? {
+        let (_, value) = row?;
+        let entry: UpstreamRecord = serde_json::from_slice(value.value())?;
+        if entry.deleted_at_unix_secs.is_some() {
+            continue;
+        }
+        if let Some(plugin) = &entry.warmup_dialect_plugin
+            && plugin.wasm_registry_id == registry_id
+        {
+            return Ok(Some(entry.id));
+        }
+    }
+    Ok(None)
+}
+
 fn principal_exists(
     write_txn: &redb::WriteTransaction,
     principal_id: Uuid,
@@ -1034,4 +1060,81 @@ fn decrement_blob(
     let payload = serde_json::to_vec(&blob)?;
     blobs.insert(sha256.as_slice(), payload.as_slice())?;
     Ok(became_orphan)
+}
+
+#[cfg(test)]
+mod tests {
+    use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
+    use cc_lb_storage_api::{
+        PluginRegistryStore, UpstreamCreate, UpstreamStore, WasmBlob, WasmRegistryEntryInput,
+    };
+    use uuid::Uuid;
+
+    use crate::RedbStorage;
+
+    fn minimal_wasm() -> Vec<u8> {
+        vec![0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00]
+    }
+
+    #[tokio::test]
+    async fn delete_registry_rejects_when_referenced_by_upstream_warmup_dialect() {
+        let storage = RedbStorage::open_in_memory([41; 32]).expect("storage opens");
+        let blob_bytes = minimal_wasm();
+        let blob = WasmBlob {
+            sha256: [11; 32],
+            size_bytes: blob_bytes.len() as u64,
+            bytes: blob_bytes,
+            parse_validated_at_unix_secs: 1_800_000_000,
+        };
+        let entry = WasmRegistryEntryInput {
+            name: "warmup-dialect-test".to_owned(),
+            original_filename: "warmup-dialect-test.wasm".to_owned(),
+            label: None,
+            uploaded_at_unix_secs: 1_800_000_100,
+            uploaded_by_admin_id: Uuid::new_v4(),
+            wire_version: 1,
+            supported_slots: Vec::new(),
+        };
+        let (registry, _) = storage
+            .persist_wasm_upload(blob, entry)
+            .await
+            .expect("registry persists");
+
+        let _upstream = storage
+            .create(UpstreamCreate {
+                name: format!("oauth-{}", Uuid::new_v4().simple()),
+                kind: UpstreamKind::AnthropicOauth,
+                base_url: None,
+                api_key_ciphertext: None,
+                warmup_enabled: true,
+                next_warmup_at: None,
+                last_warmup_cycle_key: None,
+                warmup_lease_holder: None,
+                warmup_lease_until_unix_secs: None,
+                warmup_dialect_plugin: Some(UpstreamWarmupDialectPlugin {
+                    wasm_registry_id: registry.id,
+                    config: serde_json::Value::Null,
+                    wire_version: Some(1),
+                }),
+            })
+            .await
+            .expect("upstream create succeeds");
+
+        let err = storage
+            .delete_registry_entry(registry.id, registry.revision)
+            .await
+            .expect_err("delete must reject while referenced by warmup_dialect_plugin");
+        assert!(
+            err.to_string().contains("referenced"),
+            "error mentions referenced: {err}"
+        );
+        assert!(
+            storage
+                .get_registry_entry_by_id(registry.id)
+                .await
+                .expect("get succeeds")
+                .is_some(),
+            "registry entry remains after rejected delete"
+        );
+    }
 }

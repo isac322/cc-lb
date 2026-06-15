@@ -222,6 +222,21 @@ impl WarmupFixture {
         .expect("next_warmup_at updated");
     }
 
+    pub async fn set_last_warmup_cycle_key(&self, upstream_id: Uuid, cycle_key: i64) {
+        let record = self.upstream_record(upstream_id).await;
+        UpstreamStore::update(
+            self.storage.as_ref(),
+            upstream_id,
+            record.revision,
+            UpstreamUpdate {
+                last_warmup_cycle_key: Some(cycle_key),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect("last_warmup_cycle_key updated");
+    }
+
     pub async fn scan_once(&self) {
         self.scan_once_with_replica(self.replica_id).await;
     }

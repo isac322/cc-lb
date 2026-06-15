@@ -282,6 +282,7 @@ export function useUpstreams() {
   return useQuery({
     queryKey: qk.upstreams,
     queryFn: () => getJson<UpstreamListResp>('/admin/v1/upstreams'),
+    refetchInterval: 30_000,
   });
 }
 export function usePrincipals() {
@@ -623,6 +624,7 @@ export type FireNowErrorReason =
   | 'bad_request'
   | 'not_found'
   | 'dialect_plugin_failed'
+  | 'oauth_credentials_missing'
   | 'transient';
 
 export type FireNowResponse =
@@ -663,30 +665,25 @@ export function useFireNowUpstreamWarmup() {
           `/admin/v1/upstreams/${id}/warmup/fire-now`,
           { method: 'POST' },
         );
-        if (res.status === 200 || res.status === 202) {
-          return (await res.json()) as FireNowResponse;
-        }
-        throw new ApiError(
-          res.status,
-          null,
-          null,
-          res.statusText || `Request failed (${res.status})`,
-        );
+        return (await res.json()) as FireNowResponse;
       } catch (error) {
         if (
           error instanceof ApiError &&
-          (error.status === 502 || error.status === 503)
+          (error.status === 400 ||
+            error.status === 502 ||
+            error.status === 503) &&
+          error.body &&
+          typeof error.body === 'object' &&
+          (error.body as { fired?: unknown }).fired === false
         ) {
           return error.body as FireNowResponse;
         }
         throw error;
       }
     },
-    onSuccess: async (response, id) => {
-      if (response.fired) {
-        await qc.invalidateQueries({ queryKey: qk.upstream(id) });
-        await qc.invalidateQueries({ queryKey: qk.upstreams });
-      }
+    onSuccess: async (_response, id) => {
+      await qc.invalidateQueries({ queryKey: qk.upstream(id) });
+      await qc.invalidateQueries({ queryKey: qk.upstreams });
     },
   });
 }

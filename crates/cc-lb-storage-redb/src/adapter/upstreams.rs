@@ -283,7 +283,7 @@ fn create_sync(
         last_warmup_cycle_key: create.last_warmup_cycle_key,
         warmup_lease_holder: create.warmup_lease_holder,
         warmup_lease_until_unix_secs: create.warmup_lease_until_unix_secs,
-        warmup_dialect_plugin: None,
+        warmup_dialect_plugin: create.warmup_dialect_plugin,
     };
 
     let write_txn = storage.db.begin_write()?;
@@ -386,6 +386,9 @@ fn update_sync(
         }
         if update.warmup_lease_until_unix_secs.is_some() {
             record.warmup_lease_until_unix_secs = update.warmup_lease_until_unix_secs;
+        }
+        if let Some(warmup_dialect_plugin) = update.warmup_dialect_plugin {
+            record.warmup_dialect_plugin = Some(warmup_dialect_plugin);
         }
         Ok(())
     })
