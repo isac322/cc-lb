@@ -73,7 +73,15 @@ function OverviewPage() {
   const principalNameMap = usePrincipalNameMap();
   const upstreamNameMap = useUpstreamNameMap();
 
-  const nowUnixSecs = Math.floor(Date.now() / 1000);
+  const [nowUnixSecs, setNowUnixSecs] = useState(() =>
+    Math.floor(Date.now() / 1000),
+  );
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setNowUnixSecs(Math.floor(Date.now() / 1000));
+    }, 60_000);
+    return () => clearInterval(interval);
+  }, []);
   const sinceUnixSecs = useMemo(() => {
     switch (range) {
       case '1h':
