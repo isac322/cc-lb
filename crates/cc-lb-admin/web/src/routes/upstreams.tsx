@@ -1410,8 +1410,15 @@ function DetailView({
                             .utilization_per_hour;
                         const eta =
                           windowAnalysis?.actual_account_burn.eta_to_limit_secs;
+                        const windowNotStarted =
+                          !isOverage &&
+                          (snap.utilization == null ||
+                            snap.utilization === 0 ||
+                            snap.resets_at_unix_secs == null ||
+                            snap.resets_at_unix_secs <= nowUnixSecs);
                         const waitingForGrowth =
                           !isOverage &&
+                          !windowNotStarted &&
                           (!windowAnalysis ||
                             windowAnalysis.actual_account_burn.reason ===
                               'insufficient_growth_intervals');
@@ -1483,7 +1490,12 @@ function DetailView({
                                   />
                                 </div>
                               )}
-                              {snap.resets_at_unix_secs ? (
+                              {windowNotStarted ? (
+                                <div className="text-[10px] text-text-faint font-mono mt-1">
+                                  not started — begins on first request or
+                                  warm-up
+                                </div>
+                              ) : snap.resets_at_unix_secs ? (
                                 <div className="text-[10px] text-text-faint font-mono mt-1">
                                   resets{' '}
                                   <RelativeTime
@@ -1491,7 +1503,7 @@ function DetailView({
                                   />
                                 </div>
                               ) : null}
-                              {!isOverage && (
+                              {!isOverage && !windowNotStarted && (
                                 <div className="border-t border-subtle pt-1.5 mt-1.5 flex flex-col gap-1">
                                   <div className="flex items-baseline justify-between gap-2">
                                     <span className="text-[10px] uppercase tracking-wider text-text-faint">
