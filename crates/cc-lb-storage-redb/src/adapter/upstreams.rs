@@ -920,6 +920,18 @@ fn ensure_split_spec_exists_in_txn(
     Ok(())
 }
 
+fn split_spec_is_active_in_txn(
+    write_txn: &redb::WriteTransaction,
+    id: Uuid,
+) -> Result<bool, crate::StorageError> {
+    let specs = write_txn.open_table(UPSTREAM_SPEC_V1)?;
+    let Some(stored) = specs.get(id.as_bytes().as_slice())? else {
+        return Ok(false);
+    };
+    let spec: UpstreamSpecRecord = serde_json::from_slice(stored.value())?;
+    Ok(spec.deleted_at_unix_secs.is_none())
+}
+
 fn now_unix_secs_i64() -> Result<i64, crate::StorageError> {
     i64::try_from(now_unix_secs()).map_err(|_| crate::StorageError::InvalidInput {
         field: "now".to_owned(),
@@ -936,7 +948,9 @@ fn claim_split_lease_sync(
 ) -> Result<bool, crate::StorageError> {
     let now = now_unix_secs_i64()?;
     let write_txn = storage.db.begin_write()?;
-    ensure_split_spec_exists_in_txn(&write_txn, id)?;
+    if !split_spec_is_active_in_txn(&write_txn, id)? {
+        return Ok(false);
+    }
     let key = lease_key(id, lease_kind);
     let claimed = {
         let mut table = write_txn.open_table(UPSTREAM_LEASE_V1)?;
@@ -972,7 +986,9 @@ fn renew_split_lease_sync(
 ) -> Result<bool, crate::StorageError> {
     let now = now_unix_secs_i64()?;
     let write_txn = storage.db.begin_write()?;
-    ensure_split_spec_exists_in_txn(&write_txn, id)?;
+    if !split_spec_is_active_in_txn(&write_txn, id)? {
+        return Ok(false);
+    }
     let key = lease_key(id, lease_kind);
     let renewed = {
         let mut table = write_txn.open_table(UPSTREAM_LEASE_V1)?;
@@ -1033,7 +1049,9 @@ fn write_split_warmup_cycle_key_sync(
 ) -> Result<bool, crate::StorageError> {
     let now = now_unix_secs_i64()?;
     let write_txn = storage.db.begin_write()?;
-    ensure_split_spec_exists_in_txn(&write_txn, id)?;
+    if !split_spec_is_active_in_txn(&write_txn, id)? {
+        return Ok(false);
+    }
     let lease_key = lease_key(id, UpstreamLeaseKind::Warmup);
     let updated = {
         let mut leases = write_txn.open_table(UPSTREAM_LEASE_V1)?;
@@ -1080,7 +1098,9 @@ fn write_split_warmup_next_at_sync(
 ) -> Result<bool, crate::StorageError> {
     let now = now_unix_secs_i64()?;
     let write_txn = storage.db.begin_write()?;
-    ensure_split_spec_exists_in_txn(&write_txn, id)?;
+    if !split_spec_is_active_in_txn(&write_txn, id)? {
+        return Ok(false);
+    }
     let lease_key = lease_key(id, UpstreamLeaseKind::Warmup);
     let updated = {
         let leases = write_txn.open_table(UPSTREAM_LEASE_V1)?;
