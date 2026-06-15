@@ -2,6 +2,10 @@ import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { ArrowUpRight, Info } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  OverviewQuotaSkeleton,
+  writeCachedUpstreamCount,
+} from '../components/ui/OverviewQuotaSkeleton';
+import {
   Card,
   CardBody,
   CardHeader,
@@ -232,6 +236,12 @@ function OverviewPage() {
     return { rows, upstreams: upstreamsList, markers };
   }, [quotaSeries.data, range]);
 
+  useEffect(() => {
+    if (chartData.upstreams.length > 0) {
+      writeCachedUpstreamCount(chartData.upstreams.length);
+    }
+  }, [chartData.upstreams.length]);
+
   const totals = summary.data?.totals;
   const topPrincipals = useMemo(() => {
     const series = principalUsage.data?.series ?? [];
@@ -337,11 +347,15 @@ function OverviewPage() {
           <CardBody className="flex-1 p-3 pt-1">
             <div className="w-full" style={{ minWidth: 0 }}>
               {quotaSeries.isLoading ? (
-                <div className="h-[300px] flex items-center justify-center text-text-faint text-sm">
-                  Loading…
-                </div>
+                <OverviewQuotaSkeleton
+                  cellCount={
+                    chartData.upstreams.length ||
+                    upstreams.data?.upstreams.length ||
+                    undefined
+                  }
+                />
               ) : !chartData.rows.length ? (
-                <div className="h-[300px]">
+                <div className="min-h-[180px]">
                   <EmptyState title="No data in range" />
                 </div>
               ) : (
@@ -349,7 +363,7 @@ function OverviewPage() {
                   {chartData.upstreams.map((u) => (
                     <Card
                       key={u.id}
-                      className="flex flex-col bg-overlay-1 border-subtle"
+                      className="flex flex-col bg-overlay-1 border-subtle h-[180px]"
                     >
                       <div className="px-3 py-2 border-b border-subtle text-xs font-medium truncate">
                         {u.name}

@@ -1034,11 +1034,7 @@ function DetailView({
                   ) : !chartData.rows.length ? (
                     <EmptyState title="No data in range" />
                   ) : (
-                    <ResponsiveContainer
-                      width="100%"
-                      height={240}
-                      debounce={150}
-                    >
+                    <ResponsiveContainer width="100%" height={240}>
                       <AreaChart
                         data={chartData.rows}
                         margin={{ top: 28, right: 24, bottom: 4, left: 0 }}

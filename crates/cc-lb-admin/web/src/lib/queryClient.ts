@@ -1,4 +1,9 @@
-import { MutationCache, QueryCache, QueryClient } from '@tanstack/react-query';
+import {
+  keepPreviousData,
+  MutationCache,
+  QueryCache,
+  QueryClient,
+} from '@tanstack/react-query';
 import { toast } from 'sonner';
 import { ApiError } from './api';
 
@@ -31,6 +36,10 @@ export const queryClient = new QueryClient({
       refetchOnWindowFocus: false,
       staleTime: 10_000,
       gcTime: 5 * 60_000,
+      // Anti-flicker default: queryKey changes keep the previous data on
+      // screen instead of flipping `isLoading` to true. Removing this
+      // reintroduces dashboard-wide flicker on range/upstream toggles.
+      placeholderData: keepPreviousData,
     },
     mutations: { retry: 0 },
   },
