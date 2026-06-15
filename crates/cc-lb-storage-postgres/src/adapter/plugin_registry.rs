@@ -282,13 +282,12 @@ impl PluginRegistryStore for PostgresStorage {
 
     async fn decrement_blob_refcount_or_delete(&self, sha256: [u8; 32]) -> StorageResult<bool> {
         let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
-        let referenced: Option<Vec<u8>> = sqlx::query_scalar(
-            "SELECT sha256 FROM wasm_registry_v2 WHERE sha256 = $1 LIMIT 1",
-        )
-        .bind(sha256.as_slice())
-        .fetch_optional(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
+        let referenced: Option<Vec<u8>> =
+            sqlx::query_scalar("SELECT sha256 FROM wasm_registry_v2 WHERE sha256 = $1 LIMIT 1")
+                .bind(sha256.as_slice())
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
         let removed = if referenced.is_some() {
             false
         } else {
