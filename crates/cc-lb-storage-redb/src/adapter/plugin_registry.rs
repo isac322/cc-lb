@@ -18,12 +18,14 @@ use crate::{
 
 use crate::error_map::{map_join_err, map_redb_err};
 
+/// No `refcount` field: API-exposed refcounts derive from `PLUGIN_CHAINS_V2`
+/// scans on read. Legacy payloads carrying `"refcount"` deserialize cleanly
+/// (serde_json ignores unknown fields).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct StoredWasmBlob {
     bytes: Vec<u8>,
     size_bytes: u64,
     parse_validated_at_unix_secs: u64,
-    refcount: i64,
 }
 
 #[async_trait]
@@ -266,7 +268,6 @@ impl RedbStorage {
             bytes: blob.bytes,
             size_bytes: blob.size_bytes,
             parse_validated_at_unix_secs: blob.parse_validated_at_unix_secs,
-            refcount: 0,
         };
         {
             let mut blobs = write_txn.open_table(WASM_BLOBS_V2)?;
@@ -348,13 +349,13 @@ impl RedbStorage {
             return Ok(Vec::new());
         }
         let read_txn = self.db.begin_read()?;
+        let refcounts = chain_refcounts_by_registry_read(&read_txn)?;
         let registry = read_txn.open_table(WASM_REGISTRY_V2)?;
-        let blobs = read_txn.open_table(WASM_BLOBS_V2)?;
         let mut entries = Vec::new();
         for row in registry.iter()? {
             let (_, value) = row?;
             let mut entry: WasmRegistryEntry = serde_json::from_slice(value.value())?;
-            entry.refcount = blob_refcount(&blobs, entry.sha256)?;
+            entry.refcount = refcounts.get(&entry.id).copied().unwrap_or(0);
             entries.push(entry);
         }
         entries.sort_by_key(|entry| entry.id);
@@ -382,13 +383,13 @@ impl RedbStorage {
         id: Uuid,
     ) -> Result<Option<WasmRegistryEntry>, StorageError> {
         let read_txn = self.db.begin_read()?;
+        let refcount = chain_refcount_read(&read_txn, id)?;
         let registry = read_txn.open_table(WASM_REGISTRY_V2)?;
-        let blobs = read_txn.open_table(WASM_BLOBS_V2)?;
         registry
             .get(id.as_bytes().as_slice())?
             .map(|value| {
                 let mut entry: WasmRegistryEntry = serde_json::from_slice(value.value())?;
-                entry.refcount = blob_refcount(&blobs, entry.sha256)?;
+                entry.refcount = refcount;
                 Ok(entry)
             })
             .transpose()
@@ -401,10 +402,10 @@ impl RedbStorage {
         label: Option<String>,
     ) -> Result<WasmRegistryEntry, StorageError> {
         let write_txn = self.db.begin_write()?;
+        let refcount = chain_refcount_write(&write_txn, id)?;
         let mut found = None;
         {
             let registry = write_txn.open_table(WASM_REGISTRY_V2)?;
-            let blobs = write_txn.open_table(WASM_BLOBS_V2)?;
             for row in registry.iter()? {
                 let (_key, value) = row?;
                 let mut entry: WasmRegistryEntry = serde_json::from_slice(value.value())?;
@@ -419,7 +420,7 @@ impl RedbStorage {
                         .revision
                         .checked_add(1)
                         .ok_or(StorageError::PluginRegistryRevisionOverflow)?;
-                    entry.refcount = blob_refcount_from_write(&blobs, entry.sha256)?;
+                    entry.refcount = refcount;
                     found = Some(entry);
                     break;
                 }
@@ -528,8 +529,8 @@ impl RedbStorage {
                     id: upstream_id.to_string(),
                 });
             }
+            entry.refcount = 0;
             let mut blobs = write_txn.open_table(WASM_BLOBS_V2)?;
-            entry.refcount = blob_refcount_from_write(&blobs, entry.sha256)?;
             blobs.remove(entry.sha256.as_slice())?;
             drop(blobs);
             let mut registry = write_txn.open_table(WASM_REGISTRY_V2)?;
@@ -545,35 +546,11 @@ impl RedbStorage {
         sha256: [u8; 32],
     ) -> Result<bool, StorageError> {
         let write_txn = self.db.begin_write()?;
-        let removed = {
+        let removed = if sha_is_referenced_by_registry(&write_txn, sha256)? {
+            false
+        } else {
             let mut blobs = write_txn.open_table(WASM_BLOBS_V2)?;
-            let Some(value) = blobs.get(sha256.as_slice())? else {
-                drop(blobs);
-                write_txn.commit()?;
-                return Ok(false);
-            };
-            let blob: StoredWasmBlob = serde_json::from_slice(value.value())?;
-            drop(value);
-            if blob.refcount > 0 {
-                false
-            } else {
-                let registry = write_txn.open_table(WASM_REGISTRY_V2)?;
-                let mut referenced = false;
-                for row in registry.iter()? {
-                    let (_, value) = row?;
-                    let entry: WasmRegistryEntry = serde_json::from_slice(value.value())?;
-                    if entry.sha256 == sha256 {
-                        referenced = true;
-                        break;
-                    }
-                }
-                drop(registry);
-                if referenced {
-                    false
-                } else {
-                    blobs.remove(sha256.as_slice())?.is_some()
-                }
-            }
+            blobs.remove(sha256.as_slice())?.is_some()
         };
         write_txn.commit()?;
         Ok(removed)
@@ -597,12 +574,11 @@ impl RedbStorage {
                 reason: PluginChainConflictReason::SlotIsSingleton { existing_entry_id },
             });
         }
-        let registry = registry_by_id(&write_txn, input.wasm_registry_id)?.ok_or_else(|| {
-            StorageError::PluginRegistryConflict {
+        if registry_by_id(&write_txn, input.wasm_registry_id)?.is_none() {
+            return Err(StorageError::PluginRegistryConflict {
                 message: "unknown plugin registry entry".to_owned(),
-            }
-        })?;
-        increment_blob(&write_txn, registry.sha256)?;
+            });
+        }
         let record = PluginChainEntry {
             id: Uuid::new_v4(),
             principal_id: input.principal_id,
@@ -734,12 +710,6 @@ impl RedbStorage {
                 current: entry.revision,
             });
         }
-        let registry = registry_by_id(&write_txn, entry.wasm_registry_id)?.ok_or_else(|| {
-            StorageError::PluginRegistryConflict {
-                message: "missing plugin registry entry".to_owned(),
-            }
-        })?;
-        decrement_blob(&write_txn, registry.sha256)?;
         {
             let mut chains = write_txn.open_table(PLUGIN_CHAINS_V2)?;
             chains.remove(id.as_bytes().as_slice())?;
@@ -782,22 +752,25 @@ fn scan_registry_for_upload(
     sha256: [u8; 32],
     name: &str,
 ) -> Result<(Option<WasmRegistryEntry>, bool), StorageError> {
-    let registry = write_txn.open_table(WASM_REGISTRY_V2)?;
-    let blobs = write_txn.open_table(WASM_BLOBS_V2)?;
-    let mut sha_match = None;
+    let mut sha_match: Option<WasmRegistryEntry> = None;
     let mut name_conflict = false;
-    for row in registry.iter()? {
-        let (_, value) = row?;
-        let mut entry: WasmRegistryEntry = serde_json::from_slice(value.value())?;
-        if entry.sha256 == sha256 {
-            entry.refcount = blob_refcount_from_write(&blobs, sha256)?;
-            sha_match = Some(entry);
-        } else if entry.name == name {
-            name_conflict = true;
+    {
+        let registry = write_txn.open_table(WASM_REGISTRY_V2)?;
+        for row in registry.iter()? {
+            let (_, value) = row?;
+            let entry: WasmRegistryEntry = serde_json::from_slice(value.value())?;
+            if entry.sha256 == sha256 {
+                sha_match = Some(entry);
+            } else if entry.name == name {
+                name_conflict = true;
+            }
+            if sha_match.is_some() && name_conflict {
+                break;
+            }
         }
-        if sha_match.is_some() && name_conflict {
-            break;
-        }
+    }
+    if let Some(entry) = sha_match.as_mut() {
+        entry.refcount = chain_refcount_write(write_txn, entry.id)?;
     }
     Ok((sha_match, name_conflict))
 }
@@ -812,17 +785,22 @@ fn registry_by_sha_read(
     read_txn: &redb::ReadTransaction,
     sha256: [u8; 32],
 ) -> Result<Option<WasmRegistryEntry>, StorageError> {
-    let registry = read_txn.open_table(WASM_REGISTRY_V2)?;
-    let blobs = read_txn.open_table(WASM_BLOBS_V2)?;
-    for row in registry.iter()? {
-        let (_, value) = row?;
-        let mut entry: WasmRegistryEntry = serde_json::from_slice(value.value())?;
-        if entry.sha256 == sha256 {
-            entry.refcount = blob_refcount(&blobs, sha256)?;
-            return Ok(Some(entry));
+    let mut found: Option<WasmRegistryEntry> = None;
+    {
+        let registry = read_txn.open_table(WASM_REGISTRY_V2)?;
+        for row in registry.iter()? {
+            let (_, value) = row?;
+            let entry: WasmRegistryEntry = serde_json::from_slice(value.value())?;
+            if entry.sha256 == sha256 {
+                found = Some(entry);
+                break;
+            }
         }
     }
-    Ok(None)
+    if let Some(entry) = found.as_mut() {
+        entry.refcount = chain_refcount_read(read_txn, entry.id)?;
+    }
+    Ok(found)
 }
 
 fn registry_is_referenced_by_chain(
@@ -834,6 +812,66 @@ fn registry_is_referenced_by_chain(
         let (_, value) = row?;
         let entry: PluginChainEntry = serde_json::from_slice(value.value())?;
         if entry.wasm_registry_id == registry_id {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn chain_refcount_read(
+    read_txn: &redb::ReadTransaction,
+    registry_id: Uuid,
+) -> Result<i64, StorageError> {
+    let chains = read_txn.open_table(PLUGIN_CHAINS_V2)?;
+    let mut count: i64 = 0;
+    for row in chains.iter()? {
+        let (_, value) = row?;
+        let entry: PluginChainEntry = serde_json::from_slice(value.value())?;
+        if entry.wasm_registry_id == registry_id {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn chain_refcounts_by_registry_read(
+    read_txn: &redb::ReadTransaction,
+) -> Result<std::collections::BTreeMap<Uuid, i64>, StorageError> {
+    let chains = read_txn.open_table(PLUGIN_CHAINS_V2)?;
+    let mut counts: std::collections::BTreeMap<Uuid, i64> = std::collections::BTreeMap::new();
+    for row in chains.iter()? {
+        let (_, value) = row?;
+        let entry: PluginChainEntry = serde_json::from_slice(value.value())?;
+        *counts.entry(entry.wasm_registry_id).or_insert(0) += 1;
+    }
+    Ok(counts)
+}
+
+fn chain_refcount_write(
+    write_txn: &redb::WriteTransaction,
+    registry_id: Uuid,
+) -> Result<i64, StorageError> {
+    let chains = write_txn.open_table(PLUGIN_CHAINS_V2)?;
+    let mut count: i64 = 0;
+    for row in chains.iter()? {
+        let (_, value) = row?;
+        let entry: PluginChainEntry = serde_json::from_slice(value.value())?;
+        if entry.wasm_registry_id == registry_id {
+            count += 1;
+        }
+    }
+    Ok(count)
+}
+
+fn sha_is_referenced_by_registry(
+    write_txn: &redb::WriteTransaction,
+    sha256: [u8; 32],
+) -> Result<bool, StorageError> {
+    let registry = write_txn.open_table(WASM_REGISTRY_V2)?;
+    for row in registry.iter()? {
+        let (_, value) = row?;
+        let entry: WasmRegistryEntry = serde_json::from_slice(value.value())?;
+        if entry.sha256 == sha256 {
             return Ok(true);
         }
     }
@@ -960,34 +998,10 @@ fn put_chain(
     Ok(())
 }
 
-fn blob_refcount(
-    table: &redb::ReadOnlyTable<&[u8], &[u8]>,
-    sha256: [u8; 32],
-) -> Result<i64, StorageError> {
-    Ok(table
-        .get(sha256.as_slice())?
-        .map(|value| serde_json::from_slice::<StoredWasmBlob>(value.value()))
-        .transpose()?
-        .map(|blob| blob.refcount)
-        .unwrap_or(0))
-}
-
-fn blob_refcount_from_write(
-    table: &redb::Table<'_, &[u8], &[u8]>,
-    sha256: [u8; 32],
-) -> Result<i64, StorageError> {
-    Ok(table
-        .get(sha256.as_slice())?
-        .map(|value| serde_json::from_slice::<StoredWasmBlob>(value.value()))
-        .transpose()?
-        .map(|blob| blob.refcount)
-        .unwrap_or(0))
-}
-
 fn self_heal_blob_if_missing(
     write_txn: &redb::WriteTransaction,
     blob: &WasmBlob,
-    registry_id: Uuid,
+    _registry_id: Uuid,
 ) -> Result<(), StorageError> {
     {
         let blobs = write_txn.open_table(WASM_BLOBS_V2)?;
@@ -995,23 +1009,10 @@ fn self_heal_blob_if_missing(
             return Ok(());
         }
     }
-    let refcount = {
-        let chains = write_txn.open_table(PLUGIN_CHAINS_V2)?;
-        let mut count: i64 = 0;
-        for row in chains.iter()? {
-            let (_, value) = row?;
-            let entry: PluginChainEntry = serde_json::from_slice(value.value())?;
-            if entry.wasm_registry_id == registry_id {
-                count += 1;
-            }
-        }
-        count
-    };
     let stored = StoredWasmBlob {
         bytes: blob.bytes.clone(),
         size_bytes: blob.size_bytes,
         parse_validated_at_unix_secs: blob.parse_validated_at_unix_secs,
-        refcount,
     };
     let mut blobs = write_txn.open_table(WASM_BLOBS_V2)?;
     blobs.insert(
@@ -1019,47 +1020,6 @@ fn self_heal_blob_if_missing(
         serde_json::to_vec(&stored)?.as_slice(),
     )?;
     Ok(())
-}
-
-fn increment_blob(
-    write_txn: &redb::WriteTransaction,
-    sha256: [u8; 32],
-) -> Result<(), StorageError> {
-    let mut blobs = write_txn.open_table(WASM_BLOBS_V2)?;
-    let mut blob: StoredWasmBlob = {
-        let Some(value) = blobs.get(sha256.as_slice())? else {
-            return Err(StorageError::PluginRegistryConflict {
-                message: "missing wasm blob".to_owned(),
-            });
-        };
-        serde_json::from_slice(value.value())?
-    };
-    blob.refcount += 1;
-    let payload = serde_json::to_vec(&blob)?;
-    blobs.insert(sha256.as_slice(), payload.as_slice())?;
-    Ok(())
-}
-
-// Decrement chain refcount on the blob row. Never removes the row: blob
-// lifetime is owned by the registry entry. Returns true iff refcount reached 0.
-fn decrement_blob(
-    write_txn: &redb::WriteTransaction,
-    sha256: [u8; 32],
-) -> Result<bool, StorageError> {
-    let mut blobs = write_txn.open_table(WASM_BLOBS_V2)?;
-    let mut blob: StoredWasmBlob = {
-        let Some(value) = blobs.get(sha256.as_slice())? else {
-            return Ok(false);
-        };
-        serde_json::from_slice(value.value())?
-    };
-    if blob.refcount > 0 {
-        blob.refcount -= 1;
-    }
-    let became_orphan = blob.refcount == 0;
-    let payload = serde_json::to_vec(&blob)?;
-    blobs.insert(sha256.as_slice(), payload.as_slice())?;
-    Ok(became_orphan)
 }
 
 #[cfg(test)]

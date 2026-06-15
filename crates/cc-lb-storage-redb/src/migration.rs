@@ -183,7 +183,6 @@ fn drop_incompatible_router_chain_entries(
 }
 
 fn seed_builtin_cache_affinity(write_txn: &redb::WriteTransaction) -> Result<(), StorageError> {
-    let refcount = builtin_cache_affinity_refcount(write_txn)?;
     {
         let mut blobs = write_txn.open_table(WASM_BLOBS_V2)?;
         if blobs
@@ -194,7 +193,6 @@ fn seed_builtin_cache_affinity(write_txn: &redb::WriteTransaction) -> Result<(),
                 "bytes": Vec::<u8>::new(),
                 "size_bytes": 0_u64,
                 "parse_validated_at_unix_secs": 0_u64,
-                "refcount": refcount,
             }))?;
             blobs.insert(BUILTIN_CACHE_AFFINITY_SHA256.as_slice(), payload.as_slice())?;
         }
@@ -205,27 +203,12 @@ fn seed_builtin_cache_affinity(write_txn: &redb::WriteTransaction) -> Result<(),
             .get(BUILTIN_CACHE_AFFINITY_ID.as_bytes().as_slice())?
             .is_none()
         {
-            let record = WasmRegistryEntry::builtin_cache_affinity(refcount);
+            let record = WasmRegistryEntry::builtin_cache_affinity(0);
             let payload = serde_json::to_vec(&record)?;
             registry.insert(record.id.as_bytes().as_slice(), payload.as_slice())?;
         }
     }
     Ok(())
-}
-
-fn builtin_cache_affinity_refcount(
-    write_txn: &redb::WriteTransaction,
-) -> Result<i64, StorageError> {
-    let chains = write_txn.open_table(PLUGIN_CHAINS_V2)?;
-    let mut refcount = 0_i64;
-    for row in chains.iter()? {
-        let (_, value) = row?;
-        let entry: PluginChainEntry = serde_json::from_slice(value.value())?;
-        if entry.wasm_registry_id == BUILTIN_CACHE_AFFINITY_ID {
-            refcount += 1;
-        }
-    }
-    Ok(refcount)
 }
 
 fn migrate_upstreams_v3_to_v4(write_txn: &redb::WriteTransaction) -> Result<(), StorageError> {
