@@ -663,7 +663,7 @@ pub async fn build_cc_lb_aggregate_response(
                 .unwrap_or(true)
         })
         .collect::<Vec<_>>();
-    upstreams.sort_by(|left, right| left.id.cmp(&right.id));
+    upstreams.sort_by_key(|upstream| upstream.id);
 
     let duration_windows = windows
         .iter()
