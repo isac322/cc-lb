@@ -753,6 +753,50 @@ export interface AnalysisResponse {
   max_staleness_secs: number;
   upstreams: AnalysisUpstreamResponse[];
 }
+
+export interface AggregateProviderLotResponse {
+  upstream_id: string;
+  upstream_name: string;
+  window: string;
+  source: string | null;
+  state: string;
+  provider_start_unix_secs: number | null;
+  provider_reset_unix_secs: number | null;
+  observed_at_unix_millis: number | null;
+  utilization: number | null;
+  capacity_estimate_tokens: number | null;
+  used_before_cc_window_tokens: number;
+  capacity_to_now_tokens_estimate: number | null;
+  projected_capacity_tokens_estimate: number | null;
+  confidence: string;
+}
+
+export interface AggregateWindowResponse {
+  window: string;
+  cc_window_start_unix_secs: number;
+  cc_window_reset_unix_secs: number;
+  used_tokens: number;
+  utilization: number | null;
+  utilization_percent: number | null;
+  capacity_to_now_tokens_estimate: number | null;
+  projected_capacity_tokens_estimate: number | null;
+  remaining_to_now_tokens_estimate: number | null;
+  confidence: string;
+  contributing_upstreams: number;
+  stale_upstreams: number;
+  missing_capacity_upstreams: number;
+  provider_lots: AggregateProviderLotResponse[];
+  caveats: string[];
+}
+
+export interface AggregateResponse {
+  now_unix_secs: number;
+  window_anchor_unix_secs: number;
+  max_staleness_secs: number;
+  upstream_count: number;
+  windows: AggregateWindowResponse[];
+  caveats: string[];
+}
 export interface DraftCompleteResponse {
   state_token: string;
   suggested_name: string;
