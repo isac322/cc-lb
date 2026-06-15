@@ -20,6 +20,7 @@ import {
   usePrincipalNameMap,
   usePrincipals,
   useRecentEventsInfinite,
+  useSubscriptionQuotaAggregate,
   useSubscriptionQuotaAnalysis,
   useSubscriptionQuotaLatest,
   useSubscriptionQuotaSeries,
@@ -118,6 +119,10 @@ function OverviewPage() {
     sinceUnixSecs,
     untilUnixSecs: nowUnixSecs,
   });
+  const quotaAggregate = useSubscriptionQuotaAggregate({
+    windows: '5h,7d',
+    source: 'merged',
+  });
 
   const [liveEvents, setLiveEvents] = useState<RequestEvent[]>([]);
   const [streamStatus, setStreamStatus] = useState<
@@ -196,7 +201,10 @@ function OverviewPage() {
     }
     const upstreamsList = Array.from(upstreamsMap.values());
 
-    const bucketsByTime = new Map<number, Record<string, any>>();
+    const bucketsByTime = new Map<
+      number,
+      { ts: string; unix: number } & Record<string, string | number | null>
+    >();
     const markers: { ts: number; kind: string; upstreamId: string }[] = [];
 
     for (const s of series) {
@@ -488,6 +496,66 @@ function OverviewPage() {
         </Card>
 
         <div className="flex flex-col gap-4">
+          <Card>
+            <CardHeader title="cc-lb Quota" subtitle="Proxy-window aggregate" />
+            <CardBody className="space-y-3">
+              {quotaAggregate.isLoading ? (
+                <div className="text-xs text-text-faint">Loading…</div>
+              ) : quotaAggregate.data?.windows.length ? (
+                quotaAggregate.data.windows.map((w) => (
+                  <div
+                    key={w.window}
+                    className="rounded-sm border border-subtle bg-overlay-1 p-2 text-xs space-y-1"
+                  >
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-medium">{w.window}</span>
+                      <StatusBadge
+                        tone={
+                          w.confidence === 'estimated'
+                            ? 'ok'
+                            : w.confidence === 'stale' ||
+                                w.confidence === 'partial'
+                              ? 'warn'
+                              : 'neutral'
+                        }
+                        label={w.confidence}
+                      />
+                    </div>
+                    <div className="grid grid-cols-2 gap-x-3 gap-y-1 text-text-faint">
+                      <span>Usage</span>
+                      <span className="font-mono text-text text-right">
+                        {w.utilization_percent != null
+                          ? `${w.utilization_percent.toFixed(1)}%`
+                          : '—'}
+                      </span>
+                      <span>Used tokens</span>
+                      <span className="font-mono text-text text-right">
+                        {fmtCount(w.used_tokens)}
+                      </span>
+                      <span>Capacity now</span>
+                      <span className="font-mono text-text text-right">
+                        {w.capacity_to_now_tokens_estimate != null
+                          ? fmtCount(
+                              Math.round(w.capacity_to_now_tokens_estimate),
+                            )
+                          : '—'}
+                      </span>
+                      <span>Upstreams</span>
+                      <span className="font-mono text-text text-right">
+                        {w.contributing_upstreams}/
+                        {quotaAggregate.data?.upstream_count ?? 0}
+                      </span>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="text-xs text-text-faint">
+                  No quota aggregate
+                </div>
+              )}
+            </CardBody>
+          </Card>
+
           <Card>
             <CardHeader
               title="Upstreams"
