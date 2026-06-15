@@ -40,7 +40,7 @@ jobs:
       # manifest is corrupt - it claims to own
       # share/doc/clippy/{README.md,LICENSE-MIT} which do not exist on disk, so
       # any rustup operation that removes the old clippy component fails. We
-      # install the pinned 1.95.0 toolchain as a fresh, separate directory and
+      # install the pinned 1.96.0 toolchain as a fresh, separate directory and
       # promote it to default, leaving the broken stable untouched.
       - name: Install pinned Rust toolchain from rust-toolchain.toml
         shell: bash
