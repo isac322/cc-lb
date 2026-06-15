@@ -34,7 +34,7 @@ resolver = "2"
 version = "0.1.0"
 edition = "2024"
 license = "Apache-2.0"
-rust-version = "1.95.0"
+rust-version = "1.96.0"
 
 [workspace.dependencies]
 # Plugin trio — public crates.io surface. Lockstep via exact-version pin.
@@ -98,7 +98,7 @@ tokio-util = "0.7"
 toml = "1.1.2"
 tower = "0.5"
 tower-service = "0.3"
-tower-http = "0.6"
+tower-http = "0.7"
 tracing = "0.1"
 tracing-opentelemetry = "0.33"
 tracing-subscriber = "0.3"
