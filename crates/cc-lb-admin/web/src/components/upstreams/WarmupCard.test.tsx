@@ -22,7 +22,7 @@ import {
   makeRouterPlugin,
   makeShapePlugin,
 } from '../../lib/test-utils/warmup-fixtures';
-import { RelativeTime, ResetCountdown } from '../ui/RelativeTime';
+import { RelativeTime } from '../ui/RelativeTime';
 
 vi.mock('sonner', () => ({
   toast: {
@@ -54,9 +54,6 @@ vi.mock('../../lib/queries', async () => {
 vi.mock('../ui/RelativeTime', () => ({
   RelativeTime: vi.fn(({ ts }: { ts: Date | number | null | undefined }) => (
     <span data-testid="rel-time">{String(ts)}</span>
-  )),
-  ResetCountdown: vi.fn(({ ts }: { ts: Date | number | null | undefined }) => (
-    <span data-testid="reset-countdown">{String(ts)}</span>
   )),
 }));
 
@@ -216,21 +213,18 @@ describe('WarmupCard', () => {
     expect(screen.getByText(COPY.lastNull)).toBeDefined();
   });
 
-  test('OAuth enabled with populated fields passes converted timestamps to relative components', () => {
+  test('OAuth enabled with populated future fields renders relative time labels', () => {
+    const futureNextMs = Date.now() + 4 * 60 * 60 * 1000;
     const upstream = makeOauthUpstream({
-      next_warmup_at: '2026-06-14T23:04:12Z',
+      next_warmup_at: new Date(futureNextMs).toISOString(),
       last_warmup_cycle_key: 1718380800,
     });
 
     renderWarmup(upstream);
 
-    const expectedNext = new Date(upstream.next_warmup_at as string);
-    expect(vi.mocked(ResetCountdown).mock.calls[0]?.[0].ts).toEqual(
-      expectedNext,
-    );
-    expect(screen.getByTestId('reset-countdown').textContent).toBe(
-      String(expectedNext),
-    );
+    const nextEl = screen.getByTestId('warmup-next');
+    expect(nextEl.textContent).toMatch(/^in \d/);
+    expect(nextEl.textContent).not.toMatch(/Warms/);
     expect(formatRelativeUnixSeconds).toHaveBeenCalledWith(
       upstream.last_warmup_cycle_key,
     );
@@ -240,6 +234,19 @@ describe('WarmupCard', () => {
     expect(screen.getByTestId('rel-time').textContent).toBe(
       String(formattedLast),
     );
+  });
+
+  test('OAuth enabled with overdue next_warmup_at renders Overdue badge', () => {
+    const overdueMs = Date.now() - 30 * 60 * 1000;
+    const upstream = makeOauthUpstream({
+      next_warmup_at: new Date(overdueMs).toISOString(),
+      last_warmup_cycle_key: null,
+    });
+
+    renderWarmup(upstream);
+
+    const nextEl = screen.getByTestId('warmup-next');
+    expect(nextEl.textContent).toContain('Overdue');
   });
 
   test('zero shape plugins renders notice and Plugins link without select', () => {
@@ -254,7 +261,7 @@ describe('WarmupCard', () => {
     expect(screen.queryByTestId('warmup-plugin-select')).toBeNull();
   });
 
-  test('unknown stored plugin renders unknown option and Clear button', () => {
+  test('unknown stored plugin renders unknown option in the dropdown', () => {
     renderWarmup(
       makeOauthUpstream({
         warmup_dialect_plugin: { wasm_registry_id: 'ghost', config: {} },
@@ -267,7 +274,9 @@ describe('WarmupCard', () => {
         name: COPY.unknownPluginTemplate.replace('{id}', 'ghost'),
       }),
     ).toBeDefined();
-    expect(screen.getByTestId('warmup-plugin-clear')).toBeDefined();
+    expect(
+      within(select).getByRole('option', { name: COPY.defaultPluginOption }),
+    ).toBeDefined();
   });
 
   test('fire-now confirm calls mutation once, disables pending controls, and shows success toast', () => {

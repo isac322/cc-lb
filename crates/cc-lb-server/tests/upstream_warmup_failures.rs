@@ -97,7 +97,19 @@ async fn rate_limit_with_active_five_hour_header_writes_cycle_key_without_retry(
     assert_eq!(fixture.fake.messages.request_count(), 1);
     assert_eq!(fixture.refresh_history_len().await, 0);
     let record = fixture.upstream_record(upstream_id).await;
-    assert_eq!(record.last_warmup_cycle_key, Some(active_cycle_key));
+    assert_eq!(record.last_warmup_cycle_key, Some(candidate_cycle_key));
+    let next = record
+        .next_warmup_at
+        .expect("next warmup timestamp should be set")
+        .timestamp();
+    assert!(
+        next >= active_cycle_key + 30,
+        "next_warmup_at={next}, active_cycle_key={active_cycle_key}"
+    );
+    assert!(
+        next < active_cycle_key + 61,
+        "next_warmup_at={next}, active_cycle_key={active_cycle_key}"
+    );
 }
 
 #[tokio::test]
@@ -158,5 +170,42 @@ async fn permanent_failure_abandons_without_retry(status: StatusCode, reason: &s
         captured.contains("action=\"cycle_abandoned\"")
             && captured.contains(&format!("reason=\"{reason}\"")),
         "expected warmup abandon log for {reason}, captured logs:\n{captured}"
+    );
+}
+
+#[tokio::test]
+async fn permanent_abandon_with_stale_cycle_clamps_next_warmup_to_future() {
+    let fixture = WarmupFixture::new().await;
+    let now = fixture.now_unix_secs();
+    let stale_cycle_key = now - 6 * 60 * 60;
+    let upstream_id = fixture
+        .create_due_oauth_upstream("403-stale-cycle-clamp")
+        .await;
+    fixture
+        .put_five_hour_observation(upstream_id, stale_cycle_key)
+        .await;
+    fixture
+        .fake
+        .messages
+        .push_response(error_response(StatusCode::FORBIDDEN));
+
+    fixture.scan_once().await;
+
+    let record = fixture.upstream_record(upstream_id).await;
+    assert_eq!(record.last_warmup_cycle_key, None);
+    let next = record
+        .next_warmup_at
+        .expect("permanent abandon must write next_warmup_at")
+        .timestamp();
+    assert!(
+        next >= now,
+        "stale cycle abandon must clamp next_warmup_at to the future: next={next}, now={now}"
+    );
+
+    fixture.scan_once().await;
+    assert_eq!(
+        fixture.fake.messages.request_count(),
+        1,
+        "clamped next_warmup_at must prevent an immediate second dispatch"
     );
 }

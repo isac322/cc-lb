@@ -112,7 +112,7 @@ describe('useFireNowUpstreamWarmup', () => {
     ]);
   });
 
-  test('returns lease-held response without invalidating queries', async () => {
+  test('returns lease-held response and still invalidates queries', async () => {
     const response = makeFireNowLeaseHeld('replica-2');
     stubFetchOnce(response, { status: 202 });
     const client = makeClient();
@@ -127,13 +127,17 @@ describe('useFireNowUpstreamWarmup', () => {
       held_by: 'replica-2',
     });
 
-    expect(invalidateSpy).not.toHaveBeenCalled();
+    expect(invalidateSpy.mock.calls.map(([arg]) => arg?.queryKey)).toEqual([
+      qk.upstream(UPSTREAM_ID),
+      qk.upstreams,
+    ]);
   });
 
   test.each([
+    [400, makeFireNowError('oauth_credentials_missing')],
     [502, makeFireNowError('auth_failed')],
     [503, makeFireNowError('transient')],
-  ])('returns %i error body without invalidating queries', async (status, response) => {
+  ])('returns %i error body and still invalidates queries (backend may have rescheduled next_warmup_at)', async (status, response) => {
     stubFetchOnce(response, { status });
     const client = makeClient();
     const invalidateSpy = vi.spyOn(client, 'invalidateQueries');
@@ -145,7 +149,10 @@ describe('useFireNowUpstreamWarmup', () => {
       response,
     );
 
-    expect(invalidateSpy).not.toHaveBeenCalled();
+    expect(invalidateSpy.mock.calls.map(([arg]) => arg?.queryKey)).toEqual([
+      qk.upstream(UPSTREAM_ID),
+      qk.upstreams,
+    ]);
   });
 });
 

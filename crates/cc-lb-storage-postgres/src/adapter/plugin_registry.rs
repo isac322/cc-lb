@@ -243,6 +243,18 @@ impl PluginRegistryStore for PostgresStorage {
                 id: chain_id.to_string(),
             });
         }
+        if let Some(upstream_id) = sqlx::query_scalar::<_, Uuid>(
+            "SELECT id FROM upstreams_v1 WHERE deleted_at IS NULL AND (warmup_dialect_plugin->>'wasm_registry_id')::uuid = $1 LIMIT 1",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?
+        {
+            return Err(StorageError::PluginRegistryReferenced {
+                id: upstream_id.to_string(),
+            });
+        }
         let result = sqlx::query("DELETE FROM wasm_registry_v2 WHERE id = $1 AND revision = $2")
             .bind(id)
             .bind(u64_to_i64(expected_revision, "wasm_registry.revision")?)
