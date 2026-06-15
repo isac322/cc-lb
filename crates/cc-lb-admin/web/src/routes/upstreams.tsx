@@ -2255,11 +2255,7 @@ function CreateUpstreamModal({
       );
     }
     if (step === 'oauth_handshake') {
-      return (
-        <>
-          <Button onClick={() => setStep('type')}>Back</Button>
-        </>
-      );
+      return <Button onClick={() => setStep('type')}>Back</Button>;
     }
     if (step === 'oauth_confirm') {
       return (
