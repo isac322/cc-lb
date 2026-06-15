@@ -13,6 +13,7 @@ import {
   PageContainer,
   Section,
   Skeleton,
+  SkeletonRow,
   StatusBadge,
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
@@ -43,7 +44,12 @@ function StatusPage() {
         subtitle="Fields needing process restart"
       >
         {status.isLoading ? (
-          <Skeleton className="h-24" />
+          <Card>
+            <CardBody className="space-y-2">
+              <Skeleton className="h-4 w-1/2" />
+              <Skeleton className="h-4 w-2/3" />
+            </CardBody>
+          </Card>
         ) : status.data ? (
           <Card>
             <CardBody>
@@ -138,9 +144,22 @@ function StatusPage() {
         <Card>
           <div className="overflow-x-auto">
             {creds.isLoading ? (
-              <CardBody>
-                <Skeleton className="h-12" />
-              </CardBody>
+              <table className="w-full font-mono text-xs">
+                <thead className="table-header sticky top-0 z-10">
+                  <tr className="text-[10px] uppercase tracking-wider">
+                    <th className="text-left px-4 py-2">Provider</th>
+                    <th className="text-left px-4 py-2">Kind</th>
+                    <th className="text-left px-4 py-2">Identity</th>
+                    <th className="text-left px-4 py-2">Expires</th>
+                    <th className="text-left px-4 py-2">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <SkeletonRow cols={5} />
+                  <SkeletonRow cols={5} />
+                  <SkeletonRow cols={5} />
+                </tbody>
+              </table>
             ) : creds.data?.credentials.length ? (
               <table className="w-full font-mono text-xs">
                 <thead className="table-header sticky top-0 z-10">
@@ -190,7 +209,26 @@ function StatusPage() {
 
       <Section title="OAuth Tokens" subtitle="Active OAuth flow status">
         {oauth.isLoading ? (
-          <Skeleton className="h-12" />
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <Card>
+              <CardHeader title={<Skeleton className="h-4 w-32" />} />
+              <CardBody className="space-y-2">
+                <Skeleton className="h-3 w-3/4" />
+                <Skeleton className="h-3 w-1/2" />
+                <Skeleton className="h-3 w-2/3" />
+                <Skeleton className="h-3 w-1/3" />
+              </CardBody>
+            </Card>
+            <Card>
+              <CardHeader title={<Skeleton className="h-4 w-32" />} />
+              <CardBody className="space-y-2">
+                <Skeleton className="h-3 w-3/4" />
+                <Skeleton className="h-3 w-1/2" />
+                <Skeleton className="h-3 w-2/3" />
+                <Skeleton className="h-3 w-1/3" />
+              </CardBody>
+            </Card>
+          </div>
         ) : oauth.data?.credentials.length ? (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {oauth.data.credentials.map((o, i) => (

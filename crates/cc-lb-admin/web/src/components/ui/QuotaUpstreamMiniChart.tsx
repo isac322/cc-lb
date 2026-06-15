@@ -106,7 +106,7 @@ export function QuotaUpstreamMiniChart({
           No data in this range
         </div>
       ) : (
-        <ResponsiveContainer width="100%" height="100%" debounce={150}>
+        <ResponsiveContainer width="100%" height="100%">
           <AreaChart
             data={chartData.rows}
             margin={{ top: 8, right: 8, bottom: 4, left: -20 }}
