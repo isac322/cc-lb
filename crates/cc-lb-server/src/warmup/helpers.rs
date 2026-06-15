@@ -16,6 +16,7 @@ pub enum WarmupAbandonReason {
     Forbidden,
     BadRequest,
     NotFound,
+    DialectPlugin,
 }
 
 impl WarmupAbandonReason {
@@ -25,6 +26,7 @@ impl WarmupAbandonReason {
             Self::Forbidden => "forbidden",
             Self::BadRequest => "bad_request",
             Self::NotFound => "not_found",
+            Self::DialectPlugin => "dialect_plugin_failed",
         }
     }
 }

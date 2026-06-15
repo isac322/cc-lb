@@ -1,4 +1,3 @@
-import { Zap } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import {
@@ -9,6 +8,7 @@ import {
   TOAST_DURATIONS,
 } from '../../lib/copy/warmup';
 import { formatRelativeUnixSeconds } from '../../lib/format';
+import { formatAbsolute, useLocale, useTimezone } from '../../lib/locale';
 import {
   type FireNowResponse,
   type PluginEntry,
@@ -26,15 +26,56 @@ import {
   ConfirmDialog,
   cx,
   EmptyState,
+  Hint,
   INPUT_CLASS,
 } from '../ui/primitives';
-import { RelativeTime, ResetCountdown } from '../ui/RelativeTime';
+import { RelativeTime } from '../ui/RelativeTime';
 
 function pluginSupportsSlot(
   p: { supported_slots?: string[]; slot?: string },
   slot: string,
 ): boolean {
   return p.supported_slots?.includes(slot) ?? p.slot === slot;
+}
+
+const OVERDUE_TOLERANCE_MS = 5_000;
+
+function formatRelativeDelta(diffMs: number): string {
+  const absMs = Math.abs(diffMs);
+  const totalMin = Math.floor(absMs / 60_000);
+  const d = Math.floor(totalMin / 1440);
+  const h = Math.floor((totalMin % 1440) / 60);
+  const m = totalMin % 60;
+  if (d > 0) return `${d}d ${h}h`;
+  if (h > 0) return `${h}h ${m}m`;
+  return `${Math.max(1, m)}m`;
+}
+
+function NextWarmupDisplay({ value }: { value: string }) {
+  const { effective: locale } = useLocale();
+  const { effective: timezone } = useTimezone();
+  const date = new Date(value);
+  const diffMs = date.getTime() - Date.now();
+  const abs = formatAbsolute(date, locale, timezone);
+  let text: string;
+  let tone = '';
+  if (diffMs < -OVERDUE_TOLERANCE_MS) {
+    text = `Overdue by ${formatRelativeDelta(diffMs)}`;
+    tone = 'text-amber-300';
+  } else if (diffMs < OVERDUE_TOLERANCE_MS) {
+    text = 'any moment';
+  } else {
+    text = `in ${formatRelativeDelta(diffMs)}`;
+  }
+  return (
+    <Hint label={abs} side="top">
+      <span className={cx('cursor-help', tone)}>{text}</span>
+    </Hint>
+  );
+}
+
+function LastCycleDisplay({ cycleKeyUnixSecs }: { cycleKeyUnixSecs: number }) {
+  return <RelativeTime ts={formatRelativeUnixSeconds(cycleKeyUnixSecs)} />;
 }
 
 function isStaleRevisionError(err: unknown): boolean {
@@ -56,7 +97,14 @@ function isStaleRevisionError(err: unknown): boolean {
 }
 
 function errorMessage(err: unknown, fallback: string): string {
-  return err instanceof Error && err.message ? err.message : fallback;
+  const maybe = err as {
+    body?: { error?: string; detail?: string };
+    message?: string;
+  };
+  if (maybe.body?.detail) return maybe.body.detail;
+  if (maybe.body?.error) return maybe.body.error;
+  if (maybe.message) return maybe.message;
+  return fallback;
 }
 
 function currentRevisionFromError(err: unknown): number | null {
@@ -73,9 +121,7 @@ export function WarmupCard({ upstream }: { upstream: Upstream }) {
     return null;
   }
 
-  const stateKey = `${upstream.id}:${upstream.revision}:${
-    upstream.warmup_dialect_plugin?.wasm_registry_id ?? ''
-  }`;
+  const stateKey = `${upstream.id}:${upstream.warmup_dialect_plugin?.wasm_registry_id ?? ''}`;
   return <WarmupCardInner key={stateKey} upstream={upstream} />;
 }
 
@@ -116,12 +162,13 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
     updateSettings.mutate(
       {
         id: upstream.id,
-        revision: upstream.revision,
+        revision: revisionOverride ?? upstream.revision,
         body: { warmup_enabled: !upstream.warmup_enabled },
       },
       {
         onSuccess: () => {
           setStaleRevisionVisible(false);
+          setRevisionOverride(null);
           toast.success(
             !upstream.warmup_enabled
               ? COPY.toggleEnabledSuccess
@@ -143,7 +190,12 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
 
   const handlePluginChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     const val = e.target.value;
-    if (!val) return;
+    if (!val) {
+      if (upstream.warmup_dialect_plugin) {
+        setConfirmClearPluginOpen(true);
+      }
+      return;
+    }
     setPendingPluginValue(val);
 
     updateSettings.mutate(
@@ -172,7 +224,7 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
             setRevisionOverride(currentRevisionFromError(err));
           } else {
             setPendingPluginValue(null);
-            toast.error(errorMessage(err, 'Failed to update dialect plugin'));
+            toast.error(errorMessage(err, 'Failed to update shape plugin'));
           }
         },
       },
@@ -254,63 +306,59 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
   const settingsPending = updateSettings.isPending || clearPlugin.isPending;
 
   return (
-    <Card data-testid="warmup-card" tabIndex={-1} className="space-y-4">
-      {staleRevisionVisible && (
-        <div
-          role="status"
-          aria-live="polite"
-          data-testid="warmup-stale-hint"
-          className="text-xs text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded p-2 mx-4 mt-3"
-        >
-          {COPY.staleRevisionHint}
-        </div>
-      )}
+    <Card data-testid="warmup-card" tabIndex={-1}>
       <CardHeader
-        title={
-          <div className="flex items-center gap-2">
-            <Zap className="w-4 h-4 text-amber-400" />
-            <span className="text-sm font-medium">{COPY.cardTitle}</span>
-          </div>
-        }
+        title={COPY.cardTitle}
+        subtitle={COPY.cardSubtitle}
         action={
-          <button
-            type="button"
-            role="switch"
-            data-testid="warmup-switch"
-            aria-checked={upstream.warmup_enabled}
-            disabled={settingsPending}
-            onClick={handleToggle}
-            className="group inline-flex items-center gap-2 h-7 px-2 rounded-sm transition-colors focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-overlay-3"
-          >
-            <div
+          <div className="flex items-center gap-3">
+            {upstream.warmup_enabled && (
+              <Button
+                variant="secondary"
+                size="sm"
+                data-testid="warmup-fire-now"
+                onClick={() => setConfirmFireOpen(true)}
+                disabled={fireWarmup.isPending || fireCooldown}
+              >
+                ⚡ {COPY.fireNowButtonLabel}
+              </Button>
+            )}
+            <button
+              type="button"
+              role="switch"
+              data-testid="warmup-switch"
+              aria-checked={upstream.warmup_enabled}
+              disabled={settingsPending}
+              onClick={handleToggle}
               className={cx(
-                'relative inline-flex h-4 w-8 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out border',
+                'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out border focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed',
                 upstream.warmup_enabled
                   ? 'bg-emerald-500 border-emerald-500'
-                  : 'bg-overlay-5 border-subtle-strong group-hover:border-text-muted',
+                  : 'bg-overlay-5 border-subtle-strong hover:border-text-muted',
               )}
             >
               <span
                 className={cx(
-                  'pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
+                  'pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
                   upstream.warmup_enabled ? 'translate-x-4' : 'translate-x-0.5',
                 )}
               />
-            </div>
-            <span
-              className={cx(
-                'text-[11px] font-mono uppercase tracking-wider',
-                upstream.warmup_enabled
-                  ? 'text-text'
-                  : 'text-text-muted group-hover:text-text',
-              )}
-            >
-              {upstream.warmup_enabled ? 'Enabled' : 'Disabled'}
-            </span>
-          </button>
+            </button>
+          </div>
         }
       />
-      <CardBody>
+      <CardBody className="flex flex-col gap-4">
+        {staleRevisionVisible && (
+          <div
+            role="status"
+            aria-live="polite"
+            data-testid="warmup-stale-hint"
+            className="text-xs text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded p-2"
+          >
+            {COPY.staleRevisionHint}
+          </div>
+        )}
+
         {!upstream.warmup_enabled ? (
           <EmptyState
             title={COPY.disabledEmpty}
@@ -326,30 +374,29 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
             }
           />
         ) : (
-          <div className="space-y-6">
-            <div className="grid grid-cols-2 gap-4">
+          <div className="flex flex-col gap-6">
+            <div className="grid grid-cols-1 gap-4 text-sm sm:grid-cols-2">
               <div>
                 <div className="text-xs text-text-muted mb-1">
                   {COPY.nextWarmupLabel}
                 </div>
-                <div className="text-sm" data-testid="warmup-next">
+                <div className="text-text" data-testid="warmup-next">
                   {upstream.next_warmup_at ? (
-                    <ResetCountdown ts={new Date(upstream.next_warmup_at)} />
+                    <NextWarmupDisplay value={upstream.next_warmup_at} />
                   ) : (
                     <span className="text-text-muted">{COPY.nextNull}</span>
                   )}
                 </div>
               </div>
+
               <div>
                 <div className="text-xs text-text-muted mb-1">
                   {COPY.lastCycleLabel}
                 </div>
-                <div className="text-sm" data-testid="warmup-last">
+                <div className="text-text" data-testid="warmup-last">
                   {upstream.last_warmup_cycle_key ? (
-                    <RelativeTime
-                      ts={formatRelativeUnixSeconds(
-                        upstream.last_warmup_cycle_key,
-                      )}
+                    <LastCycleDisplay
+                      cycleKeyUnixSecs={upstream.last_warmup_cycle_key}
                     />
                   ) : (
                     <span className="text-text-muted">{COPY.lastNull}</span>
@@ -367,42 +414,29 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
                   >
                     {COPY.dialectPluginLabel}
                   </label>
-                  <div className="flex items-center gap-2">
-                    <select
-                      id="dialect-plugin-select"
-                      data-testid="warmup-plugin-select"
-                      className={INPUT_CLASS}
-                      value={selectedPluginValue}
-                      onChange={handlePluginChange}
-                      disabled={settingsPending}
-                    >
-                      <option value="">{COPY.defaultPluginOption}</option>
-                      {selectedPluginValue && !selectedPluginKnown && (
-                        <option value={selectedPluginValue}>
-                          {COPY.unknownPluginTemplate.replace(
-                            '{id}',
-                            selectedPluginValue,
-                          )}
-                        </option>
-                      )}
-                      {shapePlugins.map((p: PluginEntry) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name}
-                        </option>
-                      ))}
-                    </select>
-                    {upstream.warmup_dialect_plugin !== null && (
-                      <Button
-                        variant="danger"
-                        size="sm"
-                        data-testid="warmup-plugin-clear"
-                        onClick={() => setConfirmClearPluginOpen(true)}
-                        disabled={settingsPending}
-                      >
-                        {COPY.clearPluginButtonLabel}
-                      </Button>
+                  <select
+                    id="dialect-plugin-select"
+                    data-testid="warmup-plugin-select"
+                    className={INPUT_CLASS}
+                    value={selectedPluginValue}
+                    onChange={handlePluginChange}
+                    disabled={settingsPending}
+                  >
+                    <option value="">{COPY.defaultPluginOption}</option>
+                    {selectedPluginValue && !selectedPluginKnown && (
+                      <option value={selectedPluginValue}>
+                        {COPY.unknownPluginTemplate.replace(
+                          '{id}',
+                          selectedPluginValue,
+                        )}
+                      </option>
                     )}
-                  </div>
+                    {shapePlugins.map((p: PluginEntry) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
                 </>
               )}
               {shapePlugins.length === 0 && (
@@ -414,47 +448,38 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
                 </div>
               )}
             </div>
+
+            {(leasePanel || errorPanel) && (
+              <div className="flex flex-col gap-2">
+                {leasePanel && (
+                  <div
+                    data-testid="warmup-lease-panel"
+                    role="status"
+                    aria-live="polite"
+                    className="text-xs text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded p-2"
+                  >
+                    {COPY.leaseHeldTemplate.replace(
+                      '{heldBy}',
+                      leasePanel.heldBy,
+                    )}
+                  </div>
+                )}
+                {errorPanel && (
+                  <div
+                    data-testid="warmup-error-panel"
+                    data-reason={errorPanel.reason}
+                    role="alert"
+                    aria-live="polite"
+                    className="text-xs text-red-200 bg-red-500/10 border border-red-500/30 rounded p-2"
+                  >
+                    {COPY.fireErrorReasons[errorPanel.reason]}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
       </CardBody>
-
-      {upstream.warmup_enabled && (
-        <div className="px-4 pb-4 pt-2 border-t border-overlay-5 flex flex-col gap-3">
-          <div>
-            <Button
-              variant="primary"
-              data-testid="warmup-fire-now"
-              onClick={() => setConfirmFireOpen(true)}
-              disabled={fireWarmup.isPending || fireCooldown}
-            >
-              ⚡ {COPY.fireNowButtonLabel}
-            </Button>
-          </div>
-
-          {leasePanel && (
-            <div
-              data-testid="warmup-lease-panel"
-              role="status"
-              aria-live="polite"
-              className="text-xs text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded p-2"
-            >
-              {COPY.leaseHeldTemplate.replace('{heldBy}', leasePanel.heldBy)}
-            </div>
-          )}
-
-          {errorPanel && (
-            <div
-              data-testid="warmup-error-panel"
-              data-reason={errorPanel.reason}
-              role="alert"
-              aria-live="polite"
-              className="text-xs text-red-200 bg-red-500/10 border border-red-500/30 rounded p-2"
-            >
-              {COPY.fireErrorReasons[errorPanel.reason]}
-            </div>
-          )}
-        </div>
-      )}
 
       <ConfirmDialog
         open={confirmFireOpen}

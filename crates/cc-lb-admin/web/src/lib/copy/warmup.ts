@@ -1,26 +1,28 @@
 export const COPY = {
   cardTitle: 'Warmup',
+  cardSubtitle:
+    'Keep the 5h OAuth subscription window primed by sending a small request before quota expires.',
   nextWarmupLabel: 'Next warmup',
   lastCycleLabel: 'Last cycle',
-  dialectPluginLabel: 'Dialect plugin',
-  defaultPluginOption: 'Default (no plugin)',
+  dialectPluginLabel: 'Shape plugin',
+  defaultPluginOption: 'None (default request shape)',
   enableButtonLabel: 'Enable warmup',
   fireNowButtonLabel: 'Fire warmup now',
   clearPluginButtonLabel: 'Clear plugin',
   confirmFireTitle: 'Fire warmup now?',
   confirmFireConfirmLabel: 'Fire now',
   confirmFireCancelLabel: 'Cancel',
-  confirmClearPluginTitle: 'Clear dialect plugin?',
+  confirmClearPluginTitle: 'Clear shape plugin?',
   confirmClearPluginBody:
-    'Future warmups will use the default /messages dialect. You can re-attach a plugin any time.',
+    'Future warmups will use the default request shape. You can re-attach a plugin any time.',
   confirmClearPluginConfirmLabel: 'Clear',
   toggleEnabledSuccess: 'Warmup enabled',
   toggleDisabledSuccess: 'Warmup disabled',
-  dialectPluginSaveSuccess: 'Dialect plugin updated',
-  dialectPluginClearSuccess: 'Dialect plugin cleared',
+  dialectPluginSaveSuccess: 'Shape plugin updated',
+  dialectPluginClearSuccess: 'Shape plugin cleared',
   disabledEmpty:
     'Warmup is off for this upstream. Enable to keep the 5h OAuth window primed.',
-  nextNull: 'Awaiting first quota observation',
+  nextNull: 'Not yet scheduled — will fire on next tick or use Fire warmup now',
   lastNull: 'Never warmed',
   confirmFireBody:
     'This sends a real /messages request to {upstreamName} and consumes a small token. The schedule for the current 5h window will be skipped.',
@@ -41,6 +43,8 @@ export const COPY = {
     not_found: 'Warmup failed: upstream returned 404. Check the base URL.',
     dialect_plugin_failed:
       'Warmup failed: the dialect plugin raised an error. Check plugin logs.',
+    oauth_credentials_missing:
+      'Warmup cannot fire: this upstream has no OAuth credentials yet. Complete the OAuth flow first.',
     transient:
       'Warmup failed transiently. The background loop will retry automatically.',
   },
