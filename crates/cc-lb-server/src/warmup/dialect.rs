@@ -59,6 +59,15 @@ pub enum WarmupDispatchError {
     Http(String),
 }
 
+impl WarmupDispatchError {
+    pub fn is_transient(&self) -> bool {
+        matches!(
+            self,
+            Self::Storage(_) | Self::Http(_) | Self::Materialize(_)
+        )
+    }
+}
+
 pub async fn dispatch_warmup_with_dialect(
     runtime: &ExtismRuntime,
     stores: &Stores,

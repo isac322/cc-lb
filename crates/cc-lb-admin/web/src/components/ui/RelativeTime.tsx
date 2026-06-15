@@ -66,9 +66,13 @@ export function RelativeTime({
 export function ResetCountdown({
   ts,
   className,
+  futureVerb = 'Resets',
+  pastVerb = 'Reset',
 }: {
   ts: Date | number | null | undefined;
   className?: string;
+  futureVerb?: string;
+  pastVerb?: string;
 }) {
   const { effective: locale } = useLocale();
   const { effective: timezone } = useTimezone();
@@ -96,19 +100,19 @@ export function ResetCountdown({
     const d = Math.floor(totalMin / 1440);
     const h = Math.floor((totalMin % 1440) / 60);
     const m = totalMin % 60;
-    if (d > 0) text = `Resets in ${d}d ${h}h`;
-    else if (h > 0) text = `Resets in ${h}h ${m}m`;
-    else text = `Resets in ${m}m`;
+    if (d > 0) text = `${futureVerb} in ${d}d ${h}h`;
+    else if (h > 0) text = `${futureVerb} in ${h}h ${m}m`;
+    else text = `${futureVerb} in ${m}m`;
   } else {
     if (absMs > 24 * 3600000) {
-      text = `Reset >1d ago (stale)`;
+      text = `${pastVerb} >1d ago (stale)`;
     } else {
       const h = Math.floor(absMs / 3600000);
       const m = Math.floor((absMs % 3600000) / 60000);
       if (h > 0) {
-        text = `Reset ${h}h ${m}m ago`;
+        text = `${pastVerb} ${h}h ${m}m ago`;
       } else {
-        text = `Reset ${m}m ago`;
+        text = `${pastVerb} ${m}m ago`;
       }
     }
   }

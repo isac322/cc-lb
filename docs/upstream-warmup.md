@@ -8,32 +8,42 @@ Anthropic OAuth upstreams require periodic activity to keep their five-hour rate
 
 ## Enabling per upstream
 
-To enable warm-up for a specific upstream, send a PATCH request to the admin API. Set the `warmup_enabled` field to `true` in the request body.
+To enable warm-up for a specific upstream, send a PATCH request to the admin API. Set the `warmup_enabled` field to `true` in the request body. PATCH requires an `If-Match` ETag from a prior GET to prevent lost updates.
 
 ```bash
+# 1. fetch current revision
+ETAG=$(curl -sI http://localhost:8080/admin/v1/upstreams/11111111-2222-3333-4444-555555555555 \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | grep -i '^etag:' | awk '{print $2}' | tr -d '\r')
+
+# 2. PATCH with If-Match
 curl -X PATCH http://localhost:8080/admin/v1/upstreams/11111111-2222-3333-4444-555555555555 \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
+  -H "If-Match: $ETAG" \
   -d '{"warmup_enabled": true}'
 ```
 
 ## Disabling per upstream
 
-To disable warm-up for a specific upstream, send a PATCH request to the admin API. Set the `warmup_enabled` field to `false` in the request body.
+To disable warm-up for a specific upstream, send a PATCH request to the admin API with `If-Match` from a prior GET.
 
 ```bash
+ETAG=$(curl -sI http://localhost:8080/admin/v1/upstreams/11111111-2222-3333-4444-555555555555 \
+  -H "Authorization: Bearer $ADMIN_TOKEN" | grep -i '^etag:' | awk '{print $2}' | tr -d '\r')
+
 curl -X PATCH http://localhost:8080/admin/v1/upstreams/11111111-2222-3333-4444-555555555555 \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
+  -H "If-Match: $ETAG" \
   -d '{"warmup_enabled": false}'
 ```
 
 ## Emergency stop
 
-If you need to stop all warm-up activity immediately across all OAuth upstreams, you can run a direct SQL update on the database. This disables the warm-up flag for all Anthropic OAuth upstreams at once.
+If you need to stop all warm-up activity immediately across all OAuth upstreams, you can run a direct SQL update on the database. This disables the warm-up flag for all Anthropic OAuth upstreams at once. The `kind` column stores `UpstreamKind::as_str()` output, which is `anthropic_oauth` (snake_case).
 
 ```sql
-UPDATE upstreams_v1 SET warmup_enabled = false WHERE kind = 'AnthropicOauth';
+UPDATE upstreams_v1 SET warmup_enabled = false WHERE kind = 'anthropic_oauth';
 ```
 
 ## Manual fire

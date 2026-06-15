@@ -40,6 +40,7 @@ pub const WARMUP_TICK_SECS: u64 = 30;
 pub const WARMUP_POST_RESET_GUARD_SECS: u64 = 30;
 pub const WARMUP_LEASE_TTL_SECS: i64 = 120;
 pub const WARMUP_REQUEST_TIMEOUT_SECS: u64 = 30;
+pub const WARMUP_NO_OBSERVATION_BACKOFF_SECS: i64 = 60;
 
 const _: () = assert!(WARMUP_LEASE_TTL_SECS as u64 > WARMUP_REQUEST_TIMEOUT_SECS + 30 + 10);
 const PAGE_SIZE: usize = 100;
@@ -156,36 +157,95 @@ impl UpstreamWarmupLoop {
         if !claimed {
             return Ok(());
         }
+        let upstream_id = upstream.id;
+        let outcome = self.fire_candidate_after_claim(upstream_id, cancel).await;
+        match outcome {
+            Ok(FireOutcome::LeaseClearedByStorage) => Ok(()),
+            Ok(FireOutcome::NeedsRelease) => {
+                self.release_warmup_lease(upstream_id).await;
+                Ok(())
+            }
+            Err(error) => {
+                self.release_warmup_lease(upstream_id).await;
+                Err(error)
+            }
+        }
+    }
+
+    async fn fire_candidate_after_claim(
+        &self,
+        upstream_id: Uuid,
+        cancel: &CancellationToken,
+    ) -> Result<FireOutcome, WarmupLoopError> {
         let now = self.db_now_unix_secs().await?;
         let lease_until = unix_secs_datetime(now.saturating_add(WARMUP_LEASE_TTL_SECS))?;
-        tracing::info!(target: "warmup", upstream_id = %upstream.id, holder = %self.replica_id, lease_until = ?lease_until, action = "lease_claimed");
+        tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %self.replica_id, lease_until = ?lease_until, action = "lease_claimed");
 
-        let Some(latest) = self.latest_five_hour(upstream.id).await? else {
-            return Ok(());
-        };
-        let Some(cycle_key) = cycle_key_from_observation(&latest) else {
-            return Ok(());
+        let upstream = self
+            .stores
+            .upstreams
+            .get_by_id(upstream_id)
+            .await?
+            .ok_or(WarmupLoopError::MissingUpstream)?;
+        let now_dt = self.db_now_datetime().await?;
+        if !warmup_due_candidate(&upstream, now_dt) {
+            return Ok(FireOutcome::NeedsRelease);
+        }
+
+        let observation_cycle_key = self
+            .latest_five_hour(upstream_id)
+            .await?
+            .as_ref()
+            .and_then(cycle_key_from_observation);
+        // Synthetic db_now seeds the first cycle when there is no observation yet.
+        let cycle_key = match observation_cycle_key {
+            Some(ck) => ck,
+            None if upstream.last_warmup_cycle_key.is_none() => self.db_now_unix_secs().await?,
+            None => {
+                self.write_short_backoff(upstream_id).await?;
+                return Ok(FireOutcome::NeedsRelease);
+            }
         };
         if upstream.last_warmup_cycle_key == Some(cycle_key) {
-            return Ok(());
+            let jitter_ms =
+                self.warmup_jitter_ms(upstream_id, u64::try_from(cycle_key).unwrap_or(0));
+            let mut next_warmup_at = schedule_for_cycle(cycle_key, jitter_ms)?;
+            let now_secs = self.db_now_unix_secs().await?;
+            let min_next =
+                unix_secs_datetime(now_secs.saturating_add(WARMUP_NO_OBSERVATION_BACKOFF_SECS))?;
+            if next_warmup_at < min_next {
+                next_warmup_at = min_next;
+            }
+            self.write_warmup_next_at(upstream_id, next_warmup_at)
+                .await?;
+            return Ok(FireOutcome::NeedsRelease);
         }
 
         let now = self.db_now_unix_secs().await?;
         if cycle_key > now {
             let jitter_ms =
-                self.warmup_jitter_ms(upstream.id, u64::try_from(cycle_key).unwrap_or(0));
+                self.warmup_jitter_ms(upstream_id, u64::try_from(cycle_key).unwrap_or(0));
             let next_warmup_at = schedule_for_cycle(cycle_key, jitter_ms)?;
-            self.write_warmup_next_at(upstream.id, next_warmup_at)
+            self.write_warmup_next_at(upstream_id, next_warmup_at)
                 .await?;
-            return Ok(());
+            return Ok(FireOutcome::NeedsRelease);
         }
 
-        self.sleep_jitter(upstream.id, cycle_key, cancel).await?;
+        self.sleep_jitter(upstream_id, cycle_key, cancel).await?;
         let result = self
             .fire_with_current_credentials(&upstream, cycle_key, cancel)
             .await?;
         self.handle_warmup_result(upstream, cycle_key, result, cancel)
             .await
+    }
+
+    async fn write_short_backoff(&self, upstream_id: Uuid) -> Result<(), WarmupLoopError> {
+        let now = self.db_now_unix_secs().await?;
+        let next_warmup_at =
+            unix_secs_datetime(now.saturating_add(WARMUP_NO_OBSERVATION_BACKOFF_SECS))?;
+        self.write_warmup_next_at(upstream_id, next_warmup_at)
+            .await?;
+        Ok(())
     }
 
     async fn fire_with_current_credentials(
@@ -205,28 +265,28 @@ impl UpstreamWarmupLoop {
         candidate_cycle_key: i64,
         result: WarmupDispatchResult,
         cancel: &CancellationToken,
-    ) -> Result<(), WarmupLoopError> {
+    ) -> Result<FireOutcome, WarmupLoopError> {
         match result.outcome {
             WarmupResult::Success { cycle_key }
             | WarmupResult::WindowAlreadyActive { cycle_key } => {
-                self.write_cycle_success(upstream.id, cycle_key).await?;
+                self.write_cycle_success(upstream.id, candidate_cycle_key, cycle_key)
+                    .await
             }
             WarmupResult::RetryableTransient => {
                 self.schedule_backoff(upstream.id).await?;
-                self.release_warmup_lease(upstream.id).await;
+                Ok(FireOutcome::NeedsRelease)
             }
             WarmupResult::AbandonCyclePermanent(WarmupAbandonReason::AuthFailed) => {
                 self.retry_after_refresh(upstream, candidate_cycle_key, cancel)
-                    .await?;
+                    .await
             }
             WarmupResult::AbandonCyclePermanent(reason) => {
                 tracing::warn!(target: "warmup", upstream_id = %upstream.id, reason = reason.as_str(), action = "cycle_abandoned");
                 self.schedule_next_cycle(upstream.id, candidate_cycle_key)
                     .await?;
-                self.release_warmup_lease(upstream.id).await;
+                Ok(FireOutcome::NeedsRelease)
             }
         }
-        Ok(())
     }
 
     async fn retry_after_refresh(
@@ -234,15 +294,14 @@ impl UpstreamWarmupLoop {
         upstream: UpstreamRecord,
         candidate_cycle_key: i64,
         cancel: &CancellationToken,
-    ) -> Result<(), WarmupLoopError> {
+    ) -> Result<FireOutcome, WarmupLoopError> {
         let access_token = match self.refresh_access_token(upstream.id).await {
             Ok(access_token) => access_token,
             Err(_error) => {
                 tracing::warn!(target: "warmup", upstream_id = %upstream.id, reason = "auth_failed", action = "cycle_abandoned");
                 self.schedule_next_cycle(upstream.id, candidate_cycle_key)
                     .await?;
-                self.release_warmup_lease(upstream.id).await;
-                return Ok(());
+                return Ok(FireOutcome::NeedsRelease);
             }
         };
         let refreshed = self
@@ -257,20 +316,20 @@ impl UpstreamWarmupLoop {
         match result.outcome {
             WarmupResult::Success { cycle_key }
             | WarmupResult::WindowAlreadyActive { cycle_key } => {
-                self.write_cycle_success(upstream.id, cycle_key).await?;
+                self.write_cycle_success(upstream.id, candidate_cycle_key, cycle_key)
+                    .await
             }
             WarmupResult::RetryableTransient => {
                 self.schedule_backoff(upstream.id).await?;
-                self.release_warmup_lease(upstream.id).await;
+                Ok(FireOutcome::NeedsRelease)
             }
             WarmupResult::AbandonCyclePermanent(reason) => {
                 tracing::warn!(target: "warmup", upstream_id = %upstream.id, reason = reason.as_str(), action = "cycle_abandoned");
                 self.schedule_next_cycle(upstream.id, candidate_cycle_key)
                     .await?;
-                self.release_warmup_lease(upstream.id).await;
+                Ok(FireOutcome::NeedsRelease)
             }
         }
-        Ok(())
     }
 
     async fn dispatch_and_classify(
@@ -282,6 +341,14 @@ impl UpstreamWarmupLoop {
     ) -> Result<WarmupDispatchResult, WarmupLoopError> {
         let jitter_ms =
             self.warmup_jitter_ms(upstream.id, u64::try_from(candidate_cycle_key).unwrap_or(0));
+
+        if upstream.warmup_dialect_plugin.is_some() && self.runtime.is_none() {
+            tracing::warn!(target: "warmup", upstream_id = %upstream.id, holder = %self.replica_id, cycle_key = %candidate_cycle_key, action = "dispatch_start", reason = "dialect_runtime_unavailable");
+            return Ok(WarmupDispatchResult {
+                outcome: WarmupResult::AbandonCyclePermanent(WarmupAbandonReason::DialectPlugin),
+            });
+        }
+
         let dialect_runtime = upstream
             .warmup_dialect_plugin
             .as_ref()
@@ -312,10 +379,19 @@ impl UpstreamWarmupLoop {
                 Ok(Err(crate::warmup::dialect::WarmupDispatchError::MissingPlugin)) => {
                     // Fall through to the standard OAuth dispatch path below.
                 }
-                Ok(Err(_)) | Err(_) => {
-                    // Treat dialect plugin failures and timeouts as transient
-                    // per D1; the next tick will retry under backoff. No
-                    // cycle_abandoned event is emitted for transient failures.
+                Ok(Err(error)) => {
+                    if error.is_transient() {
+                        dispatch_outcome = Some((StatusCode::BAD_GATEWAY, Vec::new()));
+                    } else {
+                        tracing::warn!(target: "warmup", upstream_id = %upstream.id, holder = %self.replica_id, error = %error, action = "dispatch_result", outcome = "dialect_plugin_permanent");
+                        return Ok(WarmupDispatchResult {
+                            outcome: WarmupResult::AbandonCyclePermanent(
+                                WarmupAbandonReason::DialectPlugin,
+                            ),
+                        });
+                    }
+                }
+                Err(_) => {
                     dispatch_outcome = Some((StatusCode::BAD_GATEWAY, Vec::new()));
                 }
             }
@@ -398,26 +474,40 @@ impl UpstreamWarmupLoop {
     async fn write_cycle_success(
         &self,
         upstream_id: Uuid,
-        cycle_key: i64,
-    ) -> Result<(), WarmupLoopError> {
-        let next_cycle = cycle_key.saturating_add(FIVE_HOURS_SECS);
-        let jitter_ms = self.warmup_jitter_ms(upstream_id, u64::try_from(next_cycle).unwrap_or(0));
-        let next_warmup_at = schedule_for_cycle(next_cycle, jitter_ms)?;
+        candidate_cycle_key: i64,
+        response_cycle_key: i64,
+    ) -> Result<FireOutcome, WarmupLoopError> {
+        let schedule_anchor = if response_cycle_key > candidate_cycle_key {
+            response_cycle_key
+        } else {
+            candidate_cycle_key.saturating_add(FIVE_HOURS_SECS)
+        };
+        let jitter_ms =
+            self.warmup_jitter_ms(upstream_id, u64::try_from(schedule_anchor).unwrap_or(0));
+        let mut next_warmup_at = schedule_for_cycle(schedule_anchor, jitter_ms)?;
+        let now_secs = self.db_now_unix_secs().await?;
+        let min_next =
+            unix_secs_datetime(now_secs.saturating_add(WARMUP_NO_OBSERVATION_BACKOFF_SECS))?;
+        if next_warmup_at < min_next {
+            next_warmup_at = min_next;
+        }
         let written = self
             .stores
             .upstreams
             .write_warmup_cycle_key(
                 upstream_id,
                 &self.replica_id,
-                cycle_key,
+                candidate_cycle_key,
                 Some(next_warmup_at),
             )
             .await?;
         if written {
             self.reset_backoff(upstream_id);
-            tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %self.replica_id, cycle_key = %cycle_key, next_warmup_at = ?next_warmup_at, action = "cycle_key_written");
+            tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %self.replica_id, cycle_key = %candidate_cycle_key, response_cycle_key = %response_cycle_key, schedule_anchor = %schedule_anchor, next_warmup_at = ?next_warmup_at, action = "cycle_key_written");
+            Ok(FireOutcome::LeaseClearedByStorage)
+        } else {
+            Ok(FireOutcome::NeedsRelease)
         }
-        Ok(())
     }
 
     async fn schedule_backoff(&self, upstream_id: Uuid) -> Result<(), WarmupLoopError> {
@@ -444,7 +534,13 @@ impl UpstreamWarmupLoop {
     ) -> Result<(), WarmupLoopError> {
         let next_cycle = cycle_key.saturating_add(FIVE_HOURS_SECS);
         let jitter_ms = self.warmup_jitter_ms(upstream_id, u64::try_from(next_cycle).unwrap_or(0));
-        let next_warmup_at = schedule_for_cycle(next_cycle, jitter_ms)?;
+        let mut next_warmup_at = schedule_for_cycle(next_cycle, jitter_ms)?;
+        let now_secs = self.db_now_unix_secs().await?;
+        let min_next =
+            unix_secs_datetime(now_secs.saturating_add(WARMUP_NO_OBSERVATION_BACKOFF_SECS))?;
+        if next_warmup_at < min_next {
+            next_warmup_at = min_next;
+        }
         self.write_warmup_next_at(upstream_id, next_warmup_at)
             .await?;
         Ok(())
@@ -528,6 +624,12 @@ struct WarmupDispatchResult {
     outcome: WarmupResult,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum FireOutcome {
+    LeaseClearedByStorage,
+    NeedsRelease,
+}
+
 #[derive(Debug, thiserror::Error)]
 enum WarmupLoopError {
     #[error(transparent)]
@@ -551,15 +653,16 @@ enum WarmupLoopError {
 }
 
 fn warmup_due_candidate(record: &UpstreamRecord, now: DateTime<Utc>) -> bool {
-    // warmup costs real Anthropic budget per fire; usage polling is read-only - so warmup respects operator disable, polling does not.
+    // None next_warmup_at auto-heals enabled rows from pre-bootstrap releases.
     record.enabled
         && record.warmup_enabled
         && record.kind == UpstreamKind::AnthropicOauth
         && record.deleted_at_unix_secs.is_none()
+        && record.oauth_credentials.is_some()
         && record
             .next_warmup_at
             .as_ref()
-            .is_some_and(|next| *next <= now)
+            .is_none_or(|next| *next <= now)
 }
 
 fn decrypt_bundle(
@@ -608,4 +711,67 @@ fn warmup_http_client() -> WarmupHttpClient {
         .enable_http2()
         .build();
     Client::builder(TokioExecutor::new()).build(connector)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cc_lb_aead::EncryptedOAuthTokens;
+    use cc_lb_storage_api::upstream::UpstreamKind;
+
+    fn enabled_oauth_record() -> UpstreamRecord {
+        UpstreamRecord {
+            id: Uuid::new_v4(),
+            name: "test".to_owned(),
+            kind: UpstreamKind::AnthropicOauth,
+            base_url: None,
+            enabled: true,
+            oauth_credentials: Some(EncryptedOAuthTokens::from_ciphertext(vec![0; 16])),
+            api_key_ciphertext: None,
+            refresh_lease_holder: None,
+            refresh_lease_until_unix_secs: None,
+            last_apply_error: None,
+            last_apply_at_unix_secs: None,
+            deleted_at_unix_secs: None,
+            revision: 1,
+            created_at_unix_secs: 0,
+            updated_at_unix_secs: 0,
+            warmup_enabled: true,
+            next_warmup_at: None,
+            last_warmup_cycle_key: None,
+            warmup_lease_holder: None,
+            warmup_lease_until_unix_secs: None,
+            warmup_dialect_plugin: None,
+        }
+    }
+
+    #[test]
+    fn warmup_due_candidate_null_next_warmup_is_due_when_credentials_present() {
+        let record = enabled_oauth_record();
+        assert!(warmup_due_candidate(&record, Utc::now()));
+    }
+
+    #[test]
+    fn warmup_due_candidate_rejects_missing_oauth_credentials() {
+        let mut record = enabled_oauth_record();
+        record.oauth_credentials = None;
+        assert!(
+            !warmup_due_candidate(&record, Utc::now()),
+            "rows with no oauth_credentials must not be picked up"
+        );
+    }
+
+    #[test]
+    fn warmup_due_candidate_rejects_disabled() {
+        let mut record = enabled_oauth_record();
+        record.warmup_enabled = false;
+        assert!(!warmup_due_candidate(&record, Utc::now()));
+    }
+
+    #[test]
+    fn warmup_due_candidate_rejects_future_next_warmup() {
+        let mut record = enabled_oauth_record();
+        record.next_warmup_at = Some(Utc::now() + chrono::Duration::hours(1));
+        assert!(!warmup_due_candidate(&record, Utc::now()));
+    }
 }
