@@ -3,8 +3,10 @@ use std::{future::Future, sync::Arc};
 use anyhow::{Result, ensure};
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
-use cc_lb_storage_api::{
-    StorageError, UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStore, UpstreamUpdate,
+use cc_lb_storage_api::{StorageError, UpstreamStore};
+use cc_lb_storage_api::upstream::{
+    UpstreamCreate, UpstreamKind, UpstreamLeaseKind, UpstreamRecord, UpstreamStatusUpdate,
+    UpstreamUpdate,
 };
 use url::Url;
 use uuid::Uuid;
@@ -65,7 +67,14 @@ where
     complete_refresh_stores_tokens_and_clears_lease(Arc::clone(&backend)).await?;
     release_lease_on_failure_clears_lease(Arc::clone(&backend)).await?;
     set_last_apply_error_roundtrip(Arc::clone(&backend)).await?;
+    status_update_does_not_bump_spec_revision(Arc::clone(&backend)).await?;
+    lease_update_does_not_bump_spec_revision(Arc::clone(&backend)).await?;
+    secret_and_token_updates_do_not_bump_spec_revision(Arc::clone(&backend)).await?;
     soft_delete_sets_deleted_at(Arc::clone(&backend)).await?;
+    update_spec_on_soft_deleted_returns_not_found(Arc::clone(&backend)).await?;
+    set_status_on_soft_deleted_returns_not_found(Arc::clone(&backend)).await?;
+    secret_update_on_soft_deleted_returns_not_found(Arc::clone(&backend)).await?;
+    recreate_same_name_after_soft_delete_fails(Arc::clone(&backend)).await?;
     hard_delete_removes_row(Arc::clone(&backend)).await?;
     validate_identifier_rejects_bad_name(backend).await
 }
@@ -379,6 +388,120 @@ scenario!(set_last_apply_error_roundtrip, |store| async move {
     Ok(())
 });
 
+scenario!(status_update_does_not_bump_spec_revision, |store| async move {
+    let record = create_named(store.as_ref(), "upstream-status-stable").await?;
+    store
+        .set_status(
+            record.id,
+            UpstreamStatusUpdate {
+                last_apply_error: Some(Some("background".to_owned())),
+                last_apply_at_unix_secs: Some(Some(1_800_000_000)),
+                ..UpstreamStatusUpdate::default()
+            },
+        )
+        .await?;
+    let status_updated = store.get_by_id(record.id).await?.expect("record");
+    ensure!(
+        status_updated.revision == record.revision,
+        "status update should not bump spec revision"
+    );
+    let spec_updated = store
+        .update_spec(
+            record.id,
+            record.revision,
+            UpstreamUpdate {
+                base_url: Some(url("https://status-stable.example.com")?),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await?;
+    ensure!(
+        spec_updated.revision == record.revision + 1,
+        "spec update should still use original revision after status update"
+    );
+    Ok(())
+});
+
+scenario!(lease_update_does_not_bump_spec_revision, |store| async move {
+    let record = create_named(store.as_ref(), "upstream-lease-stable").await?;
+    let holder = "warmup-holder".to_owned();
+    ensure!(
+        store
+            .claim_lease(record.id, UpstreamLeaseKind::Warmup, holder.clone(), 60)
+            .await?,
+        "warmup lease claim should succeed"
+    );
+    ensure!(
+        store
+            .renew_lease(record.id, UpstreamLeaseKind::Warmup, holder.clone(), 60)
+            .await?,
+        "warmup lease renew should succeed"
+    );
+    ensure!(
+        store
+            .release_lease(record.id, UpstreamLeaseKind::Warmup, holder)
+            .await?,
+        "warmup lease release should succeed"
+    );
+    let lease_updated = store.get_by_id(record.id).await?.expect("record");
+    ensure!(
+        lease_updated.revision == record.revision,
+        "lease updates should not bump spec revision"
+    );
+    let spec_updated = store
+        .update_spec(
+            record.id,
+            record.revision,
+            UpstreamUpdate {
+                base_url: Some(url("https://lease-stable.example.com")?),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await?;
+    ensure!(
+        spec_updated.revision == record.revision + 1,
+        "spec update should still use original revision after lease updates"
+    );
+    Ok(())
+});
+
+scenario!(secret_and_token_updates_do_not_bump_spec_revision, |store| async move {
+    let record = create_named(store.as_ref(), "upstream-secret-token-stable").await?;
+    let secret_updated = store
+        .update_api_key_secret(record.id, Some(vec![9, 8, 7]))
+        .await?;
+    ensure!(
+        secret_updated.revision == record.revision,
+        "secret update should not bump spec revision"
+    );
+    let aead = AeadService::from_master_key([45; 32]);
+    let encrypted = EncryptedOAuthTokens::encrypt(
+        &aead,
+        &token_bundle("access-stable", "refresh-stable"),
+        record.id.as_bytes(),
+    )?;
+    let token_updated = store.update_oauth_token(record.id, encrypted).await?;
+    ensure!(
+        token_updated.revision == record.revision,
+        "token update should not bump spec revision"
+    );
+    let spec_updated = store
+        .update_spec(
+            record.id,
+            record.revision,
+            UpstreamUpdate {
+                base_url: Some(url("https://secret-token-stable.example.com")?),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await?;
+    ensure!(
+        spec_updated.revision == record.revision + 1,
+        "spec update should still use original revision after secret/token updates"
+    );
+    Ok(())
+});
+
 scenario!(soft_delete_sets_deleted_at, |store| async move {
     let record = create_named(store.as_ref(), "upstream-soft-delete").await?;
     store.soft_delete(record.id, record.revision).await?;
@@ -390,6 +513,97 @@ scenario!(soft_delete_sets_deleted_at, |store| async move {
     ensure!(
         deleted.revision == record.revision + 1,
         "soft delete should increment revision"
+    );
+    Ok(())
+});
+
+scenario!(update_spec_on_soft_deleted_returns_not_found, |store| async move {
+    let record = create_named(store.as_ref(), "upstream-spec-after-delete").await?;
+    store.soft_delete(record.id, record.revision).await?;
+    let deleted = store.get_by_id(record.id).await?.expect("record remains");
+    let error = store
+        .update_spec(
+            record.id,
+            deleted.revision,
+            UpstreamUpdate {
+                base_url: Some(url("https://example.com/after-delete")?),
+                ..UpstreamUpdate::default()
+            },
+        )
+        .await
+        .expect_err("spec update on soft-deleted upstream should fail");
+    ensure!(
+        matches!(error, StorageError::Conflict { .. }),
+        "expected conflict/not-found error, got {error:?}"
+    );
+    let still_deleted = store.get_by_id(record.id).await?.expect("record remains");
+    ensure!(
+        still_deleted.revision == deleted.revision,
+        "spec_revision should not advance on soft-deleted upstream"
+    );
+    Ok(())
+});
+
+scenario!(set_status_on_soft_deleted_returns_not_found, |store| async move {
+    let record = create_named(store.as_ref(), "upstream-status-after-delete").await?;
+    store.soft_delete(record.id, record.revision).await?;
+    let error = store
+        .set_status(
+            record.id,
+            UpstreamStatusUpdate {
+                last_apply_error: Some(Some("bg-after-delete".to_owned())),
+                ..UpstreamStatusUpdate::default()
+            },
+        )
+        .await
+        .expect_err("status update on soft-deleted upstream should fail");
+    ensure!(
+        matches!(error, StorageError::Conflict { .. }),
+        "expected conflict/not-found error, got {error:?}"
+    );
+    let after = store.get_by_id(record.id).await?.expect("record remains");
+    ensure!(
+        after.last_apply_error.is_none(),
+        "background status write must not land on soft-deleted upstream"
+    );
+    Ok(())
+});
+
+scenario!(secret_update_on_soft_deleted_returns_not_found, |store| async move {
+    let record = create_named(store.as_ref(), "upstream-secret-after-delete").await?;
+    store.soft_delete(record.id, record.revision).await?;
+    let error = store
+        .update_api_key_secret(record.id, Some(vec![9, 9, 9]))
+        .await
+        .expect_err("secret update on soft-deleted upstream should fail");
+    ensure!(
+        matches!(error, StorageError::Conflict { .. }),
+        "expected conflict/not-found error, got {error:?}"
+    );
+    Ok(())
+});
+
+scenario!(recreate_same_name_after_soft_delete_fails, |store| async move {
+    let record = create_named(store.as_ref(), "upstream-name-reservation").await?;
+    store.soft_delete(record.id, record.revision).await?;
+    let error = store
+        .create(UpstreamCreate {
+            name: "upstream-name-reservation".to_owned(),
+            kind: UpstreamKind::AnthropicOauth,
+            base_url: None,
+            api_key_ciphertext: None,
+            warmup_enabled: false,
+            next_warmup_at: None,
+            last_warmup_cycle_key: None,
+            warmup_lease_holder: None,
+            warmup_lease_until_unix_secs: None,
+            warmup_dialect_plugin: None,
+        })
+        .await
+        .expect_err("creating upstream with reserved name should fail");
+    ensure!(
+        matches!(error, StorageError::Conflict { .. }),
+        "expected conflict error, got {error:?}"
     );
     Ok(())
 });

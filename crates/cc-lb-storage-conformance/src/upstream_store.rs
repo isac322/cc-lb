@@ -3,6 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
+use cc_lb_storage_api::upstream::{UpstreamLeaseKind, UpstreamStatusUpdate};
 use cc_lb_storage_api::{
     StorageError, StorageResult, UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStore,
     UpstreamUpdate, validate_identifier,
@@ -46,7 +47,7 @@ impl UpstreamStore for MemoryUpstreamStore {
             last_warmup_cycle_key: create.last_warmup_cycle_key,
             warmup_lease_holder: create.warmup_lease_holder,
             warmup_lease_until_unix_secs: create.warmup_lease_until_unix_secs,
-            warmup_dialect_plugin: None,
+            warmup_dialect_plugin: create.warmup_dialect_plugin,
         };
         records.push(record.clone());
         Ok(record)
@@ -109,6 +110,9 @@ impl UpstreamStore for MemoryUpstreamStore {
             if let Some(base_url) = update.base_url {
                 record.base_url = Some(base_url);
             }
+            if let Some(enabled) = update.enabled {
+                record.enabled = enabled;
+            }
             if let Some(api_key_ciphertext) = update.api_key_ciphertext {
                 record.api_key_ciphertext = Some(api_key_ciphertext);
             }
@@ -126,6 +130,9 @@ impl UpstreamStore for MemoryUpstreamStore {
             }
             if let Some(warmup_lease_until_unix_secs) = update.warmup_lease_until_unix_secs {
                 record.warmup_lease_until_unix_secs = Some(warmup_lease_until_unix_secs);
+            }
+            if let Some(warmup_dialect_plugin) = update.warmup_dialect_plugin {
+                record.warmup_dialect_plugin = Some(warmup_dialect_plugin);
             }
             Ok(())
         })
@@ -145,17 +152,224 @@ impl UpstreamStore for MemoryUpstreamStore {
         .await
     }
 
+    async fn update_spec(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+        update: UpstreamUpdate,
+    ) -> StorageResult<UpstreamRecord> {
+        if let Some(name) = update.name.as_deref() {
+            validate_identifier("upstream.name", name)?;
+        }
+        self.mutate(id, Some(expected_revision), |record| {
+            if let Some(name) = update.name {
+                record.name = name;
+            }
+            if let Some(base_url) = update.base_url {
+                record.base_url = Some(base_url);
+            }
+            if let Some(enabled) = update.enabled {
+                record.enabled = enabled;
+            }
+            if let Some(warmup_enabled) = update.warmup_enabled {
+                record.warmup_enabled = warmup_enabled;
+            }
+            if let Some(warmup_dialect_plugin) = update.warmup_dialect_plugin {
+                record.warmup_dialect_plugin = Some(warmup_dialect_plugin);
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn update_api_key_secret(
+        &self,
+        id: Uuid,
+        api_key_ciphertext: Option<Vec<u8>>,
+    ) -> StorageResult<UpstreamRecord> {
+        self.mutate_without_revision(id, |record| {
+            record.api_key_ciphertext = api_key_ciphertext;
+            Ok(())
+        })
+        .await
+    }
+
+    async fn update_oauth_token(
+        &self,
+        id: Uuid,
+        tokens: EncryptedOAuthTokens,
+    ) -> StorageResult<UpstreamRecord> {
+        self.mutate_without_revision(id, |record| {
+            record.oauth_credentials = Some(tokens);
+            Ok(())
+        })
+        .await
+    }
+
+    async fn set_status(&self, id: Uuid, status: UpstreamStatusUpdate) -> StorageResult<()> {
+        self.mutate_without_revision(id, |record| {
+            if let Some(value) = status.last_apply_error {
+                record.last_apply_error = value;
+            }
+            if let Some(value) = status.last_apply_at_unix_secs {
+                record.last_apply_at_unix_secs = value;
+            }
+            if let Some(value) = status.next_warmup_at {
+                record.next_warmup_at = value;
+            }
+            if let Some(value) = status.last_warmup_cycle_key {
+                record.last_warmup_cycle_key = value;
+            }
+            Ok(())
+        })
+        .await?;
+        Ok(())
+    }
+
+    async fn claim_lease(
+        &self,
+        id: Uuid,
+        lease_kind: UpstreamLeaseKind,
+        holder: String,
+        ttl_secs: i64,
+    ) -> StorageResult<bool> {
+        let now_i64 = now_unix_secs_i64()?;
+        let now_u64 = u64::try_from(now_i64).map_err(|_| fatal("current unix timestamp is negative"))?;
+        let until_i64 = now_i64.saturating_add(ttl_secs);
+        let until_u64 = u64::try_from(until_i64).map_err(|_| {
+            StorageError::InvalidInput {
+                field: "ttl_secs".to_owned(),
+                reason: "refresh lease expiry cannot be represented as u64".to_owned(),
+            }
+        })?;
+        let mut records = self.records.lock().await;
+        let Some(record) = records.iter_mut().find(|record| record.id == id) else {
+            return Ok(false);
+        };
+        if record.deleted_at_unix_secs.is_some() {
+            return Ok(false);
+        }
+        match lease_kind {
+            UpstreamLeaseKind::Refresh => {
+                let holder_id = Uuid::parse_str(&holder).map_err(|error| StorageError::InvalidInput {
+                    field: "holder".to_owned(),
+                    reason: error.to_string(),
+                })?;
+                if record
+                    .refresh_lease_until_unix_secs
+                    .is_some_and(|until| until > now_u64)
+                    && record.refresh_lease_holder != Some(holder_id)
+                {
+                    return Ok(false);
+                }
+                record.refresh_lease_holder = Some(holder_id);
+                record.refresh_lease_until_unix_secs = Some(until_u64);
+            }
+            UpstreamLeaseKind::Warmup => {
+                if record
+                    .warmup_lease_until_unix_secs
+                    .is_some_and(|until| until > now_i64)
+                    && record.warmup_lease_holder.as_deref() != Some(holder.as_str())
+                {
+                    return Ok(false);
+                }
+                record.warmup_lease_holder = Some(holder);
+                record.warmup_lease_until_unix_secs = Some(until_i64);
+            }
+        }
+        Ok(true)
+    }
+
+    async fn renew_lease(
+        &self,
+        id: Uuid,
+        lease_kind: UpstreamLeaseKind,
+        holder: String,
+        ttl_secs: i64,
+    ) -> StorageResult<bool> {
+        let now_i64 = now_unix_secs_i64()?;
+        let now_u64 = u64::try_from(now_i64).map_err(|_| fatal("current unix timestamp is negative"))?;
+        let until_i64 = now_i64.saturating_add(ttl_secs);
+        let until_u64 = u64::try_from(until_i64).map_err(|_| {
+            StorageError::InvalidInput {
+                field: "ttl_secs".to_owned(),
+                reason: "refresh lease expiry cannot be represented as u64".to_owned(),
+            }
+        })?;
+        let mut records = self.records.lock().await;
+        let Some(record) = records.iter_mut().find(|record| record.id == id) else {
+            return Ok(false);
+        };
+        match lease_kind {
+            UpstreamLeaseKind::Refresh => {
+                let holder_id = Uuid::parse_str(&holder).map_err(|error| StorageError::InvalidInput {
+                    field: "holder".to_owned(),
+                    reason: error.to_string(),
+                })?;
+                if record.refresh_lease_holder != Some(holder_id)
+                    || record
+                        .refresh_lease_until_unix_secs
+                        .is_none_or(|until| until <= now_u64)
+                {
+                    return Ok(false);
+                }
+                record.refresh_lease_until_unix_secs = Some(until_u64);
+            }
+            UpstreamLeaseKind::Warmup => {
+                if record.warmup_lease_holder.as_deref() != Some(holder.as_str())
+                    || record
+                        .warmup_lease_until_unix_secs
+                        .is_none_or(|until| until <= now_i64)
+                {
+                    return Ok(false);
+                }
+                record.warmup_lease_until_unix_secs = Some(until_i64);
+            }
+        }
+        Ok(true)
+    }
+
+    async fn release_lease(
+        &self,
+        id: Uuid,
+        lease_kind: UpstreamLeaseKind,
+        holder: String,
+    ) -> StorageResult<bool> {
+        let mut records = self.records.lock().await;
+        let Some(record) = records.iter_mut().find(|record| record.id == id) else {
+            return Ok(false);
+        };
+        match lease_kind {
+            UpstreamLeaseKind::Refresh => {
+                let holder_id = Uuid::parse_str(&holder).map_err(|error| StorageError::InvalidInput {
+                    field: "holder".to_owned(),
+                    reason: error.to_string(),
+                })?;
+                if record.refresh_lease_holder != Some(holder_id) {
+                    return Ok(false);
+                }
+                record.refresh_lease_holder = None;
+                record.refresh_lease_until_unix_secs = None;
+            }
+            UpstreamLeaseKind::Warmup => {
+                if record.warmup_lease_holder.as_deref() != Some(holder.as_str()) {
+                    return Ok(false);
+                }
+                record.warmup_lease_holder = None;
+                record.warmup_lease_until_unix_secs = None;
+            }
+        }
+        Ok(true)
+    }
+
     async fn store_oauth_tokens(
         &self,
         id: Uuid,
         expected_revision: u64,
         tokens: EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord> {
-        self.mutate(id, Some(expected_revision), |record| {
-            record.oauth_credentials = Some(tokens);
-            Ok(())
-        })
-        .await
+        self.ensure_revision(id, expected_revision).await?;
+        self.update_oauth_token(id, tokens).await
     }
 
     async fn claim_refresh_lease(
@@ -164,22 +378,12 @@ impl UpstreamStore for MemoryUpstreamStore {
         holder: Uuid,
         ttl_secs: u64,
     ) -> StorageResult<bool> {
-        let now = now_unix_secs();
-        let mut claimed = false;
-        self.mutate(id, None, |record| {
-            let expired = record
-                .refresh_lease_until_unix_secs
-                .map(|lease_until| lease_until <= now)
-                .unwrap_or(true);
-            if expired || record.refresh_lease_holder == Some(holder) {
-                record.refresh_lease_holder = Some(holder);
-                record.refresh_lease_until_unix_secs = Some(now.saturating_add(ttl_secs));
-                claimed = true;
-            }
-            Ok(())
-        })
-        .await?;
-        Ok(claimed)
+        let ttl_secs = i64::try_from(ttl_secs).map_err(|_| StorageError::InvalidInput {
+            field: "ttl_secs".to_owned(),
+            reason: "refresh lease ttl cannot be represented as i64".to_owned(),
+        })?;
+        self.claim_lease(id, UpstreamLeaseKind::Refresh, holder.to_string(), ttl_secs)
+            .await
     }
 
     async fn complete_refresh(
@@ -188,16 +392,24 @@ impl UpstreamStore for MemoryUpstreamStore {
         holder: Uuid,
         tokens: EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord> {
-        self.mutate(id, None, |record| {
-            if record.refresh_lease_holder != Some(holder) {
-                return Err(conflict("holder mismatch"));
-            }
-            record.oauth_credentials = Some(tokens);
-            record.refresh_lease_holder = None;
-            record.refresh_lease_until_unix_secs = None;
-            Ok(())
-        })
-        .await
+        if !self
+            .release_lease(id, UpstreamLeaseKind::Refresh, holder.to_string())
+            .await?
+        {
+            return Err(conflict("holder mismatch"));
+        }
+        self.update_oauth_token(id, tokens).await?;
+        self.set_status(
+            id,
+            UpstreamStatusUpdate {
+                last_apply_error: Some(None),
+                ..UpstreamStatusUpdate::default()
+            },
+        )
+        .await?;
+        self.get_by_id(id)
+            .await?
+            .ok_or_else(|| conflict("upstream not found"))
     }
 
     async fn release_lease_on_failure(
@@ -206,28 +418,34 @@ impl UpstreamStore for MemoryUpstreamStore {
         holder: Uuid,
         reason: String,
     ) -> StorageResult<()> {
-        self.mutate(id, None, |record| {
-            if record.refresh_lease_holder != Some(holder) {
-                return Err(conflict("holder mismatch"));
-            }
-            record.last_apply_error = Some(reason);
-            record.last_apply_at_unix_secs = Some(now_unix_secs());
-            record.refresh_lease_holder = None;
-            record.refresh_lease_until_unix_secs = None;
-            Ok(())
-        })
+        if !self
+            .release_lease(id, UpstreamLeaseKind::Refresh, holder.to_string())
+            .await?
+        {
+            return Err(conflict("holder mismatch"));
+        }
+        self.set_status(
+            id,
+            UpstreamStatusUpdate {
+                last_apply_error: Some(Some(reason)),
+                last_apply_at_unix_secs: Some(Some(now_unix_secs())),
+                ..UpstreamStatusUpdate::default()
+            },
+        )
         .await?;
         Ok(())
     }
 
     async fn set_last_apply_error(&self, id: Uuid, error: Option<String>) -> StorageResult<()> {
-        self.mutate(id, None, |record| {
-            record.last_apply_error = error;
-            record.last_apply_at_unix_secs = Some(now_unix_secs());
-            Ok(())
-        })
-        .await?;
-        Ok(())
+        self.set_status(
+            id,
+            UpstreamStatusUpdate {
+                last_apply_error: Some(error),
+                last_apply_at_unix_secs: Some(Some(now_unix_secs())),
+                ..UpstreamStatusUpdate::default()
+            },
+        )
+        .await
     }
 
     async fn soft_delete(&self, id: Uuid, expected_revision: u64) -> StorageResult<()> {
@@ -250,23 +468,8 @@ impl UpstreamStore for MemoryUpstreamStore {
         holder: &str,
         ttl_secs: i64,
     ) -> StorageResult<bool> {
-        let now = i64::try_from(now_unix_secs()).unwrap_or(i64::MAX);
-        let mut records = self.records.lock().await;
-        let Some(record) = records.iter_mut().find(|record| record.id == id) else {
-            return Ok(false);
-        };
-        if record
-            .warmup_lease_until_unix_secs
-            .is_some_and(|until| until > now)
-            && record.warmup_lease_holder.as_deref() != Some(holder)
-        {
-            return Ok(false);
-        }
-        record.warmup_lease_holder = Some(holder.to_owned());
-        record.warmup_lease_until_unix_secs = Some(now.saturating_add(ttl_secs));
-        record.revision += 1;
-        record.updated_at_unix_secs = now_unix_secs();
-        Ok(true)
+        self.claim_lease(id, UpstreamLeaseKind::Warmup, holder.to_owned(), ttl_secs)
+            .await
     }
 
     async fn write_warmup_cycle_key(
@@ -276,7 +479,7 @@ impl UpstreamStore for MemoryUpstreamStore {
         new_cycle_key: i64,
         next_warmup_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> StorageResult<bool> {
-        let now = i64::try_from(now_unix_secs()).unwrap_or(i64::MAX);
+        let now = now_unix_secs_i64()?;
         let mut records = self.records.lock().await;
         let Some(record) = records.iter_mut().find(|record| record.id == id) else {
             return Ok(false);
@@ -294,25 +497,52 @@ impl UpstreamStore for MemoryUpstreamStore {
         record.next_warmup_at = next_warmup_at;
         record.warmup_lease_holder = None;
         record.warmup_lease_until_unix_secs = None;
-        record.revision += 1;
-        record.updated_at_unix_secs = now_unix_secs();
         Ok(true)
     }
 
     async fn release_warmup_lease(&self, id: Uuid, holder: &str) -> StorageResult<bool> {
+        self.release_lease(id, UpstreamLeaseKind::Warmup, holder.to_owned())
+            .await
+    }
+
+    async fn clear_warmup_dialect_plugin(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+    ) -> StorageResult<Option<UpstreamRecord>> {
+        let mut records = self.records.lock().await;
+        let Some(record) = records.iter_mut().find(|record| record.id == id) else {
+            return Ok(None);
+        };
+        if record.deleted_at_unix_secs.is_some() || record.revision != expected_revision {
+            return Ok(None);
+        }
+        record.warmup_dialect_plugin = None;
+        record.revision += 1;
+        record.updated_at_unix_secs = now_unix_secs();
+        Ok(Some(record.clone()))
+    }
+
+    async fn write_warmup_next_at(
+        &self,
+        id: Uuid,
+        holder: &str,
+        next_warmup_at: chrono::DateTime<chrono::Utc>,
+    ) -> StorageResult<bool> {
+        let now = now_unix_secs_i64()?;
         let mut records = self.records.lock().await;
         let Some(record) = records.iter_mut().find(|record| record.id == id) else {
             return Ok(false);
         };
         if record.deleted_at_unix_secs.is_some()
             || record.warmup_lease_holder.as_deref() != Some(holder)
+            || record
+                .warmup_lease_until_unix_secs
+                .is_none_or(|until| until <= now)
         {
             return Ok(false);
         }
-        record.warmup_lease_holder = None;
-        record.warmup_lease_until_unix_secs = None;
-        record.revision += 1;
-        record.updated_at_unix_secs = now_unix_secs();
+        record.next_warmup_at = Some(next_warmup_at);
         Ok(true)
     }
 }
@@ -347,6 +577,35 @@ impl MemoryUpstreamStore {
         record.revision += 1;
         record.updated_at_unix_secs = now_unix_secs();
         Ok(record.clone())
+    }
+
+    async fn mutate_without_revision<F>(
+        &self,
+        id: Uuid,
+        mutate: F,
+    ) -> StorageResult<UpstreamRecord>
+    where
+        F: FnOnce(&mut UpstreamRecord) -> StorageResult<()>,
+    {
+        let mut records = self.records.lock().await;
+        let record = records
+            .iter_mut()
+            .find(|record| record.id == id)
+            .ok_or_else(|| conflict("upstream not found"))?;
+        mutate(record)?;
+        Ok(record.clone())
+    }
+
+    async fn ensure_revision(&self, id: Uuid, expected_revision: u64) -> StorageResult<()> {
+        let records = self.records.lock().await;
+        let record = records
+            .iter()
+            .find(|record| record.id == id)
+            .ok_or_else(|| conflict("upstream not found"))?;
+        if record.revision != expected_revision {
+            return Err(conflict("stale upstream revision"));
+        }
+        Ok(())
     }
 }
 
@@ -675,9 +934,19 @@ fn conflict(message: impl Into<String>) -> StorageError {
     }
 }
 
+fn fatal(message: impl Into<String>) -> StorageError {
+    StorageError::Fatal {
+        message: message.into(),
+    }
+}
+
 fn now_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
+}
+
+fn now_unix_secs_i64() -> StorageResult<i64> {
+    i64::try_from(now_unix_secs()).map_err(|_| fatal("current unix timestamp cannot be represented as i64"))
 }

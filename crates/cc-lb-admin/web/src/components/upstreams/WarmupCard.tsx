@@ -165,13 +165,13 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
   useEffect(() => {
     setStaleRevisionVisible(false);
     setRevisionOverride(null);
-  }, [upstream.revision]);
+  }, [upstream.spec_revision]);
 
   const handleToggle = () => {
     updateSettings.mutate(
       {
         id: upstream.id,
-        revision: revisionOverride ?? upstream.revision,
+        spec_revision: revisionOverride ?? upstream.spec_revision,
         body: { warmup_enabled: !upstream.warmup_enabled },
       },
       {
@@ -210,7 +210,7 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
     updateSettings.mutate(
       {
         id: upstream.id,
-        revision: revisionOverride ?? upstream.revision,
+        spec_revision: revisionOverride ?? upstream.spec_revision,
         body: {
           warmup_dialect_plugin: {
             wasm_registry_id: val,
@@ -242,7 +242,7 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
 
   const handleClearPlugin = () => {
     clearPlugin.mutate(
-      { id: upstream.id, revision: revisionOverride ?? upstream.revision },
+      { id: upstream.id, spec_revision: revisionOverride ?? upstream.spec_revision },
       {
         onSuccess: () => {
           setPendingPluginValue(null);
@@ -390,8 +390,8 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
                   {COPY.nextWarmupLabel}
                 </div>
                 <div className="text-text" data-testid="warmup-next">
-                  {upstream.next_warmup_at ? (
-                    <NextWarmupDisplay value={upstream.next_warmup_at} />
+                  {upstream.status.next_warmup_at ? (
+                    <NextWarmupDisplay value={upstream.status.next_warmup_at} />
                   ) : (
                     <span className="text-text-muted">{COPY.nextNull}</span>
                   )}
@@ -403,9 +403,9 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
                   {COPY.lastCycleLabel}
                 </div>
                 <div className="text-text" data-testid="warmup-last">
-                  {upstream.last_warmup_cycle_key ? (
+                  {upstream.status.last_warmup_cycle_key ? (
                     <LastCycleDisplay
-                      cycleKeyUnixSecs={upstream.last_warmup_cycle_key}
+                      cycleKeyUnixSecs={upstream.status.last_warmup_cycle_key}
                     />
                   ) : (
                     <span className="text-text-muted">{COPY.lastNull}</span>

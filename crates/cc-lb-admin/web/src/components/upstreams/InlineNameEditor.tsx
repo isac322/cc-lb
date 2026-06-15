@@ -39,7 +39,7 @@ export function InlineNameEditor({ upstream, className }: Props) {
       {
         id: upstream.id,
         body: { name: trimmedNewName },
-        revision: upstream.revision,
+        spec_revision: upstream.spec_revision,
       },
       {
         onSuccess: () => {

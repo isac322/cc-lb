@@ -226,7 +226,7 @@ describe('WarmupCard', () => {
     expect(nextEl.textContent).toMatch(/^in \d/);
     expect(nextEl.textContent).not.toMatch(/Warms/);
     expect(formatRelativeUnixSeconds).toHaveBeenCalledWith(
-      upstream.last_warmup_cycle_key,
+      upstream.status.last_warmup_cycle_key,
     );
     const formattedLast = vi.mocked(formatRelativeUnixSeconds).mock.results[0]
       ?.value as Date;

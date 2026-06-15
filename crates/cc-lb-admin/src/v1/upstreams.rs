@@ -136,9 +136,16 @@ struct UpstreamResponse {
     enabled: bool,
     warmup_enabled: bool,
     warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
+    spec_revision: u64,
+    status: UpstreamStatusResponse,
+}
+
+#[derive(Debug, Serialize)]
+struct UpstreamStatusResponse {
+    last_apply_error: Option<String>,
+    last_apply_at_unix_secs: Option<u64>,
     next_warmup_at: Option<DateTime<Utc>>,
     last_warmup_cycle_key: Option<i64>,
-    revision: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -940,6 +947,7 @@ async fn update_upstream(
             name: body.name,
             base_url: body.base_url,
             api_key_ciphertext,
+            enabled: None,
             warmup_enabled: body.warmup_enabled,
             warmup_dialect_plugin: body.warmup_dialect_plugin,
             next_warmup_at: bootstrap_next_warmup_at,
@@ -1220,9 +1228,13 @@ fn upstream_response(record: &UpstreamRecord) -> UpstreamResponse {
         enabled: record.enabled,
         warmup_enabled: record.warmup_enabled,
         warmup_dialect_plugin: record.warmup_dialect_plugin.clone(),
-        next_warmup_at: record.next_warmup_at,
-        last_warmup_cycle_key: record.last_warmup_cycle_key,
-        revision: record.revision,
+        spec_revision: record.revision,
+        status: UpstreamStatusResponse {
+            last_apply_error: record.last_apply_error.clone(),
+            last_apply_at_unix_secs: record.last_apply_at_unix_secs,
+            next_warmup_at: record.next_warmup_at,
+            last_warmup_cycle_key: record.last_warmup_cycle_key,
+        },
     }
 }
 

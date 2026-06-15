@@ -16,7 +16,7 @@ import {
 } from '../../test-utils/warmup-fixtures';
 
 const UPSTREAM_ID = 'oauth-1';
-const REVISION = 7;
+const SPEC_REVISION = 7;
 
 function makeClient() {
   return new QueryClient({
@@ -160,7 +160,7 @@ describe('useClearUpstreamWarmupDialectPlugin', () => {
   test('sends DELETE with If-Match revision header', async () => {
     const updatedUpstream = makeOauthUpstream({
       id: UPSTREAM_ID,
-      revision: REVISION + 1,
+      spec_revision: SPEC_REVISION + 1,
       warmup_dialect_plugin: null,
     });
     const fetchMock = stubFetchOnce(updatedUpstream);
@@ -169,7 +169,7 @@ describe('useClearUpstreamWarmupDialectPlugin', () => {
       wrapper: makeWrapper(client),
     });
 
-    await result.current.mutateAsync({ id: UPSTREAM_ID, revision: REVISION });
+    await result.current.mutateAsync({ id: UPSTREAM_ID, spec_revision: SPEC_REVISION });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const { url, init } = requestFrom(fetchMock);
@@ -177,13 +177,13 @@ describe('useClearUpstreamWarmupDialectPlugin', () => {
       `/admin/v1/upstreams/${UPSTREAM_ID}/warmup-dialect-plugin`,
     );
     expect(init?.method).toBe('DELETE');
-    expect(headersFrom(init).get('If-Match')).toBe(`W/"${REVISION}"`);
+    expect(headersFrom(init).get('If-Match')).toBe(`W/"${SPEC_REVISION}"`);
   });
 
   test('returns updated upstream and invalidates upstream detail before list', async () => {
     const updatedUpstream = makeOauthUpstream({
       id: UPSTREAM_ID,
-      revision: REVISION + 1,
+      spec_revision: SPEC_REVISION + 1,
       warmup_dialect_plugin: null,
     });
     stubFetchOnce(updatedUpstream);
@@ -194,7 +194,7 @@ describe('useClearUpstreamWarmupDialectPlugin', () => {
     });
 
     await expect(
-      result.current.mutateAsync({ id: UPSTREAM_ID, revision: REVISION }),
+      result.current.mutateAsync({ id: UPSTREAM_ID, spec_revision: SPEC_REVISION }),
     ).resolves.toEqual(updatedUpstream);
 
     expect(invalidateSpy.mock.calls.map(([arg]) => arg?.queryKey)).toEqual([
@@ -216,7 +216,7 @@ describe('useUpdateUpstreamWarmupSettings', () => {
     };
     const updatedUpstream = makeOauthUpstream({
       id: UPSTREAM_ID,
-      revision: REVISION + 1,
+      spec_revision: SPEC_REVISION + 1,
       ...patch,
     });
     const fetchMock = stubFetchOnce(updatedUpstream);
@@ -227,7 +227,7 @@ describe('useUpdateUpstreamWarmupSettings', () => {
 
     await result.current.mutateAsync({
       id: UPSTREAM_ID,
-      revision: REVISION,
+      spec_revision: SPEC_REVISION,
       body: patch,
     });
 
@@ -235,7 +235,7 @@ describe('useUpdateUpstreamWarmupSettings', () => {
     const { url, init } = requestFrom(fetchMock);
     expect(url).toBe(`/admin/v1/upstreams/${UPSTREAM_ID}`);
     expect(init?.method).toBe('PATCH');
-    expect(headersFrom(init).get('If-Match')).toBe(`W/"${REVISION}"`);
+    expect(headersFrom(init).get('If-Match')).toBe(`W/"${SPEC_REVISION}"`);
     expect(init?.body).toBe(JSON.stringify(patch));
   });
 
@@ -243,7 +243,7 @@ describe('useUpdateUpstreamWarmupSettings', () => {
     const patch = { warmup_enabled: false };
     const updatedUpstream = makeOauthUpstream({
       id: UPSTREAM_ID,
-      revision: REVISION + 1,
+      spec_revision: SPEC_REVISION + 1,
       ...patch,
     });
     stubFetchOnce(updatedUpstream);
@@ -256,7 +256,7 @@ describe('useUpdateUpstreamWarmupSettings', () => {
     await expect(
       result.current.mutateAsync({
         id: UPSTREAM_ID,
-        revision: REVISION,
+        spec_revision: SPEC_REVISION,
         body: patch,
       }),
     ).resolves.toEqual(updatedUpstream);

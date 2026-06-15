@@ -4,15 +4,16 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{
     MAX_WASM_BLOB_BYTES, PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput,
     PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, StorageError as ApiStorageError,
-    StorageResult, UpstreamRecord, WasmBlob, WasmBlobRecord, WasmRegistryEntry,
-    WasmRegistryEntryInput, sparse_order, validate_identifier,
+    StorageResult, WasmBlob, WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput,
+    sparse_order, validate_identifier,
 };
+use cc_lb_storage_api::upstream::UpstreamWarmupDialectPlugin;
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use crate::{
-    PLUGIN_CHAINS_V2, PRINCIPALS_V2, RedbStorage, StorageError, UPSTREAMS_V2, WASM_BLOBS_V2,
+    PLUGIN_CHAINS_V2, PRINCIPALS_V2, RedbStorage, StorageError, UPSTREAM_SPEC_V1, WASM_BLOBS_V2,
     WASM_REGISTRY_V2,
 };
 
@@ -882,10 +883,16 @@ fn registry_is_referenced_by_warmup_dialect(
     write_txn: &redb::WriteTransaction,
     registry_id: Uuid,
 ) -> Result<Option<Uuid>, StorageError> {
-    let upstreams = write_txn.open_table(UPSTREAMS_V2)?;
+    #[derive(Deserialize)]
+    struct SpecSlim {
+        id: Uuid,
+        warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
+        deleted_at_unix_secs: Option<u64>,
+    }
+    let upstreams = write_txn.open_table(UPSTREAM_SPEC_V1)?;
     for row in upstreams.iter()? {
         let (_, value) = row?;
-        let entry: UpstreamRecord = serde_json::from_slice(value.value())?;
+        let entry: SpecSlim = serde_json::from_slice(value.value())?;
         if entry.deleted_at_unix_secs.is_some() {
             continue;
         }
