@@ -169,7 +169,10 @@ describe('useClearUpstreamWarmupDialectPlugin', () => {
       wrapper: makeWrapper(client),
     });
 
-    await result.current.mutateAsync({ id: UPSTREAM_ID, spec_revision: SPEC_REVISION });
+    await result.current.mutateAsync({
+      id: UPSTREAM_ID,
+      spec_revision: SPEC_REVISION,
+    });
 
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const { url, init } = requestFrom(fetchMock);
@@ -194,7 +197,10 @@ describe('useClearUpstreamWarmupDialectPlugin', () => {
     });
 
     await expect(
-      result.current.mutateAsync({ id: UPSTREAM_ID, spec_revision: SPEC_REVISION }),
+      result.current.mutateAsync({
+        id: UPSTREAM_ID,
+        spec_revision: SPEC_REVISION,
+      }),
     ).resolves.toEqual(updatedUpstream);
 
     expect(invalidateSpy.mock.calls.map(([arg]) => arg?.queryKey)).toEqual([

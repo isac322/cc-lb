@@ -610,8 +610,13 @@ export function useCreateUpstream() {
 export function useDeleteUpstream() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, spec_revision }: { id: string; spec_revision: number }) =>
-      deleteJson(`/admin/v1/upstreams/${id}`, { ifMatch: spec_revision }),
+    mutationFn: ({
+      id,
+      spec_revision,
+    }: {
+      id: string;
+      spec_revision: number;
+    }) => deleteJson(`/admin/v1/upstreams/${id}`, { ifMatch: spec_revision }),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.upstreams }),
   });
 }
@@ -723,7 +728,13 @@ export function useClearUpstreamWarmupDialectPlugin() {
   const qc = useQueryClient();
   return useMutation({
     mutationKey: ['upstreams', 'clear-warmup-dialect-plugin'],
-    mutationFn: ({ id, spec_revision }: { id: string; spec_revision: number }) =>
+    mutationFn: ({
+      id,
+      spec_revision,
+    }: {
+      id: string;
+      spec_revision: number;
+    }) =>
       deleteJson<Upstream>(`/admin/v1/upstreams/${id}/warmup-dialect-plugin`, {
         ifMatch: spec_revision,
       }),

@@ -242,7 +242,10 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
 
   const handleClearPlugin = () => {
     clearPlugin.mutate(
-      { id: upstream.id, spec_revision: revisionOverride ?? upstream.spec_revision },
+      {
+        id: upstream.id,
+        spec_revision: revisionOverride ?? upstream.spec_revision,
+      },
       {
         onSuccess: () => {
           setPendingPluginValue(null);

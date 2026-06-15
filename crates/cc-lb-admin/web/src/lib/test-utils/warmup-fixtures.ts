@@ -38,7 +38,9 @@ function mergeUpstreamOverrides(
   };
 }
 
-export function makeOauthUpstream(overrides?: UpstreamFixtureOverrides): Upstream {
+export function makeOauthUpstream(
+  overrides?: UpstreamFixtureOverrides,
+): Upstream {
   return mergeUpstreamOverrides(
     {
       id: 'oauth-1',
@@ -59,7 +61,9 @@ export function makeOauthUpstream(overrides?: UpstreamFixtureOverrides): Upstrea
   );
 }
 
-export function makeApiKeyUpstream(overrides?: UpstreamFixtureOverrides): Upstream {
+export function makeApiKeyUpstream(
+  overrides?: UpstreamFixtureOverrides,
+): Upstream {
   return mergeUpstreamOverrides(
     {
       id: 'api-key-1',
