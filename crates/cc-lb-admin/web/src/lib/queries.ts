@@ -11,7 +11,6 @@ import {
 import { useMemo } from 'react';
 import { toast } from 'sonner';
 import {
-  type AggregateResponse,
   type AnalysisResponse,
   ApiError,
   type AuditQueryResponse,
@@ -222,8 +221,6 @@ export const qk = {
     ['subscription-quota', 'series', params] as const,
   subscriptionQuotaAnalysis: (params: Record<string, any>) =>
     ['subscription-quota', 'analysis', params] as const,
-  subscriptionQuotaAggregate: (params: Record<string, any>) =>
-    ['subscription-quota', 'aggregate', params] as const,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -556,29 +553,6 @@ export function useSubscriptionQuotaAnalysis(params: {
         `/admin/v1/subscription-quotas/analysis?${searchParams.toString()}`,
       ),
     refetchInterval: 120_000,
-  });
-}
-
-export function useSubscriptionQuotaAggregate(params: {
-  upstreamIds?: string;
-  windows?: string;
-  source?: string;
-  maxStalenessSecs?: number;
-}) {
-  const searchParams = new URLSearchParams();
-  if (params.upstreamIds) searchParams.set('upstream_ids', params.upstreamIds);
-  if (params.windows) searchParams.set('windows', params.windows);
-  if (params.source) searchParams.set('source', params.source);
-  if (params.maxStalenessSecs !== undefined)
-    searchParams.set('max_staleness_secs', String(params.maxStalenessSecs));
-
-  return useQuery({
-    queryKey: qk.subscriptionQuotaAggregate(params),
-    queryFn: () =>
-      getJson<AggregateResponse>(
-        `/admin/v1/subscription-quotas/aggregate?${searchParams.toString()}`,
-      ),
-    refetchInterval: 60_000,
   });
 }
 
