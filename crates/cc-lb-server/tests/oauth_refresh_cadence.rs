@@ -80,7 +80,6 @@ impl UpstreamStore for MockUpstreamStore {
         self.inner.set_enabled(id, expected_revision, enabled).await
     }
 
-
     async fn update_spec(
         &self,
         id: Uuid,

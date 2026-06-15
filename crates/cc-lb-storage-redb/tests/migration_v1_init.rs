@@ -95,7 +95,10 @@ fn v3_to_v4_rewrites_legacy_upstreams_without_shape_plugin()
         value.get("id").and_then(|v| v.as_str()),
         Some(id.to_string().as_str())
     );
-    assert_eq!(value.get("name").and_then(|v| v.as_str()), Some("legacy-api-key"));
+    assert_eq!(
+        value.get("name").and_then(|v| v.as_str()),
+        Some("legacy-api-key")
+    );
     assert_eq!(
         value.get("kind").and_then(|v| v.as_str()),
         Some("anthropic_api_key")
@@ -130,7 +133,10 @@ fn v3_to_v4_converts_active_custom_upstream_to_anthropic_api_key()
         value.get("id").and_then(|v| v.as_str()),
         Some(id.to_string().as_str())
     );
-    assert_eq!(value.get("name").and_then(|v| v.as_str()), Some("legacy-api-key"));
+    assert_eq!(
+        value.get("name").and_then(|v| v.as_str()),
+        Some("legacy-api-key")
+    );
     assert_eq!(
         value.get("kind").and_then(|v| v.as_str()),
         Some("anthropic_api_key")

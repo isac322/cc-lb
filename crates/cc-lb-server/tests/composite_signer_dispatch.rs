@@ -243,7 +243,6 @@ impl UpstreamStore for OrderedUpstreamStore {
         UpstreamStore::set_enabled(self.inner.as_ref(), id, expected_revision, enabled).await
     }
 
-
     async fn update_spec(
         &self,
         id: Uuid,

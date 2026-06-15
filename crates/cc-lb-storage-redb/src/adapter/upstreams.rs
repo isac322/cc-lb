@@ -116,10 +116,12 @@ impl UpstreamStore for RedbStorage {
             validate_identifier("name", name)?;
         }
         let storage = self.clone();
-        tokio::task::spawn_blocking(move || update_split_sync(&storage, id, expected_revision, update))
-            .await
-            .map_err(map_join_err)?
-            .map_err(map_redb_err)
+        tokio::task::spawn_blocking(move || {
+            update_split_sync(&storage, id, expected_revision, update)
+        })
+        .await
+        .map_err(map_join_err)?
+        .map_err(map_redb_err)
     }
 
     async fn set_enabled(
@@ -152,10 +154,12 @@ impl UpstreamStore for RedbStorage {
         update: UpstreamUpdate,
     ) -> StorageResult<UpstreamRecord> {
         let storage = self.clone();
-        tokio::task::spawn_blocking(move || update_split_spec_sync(&storage, id, expected_revision, update))
-            .await
-            .map_err(map_join_err)?
-            .map_err(map_redb_err)
+        tokio::task::spawn_blocking(move || {
+            update_split_spec_sync(&storage, id, expected_revision, update)
+        })
+        .await
+        .map_err(map_join_err)?
+        .map_err(map_redb_err)
     }
 
     async fn update_api_key_secret(
@@ -164,10 +168,12 @@ impl UpstreamStore for RedbStorage {
         api_key_ciphertext: Option<Vec<u8>>,
     ) -> StorageResult<UpstreamRecord> {
         let storage = self.clone();
-        tokio::task::spawn_blocking(move || update_split_api_key_secret_sync(&storage, id, api_key_ciphertext))
-            .await
-            .map_err(map_join_err)?
-            .map_err(map_redb_err)
+        tokio::task::spawn_blocking(move || {
+            update_split_api_key_secret_sync(&storage, id, api_key_ciphertext)
+        })
+        .await
+        .map_err(map_join_err)?
+        .map_err(map_redb_err)
     }
 
     async fn update_oauth_token(
@@ -198,10 +204,12 @@ impl UpstreamStore for RedbStorage {
         ttl_secs: i64,
     ) -> StorageResult<bool> {
         let storage = self.clone();
-        tokio::task::spawn_blocking(move || claim_split_lease_sync(&storage, id, lease_kind, &holder, ttl_secs))
-            .await
-            .map_err(map_join_err)?
-            .map_err(map_redb_err)
+        tokio::task::spawn_blocking(move || {
+            claim_split_lease_sync(&storage, id, lease_kind, &holder, ttl_secs)
+        })
+        .await
+        .map_err(map_join_err)?
+        .map_err(map_redb_err)
     }
 
     async fn renew_lease(
@@ -212,10 +220,12 @@ impl UpstreamStore for RedbStorage {
         ttl_secs: i64,
     ) -> StorageResult<bool> {
         let storage = self.clone();
-        tokio::task::spawn_blocking(move || renew_split_lease_sync(&storage, id, lease_kind, &holder, ttl_secs))
-            .await
-            .map_err(map_join_err)?
-            .map_err(map_redb_err)
+        tokio::task::spawn_blocking(move || {
+            renew_split_lease_sync(&storage, id, lease_kind, &holder, ttl_secs)
+        })
+        .await
+        .map_err(map_join_err)?
+        .map_err(map_redb_err)
     }
 
     async fn release_lease(
@@ -225,10 +235,12 @@ impl UpstreamStore for RedbStorage {
         holder: String,
     ) -> StorageResult<bool> {
         let storage = self.clone();
-        tokio::task::spawn_blocking(move || release_split_lease_sync(&storage, id, lease_kind, &holder))
-            .await
-            .map_err(map_join_err)?
-            .map_err(map_redb_err)
+        tokio::task::spawn_blocking(move || {
+            release_split_lease_sync(&storage, id, lease_kind, &holder)
+        })
+        .await
+        .map_err(map_join_err)?
+        .map_err(map_redb_err)
     }
 
     async fn store_oauth_tokens(
@@ -483,7 +495,10 @@ fn create_split_sync(
             ));
         }
         let mut specs = write_txn.open_table(UPSTREAM_SPEC_V1)?;
-        specs.insert(id.as_bytes().as_slice(), serde_json::to_vec(&spec)?.as_slice())?;
+        specs.insert(
+            id.as_bytes().as_slice(),
+            serde_json::to_vec(&spec)?.as_slice(),
+        )?;
         by_name.insert(spec.name.as_str(), id.as_bytes().as_slice())?;
     }
     if let Some(api_key_ciphertext) = create.api_key_ciphertext {
@@ -494,7 +509,10 @@ fn create_split_sync(
             updated_at_unix_secs: now,
         };
         let mut table = write_txn.open_table(UPSTREAM_API_KEY_SECRET_V1)?;
-        table.insert(id.as_bytes().as_slice(), serde_json::to_vec(&secret)?.as_slice())?;
+        table.insert(
+            id.as_bytes().as_slice(),
+            serde_json::to_vec(&secret)?.as_slice(),
+        )?;
     }
     if create.next_warmup_at.is_some() || create.last_warmup_cycle_key.is_some() {
         let status = UpstreamStatusRecord {
@@ -504,7 +522,10 @@ fn create_split_sync(
             ..UpstreamStatusRecord::default()
         };
         let mut table = write_txn.open_table(UPSTREAM_STATUS_V1)?;
-        table.insert(id.as_bytes().as_slice(), serde_json::to_vec(&status)?.as_slice())?;
+        table.insert(
+            id.as_bytes().as_slice(),
+            serde_json::to_vec(&status)?.as_slice(),
+        )?;
     }
     if let (Some(holder), Some(until_unix_secs)) = (
         create.warmup_lease_holder,
@@ -584,8 +605,10 @@ fn compose_split_from_txn(
         return Ok(None);
     };
     let spec: UpstreamSpecRecord = serde_json::from_slice(spec_guard.value())?;
-    let secret = read_optional_json::<UpstreamApiKeySecretRecord>(read_txn, UPSTREAM_API_KEY_SECRET_V1, id)?;
-    let token = read_optional_json::<UpstreamOauthTokenRecord>(read_txn, UPSTREAM_OAUTH_TOKEN_V1, id)?;
+    let secret =
+        read_optional_json::<UpstreamApiKeySecretRecord>(read_txn, UPSTREAM_API_KEY_SECRET_V1, id)?;
+    let token =
+        read_optional_json::<UpstreamOauthTokenRecord>(read_txn, UPSTREAM_OAUTH_TOKEN_V1, id)?;
     let status = read_optional_json::<UpstreamStatusRecord>(read_txn, UPSTREAM_STATUS_V1, id)?;
     let refresh_lease = read_lease(read_txn, spec.id, UpstreamLeaseKind::Refresh)?;
     let warmup_lease = read_lease(read_txn, spec.id, UpstreamLeaseKind::Warmup)?;
@@ -606,15 +629,21 @@ fn compose_split_from_txn(
         refresh_lease_until_unix_secs: refresh_lease
             .as_ref()
             .and_then(|lease| u64::try_from(lease.until_unix_secs).ok()),
-        last_apply_error: status.as_ref().and_then(|status| status.last_apply_error.clone()),
-        last_apply_at_unix_secs: status.as_ref().and_then(|status| status.last_apply_at_unix_secs),
+        last_apply_error: status
+            .as_ref()
+            .and_then(|status| status.last_apply_error.clone()),
+        last_apply_at_unix_secs: status
+            .as_ref()
+            .and_then(|status| status.last_apply_at_unix_secs),
         deleted_at_unix_secs: spec.deleted_at_unix_secs,
         revision: spec.spec_revision,
         created_at_unix_secs: spec.created_at_unix_secs,
         updated_at_unix_secs: spec.updated_at_unix_secs,
         warmup_enabled: spec.warmup_enabled,
         next_warmup_at: status.as_ref().and_then(|status| status.next_warmup_at),
-        last_warmup_cycle_key: status.as_ref().and_then(|status| status.last_warmup_cycle_key),
+        last_warmup_cycle_key: status
+            .as_ref()
+            .and_then(|status| status.last_warmup_cycle_key),
         warmup_lease_holder: warmup_lease.as_ref().map(|lease| lease.holder.clone()),
         warmup_lease_until_unix_secs: warmup_lease.as_ref().map(|lease| lease.until_unix_secs),
         warmup_dialect_plugin: spec.warmup_dialect_plugin,
@@ -663,7 +692,8 @@ fn update_split_sync(
         last_warmup_cycle_key: update.last_warmup_cycle_key.take().map(Some),
         ..UpstreamStatusUpdate::default()
     };
-    let has_status_update = status.next_warmup_at.is_some() || status.last_warmup_cycle_key.is_some();
+    let has_status_update =
+        status.next_warmup_at.is_some() || status.last_warmup_cycle_key.is_some();
     if has_spec_update {
         update_split_spec_sync(storage, id, expected_revision, update)?;
     } else {
@@ -733,7 +763,10 @@ fn update_split_spec_sync(
             by_name.remove(old_name.as_str())?;
             by_name.insert(spec.name.as_str(), id.as_bytes().as_slice())?;
         }
-        specs.insert(id.as_bytes().as_slice(), serde_json::to_vec(&spec)?.as_slice())?;
+        specs.insert(
+            id.as_bytes().as_slice(),
+            serde_json::to_vec(&spec)?.as_slice(),
+        )?;
     }
     write_txn.commit()?;
     get_split_by_id_sync(storage, id)?.ok_or(crate::StorageError::UpstreamNotFound)
@@ -761,7 +794,10 @@ fn update_split_api_key_secret_sync(
             created_at_unix_secs: now,
             updated_at_unix_secs: now,
         };
-        table.insert(id.as_bytes().as_slice(), serde_json::to_vec(&secret)?.as_slice())?;
+        table.insert(
+            id.as_bytes().as_slice(),
+            serde_json::to_vec(&secret)?.as_slice(),
+        )?;
     }
     write_txn.commit()?;
     get_split_by_id_sync(storage, id)?.ok_or(crate::StorageError::UpstreamNotFound)
@@ -790,7 +826,10 @@ fn update_split_oauth_token_sync(
             created_at_unix_secs: now,
             updated_at_unix_secs: now,
         };
-        table.insert(id.as_bytes().as_slice(), serde_json::to_vec(&token)?.as_slice())?;
+        table.insert(
+            id.as_bytes().as_slice(),
+            serde_json::to_vec(&token)?.as_slice(),
+        )?;
     }
     write_txn.commit()?;
     get_split_by_id_sync(storage, id)?.ok_or(crate::StorageError::UpstreamNotFound)
@@ -833,7 +872,10 @@ fn set_split_status_sync(
             status.last_warmup_cycle_key = value;
         }
         status.updated_at_unix_secs = now;
-        table.insert(id.as_bytes().as_slice(), serde_json::to_vec(&status)?.as_slice())?;
+        table.insert(
+            id.as_bytes().as_slice(),
+            serde_json::to_vec(&status)?.as_slice(),
+        )?;
     }
     write_txn.commit()?;
     Ok(())
@@ -1095,7 +1137,10 @@ fn soft_delete_split_sync(
         spec.deleted_at_unix_secs = Some(now);
         spec.spec_revision = spec.spec_revision.saturating_add(1);
         spec.updated_at_unix_secs = now;
-        specs.insert(id.as_bytes().as_slice(), serde_json::to_vec(&spec)?.as_slice())?;
+        specs.insert(
+            id.as_bytes().as_slice(),
+            serde_json::to_vec(&spec)?.as_slice(),
+        )?;
     }
     write_txn.commit()?;
     Ok(())
@@ -1151,7 +1196,10 @@ fn clear_split_warmup_dialect_plugin_sync(
             spec.warmup_dialect_plugin = None;
             spec.spec_revision = spec.spec_revision.saturating_add(1);
             spec.updated_at_unix_secs = now;
-            specs.insert(id.as_bytes().as_slice(), serde_json::to_vec(&spec)?.as_slice())?;
+            specs.insert(
+                id.as_bytes().as_slice(),
+                serde_json::to_vec(&spec)?.as_slice(),
+            )?;
             Some(())
         }
     };
@@ -1231,9 +1279,11 @@ mod tests {
             let stored = storage.get_by_id(record.id).await?.expect("upstream");
             assert_eq!(stored.warmup_lease_holder.as_deref(), Some("replica-a"));
             let now = now_unix_secs_i64()?;
-            assert!(stored
-                .warmup_lease_until_unix_secs
-                .is_some_and(|until| until > now));
+            assert!(
+                stored
+                    .warmup_lease_until_unix_secs
+                    .is_some_and(|until| until > now)
+            );
             Ok(())
         })
     }

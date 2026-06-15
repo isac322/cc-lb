@@ -473,7 +473,7 @@ async fn update_split_spec(
         validate_identifier("upstream.name", name)?;
     }
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
-    let row = sqlx::query(concat!(
+    let row = sqlx::query(
         "UPDATE upstream_spec_v1
            SET name = COALESCE($3, name),
                base_url = COALESCE($4, base_url),
@@ -483,8 +483,8 @@ async fn update_split_spec(
                spec_revision = spec_revision + 1,
                updated_at = NOW()
          WHERE id = $1 AND spec_revision = $2 AND deleted_at IS NULL
-         RETURNING id"
-    ))
+         RETURNING id",
+    )
     .bind(id)
     .bind(u64_to_i64(expected_revision, "upstream spec revision")?)
     .bind(update.name)

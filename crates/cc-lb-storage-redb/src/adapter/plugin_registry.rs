@@ -1,13 +1,13 @@
 use std::collections::HashSet;
 
 use async_trait::async_trait;
+use cc_lb_storage_api::upstream::UpstreamWarmupDialectPlugin;
 use cc_lb_storage_api::{
     MAX_WASM_BLOB_BYTES, PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput,
     PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, StorageError as ApiStorageError,
     StorageResult, WasmBlob, WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput,
     sparse_order, validate_identifier,
 };
-use cc_lb_storage_api::upstream::UpstreamWarmupDialectPlugin;
 use redb::{ReadableDatabase, ReadableTable};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;

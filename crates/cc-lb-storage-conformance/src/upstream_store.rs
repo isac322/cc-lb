@@ -234,13 +234,12 @@ impl UpstreamStore for MemoryUpstreamStore {
         ttl_secs: i64,
     ) -> StorageResult<bool> {
         let now_i64 = now_unix_secs_i64()?;
-        let now_u64 = u64::try_from(now_i64).map_err(|_| fatal("current unix timestamp is negative"))?;
+        let now_u64 =
+            u64::try_from(now_i64).map_err(|_| fatal("current unix timestamp is negative"))?;
         let until_i64 = now_i64.saturating_add(ttl_secs);
-        let until_u64 = u64::try_from(until_i64).map_err(|_| {
-            StorageError::InvalidInput {
-                field: "ttl_secs".to_owned(),
-                reason: "refresh lease expiry cannot be represented as u64".to_owned(),
-            }
+        let until_u64 = u64::try_from(until_i64).map_err(|_| StorageError::InvalidInput {
+            field: "ttl_secs".to_owned(),
+            reason: "refresh lease expiry cannot be represented as u64".to_owned(),
         })?;
         let mut records = self.records.lock().await;
         let Some(record) = records.iter_mut().find(|record| record.id == id) else {
@@ -251,10 +250,11 @@ impl UpstreamStore for MemoryUpstreamStore {
         }
         match lease_kind {
             UpstreamLeaseKind::Refresh => {
-                let holder_id = Uuid::parse_str(&holder).map_err(|error| StorageError::InvalidInput {
-                    field: "holder".to_owned(),
-                    reason: error.to_string(),
-                })?;
+                let holder_id =
+                    Uuid::parse_str(&holder).map_err(|error| StorageError::InvalidInput {
+                        field: "holder".to_owned(),
+                        reason: error.to_string(),
+                    })?;
                 if record
                     .refresh_lease_until_unix_secs
                     .is_some_and(|until| until > now_u64)
@@ -288,13 +288,12 @@ impl UpstreamStore for MemoryUpstreamStore {
         ttl_secs: i64,
     ) -> StorageResult<bool> {
         let now_i64 = now_unix_secs_i64()?;
-        let now_u64 = u64::try_from(now_i64).map_err(|_| fatal("current unix timestamp is negative"))?;
+        let now_u64 =
+            u64::try_from(now_i64).map_err(|_| fatal("current unix timestamp is negative"))?;
         let until_i64 = now_i64.saturating_add(ttl_secs);
-        let until_u64 = u64::try_from(until_i64).map_err(|_| {
-            StorageError::InvalidInput {
-                field: "ttl_secs".to_owned(),
-                reason: "refresh lease expiry cannot be represented as u64".to_owned(),
-            }
+        let until_u64 = u64::try_from(until_i64).map_err(|_| StorageError::InvalidInput {
+            field: "ttl_secs".to_owned(),
+            reason: "refresh lease expiry cannot be represented as u64".to_owned(),
         })?;
         let mut records = self.records.lock().await;
         let Some(record) = records.iter_mut().find(|record| record.id == id) else {
@@ -302,10 +301,11 @@ impl UpstreamStore for MemoryUpstreamStore {
         };
         match lease_kind {
             UpstreamLeaseKind::Refresh => {
-                let holder_id = Uuid::parse_str(&holder).map_err(|error| StorageError::InvalidInput {
-                    field: "holder".to_owned(),
-                    reason: error.to_string(),
-                })?;
+                let holder_id =
+                    Uuid::parse_str(&holder).map_err(|error| StorageError::InvalidInput {
+                        field: "holder".to_owned(),
+                        reason: error.to_string(),
+                    })?;
                 if record.refresh_lease_holder != Some(holder_id)
                     || record
                         .refresh_lease_until_unix_secs
@@ -341,10 +341,11 @@ impl UpstreamStore for MemoryUpstreamStore {
         };
         match lease_kind {
             UpstreamLeaseKind::Refresh => {
-                let holder_id = Uuid::parse_str(&holder).map_err(|error| StorageError::InvalidInput {
-                    field: "holder".to_owned(),
-                    reason: error.to_string(),
-                })?;
+                let holder_id =
+                    Uuid::parse_str(&holder).map_err(|error| StorageError::InvalidInput {
+                        field: "holder".to_owned(),
+                        reason: error.to_string(),
+                    })?;
                 if record.refresh_lease_holder != Some(holder_id) {
                     return Ok(false);
                 }
@@ -579,11 +580,7 @@ impl MemoryUpstreamStore {
         Ok(record.clone())
     }
 
-    async fn mutate_without_revision<F>(
-        &self,
-        id: Uuid,
-        mutate: F,
-    ) -> StorageResult<UpstreamRecord>
+    async fn mutate_without_revision<F>(&self, id: Uuid, mutate: F) -> StorageResult<UpstreamRecord>
     where
         F: FnOnce(&mut UpstreamRecord) -> StorageResult<()>,
     {
@@ -948,5 +945,6 @@ fn now_unix_secs() -> u64 {
 }
 
 fn now_unix_secs_i64() -> StorageResult<i64> {
-    i64::try_from(now_unix_secs()).map_err(|_| fatal("current unix timestamp cannot be represented as i64"))
+    i64::try_from(now_unix_secs())
+        .map_err(|_| fatal("current unix timestamp cannot be represented as i64"))
 }
