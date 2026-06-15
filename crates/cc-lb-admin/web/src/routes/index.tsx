@@ -201,7 +201,10 @@ function OverviewPage() {
     }
     const upstreamsList = Array.from(upstreamsMap.values());
 
-    const bucketsByTime = new Map<number, Record<string, any>>();
+    const bucketsByTime = new Map<
+      number,
+      { ts: string; unix: number } & Record<string, string | number | null>
+    >();
     const markers: { ts: number; kind: string; upstreamId: string }[] = [];
 
     for (const s of series) {
@@ -494,10 +497,7 @@ function OverviewPage() {
 
         <div className="flex flex-col gap-4">
           <Card>
-            <CardHeader
-              title="cc-lb Quota"
-              subtitle="Proxy-window aggregate"
-            />
+            <CardHeader title="cc-lb Quota" subtitle="Proxy-window aggregate" />
             <CardBody className="space-y-3">
               {quotaAggregate.isLoading ? (
                 <div className="text-xs text-text-faint">Loading…</div>
@@ -535,7 +535,9 @@ function OverviewPage() {
                       <span>Capacity now</span>
                       <span className="font-mono text-text text-right">
                         {w.capacity_to_now_tokens_estimate != null
-                          ? fmtCount(Math.round(w.capacity_to_now_tokens_estimate))
+                          ? fmtCount(
+                              Math.round(w.capacity_to_now_tokens_estimate),
+                            )
                           : '—'}
                       </span>
                       <span>Upstreams</span>
@@ -547,7 +549,9 @@ function OverviewPage() {
                   </div>
                 ))
               ) : (
-                <div className="text-xs text-text-faint">No quota aggregate</div>
+                <div className="text-xs text-text-faint">
+                  No quota aggregate
+                </div>
               )}
             </CardBody>
           </Card>
