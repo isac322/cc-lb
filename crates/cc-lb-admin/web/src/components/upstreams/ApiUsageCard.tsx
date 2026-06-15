@@ -150,15 +150,15 @@ export function ApiUsageCard({
         action={action}
       />
       <CardBody>
-        {isLoading ? (
-          <Skeleton className="h-64 w-full" />
-        ) : chartData.length === 0 ? (
-          <div className="flex h-64 items-center justify-center text-sm text-zinc-500">
-            No usage in selected range
-          </div>
-        ) : (
-          <div className="flex flex-col gap-4">
-            <div className="h-64 w-full">
+        <div className="flex flex-col gap-4">
+          <div className="h-64 w-full">
+            {isLoading ? (
+              <Skeleton className="h-full w-full" />
+            ) : chartData.length === 0 ? (
+              <div className="flex h-full items-center justify-center text-sm text-zinc-500">
+                No usage in selected range
+              </div>
+            ) : (
               <ResponsiveContainer width="100%" height="100%">
                 <AreaChart
                   data={chartData}
@@ -245,28 +245,35 @@ export function ApiUsageCard({
                   })}
                 </AreaChart>
               </ResponsiveContainer>
-            </div>
-            <div className="flex flex-wrap items-center gap-4 text-sm">
-              {models.map((model) => {
-                const color = getWindowColor(model).fill;
-                const lastBucket = chartData[chartData.length - 1];
-                const val = lastBucket ? lastBucket[model] || 0 : 0;
-                return (
-                  <div key={model} className="flex items-center gap-2">
-                    <div
-                      className="h-3 w-3 rounded-full"
-                      style={{ backgroundColor: color }}
-                    />
-                    <span className="font-medium text-zinc-900 dark:text-zinc-100">
-                      {model}
-                    </span>
-                    <span className="text-zinc-500">{formatTooltip(val)}</span>
-                  </div>
-                );
-              })}
-            </div>
+            )}
           </div>
-        )}
+          <div
+            data-testid="api-usage-legend-slot"
+            className="flex flex-wrap items-center gap-4 text-sm min-h-[28px]"
+          >
+            {!isLoading && chartData.length > 0
+              ? models.map((model) => {
+                  const color = getWindowColor(model).fill;
+                  const lastBucket = chartData[chartData.length - 1];
+                  const val = lastBucket ? lastBucket[model] || 0 : 0;
+                  return (
+                    <div key={model} className="flex items-center gap-2">
+                      <div
+                        className="h-3 w-3 rounded-full"
+                        style={{ backgroundColor: color }}
+                      />
+                      <span className="font-medium text-zinc-900 dark:text-zinc-100">
+                        {model}
+                      </span>
+                      <span className="text-zinc-500">
+                        {formatTooltip(val)}
+                      </span>
+                    </div>
+                  );
+                })
+              : null}
+          </div>
+        </div>
       </CardBody>
     </Card>
   );

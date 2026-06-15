@@ -158,6 +158,15 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
     return () => clearTimeout(timer);
   }, [leasePanel]);
 
+  // Reset revision-bound flags when the server advances past us.
+  // pendingPluginValue is intentionally excluded — the mutation's onSuccess
+  // owns it and clearing here would clobber in-flight optimistic state.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: revision is the trigger, not a read
+  useEffect(() => {
+    setStaleRevisionVisible(false);
+    setRevisionOverride(null);
+  }, [upstream.revision]);
+
   const handleToggle = () => {
     updateSettings.mutate(
       {
