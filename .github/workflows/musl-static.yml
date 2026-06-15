@@ -31,16 +31,16 @@ jobs:
     container:
       image: messense/rust-musl-cross:aarch64-musl
     env:
-      RUSTUP_TOOLCHAIN: 1.95.0
+      RUSTUP_TOOLCHAIN: 1.96.0
     steps:
       - uses: actions/checkout@v6
-      # The messense/rust-musl-cross image ships rustc 1.94.0 but the workspace
-      # pins channel = "1.95.0" via rust-toolchain.toml. We cannot simply call
+      # The messense/rust-musl-cross image ships rustc 1.95.0 but the workspace
+      # pins channel = "1.96.0" via rust-toolchain.toml. We cannot simply call
       # `rustup update stable` because the image's preinstalled clippy package
       # manifest is corrupt - it claims to own
       # share/doc/clippy/{README.md,LICENSE-MIT} which do not exist on disk, so
       # any rustup operation that removes the old clippy component fails. We
-      # install the pinned 1.95.0 toolchain as a fresh, separate directory and
+      # install the pinned 1.96.0 toolchain as a fresh, separate directory and
       # promote it to default, leaving the broken stable untouched.
       - name: Install pinned Rust toolchain from rust-toolchain.toml
         shell: bash
