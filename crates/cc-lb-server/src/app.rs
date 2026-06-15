@@ -992,6 +992,8 @@ async fn build_app_with_storage_inner(
         breaker_registry,
         start_time,
         drain_controller: drain_controller.clone(),
+        storage: storage.clone(),
+        dynamic_view: dynamic_view.clone(),
         key_store: Some(key_store.clone()),
         builtin_authn: Some(builtin_authn.clone()),
     };
@@ -1615,9 +1617,10 @@ struct ProxyState {
     breaker_registry: Arc<BreakerRegistry>,
     start_time: std::time::Instant,
     drain_controller: DrainController,
+    storage: Arc<dyn Storage>,
+    dynamic_view: Arc<DynamicViewHolder>,
     #[allow(dead_code)]
     key_store: Option<Arc<KeyStore>>,
-    #[allow(dead_code)]
     builtin_authn: Option<Arc<BuiltinAuthn>>,
 }
 
@@ -1814,6 +1817,7 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
             get(lifecycle_handler).delete(lifecycle_handler),
         )
         .route("/v1/files/{id}/content", get(lifecycle_handler))
+        .route("/api/oauth/usage", get(oauth_usage_handler))
         .route("/api/{*path}", any(lifecycle_handler))
         .route("/v1/{*path}", any(lifecycle_handler))
         .with_state(state)
@@ -1891,6 +1895,68 @@ async fn lifecycle_handler(
         Ok(response) => response,
         Err(source) => {
             let mut response = Response::new(Body::from(source.to_string()));
+            *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
+            response
+        }
+    }
+}
+
+async fn oauth_usage_handler(
+    State(state): State<ProxyState>,
+    request: Request<Body>,
+) -> Response<Body> {
+    let Some(authn) = state.builtin_authn.as_ref() else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            serde_json::json!({ "error": "auth_unavailable" }),
+        );
+    };
+    if authn
+        .authenticate_none_mode(request.headers())
+        .await
+        .is_none()
+    {
+        let dynamic_view = state.dynamic_view.load();
+        if let Err(error) = authn
+            .authenticate(request.headers(), &dynamic_view.principal_view)
+            .await
+        {
+            let status =
+                StatusCode::from_u16(error.http_status()).unwrap_or(StatusCode::UNAUTHORIZED);
+            return json_response(
+                status,
+                serde_json::json!({ "error": "authentication_error", "message": error.to_string() }),
+            );
+        }
+    }
+
+    match cc_lb_admin::subscription_quotas::build_cc_lb_oauth_usage_response(
+        state.storage.as_ref(),
+        &state.dynamic_view,
+    )
+    .await
+    {
+        Ok(response) => json_response(StatusCode::OK, response),
+        Err(error) => {
+            tracing::error!(%error, "cc-lb oauth usage response build failed");
+            json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                serde_json::json!({ "error": "usage_unavailable" }),
+            )
+        }
+    }
+}
+
+fn json_response(status: StatusCode, value: impl Serialize) -> Response<Body> {
+    match serde_json::to_vec(&value) {
+        Ok(bytes) => Response::builder()
+            .status(status)
+            .header(axum::http::header::CONTENT_TYPE, "application/json")
+            .body(Body::from(bytes))
+            .unwrap_or_else(|_| Response::new(Body::empty())),
+        Err(error) => {
+            tracing::error!(%error, "json response serialization failed");
+            let mut response = Response::new(Body::from("json serialization failed"));
             *response.status_mut() = StatusCode::INTERNAL_SERVER_ERROR;
             response
         }
