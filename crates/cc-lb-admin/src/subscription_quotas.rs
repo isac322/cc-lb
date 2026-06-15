@@ -10,11 +10,13 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
+use cc_lb_core::DynamicViewHolder;
 use cc_lb_plugin_api::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_storage_api::{
     Storage, StorageError, SubscriptionQuotaBucket, SubscriptionQuotaSeriesQuery,
     SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus,
     SubscriptionQuotaWindow, UpstreamRecord, UpstreamStore, UsageRollup, UsageRollupResolution,
+    upstream::UpstreamKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -47,6 +49,14 @@ pub fn router() -> Router<AdminState> {
         .route("/admin/subscription-quotas/latest", get(handle_latest))
         .route("/admin/v1/subscription-quotas/series", get(handle_series))
         .route("/admin/subscription-quotas/series", get(handle_series))
+        .route(
+            "/admin/v1/subscription-quotas/aggregate",
+            get(handle_aggregate),
+        )
+        .route(
+            "/admin/subscription-quotas/aggregate",
+            get(handle_aggregate),
+        )
         .route(
             "/admin/v1/subscription-quotas/analysis",
             get(handle_analysis),
@@ -156,6 +166,88 @@ struct AnalysisQuery {
     since_unix_secs: u64,
     until_unix_secs: u64,
     source: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct AggregateQuery {
+    upstream_ids: Option<String>,
+    windows: Option<String>,
+    source: Option<String>,
+    max_staleness_secs: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CcLbOAuthUsageResponse {
+    #[serde(rename = "5h", skip_serializing_if = "Option::is_none")]
+    pub five_hour: Option<CcLbOAuthWindowUsage>,
+    #[serde(rename = "7d", skip_serializing_if = "Option::is_none")]
+    pub seven_day: Option<CcLbOAuthWindowUsage>,
+    #[serde(rename = "7d_sonnet", skip_serializing_if = "Option::is_none")]
+    pub seven_day_sonnet: Option<CcLbOAuthWindowUsage>,
+    #[serde(rename = "7d_opus", skip_serializing_if = "Option::is_none")]
+    pub seven_day_opus: Option<CcLbOAuthWindowUsage>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extra_usage: Option<CcLbOAuthExtraUsage>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CcLbOAuthWindowUsage {
+    pub utilization: Option<f64>,
+    pub resets_at: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CcLbOAuthExtraUsage {
+    pub enabled: Option<bool>,
+    pub monthly_limit: Option<f64>,
+    pub used_credits: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AggregateResponse {
+    now_unix_secs: u64,
+    window_anchor_unix_secs: u64,
+    max_staleness_secs: u64,
+    upstream_count: usize,
+    windows: Vec<AggregateWindowResponse>,
+    caveats: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AggregateWindowResponse {
+    window: String,
+    cc_window_start_unix_secs: u64,
+    cc_window_reset_unix_secs: u64,
+    used_tokens: u64,
+    utilization: Option<f64>,
+    utilization_percent: Option<f64>,
+    capacity_to_now_tokens_estimate: Option<f64>,
+    projected_capacity_tokens_estimate: Option<f64>,
+    remaining_to_now_tokens_estimate: Option<f64>,
+    confidence: String,
+    contributing_upstreams: usize,
+    stale_upstreams: usize,
+    missing_capacity_upstreams: usize,
+    provider_lots: Vec<AggregateProviderLotResponse>,
+    caveats: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AggregateProviderLotResponse {
+    upstream_id: String,
+    upstream_name: String,
+    window: String,
+    source: Option<String>,
+    state: String,
+    provider_start_unix_secs: Option<u64>,
+    provider_reset_unix_secs: Option<u64>,
+    observed_at_unix_millis: Option<u64>,
+    utilization: Option<f64>,
+    capacity_estimate_tokens: Option<f64>,
+    used_before_cc_window_tokens: u64,
+    capacity_to_now_tokens_estimate: Option<f64>,
+    projected_capacity_tokens_estimate: Option<f64>,
+    confidence: String,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -269,6 +361,48 @@ async fn handle_analysis(
         Ok(response) => Json(response).into_response(),
         Err(response) => response,
     }
+}
+
+async fn handle_aggregate(
+    State(state): State<AdminState>,
+    Query(query): Query<AggregateQuery>,
+) -> Response {
+    match build_aggregate_response(&state, query).await {
+        Ok(response) => Json(response).into_response(),
+        Err(response) => response,
+    }
+}
+
+pub async fn build_cc_lb_oauth_usage_response(
+    storage: &dyn Storage,
+    dynamic_view: &DynamicViewHolder,
+) -> Result<CcLbOAuthUsageResponse, StorageError> {
+    let aggregate = build_cc_lb_aggregate_response(
+        storage,
+        dynamic_view,
+        None,
+        vec![
+            SubscriptionQuotaWindow::FiveHour,
+            SubscriptionQuotaWindow::SevenDay,
+            SubscriptionQuotaWindow::SevenDaySonnet,
+            SubscriptionQuotaWindow::SevenDayOpus,
+        ],
+        SubscriptionQuotaSourceMerge::Merged,
+        dynamic_view
+            .load()
+            .subscription_quota_routing_max_staleness_secs,
+    )
+    .await?;
+    let mut response = oauth_usage_from_aggregate(&aggregate);
+    response.extra_usage = build_cc_lb_oauth_extra_usage(
+        storage,
+        dynamic_view,
+        dynamic_view
+            .load()
+            .subscription_quota_routing_max_staleness_secs,
+    )
+    .await?;
+    Ok(response)
 }
 
 async fn build_latest_response(
@@ -473,6 +607,592 @@ async fn build_analysis_response(
         max_staleness_secs,
         upstreams,
     })
+}
+
+async fn build_aggregate_response(
+    state: &AdminState,
+    query: AggregateQuery,
+) -> Result<AggregateResponse, Response> {
+    let storage = storage(state)?;
+    let source = parse_source_merge(query.source.as_deref())?;
+    let windows = parse_windows_or_default(query.windows.as_deref())?;
+    let upstream_ids = match query.upstream_ids.as_deref() {
+        Some(value) if !value.trim().is_empty() => Some(parse_upstream_ids(value)?),
+        _ => None,
+    };
+    let max_staleness_secs = query.max_staleness_secs.unwrap_or_else(|| {
+        state
+            .dynamic_view
+            .load()
+            .subscription_quota_routing_max_staleness_secs
+    });
+
+    build_cc_lb_aggregate_response(
+        storage,
+        &state.dynamic_view,
+        upstream_ids,
+        windows,
+        source,
+        max_staleness_secs,
+    )
+    .await
+    .map_err(storage_error)
+}
+
+pub async fn build_cc_lb_aggregate_response(
+    storage: &dyn Storage,
+    dynamic_view: &DynamicViewHolder,
+    upstream_ids: Option<Vec<Uuid>>,
+    windows: Vec<SubscriptionQuotaWindow>,
+    source: SubscriptionQuotaSourceMerge,
+    max_staleness_secs: u64,
+) -> Result<AggregateResponse, StorageError> {
+    let now_unix_millis = now_unix_millis();
+    let now_unix_secs = now_unix_millis / 1_000;
+    let requested = upstream_ids.map(|ids| ids.into_iter().collect::<HashSet<_>>());
+    let mut upstreams = list_all_upstreams_storage(storage)
+        .await?
+        .into_iter()
+        .filter(|upstream| upstream.deleted_at_unix_secs.is_none())
+        .filter(|upstream| upstream.enabled)
+        .filter(|upstream| upstream.kind == UpstreamKind::AnthropicOauth)
+        .filter(|upstream| {
+            requested
+                .as_ref()
+                .map(|ids| ids.contains(&upstream.id))
+                .unwrap_or(true)
+        })
+        .collect::<Vec<_>>();
+    upstreams.sort_by_key(|upstream| upstream.id);
+
+    let duration_windows = windows
+        .iter()
+        .copied()
+        .filter(|window| window_secs(*window).is_some())
+        .collect::<Vec<_>>();
+    let query_start = duration_windows
+        .iter()
+        .filter_map(|window| window_secs(*window))
+        .map(|secs| cc_window_bounds(now_unix_secs, secs).0)
+        .min()
+        .unwrap_or(now_unix_secs);
+    let upstream_ids = upstreams
+        .iter()
+        .map(|upstream| upstream.id)
+        .collect::<HashSet<_>>();
+    let upstream_by_id = upstreams
+        .iter()
+        .cloned()
+        .map(|upstream| (upstream.id, upstream))
+        .collect::<HashMap<_, _>>();
+
+    let quota_series = if upstreams.is_empty() || duration_windows.is_empty() {
+        Vec::new()
+    } else {
+        storage
+            .list_subscription_quota_series(SubscriptionQuotaSeriesQuery {
+                upstream_ids: upstreams.iter().map(|upstream| upstream.id).collect(),
+                windows: duration_windows.clone(),
+                sources: sources_for_merge(source),
+                since_unix_millis: query_start.saturating_mul(1_000),
+                until_unix_millis: now_unix_millis,
+                bucket_secs: ANALYSIS_BUCKET_SECS,
+                max_points_per_series: ANALYSIS_MAX_POINTS,
+                source_merge: source,
+            })
+            .await?
+    };
+
+    let dynamic_view = dynamic_view.load();
+    let mut latest_inputs = Vec::new();
+    for upstream in &upstreams {
+        for snapshot in dynamic_view.subscription_quota_cache.snapshot_for_upstream(
+            upstream.id,
+            now_unix_millis,
+            max_staleness_secs,
+        ) {
+            if !snapshot_matches_source(&snapshot, source) {
+                continue;
+            }
+            let Some(window) = SubscriptionQuotaWindow::from_str(&snapshot.window) else {
+                continue;
+            };
+            if !windows.contains(&window) || window_secs(window).is_none() {
+                continue;
+            }
+            latest_inputs.push(provider_lot_input_from_snapshot(
+                upstream,
+                window,
+                &snapshot,
+                now_unix_secs,
+            ));
+        }
+    }
+
+    let mut lot_inputs = provider_lot_inputs_from_series(&quota_series, &upstream_by_id);
+    let covered_by_series = lot_inputs
+        .iter()
+        .map(|input| (input.upstream.id, input.window))
+        .collect::<HashSet<_>>();
+    lot_inputs.extend(
+        latest_inputs
+            .into_iter()
+            .filter(|input| !covered_by_series.contains(&(input.upstream.id, input.window))),
+    );
+
+    let earliest_rollup_start = lot_inputs
+        .iter()
+        .filter_map(|input| input.provider_start)
+        .min()
+        .unwrap_or(query_start)
+        .min(query_start);
+    let rollups = storage
+        .query_usage_rollups_in_range(
+            UsageRollupResolution::Minute,
+            earliest_rollup_start,
+            now_unix_secs,
+        )
+        .await?;
+
+    let mut aggregate_windows = Vec::new();
+    for window in duration_windows {
+        let window_lots = lot_inputs
+            .iter()
+            .filter(|input| input.window == window)
+            .map(|input| build_provider_lot_response(input, &rollups, now_unix_secs))
+            .collect::<Vec<_>>();
+        aggregate_windows.push(build_aggregate_window_response(
+            window,
+            &window_lots,
+            &rollups,
+            &upstream_ids,
+            now_unix_secs,
+        ));
+    }
+
+    let caveats = vec![
+        CAPACITY_CAVEAT.to_owned(),
+        "cc-lb /api/oauth/usage preserves Anthropic OAuth usage response shape; detailed cc-lb fields are exposed only on this admin aggregate endpoint".to_owned(),
+    ];
+
+    Ok(AggregateResponse {
+        now_unix_secs,
+        window_anchor_unix_secs: 0,
+        max_staleness_secs,
+        upstream_count: upstreams.len(),
+        windows: aggregate_windows,
+        caveats,
+    })
+}
+
+fn build_aggregate_window_response(
+    window: SubscriptionQuotaWindow,
+    lots: &[AggregateProviderLotResponse],
+    rollups: &[UsageRollup],
+    upstream_ids: &HashSet<Uuid>,
+    now_unix_secs: u64,
+) -> AggregateWindowResponse {
+    let secs = window_secs(window).expect("aggregate windows are duration-backed");
+    let (cc_start, cc_reset) = cc_window_bounds(now_unix_secs, secs);
+    let used_tokens =
+        tokens_in_interval_for_upstreams(rollups, upstream_ids, cc_start, now_unix_secs);
+    let capacity_to_now = sum_optional(lots.iter().map(|lot| lot.capacity_to_now_tokens_estimate));
+    let projected_capacity = sum_optional(
+        lots.iter()
+            .map(|lot| lot.projected_capacity_tokens_estimate),
+    );
+    let utilization = capacity_to_now.and_then(|capacity| {
+        if capacity > 0.0 {
+            Some((used_tokens as f64 / capacity).clamp(0.0, 1.0))
+        } else {
+            None
+        }
+    });
+    let stale_upstreams = lots.iter().filter(|lot| lot.state == "stale").count();
+    let missing_capacity_upstreams = lots
+        .iter()
+        .filter(|lot| lot.capacity_estimate_tokens.is_none())
+        .count();
+    let contributing_upstreams = lots
+        .iter()
+        .filter(|lot| lot.capacity_to_now_tokens_estimate.unwrap_or(0.0) > 0.0)
+        .count();
+    let mut caveats = vec![CAPACITY_CAVEAT.to_owned()];
+    if missing_capacity_upstreams > 0 {
+        caveats.push(
+            "some upstreams lack enough utilization/proxy-token history to infer capacity"
+                .to_owned(),
+        );
+    }
+    if stale_upstreams > 0 {
+        caveats.push(STALE_DATA_CAVEAT.to_owned());
+    }
+
+    AggregateWindowResponse {
+        window: window.as_str().to_owned(),
+        cc_window_start_unix_secs: cc_start,
+        cc_window_reset_unix_secs: cc_reset,
+        used_tokens,
+        utilization,
+        utilization_percent: utilization.map(|value| value * 100.0),
+        capacity_to_now_tokens_estimate: capacity_to_now,
+        projected_capacity_tokens_estimate: projected_capacity,
+        remaining_to_now_tokens_estimate: capacity_to_now
+            .map(|capacity| (capacity - used_tokens as f64).max(0.0)),
+        confidence: aggregate_confidence(lots, capacity_to_now),
+        contributing_upstreams,
+        stale_upstreams,
+        missing_capacity_upstreams,
+        provider_lots: lots.to_vec(),
+        caveats,
+    }
+}
+
+#[derive(Clone)]
+struct AggregateProviderLotInput {
+    upstream: UpstreamRecord,
+    window: SubscriptionQuotaWindow,
+    source: Option<String>,
+    state: SubscriptionQuotaDataState,
+    provider_start: Option<u64>,
+    provider_reset: Option<u64>,
+    observed_at_unix_millis: Option<u64>,
+    utilization: Option<f64>,
+}
+
+fn provider_lot_input_from_snapshot(
+    upstream: &UpstreamRecord,
+    window: SubscriptionQuotaWindow,
+    snapshot: &SubscriptionQuotaCandidateSnapshot,
+    now_unix_secs: u64,
+) -> AggregateProviderLotInput {
+    let secs = window_secs(window).expect("aggregate windows are duration-backed");
+    let (_, cc_reset) = cc_window_bounds(now_unix_secs, secs);
+    AggregateProviderLotInput {
+        upstream: upstream.clone(),
+        window,
+        source: snapshot.source.clone(),
+        state: snapshot.state,
+        provider_start: provider_window_start_unix_secs(window, snapshot, now_unix_secs),
+        provider_reset: snapshot.resets_at_unix_secs.or(Some(cc_reset)),
+        observed_at_unix_millis: snapshot.observed_at_unix_millis,
+        utilization: snapshot.utilization,
+    }
+}
+
+fn provider_lot_inputs_from_series(
+    series: &[cc_lb_storage_api::SubscriptionQuotaSeries],
+    upstream_by_id: &HashMap<Uuid, UpstreamRecord>,
+) -> Vec<AggregateProviderLotInput> {
+    let mut inputs = Vec::new();
+    for series in series {
+        let Some(upstream) = upstream_by_id.get(&series.upstream_id) else {
+            continue;
+        };
+        let Some(secs) = window_secs(series.window) else {
+            continue;
+        };
+        let observations = analysis_observations(&series.buckets);
+        let cycles = split_reset_cycles(&observations, ANALYSIS_BUCKET_SECS);
+        for cycle in cycles {
+            let Some(last) = cycle.observations.last() else {
+                continue;
+            };
+            let provider_reset = last.resets_at_unix_secs_last;
+            inputs.push(AggregateProviderLotInput {
+                upstream: upstream.clone(),
+                window: series.window,
+                source: Some(series.source.as_str().to_owned()),
+                state: SubscriptionQuotaDataState::Fresh,
+                provider_start: provider_reset
+                    .map(|reset| reset.saturating_sub(secs))
+                    .or_else(|| {
+                        cycle
+                            .observations
+                            .first()
+                            .map(|first| first.observed_at_unix_millis_last / 1_000)
+                    }),
+                provider_reset,
+                observed_at_unix_millis: Some(last.observed_at_unix_millis_last),
+                utilization: Some(last.utilization_last),
+            });
+        }
+    }
+    inputs
+}
+
+fn build_provider_lot_response(
+    input: &AggregateProviderLotInput,
+    rollups: &[UsageRollup],
+    now_unix_secs: u64,
+) -> AggregateProviderLotResponse {
+    let upstream = &input.upstream;
+    let window = input.window;
+    let secs = window_secs(window).expect("aggregate windows are duration-backed");
+    let (cc_start, cc_reset) = cc_window_bounds(now_unix_secs, secs);
+    let provider_start = input.provider_start;
+    let provider_reset = input.provider_reset.or(Some(cc_reset));
+    let observed_at_unix_secs = input
+        .observed_at_unix_millis
+        .map(|observed_at| observed_at / 1_000)
+        .unwrap_or(now_unix_secs);
+    let provider_sample_end = provider_reset
+        .unwrap_or(now_unix_secs)
+        .min(observed_at_unix_secs)
+        .min(now_unix_secs);
+    let provider_tokens = provider_start
+        .map(|start| {
+            tokens_in_interval_for_upstream(rollups, upstream.id, start, provider_sample_end)
+        })
+        .unwrap_or(0);
+    let capacity_estimate = match (input.utilization, provider_tokens) {
+        (Some(utilization), tokens) if utilization > 0.0 && tokens > 0 => {
+            Some(tokens as f64 / utilization)
+        }
+        _ => None,
+    };
+    let used_before_cc_window = provider_start
+        .map(|start| tokens_in_interval_for_upstream(rollups, upstream.id, start, cc_start))
+        .unwrap_or(0);
+    let capacity_to_now = match (provider_start, provider_reset, capacity_estimate) {
+        (Some(start), Some(reset), Some(capacity)) => Some(capacity_contribution_for_prefix(
+            start,
+            reset,
+            capacity,
+            used_before_cc_window as f64,
+            cc_start,
+            cc_reset,
+            now_unix_secs,
+        )),
+        _ => None,
+    };
+    let projected_capacity = match (provider_start, provider_reset, capacity_estimate) {
+        (Some(start), Some(reset), Some(capacity)) => Some(capacity_contribution_for_prefix(
+            start,
+            reset,
+            capacity,
+            used_before_cc_window as f64,
+            cc_start,
+            cc_reset,
+            cc_reset,
+        )),
+        _ => None,
+    };
+    let confidence = if capacity_estimate.is_none() {
+        "low"
+    } else if input.state == SubscriptionQuotaDataState::Fresh {
+        "estimated"
+    } else {
+        "stale"
+    };
+
+    AggregateProviderLotResponse {
+        upstream_id: upstream.id.to_string(),
+        upstream_name: upstream.name.clone(),
+        window: window.as_str().to_owned(),
+        source: input.source.clone(),
+        state: data_state_str(input.state).to_owned(),
+        provider_start_unix_secs: provider_start,
+        provider_reset_unix_secs: provider_reset,
+        observed_at_unix_millis: input.observed_at_unix_millis,
+        utilization: input.utilization,
+        capacity_estimate_tokens: capacity_estimate,
+        used_before_cc_window_tokens: used_before_cc_window,
+        capacity_to_now_tokens_estimate: capacity_to_now,
+        projected_capacity_tokens_estimate: projected_capacity,
+        confidence: confidence.to_owned(),
+    }
+}
+
+fn oauth_usage_from_aggregate(aggregate: &AggregateResponse) -> CcLbOAuthUsageResponse {
+    let mut response = CcLbOAuthUsageResponse {
+        five_hour: None,
+        seven_day: None,
+        seven_day_sonnet: None,
+        seven_day_opus: None,
+        extra_usage: None,
+    };
+    for window in &aggregate.windows {
+        let usage = CcLbOAuthWindowUsage {
+            utilization: window.utilization_percent,
+            resets_at: Some(window.cc_window_reset_unix_secs),
+        };
+        match window.window.as_str() {
+            "5h" => response.five_hour = Some(usage),
+            "7d" => response.seven_day = Some(usage),
+            "7d_sonnet" => response.seven_day_sonnet = Some(usage),
+            "7d_opus" => response.seven_day_opus = Some(usage),
+            _ => {}
+        }
+    }
+    response
+}
+
+async fn build_cc_lb_oauth_extra_usage(
+    storage: &dyn Storage,
+    dynamic_view: &DynamicViewHolder,
+    max_staleness_secs: u64,
+) -> Result<Option<CcLbOAuthExtraUsage>, StorageError> {
+    let upstreams = list_all_upstreams_storage(storage)
+        .await?
+        .into_iter()
+        .filter(|upstream| upstream.deleted_at_unix_secs.is_none())
+        .filter(|upstream| upstream.enabled)
+        .filter(|upstream| upstream.kind == UpstreamKind::AnthropicOauth)
+        .collect::<Vec<_>>();
+    let now_unix_millis = now_unix_millis();
+    let dynamic_view = dynamic_view.load();
+    let mut enabled = None;
+    let mut monthly_limit = 0.0;
+    let mut saw_monthly_limit = false;
+    let mut used_credits = 0.0;
+    let mut saw_used_credits = false;
+
+    for upstream in upstreams {
+        for snapshot in dynamic_view.subscription_quota_cache.snapshot_for_upstream(
+            upstream.id,
+            now_unix_millis,
+            max_staleness_secs,
+        ) {
+            if SubscriptionQuotaWindow::from_str(&snapshot.window)
+                != Some(SubscriptionQuotaWindow::Overage)
+            {
+                continue;
+            }
+            if let Some(value) = snapshot.extra_usage_enabled {
+                enabled = Some(enabled.unwrap_or(false) || value);
+            }
+            if let Some(value) = snapshot.extra_usage_monthly_limit {
+                monthly_limit += value;
+                saw_monthly_limit = true;
+            }
+            if let Some(value) = snapshot.extra_usage_used_credits {
+                used_credits += value;
+                saw_used_credits = true;
+            }
+        }
+    }
+
+    if enabled.is_none() && !saw_monthly_limit && !saw_used_credits {
+        return Ok(None);
+    }
+    Ok(Some(CcLbOAuthExtraUsage {
+        enabled,
+        monthly_limit: saw_monthly_limit.then_some(monthly_limit),
+        used_credits: saw_used_credits.then_some(used_credits),
+    }))
+}
+
+fn capacity_contribution_for_prefix(
+    provider_start: u64,
+    provider_reset: u64,
+    limit_estimate: f64,
+    consumed_before_entry: f64,
+    cc_start: u64,
+    cc_reset: u64,
+    prefix_end: u64,
+) -> f64 {
+    if provider_start >= cc_reset || provider_reset <= cc_start {
+        return 0.0;
+    }
+    let entry = provider_start.max(cc_start);
+    let exit = provider_reset.min(cc_reset).min(prefix_end);
+    if entry >= exit {
+        return 0.0;
+    }
+    (limit_estimate - consumed_before_entry).max(0.0)
+}
+
+fn provider_window_start_unix_secs(
+    window: SubscriptionQuotaWindow,
+    snapshot: &SubscriptionQuotaCandidateSnapshot,
+    now_unix_secs: u64,
+) -> Option<u64> {
+    let secs = window_secs(window)?;
+    Some(
+        snapshot
+            .resets_at_unix_secs
+            .map(|reset| reset.saturating_sub(secs))
+            .unwrap_or_else(|| cc_window_bounds(now_unix_secs, secs).0),
+    )
+}
+
+fn cc_window_bounds(now_unix_secs: u64, window_secs: u64) -> (u64, u64) {
+    let start = now_unix_secs - (now_unix_secs % window_secs);
+    (start, start.saturating_add(window_secs))
+}
+
+fn window_secs(window: SubscriptionQuotaWindow) -> Option<u64> {
+    match window {
+        SubscriptionQuotaWindow::FiveHour => Some(5 * 3_600),
+        SubscriptionQuotaWindow::SevenDay
+        | SubscriptionQuotaWindow::SevenDaySonnet
+        | SubscriptionQuotaWindow::SevenDayOpus => Some(7 * 24 * 3_600),
+        SubscriptionQuotaWindow::Overage | SubscriptionQuotaWindow::Unified => None,
+    }
+}
+
+fn tokens_in_interval_for_upstreams(
+    rollups: &[UsageRollup],
+    upstream_ids: &HashSet<Uuid>,
+    start_unix_secs: u64,
+    end_unix_secs: u64,
+) -> u64 {
+    rollups
+        .iter()
+        .filter(|rollup| upstream_ids.contains(&rollup.upstream_id))
+        .filter(|rollup| {
+            rollup.bucket_start >= start_unix_secs && rollup.bucket_start <= end_unix_secs
+        })
+        .map(proxy_tokens)
+        .sum()
+}
+
+fn tokens_in_interval_for_upstream(
+    rollups: &[UsageRollup],
+    upstream_id: Uuid,
+    start_unix_secs: u64,
+    end_unix_secs: u64,
+) -> u64 {
+    rollups
+        .iter()
+        .filter(|rollup| rollup.upstream_id == upstream_id)
+        .filter(|rollup| {
+            rollup.bucket_start >= start_unix_secs && rollup.bucket_start <= end_unix_secs
+        })
+        .map(proxy_tokens)
+        .sum()
+}
+
+fn sum_optional(values: impl Iterator<Item = Option<f64>>) -> Option<f64> {
+    let mut saw_value = false;
+    let total = values.fold(0.0, |acc, value| match value {
+        Some(value) => {
+            saw_value = true;
+            acc + value
+        }
+        None => acc,
+    });
+    saw_value.then_some(total)
+}
+
+fn aggregate_confidence(
+    lots: &[AggregateProviderLotResponse],
+    capacity_to_now: Option<f64>,
+) -> String {
+    if capacity_to_now.unwrap_or(0.0) <= 0.0 || lots.is_empty() {
+        return "low".to_owned();
+    }
+    if lots.iter().any(|lot| lot.state == "stale") {
+        return "stale".to_owned();
+    }
+    if lots
+        .iter()
+        .any(|lot| lot.capacity_estimate_tokens.is_none())
+    {
+        return "partial".to_owned();
+    }
+    "estimated".to_owned()
 }
 
 fn build_analysis_window(
@@ -876,12 +1596,18 @@ async fn upstreams_for_optional_query(
 }
 
 async fn list_all_upstreams(storage: &dyn Storage) -> Result<Vec<UpstreamRecord>, Response> {
+    list_all_upstreams_storage(storage)
+        .await
+        .map_err(storage_error)
+}
+
+async fn list_all_upstreams_storage(
+    storage: &dyn Storage,
+) -> Result<Vec<UpstreamRecord>, StorageError> {
     let mut after = None;
     let mut all = Vec::new();
     loop {
-        let page = UpstreamStore::list(storage, after, STORE_PAGE_LIMIT)
-            .await
-            .map_err(storage_error)?;
+        let page = UpstreamStore::list(storage, after, STORE_PAGE_LIMIT).await?;
         if page.is_empty() {
             break;
         }
@@ -1270,6 +1996,214 @@ mod tests {
         assert_eq!(deficit.shortfall_tokens, 2_100_000.0);
         assert_eq!(deficit.recommended_multiplier, 2.4);
         assert_eq!(deficit.confidence, "medium");
+    }
+
+    #[test]
+    fn prefix_capacity_does_not_borrow_future_provider_lot() {
+        let cc_start = 10_000;
+        let cc_reset = cc_start + 5 * 3_600;
+        let before_future_reset = cc_start + 3_600;
+        let after_future_reset = cc_start + 3 * 3_600;
+
+        let active_capacity = capacity_contribution_for_prefix(
+            cc_start - 3_600,
+            cc_start + 4 * 3_600,
+            100.0,
+            30.0,
+            cc_start,
+            cc_reset,
+            before_future_reset,
+        );
+        let future_capacity = capacity_contribution_for_prefix(
+            cc_start + 2 * 3_600,
+            cc_start + 7 * 3_600,
+            100.0,
+            0.0,
+            cc_start,
+            cc_reset,
+            before_future_reset,
+        );
+        let future_after_start = capacity_contribution_for_prefix(
+            cc_start + 2 * 3_600,
+            cc_start + 7 * 3_600,
+            100.0,
+            0.0,
+            cc_start,
+            cc_reset,
+            after_future_reset,
+        );
+
+        assert_eq!(active_capacity, 70.0);
+        assert_eq!(future_capacity, 0.0);
+        assert_eq!(future_after_start, 100.0);
+    }
+
+    #[test]
+    fn aggregate_window_counts_historical_provider_lots_after_reset() {
+        let upstream_id = Uuid::new_v4();
+        let upstream = upstream_record(upstream_id);
+        let series = cc_lb_storage_api::SubscriptionQuotaSeries {
+            upstream_id,
+            window: SubscriptionQuotaWindow::FiveHour,
+            source: SubscriptionQuotaSourceMerge::Merged,
+            buckets: vec![
+                quota_bucket(44_000, 0.5, 45_000),
+                quota_bucket(50_000, 0.5, 63_000),
+            ],
+        };
+        let upstreams = HashMap::from([(upstream_id, upstream)]);
+        let inputs = provider_lot_inputs_from_series(&[series], &upstreams);
+        let rollups = vec![
+            usage_rollup(upstream_id, 40_000, 50),
+            usage_rollup(upstream_id, 48_000, 100),
+        ];
+        let lots = inputs
+            .iter()
+            .map(|input| build_provider_lot_response(input, &rollups, 50_000))
+            .collect::<Vec<_>>();
+
+        let response = build_aggregate_window_response(
+            SubscriptionQuotaWindow::FiveHour,
+            &lots,
+            &rollups,
+            &HashSet::from([upstream_id]),
+            50_000,
+        );
+
+        assert_eq!(lots.len(), 2);
+        assert_eq!(response.used_tokens, 150);
+        assert_eq!(response.capacity_to_now_tokens_estimate, Some(300.0));
+        assert_eq!(response.utilization_percent, Some(50.0));
+    }
+
+    #[test]
+    fn oauth_usage_response_serializes_anthropic_shape_only() {
+        let aggregate = AggregateResponse {
+            now_unix_secs: 1_000,
+            window_anchor_unix_secs: 0,
+            max_staleness_secs: 60,
+            upstream_count: 2,
+            windows: vec![
+                aggregate_window("5h", 1_800, 25.0),
+                aggregate_window("7d", 604_800, 40.0),
+                aggregate_window("7d_sonnet", 604_800, 30.0),
+                aggregate_window("7d_opus", 604_800, 10.0),
+            ],
+            caveats: vec!["admin only".to_owned()],
+        };
+
+        let value = serde_json::to_value(oauth_usage_from_aggregate(&aggregate)).unwrap();
+
+        assert_eq!(value["5h"]["utilization"], 25.0);
+        assert_eq!(value["5h"]["resets_at"], 1_800);
+        assert_eq!(value["7d"]["utilization"], 40.0);
+        assert_eq!(value["7d_sonnet"]["utilization"], 30.0);
+        assert_eq!(value["7d_opus"]["utilization"], 10.0);
+        assert!(value.get("five_hour").is_none());
+        assert!(value.get("windows").is_none());
+        assert!(value.get("caveats").is_none());
+    }
+
+    fn aggregate_window(
+        window: &str,
+        reset_unix_secs: u64,
+        utilization_percent: f64,
+    ) -> AggregateWindowResponse {
+        AggregateWindowResponse {
+            window: window.to_owned(),
+            cc_window_start_unix_secs: 0,
+            cc_window_reset_unix_secs: reset_unix_secs,
+            used_tokens: 10,
+            utilization: Some(utilization_percent / 100.0),
+            utilization_percent: Some(utilization_percent),
+            capacity_to_now_tokens_estimate: Some(40.0),
+            projected_capacity_tokens_estimate: Some(40.0),
+            remaining_to_now_tokens_estimate: Some(30.0),
+            confidence: "estimated".to_owned(),
+            contributing_upstreams: 1,
+            stale_upstreams: 0,
+            missing_capacity_upstreams: 0,
+            provider_lots: Vec::new(),
+            caveats: Vec::new(),
+        }
+    }
+
+    fn upstream_record(id: Uuid) -> UpstreamRecord {
+        UpstreamRecord {
+            id,
+            name: "oauth-upstream".to_owned(),
+            kind: UpstreamKind::AnthropicOauth,
+            base_url: None,
+            enabled: true,
+            oauth_credentials: None,
+            api_key_ciphertext: None,
+            refresh_lease_holder: None,
+            refresh_lease_until_unix_secs: None,
+            last_apply_error: None,
+            last_apply_at_unix_secs: None,
+            deleted_at_unix_secs: None,
+            revision: 1,
+            created_at_unix_secs: 0,
+            updated_at_unix_secs: 0,
+            warmup_enabled: false,
+            next_warmup_at: None,
+            last_warmup_cycle_key: None,
+            warmup_lease_holder: None,
+            warmup_lease_until_unix_secs: None,
+            warmup_dialect_plugin: None,
+        }
+    }
+
+    fn quota_bucket(
+        observed_at_unix_secs: u64,
+        utilization: f64,
+        resets_at_unix_secs: u64,
+    ) -> SubscriptionQuotaBucket {
+        SubscriptionQuotaBucket {
+            bucket_start_unix_secs: observed_at_unix_secs,
+            observed: true,
+            sample_count: 1,
+            utilization_min: Some(utilization),
+            utilization_avg: Some(utilization),
+            utilization_max: Some(utilization),
+            utilization_last: Some(utilization),
+            status_last: None,
+            resets_at_unix_secs_last: Some(resets_at_unix_secs),
+            observed_at_unix_millis_last: Some(observed_at_unix_secs * 1_000),
+            sources_seen: vec![SubscriptionQuotaSource::Api],
+        }
+    }
+
+    fn usage_rollup(upstream_id: Uuid, bucket_start: u64, tokens: u64) -> UsageRollup {
+        UsageRollup {
+            resolution: UsageRollupResolution::Minute,
+            bucket_start,
+            principal: "principal".to_owned(),
+            upstream_id,
+            upstream_name: "oauth-upstream".to_owned(),
+            model: "model".to_owned(),
+            request_count: 1,
+            input_tokens: tokens,
+            output_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            error_count: 0,
+            latency_count: 0,
+            latency_ms_sum: 0,
+            latency_ms_min: None,
+            latency_ms_max: None,
+            proxy_setup_ms_count: 0,
+            proxy_setup_ms_sum: 0,
+            shape_ms_count: 0,
+            shape_ms_sum: 0,
+            sign_ms_count: 0,
+            sign_ms_sum: 0,
+            upstream_ttfb_ms_count: 0,
+            upstream_ttfb_ms_sum: 0,
+            upstream_body_ms_count: 0,
+            upstream_body_ms_sum: 0,
+            virtual_cost_micros: 0,
+        }
     }
 
     fn observation(

@@ -33,7 +33,7 @@ export function ApiUsageCard({
   const chartId = useId();
 
   const chartData = useMemo(() => {
-    if (!data || !data.series || data.series.length === 0) return [];
+    if (!data?.series || data.series.length === 0) return [];
 
     const bucketsByTs = new Map<number, Record<string, number>>();
 
@@ -57,7 +57,7 @@ export function ApiUsageCard({
   }, [data, metric]);
 
   const models = useMemo(() => {
-    if (!data || !data.series) return [];
+    if (!data?.series) return [];
     return data.series.map((s) => s.key);
   }, [data]);
 
@@ -217,8 +217,8 @@ export function ApiUsageCard({
                   />
                   <Tooltip
                     labelFormatter={(label) => formatXAxis(label as number)}
-                    formatter={(value: any, name: any) => [
-                      formatTooltip(Number(value || 0)),
+                    formatter={(value: unknown, name: unknown) => [
+                      formatTooltip(Number(value ?? 0)),
                       String(name),
                     ]}
                     contentStyle={{
