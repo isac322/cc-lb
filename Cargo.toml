@@ -4,6 +4,7 @@ members = [
     "crates/cc-lb-plugin-wire",
     "crates/cc-lb-runtime-protocol",
     "crates/cc-lb-plugin-conformance",
+    "crates/cc-lb-redb-migrate",
     "crates/cc-lb-*",
     "benches/extism_sse_overhead",
     "plugins/router/cache-aware",
