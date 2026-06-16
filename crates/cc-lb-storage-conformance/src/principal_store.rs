@@ -1,13 +1,19 @@
-use std::str::FromStr;
 use std::sync::Arc;
+
+#[cfg(feature = "postgres")]
+use std::str::FromStr;
 
 use anyhow::Result;
 use async_trait::async_trait;
 use cc_lb_storage_api::BackendKind;
+#[cfg(feature = "postgres")]
 use cc_lb_storage_postgres::PostgresStorage;
 use cc_lb_storage_redb::RedbStorage;
+#[cfg(feature = "postgres")]
 use sqlx::AssertSqlSafe;
+#[cfg(feature = "postgres")]
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+#[cfg(feature = "postgres")]
 use uuid::Uuid;
 
 use crate::harness::ConformanceBackend;
@@ -19,6 +25,7 @@ async fn principal_store_redb() -> Result<()> {
 }
 
 #[tokio::test]
+#[cfg(feature = "postgres")]
 async fn principal_store_postgres() -> Result<()> {
     let Some(url) = postgres_url() else {
         eprintln!("skip: CI_POSTGRES_URL not set");
@@ -33,6 +40,7 @@ async fn principal_store_stale_revision_conflict_redb() -> Result<()> {
 }
 
 #[tokio::test]
+#[cfg(feature = "postgres")]
 async fn principal_store_stale_revision_conflict_postgres() -> Result<()> {
     let Some(url) = postgres_url() else {
         eprintln!("skip: CI_POSTGRES_URL not set");
@@ -72,10 +80,12 @@ impl ConformanceBackend for RedbPrincipalBackend {
     }
 }
 
+#[cfg(feature = "postgres")]
 struct PostgresPrincipalBackend {
     url: String,
 }
 
+#[cfg(feature = "postgres")]
 struct PostgresFixture {
     url: String,
     schema: String,
@@ -83,6 +93,7 @@ struct PostgresFixture {
 }
 
 #[async_trait]
+#[cfg(feature = "postgres")]
 impl ConformanceBackend for PostgresPrincipalBackend {
     type Storage = PostgresStorage;
     type Fixture = PostgresFixture;
@@ -139,10 +150,12 @@ impl ConformanceBackend for PostgresPrincipalBackend {
     }
 }
 
+#[cfg(feature = "postgres")]
 fn postgres_url() -> Option<String> {
     std::env::var("CI_POSTGRES_URL").ok()
 }
 
+#[cfg(feature = "postgres")]
 const MIGRATIONS: &[&str] = &[
     include_str!("../../cc-lb-storage-postgres/migrations/0001_meta.sql"),
     include_str!("../../cc-lb-storage-postgres/migrations/0002_killswitch.sql"),

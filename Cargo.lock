@@ -991,6 +991,7 @@ dependencies = [
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
  "cc-lb-storage-redb",
+ "cc-lb-storage-sqlite",
  "chrono",
  "futures",
  "proptest",

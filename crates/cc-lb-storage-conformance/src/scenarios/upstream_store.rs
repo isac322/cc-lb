@@ -799,6 +799,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "postgres")]
     mod postgres_backend {
         use std::str::FromStr;
 
