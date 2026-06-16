@@ -224,7 +224,6 @@ where
 /// Verify that list_active_for_upstream returns results deterministically sorted
 /// by prefix_hash, then ttl_class. This ensures consistent ordering across backends
 /// for conformance and operational stability.
-#[ignore]
 pub async fn observation_list_is_sorted<B>(
     backend: Arc<B>,
     clock: ClockHandle,

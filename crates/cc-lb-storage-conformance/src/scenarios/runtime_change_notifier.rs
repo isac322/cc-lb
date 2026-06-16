@@ -39,7 +39,6 @@ where
     join_run(handle).await
 }
 
-#[ignore = "un-ignored in T22/T23"]
 pub async fn subscriber_receives_within_latency_budget<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,

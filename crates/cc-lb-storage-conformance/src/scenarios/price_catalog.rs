@@ -5,7 +5,6 @@ use cc_lb_storage_api::{PriceCatalogCache, PriceCatalogSnapshotRecord};
 
 use crate::harness::{ConformanceBackend, with_conformance_fixture};
 
-#[ignore = "un-ignored in T22/T23"]
 pub async fn roundtrip_smoke<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,

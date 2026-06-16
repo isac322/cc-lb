@@ -21,7 +21,6 @@ where
     .await
 }
 
-#[ignore = "un-ignored in T22/T23"]
 pub async fn lease_pk_mutex_excludes_concurrent_holders<B>(backend: Arc<B>) -> ConformanceResult
 where
     B: ConformanceBackend,
@@ -67,7 +66,6 @@ where
     .await
 }
 
-#[ignore = "un-ignored in T22/T23"]
 pub async fn updated_at_within_2s_of_host_clock<B>(backend: Arc<B>) -> ConformanceResult
 where
     B: ConformanceBackend,

@@ -637,7 +637,6 @@ pub async fn refcount_increment_on_chain_insert<S: PluginRegistryStore + Princip
     Ok(())
 }
 
-#[ignore = "un-ignored in T22/T23"]
 pub async fn refcount_under_concurrency<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,
