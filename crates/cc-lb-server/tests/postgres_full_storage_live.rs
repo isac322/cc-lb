@@ -111,6 +111,8 @@ impl Drop for RunningUpstream {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
+// Fields captured for Debug-on-failure diagnostics; some may not be read in test assertions.
 struct IssuedKey {
     principal_id: String,
     key_id: String,
