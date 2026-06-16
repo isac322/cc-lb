@@ -86,6 +86,8 @@ jobs:
             --exclude cc-lb-loadgen \
             --exclude cc-lb-plugin-conformance \
             --exclude cc-lb-plugin-lifecycle-tests \
+            --exclude plugin-handshake-spike \
+            --exclude plugin-handshake-spike-host-check \
             --exclude plugin-api-key \
             --exclude plugin-oauth-anthropic-pro \
             --exclude plugin-internal-key-mapping \
