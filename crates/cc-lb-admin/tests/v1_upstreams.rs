@@ -116,7 +116,11 @@ async fn create_returns_201_with_body_and_location_header() {
     assert_eq!(body(&response)["name"], "primary");
     assert_eq!(body(&response)["kind"], "anthropic_oauth");
     assert_eq!(body(&response)["enabled"], true);
-    assert_eq!(body(&response)["revision"], 1);
+    assert_eq!(body(&response)["spec_revision"], 1);
+    assert!(body(&response)["revision"].is_null());
+    assert!(body(&response)["status"].is_object());
+    assert!(body(&response)["status"]["next_warmup_at"].is_null());
+    assert!(body(&response)["status"]["last_warmup_cycle_key"].is_null());
     let id = body(&response)["id"].as_str().unwrap();
     assert_eq!(
         response.headers.get(header::LOCATION).unwrap(),
@@ -191,7 +195,7 @@ async fn update_with_correct_if_match_returns_200_and_bumps_revision() {
 
     assert_eq!(response.status, StatusCode::OK);
     assert_eq!(body(&response)["name"], "primary-renamed");
-    assert_eq!(body(&response)["revision"], 2);
+    assert_eq!(body(&response)["spec_revision"], 2);
 }
 
 #[tokio::test]
@@ -253,7 +257,7 @@ async fn enable_disable_emits_audit_and_persists_state() {
     .await;
     assert_eq!(disabled.status, StatusCode::OK);
     assert_eq!(body(&disabled)["enabled"], false);
-    assert_eq!(body(&disabled)["revision"], 2);
+    assert_eq!(body(&disabled)["spec_revision"], 2);
 
     let enabled = request(
         app,
@@ -265,7 +269,7 @@ async fn enable_disable_emits_audit_and_persists_state() {
     .await;
     assert_eq!(enabled.status, StatusCode::OK);
     assert_eq!(body(&enabled)["enabled"], true);
-    assert_eq!(body(&enabled)["revision"], 3);
+    assert_eq!(body(&enabled)["spec_revision"], 3);
 
     // Poll the audit log instead of relying on a fixed sleep. The audit sink
     // batches writes to its background writer; on slower CI runners the 250 ms

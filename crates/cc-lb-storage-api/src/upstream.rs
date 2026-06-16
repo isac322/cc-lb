@@ -101,6 +101,7 @@ pub struct UpstreamCreate {
 pub struct UpstreamUpdate {
     pub name: Option<String>,
     pub base_url: Option<Url>,
+    pub enabled: Option<bool>,
     pub api_key_ciphertext: Option<Vec<u8>>,
     pub warmup_enabled: Option<bool>,
     pub next_warmup_at: Option<DateTime<Utc>>,
@@ -108,6 +109,33 @@ pub struct UpstreamUpdate {
     pub warmup_lease_holder: Option<String>,
     pub warmup_lease_until_unix_secs: Option<i64>,
     pub warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UpstreamLeaseKind {
+    Refresh,
+    Warmup,
+}
+
+impl UpstreamLeaseKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Refresh => "refresh",
+            Self::Warmup => "warmup",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct UpstreamStatusUpdate {
+    pub last_apply_error: Option<Option<String>>,
+    pub last_apply_at_unix_secs: Option<Option<u64>>,
+    pub observed_spec_revision: Option<Option<u64>>,
+    pub observed_api_key_secret_revision: Option<Option<u64>>,
+    pub observed_oauth_token_revision: Option<Option<u64>>,
+    pub next_warmup_at: Option<Option<DateTime<Utc>>>,
+    pub last_warmup_cycle_key: Option<Option<i64>>,
 }
 
 #[async_trait]
@@ -128,6 +156,43 @@ pub trait UpstreamStore: Send + Sync {
         expected_revision: u64,
         enabled: bool,
     ) -> StorageResult<UpstreamRecord>;
+    async fn update_spec(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+        update: UpstreamUpdate,
+    ) -> StorageResult<UpstreamRecord>;
+    async fn update_api_key_secret(
+        &self,
+        id: Uuid,
+        api_key_ciphertext: Option<Vec<u8>>,
+    ) -> StorageResult<UpstreamRecord>;
+    async fn update_oauth_token(
+        &self,
+        id: Uuid,
+        tokens: EncryptedOAuthTokens,
+    ) -> StorageResult<UpstreamRecord>;
+    async fn set_status(&self, id: Uuid, status: UpstreamStatusUpdate) -> StorageResult<()>;
+    async fn claim_lease(
+        &self,
+        id: Uuid,
+        lease_kind: UpstreamLeaseKind,
+        holder: String,
+        ttl_secs: i64,
+    ) -> StorageResult<bool>;
+    async fn renew_lease(
+        &self,
+        id: Uuid,
+        lease_kind: UpstreamLeaseKind,
+        holder: String,
+        ttl_secs: i64,
+    ) -> StorageResult<bool>;
+    async fn release_lease(
+        &self,
+        id: Uuid,
+        lease_kind: UpstreamLeaseKind,
+        holder: String,
+    ) -> StorageResult<bool>;
     async fn store_oauth_tokens(
         &self,
         id: Uuid,

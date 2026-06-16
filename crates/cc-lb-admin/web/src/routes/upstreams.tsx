@@ -856,7 +856,7 @@ function DetailView({
                       {
                         id: upstream.id,
                         enabled: !upstream.enabled,
-                        revision: upstream.revision,
+                        spec_revision: upstream.spec_revision,
                       },
                       {
                         onSuccess: () =>
@@ -1845,7 +1845,7 @@ function DetailView({
         destructive
         onConfirm={() =>
           del.mutate(
-            { id: upstream.id, revision: upstream.revision },
+            { id: upstream.id, spec_revision: upstream.spec_revision },
             {
               onSuccess: () => {
                 toast.success('Upstream deleted');

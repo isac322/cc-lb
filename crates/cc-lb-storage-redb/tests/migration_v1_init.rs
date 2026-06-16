@@ -1,8 +1,7 @@
-use cc_lb_storage_api::UpstreamRecord;
 use cc_lb_storage_redb::{
     AUDIT_LOG_V1, CURRENT_SCHEMA_VERSION, KILLSWITCH_V1, OAUTH_CREDENTIALS_V1,
     PROMPT_CACHE_OBSERVATIONS, REQUEST_EVENTS_V1, SCHEMA_VERSION_V1, Storage, StorageError,
-    UPSTREAMS_V2,
+    UPSTREAM_SPEC_V1, UPSTREAMS_V2,
 };
 use redb::{ReadableDatabase, TableHandle};
 use serde_json::json;
@@ -84,7 +83,7 @@ fn v3_to_v4_rewrites_legacy_upstreams_without_shape_plugin()
 
     let db = redb::Database::create(&path)?;
     let read_txn = db.begin_read()?;
-    let table = read_txn.open_table(UPSTREAMS_V2)?;
+    let table = read_txn.open_table(UPSTREAM_SPEC_V1)?;
     let stored = table
         .get(id.as_bytes().as_slice())?
         .expect("upstream survives migration")
@@ -92,9 +91,18 @@ fn v3_to_v4_rewrites_legacy_upstreams_without_shape_plugin()
         .to_vec();
     let value: serde_json::Value = serde_json::from_slice(&stored)?;
     assert!(value.get("shape_plugin").is_none());
-    let record: UpstreamRecord = serde_json::from_slice(&stored)?;
-    assert_eq!(record.id, id);
-    assert_eq!(record.name, "legacy-api-key");
+    assert_eq!(
+        value.get("id").and_then(|v| v.as_str()),
+        Some(id.to_string().as_str())
+    );
+    assert_eq!(
+        value.get("name").and_then(|v| v.as_str()),
+        Some("legacy-api-key")
+    );
+    assert_eq!(
+        value.get("kind").and_then(|v| v.as_str()),
+        Some("anthropic_api_key")
+    );
 
     Ok(())
 }
@@ -114,18 +122,24 @@ fn v3_to_v4_converts_active_custom_upstream_to_anthropic_api_key()
 
     let db = redb::Database::create(&path)?;
     let read_txn = db.begin_read()?;
-    let table = read_txn.open_table(UPSTREAMS_V2)?;
+    let table = read_txn.open_table(UPSTREAM_SPEC_V1)?;
     let stored = table
         .get(id.as_bytes().as_slice())?
         .expect("upstream survives migration")
         .value()
         .to_vec();
-    let record: UpstreamRecord = serde_json::from_slice(&stored)?;
-    assert_eq!(record.id, id);
-    assert_eq!(record.name, "legacy-api-key");
+    let value: serde_json::Value = serde_json::from_slice(&stored)?;
     assert_eq!(
-        record.kind,
-        cc_lb_storage_api::upstream::UpstreamKind::AnthropicApiKey
+        value.get("id").and_then(|v| v.as_str()),
+        Some(id.to_string().as_str())
+    );
+    assert_eq!(
+        value.get("name").and_then(|v| v.as_str()),
+        Some("legacy-api-key")
+    );
+    assert_eq!(
+        value.get("kind").and_then(|v| v.as_str()),
+        Some("anthropic_api_key")
     );
 
     Ok(())
@@ -145,7 +159,7 @@ fn v3_to_v4_drops_soft_deleted_custom_upstream() -> Result<(), Box<dyn std::erro
 
     let db = redb::Database::create(&path)?;
     let read_txn = db.begin_read()?;
-    let table = read_txn.open_table(UPSTREAMS_V2)?;
+    let table = read_txn.open_table(UPSTREAM_SPEC_V1)?;
     let stored = table.get(id.as_bytes().as_slice())?;
     assert!(
         stored.is_none(),

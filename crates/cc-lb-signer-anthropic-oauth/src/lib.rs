@@ -914,7 +914,7 @@ mod tests {
     use cc_lb_plugin_api::{
         RequestContext, Upstream, UpstreamDialect, shape_request, sign_request,
     };
-    use cc_lb_storage_api::upstream::UpstreamKind;
+    use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamLeaseKind, UpstreamStatusUpdate};
     use cc_lb_storage_api::{
         OAuthCredentialStore, StorageError, StorageResult, UpstreamCreate, UpstreamRecord,
         UpstreamRecordId, UpstreamStore, UpstreamUpdate, validate_identifier,
@@ -1039,6 +1039,92 @@ mod tests {
                 Ok(())
             })
             .await
+        }
+
+        async fn update_spec(
+            &self,
+            id: UpstreamRecordId,
+            expected_revision: u64,
+            update: UpstreamUpdate,
+        ) -> StorageResult<UpstreamRecord> {
+            self.update(id, expected_revision, update).await
+        }
+
+        async fn update_api_key_secret(
+            &self,
+            id: UpstreamRecordId,
+            api_key_ciphertext: Option<Vec<u8>>,
+        ) -> StorageResult<UpstreamRecord> {
+            self.mutate(id, None, |record| {
+                record.api_key_ciphertext = api_key_ciphertext;
+                Ok(())
+            })
+            .await
+        }
+
+        async fn update_oauth_token(
+            &self,
+            id: UpstreamRecordId,
+            tokens: EncryptedOAuthTokens,
+        ) -> StorageResult<UpstreamRecord> {
+            self.mutate(id, None, |record| {
+                record.oauth_credentials = Some(tokens);
+                Ok(())
+            })
+            .await
+        }
+
+        async fn set_status(
+            &self,
+            id: UpstreamRecordId,
+            status: UpstreamStatusUpdate,
+        ) -> StorageResult<()> {
+            self.mutate(id, None, |record| {
+                if let Some(value) = status.last_apply_error {
+                    record.last_apply_error = value;
+                }
+                if let Some(value) = status.last_apply_at_unix_secs {
+                    record.last_apply_at_unix_secs = value;
+                }
+                if let Some(value) = status.next_warmup_at {
+                    record.next_warmup_at = value;
+                }
+                if let Some(value) = status.last_warmup_cycle_key {
+                    record.last_warmup_cycle_key = value;
+                }
+                Ok(())
+            })
+            .await?;
+            Ok(())
+        }
+
+        async fn claim_lease(
+            &self,
+            _id: UpstreamRecordId,
+            _lease_kind: UpstreamLeaseKind,
+            _holder: String,
+            _ttl_secs: i64,
+        ) -> StorageResult<bool> {
+            Ok(false)
+        }
+
+        async fn renew_lease(
+            &self,
+            _id: UpstreamRecordId,
+            _lease_kind: UpstreamLeaseKind,
+            _holder: String,
+            _ttl_secs: i64,
+        ) -> StorageResult<bool> {
+            Ok(false)
+        }
+
+        async fn release_lease(
+            &self,
+            _id: UpstreamRecordId,
+            _lease_kind: UpstreamLeaseKind,
+            _holder: String,
+        ) -> StorageResult<bool> {
+            Ok(false)
         }
 
         async fn store_oauth_tokens(

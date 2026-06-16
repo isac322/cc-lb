@@ -46,18 +46,24 @@ import {
 // Entity shapes the new UI uses. (These mirror what mock-server.ts returns
 // and what the old hooks/* declared piecemeal.)
 
+export interface UpstreamStatus {
+  last_apply_error: string | null;
+  last_apply_at_unix_secs: number | null;
+  next_warmup_at: string | null;
+  last_warmup_cycle_key: number | null;
+}
+
 export interface Upstream {
   id: string;
   name: string;
   kind: 'anthropic_api_key' | 'anthropic_oauth';
   enabled: boolean;
-  revision: number;
+  spec_revision: number;
   base_url?: string | null;
   api_key_env?: string | null;
   warmup_enabled: boolean;
   warmup_dialect_plugin: UpstreamWarmupDialectPlugin | null;
-  next_warmup_at: string | null;
-  last_warmup_cycle_key: number | null;
+  status: UpstreamStatus;
 }
 
 export interface UpstreamWarmupDialectPlugin {
@@ -604,8 +610,13 @@ export function useCreateUpstream() {
 export function useDeleteUpstream() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: ({ id, revision }: { id: string; revision: number }) =>
-      deleteJson(`/admin/v1/upstreams/${id}`, { ifMatch: revision }),
+    mutationFn: ({
+      id,
+      spec_revision,
+    }: {
+      id: string;
+      spec_revision: number;
+    }) => deleteJson(`/admin/v1/upstreams/${id}`, { ifMatch: spec_revision }),
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.upstreams }),
   });
 }
@@ -615,16 +626,16 @@ export function useToggleUpstream() {
     mutationFn: ({
       id,
       enabled,
-      revision,
+      spec_revision,
     }: {
       id: string;
       enabled: boolean;
-      revision: number;
+      spec_revision: number;
     }) =>
       postJson<Upstream, Record<string, never>>(
         `/admin/v1/upstreams/${id}/${enabled ? 'enable' : 'disable'}`,
         {},
-        { ifMatch: revision },
+        { ifMatch: spec_revision },
       ),
     onSuccess: (_d, vars) => {
       qc.invalidateQueries({ queryKey: qk.upstreams });
@@ -664,16 +675,16 @@ export function useUpdateUpstream() {
     mutationFn: ({
       id,
       body,
-      revision,
+      spec_revision,
     }: {
       id: string;
       body: UpdateUpstreamRequest;
-      revision: number;
+      spec_revision: number;
     }) =>
       putJson<Upstream, UpdateUpstreamRequest>(
         `/admin/v1/upstreams/${id}`,
         body,
-        { ifMatch: revision },
+        { ifMatch: spec_revision },
       ),
     onSuccess: (_d, vars) => {
       qc.invalidateQueries({ queryKey: qk.upstreams });
@@ -717,9 +728,15 @@ export function useClearUpstreamWarmupDialectPlugin() {
   const qc = useQueryClient();
   return useMutation({
     mutationKey: ['upstreams', 'clear-warmup-dialect-plugin'],
-    mutationFn: ({ id, revision }: { id: string; revision: number }) =>
+    mutationFn: ({
+      id,
+      spec_revision,
+    }: {
+      id: string;
+      spec_revision: number;
+    }) =>
       deleteJson<Upstream>(`/admin/v1/upstreams/${id}/warmup-dialect-plugin`, {
-        ifMatch: revision,
+        ifMatch: spec_revision,
       }),
     onSuccess: async (serverResponse, { id }) => {
       qc.setQueryData(qk.upstream(id), serverResponse);
@@ -735,16 +752,16 @@ export function useUpdateUpstreamWarmupSettings() {
     mutationFn: ({
       id,
       body,
-      revision,
+      spec_revision,
     }: {
       id: string;
       body: UpdateUpstreamWarmupSettingsRequest;
-      revision: number;
+      spec_revision: number;
     }) =>
       patchJson<Upstream, UpdateUpstreamWarmupSettingsRequest>(
         `/admin/v1/upstreams/${id}`,
         body,
-        { ifMatch: revision },
+        { ifMatch: spec_revision },
       ),
     onSuccess: async (serverResponse, { id }) => {
       qc.setQueryData(qk.upstream(id), serverResponse);
