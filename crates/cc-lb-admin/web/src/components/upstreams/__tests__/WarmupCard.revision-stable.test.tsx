@@ -1,10 +1,10 @@
 // Regression: WarmupCard used to set its inner React `key` to
-//   `${upstream.id}:${upstream.revision}:${upstream.warmup_dialect_plugin?.wasm_registry_id ?? ''}`
+//   `${upstream.id}:${upstream.spec_revision}:${upstream.warmup_dialect_plugin?.wasm_registry_id ?? ''}`
 // Every mutation (toggle, plugin swap, fire-now success) invalidated `qk.upstreams`,
-// the upstream was refetched, `revision` bumped from N to N+1, and the key
+// the upstream was refetched, `spec_revision` bumped from N to N+1, and the key
 // flipped — forcing React to unmount WarmupCardInner and mount a fresh one.
 // Visible to the user as a card flash on every action. This test pins the
-// repair: the inner card stays mounted across revision bumps, and only
+// repair: the inner card stays mounted across spec_revision bumps, and only
 // remounts when `upstream.id` actually changes (i.e. the user selected a
 // different upstream).
 
@@ -81,13 +81,13 @@ async function importWarmupCard() {
 }
 
 describe('WarmupCard mount stability', () => {
-  test('inner card DOM node is preserved when upstream.revision changes', async () => {
+  test('inner card DOM node is preserved when upstream.spec_revision changes', async () => {
     const WarmupCard = await importWarmupCard();
-    const upstream = makeOauthUpstream({ id: 'oauth-1', revision: 1 });
+    const upstream = makeOauthUpstream({ id: 'oauth-1', spec_revision: 1 });
     const { rerender } = render(<WarmupCard upstream={upstream} />);
     const before = screen.getByTestId('warmup-card');
 
-    const bumped = { ...upstream, revision: 2 };
+    const bumped = { ...upstream, spec_revision: 2 };
     rerender(<WarmupCard upstream={bumped} />);
     const after = screen.getByTestId('warmup-card');
 
@@ -99,7 +99,7 @@ describe('WarmupCard mount stability', () => {
     const WarmupCard = await importWarmupCard();
     const upstream = makeOauthUpstream({
       id: 'oauth-1',
-      revision: 1,
+      spec_revision: 1,
       warmup_dialect_plugin: { wasm_registry_id: 'shape-a', config: {} },
     });
     const { rerender } = render(<WarmupCard upstream={upstream} />);
@@ -107,25 +107,25 @@ describe('WarmupCard mount stability', () => {
 
     const swapped = {
       ...upstream,
-      revision: 2,
+      spec_revision: 2,
       warmup_dialect_plugin: { wasm_registry_id: 'shape-b', config: {} },
     };
     rerender(<WarmupCard upstream={swapped} />);
     const after = screen.getByTestId('warmup-card');
 
     // The user-initiated plugin swap is treated as a fresh-state event by the
-    // production component (key includes wasm_registry_id). The revision-bump
+    // production component (key includes wasm_registry_id). The spec_revision-bump
     // anti-flicker contract above is unaffected by this choice.
     expect(after).not.toBe(before);
   });
 
   test('inner card DOM node is replaced when upstream.id changes', async () => {
     const WarmupCard = await importWarmupCard();
-    const a = makeOauthUpstream({ id: 'oauth-1', revision: 1 });
+    const a = makeOauthUpstream({ id: 'oauth-1', spec_revision: 1 });
     const { rerender } = render(<WarmupCard upstream={a} />);
     const before = screen.getByTestId('warmup-card');
 
-    const b = makeOauthUpstream({ id: 'oauth-2', revision: 1 });
+    const b = makeOauthUpstream({ id: 'oauth-2', spec_revision: 1 });
     rerender(<WarmupCard upstream={b} />);
     const after = screen.getByTestId('warmup-card');
 

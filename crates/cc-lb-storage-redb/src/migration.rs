@@ -15,8 +15,10 @@ use crate::{
     OAUTH_CREDENTIALS_V1, ORGANIZATION_METADATA_V1, PLUGIN_CHAINS_V2, PRICE_CATALOG_V1,
     PRINCIPAL_ALLOWED_UPSTREAMS_V1, PRINCIPALS_V2, PRINCIPALS_V2_BY_NAME,
     PROMPT_CACHE_OBSERVATIONS, REQUEST_EVENTS_V1, SCHEMA_VERSION_KEY, SCHEMA_VERSION_V1,
-    StorageError, UPSTREAM_RATE_LIMIT_STATE_V1, UPSTREAM_SUBSCRIPTION_METADATA_V1,
-    UPSTREAM_SUBSCRIPTION_QUOTA_LATEST_V1, UPSTREAM_SUBSCRIPTION_QUOTA_OBSERVATIONS_BY_TIME_V1,
+    StorageError, UPSTREAM_API_KEY_SECRET_V1, UPSTREAM_LEASE_V1, UPSTREAM_OAUTH_TOKEN_V1,
+    UPSTREAM_RATE_LIMIT_STATE_V1, UPSTREAM_SPEC_V1, UPSTREAM_SPEC_V1_BY_NAME, UPSTREAM_STATUS_V1,
+    UPSTREAM_SUBSCRIPTION_METADATA_V1, UPSTREAM_SUBSCRIPTION_QUOTA_LATEST_V1,
+    UPSTREAM_SUBSCRIPTION_QUOTA_OBSERVATIONS_BY_TIME_V1,
     UPSTREAM_SUBSCRIPTION_QUOTA_OBSERVATIONS_V1, UPSTREAMS_V2, UPSTREAMS_V2_BY_NAME,
     USAGE_ROLLUP_CHECKPOINTS_V1, USAGE_ROLLUPS_V2, WASM_BLOBS_V2, WASM_REGISTRY_V2,
 };
@@ -107,6 +109,24 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
         write_txn.open_table(UPSTREAMS_V2_BY_NAME)?;
     }
     {
+        write_txn.open_table(UPSTREAM_SPEC_V1)?;
+    }
+    {
+        write_txn.open_table(UPSTREAM_SPEC_V1_BY_NAME)?;
+    }
+    {
+        write_txn.open_table(UPSTREAM_API_KEY_SECRET_V1)?;
+    }
+    {
+        write_txn.open_table(UPSTREAM_OAUTH_TOKEN_V1)?;
+    }
+    {
+        write_txn.open_table(UPSTREAM_STATUS_V1)?;
+    }
+    {
+        write_txn.open_table(UPSTREAM_LEASE_V1)?;
+    }
+    {
         write_txn.open_table(UPSTREAM_RATE_LIMIT_STATE_V1)?;
     }
     {
@@ -148,6 +168,7 @@ pub(crate) fn initialize_schema(db: &Arc<Database>) -> Result<(), StorageError> 
     if stored_version.is_none_or(|version| version < 6) {
         drop_incompatible_router_chain_entries(&write_txn)?;
     }
+    migrate_upstream_split_tables(&write_txn)?;
     seed_builtin_cache_affinity(&write_txn)?;
     {
         let mut schema = write_txn.open_table(SCHEMA_VERSION_V1)?;
@@ -308,6 +329,137 @@ fn migrate_upstreams_v3_to_v4(write_txn: &redb::WriteTransaction) -> Result<(), 
     }
 
     Ok(())
+}
+
+fn migrate_upstream_split_tables(write_txn: &redb::WriteTransaction) -> Result<(), StorageError> {
+    let rows = {
+        let table = write_txn.open_table(UPSTREAMS_V2)?;
+        table
+            .iter()?
+            .map(|row| {
+                let (key, value) = row?;
+                Ok((key.value().to_vec(), value.value().to_vec()))
+            })
+            .collect::<Result<Vec<_>, StorageError>>()?
+    };
+
+    for (key, value) in rows {
+        let record: UpstreamRecord = serde_json::from_slice(&value)?;
+        let split_exists = {
+            let spec = write_txn.open_table(UPSTREAM_SPEC_V1)?;
+            spec.get(key.as_slice())?.is_some()
+        };
+        if split_exists {
+            continue;
+        }
+
+        let spec_payload = serde_json::to_vec(&serde_json::json!({
+            "id": record.id,
+            "name": record.name,
+            "kind": record.kind,
+            "base_url": record.base_url,
+            "enabled": record.enabled,
+            "warmup_enabled": record.warmup_enabled,
+            "warmup_dialect_plugin": record.warmup_dialect_plugin,
+            "spec_revision": record.revision,
+            "created_at_unix_secs": record.created_at_unix_secs,
+            "updated_at_unix_secs": record.updated_at_unix_secs,
+            "deleted_at_unix_secs": record.deleted_at_unix_secs,
+        }))?;
+        {
+            let mut spec = write_txn.open_table(UPSTREAM_SPEC_V1)?;
+            spec.insert(key.as_slice(), spec_payload.as_slice())?;
+        }
+        {
+            let mut by_name = write_txn.open_table(UPSTREAM_SPEC_V1_BY_NAME)?;
+            by_name.insert(record.name.as_str(), key.as_slice())?;
+        }
+
+        if let Some(api_key_ciphertext) = record.api_key_ciphertext {
+            let payload = serde_json::to_vec(&serde_json::json!({
+                "upstream_id": record.id,
+                "api_key_ciphertext": api_key_ciphertext,
+                "secret_revision": record.revision,
+                "created_at_unix_secs": record.created_at_unix_secs,
+                "updated_at_unix_secs": record.updated_at_unix_secs,
+            }))?;
+            let mut table = write_txn.open_table(UPSTREAM_API_KEY_SECRET_V1)?;
+            table.insert(key.as_slice(), payload.as_slice())?;
+        }
+
+        if let Some(oauth_credentials) = record.oauth_credentials {
+            let payload = serde_json::to_vec(&serde_json::json!({
+                "upstream_id": record.id,
+                "oauth_credentials": oauth_credentials,
+                "token_revision": record.revision,
+                "refreshed_at_unix_secs": record.updated_at_unix_secs,
+                "created_at_unix_secs": record.created_at_unix_secs,
+                "updated_at_unix_secs": record.updated_at_unix_secs,
+            }))?;
+            let mut table = write_txn.open_table(UPSTREAM_OAUTH_TOKEN_V1)?;
+            table.insert(key.as_slice(), payload.as_slice())?;
+        }
+
+        if record.last_apply_error.is_some()
+            || record.last_apply_at_unix_secs.is_some()
+            || record.next_warmup_at.is_some()
+            || record.last_warmup_cycle_key.is_some()
+        {
+            let payload = serde_json::to_vec(&serde_json::json!({
+                "upstream_id": record.id,
+                "last_apply_error": record.last_apply_error,
+                "last_apply_at_unix_secs": record.last_apply_at_unix_secs,
+                "observed_spec_revision": null,
+                "observed_api_key_secret_revision": null,
+                "observed_oauth_token_revision": null,
+                "next_warmup_at": record.next_warmup_at,
+                "last_warmup_cycle_key": record.last_warmup_cycle_key,
+                "updated_at_unix_secs": record.updated_at_unix_secs,
+            }))?;
+            let mut table = write_txn.open_table(UPSTREAM_STATUS_V1)?;
+            table.insert(key.as_slice(), payload.as_slice())?;
+        }
+
+        if let (Some(holder), Some(until_unix_secs)) = (
+            record.refresh_lease_holder,
+            record.refresh_lease_until_unix_secs,
+        ) {
+            let lease_key = upstream_lease_key(record.id, "refresh");
+            let payload = serde_json::to_vec(&serde_json::json!({
+                "upstream_id": record.id,
+                "lease_kind": "refresh",
+                "holder": holder.to_string(),
+                "until_unix_secs": until_unix_secs,
+                "updated_at_unix_secs": record.updated_at_unix_secs,
+            }))?;
+            let mut table = write_txn.open_table(UPSTREAM_LEASE_V1)?;
+            table.insert(lease_key.as_str(), payload.as_slice())?;
+        }
+
+        if let (Some(holder), Some(until_unix_secs)) = (
+            record.warmup_lease_holder,
+            record.warmup_lease_until_unix_secs,
+        ) {
+            let lease_key = upstream_lease_key(record.id, "warmup");
+            let payload = serde_json::to_vec(&serde_json::json!({
+                "upstream_id": record.id,
+                "lease_kind": "warmup",
+                "holder": holder,
+                "until_unix_secs": until_unix_secs,
+                "updated_at_unix_secs": record.updated_at_unix_secs,
+            }))?;
+            let mut table = write_txn.open_table(UPSTREAM_LEASE_V1)?;
+            table.insert(lease_key.as_str(), payload.as_slice())?;
+        }
+    }
+
+    write_txn.delete_table(UPSTREAMS_V2)?;
+    write_txn.delete_table(UPSTREAMS_V2_BY_NAME)?;
+    Ok(())
+}
+
+fn upstream_lease_key(upstream_id: uuid::Uuid, lease_kind: &str) -> String {
+    format!("{upstream_id}:{lease_kind}")
 }
 
 fn reset_usage_rollups_v1(write_txn: &redb::WriteTransaction) -> Result<(), StorageError> {

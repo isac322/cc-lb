@@ -49,7 +49,7 @@ export function SettingsCard({ upstream }: Props) {
       {
         id: upstream.id,
         body,
-        revision: upstream.revision,
+        spec_revision: upstream.spec_revision,
       },
       {
         onSuccess: () => {

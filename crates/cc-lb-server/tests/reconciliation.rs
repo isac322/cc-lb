@@ -20,7 +20,7 @@ use cc_lb_storage_api::{
     WasmRegistryEntry, WasmRegistryEntryInput,
 };
 
-use cc_lb_storage_api::upstream::UpstreamKind;
+use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamLeaseKind, UpstreamStatusUpdate};
 use cc_lb_storage_redb::Storage;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tokio::sync::Notify;
@@ -386,6 +386,64 @@ impl UpstreamStore for BlockingUpstreamStore {
         _expected_revision: u64,
         _enabled: bool,
     ) -> StorageResult<UpstreamRecord> {
+        unimplemented!()
+    }
+
+    async fn update_spec(
+        &self,
+        _id: Uuid,
+        _expected_revision: u64,
+        _update: UpstreamUpdate,
+    ) -> StorageResult<UpstreamRecord> {
+        unimplemented!()
+    }
+
+    async fn update_api_key_secret(
+        &self,
+        _id: Uuid,
+        _api_key_ciphertext: Option<Vec<u8>>,
+    ) -> StorageResult<UpstreamRecord> {
+        unimplemented!()
+    }
+
+    async fn update_oauth_token(
+        &self,
+        _id: Uuid,
+        _tokens: cc_lb_aead::EncryptedOAuthTokens,
+    ) -> StorageResult<UpstreamRecord> {
+        unimplemented!()
+    }
+
+    async fn set_status(&self, _id: Uuid, _status: UpstreamStatusUpdate) -> StorageResult<()> {
+        unimplemented!()
+    }
+
+    async fn claim_lease(
+        &self,
+        _id: Uuid,
+        _lease_kind: UpstreamLeaseKind,
+        _holder: String,
+        _ttl_secs: i64,
+    ) -> StorageResult<bool> {
+        unimplemented!()
+    }
+
+    async fn renew_lease(
+        &self,
+        _id: Uuid,
+        _lease_kind: UpstreamLeaseKind,
+        _holder: String,
+        _ttl_secs: i64,
+    ) -> StorageResult<bool> {
+        unimplemented!()
+    }
+
+    async fn release_lease(
+        &self,
+        _id: Uuid,
+        _lease_kind: UpstreamLeaseKind,
+        _holder: String,
+    ) -> StorageResult<bool> {
         unimplemented!()
     }
 

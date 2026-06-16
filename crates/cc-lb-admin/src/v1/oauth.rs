@@ -20,11 +20,12 @@ use cc_lb_core::anthropic_compat::{
 use cc_lb_core::{
     AuditEntry, AuditPayload, MetadataHookRequest, fetch_metadata_only, make_metadata_http_client,
 };
-use cc_lb_storage_api::upstream::UpstreamKind;
+use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{
     OrganizationMetadataRecord, Storage, StorageError, UpstreamCreate, UpstreamRecord,
     UpstreamStore, UpstreamSubscriptionMetadataRecord, validate_identifier,
 };
+use chrono::{DateTime, Utc};
 use oauth2::{AuthUrl, ClientId, TokenUrl};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -131,7 +132,18 @@ struct UpstreamResponse {
     name: String,
     kind: UpstreamKind,
     enabled: bool,
-    revision: u64,
+    warmup_enabled: bool,
+    warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
+    spec_revision: u64,
+    status: UpstreamStatusResponse,
+}
+
+#[derive(Serialize)]
+struct UpstreamStatusResponse {
+    last_apply_error: Option<String>,
+    last_apply_at_unix_secs: Option<u64>,
+    next_warmup_at: Option<DateTime<Utc>>,
+    last_warmup_cycle_key: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -962,7 +974,15 @@ fn upstream_response(record: &UpstreamRecord) -> UpstreamResponse {
         name: record.name.clone(),
         kind: record.kind,
         enabled: record.enabled,
-        revision: record.revision,
+        warmup_enabled: record.warmup_enabled,
+        warmup_dialect_plugin: record.warmup_dialect_plugin.clone(),
+        spec_revision: record.revision,
+        status: UpstreamStatusResponse {
+            last_apply_error: record.last_apply_error.clone(),
+            last_apply_at_unix_secs: record.last_apply_at_unix_secs,
+            next_warmup_at: record.next_warmup_at,
+            last_warmup_cycle_key: record.last_warmup_cycle_key,
+        },
     }
 }
 

@@ -20,50 +20,46 @@ const upstreams: any[] = [
     name: "anthropic-primary",
     kind: "anthropic_api_key",
     enabled: true,
-    revision: 7,
+    spec_revision: 7,
     base_url: "https://api.anthropic.com",
     api_key_env: "ANTHROPIC_API_KEY",
     warmup_enabled: false,
     warmup_dialect_plugin: null,
-    next_warmup_at: null,
-    last_warmup_cycle_key: null,
+    status: { last_apply_error: null, last_apply_at_unix_secs: null, next_warmup_at: null, last_warmup_cycle_key: null },
   },
   {
     id: "us-anthropic-secondary",
     name: "anthropic-secondary",
     kind: "anthropic_api_key",
     enabled: false,
-    revision: 3,
+    spec_revision: 3,
     base_url: "https://api.anthropic.com",
     api_key_env: "ANTHROPIC_API_KEY_2",
     warmup_enabled: false,
     warmup_dialect_plugin: null,
-    next_warmup_at: null,
-    last_warmup_cycle_key: null,
+    status: { last_apply_error: null, last_apply_at_unix_secs: null, next_warmup_at: null, last_warmup_cycle_key: null },
   },
   {
     id: "us-oauth-healthy",
     name: "oauth-healthy",
     kind: "anthropic_oauth",
     enabled: true,
-    revision: 4,
+    spec_revision: 4,
     base_url: "https://api.anthropic.com",
     warmup_enabled: true,
     warmup_dialect_plugin: null,
-    next_warmup_at: "2026-06-14T23:04:12Z",
-    last_warmup_cycle_key: 1718380800,
+    status: { last_apply_error: null, last_apply_at_unix_secs: null, next_warmup_at: "2026-06-14T23:04:12Z", last_warmup_cycle_key: 1718380800 },
   },
   {
     id: "us-oauth-disabled",
     name: "oauth-disabled",
     kind: "anthropic_oauth",
     enabled: false,
-    revision: 2,
+    spec_revision: 2,
     base_url: "https://api.anthropic.com",
     warmup_enabled: false,
     warmup_dialect_plugin: null,
-    next_warmup_at: null,
-    last_warmup_cycle_key: null,
+    status: { last_apply_error: null, last_apply_at_unix_secs: null, next_warmup_at: null, last_warmup_cycle_key: null },
   },
 ];
 
@@ -608,9 +604,9 @@ async function handle(req: Request, url: URL): Promise<Response> {
     const body = await readJson<any>(req);
     if (!body.name) return err(400, "invalid_input", "name required");
     if (upstreams.find((u) => u.name === body.name)) return err(409, "conflict", "name already exists");
-    const newU = { id: `us-${Date.now().toString(36)}`, name: body.name, kind: body.kind ?? "anthropic_api_key", enabled: true, revision: 1, base_url: body.base_url ?? "https://api.anthropic.com", api_key_env: body.api_key_env ?? null, warmup_enabled: false, warmup_dialect_plugin: null, next_warmup_at: null, last_warmup_cycle_key: null };
+    const newU = { id: `us-${Date.now().toString(36)}`, name: body.name, kind: body.kind ?? "anthropic_api_key", enabled: true, spec_revision: 1, base_url: body.base_url ?? "https://api.anthropic.com", api_key_env: body.api_key_env ?? null, warmup_enabled: false, warmup_dialect_plugin: null, status: { last_apply_error: null, last_apply_at_unix_secs: null, next_warmup_at: null, last_warmup_cycle_key: null } };
     upstreams.push(newU);
-    return created(newU, { etag: `"${newU.revision}"`, location: `/admin/v1/upstreams/${newU.id}` });
+    return created(newU, { etag: `"${newU.spec_revision}"`, location: `/admin/v1/upstreams/${newU.id}` });
   }
   {
     const mm = path.match(/^\/admin\/v1\/upstreams\/([^/]+)$/);
@@ -618,23 +614,23 @@ async function handle(req: Request, url: URL): Promise<Response> {
       const id = mm[1]!;
       const u = upstreams.find((x) => x.id === id);
       if (!u) return notFound("upstream_not_found");
-      if (m === "GET") return ok(u, { etag: `"${u.revision}"` });
+      if (m === "GET") return ok(u, { etag: `"${u.spec_revision}"` });
       if (m === "PUT") {
         const body = await readJson<any>(req);
         Object.assign(u, body);
-        u.revision++;
-        return ok(u, { etag: `"${u.revision}"` });
+        u.spec_revision++;
+        return ok(u, { etag: `"${u.spec_revision}"` });
       }
       if (m === "PATCH") {
         const ifMatch = req.headers.get("If-Match");
         if (!ifMatch) return err(428, "precondition_required", "If-Match header required");
-        const expectedEtag = `W/"${u.revision}"`;
-        if (ifMatch !== expectedEtag && ifMatch !== `"${u.revision}"`) return err(412, "precondition_failed");
+        const expectedEtag = `W/"${u.spec_revision}"`;
+        if (ifMatch !== expectedEtag && ifMatch !== `"${u.spec_revision}"`) return err(412, "precondition_failed");
         const body = await readJson<any>(req);
         if (body.warmup_enabled !== undefined) u.warmup_enabled = body.warmup_enabled;
         if (body.warmup_dialect_plugin !== undefined) u.warmup_dialect_plugin = body.warmup_dialect_plugin;
-        u.revision++;
-        return ok(u, { etag: `"${u.revision}"` });
+        u.spec_revision++;
+        return ok(u, { etag: `"${u.spec_revision}"` });
       }
       if (m === "DELETE") {
         const ix = upstreams.indexOf(u);
@@ -649,8 +645,8 @@ async function handle(req: Request, url: URL): Promise<Response> {
       const u = upstreams.find((x) => x.id === mm[1]);
       if (!u) return notFound("upstream_not_found");
       u.enabled = mm[2] === "enable";
-      u.revision++;
-      return ok(u, { etag: `"${u.revision}"` });
+      u.spec_revision++;
+      return ok(u, { etag: `"${u.spec_revision}"` });
     }
   }
   {
@@ -681,11 +677,11 @@ async function handle(req: Request, url: URL): Promise<Response> {
       if (!u) return notFound("upstream_not_found");
       const ifMatch = req.headers.get("If-Match");
       if (!ifMatch) return err(428, "precondition_required", "If-Match header required");
-      const expectedEtag = `W/"${u.revision}"`;
-      if (ifMatch !== expectedEtag && ifMatch !== `"${u.revision}"`) return err(412, "precondition_failed");
+      const expectedEtag = `W/"${u.spec_revision}"`;
+      if (ifMatch !== expectedEtag && ifMatch !== `"${u.spec_revision}"`) return err(412, "precondition_failed");
       u.warmup_dialect_plugin = null;
-      u.revision++;
-      return ok(u, { etag: `"${u.revision}"` });
+      u.spec_revision++;
+      return ok(u, { etag: `"${u.spec_revision}"` });
     }
   }
   {
@@ -949,7 +945,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
   if (path === "/admin/v1/export" && m === "GET") {
     return ok({
       exported_at_unix_secs: NOW(), schema_version: 2,
-      upstreams: upstreams.map((u) => ({ name: u.name, kind: u.kind, enabled: u.enabled, oauth_credentials_present: u.kind === "anthropic_oauth", expires_at_unix_secs: u.kind === "anthropic_oauth" ? NOW() + 3600 * 8 : null, revision: u.revision })),
+      upstreams: upstreams.map((u) => ({ name: u.name, kind: u.kind, enabled: u.enabled, oauth_credentials_present: u.kind === "anthropic_oauth", expires_at_unix_secs: u.kind === "anthropic_oauth" ? NOW() + 3600 * 8 : null, spec_revision: u.spec_revision })),
       principals: principals.map((p) => ({ name: p.name, kind: p.kind, allowed_models: p.allowed_models, default_limits: p.default_limits, enabled: p.enabled, revision: p.revision })),
       plugins: {
         registry: plugins.map((p) => ({ sha256_hex: p.sha256_hex, name: p.name, original_filename: p.original_filename, label: p.label, size_bytes: p.size_bytes, refcount: p.refcount })),

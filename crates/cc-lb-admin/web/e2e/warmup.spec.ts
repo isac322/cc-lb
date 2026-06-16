@@ -9,13 +9,17 @@ type UpstreamFixture = {
   name: string;
   kind: 'anthropic_api_key' | 'anthropic_oauth';
   enabled: boolean;
-  revision: number;
+  spec_revision: number;
   base_url: string;
   api_key_env?: string | null;
   warmup_enabled: boolean;
   warmup_dialect_plugin: WarmupPlugin;
-  next_warmup_at: string | null;
-  last_warmup_cycle_key: number | null;
+  status: {
+    last_apply_error: string | null;
+    last_apply_at_unix_secs: number | null;
+    next_warmup_at: string | null;
+    last_warmup_cycle_key: number | null;
+  };
 };
 type PluginFixture = {
   id: string;
@@ -32,7 +36,7 @@ type PluginFixture = {
 };
 
 const evidenceDir = path.join(process.cwd(), '../../../.omo/evidence/warmup');
-const revision = 4;
+const specRevision = 4;
 
 function ensureEvidenceDir() {
   fs.mkdirSync(evidenceDir, { recursive: true });
@@ -48,12 +52,16 @@ function oauthHealthy(overrides: Partial<UpstreamFixture> = {}): UpstreamFixture
     name: 'oauth-healthy',
     kind: 'anthropic_oauth',
     enabled: true,
-    revision,
+    spec_revision: specRevision,
     base_url: 'https://api.anthropic.com',
     warmup_enabled: true,
     warmup_dialect_plugin: null,
-    next_warmup_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
-    last_warmup_cycle_key: Math.floor(Date.now() / 1000) - 20 * 60,
+    status: {
+      last_apply_error: null,
+      last_apply_at_unix_secs: null,
+      next_warmup_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
+      last_warmup_cycle_key: Math.floor(Date.now() / 1000) - 20 * 60,
+    },
     ...overrides,
   };
 }
@@ -62,10 +70,14 @@ function oauthDisabled(): UpstreamFixture {
   return {
     ...oauthHealthy({ id: 'oauth-disabled', name: 'oauth-disabled' }),
     enabled: false,
-    revision: 2,
+    spec_revision: 2,
     warmup_enabled: false,
-    next_warmup_at: null,
-    last_warmup_cycle_key: null,
+    status: {
+      last_apply_error: null,
+      last_apply_at_unix_secs: null,
+      next_warmup_at: null,
+      last_warmup_cycle_key: null,
+    },
   };
 }
 
@@ -75,13 +87,17 @@ function apiKeyUpstream(): UpstreamFixture {
     name: 'api-key-id',
     kind: 'anthropic_api_key',
     enabled: true,
-    revision: 7,
+    spec_revision: 7,
     base_url: 'https://api.anthropic.com',
     api_key_env: 'ANTHROPIC_API_KEY',
     warmup_enabled: false,
     warmup_dialect_plugin: null,
-    next_warmup_at: null,
-    last_warmup_cycle_key: null,
+    status: {
+      last_apply_error: null,
+      last_apply_at_unix_secs: null,
+      next_warmup_at: null,
+      last_warmup_cycle_key: null,
+    },
   };
 }
 
@@ -146,7 +162,7 @@ async function installAppFixtures(
     const upstreamMatch = pathname.match(/^\/admin\/v1\/upstreams\/([^/]+)$/);
     if (upstreamMatch && method === 'GET') {
       const upstream = upstreams.find((candidate) => candidate.id === upstreamMatch[1]);
-      return upstream ? json(200, upstream, { etag: `"${upstream.revision}"` }) : json(404, { error: 'not_found' });
+      return upstream ? json(200, upstream, { etag: `"${upstream.spec_revision}"` }) : json(404, { error: 'not_found' });
     }
     if (upstreamMatch && method === 'PATCH') {
       const upstream = upstreams.find((candidate) => candidate.id === upstreamMatch[1]);
@@ -154,8 +170,8 @@ async function installAppFixtures(
       const override = await options.onPatch?.(request, upstream);
       if (override) return json(override.status, override.body);
       const body = request.postDataJSON() as Partial<Pick<UpstreamFixture, 'warmup_enabled' | 'warmup_dialect_plugin'>>;
-      Object.assign(upstream, body, { revision: upstream.revision + 1 });
-      return json(200, upstream, { etag: `"${upstream.revision}"` });
+      Object.assign(upstream, body, { spec_revision: upstream.spec_revision + 1 });
+      return json(200, upstream, { etag: `"${upstream.spec_revision}"` });
     }
     const clearMatch = pathname.match(/^\/admin\/v1\/upstreams\/([^/]+)\/warmup-dialect-plugin$/);
     if (clearMatch && method === 'DELETE') {
@@ -164,8 +180,8 @@ async function installAppFixtures(
       const override = await options.onDelete?.(request, upstream);
       if (override) return json(override.status, override.body);
       upstream.warmup_dialect_plugin = null;
-      upstream.revision += 1;
-      return json(200, upstream, { etag: `"${upstream.revision}"` });
+      upstream.spec_revision += 1;
+      return json(200, upstream, { etag: `"${upstream.spec_revision}"` });
     }
     if (pathname.match(/^\/admin\/v1\/upstreams\/([^/]+)\/warmup\/fire-now$/) && method === 'POST') {
       const response = await (options.onFireNow?.(request) ?? { status: 200, body: { fired: true, cycle_key: 1718380800 } });
@@ -337,7 +353,7 @@ test.describe('WarmupCard', () => {
         patchBody = request.postDataJSON();
         ifMatch = request.headers()['if-match'] ?? null;
         upstream.warmup_dialect_plugin = { wasm_registry_id: 'anthropic-shape-v2', config: {} };
-        upstream.revision += 1;
+        upstream.spec_revision += 1;
         return { status: 200, body: upstream };
       },
     });
@@ -345,7 +361,7 @@ test.describe('WarmupCard', () => {
     await page.getByTestId('warmup-plugin-select').selectOption('anthropic-shape-v2');
 
     await expect.poll(() => patchBody).toEqual({ warmup_dialect_plugin: { wasm_registry_id: 'anthropic-shape-v2', config: {} } });
-    expect(ifMatch).toBe(`W/"${revision}"`);
+    expect(ifMatch).toBe(`W/"${specRevision}"`);
     fs.writeFileSync(evidencePath('scenario-6-patch-body.json'), JSON.stringify(patchBody, null, 2));
     await expect(page.getByTestId('warmup-plugin-select')).toHaveValue('anthropic-shape-v2');
     await expect(page.getByText(COPY.dialectPluginSaveSuccess)).toBeVisible();
@@ -362,7 +378,7 @@ test.describe('WarmupCard', () => {
         deleteUrl = new URL(request.url()).pathname;
         ifMatch = request.headers()['if-match'] ?? null;
         upstream.warmup_dialect_plugin = null;
-        upstream.revision += 1;
+        upstream.spec_revision += 1;
         return { status: 200, body: upstream };
       },
     });
@@ -371,7 +387,7 @@ test.describe('WarmupCard', () => {
     await page.getByRole('button', { name: 'Clear' }).click();
 
     await expect.poll(() => deleteUrl).toBe('/admin/v1/upstreams/oauth-healthy/warmup-dialect-plugin');
-    expect(ifMatch).toBe(`W/"${revision}"`);
+    expect(ifMatch).toBe(`W/"${specRevision}"`);
     await expect(page.getByTestId('warmup-plugin-select')).toHaveValue('');
     await expect(page.getByTestId('warmup-plugin-clear')).toHaveCount(0);
     await expect(page.getByText(COPY.dialectPluginClearSuccess)).toBeVisible();
@@ -383,9 +399,9 @@ test.describe('WarmupCard', () => {
     await installAppFixtures(page, {
       onPatch: async (_request, upstream) => {
         attempts += 1;
-        if (attempts === 1) return { status: 409, body: { error: 'stale_revision', current_revision: revision + 1 } };
+        if (attempts === 1) return { status: 409, body: { error: 'stale_revision', current_revision: specRevision + 1 } };
         upstream.warmup_dialect_plugin = { wasm_registry_id: 'anthropic-shape-v2', config: {} };
-        upstream.revision = revision + 2;
+        upstream.spec_revision = specRevision + 2;
         return { status: 200, body: upstream };
       },
     });
@@ -409,9 +425,9 @@ test.describe('WarmupCard', () => {
         patchBody = request.postDataJSON();
         ifMatch = request.headers()['if-match'] ?? null;
         upstream.warmup_enabled = true;
-        upstream.next_warmup_at = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-        upstream.last_warmup_cycle_key = Math.floor(Date.now() / 1000) - 20 * 60;
-        upstream.revision += 1;
+        upstream.status.next_warmup_at = new Date(Date.now() + 30 * 60 * 1000).toISOString();
+        upstream.status.last_warmup_cycle_key = Math.floor(Date.now() / 1000) - 20 * 60;
+        upstream.spec_revision += 1;
         return { status: 200, body: upstream };
       },
     });

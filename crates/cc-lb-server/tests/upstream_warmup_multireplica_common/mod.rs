@@ -237,9 +237,10 @@ impl PostgresWarmupFixture {
 
     pub async fn expire_warmup_lease(&self, upstream_id: Uuid) -> TestResult {
         sqlx::query(
-            "UPDATE upstreams_v1
-                SET warmup_lease_until_unix_secs = extract(epoch from now())::bigint - 1
-              WHERE id = $1",
+            "UPDATE upstream_lease_v1
+                SET until_unix_secs = extract(epoch from now())::bigint - 1
+              WHERE upstream_id = $1
+                AND lease_kind = 'warmup'",
         )
         .bind(upstream_id)
         .execute(&self.pool)
@@ -249,11 +250,12 @@ impl PostgresWarmupFixture {
 
     pub async fn warmup_lease_until(&self, upstream_id: Uuid) -> TestResult<Option<i64>> {
         Ok(sqlx::query_scalar::<_, Option<i64>>(
-            "SELECT warmup_lease_until_unix_secs FROM upstreams_v1 WHERE id = $1",
+            "SELECT until_unix_secs FROM upstream_lease_v1 WHERE upstream_id = $1 AND lease_kind = 'warmup'",
         )
         .bind(upstream_id)
-        .fetch_one(&self.pool)
-        .await?)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten())
     }
 
     pub async fn cycle_key_write_count(&self, upstream_id: Uuid) -> TestResult<i64> {
@@ -454,9 +456,15 @@ async fn install_cycle_key_write_trigger(pool: &PgPool) -> TestResult {
          LANGUAGE plpgsql
          AS $$
          BEGIN
-             IF OLD.last_warmup_cycle_key IS DISTINCT FROM NEW.last_warmup_cycle_key THEN
+             IF TG_OP = 'INSERT' THEN
+                 IF NEW.last_warmup_cycle_key IS NOT NULL THEN
+                     INSERT INTO warmup_cycle_key_writes (upstream_id, holder, new_cycle_key)
+                     VALUES (NEW.upstream_id, NULL, NEW.last_warmup_cycle_key);
+                 END IF;
+             ELSIF OLD.last_warmup_cycle_key IS DISTINCT FROM NEW.last_warmup_cycle_key
+                   AND NEW.last_warmup_cycle_key IS NOT NULL THEN
                  INSERT INTO warmup_cycle_key_writes (upstream_id, holder, new_cycle_key)
-                 VALUES (NEW.id, NEW.warmup_lease_holder, NEW.last_warmup_cycle_key);
+                 VALUES (NEW.upstream_id, NULL, NEW.last_warmup_cycle_key);
              END IF;
              RETURN NEW;
          END;
@@ -466,7 +474,7 @@ async fn install_cycle_key_write_trigger(pool: &PgPool) -> TestResult {
     .await?;
     sqlx::query(
         "CREATE TRIGGER record_warmup_cycle_key_write_trigger
-         AFTER UPDATE OF last_warmup_cycle_key ON upstreams_v1
+         AFTER INSERT OR UPDATE OF last_warmup_cycle_key ON upstream_status_v1
          FOR EACH ROW
          EXECUTE FUNCTION record_warmup_cycle_key_write()",
     )

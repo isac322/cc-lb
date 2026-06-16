@@ -368,7 +368,7 @@ async fn rollup_usage_once_inner(storage: &PostgresStorage) -> StorageResult<Usa
 async fn load_upstream_identities(
     tx: &mut Transaction<'_, Postgres>,
 ) -> StorageResult<HashMap<String, UpstreamIdentity>> {
-    let rows = sqlx::query("SELECT id, name FROM upstreams_v1 WHERE deleted_at IS NULL")
+    let rows = sqlx::query("SELECT id, name FROM upstream_spec_v1 WHERE deleted_at IS NULL")
         .fetch_all(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;
