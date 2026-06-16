@@ -19,12 +19,12 @@ use cc_lb_server::refresh::LazyRefresher;
 use cc_lb_server::upstream_warmup_loop::UpstreamWarmupLoop;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamLeaseKind, UpstreamStatusUpdate};
 use cc_lb_storage_api::{
-    PrincipalCreate, PrincipalKind, PrincipalStore, StorageResult,
+    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, StorageResult,
     SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
     SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamCreate, UpstreamRecord,
     UpstreamStore, UpstreamSubscriptionQuotaStore, UpstreamUpdate,
 };
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use chrono::{DateTime, TimeZone, Utc};
 use fake_anthropic::{
     AppConfig, MessageScript, RecordedMessageRequest, ScriptedMessageResponse,
@@ -63,10 +63,16 @@ impl WarmupFixture {
     pub async fn new() -> Self {
         let fake = RunningFakeAnthropic::spawn().await;
         let dir = tempfile::tempdir().expect("tempdir");
-        let storage = Arc::new(
-            Storage::open(&dir.path().join("upstream-warmup.redb"), MASTER_KEY)
-                .expect("redb storage opens"),
+        let database_url = format!(
+            "sqlite://{}",
+            dir.path().join("upstream-warmup.sqlite").display()
         );
+        let storage = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite(&database_url)
+                .await
+                .expect("sqlite storage opens"),
+        );
+        storage.initialize(BackendKind::Sqlite).await.unwrap();
         let clock = Arc::new(AtomicI64::new(real_now_secs()));
         let upstreams = Arc::new(TestClockUpstreamStore::new(storage.clone(), clock.clone()));
         let stores = Arc::new(Stores {

@@ -2,11 +2,11 @@ use std::path::Path;
 use std::process::{Command, Output};
 
 use cc_lb_storage_api::{
-    PluginChainEntry, PluginChainEntryInput, PluginRegistryStore, PluginSlot, WasmBlob,
-    WasmRegistryEntry, WasmRegistryEntryInput,
+    BackendKind, MetaStore, PluginChainEntry, PluginChainEntryInput, PluginRegistryStore,
+    PluginSlot, WasmBlob, WasmRegistryEntry, WasmRegistryEntryInput,
     principal::{Limit, LimitKind, PrincipalCreate, PrincipalKind, PrincipalStore},
 };
-use cc_lb_storage_redb::RedbStorage;
+use cc_lb_storage_sqlite::SqliteStorage;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -14,8 +14,8 @@ use uuid::Uuid;
 #[tokio::test]
 async fn list_abandoned_chain_entries_empty_storage_outputs_empty_report() -> anyhow::Result<()> {
     let dir = tempfile::tempdir()?;
-    let path = dir.path().join("storage.redb");
-    let storage = RedbStorage::open(&path, [42; 32])?;
+    let path = dir.path().join("storage.sqlite");
+    let storage = open_sqlite_storage(&path).await?;
     drop(storage);
 
     let output = run_doctor(&path)?;
@@ -26,7 +26,7 @@ async fn list_abandoned_chain_entries_empty_storage_outputs_empty_report() -> an
 
 #[tokio::test]
 async fn list_abandoned_chain_entries_reports_empty_supported_slots() -> anyhow::Result<()> {
-    let (dir, storage) = open_storage()?;
+    let (dir, storage) = open_storage().await?;
     let principal_id = create_principal(&storage, "doctor-abandoned-principal").await?;
     let registry_entry =
         upload_plugin(&storage, "doctor-abandoned-plugin", [11; 32], Vec::new()).await?;
@@ -53,7 +53,7 @@ async fn list_abandoned_chain_entries_reports_empty_supported_slots() -> anyhow:
 
 #[tokio::test]
 async fn list_abandoned_chain_entries_omits_healthy_chain_entries() -> anyhow::Result<()> {
-    let (dir, storage) = open_storage()?;
+    let (dir, storage) = open_storage().await?;
     let principal_id = create_principal(&storage, "doctor-healthy-principal").await?;
     let registry_entry = upload_plugin(
         &storage,
@@ -72,18 +72,25 @@ async fn list_abandoned_chain_entries_omits_healthy_chain_entries() -> anyhow::R
     Ok(())
 }
 
-fn open_storage() -> anyhow::Result<(TempDir, RedbStorage)> {
+async fn open_storage() -> anyhow::Result<(TempDir, SqliteStorage)> {
     let dir = tempfile::tempdir()?;
     let path = storage_path(&dir);
-    let storage = RedbStorage::open(&path, [42; 32])?;
+    let storage = open_sqlite_storage(&path).await?;
     Ok((dir, storage))
 }
 
 fn storage_path(dir: &TempDir) -> std::path::PathBuf {
-    dir.path().join("storage.redb")
+    dir.path().join("storage.sqlite")
 }
 
-async fn create_principal(storage: &RedbStorage, name: &str) -> anyhow::Result<Uuid> {
+async fn open_sqlite_storage(path: &Path) -> anyhow::Result<SqliteStorage> {
+    let database_url = format!("sqlite://{}", path.display());
+    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url).await?;
+    storage.initialize(BackendKind::Sqlite).await?;
+    Ok(storage)
+}
+
+async fn create_principal(storage: &SqliteStorage, name: &str) -> anyhow::Result<Uuid> {
     let principal = storage
         .create(
             PrincipalCreate {
@@ -104,7 +111,7 @@ async fn create_principal(storage: &RedbStorage, name: &str) -> anyhow::Result<U
 }
 
 async fn upload_plugin(
-    storage: &RedbStorage,
+    storage: &SqliteStorage,
     name: &str,
     sha256: [u8; 32],
     supported_slots: Vec<PluginSlot>,
@@ -134,7 +141,7 @@ async fn upload_plugin(
 }
 
 async fn insert_router_chain(
-    storage: &RedbStorage,
+    storage: &SqliteStorage,
     principal_id: Uuid,
     wasm_registry_id: Uuid,
     order: i64,

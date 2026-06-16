@@ -3,11 +3,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     StorageError, StorageResult, SubscriptionQuotaBucket, SubscriptionQuotaLatestRecord,
-    SubscriptionQuotaObservationRecord, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
-    SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaWindow,
-    UpstreamSubscriptionQuotaStore,
+    SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind, SubscriptionQuotaSeries,
+    SubscriptionQuotaSeriesQuery, SubscriptionQuotaSource, SubscriptionQuotaSourceMerge,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamSubscriptionQuotaStore,
 };
-use sqlx::{AssertSqlSafe, Row};
+use sqlx::{AssertSqlSafe, Row, sqlite::SqliteRow};
 use uuid::Uuid;
 
 use crate::{SqliteStorage, map_sqlx_error};
@@ -20,52 +20,8 @@ impl UpstreamSubscriptionQuotaStore for SqliteStorage {
     ) -> StorageResult<()> {
         let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
         for record in records {
-            let payload = serde_json::to_string(record)?;
-            sqlx::query(
-                "INSERT INTO upstream_subscription_quotas_v1 \
-                 (upstream_id, sample_id, sample_kind, observed_at, input_tokens, output_tokens, request_count, cost_usd_micros) \
-                 VALUES (?, ?, ?, ?, 0, 0, 0, 0) \
-                 ON CONFLICT(upstream_id, sample_id) DO UPDATE SET \
-                 sample_kind = excluded.sample_kind, \
-                 observed_at = excluded.observed_at, \
-                 input_tokens = excluded.input_tokens, \
-                 output_tokens = excluded.output_tokens, \
-                 request_count = excluded.request_count, \
-                 cost_usd_micros = excluded.cost_usd_micros",
-            )
-            .bind(record.upstream_id.to_string())
-            .bind(record.sample_id.to_string())
-            .bind(payload)
-            .bind(u64_to_i64(
-                record.observed_at_unix_millis,
-                "subscription quota observed_at_unix_millis",
-            )?)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
-
-            let observed_at = u64_to_i64(
-                record.observed_at_unix_millis,
-                "subscription quota observed_at_unix_millis",
-            )?;
-            let payload = serde_json::to_string(record)?;
-            sqlx::query(
-                "INSERT INTO upstream_subscription_quota_latest_v1 \
-                 (upstream_id, window, source, payload, observed_at) \
-                 VALUES (?, ?, ?, ?, ?) \
-                 ON CONFLICT(upstream_id, window, source) DO UPDATE SET \
-                 payload = excluded.payload, \
-                 observed_at = excluded.observed_at \
-                 WHERE excluded.observed_at >= upstream_subscription_quota_latest_v1.observed_at",
-            )
-            .bind(record.upstream_id.to_string())
-            .bind(record.window.as_str())
-            .bind(record.source.as_str())
-            .bind(payload)
-            .bind(observed_at)
-            .execute(&mut *tx)
-            .await
-            .map_err(map_sqlx_error)?;
+            insert_observation(&mut tx, record).await?;
+            upsert_latest(&mut tx, record).await?;
         }
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(())
@@ -122,11 +78,11 @@ impl UpstreamSubscriptionQuotaStore for SqliteStorage {
             return Ok(0);
         }
         let result = sqlx::query(
-            "DELETE FROM upstream_subscription_quotas_v1 \
+            "DELETE FROM upstream_subscription_quota_observations_v1 \
              WHERE rowid IN ( \
-                 SELECT rowid FROM upstream_subscription_quotas_v1 \
-                 WHERE observed_at < ? \
-                 ORDER BY observed_at ASC, upstream_id ASC, sample_id ASC \
+                 SELECT rowid FROM upstream_subscription_quota_observations_v1 \
+                 WHERE observed_at_unix_millis < ? \
+                 ORDER BY observed_at_unix_millis ASC, upstream_id ASC, sample_id ASC \
                  LIMIT ? \
              )",
         )
@@ -153,7 +109,7 @@ async fn list_latest_records_for_upstreams(
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
-        "SELECT payload FROM upstream_subscription_quota_latest_v1 \
+        "SELECT * FROM upstream_subscription_quota_latest_v1 \
          WHERE upstream_id IN ({placeholders}) \
          ORDER BY upstream_id ASC, window ASC, source ASC"
     );
@@ -166,13 +122,7 @@ async fn list_latest_records_for_upstreams(
         .await
         .map_err(map_sqlx_error)?;
 
-    rows.into_iter()
-        .map(|row| {
-            let payload: String = row.try_get("payload").map_err(map_sqlx_error)?;
-            serde_json::from_str::<SubscriptionQuotaLatestRecord>(&payload)
-                .map_err(StorageError::from)
-        })
-        .collect()
+    rows.into_iter().map(row_to_record).collect()
 }
 
 async fn list_records_for_upstreams(
@@ -186,9 +136,9 @@ async fn list_records_for_upstreams(
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
-        "SELECT sample_kind FROM upstream_subscription_quotas_v1 \
+        "SELECT * FROM upstream_subscription_quota_observations_v1 \
          WHERE upstream_id IN ({placeholders}) \
-         ORDER BY upstream_id ASC, observed_at ASC, sample_id ASC"
+         ORDER BY upstream_id ASC, window ASC, source ASC, observed_at_unix_millis ASC, sample_id ASC"
     );
     let mut query = sqlx::query(AssertSqlSafe(sql));
     for upstream_id in upstream_ids {
@@ -199,13 +149,140 @@ async fn list_records_for_upstreams(
         .await
         .map_err(map_sqlx_error)?;
 
-    rows.into_iter()
-        .map(|row| {
-            let payload: String = row.try_get("sample_kind").map_err(map_sqlx_error)?;
-            serde_json::from_str::<SubscriptionQuotaObservationRecord>(&payload)
-                .map_err(StorageError::from)
-        })
-        .collect()
+    rows.into_iter().map(row_to_record).collect()
+}
+
+async fn insert_observation(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    record: &SubscriptionQuotaObservationRecord,
+) -> StorageResult<()> {
+    sqlx::query(
+        "INSERT INTO upstream_subscription_quota_observations_v1 \
+         (upstream_id, window, source, sample_kind, observed_at_unix_millis, sample_id, \
+          utilization, status, resets_at_unix_secs, surpassed_threshold, representative_claim, disabled_reason, \
+          extra_usage_enabled, extra_usage_monthly_limit, extra_usage_used_credits, ingested_at_unix_millis) \
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) \
+         ON CONFLICT DO NOTHING",
+    )
+    .bind(record.upstream_id.to_string())
+    .bind(record.window.as_str())
+    .bind(record.source.as_str())
+    .bind(record.sample_kind.as_str())
+    .bind(u64_to_i64(record.observed_at_unix_millis, "subscription quota observed_at_unix_millis")?)
+    .bind(record.sample_id.to_string())
+    .bind(record.utilization)
+    .bind(record.status.map(SubscriptionQuotaStatus::as_str))
+    .bind(record.resets_at_unix_secs.map(|value| u64_to_i64(value, "subscription quota resets_at_unix_secs")).transpose()?)
+    .bind(record.surpassed_threshold)
+    .bind(&record.representative_claim)
+    .bind(&record.disabled_reason)
+    .bind(record.extra_usage_enabled)
+    .bind(record.extra_usage_monthly_limit)
+    .bind(record.extra_usage_used_credits)
+    .bind(u64_to_i64(record.ingested_at_unix_millis, "subscription quota ingested_at_unix_millis")?)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    Ok(())
+}
+
+async fn upsert_latest(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    record: &SubscriptionQuotaObservationRecord,
+) -> StorageResult<()> {
+    sqlx::query(
+        "INSERT INTO upstream_subscription_quota_latest_v1 \
+         (upstream_id, window, source, sample_kind, observed_at_unix_millis, sample_id, \
+          utilization, status, resets_at_unix_secs, surpassed_threshold, representative_claim, disabled_reason, \
+          extra_usage_enabled, extra_usage_monthly_limit, extra_usage_used_credits, ingested_at_unix_millis) \
+         VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) \
+         ON CONFLICT(upstream_id, window, source) DO UPDATE SET \
+         sample_kind = excluded.sample_kind, observed_at_unix_millis = excluded.observed_at_unix_millis, \
+         sample_id = excluded.sample_id, utilization = excluded.utilization, status = excluded.status, \
+         resets_at_unix_secs = excluded.resets_at_unix_secs, surpassed_threshold = excluded.surpassed_threshold, \
+         representative_claim = excluded.representative_claim, disabled_reason = excluded.disabled_reason, \
+         extra_usage_enabled = excluded.extra_usage_enabled, extra_usage_monthly_limit = excluded.extra_usage_monthly_limit, \
+         extra_usage_used_credits = excluded.extra_usage_used_credits, ingested_at_unix_millis = excluded.ingested_at_unix_millis \
+         WHERE excluded.observed_at_unix_millis >= upstream_subscription_quota_latest_v1.observed_at_unix_millis",
+    )
+    .bind(record.upstream_id.to_string())
+    .bind(record.window.as_str())
+    .bind(record.source.as_str())
+    .bind(record.sample_kind.as_str())
+    .bind(u64_to_i64(record.observed_at_unix_millis, "subscription quota observed_at_unix_millis")?)
+    .bind(record.sample_id.to_string())
+    .bind(record.utilization)
+    .bind(record.status.map(SubscriptionQuotaStatus::as_str))
+    .bind(record.resets_at_unix_secs.map(|value| u64_to_i64(value, "subscription quota resets_at_unix_secs")).transpose()?)
+    .bind(record.surpassed_threshold)
+    .bind(&record.representative_claim)
+    .bind(&record.disabled_reason)
+    .bind(record.extra_usage_enabled)
+    .bind(record.extra_usage_monthly_limit)
+    .bind(record.extra_usage_used_credits)
+    .bind(u64_to_i64(record.ingested_at_unix_millis, "subscription quota ingested_at_unix_millis")?)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    Ok(())
+}
+
+fn row_to_record(row: SqliteRow) -> StorageResult<SubscriptionQuotaObservationRecord> {
+    let window = parse_window(&row.try_get::<String, _>("window").map_err(map_sqlx_error)?)?;
+    let source = parse_source(&row.try_get::<String, _>("source").map_err(map_sqlx_error)?)?;
+    let sample_kind = parse_sample_kind(
+        &row.try_get::<String, _>("sample_kind")
+            .map_err(map_sqlx_error)?,
+    )?;
+    let status = row
+        .try_get::<Option<String>, _>("status")
+        .map_err(map_sqlx_error)?
+        .as_deref()
+        .map(parse_status)
+        .transpose()?;
+    let upstream_id = row
+        .try_get::<String, _>("upstream_id")
+        .map_err(map_sqlx_error)?;
+    let sample_id = row
+        .try_get::<String, _>("sample_id")
+        .map_err(map_sqlx_error)?;
+
+    Ok(SubscriptionQuotaObservationRecord {
+        upstream_id: parse_uuid(&upstream_id, "subscription quota upstream_id")?,
+        window,
+        source,
+        sample_kind,
+        observed_at_unix_millis: i64_to_u64(
+            row.try_get("observed_at_unix_millis")
+                .map_err(map_sqlx_error)?,
+            "subscription quota observed_at_unix_millis",
+        )?,
+        sample_id: parse_uuid(&sample_id, "subscription quota sample_id")?,
+        utilization: row.try_get("utilization").map_err(map_sqlx_error)?,
+        status,
+        resets_at_unix_secs: row
+            .try_get::<Option<i64>, _>("resets_at_unix_secs")
+            .map_err(map_sqlx_error)?
+            .map(|value| i64_to_u64(value, "subscription quota resets_at_unix_secs"))
+            .transpose()?,
+        surpassed_threshold: row.try_get("surpassed_threshold").map_err(map_sqlx_error)?,
+        representative_claim: row
+            .try_get("representative_claim")
+            .map_err(map_sqlx_error)?,
+        disabled_reason: row.try_get("disabled_reason").map_err(map_sqlx_error)?,
+        extra_usage_enabled: row.try_get("extra_usage_enabled").map_err(map_sqlx_error)?,
+        extra_usage_monthly_limit: row
+            .try_get("extra_usage_monthly_limit")
+            .map_err(map_sqlx_error)?,
+        extra_usage_used_credits: row
+            .try_get("extra_usage_used_credits")
+            .map_err(map_sqlx_error)?,
+        ingested_at_unix_millis: i64_to_u64(
+            row.try_get("ingested_at_unix_millis")
+                .map_err(map_sqlx_error)?,
+            "subscription quota ingested_at_unix_millis",
+        )?,
+    })
 }
 
 fn build_series(
@@ -341,9 +418,45 @@ fn filtered_sources(query: &SubscriptionQuotaSeriesQuery) -> Vec<SubscriptionQuo
         .collect()
 }
 
+fn parse_window(value: &str) -> StorageResult<SubscriptionQuotaWindow> {
+    SubscriptionQuotaWindow::from_str(value).ok_or_else(|| StorageError::Corrupted {
+        message: format!("invalid subscription quota window {value}"),
+    })
+}
+
+fn parse_source(value: &str) -> StorageResult<SubscriptionQuotaSource> {
+    SubscriptionQuotaSource::from_str(value).ok_or_else(|| StorageError::Corrupted {
+        message: format!("invalid subscription quota source {value}"),
+    })
+}
+
+fn parse_status(value: &str) -> StorageResult<SubscriptionQuotaStatus> {
+    SubscriptionQuotaStatus::from_str(value).ok_or_else(|| StorageError::Corrupted {
+        message: format!("invalid subscription quota status {value}"),
+    })
+}
+
+fn parse_sample_kind(value: &str) -> StorageResult<SubscriptionQuotaSampleKind> {
+    SubscriptionQuotaSampleKind::from_str(value).ok_or_else(|| StorageError::Corrupted {
+        message: format!("invalid subscription quota sample kind {value}"),
+    })
+}
+
+fn parse_uuid(value: &str, field: &str) -> StorageResult<Uuid> {
+    Uuid::parse_str(value).map_err(|error| StorageError::Corrupted {
+        message: format!("invalid {field} {value}: {error}"),
+    })
+}
+
 fn u64_to_i64(value: u64, field: &str) -> StorageResult<i64> {
     i64::try_from(value).map_err(|_| StorageError::InvalidInput {
         field: field.to_owned(),
         reason: "value exceeds i64::MAX".to_owned(),
+    })
+}
+
+fn i64_to_u64(value: i64, field: &str) -> StorageResult<u64> {
+    u64::try_from(value).map_err(|_| StorageError::Corrupted {
+        message: format!("{field} is negative in sqlite storage"),
     })
 }

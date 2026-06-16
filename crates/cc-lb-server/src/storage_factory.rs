@@ -7,7 +7,7 @@ use std::sync::Arc;
 use cc_lb_aead::AeadService;
 use cc_lb_config::StorageConfig;
 use cc_lb_storage_api::{
-    BackendKind, ManagedKeyStore, PluginBlobRepo, PluginRegistryRepo, Storage, StorageError,
+    BackendKind, ManagedKeyStore, MetaStore, PluginBlobRepo, PluginRegistryRepo, Storage,
     StorageResult,
 };
 
@@ -40,50 +40,6 @@ impl OpenedStorage {
     }
 }
 
-pub enum BackendHandle {
-    Redb(Arc<cc_lb_storage_redb::Storage>),
-    #[cfg(feature = "postgres")]
-    Postgres(Arc<dyn Storage>),
-}
-
-impl BackendHandle {
-    pub async fn put_anthropic_api_key_ciphertext(
-        &self,
-        _storage_key: &str,
-        _ciphertext: &[u8],
-    ) -> StorageResult<()> {
-        match self {
-            Self::Redb(_) => Err(raw_ciphertext_unavailable(
-                "put anthropic API key ciphertext",
-            )),
-            #[cfg(feature = "postgres")]
-            Self::Postgres(storage) => {
-                storage
-                    .put_anthropic_api_key_ciphertext(_storage_key, _ciphertext)
-                    .await
-            }
-        }
-    }
-
-    pub async fn get_oauth_ciphertext(
-        &self,
-        _principal_id: &str,
-        _provider: &str,
-    ) -> StorageResult<Option<Vec<u8>>> {
-        match self {
-            Self::Redb(_) => Err(raw_ciphertext_unavailable("get OAuth ciphertext")),
-            #[cfg(feature = "postgres")]
-            Self::Postgres(storage) => storage.get_oauth_ciphertext(_principal_id, _provider).await,
-        }
-    }
-}
-
-fn raw_ciphertext_unavailable(operation: &str) -> StorageError {
-    StorageError::Unavailable {
-        message: format!("{operation} is unavailable for redb through storage_factory"),
-    }
-}
-
 #[derive(Debug, thiserror::Error)]
 pub enum StorageFactoryError {
     #[error("storage backend '{backend}' requires the '{backend}' cargo feature")]
@@ -102,15 +58,14 @@ pub enum StorageFactoryError {
 pub async fn open_storage(
     config: &StorageConfig,
     _aead: Arc<AeadService>,
-    master_key: [u8; 32],
+    _master_key: [u8; 32],
 ) -> Result<OpenedStorage, StorageFactoryError> {
     match config {
-        StorageConfig::Redb { path } => open_redb(path, master_key).await,
         StorageConfig::Postgres {
             url,
             pool: pool_config,
         } => open_postgres(url, pool_config).await,
-        StorageConfig::Sqlite { .. } => unimplemented!("sqlite backend not yet wired"),
+        StorageConfig::Sqlite { path } => open_sqlite(path).await,
     }
 }
 
@@ -118,59 +73,6 @@ pub async fn probe_postgres_connection(url: &str) -> Result<(), StorageFactoryEr
     probe_postgres_connection_impl(url).await
 }
 
-#[cfg(feature = "redb")]
-async fn open_redb(
-    path: &Path,
-    master_key: [u8; 32],
-) -> Result<OpenedStorage, StorageFactoryError> {
-    let storage =
-        cc_lb_storage_redb::Storage::open(path, master_key).map_err(map_redb_open_error)?;
-    storage
-        .initialize(BackendKind::Redb)
-        .map_err(map_redb_open_error)?;
-    let storage = Arc::new(storage);
-    let managed_key_store = Arc::new(cc_lb_storage_redb::RedbManagedKeyStore::new(
-        storage.clone(),
-    ));
-    let plugin_registry_repo = Arc::new(
-        cc_lb_storage_redb::RedbPluginRegistryRepo::new(storage.as_ref().clone())
-            .map_err(map_redb_open_error)?,
-    ) as Arc<dyn PluginRegistryRepo>;
-    let plugin_blob_repo = Arc::new(
-        cc_lb_storage_redb::RedbPluginBlobRepo::new(storage.as_ref().clone())
-            .map_err(map_redb_open_error)?,
-    ) as Arc<dyn PluginBlobRepo>;
-    Ok(OpenedStorage {
-        storage: storage as Arc<dyn Storage>,
-        managed_key_store,
-        plugin_registry_repo,
-        plugin_blob_repo,
-    })
-}
-
-#[cfg(not(feature = "redb"))]
-async fn open_redb(
-    _path: &Path,
-    _master_key: [u8; 32],
-) -> Result<OpenedStorage, StorageFactoryError> {
-    Err(StorageFactoryError::FeatureDisabled {
-        backend: "redb".to_owned(),
-    })
-}
-
-#[cfg(feature = "redb")]
-fn map_redb_open_error(error: cc_lb_storage_redb::StorageError) -> StorageFactoryError {
-    match error {
-        cc_lb_storage_redb::StorageError::BackendKindMismatch { stored, configured } => {
-            StorageFactoryError::BackendKindMismatch { stored, configured }
-        }
-        other => StorageFactoryError::InitFailed {
-            message: other.to_string(),
-        },
-    }
-}
-
-#[cfg(feature = "postgres")]
 fn map_init_error(
     error: cc_lb_storage_api::StorageError,
     configured: BackendKind,
@@ -183,6 +85,34 @@ fn map_init_error(
             message: other.to_string(),
         },
     }
+}
+
+#[cfg(not(feature = "sqlite"))]
+async fn open_sqlite(_path: &Path) -> Result<OpenedStorage, StorageFactoryError> {
+    Err(StorageFactoryError::FeatureDisabled {
+        backend: "sqlite".to_owned(),
+    })
+}
+
+#[cfg(feature = "sqlite")]
+async fn open_sqlite(path: &Path) -> Result<OpenedStorage, StorageFactoryError> {
+    let database_url = format!("sqlite://{}", path.display());
+    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url)
+        .await
+        .map_err(|error| StorageFactoryError::ConnectionFailed {
+            message: error.to_string(),
+        })?;
+    storage
+        .initialize(BackendKind::Sqlite)
+        .await
+        .map_err(|error| map_init_error(error, BackendKind::Sqlite))?;
+    let storage = Arc::new(storage);
+    Ok(OpenedStorage {
+        storage: storage.clone() as Arc<dyn Storage>,
+        managed_key_store: storage.clone() as Arc<dyn ManagedKeyStore>,
+        plugin_registry_repo: storage.clone() as Arc<dyn PluginRegistryRepo>,
+        plugin_blob_repo: storage as Arc<dyn PluginBlobRepo>,
+    })
 }
 
 #[cfg(not(feature = "postgres"))]

@@ -758,46 +758,8 @@ fn url(value: &str) -> Result<Url> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "postgres")]
     use super::*;
-
-    mod redb_backend {
-        use std::path::PathBuf;
-
-        use cc_lb_storage_redb::RedbStorage;
-
-        use super::*;
-
-        struct RedbBackend;
-        struct RedbFixture {
-            _dir: tempfile::TempDir,
-            path: PathBuf,
-        }
-
-        #[async_trait]
-        impl UpstreamStoreBackend for RedbBackend {
-            type Store = RedbStorage;
-            type Fixture = RedbFixture;
-
-            async fn create_fixture(&self) -> Result<Self::Fixture> {
-                let dir = tempfile::tempdir()?;
-                let path = dir.path().join("upstream-store.redb");
-                Ok(RedbFixture { _dir: dir, path })
-            }
-
-            async fn open(&self, fixture: &Self::Fixture) -> Result<Self::Store> {
-                Ok(RedbStorage::open(&fixture.path, [7; 32])?)
-            }
-
-            async fn teardown(&self, _fixture: Self::Fixture) -> Result<()> {
-                Ok(())
-            }
-        }
-
-        #[tokio::test]
-        async fn upstream_store_redb() -> Result<()> {
-            run_all(Arc::new(RedbBackend)).await
-        }
-    }
 
     #[cfg(feature = "postgres")]
     mod postgres_backend {

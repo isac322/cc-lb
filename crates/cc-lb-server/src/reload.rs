@@ -362,15 +362,6 @@ fn summarize_storage_restart_required(
     new_config: &StorageConfig,
 ) {
     match (current, new_config) {
-        (StorageConfig::Redb { path: current }, StorageConfig::Redb { path: new_config }) => {
-            push_changed(
-                changes,
-                "storage.path",
-                current.display().to_string(),
-                new_config.display().to_string(),
-                "storage backend changes require a process restart",
-            );
-        }
         (
             StorageConfig::Postgres {
                 url: current_url,
@@ -503,7 +494,6 @@ fn path_option_string(path: Option<&PathBuf>) -> String {
 
 fn storage_kind(storage: &StorageConfig) -> &'static str {
     match storage {
-        StorageConfig::Redb { .. } => "redb",
         StorageConfig::Postgres { .. } => "postgres",
         StorageConfig::Sqlite { .. } => "sqlite",
     }

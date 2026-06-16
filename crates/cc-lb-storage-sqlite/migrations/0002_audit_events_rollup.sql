@@ -25,8 +25,12 @@ CREATE TABLE IF NOT EXISTS request_events_v1 (
     request_id TEXT NOT NULL,
     ts INTEGER NOT NULL,
     event_type TEXT NOT NULL,
+    upstream_id TEXT,
     payload TEXT NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS request_events_v1_upstream_id_idx
+    ON request_events_v1 (upstream_id);
 
 CREATE TABLE IF NOT EXISTS usage_rollups_v2 (
     resolution TEXT NOT NULL CHECK (resolution IN ('minute', 'hour')),
@@ -58,4 +62,12 @@ CREATE TABLE IF NOT EXISTS usage_rollups_v2 (
     virtual_cost_micros INTEGER NOT NULL DEFAULT 0 CHECK (virtual_cost_micros >= 0),
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (resolution, bucket_start_unix_secs, principal_id, upstream_id, model)
+);
+
+CREATE INDEX IF NOT EXISTS usage_rollups_v2_upstream_resolution_bucket_idx
+    ON usage_rollups_v2 (upstream_id, resolution, bucket_start_unix_secs);
+
+CREATE TABLE IF NOT EXISTS usage_rollup_checkpoints_v1 (
+    id TEXT PRIMARY KEY,
+    value INTEGER NOT NULL CHECK (value >= 0)
 );

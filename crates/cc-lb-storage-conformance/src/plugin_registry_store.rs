@@ -1,4 +1,4 @@
-use std::{any::Any, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
@@ -973,7 +973,6 @@ async fn chain_delete_keeps_blob_for_reinsert_on_storage<
 >(
     storage: &S,
 ) -> Result<()> {
-    // NOTE: Phase-3 is currently green on redb; W3a revision hardening still applies.
     let (principal, plugin) = principal_and_plugin(storage, 25, "plugin-chain-reinsert").await?;
     let created = storage
         .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
@@ -1361,29 +1360,10 @@ async fn insert_orphan_blob_if_exposed<S: PluginRegistryStore + 'static>(
     storage: &S,
     blob: &WasmBlob,
 ) -> Result<bool> {
-    #[cfg(feature = "redb")]
-    {
-        if let Some(redb) = (storage as &dyn Any).downcast_ref::<cc_lb_storage_redb::RedbStorage>()
-        {
-            let write_txn = redb.begin_write()?;
-            {
-                let mut blobs = write_txn.open_table(cc_lb_storage_redb::WASM_BLOBS_V2)?;
-                let payload = serde_json::to_vec(&json!({
-                    "bytes": blob.bytes.clone(),
-                    "size_bytes": blob.size_bytes,
-                    "parse_validated_at_unix_secs": blob.parse_validated_at_unix_secs,
-                    "refcount": 0,
-                }))?;
-                blobs.insert(blob.sha256.as_slice(), payload.as_slice())?;
-            }
-            write_txn.commit()?;
-            return Ok(true);
-        }
-    }
     #[cfg(feature = "postgres")]
     {
-        if let Some(postgres) =
-            (storage as &dyn Any).downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
+        if let Some(postgres) = (storage as &dyn std::any::Any)
+            .downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
         {
             sqlx::query("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, refcount, created_at) VALUES ($1, $2, $3, NOW(), 0, NOW()) ON CONFLICT (sha256) DO NOTHING")
                 .bind(blob.sha256.as_slice())
@@ -1402,23 +1382,10 @@ async fn delete_blob_row_if_exposed<S: PluginRegistryStore + 'static>(
     storage: &S,
     sha256: [u8; 32],
 ) -> Result<bool> {
-    #[cfg(feature = "redb")]
-    {
-        if let Some(redb) = (storage as &dyn Any).downcast_ref::<cc_lb_storage_redb::RedbStorage>()
-        {
-            let write_txn = redb.begin_write()?;
-            {
-                let mut blobs = write_txn.open_table(cc_lb_storage_redb::WASM_BLOBS_V2)?;
-                blobs.remove(sha256.as_slice())?;
-            }
-            write_txn.commit()?;
-            return Ok(true);
-        }
-    }
     #[cfg(feature = "postgres")]
     {
-        if let Some(postgres) =
-            (storage as &dyn Any).downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
+        if let Some(postgres) = (storage as &dyn std::any::Any)
+            .downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
         {
             let result = sqlx::query("DELETE FROM wasm_blobs_v2 WHERE sha256 = $1")
                 .bind(sha256.as_slice())
@@ -1543,19 +1510,5 @@ fn chain_with_slot(
         batched_events_per_flush: 1,
         batched_flush_ms: 100,
         wire_version: None,
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use cc_lb_storage_redb::RedbStorage;
-
-    use super::*;
-
-    #[tokio::test]
-    async fn plugin_registry_store_redb_conformance() -> Result<()> {
-        let dir = tempfile::tempdir()?;
-        let storage = RedbStorage::open(&dir.path().join("plugin-registry.redb"), [0; 32])?;
-        run_all_on_storage(&storage).await
     }
 }

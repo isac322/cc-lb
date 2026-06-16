@@ -338,8 +338,8 @@ upstream_kind = "anthropic_key"
 upstream_credential_ref = "anthropic"
 
 [storage]
-kind = "redb"
-path = "./data/cc-lb.redb"
+kind = "sqlite"
+path = "./data/cc-lb.sqlite"
 
 [aead]
 key_env = "CC_LB_MASTER_KEY"
@@ -380,7 +380,7 @@ cache_ttl_ceiling_secs = 300
 
       <li>
         <h3>환경변수 (마스터키 + admin 토큰)</h3>
-        <p><code>[aead]</code>의 <code>key_env</code>가 가리키는 변수와 <code>[admin]</code>의 <code>token_env</code>를 설정합니다. Quick start는 <code>./data/cc-lb.redb</code>를 사용하고, upstream/principal은 서버가 뜬 뒤 admin v1 API로 생성합니다.</p>
+        <p><code>[aead]</code>의 <code>key_env</code>가 가리키는 변수와 <code>[admin]</code>의 <code>token_env</code>를 설정합니다. Quick start는 <code>./data/cc-lb.sqlite</code>를 사용하고, upstream/principal은 서버가 뜬 뒤 admin v1 API로 생성합니다.</p>
         <div class="codewrap"><span class="lang">bash</span><pre class="has-lang"><code>export CC_LB_MASTER_KEY=$(openssl rand -hex 32)   # 64자 hex 필수
 export CC_LB_ADMIN_TOKEN=$(openssl rand -hex 24)</code></pre><button class="copy">복사</button></div>
       </li>
@@ -671,8 +671,8 @@ curl -s http://127.0.0.1:8080/v1/messages \
 
     <h4>최소 config 발췌</h4>
     <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[storage]
-kind = &quot;redb&quot;
-path = &quot;/var/lib/cc-lb/cc-lb.redb&quot;
+kind = &quot;sqlite&quot;
+path = &quot;/var/lib/cc-lb/cc-lb.sqlite&quot;
 
 [aead]
 key_env = &quot;CC_LB_MASTER_KEY&quot;
@@ -714,14 +714,14 @@ curl -s -i http://127.0.0.1:8080/v1/messages -H &quot;x-api-key: ck-internal-unk
     <h4>현실</h4>
     <ul>
       <li><code>examples/plugin-oauth-anthropic-pro/</code> + <code>anthropic_oauth</code> signer 조합. <span class="pill ok">자동 refresh + single-flight 검증됨 (T15)</span></li>
-      <li>토큰은 redb에 ChaCha20-Poly1305로 AEAD 암호화되어 저장됩니다. 마스터키 (<code>CC_LB_MASTER_KEY</code>) 없으면 복호화 불가.</li>
+      <li>토큰은 sqlite에 ChaCha20-Poly1305로 AEAD 암호화되어 저장됩니다. 마스터키 (<code>CC_LB_MASTER_KEY</code>) 없으면 복호화 불가.</li>
       <li>최초 토큰 등록은 admin REST의 PKCE 흐름으로 합니다 (<code>POST /admin/v1/upstreams/{upstream_id}/oauth/start</code> → 본인 브라우저에서 인증 → callback → <code>POST /admin/v1/upstreams/{upstream_id}/oauth/complete</code>).</li>
     </ul>
 
     <h4>최소 config 발췌</h4>
     <div class="codewrap"><span class="lang">toml</span><pre class="has-lang"><code>[storage]
-kind = &quot;redb&quot;
-path = &quot;/var/lib/cc-lb/cc-lb.redb&quot;
+kind = &quot;sqlite&quot;
+path = &quot;/var/lib/cc-lb/cc-lb.sqlite&quot;
 
 [aead]
 key_env = &quot;CC_LB_MASTER_KEY&quot;
@@ -796,7 +796,7 @@ curl -s http://127.0.0.1:8080/v1/messages \
 
       <div class="row">
         <label class="check"><input type="checkbox" id="b-tls" /> TLS 켜기</label>
-        <label class="check"><input type="checkbox" id="b-storage" /> redb 저장소 켜기 (OAuth/Quota 영속화)</label>
+        <label class="check"><input type="checkbox" id="b-storage" /> sqlite 저장소 켜기 (OAuth/Quota 영속화)</label>
         <label class="check"><input type="checkbox" id="b-plugin" /> 플러그인 슬롯 비워두기 → 채워두기</label>
       </div>
 
@@ -973,7 +973,7 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
       <li><b>cross-LLM 변환 없음</b> — Anthropic Messages API 형식만 지원. OpenAI/Gemini 형식 변환은 scope 밖.</li>
       <li><b>스트리밍 ↔ 비스트리밍 변환 없음</b> — 요청 그대로 forwarding.</li>
       <li><b>응답 캐싱 없음</b> — 매 요청마다 upstream 호출.</li>
-      <li><b>분산 모드 없음</b> — 단일 인스턴스 전제. 여러 인스턴스 띄우려면 외부 LB + 외부 redb 공유 필요 (현재 redb는 single-writer).</li>
+      <li><b>분산 모드 없음</b> — 단일 인스턴스 전제. 여러 인스턴스 띄우려면 Postgres가 필요합니다.</li>
       <li><b>HTTP/3 / gRPC / WebSocket 없음</b> — Anthropic API가 HTTP/1.1+HTTP/2 SSE 기반이라 그 외 프로토콜은 미지원.</li>
     </ul>
 
@@ -1126,8 +1126,8 @@ curl -s -H &quot;Authorization: Bearer $CC_LB_ADMIN_TOKEN&quot; \
     toml += 'upstream_credential_ref = "' + upstreamName + '"\n\n';
 
     toml += '[storage]\n';
-    toml += 'kind = "redb"\n';
-    toml += 'path = "' + (bStorage.checked ? '/var/lib/cc-lb/cc-lb.redb' : './cc-lb.redb') + '"\n\n';
+    toml += 'kind = "sqlite"\n';
+    toml += 'path = "' + (bStorage.checked ? '/var/lib/cc-lb/cc-lb.sqlite' : './cc-lb.sqlite') + '"\n\n';
     toml += '[aead]\n';
     toml += 'key_env = "CC_LB_MASTER_KEY"\n\n';
 

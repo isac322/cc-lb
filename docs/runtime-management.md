@@ -267,7 +267,7 @@ In multi-replica deployments, replicas coordinate configuration updates and back
 - **Reconciliation Fallback**: If a replica misses a notification, a background reconciler polls the database every 60 seconds as a fallback.
 - **Database Lease**: For background tasks like OAuth token refresh, replicas use a database-backed UUID lease to ensure only one replica performs the refresh.
 - **Status Monitoring**: You can monitor the status of all replicas and check for partial-failure states via the `/admin/v1/status` endpoint.
-- **Storage Backend**: Note that the `redb` storage backend is single-process only and does not support multi-replica deployments.
+- **Storage Backend**: Use Postgres for multi-replica deployments.
 
 ## Restart-Required Matrix
 
@@ -313,7 +313,7 @@ This section lists common failures and their diagnosis steps.
 
 - **Symptom**: The server fails to start and logs "storage is required".
 - **Diagnosis**: There is currently no Postgres-as-startup-storage path.
-- **Workaround**: Use the `redb` backend for single-replica deployments until a follow-up implements Postgres startup storage.
+- **Workaround**: Use the sqlite backend for single-replica deployments until a follow-up implements Postgres startup storage.
 
 ### OAuth refresh fails persistently
 

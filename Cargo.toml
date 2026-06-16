@@ -4,8 +4,8 @@ members = [
     "crates/cc-lb-plugin-wire",
     "crates/cc-lb-runtime-protocol",
     "crates/cc-lb-plugin-conformance",
-    "crates/cc-lb-redb-migrate",
     "crates/cc-lb-storage-sqlite",
+    "crates/cc-lb-redb-migrate",
     "crates/cc-lb-*",
     "benches/extism_sse_overhead",
     "plugins/router/cache-aware",
@@ -19,7 +19,6 @@ members = [
     "tests/plugin-lifecycle",
     "tests/property",
     "tests/tls",
-    "tests/crash-recovery",
     "tests/integration",
     "tests/multi-replica",
     "tests/real-client",
@@ -83,7 +82,6 @@ opentelemetry = "0.32"
 opentelemetry-otlp = { version = "0.32", default-features = false, features = ["grpc-tonic", "trace"] }
 opentelemetry_sdk = { version = "0.32", features = ["trace"] }
 proptest = "1"
-redb = "4"
 regex = "1"
 ring = "0.17"
 rust-embed = "8"

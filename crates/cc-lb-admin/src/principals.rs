@@ -133,7 +133,7 @@ pub async fn principal_key_usage(
         .max(1);
 
     let events = storage
-        .query_request_events(range_start_ms, range_end_ms, usize::MAX)
+        .query_request_events(range_start_ms / 1000, range_end_ms / 1000, usize::MAX)
         .await?;
 
     let mut aggregates: BTreeMap<u64, UsageSeries> = BTreeMap::new();

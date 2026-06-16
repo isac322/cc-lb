@@ -8,7 +8,7 @@ use serde_json::json;
 
 #[tokio::test]
 async fn credentials_list_returns_empty_array_with_no_principals() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
     let (status, _, body, _) = authed_json(app(state), "GET", "/admin/credentials", None).await;
@@ -19,7 +19,7 @@ async fn credentials_list_returns_empty_array_with_no_principals() {
 
 #[tokio::test]
 async fn credentials_list_filters_out_principals_without_credentials() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     PrincipalStore::create(
         storage.as_ref(),
         PrincipalCreate {
@@ -43,7 +43,7 @@ async fn credentials_list_filters_out_principals_without_credentials() {
 
 #[tokio::test]
 async fn oauth_status_returns_credentials_array() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
     let (status, _, body, _) = authed_json(app(state), "GET", "/admin/oauth/status", None).await;
@@ -53,7 +53,7 @@ async fn oauth_status_returns_credentials_array() {
 
 #[tokio::test]
 async fn revoke_returns_client_error_for_unknown_principal_provider() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
     let (status, _, _) = authed_bytes(
         app(state),
@@ -70,7 +70,7 @@ async fn revoke_returns_client_error_for_unknown_principal_provider() {
 
 #[tokio::test]
 async fn rotate_returns_501_not_implemented() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
     let (status, _, _) = authed_bytes(
         app(state),

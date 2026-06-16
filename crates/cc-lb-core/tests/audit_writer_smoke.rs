@@ -2,12 +2,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_core::{AuditEntry, spawn_audit_writer};
-use cc_lb_storage_api::AuditStore;
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_api::{AuditStore, BackendKind, MetaStore};
+use cc_lb_storage_sqlite::SqliteStorage;
 
 #[tokio::test(flavor = "current_thread")]
 async fn flush_100() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, storage) = new_storage()?;
+    let (_dir, storage) = new_storage().await?;
     let audit_storage: Arc<dyn AuditStore> = storage.clone();
     let (sink, join) = spawn_audit_writer(audit_storage, 1024);
 
@@ -16,16 +16,11 @@ async fn flush_100() -> Result<(), Box<dyn std::error::Error>> {
             .expect("enqueue succeeds");
     }
 
-    // NOTE [Priority-3 footgun]: spawn_audit_writer is a bounded-channel background
-    // task. The original flat 2s sleep was enough for plain debug builds but raced
-    // on CI under cargo-llvm-cov instrumentation (slower redb writes) - only ~31 of
-    // 100 entries had flushed when the assertion fired. Poll up to 10s for the full
-    // count before asserting; the drop(sink) below still proves drain-on-shutdown.
     const BUDGET: Duration = Duration::from_secs(10);
     const INTERVAL: Duration = Duration::from_millis(25);
     let deadline = std::time::Instant::now() + BUDGET;
     let final_count = loop {
-        let count = storage.count_audit_entries()?;
+        let count = audit_count(storage.as_ref()).await?;
         if count == 100 || std::time::Instant::now() >= deadline {
             break count;
         }
@@ -40,7 +35,7 @@ async fn flush_100() -> Result<(), Box<dyn std::error::Error>> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn full_drops() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, storage) = new_storage()?;
+    let (_dir, storage) = new_storage().await?;
     let audit_storage: Arc<dyn AuditStore> = storage.clone();
     let (sink, join) = spawn_audit_writer(audit_storage, 4);
 
@@ -57,7 +52,7 @@ async fn full_drops() -> Result<(), Box<dyn std::error::Error>> {
 
 #[tokio::test(flavor = "current_thread")]
 async fn shutdown_drain() -> Result<(), Box<dyn std::error::Error>> {
-    let (_dir, storage) = new_storage()?;
+    let (_dir, storage) = new_storage().await?;
     let audit_storage: Arc<dyn AuditStore> = storage.clone();
     let (sink, join) = spawn_audit_writer(audit_storage, 1024);
 
@@ -68,14 +63,24 @@ async fn shutdown_drain() -> Result<(), Box<dyn std::error::Error>> {
 
     drop(sink);
     join.await?;
-    assert_eq!(storage.count_audit_entries()?, 20);
+    assert_eq!(audit_count(storage.as_ref()).await?, 20);
     Ok(())
 }
 
-fn new_storage() -> Result<(tempfile::TempDir, Arc<Storage>), Box<dyn std::error::Error>> {
+async fn new_storage() -> Result<(tempfile::TempDir, Arc<SqliteStorage>), Box<dyn std::error::Error>>
+{
     let dir = tempfile::tempdir()?;
-    let storage = Storage::open(&dir.path().join("audit-writer.redb"), [27; 32])?;
+    let database_url = format!(
+        "sqlite://{}",
+        dir.path().join("audit-writer.sqlite").display()
+    );
+    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url).await?;
+    storage.initialize(BackendKind::Sqlite).await?;
     Ok((dir, Arc::new(storage)))
+}
+
+async fn audit_count(storage: &SqliteStorage) -> Result<usize, Box<dyn std::error::Error>> {
+    Ok(storage.query_audit(None, 0, u64::MAX, 1_000).await?.len())
 }
 
 fn audit_entry(index: usize) -> AuditEntry {

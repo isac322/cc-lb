@@ -19,7 +19,6 @@ loom = "0.7"
 
 arc-swap.workspace = true
 cc-lb-storage-api = { path = "../../crates/cc-lb-storage-api" }
-cc-lb-storage-redb = { path = "../../crates/cc-lb-storage-redb" }
 dashmap.workspace = true
 globset.workspace = true
 metrics.workspace = true

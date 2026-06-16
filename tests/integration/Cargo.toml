@@ -16,7 +16,7 @@ cc-lb-core = { path = "../../crates/cc-lb-core" }
 cc-lb-pricing = { path = "../../crates/cc-lb-pricing" }
 cc-lb-server = { path = "../../crates/cc-lb-server" }
 cc-lb-storage-api = { path = "../../crates/cc-lb-storage-api" }
-cc-lb-storage-redb = { path = "../../crates/cc-lb-storage-redb" }
+cc-lb-storage-sqlite = { path = "../../crates/cc-lb-storage-sqlite" }
 http.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"

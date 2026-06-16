@@ -37,7 +37,7 @@ pub mod cache_observation_dropped_reason {
 }
 
 pub mod cache_observation_store_kind {
-    pub const REDB: &str = "redb";
+    pub const SQLITE: &str = "sqlite";
     pub const POSTGRES: &str = "postgres";
 }
 

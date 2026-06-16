@@ -16,4 +16,4 @@ cc-lb-signer-gcp
 cc-lb-storage-api
 cc-lb-storage-conformance
 cc-lb-storage-postgres
-cc-lb-storage-redb
+cc-lb-storage-sqlite

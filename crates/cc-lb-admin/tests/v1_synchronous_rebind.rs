@@ -20,7 +20,7 @@ use cc_lb_plugin_api::{
     SignerFactory, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::UpstreamStore;
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use http_body_util::BodyExt;
 use serde_json::json;
 use tower::ServiceExt;
@@ -143,8 +143,7 @@ impl UpstreamDispatch for NoopDispatch {
 #[tokio::test]
 async fn create_upstream_rebinds_dynamic_view_before_response_returns() {
     let dir = tempfile::tempdir().expect("temp admin dir");
-    let storage =
-        Arc::new(Storage::open(&dir.path().join("admin.redb"), [9; 32]).expect("admin redb opens"));
+    let storage = admin_test_common::sqlite_storage(dir.path(), "admin.sqlite").await;
     let config = Config::default();
     let holder = admin_test_common::dynamic_view_holder(&config);
     let rebinder = Arc::new(SnapshotRebinder {

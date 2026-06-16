@@ -263,7 +263,7 @@ impl storage_api::MetaStore for TestStorage {
     }
 
     async fn backend_kind(&self) -> storage_api::StorageResult<storage_api::BackendKind> {
-        Ok(storage_api::BackendKind::Redb)
+        Ok(storage_api::BackendKind::Sqlite)
     }
 
     async fn killswitch_enabled(&self) -> storage_api::StorageResult<bool> {

@@ -1030,7 +1030,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
   if (path === "/admin/config/diff" && m === "GET") {
     const from = parseInt(url.searchParams.get("from_revision") ?? "0", 10);
     const to = parseInt(url.searchParams.get("to_revision") ?? "0", 10);
-    return ok({ from, to, diff: [{ path: "listener.proxy_addr", from: "0.0.0.0:52250", to: "0.0.0.0:52251" }, { path: "storage.url", from: "redb:///var/lib/cclb", to: "postgres://...@db" }] });
+    return ok({ from, to, diff: [{ path: "listener.proxy_addr", from: "0.0.0.0:52250", to: "0.0.0.0:52251" }, { path: "storage.url", from: "sqlite:///var/lib/cclb.sqlite", to: "postgres://...@db" }] });
   }
   if (path === "/admin/config/reload" && m === "POST") return ok({ status: "ok", reloading: true });
 

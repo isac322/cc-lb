@@ -244,7 +244,6 @@ async fn start_oauth(
             expected_revision: upstream.revision,
         },
     };
-    // M-R5: redb-backed runtime management is single-process, so v1 PKCE state is in-process.
     match pkce_flows().lock() {
         Ok(mut flows) => {
             let now = now_unix_secs();

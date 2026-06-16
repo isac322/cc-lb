@@ -1,6 +1,6 @@
 # cc-lb-server
 
-Anthropic-compatible multi-principal reverse proxy server. Supports both redb (default) and postgres backends for managed API key storage and policy enforcement.
+Anthropic-compatible multi-principal reverse proxy server. Supports sqlite and postgres backends for managed API key storage and policy enforcement.
 
 ## Postgres deployment
 
@@ -39,12 +39,12 @@ Postgres support requires the `postgres` feature flag. Build with:
 cargo build --features postgres
 ```
 
-The default build uses the redb backend:
+The default build uses the sqlite backend:
 ```
-cargo build  # equivalent to: cargo build --features redb
+cargo build  # equivalent to: cargo build --features sqlite
 ```
 
-To build with both backends available (redb default at runtime, postgres via config):
+To build with both backends available (sqlite default at runtime, postgres via config):
 ```
 cargo build --all-features
 ```

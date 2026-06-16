@@ -12,7 +12,6 @@ use crate::harness::{ConformanceBackend, with_conformance_fixture};
 
 #[cfg(test)]
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(5);
-const NOOP_TIMEOUT: Duration = Duration::from_millis(100);
 const SUBSCRIBE_TIMEOUT: Duration = Duration::from_millis(10);
 const POSTGRES_LATENCY_BUDGET: Duration = Duration::from_millis(5_000);
 const SQLITE_LATENCY_BUDGET: Duration = Duration::from_millis(1_000);
@@ -96,29 +95,6 @@ where
     .await
 }
 
-pub async fn redb_noop_subscribe_never_receives<N>(notifier: &N) -> Result<()>
-where
-    N: RuntimeChangeNotifier + ?Sized,
-{
-    let mut receiver = notifier.subscribe().await?;
-    let result = time::timeout(NOOP_TIMEOUT, receiver.recv()).await;
-    ensure!(
-        result.is_err(),
-        "redb no-op receiver should not receive events"
-    );
-    Ok(())
-}
-
-pub async fn redb_run_returns_immediately<N>(notifier: Arc<N>) -> Result<()>
-where
-    N: RuntimeChangeNotifier + 'static,
-{
-    time::timeout(NOOP_TIMEOUT, notifier.run(CancellationToken::new()))
-        .await
-        .context("redb no-op run should complete immediately")??;
-    Ok(())
-}
-
 pub fn payload_is_truncated_to_identifier_limit() -> Result<()> {
     let payload = "x".repeat(MAX_CHANGE_PAYLOAD_LEN + 50);
     let event = ChangeEvent::new(ChangeChannel::Upstream, &payload);
@@ -137,9 +113,6 @@ fn latency_budget_for_backend(kind: BackendKind) -> Result<Duration> {
     match kind {
         BackendKind::Postgres => Ok(POSTGRES_LATENCY_BUDGET),
         BackendKind::Sqlite => Ok(SQLITE_LATENCY_BUDGET),
-        BackendKind::Redb => {
-            anyhow::bail!("redb runtime change notifier does not broadcast storage mutations")
-        }
     }
 }
 
@@ -311,30 +284,6 @@ mod tests {
         anyhow::bail!("timed out waiting for postgres listener backend")
     }
 
-    #[tokio::test]
-    async fn runtime_change_notifier_redb_subscribe_returns_without_blocking() -> Result<()> {
-        let (_dir, storage) = redb_storage()?;
-        subscribe_returns_without_blocking(&storage).await
-    }
-
-    #[tokio::test]
-    async fn runtime_change_notifier_redb_noop_subscribe_never_receives() -> Result<()> {
-        let (_dir, storage) = redb_storage()?;
-        redb_noop_subscribe_never_receives(&storage).await
-    }
-
-    #[tokio::test]
-    async fn runtime_change_notifier_redb_run_returns_immediately() -> Result<()> {
-        let (_dir, storage) = redb_storage()?;
-        redb_run_returns_immediately(Arc::new(storage)).await
-    }
-
-    #[tokio::test]
-    async fn runtime_change_notifier_cancel_during_redb_run_is_graceful() -> Result<()> {
-        let (_dir, storage) = redb_storage()?;
-        cancel_during_run_is_graceful(Arc::new(storage)).await
-    }
-
     #[test]
     fn runtime_change_notifier_payload_is_truncated_to_identifier_limit() -> Result<()> {
         payload_is_truncated_to_identifier_limit()
@@ -387,13 +336,6 @@ mod tests {
                 .await;
         fixture.teardown().await?;
         result
-    }
-
-    fn redb_storage() -> Result<(tempfile::TempDir, cc_lb_storage_redb::RedbStorage)> {
-        let dir = tempfile::tempdir()?;
-        let storage =
-            cc_lb_storage_redb::RedbStorage::open(&dir.path().join("notifier.redb"), [0; 32])?;
-        Ok((dir, storage))
     }
 
     struct PostgresFixture {

@@ -8,12 +8,13 @@ use cc_lb_core::DynamicViewHolder;
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::notify_listener::{NotifyListener, NotifyListenerParams};
+use cc_lb_storage_api::BackendKind;
 use cc_lb_storage_api::upstream::{UpstreamLeaseKind, UpstreamStatusUpdate};
 use cc_lb_storage_api::{
     ChangeChannel, ChangeEvent, RuntimeChangeNotifier, StorageError, StorageResult, UpstreamCreate,
     UpstreamRecord, UpstreamStore, UpstreamUpdate,
 };
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_sqlite::{SqliteStorage as Storage, open_sqlite};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tokio::sync::{broadcast, oneshot};
 use tokio_util::sync::CancellationToken;
@@ -289,8 +290,13 @@ struct Fixture {
 
 async fn fixture() -> Fixture {
     let dir = tempfile::tempdir().expect("tempdir");
-    let storage =
-        Arc::new(Storage::open(&dir.path().join("notify.redb"), [24; 32]).expect("storage"));
+    let path = dir.path().join("notify.sqlite");
+    let database_url = format!("sqlite://{}", path.display());
+    let storage = open_sqlite(&database_url).await.expect("storage opens");
+    cc_lb_storage_api::MetaStore::initialize(&storage, BackendKind::Sqlite)
+        .await
+        .expect("initialize");
+    let storage = Arc::new(storage);
     let stores = Arc::new(Stores {
         upstreams: storage.clone(),
         principals: storage.clone(),

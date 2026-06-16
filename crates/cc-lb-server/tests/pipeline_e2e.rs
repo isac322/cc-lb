@@ -21,6 +21,7 @@ use cc_lb_core::{DynamicViewHolder, Lifecycle, LifecycleConfig};
 use cc_lb_plugin_api::{InternalErrorKind, InternalErrorStage, TerminalStrategy};
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
+use cc_lb_storage_api::BackendKind;
 use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
@@ -28,7 +29,7 @@ use cc_lb_storage_api::{
     PrincipalStore, PrincipalUpdate, RequestEvent, RequestEventStore, Storage as StorageTrait,
     UpstreamCreate, UpstreamStore, WasmBlob, WasmRegistryEntryInput,
 };
-use cc_lb_storage_redb::Storage as RedbStorage;
+use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use http::{Request, StatusCode};
 use http_body_util::BodyExt;
@@ -459,7 +460,7 @@ async fn allowed_upstreams_prefilter_zero_returns_503() -> TestResult<()> {
 
 struct PipelineHarness {
     _dir: tempfile::TempDir,
-    storage: Arc<RedbStorage>,
+    storage: Arc<SqliteStorage>,
     upstreams: Vec<SeededUpstream>,
     lifecycle: Lifecycle,
 }
@@ -478,10 +479,13 @@ impl PipelineHarness {
         ShapePlugin: FnOnce(&[SeededUpstream]) -> Option<PluginFixture>,
     {
         let dir = tempfile::tempdir()?;
-        let storage = Arc::new(RedbStorage::open(
-            &dir.path().join("pipeline-e2e.redb"),
-            [seed; 32],
-        )?);
+        let path = dir.path().join("pipeline-e2e.sqlite");
+        let database_url = format!("sqlite://{}", path.display());
+        let storage = open_sqlite(&database_url).await.expect("storage opens");
+        cc_lb_storage_api::MetaStore::initialize(&storage, BackendKind::Sqlite)
+            .await
+            .expect("initialize");
+        let storage = Arc::new(storage);
         let upstreams = spawn_seeded_upstreams(storage.as_ref()).await?;
         let created = PrincipalStore::create(
             storage.as_ref(),
@@ -634,7 +638,7 @@ struct SeededUpstream {
     _server: Arc<JoinHandle<io::Result<()>>>,
 }
 
-async fn spawn_seeded_upstreams(storage: &RedbStorage) -> TestResult<Vec<SeededUpstream>> {
+async fn spawn_seeded_upstreams(storage: &SqliteStorage) -> TestResult<Vec<SeededUpstream>> {
     let mut upstreams = Vec::with_capacity(5);
     for index in 0..5 {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -687,7 +691,7 @@ async fn wait_for_listening(addr: SocketAddr) -> TestResult<()> {
 }
 
 async fn insert_plugin(
-    storage: &RedbStorage,
+    storage: &SqliteStorage,
     principal_id: Uuid,
     slot: PluginSlot,
     fixture: PluginFixture,
@@ -730,7 +734,7 @@ async fn insert_plugin(
     Ok(())
 }
 
-fn stores(storage: Arc<RedbStorage>) -> Stores {
+fn stores(storage: Arc<SqliteStorage>) -> Stores {
     Stores {
         upstreams: storage.clone(),
         principals: storage.clone(),

@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn export_supported_slots_serializes_registry_entry_slots_as_snake_case() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     storage
         .persist_wasm_upload(
             WasmBlob {

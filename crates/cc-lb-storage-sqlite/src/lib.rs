@@ -32,7 +32,7 @@ pub async fn open_sqlite(database_url: &str) -> StorageResult<SqliteStorage> {
         .busy_timeout(Duration::from_secs(5));
 
     let pool = SqlitePoolOptions::new()
-        .max_connections(1)
+        .max_connections(4)
         .connect_with(options)
         .await
         .map_err(map_sqlx_error)?;

@@ -8,7 +8,7 @@ use serde_json::json;
 
 #[tokio::test]
 async fn get_no_draft_returns_zero_revision_and_null_payload() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let app = app(test_state(
         config_admin_common::minimal_config(),
         Some(storage),
@@ -26,7 +26,7 @@ async fn get_no_draft_returns_zero_revision_and_null_payload() {
 
 #[tokio::test]
 async fn put_draft_from_zero_revision_saves_invalid_json_without_validation() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let app = app(test_state(
         config_admin_common::minimal_config(),
         Some(storage),
@@ -52,7 +52,7 @@ async fn put_draft_from_zero_revision_saves_invalid_json_without_validation() {
 
 #[tokio::test]
 async fn stale_put_returns_current_revision_conflict() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let app = app(test_state(
         config_admin_common::minimal_config(),
         Some(storage),
@@ -80,7 +80,7 @@ async fn stale_put_returns_current_revision_conflict() {
 
 #[tokio::test]
 async fn saving_new_draft_invalidates_last_validated_revision() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let app = app(test_state(
         config_admin_common::minimal_config(),
         Some(storage),

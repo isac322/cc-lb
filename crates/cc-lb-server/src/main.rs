@@ -7,7 +7,7 @@ use std::process::ExitCode;
 use cc_lb_server::app::{BuildError, ServeError};
 use cc_lb_server::cli::{Cli, Command, ConfigCommand, DoctorCommand};
 use cc_lb_server::{run_serve, validate};
-use cc_lb_storage_api::{PluginRegistryStore, PluginSlot, PrincipalStore};
+use cc_lb_storage_api::{BackendKind, MetaStore, PluginRegistryStore, PluginSlot, PrincipalStore};
 use clap::FromArgMatches;
 use serde::Serialize;
 use thiserror::Error;
@@ -26,7 +26,7 @@ enum DoctorError {
     #[error("storage not found: {path}")]
     StorageNotFound { path: String },
     #[error("failed to open storage: {0}")]
-    StorageOpen(#[source] cc_lb_storage_redb::StorageError),
+    StorageOpen(#[source] cc_lb_storage_api::StorageError),
     #[error("storage query failed: {0}")]
     StorageQuery(#[source] cc_lb_storage_api::StorageError),
     #[error("failed to write JSON report: {0}")]
@@ -98,7 +98,7 @@ fn main() -> ExitCode {
 fn serve_error_exit_code(error: &ServeError) -> ExitCode {
     match error {
         ServeError::Build(BuildError::Storage(
-            cc_lb_storage_redb::StorageError::BackendKindMismatch { .. },
+            cc_lb_storage_api::StorageError::BackendKindMismatch { .. },
         ))
         | ServeError::Build(BuildError::StorageFactory(
             cc_lb_server::storage_factory::StorageFactoryError::BackendKindMismatch { .. },
@@ -174,8 +174,14 @@ async fn run_list_abandoned_chain_entries() -> Result<(), DoctorError> {
         });
     }
 
-    let storage =
-        cc_lb_storage_redb::Storage::open(&path, [0; 32]).map_err(DoctorError::StorageOpen)?;
+    let database_url = format!("sqlite://{}", path.display());
+    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url)
+        .await
+        .map_err(DoctorError::StorageOpen)?;
+    storage
+        .initialize(BackendKind::Sqlite)
+        .await
+        .map_err(DoctorError::StorageOpen)?;
     let mut abandoned_chain_entries = Vec::new();
     let principals = storage
         .list(0, usize::MAX, true)
@@ -235,7 +241,7 @@ fn default_doctor_storage_path() -> PathBuf {
             .join(".local")
             .join("share")
             .join("cc-lb")
-            .join("storage.redb"),
-        None => PathBuf::from("~/.local/share/cc-lb/storage.redb"),
+            .join("storage.sqlite"),
+        None => PathBuf::from("~/.local/share/cc-lb/storage.sqlite"),
     }
 }

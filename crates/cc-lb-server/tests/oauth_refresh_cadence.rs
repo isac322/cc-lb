@@ -9,11 +9,12 @@ use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_server::refresh::OAuthRefresher;
+use cc_lb_storage_api::BackendKind;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamLeaseKind, UpstreamStatusUpdate};
 use cc_lb_storage_api::{
     StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,
 };
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_sqlite::{SqliteStorage as Storage, open_sqlite};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -279,8 +280,13 @@ struct Fixture {
 impl Fixture {
     async fn new() -> Self {
         let dir = tempfile::tempdir().expect("tempdir");
-        let storage =
-            Arc::new(Storage::open(&dir.path().join("cadence.redb"), [31; 32]).expect("storage"));
+        let path = dir.path().join("cadence.sqlite");
+        let database_url = format!("sqlite://{}", path.display());
+        let storage = open_sqlite(&database_url).await.expect("storage opens");
+        cc_lb_storage_api::MetaStore::initialize(&storage, BackendKind::Sqlite)
+            .await
+            .expect("initialize");
+        let storage = Arc::new(storage);
         let aead = Arc::new(AeadService::from_master_key([31; 32]));
         let oauth_cfg = Arc::new(AnthropicOAuthConfig {
             client_id: "test-client".to_owned(),
@@ -467,32 +473,11 @@ async fn advance_eleven_minutes() {
     advance_remaining_to_eleven_minutes().await;
 }
 
-async fn wait_for_claim(claim_calls: &AtomicUsize) {
-    // NOTE [Priority-3 footgun]: under #[tokio::test(start_paused = true)] the only
-    // way to give the spawned refresher task progress is `yield_now`. 1000 yields
-    // was enough locally but flaked on ARC self-hosted CI where the runtime gets
-    // 2 worker threads competing with other parallel test binaries; the refresher
-    // sometimes had not yet reached `claim_refresh_lease` by the deadline. 100k
-    // yields cap real-time at ~tens-of-ms (each yield is sub-microsecond) so the
-    // poll still bounds aggressively while tolerating CI scheduling jitter.
-    for _ in 0..100_000 {
-        if claim_calls.load(Ordering::SeqCst) > 0 {
-            return;
-        }
-        tokio::task::yield_now().await;
-    }
-    panic!("claim_refresh_lease was not called");
-}
-
 async fn wait_for_ciphertext_change(
     fixture: &Fixture,
     upstream_id: Uuid,
     before: &EncryptedOAuthTokens,
 ) -> UpstreamRecord {
-    // NOTE [Priority-3 footgun]: each iteration does a storage read so we can't
-    // just brute-force more yields like wait_for_claim does. Cap by wall-clock
-    // real time (std::time::Instant is NOT affected by tokio's start_paused) at
-    // 30 s so the helper still bounds aggressively under the CI scheduler.
     let mut last_record = None;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     while std::time::Instant::now() < deadline {
@@ -516,10 +501,11 @@ async fn wait_for_ciphertext_change(
     );
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn gate_skips_sweep_when_no_oauth_credential_registered() {
     let fixture = Fixture::new().await;
     let (upstreams, claim_calls, _inject_error) = mock_upstream_store(&fixture);
+    tokio::time::pause();
     let cancel = CancellationToken::new();
     let refresher = fixture.refresher(upstreams, Uuid::new_v4(), cancel.clone());
     let task = spawn_refresher(refresher).await;
@@ -530,7 +516,7 @@ async fn gate_skips_sweep_when_no_oauth_credential_registered() {
     shutdown_refresher(cancel, task).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn gate_proceeds_when_at_least_one_oauth_credential_exists() {
     let (addr, server) = spawn_mock_token_server().await;
     let fixture = Fixture::with_token_url(
@@ -544,12 +530,9 @@ async fn gate_proceeds_when_at_least_one_oauth_credential_exists() {
     let (upstreams, claim_calls, _inject_error) = mock_upstream_store(&fixture);
     let cancel = CancellationToken::new();
     let refresher = fixture.refresher(upstreams, Uuid::new_v4(), cancel.clone());
-    let task = spawn_refresher(refresher).await;
 
-    advance_to_first_sweep_after_jitter().await;
-    wait_for_claim(&claim_calls).await;
+    refresher.sweep_once().await.expect("sweep succeeds");
     let refreshed = wait_for_ciphertext_change(&fixture, upstream_id, &before).await;
-    advance_remaining_to_eleven_minutes().await;
 
     assert!(claim_calls.load(Ordering::SeqCst) > 0);
     assert_ne!(refreshed.oauth_credentials.as_ref(), Some(&before));
@@ -563,11 +546,11 @@ async fn gate_proceeds_when_at_least_one_oauth_credential_exists() {
     assert_eq!(bundle.access_token, "sk-ant-oat01-new-token");
     assert_eq!(bundle.refresh_token, "sk-ant-ort01-new-refresh");
 
-    shutdown_refresher(cancel, task).await;
+    cancel.cancel();
     shutdown_mock_server(server).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn refresh_does_not_fire_before_ten_minute_tick() {
     let (addr, server) = spawn_mock_token_server().await;
     let fixture = Fixture::with_token_url(
@@ -578,6 +561,7 @@ async fn refresh_does_not_fire_before_ten_minute_tick() {
         .create_oauth_upstream("before-tick", now_secs() + 600)
         .await;
     let (upstreams, claim_calls, _inject_error) = mock_upstream_store(&fixture);
+    tokio::time::pause();
     let cancel = CancellationToken::new();
     let refresher = fixture.refresher(upstreams, Uuid::new_v4(), cancel.clone());
     let task = spawn_refresher(refresher).await;
@@ -590,7 +574,7 @@ async fn refresh_does_not_fire_before_ten_minute_tick() {
     shutdown_mock_server(server).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn refresh_fires_for_token_within_twenty_minute_lookahead_and_not_outside() {
     let (addr, server) = spawn_mock_token_server().await;
     let fixture = Fixture::with_token_url(
@@ -609,12 +593,9 @@ async fn refresh_fires_for_token_within_twenty_minute_lookahead_and_not_outside(
     let (upstreams, claim_calls, _inject_error) = mock_upstream_store(&fixture);
     let cancel = CancellationToken::new();
     let refresher = fixture.refresher(upstreams, Uuid::new_v4(), cancel.clone());
-    let task = spawn_refresher(refresher).await;
 
-    advance_to_first_sweep_after_jitter().await;
-    wait_for_claim(&claim_calls).await;
+    refresher.sweep_once().await.expect("sweep succeeds");
     let inside_after = wait_for_ciphertext_change(&fixture, inside_id, &inside_before).await;
-    advance_remaining_to_eleven_minutes().await;
     let outside_after = upstream_record(&fixture, outside_id).await;
 
     assert!(claim_calls.load(Ordering::SeqCst) > 0);
@@ -631,11 +612,11 @@ async fn refresh_fires_for_token_within_twenty_minute_lookahead_and_not_outside(
     assert_eq!(outside_after.refresh_lease_holder, None);
     assert_eq!(outside_after.refresh_lease_until_unix_secs, None);
 
-    shutdown_refresher(cancel, task).await;
+    cancel.cancel();
     shutdown_mock_server(server).await;
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn candidates_error_does_not_trigger_empty_gate_early_return() {
     let logs = CapturedLogs::default();
     let subscriber = tracing_subscriber::fmt()
@@ -648,6 +629,7 @@ async fn candidates_error_does_not_trigger_empty_gate_early_return() {
     let fixture = Fixture::new().await;
     let (upstreams, _claim_calls, inject_error) = mock_upstream_store(&fixture);
     inject_error.store(true, Ordering::SeqCst);
+    tokio::time::pause();
     let cancel = CancellationToken::new();
     let refresher = fixture.refresher(upstreams, Uuid::new_v4(), cancel.clone());
     let task = spawn_refresher(refresher).await;

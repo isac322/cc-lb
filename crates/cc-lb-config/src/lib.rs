@@ -20,7 +20,7 @@ pub use types::{
     AdminConfig, AnthropicCompatPollerConfig, AnthropicOAuthConfig, ApiKeysConfig, BodyConfig,
     BulkheadConfig, CircuitBreakerConfig, Config, ConfigOverrides, DEFAULT_ADMIN_TOKEN_ENV,
     DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES, DEFAULT_OAUTH_AEAD_KEY_ENV,
-    DEFAULT_REDB_PATH, DnsConfig, DownstreamAuthConfig, DownstreamAuthMode, EgressConfig, Limit,
+    DEFAULT_SQLITE_PATH, DnsConfig, DownstreamAuthConfig, DownstreamAuthMode, EgressConfig, Limit,
     LimitKind, ListenerConfig, ListenerOverrides, NoneModeConfig, NoneModeUpstreamKind,
     OAuthUsagePollerConfig, ObservabilityConfig, PostgresPoolConfig, PriceCatalogConfig,
     PromptCacheShadowConfig, RestartRequiredField, RuntimeConfig, StartupHandshakeConfig,

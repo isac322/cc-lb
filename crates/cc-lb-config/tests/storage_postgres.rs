@@ -5,23 +5,23 @@ use cc_lb_config::{Config, ConfigError, PostgresPoolConfig, StorageConfig, valid
 #[test]
 fn test_legacy_flat_storage_parses() {
     let dir = tempfile::tempdir().unwrap();
-    let redb_path = dir.path().join("test.redb");
+    let storage_path = dir.path().join("test.sqlite");
     let config_path = dir.path().join("config.toml");
     std::fs::write(
         &config_path,
         format!(
             r#"[storage]
-redb_path = "{}"
+storage_path = "{}"
 oauth_aead_key_env = "MY_KEY"
 "#,
-            common::toml_path(&redb_path)
+            common::toml_path(&storage_path)
         ),
     )
     .unwrap();
 
     let config = Config::load(&config_path).unwrap();
 
-    assert_eq!(config.storage, StorageConfig::Redb { path: redb_path });
+    assert_eq!(config.storage, StorageConfig::Sqlite { path: storage_path });
     assert_eq!(config.aead.key_env, "MY_KEY");
 }
 
@@ -58,7 +58,7 @@ fn test_postgres_pool_defaults() {
 }
 
 #[test]
-fn test_tagged_kind_with_legacy_redb_path_is_rejected() {
+fn test_tagged_kind_with_legacy_storage_path_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     let config_path = dir.path().join("config.toml");
     std::fs::write(
@@ -66,7 +66,7 @@ fn test_tagged_kind_with_legacy_redb_path_is_rejected() {
         r#"[storage]
 kind = "postgres"
 url = "postgres://localhost/db"
-redb_path = "/tmp/leftover.redb"
+storage_path = "/tmp/leftover.sqlite"
 "#,
     )
     .unwrap();
@@ -77,7 +77,7 @@ redb_path = "/tmp/leftover.redb"
     let message = format!("{error}");
     assert!(
         message.contains("conflicting [storage] keys")
-            && message.contains("redb_path")
+            && message.contains("storage_path")
             && message.contains("`kind`"),
         "unexpected error message: {message}"
     );

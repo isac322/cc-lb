@@ -1475,14 +1475,14 @@ mod tests {
         RequestContext, RouteDecision, RouteError, RouterPlugin, ShapedRequest, SignedRequest,
         Signer, SignerError, SignerFactory, SigningCapability, Upstream, UpstreamCandidate,
     };
-    use cc_lb_storage_api::UpstreamStore;
+    use cc_lb_storage_api::{BackendKind, MetaStore, UpstreamStore};
     use http_body_util::BodyExt;
     use tokio::net::TcpListener;
     use tower::ServiceExt;
 
     use super::*;
 
-    type TestStorage = cc_lb_storage_redb::Storage;
+    type TestStorage = cc_lb_storage_sqlite::SqliteStorage;
 
     const TEST_FIRE_NOW_HOLDER: &str = "fire-now:00000000-0000-4000-8000-000000000000";
 
@@ -1546,6 +1546,7 @@ mod tests {
     }
 
     struct TestContext {
+        _dir: tempfile::TempDir,
         state: AdminState,
         storage: Arc<TestStorage>,
         aead: Arc<AeadService>,
@@ -1630,7 +1631,7 @@ mod tests {
 
     #[tokio::test]
     async fn fire_now_rejects_non_oauth_400() {
-        let context = test_context();
+        let context = test_context().await;
         let upstream = create_api_key_upstream(context.storage.as_ref(), true).await;
 
         let (status, body) = fire_now_response(context.state, upstream.id).await;
@@ -1642,7 +1643,7 @@ mod tests {
 
     #[tokio::test]
     async fn fire_now_rejects_warmup_disabled_400() {
-        let context = test_context();
+        let context = test_context().await;
         let upstream =
             create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), false, None)
                 .await;
@@ -1655,7 +1656,7 @@ mod tests {
 
     #[tokio::test]
     async fn fire_now_returns_202_when_lease_held() {
-        let context = test_context();
+        let context = test_context().await;
         let upstream =
             create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), true, None)
                 .await;
@@ -1677,7 +1678,7 @@ mod tests {
 
     #[tokio::test]
     async fn fire_now_returns_200_on_success_and_writes_cycle_key() {
-        let context = test_context();
+        let context = test_context().await;
         let (base_url, server) = spawn_warmup_server(StatusCode::OK).await;
         let upstream = create_oauth_upstream(
             context.storage.as_ref(),
@@ -1707,7 +1708,7 @@ mod tests {
 
     #[tokio::test]
     async fn fire_now_returns_502_on_permanent_abandon() {
-        let context = test_context();
+        let context = test_context().await;
         let (base_url, server) = spawn_warmup_server(StatusCode::UNAUTHORIZED).await;
         let upstream = create_oauth_upstream(
             context.storage.as_ref(),
@@ -1736,7 +1737,7 @@ mod tests {
 
     #[tokio::test]
     async fn fire_now_returns_503_on_transient() {
-        let context = test_context();
+        let context = test_context().await;
         let (base_url, server) = spawn_warmup_server(StatusCode::INTERNAL_SERVER_ERROR).await;
         let upstream = create_oauth_upstream(
             context.storage.as_ref(),
@@ -1763,8 +1764,17 @@ mod tests {
         server.abort();
     }
 
-    fn test_context() -> TestContext {
-        let storage = Arc::new(TestStorage::open_in_memory([7; 32]).expect("storage opens"));
+    async fn test_context() -> TestContext {
+        let dir = tempfile::tempdir().expect("storage dir");
+        let database_url = format!("sqlite://{}", dir.path().join("upstreams.sqlite").display());
+        let storage = cc_lb_storage_sqlite::open_sqlite(&database_url)
+            .await
+            .expect("storage opens");
+        storage
+            .initialize(BackendKind::Sqlite)
+            .await
+            .expect("storage initializes");
+        let storage = Arc::new(storage);
         let aead = Arc::new(AeadService::from_master_key([8; 32]));
         let state = AdminState {
             storage: Some(storage.clone()),
@@ -1784,6 +1794,7 @@ mod tests {
             start_time: std::time::Instant::now(),
         };
         TestContext {
+            _dir: dir,
             state,
             storage,
             aead,
@@ -1908,7 +1919,7 @@ mod tests {
 
     #[tokio::test]
     async fn fire_now_with_dialect_plugin_returns_502_when_runtime_unavailable() {
-        let context = test_context();
+        let context = test_context().await;
         let (base_url, server) = spawn_warmup_server(StatusCode::OK).await;
         let plugin = UpstreamWarmupDialectPlugin {
             wasm_registry_id: Uuid::new_v4(),
@@ -1941,7 +1952,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_upstream_with_warmup_enabled_rejects_anthropic_oauth_kind() {
-        let context = test_context();
+        let context = test_context().await;
         let body = serde_json::json!({
             "name": "oauth-warmup-precreate",
             "kind": "anthropic_oauth",
@@ -1970,7 +1981,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_warmup_enabled_bootstraps_when_currently_null() {
-        let context = test_context();
+        let context = test_context().await;
         let upstream =
             create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), false, None)
                 .await;
@@ -2006,7 +2017,7 @@ mod tests {
 
     #[tokio::test]
     async fn update_warmup_enabled_rejects_when_oauth_credentials_missing() {
-        let context = test_context();
+        let context = test_context().await;
         let upstream = context
             .storage
             .create(UpstreamCreate {
@@ -2057,7 +2068,7 @@ mod tests {
 
     #[tokio::test]
     async fn fire_now_returns_400_when_oauth_credentials_missing() {
-        let context = test_context();
+        let context = test_context().await;
         let upstream = context
             .storage
             .create(UpstreamCreate {

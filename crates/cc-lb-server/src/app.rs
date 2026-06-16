@@ -41,7 +41,8 @@ use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_runtime_extism::registry::PluginRegistry;
 use cc_lb_storage_api::{
-    ManagedKeyStore, PluginBlobRepo, PluginRegistryRepo, RuntimeChangeNotifier, Storage,
+    BackendKind, ManagedKeyStore, MetaStore, PluginBlobRepo, PluginRegistryRepo,
+    RuntimeChangeNotifier, Storage,
 };
 use http_body_util::BodyExt;
 use hyper_rustls::HttpsConnectorBuilder;
@@ -136,9 +137,7 @@ pub enum BuildError {
     #[error(transparent)]
     Observability(#[from] cc_lb_observability::InitError),
     #[error(transparent)]
-    Storage(#[from] cc_lb_storage_redb::StorageError),
-    #[error(transparent)]
-    StorageApi(#[from] cc_lb_storage_api::StorageError),
+    Storage(#[from] cc_lb_storage_api::StorageError),
     #[error(transparent)]
     StorageFactory(#[from] crate::storage_factory::StorageFactoryError),
     #[cfg(feature = "postgres")]
@@ -333,15 +332,15 @@ pub async fn build_app(config: Config) -> Result<App, BuildError> {
 
 pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError> {
     let dir = tempfile::TempDir::new()?;
-    let path = dir.path().join("storage.redb");
+    let path = dir.path().join("storage.sqlite");
     let key = [0u8; 32];
     let aead = Arc::new(AeadService::from_master_key(key));
-    let storage_arc = Arc::new(cc_lb_storage_redb::Storage::open(&path, key)?);
-    let managed_store: Arc<dyn ManagedKeyStore> = Arc::new(
-        cc_lb_storage_redb::RedbManagedKeyStore::new(storage_arc.clone()),
-    );
+    let database_url = format!("sqlite://{}", path.display());
+    let storage_arc = Arc::new(cc_lb_storage_sqlite::open_sqlite(&database_url).await?);
+    storage_arc.initialize(BackendKind::Sqlite).await?;
+    let managed_store: Arc<dyn ManagedKeyStore> = storage_arc.clone();
     let storage: Arc<dyn Storage> = storage_arc.clone();
-    config.storage = cc_lb_config::StorageConfig::Redb { path };
+    config.storage = cc_lb_config::StorageConfig::Sqlite { path };
     config.aead.key_env = "__CC_LB_TEST_KEY__".to_owned();
     config.downstream_auth.mode = DownstreamAuthMode::None;
     config.downstream_auth.none_mode = Some(cc_lb_config::NoneModeConfig {
@@ -349,12 +348,8 @@ pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError
         upstream_kind: cc_lb_config::NoneModeUpstreamKind::AnthropicKey,
     });
     std::mem::forget(dir);
-    let plugin_registry_repo = Arc::new(cc_lb_storage_redb::RedbPluginRegistryRepo::new(
-        storage_arc.as_ref().clone(),
-    )?) as Arc<dyn PluginRegistryRepo>;
-    let plugin_blob_repo = Arc::new(cc_lb_storage_redb::RedbPluginBlobRepo::new(
-        storage_arc.as_ref().clone(),
-    )?) as Arc<dyn PluginBlobRepo>;
+    let plugin_registry_repo = storage_arc.clone() as Arc<dyn PluginRegistryRepo>;
+    let plugin_blob_repo = storage_arc.clone() as Arc<dyn PluginBlobRepo>;
     build_app_with_storage_inner(
         config,
         None,

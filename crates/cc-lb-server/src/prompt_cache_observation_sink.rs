@@ -153,7 +153,7 @@ mod tests {
     async fn writer_processes_records_into_store() {
         let store = MockStore::default();
         let records = Arc::clone(&store.records);
-        let (sink, writer) = PromptCacheObservationSink::new(Arc::new(store), 8, "redb");
+        let (sink, writer) = PromptCacheObservationSink::new(Arc::new(store), 8, "sqlite");
 
         for index in 0..3 {
             sink.enqueue(record(index)).expect("record enqueued");
@@ -170,7 +170,7 @@ mod tests {
     #[tokio::test]
     async fn closed_channel_returns_closed_error() {
         let (sink, writer) =
-            PromptCacheObservationSink::new(Arc::new(MockStore::default()), 2, "redb");
+            PromptCacheObservationSink::new(Arc::new(MockStore::default()), 2, "sqlite");
 
         writer.abort();
         let _ = writer.await;

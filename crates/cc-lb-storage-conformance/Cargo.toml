@@ -7,10 +7,9 @@ rust-version.workspace = true
 publish = false
 
 [features]
-default = ["redb"]
-redb = ["dep:cc-lb-storage-redb", "dep:redb"]
+default = ["sqlite"]
 postgres = ["dep:cc-lb-storage-postgres", "dep:sqlx"]
-sqlite = ["dep:cc-lb-storage-sqlite"]
+sqlite = []
 
 [dependencies]
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
@@ -23,15 +22,12 @@ proptest = { workspace = true }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 serde_json = { workspace = true }
-cc-lb-storage-redb = { path = "../cc-lb-storage-redb", optional = true }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres", optional = true }
-cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite", optional = true }
+cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-ring"], optional = true }
-redb = { workspace = true, optional = true }
 tokio-util = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
 tempfile = { workspace = true }

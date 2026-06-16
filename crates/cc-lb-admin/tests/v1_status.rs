@@ -13,8 +13,8 @@ use cc_lb_core::{
 };
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
-    PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob, WasmRegistryEntryInput,
+    MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate,
+    PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob, WasmRegistryEntryInput,
 };
 use config_admin_common::{app, authed_json, temp_storage, test_state};
 use serde_json::{Value, json};
@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn status_reflects_in_memory_dynamic_view_generation_and_replica_id() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let mut state = test_state(Config::default(), Some(storage.clone()));
     let replica = ReplicaIdentity {
         id: Uuid::new_v4(),
@@ -52,7 +52,7 @@ async fn status_reflects_in_memory_dynamic_view_generation_and_replica_id() {
 
 #[tokio::test]
 async fn status_shows_partial_failure_when_upstream_marked_error_in_snapshot() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let upstream = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
@@ -84,7 +84,7 @@ async fn status_shows_partial_failure_when_upstream_marked_error_in_snapshot() {
 
 #[tokio::test]
 async fn export_contains_no_plaintext_oauth_tokens() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let upstream = UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
@@ -128,7 +128,7 @@ async fn export_contains_no_plaintext_oauth_tokens() {
 
 #[tokio::test]
 async fn export_schema_version_field_present_and_equals_1() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
 
     let (status, _, body, _) = authed_json(
         app(test_state(Config::default(), Some(storage))),
@@ -144,7 +144,7 @@ async fn export_schema_version_field_present_and_equals_1() {
 
 #[tokio::test]
 async fn export_round_trips_through_stable_key_ordering() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     seed_upstream(&storage, "bravo").await;
     seed_upstream(&storage, "alpha").await;
     let principal_id = seed_principal(&storage, "principal-alpha").await;
@@ -183,8 +183,8 @@ async fn export_round_trips_through_stable_key_ordering() {
 
 #[tokio::test]
 async fn status_endpoint_includes_killswitch_state() {
-    let (_dir, storage) = temp_storage();
-    storage.set_killswitch_enabled(true).unwrap();
+    let (_dir, storage) = temp_storage().await;
+    storage.set_killswitch_enabled(true).await.unwrap();
 
     let (status, _, body, _) = authed_json(
         app(test_state(Config::default(), Some(storage))),
@@ -221,7 +221,7 @@ fn snapshot_with_upstream_error(name: &str) -> UpstreamStatusSnapshot {
     }
 }
 
-async fn seed_upstream(storage: &cc_lb_storage_redb::Storage, name: &str) {
+async fn seed_upstream(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &str) {
     UpstreamStore::create(
         storage,
         UpstreamCreate {
@@ -241,7 +241,7 @@ async fn seed_upstream(storage: &cc_lb_storage_redb::Storage, name: &str) {
     .unwrap();
 }
 
-async fn seed_principal(storage: &cc_lb_storage_redb::Storage, name: &str) -> Uuid {
+async fn seed_principal(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &str) -> Uuid {
     PrincipalStore::create(
         storage,
         PrincipalCreate {
@@ -259,7 +259,7 @@ async fn seed_principal(storage: &cc_lb_storage_redb::Storage, name: &str) -> Uu
 }
 
 async fn seed_registry(
-    storage: &cc_lb_storage_redb::Storage,
+    storage: &cc_lb_storage_sqlite::SqliteStorage,
     seed: u8,
     name: &str,
 ) -> cc_lb_storage_api::WasmRegistryEntry {

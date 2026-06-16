@@ -5,7 +5,6 @@ use uuid::Uuid;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BackendKind {
-    Redb,
     Postgres,
     Sqlite,
 }
@@ -13,7 +12,6 @@ pub enum BackendKind {
 impl BackendKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Redb => "redb",
             Self::Postgres => "postgres",
             Self::Sqlite => "sqlite",
         }

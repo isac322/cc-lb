@@ -132,7 +132,10 @@ async fn list_keys(
                     .map(|d| d.as_millis() as u64)
                     .unwrap_or(0);
                 let since_ms = now_ms.saturating_sub(30 * 24 * 60 * 60 * 1000);
-                match storage.query_request_events(since_ms, now_ms, 5000).await {
+                match storage
+                    .query_request_events(since_ms / 1000, now_ms / 1000, 5000)
+                    .await
+                {
                     Ok(events) => {
                         let mut map: std::collections::HashMap<String, u64> =
                             std::collections::HashMap::new();

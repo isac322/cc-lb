@@ -135,7 +135,7 @@ fn observation_failure_does_not_fail_response() {
             let (sink, writer) = PromptCacheObservationSink::new(
                 Arc::new(FailingStore),
                 8,
-                cache_observation_store_kind::REDB,
+                cache_observation_store_kind::SQLITE,
             );
 
             // Each enqueue simulates the post-response observation enqueue
@@ -171,14 +171,14 @@ fn observation_failure_does_not_fail_response() {
     // upsert (3 enqueues -> 3 failed upserts -> counter == 3).
     let rendered = prom_handle.render();
     assert!(
-        rendered.contains("cc_lb_cache_observation_write_failed_total{store=\"redb\"}"),
-        "expected write_failed counter for store=redb in metrics output:\n{rendered}"
+        rendered.contains("cc_lb_cache_observation_write_failed_total{store=\"sqlite\"}"),
+        "expected write_failed counter for store=sqlite in metrics output:\n{rendered}"
     );
-    let counter_value = parse_write_failed_counter(&rendered, cache_observation_store_kind::REDB)
+    let counter_value = parse_write_failed_counter(&rendered, cache_observation_store_kind::SQLITE)
         .expect("write_failed counter parses from prometheus output");
     assert!(
         counter_value >= 1,
-        "expected write_failed counter >= 1 for store=redb, got {counter_value}\n{rendered}"
+        "expected write_failed counter >= 1 for store=sqlite, got {counter_value}\n{rendered}"
     );
 
     // Assertion 3: writer logged a WARN with the simulated error message.

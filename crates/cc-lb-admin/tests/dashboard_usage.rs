@@ -2,13 +2,13 @@ mod config_admin_common;
 
 use axum::http::StatusCode;
 use cc_lb_config::Config;
-use cc_lb_storage_api::RequestEvent;
+use cc_lb_storage_api::{RequestEvent, RequestEventStore, UsageRollupStore};
 use config_admin_common::{app, authed_bytes, authed_json, temp_storage, test_state};
 use uuid::Uuid;
 
 #[tokio::test]
 async fn usage_returns_200_grouped_by_model() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
     let (status, _, body, _) = authed_json(
@@ -25,7 +25,7 @@ async fn usage_returns_200_grouped_by_model() {
 
 #[tokio::test]
 async fn usage_returns_200_grouped_by_principal() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
     let (status, _, body, _) = authed_json(
@@ -41,7 +41,7 @@ async fn usage_returns_200_grouped_by_principal() {
 
 #[tokio::test]
 async fn usage_rejects_invalid_group_by() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
     let (status, _, _) = authed_bytes(
@@ -56,7 +56,7 @@ async fn usage_rejects_invalid_group_by() {
 
 #[tokio::test]
 async fn usage_filters_by_upstream_id() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let upstream_id = Uuid::from_u128(1);
     let other_upstream_id = Uuid::from_u128(2);
     let bucket_ts = current_unix_secs().saturating_sub(3_600);
@@ -69,6 +69,7 @@ async fn usage_filters_by_upstream_id() {
             "target-upstream",
             3,
         ))
+        .await
         .unwrap();
     storage
         .append_request_event(&usage_event(
@@ -78,8 +79,9 @@ async fn usage_filters_by_upstream_id() {
             "other-upstream",
             7,
         ))
+        .await
         .unwrap();
-    storage.rollup_usage_once().unwrap();
+    storage.rollup_usage_once().await.unwrap();
 
     let state = test_state(Config::default(), Some(storage));
     let (status, _, body, _) = authed_json(

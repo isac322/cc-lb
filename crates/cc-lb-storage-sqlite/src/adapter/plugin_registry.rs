@@ -342,8 +342,8 @@ impl PluginRegistryStore for SqliteStorage {
         &self,
         input: PluginChainEntryInput,
     ) -> StorageResult<PluginChainEntry> {
-        let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
-        let sha256 = sha_for_registry_id_in_tx(&mut tx, input.wasm_registry_id)
+        let sha256 = self
+            .sha_for_registry_id(input.wasm_registry_id)
             .await?
             .ok_or_else(|| StorageError::PluginRegistryConflict {
                 message: "unknown plugin registry entry".to_owned(),
@@ -351,7 +351,7 @@ impl PluginRegistryStore for SqliteStorage {
         let principal_exists: Option<i64> =
             sqlx::query_scalar("SELECT 1 FROM principals_v1 WHERE id = ?")
                 .bind(input.principal_id.to_string())
-                .fetch_optional(&mut *tx)
+                .fetch_optional(self.pool())
                 .await
                 .map_err(map_sqlx_error)?;
         if principal_exists.is_none() {
@@ -365,7 +365,7 @@ impl PluginRegistryStore for SqliteStorage {
             )
             .bind(input.principal_id.to_string())
             .bind(input.slot.as_str())
-            .fetch_optional(&mut *tx)
+            .fetch_optional(self.pool())
             .await
             .map_err(map_sqlx_error)?
         {
@@ -386,11 +386,10 @@ impl PluginRegistryStore for SqliteStorage {
         .bind(sha256.as_slice())
         .bind(input.order)
         .bind(config)
-        .fetch_one(&mut *tx)
+        .fetch_one(self.pool())
         .await
         .map_err(map_sqlite_error)?;
         let entry = chain_from_row(row)?;
-        tx.commit().await.map_err(map_sqlx_error)?;
         Ok(entry)
     }
 
@@ -1213,6 +1212,9 @@ fn u32_from_i64(value: i64, field: &str) -> StorageResult<u32> {
 }
 
 fn usize_to_i64(value: usize, field: &str) -> StorageResult<i64> {
+    if value == usize::MAX {
+        return Ok(i64::MAX);
+    }
     i64::try_from(value).map_err(|_| StorageError::Fatal {
         message: format!("{field} cannot be represented as sqlite integer"),
     })

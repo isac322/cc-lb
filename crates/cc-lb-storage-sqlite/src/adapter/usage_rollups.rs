@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use crate::{SqliteStorage, map_sqlx_error};
 
-const CHECKPOINT_KEY: &str = "usage_rollup_checkpoint_high_water";
+const CHECKPOINT_ID: &str = "high_water";
 const ROLLUP_BATCH_LIMIT: i64 = 10_000;
 const MINUTE_SECS: u64 = 60;
 const HOUR_SECS: u64 = 60 * 60;
@@ -163,14 +163,16 @@ impl UsageRollupStore for SqliteStorage {
     }
 
     async fn usage_rollup_checkpoint(&self) -> StorageResult<Option<u64>> {
-        let value = sqlx::query_scalar::<_, String>("SELECT value FROM meta_v1 WHERE key = ?")
-            .bind(CHECKPOINT_KEY)
-            .fetch_optional(self.pool())
-            .await
-            .map_err(map_sqlx_error)?;
+        let value = sqlx::query_scalar::<_, i64>(
+            "SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = ?",
+        )
+        .bind(CHECKPOINT_ID)
+        .fetch_optional(self.pool())
+        .await
+        .map_err(map_sqlx_error)?;
 
         value
-            .map(|value| parse_u64(&value, "usage rollup checkpoint"))
+            .map(|value| i64_to_u64(value, "usage rollup checkpoint"))
             .transpose()
     }
 
@@ -191,7 +193,7 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
 
     let previous_checkpoint = usage_rollup_checkpoint_in_tx(&mut tx).await?.unwrap_or(0);
     let rows = sqlx::query(
-        "SELECT id, payload FROM request_events_v1 WHERE id > ? ORDER BY id ASC LIMIT ?",
+        "SELECT id, payload, upstream_id FROM request_events_v1 WHERE id > ? ORDER BY id ASC LIMIT ?",
     )
     .bind(u64_to_i64(
         previous_checkpoint,
@@ -220,8 +222,14 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
             "request event id",
         )?;
         let payload: String = row.try_get("payload").map_err(map_sqlx_error)?;
+        let table_upstream_id = row
+            .try_get::<Option<String>, _>("upstream_id")
+            .map_err(map_sqlx_error)?
+            .as_deref()
+            .map(|value| parse_uuid(value, "request event upstream_id"))
+            .transpose()?;
         let event: RequestEvent = serde_json::from_str(&payload)?;
-        let upstream = resolve_upstream_identity(&event, &upstreams);
+        let upstream = resolve_upstream_identity(&event, table_upstream_id, &upstreams);
 
         max_id = max_id.max(id);
         for resolution in [UsageRollupResolution::Minute, UsageRollupResolution::Hour] {
@@ -356,14 +364,15 @@ async fn rollup_usage_once_inner(storage: &SqliteStorage) -> StorageResult<Usage
 async fn usage_rollup_checkpoint_in_tx(
     tx: &mut Transaction<'_, Sqlite>,
 ) -> StorageResult<Option<u64>> {
-    let value = sqlx::query_scalar::<_, String>("SELECT value FROM meta_v1 WHERE key = ?")
-        .bind(CHECKPOINT_KEY)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(map_sqlx_error)?;
+    let value =
+        sqlx::query_scalar::<_, i64>("SELECT value FROM usage_rollup_checkpoints_v1 WHERE id = ?")
+            .bind(CHECKPOINT_ID)
+            .fetch_optional(&mut **tx)
+            .await
+            .map_err(map_sqlx_error)?;
 
     value
-        .map(|value| parse_u64(&value, "usage rollup checkpoint"))
+        .map(|value| i64_to_u64(value, "usage rollup checkpoint"))
         .transpose()
 }
 
@@ -372,12 +381,12 @@ async fn persist_checkpoint_in_tx(
     checkpoint: u64,
 ) -> StorageResult<()> {
     sqlx::query(
-        "INSERT INTO meta_v1 (key, value) VALUES (?, ?) \
-         ON CONFLICT(key) DO UPDATE SET value = excluded.value \
-         WHERE CAST(meta_v1.value AS INTEGER) < CAST(excluded.value AS INTEGER)",
+        "INSERT INTO usage_rollup_checkpoints_v1 (id, value) VALUES (?, ?) \
+         ON CONFLICT(id) DO UPDATE SET value = excluded.value \
+         WHERE usage_rollup_checkpoints_v1.value < excluded.value",
     )
-    .bind(CHECKPOINT_KEY)
-    .bind(checkpoint.to_string())
+    .bind(CHECKPOINT_ID)
+    .bind(u64_to_i64(checkpoint, "usage rollup checkpoint")?)
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
@@ -407,9 +416,10 @@ async fn load_upstream_identities(
 
 fn resolve_upstream_identity(
     event: &RequestEvent,
+    table_upstream_id: Option<Uuid>,
     upstreams: &HashMap<String, UpstreamIdentity>,
 ) -> UpstreamIdentity {
-    if let Some(upstream_id) = event.upstream_id {
+    if let Some(upstream_id) = event.upstream_id.or(table_upstream_id) {
         if let Some(name) = event.upstream_name.clone() {
             return UpstreamIdentity {
                 id: upstream_id,
@@ -613,12 +623,6 @@ fn option_u64_to_i64(value: Option<u64>, field: &str) -> StorageResult<Option<i6
 fn parse_uuid(value: &str, field: &str) -> StorageResult<Uuid> {
     Uuid::parse_str(value).map_err(|error| StorageError::Corrupted {
         message: format!("invalid {field} {value}: {error}"),
-    })
-}
-
-fn parse_u64(value: &str, field: &str) -> StorageResult<u64> {
-    value.parse::<u64>().map_err(|_| StorageError::Corrupted {
-        message: format!("invalid {field} value {value}"),
     })
 }
 

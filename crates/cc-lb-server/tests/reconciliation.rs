@@ -11,17 +11,18 @@ use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::reconcile::Reconciler;
 use cc_lb_storage_api::{
-    AnthropicCompatibilityKvStore, CompatibilityKvRecord, PluginChainEntry, PluginChainEntryInput,
-    PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
-    PrincipalRecord, PrincipalStore, PrincipalUpdate, PromptCacheObservationStore, StorageResult,
-    SubscriptionQuotaObservationRecord, SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery,
-    UpstreamCreate, UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore,
-    UpstreamRecord, UpstreamStore, UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob,
-    WasmRegistryEntry, WasmRegistryEntryInput,
+    AnthropicCompatibilityKvStore, BackendKind, CompatibilityKvRecord, MetaStore, PluginChainEntry,
+    PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore, PluginSlot,
+    PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate,
+    PromptCacheObservationStore, StorageResult, SubscriptionQuotaObservationRecord,
+    SubscriptionQuotaSeries, SubscriptionQuotaSeriesQuery, UpstreamCreate,
+    UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamRecord, UpstreamStore,
+    UpstreamSubscriptionQuotaStore, UpstreamUpdate, WasmBlob, WasmRegistryEntry,
+    WasmRegistryEntryInput,
 };
 
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamLeaseKind, UpstreamStatusUpdate};
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
@@ -50,10 +51,15 @@ fn labeled_counter_value(handle: &PrometheusHandle, name: &str, label: &str, val
         .unwrap_or(0.0)
 }
 
-fn storage_fixture() -> (tempfile::TempDir, Arc<Storage>) {
+async fn storage_fixture() -> (tempfile::TempDir, Arc<Storage>) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let storage =
-        Arc::new(Storage::open(&dir.path().join("test.redb"), [25; 32]).expect("storage"));
+    let database_url = format!("sqlite://{}", dir.path().join("test.sqlite").display());
+    let storage = Arc::new(
+        cc_lb_storage_sqlite::open_sqlite(&database_url)
+            .await
+            .expect("storage"),
+    );
+    storage.initialize(BackendKind::Sqlite).await.unwrap();
     (dir, storage)
 }
 
@@ -186,10 +192,10 @@ async fn advance_until(mut done: impl FnMut() -> bool) {
     }
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn unchanged_tick_emits_unchanged_metric_and_does_not_rebuild() {
     let metrics = install_prometheus();
-    let (dir, storage) = storage_fixture();
+    let (dir, storage) = storage_fixture().await;
     create_principal(&storage, "principal-a").await;
     create_upstream(&storage, "upstream-a").await;
     let stores = stores(storage);
@@ -206,10 +212,10 @@ async fn unchanged_tick_emits_unchanged_metric_and_does_not_rebuild() {
     assert!(after > before);
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn notify_dropped_then_reconcile_catches_up_within_one_tick() {
     let metrics = install_prometheus();
-    let (dir, storage) = storage_fixture();
+    let (dir, storage) = storage_fixture().await;
     create_principal(&storage, "principal-a").await;
     create_upstream(&storage, "upstream-a").await;
     let stores = stores(storage.clone());
@@ -227,9 +233,9 @@ async fn notify_dropped_then_reconcile_catches_up_within_one_tick() {
     assert!(after > before);
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn reconciler_rebuilds_after_registry_entry_insert() {
-    let (dir, storage) = storage_fixture();
+    let (dir, storage) = storage_fixture().await;
     create_principal(&storage, "principal-registry-insert").await;
     create_upstream(&storage, "upstream-registry-insert").await;
     let stores = stores(storage.clone());
@@ -245,9 +251,9 @@ async fn reconciler_rebuilds_after_registry_entry_insert() {
     assert!(holder.load().generation > generation);
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn reconciler_rebuilds_after_registry_entry_delete() {
-    let (dir, storage) = storage_fixture();
+    let (dir, storage) = storage_fixture().await;
     create_principal(&storage, "principal-registry-delete").await;
     create_upstream(&storage, "upstream-registry-delete").await;
     let entry = seed_registry(&storage, 32, "plugin-registry-delete").await;
@@ -268,9 +274,9 @@ async fn reconciler_rebuilds_after_registry_entry_delete() {
     assert!(holder.load().generation > generation);
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn reconciler_rebuilds_after_registry_entry_update() {
-    let (dir, storage) = storage_fixture();
+    let (dir, storage) = storage_fixture().await;
     create_principal(&storage, "principal-registry-update").await;
     create_upstream(&storage, "upstream-registry-update").await;
     let entry = seed_registry(&storage, 33, "plugin-registry-update").await;
@@ -290,7 +296,7 @@ async fn reconciler_rebuilds_after_registry_entry_update() {
     assert!(holder.load().generation > generation);
 }
 
-#[tokio::test(start_paused = true)]
+#[tokio::test]
 async fn cancel_during_tick_is_graceful() {
     let blocking_store = Arc::new(BlockingUpstreamStore::default());
     let blocking_stores = Arc::new(Stores {
@@ -304,7 +310,7 @@ async fn cancel_during_tick_is_graceful() {
         audit: None,
         plugin_registry_repo: None,
     });
-    let (_dir, storage) = storage_fixture();
+    let (_dir, storage) = storage_fixture().await;
     let runtime = Arc::new(ExtismRuntime::new());
     let real_stores = stores(storage);
     let data_dir = tempfile::tempdir().expect("tempdir");
@@ -318,6 +324,7 @@ async fn cancel_during_tick_is_graceful() {
         data_dir.path(),
     );
     let release = blocking_store.release.clone();
+    tokio::time::pause();
     let task = tokio::spawn(reconciler.run());
 
     advance_until(|| blocking_store.entered()).await;

@@ -506,7 +506,7 @@ dependencies = [
  "cc-lb-runtime-extism",
  "cc-lb-signer-anthropic-oauth",
  "cc-lb-storage-api",
- "cc-lb-storage-redb",
+ "cc-lb-storage-sqlite",
  "chrono",
  "extism",
  "fake-anthropic",
@@ -522,7 +522,6 @@ dependencies = [
  "mock-anthropic-oauth-server",
  "nix",
  "oauth2",
- "redb",
  "ring",
  "rust-embed",
  "schemars",
@@ -593,7 +592,7 @@ dependencies = [
  "cc-lb-plugin-api",
  "cc-lb-pricing",
  "cc-lb-storage-api",
- "cc-lb-storage-redb",
+ "cc-lb-storage-sqlite",
  "chrono",
  "dashmap",
  "eventsource-stream",
@@ -745,7 +744,7 @@ dependencies = [
  "arc-swap",
  "bytes",
  "cc-lb-storage-api",
- "cc-lb-storage-redb",
+ "cc-lb-storage-sqlite",
  "futures-lite",
  "http",
  "http-body-util",
@@ -873,7 +872,7 @@ dependencies = [
  "cc-lb-signer-anthropic-oauth",
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
- "cc-lb-storage-redb",
+ "cc-lb-storage-sqlite",
  "chrono",
  "clap",
  "fake-anthropic",
@@ -890,7 +889,6 @@ dependencies = [
  "oauth2",
  "parking_lot",
  "rand 0.10.1",
- "redb",
  "rustls",
  "rustls-pemfile",
  "serde",
@@ -971,7 +969,7 @@ dependencies = [
  "cc-lb-aead",
  "cc-lb-plugin-api",
  "cc-lb-plugin-wire",
- "cc-lb-storage-redb",
+ "cc-lb-storage-sqlite",
  "chrono",
  "serde",
  "serde_json",
@@ -993,12 +991,10 @@ dependencies = [
  "cc-lb-core",
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
- "cc-lb-storage-redb",
  "cc-lb-storage-sqlite",
  "chrono",
  "futures",
  "proptest",
- "redb",
  "serde_json",
  "sqlx",
  "tempfile",
@@ -1027,32 +1023,6 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
- "url",
- "uuid",
-]
-
-[[package]]
-name = "cc-lb-storage-redb"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "base64",
- "bincode",
- "cc-lb-aead",
- "cc-lb-plugin-api",
- "cc-lb-storage-api",
- "cc-lb-storage-conformance",
- "chacha20poly1305",
- "chrono",
- "redb",
- "ring",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-util",
  "url",
  "uuid",
 ]
@@ -4978,19 +4948,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tests-crash-recovery"
-version = "0.1.0"
-dependencies = [
- "cc-lb-core",
- "cc-lb-storage-api",
- "cc-lb-storage-redb",
- "redb",
- "serde_json",
- "tempfile",
- "tokio",
-]
-
-[[package]]
 name = "tests-integration"
 version = "0.1.0"
 dependencies = [
@@ -4999,7 +4956,7 @@ dependencies = [
  "cc-lb-pricing",
  "cc-lb-server",
  "cc-lb-storage-api",
- "cc-lb-storage-redb",
+ "cc-lb-storage-sqlite",
  "http",
  "serde_json",
  "serde_yaml",
@@ -5016,7 +4973,6 @@ dependencies = [
  "arc-swap",
  "bincode",
  "cc-lb-storage-api",
- "cc-lb-storage-redb",
  "dashmap",
  "globset",
  "loom",

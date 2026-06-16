@@ -18,6 +18,8 @@ use cc_lb_plugin_api::{
     ObservabilityHook, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
     SignedRequest, SignerFactory, Upstream, UpstreamCandidate,
 };
+use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_storage_sqlite::SqliteStorage;
 use http_body_util::BodyExt;
 use tower::ServiceExt;
 
@@ -25,12 +27,8 @@ pub fn limit_engine() -> Arc<LimitEngine> {
     LimitEngine::new(Arc::new(KeyConcurrencyManager::new()))
 }
 
-pub fn key_store(
-    storage: Arc<cc_lb_storage_redb::Storage>,
-) -> Arc<cc_lb_core::api_keys::key_store::KeyStore> {
-    Arc::new(cc_lb_core::api_keys::key_store::KeyStore::new(Arc::new(
-        cc_lb_storage_redb::RedbManagedKeyStore::new(storage),
-    )))
+pub fn key_store(storage: Arc<SqliteStorage>) -> Arc<cc_lb_core::api_keys::key_store::KeyStore> {
+    Arc::new(cc_lb_core::api_keys::key_store::KeyStore::new(storage))
 }
 
 pub fn dynamic_view_holder(_config: &Config) -> Arc<DynamicViewHolder> {
@@ -104,7 +102,7 @@ impl UpstreamDispatch for NoopDispatch {
 
 pub struct SpawnedAdminServer {
     pub _dir: tempfile::TempDir,
-    pub storage: Arc<cc_lb_storage_redb::Storage>,
+    pub storage: Arc<SqliteStorage>,
     pub client: AdminClient,
     pub _audit_task: tokio::task::JoinHandle<()>,
 }
@@ -115,12 +113,9 @@ pub struct AdminClient {
     token: String,
 }
 
-pub fn spawn_admin_server() -> SpawnedAdminServer {
+pub async fn spawn_admin_server() -> SpawnedAdminServer {
     let dir = tempfile::tempdir().expect("temp admin server dir");
-    let storage = Arc::new(
-        cc_lb_storage_redb::Storage::open(&dir.path().join("admin.redb"), [0; 32])
-            .expect("admin redb opens"),
-    );
+    let storage = sqlite_storage(dir.path(), "admin.sqlite").await;
     let (audit_sink, audit_task) = spawn_audit_writer(storage.clone(), 128);
     let config = Config::default();
     let state = cc_lb_admin::AdminState {
@@ -149,6 +144,18 @@ pub fn spawn_admin_server() -> SpawnedAdminServer {
         },
         _audit_task: audit_task,
     }
+}
+
+pub async fn sqlite_storage(dir: &std::path::Path, filename: &str) -> Arc<SqliteStorage> {
+    let database_url = format!("sqlite://{}", dir.join(filename).display());
+    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url)
+        .await
+        .expect("admin sqlite opens");
+    storage
+        .initialize(BackendKind::Sqlite)
+        .await
+        .expect("admin sqlite initializes");
+    Arc::new(storage)
 }
 
 impl AdminClient {

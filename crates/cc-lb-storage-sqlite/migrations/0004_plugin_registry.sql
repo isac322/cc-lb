@@ -67,7 +67,7 @@ VALUES (
     'cache-affinity',
     'builtin://cache-affinity',
     3,
-    '{"supported_slots":["router","observability_hook"]}',
+    '{"identity":{"magic":[204,27,112,16,0,1,0,0],"abi_envelope":1,"plugin_name":"cache-affinity","plugin_version":"builtin"},"negotiated_functions":{"cc_lb_route":3},"negotiated_capabilities":[],"handshake_completed_at":1,"self_check_passed":true,"self_check_completed_at":1,"expires_at":9223372036854775807}',
     zeroblob(32),
     1,
     0,
@@ -92,4 +92,3 @@ ON CONFLICT(key) DO NOTHING;
 INSERT INTO plugin_registry_marker_v1 (key, value)
 VALUES ('wasm_registry:0000000000000000000000000000000000000000000000000000000000000000:supported_slots', '["router","observability_hook"]')
 ON CONFLICT(key) DO NOTHING;
-

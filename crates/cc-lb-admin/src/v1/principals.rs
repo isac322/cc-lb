@@ -170,7 +170,7 @@ async fn list_principals(
     let offset = query.after.unwrap_or(0);
     let limit = query.limit.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT);
 
-    let total = match PrincipalStore::list(storage, 0, usize::MAX, false).await {
+    let total = match PrincipalStore::list(storage, 0, MAX_LIMIT, false).await {
         Ok(records) => records.len(),
         Err(error) => return storage_error(error),
     };

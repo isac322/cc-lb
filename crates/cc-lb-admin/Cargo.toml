@@ -8,7 +8,7 @@ publish = false
 build = "build.rs"
 
 [features]
-redb = []
+sqlite = []
 postgres = []
 
 [dependencies]
@@ -26,7 +26,6 @@ tokio.workspace = true
 tokio-util.workspace = true
 rust-embed.workspace = true
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
-cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-core = { path = "../cc-lb-core" }
 cc-lb-config = { path = "../cc-lb-config" }
@@ -63,7 +62,6 @@ http-body-util.workspace = true
 humantime = "2.3"
 insta.workspace = true
 tempfile.workspace = true
-cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
-redb.workspace = true
 mock-anthropic-oauth-server = { path = "../../tests/fixtures/mock-anthropic-oauth-server" }
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic" }
+cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }

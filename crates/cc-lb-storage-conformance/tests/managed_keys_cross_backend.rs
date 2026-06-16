@@ -1,4 +1,4 @@
-#![cfg(all(feature = "redb", feature = "postgres"))]
+#![cfg(all(feature = "sqlite", feature = "postgres"))]
 
 use std::{
     str::FromStr,
@@ -9,7 +9,7 @@ use std::{
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use cc_lb_storage_conformance::scenarios::managed_keys::managed_keys_cross_backend_equivalence;
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage, adapter::retry};
-use cc_lb_storage_redb::{RedbManagedKeyStore, RedbStorage};
+use cc_lb_storage_sqlite::open_sqlite;
 use sqlx::{
     AssertSqlSafe, PgPool,
     postgres::{PgConnectOptions, PgPoolOptions},
@@ -23,7 +23,7 @@ struct PostgresFixture {
 }
 
 #[test]
-fn managed_keys_cross_backend_equivalence_redb_postgres() {
+fn managed_keys_cross_backend_equivalence_sqlite_postgres() {
     let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
         eprintln!("skip: CI_POSTGRES_URL not set");
         return;
@@ -32,14 +32,15 @@ fn managed_keys_cross_backend_equivalence_redb_postgres() {
     Runtime::new()
         .expect("tokio runtime")
         .block_on(run_cross_backend_equivalence(url))
-        .expect("managed_keys_cross_backend_equivalence redb/postgres");
+        .expect("managed_keys_cross_backend_equivalence sqlite/postgres");
 }
 
 async fn run_cross_backend_equivalence(url: String) -> anyhow::Result<()> {
-    let redb_dir = tempfile::tempdir()?;
-    let redb_path = redb_dir.path().join("managed_keys_cross_backend.redb");
-    let redb_storage = RedbStorage::open(&redb_path, [41; 32])?;
-    let redb_store = RedbManagedKeyStore::new(Arc::new(redb_storage));
+    let sqlite_dir = tempfile::tempdir()?;
+    let sqlite_path = sqlite_dir.path().join("managed_keys_cross_backend.sqlite");
+    let sqlite_url = format!("sqlite://{}", sqlite_path.display());
+    let sqlite_store = open_sqlite(&sqlite_url).await?;
+    sqlite_store.initialize(BackendKind::Sqlite).await?;
 
     let fixture = create_postgres_fixture(url).await?;
     let postgres_store = PostgresManagedKeyStore::new(
@@ -47,7 +48,7 @@ async fn run_cross_backend_equivalence(url: String) -> anyhow::Result<()> {
         Arc::new(retry::RetryPolicy::default()),
     );
 
-    let result = managed_keys_cross_backend_equivalence(&redb_store, &postgres_store).await;
+    let result = managed_keys_cross_backend_equivalence(&sqlite_store, &postgres_store).await;
     let teardown = teardown_postgres_fixture(fixture).await;
     result?;
     teardown

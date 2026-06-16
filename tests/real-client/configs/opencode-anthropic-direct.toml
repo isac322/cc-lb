@@ -22,8 +22,8 @@ principal_id = "api-key"
 upstream_kind = "anthropic_key"
 
 [storage]
-kind = "redb"
-path = "__REDB_PATH__"
+kind = "sqlite"
+path = "__SQLITE_PATH__"
 
 [aead]
 key_env = "CC_LB_MASTER_KEY"

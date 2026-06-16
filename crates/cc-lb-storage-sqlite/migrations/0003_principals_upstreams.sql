@@ -1,10 +1,17 @@
 CREATE TABLE IF NOT EXISTS principals_v1 (
     id TEXT PRIMARY KEY,
     name TEXT NOT NULL UNIQUE,
+    kind TEXT NOT NULL DEFAULT 'machine' CHECK (kind IN ('machine','human','admin')),
     enabled INTEGER NOT NULL DEFAULT 1,
+    allowed_models TEXT NOT NULL DEFAULT '[]',
     allowed_upstreams TEXT NOT NULL DEFAULT '[]',
+    default_limits TEXT NOT NULL DEFAULT '[]',
+    router_terminal_strategy TEXT NOT NULL DEFAULT 'first-pick' CHECK (router_terminal_strategy IN ('first-pick','random','round-robin','least-connections')),
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0),
     created_at INTEGER NOT NULL,
     updated_at INTEGER NOT NULL,
+    last_apply_error TEXT,
+    last_apply_at INTEGER,
     deleted_at INTEGER
 );
 
