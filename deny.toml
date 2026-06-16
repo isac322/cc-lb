@@ -15,7 +15,6 @@ confidence-threshold = 0.8
 yanked = "warn"
 ignore = [
     { id = "RUSTSEC-2025-0134", reason = "rustls 0.23 still depends on rustls-pemfile 2.2.0; removing it requires a broader TLS stack migration." },
-    { id = "RUSTSEC-2025-0141", reason = "cc-lb-redb-migrate uses bincode 2.x `serde` integration; the upstream team ceased development permanently with no safe upgrade available." },
     { id = "RUSTSEC-2026-0085", reason = "wasmtime 43.0.2 is pinned by extism 1.30.0; awaiting an upstream wasmtime patch release." },
     { id = "RUSTSEC-2026-0086", reason = "wasmtime 43.0.2 is pinned by extism 1.30.0; awaiting an upstream wasmtime patch release." },
     { id = "RUSTSEC-2026-0087", reason = "wasmtime 43.0.2 is pinned by extism 1.30.0; awaiting an upstream wasmtime patch release." },

@@ -777,26 +777,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "cc-lb-redb-migrate"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bincode",
- "cc-lb-storage-api",
- "chrono",
- "clap",
- "redb",
- "serde",
- "serde_json",
- "sqlx",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-subscriber",
- "uuid",
-]
-
-[[package]]
 name = "cc-lb-runtime-extism"
 version = "0.1.0"
 dependencies = [
@@ -4041,15 +4021,6 @@ name = "real-client"
 version = "0.1.0"
 
 [[package]]
-name = "redb"
-version = "4.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8e925444704b5f17d32bf42f5b6e2df050bceebc3dcd6e71cc73dafe8092e839"
-dependencies = [
- "libc",
-]
-
-[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5125,7 +5096,6 @@ dependencies = [
  "bytes",
  "libc",
  "mio",
- "parking_lot",
  "pin-project-lite",
  "signal-hook-registry",
  "socket2",
