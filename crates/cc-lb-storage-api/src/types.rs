@@ -7,6 +7,7 @@ use uuid::Uuid;
 pub enum BackendKind {
     Redb,
     Postgres,
+    Sqlite,
 }
 
 impl BackendKind {
@@ -14,6 +15,7 @@ impl BackendKind {
         match self {
             Self::Redb => "redb",
             Self::Postgres => "postgres",
+            Self::Sqlite => "sqlite",
         }
     }
 }
