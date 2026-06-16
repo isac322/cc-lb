@@ -421,9 +421,9 @@ fn base64_url_no_pad(value: &[u8]) -> String {
         out.push(ALPHABET[(((b0 & 0b0000_0011) << 4) | (b1 >> 4)) as usize] as char);
         if chunk.len() > 1 {
             out.push(ALPHABET[(((b1 & 0b0000_1111) << 2) | (b2 >> 6)) as usize] as char);
-        }
-        if chunk.len() > 2 {
-            out.push(ALPHABET[(b2 & 0b0011_1111) as usize] as char);
+            if chunk.len() > 2 {
+                out.push(ALPHABET[(b2 & 0b0011_1111) as usize] as char);
+            }
         }
     }
     out
@@ -441,12 +441,12 @@ fn now_i64() -> StorageResult<i64> {
 }
 
 fn map_managed_sqlx_error(error: sqlx::Error) -> StorageError {
-    if let sqlx::Error::Database(database_error) = &error {
-        if database_error.is_unique_violation() {
-            return StorageError::Conflict {
-                message: database_error.to_string(),
-            };
-        }
+    if let sqlx::Error::Database(database_error) = &error
+        && database_error.is_unique_violation()
+    {
+        return StorageError::Conflict {
+            message: database_error.to_string(),
+        };
     }
     map_sqlx_error(error)
 }

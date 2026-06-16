@@ -219,6 +219,7 @@ impl PrincipalStore for SqliteStorage {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn update_principal(
     storage: &SqliteStorage,
     id: Uuid,
