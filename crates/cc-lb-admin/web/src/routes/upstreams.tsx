@@ -50,6 +50,7 @@ import { WarmupCard } from '../components/upstreams/WarmupCard';
 import { ApiError } from '../lib/api';
 import { getWindowColor, WINDOW_DURATION_SECS } from '../lib/colors';
 import { DEFAULT_ANTHROPIC_BASE_URL } from '../lib/constants';
+import { fmtChartTooltipTs } from '../lib/format';
 import {
   type Upstream,
   useCompleteOauthDraft,
@@ -1128,7 +1129,7 @@ function DetailView({
                                     marginBottom: 4,
                                   }}
                                 >
-                                  {label}
+                                  {fmtChartTooltipTs(Number(label))}
                                 </div>
                                 {payload.map((p, i) => {
                                   const key = String(p.dataKey);

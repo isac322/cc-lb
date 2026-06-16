@@ -1057,6 +1057,85 @@ async function handle(req: Request, url: URL): Promise<Response> {
     }
   }
 
+  if (path === "/admin/v1/subscription-quotas/latest" && m === "GET") {
+    const now = NOW();
+    return ok({
+      now_unix_secs: now,
+      max_staleness_secs: 300,
+      upstreams: upstreams.filter((u) => u.kind === "anthropic_oauth" && u.enabled).map((u) => ({
+        upstream_id: u.id,
+        upstream_name: u.name,
+        windows: ["5h", "7d", "7d_sonnet"].map((win, idx) => ({
+          window: win,
+          state: "fresh",
+          source: "merged",
+          utilization: 0.25 + idx * 0.15,
+          status: "ok",
+          resets_at_unix_secs: now + (win === "5h" ? 3600 : 7 * 24 * 3600),
+          surpassed_threshold: false,
+          representative_claim: null,
+          disabled_reason: null,
+          extra_usage_enabled: false,
+          extra_usage_monthly_limit: null,
+          extra_usage_used_credits: null,
+          observed_at_unix_millis: now * 1000,
+          age_secs: 10,
+        })),
+      })),
+    });
+  }
+  if (path === "/admin/v1/subscription-quotas/series" && m === "GET") {
+    const now = NOW();
+    const range = url.searchParams.get("range") || "7d";
+    const rangeSecs = range === "24h" ? 24 * 3600 : range === "6h" ? 6 * 3600 : range === "1h" ? 3600 : 7 * 24 * 3600;
+    const bucketSecs = range === "1h" ? 60 : range === "6h" ? 300 : range === "24h" ? 1800 : 3600;
+    const nBuckets = Math.min(Math.floor(rangeSecs / bucketSecs), 200);
+    const targets = upstreams.filter((u) => u.kind === "anthropic_oauth" && u.enabled);
+    return ok({
+      since_unix_secs: now - rangeSecs,
+      until_unix_secs: now,
+      bucket_secs: bucketSecs,
+      source: "merged",
+      series: targets.flatMap((u) => ["5h", "7d", "7d_sonnet"].map((win, wi) => ({
+        upstream_id: u.id,
+        upstream_name: u.name,
+        window: win,
+        buckets: Array.from({ length: nBuckets }, (_, i) => {
+          const ts = now - (nBuckets - i) * bucketSecs;
+          const base = 0.2 + wi * 0.12;
+          const wave = Math.sin((i / nBuckets) * Math.PI * 2) * 0.18;
+          const util = Math.max(0.02, Math.min(0.96, base + wave + (i / nBuckets) * 0.15));
+          return {
+            bucket_start_unix_secs: ts,
+            observed: true,
+            sample_count: 1,
+            utilization_min: util,
+            utilization_avg: util,
+            utilization_max: util,
+            utilization_last: util,
+            status_last: "ok",
+            resets_at_unix_secs_last: now + (win === "5h" ? 3600 : 7 * 24 * 3600),
+            observed_at_unix_millis_last: ts * 1000,
+            sources_seen: ["merged"],
+          };
+        }),
+        markers: [],
+      }))),
+    });
+  }
+  if (path === "/admin/v1/subscription-quotas/analysis" && m === "GET") {
+    const now = NOW();
+    const range = url.searchParams.get("range") || "7d";
+    const rangeSecs = range === "24h" ? 24 * 3600 : range === "6h" ? 6 * 3600 : range === "1h" ? 3600 : 7 * 24 * 3600;
+    return ok({
+      since_unix_secs: now - rangeSecs,
+      until_unix_secs: now,
+      now_unix_secs: now,
+      max_staleness_secs: 300,
+      upstreams: [],
+    });
+  }
+
   return notFound(`unhandled:${m}:${path}`);
 }
 

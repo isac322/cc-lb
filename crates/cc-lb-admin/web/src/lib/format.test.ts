@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fmtMsCompact } from './format';
+import { fmtChartTooltipTs, fmtMsCompact } from './format';
 
 describe('fmtMsCompact', () => {
   it('returns dash for null', () => {
@@ -31,5 +31,38 @@ describe('fmtMsCompact', () => {
   });
   it('formats 72000 as 1.2m', () => {
     expect(fmtMsCompact(72_000)).toEqual({ value: '1.2', unit: 'm' });
+  });
+});
+
+describe('fmtChartTooltipTs', () => {
+  it('returns dash for null', () => {
+    expect(fmtChartTooltipTs(null)).toBe('—');
+  });
+  it('returns dash for undefined', () => {
+    expect(fmtChartTooltipTs(undefined)).toBe('—');
+  });
+  it('returns dash for NaN', () => {
+    expect(fmtChartTooltipTs(Number.NaN)).toBe('—');
+  });
+  it('does not return the raw epoch number as a string', () => {
+    const epoch = 1_718_553_120;
+    expect(fmtChartTooltipTs(epoch)).not.toBe(String(epoch));
+  });
+  it('matches the M/D HH:MM pattern with padded hour and minute', () => {
+    const epoch = 1_718_553_120;
+    expect(fmtChartTooltipTs(epoch)).toMatch(/^\d{1,2}\/\d{1,2} \d{2}:\d{2}$/);
+  });
+  it('pads HH:MM to two digits for early-morning times', () => {
+    const d = new Date();
+    d.setHours(9, 5, 0, 0);
+    const ts = Math.floor(d.getTime() / 1000);
+    expect(fmtChartTooltipTs(ts)).toMatch(/ 09:05$/);
+  });
+  it('uses local month/day with a slash separator before the time', () => {
+    const d = new Date();
+    d.setHours(12, 30, 0, 0);
+    const ts = Math.floor(d.getTime() / 1000);
+    const expected = `${d.getMonth() + 1}/${d.getDate()} 12:30`;
+    expect(fmtChartTooltipTs(ts)).toBe(expected);
   });
 });
