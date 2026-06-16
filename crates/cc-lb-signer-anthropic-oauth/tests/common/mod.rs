@@ -17,8 +17,7 @@ use cc_lb_signer_anthropic_oauth::{
 };
 use cc_lb_storage_api::{
     ApiKeyStore, AuditEntry, AuditStore, BackendKind, ConfigDraftState, ConfigStore, HistoryEntry,
-    HistorySummary, LimitStateStore, MetaStore, OAuthCredentialStore, OAuthCredentials,
-    PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState, QuotaStore, RequestEvent,
+    HistorySummary, MetaStore, OAuthCredentialStore, OAuthCredentials, RequestEvent,
     RequestEventStore, StorageError, StorageResult, UsageRollup, UsageRollupResolution,
     UsageRollupRun, UsageRollupStore,
 };
@@ -377,78 +376,6 @@ impl RequestEventStore for MemoryStorage {
         _until: u64,
         _limit: usize,
     ) -> StorageResult<Vec<RequestEvent>> {
-        unsupported()
-    }
-}
-
-#[async_trait]
-impl QuotaStore for MemoryStorage {
-    async fn incr_quota(
-        &self,
-        _principal_id: &str,
-        _window_start: u64,
-        _kind: cc_lb_storage_api::BucketKind,
-        _amount: u64,
-    ) -> StorageResult<u64> {
-        unsupported()
-    }
-
-    async fn try_incr_quota(
-        &self,
-        _principal_id: &str,
-        _window_start: u64,
-        _kind: cc_lb_storage_api::BucketKind,
-        _amount: u64,
-        _capacity: u64,
-    ) -> StorageResult<Option<u64>> {
-        unsupported()
-    }
-
-    async fn get_quota(
-        &self,
-        _principal_id: &str,
-        _window_start: u64,
-        _kind: cc_lb_storage_api::BucketKind,
-    ) -> StorageResult<u64> {
-        unsupported()
-    }
-
-    async fn adjust_quota(
-        &self,
-        _principal_id: &str,
-        _window_start: u64,
-        _kind: cc_lb_storage_api::BucketKind,
-        _delta: i64,
-    ) -> StorageResult<u64> {
-        unsupported()
-    }
-
-    async fn sweep_old_quotas(&self, _older_than_window_start: u64) -> StorageResult<u64> {
-        unsupported()
-    }
-}
-
-#[async_trait]
-impl LimitStateStore for MemoryStorage {
-    async fn put_principal_limit_state(&self, _state: &PrincipalLimitState) -> StorageResult<()> {
-        unsupported()
-    }
-
-    async fn get_principal_limit_state(
-        &self,
-        _principal_id: &str,
-        _identity_kind: PrincipalLimitIdentityKind,
-        _identity_value: Option<&str>,
-        _window: &str,
-        _kind: PrincipalLimitKind,
-    ) -> StorageResult<Option<PrincipalLimitState>> {
-        unsupported()
-    }
-
-    async fn list_principal_limit_states(
-        &self,
-        _principal_id: &str,
-    ) -> StorageResult<Vec<PrincipalLimitState>> {
         unsupported()
     }
 }

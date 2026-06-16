@@ -4,7 +4,10 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use cc_lb_storage_api::Storage;
-use cc_lb_storage_api::types::{KeyStatus as StoredKeyStatus, StoredApiKeyRecord};
+use cc_lb_storage_api::types::{
+    KeyStatus as StoredKeyStatus, PrincipalLimitIdentityKind, PrincipalLimitKind,
+    PrincipalLimitState, StoredApiKeyRecord,
+};
 use parking_lot::RwLock;
 use serde::Serialize;
 
@@ -122,6 +125,13 @@ impl RingCounter {
     pub fn record(&mut self, now_sec: u64, delta: i64) {
         self.buckets.push_back((now_sec, delta));
         self.evict_old(now_sec);
+    }
+
+    pub fn replace_total(&mut self, now_sec: u64, total: i64) {
+        self.buckets.clear();
+        if total != 0 {
+            self.buckets.push_back((now_sec, total));
+        }
     }
 
     fn oldest_bucket_sec(&mut self, now_sec: u64) -> Option<u64> {
@@ -489,6 +499,39 @@ impl LimitEngine {
         );
     }
 
+    pub fn record_principal_limit_state(&self, state: &PrincipalLimitState) {
+        let kind = principal_limit_kind(state.kind);
+        let Some(window_sec) = parse_limit_window_secs(&state.window) else {
+            return;
+        };
+        let key_id = principal_limit_key_id(state);
+
+        if let Some(limit) = state.limit {
+            let limit = Limit {
+                kind,
+                window: Duration::from_secs(window_sec),
+                cap_micros: u64_to_i64_saturating(limit),
+            };
+            let mut effective_limits = self.inner.effective_limits.write();
+            let limits = effective_limits
+                .entry((key_id.clone(), state.principal_id.clone()))
+                .or_default();
+            limits.retain(|candidate| {
+                candidate.kind != limit.kind || candidate.window != limit.window
+            });
+            limits.push(limit);
+        }
+
+        if let (Some(limit), Some(remaining)) = (state.limit, state.remaining) {
+            let used = u64_to_i64_saturating(limit.saturating_sub(remaining));
+            let mut rolling = self.inner.rolling.write();
+            rolling
+                .entry((key_id, kind, window_sec))
+                .or_insert_with(|| RingCounter::new(window_sec))
+                .replace_total(state.observed_at_unix_secs, used);
+        }
+    }
+
     fn current_total(&self, key_id: &str, kind: LimitKind, window_sec: u64, now_sec: u64) -> i64 {
         let mut rolling = self.inner.rolling.write();
         rolling
@@ -722,6 +765,56 @@ fn convert_limit_kind(kind: cc_lb_storage_api::types::LimitKind) -> LimitKind {
     }
 }
 
+fn principal_limit_kind(kind: PrincipalLimitKind) -> LimitKind {
+    match kind {
+        PrincipalLimitKind::Requests => LimitKind::Requests,
+        PrincipalLimitKind::Tokens => LimitKind::TotalTokens,
+        PrincipalLimitKind::InputTokens => LimitKind::InputTokens,
+        PrincipalLimitKind::OutputTokens => LimitKind::OutputTokens,
+    }
+}
+
+fn principal_limit_key_id(state: &PrincipalLimitState) -> String {
+    match state.identity_kind {
+        PrincipalLimitIdentityKind::Credential => state
+            .identity_value
+            .clone()
+            .unwrap_or_else(|| state.principal_id.clone()),
+        PrincipalLimitIdentityKind::Account | PrincipalLimitIdentityKind::Unobserved => {
+            state.principal_id.clone()
+        }
+    }
+}
+
+fn parse_limit_window_secs(window: &str) -> Option<u64> {
+    match window {
+        "default" | "minute" | "1m" => Some(60),
+        "hour" | "1h" => Some(3_600),
+        "5h" => Some(18_000),
+        "weekly" | "7d" => Some(604_800),
+        _ => parse_window_suffix(window),
+    }
+}
+
+fn parse_window_suffix(window: &str) -> Option<u64> {
+    let (value, multiplier) = if let Some(value) = window.strip_suffix('s') {
+        (value, 1)
+    } else if let Some(value) = window.strip_suffix('m') {
+        (value, 60)
+    } else if let Some(value) = window.strip_suffix('h') {
+        (value, 3_600)
+    } else if let Some(value) = window.strip_suffix('d') {
+        (value, 86_400)
+    } else {
+        return None;
+    };
+    value.parse::<u64>().ok()?.checked_mul(multiplier)
+}
+
+fn u64_to_i64_saturating(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
 fn key_id_for(record: &StoredApiKeyRecord) -> String {
     record.key_hash_b64.clone()
 }
@@ -756,4 +849,54 @@ fn civil_from_days(days_since_epoch: i64) -> (i64, u32, u32) {
     let month = mp + if mp < 10 { 3 } else { -9 };
     year += if month <= 2 { 1 } else { 0 };
     (year, month as u32, day as u32)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use cc_lb_storage_api::types::{
+        PrincipalLimitIdentityKind, PrincipalLimitKind, PrincipalLimitState,
+    };
+
+    use super::*;
+
+    #[test]
+    fn record_principal_limit_state_feeds_limit_engine_snapshot() {
+        let engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()));
+        let observed_at_unix_secs = now_sec();
+
+        engine.record_principal_limit_state(&PrincipalLimitState {
+            principal_id: "principal-a".to_owned(),
+            identity_kind: PrincipalLimitIdentityKind::Credential,
+            identity_value: Some("key-a".to_owned()),
+            account_observed: false,
+            window: "1m".to_owned(),
+            kind: PrincipalLimitKind::Requests,
+            limit: Some(10),
+            remaining: Some(7),
+            reset: None,
+            observed_at_unix_secs,
+            stored_at_unix_secs: observed_at_unix_secs,
+        });
+
+        let view =
+            PrincipalView::for_tests("principal-a", true, Vec::new(), Vec::new(), HashMap::new());
+        let snapshot = engine.snapshot_for_principal(&view, "principal-a", IdentityFilter::All);
+        let api_key_identity = snapshot
+            .identities
+            .iter()
+            .find(|identity| identity.identity_kind == "api_key")
+            .expect("api key identity should be recorded");
+        let requests = api_key_identity.windows[0]
+            .snapshots
+            .iter()
+            .find(|snapshot| snapshot.kind == "requests")
+            .expect("requests snapshot should be recorded");
+
+        assert_eq!(api_key_identity.identity_value.as_deref(), Some("key-a"));
+        assert_eq!(requests.limit, Some(10));
+        assert_eq!(requests.remaining, Some(7));
+        assert!(requests.observed);
+    }
 }

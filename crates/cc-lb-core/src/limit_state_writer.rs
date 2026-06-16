@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
-use cc_lb_storage_api::{PrincipalLimitState, Storage};
+use cc_lb_storage_api::PrincipalLimitState;
 use thiserror::Error;
 use tokio::sync::mpsc::{self, Receiver, Sender, error::TrySendError};
 use tokio::task::JoinHandle;
+
+use crate::api_keys::limit_engine::LimitEngine;
 
 pub const DEFAULT_PRINCIPAL_LIMIT_STATE_CHANNEL_CAPACITY: usize = 1024;
 
@@ -38,11 +40,11 @@ impl PrincipalLimitStateSink {
         match self.tx.try_send(state) {
             Ok(()) => Ok(()),
             Err(TrySendError::Full(_)) => {
-                cc_lb_observability::increment_dropped_events("limit_state_full");
+                cc_lb_observability::increment_dropped_events_by("limit_state_full", 1);
                 Err(PrincipalLimitStateEnqueueError::Full)
             }
             Err(TrySendError::Closed(_)) => {
-                cc_lb_observability::increment_dropped_events("limit_state_closed");
+                cc_lb_observability::increment_dropped_events_by("limit_state_closed", 1);
                 Err(PrincipalLimitStateEnqueueError::Closed)
             }
         }
@@ -50,18 +52,12 @@ impl PrincipalLimitStateSink {
 }
 
 pub fn start_principal_limit_state_writer(
-    storage: Arc<dyn Storage>,
+    limit_engine: Arc<LimitEngine>,
     mut receiver: Receiver<PrincipalLimitState>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         while let Some(state) = receiver.recv().await {
-            match storage.put_principal_limit_state(&state).await {
-                Ok(()) => {}
-                Err(source) => {
-                    cc_lb_observability::increment_dropped_events("limit_state_worker_drop");
-                    tracing::warn!(error = %source, "principal limit state persistence failed");
-                }
-            }
+            limit_engine.record_principal_limit_state(&state);
         }
     })
 }

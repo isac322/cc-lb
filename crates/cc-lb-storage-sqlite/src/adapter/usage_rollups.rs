@@ -2,9 +2,8 @@ use std::collections::BTreeMap;
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    BucketKind, LimitStateStore, PrincipalLimitIdentityKind, PrincipalLimitKind,
-    PrincipalLimitState, QuotaStore, RequestEvent, StorageError, StorageResult, UsageRollup,
-    UsageRollupResolution, UsageRollupRun, UsageRollupStore,
+    RequestEvent, StorageError, StorageResult, UsageRollup, UsageRollupResolution, UsageRollupRun,
+    UsageRollupStore,
 };
 use sqlx::Row;
 use uuid::Uuid;
@@ -377,76 +376,4 @@ fn i64_to_u64(value: i64, field: &str) -> StorageResult<u64> {
     u64::try_from(value).map_err(|_| StorageError::Corrupted {
         message: format!("{field} is negative in sqlite storage"),
     })
-}
-
-#[async_trait]
-impl QuotaStore for SqliteStorage {
-    async fn incr_quota(
-        &self,
-        _principal_id: &str,
-        _window_start: u64,
-        _kind: BucketKind,
-        _amount: u64,
-    ) -> StorageResult<u64> {
-        unimplemented!()
-    }
-
-    async fn try_incr_quota(
-        &self,
-        _principal_id: &str,
-        _window_start: u64,
-        _kind: BucketKind,
-        _amount: u64,
-        _capacity: u64,
-    ) -> StorageResult<Option<u64>> {
-        unimplemented!()
-    }
-
-    async fn get_quota(
-        &self,
-        _principal_id: &str,
-        _window_start: u64,
-        _kind: BucketKind,
-    ) -> StorageResult<u64> {
-        unimplemented!()
-    }
-
-    async fn adjust_quota(
-        &self,
-        _principal_id: &str,
-        _window_start: u64,
-        _kind: BucketKind,
-        _delta: i64,
-    ) -> StorageResult<u64> {
-        unimplemented!()
-    }
-
-    async fn sweep_old_quotas(&self, _older_than_window_start: u64) -> StorageResult<u64> {
-        unimplemented!()
-    }
-}
-
-#[async_trait]
-impl LimitStateStore for SqliteStorage {
-    async fn put_principal_limit_state(&self, _state: &PrincipalLimitState) -> StorageResult<()> {
-        unimplemented!()
-    }
-
-    async fn get_principal_limit_state(
-        &self,
-        _principal_id: &str,
-        _identity_kind: PrincipalLimitIdentityKind,
-        _identity_value: Option<&str>,
-        _window: &str,
-        _kind: PrincipalLimitKind,
-    ) -> StorageResult<Option<PrincipalLimitState>> {
-        unimplemented!()
-    }
-
-    async fn list_principal_limit_states(
-        &self,
-        _principal_id: &str,
-    ) -> StorageResult<Vec<PrincipalLimitState>> {
-        unimplemented!()
-    }
 }

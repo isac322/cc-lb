@@ -1,18 +1,13 @@
 #![allow(dead_code)]
 
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use async_trait::async_trait;
 use cc_lb_storage_api as storage_api;
 
-type QuotaKey = (String, u64, storage_api::BucketKind);
-
 #[derive(Default)]
 pub struct TestStorage {
-    quotas: Mutex<HashMap<QuotaKey, u64>>,
     request_events: Mutex<Vec<storage_api::RequestEvent>>,
-    limit_states: Mutex<Vec<storage_api::PrincipalLimitState>>,
     config_draft: Mutex<storage_api::ConfigDraftState>,
     killswitch_enabled: Mutex<bool>,
 }
@@ -24,25 +19,6 @@ impl TestStorage {
 
     pub fn as_storage(self: &Arc<Self>) -> Arc<dyn storage_api::Storage> {
         self.clone()
-    }
-
-    pub async fn incr_quota(
-        &self,
-        principal_id: &str,
-        window_start: u64,
-        kind: storage_api::BucketKind,
-        amount: u64,
-    ) -> storage_api::StorageResult<u64> {
-        storage_api::QuotaStore::incr_quota(self, principal_id, window_start, kind, amount).await
-    }
-
-    pub async fn get_quota(
-        &self,
-        principal_id: &str,
-        window_start: u64,
-        kind: storage_api::BucketKind,
-    ) -> storage_api::StorageResult<u64> {
-        storage_api::QuotaStore::get_quota(self, principal_id, window_start, kind).await
     }
 }
 
@@ -93,140 +69,6 @@ impl storage_api::RequestEventStore for TestStorage {
             .collect::<Vec<_>>();
         events.truncate(limit);
         Ok(events)
-    }
-}
-
-#[async_trait]
-impl storage_api::QuotaStore for TestStorage {
-    async fn incr_quota(
-        &self,
-        principal_id: &str,
-        window_start: u64,
-        kind: storage_api::BucketKind,
-        amount: u64,
-    ) -> storage_api::StorageResult<u64> {
-        let mut quotas = lock_or_storage_error(&self.quotas)?;
-        let key = quota_key(principal_id, window_start, kind);
-        let current = quotas.get(&key).copied().unwrap_or(0);
-        let updated =
-            current
-                .checked_add(amount)
-                .ok_or_else(|| storage_api::StorageError::Fatal {
-                    message: "test quota counter overflow".to_owned(),
-                })?;
-        quotas.insert(key, updated);
-        Ok(updated)
-    }
-
-    async fn try_incr_quota(
-        &self,
-        principal_id: &str,
-        window_start: u64,
-        kind: storage_api::BucketKind,
-        amount: u64,
-        capacity: u64,
-    ) -> storage_api::StorageResult<Option<u64>> {
-        let mut quotas = lock_or_storage_error(&self.quotas)?;
-        let key = quota_key(principal_id, window_start, kind);
-        let current = quotas.get(&key).copied().unwrap_or(0);
-        let Some(updated) = current.checked_add(amount) else {
-            return Err(storage_api::StorageError::Fatal {
-                message: "test quota counter overflow".to_owned(),
-            });
-        };
-        if updated > capacity {
-            return Ok(None);
-        }
-        quotas.insert(key, updated);
-        Ok(Some(updated))
-    }
-
-    async fn get_quota(
-        &self,
-        principal_id: &str,
-        window_start: u64,
-        kind: storage_api::BucketKind,
-    ) -> storage_api::StorageResult<u64> {
-        let quotas = lock_or_storage_error(&self.quotas)?;
-        Ok(quotas
-            .get(&quota_key(principal_id, window_start, kind))
-            .copied()
-            .unwrap_or(0))
-    }
-
-    async fn adjust_quota(
-        &self,
-        principal_id: &str,
-        window_start: u64,
-        kind: storage_api::BucketKind,
-        delta: i64,
-    ) -> storage_api::StorageResult<u64> {
-        let mut quotas = lock_or_storage_error(&self.quotas)?;
-        let key = quota_key(principal_id, window_start, kind);
-        let current = quotas.get(&key).copied().unwrap_or(0);
-        let updated = if delta >= 0 {
-            current.checked_add(delta as u64)
-        } else {
-            current.checked_sub(delta.unsigned_abs())
-        }
-        .ok_or_else(|| storage_api::StorageError::Fatal {
-            message: "test quota adjustment out of range".to_owned(),
-        })?;
-        quotas.insert(key, updated);
-        Ok(updated)
-    }
-
-    async fn sweep_old_quotas(
-        &self,
-        older_than_window_start: u64,
-    ) -> storage_api::StorageResult<u64> {
-        let mut quotas = lock_or_storage_error(&self.quotas)?;
-        let before = quotas.len();
-        quotas.retain(|(_, window_start, _), _| *window_start >= older_than_window_start);
-        Ok((before - quotas.len()) as u64)
-    }
-}
-
-#[async_trait]
-impl storage_api::LimitStateStore for TestStorage {
-    async fn put_principal_limit_state(
-        &self,
-        state: &storage_api::PrincipalLimitState,
-    ) -> storage_api::StorageResult<()> {
-        lock_or_storage_error(&self.limit_states)?.push(state.clone());
-        Ok(())
-    }
-
-    async fn get_principal_limit_state(
-        &self,
-        principal_id: &str,
-        identity_kind: storage_api::PrincipalLimitIdentityKind,
-        identity_value: Option<&str>,
-        window: &str,
-        kind: storage_api::PrincipalLimitKind,
-    ) -> storage_api::StorageResult<Option<storage_api::PrincipalLimitState>> {
-        let states = lock_or_storage_error(&self.limit_states)?;
-        Ok(states
-            .iter()
-            .find(|state| {
-                state.principal_id == principal_id
-                    && state.identity_kind == identity_kind
-                    && state.identity_value.as_deref() == identity_value
-                    && state.window == window
-                    && state.kind == kind
-            })
-            .cloned())
-    }
-
-    async fn list_principal_limit_states(
-        &self,
-        principal_id: &str,
-    ) -> storage_api::StorageResult<Vec<storage_api::PrincipalLimitState>> {
-        Ok(lock_or_storage_error(&self.limit_states)?
-            .iter()
-            .filter(|state| state.principal_id == principal_id)
-            .cloned()
-            .collect())
     }
 }
 
@@ -432,10 +274,6 @@ impl storage_api::MetaStore for TestStorage {
         *lock_or_storage_error(&self.killswitch_enabled)? = enabled;
         Ok(())
     }
-}
-
-fn quota_key(principal_id: &str, window_start: u64, kind: storage_api::BucketKind) -> QuotaKey {
-    (principal_id.to_owned(), window_start, kind)
 }
 
 fn lock_or_storage_error<T>(mutex: &Mutex<T>) -> storage_api::StorageResult<MutexGuard<'_, T>> {
