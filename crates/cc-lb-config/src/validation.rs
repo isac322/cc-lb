@@ -200,6 +200,54 @@ fn validate_storage(config: &Config) -> Result<(), ConfigError> {
                 });
             }
         }
+        StorageConfig::Sqlite { path } => {
+            validate_sqlite_path(path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_sqlite_path(path: &Path) -> Result<(), ValidationError> {
+    if path.exists() {
+        let metadata = fs::metadata(path).map_err(|error| {
+            ValidationError::new("storage.path", format!("cannot inspect path: {error}"))
+        })?;
+        if !metadata.is_file() {
+            return Err(ValidationError::new(
+                "storage.path",
+                format!("not a file: {}", path.display()),
+            ));
+        }
+        if metadata.permissions().readonly() {
+            return Err(ValidationError::new(
+                "storage.path",
+                format!("file is not writable: {}", path.display()),
+            ));
+        }
+    }
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent_metadata = fs::metadata(parent).map_err(|_| {
+        ValidationError::new(
+            "storage.path",
+            format!("parent directory does not exist: {}", parent.display()),
+        )
+    })?;
+    if !parent_metadata.is_dir() {
+        return Err(ValidationError::new(
+            "storage.path",
+            format!("parent path is not a directory: {}", parent.display()),
+        ));
+    }
+    if parent_metadata.permissions().readonly() {
+        return Err(ValidationError::new(
+            "storage.path",
+            format!("parent directory is not writable: {}", parent.display()),
+        ));
     }
 
     Ok(())

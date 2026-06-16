@@ -288,6 +288,9 @@ pub enum StorageConfig {
         #[serde(default)]
         pool: PostgresPoolConfig,
     },
+    Sqlite {
+        path: PathBuf,
+    },
 }
 
 impl Default for StorageConfig {
@@ -340,6 +343,9 @@ enum TaggedStorageConfig {
         #[serde(default)]
         pool: PostgresPoolConfig,
     },
+    Sqlite {
+        path: PathBuf,
+    },
 }
 
 impl From<TaggedStorageConfig> for StorageConfig {
@@ -347,6 +353,7 @@ impl From<TaggedStorageConfig> for StorageConfig {
         match value {
             TaggedStorageConfig::Redb { path } => Self::Redb { path },
             TaggedStorageConfig::Postgres { url, pool } => Self::Postgres { url, pool },
+            TaggedStorageConfig::Sqlite { path } => Self::Sqlite { path },
         }
     }
 }

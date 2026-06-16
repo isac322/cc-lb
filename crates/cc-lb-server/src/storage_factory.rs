@@ -110,6 +110,7 @@ pub async fn open_storage(
             url,
             pool: pool_config,
         } => open_postgres(url, pool_config).await,
+        StorageConfig::Sqlite { .. } => unimplemented!("sqlite backend not yet wired"),
     }
 }
 

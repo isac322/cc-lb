@@ -119,6 +119,7 @@ async fn run_inner(
             StorageConfig::Postgres { url, .. } => storage_factory::probe_postgres_connection(url)
                 .await
                 .map_err(|error| PreflightError::Storage(error.to_string()))?,
+            StorageConfig::Sqlite { path } => validate_redb_path(path)?,
         }
         let aead = Arc::new(AeadService::from_master_key(key));
         let _storage = storage_factory::open_storage(&cfg.storage, aead, key)
