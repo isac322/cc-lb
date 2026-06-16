@@ -12,6 +12,7 @@ import {
 } from 'recharts';
 import { WINDOW_LABELS } from '../../lib/api';
 import { getWindowColor, WINDOW_DURATION_SECS } from '../../lib/colors';
+import { fmtChartTooltipTs } from '../../lib/format';
 
 export function QuotaUpstreamMiniChart({
   upstreamId,
@@ -200,7 +201,7 @@ export function QuotaUpstreamMiniChart({
                         marginBottom: 4,
                       }}
                     >
-                      {label}
+                      {fmtChartTooltipTs(Number(label))}
                     </div>
                     {payload.map((p, i) => {
                       const w = String(p.dataKey);
