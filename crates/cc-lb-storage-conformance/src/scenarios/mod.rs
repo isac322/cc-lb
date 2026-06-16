@@ -13,6 +13,7 @@ pub mod organization_metadata_store;
 pub use crate::plugin_registry_store;
 #[cfg(any())]
 pub mod pool_exhaustion;
+pub mod price_catalog;
 pub mod principal_store;
 pub mod prompt_cache_observation_store;
 #[cfg(any())]
