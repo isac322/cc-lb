@@ -84,3 +84,13 @@ export function fmtMsCompact(ms: number | null | undefined): {
 export function formatRelativeUnixSeconds(seconds: number): Date {
   return new Date(seconds * 1000);
 }
+
+export function fmtChartTooltipTs(unixSecs: number | null | undefined): string {
+  if (unixSecs == null || !Number.isFinite(unixSecs)) return DASH;
+  const d = new Date(unixSecs * 1000);
+  const m = d.getMonth() + 1;
+  const day = d.getDate();
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mm = String(d.getMinutes()).padStart(2, '0');
+  return `${m}/${day} ${hh}:${mm}`;
+}
