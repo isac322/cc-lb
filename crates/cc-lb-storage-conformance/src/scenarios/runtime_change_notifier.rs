@@ -3,14 +3,15 @@ use std::{sync::Arc, time::Duration};
 use anyhow::{Context, Result, ensure};
 use cc_lb_storage_api::{
     BackendKind, ChangeChannel, ChangeEvent, MAX_CHANGE_PAYLOAD_LEN, MetaStore,
-    RuntimeChangeNotifier, UpstreamCreate, UpstreamKind, UpstreamStore, normalize_payload,
+    RuntimeChangeNotifier, normalize_payload,
+    upstream::{UpstreamCreate, UpstreamKind, UpstreamStore},
 };
 use tokio::{task::JoinHandle, time};
 use tokio_util::sync::CancellationToken;
 
 use crate::harness::{ConformanceBackend, with_conformance_fixture};
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres"))]
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(5);
 const SUBSCRIBE_TIMEOUT: Duration = Duration::from_millis(10);
 const POSTGRES_LATENCY_BUDGET: Duration = Duration::from_millis(5_000);
@@ -137,7 +138,7 @@ fn latency_upstream() -> UpstreamCreate {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres"))]
 async fn recv_matching(
     receiver: &mut tokio::sync::broadcast::Receiver<ChangeEvent>,
     channel: ChangeChannel,
@@ -168,7 +169,7 @@ async fn join_run(handle: JoinHandle<cc_lb_storage_api::StorageResult<()>>) -> R
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "postgres"))]
 mod tests {
     use std::{str::FromStr, sync::Arc};
 

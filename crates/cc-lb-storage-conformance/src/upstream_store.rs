@@ -3,10 +3,10 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
-use cc_lb_storage_api::upstream::{UpstreamLeaseKind, UpstreamStatusUpdate};
-use cc_lb_storage_api::{
-    StorageError, StorageResult, UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStore,
-    UpstreamUpdate, validate_identifier,
+use cc_lb_storage_api::{StorageError, StorageResult, validate_identifier};
+use cc_lb_storage_api::upstream::{
+    UpstreamCreate, UpstreamKind, UpstreamLeaseKind, UpstreamRecord, UpstreamStatusUpdate,
+    UpstreamStore, UpstreamUpdate,
 };
 use tokio::sync::Mutex;
 use url::Url;
