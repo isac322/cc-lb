@@ -1084,7 +1084,7 @@ async fn persist_wasm_upload_heals_missing_blob_on_storage<S: PluginRegistryStor
     // which prevents the zombie state this scenario exercises. Skip on postgres.
     #[cfg(feature = "postgres")]
     {
-        if (storage as &dyn Any)
+        if (storage as &dyn std::any::Any)
             .downcast_ref::<cc_lb_storage_postgres::PostgresStorage>()
             .is_some()
         {
