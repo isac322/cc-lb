@@ -776,6 +776,10 @@ async fn renew_split_lease(
             AND lease_kind = $2
             AND holder = $3
             AND until_unix_secs > extract(epoch from now())::bigint
+            AND EXISTS (
+                SELECT 1 FROM upstream_spec_v1
+                WHERE id = $1 AND deleted_at IS NULL
+            )
           RETURNING upstream_id",
     )
     .bind(id)
@@ -891,7 +895,7 @@ async fn soft_delete_split(
     expected_revision: u64,
 ) -> StorageResult<()> {
     let row = sqlx::query(
-        "UPDATE upstream_spec_v1 SET deleted_at = NOW(), spec_revision = spec_revision + 1, updated_at = NOW() WHERE id = $1 AND spec_revision = $2 RETURNING id",
+        "UPDATE upstream_spec_v1 SET deleted_at = NOW(), spec_revision = spec_revision + 1, updated_at = NOW() WHERE id = $1 AND spec_revision = $2 AND deleted_at IS NULL RETURNING id",
     )
     .bind(id)
     .bind(u64_to_i64(expected_revision, "upstream spec revision")?)

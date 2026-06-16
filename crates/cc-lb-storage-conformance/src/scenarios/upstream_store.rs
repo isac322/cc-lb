@@ -74,6 +74,8 @@ where
     update_spec_on_soft_deleted_returns_not_found(Arc::clone(&backend)).await?;
     set_status_on_soft_deleted_returns_not_found(Arc::clone(&backend)).await?;
     secret_update_on_soft_deleted_returns_not_found(Arc::clone(&backend)).await?;
+    double_soft_delete_returns_not_found(Arc::clone(&backend)).await?;
+    renew_lease_on_soft_deleted_returns_false(Arc::clone(&backend)).await?;
     recreate_same_name_after_soft_delete_fails(Arc::clone(&backend)).await?;
     hard_delete_removes_row(Arc::clone(&backend)).await?;
     validate_identifier_rejects_bad_name(backend).await
@@ -596,6 +598,51 @@ scenario!(
         ensure!(
             matches!(error, StorageError::Conflict { .. }),
             "expected conflict/not-found error, got {error:?}"
+        );
+        Ok(())
+    }
+);
+
+scenario!(double_soft_delete_returns_not_found, |store| async move {
+    let record = create_named(store.as_ref(), "upstream-double-soft-delete").await?;
+    store.soft_delete(record.id, record.revision).await?;
+    let deleted = store.get_by_id(record.id).await?.expect("record remains");
+    let error = store
+        .soft_delete(record.id, deleted.revision)
+        .await
+        .expect_err("second soft delete on soft-deleted upstream should fail");
+    ensure!(
+        matches!(error, StorageError::Conflict { .. }),
+        "expected conflict/not-found error, got {error:?}"
+    );
+    let still_deleted = store.get_by_id(record.id).await?.expect("record remains");
+    ensure!(
+        still_deleted.revision == deleted.revision,
+        "spec_revision must not advance on second soft delete"
+    );
+    ensure!(
+        still_deleted.deleted_at_unix_secs == deleted.deleted_at_unix_secs,
+        "deleted_at must not be re-stamped on second soft delete"
+    );
+    Ok(())
+});
+
+scenario!(
+    renew_lease_on_soft_deleted_returns_false,
+    |store| async move {
+        let record = create_named(store.as_ref(), "upstream-renew-after-delete").await?;
+        let holder = "warmup-holder-after-delete".to_owned();
+        let claimed = store
+            .claim_lease(record.id, UpstreamLeaseKind::Warmup, holder.clone(), 60)
+            .await?;
+        ensure!(claimed, "initial lease claim should succeed");
+        store.soft_delete(record.id, record.revision).await?;
+        let renewed = store
+            .renew_lease(record.id, UpstreamLeaseKind::Warmup, holder, 60)
+            .await?;
+        ensure!(
+            !renewed,
+            "renew_lease must return false for soft-deleted upstream"
         );
         Ok(())
     }

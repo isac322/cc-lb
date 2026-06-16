@@ -967,7 +967,7 @@ async fn update_upstream(
                     fields_changed,
                 },
             );
-            let mut response = Json(upstream_response(&updated)).into_response();
+            let mut response = respond_with_etag(&updated);
             add_dynamic_rebind_headers(&mut response, &state).await;
             Ok(response)
         }
@@ -1054,7 +1054,7 @@ async fn delete_upstream_warmup_dialect_plugin(
                     fields_changed: vec!["warmup_dialect_plugin"],
                 },
             );
-            let mut response = Json(upstream_response(&updated)).into_response();
+            let mut response = respond_with_etag(&updated);
             add_dynamic_rebind_headers(&mut response, &state).await;
             Ok(response)
         }
@@ -1107,7 +1107,7 @@ async fn set_enabled(
         },
     );
 
-    let mut response = respond_with_etag(updated);
+    let mut response = respond_with_etag(&updated);
     crate::v1::add_dynamic_rebind_headers(&mut response, &state).await;
     Ok(response)
 }
@@ -1130,8 +1130,8 @@ async fn stale_or_conflict(
     }
 }
 
-fn respond_with_etag(record: UpstreamRecord) -> Response {
-    let mut response = Json(upstream_response(&record)).into_response();
+fn respond_with_etag(record: &UpstreamRecord) -> Response {
+    let mut response = Json(upstream_response(record)).into_response();
     if let Ok(etag) = etag_value(record.revision) {
         response.headers_mut().insert(ETAG, etag);
     }
