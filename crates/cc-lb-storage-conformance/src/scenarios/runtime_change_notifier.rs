@@ -2,15 +2,21 @@ use std::{sync::Arc, time::Duration};
 
 use anyhow::{Context, Result, ensure};
 use cc_lb_storage_api::{
-    ChangeChannel, ChangeEvent, MAX_CHANGE_PAYLOAD_LEN, RuntimeChangeNotifier, normalize_payload,
+    BackendKind, ChangeChannel, ChangeEvent, MAX_CHANGE_PAYLOAD_LEN, MetaStore,
+    RuntimeChangeNotifier, UpstreamCreate, UpstreamKind, UpstreamStore, normalize_payload,
 };
 use tokio::{task::JoinHandle, time};
 use tokio_util::sync::CancellationToken;
+
+use crate::harness::{ConformanceBackend, with_conformance_fixture};
 
 #[cfg(test)]
 const RECEIVE_TIMEOUT: Duration = Duration::from_secs(5);
 const NOOP_TIMEOUT: Duration = Duration::from_millis(100);
 const SUBSCRIBE_TIMEOUT: Duration = Duration::from_millis(10);
+const POSTGRES_LATENCY_BUDGET: Duration = Duration::from_millis(5_000);
+const SQLITE_LATENCY_BUDGET: Duration = Duration::from_millis(1_000);
+const POSTGRES_LISTEN_STARTUP_DELAY: Duration = Duration::from_millis(100);
 
 pub async fn subscribe_returns_without_blocking<N>(notifier: &N) -> Result<()>
 where
@@ -31,6 +37,64 @@ where
     time::sleep(Duration::from_millis(20)).await;
     cancel.cancel();
     join_run(handle).await
+}
+
+#[ignore = "un-ignored in T22/T23"]
+pub async fn subscriber_receives_within_latency_budget<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        let backend_kind = MetaStore::backend_kind(storage.as_ref()).await?;
+        let latency_budget = latency_budget_for_backend(backend_kind)?;
+        let mut receiver = RuntimeChangeNotifier::subscribe(storage.as_ref()).await?;
+        let cancel = CancellationToken::new();
+        let handle = spawn_run(Arc::clone(&storage), cancel.clone());
+        startup_delay_for_backend(backend_kind).await;
+
+        let mut subscriber = tokio::spawn(async move {
+            loop {
+                let event = receiver.recv().await?;
+                if event.channel == ChangeChannel::Upstream {
+                    return Ok::<_, anyhow::Error>(event);
+                }
+            }
+        });
+
+        let scenario_result = async {
+            let record = UpstreamStore::create(storage.as_ref(), latency_upstream()).await?;
+            let event = time::timeout(latency_budget, &mut subscriber)
+                .await
+                .with_context(|| {
+                    format!(
+                        "subscriber should receive upstream change within {}ms for {backend_kind:?}",
+                        latency_budget.as_millis()
+                    )
+                })?
+                .context("subscriber task should complete")??;
+
+            let expected_payload = record.id.to_string();
+            ensure!(
+                event.payload == expected_payload,
+                "notifier payload should identify mutated upstream; expected {expected_payload}, got {}",
+                event.payload
+            );
+
+            Ok(())
+        }
+        .await;
+
+        if !subscriber.is_finished() {
+            subscriber.abort();
+            let _ = subscriber.await;
+        }
+        cancel.cancel();
+        let run_result = join_run(handle).await;
+
+        scenario_result?;
+        run_result
+    })
+    .await
 }
 
 pub async fn redb_noop_subscribe_never_receives<N>(notifier: &N) -> Result<()>
@@ -68,6 +132,37 @@ pub fn payload_is_truncated_to_identifier_limit() -> Result<()> {
         "ChangeEvent and helper should normalize payload identically"
     );
     Ok(())
+}
+
+fn latency_budget_for_backend(kind: BackendKind) -> Result<Duration> {
+    match kind {
+        BackendKind::Postgres => Ok(POSTGRES_LATENCY_BUDGET),
+        BackendKind::Sqlite => Ok(SQLITE_LATENCY_BUDGET),
+        BackendKind::Redb => {
+            anyhow::bail!("redb runtime change notifier does not broadcast storage mutations")
+        }
+    }
+}
+
+async fn startup_delay_for_backend(kind: BackendKind) {
+    if kind == BackendKind::Postgres {
+        time::sleep(POSTGRES_LISTEN_STARTUP_DELAY).await;
+    }
+}
+
+fn latency_upstream() -> UpstreamCreate {
+    UpstreamCreate {
+        name: "notifier-latency-budget".to_owned(),
+        kind: UpstreamKind::AnthropicOauth,
+        base_url: None,
+        api_key_ciphertext: None,
+        warmup_enabled: false,
+        next_warmup_at: None,
+        last_warmup_cycle_key: None,
+        warmup_lease_holder: None,
+        warmup_lease_until_unix_secs: None,
+        warmup_dialect_plugin: None,
+    }
 }
 
 #[cfg(test)]
