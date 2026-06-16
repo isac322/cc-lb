@@ -18,6 +18,7 @@ impl UpstreamSubscriptionQuotaStore for SqliteStorage {
         &self,
         records: &[SubscriptionQuotaObservationRecord],
     ) -> StorageResult<()> {
+        let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
         for record in records {
             let payload = serde_json::to_string(record)?;
             sqlx::query(
@@ -39,10 +40,34 @@ impl UpstreamSubscriptionQuotaStore for SqliteStorage {
                 record.observed_at_unix_millis,
                 "subscription quota observed_at_unix_millis",
             )?)
-            .execute(self.pool())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+
+            let observed_at = u64_to_i64(
+                record.observed_at_unix_millis,
+                "subscription quota observed_at_unix_millis",
+            )?;
+            let payload = serde_json::to_string(record)?;
+            sqlx::query(
+                "INSERT INTO upstream_subscription_quota_latest_v1 \
+                 (upstream_id, window, source, payload, observed_at) \
+                 VALUES (?, ?, ?, ?, ?) \
+                 ON CONFLICT(upstream_id, window, source) DO UPDATE SET \
+                 payload = excluded.payload, \
+                 observed_at = excluded.observed_at \
+                 WHERE excluded.observed_at >= upstream_subscription_quota_latest_v1.observed_at",
+            )
+            .bind(record.upstream_id.to_string())
+            .bind(record.window.as_str())
+            .bind(record.source.as_str())
+            .bind(payload)
+            .bind(observed_at)
+            .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
         }
+        tx.commit().await.map_err(map_sqlx_error)?;
         Ok(())
     }
 
@@ -58,24 +83,7 @@ impl UpstreamSubscriptionQuotaStore for SqliteStorage {
         &self,
         upstream_ids: &[Uuid],
     ) -> StorageResult<Vec<SubscriptionQuotaLatestRecord>> {
-        if upstream_ids.is_empty() {
-            return Ok(Vec::new());
-        }
-        let mut latest: BTreeMap<
-            (Uuid, SubscriptionQuotaWindow, SubscriptionQuotaSource),
-            SubscriptionQuotaObservationRecord,
-        > = BTreeMap::new();
-        for record in list_records_for_upstreams(self, upstream_ids).await? {
-            latest
-                .entry((record.upstream_id, record.window, record.source))
-                .and_modify(|existing| {
-                    if existing.observed_at_unix_millis <= record.observed_at_unix_millis {
-                        *existing = record.clone();
-                    }
-                })
-                .or_insert(record);
-        }
-        Ok(latest.into_values().collect())
+        list_latest_records_for_upstreams(self, upstream_ids).await
     }
 
     async fn list_subscription_quota_series(
@@ -132,6 +140,39 @@ impl UpstreamSubscriptionQuotaStore for SqliteStorage {
         .map_err(map_sqlx_error)?;
         Ok(result.rows_affected())
     }
+}
+
+async fn list_latest_records_for_upstreams(
+    storage: &SqliteStorage,
+    upstream_ids: &[Uuid],
+) -> StorageResult<Vec<SubscriptionQuotaLatestRecord>> {
+    if upstream_ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let placeholders = std::iter::repeat_n("?", upstream_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let sql = format!(
+        "SELECT payload FROM upstream_subscription_quota_latest_v1 \
+         WHERE upstream_id IN ({placeholders}) \
+         ORDER BY upstream_id ASC, window ASC, source ASC"
+    );
+    let mut query = sqlx::query(AssertSqlSafe(sql));
+    for upstream_id in upstream_ids {
+        query = query.bind(upstream_id.to_string());
+    }
+    let rows = query
+        .fetch_all(storage.pool())
+        .await
+        .map_err(map_sqlx_error)?;
+
+    rows.into_iter()
+        .map(|row| {
+            let payload: String = row.try_get("payload").map_err(map_sqlx_error)?;
+            serde_json::from_str::<SubscriptionQuotaLatestRecord>(&payload)
+                .map_err(StorageError::from)
+        })
+        .collect()
 }
 
 async fn list_records_for_upstreams(

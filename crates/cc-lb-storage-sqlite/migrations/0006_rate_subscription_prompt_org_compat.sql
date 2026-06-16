@@ -18,6 +18,15 @@ CREATE TABLE IF NOT EXISTS upstream_subscription_quotas_v1 (
     PRIMARY KEY (upstream_id, sample_id)
 );
 
+CREATE TABLE IF NOT EXISTS upstream_subscription_quota_latest_v1 (
+    upstream_id TEXT NOT NULL,
+    window TEXT NOT NULL,
+    source TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    observed_at INTEGER NOT NULL,
+    PRIMARY KEY (upstream_id, window, source)
+);
+
 CREATE TABLE IF NOT EXISTS upstream_subscription_metadata_v1 (
     upstream_id TEXT PRIMARY KEY,
     payload TEXT NOT NULL,

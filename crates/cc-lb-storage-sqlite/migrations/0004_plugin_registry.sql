@@ -43,3 +43,53 @@ CREATE INDEX IF NOT EXISTS plugin_chains_v2_principal_slot_order_idx
 
 CREATE INDEX IF NOT EXISTS plugin_chains_v2_wasm_sha256_idx
     ON plugin_chains_v2 (wasm_sha256);
+
+-- Seed builtin cache affinity blob and registry entry
+INSERT INTO wasm_blobs_v2 (sha256, bytes, created_at)
+VALUES (zeroblob(32), zeroblob(0), 0)
+ON CONFLICT(sha256) DO NOTHING;
+
+INSERT INTO wasm_registry_v2 (
+    sha256,
+    plugin_name,
+    plugin_version,
+    abi_envelope,
+    augmented_metadata,
+    host_offer_hash,
+    handshake_schema_version,
+    last_handshake_at,
+    status,
+    created_at,
+    updated_at
+)
+VALUES (
+    zeroblob(32),
+    'cache-affinity',
+    'builtin://cache-affinity',
+    3,
+    '{"supported_slots":["router","observability_hook"]}',
+    zeroblob(32),
+    1,
+    0,
+    'active',
+    0,
+    0
+)
+ON CONFLICT(sha256) DO NOTHING;
+
+INSERT INTO plugin_registry_marker_v1 (key, value)
+VALUES ('wasm_registry:0000000000000000000000000000000000000000000000000000000000000000:id', '00000000-0000-0000-0000-000000000001')
+ON CONFLICT(key) DO NOTHING;
+
+INSERT INTO plugin_registry_marker_v1 (key, value)
+VALUES ('wasm_registry_id:00000000-0000-0000-0000-000000000001:sha256', '0000000000000000000000000000000000000000000000000000000000000000')
+ON CONFLICT(key) DO NOTHING;
+
+INSERT INTO plugin_registry_marker_v1 (key, value)
+VALUES ('wasm_registry:0000000000000000000000000000000000000000000000000000000000000000:wire_version', '3')
+ON CONFLICT(key) DO NOTHING;
+
+INSERT INTO plugin_registry_marker_v1 (key, value)
+VALUES ('wasm_registry:0000000000000000000000000000000000000000000000000000000000000000:supported_slots', '["router","observability_hook"]')
+ON CONFLICT(key) DO NOTHING;
+
