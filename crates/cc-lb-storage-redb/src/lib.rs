@@ -60,6 +60,18 @@ pub const PRINCIPAL_ALLOWED_UPSTREAMS_V1: TableDefinition<&[u8], &[u8]> =
 pub const UPSTREAMS_V2: TableDefinition<&[u8], &[u8]> = TableDefinition::new("upstreams_v2");
 pub const UPSTREAMS_V2_BY_NAME: TableDefinition<&str, &[u8]> =
     TableDefinition::new("upstreams_v2_by_name");
+pub const UPSTREAM_SPEC_V1: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("upstream_spec_v1");
+pub const UPSTREAM_SPEC_V1_BY_NAME: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("upstream_spec_v1_by_name");
+pub const UPSTREAM_API_KEY_SECRET_V1: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("upstream_api_key_secret_v1");
+pub const UPSTREAM_OAUTH_TOKEN_V1: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("upstream_oauth_token_v1");
+pub const UPSTREAM_STATUS_V1: TableDefinition<&[u8], &[u8]> =
+    TableDefinition::new("upstream_status_v1");
+pub const UPSTREAM_LEASE_V1: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("upstream_lease_v1");
 pub const UPSTREAM_RATE_LIMIT_STATE_V1: TableDefinition<&str, &[u8]> =
     TableDefinition::new("upstream_rate_limit_state_v1");
 pub const ANTHROPIC_COMPATIBILITY_KV_V1: TableDefinition<&str, &[u8]> =

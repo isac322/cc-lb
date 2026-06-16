@@ -31,7 +31,7 @@ use cc_lb_plugin_api::SignedRequest;
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_server::SubscriptionQuotaCache;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
-use cc_lb_storage_api::upstream::UpstreamKind;
+use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamLeaseKind, UpstreamStatusUpdate};
 use cc_lb_storage_api::{
     PrincipalCreate, PrincipalKind, PrincipalStore, StorageResult, UpstreamCreate, UpstreamRecord,
     UpstreamStore, UpstreamUpdate,
@@ -270,6 +270,64 @@ impl UpstreamStore for NameSortedUpstreamStore {
         enabled: bool,
     ) -> StorageResult<UpstreamRecord> {
         UpstreamStore::set_enabled(self.inner.as_ref(), id, expected_revision, enabled).await
+    }
+
+    async fn update_spec(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+        update: UpstreamUpdate,
+    ) -> StorageResult<UpstreamRecord> {
+        UpstreamStore::update_spec(self.inner.as_ref(), id, expected_revision, update).await
+    }
+
+    async fn update_api_key_secret(
+        &self,
+        id: Uuid,
+        api_key_ciphertext: Option<Vec<u8>>,
+    ) -> StorageResult<UpstreamRecord> {
+        UpstreamStore::update_api_key_secret(self.inner.as_ref(), id, api_key_ciphertext).await
+    }
+
+    async fn update_oauth_token(
+        &self,
+        id: Uuid,
+        tokens: EncryptedOAuthTokens,
+    ) -> StorageResult<UpstreamRecord> {
+        UpstreamStore::update_oauth_token(self.inner.as_ref(), id, tokens).await
+    }
+
+    async fn set_status(&self, id: Uuid, status: UpstreamStatusUpdate) -> StorageResult<()> {
+        UpstreamStore::set_status(self.inner.as_ref(), id, status).await
+    }
+
+    async fn claim_lease(
+        &self,
+        id: Uuid,
+        lease_kind: UpstreamLeaseKind,
+        holder: String,
+        ttl_secs: i64,
+    ) -> StorageResult<bool> {
+        UpstreamStore::claim_lease(self.inner.as_ref(), id, lease_kind, holder, ttl_secs).await
+    }
+
+    async fn renew_lease(
+        &self,
+        id: Uuid,
+        lease_kind: UpstreamLeaseKind,
+        holder: String,
+        ttl_secs: i64,
+    ) -> StorageResult<bool> {
+        UpstreamStore::renew_lease(self.inner.as_ref(), id, lease_kind, holder, ttl_secs).await
+    }
+
+    async fn release_lease(
+        &self,
+        id: Uuid,
+        lease_kind: UpstreamLeaseKind,
+        holder: String,
+    ) -> StorageResult<bool> {
+        UpstreamStore::release_lease(self.inner.as_ref(), id, lease_kind, holder).await
     }
 
     async fn store_oauth_tokens(

@@ -7,34 +7,81 @@ import type {
 
 export const FIXED_NOW = new Date('2026-06-14T11:25:00.000Z');
 
-export function makeOauthUpstream(overrides?: Partial<Upstream>): Upstream {
+type UpstreamFixtureOverrides = Partial<Upstream> & {
+  revision?: number;
+  next_warmup_at?: string | null;
+  last_warmup_cycle_key?: number | null;
+  status?: Partial<Upstream['status']>;
+};
+
+function mergeUpstreamOverrides(
+  base: Upstream,
+  overrides: UpstreamFixtureOverrides = {},
+): Upstream {
+  const { revision, next_warmup_at, last_warmup_cycle_key, status, ...rest } =
+    overrides;
+  const mergedStatus: Upstream['status'] = {
+    ...base.status,
+    ...status,
+  };
+  if ('next_warmup_at' in overrides) {
+    mergedStatus.next_warmup_at = next_warmup_at ?? null;
+  }
+  if ('last_warmup_cycle_key' in overrides) {
+    mergedStatus.last_warmup_cycle_key = last_warmup_cycle_key ?? null;
+  }
   return {
-    id: 'oauth-1',
-    name: 'my-prod-oauth',
-    kind: 'anthropic_oauth',
-    enabled: true,
-    warmup_enabled: true,
-    warmup_dialect_plugin: null,
-    next_warmup_at: '2026-06-14T23:04:12Z',
-    last_warmup_cycle_key: 1718380800, // 2024-06-14T17:50:00Z
-    revision: 1,
-    ...overrides,
+    ...base,
+    ...rest,
+    spec_revision: rest.spec_revision ?? revision ?? base.spec_revision,
+    status: mergedStatus,
   };
 }
 
-export function makeApiKeyUpstream(overrides?: Partial<Upstream>): Upstream {
-  return {
-    id: 'api-key-1',
-    name: 'my-api-key',
-    kind: 'anthropic_api_key',
-    enabled: true,
-    warmup_enabled: false,
-    warmup_dialect_plugin: null,
-    next_warmup_at: null,
-    last_warmup_cycle_key: null,
-    revision: 1,
-    ...overrides,
-  };
+export function makeOauthUpstream(
+  overrides?: UpstreamFixtureOverrides,
+): Upstream {
+  return mergeUpstreamOverrides(
+    {
+      id: 'oauth-1',
+      name: 'my-prod-oauth',
+      kind: 'anthropic_oauth',
+      enabled: true,
+      warmup_enabled: true,
+      warmup_dialect_plugin: null,
+      spec_revision: 1,
+      status: {
+        last_apply_error: null,
+        last_apply_at_unix_secs: null,
+        next_warmup_at: '2026-06-14T23:04:12Z',
+        last_warmup_cycle_key: 1718380800, // 2024-06-14T17:50:00Z
+      },
+    },
+    overrides,
+  );
+}
+
+export function makeApiKeyUpstream(
+  overrides?: UpstreamFixtureOverrides,
+): Upstream {
+  return mergeUpstreamOverrides(
+    {
+      id: 'api-key-1',
+      name: 'my-api-key',
+      kind: 'anthropic_api_key',
+      enabled: true,
+      warmup_enabled: false,
+      warmup_dialect_plugin: null,
+      spec_revision: 1,
+      status: {
+        last_apply_error: null,
+        last_apply_at_unix_secs: null,
+        next_warmup_at: null,
+        last_warmup_cycle_key: null,
+      },
+    },
+    overrides,
+  );
 }
 
 export function makePluginRegistryEntry(

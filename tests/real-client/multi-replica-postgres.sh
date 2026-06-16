@@ -465,14 +465,14 @@ assert_refresh_lease_contention() {
   local upstream_id=$1
   local holder_a='11111111-1111-4111-8111-111111111111'
   local holder_b='22222222-2222-4222-8222-222222222222'
-  psql_exec "UPDATE upstreams_v1 SET refresh_lease_holder = NULL, refresh_lease_until = NULL WHERE id = '$upstream_id';"
-  psql_exec "UPDATE upstreams_v1 SET refresh_lease_holder = '$holder_a', refresh_lease_until = NOW() + INTERVAL '90 seconds' WHERE id = '$upstream_id' AND (refresh_lease_until IS NULL OR refresh_lease_until <= NOW() OR refresh_lease_holder = '$holder_a');"
+  psql_exec "DELETE FROM upstream_lease_v1 WHERE upstream_id = '$upstream_id' AND lease_kind = 'refresh';"
+  psql_exec "INSERT INTO upstream_lease_v1 (upstream_id, lease_kind, holder, until_unix_secs, updated_at) VALUES ('$upstream_id', 'refresh', '$holder_a', extract(epoch from now())::bigint + 90, NOW()) ON CONFLICT (upstream_id, lease_kind) DO UPDATE SET holder = EXCLUDED.holder, until_unix_secs = EXCLUDED.until_unix_secs, updated_at = NOW() WHERE upstream_lease_v1.holder = EXCLUDED.holder OR upstream_lease_v1.until_unix_secs <= extract(epoch from now())::bigint;"
   local stolen
-  stolen=$(psql_scalar "WITH stolen AS (UPDATE upstreams_v1 SET refresh_lease_holder = '$holder_b', refresh_lease_until = NOW() + INTERVAL '90 seconds' WHERE id = '$upstream_id' AND (refresh_lease_until IS NULL OR refresh_lease_until <= NOW() OR refresh_lease_holder = '$holder_b') RETURNING 1) SELECT count(*) FROM stolen;")
+  stolen=$(psql_scalar "WITH stolen AS (INSERT INTO upstream_lease_v1 (upstream_id, lease_kind, holder, until_unix_secs, updated_at) VALUES ('$upstream_id', 'refresh', '$holder_b', extract(epoch from now())::bigint + 90, NOW()) ON CONFLICT (upstream_id, lease_kind) DO UPDATE SET holder = EXCLUDED.holder, until_unix_secs = EXCLUDED.until_unix_secs, updated_at = NOW() WHERE upstream_lease_v1.holder = EXCLUDED.holder OR upstream_lease_v1.until_unix_secs <= extract(epoch from now())::bigint RETURNING 1) SELECT count(*) FROM stolen;")
   if [ "${stolen:-0}" != "0" ]; then
     fail "refresh lease contention allowed second holder"
   fi
-  psql_exec "UPDATE upstreams_v1 SET refresh_lease_holder = NULL, refresh_lease_until = NULL WHERE id = '$upstream_id';"
+  psql_exec "DELETE FROM upstream_lease_v1 WHERE upstream_id = '$upstream_id' AND lease_kind = 'refresh';"
   printf 'refresh lease contention preserved single holder\n'
 }
 

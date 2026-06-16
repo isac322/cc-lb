@@ -1,18 +1,16 @@
 use std::collections::{BTreeMap, HashMap};
 
 use bincode::{config, serde as bincode_serde};
-use cc_lb_storage_api::{
-    UpstreamRecord,
-    types::{
-        RequestEvent, RequestEventUpstream, UsageRollup, UsageRollupKey, UsageRollupResolution,
-        UsageRollupRun,
-    },
+use cc_lb_storage_api::types::{
+    RequestEvent, RequestEventUpstream, UsageRollup, UsageRollupKey, UsageRollupResolution,
+    UsageRollupRun,
 };
 use redb::{ReadableDatabase, ReadableTable};
+use serde::Deserialize;
 use uuid::Uuid;
 
 use crate::{
-    REQUEST_EVENTS_V1, Storage, StorageError, UPSTREAMS_V2, USAGE_ROLLUP_CHECKPOINTS_V1,
+    REQUEST_EVENTS_V1, Storage, StorageError, UPSTREAM_SPEC_V1, USAGE_ROLLUP_CHECKPOINTS_V1,
     USAGE_ROLLUPS_V2,
 };
 
@@ -303,11 +301,17 @@ fn add_event_deltas(
 fn load_upstream_identities(
     tx: &redb::WriteTransaction,
 ) -> Result<HashMap<String, UpstreamIdentity>, StorageError> {
-    let table = tx.open_table(UPSTREAMS_V2)?;
+    #[derive(Deserialize)]
+    struct SpecSlim {
+        id: Uuid,
+        name: String,
+        deleted_at_unix_secs: Option<u64>,
+    }
+    let table = tx.open_table(UPSTREAM_SPEC_V1)?;
     let mut upstreams = HashMap::new();
     for row in table.iter()? {
         let (_, value) = row?;
-        let record: UpstreamRecord = serde_json::from_slice(value.value())?;
+        let record: SpecSlim = serde_json::from_slice(value.value())?;
         if record.deleted_at_unix_secs.is_some() {
             continue;
         }

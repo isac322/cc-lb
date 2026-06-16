@@ -244,7 +244,7 @@ impl PluginRegistryStore for PostgresStorage {
             });
         }
         if let Some(upstream_id) = sqlx::query_scalar::<_, Uuid>(
-            "SELECT id FROM upstreams_v1 WHERE deleted_at IS NULL AND (warmup_dialect_plugin->>'wasm_registry_id')::uuid = $1 LIMIT 1",
+            "SELECT id FROM upstream_spec_v1 WHERE deleted_at IS NULL AND (warmup_dialect_plugin->>'wasm_registry_id')::uuid = $1 LIMIT 1",
         )
         .bind(id)
         .fetch_optional(&mut *tx)
