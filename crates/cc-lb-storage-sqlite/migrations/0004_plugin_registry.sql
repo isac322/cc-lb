@@ -1,0 +1,45 @@
+CREATE TABLE IF NOT EXISTS wasm_blobs_v2 (
+    sha256 BLOB PRIMARY KEY,
+    bytes BLOB NOT NULL,
+    created_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS wasm_registry_v2 (
+    sha256 BLOB PRIMARY KEY REFERENCES wasm_blobs_v2(sha256) ON DELETE RESTRICT,
+    plugin_name TEXT NOT NULL,
+    plugin_version TEXT NOT NULL,
+    abi_envelope INTEGER NOT NULL,
+    augmented_metadata TEXT NOT NULL,
+    host_offer_hash BLOB NOT NULL,
+    handshake_schema_version INTEGER NOT NULL,
+    last_handshake_at INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS plugin_chains_v2 (
+    id TEXT PRIMARY KEY,
+    principal_id TEXT NOT NULL,
+    slot TEXT NOT NULL,
+    wasm_sha256 BLOB NOT NULL REFERENCES wasm_registry_v2(sha256) ON DELETE RESTRICT,
+    order_index INTEGER NOT NULL,
+    config TEXT,
+    revision INTEGER NOT NULL DEFAULT 1 CHECK (revision >= 0),
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS plugin_registry_marker_v1 (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS wasm_registry_v2_status_idx
+    ON wasm_registry_v2 (status, plugin_name, sha256);
+
+CREATE INDEX IF NOT EXISTS plugin_chains_v2_principal_slot_order_idx
+    ON plugin_chains_v2 (principal_id, slot, order_index, id);
+
+CREATE INDEX IF NOT EXISTS plugin_chains_v2_wasm_sha256_idx
+    ON plugin_chains_v2 (wasm_sha256);
