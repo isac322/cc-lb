@@ -332,6 +332,10 @@ prompt_cache_observation_postgres_test!(
     prompt_cache_observation_hydrate_after_restart_filters_expired_postgres,
     hydrate_after_restart_filters_expired
 );
+prompt_cache_observation_postgres_test!(
+    prompt_cache_observation_observation_list_is_sorted_postgres,
+    observation_list_is_sorted
+);
 
 fn run_postgres_scenario<F, Fut>(name: &str, scenario: F)
 where

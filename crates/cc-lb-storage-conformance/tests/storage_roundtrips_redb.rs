@@ -259,6 +259,10 @@ prompt_cache_observation_redb_test!(
     prompt_cache_observation_hydrate_after_restart_filters_expired_redb,
     hydrate_after_restart_filters_expired
 );
+prompt_cache_observation_redb_test!(
+    prompt_cache_observation_observation_list_is_sorted_redb,
+    observation_list_is_sorted
+);
 
 #[test]
 fn upstream_subscription_metadata_store_redb() {

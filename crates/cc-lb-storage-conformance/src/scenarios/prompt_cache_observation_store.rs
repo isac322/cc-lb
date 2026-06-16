@@ -221,6 +221,82 @@ where
     teardown
 }
 
+/// Verify that list_active_for_upstream returns results deterministically sorted
+/// by prefix_hash, then ttl_class. This ensures consistent ordering across backends
+/// for conformance and operational stability.
+#[ignore]
+pub async fn observation_list_is_sorted<B>(
+    backend: Arc<B>,
+    clock: ClockHandle,
+) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: PromptCacheObservationStore,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        let now = clock.now_unix_secs();
+        let upstream_id = upstream_id(5);
+
+        let records_to_insert = vec![
+            observation(
+                upstream_id,
+                "sha256:prefix-c",
+                TtlClass::Ephemeral1h,
+                now + 3_600,
+                now,
+            ),
+            observation(
+                upstream_id,
+                "sha256:prefix-a",
+                TtlClass::Ephemeral5m,
+                now + 300,
+                now,
+            ),
+            observation(
+                upstream_id,
+                "sha256:prefix-a",
+                TtlClass::Ephemeral1h,
+                now + 3_600,
+                now,
+            ),
+            observation(
+                upstream_id,
+                "sha256:prefix-b",
+                TtlClass::Ephemeral5m,
+                now + 300,
+                now,
+            ),
+        ];
+
+        for record in &records_to_insert {
+            storage.upsert_observation(record).await?;
+        }
+
+        let records = storage.list_active_for_upstream(upstream_id, now).await?;
+        ensure!(records.len() == 4, "should have 4 active records");
+
+        let mut prev: Option<(String, i16)> = None;
+        for record in &records {
+            let ttl_value = match record.ttl_class {
+                TtlClass::Ephemeral5m => 0i16,
+                TtlClass::Ephemeral1h => 1i16,
+            };
+            let curr = (record.prefix_hash.clone(), ttl_value);
+            if let Some(p) = &prev {
+                ensure!(
+                    &curr >= p,
+                    "records should be sorted by (prefix_hash, ttl_class): expected {:?} >= {:?}",
+                    curr,
+                    p
+                );
+            }
+            prev = Some(curr);
+        }
+        Ok(())
+    })
+    .await
+}
+
 fn observation(
     upstream_id: Uuid,
     prefix_hash: &str,
