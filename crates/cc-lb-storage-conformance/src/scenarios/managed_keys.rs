@@ -182,8 +182,8 @@ where
             "revoked salt should be zeroed"
         );
         ensure!(
-            revoked.last_4.is_empty(),
-            "revoked last_4 should be cleared"
+            revoked.last_4 == params.last_4,
+            "revoked last_4 should be preserved"
         );
 
         Ok(())
