@@ -2,12 +2,12 @@ use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    AugmentedMetadata, BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME,
-    BUILTIN_CACHE_AFFINITY_SHA256, MAX_WASM_BLOB_BYTES, PluginBlobRepo, PluginChainConflictReason,
-    PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryRecord,
-    PluginRegistryRepo, PluginRegistryStatus, PluginRegistryStore, PluginSlot, RepoError,
-    StorageError, StorageResult, WasmBlob, WasmBlobRecord, WasmRegistryEntry,
-    WasmRegistryEntryInput, default_wire_version, sparse_order, validate_identifier,
+    AugmentedMetadata, BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_SHA256,
+    MAX_WASM_BLOB_BYTES, PluginBlobRepo, PluginChainConflictReason, PluginChainEntry,
+    PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryRecord, PluginRegistryRepo,
+    PluginRegistryStatus, PluginRegistryStore, PluginSlot, RepoError, StorageError, StorageResult,
+    WasmBlob, WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput, default_wire_version,
+    sparse_order, validate_identifier,
 };
 use serde_json::Value;
 use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
@@ -16,8 +16,9 @@ use uuid::Uuid;
 use crate::{SqliteStorage, map_sqlx_error};
 
 const SHUTDOWN_MARKER_KEY: &str = "shutdown";
-const LIST_REGISTRY_SQL: &str = "SELECT wasm_registry_v2.*, (SELECT COUNT(*) FROM plugin_chains_v2 WHERE wasm_sha256 = wasm_registry_v2.sha256) AS refcount FROM wasm_registry_v2 WHERE (? IS NULL OR wasm_registry_v2.sha256 > ?) ORDER BY wasm_registry_v2.sha256 ASC LIMIT ?";
-const GET_REGISTRY_BY_SHA_SQL: &str = "SELECT wasm_registry_v2.*, (SELECT COUNT(*) FROM plugin_chains_v2 WHERE wasm_sha256 = wasm_registry_v2.sha256) AS refcount FROM wasm_registry_v2 WHERE wasm_registry_v2.sha256 = ?";
+const LIST_REGISTRY_SQL: &str = "SELECT wasm_registry_v2.*, wasm_blobs_v2.refcount FROM wasm_registry_v2 JOIN wasm_blobs_v2 ON wasm_blobs_v2.sha256 = wasm_registry_v2.sha256 WHERE (? IS NULL OR wasm_registry_v2.id > ?) ORDER BY wasm_registry_v2.id ASC LIMIT ?";
+const GET_REGISTRY_BY_SHA_SQL: &str = "SELECT wasm_registry_v2.*, wasm_blobs_v2.refcount FROM wasm_registry_v2 JOIN wasm_blobs_v2 ON wasm_blobs_v2.sha256 = wasm_registry_v2.sha256 WHERE wasm_registry_v2.sha256 = ?";
+const GET_REGISTRY_BY_ID_SQL: &str = "SELECT wasm_registry_v2.*, wasm_blobs_v2.refcount FROM wasm_registry_v2 JOIN wasm_blobs_v2 ON wasm_blobs_v2.sha256 = wasm_registry_v2.sha256 WHERE wasm_registry_v2.id = ?";
 
 #[async_trait]
 impl PluginRegistryStore for SqliteStorage {
@@ -32,22 +33,30 @@ impl PluginRegistryStore for SqliteStorage {
         let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
         let now = unix_secs_to_i64(blob.parse_validated_at_unix_secs, "wasm_blob.created_at")?;
         let blob_insert = sqlx::query(
-            "INSERT INTO wasm_blobs_v2 (sha256, bytes, created_at) VALUES (?, ?, ?) ON CONFLICT(sha256) DO NOTHING",
+            "INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, refcount, created_at) VALUES (?, ?, ?, ?, 0, ?) ON CONFLICT(sha256) DO NOTHING",
         )
         .bind(blob.sha256.as_slice())
         .bind(blob.bytes.as_slice())
+        .bind(u64_to_i64(blob.size_bytes, "wasm_blob.size_bytes")?)
+        .bind(now)
         .bind(now)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlite_error)?;
 
         let metadata = metadata_from_input(&input)?;
+        let id = Uuid::new_v4();
         let registry_insert = sqlx::query(
-            "INSERT INTO wasm_registry_v2 (sha256, plugin_name, plugin_version, abi_envelope, augmented_metadata, host_offer_hash, handshake_schema_version, last_handshake_at, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?) ON CONFLICT(sha256) DO NOTHING",
+            "INSERT INTO wasm_registry_v2 (id, sha256, plugin_name, plugin_version, label, uploaded_by_admin_id, revision, wire_version, supported_slots, abi_envelope, augmented_metadata, host_offer_hash, handshake_schema_version, last_handshake_at, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?) ON CONFLICT(sha256) DO NOTHING",
         )
+        .bind(id.to_string())
         .bind(blob.sha256.as_slice())
         .bind(&input.name)
         .bind(&input.original_filename)
+        .bind(input.label.as_deref())
+        .bind(input.uploaded_by_admin_id.to_string())
+        .bind(i64::from(input.wire_version))
+        .bind(slots_to_json(&input.supported_slots)?)
         .bind(i64::from(input.wire_version))
         .bind(serde_json::to_string(&metadata)?)
         .bind(blob.sha256.as_slice())
@@ -71,35 +80,6 @@ impl PluginRegistryStore for SqliteStorage {
                     message: "sha256 already registered for a different wasm entry".to_owned(),
                 });
             }
-        } else {
-            let id = Uuid::new_v4();
-            put_marker_in_tx(&mut tx, &registry_id_key(blob.sha256), &id.to_string()).await?;
-            put_marker_in_tx(&mut tx, &registry_sha_key(id), &sha_hex(&blob.sha256)).await?;
-            put_marker_in_tx(
-                &mut tx,
-                &registry_label_key(blob.sha256),
-                &optional_string(&input.label)?,
-            )
-            .await?;
-            put_marker_in_tx(
-                &mut tx,
-                &registry_uploaded_by_key(blob.sha256),
-                &input.uploaded_by_admin_id.to_string(),
-            )
-            .await?;
-            put_marker_in_tx(&mut tx, &registry_revision_key(blob.sha256), "0").await?;
-            put_marker_in_tx(
-                &mut tx,
-                &registry_wire_version_key(blob.sha256),
-                &input.wire_version.to_string(),
-            )
-            .await?;
-            put_marker_in_tx(
-                &mut tx,
-                &registry_supported_slots_key(blob.sha256),
-                &slots_to_json(&input.supported_slots)?,
-            )
-            .await?;
         }
 
         let entry = registry_by_sha_in_tx(&mut tx, blob.sha256)
@@ -153,21 +133,17 @@ impl PluginRegistryStore for SqliteStorage {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let after_sha = match after {
-            Some(id) => self.sha_for_registry_id(id).await?,
-            None => None,
-        }
-        .map(|sha| sha.to_vec());
+        let after_id = after.map(|id| id.to_string());
         let rows = sqlx::query(LIST_REGISTRY_SQL)
-            .bind(after_sha.clone())
-            .bind(after_sha)
+            .bind(after_id.clone())
+            .bind(after_id)
             .bind(usize_to_i64(limit, "plugin_registry.limit")?)
             .fetch_all(self.pool())
             .await
             .map_err(map_sqlx_error)?;
         let mut entries = Vec::with_capacity(rows.len());
         for row in rows {
-            entries.push(self.registry_from_row(row).await?);
+            entries.push(registry_from_row(row)?);
         }
         Ok(entries)
     }
@@ -182,16 +158,18 @@ impl PluginRegistryStore for SqliteStorage {
             .await
             .map_err(map_sqlx_error)?;
         match row {
-            Some(row) => Ok(Some(self.registry_from_row(row).await?)),
+            Some(row) => Ok(Some(registry_from_row(row)?)),
             None => Ok(None),
         }
     }
 
     async fn get_registry_entry_by_id(&self, id: Uuid) -> StorageResult<Option<WasmRegistryEntry>> {
-        let Some(sha256) = self.sha_for_registry_id(id).await? else {
-            return Ok(None);
-        };
-        self.get_registry_entry_by_sha(sha256).await
+        let row = sqlx::query(GET_REGISTRY_BY_ID_SQL)
+            .bind(id.to_string())
+            .fetch_optional(self.pool())
+            .await
+            .map_err(map_sqlx_error)?;
+        row.map(registry_from_row).transpose()
     }
 
     async fn update_registry_label(
@@ -201,32 +179,19 @@ impl PluginRegistryStore for SqliteStorage {
         label: Option<String>,
     ) -> StorageResult<WasmRegistryEntry> {
         let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
-        let sha256 = sha_for_registry_id_in_tx(&mut tx, id)
-            .await?
-            .ok_or_else(|| conflict("unknown plugin registry entry"))?;
-        let current = registry_revision_in_tx(&mut tx, sha256).await?;
+        let current = registry_revision_in_tx(&mut tx, id).await?;
         if current != expected_revision {
             return Err(StorageError::StalePluginRegistryRevision { current });
         }
-        put_marker_in_tx(
-            &mut tx,
-            &registry_label_key(sha256),
-            &optional_string(&label)?,
-        )
-        .await?;
-        put_marker_in_tx(
-            &mut tx,
-            &registry_revision_key(sha256),
-            &(current + 1).to_string(),
-        )
-        .await?;
-        sqlx::query("UPDATE wasm_registry_v2 SET updated_at = unixepoch() WHERE sha256 = ?")
-            .bind(sha256.as_slice())
+        sqlx::query("UPDATE wasm_registry_v2 SET label = ?, revision = revision + 1, updated_at = unixepoch() WHERE id = ? AND revision = ?")
+            .bind(label.as_deref())
+            .bind(id.to_string())
+            .bind(u64_to_i64(expected_revision, "wasm_registry.revision")?)
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
         tx.commit().await.map_err(map_sqlx_error)?;
-        self.get_registry_entry_by_sha(sha256)
+        self.get_registry_entry_by_id(id)
             .await?
             .ok_or_else(|| conflict("updated plugin registry row disappeared"))
     }
@@ -236,34 +201,22 @@ impl PluginRegistryStore for SqliteStorage {
         id: Uuid,
         supported_slots: Vec<PluginSlot>,
     ) -> StorageResult<()> {
-        let sha256 = self
-            .sha_for_registry_id(id)
-            .await?
-            .ok_or_else(|| conflict("unknown plugin registry entry"))?;
-        sqlx::query(
-            "INSERT INTO plugin_registry_marker_v1 (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        )
-        .bind(registry_supported_slots_key(sha256))
-        .bind(slots_to_json(&supported_slots)?)
-        .execute(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
+        sqlx::query("UPDATE wasm_registry_v2 SET supported_slots = ? WHERE id = ?")
+            .bind(slots_to_json(&supported_slots)?)
+            .bind(id.to_string())
+            .execute(self.pool())
+            .await
+            .map_err(map_sqlx_error)?;
         Ok(())
     }
 
     async fn update_wire_version(&self, id: Uuid, wire_version: u8) -> StorageResult<()> {
-        let sha256 = self
-            .sha_for_registry_id(id)
-            .await?
-            .ok_or_else(|| conflict("unknown plugin registry entry"))?;
-        sqlx::query(
-            "INSERT INTO plugin_registry_marker_v1 (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-        )
-        .bind(registry_wire_version_key(sha256))
-        .bind(wire_version.to_string())
-        .execute(self.pool())
-        .await
-        .map_err(map_sqlx_error)?;
+        sqlx::query("UPDATE wasm_registry_v2 SET wire_version = ? WHERE id = ?")
+            .bind(i64::from(wire_version))
+            .bind(id.to_string())
+            .execute(self.pool())
+            .await
+            .map_err(map_sqlx_error)?;
         Ok(())
     }
 
@@ -273,22 +226,19 @@ impl PluginRegistryStore for SqliteStorage {
         expected_revision: u64,
     ) -> StorageResult<Option<WasmRegistryEntry>> {
         let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
-        let Some(sha256) = sha_for_registry_id_in_tx(&mut tx, id).await? else {
+        let Some(entry) = registry_by_id_in_tx(&mut tx, id).await? else {
             tx.commit().await.map_err(map_sqlx_error)?;
             return Ok(None);
         };
-        let entry = registry_by_sha_in_tx(&mut tx, sha256)
-            .await?
-            .ok_or_else(|| conflict("unknown plugin registry entry"))?;
         if entry.revision != expected_revision {
             return Err(StorageError::StalePluginRegistryRevision {
                 current: entry.revision,
             });
         }
         if let Some(chain_id) = sqlx::query_scalar::<_, String>(
-            "SELECT id FROM plugin_chains_v2 WHERE wasm_sha256 = ? LIMIT 1",
+            "SELECT id FROM plugin_chains_v2 WHERE wasm_registry_id = ? LIMIT 1",
         )
-        .bind(sha256.as_slice())
+        .bind(id.to_string())
         .fetch_optional(&mut *tx)
         .await
         .map_err(map_sqlx_error)?
@@ -301,16 +251,15 @@ impl PluginRegistryStore for SqliteStorage {
             });
         }
         sqlx::query("DELETE FROM wasm_registry_v2 WHERE sha256 = ?")
-            .bind(sha256.as_slice())
+            .bind(entry.sha256.as_slice())
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
         sqlx::query("DELETE FROM wasm_blobs_v2 WHERE sha256 = ?")
-            .bind(sha256.as_slice())
+            .bind(entry.sha256.as_slice())
             .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
-        delete_registry_markers_in_tx(&mut tx, sha256, id).await?;
         tx.commit().await.map_err(map_sqlx_error)?;
         Ok(Some(entry))
     }
@@ -342,8 +291,8 @@ impl PluginRegistryStore for SqliteStorage {
         &self,
         input: PluginChainEntryInput,
     ) -> StorageResult<PluginChainEntry> {
-        let sha256 = self
-            .sha_for_registry_id(input.wasm_registry_id)
+        let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
+        let sha256 = sha_for_registry_id_in_tx(&mut tx, input.wasm_registry_id)
             .await?
             .ok_or_else(|| StorageError::PluginRegistryConflict {
                 message: "unknown plugin registry entry".to_owned(),
@@ -351,7 +300,7 @@ impl PluginRegistryStore for SqliteStorage {
         let principal_exists: Option<i64> =
             sqlx::query_scalar("SELECT 1 FROM principals_v1 WHERE id = ?")
                 .bind(input.principal_id.to_string())
-                .fetch_optional(self.pool())
+                .fetch_optional(&mut *tx)
                 .await
                 .map_err(map_sqlx_error)?;
         if principal_exists.is_none() {
@@ -365,7 +314,7 @@ impl PluginRegistryStore for SqliteStorage {
             )
             .bind(input.principal_id.to_string())
             .bind(input.slot.as_str())
-            .fetch_optional(self.pool())
+            .fetch_optional(&mut *tx)
             .await
             .map_err(map_sqlx_error)?
         {
@@ -376,19 +325,28 @@ impl PluginRegistryStore for SqliteStorage {
             });
         }
         let id = Uuid::new_v4();
-        let config = chain_config_to_json(&input)?;
         let row = sqlx::query(
-            "INSERT INTO plugin_chains_v2 (id, principal_id, slot, wasm_sha256, order_index, config, revision, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 0, unixepoch(), unixepoch()) RETURNING *",
+            "INSERT INTO plugin_chains_v2 (id, principal_id, slot, wasm_registry_id, order_value, config, sse_per_event, batched_events_per_flush, batched_flush_ms, revision, wire_version, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, unixepoch(), unixepoch()) RETURNING *",
         )
         .bind(id.to_string())
         .bind(input.principal_id.to_string())
         .bind(input.slot.as_str())
-        .bind(sha256.as_slice())
+        .bind(input.wasm_registry_id.to_string())
         .bind(input.order)
-        .bind(config)
-        .fetch_one(self.pool())
+        .bind(serde_json::to_string(&input.config)?)
+        .bind(input.sse_per_event)
+        .bind(i64::from(input.batched_events_per_flush))
+        .bind(u64_to_i64(input.batched_flush_ms, "plugin_chain.batched_flush_ms")?)
+        .bind(input.wire_version.map(i64::from))
+        .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlite_error)?;
+        sqlx::query("UPDATE wasm_blobs_v2 SET refcount = refcount + 1 WHERE sha256 = ?")
+            .bind(sha256.as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
         let entry = chain_from_row(row)?;
         Ok(entry)
     }
@@ -399,7 +357,7 @@ impl PluginRegistryStore for SqliteStorage {
         slot: PluginSlot,
     ) -> StorageResult<Vec<PluginChainEntry>> {
         let rows = sqlx::query(
-            "SELECT * FROM plugin_chains_v2 WHERE principal_id = ? AND slot = ? ORDER BY order_index ASC, id ASC",
+            "SELECT * FROM plugin_chains_v2 WHERE principal_id = ? AND slot = ? ORDER BY order_value ASC, id ASC",
         )
         .bind(principal_id.to_string())
         .bind(slot.as_str())
@@ -446,11 +404,13 @@ impl PluginRegistryStore for SqliteStorage {
         if let Some(value) = update.batched_flush_ms {
             current.batched_flush_ms = value;
         }
-        let config = serde_json::to_string(&StoredChainConfig::from_entry(&current))?;
         let row = sqlx::query(
-            "UPDATE plugin_chains_v2 SET config = ?, revision = revision + 1, updated_at = unixepoch() WHERE id = ? AND revision = ? RETURNING *",
+            "UPDATE plugin_chains_v2 SET config = ?, sse_per_event = ?, batched_events_per_flush = ?, batched_flush_ms = ?, revision = revision + 1, updated_at = unixepoch() WHERE id = ? AND revision = ? RETURNING *",
         )
-        .bind(config)
+        .bind(serde_json::to_string(&current.config)?)
+        .bind(current.sse_per_event)
+        .bind(i64::from(current.batched_events_per_flush))
+        .bind(u64_to_i64(current.batched_flush_ms, "plugin_chain.batched_flush_ms")?)
         .bind(id.to_string())
         .bind(u64_to_i64(expected_revision, "plugin_chain.revision")?)
         .fetch_optional(self.pool())
@@ -497,7 +457,7 @@ impl PluginRegistryStore for SqliteStorage {
         }
 
         let rows = sqlx::query(
-            "SELECT * FROM plugin_chains_v2 WHERE principal_id = ? AND slot = ? ORDER BY order_index ASC, id ASC",
+            "SELECT * FROM plugin_chains_v2 WHERE principal_id = ? AND slot = ? ORDER BY order_value ASC, id ASC",
         )
         .bind(principal_id.to_string())
         .bind(slot.as_str())
@@ -524,7 +484,7 @@ impl PluginRegistryStore for SqliteStorage {
         }
         for (id, order, expected_revision) in new_orders {
             sqlx::query(
-                "UPDATE plugin_chains_v2 SET order_index = ?, revision = revision + 1, updated_at = unixepoch() WHERE id = ? AND revision = ?",
+                "UPDATE plugin_chains_v2 SET order_value = ?, revision = revision + 1, updated_at = unixepoch() WHERE id = ? AND revision = ?",
             )
             .bind(order)
             .bind(id.to_string())
@@ -534,7 +494,7 @@ impl PluginRegistryStore for SqliteStorage {
             .map_err(map_sqlite_error)?;
         }
         let rows = sqlx::query(
-            "SELECT * FROM plugin_chains_v2 WHERE principal_id = ? AND slot = ? ORDER BY order_index ASC, id ASC",
+            "SELECT * FROM plugin_chains_v2 WHERE principal_id = ? AND slot = ? ORDER BY order_value ASC, id ASC",
         )
         .bind(principal_id.to_string())
         .bind(slot.as_str())
@@ -558,10 +518,11 @@ impl PluginRegistryStore for SqliteStorage {
                 current: entry.revision,
             });
         }
+        let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
         let result = sqlx::query("DELETE FROM plugin_chains_v2 WHERE id = ? AND revision = ?")
             .bind(id.to_string())
             .bind(u64_to_i64(expected_revision, "plugin_chain.revision")?)
-            .execute(self.pool())
+            .execute(&mut *tx)
             .await
             .map_err(map_sqlite_error)?;
         if result.rows_affected() == 0 {
@@ -569,6 +530,16 @@ impl PluginRegistryStore for SqliteStorage {
                 current: entry.revision,
             });
         }
+        if let Some(sha256) = sha_for_registry_id_in_tx(&mut tx, entry.wasm_registry_id).await? {
+            sqlx::query(
+                "UPDATE wasm_blobs_v2 SET refcount = max(refcount - 1, 0) WHERE sha256 = ?",
+            )
+            .bind(sha256.as_slice())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        }
+        tx.commit().await.map_err(map_sqlx_error)?;
         Ok(Some(entry))
     }
 
@@ -595,17 +566,20 @@ impl PluginRegistryStore for SqliteStorage {
 #[async_trait]
 impl PluginRegistryRepo for SqliteStorage {
     async fn upsert_record(&self, record: &PluginRegistryRecord) -> Result<(), RepoError> {
-        sqlx::query("INSERT INTO wasm_blobs_v2 (sha256, bytes, created_at) VALUES (?, x'', unixepoch()) ON CONFLICT(sha256) DO NOTHING")
+        sqlx::query("INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, refcount, created_at) VALUES (?, x'', 0, NULL, 0, unixepoch()) ON CONFLICT(sha256) DO NOTHING")
             .bind(record.sha256.as_slice())
             .execute(self.pool())
             .await
             .map_err(map_sqlite_error)?;
         sqlx::query(
-            "INSERT INTO wasm_registry_v2 (sha256, plugin_name, plugin_version, abi_envelope, augmented_metadata, host_offer_hash, handshake_schema_version, last_handshake_at, status, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch(), unixepoch()) ON CONFLICT(sha256) DO UPDATE SET plugin_name = excluded.plugin_name, plugin_version = excluded.plugin_version, abi_envelope = excluded.abi_envelope, augmented_metadata = excluded.augmented_metadata, host_offer_hash = excluded.host_offer_hash, handshake_schema_version = excluded.handshake_schema_version, last_handshake_at = excluded.last_handshake_at, status = excluded.status, updated_at = unixepoch()",
+            "INSERT INTO wasm_registry_v2 (id, sha256, plugin_name, plugin_version, label, uploaded_by_admin_id, revision, wire_version, supported_slots, abi_envelope, augmented_metadata, host_offer_hash, handshake_schema_version, last_handshake_at, status, created_at, updated_at) VALUES (?, ?, ?, ?, NULL, ?, 0, ?, '[]', ?, ?, ?, ?, ?, ?, unixepoch(), unixepoch()) ON CONFLICT(sha256) DO UPDATE SET plugin_name = excluded.plugin_name, plugin_version = excluded.plugin_version, abi_envelope = excluded.abi_envelope, augmented_metadata = excluded.augmented_metadata, host_offer_hash = excluded.host_offer_hash, handshake_schema_version = excluded.handshake_schema_version, last_handshake_at = excluded.last_handshake_at, status = excluded.status, updated_at = unixepoch()",
         )
+        .bind(uuid_from_sha(record.sha256).to_string())
         .bind(record.sha256.as_slice())
         .bind(&record.plugin_name)
         .bind(&record.plugin_version)
+        .bind(Uuid::nil().to_string())
+        .bind(i64::from(default_wire_version()))
         .bind(i64::from(record.abi_envelope))
         .bind(serde_json::to_string(&record.augmented_metadata)?)
         .bind(record.host_offer_hash.as_slice())
@@ -713,10 +687,11 @@ impl PluginRegistryRepo for SqliteStorage {
 impl PluginBlobRepo for SqliteStorage {
     async fn put_blob(&self, sha256: &[u8; 32], bytes: &[u8]) -> Result<(), RepoError> {
         sqlx::query(
-            "INSERT INTO wasm_blobs_v2 (sha256, bytes, created_at) VALUES (?, ?, unixepoch()) ON CONFLICT(sha256) DO UPDATE SET bytes = excluded.bytes",
+            "INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, refcount, created_at) VALUES (?, ?, ?, NULL, 0, unixepoch()) ON CONFLICT(sha256) DO UPDATE SET bytes = excluded.bytes, size_bytes = excluded.size_bytes",
         )
         .bind(sha256.as_slice())
         .bind(bytes)
+        .bind(usize_to_i64(bytes.len(), "wasm_blob.size_bytes")?)
         .execute(self.pool())
         .await
         .map_err(map_sqlite_error)?;
@@ -752,25 +727,6 @@ impl PluginBlobRepo for SqliteStorage {
 }
 
 impl SqliteStorage {
-    async fn sha_for_registry_id(&self, id: Uuid) -> StorageResult<Option<[u8; 32]>> {
-        if id == BUILTIN_CACHE_AFFINITY_ID {
-            return Ok(Some(BUILTIN_CACHE_AFFINITY_SHA256));
-        }
-        let value: Option<String> =
-            sqlx::query_scalar("SELECT value FROM plugin_registry_marker_v1 WHERE key = ?")
-                .bind(registry_sha_key(id))
-                .fetch_optional(self.pool())
-                .await
-                .map_err(map_sqlx_error)?;
-        value.map(|value| sha_from_hex(&value)).transpose()
-    }
-
-    async fn registry_from_row(&self, row: SqliteRow) -> StorageResult<WasmRegistryEntry> {
-        let sha256 = row_sha(&row)?;
-        let markers = registry_markers_for_pool(self.pool(), sha256).await?;
-        registry_from_row_with_markers(row, &markers)
-    }
-
     async fn get_chain_by_id(&self, id: Uuid) -> StorageResult<Option<PluginChainEntry>> {
         let row = sqlx::query("SELECT * FROM plugin_chains_v2 WHERE id = ?")
             .bind(id.to_string())
@@ -779,6 +735,18 @@ impl SqliteStorage {
             .map_err(map_sqlx_error)?;
         row.map(chain_from_row).transpose()
     }
+}
+
+async fn registry_by_id_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: Uuid,
+) -> StorageResult<Option<WasmRegistryEntry>> {
+    let row = sqlx::query(GET_REGISTRY_BY_ID_SQL)
+        .bind(id.to_string())
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    row.map(registry_from_row).transpose()
 }
 
 async fn registry_by_sha_in_tx(
@@ -790,120 +758,45 @@ async fn registry_by_sha_in_tx(
         .fetch_optional(&mut **tx)
         .await
         .map_err(map_sqlx_error)?;
-    match row {
-        Some(row) => {
-            let sha256 = row_sha(&row)?;
-            let markers = registry_markers_for_tx(tx, sha256).await?;
-            Ok(Some(registry_from_row_with_markers(row, &markers)?))
-        }
-        None => Ok(None),
-    }
+    row.map(registry_from_row).transpose()
 }
 
-async fn registry_markers_for_pool(
-    pool: &sqlx::SqlitePool,
-    sha256: [u8; 32],
-) -> StorageResult<HashMap<String, String>> {
-    let keys = registry_marker_keys(sha256);
-    let mut markers = HashMap::with_capacity(keys.len());
-    for key in keys {
-        if let Some(value) = sqlx::query_scalar::<_, String>(
-            "SELECT value FROM plugin_registry_marker_v1 WHERE key = ?",
-        )
-        .bind(&key)
-        .fetch_optional(pool)
-        .await
-        .map_err(map_sqlx_error)?
-        {
-            markers.insert(key, value);
-        }
-    }
-    Ok(markers)
-}
-
-async fn registry_markers_for_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    sha256: [u8; 32],
-) -> StorageResult<HashMap<String, String>> {
-    let keys = registry_marker_keys(sha256);
-    let mut markers = HashMap::with_capacity(keys.len());
-    for key in keys {
-        if let Some(value) = sqlx::query_scalar::<_, String>(
-            "SELECT value FROM plugin_registry_marker_v1 WHERE key = ?",
-        )
-        .bind(&key)
-        .fetch_optional(&mut **tx)
-        .await
-        .map_err(map_sqlx_error)?
-        {
-            markers.insert(key, value);
-        }
-    }
-    Ok(markers)
-}
-
-fn registry_marker_keys(sha256: [u8; 32]) -> Vec<String> {
-    vec![
-        registry_id_key(sha256),
-        registry_label_key(sha256),
-        registry_uploaded_by_key(sha256),
-        registry_revision_key(sha256),
-        registry_wire_version_key(sha256),
-        registry_supported_slots_key(sha256),
-    ]
-}
-
-fn registry_from_row_with_markers(
-    row: SqliteRow,
-    markers: &HashMap<String, String>,
-) -> StorageResult<WasmRegistryEntry> {
+fn registry_from_row(row: SqliteRow) -> StorageResult<WasmRegistryEntry> {
     let sha256 = row_sha(&row)?;
     let refcount = row.try_get::<i64, _>("refcount").map_err(map_sqlx_error)?;
-    if sha256 == BUILTIN_CACHE_AFFINITY_SHA256 {
+    let id = parse_uuid(
+        &row.try_get::<String, _>("id").map_err(map_sqlx_error)?,
+        "wasm_registry.id",
+    )?;
+    if id == BUILTIN_CACHE_AFFINITY_ID || sha256 == BUILTIN_CACHE_AFFINITY_SHA256 {
         return Ok(WasmRegistryEntry::builtin_cache_affinity(refcount));
     }
-    let id = markers
-        .get(&registry_id_key(sha256))
-        .cloned()
-        .map(|value| parse_uuid(&value, "wasm_registry.id"))
-        .transpose()?
-        .unwrap_or_else(|| uuid_from_sha(sha256));
-    let label = markers
-        .get(&registry_label_key(sha256))
-        .cloned()
-        .map(|value| serde_json::from_str::<Option<String>>(&value))
-        .transpose()?
-        .unwrap_or(None);
-    let uploaded_by = markers
-        .get(&registry_uploaded_by_key(sha256))
-        .cloned()
-        .map(|value| parse_uuid(&value, "wasm_registry.uploaded_by_admin_id"))
-        .transpose()?
-        .unwrap_or_else(Uuid::nil);
-    let revision = markers
-        .get(&registry_revision_key(sha256))
-        .cloned()
-        .map(|value| parse_u64(&value, "wasm_registry.revision"))
-        .transpose()?
-        .unwrap_or(0);
-    let wire_version = markers
-        .get(&registry_wire_version_key(sha256))
-        .cloned()
-        .map(|value| parse_u8(&value, "wasm_registry.wire_version"))
-        .transpose()?
-        .unwrap_or_else(default_wire_version);
-    let supported_slots = markers
-        .get(&registry_supported_slots_key(sha256))
-        .cloned()
-        .map(|value| slots_from_json(&value))
-        .transpose()?
-        .unwrap_or_default();
+    let uploaded_by = parse_uuid(
+        &row.try_get::<String, _>("uploaded_by_admin_id")
+            .map_err(map_sqlx_error)?,
+        "wasm_registry.uploaded_by_admin_id",
+    )?;
+    let revision = i64_to_u64(
+        row.try_get("revision").map_err(map_sqlx_error)?,
+        "wasm_registry.revision",
+    )?;
+    let wire_version = u8::try_from(
+        row.try_get::<i64, _>("wire_version")
+            .map_err(map_sqlx_error)?,
+    )
+    .map_err(|_| StorageError::Corrupted {
+        message: "wasm_registry.wire_version is outside u8 range".to_owned(),
+    })?;
+    let supported_slots = slots_from_json(
+        &row.try_get::<String, _>("supported_slots")
+            .map_err(map_sqlx_error)?,
+    )?;
     Ok(WasmRegistryEntry {
         id,
         sha256,
         name: row.try_get("plugin_name").map_err(map_sqlx_error)?,
         original_filename: row.try_get("plugin_version").map_err(map_sqlx_error)?,
-        label,
+        label: row.try_get("label").map_err(map_sqlx_error)?,
         uploaded_at_unix_secs: i64_to_u64(
             row.try_get("last_handshake_at").map_err(map_sqlx_error)?,
             "wasm_registry.uploaded_at",
@@ -954,59 +847,15 @@ fn record_from_row(row: SqliteRow) -> Result<PluginRegistryRecord, RepoError> {
     })
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-struct StoredChainConfig {
-    config: Value,
-    sse_per_event: bool,
-    batched_events_per_flush: u32,
-    batched_flush_ms: u64,
-    wire_version: Option<u8>,
-    wasm_registry_id: Uuid,
-}
-
-impl StoredChainConfig {
-    fn from_entry(entry: &PluginChainEntry) -> Self {
-        Self {
-            config: entry.config.clone(),
-            sse_per_event: entry.sse_per_event,
-            batched_events_per_flush: entry.batched_events_per_flush,
-            batched_flush_ms: entry.batched_flush_ms,
-            wire_version: entry.wire_version,
-            wasm_registry_id: entry.wasm_registry_id,
-        }
-    }
-}
-
-fn chain_config_to_json(input: &PluginChainEntryInput) -> StorageResult<String> {
-    serde_json::to_string(&StoredChainConfig {
-        config: input.config.clone(),
-        sse_per_event: input.sse_per_event,
-        batched_events_per_flush: input.batched_events_per_flush,
-        batched_flush_ms: input.batched_flush_ms,
-        wire_version: input.wire_version,
-        wasm_registry_id: input.wasm_registry_id,
-    })
-    .map_err(StorageError::from)
-}
-
 fn chain_from_row(row: SqliteRow) -> StorageResult<PluginChainEntry> {
     let id = row.try_get::<String, _>("id").map_err(map_sqlx_error)?;
     let principal_id = row
         .try_get::<String, _>("principal_id")
         .map_err(map_sqlx_error)?;
-    let config_text: Option<String> = row.try_get("config").map_err(map_sqlx_error)?;
-    let stored: StoredChainConfig = config_text
-        .as_deref()
-        .map(serde_json::from_str)
-        .transpose()?
-        .unwrap_or(StoredChainConfig {
-            config: Value::Null,
-            sse_per_event: false,
-            batched_events_per_flush: 0,
-            batched_flush_ms: 0,
-            wire_version: None,
-            wasm_registry_id: Uuid::nil(),
-        });
+    let config_text: String = row.try_get("config").map_err(map_sqlx_error)?;
+    let wasm_registry_id = row
+        .try_get::<String, _>("wasm_registry_id")
+        .map_err(map_sqlx_error)?;
     Ok(PluginChainEntry {
         id: parse_uuid(&id, "plugin_chain.id")?,
         principal_id: parse_uuid(&principal_id, "plugin_chain.principal_id")?,
@@ -1018,34 +867,36 @@ fn chain_from_row(row: SqliteRow) -> StorageResult<PluginChainEntry> {
         .ok_or_else(|| StorageError::Corrupted {
             message: "invalid plugin slot".to_owned(),
         })?,
-        order: row.try_get("order_index").map_err(map_sqlx_error)?,
-        wasm_registry_id: stored.wasm_registry_id,
-        config: stored.config,
-        sse_per_event: stored.sse_per_event,
-        batched_events_per_flush: stored.batched_events_per_flush,
-        batched_flush_ms: stored.batched_flush_ms,
+        order: row.try_get("order_value").map_err(map_sqlx_error)?,
+        wasm_registry_id: parse_uuid(&wasm_registry_id, "plugin_chain.wasm_registry_id")?,
+        config: serde_json::from_str::<Value>(&config_text)?,
+        sse_per_event: row
+            .try_get::<i64, _>("sse_per_event")
+            .map_err(map_sqlx_error)?
+            != 0,
+        batched_events_per_flush: u32_from_i64(
+            row.try_get("batched_events_per_flush")
+                .map_err(map_sqlx_error)?,
+            "plugin_chain.batched_events_per_flush",
+        )?,
+        batched_flush_ms: i64_to_u64(
+            row.try_get("batched_flush_ms").map_err(map_sqlx_error)?,
+            "plugin_chain.batched_flush_ms",
+        )?,
         revision: i64_to_u64(
             row.try_get("revision").map_err(map_sqlx_error)?,
             "plugin_chain.revision",
         )?,
-        wire_version: stored.wire_version,
+        wire_version: row
+            .try_get::<Option<i64>, _>("wire_version")
+            .map_err(map_sqlx_error)?
+            .map(|value| {
+                u8::try_from(value).map_err(|_| StorageError::Corrupted {
+                    message: "plugin_chain.wire_version is outside u8 range".to_owned(),
+                })
+            })
+            .transpose()?,
     })
-}
-
-async fn put_marker_in_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    key: &str,
-    value: &str,
-) -> StorageResult<()> {
-    sqlx::query(
-        "INSERT INTO plugin_registry_marker_v1 (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-    )
-    .bind(key)
-    .bind(value)
-    .execute(&mut **tx)
-    .await
-    .map_err(map_sqlx_error)?;
-    Ok(())
 }
 
 async fn sha_for_registry_id_in_tx(
@@ -1055,27 +906,24 @@ async fn sha_for_registry_id_in_tx(
     if id == BUILTIN_CACHE_AFFINITY_ID {
         return Ok(Some(BUILTIN_CACHE_AFFINITY_SHA256));
     }
-    let value: Option<String> =
-        sqlx::query_scalar("SELECT value FROM plugin_registry_marker_v1 WHERE key = ?")
-            .bind(registry_sha_key(id))
+    let value: Option<Vec<u8>> =
+        sqlx::query_scalar("SELECT sha256 FROM wasm_registry_v2 WHERE id = ?")
+            .bind(id.to_string())
             .fetch_optional(&mut **tx)
             .await
             .map_err(map_sqlx_error)?;
-    value.map(|value| sha_from_hex(&value)).transpose()
+    value.map(|value| sha_to_array(&value)).transpose()
 }
 
-async fn registry_revision_in_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    sha256: [u8; 32],
-) -> StorageResult<u64> {
-    let value: Option<String> =
-        sqlx::query_scalar("SELECT value FROM plugin_registry_marker_v1 WHERE key = ?")
-            .bind(registry_revision_key(sha256))
+async fn registry_revision_in_tx(tx: &mut Transaction<'_, Sqlite>, id: Uuid) -> StorageResult<u64> {
+    let value: Option<i64> =
+        sqlx::query_scalar("SELECT revision FROM wasm_registry_v2 WHERE id = ?")
+            .bind(id.to_string())
             .fetch_optional(&mut **tx)
             .await
             .map_err(map_sqlx_error)?;
     value
-        .map(|value| parse_u64(&value, "wasm_registry.revision"))
+        .map(|value| i64_to_u64(value, "wasm_registry.revision"))
         .transpose()
         .map(|value| value.unwrap_or(0))
 }
@@ -1101,29 +949,6 @@ async fn warmup_reference_in_tx(
         }
     }
     Ok(None)
-}
-
-async fn delete_registry_markers_in_tx(
-    tx: &mut Transaction<'_, Sqlite>,
-    sha256: [u8; 32],
-    id: Uuid,
-) -> StorageResult<()> {
-    for key in [
-        registry_id_key(sha256),
-        registry_sha_key(id),
-        registry_label_key(sha256),
-        registry_uploaded_by_key(sha256),
-        registry_revision_key(sha256),
-        registry_wire_version_key(sha256),
-        registry_supported_slots_key(sha256),
-    ] {
-        sqlx::query("DELETE FROM plugin_registry_marker_v1 WHERE key = ?")
-            .bind(key)
-            .execute(&mut **tx)
-            .await
-            .map_err(map_sqlx_error)?;
-    }
-    Ok(())
 }
 
 fn validate_blob(blob: &WasmBlob) -> StorageResult<()> {
@@ -1242,26 +1067,10 @@ fn parse_i64(value: &str, field: &str) -> StorageResult<i64> {
     })
 }
 
-fn parse_u64(value: &str, field: &str) -> StorageResult<u64> {
-    value.parse().map_err(|_| StorageError::Corrupted {
-        message: format!("invalid {field}"),
-    })
-}
-
-fn parse_u8(value: &str, field: &str) -> StorageResult<u8> {
-    value.parse().map_err(|_| StorageError::Corrupted {
-        message: format!("invalid {field}"),
-    })
-}
-
 fn parse_uuid(value: &str, field: &str) -> StorageResult<Uuid> {
     Uuid::parse_str(value).map_err(|error| StorageError::Corrupted {
         message: format!("invalid {field} {value}: {error}"),
     })
-}
-
-fn optional_string(value: &Option<String>) -> StorageResult<String> {
-    serde_json::to_string(value).map_err(StorageError::from)
 }
 
 fn slots_to_json(slots: &[PluginSlot]) -> StorageResult<String> {
@@ -1277,63 +1086,8 @@ fn slots_from_json(value: &str) -> StorageResult<Vec<PluginSlot>> {
         .collect())
 }
 
-fn registry_id_key(sha256: [u8; 32]) -> String {
-    format!("wasm_registry:{}:id", sha_hex(&sha256))
-}
-
-fn registry_sha_key(id: Uuid) -> String {
-    format!("wasm_registry_id:{id}:sha256")
-}
-
-fn registry_label_key(sha256: [u8; 32]) -> String {
-    format!("wasm_registry:{}:label", sha_hex(&sha256))
-}
-
-fn registry_uploaded_by_key(sha256: [u8; 32]) -> String {
-    format!("wasm_registry:{}:uploaded_by", sha_hex(&sha256))
-}
-
-fn registry_revision_key(sha256: [u8; 32]) -> String {
-    format!("wasm_registry:{}:revision", sha_hex(&sha256))
-}
-
-fn registry_wire_version_key(sha256: [u8; 32]) -> String {
-    format!("wasm_registry:{}:wire_version", sha_hex(&sha256))
-}
-
-fn registry_supported_slots_key(sha256: [u8; 32]) -> String {
-    format!("wasm_registry:{}:supported_slots", sha_hex(&sha256))
-}
-
-fn sha_hex(sha256: &[u8; 32]) -> String {
-    sha256.iter().map(|byte| format!("{byte:02x}")).collect()
-}
-
-fn sha_from_hex(value: &str) -> StorageResult<[u8; 32]> {
-    if value.len() != 64 {
-        return Err(StorageError::Corrupted {
-            message: "sha256 hex must be 64 chars".to_owned(),
-        });
-    }
-    let mut out = [0_u8; 32];
-    for (index, chunk) in value.as_bytes().chunks_exact(2).enumerate() {
-        let text = std::str::from_utf8(chunk).map_err(|_| StorageError::Corrupted {
-            message: "sha256 hex is not utf8".to_owned(),
-        })?;
-        out[index] = u8::from_str_radix(text, 16).map_err(|_| StorageError::Corrupted {
-            message: "sha256 hex is invalid".to_owned(),
-        })?;
-    }
-    Ok(out)
-}
-
 fn uuid_from_sha(sha256: [u8; 32]) -> Uuid {
     let mut bytes = [0_u8; 16];
     bytes.copy_from_slice(&sha256[..16]);
     Uuid::from_bytes(bytes)
-}
-
-#[allow(dead_code)]
-fn builtin_name() -> &'static str {
-    BUILTIN_CACHE_AFFINITY_NAME
 }
