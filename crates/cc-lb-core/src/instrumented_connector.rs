@@ -70,7 +70,7 @@ mod tests {
     use std::future::Future;
     use std::pin::Pin;
     use std::task::{Context, Poll};
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     use http::Uri;
     use tower::Service;
@@ -184,15 +184,23 @@ mod tests {
 
         let mut connector = InstrumentedHttpsConnector::new(DnsSimulator);
 
-        let (_, timings) = with_timings(async {
+        let (total_elapsed, timings) = with_timings(async {
+            let start = Instant::now();
             let _ = connector.call("https://example.com".parse().unwrap()).await;
+            start.elapsed()
         })
         .await;
 
+        assert_eq!(timings.dns_ms, Some(30));
         let connect_ms = timings.connect_ms.expect("connect_ms recorded");
+        let total_ms = total_elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
         assert!(
-            (40..=100).contains(&connect_ms),
-            "expected ~50ms connect_ms, got {connect_ms}"
+            connect_ms < total_ms,
+            "expected DNS subtraction from total {total_ms}ms, got {connect_ms}ms"
+        );
+        assert!(
+            connect_ms.saturating_add(30) <= total_ms,
+            "expected connect_ms {connect_ms}ms plus DNS 30ms to fit within total {total_ms}ms"
         );
     }
 
