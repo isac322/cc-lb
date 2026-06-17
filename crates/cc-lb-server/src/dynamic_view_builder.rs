@@ -14,6 +14,7 @@ use cc_lb_core::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
     RouterPipelineCache,
 };
+use cc_lb_core::builtin_filters::cache_affinity::CacheAffinityFilter;
 use cc_lb_core::clock::SystemClock;
 use cc_lb_core::{
     ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamRateLimitCache,
@@ -21,8 +22,8 @@ use cc_lb_core::{
 };
 use cc_lb_dialect_anthropic::AnthropicDirectDialect;
 use cc_lb_plugin_api::{
-    PluginManifest, Principal, RateLimitObservation, RequestContext, RouteDecision, RouteError,
-    RouterPlugin, Signer, SignerError, SignerFactory, Upstream, UpstreamCandidate,
+    FilterPlugin, PluginManifest, Principal, RateLimitObservation, RequestContext, RouteDecision,
+    RouteError, RouterPlugin, Signer, SignerError, SignerFactory, Upstream, UpstreamCandidate,
 };
 use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -602,9 +603,29 @@ async fn build_router_pipeline(
     }
 
     router_entries.sort_by_key(|entry| entry.order);
-    let mut filters = Vec::with_capacity(router_entries.len());
+    let mut filters: Vec<Arc<dyn FilterPlugin>> = Vec::with_capacity(router_entries.len());
     let mut router_staged = Vec::with_capacity(router_entries.len());
     for entry in router_entries {
+        let Some(registry_entry) = registry.get(&entry.wasm_registry_id) else {
+            let error = io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found");
+            tracing::error!(
+                principal = %principal.name,
+                chain_entry_id = %entry.id,
+                %error,
+                "router chain entry failed to materialize; principal fails closed",
+            );
+            return Ok(Some(Arc::new(RouterPipelineCache {
+                user_filters: Vec::new(),
+                terminal: principal.router_terminal_strategy.clone(),
+                instantiation_error: Some(Arc::<str>::from(format!(
+                    "router pipeline instantiation failed: {error}"
+                ))),
+            })));
+        };
+        if registry_entry.is_builtin {
+            filters.push(Arc::new(CacheAffinityFilter::new()));
+            continue;
+        }
         let manifest = match manifest_for_chain_entry(stores, data_dir, registry, &entry).await {
             Ok(manifest) => manifest,
             Err(error) => {
