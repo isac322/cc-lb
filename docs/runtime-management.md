@@ -35,6 +35,10 @@ kind = "user"
 
 All administrative operations are authenticated via a Bearer token in the `Authorization` header.
 
+### Local proxy key files
+
+If an operator keeps a local proxy client key file such as `~/.config/cc-lb/proxy-key`, treat it as a client-side cache of the plaintext key returned once by `POST /admin/v1/principals/{id}/keys`. Rotating a managed key is a two-step lifecycle: issue the replacement key, update the local key file atomically with mode `0600`, verify the proxy request path with the new key, then revoke the old key through the admin API. The server never rewrites operator key files automatically.
+
 ### Upstreams API
 
 | Method | Path | Auth | Request Body | Response Body | Error Codes |
