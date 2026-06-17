@@ -1,0 +1,1 @@
+ALTER TABLE upstream_rate_limit_states_v1 RENAME TO upstream_rate_limit_state_v1;

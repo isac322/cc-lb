@@ -16,11 +16,11 @@ impl UpstreamRateLimitStateStore for SqliteStorage {
     ) -> StorageResult<()> {
         let payload = serde_json::to_string(record)?;
         sqlx::query(
-            "INSERT INTO upstream_rate_limit_states_v1 (upstream_id, key, value, updated_at) \
+            "INSERT INTO upstream_rate_limit_state_v1 (upstream_id, key, value, updated_at) \
              VALUES (?, ?, ?, ?) \
              ON CONFLICT(upstream_id, key) DO UPDATE SET \
              value = excluded.value, updated_at = excluded.updated_at \
-             WHERE excluded.updated_at >= upstream_rate_limit_states_v1.updated_at",
+             WHERE excluded.updated_at >= upstream_rate_limit_state_v1.updated_at",
         )
         .bind(record.upstream_id.to_string())
         .bind(observation_key(&record.window, record.kind))
@@ -48,7 +48,7 @@ impl UpstreamRateLimitStateStore for SqliteStorage {
             .collect::<Vec<_>>()
             .join(", ");
         let sql = format!(
-            "SELECT value FROM upstream_rate_limit_states_v1 \
+            "SELECT value FROM upstream_rate_limit_state_v1 \
              WHERE upstream_id IN ({placeholders}) \
              ORDER BY upstream_id ASC, key ASC"
         );
