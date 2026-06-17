@@ -1,8 +1,11 @@
 use std::sync::Arc;
 
 use cc_lb_server::app::backfill_wire_version;
-use cc_lb_storage_api::{PluginRegistryStore, WasmBlob, WasmRegistryEntry, WasmRegistryEntryInput};
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_api::{
+    BackendKind, MetaStore, PluginRegistryStore, WasmBlob, WasmRegistryEntry,
+    WasmRegistryEntryInput,
+};
+use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use serde_json::json;
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -11,7 +14,7 @@ const ENVELOPE_VERSION_V1: u32 = 1;
 
 #[tokio::test]
 async fn backfill_updates_legacy_entry_from_handshake_chosen_wire_version() {
-    let (_dir, storage) = open_storage();
+    let (_dir, storage) = open_storage().await;
     let entry = seed_filter_plugin(&storage, "legacy-filter", 1).await;
     assert_eq!(entry.wire_version, 1);
 
@@ -27,7 +30,7 @@ async fn backfill_updates_legacy_entry_from_handshake_chosen_wire_version() {
 
 #[tokio::test]
 async fn backfill_skips_entries_with_non_default_wire_version() {
-    let (_dir, storage) = open_storage();
+    let (_dir, storage) = open_storage().await;
     let entry = seed_filter_plugin(&storage, "already-negotiated-filter", 2).await;
 
     backfill_wire_version(storage.as_ref()).await;
@@ -40,9 +43,15 @@ async fn backfill_skips_entries_with_non_default_wire_version() {
     assert_eq!(after.wire_version, 2);
 }
 
-fn open_storage() -> (TempDir, Arc<Storage>) {
+async fn open_storage() -> (TempDir, Arc<Storage>) {
     let dir = tempfile::tempdir().unwrap();
-    let storage = Arc::new(Storage::open(&dir.path().join("backfill.redb"), [42; 32]).unwrap());
+    let database_url = format!("sqlite://{}", dir.path().join("backfill.sqlite").display());
+    let storage = Arc::new(
+        cc_lb_storage_sqlite::open_sqlite(&database_url)
+            .await
+            .unwrap(),
+    );
+    storage.initialize(BackendKind::Sqlite).await.unwrap();
     (dir, storage)
 }
 

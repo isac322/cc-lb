@@ -107,7 +107,7 @@ jobs:
           DATABASE_URL: ${{ env.CI_POSTGRES_URL }}
 
       - name: Run cc-lb-server DB unreachable chaos test (ignored)
-        run: cargo test -p cc-lb-server --features postgres,redb --test db_unreachable_503 -- --ignored
+        run: cargo test -p cc-lb-server --features postgres --test db_unreachable_503 -- --ignored
         continue-on-error: true
 
       # Fallback in case the ARC pod has not yet picked up the cc-lb-actions-runner

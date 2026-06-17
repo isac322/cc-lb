@@ -2,17 +2,17 @@ use std::sync::Arc;
 
 use cc_lb_server::app::backfill_supported_slots;
 use cc_lb_storage_api::{
-    BUILTIN_CACHE_AFFINITY_ID, PluginRegistryStore, PluginSlot, WasmBlob, WasmRegistryEntry,
-    WasmRegistryEntryInput,
+    BUILTIN_CACHE_AFFINITY_ID, BackendKind, MetaStore, PluginRegistryStore, PluginSlot, WasmBlob,
+    WasmRegistryEntry, WasmRegistryEntryInput,
 };
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use tempfile::TempDir;
 use uuid::Uuid;
 
 #[tokio::test]
 async fn backfill_populates_builtin_cache_affinity_with_router_slot() {
-    let (_dir, storage) = open_storage();
-    overwrite_builtin_with_empty_slots(&storage).await;
+    let (_dir, storage) = open_storage().await;
+    assert_builtin_has_router_slot(&storage).await;
 
     backfill_supported_slots(storage.as_ref()).await;
 
@@ -26,7 +26,7 @@ async fn backfill_populates_builtin_cache_affinity_with_router_slot() {
 
 #[tokio::test]
 async fn backfill_skips_entries_already_populated_and_is_idempotent() {
-    let (_dir, storage) = open_storage();
+    let (_dir, storage) = open_storage().await;
     let entry = seed_legacy_entry(&storage, 9, "already-populated").await;
     storage
         .update_supported_slots(entry.id, vec![PluginSlot::Shape])
@@ -46,7 +46,7 @@ async fn backfill_skips_entries_already_populated_and_is_idempotent() {
 
 #[tokio::test]
 async fn backfill_legacy_route_plugin_stays_empty() {
-    let (_dir, storage) = open_storage();
+    let (_dir, storage) = open_storage().await;
     let entry = seed_legacy_route_plugin(&storage, "legacy-route").await;
     assert!(entry.supported_slots.is_empty());
 
@@ -62,7 +62,7 @@ async fn backfill_legacy_route_plugin_stays_empty() {
 
 #[tokio::test]
 async fn backfill_tolerates_corrupt_blob_without_panicking() {
-    let (_dir, storage) = open_storage();
+    let (_dir, storage) = open_storage().await;
     let entry = seed_legacy_entry(&storage, 11, "corrupt-blob").await;
     assert!(entry.supported_slots.is_empty());
 
@@ -76,23 +76,25 @@ async fn backfill_tolerates_corrupt_blob_without_panicking() {
     assert!(after.supported_slots.is_empty());
 }
 
-fn open_storage() -> (TempDir, Arc<Storage>) {
+async fn open_storage() -> (TempDir, Arc<Storage>) {
     let dir = tempfile::tempdir().unwrap();
-    let storage = Arc::new(Storage::open(&dir.path().join("backfill.redb"), [42; 32]).unwrap());
+    let database_url = format!("sqlite://{}", dir.path().join("backfill.sqlite").display());
+    let storage = Arc::new(
+        cc_lb_storage_sqlite::open_sqlite(&database_url)
+            .await
+            .unwrap(),
+    );
+    storage.initialize(BackendKind::Sqlite).await.unwrap();
     (dir, storage)
 }
 
-async fn overwrite_builtin_with_empty_slots(storage: &Arc<Storage>) {
-    storage
-        .update_supported_slots(BUILTIN_CACHE_AFFINITY_ID, Vec::new())
-        .await
-        .unwrap();
+async fn assert_builtin_has_router_slot(storage: &Arc<Storage>) {
     let entry = storage
         .get_registry_entry_by_id(BUILTIN_CACHE_AFFINITY_ID)
         .await
         .unwrap()
         .expect("builtin entry exists");
-    assert!(entry.supported_slots.is_empty());
+    assert_eq!(entry.supported_slots, vec![PluginSlot::Router]);
 }
 
 async fn seed_legacy_route_plugin(storage: &Arc<Storage>, name: &str) -> WasmRegistryEntry {

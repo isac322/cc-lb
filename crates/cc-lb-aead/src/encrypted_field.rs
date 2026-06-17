@@ -14,8 +14,6 @@ use crate::service::AeadService;
 /// value, typically a resource identifier. Decryption fails if the AAD does not match.
 ///
 /// The wrapped plaintext type `T` must implement `Serialize` and `Deserialize`.
-/// The ciphertext is stored as raw bytes internally and serialized as base64 for JSON
-/// or raw bytes for binary formats (BYTEA, redb blob).
 ///
 /// # Security
 /// - Decryption fails if AAD does not match.
@@ -72,8 +70,6 @@ impl<T: Serialize + for<'de> Deserialize<'de>> AeadEncryptedField<T> {
 
     /// Access the raw ciphertext for external storage/serialization.
     ///
-    /// This is useful for backends that need the raw bytes directly
-    /// (e.g., postgres BYTEA, redb BLOB).
     pub fn ciphertext(&self) -> &[u8] {
         &self.ciphertext
     }
@@ -257,10 +253,8 @@ mod tests {
 
         let encrypted = AeadEncryptedField::encrypt(&aead, &bundle, aad).expect("encrypt");
 
-        // For raw bytes storage (postgres BYTEA, redb blob), we access ciphertext directly
         let raw_bytes = encrypted.ciphertext().to_vec();
 
-        // Reconstruct from raw bytes
         let reconstructed = AeadEncryptedField::<OAuthTokenBundle>::from_ciphertext(raw_bytes);
 
         let decrypted = reconstructed

@@ -6,7 +6,7 @@ use config_admin_common::{app, authed_bytes, authed_json, temp_storage, test_sta
 
 #[tokio::test]
 async fn summary_returns_200_with_empty_storage() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
     let (status, _, body, _) =
@@ -19,7 +19,7 @@ async fn summary_returns_200_with_empty_storage() {
 
 #[tokio::test]
 async fn summary_accepts_multiple_ranges() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
     let app = app(state);
 
@@ -37,7 +37,7 @@ async fn summary_accepts_multiple_ranges() {
 
 #[tokio::test]
 async fn summary_rejects_invalid_range() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
     let (status, _, _) = authed_bytes(

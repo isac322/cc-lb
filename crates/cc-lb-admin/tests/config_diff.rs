@@ -10,6 +10,7 @@ use axum::{
 };
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
+use cc_lb_storage_api::{ConfigStore, HistorySummary};
 use tower::ServiceExt;
 
 fn test_state() -> AdminState {
@@ -35,7 +36,7 @@ fn test_state() -> AdminState {
 
 #[tokio::test]
 async fn config_diff_route_returns_history_difference() {
-    let (_dir, storage) = config_admin_common::temp_storage();
+    let (_dir, storage) = config_admin_common::temp_storage().await;
     let mut from_config = Config::default();
     from_config.body.messages_cap_bytes = 100;
     let mut to_config = Config::default();
@@ -46,13 +47,14 @@ async fn config_diff_route_returns_history_difference() {
                 revision,
                 toml::to_string_pretty(config).unwrap(),
                 1000 + revision,
-                cc_lb_storage_redb::HistorySummary {
+                HistorySummary {
                     upstreams: 0,
                     principals: 0,
                     plugin_count: 0,
                     tls_enabled: false,
                 },
             )
+            .await
             .unwrap();
     }
     let app = config_admin_common::app(config_admin_common::test_state(

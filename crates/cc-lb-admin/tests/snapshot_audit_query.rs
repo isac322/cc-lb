@@ -6,7 +6,9 @@ use axum::{
 };
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
-use cc_lb_storage_redb::{AuditEntry, Storage};
+use cc_lb_storage_api::AuditEntry;
+use cc_lb_storage_api::AuditStore;
+use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -35,9 +37,7 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
 #[tokio::test]
 async fn test_snapshot_audit_query() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let db_path = temp_dir.path().join("test.redb");
-    let master_key = [0u8; 32];
-    let storage = Arc::new(Storage::open(&db_path, master_key).unwrap());
+    let storage = admin_test_common::sqlite_storage(temp_dir.path(), "test.sqlite").await;
 
     let entry = AuditEntry {
         ts: 1000,
@@ -53,7 +53,7 @@ async fn test_snapshot_audit_query() {
         agent_label: None,
         ..Default::default()
     };
-    storage.append_audit(&entry).unwrap();
+    storage.append_audit(&entry).await.unwrap();
 
     let app = router(test_state(storage));
 

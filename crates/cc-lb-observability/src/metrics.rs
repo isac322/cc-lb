@@ -269,7 +269,7 @@ pub fn touch_prometheus14_metrics() {
     .increment(1);
     metrics::counter!(
         "cc_lb_cache_observation_write_failed_total",
-        "store" => "redb"
+        "store" => "sqlite"
     )
     .increment(1);
 }

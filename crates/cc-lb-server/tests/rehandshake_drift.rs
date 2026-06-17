@@ -12,19 +12,19 @@ use cc_lb_runtime_extism::registry::PluginRegistry;
 use cc_lb_server::startup_handshake::{
     StartupHandshakeOpts, run_startup_handshake_with_slot_store,
 };
+use cc_lb_storage_api::MetaStore;
 use cc_lb_storage_api::{
     BackendKind, PluginBlobRepo, PluginRegistryRecord, PluginRegistryRepo, PluginRegistryStatus,
     PluginRegistryStore, PluginSlot, Storage as StorageTrait, WasmBlob, WasmRegistryEntryInput,
 };
-use cc_lb_storage_redb::RedbStorage;
+use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
 use sha2::{Digest, Sha256};
 use tokio::sync::watch;
 use uuid::Uuid;
 
 #[tokio::test(flavor = "current_thread")]
 async fn startup_rehandshake_updates_supported_slots_and_warns_on_drift() -> Result<()> {
-    let storage = Arc::new(RedbStorage::open_in_memory([77; 32])?);
-    storage.initialize(BackendKind::Redb)?;
+    let storage = sqlite_storage().await?;
     let registry = PluginRegistry::new(
         storage.clone() as Arc<dyn PluginRegistryRepo>,
         storage.clone() as Arc<dyn PluginBlobRepo>,
@@ -112,6 +112,18 @@ async fn startup_rehandshake_updates_supported_slots_and_warns_on_drift() -> Res
     );
 
     Ok(())
+}
+
+async fn sqlite_storage() -> Result<Arc<SqliteStorage>> {
+    let dir = tempfile::tempdir()?;
+    let database_url = format!(
+        "sqlite://{}",
+        dir.path().join("rehandshake.sqlite").display()
+    );
+    let storage = open_sqlite(&database_url).await?;
+    storage.initialize(BackendKind::Sqlite).await?;
+    std::mem::forget(dir);
+    Ok(Arc::new(storage))
 }
 
 fn plugin_record(

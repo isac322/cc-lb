@@ -576,7 +576,7 @@ fn write_config(
         );
         std::env::set_var("CC_LB_ADMIN_TOKEN", "admin-token");
     }
-    let storage_path = path.with_file_name("cc-lb.redb");
+    let storage_path = path.with_file_name("cc-lb.sqlite");
     let storage_path = storage_path.display();
     let config = format!(
         r#"[listener]
@@ -598,7 +598,7 @@ upstream_kind = "anthropic_key"
 
 
 [storage]
-kind = "redb"
+kind = "sqlite"
 path = "{storage_path}"
 
 [aead]

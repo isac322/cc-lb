@@ -9,7 +9,6 @@ use bytes::Bytes;
 use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
 use cc_lb_core::api_keys::builtin_authn::{BuiltinAuthError, BuiltinAuthn};
 use cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager;
-use cc_lb_core::api_keys::key_store::KeyStore;
 use cc_lb_core::api_keys::limit_engine::LimitEngine;
 use cc_lb_core::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalView, RouterPipelineCache,
@@ -24,7 +23,6 @@ use cc_lb_plugin_api::{
 };
 use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
 use http::{HeaderMap, StatusCode};
 use url::Url;
 
@@ -32,15 +30,8 @@ use common::{DispatchMode, MockDispatch, TestAuthn, TestState, collect_body, mes
 
 #[test]
 fn builtin_authn_accepts_bound_principal_view() -> Result<(), Box<dyn std::error::Error>> {
-    let (_storage_dir, storage) = storage("authn-bound-view")?;
     let view = principal_view("principal-a", None);
-    let authn = BuiltinAuthn::new(
-        DownstreamAuthMode::ApiKey,
-        None,
-        Some(Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(
-            storage,
-        ))))),
-    );
+    let authn = BuiltinAuthn::new(DownstreamAuthMode::ApiKey, None, None);
 
     let error = tokio::runtime::Builder::new_current_thread()
         .build()?
@@ -179,7 +170,6 @@ fn none_mode_authn(
     view: Arc<PrincipalView>,
     state: TestState,
 ) -> Result<TestAuthn, Box<dyn std::error::Error>> {
-    let (_storage_dir, storage) = storage("none-mode-bound-view")?;
     Ok(TestAuthn {
         authn: Arc::new(BuiltinAuthn::new(
             DownstreamAuthMode::None,
@@ -187,25 +177,12 @@ fn none_mode_authn(
                 principal_id: principal_id.to_owned(),
                 upstream_kind: NoneModeUpstreamKind::AnthropicKey,
             }),
-            Some(Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(
-                storage,
-            ))))),
+            None,
         )),
         principal_view: view,
         state,
         refresh_allowed: true,
     })
-}
-
-fn storage(
-    name: &str,
-) -> Result<(&'static tempfile::TempDir, Arc<Storage>), Box<dyn std::error::Error>> {
-    let dir = Box::leak(Box::new(tempfile::tempdir()?));
-    let storage = Arc::new(Storage::open(
-        &dir.path().join(format!("{name}.redb")),
-        [9; 32],
-    )?);
-    Ok((dir, storage))
 }
 
 fn test_upstream_record() -> UpstreamRecord {

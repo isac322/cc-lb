@@ -11,7 +11,6 @@ use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_config::{DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamKind};
 use cc_lb_core::api_keys::builtin_authn::BuiltinAuthn;
-use cc_lb_core::api_keys::key_store::KeyStore;
 use cc_lb_core::api_keys::principal_view::PrincipalView;
 use cc_lb_core::{
     ApiKeyAwareSignerFactory, DispatchError, DynamicViewBuilder, DynamicViewHolder,
@@ -24,7 +23,6 @@ use cc_lb_plugin_api::{
     Upstream, UpstreamCandidate, UpstreamDialect, sign_request,
 };
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode};
 use http_body_util::BodyExt;
@@ -65,13 +63,6 @@ impl TestAuthn {
     }
 
     pub fn with_principal_view(state: TestState, view: Arc<PrincipalView>) -> Self {
-        let dir = tempfile::tempdir().expect("test auth storage dir is created");
-        let storage = Arc::new(
-            Storage::open(&dir.path().join("test-auth.redb"), [7; 32])
-                .expect("test auth storage opens"),
-        );
-        let _dir = Box::leak(Box::new(dir));
-        let managed_key_store = RedbManagedKeyStore::new(storage);
         Self {
             authn: Arc::new(BuiltinAuthn::new(
                 DownstreamAuthMode::None,
@@ -79,7 +70,7 @@ impl TestAuthn {
                     principal_id: "principal-test".to_owned(),
                     upstream_kind: NoneModeUpstreamKind::AnthropicKey,
                 }),
-                Some(Arc::new(KeyStore::new(Arc::new(managed_key_store)))),
+                None,
             )),
             principal_view: view,
             state,

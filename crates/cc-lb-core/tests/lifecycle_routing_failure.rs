@@ -18,8 +18,8 @@ use cc_lb_plugin_api::{
     RouterPlugin, TerminalStrategy, Upstream, UpstreamCandidate,
 };
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{RequestEventStore, Storage as StorageTrait};
-use cc_lb_storage_redb::Storage as RedbStorage;
+use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_sqlite::SqliteStorage;
 use http::StatusCode;
 use serde_json::Value;
 use url::Url;
@@ -35,10 +35,7 @@ async fn no_candidates_after_filters_returns_503_and_logs_request_event()
     let router_calls = Arc::new(Mutex::new(Vec::new()));
     let state = TestState::default();
     let _dir = tempfile::tempdir()?;
-    let storage = Arc::new(RedbStorage::open(
-        &_dir.path().join("lifecycle-routing-failure.redb"),
-        [31; 32],
-    )?);
+    let storage = Arc::new(sqlite_storage(&_dir, "lifecycle-routing-failure.sqlite").await?);
     let lifecycle = lifecycle_with_pipeline(
         vec![Arc::new(KeepFilter {
             kept_upstream_ids: Vec::new(),
@@ -96,6 +93,16 @@ async fn no_candidates_after_filters_returns_503_and_logs_request_event()
         error.message.as_deref() == Some("no upstream candidates remain after routing filters")
     }));
     Ok(())
+}
+
+async fn sqlite_storage(
+    dir: &tempfile::TempDir,
+    file_name: &str,
+) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
+    let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
+    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url).await?;
+    storage.initialize(BackendKind::Sqlite).await?;
+    Ok(storage)
 }
 
 fn lifecycle_with_pipeline(

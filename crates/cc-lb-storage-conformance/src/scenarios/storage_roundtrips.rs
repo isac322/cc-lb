@@ -2,12 +2,11 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 use cc_lb_storage_api::{
-    AuditStore as _, BackendKind, ConfigDraftState, ConfigStore as _, LimitStateStore as _,
-    OAuthCredentialStore as _, RequestEventStore as _, StorageError,
+    AuditStore as _, ConfigDraftState, ConfigStore as _, OAuthCredentialStore as _,
+    RequestEventStore as _,
     types::{
-        AuditEntry, HistoryEntry, HistorySummary, PrincipalLimitIdentityKind, PrincipalLimitKind,
-        PrincipalLimitState, RequestCacheBreakpoint, RequestCacheBreakpointSource,
-        RequestCacheState, RequestEvent, RequestEventUpstream,
+        AuditEntry, HistoryEntry, HistorySummary, RequestCacheBreakpoint,
+        RequestCacheBreakpointSource, RequestCacheState, RequestEvent, RequestEventUpstream,
     },
 };
 use serde_json::json;
@@ -47,7 +46,6 @@ where
 {
     audit_store_roundtrip(Arc::clone(&backend)).await?;
     request_event_store_roundtrip(Arc::clone(&backend)).await?;
-    limit_state_store_roundtrip(Arc::clone(&backend)).await?;
     config_store_roundtrip(Arc::clone(&backend)).await?;
     oauth_credential_store_roundtrip(backend).await?;
 
@@ -95,57 +93,6 @@ where
 
         let read_back = storage.query_request_events(0, u64::MAX, 10).await?;
         assert_byte_identical_vec!(read_back, events, "RequestEventStore readback")?;
-
-        Ok(())
-    }
-    .await;
-    let teardown = fixture.teardown().await;
-    result?;
-    teardown
-}
-
-pub async fn limit_state_store_roundtrip<B>(backend: Arc<B>) -> Result<()>
-where
-    B: ConformanceBackend,
-    B::Storage: cc_lb_storage_api::Storage,
-{
-    let mut fixture = ConformanceFixture::new(backend).await?;
-    let result: Result<()> = async {
-        let storage = fixture.storage();
-        let states = principal_limit_states();
-
-        if fixture.backend_kind() == BackendKind::Redb {
-            let error = storage
-                .put_principal_limit_state(&states[0])
-                .await
-                .expect_err("redb limit-state storage is intentionally removed");
-            ensure!(
-                matches!(error, StorageError::Fatal { message } if message == "legacy redb limit state store removed; use limit engine"),
-                "redb must report the documented limit-state removal"
-            );
-            return Ok(());
-        }
-
-        for state in &states {
-            storage.put_principal_limit_state(state).await?;
-        }
-
-        let read_back = storage
-            .get_principal_limit_state(
-                "roundtrip-limit-principal",
-                PrincipalLimitIdentityKind::Credential,
-                Some("credential-a"),
-                "weekly",
-                PrincipalLimitKind::Tokens,
-            )
-            .await?
-            .context("credential limit state should round-trip")?;
-        assert_byte_identical!(read_back, states[0], "LimitStateStore point read")?;
-
-        let listed = storage
-            .list_principal_limit_states("roundtrip-limit-principal")
-            .await?;
-        assert_byte_identical_vec!(listed, states, "LimitStateStore list readback")?;
 
         Ok(())
     }
@@ -390,37 +337,6 @@ fn request_events() -> Vec<RequestEvent> {
             duration_ms: 144,
             error_code: Some("rate_limit".to_owned()),
             ..Default::default()
-        },
-    ]
-}
-
-fn principal_limit_states() -> Vec<PrincipalLimitState> {
-    vec![
-        PrincipalLimitState {
-            principal_id: "roundtrip-limit-principal".to_owned(),
-            identity_kind: PrincipalLimitIdentityKind::Credential,
-            identity_value: Some("credential-a".to_owned()),
-            account_observed: false,
-            window: "weekly".to_owned(),
-            kind: PrincipalLimitKind::Tokens,
-            limit: Some(100_000),
-            remaining: Some(99_000),
-            reset: Some("2026-05-29T00:00:00Z".to_owned()),
-            observed_at_unix_secs: 1_800_300_200,
-            stored_at_unix_secs: 1_800_300_201,
-        },
-        PrincipalLimitState {
-            principal_id: "roundtrip-limit-principal".to_owned(),
-            identity_kind: PrincipalLimitIdentityKind::Unobserved,
-            identity_value: None,
-            account_observed: false,
-            window: "minute".to_owned(),
-            kind: PrincipalLimitKind::Requests,
-            limit: None,
-            remaining: None,
-            reset: None,
-            observed_at_unix_secs: 1_800_300_202,
-            stored_at_unix_secs: 1_800_300_203,
         },
     ]
 }

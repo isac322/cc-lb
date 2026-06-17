@@ -15,6 +15,7 @@ use cc_lb_pricing::{
 };
 use cc_lb_server::{BuildError, build_app, signal::SignalHandle};
 use cc_lb_storage_api::{
+    BackendKind, MetaStore,
     principal::{
         Limit as PrincipalLimit, LimitKind as PrincipalLimitKind, PrincipalCreate, PrincipalKind,
         PrincipalStore,
@@ -25,7 +26,7 @@ use cc_lb_storage_api::{
     },
     upstream::{UpstreamCreate, UpstreamKind, UpstreamStore},
 };
-use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
+use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
 use serde_json::{Value, json};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -67,7 +68,7 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
         .mount(&upstream)
         .await;
 
-    let storage_path = dir.path().join("managed-api-key.redb");
+    let storage_path = dir.path().join("managed-api-key.sqlite");
     let initial_config = base_config(
         DownstreamAuthMode::ApiKey,
         None,
@@ -244,7 +245,7 @@ async fn managed_api_key_full_flow() -> Result<(), Box<dyn std::error::Error>> {
     server.shutdown().await;
 
     usage_tokens.store(20, Ordering::SeqCst);
-    let none_storage_path = dir.path().join("managed-api-key-none.redb");
+    let none_storage_path = dir.path().join("managed-api-key-none.sqlite");
     let none_config = base_config(
         DownstreamAuthMode::None,
         Some(NoneModeConfig {
@@ -651,11 +652,11 @@ fn price_catalog_fixture() -> Value {
 }
 
 async fn seed_runtime_state(
-    redb_path: &std::path::Path,
+    sqlite_path: &std::path::Path,
     upstream_url: String,
     principal_name: &str,
 ) -> Result<(String, String), Box<dyn std::error::Error>> {
-    let storage = Arc::new(Storage::open(redb_path, [0x11; 32])?);
+    let storage = sqlite_storage(sqlite_path).await?;
     UpstreamStore::create(
         storage.as_ref(),
         UpstreamCreate {
@@ -700,8 +701,7 @@ async fn seed_runtime_state(
         now_secs(),
     )
     .await?;
-    let managed_keys = Arc::new(RedbManagedKeyStore::new(storage));
-    let (_record, plaintext) = KeyStore::new(managed_keys)
+    let (_record, plaintext) = KeyStore::new(storage)
         .create(
             principal_name,
             CreateParams {
@@ -725,7 +725,7 @@ async fn seed_runtime_state(
 fn base_config(
     mode: DownstreamAuthMode,
     none_mode: Option<NoneModeConfig>,
-    redb_path: std::path::PathBuf,
+    sqlite_path: std::path::PathBuf,
     litellm_url: String,
 ) -> Config {
     let mut config = Config::default();
@@ -735,7 +735,7 @@ fn base_config(
     config.timeouts.upstream_total_secs = 10;
     config.downstream_auth.mode = mode;
     config.downstream_auth.none_mode = none_mode;
-    config.storage = StorageConfig::Redb { path: redb_path };
+    config.storage = StorageConfig::Sqlite { path: sqlite_path };
     config.aead.key_env = MASTER_KEY_ENV.to_owned();
     config.api_keys.price_catalog.url = format!("{litellm_url}/prices");
     config.api_keys.price_catalog.refresh_interval = Duration::from_secs(60 * 60);
@@ -744,6 +744,15 @@ fn base_config(
         .keep()
         .join("prices.json");
     config
+}
+
+async fn sqlite_storage(
+    path: &std::path::Path,
+) -> Result<Arc<SqliteStorage>, Box<dyn std::error::Error>> {
+    let database_url = format!("sqlite://{}", path.display());
+    let storage = open_sqlite(&database_url).await?;
+    storage.initialize(BackendKind::Sqlite).await?;
+    Ok(Arc::new(storage))
 }
 
 fn free_addr() -> SocketAddr {

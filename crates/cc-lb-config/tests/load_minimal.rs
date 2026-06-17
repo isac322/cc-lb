@@ -1,10 +1,8 @@
 mod common;
 
-use std::path::PathBuf;
-
 use cc_lb_config::{
     Config, DEFAULT_ADMIN_TOKEN_ENV, DEFAULT_FILES_CAP_BYTES, DEFAULT_MESSAGES_CAP_BYTES,
-    DEFAULT_OAUTH_AEAD_KEY_ENV, DEFAULT_REDB_PATH, StorageConfig,
+    DEFAULT_OAUTH_AEAD_KEY_ENV, DEFAULT_SQLITE_PATH, StorageConfig,
 };
 
 #[test]
@@ -20,8 +18,8 @@ fn load_minimal_toml_applies_plan_defaults() {
     assert_eq!(config.body.files_cap_bytes, DEFAULT_FILES_CAP_BYTES);
     assert_eq!(
         config.storage,
-        StorageConfig::Redb {
-            path: PathBuf::from(DEFAULT_REDB_PATH)
+        StorageConfig::Sqlite {
+            path: DEFAULT_SQLITE_PATH.into()
         }
     );
     assert_eq!(config.aead.key_env, DEFAULT_OAUTH_AEAD_KEY_ENV);

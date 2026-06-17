@@ -21,8 +21,8 @@ use cc_lb_plugin_api::{
 };
 use cc_lb_storage_api::types::{KeyStatus, RequestEvent, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{RequestEventStore, Storage as StorageTrait};
-use cc_lb_storage_redb::Storage as RedbStorage;
+use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
 use http::{HeaderMap, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper_rustls::HttpsConnectorBuilder;
@@ -43,7 +43,7 @@ const DEFAULT_UPSTREAM_ID: &str = "00000000-0000-0000-0000-000000000001";
 async fn cold_request_populates_all_connection_stages_ip_upstream() {
     let upstream = MockUpstream::start(Duration::ZERO).await;
     let dispatcher = instrumented_bulkhead_dispatcher(None, 8, 8);
-    let harness = lifecycle_for(&upstream.ip_base_url(), dispatcher);
+    let harness = lifecycle_for(&upstream.ip_base_url(), dispatcher).await;
 
     send_message(&harness.lifecycle).await;
 
@@ -68,7 +68,7 @@ async fn cold_request_with_hostname_populates_dns_ms() {
     let upstream = MockUpstream::start(Duration::ZERO).await;
     let resolver = Arc::new(StaticResolver::new("mock-upstream.test"));
     let dispatcher = instrumented_bulkhead_dispatcher(Some(resolver), 8, 8);
-    let harness = lifecycle_for(&upstream.host_base_url("mock-upstream.test"), dispatcher);
+    let harness = lifecycle_for(&upstream.host_base_url("mock-upstream.test"), dispatcher).await;
 
     send_message(&harness.lifecycle).await;
 
@@ -86,7 +86,7 @@ async fn warm_pool_request_skips_connection_stages() {
     let upstream = MockUpstream::start(Duration::ZERO).await;
     let resolver = Arc::new(StaticResolver::new("mock-upstream.test"));
     let dispatcher = instrumented_bulkhead_dispatcher(Some(resolver), 8, 8);
-    let harness = lifecycle_for(&upstream.host_base_url("mock-upstream.test"), dispatcher);
+    let harness = lifecycle_for(&upstream.host_base_url("mock-upstream.test"), dispatcher).await;
 
     send_message(&harness.lifecycle).await;
     send_message(&harness.lifecycle).await;
@@ -109,7 +109,7 @@ async fn warm_pool_request_skips_connection_stages() {
 async fn bulkhead_contention_records_wait_ms() {
     let upstream = MockUpstream::start(Duration::from_millis(40)).await;
     let dispatcher = instrumented_bulkhead_dispatcher(None, 1, 1);
-    let harness = lifecycle_for(&upstream.ip_base_url(), dispatcher);
+    let harness = lifecycle_for(&upstream.ip_base_url(), dispatcher).await;
     let LifecycleHarness {
         lifecycle,
         storage,
@@ -144,18 +144,24 @@ async fn bulkhead_contention_records_wait_ms() {
 
 struct LifecycleHarness {
     lifecycle: Lifecycle,
-    storage: Arc<RedbStorage>,
+    storage: Arc<SqliteStorage>,
     _dir: tempfile::TempDir,
 }
 
-fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) -> LifecycleHarness {
+async fn lifecycle_for(base_url: &str, dispatcher: Arc<dyn UpstreamDispatch>) -> LifecycleHarness {
     let state = TestState::default();
     let authn = TestAuthn::new(state);
     let dir = tempfile::tempdir().expect("request event storage tempdir");
-    let storage = Arc::new(
-        RedbStorage::open(&dir.path().join("latency-stages.redb"), [17; 32])
-            .expect("request event storage opens"),
-    );
+    let path = dir.path().join("latency-stages.sqlite");
+    let database_url = format!("sqlite://{}", path.display());
+    let storage = open_sqlite(&database_url)
+        .await
+        .expect("request event storage opens");
+    storage
+        .initialize(BackendKind::Sqlite)
+        .await
+        .expect("initialize");
+    let storage = Arc::new(storage);
     let limit_engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()));
     let base_url = Url::parse(base_url).expect("test base URL parses");
     let view = DynamicViewBuilder::new(0)
@@ -237,7 +243,7 @@ async fn send_message(lifecycle: &Lifecycle) {
         .to_bytes();
 }
 
-async fn single_event(storage: &RedbStorage) -> RequestEvent {
+async fn single_event(storage: &SqliteStorage) -> RequestEvent {
     let events = events(storage).await;
     assert_eq!(
         events.len(),
@@ -247,7 +253,7 @@ async fn single_event(storage: &RedbStorage) -> RequestEvent {
     events.into_iter().next().expect("event exists")
 }
 
-async fn events(storage: &RedbStorage) -> Vec<RequestEvent> {
+async fn events(storage: &SqliteStorage) -> Vec<RequestEvent> {
     RequestEventStore::query_request_events(storage, 0, u64::MAX, 100)
         .await
         .expect("query request events")

@@ -33,7 +33,7 @@ pub const DEFAULT_MESSAGES_CAP_BYTES: u64 = 32 * 1024 * 1024;
 pub const DEFAULT_FILES_CAP_BYTES: u64 = 100 * 1024 * 1024;
 pub const DEFAULT_OAUTH_AEAD_KEY_ENV: &str = "CC_LB_MASTER_KEY";
 pub const DEFAULT_ADMIN_TOKEN_ENV: &str = "CC_LB_ADMIN_TOKEN";
-pub const DEFAULT_REDB_PATH: &str = "/var/lib/cc-lb/storage.redb";
+pub const DEFAULT_SQLITE_PATH: &str = "/var/lib/cc-lb/storage.sqlite";
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -280,20 +280,20 @@ impl Default for ApiKeysConfig {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum StorageConfig {
-    Redb {
-        path: PathBuf,
-    },
     Postgres {
         url: String,
         #[serde(default)]
         pool: PostgresPoolConfig,
     },
+    Sqlite {
+        path: PathBuf,
+    },
 }
 
 impl Default for StorageConfig {
     fn default() -> Self {
-        Self::Redb {
-            path: PathBuf::from(DEFAULT_REDB_PATH),
+        Self::Sqlite {
+            path: PathBuf::from(DEFAULT_SQLITE_PATH),
         }
     }
 }
@@ -305,24 +305,10 @@ impl<'de> Deserialize<'de> for StorageConfig {
     {
         let value = Value::deserialize(deserializer)?;
         let has_kind = value.get("kind").is_some();
-        let has_legacy_redb_path = value.get("redb_path").is_some();
-        let has_legacy_aead_env = value.get("oauth_aead_key_env").is_some();
 
         if has_kind {
             let tagged = TaggedStorageConfig::deserialize(value).map_err(D::Error::custom)?;
             return Ok(tagged.into());
-        }
-
-        if has_legacy_redb_path || has_legacy_aead_env {
-            tracing::warn!(
-                "[storage] redb_path/oauth_aead_key_env is deprecated; use kind = \"redb\" + path and [aead].key_env"
-            );
-            let legacy = LegacyStorageConfig::deserialize(value).map_err(D::Error::custom)?;
-            return Ok(Self::Redb {
-                path: legacy
-                    .redb_path
-                    .unwrap_or_else(|| PathBuf::from(DEFAULT_REDB_PATH)),
-            });
         }
 
         Ok(Self::default())
@@ -332,28 +318,23 @@ impl<'de> Deserialize<'de> for StorageConfig {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum TaggedStorageConfig {
-    Redb {
-        path: PathBuf,
-    },
     Postgres {
         url: String,
         #[serde(default)]
         pool: PostgresPoolConfig,
+    },
+    Sqlite {
+        path: PathBuf,
     },
 }
 
 impl From<TaggedStorageConfig> for StorageConfig {
     fn from(value: TaggedStorageConfig) -> Self {
         match value {
-            TaggedStorageConfig::Redb { path } => Self::Redb { path },
             TaggedStorageConfig::Postgres { url, pool } => Self::Postgres { url, pool },
+            TaggedStorageConfig::Sqlite { path } => Self::Sqlite { path },
         }
     }
-}
-
-#[derive(Default, Deserialize)]
-struct LegacyStorageConfig {
-    redb_path: Option<PathBuf>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

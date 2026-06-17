@@ -141,8 +141,8 @@
     "storage": {
       "$ref": "#/$defs/StorageConfig",
       "default": {
-        "kind": "redb",
-        "path": "/var/lib/cc-lb/storage.redb"
+        "kind": "sqlite",
+        "path": "/var/lib/cc-lb/storage.sqlite"
       }
     },
     "subscription_quota": {
@@ -782,22 +782,6 @@
           "properties": {
             "kind": {
               "type": "string",
-              "const": "redb"
-            },
-            "path": {
-              "type": "string"
-            }
-          },
-          "required": [
-            "kind",
-            "path"
-          ]
-        },
-        {
-          "type": "object",
-          "properties": {
-            "kind": {
-              "type": "string",
               "const": "postgres"
             },
             "pool": {
@@ -818,6 +802,22 @@
           "required": [
             "kind",
             "url"
+          ]
+        },
+        {
+          "type": "object",
+          "properties": {
+            "kind": {
+              "type": "string",
+              "const": "sqlite"
+            },
+            "path": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "kind",
+            "path"
           ]
         }
       ]

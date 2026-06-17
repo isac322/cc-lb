@@ -163,8 +163,8 @@ principal_id = "api-key"
 upstream_kind = "anthropic_key"
 
 [storage]
-kind = "redb"
-path = "$TMP_DIR/cc-lb.redb"
+kind = "sqlite"
+path = "$TMP_DIR/cc-lb.sqlite"
 
 [aead]
 key_env = "CC_LB_MASTER_KEY"
@@ -240,7 +240,8 @@ run_mode() {
 mkdir -p "$SCRIPT_DIR/.tmp" "$ROOT_DIR/.omo/evidence"
 TMP_DIR=$(mktemp -d "$SCRIPT_DIR/.tmp/run.XXXXXX")
 
-cargo build --release -q -p fake-anthropic -p cc-lb-server
+cargo build --release -q -p fake-anthropic
+cargo build --release -q -p cc-lb-server --features sqlite
 cargo build --release -q -p cc-lb-loadgen --bin cc-lb-loadgen
 
 fake_port=$(free_port)

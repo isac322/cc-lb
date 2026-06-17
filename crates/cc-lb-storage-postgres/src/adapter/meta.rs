@@ -110,8 +110,8 @@ impl MetaStore for PostgresStorage {
 
 fn parse_backend_kind(value: &str) -> StorageResult<BackendKind> {
     match value {
-        "redb" => Ok(BackendKind::Redb),
         "postgres" => Ok(BackendKind::Postgres),
+        "sqlite" => Ok(BackendKind::Sqlite),
         value => Err(StorageError::Corrupted {
             message: format!("invalid backend_kind meta value {value}"),
         }),

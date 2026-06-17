@@ -3,7 +3,7 @@ use std::process::Command;
 #[test]
 fn missing_aead_key_fatal() {
     let dir = tempfile::tempdir().unwrap();
-    let storage_path = dir.path().join("missing-aead-key.redb");
+    let storage_path = dir.path().join("missing-aead-key.sqlite");
     let config_path = dir.path().join("cc-lb.toml");
     std::fs::write(
         &config_path,
@@ -15,7 +15,7 @@ admin_addr = "127.0.0.1:0"
 metrics_addr = "127.0.0.1:0"
 
 [storage]
-kind = "redb"
+kind = "sqlite"
 path = "{}"
 
 [aead]

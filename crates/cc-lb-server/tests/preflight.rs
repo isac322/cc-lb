@@ -4,20 +4,20 @@ use cc_lb_core::LifecycleConfig;
 use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_server::preflight::{self, PreflightReport};
 use cc_lb_storage_api::{
-    PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
-    PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob, WasmRegistryEntry,
-    WasmRegistryEntryInput,
+    BackendKind, MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlot,
+    PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob,
+    WasmRegistryEntry, WasmRegistryEntryInput,
 };
 
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
 use serde_json::json;
 use tempfile::TempDir;
 use uuid::Uuid;
 
 #[tokio::test]
 async fn empty_db_report() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new().await;
 
     let report = run_preflight(&fixture).await;
 
@@ -32,7 +32,7 @@ async fn empty_db_report() {
 
 #[tokio::test]
 async fn partial_state() {
-    let fixture = Fixture::new();
+    let fixture = Fixture::new().await;
     seed_upstream(
         &fixture.storage,
         "upstream-a",
@@ -129,16 +129,21 @@ async fn partial_state() {
 struct Fixture {
     _db_dir: TempDir,
     data_dir: TempDir,
-    storage: Arc<Storage>,
+    storage: Arc<SqliteStorage>,
     stores: Stores,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    async fn new() -> Self {
         let db_dir = tempfile::tempdir().unwrap();
         let data_dir = tempfile::tempdir().unwrap();
-        let storage =
-            Arc::new(Storage::open(&db_dir.path().join("preflight.redb"), [36; 32]).unwrap());
+        let database_url = format!(
+            "sqlite://{}",
+            db_dir.path().join("preflight.sqlite").display()
+        );
+        let storage = open_sqlite(&database_url).await.unwrap();
+        storage.initialize(BackendKind::Sqlite).await.unwrap();
+        let storage = Arc::new(storage);
         let upstreams: Arc<dyn UpstreamStore> = storage.clone();
         let principals: Arc<dyn PrincipalStore> = storage.clone();
         let plugin_registry: Arc<dyn PluginRegistryStore> = storage.clone();
@@ -194,7 +199,12 @@ fn print_report(report: &PreflightReport) {
     }
 }
 
-async fn seed_upstream(storage: &Storage, name: &str, kind: UpstreamKind, base_url: Option<&str>) {
+async fn seed_upstream(
+    storage: &SqliteStorage,
+    name: &str,
+    kind: UpstreamKind,
+    base_url: Option<&str>,
+) {
     UpstreamStore::create(
         storage,
         UpstreamCreate {
@@ -215,7 +225,7 @@ async fn seed_upstream(storage: &Storage, name: &str, kind: UpstreamKind, base_u
 }
 
 async fn seed_principal(
-    storage: &Storage,
+    storage: &SqliteStorage,
     name: &str,
     allowed_models: Vec<String>,
 ) -> cc_lb_storage_api::PrincipalRecord {
@@ -234,7 +244,7 @@ async fn seed_principal(
     .unwrap()
 }
 
-async fn seed_registry(storage: &Storage, seed: u8, name: &str) -> WasmRegistryEntry {
+async fn seed_registry(storage: &SqliteStorage, seed: u8, name: &str) -> WasmRegistryEntry {
     let (entry, _) = storage
         .persist_wasm_upload(
             WasmBlob {
@@ -259,7 +269,7 @@ async fn seed_registry(storage: &Storage, seed: u8, name: &str) -> WasmRegistryE
 }
 
 async fn seed_chain(
-    storage: &Storage,
+    storage: &SqliteStorage,
     principal_id: Uuid,
     slot: PluginSlot,
     wasm_registry_id: Uuid,

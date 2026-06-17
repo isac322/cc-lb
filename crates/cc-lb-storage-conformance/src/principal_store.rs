@@ -1,24 +1,31 @@
-use std::str::FromStr;
 use std::sync::Arc;
+
+#[cfg(feature = "postgres")]
+use std::str::FromStr;
 
 use anyhow::Result;
 use async_trait::async_trait;
-use cc_lb_storage_api::BackendKind;
+use cc_lb_storage_api::{BackendKind, MetaStore};
+#[cfg(feature = "postgres")]
 use cc_lb_storage_postgres::PostgresStorage;
-use cc_lb_storage_redb::RedbStorage;
+use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
+#[cfg(feature = "postgres")]
 use sqlx::AssertSqlSafe;
+#[cfg(feature = "postgres")]
 use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+#[cfg(feature = "postgres")]
 use uuid::Uuid;
 
 use crate::harness::ConformanceBackend;
 use crate::scenarios::principal_store::{run_all, stale_revision_conflict};
 
 #[tokio::test]
-async fn principal_store_redb() -> Result<()> {
-    run_all(Arc::new(RedbPrincipalBackend)).await
+async fn principal_store_sqlite() -> Result<()> {
+    run_all(Arc::new(SqlitePrincipalBackend)).await
 }
 
 #[tokio::test]
+#[cfg(feature = "postgres")]
 async fn principal_store_postgres() -> Result<()> {
     let Some(url) = postgres_url() else {
         eprintln!("skip: CI_POSTGRES_URL not set");
@@ -28,11 +35,12 @@ async fn principal_store_postgres() -> Result<()> {
 }
 
 #[tokio::test]
-async fn principal_store_stale_revision_conflict_redb() -> Result<()> {
-    stale_revision_conflict(Arc::new(RedbPrincipalBackend)).await
+async fn principal_store_stale_revision_conflict_sqlite() -> Result<()> {
+    stale_revision_conflict(Arc::new(SqlitePrincipalBackend)).await
 }
 
 #[tokio::test]
+#[cfg(feature = "postgres")]
 async fn principal_store_stale_revision_conflict_postgres() -> Result<()> {
     let Some(url) = postgres_url() else {
         eprintln!("skip: CI_POSTGRES_URL not set");
@@ -41,26 +49,32 @@ async fn principal_store_stale_revision_conflict_postgres() -> Result<()> {
     stale_revision_conflict(Arc::new(PostgresPrincipalBackend { url })).await
 }
 
-struct RedbPrincipalBackend;
+struct SqlitePrincipalBackend;
 
-struct RedbFixture {
+struct SqliteFixture {
     _dir: tempfile::TempDir,
-    path: std::path::PathBuf,
+    database_url: String,
 }
 
 #[async_trait]
-impl ConformanceBackend for RedbPrincipalBackend {
-    type Storage = RedbStorage;
-    type Fixture = RedbFixture;
+impl ConformanceBackend for SqlitePrincipalBackend {
+    type Storage = SqliteStorage;
+    type Fixture = SqliteFixture;
 
     async fn create_fixture(&self) -> Result<Self::Fixture> {
         let dir = tempfile::tempdir()?;
-        let path = dir.path().join("principal_store.redb");
-        Ok(RedbFixture { _dir: dir, path })
+        let path = dir.path().join("principal_store.sqlite");
+        let database_url = format!("sqlite://{}", path.display());
+        Ok(SqliteFixture {
+            _dir: dir,
+            database_url,
+        })
     }
 
     async fn open(&self, fixture: &Self::Fixture) -> Result<Self::Storage> {
-        Ok(RedbStorage::open(&fixture.path, [41; 32])?)
+        let storage = open_sqlite(&fixture.database_url).await?;
+        storage.initialize(BackendKind::Sqlite).await?;
+        Ok(storage)
     }
 
     async fn teardown(&self, _fixture: Self::Fixture) -> Result<()> {
@@ -68,14 +82,16 @@ impl ConformanceBackend for RedbPrincipalBackend {
     }
 
     fn kind(&self) -> BackendKind {
-        BackendKind::Redb
+        BackendKind::Sqlite
     }
 }
 
+#[cfg(feature = "postgres")]
 struct PostgresPrincipalBackend {
     url: String,
 }
 
+#[cfg(feature = "postgres")]
 struct PostgresFixture {
     url: String,
     schema: String,
@@ -83,6 +99,7 @@ struct PostgresFixture {
 }
 
 #[async_trait]
+#[cfg(feature = "postgres")]
 impl ConformanceBackend for PostgresPrincipalBackend {
     type Storage = PostgresStorage;
     type Fixture = PostgresFixture;
@@ -139,10 +156,12 @@ impl ConformanceBackend for PostgresPrincipalBackend {
     }
 }
 
+#[cfg(feature = "postgres")]
 fn postgres_url() -> Option<String> {
     std::env::var("CI_POSTGRES_URL").ok()
 }
 
+#[cfg(feature = "postgres")]
 const MIGRATIONS: &[&str] = &[
     include_str!("../../cc-lb-storage-postgres/migrations/0001_meta.sql"),
     include_str!("../../cc-lb-storage-postgres/migrations/0002_killswitch.sql"),
@@ -159,4 +178,5 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../cc-lb-storage-postgres/migrations/0016_principals.sql"),
     include_str!("../../cc-lb-storage-postgres/migrations/0019_principal_allowed_upstreams.sql"),
     include_str!("../../cc-lb-storage-postgres/migrations/0033_router_pipeline.sql"),
+    include_str!("../../cc-lb-storage-postgres/migrations/0045_audit_log_wider_columns.sql"),
 ];

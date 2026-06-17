@@ -9,7 +9,7 @@ use cc_lb_storage_api::{
     HistorySummary, MetaStore, StorageError, StorageResult,
 };
 
-use crate::harness::{ConformanceBackend, ConformanceFixture, scenario_applies_to_backend};
+use crate::harness::{ConformanceBackend, ConformanceFixture};
 
 #[async_trait]
 pub trait RevisioningMetaBackend: ConformanceBackend {
@@ -36,10 +36,6 @@ where
     meta_backend_kind_stamp(Arc::clone(&backend)).await?;
     meta_backend_kind_mismatch(Arc::clone(&backend)).await?;
     meta_killswitch_persistence(Arc::clone(&backend)).await?;
-
-    if scenario_applies_to_backend(backend.kind(), &[BackendKind::Redb]) {
-        meta_legacy_redb_autostamp(backend).await?;
-    }
 
     Ok(())
 }
@@ -312,14 +308,14 @@ where
     B: RevisioningMetaBackend,
 {
     let mismatch = backend
-        .initialize_with_stamped_backend_kind(BackendKind::Postgres, BackendKind::Redb)
+        .initialize_with_stamped_backend_kind(BackendKind::Postgres, BackendKind::Sqlite)
         .await
         .expect_err("backend kind mismatch must be rejected");
     assert!(matches!(
         mismatch,
         StorageError::BackendKindMismatch {
             stored: BackendKind::Postgres,
-            configured: BackendKind::Redb
+            configured: BackendKind::Sqlite
         }
     ));
 
@@ -345,37 +341,6 @@ where
     let reopened = backend.open(&fixture).await?;
     assert!(!MetaStore::killswitch_enabled(&reopened).await?);
     drop(reopened);
-
-    backend.teardown(fixture).await
-}
-
-pub async fn meta_legacy_redb_autostamp<B>(backend: Arc<B>) -> Result<()>
-where
-    B: RevisioningMetaBackend,
-{
-    if !scenario_applies_to_backend(backend.kind(), &[BackendKind::Redb]) {
-        return Ok(());
-    }
-
-    let fixture = backend.create_legacy_without_backend_kind().await?;
-    assert_eq!(backend.stored_backend_kind(&fixture).await?, None);
-
-    let storage = backend.open(&fixture).await?;
-    assert_eq!(MetaStore::backend_kind(&storage).await?, BackendKind::Redb);
-    drop(storage);
-    assert_eq!(
-        backend.stored_backend_kind(&fixture).await?,
-        Some(BackendKind::Redb)
-    );
-
-    let reopened = backend.open(&fixture).await?;
-    MetaStore::initialize(&reopened, BackendKind::Redb).await?;
-    assert_eq!(MetaStore::backend_kind(&reopened).await?, BackendKind::Redb);
-    drop(reopened);
-    assert_eq!(
-        backend.stored_backend_kind(&fixture).await?,
-        Some(BackendKind::Redb)
-    );
 
     backend.teardown(fixture).await
 }

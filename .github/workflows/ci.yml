@@ -37,6 +37,9 @@ jobs:
 
   clippy:
     runs-on: oracle4-cc-lb
+    strategy:
+      matrix:
+        features: [sqlite, postgres]
     steps:
       - uses: actions/checkout@v6
       - uses: dtolnay/rust-toolchain@stable
@@ -45,7 +48,7 @@ jobs:
       - name: Install wasm target for conformance fixtures
         run: rustup target add wasm32-unknown-unknown
       - uses: ./.github/actions/setup-rust-cache
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets --no-default-features --features ${{ matrix.features }} -- -D warnings
       - name: Show sccache stats
         if: always()
         run: |
@@ -57,6 +60,9 @@ jobs:
 
   nextest:
     runs-on: oracle4-cc-lb
+    strategy:
+      matrix:
+        features: [sqlite, postgres]
     env:
       CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
@@ -74,7 +80,7 @@ jobs:
           tool: cargo-nextest
       - name: Pre-build handshake spike wasm artifact
         run: cargo build -p plugin-handshake-spike --target wasm32-unknown-unknown --release
-      - run: cargo nextest run --workspace --exclude cc-lb-loadgen
+      - run: cargo nextest run --workspace --exclude cc-lb-loadgen --no-default-features --features ${{ matrix.features }}
       - name: Show sccache stats
         if: always()
         run: |

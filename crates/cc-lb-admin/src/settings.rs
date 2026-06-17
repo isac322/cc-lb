@@ -14,6 +14,7 @@ use thiserror::Error;
 use crate::{ConfigReloader, CurrentConfig};
 
 const MAX_DIFF_CHANGES: usize = 500;
+const INVALID_DRAFT_TTL_SECS: u64 = 24 * 60 * 60;
 
 pub const COVERAGE_CHECKLIST: &[&str] = &[
     "listener",
@@ -192,7 +193,15 @@ fn strip_schema_defaults(value: &mut Value) {
 }
 
 pub async fn get_draft(storage: &dyn Storage) -> Result<ConfigDraftResponse, SettingsError> {
-    draft_response(storage.get_config_draft().await?)
+    let state = storage.get_config_draft().await?;
+    if invalid_draft_expired(&state, now_unix_secs()) {
+        let revision = state.revision;
+        let _ = storage
+            .put_config_draft(ConfigDraftState::default(), revision)
+            .await?;
+        return draft_response(storage.get_config_draft().await?);
+    }
+    draft_response(state)
 }
 
 pub async fn put_draft(
@@ -476,6 +485,21 @@ fn draft_response(state: ConfigDraftState) -> Result<ConfigDraftResponse, Settin
         last_validation_error: state.last_validation_error,
         saved_at_unix_secs: state.saved_at_unix_secs,
     })
+}
+
+fn invalid_draft_expired(state: &ConfigDraftState, now_unix_secs: u64) -> bool {
+    state.draft.is_some()
+        && state.last_validation_error.is_some()
+        && state
+            .saved_at_unix_secs
+            .is_some_and(|saved_at| now_unix_secs.saturating_sub(saved_at) > INVALID_DRAFT_TTL_SECS)
+}
+
+fn now_unix_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 fn deserialize_and_validate_config(value: Value) -> Result<Config, String> {

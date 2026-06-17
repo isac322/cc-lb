@@ -146,20 +146,20 @@ mod tests {
     }
 
     #[test]
-    fn decrypts_current_redb_nonce_ciphertext_format() {
+    fn decrypts_current_nonce_ciphertext_format() {
         let master_key = [17; MASTER_KEY_LEN];
         let service = AeadService::from_master_key(master_key);
-        let plaintext = b"legacy-redb-oauth-json";
+        let plaintext = b"legacy-oauth-json";
         let aad = b"alice";
 
-        let blob = encrypt_like_current_redb(master_key, plaintext, aad);
+        let blob = encrypt_like_current_format(master_key, plaintext, aad);
 
         assert_eq!(&blob[..NONCE_LEN], &[23; NONCE_LEN]);
         assert_eq!(service.decrypt(&blob, aad).expect("decrypts"), plaintext);
     }
 
     #[test]
-    fn encrypts_blob_readable_by_current_redb_format() {
+    fn encrypts_blob_readable_by_current_format() {
         let master_key = [19; MASTER_KEY_LEN];
         let service = AeadService::from_master_key(master_key);
         let plaintext = b"new-service-oauth-json";
@@ -167,10 +167,13 @@ mod tests {
 
         let blob = service.encrypt(plaintext, aad).expect("encrypts");
 
-        assert_eq!(decrypt_like_current_redb(master_key, &blob, aad), plaintext);
+        assert_eq!(
+            decrypt_like_current_format(master_key, &blob, aad),
+            plaintext
+        );
     }
 
-    fn encrypt_like_current_redb(
+    fn encrypt_like_current_format(
         master_key: [u8; MASTER_KEY_LEN],
         plaintext: &[u8],
         aad: &[u8],
@@ -185,7 +188,7 @@ mod tests {
                     aad,
                 },
             )
-            .expect("legacy redb encrypts");
+            .expect("legacy format encrypts");
 
         let mut blob = Vec::with_capacity(NONCE_LEN + ciphertext.len());
         blob.extend_from_slice(nonce);
@@ -193,7 +196,7 @@ mod tests {
         blob
     }
 
-    fn decrypt_like_current_redb(
+    fn decrypt_like_current_format(
         master_key: [u8; MASTER_KEY_LEN],
         blob: &[u8],
         aad: &[u8],
@@ -208,7 +211,7 @@ mod tests {
                     aad,
                 },
             )
-            .expect("legacy redb decrypts")
+            .expect("legacy format decrypts")
     }
 
     fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {

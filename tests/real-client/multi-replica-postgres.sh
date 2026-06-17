@@ -341,7 +341,7 @@ start_replica_a() {
   CC_LB_BOOTSTRAP_ADMIN_TOKEN="$ADMIN_TOKEN" \
   CC_LB_DATA_DIR="$TMP_DIR/A-data" \
   RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
-  cargo run -q -p cc-lb-server --features postgres,redb -- serve --config "$TMP_DIR/A.toml" --data-dir "$TMP_DIR/A-data" \
+  cargo run -q -p cc-lb-server --features postgres,sqlite -- serve --config "$TMP_DIR/A.toml" --data-dir "$TMP_DIR/A-data" \
     > "$TMP_DIR/A.log" 2>&1 &
   A_PID=$!
 }
@@ -351,7 +351,7 @@ start_replica_b() {
   CC_LB_ADMIN_TOKEN="$ADMIN_TOKEN" \
   CC_LB_DATA_DIR="$TMP_DIR/B-data" \
   RUST_LOG=info,hyper=warn,hyper_util=warn,axum=warn \
-  cargo run -q -p cc-lb-server --features postgres,redb -- serve --config "$TMP_DIR/B.toml" --data-dir "$TMP_DIR/B-data" \
+  cargo run -q -p cc-lb-server --features postgres,sqlite -- serve --config "$TMP_DIR/B.toml" --data-dir "$TMP_DIR/B-data" \
     > "$TMP_DIR/B.log" 2>&1 &
   B_PID=$!
 }

@@ -1,5 +1,6 @@
 ---
 source: crates/cc-lb-admin/tests/v1_status.rs
+assertion_line: 181
 expression: body
 ---
 {

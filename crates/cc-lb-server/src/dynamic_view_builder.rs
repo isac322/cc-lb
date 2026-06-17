@@ -14,6 +14,7 @@ use cc_lb_core::api_keys::principal_view::{
     DialectCache, ObservabilityHooksCache, PrincipalRoutingArtifacts, PrincipalView,
     RouterPipelineCache,
 };
+use cc_lb_core::builtin_filters::cache_affinity::CacheAffinityFilter;
 use cc_lb_core::clock::SystemClock;
 use cc_lb_core::{
     ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamRateLimitCache,
@@ -21,8 +22,8 @@ use cc_lb_core::{
 };
 use cc_lb_dialect_anthropic::AnthropicDirectDialect;
 use cc_lb_plugin_api::{
-    PluginManifest, Principal, RateLimitObservation, RequestContext, RouteDecision, RouteError,
-    RouterPlugin, Signer, SignerError, SignerFactory, Upstream, UpstreamCandidate,
+    FilterPlugin, PluginManifest, Principal, RateLimitObservation, RequestContext, RouteDecision,
+    RouteError, RouterPlugin, Signer, SignerError, SignerFactory, Upstream, UpstreamCandidate,
 };
 use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -225,13 +226,10 @@ pub async fn build_dynamic_view(
         // dropped: when the sender is dropped on the next rebind the mpsc channel
         // closes and the writer task exits naturally.
         //
-        // TODO: thread the actual storage backend kind through `Stores` so the
-        // `store_kind` metric label reflects redb vs postgres deployments. The
-        // sole production backend wired today is redb.
         let (sink, _writer) = PromptCacheObservationSink::new(
             stores.prompt_cache_observations.clone(),
             DEFAULT_PROMPT_CACHE_OBSERVATION_CHANNEL_CAPACITY,
-            "redb",
+            cc_lb_observability::cache_observation_store_kind::SQLITE,
         );
         let sink_arc: Arc<dyn PromptCacheObservationSinkLike> = Arc::new(sink);
         (Some(cache), Some(sink_arc))
@@ -605,9 +603,29 @@ async fn build_router_pipeline(
     }
 
     router_entries.sort_by_key(|entry| entry.order);
-    let mut filters = Vec::with_capacity(router_entries.len());
+    let mut filters: Vec<Arc<dyn FilterPlugin>> = Vec::with_capacity(router_entries.len());
     let mut router_staged = Vec::with_capacity(router_entries.len());
     for entry in router_entries {
+        let Some(registry_entry) = registry.get(&entry.wasm_registry_id) else {
+            let error = io::Error::new(io::ErrorKind::NotFound, "plugin registry entry not found");
+            tracing::error!(
+                principal = %principal.name,
+                chain_entry_id = %entry.id,
+                %error,
+                "router chain entry failed to materialize; principal fails closed",
+            );
+            return Ok(Some(Arc::new(RouterPipelineCache {
+                user_filters: Vec::new(),
+                terminal: principal.router_terminal_strategy.clone(),
+                instantiation_error: Some(Arc::<str>::from(format!(
+                    "router pipeline instantiation failed: {error}"
+                ))),
+            })));
+        };
+        if registry_entry.is_builtin {
+            filters.push(Arc::new(CacheAffinityFilter::new()));
+            continue;
+        }
         let manifest = match manifest_for_chain_entry(stores, data_dir, registry, &entry).await {
             Ok(manifest) => manifest,
             Err(error) => {
@@ -910,9 +928,10 @@ mod tests {
 
     use cc_lb_plugin_api::types::TtlClass as PluginTtlClass;
     use cc_lb_storage_api::{
-        PromptCacheObservationRecord, TtlClass as StorageTtlClass, UpstreamCreate,
+        BackendKind, MetaStore, PromptCacheObservationRecord, TtlClass as StorageTtlClass,
+        UpstreamCreate,
     };
-    use cc_lb_storage_redb::Storage;
+    use cc_lb_storage_sqlite::SqliteStorage as Storage;
 
     use super::*;
     use crate::prompt_cache_observation_cache::HASH_SCHEMA_VERSION;
@@ -982,12 +1001,19 @@ mod tests {
         }
     }
 
-    fn storage_fixture(seed: u8) -> (tempfile::TempDir, Arc<Storage>) {
+    async fn storage_fixture(seed: u8) -> (tempfile::TempDir, Arc<Storage>) {
         let dir = tempfile::tempdir().expect("tempdir");
-        let storage = Arc::new(
-            Storage::open(&dir.path().join("dynamic-view-builder.redb"), [seed; 32])
-                .expect("storage"),
+        let database_url = format!(
+            "sqlite://{}",
+            dir.path()
+                .join(format!("dynamic-view-builder-{seed}.sqlite"))
+                .display()
         );
+        let storage = cc_lb_storage_sqlite::open_sqlite(&database_url)
+            .await
+            .expect("storage");
+        storage.initialize(BackendKind::Sqlite).await.unwrap();
+        let storage = Arc::new(storage);
         (dir, storage)
     }
 
@@ -1078,7 +1104,7 @@ mod tests {
 
     #[tokio::test]
     async fn includes_prompt_cache() {
-        let (dir, storage) = storage_fixture(19);
+        let (dir, storage) = storage_fixture(19).await;
         let upstream = create_upstream(&storage, "prompt-cache-upstream").await;
         let prompt_store = Arc::new(FakePromptCacheObservationStore::new(vec![
             prompt_record(upstream.id, "hash-a", 1_700_000_001),
@@ -1121,7 +1147,7 @@ mod tests {
 
     #[tokio::test]
     async fn observation_sink_routes_records_to_store() {
-        let (dir, storage) = storage_fixture(22);
+        let (dir, storage) = storage_fixture(22).await;
         let upstream = create_upstream(&storage, "sink-wiring-upstream").await;
         let prompt_store = Arc::new(FakePromptCacheObservationStore::new(Vec::new()));
         let stores = stores(storage, prompt_store.clone());
@@ -1160,9 +1186,9 @@ mod tests {
         assert_eq!(stored[0].upstream_id, upstream.id);
     }
 
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    #[tokio::test]
     async fn hydrate_timeout_logs_warn_and_continues() {
-        let (dir, storage) = storage_fixture(20);
+        let (dir, storage) = storage_fixture(20).await;
         let upstream = create_upstream(&storage, "timeout-upstream").await;
         let stores = stores(
             storage,
@@ -1190,7 +1216,7 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_flag_skips_cache_construction() {
-        let (dir, storage) = storage_fixture(21);
+        let (dir, storage) = storage_fixture(21).await;
         let stores = stores(
             storage,
             Arc::new(FakePromptCacheObservationStore::new(Vec::new())),
@@ -1210,7 +1236,7 @@ mod tests {
 
     #[tokio::test]
     async fn tunables_propagate_to_cache() {
-        let (dir, storage) = storage_fixture(22);
+        let (dir, storage) = storage_fixture(22).await;
         let stores = stores(
             storage,
             Arc::new(FakePromptCacheObservationStore::new(Vec::new())),

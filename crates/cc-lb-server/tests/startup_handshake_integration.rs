@@ -17,7 +17,7 @@ use cc_lb_storage_api::{
     BackendKind, PluginBlobRepo, PluginRegistryRecord, PluginRegistryRepo, PluginRegistryStatus,
     RepoError,
 };
-use cc_lb_storage_redb::{RedbPluginBlobRepo, RedbPluginRegistryRepo, RedbStorage};
+use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, Notify, watch};
@@ -27,7 +27,7 @@ static TEST_LOCK: Mutex<()> = Mutex::const_new(());
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn skip_if_fresh_fast_path_100_records_executes_zero_handshakes() -> Result<()> {
     let _test_guard = TEST_LOCK.lock().await;
-    let repos = TestRepos::new()?;
+    let repos = TestRepos::new().await?;
     let registry = repos.registry(BTreeSet::new())?;
     let seeded = seed_records(
         &repos,
@@ -64,7 +64,7 @@ async fn skip_if_fresh_fast_path_100_records_executes_zero_handshakes() -> Resul
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn force_handshake_rehandshakes_all_records() -> Result<()> {
     let _test_guard = TEST_LOCK.lock().await;
-    let repos = TestRepos::new()?;
+    let repos = TestRepos::new().await?;
     let registry = repos.registry(BTreeSet::new())?;
     let count = 16;
     seed_records(
@@ -103,7 +103,7 @@ async fn force_handshake_rehandshakes_all_records() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn host_offer_change_rehandshakes_all_records() -> Result<()> {
     let _test_guard = TEST_LOCK.lock().await;
-    let repos = TestRepos::new()?;
+    let repos = TestRepos::new().await?;
     let old_registry = repos.registry(BTreeSet::new())?;
     let new_registry = repos.registry(BTreeSet::from(["changed-host-offer".to_owned()]))?;
     let count = 16;
@@ -148,7 +148,7 @@ async fn host_offer_change_rehandshakes_all_records() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn mid_startup_shutdown_saves_partial_progress_and_marker() -> Result<()> {
     let _test_guard = TEST_LOCK.lock().await;
-    let repos = TestRepos::new()?;
+    let repos = TestRepos::new().await?;
     let registry = repos.registry(BTreeSet::new())?;
     let original_last_handshake_at = unix_now()?.saturating_sub(120);
     let seeded = seed_records(
@@ -213,7 +213,7 @@ async fn mid_startup_shutdown_saves_partial_progress_and_marker() -> Result<()> 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn recovery_from_mid_shutdown_rehandshakes_stale_records() -> Result<()> {
     let _test_guard = TEST_LOCK.lock().await;
-    let repos = TestRepos::new()?;
+    let repos = TestRepos::new().await?;
     let registry = repos.registry(BTreeSet::new())?;
     let shutdown_marker = unix_now()?;
     let seeded = seed_records(
@@ -256,7 +256,7 @@ async fn recovery_from_mid_shutdown_rehandshakes_stale_records() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn parallel_execution_caps_at_8_and_is_time_bounded() -> Result<()> {
     let _test_guard = TEST_LOCK.lock().await;
-    let repos = TestRepos::new()?;
+    let repos = TestRepos::new().await?;
     let registry = repos.registry(BTreeSet::new())?;
     seed_records(
         &repos,
@@ -309,7 +309,7 @@ async fn parallel_execution_caps_at_8_and_is_time_bounded() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
 async fn budget_limit_disables_remaining_records() -> Result<()> {
     let _test_guard = TEST_LOCK.lock().await;
-    let repos = TestRepos::new()?;
+    let repos = TestRepos::new().await?;
     let registry = repos.registry(BTreeSet::new())?;
     let seeded = seed_records(
         &repos,
@@ -351,18 +351,21 @@ async fn budget_limit_disables_remaining_records() -> Result<()> {
 }
 
 struct TestRepos {
-    registry_repo: Arc<RedbPluginRegistryRepo>,
+    registry_repo: Arc<SqliteStorage>,
     blobs: Arc<InstrumentedBlobRepo>,
 }
 
 impl TestRepos {
-    fn new() -> Result<Self> {
-        let storage = RedbStorage::open_in_memory([41; 32])?;
-        storage.initialize(BackendKind::Redb)?;
-        let registry_repo = Arc::new(RedbPluginRegistryRepo::new(storage.clone())?);
-        let blobs = Arc::new(InstrumentedBlobRepo::new(RedbPluginBlobRepo::new(storage)?));
+    async fn new() -> Result<Self> {
+        let storage = open_sqlite("sqlite::memory:").await?;
+        cc_lb_storage_api::MetaStore::initialize(&storage, BackendKind::Sqlite).await?;
+        for record in storage.list_active().await? {
+            storage.delete_by_sha256(&record.sha256).await?;
+        }
+        let storage = Arc::new(storage);
+        let blobs = Arc::new(InstrumentedBlobRepo::new(storage.clone()));
         Ok(Self {
-            registry_repo,
+            registry_repo: storage,
             blobs,
         })
     }
@@ -483,14 +486,14 @@ async fn count_records_with_status(
 }
 
 struct InstrumentedBlobRepo {
-    inner: Arc<RedbPluginBlobRepo>,
+    inner: Arc<SqliteStorage>,
     stats: Arc<BlobStats>,
 }
 
 impl InstrumentedBlobRepo {
-    fn new(inner: RedbPluginBlobRepo) -> Self {
+    fn new(inner: Arc<SqliteStorage>) -> Self {
         Self {
-            inner: Arc::new(inner),
+            inner,
             stats: Arc::new(BlobStats::default()),
         }
     }

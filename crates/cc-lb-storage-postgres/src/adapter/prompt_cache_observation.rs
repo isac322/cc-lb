@@ -41,7 +41,7 @@ impl PromptCacheObservationStore for PostgresStorage {
         not_expired_at_unix_secs: u64,
     ) -> StorageResult<Vec<PromptCacheObservationRecord>> {
         let rows = sqlx::query(
-            "SELECT upstream_id, canonical_model_id, prefix_hash, ttl_class, expires_at, last_observed_at, hash_schema_version FROM prompt_cache_observations WHERE upstream_id = $1 AND expires_at > $2",
+            "SELECT upstream_id, canonical_model_id, prefix_hash, ttl_class, expires_at, last_observed_at, hash_schema_version FROM prompt_cache_observations WHERE upstream_id = $1 AND expires_at > $2 ORDER BY prefix_hash, ttl_class",
         )
         .bind(upstream_id)
         .bind(u64_to_i64(

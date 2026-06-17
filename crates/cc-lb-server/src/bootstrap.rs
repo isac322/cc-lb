@@ -464,13 +464,14 @@ fn parse_upstream_kind(
 mod tests {
     use super::*;
     use cc_lb_storage_api::{
-        PluginRegistryStore, PrincipalStore, WasmBlob, WasmRegistryEntryInput,
+        BackendKind, MetaStore, PluginRegistryStore, PrincipalStore, WasmBlob,
+        WasmRegistryEntryInput,
     };
-    use cc_lb_storage_redb::Storage;
+    use cc_lb_storage_sqlite::SqliteStorage as Storage;
 
     #[tokio::test]
     async fn bootstrap_seeds_principals_from_toml() {
-        let (dir, storage) = fixture();
+        let (dir, storage) = fixture().await;
         fs::write(
             dir.path().join("bootstrap.toml"),
             format!(
@@ -528,7 +529,7 @@ mod tests {
 
     #[tokio::test]
     async fn bootstrap_seeds_plugin_chain_when_wasm_exists() {
-        let (dir, storage) = fixture();
+        let (dir, storage) = fixture().await;
         seed_principal(&storage, "plugin-principal").await;
         seed_registry(&storage, "audit").await;
         fs::write(
@@ -592,7 +593,7 @@ plugins = ["audit"]
 
     #[tokio::test]
     async fn bootstrap_skips_chain_when_wasm_missing_with_warning() {
-        let (dir, storage) = fixture();
+        let (dir, storage) = fixture().await;
         let principal = seed_principal(&storage, "plugin-principal").await;
         fs::write(
             dir.path().join("bootstrap.toml"),
@@ -623,9 +624,13 @@ plugins = ["missing-plugin"]
         assert!(entries.is_empty());
     }
 
-    fn fixture() -> (tempfile::TempDir, Storage) {
+    async fn fixture() -> (tempfile::TempDir, Storage) {
         let dir = tempfile::tempdir().unwrap();
-        let storage = Storage::open(&dir.path().join("storage.redb"), [7; 32]).unwrap();
+        let database_url = format!("sqlite://{}", dir.path().join("storage.sqlite").display());
+        let storage = cc_lb_storage_sqlite::open_sqlite(&database_url)
+            .await
+            .unwrap();
+        storage.initialize(BackendKind::Sqlite).await.unwrap();
         (dir, storage)
     }
 

@@ -11,8 +11,9 @@ use cc_lb_runtime_extism::{
     registry::{PluginRegistry, RegistryError},
 };
 use cc_lb_storage_api::{
-    BUILTIN_CACHE_AFFINITY_ID, PluginRegistryRecord, PluginRegistryRepo, PluginRegistryStatus,
-    PluginRegistryStore, RepoError, Storage, WasmRegistryEntry,
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_SHA256, PluginRegistryRecord,
+    PluginRegistryRepo, PluginRegistryStatus, PluginRegistryStore, RepoError, Storage,
+    WasmRegistryEntry,
 };
 use thiserror::Error;
 use tokio::sync::{Semaphore, watch};
@@ -195,6 +196,13 @@ async fn process_record(
     force_rehandshake: bool,
     now: i64,
 ) -> RecordOutcome {
+    if record.sha256 == BUILTIN_CACHE_AFFINITY_SHA256 {
+        registry.load_record_into_cache(&record);
+        return RecordOutcome::SkippedFresh {
+            sha256: record.sha256,
+        };
+    }
+
     if !force_rehandshake && skip_if_fresh && is_fresh(&record, registry.host_offer_hash(), now) {
         registry.load_record_into_cache(&record);
         return RecordOutcome::SkippedFresh {

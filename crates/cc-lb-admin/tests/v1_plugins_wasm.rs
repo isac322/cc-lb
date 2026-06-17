@@ -19,7 +19,7 @@ static FIXTURE_WASM: OnceLock<PathBuf> = OnceLock::new();
 
 #[tokio::test]
 async fn happy_upload_returns_201_with_sha_and_cache_file_exists() {
-    let harness = Harness::new();
+    let harness = Harness::new().await;
     let wasm = fixture_wasm();
     let response = harness.upload("echo", "echo.wasm", wasm).await;
     assert_eq!(response.status, StatusCode::CREATED);
@@ -40,7 +40,7 @@ async fn happy_upload_returns_201_with_sha_and_cache_file_exists() {
 
 #[tokio::test]
 async fn upload_persists_supported_slots_for_filter_exporting_plugin() {
-    let harness = Harness::new();
+    let harness = Harness::new().await;
     let wasm = fixture_wasm();
     let upload = harness.upload("echo-slots", "echo-slots.wasm", wasm).await;
     assert_eq!(upload.status, StatusCode::CREATED);
@@ -66,7 +66,7 @@ async fn upload_persists_supported_slots_for_filter_exporting_plugin() {
 async fn reupload_heals_empty_supported_slots_on_existing_entry() {
     use cc_lb_storage_api::PluginRegistryStore;
 
-    let harness = Harness::new();
+    let harness = Harness::new().await;
     let wasm = fixture_wasm();
     let first = harness.upload("echo-heal", "echo-heal.wasm", wasm).await;
     assert_eq!(first.status, StatusCode::CREATED);
@@ -113,7 +113,7 @@ async fn reupload_heals_empty_supported_slots_on_existing_entry() {
 
 #[tokio::test]
 async fn idempotent_duplicate_upload_returns_200_same_sha() {
-    let harness = Harness::new();
+    let harness = Harness::new().await;
     let wasm = fixture_wasm();
     let first = harness.upload("echo", "echo.wasm", wasm).await;
     let second = harness.upload("echo", "echo.wasm", wasm).await;
@@ -129,7 +129,7 @@ async fn idempotent_duplicate_upload_returns_200_same_sha() {
 #[allow(non_snake_case)]
 #[tokio::test]
 async fn oversize_33MiB_returns_413() {
-    let harness = Harness::new();
+    let harness = Harness::new().await;
     let bytes = vec![0_u8; 33 * 1024 * 1024];
     let response = harness.upload("big", "big.wasm", &bytes).await;
     assert_eq!(response.status, StatusCode::PAYLOAD_TOO_LARGE);
@@ -137,7 +137,7 @@ async fn oversize_33MiB_returns_413() {
 
 #[tokio::test]
 async fn bad_magic_bytes_returns_400_with_invalid_wasm_magic() {
-    let harness = Harness::new();
+    let harness = Harness::new().await;
     let response = harness.upload("bad", "bad.wasm", b"NOT_WASM").await;
     assert_eq!(response.status, StatusCode::BAD_REQUEST);
     assert_eq!(response.json["error"], "invalid_wasm_magic");
@@ -145,7 +145,7 @@ async fn bad_magic_bytes_returns_400_with_invalid_wasm_magic() {
 
 #[tokio::test]
 async fn extism_parse_failure_returns_400_with_truncated_message() {
-    let harness = Harness::new();
+    let harness = Harness::new().await;
     let response = harness
         .upload("parsefail", "parsefail.wasm", b"\0asm\x01\0\0\0garbage")
         .await;
@@ -156,7 +156,7 @@ async fn extism_parse_failure_returns_400_with_truncated_message() {
 
 #[tokio::test]
 async fn ratelimit_11th_upload_in_60s_returns_429_with_retry_after() {
-    let harness = Harness::new();
+    let harness = Harness::new().await;
     let wasm = fixture_wasm();
     let mut last = None;
     for index in 0..11 {
@@ -177,7 +177,7 @@ async fn ratelimit_11th_upload_in_60s_returns_429_with_retry_after() {
 
 #[tokio::test]
 async fn gc_keeps_referenced_uploads_and_cache_files() {
-    let harness = Harness::new();
+    let harness = Harness::new().await;
     let wasm = fixture_wasm();
     let upload = harness.upload("echo", "echo.wasm", wasm).await;
     assert_eq!(upload.status, StatusCode::CREATED);
@@ -196,7 +196,7 @@ async fn gc_keeps_referenced_uploads_and_cache_files() {
 
 #[tokio::test]
 async fn filename_with_traversal_dot_dot_slash_rejected_400() {
-    let harness = Harness::new();
+    let harness = Harness::new().await;
     let response = harness
         .upload("badname", "../bad.wasm", fixture_wasm())
         .await;
@@ -206,7 +206,7 @@ async fn filename_with_traversal_dot_dot_slash_rejected_400() {
 
 #[tokio::test]
 async fn filename_with_embedded_nul_rejected_400() {
-    let harness = Harness::new();
+    let harness = Harness::new().await;
     let response = harness
         .upload("badnul", "bad\0name.wasm", fixture_wasm())
         .await;
@@ -218,12 +218,12 @@ struct Harness {
     app: axum::Router,
     _dir: tempfile::TempDir,
     data_dir: PathBuf,
-    storage: std::sync::Arc<cc_lb_storage_redb::RedbStorage>,
+    storage: std::sync::Arc<cc_lb_storage_sqlite::SqliteStorage>,
 }
 
 impl Harness {
-    fn new() -> Self {
-        let (dir, storage) = temp_storage();
+    async fn new() -> Self {
+        let (dir, storage) = temp_storage().await;
         let data_dir = dir.path().join("data");
         let mut config = Config::default();
         config.runtime.data_dir = Some(data_dir.clone());

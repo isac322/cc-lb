@@ -129,7 +129,11 @@ async fn upload_wasm(
             add_dynamic_rebind_headers(&mut response, &state).await;
             response
         }
-        Err(error) => error.into_response(),
+        Err(error) => {
+            let status = error.status().as_u16();
+            enqueue_upload_attempt_audit(&state, status);
+            error.into_response()
+        }
     }
 }
 
@@ -606,6 +610,27 @@ fn enqueue_upload_audit(
     entry.status = 201;
     entry.actor = Some("admin".to_owned());
     let _ = audit_sink.try_enqueue(entry);
+}
+
+fn enqueue_upload_attempt_audit(state: &AdminState, status: u16) {
+    let Some(audit_sink) = &state.audit_sink else {
+        return;
+    };
+    let ts = unix_now_secs();
+    let _ = audit_sink.try_enqueue(AuditEntry {
+        ts,
+        request_id: format!("admin-plugin-registry-upload-attempt-{ts}"),
+        principal_id: "admin".to_owned(),
+        route: "/admin/v1/plugins/wasm".to_owned(),
+        upstream: "admin".to_owned(),
+        status,
+        input_tokens: Some(0),
+        output_tokens: Some(0),
+        duration_ms: 0,
+        admin_action: Some("plugin_registry_upload_attempt".to_owned()),
+        actor: Some("admin".to_owned()),
+        ..AuditEntry::default()
+    });
 }
 
 fn admin_id_from_headers(headers: &HeaderMap) -> Uuid {
