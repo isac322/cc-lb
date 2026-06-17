@@ -3,11 +3,11 @@ use std::hash::{Hash, Hasher};
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use cc_lb_storage_api::Storage;
 use cc_lb_storage_api::types::{
     KeyStatus as StoredKeyStatus, PrincipalLimitIdentityKind, PrincipalLimitKind,
     PrincipalLimitState, StoredApiKeyRecord,
 };
+use cc_lb_storage_api::{RequestEvent, Storage, StorageError};
 use parking_lot::RwLock;
 use serde::Serialize;
 
@@ -22,6 +22,8 @@ impl Hash for LimitKind {
 }
 
 type RollingKey = (String, LimitKind, u64);
+const STARTUP_REPLAY_PAGE_LIMIT: usize = 50_000;
+const STARTUP_REPLAY_WINDOWS_SECS: &[u64] = &[60, 3_600, 18_000, 604_800];
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum IdentityFilter {
@@ -492,13 +494,71 @@ impl LimitEngine {
         sort_windows(windows)
     }
 
-    pub fn startup_replay(&self, storage: Arc<dyn Storage>) {
-        let _ = storage;
-        tracing::warn!(
-            "limit engine startup replay is not implemented for trait storage; rolling counters start empty"
-        );
+    pub async fn startup_replay(&self, storage: Arc<dyn Storage>) {
+        match self.startup_replay_inner(storage).await {
+            Ok(replayed) => tracing::info!(replayed, "limit engine startup replay completed"),
+            Err(error) => {
+                tracing::warn!(%error, "limit engine startup replay failed; rolling counters start empty")
+            }
+        }
     }
 
+    async fn startup_replay_inner(&self, storage: Arc<dyn Storage>) -> Result<usize, StorageError> {
+        let max_window = STARTUP_REPLAY_WINDOWS_SECS
+            .iter()
+            .copied()
+            .max()
+            .unwrap_or(0);
+        let now = now_sec();
+        let events = storage
+            .query_request_events(
+                now.saturating_sub(max_window),
+                now,
+                STARTUP_REPLAY_PAGE_LIMIT,
+            )
+            .await?;
+        let mut replayed = 0;
+        for event in events {
+            if self.replay_event(&event) {
+                replayed += 1;
+            }
+        }
+        Ok(replayed)
+    }
+
+    fn replay_event(&self, event: &RequestEvent) -> bool {
+        let Some(key_id) = &event.key_id else {
+            return false;
+        };
+        let event_sec = event.ts_ms.map(|ts| ts / 1_000).unwrap_or(event.ts);
+        for window_sec in STARTUP_REPLAY_WINDOWS_SECS {
+            for kind in replay_kinds() {
+                let amount = replay_amount(event, kind);
+                if amount != 0 {
+                    self.record_amount(key_id, kind, *window_sec, amount, event_sec);
+                }
+            }
+        }
+        true
+    }
+
+    #[cfg(test)]
+    fn replay_event_for_test(&self, event: &RequestEvent) -> bool {
+        self.replay_event(event)
+    }
+}
+
+fn replay_kinds() -> [LimitKind; 5] {
+    [
+        LimitKind::Requests,
+        LimitKind::InputTokens,
+        LimitKind::OutputTokens,
+        LimitKind::TotalTokens,
+        LimitKind::CostUsd,
+    ]
+}
+
+impl LimitEngine {
     pub fn record_principal_limit_state(&self, state: &PrincipalLimitState) {
         let kind = principal_limit_kind(state.kind);
         let Some(window_sec) = parse_limit_window_secs(&state.window) else {
@@ -754,6 +814,21 @@ fn effective_limits(record: &StoredApiKeyRecord, defaults: &[Limit]) -> Vec<Limi
     limits
 }
 
+fn replay_amount(event: &RequestEvent, kind: LimitKind) -> i64 {
+    match kind {
+        LimitKind::Requests => 1,
+        LimitKind::InputTokens => event.input_tokens.unwrap_or(0) as i64,
+        LimitKind::OutputTokens => event.output_tokens.unwrap_or(0) as i64,
+        LimitKind::TotalTokens => event
+            .input_tokens
+            .unwrap_or(0)
+            .saturating_add(event.output_tokens.unwrap_or(0))
+            as i64,
+        LimitKind::CostUsd => event.cost_usd_micros.unwrap_or(0).max(0),
+        LimitKind::Concurrent => 0,
+    }
+}
+
 fn convert_limit_kind(kind: cc_lb_storage_api::types::LimitKind) -> LimitKind {
     match kind {
         cc_lb_storage_api::types::LimitKind::Requests => LimitKind::Requests,
@@ -898,5 +973,42 @@ mod tests {
         assert_eq!(requests.limit, Some(10));
         assert_eq!(requests.remaining, Some(7));
         assert!(requests.observed);
+    }
+
+    #[test]
+    fn replay_event_restores_all_rolling_counters() {
+        let engine = LimitEngine::new(Arc::new(KeyConcurrencyManager::new()));
+        let observed_at_unix_secs = now_sec();
+        let event = RequestEvent {
+            key_id: Some("key-a".to_owned()),
+            ts: observed_at_unix_secs,
+            input_tokens: Some(3),
+            output_tokens: Some(5),
+            cost_usd_micros: Some(11),
+            ..RequestEvent::default()
+        };
+
+        assert!(engine.replay_event_for_test(&event));
+
+        assert_eq!(
+            engine.current_total("key-a", LimitKind::Requests, 60, observed_at_unix_secs),
+            1
+        );
+        assert_eq!(
+            engine.current_total("key-a", LimitKind::InputTokens, 60, observed_at_unix_secs),
+            3
+        );
+        assert_eq!(
+            engine.current_total("key-a", LimitKind::OutputTokens, 60, observed_at_unix_secs),
+            5
+        );
+        assert_eq!(
+            engine.current_total("key-a", LimitKind::TotalTokens, 60, observed_at_unix_secs),
+            8
+        );
+        assert_eq!(
+            engine.current_total("key-a", LimitKind::CostUsd, 60, observed_at_unix_secs),
+            11
+        );
     }
 }

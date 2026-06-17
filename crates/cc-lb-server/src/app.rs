@@ -668,7 +668,7 @@ async fn build_app_with_storage_inner(
 
     let concurrent_mgr = Arc::new(KeyConcurrencyManager::new());
     let limit_engine = LimitEngine::new(concurrent_mgr);
-    limit_engine.startup_replay(storage.clone());
+    limit_engine.startup_replay(storage.clone()).await;
     let builtin_authn = Arc::new(BuiltinAuthn::new(
         config.downstream_auth.mode.clone(),
         config.downstream_auth.none_mode.clone(),
