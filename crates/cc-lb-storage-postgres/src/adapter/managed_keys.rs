@@ -630,7 +630,7 @@ mod tests {
         assert_eq!(revoked.index_hash, [0; 32]);
         assert_eq!(revoked.verify_hash, [0; 32]);
         assert_eq!(revoked.secret_salt, [0; 16]);
-        assert_eq!(revoked.last_4, "");
+        assert_eq!(revoked.last_4, params.last_4);
 
         fixture.drop_schema().await?;
         Ok(())
