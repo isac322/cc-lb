@@ -26,8 +26,8 @@ use cc_lb_plugin_api::{
 use cc_lb_storage_api::principal::{PrincipalKind, PrincipalRecord};
 use cc_lb_storage_api::types::{KeyStatus, StoredApiKeyRecord};
 use cc_lb_storage_api::upstream::{UpstreamKind as StorageUpstreamKind, UpstreamRecord};
-use cc_lb_storage_api::{RequestEventStore, Storage as StorageTrait};
-use cc_lb_storage_redb::Storage as RedbStorage;
+use cc_lb_storage_api::{BackendKind, MetaStore, RequestEventStore, Storage as StorageTrait};
+use cc_lb_storage_sqlite::SqliteStorage;
 use http::StatusCode;
 use url::Url;
 use uuid::Uuid;
@@ -43,10 +43,7 @@ async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dy
     let choices = Arc::new(Mutex::new(Vec::new()));
     let filter_calls = Arc::new(Mutex::new(Vec::new()));
     let _dir = tempfile::tempdir()?;
-    let storage = Arc::new(RedbStorage::open(
-        &_dir.path().join("lifecycle-terminal.redb"),
-        [18; 32],
-    )?);
+    let storage = Arc::new(sqlite_storage(&_dir, "lifecycle-terminal.sqlite").await?);
     let lifecycle = lifecycle_with_terminal(
         TerminalStrategy::FirstPick,
         vec![Arc::new(KeepFilter {
@@ -93,6 +90,16 @@ async fn first_pick_selects_first_candidate_after_filters() -> Result<(), Box<dy
         Some((Some(second), TerminalStrategy::FirstPick))
     );
     Ok(())
+}
+
+async fn sqlite_storage(
+    dir: &tempfile::TempDir,
+    file_name: &str,
+) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
+    let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
+    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url).await?;
+    storage.initialize(BackendKind::Sqlite).await?;
+    Ok(storage)
 }
 
 #[tokio::test]

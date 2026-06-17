@@ -24,6 +24,7 @@ tokio = { workspace = true, features = ["macros", "rt", "sync", "time", "fs"] }
 tracing.workspace = true
 
 [dev-dependencies]
-cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
+cc-lb-storage-api = { path = "../cc-lb-storage-api" }
+cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 tempfile.workspace = true
 wiremock = "0.6"

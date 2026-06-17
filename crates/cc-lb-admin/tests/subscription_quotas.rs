@@ -5,7 +5,7 @@ use serde_json::json;
 
 #[tokio::test]
 async fn subscription_quota_latest_is_registered_on_v1_and_legacy_paths() {
-    let server = admin_test_common::spawn_admin_server();
+    let server = admin_test_common::spawn_admin_server().await;
     let (status, _, body) = server
         .client
         .post_json(
@@ -29,7 +29,7 @@ async fn subscription_quota_latest_is_registered_on_v1_and_legacy_paths() {
 
 #[tokio::test]
 async fn subscription_quota_series_defaults_missing_upstream_ids_to_all() {
-    let server = admin_test_common::spawn_admin_server();
+    let server = admin_test_common::spawn_admin_server().await;
     let (status, _, _) = server
         .client
         .post_json(
@@ -52,7 +52,7 @@ async fn subscription_quota_series_defaults_missing_upstream_ids_to_all() {
 
 #[tokio::test]
 async fn subscription_quota_analysis_defaults_missing_upstream_ids_to_all() {
-    let server = admin_test_common::spawn_admin_server();
+    let server = admin_test_common::spawn_admin_server().await;
 
     let (status, _, _) = server
         .client

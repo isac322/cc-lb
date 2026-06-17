@@ -9,11 +9,11 @@ use cc_lb_config::{Config, DownstreamAuthMode, NoneModeConfig, NoneModeUpstreamK
 use cc_lb_server::app::build_app_with_storage;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    ManagedKeyStore, PrincipalCreate, PrincipalKind, PrincipalStore, RateLimitKind,
-    Storage as StorageTrait, UpstreamCreate, UpstreamRateLimitObservationRecord,
+    BackendKind, ManagedKeyStore, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore,
+    RateLimitKind, Storage as StorageTrait, UpstreamCreate, UpstreamRateLimitObservationRecord,
     UpstreamRateLimitStateStore, UpstreamStore,
 };
-use cc_lb_storage_redb::{RedbManagedKeyStore, Storage as RedbStorage};
+use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use http_body_util::BodyExt;
 use tokio::net::TcpListener;
@@ -29,8 +29,8 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
     let upstream_server = spawn_upstream().await?;
     let dir = tempfile::tempdir()?;
     let key = [0; 32];
-    let storage_path = dir.path().join("storage.redb");
-    let storage_arc = Arc::new(RedbStorage::open(&storage_path, key)?);
+    let storage_path = dir.path().join("storage.sqlite");
+    let storage_arc = sqlite_storage(&storage_path).await?;
     let upstream = UpstreamStore::create(
         storage_arc.as_ref(),
         UpstreamCreate {
@@ -60,11 +60,10 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
     )
     .await?;
 
-    let managed_store: Arc<dyn ManagedKeyStore> =
-        Arc::new(RedbManagedKeyStore::new(storage_arc.clone()));
+    let managed_store: Arc<dyn ManagedKeyStore> = storage_arc.clone();
     let storage: Arc<dyn StorageTrait> = storage_arc.clone();
     let mut config = Config {
-        storage: cc_lb_config::StorageConfig::Redb { path: storage_path },
+        storage: cc_lb_config::StorageConfig::Sqlite { path: storage_path },
         ..Default::default()
     };
     config.runtime.data_dir = Some(dir.path().to_path_buf());
@@ -123,6 +122,13 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
     );
 
     Ok(())
+}
+
+async fn sqlite_storage(path: &std::path::Path) -> TestResult<Arc<SqliteStorage>> {
+    let database_url = format!("sqlite://{}", path.display());
+    let storage = open_sqlite(&database_url).await?;
+    storage.initialize(BackendKind::Sqlite).await?;
+    Ok(Arc::new(storage))
 }
 
 struct RunningUpstream {

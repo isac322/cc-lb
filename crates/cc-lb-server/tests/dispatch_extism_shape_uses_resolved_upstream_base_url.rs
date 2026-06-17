@@ -54,10 +54,11 @@ use cc_lb_server::SubscriptionQuotaCache;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
-    PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob, WasmRegistryEntryInput,
+    BackendKind, MetaStore, PluginChainEntryInput, PluginRegistryStore, PluginSlot,
+    PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore, WasmBlob,
+    WasmRegistryEntryInput,
 };
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use serde_json::json;
@@ -68,10 +69,18 @@ use uuid::Uuid;
 #[tokio::test]
 async fn extism_shape_plugin_receives_resolved_upstream_base_url_via_envelope() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let storage = Arc::new(
-        Storage::open(&dir.path().join("extism-shape-base-url.redb"), [33; 32])
-            .expect("storage opens"),
+    let database_url = format!(
+        "sqlite://{}",
+        dir.path().join("extism-shape-base-url.sqlite").display()
     );
+    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url)
+        .await
+        .expect("storage opens");
+    storage
+        .initialize(BackendKind::Sqlite)
+        .await
+        .expect("storage initializes");
+    let storage = Arc::new(storage);
 
     let target = UpstreamStore::create(
         storage.as_ref(),

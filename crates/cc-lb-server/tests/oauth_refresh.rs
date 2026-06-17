@@ -24,10 +24,13 @@ use cc_lb_server::refresh::{LazyRefresher, OAuthRefresher};
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh,
 };
-use cc_lb_storage_api::{PrincipalCreate, PrincipalKind, UpstreamCreate, UpstreamStore};
+use cc_lb_storage_api::{
+    AuditStore, BackendKind, MetaStore, PrincipalCreate, PrincipalKind, UpstreamCreate,
+    UpstreamStore,
+};
 
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use http::Request;
 use http::header::{AUTHORIZATION, LOCATION};
@@ -65,8 +68,13 @@ impl Fixture {
     async fn new() -> Self {
         let fake_addr = spawn_fake_anthropic().await;
         let dir = tempfile::tempdir().expect("tempdir");
-        let storage =
-            Arc::new(Storage::open(&dir.path().join("oauth.redb"), [31; 32]).expect("storage"));
+        let database_url = format!("sqlite://{}", dir.path().join("oauth.sqlite").display());
+        let storage = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite(&database_url)
+                .await
+                .expect("storage"),
+        );
+        storage.initialize(BackendKind::Sqlite).await.unwrap();
         let stores = Arc::new(Stores {
             upstreams: storage.clone(),
             principals: storage.clone(),
@@ -513,6 +521,7 @@ async fn audit_redaction_clean_no_token_literals_in_audit_db() {
     let entries = fixture
         .storage
         .query_audit(None, 0, u64::MAX, 100)
+        .await
         .expect("audit query");
     let rendered = entries
         .iter()

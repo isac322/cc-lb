@@ -4,7 +4,8 @@ admin_addr = "127.0.0.1:9090"
 metrics_addr = "127.0.0.1:9091"
 
 [storage]
-redb_path = "/var/lib/cc-lb/store.redb"
+kind = "sqlite"
+path = "/var/lib/cc-lb/store.sqlite"
 oauth_aead_key_env = "CC_LB_MASTER_KEY"
 
 [admin]

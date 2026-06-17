@@ -7,17 +7,18 @@ use cc_lb_core::{ApplyStatus, DynamicView};
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::{
-    PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore,
+    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate,
+    UpstreamStore,
 };
 
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
 
 fn oauth_config() -> AnthropicOAuthConfig {
     AnthropicOAuthConfig::default()
 }
 
-fn stores(storage: Arc<Storage>) -> Stores {
+fn stores(storage: Arc<SqliteStorage>) -> Stores {
     Stores {
         upstreams: storage.clone(),
         principals: storage.clone(),
@@ -31,13 +32,22 @@ fn stores(storage: Arc<Storage>) -> Stores {
     }
 }
 
-fn storage_fixture() -> (tempfile::TempDir, Arc<Storage>) {
+async fn storage_fixture() -> (tempfile::TempDir, Arc<SqliteStorage>) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let storage = Arc::new(Storage::open(&dir.path().join("test.redb"), [7; 32]).expect("storage"));
+    let database_url = format!("sqlite://{}", dir.path().join("test.sqlite").display());
+    let storage = open_sqlite(&database_url).await.expect("storage");
+    storage
+        .initialize(BackendKind::Sqlite)
+        .await
+        .expect("storage initialized");
+    let storage = Arc::new(storage);
     (dir, storage)
 }
 
-async fn create_principal(storage: &Storage, name: &str) -> cc_lb_storage_api::PrincipalRecord {
+async fn create_principal(
+    storage: &SqliteStorage,
+    name: &str,
+) -> cc_lb_storage_api::PrincipalRecord {
     PrincipalStore::create(
         storage,
         PrincipalCreate {
@@ -54,7 +64,7 @@ async fn create_principal(storage: &Storage, name: &str) -> cc_lb_storage_api::P
 }
 
 async fn create_api_key_upstream(
-    storage: &Storage,
+    storage: &SqliteStorage,
     name: &str,
 ) -> cc_lb_storage_api::UpstreamRecord {
     UpstreamStore::create(
@@ -100,7 +110,7 @@ async fn build(
 
 #[tokio::test]
 async fn principals_delete_rebuild_removes_deleted_and_increments_generation() {
-    let (dir, storage) = storage_fixture();
+    let (dir, storage) = storage_fixture().await;
     let stores = stores(storage.clone());
     let runtime = ExtismRuntime::new();
     let principal_a = create_principal(&storage, "principal-a").await;
@@ -135,7 +145,7 @@ async fn principals_delete_rebuild_removes_deleted_and_increments_generation() {
 
 #[tokio::test]
 async fn corrupt_oauth_upstream_is_error_while_other_upstreams_stay_active() {
-    let (dir, storage) = storage_fixture();
+    let (dir, storage) = storage_fixture().await;
     let stores = stores(storage.clone());
     let runtime = ExtismRuntime::new();
     create_principal(&storage, "principal-a").await;

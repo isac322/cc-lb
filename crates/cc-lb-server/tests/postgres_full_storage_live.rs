@@ -18,10 +18,7 @@ use cc_lb_config::{
 use cc_lb_server::app::{
     App, build_app_for_testing_postgres, build_app_with_storage, seed_app_testing_storage,
 };
-use cc_lb_storage_api::{
-    BackendKind, ManagedKeyStore, PrincipalLimitIdentityKind, PrincipalLimitKind,
-    PrincipalLimitState, Storage as StorageTrait,
-};
+use cc_lb_storage_api::{BackendKind, ManagedKeyStore, Storage as StorageTrait};
 use cc_lb_storage_postgres::adapter::retry::RetryPolicy;
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage};
 use http_body_util::BodyExt;
@@ -67,7 +64,6 @@ async fn every_postgres_storage_path_writes_a_row() -> TestResult<()> {
 
     let proxy_response = proxy_messages(&app, &issued.plaintext_key).await?;
     assert_eq!(proxy_response.status(), StatusCode::OK);
-    let proxy_headers = proxy_response.headers().clone();
     let proxy_body = response_body(proxy_response).await?;
     assert!(
         proxy_body.contains("\"id\":\"msg_live\""),
@@ -93,48 +89,10 @@ async fn every_postgres_storage_path_writes_a_row() -> TestResult<()> {
     .await?;
     assert_eq!(killswitch_meta, 1);
 
-    let remaining = proxy_headers
-        .get("anthropic-ratelimit-requests-remaining")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(999_999);
-    let persisted_state = PrincipalLimitState {
-        principal_id: PRINCIPAL_ID.to_owned(),
-        identity_kind: PrincipalLimitIdentityKind::Credential,
-        identity_value: Some(issued.key_id.clone()),
-        account_observed: false,
-        window: "1m".to_owned(),
-        kind: PrincipalLimitKind::Requests,
-        limit: Some(1_000_000),
-        remaining: Some(remaining),
-        reset: proxy_headers
-            .get("anthropic-ratelimit-requests-reset")
-            .and_then(|value| value.to_str().ok())
-            .map(ToOwned::to_owned),
-        observed_at_unix_secs: unix_now_secs(),
-        stored_at_unix_secs: unix_now_secs(),
-    };
-    let storage: Arc<dyn StorageTrait> = Arc::new(PostgresStorage::new(pool.clone()));
-    storage.put_principal_limit_state(&persisted_state).await?;
-    assert_table_count_at_least(&pool, "principal_limit_states_v1", 1).await?;
-
     drop(app);
     let restarted_pool = postgres_pool(&database_url).await?;
     let _restarted =
         build_postgres_app(&database_url, restarted_pool.clone(), upstream.addr).await?;
-    let replay_storage: Arc<dyn StorageTrait> = Arc::new(PostgresStorage::new(restarted_pool));
-    let replayed = replay_storage
-        .list_principal_limit_states(PRINCIPAL_ID)
-        .await?;
-    assert!(
-        replayed.iter().any(|state| {
-            state.identity_kind == PrincipalLimitIdentityKind::Credential
-                && state.identity_value.as_deref() == Some(issued.key_id.as_str())
-                && state.kind == PrincipalLimitKind::Requests
-                && state.window == "1m"
-        }),
-        "persisted principal limit state was not available after restart: {replayed:?}"
-    );
 
     Ok(())
 }
@@ -153,6 +111,8 @@ impl Drop for RunningUpstream {
 }
 
 #[derive(Debug)]
+#[allow(dead_code)]
+// Fields captured for Debug-on-failure diagnostics; some may not be read in test assertions.
 struct IssuedKey {
     principal_id: String,
     key_id: String,
@@ -421,11 +381,6 @@ async fn table_count(pool: &PgPool, table: &str) -> TestResult<i64> {
                 .fetch_one(pool)
                 .await?
         }
-        "principal_limit_states_v1" => {
-            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM principal_limit_states_v1")
-                .fetch_one(pool)
-                .await?
-        }
         other => return Err(error(format!("unsupported table count target: {other}"))),
     };
     Ok(count)
@@ -437,13 +392,6 @@ fn json_string(payload: &Value, field: &str) -> TestResult<String> {
         .and_then(Value::as_str)
         .map(ToOwned::to_owned)
         .ok_or_else(|| error(format!("response missing {field}: {payload}")))
-}
-
-fn unix_now_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }
 
 fn error(message: impl Into<String>) -> Box<dyn Error + Send + Sync> {

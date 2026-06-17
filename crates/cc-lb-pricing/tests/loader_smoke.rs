@@ -2,7 +2,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use cc_lb_pricing::{CatalogStatus, LiteLlmLoader, PriceCatalog};
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_api::{BackendKind, MetaStore, PriceCatalogCache};
+use cc_lb_storage_sqlite::SqliteStorage;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -26,7 +27,7 @@ async fn fetch_install_persist() -> Result<(), Box<dyn std::error::Error>> {
         .await;
 
     let dir = tempfile::tempdir()?;
-    let storage = Arc::new(Storage::open(&dir.path().join("storage.redb"), [13; 32])?);
+    let storage = Arc::new(sqlite_storage(&dir, "storage-13.sqlite").await?);
     let catalog = PriceCatalog::new_empty();
     let loader = LiteLlmLoader::new(
         catalog.clone(),
@@ -40,15 +41,17 @@ async fn fetch_install_persist() -> Result<(), Box<dyn std::error::Error>> {
     assert!(LiteLlmLoader::wait_for_first_snapshot(&catalog, Duration::from_secs(5)).await);
     assert!(catalog.lookup("claude-3-5-sonnet-20241022", None).is_some());
     // NOTE [Priority-3 footgun]: wait_for_first_snapshot fires when the in-memory
-    // PriceCatalog is populated, but the redb write happens on a separate
+    // PriceCatalog is populated, but the storage write happens on a separate
     // background hop. Under cargo-llvm-cov instrumentation the persist lags by
     // up to a few hundred ms; poll the disk snapshot for up to 5 s real time
     // before failing instead of asserting once and racing the writer.
     let persist_deadline = std::time::Instant::now() + Duration::from_secs(5);
-    while storage.get_price_snapshot()?.is_none() && std::time::Instant::now() < persist_deadline {
+    while storage.get_price_snapshot().await?.is_none()
+        && std::time::Instant::now() < persist_deadline
+    {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(storage.get_price_snapshot()?.is_some());
+    assert!(storage.get_price_snapshot().await?.is_some());
     server.verify().await;
 
     handle.abort();
@@ -69,7 +72,7 @@ async fn cold_start_3_retry_fail_with_disk_cache() -> Result<(), Box<dyn std::er
     let dir = tempfile::tempdir()?;
     let cache_path = dir.path().join("litellm-cache.json");
     tokio::fs::write(&cache_path, SAMPLE_LITELLM_JSON).await?;
-    let storage = Arc::new(Storage::open(&dir.path().join("storage.redb"), [17; 32])?);
+    let storage = Arc::new(sqlite_storage(&dir, "storage-17.sqlite").await?);
     let catalog = PriceCatalog::new_empty();
     let loader = LiteLlmLoader::new(
         catalog.clone(),
@@ -100,7 +103,7 @@ async fn cold_start_3_retry_fail_no_disk_cache() -> Result<(), Box<dyn std::erro
         .await;
 
     let dir = tempfile::tempdir()?;
-    let storage = Arc::new(Storage::open(&dir.path().join("storage.redb"), [19; 32])?);
+    let storage = Arc::new(sqlite_storage(&dir, "storage-19.sqlite").await?);
     let catalog = PriceCatalog::new_empty();
     let loader = LiteLlmLoader::new(
         catalog.clone(),
@@ -118,4 +121,14 @@ async fn cold_start_3_retry_fail_no_disk_cache() -> Result<(), Box<dyn std::erro
     handle.abort();
     let _ = handle.await;
     Ok(())
+}
+
+async fn sqlite_storage(
+    dir: &tempfile::TempDir,
+    file_name: &str,
+) -> Result<SqliteStorage, Box<dyn std::error::Error>> {
+    let database_url = format!("sqlite://{}", dir.path().join(file_name).display());
+    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url).await?;
+    storage.initialize(BackendKind::Sqlite).await?;
+    Ok(storage)
 }

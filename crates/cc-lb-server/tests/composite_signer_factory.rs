@@ -12,8 +12,8 @@ use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_signer_anthropic_oauth::AnthropicOAuthSignerFactory;
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_api::{UpstreamCreate, UpstreamStore};
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_api::{BackendKind, MetaStore, UpstreamCreate, UpstreamStore};
+use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use tokio::net::TcpListener;
@@ -43,8 +43,13 @@ impl Fixture {
     async fn new() -> Self {
         let fake_addr = spawn_fake_anthropic().await;
         let dir = tempfile::tempdir().expect("tempdir");
-        let storage =
-            Arc::new(Storage::open(&dir.path().join("composite.redb"), [32; 32]).expect("storage"));
+        let database_url = format!("sqlite://{}", dir.path().join("composite.sqlite").display());
+        let storage = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite(&database_url)
+                .await
+                .expect("storage"),
+        );
+        storage.initialize(BackendKind::Sqlite).await.unwrap();
         let stores = Arc::new(Stores {
             upstreams: storage.clone(),
             principals: storage.clone(),

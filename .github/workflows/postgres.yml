@@ -73,7 +73,7 @@ jobs:
 
       - name: Run Postgres storage conformance tests
         run: |
-          cargo test -p cc-lb-storage-conformance --features postgres,redb \
+          cargo test -p cc-lb-storage-conformance --features postgres \
             --test storage_roundtrips_postgres \
             --test managed_keys_postgres \
             --test managed_keys_cross_backend \
@@ -81,7 +81,7 @@ jobs:
 
       - name: Run cc-lb-server Postgres feature and integration tests
         run: |
-          cargo test -p cc-lb-server --features postgres,redb \
+          cargo test -p cc-lb-server --features postgres \
             --test bad_postgres_url_fatal \
             --test backend_kind_mismatch_fatal \
             --test restart_required_matrix \

@@ -2,13 +2,13 @@ mod config_admin_common;
 
 use axum::http::StatusCode;
 use cc_lb_config::Config;
-use cc_lb_storage_api::RequestEvent;
+use cc_lb_storage_api::{RequestEvent, RequestEventStore};
 use config_admin_common::{app, authed_bytes, authed_json, temp_storage, test_state};
 use uuid::Uuid;
 
 #[tokio::test]
 async fn events_recent_returns_empty_with_no_traffic() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
     let (status, _, body, _) = authed_json(app(state), "GET", "/admin/events/recent", None).await;
@@ -20,7 +20,7 @@ async fn events_recent_returns_empty_with_no_traffic() {
 
 #[tokio::test]
 async fn events_recent_accepts_limit_param() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
     let (status, _, body, _) =
@@ -31,7 +31,7 @@ async fn events_recent_accepts_limit_param() {
 
 #[tokio::test]
 async fn events_recent_rejects_invalid_limit() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
     let (status, _, _) =
         authed_bytes(app(state), "GET", "/admin/events/recent?limit=abc", None).await;
@@ -40,7 +40,7 @@ async fn events_recent_rejects_invalid_limit() {
 
 #[tokio::test]
 async fn events_recent_filters_by_upstream_id() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let upstream_id = Uuid::from_u128(1);
     let other_upstream_id = Uuid::from_u128(2);
 
@@ -51,6 +51,7 @@ async fn events_recent_filters_by_upstream_id() {
             upstream_id,
             "target-upstream",
         ))
+        .await
         .unwrap();
     storage
         .append_request_event(&request_event(
@@ -59,6 +60,7 @@ async fn events_recent_filters_by_upstream_id() {
             other_upstream_id,
             "other-upstream",
         ))
+        .await
         .unwrap();
 
     let state = test_state(Config::default(), Some(storage));

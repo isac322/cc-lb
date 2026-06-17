@@ -57,7 +57,7 @@ fn retryable_classification_matches_storage_error_intent() {
             message: "invariant failed".to_owned(),
         },
         StorageError::BackendKindMismatch {
-            stored: BackendKind::Redb,
+            stored: BackendKind::Sqlite,
             configured: BackendKind::Postgres,
         },
         StorageError::Serialization(serialization_error),
@@ -71,19 +71,19 @@ fn retryable_classification_matches_storage_error_intent() {
 
 #[test]
 fn backend_kind_serde_uses_lowercase_wire_format_and_as_str() {
-    assert_eq!(BackendKind::Redb.as_str(), "redb");
+    assert_eq!(BackendKind::Sqlite.as_str(), "sqlite");
     assert_eq!(BackendKind::Postgres.as_str(), "postgres");
     assert_eq!(
-        serde_json::to_string(&BackendKind::Redb).unwrap(),
-        "\"redb\""
+        serde_json::to_string(&BackendKind::Sqlite).unwrap(),
+        "\"sqlite\""
     );
     assert_eq!(
         serde_json::to_string(&BackendKind::Postgres).unwrap(),
         "\"postgres\""
     );
     assert_eq!(
-        serde_json::from_str::<BackendKind>("\"redb\"").unwrap(),
-        BackendKind::Redb
+        serde_json::from_str::<BackendKind>("\"sqlite\"").unwrap(),
+        BackendKind::Sqlite
     );
     assert_eq!(
         serde_json::from_str::<BackendKind>("\"postgres\"").unwrap(),
@@ -195,7 +195,7 @@ listen = '127.0.0.1:8080'"
     });
     assert_json_roundtrip(StoredHistoryEntry {
         config_toml: "[storage]
-backend = 'redb'"
+backend = 'sqlite'"
             .to_owned(),
         applied_at_unix_secs: 1_716_000_006,
         summary,

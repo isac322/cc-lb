@@ -26,10 +26,11 @@ use cc_lb_plugin_api::SignedRequest;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    PrincipalCreate, PrincipalKind, PrincipalStore, Storage as StorageTrait, UpstreamCreate,
-    UpstreamRateLimitObservationRecord, UpstreamRateLimitStateStore, UpstreamStore,
+    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore,
+    Storage as StorageTrait, UpstreamCreate, UpstreamRateLimitObservationRecord,
+    UpstreamRateLimitStateStore, UpstreamStore,
 };
-use cc_lb_storage_redb::{RedbManagedKeyStore, Storage as RedbStorage};
+use cc_lb_storage_sqlite::SqliteStorage;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tokio::task::JoinHandle;
@@ -69,7 +70,7 @@ async fn reference_round_robin_distribution() -> TestResult<()> {
 struct Harness {
     admin: axum::Router,
     lifecycle: Arc<Lifecycle>,
-    storage: Arc<RedbStorage>,
+    storage: Arc<SqliteStorage>,
     principal_id: Uuid,
     upstreams: Vec<SeededUpstream>,
     rate_limit_writer: JoinHandle<()>,
@@ -79,9 +80,12 @@ impl Harness {
     async fn new() -> TestResult<Self> {
         let dir = tempfile::tempdir()?;
         let data_dir = dir.path().join("data");
-        let storage_path = dir.path().join("round-robin.redb");
         let key = [26; 32];
-        let storage = Arc::new(RedbStorage::open(&storage_path, key)?);
+        let storage_path = dir.path().join("round-robin.sqlite");
+        let database_url = format!("sqlite://{}", storage_path.display());
+        let storage = cc_lb_storage_sqlite::open_sqlite(&database_url).await?;
+        storage.initialize(BackendKind::Sqlite).await?;
+        let storage = Arc::new(storage);
         let aead = Arc::new(AeadService::from_master_key(key));
         let principal = PrincipalStore::create(
             storage.as_ref(),
@@ -122,9 +126,7 @@ impl Harness {
         )
         .await?;
         let dynamic_view = Arc::new(DynamicViewHolder::new(initial_view));
-        let key_store = Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(
-            storage.clone(),
-        ))));
+        let key_store = Arc::new(KeyStore::new(storage.clone()));
         let authn = Arc::new(BuiltinAuthn::new(
             DownstreamAuthMode::ApiKey,
             None,
@@ -518,7 +520,7 @@ async fn rebuild_test_view(
 }
 
 async fn seed_oauth_upstreams(
-    storage: &RedbStorage,
+    storage: &SqliteStorage,
     aead: &AeadService,
 ) -> TestResult<Vec<SeededUpstream>> {
     let mut upstreams = Vec::new();

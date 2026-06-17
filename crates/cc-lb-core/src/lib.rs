@@ -35,6 +35,8 @@ pub mod instrumented_connector;
 #[cfg(not(loom))]
 pub mod lifecycle;
 #[cfg(not(loom))]
+pub mod limit_state_writer;
+#[cfg(not(loom))]
 pub mod model_resolution;
 #[cfg(not(loom))]
 pub mod poll_schedule_estimator;
@@ -106,6 +108,10 @@ pub use lifecycle::{
     LimitSubjectProvider, NoopSubscriptionQuotaCache, ProxyError, ReplicaIdentity, RequestKind,
     SubscriptionQuotaCacheLike, UpstreamDispatch, build_candidates, observe_rate_limits,
     observe_subscription_quota_headers, parse_request_cache_breakpoints,
+};
+#[cfg(not(loom))]
+pub use limit_state_writer::{
+    PrincipalLimitStateEnqueueError, PrincipalLimitStateSink, start_principal_limit_state_writer,
 };
 #[cfg(not(loom))]
 pub use poll_schedule_estimator::{EstimatorConfig, PollScheduleEstimator, ThrottleObservation};

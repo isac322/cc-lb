@@ -4,11 +4,6 @@ use uuid::Uuid;
 
 use crate::StorageResult;
 
-/// CROSS-BACKEND WIRE INVARIANT: `as_str()` values are persisted as-is into both
-/// postgres TEXT columns (and CHECK constraints) and the redb binary key
-/// window-code mapping. Changing any string requires a data migration plus
-/// redb table rename. The `code()` byte is the redb key encoding and MUST be
-/// stable across releases for the same logical window.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum SubscriptionQuotaWindow {
     #[serde(rename = "5h")]
@@ -50,7 +45,6 @@ impl SubscriptionQuotaWindow {
         })
     }
 
-    /// Stable redb-key byte. NEVER reuse a value for a different window.
     pub fn code(self) -> u8 {
         match self {
             Self::FiveHour => 1,

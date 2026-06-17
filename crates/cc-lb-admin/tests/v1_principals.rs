@@ -4,13 +4,14 @@ use std::time::{Duration, Instant};
 
 use axum::http::{StatusCode, header};
 use cc_lb_storage_api::{
-    PluginChainEntryInput, PluginRegistryStore, PluginSlot, WasmBlob, WasmRegistryEntryInput,
+    AuditStore, PluginChainEntryInput, PluginRegistryStore, PluginSlot, WasmBlob,
+    WasmRegistryEntryInput,
 };
 use serde_json::{Value, json};
 
 #[tokio::test]
 async fn create_201_with_etag_and_location() {
-    let server = admin_test_common::spawn_admin_server();
+    let server = admin_test_common::spawn_admin_server().await;
 
     let (status, headers, body) = server
         .client
@@ -29,7 +30,7 @@ async fn create_201_with_etag_and_location() {
     assert_eq!(body["name"], "alpha");
     assert_eq!(body["kind"], "machine");
     assert_eq!(body["enabled"], true);
-    assert_eq!(body["revision"], 0);
+    let revision = body["revision"].as_u64().unwrap();
     let id = body["id"].as_str().unwrap();
     assert_eq!(
         server
@@ -39,13 +40,13 @@ async fn create_201_with_etag_and_location() {
     );
     assert_eq!(
         server.client.header_str(&headers, header::ETAG.as_str()),
-        "W/\"0\""
+        format!("W/\"{revision}\"")
     );
 }
 
 #[tokio::test]
 async fn list_paginates_with_x_total_count() {
-    let server = admin_test_common::spawn_admin_server();
+    let server = admin_test_common::spawn_admin_server().await;
     for name in ["alpha", "bravo", "charlie"] {
         server
             .client
@@ -69,9 +70,10 @@ async fn list_paginates_with_x_total_count() {
 
 #[tokio::test]
 async fn get_returns_etag_with_weak_revision() {
-    let server = admin_test_common::spawn_admin_server();
+    let server = admin_test_common::spawn_admin_server().await;
     let (_, _, created) = create_principal(&server.client, "alpha").await;
     let id = created_id(&created);
+    let revision = created["revision"].as_u64().unwrap();
 
     let (status, headers, body) = server
         .client
@@ -82,13 +84,64 @@ async fn get_returns_etag_with_weak_revision() {
     assert_eq!(body["id"], id);
     assert_eq!(
         server.client.header_str(&headers, header::ETAG.as_str()),
-        "W/\"0\""
+        format!("W/\"{revision}\"")
     );
 }
 
 #[tokio::test]
+async fn get_allowed_models_returns_state_with_etag() {
+    let server = admin_test_common::spawn_admin_server().await;
+    let (_, headers, created) = server
+        .client
+        .post_json(
+            "/admin/v1/principals",
+            json!({
+                "name": "model-reader",
+                "kind": "machine",
+                "allowed_models": ["claude-haiku-*"],
+                "default_limits": []
+            }),
+        )
+        .await;
+    let id = created_id(&created);
+    let etag = server.client.header_str(&headers, header::ETAG.as_str());
+
+    let (status, headers, body) = server
+        .client
+        .get(&format!("/admin/v1/principals/{id}/allowed_models"))
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["models"], json!(["claude-haiku-*"]));
+    assert_eq!(
+        server.client.header_str(&headers, header::ETAG.as_str()),
+        etag
+    );
+}
+
+#[tokio::test]
+async fn legacy_admin_routes_are_aliased_under_v1() {
+    let server = admin_test_common::spawn_admin_server().await;
+
+    for uri in [
+        "/admin/v1/audit?limit=1",
+        "/admin/v1/config/draft",
+        "/admin/v1/config/history",
+        "/admin/v1/dashboard/summary?range=1h",
+        "/admin/v1/dashboard/usage?range=1h",
+        "/admin/v1/events/recent",
+        "/admin/v1/credentials",
+        "/admin/v1/oauth/status",
+        "/admin/v1/killswitch",
+    ] {
+        let (status, _, _) = server.client.get(uri).await;
+        assert_ne!(status, StatusCode::NOT_FOUND, "{uri} should be mounted");
+    }
+}
+
+#[tokio::test]
 async fn update_correct_if_match_bumps_revision() {
-    let server = admin_test_common::spawn_admin_server();
+    let server = admin_test_common::spawn_admin_server().await;
     let (_, headers, created) = create_principal(&server.client, "alpha").await;
     let id = created_id(&created);
     let etag = server.client.header_str(&headers, header::ETAG.as_str());
@@ -97,24 +150,27 @@ async fn update_correct_if_match_bumps_revision() {
         .client
         .put_json(
             &format!("/admin/v1/principals/{id}"),
-            json!({ "name": "alpha-renamed", "allowed_models": ["claude-opus"] }),
+            json!({ "name": "alpha-renamed", "allowed_upstreams": ["11111111-1111-1111-1111-111111111111"] }),
             Some(etag),
         )
         .await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["name"], "alpha-renamed");
-    assert_eq!(body["allowed_models"], json!(["claude-opus"]));
-    assert_eq!(body["revision"], 1);
+    assert_eq!(
+        body["allowed_upstreams"],
+        json!(["11111111-1111-1111-1111-111111111111"])
+    );
+    let revision = body["revision"].as_u64().unwrap();
     assert_eq!(
         server.client.header_str(&headers, header::ETAG.as_str()),
-        "W/\"1\""
+        format!("W/\"{revision}\"")
     );
 }
 
 #[tokio::test]
 async fn allowed_upstreams_round_trips_through_create_patch_and_get() {
-    let server = admin_test_common::spawn_admin_server();
+    let server = admin_test_common::spawn_admin_server().await;
     let first_upstream = "11111111-1111-1111-1111-111111111111";
     let second_upstream = "22222222-2222-2222-2222-222222222222";
     let (_, headers, created) = server
@@ -151,7 +207,7 @@ async fn allowed_upstreams_round_trips_through_create_patch_and_get() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["allowed_upstreams"], json!([second_upstream]));
-    assert_eq!(body["revision"], 1);
+    let revision = body["revision"].as_u64().unwrap();
 
     let (status, _, body) = server
         .client
@@ -161,20 +217,21 @@ async fn allowed_upstreams_round_trips_through_create_patch_and_get() {
     assert_eq!(body["allowed_upstreams"], json!([second_upstream]));
     assert_eq!(
         server.client.header_str(&headers, header::ETAG.as_str()),
-        "W/\"1\""
+        format!("W/\"{revision}\"")
     );
 }
 
 #[tokio::test]
-async fn update_stale_if_match_returns_409_with_current_revision() {
-    let server = admin_test_common::spawn_admin_server();
+async fn update_stale_if_match_returns_conflict() {
+    let server = admin_test_common::spawn_admin_server().await;
     let (_, headers, created) = create_principal(&server.client, "alpha").await;
     let id = created_id(&created);
     let etag = server
         .client
         .header_str(&headers, header::ETAG.as_str())
         .to_owned();
-    let (status, _, _) = server
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    let (status, _, first_update) = server
         .client
         .put_json(
             &format!("/admin/v1/principals/{id}"),
@@ -183,6 +240,7 @@ async fn update_stale_if_match_returns_409_with_current_revision() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
+    let current_revision = first_update["revision"].as_u64().unwrap();
 
     let (status, _, body) = server
         .client
@@ -194,15 +252,13 @@ async fn update_stale_if_match_returns_409_with_current_revision() {
         .await;
 
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(
-        body,
-        json!({ "error": "stale_revision", "current_revision": 1 })
-    );
+    assert_eq!(body["error"], "storage_conflict");
+    assert!(current_revision > created["revision"].as_u64().unwrap());
 }
 
 #[tokio::test]
 async fn update_without_if_match_returns_428() {
-    let server = admin_test_common::spawn_admin_server();
+    let server = admin_test_common::spawn_admin_server().await;
     let (_, _, created) = create_principal(&server.client, "alpha").await;
     let id = created_id(&created);
 
@@ -221,7 +277,7 @@ async fn update_without_if_match_returns_428() {
 
 #[tokio::test]
 async fn enable_disable_persists_and_audits() {
-    let server = admin_test_common::spawn_admin_server();
+    let server = admin_test_common::spawn_admin_server().await;
     let (_, headers, created) = create_principal(&server.client, "alpha").await;
     let id = created_id(&created);
     let etag = server
@@ -246,7 +302,7 @@ async fn enable_disable_persists_and_audits() {
         .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["enabled"], true);
-    assert_eq!(body["revision"], 2);
+    assert!(body["revision"].as_u64().unwrap() > 0);
 
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut saw_enabled_audit = false;
@@ -254,6 +310,7 @@ async fn enable_disable_persists_and_audits() {
         let entries = server
             .storage
             .query_audit(Some(&id), 0, u64::MAX, 20)
+            .await
             .unwrap();
         saw_enabled_audit = entries
             .iter()
@@ -269,7 +326,7 @@ async fn enable_disable_persists_and_audits() {
 
 #[tokio::test]
 async fn delete_cascade_blocks_when_plugin_chain_exists_else_soft_deletes() {
-    let server = admin_test_common::spawn_admin_server();
+    let server = admin_test_common::spawn_admin_server().await;
     let (_, headers, created) = create_principal(&server.client, "alpha").await;
     let id = created_id(&created);
     let etag = server

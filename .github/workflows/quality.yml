@@ -86,6 +86,8 @@ jobs:
             --exclude cc-lb-loadgen \
             --exclude cc-lb-plugin-conformance \
             --exclude cc-lb-plugin-lifecycle-tests \
+            --exclude plugin-handshake-spike \
+            --exclude plugin-handshake-spike-host-check \
             --exclude plugin-api-key \
             --exclude plugin-oauth-anthropic-pro \
             --exclude plugin-internal-key-mapping \
@@ -113,7 +115,7 @@ jobs:
           cargo llvm-cov report --package cc-lb-signer-anthropic-key  --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov report --package cc-lb-signer-anthropic-oauth --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
           cargo llvm-cov report --package cc-lb-server                --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
-          cargo llvm-cov report --package cc-lb-storage-redb          --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
+          cargo llvm-cov report --package cc-lb-storage-sqlite        --fail-under-lines 60 --ignore-filename-regex '^(tests/|fuzz/|examples/|third_party/|tests/fixtures/)'
 
       - name: Show sccache stats
         if: always()

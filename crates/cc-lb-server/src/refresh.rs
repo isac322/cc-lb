@@ -569,13 +569,15 @@ fn now_unix_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use cc_lb_storage_api::upstream::UpstreamKind;
-    use cc_lb_storage_api::{UpstreamCreate, UpstreamStore};
-    use cc_lb_storage_redb::Storage;
+    use cc_lb_storage_api::{BackendKind, MetaStore, UpstreamCreate, UpstreamStore};
     use uuid::Uuid;
 
     #[tokio::test]
     async fn release_lease_on_failure_clears_refresh_lease() {
-        let storage = Storage::open_in_memory([41; 32]).expect("storage opens");
+        let storage = cc_lb_storage_sqlite::open_sqlite("sqlite::memory:")
+            .await
+            .expect("storage opens");
+        storage.initialize(BackendKind::Sqlite).await.unwrap();
         let record = storage
             .create(UpstreamCreate {
                 name: "failure-clear".to_owned(),

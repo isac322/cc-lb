@@ -10,7 +10,7 @@ use clap::{Parser, ValueEnum};
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 pub enum Backend {
-    Redb,
+    Sqlite,
     Postgres,
 }
 
@@ -21,7 +21,7 @@ pub struct Args {
     pub backend: Backend,
 
     #[arg(long, value_name = "PATH")]
-    pub redb_path: Option<PathBuf>,
+    pub sqlite_path: Option<PathBuf>,
 
     #[arg(long, value_name = "URL")]
     pub postgres_url: Option<String>,
@@ -75,15 +75,15 @@ async fn main() {
     let args = Args::parse();
 
     let config = match args.backend {
-        Backend::Redb => {
-            let path = match args.redb_path {
+        Backend::Sqlite => {
+            let path = match args.sqlite_path {
                 Some(p) => p,
                 None => {
-                    eprintln!("Error: --redb-path is required when --backend is redb");
+                    eprintln!("Error: --sqlite-path is required when --backend is sqlite");
                     std::process::exit(1);
                 }
             };
-            StorageConfig::Redb { path }
+            StorageConfig::Sqlite { path }
         }
         Backend::Postgres => {
             let url = match args.postgres_url {

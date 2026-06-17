@@ -26,6 +26,11 @@ struct AuditInsertRow<'a> {
     output_tokens: i64,
     duration_ms: i64,
     agent_label: Option<&'a str>,
+    api_key_id: Option<&'a str>,
+    cost_usd_micros: Option<i64>,
+    limit_violation: Option<&'a str>,
+    admin_action: Option<&'a str>,
+    actor: Option<&'a str>,
     kind: Option<&'a str>,
     payload: Option<Vec<u8>>,
 }
@@ -36,7 +41,7 @@ impl AuditStore for PostgresStorage {
         let payload = entry.payload.as_ref().map(serde_json::to_vec).transpose()?;
 
         sqlx::query(
-            "INSERT INTO audit_log_v1 (ts, request_id, principal_id, route, upstream, model, status,              input_tokens, output_tokens, duration_ms, agent_label, kind, payload)              VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+            "INSERT INTO audit_log_v1 (ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, kind, payload) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)",
         )
         .bind(unix_secs_to_datetime(entry.ts, "audit ts")?)
         .bind(&entry.request_id)
@@ -49,6 +54,16 @@ impl AuditStore for PostgresStorage {
         .bind(u64_to_i64(entry.output_tokens.unwrap_or(0), "audit output_tokens")?)
         .bind(u64_to_i64(entry.duration_ms, "audit duration_ms")?)
         .bind(entry.agent_label.as_deref())
+        .bind(entry.api_key_id.as_deref())
+        .bind(
+            entry
+                .cost_usd_micros
+                .map(|value| u64_to_i64(value, "audit cost_usd_micros"))
+                .transpose()?,
+        )
+        .bind(entry.limit_violation.as_deref())
+        .bind(entry.admin_action.as_deref())
+        .bind(entry.actor.as_deref())
         .bind(entry.kind.as_deref())
         .bind(payload)
         .execute(&self.pool)
@@ -69,7 +84,7 @@ impl AuditStore for PostgresStorage {
             .collect::<StorageResult<Vec<_>>>()?;
 
         let mut query_builder = QueryBuilder::<Postgres>::new(
-            "INSERT INTO audit_log_v1 (ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, kind, payload) ",
+            "INSERT INTO audit_log_v1 (ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, kind, payload) ",
         );
         query_builder.push_values(rows.iter(), |mut values, row| {
             values
@@ -84,6 +99,11 @@ impl AuditStore for PostgresStorage {
                 .push_bind(row.output_tokens)
                 .push_bind(row.duration_ms)
                 .push_bind(row.agent_label)
+                .push_bind(row.api_key_id)
+                .push_bind(row.cost_usd_micros)
+                .push_bind(row.limit_violation)
+                .push_bind(row.admin_action)
+                .push_bind(row.actor)
                 .push_bind(row.kind)
                 .push_bind(row.payload.as_deref());
         });
@@ -113,7 +133,7 @@ impl AuditStore for PostgresStorage {
         let until = unix_secs_to_datetime_upper(until, "audit until")?;
 
         let rows = sqlx::query(
-            "SELECT ts, request_id, principal_id, route, upstream, model, status,              input_tokens, output_tokens, duration_ms, agent_label, kind, payload              FROM audit_log_v1              WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2)              AND ($3::text IS NULL OR principal_id = $3)              ORDER BY seq ASC LIMIT $4",
+            "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, limit_violation, admin_action, actor, kind, payload FROM audit_log_v1 WHERE ts >= $1 AND ($2::timestamptz IS NULL OR ts <= $2) AND ($3::text IS NULL OR principal_id = $3) ORDER BY seq ASC LIMIT $4",
         )
         .bind(since)
         .bind(until)
@@ -171,6 +191,14 @@ fn audit_insert_row(entry: &AuditEntry) -> StorageResult<AuditInsertRow<'_>> {
         output_tokens: u64_to_i64(entry.output_tokens.unwrap_or(0), "audit output_tokens")?,
         duration_ms: u64_to_i64(entry.duration_ms, "audit duration_ms")?,
         agent_label: entry.agent_label.as_deref(),
+        api_key_id: entry.api_key_id.as_deref(),
+        cost_usd_micros: entry
+            .cost_usd_micros
+            .map(|value| u64_to_i64(value, "audit cost_usd_micros"))
+            .transpose()?,
+        limit_violation: entry.limit_violation.as_deref(),
+        admin_action: entry.admin_action.as_deref(),
+        actor: entry.actor.as_deref(),
         kind: entry.kind.as_deref(),
         payload: entry.payload.as_ref().map(serde_json::to_vec).transpose()?,
     })
@@ -210,11 +238,15 @@ fn row_to_audit_entry(row: PgRow) -> StorageResult<AuditEntry> {
             "audit duration_ms",
         )?,
         agent_label: row.try_get("agent_label").map_err(map_sqlx_error)?,
-        api_key_id: None,
-        cost_usd_micros: None,
-        limit_violation: None,
-        admin_action: None,
-        actor: None,
+        api_key_id: row.try_get("api_key_id").map_err(map_sqlx_error)?,
+        cost_usd_micros: row
+            .try_get::<Option<i64>, _>("cost_usd_micros")
+            .map_err(map_sqlx_error)?
+            .map(|value| i64_to_u64(value, "audit cost_usd_micros"))
+            .transpose()?,
+        limit_violation: row.try_get("limit_violation").map_err(map_sqlx_error)?,
+        admin_action: row.try_get("admin_action").map_err(map_sqlx_error)?,
+        actor: row.try_get("actor").map_err(map_sqlx_error)?,
         kind: row.try_get("kind").map_err(map_sqlx_error)?,
         payload,
     })

@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn reorder_chain_revalidates_slot_drift() {
-    let server = admin_test_common::spawn_admin_server();
+    let server = admin_test_common::spawn_admin_server().await;
     let principal_id = seed_principal(&server.storage, "principal-reorder-slot-drift").await;
     let registry = seed_registry_with_slots(
         &server.storage,
@@ -59,7 +59,7 @@ async fn reorder_chain_revalidates_slot_drift() {
 
 #[tokio::test]
 async fn rebalance_chain_revalidates_slot_drift() {
-    let server = admin_test_common::spawn_admin_server();
+    let server = admin_test_common::spawn_admin_server().await;
     let principal_id = seed_principal(&server.storage, "principal-rebalance-slot-drift").await;
     let registry = seed_registry_with_slots(
         &server.storage,
@@ -105,7 +105,7 @@ async fn rebalance_chain_revalidates_slot_drift() {
     );
 }
 
-async fn seed_principal(storage: &cc_lb_storage_redb::Storage, name: &str) -> Uuid {
+async fn seed_principal(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &str) -> Uuid {
     storage
         .create(
             PrincipalCreate {
@@ -123,7 +123,7 @@ async fn seed_principal(storage: &cc_lb_storage_redb::Storage, name: &str) -> Uu
 }
 
 async fn seed_registry_with_slots(
-    storage: &cc_lb_storage_redb::Storage,
+    storage: &cc_lb_storage_sqlite::SqliteStorage,
     seed: u8,
     name: &str,
     slots: Vec<PluginSlot>,
@@ -152,7 +152,7 @@ async fn seed_registry_with_slots(
 }
 
 async fn seed_chain_with_slot(
-    storage: &cc_lb_storage_redb::Storage,
+    storage: &cc_lb_storage_sqlite::SqliteStorage,
     principal_id: Uuid,
     slot: PluginSlot,
     wasm_registry_id: Uuid,

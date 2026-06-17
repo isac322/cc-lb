@@ -1,0 +1,73 @@
+CREATE TABLE IF NOT EXISTS audit_entries_v1 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts INTEGER NOT NULL,
+    request_id TEXT NOT NULL,
+    principal_id TEXT NOT NULL,
+    route TEXT NOT NULL,
+    upstream TEXT NOT NULL,
+    model TEXT,
+    status INTEGER NOT NULL,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    duration_ms INTEGER NOT NULL,
+    agent_label TEXT,
+    api_key_id TEXT,
+    cost_usd_micros INTEGER,
+    limit_violation TEXT,
+    admin_action TEXT,
+    actor TEXT,
+    kind TEXT,
+    payload TEXT
+);
+
+CREATE TABLE IF NOT EXISTS request_events_v1 (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    request_id TEXT NOT NULL,
+    ts INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    upstream_id TEXT,
+    payload TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS request_events_v1_upstream_id_idx
+    ON request_events_v1 (upstream_id);
+
+CREATE TABLE IF NOT EXISTS usage_rollups_v2 (
+    resolution TEXT NOT NULL CHECK (resolution IN ('minute', 'hour')),
+    bucket_start_unix_secs INTEGER NOT NULL CHECK (bucket_start_unix_secs >= 0),
+    principal_id TEXT NOT NULL,
+    upstream_id TEXT NOT NULL,
+    upstream_name TEXT NOT NULL,
+    model TEXT NOT NULL,
+    request_count INTEGER NOT NULL DEFAULT 0 CHECK (request_count >= 0),
+    input_tokens INTEGER NOT NULL DEFAULT 0 CHECK (input_tokens >= 0),
+    output_tokens INTEGER NOT NULL DEFAULT 0 CHECK (output_tokens >= 0),
+    cache_creation_input_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cache_creation_input_tokens >= 0),
+    cache_read_input_tokens INTEGER NOT NULL DEFAULT 0 CHECK (cache_read_input_tokens >= 0),
+    error_count INTEGER NOT NULL DEFAULT 0 CHECK (error_count >= 0),
+    latency_count INTEGER NOT NULL DEFAULT 0 CHECK (latency_count >= 0),
+    latency_ms_sum INTEGER NOT NULL DEFAULT 0 CHECK (latency_ms_sum >= 0),
+    latency_ms_min INTEGER CHECK (latency_ms_min >= 0),
+    latency_ms_max INTEGER CHECK (latency_ms_max >= 0),
+    proxy_setup_ms_count INTEGER NOT NULL DEFAULT 0 CHECK (proxy_setup_ms_count >= 0),
+    proxy_setup_ms_sum INTEGER NOT NULL DEFAULT 0 CHECK (proxy_setup_ms_sum >= 0),
+    shape_ms_count INTEGER NOT NULL DEFAULT 0 CHECK (shape_ms_count >= 0),
+    shape_ms_sum INTEGER NOT NULL DEFAULT 0 CHECK (shape_ms_sum >= 0),
+    sign_ms_count INTEGER NOT NULL DEFAULT 0 CHECK (sign_ms_count >= 0),
+    sign_ms_sum INTEGER NOT NULL DEFAULT 0 CHECK (sign_ms_sum >= 0),
+    upstream_ttfb_ms_count INTEGER NOT NULL DEFAULT 0 CHECK (upstream_ttfb_ms_count >= 0),
+    upstream_ttfb_ms_sum INTEGER NOT NULL DEFAULT 0 CHECK (upstream_ttfb_ms_sum >= 0),
+    upstream_body_ms_count INTEGER NOT NULL DEFAULT 0 CHECK (upstream_body_ms_count >= 0),
+    upstream_body_ms_sum INTEGER NOT NULL DEFAULT 0 CHECK (upstream_body_ms_sum >= 0),
+    virtual_cost_micros INTEGER NOT NULL DEFAULT 0 CHECK (virtual_cost_micros >= 0),
+    updated_at INTEGER NOT NULL,
+    PRIMARY KEY (resolution, bucket_start_unix_secs, principal_id, upstream_id, model)
+);
+
+CREATE INDEX IF NOT EXISTS usage_rollups_v2_upstream_resolution_bucket_idx
+    ON usage_rollups_v2 (upstream_id, resolution, bucket_start_unix_secs);
+
+CREATE TABLE IF NOT EXISTS usage_rollup_checkpoints_v1 (
+    id TEXT PRIMARY KEY,
+    value INTEGER NOT NULL CHECK (value >= 0)
+);

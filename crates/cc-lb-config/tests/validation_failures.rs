@@ -53,10 +53,10 @@ fn encrypted_storage_retains_master_key_env_name() {
         &config_path,
         format!(
             r#"[storage]
-redb_path = "{}"
+storage_path = "{}"
 oauth_aead_key_env = "CC_LB_TEST_MASTER_KEY_INVALID"
 "#,
-            common::toml_path(&dir.path().join("credentials.redb"))
+            common::toml_path(&dir.path().join("credentials.sqlite"))
         ),
     )
     .unwrap();
@@ -66,8 +66,8 @@ oauth_aead_key_env = "CC_LB_TEST_MASTER_KEY_INVALID"
     assert_eq!(config.aead.key_env, "CC_LB_TEST_MASTER_KEY_INVALID");
     assert_eq!(
         config.storage,
-        StorageConfig::Redb {
-            path: dir.path().join("credentials.redb")
+        StorageConfig::Sqlite {
+            path: dir.path().join("credentials.sqlite")
         }
     );
 }

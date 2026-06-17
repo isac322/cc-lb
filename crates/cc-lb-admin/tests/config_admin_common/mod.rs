@@ -22,29 +22,38 @@ use cc_lb_plugin_api::{
     ObservabilityHook, Principal, RequestContext, RouteDecision, RouteError, RouterPlugin,
     SignedRequest, SignerFactory, Upstream, UpstreamCandidate,
 };
-use cc_lb_storage_redb::{RedbManagedKeyStore, RedbStorage};
+use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_storage_sqlite::SqliteStorage;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
 
 pub const TOKEN: &str = "test-token";
 
-pub fn temp_storage() -> (tempfile::TempDir, Arc<RedbStorage>) {
+pub async fn temp_storage() -> (tempfile::TempDir, Arc<SqliteStorage>) {
     let dir = tempfile::tempdir().unwrap();
-    let storage = Arc::new(RedbStorage::open(&dir.path().join("test.redb"), [0; 32]).unwrap());
+    let storage = open_storage(dir.path(), "test.sqlite").await;
     (dir, storage)
 }
 
-pub fn test_storage() -> Arc<RedbStorage> {
+pub async fn test_storage() -> Arc<SqliteStorage> {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("test.redb");
-    let storage = Arc::new(RedbStorage::open(&path, [0; 32]).unwrap());
+    let storage = open_storage(dir.path(), "test.sqlite").await;
     std::mem::forget(dir);
     storage
 }
 
-pub fn key_store(storage: Arc<RedbStorage>) -> Arc<KeyStore> {
-    Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(storage))))
+pub fn key_store(storage: Arc<SqliteStorage>) -> Arc<KeyStore> {
+    Arc::new(KeyStore::new(storage))
+}
+
+async fn open_storage(dir: &Path, filename: &str) -> Arc<SqliteStorage> {
+    let database_url = format!("sqlite://{}", dir.join(filename).display());
+    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url)
+        .await
+        .unwrap();
+    storage.initialize(BackendKind::Sqlite).await.unwrap();
+    Arc::new(storage)
 }
 
 pub fn minimal_config() -> Config {
@@ -62,7 +71,7 @@ pub fn config_value(default_requests_per_window: u64) -> Value {
     value
 }
 
-pub fn test_state(config: Config, storage: Option<Arc<RedbStorage>>) -> AdminState {
+pub fn test_state(config: Config, storage: Option<Arc<SqliteStorage>>) -> AdminState {
     let principal_view = Arc::new(PrincipalView::from_db(
         &[],
         std::collections::HashMap::new(),
@@ -92,8 +101,8 @@ pub fn test_state_without_storage() -> AdminState {
     test_state(minimal_config(), None)
 }
 
-pub fn apply_state(
-    _storage: Arc<RedbStorage>,
+pub async fn apply_state(
+    _storage: Arc<SqliteStorage>,
     _config_path: PathBuf,
     reloader: Arc<TestReloader>,
 ) -> AdminState {
@@ -102,7 +111,7 @@ pub fn apply_state(
         std::collections::HashMap::new(),
     ));
     let dynamic_view = dynamic_view_holder(principal_view);
-    let storage = test_storage();
+    let storage = test_storage().await;
     AdminState {
         storage: Some(storage.clone() as Arc<dyn cc_lb_storage_api::Storage>),
         key_store: Some(key_store(storage)),

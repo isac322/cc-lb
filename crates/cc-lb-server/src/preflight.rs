@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, DEFAULT_REDB_PATH, StorageConfig, TlsConfig};
+use cc_lb_config::{Config, DEFAULT_SQLITE_PATH, StorageConfig, TlsConfig};
 use cc_lb_core::LifecycleConfig;
 use cc_lb_storage_api::{
     PluginChainEntry, PluginSlot, PrincipalRecord, StorageError as ApiStorageError, UpstreamRecord,
@@ -115,10 +115,10 @@ async fn run_inner(
             env::var(key_name).map_err(|_| PreflightError::MasterKeyMissing(key_name.clone()))?;
         let key = decode_master_key(key_name, &key_hex)?;
         match &cfg.storage {
-            StorageConfig::Redb { path } => validate_redb_path(path)?,
             StorageConfig::Postgres { url, .. } => storage_factory::probe_postgres_connection(url)
                 .await
                 .map_err(|error| PreflightError::Storage(error.to_string()))?,
+            StorageConfig::Sqlite { path } => validate_sqlite_path(path)?,
         }
         let aead = Arc::new(AeadService::from_master_key(key));
         let _storage = storage_factory::open_storage(&cfg.storage, aead, key)
@@ -342,8 +342,8 @@ fn hex_nibble(byte: u8) -> Option<u8> {
     }
 }
 
-fn validate_redb_path(path: &Path) -> Result<(), PreflightError> {
-    if path == Path::new(DEFAULT_REDB_PATH) && !path.exists() {
+fn validate_sqlite_path(path: &Path) -> Result<(), PreflightError> {
+    if path == Path::new(DEFAULT_SQLITE_PATH) && !path.exists() {
         return Ok(());
     }
     if path.exists() {

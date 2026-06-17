@@ -8,12 +8,12 @@ publish = false
 build = "build.rs"
 
 [features]
-default = ["redb"]
-redb = [
-    "cc-lb-admin/redb",
-    "cc-lb-core/redb",
-    "cc-lb-signer-anthropic-key/redb",
-    "cc-lb-signer-anthropic-oauth/redb",
+default = ["sqlite"]
+sqlite = [
+    "cc-lb-admin/sqlite",
+    "cc-lb-core/sqlite",
+    "cc-lb-signer-anthropic-key/sqlite",
+    "cc-lb-signer-anthropic-oauth/sqlite",
 ]
 postgres = [
     "cc-lb-admin/postgres",
@@ -50,8 +50,8 @@ cc-lb-runtime-extism = { path = "../cc-lb-runtime-extism" }
 cc-lb-signer-anthropic-key = { path = "../cc-lb-signer-anthropic-key" }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
-cc-lb-storage-redb = { path = "../cc-lb-storage-redb" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres", optional = true }
+cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 clap = { workspace = true, features = ["derive"] }
 http.workspace = true
 http-body-util.workspace = true
@@ -90,7 +90,6 @@ cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres" }
 metrics-exporter-prometheus.workspace = true
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic", features = ["debug-endpoints"] }
 jemalloc_ctl = { package = "tikv-jemalloc-ctl", version = "0.7", features = ["stats"] }
-redb.workspace = true
 sqlx.workspace = true
 tikv-jemallocator = "0.7"
 tracing-subscriber.workspace = true

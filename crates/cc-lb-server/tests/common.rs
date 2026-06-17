@@ -5,11 +5,12 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 
 use cc_lb_storage_api::{
-    PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore,
+    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate,
+    UpstreamStore,
 };
 
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_sqlite::open_sqlite;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use tempfile::TempDir;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -52,7 +53,7 @@ pub async fn spawn_test_server() -> TestServer {
     let config_dir = tempfile::tempdir().expect("temp config dir");
     let config_path = config_dir.path().join("cc-lb.toml");
     write_config(&config_path, proxy_addr, admin_addr, metrics_addr);
-    seed_storage(&config_path.with_file_name("cc-lb.redb"), fake_addr).await;
+    seed_storage(&config_path.with_file_name("cc-lb.sqlite"), fake_addr).await;
 
     let child = Command::new(env!("CARGO_BIN_EXE_cc-lb"))
         .arg("serve")
@@ -93,7 +94,7 @@ fn write_config(
     admin_addr: SocketAddr,
     metrics_addr: SocketAddr,
 ) {
-    let storage_path = path.with_file_name("cc-lb.redb");
+    let storage_path = path.with_file_name("cc-lb.sqlite");
     let data_dir = path.parent().expect("config path has parent");
     let storage_path = storage_path.display();
     let data_dir = data_dir.display();
@@ -126,7 +127,7 @@ principal_id = "api-key"
 upstream_kind = "anthropic_key"
 
 [storage]
-kind = "redb"
+kind = "sqlite"
 path = "{storage_path}"
 
 [aead]
@@ -161,7 +162,14 @@ cache_ttl_ceiling_secs = 300
 }
 
 async fn seed_storage(storage_path: &Path, upstream_addr: SocketAddr) {
-    let storage = Storage::open(storage_path, [0; 32]).expect("test storage opens");
+    let database_url = format!("sqlite://{}", storage_path.display());
+    let storage = open_sqlite(&database_url)
+        .await
+        .expect("test storage opens");
+    storage
+        .initialize(BackendKind::Sqlite)
+        .await
+        .expect("test storage initializes");
     UpstreamStore::create(
         &storage,
         UpstreamCreate {

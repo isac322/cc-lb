@@ -70,7 +70,7 @@ struct OAuthStatusEntry {
     scopes: Vec<String>,
 }
 
-async fn list_credentials(State(state): State<AdminState>) -> Response {
+pub async fn list_credentials(State(state): State<AdminState>) -> Response {
     let Some(storage) = state.storage.as_ref() else {
         return service_unavailable("storage_unavailable");
     };
@@ -99,7 +99,7 @@ async fn list_credentials(State(state): State<AdminState>) -> Response {
     .into_response()
 }
 
-async fn list_oauth_status(State(state): State<AdminState>) -> Response {
+pub async fn list_oauth_status(State(state): State<AdminState>) -> Response {
     let Some(storage) = state.storage.as_ref() else {
         return service_unavailable("storage_unavailable");
     };

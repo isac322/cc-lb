@@ -6,7 +6,8 @@ use axum::{
 };
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_api::{BackendKind, MetaStore};
+use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -35,11 +36,10 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
 #[tokio::test]
 async fn test_killswitch_persists() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let db_path = temp_dir.path().join("test.redb");
-    let master_key = [0u8; 32];
+    let db_path = temp_dir.path().join("test.sqlite");
 
     {
-        let storage = Arc::new(Storage::open(&db_path, master_key).unwrap());
+        let storage = open_storage(&db_path).await;
         let app = router(test_state(storage.clone()));
 
         let req = Request::builder()
@@ -56,12 +56,12 @@ async fn test_killswitch_persists() {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["killswitch"], true);
 
-        assert!(storage.killswitch_enabled().unwrap());
+        assert!(storage.killswitch_enabled().await.unwrap());
     }
 
     {
-        let storage = Arc::new(Storage::open(&db_path, master_key).unwrap());
-        assert!(storage.killswitch_enabled().unwrap());
+        let storage = open_storage(&db_path).await;
+        assert!(storage.killswitch_enabled().await.unwrap());
 
         let app = router(test_state(storage.clone()));
 
@@ -79,6 +79,15 @@ async fn test_killswitch_persists() {
         let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
         assert_eq!(json["killswitch"], false);
 
-        assert!(!storage.killswitch_enabled().unwrap());
+        assert!(!storage.killswitch_enabled().await.unwrap());
     }
+}
+
+async fn open_storage(path: &std::path::Path) -> Arc<Storage> {
+    let database_url = format!("sqlite://{}", path.display());
+    let storage = cc_lb_storage_sqlite::open_sqlite(&database_url)
+        .await
+        .unwrap();
+    storage.initialize(BackendKind::Sqlite).await.unwrap();
+    Arc::new(storage)
 }
