@@ -1,13 +1,13 @@
 use axum::{
     Json, Router,
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post},
 };
 use cc_lb_core::api_keys::key_store::CreateParams;
 use cc_lb_core::api_keys::secret;
-use cc_lb_storage_api::types::{PrincipalKindLite, UpstreamKind};
+use cc_lb_storage_api::types::{KeyStatus, PrincipalKindLite, UpstreamKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -29,6 +29,20 @@ pub fn router() -> Router<AdminState> {
 #[derive(Debug, Deserialize)]
 struct IssueKeyRequest {
     label: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ListKeysQuery {
+    status: Option<ListKeysStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum ListKeysStatus {
+    Active,
+    Disabled,
+    Revoked,
+    All,
 }
 
 #[derive(Debug, Serialize)]
@@ -111,6 +125,7 @@ async fn issue_key(
 async fn list_keys(
     State(state): State<AdminState>,
     Path(id): Path<String>,
+    Query(query): Query<ListKeysQuery>,
 ) -> axum::response::Response {
     let Some(key_store) = state.key_store.clone() else {
         return (
@@ -163,6 +178,9 @@ async fn list_keys(
 
             let mut keys = Vec::new();
             for r in records {
+                if !matches_status(r.status, query.status.as_ref()) {
+                    continue;
+                }
                 let key_id = if r.index_hash == [0; 32] {
                     String::new()
                 } else {
@@ -201,6 +219,15 @@ async fn list_keys(
             )
                 .into_response()
         }
+    }
+}
+
+fn matches_status(status: KeyStatus, requested: Option<&ListKeysStatus>) -> bool {
+    match requested.unwrap_or(&ListKeysStatus::Active) {
+        ListKeysStatus::Active => status == KeyStatus::Active,
+        ListKeysStatus::Disabled => status == KeyStatus::Disabled,
+        ListKeysStatus::Revoked => status == KeyStatus::Revoked,
+        ListKeysStatus::All => true,
     }
 }
 
