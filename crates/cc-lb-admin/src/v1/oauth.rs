@@ -189,7 +189,13 @@ async fn start_oauth(
     };
     let upstream = match UpstreamStore::get_by_id(storage.as_ref(), upstream_id).await {
         Ok(Some(upstream)) => upstream,
-        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Ok(None) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json!({ "error": "upstream_not_found" })),
+            )
+                .into_response();
+        }
         Err(error) => return storage_error_response(&error),
     };
     if upstream.kind != UpstreamKind::AnthropicOauth {

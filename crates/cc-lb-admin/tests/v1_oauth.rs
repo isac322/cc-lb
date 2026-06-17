@@ -325,6 +325,16 @@ async fn upstream_wrong_kind_anthropic_api_key_returns_400() {
 }
 
 #[tokio::test]
+async fn unknown_upstream_start_returns_json_404() {
+    let fixture = Fixture::new().await;
+
+    let (status, body) = fixture.start(Uuid::new_v4()).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "upstream_not_found");
+}
+
+#[tokio::test]
 async fn audit_entries_contain_fingerprint_only_no_raw_tokens() {
     let fixture = Fixture::new().await;
     let upstream = fixture
