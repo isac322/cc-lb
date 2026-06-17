@@ -83,6 +83,9 @@ impl MetaStore for SqliteStorage {
     }
 
     async fn killswitch_enabled(&self) -> StorageResult<bool> {
+        if let Some(enabled) = super::killswitch::enabled(self).await? {
+            return Ok(enabled);
+        }
         let value: Option<String> =
             sqlx::query_scalar("SELECT value FROM meta_v1 WHERE key = 'killswitch_enabled'")
                 .fetch_optional(self.pool())
@@ -96,6 +99,7 @@ impl MetaStore for SqliteStorage {
     }
 
     async fn set_killswitch_enabled(&self, enabled: bool) -> StorageResult<()> {
+        super::killswitch::set_enabled(self, enabled).await?;
         sqlx::query(
             "INSERT INTO meta_v1 (key, value) VALUES ('killswitch_enabled', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         )
