@@ -142,13 +142,14 @@ fn latency_upstream() -> UpstreamCreate {
 async fn recv_matching(
     receiver: &mut tokio::sync::broadcast::Receiver<ChangeEvent>,
     channel: ChangeChannel,
+    payload: &str,
 ) -> Result<ChangeEvent> {
     let deadline = time::Instant::now() + RECEIVE_TIMEOUT;
     loop {
         let remaining = deadline.saturating_duration_since(time::Instant::now());
         ensure!(!remaining.is_zero(), "timed out waiting for {channel:?}");
         let event = time::timeout(remaining, receiver.recv()).await??;
-        if event.channel == channel {
+        if event.channel == channel && event.payload == payload {
             return Ok(event);
         }
     }
@@ -189,8 +190,9 @@ mod tests {
         let cancel = CancellationToken::new();
         let handle = spawn_run(Arc::clone(&notifier), cancel.clone());
         let mut receiver = notifier.subscribe().await?;
+        startup_delay_for_backend(BackendKind::Postgres).await;
         emit(pool, ChangeChannel::Upstream, "upstream-a").await?;
-        let event = recv_matching(&mut receiver, ChangeChannel::Upstream).await?;
+        let event = recv_matching(&mut receiver, ChangeChannel::Upstream, "upstream-a").await?;
         ensure!(event.payload == "upstream-a", "unexpected payload");
         cancel.cancel();
         join_run(handle).await
@@ -205,9 +207,10 @@ mod tests {
         let mut a = notifier.subscribe().await?;
         let mut b = notifier.subscribe().await?;
         let mut c = notifier.subscribe().await?;
+        startup_delay_for_backend(BackendKind::Postgres).await;
         emit(pool, ChangeChannel::Principal, "principal-a").await?;
         for receiver in [&mut a, &mut b, &mut c] {
-            let event = recv_matching(receiver, ChangeChannel::Principal).await?;
+            let event = recv_matching(receiver, ChangeChannel::Principal, "principal-a").await?;
             ensure!(event.payload == "principal-a", "fan-out payload mismatch");
         }
         cancel.cancel();
@@ -221,9 +224,10 @@ mod tests {
         let cancel = CancellationToken::new();
         let handle = spawn_run(Arc::clone(&notifier), cancel.clone());
         let mut receiver = notifier.subscribe().await?;
+        startup_delay_for_backend(BackendKind::Postgres).await;
         for channel in ChangeChannel::ALL {
             emit(pool, channel, channel.postgres_channel()).await?;
-            let event = recv_matching(&mut receiver, channel).await?;
+            let event = recv_matching(&mut receiver, channel, channel.postgres_channel()).await?;
             ensure!(
                 event.payload == channel.postgres_channel(),
                 "channel payload mismatch"
@@ -240,8 +244,14 @@ mod tests {
         let cancel = CancellationToken::new();
         let handle = spawn_run(Arc::clone(&notifier), cancel.clone());
         let mut receiver = notifier.subscribe().await?;
+        startup_delay_for_backend(BackendKind::Postgres).await;
         emit(pool, ChangeChannel::PluginRegistry, "before-terminate").await?;
-        let first = recv_matching(&mut receiver, ChangeChannel::PluginRegistry).await?;
+        let first = recv_matching(
+            &mut receiver,
+            ChangeChannel::PluginRegistry,
+            "before-terminate",
+        )
+        .await?;
         ensure!(
             first.payload == "before-terminate",
             "first payload mismatch"
@@ -249,7 +259,8 @@ mod tests {
         terminate_listener_backend(pool).await?;
         time::sleep(Duration::from_millis(200)).await;
         emit(pool, ChangeChannel::PluginChain, "after-terminate").await?;
-        let second = recv_matching(&mut receiver, ChangeChannel::PluginChain).await?;
+        let second =
+            recv_matching(&mut receiver, ChangeChannel::PluginChain, "after-terminate").await?;
         ensure!(
             second.payload == "after-terminate",
             "second payload mismatch"
