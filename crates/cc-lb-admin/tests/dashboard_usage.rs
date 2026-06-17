@@ -24,6 +24,32 @@ async fn usage_returns_200_grouped_by_model() {
 }
 
 #[tokio::test]
+async fn usage_legacy_dashboard_alias_matches_v1_body() {
+    let (_dir, storage) = temp_storage().await;
+    let state = test_state(Config::default(), Some(storage));
+    let admin_app = app(state);
+
+    let (legacy_status, _, legacy_body, _) = authed_json(
+        admin_app.clone(),
+        "GET",
+        "/admin/dashboard/usage?range=1h&group_by=model",
+        None,
+    )
+    .await;
+    let (v1_status, _, v1_body, _) = authed_json(
+        admin_app,
+        "GET",
+        "/admin/v1/dashboard/usage?range=1h&group_by=model",
+        None,
+    )
+    .await;
+
+    assert_eq!(legacy_status, StatusCode::OK);
+    assert_eq!(v1_status, StatusCode::OK);
+    assert_eq!(legacy_body, v1_body);
+}
+
+#[tokio::test]
 async fn usage_returns_200_grouped_by_principal() {
     let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));

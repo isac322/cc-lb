@@ -20,6 +20,7 @@ use crate::dashboard::{
 pub fn router() -> Router<AdminState> {
     Router::new()
         .route("/admin/dashboard/summary", get(handle_dashboard_summary))
+        .route("/admin/dashboard/usage", get(handle_dashboard_usage))
         .route("/admin/usage", get(handle_dashboard_usage))
 }
 
