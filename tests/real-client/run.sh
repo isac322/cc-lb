@@ -133,7 +133,7 @@ replacements = {
     '__REGION__': 'us-east-1',
     '__VERTEX_REGION__': 'us-central1',
     '__PROJECT__': 'fake-project',
-    '__REDB_PATH__': str(Path(tmp) / 'cc-lb.redb'),
+    '__SQLITE_PATH__': str(Path(tmp) / 'cc-lb.sqlite'),
 }
 for old, new in replacements.items():
     text = text.replace(old, new)

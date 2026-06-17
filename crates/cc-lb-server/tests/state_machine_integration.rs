@@ -15,12 +15,13 @@ use cc_lb_plugin_wire::identity::{CC_LB_PLUGIN_MAGIC, CC_LB_PLUGIN_SECTION_NAME}
 use cc_lb_server::App;
 use cc_lb_server::app::build_app_with_storage;
 use cc_lb_server::state_machine::ServerStateHandle;
+use cc_lb_storage_api::BackendKind;
 use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind};
 use cc_lb_storage_api::{
     ManagedKeyStore, PrincipalCreate, PrincipalKind, PrincipalStore, Storage as StorageTrait,
     UpstreamStore,
 };
-use cc_lb_storage_redb::{RedbManagedKeyStore, Storage as RedbStorage};
+use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
 use metrics::{
     Counter, CounterFn, Gauge, Histogram, Key, KeyName, Metadata, Recorder, SharedString, Unit,
 };
@@ -313,14 +314,16 @@ struct TestApp {
 async fn build_test_app() -> TestResult<TestApp> {
     let dir = tempfile::tempdir()?;
     let key = [0_u8; 32];
-    let storage_path = dir.path().join("state-machine.redb");
-    let storage_arc = Arc::new(RedbStorage::open(&storage_path, key)?);
+    let storage_path = dir.path().join("state-machine.sqlite");
+    let database_url = format!("sqlite://{}", storage_path.display());
+    let storage_arc = open_sqlite(&database_url).await?;
+    cc_lb_storage_api::MetaStore::initialize(&storage_arc, BackendKind::Sqlite).await?;
+    let storage_arc = Arc::new(storage_arc);
     seed_storage(storage_arc.as_ref()).await?;
-    let managed_store: Arc<dyn ManagedKeyStore> =
-        Arc::new(RedbManagedKeyStore::new(storage_arc.clone()));
+    let managed_store: Arc<dyn ManagedKeyStore> = storage_arc.clone();
     let storage: Arc<dyn StorageTrait> = storage_arc;
     let mut config = Config {
-        storage: cc_lb_config::StorageConfig::Redb { path: storage_path },
+        storage: cc_lb_config::StorageConfig::Sqlite { path: storage_path },
         ..Default::default()
     };
     config.runtime.data_dir = Some(dir.path().to_path_buf());
@@ -342,7 +345,7 @@ async fn build_test_app() -> TestResult<TestApp> {
     Ok(TestApp { app, _dir: dir })
 }
 
-async fn seed_storage(storage: &RedbStorage) -> TestResult<()> {
+async fn seed_storage(storage: &SqliteStorage) -> TestResult<()> {
     UpstreamStore::create(
         storage,
         UpstreamCreate {

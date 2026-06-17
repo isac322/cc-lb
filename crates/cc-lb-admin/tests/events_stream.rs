@@ -11,7 +11,7 @@ use tower::ServiceExt;
 
 #[tokio::test]
 async fn events_stream_opens_with_sse_content_type() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
     let response = app(state)
@@ -41,7 +41,7 @@ async fn events_stream_opens_with_sse_content_type() {
 
 #[tokio::test]
 async fn events_stream_first_byte_is_connected_comment() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let state = test_state(Config::default(), Some(storage));
 
     let response = app(state)

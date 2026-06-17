@@ -28,7 +28,7 @@ pub fn router() -> Router<AdminState> {
         .route("/admin/events/stream", get(handle_events_stream))
 }
 
-async fn handle_recent_events(
+pub async fn handle_recent_events(
     State(state): State<AdminState>,
     Query(map): Query<HashMap<String, String>>,
 ) -> Response {
@@ -53,7 +53,7 @@ async fn handle_recent_events(
     }
 }
 
-async fn handle_events_stream(
+pub async fn handle_events_stream(
     State(state): State<AdminState>,
     Query(map): Query<HashMap<String, String>>,
 ) -> Response {

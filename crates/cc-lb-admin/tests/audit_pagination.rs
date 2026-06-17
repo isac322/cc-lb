@@ -6,7 +6,9 @@ use axum::{
 };
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
-use cc_lb_storage_redb::{AuditEntry, Storage};
+use cc_lb_storage_api::AuditEntry;
+use cc_lb_storage_api::AuditStore;
+use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -35,9 +37,7 @@ fn test_state(storage: Arc<Storage>) -> AdminState {
 #[tokio::test]
 async fn test_audit_pagination() {
     let temp_dir = tempfile::tempdir().unwrap();
-    let db_path = temp_dir.path().join("test.redb");
-    let master_key = [0u8; 32];
-    let storage = Arc::new(Storage::open(&db_path, master_key).unwrap());
+    let storage = admin_test_common::sqlite_storage(temp_dir.path(), "test.sqlite").await;
 
     for i in 0..10 {
         let entry = AuditEntry {
@@ -54,7 +54,7 @@ async fn test_audit_pagination() {
             agent_label: None,
             ..Default::default()
         };
-        storage.append_audit(&entry).unwrap();
+        storage.append_audit(&entry).await.unwrap();
     }
 
     let app = router(test_state(storage));
@@ -80,7 +80,7 @@ async fn test_audit_pagination() {
         .body(Body::empty())
         .unwrap();
 
-    let response = app.oneshot(req).await.unwrap();
+    let response = app.clone().oneshot(req).await.unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
@@ -89,4 +89,21 @@ async fn test_audit_pagination() {
     assert_eq!(entries.len(), 4);
     assert_eq!(entries[0]["ts"], 1002);
     assert_eq!(entries[3]["ts"], 1005);
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/admin/audit?after=1005&limit=2")
+        .header("Authorization", "Bearer test-token")
+        .body(Body::empty())
+        .unwrap();
+
+    let response = app.oneshot(req).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    let entries = json["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["ts"], 1006);
+    assert_eq!(entries[1]["ts"], 1007);
 }

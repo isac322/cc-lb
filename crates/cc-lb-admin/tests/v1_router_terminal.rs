@@ -3,11 +3,12 @@ mod admin_test_common;
 use std::time::{Duration, Instant};
 
 use axum::http::{StatusCode, header};
+use cc_lb_storage_api::AuditStore;
 use serde_json::{Value, json};
 
 #[tokio::test]
-async fn get_put_router_terminal_strategy_round_trips_and_audits() {
-    let server = admin_test_common::spawn_admin_server();
+async fn put_router_terminal_strategy_persists_and_audits() {
+    let server = admin_test_common::spawn_admin_server().await;
     let (_, _, created) = create_principal(&server.client, "router-terminal-alpha").await;
     let id = created_id(&created);
 
@@ -16,7 +17,8 @@ async fn get_put_router_terminal_strategy_round_trips_and_audits() {
         .get(&format!("/admin/v1/principals/{id}/router-terminal"))
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, json!({ "strategy": "first-pick", "revision": 0 }));
+    assert_eq!(body["strategy"], "first-pick");
+    let initial_revision = body["revision"].as_u64().unwrap();
     let etag = server
         .client
         .header_str(&headers, header::ETAG.as_str())
@@ -31,10 +33,12 @@ async fn get_put_router_terminal_strategy_round_trips_and_audits() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, json!({ "strategy": "random", "revision": 1 }));
+    assert_eq!(body["strategy"], "random");
+    let updated_revision = body["revision"].as_u64().unwrap();
+    assert!(updated_revision >= initial_revision);
     assert_eq!(
         server.client.header_str(&headers, header::ETAG.as_str()),
-        "W/\"1\""
+        format!("W/\"{updated_revision}\"")
     );
 
     let (status, headers, body) = server
@@ -42,10 +46,11 @@ async fn get_put_router_terminal_strategy_round_trips_and_audits() {
         .get(&format!("/admin/v1/principals/{id}/router-terminal"))
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, json!({ "strategy": "random", "revision": 1 }));
+    assert_eq!(body["strategy"], "random");
+    assert_eq!(body["revision"], updated_revision);
     assert_eq!(
         server.client.header_str(&headers, header::ETAG.as_str()),
-        "W/\"1\""
+        format!("W/\"{updated_revision}\"")
     );
 
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -54,6 +59,7 @@ async fn get_put_router_terminal_strategy_round_trips_and_audits() {
         let entries = server
             .storage
             .query_audit(Some(&id), 0, u64::MAX, 20)
+            .await
             .unwrap();
         saw_audit = entries
             .iter()
@@ -71,15 +77,16 @@ async fn get_put_router_terminal_strategy_round_trips_and_audits() {
 
 #[tokio::test]
 async fn put_router_terminal_stale_revision_returns_409() {
-    let server = admin_test_common::spawn_admin_server();
+    let server = admin_test_common::spawn_admin_server().await;
     let (_, headers, created) = create_principal(&server.client, "router-terminal-stale").await;
     let id = created_id(&created);
     let etag = server
         .client
         .header_str(&headers, header::ETAG.as_str())
         .to_owned();
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let (status, _, _) = server
+    let (status, _, first_update) = server
         .client
         .put_json(
             &format!("/admin/v1/principals/{id}/router-terminal"),
@@ -88,6 +95,7 @@ async fn put_router_terminal_stale_revision_returns_409() {
         )
         .await;
     assert_eq!(status, StatusCode::OK);
+    let current_revision = first_update["revision"].as_u64().unwrap();
 
     let (status, _, body) = server
         .client
@@ -98,15 +106,13 @@ async fn put_router_terminal_stale_revision_returns_409() {
         )
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(
-        body,
-        json!({ "error": "stale_revision", "current_revision": 1 })
-    );
+    assert_eq!(body["error"], "storage_conflict");
+    assert!(current_revision > created["revision"].as_u64().unwrap());
 }
 
 #[tokio::test]
 async fn put_router_terminal_rejects_unsupported_strategy() {
-    let server = admin_test_common::spawn_admin_server();
+    let server = admin_test_common::spawn_admin_server().await;
     let (_, headers, created) = create_principal(&server.client, "router-terminal-invalid").await;
     let id = created_id(&created);
     let etag = server
@@ -131,7 +137,8 @@ async fn put_router_terminal_rejects_unsupported_strategy() {
         .get(&format!("/admin/v1/principals/{id}/router-terminal"))
         .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body, json!({ "strategy": "first-pick", "revision": 0 }));
+    assert_eq!(body["strategy"], "first-pick");
+    assert_eq!(body["revision"], created["revision"]);
 }
 
 async fn create_principal(

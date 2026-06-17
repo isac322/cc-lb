@@ -10,6 +10,7 @@ use axum::{
 };
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
+use cc_lb_storage_api::{ConfigStore, HistorySummary};
 use tower::ServiceExt;
 
 fn test_state() -> AdminState {
@@ -35,20 +36,21 @@ fn test_state() -> AdminState {
 
 #[tokio::test]
 async fn config_history_route_returns_applied_history() {
-    let (_dir, storage) = config_admin_common::temp_storage();
+    let (_dir, storage) = config_admin_common::temp_storage().await;
     let config = Config::default();
     storage
         .append_config_history(
             7,
             toml::to_string_pretty(&config).unwrap(),
             1234,
-            cc_lb_storage_redb::HistorySummary {
+            HistorySummary {
                 upstreams: 0,
                 principals: 0,
                 plugin_count: 0,
                 tls_enabled: false,
             },
         )
+        .await
         .unwrap();
     let app = config_admin_common::app(config_admin_common::test_state(config, Some(storage)));
 

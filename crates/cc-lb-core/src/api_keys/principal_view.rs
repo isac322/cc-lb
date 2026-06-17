@@ -208,6 +208,10 @@ impl PrincipalView {
         }
     }
 
+    pub fn has_any_active_principal(&self) -> bool {
+        self.specs.values().any(|spec| spec.enabled)
+    }
+
     pub fn default_limits(&self, principal_id: &str) -> &[Limit] {
         self.get(principal_id)
             .map(|spec| spec.default_limits.as_slice())

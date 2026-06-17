@@ -35,6 +35,10 @@ kind = "user"
 
 All administrative operations are authenticated via a Bearer token in the `Authorization` header.
 
+### Local proxy key files
+
+If an operator keeps a local proxy client key file such as `~/.config/cc-lb/proxy-key`, treat it as a client-side cache of the plaintext key returned once by `POST /admin/v1/principals/{id}/keys`. Rotating a managed key is a two-step lifecycle: issue the replacement key, update the local key file atomically with mode `0600`, verify the proxy request path with the new key, then revoke the old key through the admin API. The server never rewrites operator key files automatically.
+
 ### Upstreams API
 
 | Method | Path | Auth | Request Body | Response Body | Error Codes |
@@ -152,6 +156,8 @@ All administrative operations are authenticated via a Bearer token in the `Autho
 | Method | Path | Auth | Request Body | Response Body | Error Codes |
 |---|---|---|---|---|---|
 | GET | `/admin/v1/status` | Bearer | None | StatusResponse | `storage_unavailable` |
+
+`/admin/status` is a legacy alias for `/admin/v1/status` and returns the same `StatusResponse` body.
 | GET | `/admin/v1/export` | Bearer | None | ExportResponse | `storage_unavailable` |
 
 ## OAuth Subscription Flow
@@ -267,7 +273,7 @@ In multi-replica deployments, replicas coordinate configuration updates and back
 - **Reconciliation Fallback**: If a replica misses a notification, a background reconciler polls the database every 60 seconds as a fallback.
 - **Database Lease**: For background tasks like OAuth token refresh, replicas use a database-backed UUID lease to ensure only one replica performs the refresh.
 - **Status Monitoring**: You can monitor the status of all replicas and check for partial-failure states via the `/admin/v1/status` endpoint.
-- **Storage Backend**: Note that the `redb` storage backend is single-process only and does not support multi-replica deployments.
+- **Storage Backend**: Use Postgres for multi-replica deployments.
 
 ## Restart-Required Matrix
 
@@ -313,7 +319,7 @@ This section lists common failures and their diagnosis steps.
 
 - **Symptom**: The server fails to start and logs "storage is required".
 - **Diagnosis**: There is currently no Postgres-as-startup-storage path.
-- **Workaround**: Use the `redb` backend for single-replica deployments until a follow-up implements Postgres startup storage.
+- **Workaround**: Use the sqlite backend for single-replica deployments until a follow-up implements Postgres startup storage.
 
 ### OAuth refresh fails persistently
 

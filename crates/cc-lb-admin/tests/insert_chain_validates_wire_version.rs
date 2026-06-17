@@ -12,7 +12,7 @@ use uuid::Uuid;
 
 #[tokio::test]
 async fn insert_chain_rejects_wire_version_above_registry_entry() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-wire-too-new").await;
     let entry = seed_registry_with_wire_version(&storage, 41, "wire-v1-plugin", 1).await;
     let app = app(test_state(Config::default(), Some(storage)));
@@ -43,7 +43,7 @@ async fn insert_chain_rejects_wire_version_above_registry_entry() {
 
 #[tokio::test]
 async fn insert_chain_accepts_wire_version_equal_to_registry_entry() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-wire-equal").await;
     let entry = seed_registry_with_wire_version(&storage, 42, "wire-v3-plugin", 3).await;
     let app = app(test_state(Config::default(), Some(storage)));
@@ -66,7 +66,7 @@ async fn insert_chain_accepts_wire_version_equal_to_registry_entry() {
 
 #[tokio::test]
 async fn insert_chain_accepts_unspecified_wire_version() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-wire-unspecified").await;
     let entry = seed_registry_with_wire_version(&storage, 43, "wire-default-plugin", 3).await;
     let app = app(test_state(Config::default(), Some(storage)));
@@ -91,7 +91,7 @@ async fn insert_chain_accepts_unspecified_wire_version() {
 
 #[tokio::test]
 async fn insert_chain_accepts_builtin_cache_affinity_wire_version() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let principal_id = seed_principal(&storage, "principal-wire-builtin").await;
     let app = app(test_state(Config::default(), Some(storage)));
 
@@ -115,7 +115,7 @@ async fn insert_chain_accepts_builtin_cache_affinity_wire_version() {
     assert_eq!(body["wire_version"], 3);
 }
 
-async fn seed_principal(storage: &cc_lb_storage_redb::RedbStorage, name: &str) -> Uuid {
+async fn seed_principal(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &str) -> Uuid {
     storage
         .create(
             PrincipalCreate {
@@ -133,7 +133,7 @@ async fn seed_principal(storage: &cc_lb_storage_redb::RedbStorage, name: &str) -
 }
 
 async fn seed_registry_with_wire_version(
-    storage: &cc_lb_storage_redb::RedbStorage,
+    storage: &cc_lb_storage_sqlite::SqliteStorage,
     seed: u8,
     name: &str,
     wire_version: u8,

@@ -3,7 +3,7 @@ use std::path::Path;
 
 use thiserror::Error;
 
-use crate::{Config, ConfigError, DEFAULT_REDB_PATH, DownstreamAuthMode, StorageConfig};
+use crate::{Config, ConfigError, DEFAULT_SQLITE_PATH, DownstreamAuthMode, StorageConfig};
 
 #[derive(Clone, Debug, Error, Eq, PartialEq)]
 #[error("{field}: {message}")]
@@ -43,12 +43,12 @@ pub fn validate_raw_toml(raw_toml: &str) -> Result<(), ValidationError> {
 
     if let Some(storage) = table.get("storage").and_then(|v| v.as_table()) {
         let has_kind = storage.contains_key("kind");
-        let has_legacy_redb = storage.contains_key("redb_path");
+        let has_legacy_storage_path = storage.contains_key("storage_path");
         let has_legacy_aead = storage.contains_key("oauth_aead_key_env");
-        if has_kind && (has_legacy_redb || has_legacy_aead) {
+        if has_kind && (has_legacy_storage_path || has_legacy_aead) {
             let mut keys = Vec::new();
-            if has_legacy_redb {
-                keys.push("redb_path");
+            if has_legacy_storage_path {
+                keys.push("storage_path");
             }
             if has_legacy_aead {
                 keys.push("oauth_aead_key_env");
@@ -100,15 +100,15 @@ pub fn migrate_legacy_storage_toml(raw_toml: &str) -> Result<String, ValidationE
         return Ok(raw_toml.to_owned());
     };
 
-    let mut legacy_redb_path: Option<toml::Value> = None;
+    let mut legacy_storage_path: Option<toml::Value> = None;
     let mut legacy_aead_env: Option<toml::Value> = None;
     let mut storage_was_legacy_only = false;
 
     if let Some(storage) = root.get_mut("storage").and_then(|v| v.as_table_mut()) {
         let had_legacy =
-            storage.contains_key("redb_path") || storage.contains_key("oauth_aead_key_env");
+            storage.contains_key("storage_path") || storage.contains_key("oauth_aead_key_env");
         let had_kind = storage.contains_key("kind");
-        legacy_redb_path = storage.remove("redb_path");
+        legacy_storage_path = storage.remove("storage_path");
         legacy_aead_env = storage.remove("oauth_aead_key_env");
         if had_legacy && !had_kind {
             storage_was_legacy_only = true;
@@ -118,8 +118,8 @@ pub fn migrate_legacy_storage_toml(raw_toml: &str) -> Result<String, ValidationE
     if storage_was_legacy_only
         && let Some(storage) = root.get_mut("storage").and_then(|v| v.as_table_mut())
     {
-        storage.insert("kind".to_owned(), toml::Value::String("redb".to_owned()));
-        if let Some(path) = legacy_redb_path.take() {
+        storage.insert("kind".to_owned(), toml::Value::String("sqlite".to_owned()));
+        if let Some(path) = legacy_storage_path.take() {
             storage.insert("path".to_owned(), path);
         }
     }
@@ -185,12 +185,6 @@ fn validate_tls_section(prefix: &str, tls: &crate::TlsConfig) -> Result<(), Vali
 
 fn validate_storage(config: &Config) -> Result<(), ConfigError> {
     match &config.storage {
-        StorageConfig::Redb { path } => {
-            if path == Path::new(DEFAULT_REDB_PATH) && !path.exists() {
-                return Ok(());
-            }
-            validate_redb_path(path)?;
-        }
         StorageConfig::Postgres { url, pool } => {
             validate_postgres_url(url)?;
             if pool.statement_timeout_secs >= config.timeouts.upstream_total_secs {
@@ -200,6 +194,57 @@ fn validate_storage(config: &Config) -> Result<(), ConfigError> {
                 });
             }
         }
+        StorageConfig::Sqlite { path } => {
+            if path == Path::new(DEFAULT_SQLITE_PATH) && !path.exists() {
+                return Ok(());
+            }
+            validate_sqlite_path(path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_sqlite_path(path: &Path) -> Result<(), ValidationError> {
+    if path.exists() {
+        let metadata = fs::metadata(path).map_err(|error| {
+            ValidationError::new("storage.path", format!("cannot inspect path: {error}"))
+        })?;
+        if !metadata.is_file() {
+            return Err(ValidationError::new(
+                "storage.path",
+                format!("not a file: {}", path.display()),
+            ));
+        }
+        if metadata.permissions().readonly() {
+            return Err(ValidationError::new(
+                "storage.path",
+                format!("file is not writable: {}", path.display()),
+            ));
+        }
+    }
+
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent_metadata = fs::metadata(parent).map_err(|_| {
+        ValidationError::new(
+            "storage.path",
+            format!("parent directory does not exist: {}", parent.display()),
+        )
+    })?;
+    if !parent_metadata.is_dir() {
+        return Err(ValidationError::new(
+            "storage.path",
+            format!("parent path is not a directory: {}", parent.display()),
+        ));
+    }
+    if parent_metadata.permissions().readonly() {
+        return Err(ValidationError::new(
+            "storage.path",
+            format!("parent directory is not writable: {}", parent.display()),
+        ));
     }
 
     Ok(())
@@ -235,51 +280,6 @@ pub fn validate_postgres_url(url: &str) -> Result<(), ConfigError> {
         return Err(ConfigError::InvalidPostgresUrl {
             message: "missing host".to_owned(),
         });
-    }
-
-    Ok(())
-}
-
-fn validate_redb_path(path: &Path) -> Result<(), ValidationError> {
-    if path.exists() {
-        let metadata = fs::metadata(path).map_err(|error| {
-            ValidationError::new("storage.redb_path", format!("cannot inspect path: {error}"))
-        })?;
-        if !metadata.is_file() {
-            return Err(ValidationError::new(
-                "storage.redb_path",
-                format!("not a file: {}", path.display()),
-            ));
-        }
-        if metadata.permissions().readonly() {
-            return Err(ValidationError::new(
-                "storage.redb_path",
-                format!("file is not writable: {}", path.display()),
-            ));
-        }
-    }
-
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let parent_metadata = fs::metadata(parent).map_err(|_| {
-        ValidationError::new(
-            "storage.redb_path",
-            format!("parent directory does not exist: {}", parent.display()),
-        )
-    })?;
-    if !parent_metadata.is_dir() {
-        return Err(ValidationError::new(
-            "storage.redb_path",
-            format!("parent path is not a directory: {}", parent.display()),
-        ));
-    }
-    if parent_metadata.permissions().readonly() {
-        return Err(ValidationError::new(
-            "storage.redb_path",
-            format!("parent directory is not writable: {}", parent.display()),
-        ));
     }
 
     Ok(())

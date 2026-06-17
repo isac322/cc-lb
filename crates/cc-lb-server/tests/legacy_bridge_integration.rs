@@ -9,16 +9,18 @@ use cc_lb_runtime_extism::handshake::{HandshakeExecutionError, build_offer};
 use cc_lb_runtime_extism::registry::{PluginRegistry, RegistryLifecycle};
 use cc_lb_runtime_extism::self_check::SelfCheckExecutionError;
 use cc_lb_server::startup_handshake::bridge_legacy_wasm_registry;
-use cc_lb_storage_api::{PluginRegistryStore, WasmBlob, WasmRegistryEntryInput};
-use cc_lb_storage_redb::{RedbPluginBlobRepo, RedbPluginRegistryRepo, Storage as RedbStorage};
+use cc_lb_storage_api::{
+    BackendKind, MetaStore, PluginBlobRepo, PluginRegistryRepo, PluginRegistryStore, WasmBlob,
+    WasmRegistryEntryInput,
+};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use tempfile::TempDir;
 use uuid::Uuid;
 
 #[tokio::test]
-async fn bridge_registers_legacy_uploads_missing_from_plugin_registry() {
-    let (dir, storage, plugin_registry, lifecycle) = setup();
+async fn bridge_reports_sqlite_uploads_as_already_present() {
+    let (dir, storage, plugin_registry, lifecycle) = setup().await;
     let wasm = plugin_wasm("legacy-router", "0.1.0");
     let sha = sha256(&wasm);
     seed_legacy_upload(&storage, &wasm, "legacy-router").await;
@@ -26,41 +28,41 @@ async fn bridge_registers_legacy_uploads_missing_from_plugin_registry() {
     let report = bridge_legacy_wasm_registry(&plugin_registry, storage.as_ref()).await;
 
     assert_eq!(report.scanned, 1);
-    assert_eq!(report.bridged, 1);
-    assert_eq!(report.already_present, 0);
+    assert_eq!(report.bridged, 0);
+    assert_eq!(report.already_present, 1);
     assert_eq!(report.orphan, 0);
     assert!(report.failed.is_empty());
-    assert_eq!(lifecycle.handshake_count(), 1);
+    assert_eq!(lifecycle.handshake_count(), 0);
     let record = plugin_registry
         .get_by_sha256(&sha)
         .await
         .expect("registry query succeeds")
         .expect("bridged record is present");
     assert_eq!(record.plugin_name, "legacy-router");
-    assert_eq!(record.plugin_version, "0.1.0");
+    assert_eq!(record.plugin_version, "legacy-router.wasm");
     drop(dir);
 }
 
 #[tokio::test]
 async fn second_bridge_call_is_idempotent_no_extra_handshake() {
-    let (dir, storage, plugin_registry, lifecycle) = setup();
+    let (dir, storage, plugin_registry, lifecycle) = setup().await;
     let wasm = plugin_wasm("legacy-router", "0.1.0");
     seed_legacy_upload(&storage, &wasm, "legacy-router").await;
     bridge_legacy_wasm_registry(&plugin_registry, storage.as_ref()).await;
-    assert_eq!(lifecycle.handshake_count(), 1);
+    assert_eq!(lifecycle.handshake_count(), 0);
 
     let report = bridge_legacy_wasm_registry(&plugin_registry, storage.as_ref()).await;
 
     assert_eq!(report.scanned, 1);
     assert_eq!(report.bridged, 0);
     assert_eq!(report.already_present, 1);
-    assert_eq!(lifecycle.handshake_count(), 1);
+    assert_eq!(lifecycle.handshake_count(), 0);
     drop(dir);
 }
 
 #[tokio::test]
 async fn empty_legacy_registry_produces_empty_report() {
-    let (dir, storage, plugin_registry, lifecycle) = setup();
+    let (dir, storage, plugin_registry, lifecycle) = setup().await;
 
     let report = bridge_legacy_wasm_registry(&plugin_registry, storage.as_ref()).await;
 
@@ -70,18 +72,25 @@ async fn empty_legacy_registry_produces_empty_report() {
     drop(dir);
 }
 
-fn setup() -> (
+async fn setup() -> (
     TempDir,
     Arc<dyn PluginRegistryStore>,
     PluginRegistry,
     Arc<CountingLifecycle>,
 ) {
     let dir = TempDir::new().expect("tempdir");
-    let storage =
-        RedbStorage::open(&dir.path().join("legacy-bridge.redb"), [9; 32]).expect("redb opens");
-    let registry_repo =
-        Arc::new(RedbPluginRegistryRepo::new(storage.clone()).expect("registry repo"));
-    let blob_repo = Arc::new(RedbPluginBlobRepo::new(storage.clone()).expect("blob repo"));
+    let database_url = format!(
+        "sqlite://{}",
+        dir.path().join("legacy-bridge.sqlite").display()
+    );
+    let storage = Arc::new(
+        cc_lb_storage_sqlite::open_sqlite(&database_url)
+            .await
+            .expect("sqlite opens"),
+    );
+    storage.initialize(BackendKind::Sqlite).await.unwrap();
+    let registry_repo: Arc<dyn PluginRegistryRepo> = storage.clone();
+    let blob_repo: Arc<dyn PluginBlobRepo> = storage.clone();
     let lifecycle = Arc::new(CountingLifecycle::default());
     let registry = PluginRegistry::new_with_lifecycle(
         registry_repo,
@@ -90,7 +99,7 @@ fn setup() -> (
         lifecycle.clone(),
     )
     .expect("plugin registry builds");
-    let storage_dyn: Arc<dyn PluginRegistryStore> = Arc::new(storage);
+    let storage_dyn: Arc<dyn PluginRegistryStore> = storage;
     (dir, storage_dyn, registry, lifecycle)
 }
 

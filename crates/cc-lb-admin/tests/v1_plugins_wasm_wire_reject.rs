@@ -12,7 +12,7 @@ use config_admin_common::{TOKEN, temp_storage, test_state};
 
 #[tokio::test]
 async fn router_wire_v1_v2_upload_is_rejected() {
-    let harness = Harness::new();
+    let harness = Harness::new().await;
     let response = harness
         .upload(
             "legacy-router",
@@ -27,7 +27,7 @@ async fn router_wire_v1_v2_upload_is_rejected() {
 
 #[tokio::test]
 async fn shape_plugin_without_handshake_export_is_rejected() {
-    let harness = Harness::new();
+    let harness = Harness::new().await;
     let response = harness
         .upload("shape", "shape.wasm", &minimal_wasm_export("shape"))
         .await;
@@ -38,7 +38,7 @@ async fn shape_plugin_without_handshake_export_is_rejected() {
 
 #[tokio::test]
 async fn observability_plugin_without_handshake_export_is_rejected() {
-    let harness = Harness::new();
+    let harness = Harness::new().await;
     let response = harness
         .upload("observe", "observe.wasm", &minimal_wasm_export("observe"))
         .await;
@@ -53,8 +53,8 @@ struct Harness {
 }
 
 impl Harness {
-    fn new() -> Self {
-        let (dir, storage) = temp_storage();
+    async fn new() -> Self {
+        let (dir, storage) = temp_storage().await;
         let mut config = Config::default();
         config.runtime.data_dir = Some(dir.path().join("data"));
         let app = router(test_state(config, Some(storage)));

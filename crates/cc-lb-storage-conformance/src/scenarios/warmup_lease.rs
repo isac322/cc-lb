@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
+};
 
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::upstream::{UpstreamCreate, UpstreamKind, UpstreamStore};
@@ -14,6 +17,70 @@ where
 {
     with_conformance_fixture(backend, |store| async move {
         warmup_lease_scenario(store.as_ref()).await
+    })
+    .await
+}
+
+pub async fn lease_pk_mutex_excludes_concurrent_holders<B>(backend: Arc<B>) -> ConformanceResult
+where
+    B: ConformanceBackend,
+{
+    with_conformance_fixture(backend, |store| async move {
+        let record = store
+            .create(UpstreamCreate {
+                name: "warmup-lease-pk-mutex-conformance".to_owned(),
+                kind: UpstreamKind::AnthropicOauth,
+                base_url: None,
+                api_key_ciphertext: None,
+                warmup_enabled: true,
+                next_warmup_at: None,
+                last_warmup_cycle_key: None,
+                warmup_lease_holder: None,
+                warmup_lease_until_unix_secs: None,
+                warmup_dialect_plugin: None,
+            })
+            .await?;
+
+        let replica_a_store = Arc::clone(&store);
+        let replica_b_store = Arc::clone(&store);
+        let (replica_a_claimed, replica_b_claimed) = tokio::try_join!(
+            async move {
+                replica_a_store
+                    .claim_warmup_lease(record.id, "replica-a", 60)
+                    .await
+            },
+            async move {
+                replica_b_store
+                    .claim_warmup_lease(record.id, "replica-b", 60)
+                    .await
+            },
+        )?;
+
+        ensure!(
+            replica_a_claimed ^ replica_b_claimed,
+            "exactly one concurrent warmup lease claim should win; replica-a={replica_a_claimed}, replica-b={replica_b_claimed}"
+        );
+
+        Ok(())
+    })
+    .await
+}
+
+pub async fn updated_at_within_2s_of_host_clock<B>(backend: Arc<B>) -> ConformanceResult
+where
+    B: ConformanceBackend,
+{
+    with_conformance_fixture(backend, |store| async move {
+        let before = host_unix_secs()?;
+        let warmup_now = store.warmup_now_unix_secs().await?;
+        let after = host_unix_secs()?;
+
+        ensure!(
+            warmup_now >= before - 2 && warmup_now <= after + 2,
+            "warmup clock {warmup_now} should be within 2s of host clock window {before}..={after}"
+        );
+
+        Ok(())
     })
     .await
 }
@@ -178,4 +245,8 @@ pub async fn warmup_lease_scenario<S: UpstreamStore>(store: &S) -> ConformanceRe
     );
 
     Ok(())
+}
+
+fn host_unix_secs() -> Result<i64> {
+    Ok(SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs() as i64)
 }

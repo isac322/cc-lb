@@ -33,10 +33,10 @@ use cc_lb_server::SubscriptionQuotaCache;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamLeaseKind, UpstreamStatusUpdate};
 use cc_lb_storage_api::{
-    PrincipalCreate, PrincipalKind, PrincipalStore, StorageResult, UpstreamCreate, UpstreamRecord,
-    UpstreamStore, UpstreamUpdate,
+    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, StorageResult,
+    UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,
 };
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use http::{Method, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use url::Url;
@@ -45,9 +45,16 @@ use uuid::Uuid;
 #[tokio::test]
 async fn dispatch_uses_resolved_upstream_base_url_not_first_route_dialect() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let storage = Arc::new(
-        Storage::open(&dir.path().join("base-url-dispatch.redb"), [33; 32]).expect("storage"),
+    let database_url = format!(
+        "sqlite://{}",
+        dir.path().join("base-url-dispatch.sqlite").display()
     );
+    let storage = Arc::new(
+        cc_lb_storage_sqlite::open_sqlite(&database_url)
+            .await
+            .expect("storage"),
+    );
+    storage.initialize(BackendKind::Sqlite).await.unwrap();
 
     // Two enabled AnthropicApiKey upstreams.
     //   * A "aaa-primary"          — no base_url override (defaults to https://api.anthropic.com)

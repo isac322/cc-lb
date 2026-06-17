@@ -219,7 +219,6 @@ fn plugin_registry_concurrent_upload_returns_existed_once_postgres() {
 }
 
 #[test]
-#[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
 fn principal_allowed_upstreams_roundtrip_postgres() {
     run_postgres_scenario(
         "principal_allowed_upstreams_roundtrip",
@@ -228,7 +227,6 @@ fn principal_allowed_upstreams_roundtrip_postgres() {
 }
 
 #[test]
-#[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
 fn upstream_rate_limit_put_then_list_for_upstream_ids_roundtrip_postgres() {
     run_postgres_scenario(
         "upstream_rate_limit_put_then_list_for_upstream_ids_roundtrip",
@@ -237,7 +235,6 @@ fn upstream_rate_limit_put_then_list_for_upstream_ids_roundtrip_postgres() {
 }
 
 #[test]
-#[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
 fn upstream_rate_limit_latest_write_wins_within_same_key_postgres() {
     run_postgres_scenario(
         "upstream_rate_limit_latest_write_wins_within_same_key",
@@ -246,7 +243,6 @@ fn upstream_rate_limit_latest_write_wins_within_same_key_postgres() {
 }
 
 #[test]
-#[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
 fn upstream_rate_limit_latest_write_wins_within_same_key_forward_postgres() {
     run_postgres_scenario(
         "upstream_rate_limit_latest_write_wins_within_same_key_forward",
@@ -255,7 +251,6 @@ fn upstream_rate_limit_latest_write_wins_within_same_key_forward_postgres() {
 }
 
 #[test]
-#[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
 fn upstream_rate_limit_empty_list_for_unknown_id_postgres() {
     run_postgres_scenario(
         "upstream_rate_limit_empty_list_for_unknown_id",
@@ -269,7 +264,6 @@ fn warmup_lease_postgres() {
 }
 
 #[test]
-#[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
 fn anthropic_compatibility_kv_store_postgres() {
     run_postgres_scenario(
         "anthropic_compatibility_kv_store",
@@ -278,7 +272,6 @@ fn anthropic_compatibility_kv_store_postgres() {
 }
 
 #[test]
-#[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
 fn upstream_subscription_quota_store_postgres() {
     run_postgres_scenario(
         "upstream_subscription_quota_store",
@@ -287,7 +280,6 @@ fn upstream_subscription_quota_store_postgres() {
 }
 
 #[test]
-#[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
 fn upstream_subscription_metadata_store_postgres() {
     run_postgres_scenario(
         "upstream_subscription_metadata_store",
@@ -296,7 +288,6 @@ fn upstream_subscription_metadata_store_postgres() {
 }
 
 #[test]
-#[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
 fn organization_metadata_store_postgres() {
     run_postgres_scenario(
         "organization_metadata_store",
@@ -307,7 +298,6 @@ fn organization_metadata_store_postgres() {
 macro_rules! prompt_cache_observation_postgres_test {
     ($test_name:ident, $scenario:ident) => {
         #[test]
-        #[ignore = "requires CI_POSTGRES_URL and an explicit postgres conformance run"]
         fn $test_name() {
             run_postgres_scenario(stringify!($scenario), |backend| async move {
                 prompt_cache_observation_store::$scenario(backend, prompt_cache_clock()).await
@@ -331,6 +321,10 @@ prompt_cache_observation_postgres_test!(
 prompt_cache_observation_postgres_test!(
     prompt_cache_observation_hydrate_after_restart_filters_expired_postgres,
     hydrate_after_restart_filters_expired
+);
+prompt_cache_observation_postgres_test!(
+    prompt_cache_observation_observation_list_is_sorted_postgres,
+    observation_list_is_sorted
 );
 
 fn run_postgres_scenario<F, Fut>(name: &str, scenario: F)

@@ -75,7 +75,7 @@ fn queue_overflow_increments_prometheus_drop_counter() {
             let (sink, writer) = PromptCacheObservationSink::new(
                 Arc::new(store),
                 1,
-                cache_observation_store_kind::REDB,
+                cache_observation_store_kind::SQLITE,
             );
             sink.enqueue(record(0)).expect("first record enqueued");
             while started.load(Ordering::SeqCst) == 0 {
@@ -110,7 +110,7 @@ fn store_error_increments_prometheus_write_failed_counter() {
             let (sink, writer) = PromptCacheObservationSink::new(
                 Arc::new(FailingStore),
                 2,
-                cache_observation_store_kind::REDB,
+                cache_observation_store_kind::SQLITE,
             );
             sink.enqueue(record(0)).expect("record enqueued");
             drop(sink);
@@ -120,7 +120,7 @@ fn store_error_increments_prometheus_write_failed_counter() {
 
     let rendered = handle.render();
     assert!(
-        rendered.contains("cc_lb_cache_observation_write_failed_total{store=\"redb\"} 1"),
+        rendered.contains("cc_lb_cache_observation_write_failed_total{store=\"sqlite\"} 1"),
         "rendered metrics:\n{rendered}"
     );
 }

@@ -90,62 +90,6 @@ pub trait RequestEventStore: Send + Sync {
 }
 
 #[async_trait]
-pub trait QuotaStore: Send + Sync {
-    async fn incr_quota(
-        &self,
-        principal_id: &str,
-        window_start: u64,
-        kind: BucketKind,
-        amount: u64,
-    ) -> StorageResult<u64>;
-
-    async fn try_incr_quota(
-        &self,
-        principal_id: &str,
-        window_start: u64,
-        kind: BucketKind,
-        amount: u64,
-        capacity: u64,
-    ) -> StorageResult<Option<u64>>;
-
-    async fn get_quota(
-        &self,
-        principal_id: &str,
-        window_start: u64,
-        kind: BucketKind,
-    ) -> StorageResult<u64>;
-
-    async fn adjust_quota(
-        &self,
-        principal_id: &str,
-        window_start: u64,
-        kind: BucketKind,
-        delta: i64,
-    ) -> StorageResult<u64>;
-
-    async fn sweep_old_quotas(&self, older_than_window_start: u64) -> StorageResult<u64>;
-}
-
-#[async_trait]
-pub trait LimitStateStore: Send + Sync {
-    async fn put_principal_limit_state(&self, state: &PrincipalLimitState) -> StorageResult<()>;
-
-    async fn get_principal_limit_state(
-        &self,
-        principal_id: &str,
-        identity_kind: PrincipalLimitIdentityKind,
-        identity_value: Option<&str>,
-        window: &str,
-        kind: PrincipalLimitKind,
-    ) -> StorageResult<Option<PrincipalLimitState>>;
-
-    async fn list_principal_limit_states(
-        &self,
-        principal_id: &str,
-    ) -> StorageResult<Vec<PrincipalLimitState>>;
-}
-
-#[async_trait]
 pub trait UsageRollupStore: Send + Sync {
     async fn rollup_usage_once(&self) -> StorageResult<UsageRollupRun>;
 
@@ -319,8 +263,6 @@ pub trait Storage:
     + crate::principal::PrincipalStore
     + crate::upstream::UpstreamStore
     + RequestEventStore
-    + QuotaStore
-    + LimitStateStore
     + UpstreamRateLimitStateStore
     + UpstreamSubscriptionQuotaStore
     + UpstreamSubscriptionMetadataStore
@@ -348,8 +290,6 @@ impl<T> Storage for T where
         + crate::principal::PrincipalStore
         + crate::upstream::UpstreamStore
         + RequestEventStore
-        + QuotaStore
-        + LimitStateStore
         + UpstreamRateLimitStateStore
         + UpstreamSubscriptionQuotaStore
         + UpstreamSubscriptionMetadataStore

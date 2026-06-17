@@ -171,7 +171,7 @@ wait_port "$fake_port" fake-anthropic
 echo "===> step 2: spawn cc-lb-server with [storage] kind=postgres"
 CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
 CC_LB_ADMIN_TOKEN=test \
-cargo run -q -p cc-lb-server --features postgres,redb -- serve --config "$config_path" \
+cargo run -q -p cc-lb-server --features postgres,sqlite -- serve --config "$config_path" \
   > "$TMP_DIR/proxy.log" 2>&1 &
 PROXY_PID=$!
 if ! wait_port "$proxy_port" cc-lb; then
@@ -218,17 +218,17 @@ kill "$PROXY_PID" 2>/dev/null || true
 wait "$PROXY_PID" 2>/dev/null || true
 PROXY_PID=""
 
-echo "===> step 6: tamper meta.backend_kind to 'redb' to simulate a wrong-backend startup"
-psql "$CI_POSTGRES_URL" -c "UPDATE meta SET value = 'redb' WHERE key = 'backend_kind'" > /dev/null
+echo "===> step 6: tamper meta.backend_kind to 'sqlite' to simulate a wrong-backend startup"
+psql "$CI_POSTGRES_URL" -c "UPDATE meta SET value = 'sqlite' WHERE key = 'backend_kind'" > /dev/null
 new_kind=$(psql "$CI_POSTGRES_URL" -tAc "SELECT value FROM meta WHERE key = 'backend_kind'")
-[ "$new_kind" = "redb" ] || { echo "FAIL: tamper did not stick"; exit 1; }
+[ "$new_kind" = "sqlite" ] || { echo "FAIL: tamper did not stick"; exit 1; }
 
 echo "===> step 7: restart cc-lb against tampered DB - expect fatal exit (BackendKindMismatch)"
 mismatch_log="$TMP_DIR/proxy-mismatch.log"
 set +e
 CC_LB_MASTER_KEY=0000000000000000000000000000000000000000000000000000000000000000 \
 CC_LB_ADMIN_TOKEN=test \
-timeout 30 cargo run -q -p cc-lb-server --features postgres,redb -- serve --config "$config_path" \
+timeout 30 cargo run -q -p cc-lb-server --features postgres,sqlite -- serve --config "$config_path" \
   > "$mismatch_log" 2>&1
 exit_code=$?
 set -e

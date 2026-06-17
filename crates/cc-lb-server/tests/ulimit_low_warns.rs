@@ -36,7 +36,7 @@ async fn low_ulimit_preflight_still_succeeds() {
         "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
     );
     let mut config = preflight_common::base_config();
-    preflight_common::use_temp_redb(
+    preflight_common::use_temp_sqlite(
         &mut config,
         "preflight-ulimit",
         "CC_LB_TEST_MASTER_KEY_PREFLIGHT_ULIMIT",

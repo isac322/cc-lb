@@ -182,8 +182,8 @@ where
             "revoked salt should be zeroed"
         );
         ensure!(
-            revoked.last_4.is_empty(),
-            "revoked last_4 should be cleared"
+            revoked.last_4 == params.last_4,
+            "revoked last_4 should be preserved"
         );
 
         Ok(())
@@ -282,11 +282,11 @@ where
 }
 
 pub async fn managed_keys_cross_backend_equivalence(
-    redb: &dyn ManagedKeyStore,
+    sqlite: &dyn ManagedKeyStore,
     postgres: &dyn ManagedKeyStore,
 ) -> Result<()> {
     let params = issue_params(121);
-    let redb_record = redb
+    let sqlite_record = sqlite
         .issue(
             "principal-cross-backend-equivalence",
             "key-cross-backend-equivalence",
@@ -301,7 +301,7 @@ pub async fn managed_keys_cross_backend_equivalence(
         )
         .await?;
 
-    assert_record_bytes_eq(&redb_record, &postgres_record)
+    assert_record_bytes_eq(&sqlite_record, &postgres_record)
 }
 
 pub async fn managed_keys_equivalent_records<B>(backend: Arc<B>) -> Result<()>

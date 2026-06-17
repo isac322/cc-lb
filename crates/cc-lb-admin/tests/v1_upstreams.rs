@@ -12,7 +12,8 @@ use axum::{
 use cc_lb_admin::{AdminState, router};
 use cc_lb_config::Config;
 use cc_lb_core::AuditWriterSink;
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_api::AuditStore;
+use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -44,11 +45,10 @@ fn test_state(storage: Arc<Storage>, audit_sink: Option<AuditWriterSink>) -> Adm
     }
 }
 
-fn new_store() -> (tempfile::TempDir, Arc<Storage>) {
+async fn new_store() -> (tempfile::TempDir, Arc<Storage>) {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("v1_upstreams.redb");
-    let storage = Storage::open(&path, [41; 32]).unwrap();
-    (dir, Arc::new(storage))
+    let storage = admin_test_common::sqlite_storage(dir.path(), "v1_upstreams.sqlite").await;
+    (dir, storage)
 }
 
 async fn request(
@@ -107,7 +107,7 @@ fn body(response: &TestResponse) -> &Value {
 
 #[tokio::test]
 async fn create_returns_201_with_body_and_location_header() {
-    let (_dir, storage) = new_store();
+    let (_dir, storage) = new_store().await;
     let app = router(test_state(storage, None));
 
     let response = create(app, "primary").await;
@@ -130,7 +130,7 @@ async fn create_returns_201_with_body_and_location_header() {
 
 #[tokio::test]
 async fn get_after_create_returns_etag_with_revision() {
-    let (_dir, storage) = new_store();
+    let (_dir, storage) = new_store().await;
     let app = router(test_state(storage, None));
     let created = create(app.clone(), "primary").await;
     let id = body(&created)["id"].as_str().unwrap();
@@ -144,7 +144,7 @@ async fn get_after_create_returns_etag_with_revision() {
 
 #[tokio::test]
 async fn list_paginates_with_x_total_count() {
-    let (_dir, storage) = new_store();
+    let (_dir, storage) = new_store().await;
     let app = router(test_state(storage, None));
     create(app.clone(), "u-a").await;
     create(app.clone(), "u-b").await;
@@ -179,7 +179,7 @@ async fn list_paginates_with_x_total_count() {
 
 #[tokio::test]
 async fn update_with_correct_if_match_returns_200_and_bumps_revision() {
-    let (_dir, storage) = new_store();
+    let (_dir, storage) = new_store().await;
     let app = router(test_state(storage, None));
     let created = create(app.clone(), "primary").await;
     let id = body(&created)["id"].as_str().unwrap();
@@ -200,7 +200,7 @@ async fn update_with_correct_if_match_returns_200_and_bumps_revision() {
 
 #[tokio::test]
 async fn update_with_stale_if_match_returns_409_with_current_revision() {
-    let (_dir, storage) = new_store();
+    let (_dir, storage) = new_store().await;
     let app = router(test_state(storage, None));
     let created = create(app.clone(), "primary").await;
     let id = body(&created)["id"].as_str().unwrap();
@@ -221,7 +221,7 @@ async fn update_with_stale_if_match_returns_409_with_current_revision() {
 
 #[tokio::test]
 async fn update_without_if_match_returns_428_precondition_required() {
-    let (_dir, storage) = new_store();
+    let (_dir, storage) = new_store().await;
     let app = router(test_state(storage, None));
     let created = create(app.clone(), "primary").await;
     let id = body(&created)["id"].as_str().unwrap();
@@ -241,7 +241,7 @@ async fn update_without_if_match_returns_428_precondition_required() {
 
 #[tokio::test]
 async fn enable_disable_emits_audit_and_persists_state() {
-    let (_dir, storage) = new_store();
+    let (_dir, storage) = new_store().await;
     let (audit_sink, audit_writer) = cc_lb_core::spawn_audit_writer(storage.clone(), 64);
     let app = router(test_state(storage.clone(), Some(audit_sink)));
     let created = create(app.clone(), "primary").await;
@@ -279,7 +279,10 @@ async fn enable_disable_emits_audit_and_persists_state() {
     // deadline before reporting failure.
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
-        let entries = storage.query_audit(Some("admin"), 0, u64::MAX, 10).unwrap();
+        let entries = storage
+            .query_audit(Some("admin"), 0, u64::MAX, 10)
+            .await
+            .unwrap();
         let has_disable = entries.iter().any(|entry| {
             entry
                 .admin_action
@@ -312,7 +315,7 @@ async fn enable_disable_emits_audit_and_persists_state() {
 
 #[tokio::test]
 async fn delete_soft_deletes_upstream() {
-    let (_dir, storage) = new_store();
+    let (_dir, storage) = new_store().await;
     let app = router(test_state(storage, None));
     let created = create(app.clone(), "primary").await;
     let id = body(&created)["id"].as_str().unwrap();

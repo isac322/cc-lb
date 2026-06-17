@@ -16,12 +16,12 @@ use cc_lb_core::{DynamicViewHolder, Lifecycle, LifecycleConfig};
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_storage_api::{
-    PrincipalCreate, PrincipalKind, PrincipalStore, StorageResult, UpstreamCreate, UpstreamRecord,
-    UpstreamStore, UpstreamUpdate,
+    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, PrincipalStore, StorageResult,
+    UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,
 };
 
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamLeaseKind, UpstreamStatusUpdate};
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use http::Request;
 use http::header::LOCATION;
@@ -101,9 +101,16 @@ impl Fixture {
     async fn new() -> Self {
         let fake_addr = spawn_fake_anthropic().await;
         let dir = tempfile::tempdir().expect("tempdir");
-        let storage = Arc::new(
-            Storage::open(&dir.path().join("composite-dispatch.redb"), [33; 32]).expect("storage"),
+        let database_url = format!(
+            "sqlite://{}",
+            dir.path().join("composite-dispatch.sqlite").display()
         );
+        let storage = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite(&database_url)
+                .await
+                .expect("storage"),
+        );
+        storage.initialize(BackendKind::Sqlite).await.unwrap();
         let stores = Arc::new(Stores {
             upstreams: Arc::new(OrderedUpstreamStore {
                 inner: storage.clone(),

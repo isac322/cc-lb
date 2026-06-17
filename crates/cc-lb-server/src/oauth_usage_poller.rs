@@ -178,7 +178,7 @@ impl OAuthUsagePoller {
         if response.status == StatusCode::TOO_MANY_REQUESTS {
             let observation = throttle_observation(&response.headers, observed_at, &self.config);
             self.estimator.record_throttle(upstream.id, observation);
-            tracing::warn!(upstream_id = %upstream.id, status = %response.status, "oauth usage poll throttled");
+            tracing::debug!(upstream_id = %upstream.id, status = %response.status, "oauth usage poll throttled");
             return Ok(());
         }
         if !response.status.is_success() {

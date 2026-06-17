@@ -9,7 +9,7 @@ use serde_json::json;
 
 #[tokio::test]
 async fn invalid_draft_validate_reports_false_and_keeps_last_validated_revision() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let app = app(test_state(
         config_admin_common::minimal_config(),
         Some(storage),
@@ -42,7 +42,7 @@ async fn invalid_draft_validate_reports_false_and_keeps_last_validated_revision(
 
 #[tokio::test]
 async fn valid_draft_validate_marks_current_revision_valid() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let app = app(test_state(
         config_admin_common::minimal_config(),
         Some(storage),
@@ -75,7 +75,7 @@ async fn valid_draft_validate_marks_current_revision_valid() {
 
 #[tokio::test]
 async fn stale_validate_revision_returns_conflict() {
-    let (_dir, storage) = temp_storage();
+    let (_dir, storage) = temp_storage().await;
     let app = app(test_state(
         config_admin_common::minimal_config(),
         Some(storage),

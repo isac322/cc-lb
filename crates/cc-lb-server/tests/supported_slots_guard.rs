@@ -32,11 +32,11 @@ use cc_lb_server::refresh::LazyRefresher;
 use cc_lb_server::warmup::dialect::{WarmupDispatchError, dispatch_warmup_with_dialect};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    PluginChainEntry, PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate,
-    PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore, UpstreamWarmupDialectPlugin,
-    WasmBlob, WasmRegistryEntry, WasmRegistryEntryInput,
+    BackendKind, MetaStore, PluginChainEntry, PluginChainEntryInput, PluginRegistryStore,
+    PluginSlot, PrincipalCreate, PrincipalKind, PrincipalStore, UpstreamCreate, UpstreamStore,
+    UpstreamWarmupDialectPlugin, WasmBlob, WasmRegistryEntry, WasmRegistryEntryInput,
 };
-use cc_lb_storage_redb::{RedbManagedKeyStore, Storage};
+use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use http_body_util::{BodyExt, Full};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
@@ -62,16 +62,19 @@ struct Fixture {
 }
 
 impl Fixture {
-    fn new(seed: u8) -> Self {
+    async fn new(_seed: u8) -> Self {
         let db_dir = tempfile::tempdir().expect("db tempdir");
         let data_dir = tempfile::tempdir().expect("data tempdir");
-        let storage = Arc::new(
-            Storage::open(
-                &db_dir.path().join("supported-slots-guard.redb"),
-                [seed; 32],
-            )
-            .expect("storage opens"),
+        let database_url = format!(
+            "sqlite://{}",
+            db_dir.path().join("supported-slots-guard.sqlite").display()
         );
+        let storage = Arc::new(
+            cc_lb_storage_sqlite::open_sqlite(&database_url)
+                .await
+                .expect("storage opens"),
+        );
+        storage.initialize(BackendKind::Sqlite).await.unwrap();
         let stores = Arc::new(Stores {
             upstreams: storage.clone(),
             principals: storage.clone(),
@@ -94,7 +97,7 @@ impl Fixture {
 
 #[tokio::test]
 async fn dynamic_view_hooks_skip_registry_entry_not_supporting_observability_slot() {
-    let fixture = Fixture::new(91);
+    let fixture = Fixture::new(91).await;
     let principal = seed_principal(&fixture.storage, "dynamic-principal").await;
     let plugin = seed_registry_with_slots(
         &fixture.storage,
@@ -127,7 +130,7 @@ async fn dynamic_view_hooks_skip_registry_entry_not_supporting_observability_slo
 
 #[tokio::test]
 async fn warmup_dialect_returns_registry_unsupported_slot_for_non_shape_plugin() {
-    let fixture = Fixture::new(92);
+    let fixture = Fixture::new(92).await;
     let plugin = seed_registry_with_slots(
         &fixture.storage,
         92,
@@ -182,7 +185,7 @@ async fn warmup_dialect_returns_registry_unsupported_slot_for_non_shape_plugin()
 
 #[tokio::test]
 async fn preflight_warns_when_chain_entry_registry_does_not_support_slot() {
-    let fixture = Fixture::new(93);
+    let fixture = Fixture::new(93).await;
     let principal = seed_principal(&fixture.storage, "preflight-principal").await;
     let plugin = seed_registry_with_slots(
         &fixture.storage,
@@ -222,7 +225,7 @@ async fn preflight_warns_when_chain_entry_registry_does_not_support_slot() {
 
 #[tokio::test]
 async fn bootstrap_hard_errors_when_registry_entry_does_not_support_chain_slot() {
-    let fixture = Fixture::new(94);
+    let fixture = Fixture::new(94).await;
     seed_principal(&fixture.storage, "bootstrap-principal").await;
     seed_registry_with_slots(
         &fixture.storage,
@@ -271,7 +274,7 @@ plugins = ["shape-only-bootstrap"]
 
 #[tokio::test]
 async fn admin_update_chain_rejects_registry_entry_not_supporting_existing_slot() {
-    let fixture = Fixture::new(95);
+    let fixture = Fixture::new(95).await;
     let principal = seed_principal(&fixture.storage, "admin-unsupported-principal").await;
     let plugin = seed_registry_with_slots(
         &fixture.storage,
@@ -308,7 +311,7 @@ async fn admin_update_chain_rejects_registry_entry_not_supporting_existing_slot(
 
 #[tokio::test]
 async fn admin_update_chain_rejects_empty_supported_slots_as_metadata_unknown() {
-    let fixture = Fixture::new(96);
+    let fixture = Fixture::new(96).await;
     let principal = seed_principal(&fixture.storage, "admin-empty-principal").await;
     let plugin = seed_registry_raw(&fixture.storage, 96, "legacy-admin-empty-slots").await;
     let chain = seed_chain_with_slot(
@@ -550,9 +553,7 @@ fn admin_state(storage: Arc<Storage>) -> AdminState {
     ));
     AdminState {
         storage: Some(storage.clone() as Arc<dyn cc_lb_storage_api::Storage>),
-        key_store: Some(Arc::new(KeyStore::new(Arc::new(RedbManagedKeyStore::new(
-            storage,
-        ))))),
+        key_store: Some(Arc::new(KeyStore::new(storage))),
         aead: Arc::new(AeadService::from_master_key([0; 32])),
         limit_engine: LimitEngine::new(Arc::new(KeyConcurrencyManager::new())),
         lifecycle: None,

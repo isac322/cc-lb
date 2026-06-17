@@ -7,6 +7,7 @@ use axum::http::{Request, StatusCode, header};
 use cc_lb_admin::router;
 use cc_lb_config::Config;
 use cc_lb_storage_api::PluginRegistryStore;
+use cc_lb_storage_sqlite::SqliteStorage;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
@@ -16,7 +17,7 @@ use config_admin_common::{TOKEN, temp_storage, test_state};
 
 #[tokio::test]
 async fn upload_derives_wire_version_from_handshake_chosen_versions() {
-    let harness = Harness::new();
+    let harness = Harness::new().await;
     let wasm = handshake_wasm_with_filter_v3_shape_v2();
 
     let upload = harness
@@ -36,7 +37,7 @@ async fn upload_derives_wire_version_from_handshake_chosen_versions() {
 
 #[tokio::test]
 async fn idempotent_reupload_skips_handshake_and_preserves_stored_wire_version() {
-    let harness = Harness::new();
+    let harness = Harness::new().await;
     let wasm = handshake_wasm_with_filter_v3_shape_v2();
 
     let first = harness
@@ -78,12 +79,12 @@ async fn idempotent_reupload_skips_handshake_and_preserves_stored_wire_version()
 struct Harness {
     app: axum::Router,
     _dir: tempfile::TempDir,
-    storage: Arc<cc_lb_storage_redb::RedbStorage>,
+    storage: Arc<SqliteStorage>,
 }
 
 impl Harness {
-    fn new() -> Self {
-        let (dir, storage) = temp_storage();
+    async fn new() -> Self {
+        let (dir, storage) = temp_storage().await;
         let mut config = Config::default();
         config.runtime.data_dir = Some(dir.path().join("data"));
         let app = router(test_state(config, Some(storage.clone())));

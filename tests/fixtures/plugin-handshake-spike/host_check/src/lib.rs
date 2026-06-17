@@ -63,8 +63,13 @@ mod tests {
     }
 
     fn wasm_artifact_path() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../../../target/wasm32-unknown-unknown/release/plugin_handshake_spike.wasm")
+        option_env!("PLUGIN_HANDSHAKE_SPIKE_WASM")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| {
+                Path::new(env!("CARGO_MANIFEST_DIR")).join(
+                    "../../../../target/wasm32-unknown-unknown/release/plugin_handshake_spike.wasm",
+                )
+            })
     }
 
     #[allow(clippy::collapsible_if)]

@@ -23,6 +23,14 @@ static PANIC_TOTAL: AtomicU64 = AtomicU64::new(0);
 const CACHE_TOKEN_DRIFT_BUCKETS: [f64; 11] = [
     -1000.0, -500.0, -100.0, -50.0, -10.0, 0.0, 10.0, 50.0, 100.0, 500.0, 1000.0,
 ];
+const REQUEST_DURATION_BUCKETS: [f64; 12] = [
+    0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+];
+const EXTISM_DURATION_BUCKETS: [f64; 11] = [
+    0.0005, 0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5,
+];
+const SUBSCRIPTION_QUOTA_BATCH_BUCKETS: [f64; 9] =
+    [1.0, 2.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0];
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ObservabilityConfig {
@@ -356,6 +364,27 @@ pub fn panic_total() -> u64 {
 fn install_prometheus(cfg: &ObservabilityConfig) -> Result<Option<PrometheusHandle>, InitError> {
     let builder = PrometheusBuilder::new()
         .set_buckets_for_metric(
+            Matcher::Full("cc_lb_request_duration_seconds".to_owned()),
+            &REQUEST_DURATION_BUCKETS,
+        )
+        .map_err(|source| InitError::Prometheus {
+            message: source.to_string(),
+        })?
+        .set_buckets_for_metric(
+            Matcher::Full("cc_lb_extism_call_duration_seconds".to_owned()),
+            &EXTISM_DURATION_BUCKETS,
+        )
+        .map_err(|source| InitError::Prometheus {
+            message: source.to_string(),
+        })?
+        .set_buckets_for_metric(
+            Matcher::Full("subscription_quota_writer_batch_size".to_owned()),
+            &SUBSCRIPTION_QUOTA_BATCH_BUCKETS,
+        )
+        .map_err(|source| InitError::Prometheus {
+            message: source.to_string(),
+        })?
+        .set_buckets_for_metric(
             Matcher::Full("cc_lb_cache_token_drift".to_owned()),
             &CACHE_TOKEN_DRIFT_BUCKETS,
         )
@@ -442,6 +471,7 @@ fn touch_metrics() {
         "hook" => "unknown"
     )
     .record(0.0);
+    metrics::histogram!("subscription_quota_writer_batch_size").record(0.0);
     metrics::counter!(
         "cc_lb_tokens_total",
         "principal" => "unknown",

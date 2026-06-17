@@ -20,15 +20,16 @@ use crate::dashboard::{
 pub fn router() -> Router<AdminState> {
     Router::new()
         .route("/admin/dashboard/summary", get(handle_dashboard_summary))
+        .route("/admin/dashboard/usage", get(handle_dashboard_usage))
         .route("/admin/usage", get(handle_dashboard_usage))
 }
 
 #[derive(Debug, Deserialize)]
-struct SummaryQuery {
+pub(crate) struct SummaryQuery {
     range: String,
 }
 
-async fn handle_dashboard_summary(
+pub(crate) async fn handle_dashboard_summary(
     State(state): State<AdminState>,
     Query(query): Query<SummaryQuery>,
 ) -> Response {
@@ -49,7 +50,7 @@ async fn handle_dashboard_summary(
 }
 
 #[derive(Debug, Deserialize)]
-struct UsageQuery {
+pub(crate) struct UsageQuery {
     range: String,
     #[serde(default)]
     group_by: Option<String>,
@@ -59,7 +60,7 @@ struct UsageQuery {
     upstream_id: Option<String>,
 }
 
-async fn handle_dashboard_usage(
+pub(crate) async fn handle_dashboard_usage(
     State(state): State<AdminState>,
     Query(query): Query<UsageQuery>,
 ) -> Response {

@@ -5,22 +5,28 @@ use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_plugin_api::TerminalStrategy;
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
+use cc_lb_storage_api::BackendKind;
 use cc_lb_storage_api::{
     PluginChainEntry, PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate,
     PrincipalKind, PrincipalStore, PrincipalUpdate, WasmBlob, WasmRegistryEntry,
     WasmRegistryEntryInput,
 };
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_sqlite::{SqliteStorage as Storage, open_sqlite};
 use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-fn storage_fixture(seed: u8) -> (tempfile::TempDir, Arc<Storage>) {
+async fn storage_fixture(seed: u8) -> (tempfile::TempDir, Arc<Storage>) {
     let dir = tempfile::tempdir().expect("tempdir");
-    let storage = Arc::new(
-        Storage::open(&dir.path().join("dynamic-view-pipeline.redb"), [seed; 32]).expect("storage"),
-    );
-    (dir, storage)
+    let path = dir
+        .path()
+        .join(format!("dynamic-view-pipeline-{seed}.sqlite"));
+    let database_url = format!("sqlite://{}", path.display());
+    let storage = open_sqlite(&database_url).await.expect("storage");
+    cc_lb_storage_api::MetaStore::initialize(&storage, BackendKind::Sqlite)
+        .await
+        .expect("initialize");
+    (dir, Arc::new(storage))
 }
 
 fn stores(storage: Arc<Storage>) -> Stores {
@@ -164,7 +170,7 @@ fn observe_only_wat() -> &'static str {
 
 #[tokio::test]
 async fn router_pipeline_instantiates_ordered_filters_and_terminal() {
-    let (dir, storage) = storage_fixture(31);
+    let (dir, storage) = storage_fixture(31).await;
     let stores = stores(storage.clone());
     let principal = create_principal(&storage, "principal-a").await;
     let principal = set_terminal_strategy(&storage, &principal, TerminalStrategy::Random).await;
@@ -202,7 +208,7 @@ async fn router_pipeline_instantiates_ordered_filters_and_terminal() {
 
 #[tokio::test]
 async fn router_pipeline_instantiation_failure_sets_error_without_committing_slots() {
-    let (dir, storage) = storage_fixture(32);
+    let (dir, storage) = storage_fixture(32).await;
     let stores = stores(storage.clone());
     let principal = create_principal(&storage, "principal-a").await;
     let plugin = register_plugin(&storage, "not-a-filter", observe_only_wat()).await;
@@ -230,7 +236,7 @@ async fn router_pipeline_instantiation_failure_sets_error_without_committing_slo
 
 #[tokio::test]
 async fn router_pipeline_depth_above_sixteen_fails_closed() {
-    let (dir, storage) = storage_fixture(33);
+    let (dir, storage) = storage_fixture(33).await;
     let stores = stores(storage.clone());
     let principal = create_principal(&storage, "principal-a").await;
     for index in 0..17 {

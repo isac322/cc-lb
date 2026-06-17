@@ -38,17 +38,17 @@ pub fn base_config() -> Config {
     Config::default()
 }
 
-pub fn use_temp_redb(config: &mut Config, prefix: &str, key_env: &'static str) {
-    config.storage = StorageConfig::Redb {
-        path: unique_redb_path(prefix),
+pub fn use_temp_sqlite(config: &mut Config, prefix: &str, key_env: &'static str) {
+    config.storage = StorageConfig::Sqlite {
+        path: unique_sqlite_path(prefix),
     };
     config.aead.key_env = key_env.to_owned();
 }
 
-fn unique_redb_path(prefix: &str) -> std::path::PathBuf {
+fn unique_sqlite_path(prefix: &str) -> std::path::PathBuf {
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock after epoch")
         .as_nanos();
-    std::env::temp_dir().join(format!("{prefix}-{}-{nanos}.redb", std::process::id()))
+    std::env::temp_dir().join(format!("{prefix}-{}-{nanos}.sqlite", std::process::id()))
 }

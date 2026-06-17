@@ -18,8 +18,8 @@ use cc_lb_aead::{AeadEncryptedField, AeadService, OAuthTokenBundle};
 use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_core::spawn_audit_writer;
 use cc_lb_storage_api::upstream::UpstreamKind;
-use cc_lb_storage_api::{UpstreamCreate, UpstreamStore};
-use cc_lb_storage_redb::Storage;
+use cc_lb_storage_api::{AuditStore, UpstreamCreate, UpstreamStore};
+use cc_lb_storage_sqlite::SqliteStorage as Storage;
 use http_body_util::{BodyExt, Empty};
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
@@ -33,6 +33,7 @@ use uuid::Uuid;
 const MASTER_KEY: [u8; 32] = [7; 32];
 
 struct Fixture {
+    _temp_dir: tempfile::TempDir,
     app: axum::Router,
     storage: Arc<Storage>,
     aead: Arc<AeadService>,
@@ -43,8 +44,7 @@ impl Fixture {
     async fn new() -> Self {
         let oauth_addr = spawn_fake_anthropic().await;
         let temp_dir = tempfile::tempdir().expect("tempdir");
-        let db_path = temp_dir.path().join("test.redb");
-        let storage = Arc::new(Storage::open(&db_path, MASTER_KEY).expect("storage opens"));
+        let storage = admin_test_common::sqlite_storage(temp_dir.path(), "test.sqlite").await;
         let aead = Arc::new(AeadService::from_master_key(MASTER_KEY));
         let config = test_config(oauth_addr);
         let (audit_sink, audit_task) = spawn_audit_writer(storage.clone(), 64);
@@ -67,6 +67,7 @@ impl Fixture {
         };
 
         Self {
+            _temp_dir: temp_dir,
             app: router(state),
             storage,
             aead,
@@ -321,6 +322,16 @@ async fn upstream_wrong_kind_anthropic_api_key_returns_400() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"], "wrong_kind");
+}
+
+#[tokio::test]
+async fn unknown_upstream_start_returns_json_404() {
+    let fixture = Fixture::new().await;
+
+    let (status, body) = fixture.start(Uuid::new_v4()).await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"], "upstream_not_found");
 }
 
 #[tokio::test]
@@ -619,6 +630,7 @@ async fn audit_actions(storage: &Storage) -> Vec<String> {
     loop {
         let entries: Vec<String> = storage
             .query_audit(None, 0, u64::MAX, 100)
+            .await
             .expect("query audit")
             .into_iter()
             .filter_map(|entry| entry.admin_action)

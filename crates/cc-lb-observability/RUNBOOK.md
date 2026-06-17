@@ -119,13 +119,13 @@ sum(rate(cc_lb_cache_observation_dropped_total{reason="queue_full"}[5m])) > 5
 
 - **Type**: Counter
 - **Labels**: `store`
-- **Label Cardinality Bounds**: Very low, bounded by the 2 store kinds: `redb` and `postgres`.
+- **Label Cardinality Bounds**: Very low, bounded by the 2 store kinds: `sqlite` and `postgres`.
 
 ### Interpretation
 
 This metric tracks failures when writing prompt-cache observations to the persistent store.
 Any value above 0 indicates a write failure, which means cache observations are being lost.
-High values indicate persistent database issues, such as disk full for `redb` or connection/permission issues for `postgres`.
+High values indicate persistent database issues, such as disk full for `sqlite` or connection/permission issues for `postgres`.
 
 ### Typical PromQL Query
 

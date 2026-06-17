@@ -135,7 +135,7 @@ struct ExportChainEntry {
     batched_flush_ms: u64,
 }
 
-async fn status(State(state): State<AdminState>) -> axum::response::Response {
+pub(crate) async fn status(State(state): State<AdminState>) -> axum::response::Response {
     match build_status(&state).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => status_error_response(error),
@@ -491,14 +491,6 @@ fn status_error_response(error: StatusError) -> axum::response::Response {
             )
                 .into_response()
         }
-        StatusError::RedbStorage(source) => {
-            tracing::error!(error = %source, "admin v1 status redb operation failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json!({ "error": "storage_error" })),
-            )
-                .into_response()
-        }
     }
 }
 
@@ -506,18 +498,11 @@ fn status_error_response(error: StatusError) -> axum::response::Response {
 enum StatusError {
     StorageUnavailable,
     Storage(StorageError),
-    RedbStorage(cc_lb_storage_redb::StorageError),
 }
 
 impl From<StorageError> for StatusError {
     fn from(error: StorageError) -> Self {
         Self::Storage(error)
-    }
-}
-
-impl From<cc_lb_storage_redb::StorageError> for StatusError {
-    fn from(error: cc_lb_storage_redb::StorageError) -> Self {
-        Self::RedbStorage(error)
     }
 }
 
