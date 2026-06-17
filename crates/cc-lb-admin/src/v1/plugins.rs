@@ -133,7 +133,19 @@ struct ChainListResponse {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct SlotParam(PluginSlot);
+enum SlotParam {
+    Stored(PluginSlot),
+    RuntimeOnly,
+}
+
+impl SlotParam {
+    fn stored(self) -> Option<PluginSlot> {
+        match self {
+            Self::Stored(slot) => Some(slot),
+            Self::RuntimeOnly => None,
+        }
+    }
+}
 
 struct PluginChainAuditMetadata {
     wasm_registry_id: String,
@@ -147,9 +159,7 @@ impl<'de> Deserialize<'de> for SlotParam {
         D: serde::Deserializer<'de>,
     {
         let value = String::deserialize(deserializer)?;
-        parse_slot(&value)
-            .map(SlotParam)
-            .ok_or_else(|| serde::de::Error::custom("invalid plugin slot"))
+        parse_slot(&value).ok_or_else(|| serde::de::Error::custom("invalid plugin slot"))
     }
 }
 
@@ -280,10 +290,13 @@ async fn list_chain(
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
-    match storage
-        .list_chain_for_principal(principal_id, query.slot.0)
-        .await
-    {
+    let Some(slot) = query.slot.stored() else {
+        return Json(ChainListResponse {
+            entries: Vec::new(),
+        })
+        .into_response();
+    };
+    match storage.list_chain_for_principal(principal_id, slot).await {
         Ok(entries) => Json(ChainListResponse { entries }).into_response(),
         Err(error) => storage_error(error),
     }
@@ -297,7 +310,9 @@ async fn insert_chain(
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
-    let slot = body.slot.0;
+    let Some(slot) = body.slot.stored() else {
+        return error(StatusCode::BAD_REQUEST, "unsupported_plugin_slot");
+    };
     let audit_metadata = match storage
         .get_registry_entry_by_id(body.wasm_registry_id)
         .await
@@ -516,17 +531,20 @@ async fn rebalance_chain(
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
-    let existing = match storage
-        .list_chain_for_principal(principal_id, query.slot.0)
-        .await
-    {
+    let Some(slot) = query.slot.stored() else {
+        return Json(ChainListResponse {
+            entries: Vec::new(),
+        })
+        .into_response();
+    };
+    let existing = match storage.list_chain_for_principal(principal_id, slot).await {
         Ok(entries) => entries,
         Err(error) => return storage_error(error),
     };
     if let Err(response) = revalidate_chain_registry_slots(storage, principal_id, &existing).await {
         return response;
     }
-    match storage.rebalance_chain(principal_id, query.slot.0).await {
+    match storage.rebalance_chain(principal_id, slot).await {
         Ok(entries) => {
             let audit_metadata = match first_plugin_chain_audit_metadata(storage, &entries).await {
                 Ok(metadata) => metadata,
@@ -535,7 +553,7 @@ async fn rebalance_chain(
             emit_chain_audit(
                 &state,
                 principal_id,
-                query.slot.0,
+                slot,
                 audit_metadata.wasm_registry_id,
                 audit_metadata.sha256_hex,
                 audit_metadata.supported_slots,
@@ -829,11 +847,14 @@ fn supported_slot_strings(slots: &[PluginSlot]) -> Vec<String> {
     slots.iter().map(|slot| slot.as_str().to_owned()).collect()
 }
 
-fn parse_slot(value: &str) -> Option<PluginSlot> {
+fn parse_slot(value: &str) -> Option<SlotParam> {
     match value {
-        "Router" | "router" => Some(PluginSlot::Router),
-        "ObservabilityHook" | "observability_hook" => Some(PluginSlot::ObservabilityHook),
-        "Shape" | "shape" => Some(PluginSlot::Shape),
+        "Router" | "router" | "filter" => Some(SlotParam::Stored(PluginSlot::Router)),
+        "ObservabilityHook" | "observability_hook" | "observe" => {
+            Some(SlotParam::Stored(PluginSlot::ObservabilityHook))
+        }
+        "Shape" | "shape" | "normalize_error" => Some(SlotParam::Stored(PluginSlot::Shape)),
+        "build_signer" | "sign" | "on_unauthorized" => Some(SlotParam::RuntimeOnly),
         _ => None,
     }
 }

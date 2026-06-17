@@ -398,6 +398,74 @@ async fn chain_insert_accepts_builtin_cache_affinity_registry_id() {
 }
 
 #[tokio::test]
+async fn plugin_chain_accepts_runtime_slot_aliases() {
+    let (_dir, storage) = temp_storage().await;
+    let principal_id = seed_principal(&storage, "principal-slot-aliases").await;
+    let entry = seed_registry(&storage, 25, "plugin-slot-aliases").await;
+    let router =
+        seed_chain_with_slot(&storage, principal_id, PluginSlot::Router, entry.id, 1000).await;
+    let observe = seed_chain_with_slot(
+        &storage,
+        principal_id,
+        PluginSlot::ObservabilityHook,
+        entry.id,
+        1000,
+    )
+    .await;
+    let shape =
+        seed_chain_with_slot(&storage, principal_id, PluginSlot::Shape, entry.id, 1000).await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    for (slot, expected_id) in [
+        ("filter", router.id),
+        ("observe", observe.id),
+        ("normalize_error", shape.id),
+    ] {
+        let (status, _, body, _) = authed_json(
+            app.clone(),
+            "GET",
+            &format!("/admin/v1/principals/{principal_id}/plugin-chain?slot={slot}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["entries"].as_array().unwrap().len(), 1);
+        assert_eq!(body["entries"][0]["id"], expected_id.to_string());
+    }
+
+    for slot in ["sign", "build_signer", "on_unauthorized"] {
+        let (status, _, body, _) = authed_json(
+            app.clone(),
+            "GET",
+            &format!("/admin/v1/principals/{principal_id}/plugin-chain?slot={slot}"),
+            None,
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert!(body["entries"].as_array().unwrap().is_empty());
+    }
+}
+
+#[tokio::test]
+async fn plugin_chain_rejects_runtime_only_slot_mutations() {
+    let (_dir, storage) = temp_storage().await;
+    let principal_id = seed_principal(&storage, "principal-runtime-only-slot").await;
+    let entry = seed_registry(&storage, 26, "plugin-runtime-only-slot").await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body, _) = authed_json(
+        app,
+        "POST",
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
+        Some(json!({ "slot": "sign", "wasm_registry_id": entry.id })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"], "unsupported_plugin_slot");
+}
+
+#[tokio::test]
 async fn chain_insert_unknown_principal_returns_400() {
     let (_dir, storage) = temp_storage().await;
     let entry = seed_registry(&storage, 19, "plugin-unknown-principal").await;
