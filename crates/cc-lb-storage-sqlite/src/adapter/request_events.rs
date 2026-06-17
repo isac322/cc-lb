@@ -11,14 +11,42 @@ impl RequestEventStore for SqliteStorage {
     async fn append_request_event(&self, event: &RequestEvent) -> StorageResult<()> {
         let payload = serde_json::to_string(event)?;
 
+        let cache_breakpoints = serde_json::to_string(&event.cache_breakpoints)?;
         sqlx::query(
-            "INSERT INTO request_events_v1 (request_id, ts, event_type, upstream_id, payload) \
-             VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO request_events_v1 \
+             (request_id, ts, event_type, upstream_id, principal_id, created_at, key_id, model, upstream_name, cache_state, thread_id, message_id, message_index, message_count, cache_control_block_count, cache_breakpoints, cache_prefix_hash, input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens, payload) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&event.request_id)
         .bind(u64_to_i64(event_ts_secs(event), "request event ts")?)
         .bind("request")
         .bind(event.upstream_id.map(|id| id.to_string()))
+        .bind(event.principal_id.as_deref())
+        .bind(u64_to_i64(event_ts_secs(event), "request event created_at")?)
+        .bind(event.key_id.as_deref())
+        .bind(event.model.as_deref())
+        .bind(event.upstream_name.as_deref())
+        .bind(event.cache_state.map(|state| state.as_str()))
+        .bind(event.thread_id.as_deref())
+        .bind(event.message_id.as_deref())
+        .bind(option_u64_to_i64(event.message_index, "request event message_index")?)
+        .bind(option_u64_to_i64(event.message_count, "request event message_count")?)
+        .bind(option_u64_to_i64(
+            event.cache_control_block_count,
+            "request event cache_control_block_count",
+        )?)
+        .bind(cache_breakpoints)
+        .bind(event.cache_prefix_hash.as_deref())
+        .bind(option_u64_to_i64(event.input_tokens, "request event input_tokens")?)
+        .bind(option_u64_to_i64(event.output_tokens, "request event output_tokens")?)
+        .bind(option_u64_to_i64(
+            event.cache_creation_input_tokens,
+            "request event cache_creation_input_tokens",
+        )?)
+        .bind(option_u64_to_i64(
+            event.cache_read_input_tokens,
+            "request event cache_read_input_tokens",
+        )?)
         .bind(payload)
         .execute(self.pool())
         .await
@@ -111,6 +139,10 @@ async fn query_request_events(
 
 fn event_ts_secs(event: &RequestEvent) -> u64 {
     event.ts_ms.map(|ts_ms| ts_ms / 1_000).unwrap_or(event.ts)
+}
+
+fn option_u64_to_i64(value: Option<u64>, field: &str) -> StorageResult<Option<i64>> {
+    value.map(|value| u64_to_i64(value, field)).transpose()
 }
 
 fn u64_to_i64(value: u64, field: &str) -> StorageResult<i64> {
