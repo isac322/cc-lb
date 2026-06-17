@@ -21,12 +21,11 @@ use axum::middleware::{self, Next};
 use axum::routing::{any, get, post};
 use cc_lb_aead::AeadService;
 use cc_lb_config::{Config, DownstreamAuthMode, TlsConfig};
-use cc_lb_core::BreakerState;
 use cc_lb_core::{
     BreakerConfig, BreakerRegistry, BulkheadConfig, BulkheadDispatch, BulkheadRegistry,
     CircuitBreakerDispatch, DynamicView, DynamicViewBuilder, DynamicViewHolder, HopByHopStripLayer,
     Lifecycle, LifecycleConfig, SubscriptionQuotaSink, SubscriptionQuotaWriterConfig,
-    UpstreamDispatch, UpstreamRateLimitSink,
+    UpstreamDispatch, UpstreamRateLimitSink, anthropic_error_response,
     api_keys::{
         builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
         limit_engine::LimitEngine, principal_view::PrincipalView,
@@ -40,9 +39,10 @@ use cc_lb_core::{
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_runtime_extism::registry::PluginRegistry;
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     BackendKind, ManagedKeyStore, MetaStore, PluginBlobRepo, PluginRegistryRepo,
-    RuntimeChangeNotifier, Storage,
+    RuntimeChangeNotifier, Storage, UpstreamRecord,
 };
 use http_body_util::BodyExt;
 use hyper_rustls::HttpsConnectorBuilder;
@@ -675,7 +675,7 @@ async fn build_app_with_storage_inner(
         Some(key_store.clone()),
     ));
 
-    let (_dispatcher, breaker_registry) = dispatcher(&config);
+    let (_dispatcher, _breaker_registry) = dispatcher(&config);
 
     let replica_identity = {
         match replica::load_or_create_replica_id(&data_dir) {
@@ -984,9 +984,10 @@ async fn build_app_with_storage_inner(
     }
     let state = ProxyState {
         lifecycle: lifecycle.clone(),
-        breaker_registry,
+        server_state: server_state.clone(),
         start_time,
         drain_controller: drain_controller.clone(),
+        aead: aead.clone(),
         storage: storage.clone(),
         dynamic_view: dynamic_view.clone(),
         key_store: Some(key_store.clone()),
@@ -1609,9 +1610,10 @@ impl CurrentConfig for InMemoryCurrentConfig {
 #[derive(Clone)]
 struct ProxyState {
     lifecycle: Arc<Lifecycle>,
-    breaker_registry: Arc<BreakerRegistry>,
+    server_state: Arc<ServerStateHandle>,
     start_time: std::time::Instant,
     drain_controller: DrainController,
+    aead: Arc<AeadService>,
     storage: Arc<dyn Storage>,
     dynamic_view: Arc<DynamicViewHolder>,
     #[allow(dead_code)]
@@ -1815,8 +1817,26 @@ fn proxy_router(state: ProxyState, timeout_secs: u64) -> Router {
         .route("/api/oauth/usage", get(oauth_usage_handler))
         .route("/api/{*path}", any(lifecycle_handler))
         .route("/v1/{*path}", any(lifecycle_handler))
+        .fallback(proxy_not_found)
+        .method_not_allowed_fallback(proxy_method_not_allowed)
         .with_state(state)
         .layer(service_builder)
+}
+
+async fn proxy_not_found() -> Response<Body> {
+    anthropic_error_response(
+        StatusCode::NOT_FOUND,
+        "not_found",
+        "requested proxy path was not found",
+    )
+}
+
+async fn proxy_method_not_allowed() -> Response<Body> {
+    anthropic_error_response(
+        StatusCode::METHOD_NOT_ALLOWED,
+        "not_found",
+        "method is not allowed for this proxy path",
+    )
 }
 
 async fn healthz(State(state): State<ProxyState>) -> Json<HealthBody> {
@@ -1830,20 +1850,8 @@ async fn healthz(State(state): State<ProxyState>) -> Json<HealthBody> {
 }
 
 async fn readyz(State(state): State<ProxyState>) -> (StatusCode, Json<HealthBody>) {
-    let draining = state.drain_controller.is_draining();
-    let breaker_ready = state
-        .breaker_registry
-        .map
-        .iter()
-        .any(|entry| entry.value().current_state() != BreakerState::Open);
-    let ready = !draining && breaker_ready;
-    let reason = if draining {
-        Some("draining".to_owned())
-    } else if breaker_ready {
-        None
-    } else {
-        Some("no_ready_upstream".to_owned())
-    };
+    let reason = readiness_blocker(&state);
+    let ready = reason.is_none();
 
     (
         if ready {
@@ -1856,9 +1864,61 @@ async fn readyz(State(state): State<ProxyState>) -> (StatusCode, Json<HealthBody
             uptime_seconds: state.start_time.elapsed().as_secs(),
             build: BuildMeta::current(),
             ready: Some(ready),
-            reason,
+            reason: reason.map(str::to_owned),
         }),
     )
+}
+
+fn readiness_blocker(state: &ProxyState) -> Option<&'static str> {
+    if state.drain_controller.is_draining() {
+        return Some("draining");
+    }
+    if state.server_state.current() != ServerState::Ready {
+        return Some("startup_not_ready");
+    }
+
+    let view = state.dynamic_view.load();
+    if !view.principal_view.has_any_active_principal() {
+        return Some("no_ready_principal");
+    }
+    if !has_declared_ready_upstream(&view) {
+        return Some("no_ready_upstream");
+    }
+    if !oauth_credentials_decryptable(state.aead.as_ref(), view.upstreams_snapshot()) {
+        return Some("oauth_credentials_not_decryptable");
+    }
+
+    None
+}
+
+fn has_declared_ready_upstream(view: &DynamicView) -> bool {
+    view.upstreams_snapshot().iter().any(|upstream| {
+        upstream.enabled
+            && upstream.deleted_at_unix_secs.is_none()
+            && view
+                .upstream_status_snapshot
+                .entries
+                .get(&upstream.name)
+                .is_some_and(|entry| entry.status == cc_lb_core::ApplyStatus::Active)
+    })
+}
+
+fn oauth_credentials_decryptable(aead: &AeadService, upstreams: &[UpstreamRecord]) -> bool {
+    upstreams
+        .iter()
+        .filter(|upstream| {
+            upstream.enabled
+                && upstream.deleted_at_unix_secs.is_none()
+                && upstream.kind == UpstreamKind::AnthropicOauth
+        })
+        .all(|upstream| {
+            upstream
+                .oauth_credentials
+                .as_ref()
+                .is_some_and(|credentials| {
+                    credentials.decrypt(aead, upstream.id.as_bytes()).is_ok()
+                })
+        })
 }
 
 async fn timeout_error(error: tower::BoxError) -> Response<Body> {
