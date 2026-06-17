@@ -178,4 +178,5 @@ const MIGRATIONS: &[&str] = &[
     include_str!("../../cc-lb-storage-postgres/migrations/0016_principals.sql"),
     include_str!("../../cc-lb-storage-postgres/migrations/0019_principal_allowed_upstreams.sql"),
     include_str!("../../cc-lb-storage-postgres/migrations/0033_router_pipeline.sql"),
+    include_str!("../../cc-lb-storage-postgres/migrations/0045_audit_log_wider_columns.sql"),
 ];
