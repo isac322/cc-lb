@@ -419,7 +419,7 @@ async fn plugin_chain_accepts_runtime_slot_aliases() {
     for (slot, expected_id) in [
         ("filter", router.id),
         ("observe", observe.id),
-        ("normalize_error", shape.id),
+        ("shape", shape.id),
     ] {
         let (status, _, body, _) = authed_json(
             app.clone(),
@@ -433,7 +433,7 @@ async fn plugin_chain_accepts_runtime_slot_aliases() {
         assert_eq!(body["entries"][0]["id"], expected_id.to_string());
     }
 
-    for slot in ["sign", "build_signer", "on_unauthorized"] {
+    for slot in ["sign", "build_signer", "on_unauthorized", "normalize_error"] {
         let (status, _, body, _) = authed_json(
             app.clone(),
             "GET",
@@ -444,6 +444,32 @@ async fn plugin_chain_accepts_runtime_slot_aliases() {
         assert_eq!(status, StatusCode::OK);
         assert!(body["entries"].as_array().unwrap().is_empty());
     }
+}
+
+#[tokio::test]
+async fn plugin_chain_normalize_error_does_not_return_shape_entries() {
+    let (_dir, storage) = temp_storage().await;
+    let principal_id = seed_principal(&storage, "principal-normalize-error-empty").await;
+    let entry = seed_registry_with_slots(
+        &storage,
+        27,
+        "shape-normalize-error-plugin",
+        vec![PluginSlot::Shape],
+    )
+    .await;
+    seed_chain_with_slot(&storage, principal_id, PluginSlot::Shape, entry.id, 1000).await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body, _) = authed_json(
+        app,
+        "GET",
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain?slot=normalize_error"),
+        None,
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body, json!({ "entries": [] }));
 }
 
 #[tokio::test]

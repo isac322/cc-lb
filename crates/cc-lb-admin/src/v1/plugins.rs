@@ -853,8 +853,10 @@ fn parse_slot(value: &str) -> Option<SlotParam> {
         "ObservabilityHook" | "observability_hook" | "observe" => {
             Some(SlotParam::Stored(PluginSlot::ObservabilityHook))
         }
-        "Shape" | "shape" | "normalize_error" => Some(SlotParam::Stored(PluginSlot::Shape)),
-        "build_signer" | "sign" | "on_unauthorized" => Some(SlotParam::RuntimeOnly),
+        "Shape" | "shape" => Some(SlotParam::Stored(PluginSlot::Shape)),
+        "build_signer" | "sign" | "on_unauthorized" | "normalize_error" => {
+            Some(SlotParam::RuntimeOnly)
+        }
         _ => None,
     }
 }
