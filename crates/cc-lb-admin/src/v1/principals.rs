@@ -3,7 +3,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::IntoResponse,
-    routing::{get, post, put},
+    routing::{get, post},
 };
 use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_plugin_api::TerminalStrategy;
@@ -43,7 +43,7 @@ pub fn router() -> Router<AdminState> {
         )
         .route(
             "/admin/v1/principals/{id}/allowed_models",
-            put(update_allowed_models),
+            get(get_allowed_models).put(update_allowed_models),
         )
 }
 
@@ -108,6 +108,12 @@ struct PrincipalSummaryResponse {
 #[derive(Debug, Serialize)]
 struct RouterTerminalResponse {
     strategy: TerminalStrategy,
+    revision: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct AllowedModelsResponse {
+    models: Vec<String>,
     revision: u64,
 }
 
@@ -363,6 +369,35 @@ async fn update_allowed_models(
         vec!["allowed_models"],
     )
     .await
+}
+
+async fn get_allowed_models(
+    State(state): State<AdminState>,
+    Path(id): Path<String>,
+) -> axum::response::Response {
+    let Some(storage) = state.storage.as_deref() else {
+        return storage_unavailable();
+    };
+    let Ok(id) = id.parse() else {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_principal_id");
+    };
+
+    match PrincipalStore::get_by_id(storage, id).await {
+        Ok(Some(record)) if record.deleted_at_unix_secs.is_none() => {
+            let mut headers = HeaderMap::new();
+            insert_header(&mut headers, header::ETAG, &etag(record.revision));
+            (
+                headers,
+                Json(AllowedModelsResponse {
+                    models: record.allowed_models,
+                    revision: record.revision,
+                }),
+            )
+                .into_response()
+        }
+        Ok(_) => error_response(StatusCode::NOT_FOUND, "unknown_principal"),
+        Err(error) => storage_error(error),
+    }
 }
 
 async fn get_router_terminal(

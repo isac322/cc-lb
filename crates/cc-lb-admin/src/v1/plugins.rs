@@ -5,7 +5,7 @@ use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::IntoResponse,
-    routing::{get, post, put},
+    routing::{get, post},
 };
 use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_storage_api::{
@@ -47,7 +47,7 @@ pub fn router() -> Router<AdminState> {
         )
         .route(
             "/admin/v1/plugin-chain-entries/{id}",
-            put(update_chain).delete(delete_chain),
+            get(get_chain).put(update_chain).delete(delete_chain),
         )
 }
 
@@ -438,6 +438,20 @@ async fn update_chain(
         }
         Err(StorageError::StalePluginChainRevision { current }) => stale_revision(current),
         Err(error) => storage_mutation_error(error),
+    }
+}
+
+async fn get_chain(
+    State(state): State<AdminState>,
+    Path(id): Path<Uuid>,
+) -> axum::response::Response {
+    let Some(storage) = state.storage.as_deref() else {
+        return storage_unavailable();
+    };
+    match find_chain_entry(storage, id).await {
+        Ok(Some(entry)) => chain_with_etag(entry),
+        Ok(None) => error(StatusCode::NOT_FOUND, "unknown_plugin_chain_entry"),
+        Err(error) => storage_error(error),
     }
 }
 

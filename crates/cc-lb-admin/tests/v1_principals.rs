@@ -89,6 +89,57 @@ async fn get_returns_etag_with_weak_revision() {
 }
 
 #[tokio::test]
+async fn get_allowed_models_returns_state_with_etag() {
+    let server = admin_test_common::spawn_admin_server().await;
+    let (_, headers, created) = server
+        .client
+        .post_json(
+            "/admin/v1/principals",
+            json!({
+                "name": "model-reader",
+                "kind": "machine",
+                "allowed_models": ["claude-haiku-*"],
+                "default_limits": []
+            }),
+        )
+        .await;
+    let id = created_id(&created);
+    let etag = server.client.header_str(&headers, header::ETAG.as_str());
+
+    let (status, headers, body) = server
+        .client
+        .get(&format!("/admin/v1/principals/{id}/allowed_models"))
+        .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["models"], json!(["claude-haiku-*"]));
+    assert_eq!(
+        server.client.header_str(&headers, header::ETAG.as_str()),
+        etag
+    );
+}
+
+#[tokio::test]
+async fn legacy_admin_routes_are_aliased_under_v1() {
+    let server = admin_test_common::spawn_admin_server().await;
+
+    for uri in [
+        "/admin/v1/audit?limit=1",
+        "/admin/v1/config/draft",
+        "/admin/v1/config/history",
+        "/admin/v1/dashboard/summary?range=1h",
+        "/admin/v1/dashboard/usage?range=1h",
+        "/admin/v1/events/recent",
+        "/admin/v1/credentials",
+        "/admin/v1/oauth/status",
+        "/admin/v1/killswitch",
+    ] {
+        let (status, _, _) = server.client.get(uri).await;
+        assert_ne!(status, StatusCode::NOT_FOUND, "{uri} should be mounted");
+    }
+}
+
+#[tokio::test]
 async fn update_correct_if_match_bumps_revision() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, headers, created) = create_principal(&server.client, "alpha").await;
