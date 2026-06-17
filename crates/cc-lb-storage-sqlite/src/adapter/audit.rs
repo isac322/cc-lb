@@ -17,7 +17,7 @@ impl AuditStore for SqliteStorage {
             .transpose()?;
 
         sqlx::query(
-            "INSERT INTO audit_entries_v1 \
+            "INSERT INTO audit_log_v1 \
              (ts, request_id, principal_id, route, upstream, model, status, input_tokens, \
               output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, \
               limit_violation, admin_action, actor, kind, payload) \
@@ -76,7 +76,7 @@ impl AuditStore for SqliteStorage {
             "SELECT ts, request_id, principal_id, route, upstream, model, status, input_tokens, \
              output_tokens, duration_ms, agent_label, api_key_id, cost_usd_micros, \
              limit_violation, admin_action, actor, kind, payload \
-             FROM audit_entries_v1 \
+             FROM audit_log_v1 \
              WHERE ts >= ? AND ts <= ? AND (? IS NULL OR principal_id = ?) \
              ORDER BY id ASC LIMIT ?",
         )
@@ -93,7 +93,7 @@ impl AuditStore for SqliteStorage {
     }
 
     async fn prune_audit(&self, older_than: u64) -> StorageResult<u64> {
-        let result = sqlx::query("DELETE FROM audit_entries_v1 WHERE ts < ?")
+        let result = sqlx::query("DELETE FROM audit_log_v1 WHERE ts < ?")
             .bind(u64_to_i64(older_than, "audit prune cutoff")?)
             .execute(self.pool())
             .await
@@ -113,9 +113,9 @@ impl AuditStore for SqliteStorage {
 
         let cutoff_ts = cutoff_ts_x_1m / KEY_SEQUENCE_SCALE;
         let result = sqlx::query(
-            "DELETE FROM audit_entries_v1 \
+            "DELETE FROM audit_log_v1 \
              WHERE id IN ( \
-                 SELECT id FROM audit_entries_v1 \
+                 SELECT id FROM audit_log_v1 \
                  WHERE ts < ? \
                  ORDER BY id ASC \
                  LIMIT ? \

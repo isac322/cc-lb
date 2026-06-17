@@ -174,7 +174,7 @@ impl PrincipalStore for SqliteStorage {
 
     async fn hard_delete(&self, id: Uuid) -> StorageResult<bool> {
         let audit_refs = sqlx::query_scalar::<_, i64>(
-            "SELECT COUNT(1) FROM audit_entries_v1 WHERE principal_id = ?",
+            "SELECT COUNT(1) FROM audit_log_v1 WHERE principal_id = ?",
         )
         .bind(id.to_string())
         .fetch_one(self.pool())
