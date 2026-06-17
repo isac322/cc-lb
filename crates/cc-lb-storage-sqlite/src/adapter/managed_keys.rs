@@ -136,7 +136,6 @@ impl ManagedKeyStore for SqliteStorage {
         record.index_hash = [0; 32];
         record.verify_hash = [0; 32];
         record.secret_salt = [0; 16];
-        record.last_4.clear();
 
         update_record(self, principal_id, key_id, &record).await
     }

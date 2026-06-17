@@ -5,6 +5,7 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use cc_lb_core::AuditEntry;
 use cc_lb_core::api_keys::key_store::CreateParams;
 use cc_lb_core::api_keys::secret;
 use cc_lb_storage_api::types::{KeyStatus, PrincipalKindLite, UpstreamKind};
@@ -101,6 +102,7 @@ async fn issue_key(
         Ok((record, plaintext)) => {
             let (key_id, _) = secret::parse(plaintext.expose())
                 .expect("plaintext key format is guaranteed by KeyStore::create");
+            emit_key_audit(&state, &id, &key_id, "principal_key_issue", 201);
             let response = IssueKeyResponse {
                 principal_id: id,
                 key_id,
@@ -135,7 +137,7 @@ async fn list_keys(
             .into_response();
     };
 
-    match key_store.list_by_principal(&id).await {
+    match key_store.list_all().await {
         Ok(records) => {
             // Build key_id -> max(ts) map from recent request events.
             // Window: last 30 days, capped to 5000 events. Best-effort.
@@ -177,26 +179,16 @@ async fn list_keys(
             };
 
             let mut keys = Vec::new();
-            for r in records {
+            for (principal_id, key_id, r) in records {
+                if principal_id != id {
+                    continue;
+                }
                 if !matches_status(r.status, query.status.as_ref()) {
                     continue;
                 }
-                let key_id = if r.index_hash == [0; 32] {
-                    String::new()
-                } else {
-                    key_store
-                        .lookup_by_index_hash(&r.index_hash)
-                        .await
-                        .unwrap_or(None)
-                        .map(|(_, key_id, _)| key_id)
-                        .unwrap_or_default()
-                };
-                let last_used_at_unix_secs = if key_id.is_empty() {
-                    None
-                } else {
-                    last_used_map.get(&key_id).copied()
-                };
+                let last_used_at_unix_secs = last_used_map.get(&key_id).copied();
                 keys.push(ApiKeyRecord {
+                    last_4: r.last_4,
                     key_id,
                     label: if r.label.is_empty() {
                         None
@@ -205,7 +197,6 @@ async fn list_keys(
                     },
                     issued_at_unix_secs: r.issued_at_unix_secs,
                     revoked_at_unix_secs: r.revoked_at_unix_secs,
-                    last_4: r.last_4,
                     last_used_at_unix_secs,
                 });
             }
@@ -249,6 +240,7 @@ async fn revoke_key(
                 .duration_since(std::time::UNIX_EPOCH)
                 .expect("system time is always after UNIX_EPOCH")
                 .as_secs();
+            emit_key_audit(&state, &id, &key_id, "principal_key_revoke", 200);
             let response = RevokeKeyResponse {
                 key_id,
                 revoked_at_unix_secs: now,
@@ -266,4 +258,35 @@ async fn revoke_key(
                 .into_response()
         }
     }
+}
+
+fn emit_key_audit(state: &AdminState, principal_id: &str, key_id: &str, action: &str, status: u16) {
+    let Some(audit_sink) = &state.audit_sink else {
+        return;
+    };
+    let ts = unix_now_secs();
+    let _ = audit_sink.try_enqueue(AuditEntry {
+        ts,
+        request_id: format!("admin-v1-key-{key_id}-{ts}"),
+        principal_id: principal_id.to_owned(),
+        route: "admin_v1_principal_keys".to_owned(),
+        upstream: "admin".to_owned(),
+        status,
+        input_tokens: Some(0),
+        output_tokens: Some(0),
+        duration_ms: 0,
+        api_key_id: Some(key_id.to_owned()),
+        admin_action: Some(format!(
+            "{action}(principal_id={principal_id}, key_id={key_id})"
+        )),
+        actor: Some("admin".to_owned()),
+        ..AuditEntry::default()
+    });
+}
+
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }

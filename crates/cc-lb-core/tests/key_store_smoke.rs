@@ -50,6 +50,7 @@ async fn revoke_removes_index() -> Result<(), Box<dyn std::error::Error>> {
         .await?;
     let (key_id, _) = secret::parse(secret.expose())?;
     let index_hash = record.index_hash;
+    let last_4 = record.last_4.clone();
 
     store.revoke("principal-1", &key_id).await?;
 
@@ -61,7 +62,7 @@ async fn revoke_removes_index() -> Result<(), Box<dyn std::error::Error>> {
     assert_eq!(listed[0].index_hash, [0; 32]);
     assert_eq!(listed[0].verify_hash, [0; 32]);
     assert_eq!(listed[0].secret_salt, [0; 16]);
-    assert_eq!(listed[0].last_4, "");
+    assert_eq!(listed[0].last_4, last_4);
 
     Ok(())
 }

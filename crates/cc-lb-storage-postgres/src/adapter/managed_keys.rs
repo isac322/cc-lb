@@ -243,7 +243,6 @@ impl ManagedKeyStore for PostgresManagedKeyStore {
                 record.index_hash = [0; 32];
                 record.verify_hash = [0; 32];
                 record.secret_salt = [0; 16];
-                record.last_4.clear();
 
                 update_record(principal_id, key_id, &record, &mut tx).await?;
                 sqlx::query("DELETE FROM managed_api_key_index_v1 WHERE index_hash = $1")
