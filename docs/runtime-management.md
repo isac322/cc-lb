@@ -156,6 +156,8 @@ If an operator keeps a local proxy client key file such as `~/.config/cc-lb/prox
 | Method | Path | Auth | Request Body | Response Body | Error Codes |
 |---|---|---|---|---|---|
 | GET | `/admin/v1/status` | Bearer | None | StatusResponse | `storage_unavailable` |
+
+`/admin/status` is a legacy alias for `/admin/v1/status` and returns the same `StatusResponse` body.
 | GET | `/admin/v1/export` | Bearer | None | ExportResponse | `storage_unavailable` |
 
 ## OAuth Subscription Flow

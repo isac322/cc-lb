@@ -1,6 +1,7 @@
 mod admin_test_common;
 
 use admin_test_common::spawn_admin_server;
+use axum::http::{StatusCode, header};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -73,8 +74,34 @@ async fn events_recent_smoke() {
 #[tokio::test]
 async fn status_handler_smoke() {
     let server = spawn_admin_server().await;
-    let (status, _, _) = server.client.get("/admin/status").await;
-    let _ = status;
+    let (legacy_status, _, legacy_body) = server.client.get("/admin/status").await;
+    let (v1_status, _, v1_body) = server.client.get("/admin/v1/status").await;
+
+    assert_eq!(legacy_status, StatusCode::OK);
+    assert_eq!(v1_status, StatusCode::OK);
+    assert_eq!(legacy_body["version"], v1_body["version"]);
+    assert_eq!(legacy_body["git_sha"], v1_body["git_sha"]);
+    assert_eq!(legacy_body["generation"], v1_body["generation"]);
+}
+
+#[tokio::test]
+async fn admin_json_extractor_rejections_use_json_envelope() {
+    let server = spawn_admin_server().await;
+    let (status, headers, body) = server
+        .client
+        .post_raw("/admin/config/draft/validate", "application/json", "{")
+        .await;
+    let json: serde_json::Value = serde_json::from_slice(&body).expect("json rejection body");
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        headers
+            .get(header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.starts_with("application/json"))
+    );
+    assert_eq!(json["error"], "validation_failed");
+    assert!(json["message"].as_str().unwrap().contains("EOF"));
 }
 
 #[tokio::test]

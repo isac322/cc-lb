@@ -228,6 +228,37 @@ impl AdminClient {
         self.json("POST", uri, Some(body), &[]).await
     }
 
+    pub async fn post_raw(
+        &self,
+        uri: &str,
+        content_type: &str,
+        body: &'static str,
+    ) -> (StatusCode, HeaderMap, bytes::Bytes) {
+        let response = self
+            .app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(uri)
+                    .header(header::AUTHORIZATION, format!("Bearer {}", self.token))
+                    .header(header::CONTENT_TYPE, content_type)
+                    .body(Body::from(body))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("admin request succeeds");
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .expect("body collects")
+            .to_bytes();
+        (status, headers, body)
+    }
+
     pub async fn post_with_if_match(
         &self,
         uri: &str,

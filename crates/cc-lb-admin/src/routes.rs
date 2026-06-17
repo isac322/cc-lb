@@ -1,13 +1,15 @@
 use axum::{
     Json, Router,
+    body::Body,
     extract::{Path, Query, State},
-    http::{StatusCode, header},
+    http::{HeaderValue, Response, StatusCode, header},
     middleware,
     response::IntoResponse,
     routing::{get, post},
 };
 use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_storage_api::{Storage, StorageError};
+use http_body_util::BodyExt;
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -47,7 +49,7 @@ pub fn build_router(state: AdminState) -> Router {
         )
         .route("/admin/audit", get(query_audit))
         .route("/admin/v1/audit", get(query_audit))
-        .route("/admin/status", get(crate::status::handler))
+        .route("/admin/status", get(crate::v1::status::status))
         .route(
             "/admin/killswitch",
             get(get_killswitch)
@@ -123,7 +125,8 @@ pub fn build_router(state: AdminState) -> Router {
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
             require_admin_auth,
-        ));
+        ))
+        .layer(middleware::map_response(json_extractor_rejection));
 
     Router::new()
         .merge(protected_routes)
@@ -131,6 +134,50 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/{*file}", get(serve_asset))
         .route("/admin/health", get(health))
         .with_state(state)
+}
+
+async fn json_extractor_rejection(response: Response<Body>) -> Response<Body> {
+    let status = response.status();
+    if !matches!(
+        status,
+        StatusCode::BAD_REQUEST
+            | StatusCode::UNSUPPORTED_MEDIA_TYPE
+            | StatusCode::UNPROCESSABLE_ENTITY
+    ) || !response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/plain"))
+    {
+        return response;
+    }
+
+    let (parts, body) = response.into_parts();
+    let message = body
+        .collect()
+        .await
+        .map(|collected| String::from_utf8_lossy(&collected.to_bytes()).into_owned())
+        .unwrap_or_else(|_| "request validation failed".to_owned());
+    let field = validation_field_from_message(&message);
+    let body = Json(json!({
+        "error": "validation_failed",
+        "field": field,
+        "message": message,
+    }));
+    let mut response = (parts.status, body).into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json"),
+    );
+    response
+}
+
+fn validation_field_from_message(message: &str) -> Option<String> {
+    message
+        .split('`')
+        .nth(1)
+        .filter(|field| !field.is_empty())
+        .map(ToOwned::to_owned)
 }
 
 async fn get_api_key(

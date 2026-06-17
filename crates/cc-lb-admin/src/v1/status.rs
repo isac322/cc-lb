@@ -135,7 +135,7 @@ struct ExportChainEntry {
     batched_flush_ms: u64,
 }
 
-async fn status(State(state): State<AdminState>) -> axum::response::Response {
+pub(crate) async fn status(State(state): State<AdminState>) -> axum::response::Response {
     match build_status(&state).await {
         Ok(response) => Json(response).into_response(),
         Err(error) => status_error_response(error),
