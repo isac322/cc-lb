@@ -1,6 +1,7 @@
 mod config_admin_common;
 
 use axum::http::StatusCode;
+use cc_lb_storage_api::{ConfigDraftState, ConfigStore};
 use config_admin_common::{
     app, authed_json, config_value, expected_revision_body, put_body, temp_storage, test_state,
 };
@@ -121,4 +122,37 @@ async fn saving_new_draft_invalidates_last_validated_revision() {
     assert_eq!(json["last_validated_revision"], serde_json::Value::Null);
     assert_eq!(json["last_validation_error"], serde_json::Value::Null);
     assert_eq!(json["draft"]["timeouts"]["idle_secs"], 200);
+}
+
+#[tokio::test]
+async fn get_draft_purges_expired_invalid_draft() {
+    let (_dir, storage) = temp_storage().await;
+    storage
+        .put_config_draft(
+            ConfigDraftState {
+                draft: Some(json!({ "some": "bad" })),
+                revision: 0,
+                last_validated_revision: None,
+                last_validation_error: None,
+                saved_at_unix_secs: Some(1),
+            },
+            0,
+        )
+        .await
+        .unwrap();
+    storage
+        .set_last_validated_revision(1, Some("unknown top-level config keys: some".to_owned()))
+        .await
+        .unwrap();
+    let app = app(test_state(
+        config_admin_common::minimal_config(),
+        Some(storage),
+    ));
+
+    let (status, _, body, _) = authed_json(app, "GET", "/admin/config/draft", None).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["draft"], serde_json::Value::Null);
+    assert_eq!(body["last_validation_error"], serde_json::Value::Null);
+    assert_eq!(body["saved_at_unix_secs"], serde_json::Value::Null);
 }
