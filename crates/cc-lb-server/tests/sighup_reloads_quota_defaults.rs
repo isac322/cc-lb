@@ -37,6 +37,7 @@ async fn sighup_reloads_body_defaults() {
             &cc_lb_admin::CurrentConfig::current_config((watcher.clone()).as_ref()),
         ),
         config: watcher.clone(),
+        scheduler: None,
         admin_token: Some("test-token".to_string()),
         lazy_refresher: None,
         runtime: None,

@@ -1014,6 +1014,10 @@ async fn build_app_with_storage_inner(
         audit_sink: audit_sink.clone(),
         dynamic_view: dynamic_view.clone(),
         config: admin_config,
+        scheduler: Some(cc_lb_scheduler::admin::SchedulerAdminHandle::new(
+            scheduler_lazy_handle.clone(),
+            opened_scheduler.leader_election(),
+        )),
         admin_token: config
             .admin
             .token

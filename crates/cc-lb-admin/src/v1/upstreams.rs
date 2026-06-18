@@ -1565,6 +1565,7 @@ mod tests {
             audit_sink: None,
             dynamic_view: Arc::new(DynamicViewHolder::new(test_view())),
             config: Arc::new(Config::default()),
+            scheduler: None,
             admin_token: None,
             start_time: std::time::Instant::now(),
         };

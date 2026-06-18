@@ -115,6 +115,7 @@ pub fn build_router(state: AdminState) -> Router {
         .merge(crate::events_routes::router())
         .merge(crate::subscription_quotas::router())
         .merge(crate::credentials::router())
+        .merge(crate::scheduler::router())
         .merge(crate::v1::plugins::router())
         .merge(crate::v1::plugins_wasm::router())
         .merge(crate::v1::oauth::router())

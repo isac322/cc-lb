@@ -1,5 +1,6 @@
 //! cc-lb-scheduler: apalis-backed distributed job scheduler with leader election and cron support.
 
+pub mod admin;
 pub mod config;
 pub mod cron;
 pub mod error;

@@ -1,3 +1,4 @@
+use serde::Serialize;
 use sqlx::{Database, Pool};
 use uuid::Uuid;
 
@@ -211,7 +212,7 @@ pub struct PriceCatalogVersion {
     pub fetched_at_unix_secs: u64,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct SchedulerFailure {
     pub id: u64,
     pub job_type: String,

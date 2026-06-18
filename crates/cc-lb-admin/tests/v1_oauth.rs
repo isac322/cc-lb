@@ -62,6 +62,7 @@ impl Fixture {
             audit_sink: Some(Arc::new(audit_sink)),
             dynamic_view: admin_test_common::dynamic_view_holder(&config),
             config: Arc::new(config),
+            scheduler: None,
             admin_token: Some("test-token".to_owned()),
             start_time: std::time::Instant::now(),
         };
@@ -86,6 +87,7 @@ impl Fixture {
                 kind,
                 base_url: None,
                 api_key_ciphertext: None,
+                oauth_token_generation: None,
                 warmup_enabled: false,
                 next_warmup_at: None,
                 last_warmup_cycle_key: None,

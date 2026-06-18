@@ -172,6 +172,7 @@ impl Harness {
             audit_sink: None,
             dynamic_view,
             config: current_config,
+            scheduler: None,
             admin_token: Some(ADMIN_TOKEN.to_owned()),
             lazy_refresher: None,
             runtime: None,

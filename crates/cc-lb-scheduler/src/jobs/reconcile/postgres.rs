@@ -76,15 +76,29 @@ pub(super) async fn surface_failures(pool: &Pool<Postgres>, now_unix_secs: u64) 
         if failure_exists(pool, &job_type, &summary, failed_at).await? {
             continue;
         }
+        let failure_job_type = failure_job_type(&job_type);
         let attempts = i64_to_u32(i64::from(row.try_get::<i32, _>("attempts")?), "attempts")?;
         let last_error: String = row.try_get("last_error")?;
         store
-            .record(&job_type, &summary, &last_error, attempts, now_unix_secs)
+            .record(
+                failure_job_type,
+                &summary,
+                &last_error,
+                attempts,
+                now_unix_secs,
+            )
             .await?;
-        crate::scheduler_metrics::record_scheduler_failure(&job_type, 1);
+        crate::scheduler_metrics::record_scheduler_failure(failure_job_type, 1);
         recorded += 1;
     }
     Ok(recorded)
+}
+
+fn failure_job_type(apalis_job_type: &str) -> &str {
+    match apalis_job_type {
+        "entity:warmup" => "upstream_warmup",
+        other => other,
+    }
 }
 
 async fn failure_exists(

@@ -2,6 +2,8 @@
 
 use std::future::Future;
 #[cfg(feature = "postgres")]
+use std::sync::atomic::{AtomicU8, Ordering};
+#[cfg(feature = "postgres")]
 use std::time::Duration;
 
 use thiserror::Error;
@@ -15,6 +17,27 @@ use tokio::sync::Mutex;
 
 #[cfg(feature = "postgres")]
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
+#[cfg(feature = "postgres")]
+const LEADER_STATE_FOLLOWER: u8 = 0;
+#[cfg(feature = "postgres")]
+const LEADER_STATE_LEADER: u8 = 1;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum LeaderState {
+    Leader,
+    Follower,
+    Single,
+}
+
+impl LeaderState {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Leader => "leader",
+            Self::Follower => "follower",
+            Self::Single => "single",
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum LeaderError {
@@ -109,6 +132,14 @@ impl LeaderElection {
             Self::Postgres(postgres) => postgres.close().await,
         }
     }
+
+    pub fn current_state(&self) -> LeaderState {
+        match self {
+            Self::Sqlite(_sqlite) => LeaderState::Single,
+            #[cfg(feature = "postgres")]
+            Self::Postgres(postgres) => postgres.current_state(),
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -148,6 +179,7 @@ pub struct PostgresLeaderElection {
     lock_key: LeaderLockKey,
     heartbeat_interval: Duration,
     connection: Mutex<Option<PgConnection>>,
+    state: AtomicU8,
 }
 
 #[cfg(feature = "postgres")]
@@ -171,6 +203,7 @@ impl PostgresLeaderElection {
             lock_key: LeaderLockKey(lock_key),
             heartbeat_interval: DEFAULT_HEARTBEAT_INTERVAL,
             connection: Mutex::new(Some(connection)),
+            state: AtomicU8::new(LEADER_STATE_FOLLOWER),
         }
     }
 
@@ -213,7 +246,17 @@ impl PostgresLeaderElection {
         self.ensure_connected().await?;
         let mut guard = self.connection.lock().await;
         let connection = guard.as_mut().ok_or(LeaderError::NotConnected)?;
-        query_bool(connection, "SELECT pg_try_advisory_lock($1)", self.lock_key).await
+        let acquired =
+            query_bool(connection, "SELECT pg_try_advisory_lock($1)", self.lock_key).await?;
+        self.state.store(
+            if acquired {
+                LEADER_STATE_LEADER
+            } else {
+                LEADER_STATE_FOLLOWER
+            },
+            Ordering::SeqCst,
+        );
+        Ok(acquired)
     }
 
     pub async fn heartbeat(&self) -> Result<(), LeaderError> {
@@ -231,11 +274,22 @@ impl PostgresLeaderElection {
         let Some(connection) = guard.as_mut() else {
             return Ok(false);
         };
-        query_bool(connection, "SELECT pg_advisory_unlock($1)", self.lock_key).await
+        let released =
+            query_bool(connection, "SELECT pg_advisory_unlock($1)", self.lock_key).await?;
+        self.state.store(LEADER_STATE_FOLLOWER, Ordering::SeqCst);
+        Ok(released)
     }
 
     pub async fn close(&self) -> Result<(), LeaderError> {
         self.close_current().await
+    }
+
+    pub fn current_state(&self) -> LeaderState {
+        match self.state.load(Ordering::SeqCst) {
+            LEADER_STATE_LEADER => LeaderState::Leader,
+            LEADER_STATE_FOLLOWER => LeaderState::Follower,
+            _unknown => LeaderState::Follower,
+        }
     }
 
     async fn ensure_connected(&self) -> Result<(), LeaderError> {
@@ -254,9 +308,11 @@ impl PostgresLeaderElection {
     async fn close_current(&self) -> Result<(), LeaderError> {
         let connection = self.connection.lock().await.take();
         let Some(connection) = connection else {
+            self.state.store(LEADER_STATE_FOLLOWER, Ordering::SeqCst);
             return Ok(());
         };
         connection.close().await?;
+        self.state.store(LEADER_STATE_FOLLOWER, Ordering::SeqCst);
         Ok(())
     }
 }

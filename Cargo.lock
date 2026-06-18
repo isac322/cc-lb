@@ -610,6 +610,8 @@ name = "cc-lb-admin"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "apalis-postgres",
+ "apalis-sqlite",
  "arc-swap",
  "async-stream",
  "async-trait",
@@ -621,6 +623,7 @@ dependencies = [
  "cc-lb-core",
  "cc-lb-plugin-api",
  "cc-lb-runtime-extism",
+ "cc-lb-scheduler",
  "cc-lb-signer-anthropic-oauth",
  "cc-lb-storage-api",
  "cc-lb-storage-sqlite",
@@ -635,6 +638,8 @@ dependencies = [
  "hyper-rustls",
  "hyper-util",
  "insta",
+ "metrics",
+ "metrics-exporter-prometheus",
  "mime_guess",
  "mock-anthropic-oauth-server",
  "nix",
@@ -648,6 +653,7 @@ dependencies = [
  "serde_yaml",
  "sha2 0.11.0",
  "siphasher",
+ "sqlx 0.8.6",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
