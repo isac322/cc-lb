@@ -249,6 +249,22 @@ describe('WarmupCard', () => {
     expect(nextEl.textContent).toContain('Overdue');
   });
 
+  test('OAuth upstream disabled with stale next_warmup_at renders paused copy instead of Overdue', () => {
+    const overdueMs = Date.now() - 30 * 60 * 1000;
+
+    renderWarmup(
+      makeOauthUpstream({
+        enabled: false,
+        warmup_enabled: true,
+        next_warmup_at: new Date(overdueMs).toISOString(),
+      }),
+    );
+
+    expect(screen.getByText(COPY.upstreamPausedEmpty)).toBeDefined();
+    expect(screen.queryByText(/Overdue/)).toBeNull();
+    expect(screen.queryByTestId('warmup-fire-now')).toBeNull();
+  });
+
   test('zero shape plugins renders notice and Plugins link without select', () => {
     mockHooks({ registryEntries: [makeRouterPlugin('r1', 'router-only')] });
 
