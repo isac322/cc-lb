@@ -328,3 +328,173 @@ fn missing_candidate(
         upgrade_paths: None,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cc_lb_storage_api::SubscriptionQuotaSampleKind;
+
+    const MAX_STALENESS_SECS: u64 = 1_800;
+
+    fn snapshot_with(
+        observed_at_unix_millis: u64,
+        resets_at_unix_secs: Option<u64>,
+    ) -> MergedQuotaSnapshot {
+        MergedQuotaSnapshot {
+            source: MergedSource::Header,
+            utilization: Some(0.87),
+            status: None,
+            resets_at_unix_secs,
+            surpassed_threshold: None,
+            representative_claim: Some("seven_day".to_owned()),
+            fallback_percentage: None,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            observed_at_unix_millis,
+        }
+    }
+
+    fn observation_record(
+        upstream_id: Uuid,
+        observed_at_unix_millis: u64,
+        resets_at_unix_secs: Option<u64>,
+    ) -> SubscriptionQuotaObservationRecord {
+        SubscriptionQuotaObservationRecord {
+            upstream_id,
+            window: SubscriptionQuotaWindow::SevenDay,
+            source: SubscriptionQuotaSource::Header,
+            sample_kind: SubscriptionQuotaSampleKind::Sample,
+            observed_at_unix_millis,
+            sample_id: Uuid::nil(),
+            utilization: Some(0.87),
+            status: None,
+            resets_at_unix_secs,
+            surpassed_threshold: None,
+            representative_claim: Some("seven_day".to_owned()),
+            fallback_percentage: None,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            ingested_at_unix_millis: observed_at_unix_millis,
+        }
+    }
+
+    #[test]
+    fn is_fresh_returns_false_when_resets_at_is_past() {
+        let now_unix_millis: u64 = 1_750_000_000_000;
+        let snapshot = snapshot_with(
+            now_unix_millis - 60_000,
+            Some(now_unix_millis / 1_000 - 1),
+        );
+        assert!(
+            !is_fresh(&snapshot, now_unix_millis, MAX_STALENESS_SECS),
+            "snapshot whose resets_at is in the past must be reported Stale",
+        );
+    }
+
+    #[test]
+    fn is_fresh_returns_true_when_resets_at_is_future_and_observation_recent() {
+        let now_unix_millis: u64 = 1_750_000_000_000;
+        let snapshot = snapshot_with(
+            now_unix_millis - 10_000,
+            Some(now_unix_millis / 1_000 + 60),
+        );
+        assert!(is_fresh(&snapshot, now_unix_millis, MAX_STALENESS_SECS));
+    }
+
+    #[test]
+    fn is_fresh_returns_false_when_observation_too_old() {
+        let now_unix_millis: u64 = 1_750_000_000_000;
+        let snapshot = snapshot_with(
+            now_unix_millis - (MAX_STALENESS_SECS * 1_000 + 1_000),
+            Some(now_unix_millis / 1_000 + 3_600),
+        );
+        assert!(!is_fresh(&snapshot, now_unix_millis, MAX_STALENESS_SECS));
+    }
+
+    #[test]
+    fn is_fresh_returns_true_when_no_resets_at() {
+        let now_unix_millis: u64 = 1_750_000_000_000;
+        let snapshot = snapshot_with(now_unix_millis - 5_000, None);
+        assert!(is_fresh(&snapshot, now_unix_millis, MAX_STALENESS_SECS));
+    }
+
+    #[test]
+    fn is_fresh_returns_false_exactly_at_resets_at() {
+        let now_unix_millis: u64 = 1_750_000_000_000;
+        let snapshot = snapshot_with(
+            now_unix_millis - 1_000,
+            Some(now_unix_millis / 1_000),
+        );
+        assert!(
+            !is_fresh(&snapshot, now_unix_millis, MAX_STALENESS_SECS),
+            "snapshot whose resets_at equals now must be reported Stale",
+        );
+    }
+
+    #[test]
+    fn snapshot_for_upstream_reports_stale_after_reset() {
+        let cache = SubscriptionQuotaCache::new();
+        let upstream_id = Uuid::new_v4();
+        let now_unix_millis: u64 = 1_750_000_000_000;
+        let record = observation_record(
+            upstream_id,
+            now_unix_millis - 30_000,
+            Some(now_unix_millis / 1_000 - 10),
+        );
+
+        cache.upsert_observation(upstream_id, &record);
+        let candidates = cache.snapshot_for_upstream(
+            upstream_id,
+            now_unix_millis,
+            MAX_STALENESS_SECS,
+        );
+
+        let seven_day = candidates
+            .iter()
+            .find(|c| c.window == SubscriptionQuotaWindow::SevenDay.as_str())
+            .expect("7d candidate present");
+        assert_eq!(seven_day.state, SubscriptionQuotaDataState::Stale);
+        assert_eq!(
+            seven_day.utilization,
+            Some(0.87),
+            "utilization is still surfaced for diagnostics; downstream gates on state",
+        );
+    }
+
+    #[test]
+    fn snapshot_for_upstream_keeps_fresh_before_reset() {
+        let cache = SubscriptionQuotaCache::new();
+        let upstream_id = Uuid::new_v4();
+        let now_unix_millis: u64 = 1_750_000_000_000;
+        let record = observation_record(
+            upstream_id,
+            now_unix_millis - 30_000,
+            Some(now_unix_millis / 1_000 + 10),
+        );
+
+        cache.upsert_observation(upstream_id, &record);
+        let candidates = cache.snapshot_for_upstream(
+            upstream_id,
+            now_unix_millis,
+            MAX_STALENESS_SECS,
+        );
+
+        let seven_day = candidates
+            .iter()
+            .find(|c| c.window == SubscriptionQuotaWindow::SevenDay.as_str())
+            .expect("7d candidate present");
+        assert_eq!(seven_day.state, SubscriptionQuotaDataState::Fresh);
+    }
+}
