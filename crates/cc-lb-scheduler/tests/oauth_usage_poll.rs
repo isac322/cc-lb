@@ -2,7 +2,7 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use cc_lb_scheduler::error::{Result, SchedulerError};
 use cc_lb_scheduler::idempotency::{
@@ -138,55 +138,6 @@ mod jobs {
 
         #[cfg(feature = "sqlite")]
         #[tokio::test]
-        async fn poll_schedule_estimator_equivalence() -> Result<()> {
-            use cc_lb_core::{EstimatorConfig, PollScheduleEstimator};
-
-            let pool = sqlite_memory().await?;
-            let upstream_id = Uuid::new_v4();
-            let config = schedule_config();
-            let handler = sqlite_handler(pool.clone(), config.clone());
-            let estimator = PollScheduleEstimator::new(EstimatorConfig {
-                bootstrap_attempts: config.bootstrap_attempts,
-                bootstrap_default_interval_secs: config.bootstrap_default_interval_secs,
-                safety_factor: 1.0,
-                min_interval_secs: config.min_interval_secs,
-                max_interval_secs: config.max_interval_secs,
-                fallback_interval_secs: config.fallback_interval_secs,
-                history_capacity: config.history_capacity,
-                throttle_ladder_secs: config.throttle_ladder_secs.clone(),
-                rate_limit_window_secs: config.success_window_secs,
-                rate_limit_capacity: config.success_capacity,
-                rate_limit_safety_secs: config.success_safety_secs,
-            });
-
-            for second in [0, 60, 120, 180, 240] {
-                handler
-                    .handle(
-                        job(upstream_id),
-                        second,
-                        success_poller(Arc::new(AtomicUsize::new(0)), second),
-                    )
-                    .await?;
-                estimator.record_success(upstream_id, at(second));
-            }
-            let cursor = OAuthUsagePollCursorsStore::new(pool)
-                .read(upstream_id)
-                .await?
-                .expect("cursor exists");
-            let durable_next = compute_next_run_at(240, &config, Some(&cursor));
-            let legacy_next = estimator
-                .next_poll_at(upstream_id)
-                .expect("next poll")
-                .duration_since(UNIX_EPOCH)
-                .expect("epoch")
-                .as_secs();
-
-            assert_eq!(durable_next, legacy_next);
-            Ok(())
-        }
-
-        #[cfg(feature = "sqlite")]
-        #[tokio::test]
         async fn apalis_key_single_flight() -> Result<()> {
             use apalis_core::backend::TaskSink;
             use apalis_sqlite::SqliteStorage;
@@ -284,8 +235,4 @@ fn throttle_poller(
             observed_at_unix_secs: observed_at,
         }))
     }
-}
-
-fn at(seconds: u64) -> SystemTime {
-    UNIX_EPOCH + Duration::from_secs(seconds)
 }

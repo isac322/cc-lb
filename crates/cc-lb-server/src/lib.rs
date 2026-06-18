@@ -16,7 +16,6 @@ pub mod cli;
 pub mod drain;
 pub mod dynamic_view_builder;
 pub mod notify_listener;
-pub mod oauth_usage_poller;
 pub mod preflight;
 pub mod prompt_cache_observation_cache;
 pub mod prompt_cache_observation_sink;
@@ -39,7 +38,6 @@ pub mod warmup;
 
 pub use anthropic_compat_poller::{AnthropicCompatPoller, spawn_anthropic_compat_poller};
 pub use app::{App, BuildError, build_app, build_app_with_path, run_serve};
-pub use oauth_usage_poller::{OAuthUsagePoller, spawn_oauth_usage_poller};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use scheduler_factory::{
     LeaderConnectionHandle, OpenedScheduler, SchedulerBackend, SchedulerFactoryError,

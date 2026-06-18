@@ -38,9 +38,6 @@ pub mod lifecycle;
 pub mod limit_state_writer;
 #[cfg(not(loom))]
 pub mod model_resolution;
-#[cfg(not(loom))]
-pub mod poll_schedule_estimator;
-#[cfg(not(loom))]
 #[allow(dead_code)]
 mod rate_limit_headers;
 #[cfg(not(loom))]
@@ -113,9 +110,6 @@ pub use lifecycle::{
 pub use limit_state_writer::{
     PrincipalLimitStateEnqueueError, PrincipalLimitStateSink, start_principal_limit_state_writer,
 };
-#[cfg(not(loom))]
-pub use poll_schedule_estimator::{EstimatorConfig, PollScheduleEstimator, ThrottleObservation};
-#[cfg(not(loom))]
 pub use rate_limit_headers::{
     UnifiedQuotaObservation, clamp_utilization_fraction, parse_anthropic_unified_headers,
     percent_to_utilization_fraction,
