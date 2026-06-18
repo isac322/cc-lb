@@ -439,6 +439,7 @@ fn observation(
         resets_at_unix_secs: Some(1_800_000_000 + observed_at_unix_millis / 1000),
         surpassed_threshold: Some(false),
         representative_claim: Some(format!("claim-{sample_id}")),
+        fallback_percentage: Some(0.5),
         disabled_reason: None,
         extra_usage_enabled: Some(true),
         extra_usage_monthly_limit: Some(10.0),
