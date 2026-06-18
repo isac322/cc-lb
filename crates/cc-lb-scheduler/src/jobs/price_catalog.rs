@@ -227,8 +227,8 @@ fn retry(error: impl ToString) -> PriceCatalogRefreshJobResult {
 }
 
 fn record_price_catalog_status(status: PriceCatalogRefreshStatus) {
-    metrics::counter!(
-        "cclb_scheduler_price_catalog_status_total",
+    ::metrics::counter!(
+        crate::scheduler_metrics::PRICE_CATALOG_STATUS_TOTAL,
         "status" => status.as_str()
     )
     .increment(1);

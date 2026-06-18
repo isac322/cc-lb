@@ -51,9 +51,9 @@ where
     }
 
     let result = runner.prune_once_for_retention(usage_retention_days).await;
-    metrics::counter!("cclb_scheduler_prune_rows_removed_total", "table" => "request_events")
+    ::metrics::counter!(crate::scheduler_metrics::PRUNE_ROWS_REMOVED_TOTAL, "table" => "request_events")
         .increment(result.request_events_removed);
-    metrics::counter!("cclb_scheduler_prune_rows_removed_total", "table" => "audit_log")
+    ::metrics::counter!(crate::scheduler_metrics::PRUNE_ROWS_REMOVED_TOTAL, "table" => "audit_log")
         .increment(result.audit_log_removed);
     tracing::info!(
         request_events_removed = result.request_events_removed,

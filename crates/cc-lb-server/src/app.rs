@@ -287,19 +287,28 @@ pub async fn run_serve(
     cc_lb_observability::install_panic_hook(cc_lb_observability::RedactionPolicy::new(
         config.observability.user_prompt_redaction,
     ));
-    let _guard = init_observability(&mut config)?;
+    let guard = init_observability(&mut config)?;
     let startup_opts = startup_handshake_opts_from_flags(
         skip_handshake_if_fresh,
         force_handshake,
         &config.runtime.startup_handshake,
     );
-    let app = build_app_with_path_inner(
+    let app = match build_app_with_path_inner(
         config,
         Some(config_path),
         Some(StartupPreflight { strict_preflight }),
         startup_opts,
     )
-    .await?;
+    .await
+    {
+        Ok(app) => app,
+        Err(error @ BuildError::SchedulerFactory(_)) => {
+            cc_lb_scheduler::scheduler_metrics::set_scheduler_init_failure(true);
+            guard.flush_metrics();
+            return Err(error.into());
+        }
+        Err(error) => return Err(error.into()),
+    };
     app.start().await?;
     Ok(())
 }

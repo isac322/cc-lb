@@ -42,7 +42,7 @@ where
         .read_compat_etag(CLAUDE_CODE_STABLE_VERSION_KEY)
         .await?
         .expect("etag row");
-    assert_eq!(outcome, JobOutcome::Done);
+    assert_eq!(outcome, JobOutcome::Noop);
     assert_eq!(row.last_applied_at_unix_secs, UPDATED_TIME);
     assert_eq!(row.last_value_hash, stored_hash);
     assert_eq!(compatibility_kv.value_write_count(), 0);
@@ -64,7 +64,7 @@ where
         .await?;
     let compatibility_kv = RecordingCompatibilityKv::default();
 
-    handle_anthropic_compat_refresh_job(
+    let outcome = handle_anthropic_compat_refresh_job(
         AnthropicCompatRefreshJob::new(CLAUDE_CODE_STABLE_VERSION_KEY),
         &etags,
         &compatibility_kv,
@@ -83,6 +83,7 @@ where
         .read_compat_etag(CLAUDE_CODE_STABLE_VERSION_KEY)
         .await?
         .expect("etag row");
+    assert_eq!(outcome, JobOutcome::Noop);
     assert_eq!(row.etag.as_deref(), Some("etag-2"));
     assert_eq!(row.last_applied_at_unix_secs, UPDATED_TIME);
     assert_eq!(row.last_value_hash, stored_hash);

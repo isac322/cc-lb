@@ -118,10 +118,12 @@ pub async fn open_scheduler_storage(
     storage: &StorageConfig,
     scheduler: &SchedulerConfig,
 ) -> Result<OpenedScheduler, SchedulerFactoryError> {
-    match storage {
+    let opened = match storage {
         StorageConfig::Sqlite { path } => open_sqlite(path, scheduler).await,
         StorageConfig::Postgres { url, pool: _ } => open_postgres(url, scheduler).await,
-    }
+    };
+    cc_lb_scheduler::scheduler_metrics::set_scheduler_init_failure(opened.is_err());
+    opened
 }
 
 #[cfg(not(feature = "sqlite"))]

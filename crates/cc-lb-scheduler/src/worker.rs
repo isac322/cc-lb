@@ -371,7 +371,7 @@ fn build_sqlite_worker(storage: SqliteApalisStorage, ctx: SchedulerCtx) -> Entit
                 let worker = ApalisWorkerBuilder::new(ENTITY_QUEUE)
                     .backend(storage)
                     .data(ctx)
-                    .layer(TraceparentLayer::new())
+                    .layer(TraceparentLayer::new().with_scheduler_metrics())
                     .layer(RetryClass::Entity.layer())
                     .layer(TimeoutLayer::new(ENTITY_TIMEOUT))
                     .layer(CatchPanicLayer::new())
@@ -398,7 +398,7 @@ fn build_postgres_worker(storage: PostgresApalisStorage, ctx: SchedulerCtx) -> E
                 let worker = ApalisWorkerBuilder::new(ENTITY_QUEUE)
                     .backend(storage)
                     .data(ctx)
-                    .layer(TraceparentLayer::new())
+                    .layer(TraceparentLayer::new().with_scheduler_metrics())
                     .layer(RetryClass::Entity.layer())
                     .layer(TimeoutLayer::new(ENTITY_TIMEOUT))
                     .layer(CatchPanicLayer::new())
@@ -452,7 +452,7 @@ fn build_sqlite_singleton_worker(
                 let worker = ApalisWorkerBuilder::new(SINGLETON_QUEUE)
                     .backend(storage)
                     .data(ctx)
-                    .layer(TraceparentLayer::new())
+                    .layer(TraceparentLayer::new().with_scheduler_metrics())
                     .layer(RetryClass::Maintenance.layer())
                     .layer(TimeoutLayer::new(SINGLETON_TIMEOUT))
                     .layer(CatchPanicLayer::new())
@@ -482,7 +482,7 @@ fn build_postgres_singleton_worker(
                 let worker = ApalisWorkerBuilder::new(SINGLETON_QUEUE)
                     .backend(storage)
                     .data(ctx)
-                    .layer(TraceparentLayer::new())
+                    .layer(TraceparentLayer::new().with_scheduler_metrics())
                     .layer(RetryClass::Maintenance.layer())
                     .layer(TimeoutLayer::new(SINGLETON_TIMEOUT))
                     .layer(CatchPanicLayer::new())
@@ -507,21 +507,10 @@ type EntityHandlerFn =
     ) -> Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>>;
 
 fn entity_job_handler(
-    job: EntityJob,
+    _job: EntityJob,
     _ctx: Data<SchedulerCtx>,
 ) -> Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>> {
-    Box::pin(async move {
-        match job {
-            EntityJob::Warmup(_) => record_entity_status("warmup"),
-            EntityJob::OAuthRefresh(_) => record_entity_status("oauth_refresh"),
-            EntityJob::OAuthUsagePoll(_) => record_entity_status("oauth_usage_poll"),
-            EntityJob::AnthropicCompatRefresh(_) => {
-                record_entity_status("anthropic_compat_refresh")
-            }
-            EntityJob::MetadataRefresh(_) => record_entity_status("metadata_refresh"),
-        }
-        Ok(JobOutcome::Done)
-    })
+    Box::pin(async move { Ok(JobOutcome::Done) })
 }
 
 type SingletonHandlerFn =
@@ -531,23 +520,10 @@ type SingletonHandlerFn =
     ) -> Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>>;
 
 fn singleton_job_handler(
-    job: SingletonJob,
+    _job: SingletonJob,
     _ctx: Data<SchedulerCtx>,
 ) -> Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>> {
-    Box::pin(async move {
-        record_singleton_status(job.kind());
-        Ok(JobOutcome::Done)
-    })
-}
-
-fn record_entity_status(job_type: &'static str) {
-    metrics::counter!("cclb_scheduler_entity_jobs_total", "job_type" => job_type, "status" => "done")
-        .increment(1);
-}
-
-fn record_singleton_status(job_type: &'static str) {
-    metrics::counter!("cclb_scheduler_singleton_jobs_total", "job_type" => job_type, "status" => "done")
-        .increment(1);
+    Box::pin(async move { Ok(JobOutcome::Done) })
 }
 
 fn spawn_cron_producer(

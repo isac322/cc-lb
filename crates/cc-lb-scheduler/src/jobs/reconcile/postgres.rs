@@ -36,7 +36,7 @@ pub(super) async fn prune_orphans(
     live_keys: &HashSet<String>,
 ) -> Result<u64> {
     let rows = sqlx::query(
-        "SELECT idempotency_key FROM apalis.jobs WHERE job_type = ANY($1) AND status IN ('Pending','Running','Queued')",
+        "SELECT job_type, idempotency_key FROM apalis.jobs WHERE job_type = ANY($1) AND status IN ('Pending','Running','Queued')",
     )
     .bind(UPSTREAM_ENTITY_TYPES.as_slice())
     .fetch_all(pool)
@@ -45,13 +45,16 @@ pub(super) async fn prune_orphans(
     for row in rows {
         let key: String = row.try_get("idempotency_key")?;
         if !live_keys.contains(&key) {
-            pruned += sqlx::query(
+            let job_type: String = row.try_get("job_type")?;
+            let rows = sqlx::query(
                 "DELETE FROM apalis.jobs WHERE idempotency_key = $1 AND status IN ('Pending','Running','Queued')",
             )
             .bind(key)
             .execute(pool)
             .await?
             .rows_affected();
+            crate::scheduler_metrics::record_reconcile_orphan_pruned(&job_type, rows);
+            pruned += rows;
         }
     }
     Ok(pruned)
@@ -78,7 +81,7 @@ pub(super) async fn surface_failures(pool: &Pool<Postgres>, now_unix_secs: u64) 
         store
             .record(&job_type, &summary, &last_error, attempts, now_unix_secs)
             .await?;
-        metrics::counter!("cclb_scheduler_failures_total", "job_type" => job_type).increment(1);
+        crate::scheduler_metrics::record_scheduler_failure(&job_type, 1);
         recorded += 1;
     }
     Ok(recorded)

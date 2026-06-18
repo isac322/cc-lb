@@ -71,8 +71,7 @@ where
     Fetched: Future<Output = Result<CompatFetch>>,
 {
     let Some(compatibility_key) = compatibility_key(&job.key) else {
-        record_compat_status("skip");
-        return Ok(JobOutcome::Done);
+        return Ok(JobOutcome::Skip);
     };
 
     let stored = etags.read_compat_etag(&job.key).await?;
@@ -84,7 +83,6 @@ where
                 .put_compatibility_kv_failure(&job.key, now_unix_secs, &error.to_string())
                 .await
                 .map_err(storage_error)?;
-            record_compat_status("retry");
             return Ok(JobOutcome::Retry {
                 delay: COMPAT_REFRESH_RETRY_DELAY,
             });
@@ -104,8 +102,7 @@ where
                     )
                     .await?;
             }
-            record_compat_status("noop");
-            Ok(JobOutcome::Done)
+            Ok(JobOutcome::Noop)
         }
         CompatFetch::Modified {
             value,
@@ -156,8 +153,7 @@ where
         etags
             .upsert_compat_value(&job.key, next_etag, &next_hash, now_unix_secs)
             .await?;
-        record_compat_status("noop");
-        return Ok(JobOutcome::Done);
+        return Ok(JobOutcome::Noop);
     }
 
     compatibility_kv
@@ -177,7 +173,6 @@ where
             now_unix_secs,
         )
         .await?;
-    record_compat_status("applied");
     Ok(JobOutcome::Done)
 }
 
@@ -194,11 +189,6 @@ pub fn compatibility_key(name: &str) -> Option<CompatibilityKey> {
 
 fn storage_error(error: cc_lb_storage_api::StorageError) -> SchedulerError {
     SchedulerError::Job(error.to_string())
-}
-
-fn record_compat_status(status: &'static str) {
-    metrics::counter!("cclb_scheduler_jobs_total", "job_type" => "compat", "status" => status)
-        .increment(1);
 }
 
 #[cfg(test)]

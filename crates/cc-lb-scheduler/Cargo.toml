@@ -54,6 +54,7 @@ required-features = ["postgres"]
 [dev-dependencies]
 async-trait = { workspace = true }
 cron = "0.16"
+metrics-exporter-prometheus.workspace = true
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 tracing-subscriber = { workspace = true }

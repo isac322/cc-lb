@@ -110,7 +110,7 @@ where
             .await
         {
             Ok(rows_removed) => {
-                metrics::counter!("cclb_scheduler_quota_gc_rows_removed_total")
+                ::metrics::counter!(crate::scheduler_metrics::QUOTA_GC_ROWS_REMOVED_TOTAL)
                     .increment(rows_removed);
                 tracing::info!(
                     rows_removed,

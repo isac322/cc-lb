@@ -137,12 +137,10 @@ where
         Enqueued: Future<Output = Result<()>> + Send,
     {
         let Some(upstream) = self.upstreams.get_by_id(job.upstream_id).await? else {
-            record_oauth_refresh_status("skip");
-            return Ok(JobOutcome::Done);
+            return Ok(JobOutcome::Skip);
         };
         if !is_refreshable(&upstream) {
-            record_oauth_refresh_status("skip");
-            return Ok(JobOutcome::Done);
+            return Ok(JobOutcome::Skip);
         }
 
         let holder = holder_name(self.replica_id);
@@ -183,7 +181,6 @@ where
                 let mut metadata_job = MetadataRefreshJob::new(job.upstream_id, generation);
                 metadata_job.traceparent = job.traceparent;
                 enqueue_metadata(metadata_job).await?;
-                record_oauth_refresh_status("success");
                 Ok(JobOutcome::Done)
             }
             Err(error) => {
@@ -191,7 +188,6 @@ where
                     .release_if_holder(job.upstream_id, &holder)
                     .await?;
                 tracing::warn!(upstream_id = %job.upstream_id, error = %error, "oauth refresh job failed");
-                record_oauth_refresh_status("retry");
                 Ok(JobOutcome::Retry {
                     delay: self.config.retry_delay,
                 })
@@ -212,19 +208,16 @@ where
                 .await?
             {
                 Some(generation) if generation > starting_generation => {
-                    record_oauth_refresh_status("single_flight_join");
                     return Ok(JobOutcome::Done);
                 }
                 Some(_) => {}
                 None => {
-                    record_oauth_refresh_status("skip");
-                    return Ok(JobOutcome::Done);
+                    return Ok(JobOutcome::Skip);
                 }
             }
 
             let now = tokio::time::Instant::now();
             if now >= deadline {
-                record_oauth_refresh_status("retry");
                 return Ok(JobOutcome::Retry {
                     delay: self.config.retry_delay,
                 });
@@ -243,9 +236,4 @@ fn is_refreshable(upstream: &UpstreamRecord) -> bool {
 
 fn holder_name(replica_id: Uuid) -> String {
     format!("apalis-worker:{replica_id}")
-}
-
-fn record_oauth_refresh_status(status: &'static str) {
-    metrics::counter!("cclb_scheduler_jobs_total", "job_type" => "oauth_refresh", "status" => status)
-        .increment(1);
 }

@@ -78,8 +78,10 @@ where
 
         match self.store.purge_expired_before(now_unix_secs).await {
             Ok(rows_removed) => {
-                metrics::counter!("cclb_scheduler_prompt_cache_purge_rows_removed_total")
-                    .increment(rows_removed);
+                ::metrics::counter!(
+                    crate::scheduler_metrics::PROMPT_CACHE_PURGE_ROWS_REMOVED_TOTAL
+                )
+                .increment(rows_removed);
                 tracing::info!(
                     rows_removed,
                     cutoff_unix_secs = now_unix_secs,

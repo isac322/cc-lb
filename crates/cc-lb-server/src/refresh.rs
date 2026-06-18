@@ -292,7 +292,8 @@ impl LazyRefresher {
 
             let now = tokio::time::Instant::now();
             if now >= deadline {
-                metrics::counter!("cclb_scheduler_lazy_refresh_timeout_total").increment(1);
+                ::metrics::counter!(cc_lb_scheduler::scheduler_metrics::LAZY_REFRESH_TIMEOUT_TOTAL)
+                    .increment(1);
                 return Err(LazyRefreshError::Failed {
                     reason: "oauth refresh timed out waiting for another holder".to_owned(),
                 });

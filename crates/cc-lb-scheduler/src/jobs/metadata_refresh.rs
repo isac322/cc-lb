@@ -200,7 +200,7 @@ fn storage_error(error: StorageError) -> SchedulerError {
 }
 
 fn record_metadata_refresh_status(status: &'static str) {
-    metrics::counter!("cclb_scheduler_metadata_refresh_status_total", "status" => status)
+    ::metrics::counter!(crate::scheduler_metrics::METADATA_REFRESH_STATUS_TOTAL, "status" => status)
         .increment(1);
 }
 

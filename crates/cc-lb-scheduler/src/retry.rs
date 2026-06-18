@@ -8,6 +8,8 @@ use std::time::Duration;
 use serde::{Deserialize, Serialize};
 use tower::{Layer, Service};
 
+use crate::middleware::JobOutcomeStatus;
+
 type RetryFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
 const JITTER_DENOMINATOR_PER_MILLE: u64 = 1_000;
@@ -133,8 +135,34 @@ impl JitterRatio {
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum JobOutcome {
     Done,
+    Skip,
+    Noop,
+    DuplicateEffect,
     Retry { delay: Duration },
     DeadLetter,
+}
+
+impl JobOutcome {
+    pub const fn metric_status(&self) -> JobOutcomeStatus {
+        match self {
+            Self::Done => JobOutcomeStatus::Done,
+            Self::Skip => JobOutcomeStatus::Skip,
+            Self::Noop => JobOutcomeStatus::Noop,
+            Self::DuplicateEffect => JobOutcomeStatus::DuplicateEffect,
+            Self::Retry { delay: _ } | Self::DeadLetter => JobOutcomeStatus::Retry,
+        }
+    }
+
+    pub const fn is_terminal_failure(&self) -> bool {
+        match self {
+            Self::DeadLetter => true,
+            Self::Done
+            | Self::Skip
+            | Self::Noop
+            | Self::DuplicateEffect
+            | Self::Retry { delay: _ } => false,
+        }
+    }
 }
 
 pub trait RetryPayload {
@@ -201,6 +229,9 @@ where
                     Ok(JobOutcome::Retry { delay })
                 }
                 JobOutcome::Done => Ok(JobOutcome::Done),
+                JobOutcome::Skip => Ok(JobOutcome::Skip),
+                JobOutcome::Noop => Ok(JobOutcome::Noop),
+                JobOutcome::DuplicateEffect => Ok(JobOutcome::DuplicateEffect),
                 JobOutcome::DeadLetter => Ok(JobOutcome::DeadLetter),
             }
         })

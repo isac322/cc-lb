@@ -75,11 +75,15 @@ impl LeaderElection {
     }
 
     pub async fn try_acquire(&self) -> Result<bool, LeaderError> {
-        match self {
+        let acquired = match self {
             Self::Sqlite(sqlite) => sqlite.try_acquire().await,
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => postgres.try_acquire().await,
+        }?;
+        if acquired {
+            crate::scheduler_metrics::record_leader_acquired(1);
         }
+        Ok(acquired)
     }
 
     pub async fn heartbeat(&self) -> Result<(), LeaderError> {
@@ -190,6 +194,7 @@ impl PostgresLeaderElection {
                     if let Err(error) = heartbeat {
                         self.close_current().await.ok();
                         self.ensure_connected().await?;
+                        crate::scheduler_metrics::record_leader_lost(1);
                         break Err(LeaderError::LockLost { reason: error.to_string() });
                     }
                 }
