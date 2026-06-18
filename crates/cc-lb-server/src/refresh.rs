@@ -32,6 +32,9 @@ use crate::dynamic_view_builder::Stores;
 const SWEEP_INTERVAL_SECS: u64 = 600;
 const LOOKAHEAD_SECS: u64 = 1200;
 const LEASE_TTL_SECS: u64 = 90;
+const LAZY_REFRESH_CLAIM_TTL_SECS: u64 = 60;
+const LAZY_REFRESH_CONTENTION_WAIT_SECS: u64 = 60;
+const LAZY_REFRESH_POLL_INTERVAL_SECS: u64 = 1;
 const PAGE_SIZE: usize = 100;
 
 type HyperTokenClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
@@ -214,6 +217,157 @@ pub struct LazyRefresher {
     http: TokenHttpClient,
     metadata_hook: Option<MetadataHookHandle>,
     cancel: CancellationToken,
+    claim_guard: Arc<dyn LazyRefreshClaimGuard>,
+    contention: LazyRefreshContentionConfig,
+}
+
+#[derive(Clone, Copy)]
+pub struct LazyRefreshContentionConfig {
+    claim_ttl_secs: u64,
+    wait_timeout: Duration,
+    poll_interval: Duration,
+}
+
+impl LazyRefreshContentionConfig {
+    const fn production() -> Self {
+        Self {
+            claim_ttl_secs: LAZY_REFRESH_CLAIM_TTL_SECS,
+            wait_timeout: Duration::from_secs(LAZY_REFRESH_CONTENTION_WAIT_SECS),
+            poll_interval: Duration::from_secs(LAZY_REFRESH_POLL_INTERVAL_SECS),
+        }
+    }
+
+    #[cfg(test)]
+    const fn for_tests(wait_timeout: Duration, poll_interval: Duration) -> Self {
+        Self {
+            claim_ttl_secs: LAZY_REFRESH_CLAIM_TTL_SECS,
+            wait_timeout,
+            poll_interval,
+        }
+    }
+}
+
+#[async_trait]
+pub trait LazyRefreshClaimGuard: Send + Sync {
+    async fn try_acquire(
+        &self,
+        upstream_id: Uuid,
+        holder: &str,
+        ttl_secs: u64,
+        now_unix_secs: u64,
+    ) -> StorageResult<bool>;
+
+    async fn complete_and_bump_generation(
+        &self,
+        upstream_id: Uuid,
+        holder: &str,
+        generation: u64,
+    ) -> StorageResult<bool>;
+
+    async fn release_if_holder(&self, upstream_id: Uuid, holder: &str) -> StorageResult<bool>;
+}
+
+struct LegacyRefreshLeaseGuard {
+    upstreams: Arc<dyn cc_lb_storage_api::UpstreamStore>,
+    replica_id: Uuid,
+}
+
+#[async_trait]
+impl LazyRefreshClaimGuard for LegacyRefreshLeaseGuard {
+    async fn try_acquire(
+        &self,
+        upstream_id: Uuid,
+        _holder: &str,
+        ttl_secs: u64,
+        _now_unix_secs: u64,
+    ) -> StorageResult<bool> {
+        self.upstreams
+            .claim_refresh_lease(upstream_id, self.replica_id, ttl_secs)
+            .await
+    }
+
+    async fn complete_and_bump_generation(
+        &self,
+        _upstream_id: Uuid,
+        _holder: &str,
+        _generation: u64,
+    ) -> StorageResult<bool> {
+        Ok(true)
+    }
+
+    async fn release_if_holder(&self, _upstream_id: Uuid, _holder: &str) -> StorageResult<bool> {
+        Ok(true)
+    }
+}
+
+#[cfg(feature = "sqlite")]
+#[async_trait]
+impl LazyRefreshClaimGuard
+    for cc_lb_scheduler::idempotency::OAuthRefreshClaimsStore<scheduler_sqlx::Sqlite>
+{
+    async fn try_acquire(
+        &self,
+        upstream_id: Uuid,
+        holder: &str,
+        ttl_secs: u64,
+        now_unix_secs: u64,
+    ) -> StorageResult<bool> {
+        self.try_acquire(upstream_id, holder, ttl_secs, now_unix_secs)
+            .await
+            .map_err(scheduler_claim_error)
+    }
+
+    async fn complete_and_bump_generation(
+        &self,
+        upstream_id: Uuid,
+        holder: &str,
+        generation: u64,
+    ) -> StorageResult<bool> {
+        self.complete_and_bump_generation(upstream_id, holder, generation)
+            .await
+            .map_err(scheduler_claim_error)
+    }
+
+    async fn release_if_holder(&self, upstream_id: Uuid, holder: &str) -> StorageResult<bool> {
+        self.release_if_holder(upstream_id, holder)
+            .await
+            .map_err(scheduler_claim_error)
+    }
+}
+
+#[cfg(feature = "postgres")]
+#[async_trait]
+impl LazyRefreshClaimGuard
+    for cc_lb_scheduler::idempotency::OAuthRefreshClaimsStore<scheduler_sqlx::Postgres>
+{
+    async fn try_acquire(
+        &self,
+        upstream_id: Uuid,
+        holder: &str,
+        ttl_secs: u64,
+        now_unix_secs: u64,
+    ) -> StorageResult<bool> {
+        self.try_acquire(upstream_id, holder, ttl_secs, now_unix_secs)
+            .await
+            .map_err(scheduler_claim_error)
+    }
+
+    async fn complete_and_bump_generation(
+        &self,
+        upstream_id: Uuid,
+        holder: &str,
+        generation: u64,
+    ) -> StorageResult<bool> {
+        self.complete_and_bump_generation(upstream_id, holder, generation)
+            .await
+            .map_err(scheduler_claim_error)
+    }
+
+    async fn release_if_holder(&self, upstream_id: Uuid, holder: &str) -> StorageResult<bool> {
+        self.release_if_holder(upstream_id, holder)
+            .await
+            .map_err(scheduler_claim_error)
+    }
 }
 
 impl LazyRefresher {
@@ -225,6 +379,75 @@ impl LazyRefresher {
         metadata_hook: Option<MetadataHookHandle>,
         cancel: CancellationToken,
     ) -> Self {
+        let claim_guard = Arc::new(LegacyRefreshLeaseGuard {
+            upstreams: stores.upstreams.clone(),
+            replica_id,
+        });
+        Self::new_with_claim_guard(
+            stores,
+            aead,
+            oauth_cfg,
+            replica_id,
+            metadata_hook,
+            cancel,
+            claim_guard,
+        )
+    }
+
+    pub fn new_with_claim_guard(
+        stores: Arc<Stores>,
+        aead: Arc<AeadService>,
+        oauth_cfg: Arc<AnthropicOAuthConfig>,
+        replica_id: Uuid,
+        metadata_hook: Option<MetadataHookHandle>,
+        cancel: CancellationToken,
+        claim_guard: Arc<dyn LazyRefreshClaimGuard>,
+    ) -> Self {
+        Self::new_with_claim_guard_and_config(
+            stores,
+            aead,
+            oauth_cfg,
+            replica_id,
+            metadata_hook,
+            cancel,
+            claim_guard,
+            LazyRefreshContentionConfig::production(),
+        )
+    }
+
+    #[cfg(test)]
+    fn new_with_claim_guard_for_tests(
+        stores: Arc<Stores>,
+        aead: Arc<AeadService>,
+        oauth_cfg: Arc<AnthropicOAuthConfig>,
+        replica_id: Uuid,
+        metadata_hook: Option<MetadataHookHandle>,
+        cancel: CancellationToken,
+        claim_guard: Arc<dyn LazyRefreshClaimGuard>,
+        contention: LazyRefreshContentionConfig,
+    ) -> Self {
+        Self::new_with_claim_guard_and_config(
+            stores,
+            aead,
+            oauth_cfg,
+            replica_id,
+            metadata_hook,
+            cancel,
+            claim_guard,
+            contention,
+        )
+    }
+
+    fn new_with_claim_guard_and_config(
+        stores: Arc<Stores>,
+        aead: Arc<AeadService>,
+        oauth_cfg: Arc<AnthropicOAuthConfig>,
+        replica_id: Uuid,
+        metadata_hook: Option<MetadataHookHandle>,
+        cancel: CancellationToken,
+        claim_guard: Arc<dyn LazyRefreshClaimGuard>,
+        contention: LazyRefreshContentionConfig,
+    ) -> Self {
         let http = TokenHttpClient::new(Duration::from_secs(30));
         Self {
             stores,
@@ -234,6 +457,49 @@ impl LazyRefresher {
             http,
             metadata_hook,
             cancel,
+            claim_guard,
+            contention,
+        }
+    }
+
+    async fn wait_for_token_generation(
+        &self,
+        upstream_id: Uuid,
+        starting_generation: u64,
+    ) -> Result<(), LazyRefreshError> {
+        let deadline = tokio::time::Instant::now() + self.contention.wait_timeout;
+        loop {
+            let Some(upstream) = self
+                .stores
+                .upstreams
+                .get_by_id(upstream_id)
+                .await
+                .map_err(lazy_error)?
+            else {
+                return Err(LazyRefreshError::Failed {
+                    reason: "oauth upstream not found".to_owned(),
+                });
+            };
+            if upstream.oauth_token_generation > starting_generation {
+                return Ok(());
+            }
+
+            let now = tokio::time::Instant::now();
+            if now >= deadline {
+                metrics::counter!("cclb_scheduler_lazy_refresh_timeout_total").increment(1);
+                return Err(LazyRefreshError::Failed {
+                    reason: "oauth refresh timed out waiting for another holder".to_owned(),
+                });
+            }
+            let sleep_for = self.contention.poll_interval.min(deadline - now);
+            tokio::select! {
+                _ = self.cancel.cancelled() => {
+                    return Err(LazyRefreshError::Failed {
+                        reason: "oauth refresh cancelled".to_owned(),
+                    });
+                }
+                _ = tokio::time::sleep(sleep_for) => {}
+            }
         }
     }
 }
@@ -250,18 +516,23 @@ impl LazyRefreshHandle for LazyRefresher {
             .ok_or_else(|| LazyRefreshError::Failed {
                 reason: "oauth upstream not found".to_owned(),
             })?;
+        let holder = lazy_refresh_holder(self.replica_id);
         let claimed = self
-            .stores
-            .upstreams
-            .claim_refresh_lease(upstream_id, self.replica_id, LEASE_TTL_SECS)
+            .claim_guard
+            .try_acquire(
+                upstream_id,
+                &holder,
+                self.contention.claim_ttl_secs,
+                now_unix_secs(),
+            )
             .await
             .map_err(lazy_error)?;
         if !claimed {
-            return Err(LazyRefreshError::Failed {
-                reason: "oauth refresh lease is held".to_owned(),
-            });
+            return self
+                .wait_for_token_generation(upstream_id, upstream.oauth_token_generation)
+                .await;
         }
-        refresh_flow(
+        let result = refresh_flow(
             &self.stores,
             self.stores.audit.as_deref(),
             &self.aead,
@@ -272,10 +543,43 @@ impl LazyRefreshHandle for LazyRefresher {
             &self.cancel,
             upstream,
         )
-        .await
-        .map_err(|error| LazyRefreshError::Failed {
-            reason: error.to_string(),
-        })
+        .await;
+        match result {
+            Ok(()) => {
+                let generation = self
+                    .stores
+                    .upstreams
+                    .read_oauth_token_generation(upstream_id)
+                    .await
+                    .map_err(lazy_error)?
+                    .ok_or_else(|| LazyRefreshError::Failed {
+                        reason: "oauth upstream not found".to_owned(),
+                    })?;
+                let completed = self
+                    .claim_guard
+                    .complete_and_bump_generation(upstream_id, &holder, generation)
+                    .await
+                    .map_err(lazy_error)?;
+                if !completed {
+                    return Err(LazyRefreshError::Failed {
+                        reason: "oauth refresh claim was not held at completion".to_owned(),
+                    });
+                }
+                Ok(())
+            }
+            Err(error) => {
+                if let Err(release_error) = self
+                    .claim_guard
+                    .release_if_holder(upstream_id, &holder)
+                    .await
+                {
+                    tracing::warn!(error = %release_error, upstream_id = %upstream_id, "oauth refresh claim release failed");
+                }
+                Err(LazyRefreshError::Failed {
+                    reason: error.to_string(),
+                })
+            }
+        }
     }
 }
 
@@ -559,6 +863,17 @@ fn lazy_error(error: StorageError) -> LazyRefreshError {
     }
 }
 
+fn lazy_refresh_holder(replica_id: Uuid) -> String {
+    format!("cc-lb-server:lazy-refresher:{replica_id}")
+}
+
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+fn scheduler_claim_error(error: cc_lb_scheduler::error::SchedulerError) -> StorageError {
+    StorageError::Unavailable {
+        message: error.to_string(),
+    }
+}
+
 fn now_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -568,9 +883,24 @@ fn now_unix_secs() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use axum::extract::State;
+    use axum::routing::post;
+    use axum::{Json, Router};
+    use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
+    use cc_lb_config::AnthropicOAuthConfig;
+    use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
     use cc_lb_storage_api::upstream::UpstreamKind;
-    use cc_lb_storage_api::{BackendKind, MetaStore, UpstreamCreate, UpstreamStore};
+    use cc_lb_storage_api::{BackendKind, MetaStore, StorageResult, UpstreamCreate, UpstreamStore};
+    use tokio::net::TcpListener;
+    use tokio_util::sync::CancellationToken;
+    use url::Url;
     use uuid::Uuid;
+
+    use super::{LazyRefreshClaimGuard, LazyRefreshContentionConfig, LazyRefresher};
 
     #[tokio::test]
     async fn release_lease_on_failure_clears_refresh_lease() {
@@ -584,6 +914,7 @@ mod tests {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: None,
                 api_key_ciphertext: None,
+                oauth_token_generation: None,
                 warmup_enabled: false,
                 next_warmup_at: None,
                 last_warmup_cycle_key: None,
@@ -615,5 +946,264 @@ mod tests {
         assert_eq!(stored.refresh_lease_until_unix_secs, None);
         assert_eq!(stored.last_apply_error.as_deref(), Some("status_401"));
         assert!(stored.last_apply_at_unix_secs.is_some());
+    }
+
+    #[tokio::test]
+    async fn lazy_refresher_single_flight_under_concurrency() {
+        let fixture = LazyRefreshFixture::new(Duration::from_millis(50)).await;
+        let upstream_id = fixture.create_oauth_upstream().await;
+        let claims = Arc::new(TestOAuthRefreshClaims::single_winner());
+        let config = LazyRefreshContentionConfig::for_tests(
+            Duration::from_millis(500),
+            Duration::from_millis(5),
+        );
+        let first = fixture.lazy_refresher(claims.clone(), config);
+        let second = fixture.lazy_refresher(claims.clone(), config);
+
+        let (left, right) = tokio::join!(
+            first.refresh_one(upstream_id),
+            second.refresh_one(upstream_id)
+        );
+
+        left.expect("first lazy refresh succeeds");
+        right.expect("second lazy refresh joins");
+        assert_eq!(fixture.refresh_call_count(), 1);
+        assert_eq!(claims.completed_generation(), Some(1));
+    }
+
+    #[tokio::test]
+    async fn lazy_refresher_timeout_when_contended_generation_does_not_advance() {
+        let fixture = LazyRefreshFixture::new(Duration::from_millis(0)).await;
+        let upstream_id = fixture.create_oauth_upstream().await;
+        let claims = Arc::new(TestOAuthRefreshClaims::always_contended());
+        let config = LazyRefreshContentionConfig::for_tests(
+            Duration::from_millis(20),
+            Duration::from_millis(5),
+        );
+        let refresher = fixture.lazy_refresher(claims, config);
+
+        let error = refresher
+            .refresh_one(upstream_id)
+            .await
+            .expect_err("contended lazy refresh times out");
+
+        assert!(error.to_string().contains("timed out"));
+        assert_eq!(fixture.refresh_call_count(), 0);
+    }
+
+    struct LazyRefreshFixture {
+        _dir: tempfile::TempDir,
+        storage: Arc<cc_lb_storage_sqlite::SqliteStorage>,
+        stores: Arc<crate::dynamic_view_builder::Stores>,
+        aead: Arc<AeadService>,
+        oauth_cfg: Arc<AnthropicOAuthConfig>,
+        refresh_calls: Arc<AtomicUsize>,
+    }
+
+    impl LazyRefreshFixture {
+        async fn new(refresh_delay: Duration) -> Self {
+            let refresh_calls = Arc::new(AtomicUsize::new(0));
+            let token_url =
+                spawn_lazy_refresh_token_server(refresh_calls.clone(), refresh_delay).await;
+            let dir = tempfile::tempdir().expect("tempdir");
+            let database_url = format!(
+                "sqlite://{}",
+                dir.path().join("lazy-refresh.sqlite").display()
+            );
+            let storage = Arc::new(
+                cc_lb_storage_sqlite::open_sqlite(&database_url)
+                    .await
+                    .expect("storage opens"),
+            );
+            storage
+                .initialize(BackendKind::Sqlite)
+                .await
+                .expect("storage initializes");
+            let stores = Arc::new(crate::dynamic_view_builder::Stores {
+                upstreams: storage.clone(),
+                principals: storage.clone(),
+                plugin_registry: storage.clone(),
+                upstream_rate_limits: storage.clone(),
+                upstream_subscription_quotas: storage.clone(),
+                prompt_cache_observations: storage.clone(),
+                anthropic_compatibility_kv: storage.clone(),
+                audit: Some(storage.clone()),
+                plugin_registry_repo: None,
+            });
+            let aead = Arc::new(AeadService::from_master_key([42; 32]));
+            let oauth_cfg = Arc::new(AnthropicOAuthConfig {
+                client_id: "lazy-client".to_owned(),
+                auth_url: Url::parse("http://127.0.0.1/oauth/authorize").expect("auth url"),
+                token_url,
+                redirect_uri: Url::parse("http://127.0.0.1/callback").expect("redirect url"),
+                scopes: vec!["messages".to_owned()],
+            });
+            Self {
+                _dir: dir,
+                storage,
+                stores,
+                aead,
+                oauth_cfg,
+                refresh_calls,
+            }
+        }
+
+        async fn create_oauth_upstream(&self) -> Uuid {
+            let record = self
+                .storage
+                .create(UpstreamCreate {
+                    name: "lazy-guard".to_owned(),
+                    kind: UpstreamKind::AnthropicOauth,
+                    base_url: None,
+                    api_key_ciphertext: None,
+                    oauth_token_generation: None,
+                    warmup_enabled: false,
+                    next_warmup_at: None,
+                    last_warmup_cycle_key: None,
+                    warmup_lease_holder: None,
+                    warmup_lease_until_unix_secs: None,
+                    warmup_dialect_plugin: None,
+                })
+                .await
+                .expect("upstream created");
+            let encrypted = EncryptedOAuthTokens::encrypt(
+                self.aead.as_ref(),
+                &OAuthTokenBundle {
+                    access_token: "sk-ant-oat01-old".to_owned(),
+                    refresh_token: "sk-ant-ort01-old".to_owned(),
+                    expires_at_unix_secs: 1,
+                    scopes: vec!["messages".to_owned()],
+                },
+                record.id.as_bytes(),
+            )
+            .expect("tokens encrypt");
+            self.storage
+                .store_oauth_tokens(record.id, record.revision, encrypted)
+                .await
+                .expect("tokens stored");
+            record.id
+        }
+
+        fn lazy_refresher(
+            &self,
+            claims: Arc<TestOAuthRefreshClaims>,
+            config: LazyRefreshContentionConfig,
+        ) -> LazyRefresher {
+            LazyRefresher::new_with_claim_guard_for_tests(
+                self.stores.clone(),
+                self.aead.clone(),
+                self.oauth_cfg.clone(),
+                Uuid::new_v4(),
+                None,
+                CancellationToken::new(),
+                claims,
+                config,
+            )
+        }
+
+        fn refresh_call_count(&self) -> usize {
+            self.refresh_calls.load(Ordering::SeqCst)
+        }
+    }
+
+    async fn spawn_lazy_refresh_token_server(
+        refresh_calls: Arc<AtomicUsize>,
+        refresh_delay: Duration,
+    ) -> Url {
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("token listener binds");
+        let addr = listener.local_addr().expect("token listener addr");
+        let app = Router::new()
+            .route("/oauth/token", post(lazy_refresh_token_response))
+            .with_state(TokenServerState {
+                refresh_calls,
+                refresh_delay,
+            });
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("token server runs");
+        });
+        Url::parse(&format!("http://{addr}/oauth/token")).expect("token url")
+    }
+
+    #[derive(Clone)]
+    struct TokenServerState {
+        refresh_calls: Arc<AtomicUsize>,
+        refresh_delay: Duration,
+    }
+
+    async fn lazy_refresh_token_response(
+        State(state): State<TokenServerState>,
+    ) -> Json<serde_json::Value> {
+        state.refresh_calls.fetch_add(1, Ordering::SeqCst);
+        if !state.refresh_delay.is_zero() {
+            tokio::time::sleep(state.refresh_delay).await;
+        }
+        Json(serde_json::json!({
+            "access_token": "sk-ant-oat01-new",
+            "refresh_token": "sk-ant-ort01-new",
+            "expires_in": 3600,
+            "scope": "messages"
+        }))
+    }
+
+    #[derive(Debug)]
+    struct TestOAuthRefreshClaims {
+        first_acquire_wins: bool,
+        acquired: AtomicBool,
+        completed_generation: Mutex<Option<u64>>,
+    }
+
+    impl TestOAuthRefreshClaims {
+        fn single_winner() -> Self {
+            Self {
+                first_acquire_wins: true,
+                acquired: AtomicBool::new(false),
+                completed_generation: Mutex::new(None),
+            }
+        }
+
+        fn always_contended() -> Self {
+            Self {
+                first_acquire_wins: false,
+                acquired: AtomicBool::new(true),
+                completed_generation: Mutex::new(None),
+            }
+        }
+
+        fn completed_generation(&self) -> Option<u64> {
+            *self.completed_generation.lock().expect("completed lock")
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl LazyRefreshClaimGuard for TestOAuthRefreshClaims {
+        async fn try_acquire(
+            &self,
+            _upstream_id: Uuid,
+            _holder: &str,
+            _ttl_secs: u64,
+            _now_unix_secs: u64,
+        ) -> StorageResult<bool> {
+            Ok(self.first_acquire_wins && !self.acquired.swap(true, Ordering::SeqCst))
+        }
+
+        async fn complete_and_bump_generation(
+            &self,
+            _upstream_id: Uuid,
+            _holder: &str,
+            generation: u64,
+        ) -> StorageResult<bool> {
+            *self.completed_generation.lock().expect("completed lock") = Some(generation);
+            Ok(true)
+        }
+
+        async fn release_if_holder(
+            &self,
+            _upstream_id: Uuid,
+            _holder: &str,
+        ) -> StorageResult<bool> {
+            Ok(true)
+        }
     }
 }

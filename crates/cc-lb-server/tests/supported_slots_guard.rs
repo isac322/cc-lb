@@ -383,6 +383,7 @@ async fn seed_warmup_upstream(
             kind: UpstreamKind::AnthropicOauth,
             base_url: Some(Url::parse("http://127.0.0.1:9/").expect("base url")),
             api_key_ciphertext: None,
+            oauth_token_generation: None,
             warmup_enabled: true,
             next_warmup_at: None,
             last_warmup_cycle_key: None,

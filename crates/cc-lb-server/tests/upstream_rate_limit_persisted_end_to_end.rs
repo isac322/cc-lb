@@ -38,6 +38,7 @@ async fn upstream_rate_limit_observations_are_persisted_end_to_end() -> TestResu
             kind: UpstreamKind::AnthropicApiKey,
             base_url: Some(Url::parse(&format!("http://{}", upstream_server.addr))?),
             api_key_ciphertext: Some(vec![0; 32]),
+            oauth_token_generation: None,
             warmup_enabled: false,
             next_warmup_at: None,
             last_warmup_cycle_key: None,

@@ -191,6 +191,7 @@ impl PostgresWarmupFixture {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: Some(base_url),
                 api_key_ciphertext: None,
+                oauth_token_generation: None,
                 warmup_enabled: true,
                 next_warmup_at: Some(unix_datetime(now.saturating_sub(1))?),
                 last_warmup_cycle_key: None,

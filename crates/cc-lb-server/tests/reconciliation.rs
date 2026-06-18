@@ -101,6 +101,7 @@ async fn create_upstream(storage: &Storage, name: &str) -> UpstreamRecord {
             kind: UpstreamKind::AnthropicApiKey,
             base_url: None,
             api_key_ciphertext: Some(vec![1, 2, 3]),
+            oauth_token_generation: None,
             warmup_enabled: false,
             next_warmup_at: None,
             last_warmup_cycle_key: None,

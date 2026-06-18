@@ -67,7 +67,7 @@ use crate::notify_listener::{NotifyListener, NotifyListenerParams};
 use crate::oauth_usage_poller::{OAuthUsagePoller, spawn_oauth_usage_poller};
 use crate::preflight;
 use crate::reconcile::Reconciler;
-use crate::refresh::{LazyRefresher, OAuthRefresher};
+use crate::refresh::{LazyRefreshClaimGuard, LazyRefresher, OAuthRefresher};
 use crate::reload::{ConfigWatcher, summarize_restart_required};
 use crate::replica;
 use crate::signal;
@@ -143,6 +143,8 @@ pub enum BuildError {
     Storage(#[from] cc_lb_storage_api::StorageError),
     #[error(transparent)]
     StorageFactory(#[from] crate::storage_factory::StorageFactoryError),
+    #[error(transparent)]
+    SchedulerFactory(#[from] crate::scheduler_factory::SchedulerFactoryError),
     #[cfg(feature = "postgres")]
     #[error("storage connection failed: {message}")]
     StorageConnect { message: String },
@@ -370,6 +372,7 @@ pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError
         Some((plugin_registry_repo, plugin_blob_repo)),
         None,
         StartupHandshakeOpts::default(),
+        None,
     )
     .await
 }
@@ -505,6 +508,7 @@ pub async fn seed_app_testing_storage(
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: upstream_base_url,
                 api_key_ciphertext: Some(Vec::new()),
+                oauth_token_generation: None,
                 warmup_enabled: false,
                 next_warmup_at: None,
                 last_warmup_cycle_key: None,
@@ -554,8 +558,14 @@ async fn build_app_with_path_inner(
     startup_handshake_opts: StartupHandshakeOpts,
 ) -> Result<App, BuildError> {
     config.validate()?;
-    let (managed_store, storage, aead, plugin_registry_repo, plugin_blob_repo) =
-        open_storage(&config).await?;
+    let (
+        managed_store,
+        storage,
+        aead,
+        plugin_registry_repo,
+        plugin_blob_repo,
+        lazy_refresh_claim_guard,
+    ) = open_storage(&config).await?;
     build_app_with_storage_inner(
         config,
         config_path,
@@ -565,6 +575,7 @@ async fn build_app_with_path_inner(
         Some((plugin_registry_repo, plugin_blob_repo)),
         startup_preflight,
         startup_handshake_opts,
+        Some(lazy_refresh_claim_guard),
     )
     .await
 }
@@ -613,6 +624,7 @@ pub async fn build_app_with_storage(
         None,
         None,
         StartupHandshakeOpts::default(),
+        None,
     )
     .await
 }
@@ -627,6 +639,7 @@ async fn build_app_with_storage_inner(
     plugin_repos: Option<(Arc<dyn PluginRegistryRepo>, Arc<dyn PluginBlobRepo>)>,
     startup_preflight: Option<StartupPreflight>,
     startup_handshake_opts: StartupHandshakeOpts,
+    lazy_refresh_claim_guard: Option<Arc<dyn LazyRefreshClaimGuard>>,
 ) -> Result<App, BuildError> {
     let server_state = Arc::new(ServerStateHandle::new_starting());
     let key_store = Arc::new(KeyStore::new(managed_store));
@@ -782,16 +795,27 @@ async fn build_app_with_storage_inner(
     let oauth_anthropic = config.oauth.anthropic.clone().unwrap_or_default();
     let oauth_cfg = Arc::new(oauth_anthropic.clone());
     let refresh_cancel = CancellationToken::new();
-    let lazy_refresher_concrete: Option<Arc<LazyRefresher>> =
-        lifecycle_config.replica_identity.as_ref().map(|identity| {
-            Arc::new(LazyRefresher::new(
+    let lazy_refresher_concrete: Option<Arc<LazyRefresher>> = lifecycle_config
+        .replica_identity
+        .as_ref()
+        .map(|identity| match lazy_refresh_claim_guard.clone() {
+            Some(claim_guard) => Arc::new(LazyRefresher::new_with_claim_guard(
                 stores.clone(),
                 aead.clone(),
                 oauth_cfg.clone(),
                 identity.id,
                 Some(subscription_metadata_hook.clone()),
                 refresh_cancel.clone(),
-            ))
+                claim_guard,
+            )),
+            None => Arc::new(LazyRefresher::new(
+                stores.clone(),
+                aead.clone(),
+                oauth_cfg.clone(),
+                identity.id,
+                Some(subscription_metadata_hook.clone()),
+                refresh_cancel.clone(),
+            )),
         });
     let lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>> =
         lazy_refresher_concrete.as_ref().map(|refresher| {
@@ -2127,6 +2151,7 @@ type OpenStorageParts = (
     Arc<AeadService>,
     Arc<dyn PluginRegistryRepo>,
     Arc<dyn PluginBlobRepo>,
+    Arc<dyn LazyRefreshClaimGuard>,
 );
 
 pub async fn open_storage(config: &Config) -> Result<OpenStorageParts, BuildError> {
@@ -2137,13 +2162,33 @@ pub async fn open_storage(config: &Config) -> Result<OpenStorageParts, BuildErro
     let key = decode_hex_key(&key_hex)?;
     let aead = Arc::new(AeadService::from_master_key(key));
     let opened = storage_factory::open_storage(&config.storage, aead.clone(), key).await?;
+    let opened_scheduler =
+        crate::scheduler_factory::open_scheduler_storage(&config.storage, &config.scheduler)
+            .await?;
+    let lazy_refresh_claim_guard = lazy_refresh_claim_guard_from_scheduler(opened_scheduler);
     Ok((
         opened.managed_key_store,
         opened.storage,
         aead,
         opened.plugin_registry_repo,
         opened.plugin_blob_repo,
+        lazy_refresh_claim_guard,
     ))
+}
+
+fn lazy_refresh_claim_guard_from_scheduler(
+    opened_scheduler: crate::scheduler_factory::OpenedScheduler,
+) -> Arc<dyn LazyRefreshClaimGuard> {
+    match opened_scheduler.backend {
+        #[cfg(feature = "sqlite")]
+        crate::scheduler_factory::SchedulerBackend::Sqlite(sqlite) => Arc::new(
+            cc_lb_scheduler::idempotency::OAuthRefreshClaimsStore::new(sqlite.pool),
+        ),
+        #[cfg(feature = "postgres")]
+        crate::scheduler_factory::SchedulerBackend::Postgres(postgres) => Arc::new(
+            cc_lb_scheduler::idempotency::OAuthRefreshClaimsStore::new(postgres.pool),
+        ),
+    }
 }
 
 fn decode_hex_key(value: &str) -> Result<[u8; 32], BuildError> {

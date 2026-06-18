@@ -23,6 +23,7 @@ cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 chrono = { workspace = true }
 hex = { workspace = true }
+futures-util = "0.3"
 metrics = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
@@ -49,7 +50,6 @@ required-features = ["postgres"]
 [dev-dependencies]
 async-trait = { workspace = true }
 cron = "0.16"
-futures-util = "0.3"
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 tracing-subscriber = { workspace = true }

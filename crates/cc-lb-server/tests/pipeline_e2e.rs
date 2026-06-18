@@ -654,6 +654,7 @@ async fn spawn_seeded_upstreams(storage: &SqliteStorage) -> TestResult<Vec<Seede
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: Some(Url::parse(&format!("http://{addr}"))?),
                 api_key_ciphertext: Some(vec![1, 2, 3]),
+                oauth_token_generation: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
                 next_warmup_at: None,

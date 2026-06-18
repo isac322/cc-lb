@@ -132,6 +132,7 @@ impl WarmupFixture {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: Some(Url::parse(&self.fake.base_url).expect("fake base url")),
                 api_key_ciphertext: None,
+                oauth_token_generation: None,
                 warmup_enabled: true,
                 next_warmup_at: next_warmup_at.map(unix_datetime),
                 last_warmup_cycle_key: None,

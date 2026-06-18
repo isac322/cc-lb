@@ -243,6 +243,7 @@ fn api_key_upstream(id: Uuid, name: &str, base_url: &str) -> UpstreamRecord {
         enabled: true,
         oauth_credentials: None,
         api_key_ciphertext: Some(Vec::new()),
+        oauth_token_generation: 0,
         refresh_lease_holder: None,
         refresh_lease_until_unix_secs: None,
         last_apply_error: None,

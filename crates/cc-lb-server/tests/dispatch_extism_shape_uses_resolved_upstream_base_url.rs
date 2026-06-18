@@ -89,6 +89,7 @@ async fn extism_shape_plugin_receives_resolved_upstream_base_url_via_envelope() 
             kind: UpstreamKind::AnthropicApiKey,
             base_url: Some(Url::parse("http://target.invalid").expect("target base_url parses")),
             api_key_ciphertext: Some(vec![1, 2, 3]),
+            oauth_token_generation: None,
             warmup_enabled: false,
             next_warmup_at: None,
             last_warmup_cycle_key: None,
