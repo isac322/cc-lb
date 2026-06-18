@@ -175,8 +175,10 @@ pub struct SubscriptionQuotaCandidateSnapshot {
     pub status: Option<String>,
     /// Provider reset timestamp in Unix seconds.
     pub resets_at_unix_secs: Option<u64>,
-    /// Whether the provider reported a crossed warning threshold.
-    pub surpassed_threshold: Option<bool>,
+    /// Per-window threshold fraction that was crossed (0.0..=1.0). Matches the
+    /// numeric `anthropic-ratelimit-unified-{5h,7d,overage}-surpassed-threshold`
+    /// header rather than a boolean approximation.
+    pub surpassed_threshold: Option<f64>,
     /// Representative claim used for provenance/debugging.
     pub representative_claim: Option<String>,
     /// Provider reason the quota window is disabled.
@@ -191,6 +193,21 @@ pub struct SubscriptionQuotaCandidateSnapshot {
     pub observed_at_unix_millis: Option<u64>,
     /// Configured maximum age before this snapshot becomes stale.
     pub max_staleness_secs: u64,
+    /// `anthropic-ratelimit-unified-fallback` == "available". Top-level signal
+    /// surfaced only on the unified window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback_available: Option<bool>,
+    /// `anthropic-ratelimit-unified-overage-in-use` == "true". Top-level signal
+    /// surfaced only on the unified window.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overage_in_use: Option<bool>,
+    /// Monthly overage utilization fraction (0.0..=1.0). Top-level signal
+    /// distinct from per-window overage utilization.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub overage_period_monthly_utilization: Option<f64>,
+    /// Suggested upgrade paths (csv -> normalized list).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upgrade_paths: Option<Vec<String>>,
 }
 
 /// Prompt cache TTL class: immutable after entry creation.

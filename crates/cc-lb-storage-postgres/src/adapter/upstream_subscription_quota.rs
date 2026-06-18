@@ -123,12 +123,15 @@ async fn insert_observation(
     conn: &mut PgConnection,
     record: &SubscriptionQuotaObservationRecord,
 ) -> StorageResult<()> {
+    let upgrade_paths_json = encode_upgrade_paths(record.upgrade_paths.as_ref())?;
     sqlx::query(
         "INSERT INTO upstream_subscription_quota_observations_v1 \
          (upstream_id, \"window\", source, sample_kind, observed_at_unix_millis, sample_id, \
-          utilization, status, resets_at_unix_secs, surpassed_threshold, representative_claim, disabled_reason, \
-          extra_usage_enabled, extra_usage_monthly_limit, extra_usage_used_credits, ingested_at_unix_millis) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) \
+           utilization, status, resets_at_unix_secs, surpassed_threshold, representative_claim, \
+           fallback_percentage, fallback_available, overage_in_use, overage_period_monthly_utilization, upgrade_paths, \
+           disabled_reason, \
+           extra_usage_enabled, extra_usage_monthly_limit, extra_usage_used_credits, ingested_at_unix_millis) \
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) \
          ON CONFLICT DO NOTHING",
     )
     .bind(record.upstream_id)
@@ -142,6 +145,11 @@ async fn insert_observation(
     .bind(record.resets_at_unix_secs.map(|value| u64_to_i64(value, "subscription quota resets_at_unix_secs")).transpose()?)
     .bind(record.surpassed_threshold)
     .bind(&record.representative_claim)
+    .bind(record.fallback_percentage)
+    .bind(record.fallback_available)
+    .bind(record.overage_in_use)
+    .bind(record.overage_period_monthly_utilization)
+    .bind(upgrade_paths_json)
     .bind(&record.disabled_reason)
     .bind(record.extra_usage_enabled)
     .bind(record.extra_usage_monthly_limit)
@@ -157,17 +165,24 @@ async fn upsert_latest(
     conn: &mut PgConnection,
     record: &SubscriptionQuotaObservationRecord,
 ) -> StorageResult<()> {
+    let upgrade_paths_json = encode_upgrade_paths(record.upgrade_paths.as_ref())?;
     sqlx::query(
         "INSERT INTO upstream_subscription_quota_latest_v1 \
          (upstream_id, \"window\", source, sample_kind, observed_at_unix_millis, sample_id, \
-          utilization, status, resets_at_unix_secs, surpassed_threshold, representative_claim, disabled_reason, \
-          extra_usage_enabled, extra_usage_monthly_limit, extra_usage_used_credits, ingested_at_unix_millis) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) \
+           utilization, status, resets_at_unix_secs, surpassed_threshold, representative_claim, \
+           fallback_percentage, fallback_available, overage_in_use, overage_period_monthly_utilization, upgrade_paths, \
+           disabled_reason, \
+           extra_usage_enabled, extra_usage_monthly_limit, extra_usage_used_credits, ingested_at_unix_millis) \
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21) \
          ON CONFLICT (upstream_id, \"window\", source) DO UPDATE SET \
          sample_kind = EXCLUDED.sample_kind, observed_at_unix_millis = EXCLUDED.observed_at_unix_millis, \
          sample_id = EXCLUDED.sample_id, utilization = EXCLUDED.utilization, status = EXCLUDED.status, \
          resets_at_unix_secs = EXCLUDED.resets_at_unix_secs, surpassed_threshold = EXCLUDED.surpassed_threshold, \
-         representative_claim = EXCLUDED.representative_claim, disabled_reason = EXCLUDED.disabled_reason, \
+          representative_claim = EXCLUDED.representative_claim, fallback_percentage = EXCLUDED.fallback_percentage, \
+          fallback_available = EXCLUDED.fallback_available, overage_in_use = EXCLUDED.overage_in_use, \
+          overage_period_monthly_utilization = EXCLUDED.overage_period_monthly_utilization, \
+          upgrade_paths = EXCLUDED.upgrade_paths, \
+          disabled_reason = EXCLUDED.disabled_reason, \
          extra_usage_enabled = EXCLUDED.extra_usage_enabled, extra_usage_monthly_limit = EXCLUDED.extra_usage_monthly_limit, \
          extra_usage_used_credits = EXCLUDED.extra_usage_used_credits, ingested_at_unix_millis = EXCLUDED.ingested_at_unix_millis \
          WHERE EXCLUDED.observed_at_unix_millis >= upstream_subscription_quota_latest_v1.observed_at_unix_millis",
@@ -183,6 +198,11 @@ async fn upsert_latest(
     .bind(record.resets_at_unix_secs.map(|value| u64_to_i64(value, "subscription quota resets_at_unix_secs")).transpose()?)
     .bind(record.surpassed_threshold)
     .bind(&record.representative_claim)
+    .bind(record.fallback_percentage)
+    .bind(record.fallback_available)
+    .bind(record.overage_in_use)
+    .bind(record.overage_period_monthly_utilization)
+    .bind(upgrade_paths_json)
     .bind(&record.disabled_reason)
     .bind(record.extra_usage_enabled)
     .bind(record.extra_usage_monthly_limit)
@@ -192,6 +212,34 @@ async fn upsert_latest(
     .await
     .map_err(map_sqlx_error)?;
     Ok(())
+}
+
+fn encode_upgrade_paths(value: Option<&Vec<String>>) -> StorageResult<Option<String>> {
+    match value {
+        Some(paths) => {
+            serde_json::to_string(paths)
+                .map(Some)
+                .map_err(|error| StorageError::Corrupted {
+                    message: format!(
+                        "failed to serialize subscription quota upgrade_paths: {error}"
+                    ),
+                })
+        }
+        None => Ok(None),
+    }
+}
+
+fn decode_upgrade_paths(raw: Option<String>) -> StorageResult<Option<Vec<String>>> {
+    match raw {
+        Some(text) => {
+            serde_json::from_str(&text)
+                .map(Some)
+                .map_err(|error| StorageError::Corrupted {
+                    message: format!("invalid subscription quota upgrade_paths {text}: {error}"),
+                })
+        }
+        None => Ok(None),
+    }
 }
 
 fn row_to_record(row: PgRow) -> StorageResult<SubscriptionQuotaObservationRecord> {
@@ -229,6 +277,13 @@ fn row_to_record(row: PgRow) -> StorageResult<SubscriptionQuotaObservationRecord
         representative_claim: row
             .try_get("representative_claim")
             .map_err(map_sqlx_error)?,
+        fallback_percentage: row.try_get("fallback_percentage").map_err(map_sqlx_error)?,
+        fallback_available: row.try_get("fallback_available").map_err(map_sqlx_error)?,
+        overage_in_use: row.try_get("overage_in_use").map_err(map_sqlx_error)?,
+        overage_period_monthly_utilization: row
+            .try_get("overage_period_monthly_utilization")
+            .map_err(map_sqlx_error)?,
+        upgrade_paths: decode_upgrade_paths(row.try_get("upgrade_paths").map_err(map_sqlx_error)?)?,
         disabled_reason: row.try_get("disabled_reason").map_err(map_sqlx_error)?,
         extra_usage_enabled: row.try_get("extra_usage_enabled").map_err(map_sqlx_error)?,
         extra_usage_monthly_limit: row
