@@ -500,6 +500,7 @@ fn subscription_observation(
         resets_at_unix_secs: Some(u64::try_from(cycle_key)?),
         surpassed_threshold: Some(false),
         representative_claim: None,
+        fallback_percentage: None,
         disabled_reason: None,
         extra_usage_enabled: None,
         extra_usage_monthly_limit: None,

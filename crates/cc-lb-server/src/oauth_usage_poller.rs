@@ -423,6 +423,7 @@ fn sample_record(
         resets_at_unix_secs,
         surpassed_threshold: None,
         representative_claim: None,
+        fallback_percentage: None,
         disabled_reason: None,
         extra_usage_enabled: extra_usage.as_ref().and_then(|extra| extra.enabled),
         extra_usage_monthly_limit: extra_usage.as_ref().and_then(|extra| extra.monthly_limit),

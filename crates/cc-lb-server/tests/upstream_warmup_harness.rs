@@ -194,6 +194,7 @@ impl WarmupFixture {
             ),
             surpassed_threshold: None,
             representative_claim: None,
+            fallback_percentage: None,
             disabled_reason: None,
             extra_usage_enabled: None,
             extra_usage_monthly_limit: None,
