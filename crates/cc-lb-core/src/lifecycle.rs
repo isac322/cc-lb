@@ -2329,6 +2329,11 @@ pub fn observe_subscription_quota_headers(
             resets_at_unix_secs: observation.resets_at_unix_secs,
             surpassed_threshold: observation.surpassed_threshold,
             representative_claim: observation.representative_claim,
+            fallback_percentage: observation.fallback_percentage,
+            fallback_available: observation.fallback_available,
+            overage_in_use: observation.overage_in_use,
+            overage_period_monthly_utilization: observation.overage_period_monthly_utilization,
+            upgrade_paths: observation.upgrade_paths,
             disabled_reason: observation.disabled_reason,
             extra_usage_enabled: None,
             extra_usage_monthly_limit: None,
@@ -4271,21 +4276,62 @@ mod tests {
             HeaderName::from_static("anthropic-ratelimit-unified-7d-sonnet-status"),
             HeaderValue::from_static("allowed_warning"),
         );
+        headers.insert(
+            HeaderName::from_static("anthropic-ratelimit-unified-7d-sonnet-fallback-percentage"),
+            HeaderValue::from_static("0.5"),
+        );
+        headers.insert(
+            HeaderName::from_static("anthropic-ratelimit-unified-7d-sonnet-surpassed-threshold"),
+            HeaderValue::from_static("0.75"),
+        );
+        headers.insert(
+            HeaderName::from_static("anthropic-ratelimit-unified-fallback"),
+            HeaderValue::from_static("available"),
+        );
+        headers.insert(
+            HeaderName::from_static("anthropic-ratelimit-unified-overage-in-use"),
+            HeaderValue::from_static("true"),
+        );
+        headers.insert(
+            HeaderName::from_static(
+                "anthropic-ratelimit-unified-overage-period-monthly-utilization",
+            ),
+            HeaderValue::from_static("0.20"),
+        );
+        headers.insert(
+            HeaderName::from_static("anthropic-ratelimit-unified-upgrade-paths"),
+            HeaderValue::from_static("team_growth,max_5x"),
+        );
 
         let records = observe_subscription_quota_headers(&headers, upstream_id, 123_456);
 
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].upstream_id, upstream_id);
-        assert_eq!(records[0].window, SubscriptionQuotaWindow::SevenDaySonnet);
-        assert_eq!(records[0].source, SubscriptionQuotaSource::Header);
-        assert_eq!(records[0].sample_kind, SubscriptionQuotaSampleKind::Sample);
-        assert_eq!(records[0].observed_at_unix_millis, 123_456);
-        assert_eq!(records[0].ingested_at_unix_millis, 123_456);
-        assert_ne!(records[0].sample_id, Uuid::nil());
-        assert_eq!(records[0].utilization, Some(0.42));
+        assert_eq!(records.len(), 2);
+        let unified = records
+            .iter()
+            .find(|r| r.window == SubscriptionQuotaWindow::Unified)
+            .expect("unified top-level record");
+        let sonnet = records
+            .iter()
+            .find(|r| r.window == SubscriptionQuotaWindow::SevenDaySonnet)
+            .expect("7d-sonnet record");
+
+        assert_eq!(sonnet.upstream_id, upstream_id);
+        assert_eq!(sonnet.source, SubscriptionQuotaSource::Header);
+        assert_eq!(sonnet.sample_kind, SubscriptionQuotaSampleKind::Sample);
+        assert_eq!(sonnet.observed_at_unix_millis, 123_456);
+        assert_eq!(sonnet.ingested_at_unix_millis, 123_456);
+        assert_ne!(sonnet.sample_id, Uuid::nil());
+        assert_eq!(sonnet.utilization, Some(0.42));
+        assert_eq!(sonnet.status, Some(SubscriptionQuotaStatus::AllowedWarning));
+        assert_eq!(sonnet.fallback_percentage, Some(0.5));
+        assert_eq!(sonnet.surpassed_threshold, Some(0.75));
+
+        assert_eq!(unified.fallback_available, Some(true));
+        assert_eq!(unified.overage_in_use, Some(true));
+        assert_eq!(unified.overage_period_monthly_utilization, Some(0.20));
         assert_eq!(
-            records[0].status,
-            Some(SubscriptionQuotaStatus::AllowedWarning)
+            unified.upgrade_paths.as_deref(),
+            Some(["max_5x".to_owned(), "team_growth".to_owned()].as_slice())
         );
     }
 

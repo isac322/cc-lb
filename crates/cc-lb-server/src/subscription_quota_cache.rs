@@ -35,8 +35,13 @@ pub struct MergedQuotaSnapshot {
     pub utilization: Option<f64>,
     pub status: Option<SubscriptionQuotaStatus>,
     pub resets_at_unix_secs: Option<u64>,
-    pub surpassed_threshold: Option<bool>,
+    pub surpassed_threshold: Option<f64>,
     pub representative_claim: Option<String>,
+    pub fallback_percentage: Option<f64>,
+    pub fallback_available: Option<bool>,
+    pub overage_in_use: Option<bool>,
+    pub overage_period_monthly_utilization: Option<f64>,
+    pub upgrade_paths: Option<Vec<String>>,
     pub disabled_reason: Option<String>,
     pub extra_usage_enabled: Option<bool>,
     pub extra_usage_monthly_limit: Option<f64>,
@@ -134,6 +139,11 @@ impl MergedQuotaSnapshot {
             resets_at_unix_secs: record.resets_at_unix_secs,
             surpassed_threshold: record.surpassed_threshold,
             representative_claim: record.representative_claim.clone(),
+            fallback_percentage: record.fallback_percentage,
+            fallback_available: record.fallback_available,
+            overage_in_use: record.overage_in_use,
+            overage_period_monthly_utilization: record.overage_period_monthly_utilization,
+            upgrade_paths: record.upgrade_paths.clone(),
             disabled_reason: record.disabled_reason.clone(),
             extra_usage_enabled: record.extra_usage_enabled,
             extra_usage_monthly_limit: record.extra_usage_monthly_limit,
@@ -205,6 +215,11 @@ fn merge_sources(
             resets_at_unix_secs: None,
             surpassed_threshold: None,
             representative_claim: None,
+            fallback_percentage: None,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
             disabled_reason: None,
             extra_usage_enabled: None,
             extra_usage_monthly_limit: None,
@@ -228,6 +243,16 @@ fn merge_header_api(
             .representative_claim
             .clone()
             .or_else(|| api.representative_claim.clone()),
+        fallback_percentage: header.fallback_percentage.or(api.fallback_percentage),
+        fallback_available: header.fallback_available.or(api.fallback_available),
+        overage_in_use: header.overage_in_use.or(api.overage_in_use),
+        overage_period_monthly_utilization: header
+            .overage_period_monthly_utilization
+            .or(api.overage_period_monthly_utilization),
+        upgrade_paths: header
+            .upgrade_paths
+            .clone()
+            .or_else(|| api.upgrade_paths.clone()),
         disabled_reason: header
             .disabled_reason
             .clone()
@@ -271,6 +296,10 @@ fn candidate_from_snapshot(
         extra_usage_used_credits: snapshot.extra_usage_used_credits,
         observed_at_unix_millis: Some(snapshot.observed_at_unix_millis),
         max_staleness_secs,
+        fallback_available: snapshot.fallback_available,
+        overage_in_use: snapshot.overage_in_use,
+        overage_period_monthly_utilization: snapshot.overage_period_monthly_utilization,
+        upgrade_paths: snapshot.upgrade_paths,
     }
 }
 
@@ -293,5 +322,9 @@ fn missing_candidate(
         extra_usage_used_credits: None,
         observed_at_unix_millis: None,
         max_staleness_secs,
+        fallback_available: None,
+        overage_in_use: None,
+        overage_period_monthly_utilization: None,
+        upgrade_paths: None,
     }
 }

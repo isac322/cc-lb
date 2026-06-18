@@ -779,7 +779,7 @@ fn subscription_quota_to_wire_v2(
         utilization: snapshot.utilization,
         status: snapshot.status.clone(),
         resets_at_unix_secs: snapshot.resets_at_unix_secs,
-        surpassed_threshold: snapshot.surpassed_threshold,
+        surpassed_threshold: snapshot.surpassed_threshold.map(|fraction| fraction > 0.0),
         representative_claim: snapshot.representative_claim.clone(),
         disabled_reason: snapshot.disabled_reason.clone(),
         observed_at_unix_millis: snapshot.observed_at_unix_millis,
