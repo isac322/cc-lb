@@ -4,7 +4,8 @@ import { makeIntlFormatter } from 'react-timeago/defaultFormatter';
 import { formatAbsolute, useLocale, useTimezone } from '../../lib/locale';
 import { cx, Hint } from './primitives';
 
-function formatCompact(value: number, unit: string): string {
+function formatDuration(value: number, unit: string, compact: boolean): string {
+  if (!compact) return `${value} ${unit}${value === 1 ? '' : 's'}`;
   if (unit === 'year') return `${value}y`;
   if (unit === 'month') return `${value}mo`;
   if (unit === 'week') return `${value}w`;
@@ -14,11 +15,17 @@ function formatCompact(value: number, unit: string): string {
   return `${value}s`;
 }
 
-function makeResetFormatter(futureVerb: string, pastVerb: string): Formatter {
+function makeResetFormatter(
+  futureVerb: string,
+  pastVerb: string,
+  compact: boolean,
+): Formatter {
   return (value, unit, suffix) => {
-    const duration = formatCompact(value, unit);
+    const duration = formatDuration(value, unit, compact);
     if (suffix === 'from now') return `${futureVerb} in ${duration}`;
-    if (unit === 'day' && value > 1) return `${pastVerb} >1d ago (stale)`;
+    if (unit === 'day' && value > 1 && compact) {
+      return `${pastVerb} >1d ago (stale)`;
+    }
     return `${pastVerb} ${duration} ago`;
   };
 }
@@ -62,11 +69,13 @@ export function ResetCountdown({
   className,
   futureVerb = 'Resets',
   pastVerb = 'Reset',
+  compact = false,
 }: {
   ts: Date | number | null | undefined;
   className?: string;
   futureVerb?: string;
   pastVerb?: string;
+  compact?: boolean;
 }) {
   const { effective: locale } = useLocale();
   const { effective: timezone } = useTimezone();
@@ -76,8 +85,8 @@ export function ResetCountdown({
     return ts;
   }, [ts]);
   const formatter = useMemo(
-    () => makeResetFormatter(futureVerb, pastVerb),
-    [futureVerb, pastVerb],
+    () => makeResetFormatter(futureVerb, pastVerb, compact),
+    [futureVerb, pastVerb, compact],
   );
 
   if (!date) return <span className={cx('text-text-faint', className)}>—</span>;

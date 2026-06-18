@@ -1,6 +1,6 @@
 import { act, cleanup, render, screen } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, test, vi } from 'vitest';
-import { RelativeTime } from './RelativeTime';
+import { RelativeTime, ResetCountdown } from './RelativeTime';
 
 describe('RelativeTime', () => {
   beforeEach(() => {
@@ -27,5 +27,19 @@ describe('RelativeTime', () => {
     }
 
     expect(screen.getByText('5 seconds ago').textContent).toBe('5 seconds ago');
+  });
+
+  test('lets reset countdown callers choose detailed or compact durations', () => {
+    const resetTime = new Date('2026-06-18T00:01:01.000Z');
+
+    const { rerender } = render(<ResetCountdown ts={resetTime} />);
+
+    expect(screen.getByText('Resets in 1 minute').textContent).toBe(
+      'Resets in 1 minute',
+    );
+
+    rerender(<ResetCountdown compact ts={resetTime} />);
+
+    expect(screen.getByText('Resets in 1m').textContent).toBe('Resets in 1m');
   });
 });
