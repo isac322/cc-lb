@@ -3,10 +3,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
-use axum::extract::Form;
 use axum::http::{HeaderMap, Method, StatusCode};
-use axum::response::IntoResponse;
-use axum::routing::post;
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
@@ -20,14 +17,13 @@ use cc_lb_plugin_api::{
 };
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
-use cc_lb_server::refresh::{LazyRefresher, OAuthRefresher};
+use cc_lb_server::refresh::LazyRefresher;
 use cc_lb_server::scheduler_factory::{SchedulerBackend, SqliteSchedulerStorage};
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh,
 };
 use cc_lb_storage_api::{
-    AuditStore, BackendKind, MetaStore, PrincipalCreate, PrincipalKind, UpstreamCreate,
-    UpstreamStore,
+    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, UpstreamCreate, UpstreamStore,
 };
 
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -36,7 +32,6 @@ use fake_anthropic::{AppConfig, app as fake_anthropic_app};
 use http::Request;
 use http::header::{AUTHORIZATION, LOCATION};
 use http_body_util::BodyExt;
-use metrics_exporter_prometheus::{PrometheusBuilder, PrometheusHandle};
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -45,16 +40,6 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
-
-static PROMETHEUS: OnceLock<PrometheusHandle> = OnceLock::new();
-
-fn prometheus() -> &'static PrometheusHandle {
-    PROMETHEUS.get_or_init(|| {
-        PrometheusBuilder::new()
-            .install_recorder()
-            .expect("prometheus recorder")
-    })
-}
 
 struct Fixture {
     _dir: tempfile::TempDir,
@@ -171,52 +156,6 @@ impl Fixture {
         .await
         .expect("principal created");
     }
-
-    fn refresher(&self, replica_id: Uuid, cancel: CancellationToken) -> Arc<OAuthRefresher> {
-        Arc::new(OAuthRefresher::new(
-            self.stores.clone(),
-            self.aead.clone(),
-            self.oauth_cfg.clone(),
-            replica_id,
-            None,
-            cancel,
-        ))
-    }
-}
-
-#[tokio::test]
-async fn oauth_refresh_against_fake_anthropic() {
-    let fixture = Fixture::new().await;
-    let upstream_id = fixture
-        .create_oauth_upstream("happy", now_secs() + 60)
-        .await;
-
-    fixture
-        .refresher(Uuid::new_v4(), CancellationToken::new())
-        .sweep_once()
-        .await
-        .expect("sweep");
-
-    let bundle = bundle(&fixture, upstream_id).await;
-    assert!(bundle.access_token.starts_with("sk-ant-oat01-"));
-    assert!(bundle.expires_at_unix_secs > now_secs() + 3_000);
-    assert_eq!(refresh_history_len(&fixture.fake_base).await, 1);
-}
-
-#[tokio::test]
-async fn refresh_token_rotation_preserved_when_provider_rotates() {
-    let fixture = Fixture::new().await;
-    let upstream_id = fixture.create_oauth_upstream("rotation", now_secs()).await;
-    let before = bundle(&fixture, upstream_id).await.refresh_token;
-
-    fixture
-        .refresher(Uuid::new_v4(), CancellationToken::new())
-        .sweep_once()
-        .await
-        .expect("sweep");
-
-    let after = bundle(&fixture, upstream_id).await.refresh_token;
-    assert_ne!(before, after);
 }
 
 #[tokio::test]
@@ -320,228 +259,6 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
 
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
     assert_eq!(refresh_history_len(&fixture.fake_base).await, 1);
-}
-
-#[tokio::test]
-async fn two_replicas_race_only_one_calls_token_endpoint() {
-    let fixture = Fixture::new().await;
-    fixture.create_oauth_upstream("race", now_secs()).await;
-    let first = fixture.refresher(Uuid::new_v4(), CancellationToken::new());
-    let second = fixture.refresher(Uuid::new_v4(), CancellationToken::new());
-
-    let (left, right) = tokio::join!(first.sweep_once(), second.sweep_once());
-
-    left.expect("left sweep");
-    right.expect("right sweep");
-    assert_eq!(refresh_history_len(&fixture.fake_base).await, 1);
-}
-
-#[tokio::test]
-async fn failed_refresh_clears_lease_after_failure_marker() {
-    let fixture = Fixture::new().await;
-    let record = fixture
-        .storage
-        .create(UpstreamCreate {
-            name: "failure".to_owned(),
-            kind: UpstreamKind::AnthropicOauth,
-            base_url: None,
-            api_key_ciphertext: None,
-            oauth_token_generation: None,
-            warmup_enabled: false,
-            next_warmup_at: None,
-            last_warmup_cycle_key: None,
-            warmup_lease_holder: None,
-            warmup_lease_until_unix_secs: None,
-            warmup_dialect_plugin: None,
-        })
-        .await
-        .expect("upstream created");
-    fixture
-        .storage
-        .store_oauth_tokens(
-            record.id,
-            record.revision,
-            encrypted(
-                &fixture.aead,
-                record.id,
-                &OAuthTokenBundle {
-                    access_token: "sk-ant-oat01-old".to_owned(),
-                    refresh_token: "sk-ant-ort01-missing".to_owned(),
-                    expires_at_unix_secs: now_secs(),
-                    scopes: Vec::new(),
-                },
-            ),
-        )
-        .await
-        .expect("tokens stored");
-    let replica_id = Uuid::new_v4();
-
-    fixture
-        .refresher(replica_id, CancellationToken::new())
-        .sweep_once()
-        .await
-        .expect("sweep");
-
-    let updated = fixture
-        .storage
-        .get_by_id(record.id)
-        .await
-        .expect("get")
-        .expect("record");
-    assert_eq!(updated.refresh_lease_holder, None);
-    assert_eq!(updated.refresh_lease_until_unix_secs, None);
-    assert!(
-        updated
-            .last_apply_error
-            .as_deref()
-            .is_some_and(|reason| reason.starts_with("status_"))
-    );
-}
-
-#[tokio::test]
-async fn cancel_during_refresh_returns_within_one_second() {
-    let slow_addr = spawn_slow_token_server().await;
-    let fixture = Fixture::new().await;
-    fixture.create_oauth_upstream("cancel", now_secs()).await;
-    let cancel = CancellationToken::new();
-    let mut cfg = (*fixture.oauth_cfg).clone();
-    cfg.token_url = Url::parse(&format!("http://{slow_addr}/oauth/token")).expect("slow url");
-    let refresher = Arc::new(OAuthRefresher::new(
-        fixture.stores.clone(),
-        fixture.aead.clone(),
-        Arc::new(cfg),
-        Uuid::new_v4(),
-        None,
-        cancel.clone(),
-    ));
-    let task = tokio::spawn(async move { refresher.sweep_once().await });
-    tokio::time::sleep(Duration::from_millis(100)).await;
-
-    cancel.cancel();
-    tokio::time::timeout(Duration::from_secs(1), task)
-        .await
-        .expect("returns within one second")
-        .expect("join")
-        .expect("sweep result");
-}
-
-#[tokio::test]
-async fn metric_counter_increments_per_outcome() {
-    let metrics = prometheus();
-    let fixture = Fixture::new().await;
-    let before_success = counter(metrics, "metric-success", "success");
-    let before_failure = counter(metrics, "metric-failure", "failure");
-    fixture
-        .create_oauth_upstream("metric-success", now_secs())
-        .await;
-    let failed = fixture
-        .storage
-        .create(UpstreamCreate {
-            name: "metric-failure".to_owned(),
-            kind: UpstreamKind::AnthropicOauth,
-            base_url: None,
-            api_key_ciphertext: None,
-            oauth_token_generation: None,
-            warmup_enabled: false,
-            next_warmup_at: None,
-            last_warmup_cycle_key: None,
-            warmup_lease_holder: None,
-            warmup_lease_until_unix_secs: None,
-            warmup_dialect_plugin: None,
-        })
-        .await
-        .expect("upstream created");
-    fixture
-        .storage
-        .store_oauth_tokens(
-            failed.id,
-            failed.revision,
-            encrypted(
-                &fixture.aead,
-                failed.id,
-                &OAuthTokenBundle {
-                    access_token: "sk-ant-oat01-old".to_owned(),
-                    refresh_token: "missing".to_owned(),
-                    expires_at_unix_secs: now_secs(),
-                    scopes: Vec::new(),
-                },
-            ),
-        )
-        .await
-        .expect("tokens stored");
-
-    fixture
-        .refresher(Uuid::new_v4(), CancellationToken::new())
-        .sweep_once()
-        .await
-        .expect("sweep");
-
-    assert!(counter(metrics, "metric-success", "success") > before_success);
-    assert!(counter(metrics, "metric-failure", "failure") > before_failure);
-}
-
-#[tokio::test]
-async fn audit_redaction_clean_no_token_literals_in_audit_db() {
-    let fixture = Fixture::new().await;
-    fixture
-        .create_oauth_upstream("audit-success", now_secs())
-        .await;
-    let failed = fixture
-        .storage
-        .create(UpstreamCreate {
-            name: "audit-failure".to_owned(),
-            kind: UpstreamKind::AnthropicOauth,
-            base_url: None,
-            api_key_ciphertext: None,
-            oauth_token_generation: None,
-            warmup_enabled: false,
-            next_warmup_at: None,
-            last_warmup_cycle_key: None,
-            warmup_lease_holder: None,
-            warmup_lease_until_unix_secs: None,
-            warmup_dialect_plugin: None,
-        })
-        .await
-        .expect("upstream created");
-    fixture
-        .storage
-        .store_oauth_tokens(
-            failed.id,
-            failed.revision,
-            encrypted(
-                &fixture.aead,
-                failed.id,
-                &OAuthTokenBundle {
-                    access_token: "sk-ant-oat01-secretliteral".to_owned(),
-                    refresh_token: "sk-ant-ort01-secretliteral".to_owned(),
-                    expires_at_unix_secs: now_secs(),
-                    scopes: Vec::new(),
-                },
-            ),
-        )
-        .await
-        .expect("tokens stored");
-
-    fixture
-        .refresher(Uuid::new_v4(), CancellationToken::new())
-        .sweep_once()
-        .await
-        .expect("sweep");
-
-    let entries = fixture
-        .storage
-        .query_audit(None, 0, u64::MAX, 100)
-        .await
-        .expect("audit query");
-    let rendered = entries
-        .iter()
-        .map(|entry| format!("{:?}", entry))
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(rendered.contains("upstream_oauth_refresh_success"));
-    assert!(rendered.contains("upstream_oauth_refresh_failure"));
-    assert!(!rendered.contains("sk-ant-oat01"));
-    assert!(!rendered.contains("sk-ant-ort01"));
 }
 
 #[derive(Deserialize)]
@@ -724,20 +441,6 @@ async fn spawn_fake_anthropic() -> SocketAddr {
     addr
 }
 
-async fn spawn_slow_token_server() -> SocketAddr {
-    async fn slow(
-        Form(_form): Form<std::collections::HashMap<String, String>>,
-    ) -> impl IntoResponse {
-        tokio::time::sleep(Duration::from_secs(60)).await;
-        StatusCode::OK
-    }
-    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind slow");
-    let addr = listener.local_addr().expect("slow addr");
-    let app = axum::Router::new().route("/oauth/token", post(slow));
-    tokio::spawn(async move { axum::serve(listener, app).await.expect("slow server") });
-    addr
-}
-
 async fn refresh_history_len(base: &str) -> usize {
     let response = raw_http("GET", &format!("{base}/__refresh_history"), &[], &[])
         .await
@@ -772,38 +475,11 @@ fn encrypted(
     EncryptedOAuthTokens::encrypt(aead, bundle, upstream_id.as_bytes()).expect("encrypt")
 }
 
-async fn bundle(fixture: &Fixture, upstream_id: Uuid) -> OAuthTokenBundle {
-    fixture
-        .storage
-        .get_by_id(upstream_id)
-        .await
-        .expect("get")
-        .expect("record")
-        .oauth_credentials
-        .expect("tokens")
-        .decrypt(&fixture.aead, upstream_id.as_bytes())
-        .expect("decrypt")
-}
-
 fn now_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-fn counter(handle: &PrometheusHandle, upstream: &str, outcome: &str) -> f64 {
-    handle
-        .render()
-        .lines()
-        .find(|line| {
-            line.starts_with("cclb_oauth_refresh_total{")
-                && line.contains(&format!(r#"upstream="{upstream}""#))
-                && line.contains(&format!(r#"outcome="{outcome}""#))
-        })
-        .and_then(|line| line.split_whitespace().last())
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(0.0)
 }
 
 fn shaped_request() -> ShapedRequest {

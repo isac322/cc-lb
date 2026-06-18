@@ -12,7 +12,6 @@ use cc_lb_core::{AuditPayload, MetadataHookHandle, MetadataHookRequest};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::worker::{EntityJob, SchedulerBackend};
 use cc_lb_signer_anthropic_oauth::{LazyRefreshError, LazyRefreshHandle};
-use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{AuditEntry, AuditStore, StorageError, StorageResult, UpstreamRecord};
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
 use http::{HeaderValue, Request, StatusCode};
@@ -28,16 +27,9 @@ use uuid::Uuid;
 
 use crate::dynamic_view_builder::Stores;
 
-// OAuth refresh cadence. The 10-minute sweep interval and 20-minute lookahead
-// assume Anthropic-issued OAuth tokens have TTL much greater than 20 minutes
-// (Claude OAuth = 8h). Sub-20-minute TTLs would cause per-tick refresh.
-const SWEEP_INTERVAL_SECS: u64 = 600;
-const LOOKAHEAD_SECS: u64 = 1200;
-const LEASE_TTL_SECS: u64 = 90;
 const LAZY_REFRESH_CLAIM_TTL_SECS: u64 = 60;
 const LAZY_REFRESH_CONTENTION_WAIT_SECS: u64 = 60;
 const LAZY_REFRESH_POLL_INTERVAL_SECS: u64 = 1;
-const PAGE_SIZE: usize = 100;
 
 type HyperTokenClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
 
@@ -57,156 +49,6 @@ impl TokenHttpClient {
             .build();
         let client = Client::builder(TokioExecutor::new()).build(connector);
         Self { client, timeout }
-    }
-}
-
-pub struct OAuthRefresher {
-    pub stores: Arc<Stores>,
-    pub aead: Arc<AeadService>,
-    pub oauth_cfg: Arc<AnthropicOAuthConfig>,
-    pub replica_id: Uuid,
-    http: TokenHttpClient,
-    pub metadata_hook: Option<MetadataHookHandle>,
-    pub cancel: CancellationToken,
-}
-
-impl OAuthRefresher {
-    pub fn new(
-        stores: Arc<Stores>,
-        aead: Arc<AeadService>,
-        oauth_cfg: Arc<AnthropicOAuthConfig>,
-        replica_id: Uuid,
-        metadata_hook: Option<MetadataHookHandle>,
-        cancel: CancellationToken,
-    ) -> Self {
-        let http = TokenHttpClient::new(Duration::from_secs(30));
-        Self {
-            stores,
-            aead,
-            oauth_cfg,
-            replica_id,
-            http,
-            metadata_hook,
-            cancel,
-        }
-    }
-
-    pub async fn run(self: Arc<Self>) {
-        let mut interval = tokio::time::interval(Duration::from_secs(SWEEP_INTERVAL_SECS));
-        interval.tick().await;
-        loop {
-            tokio::select! {
-                _ = self.cancel.cancelled() => return,
-                _ = interval.tick() => {}
-            }
-
-            let jitter = tokio::time::sleep(Duration::from_millis(rand::random_range(0..=10_000)));
-            tokio::pin!(jitter);
-            tokio::select! {
-                _ = self.cancel.cancelled() => return,
-                _ = &mut jitter => {}
-            }
-
-            if let Err(error) = self.sweep_once().await {
-                tracing::warn!(error = %error, "oauth refresh sweep failed");
-            }
-        }
-    }
-
-    pub async fn sweep_once(&self) -> StorageResult<()> {
-        if !self.any_oauth_credential_registered().await? {
-            tracing::debug!("oauth refresh sweep skipped: no oauth credentials registered");
-            return Ok(());
-        }
-
-        let candidates = self.candidates().await?;
-        for upstream in candidates {
-            if self.cancel.is_cancelled() {
-                return Ok(());
-            }
-            let claimed = self
-                .stores
-                .upstreams
-                .claim_refresh_lease(upstream.id, self.replica_id, LEASE_TTL_SECS)
-                .await?;
-            if !claimed {
-                continue;
-            }
-            self.refresh_claimed(upstream).await;
-        }
-        Ok(())
-    }
-
-    async fn candidates(&self) -> StorageResult<Vec<UpstreamRecord>> {
-        let now = now_unix_secs();
-        let mut after = None;
-        let mut candidates = Vec::new();
-        loop {
-            tokio::select! {
-                _ = self.cancel.cancelled() => return Ok(candidates),
-                page = self.stores.upstreams.list(after, PAGE_SIZE) => {
-                    let page = page?;
-                    if page.is_empty() {
-                        break;
-                    }
-                    after = page.last().map(|record| record.id);
-                    for record in page {
-                        if is_refresh_candidate(&record, &self.aead, now) {
-                            candidates.push(record);
-                        }
-                    }
-                }
-            }
-        }
-        Ok(candidates)
-    }
-
-    async fn any_oauth_credential_registered(&self) -> StorageResult<bool> {
-        let mut after = None;
-        loop {
-            tokio::select! {
-                _ = self.cancel.cancelled() => return Ok(false),
-                page = self.stores.upstreams.list(after, PAGE_SIZE) => {
-                    let page = page?;
-                    if page.is_empty() {
-                        return Ok(false);
-                    }
-                    after = page.last().map(|record| record.id);
-                    for record in &page {
-                        if record.kind == UpstreamKind::AnthropicOauth
-                            && record.enabled
-                            && record.oauth_credentials.is_some()
-                            && record.deleted_at_unix_secs.is_none()
-                        {
-                            return Ok(true);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    async fn refresh_claimed(&self, upstream: UpstreamRecord) {
-        let result = refresh_flow(
-            &self.stores,
-            self.stores.audit.as_deref(),
-            &self.aead,
-            &self.oauth_cfg,
-            self.replica_id,
-            &self.http,
-            self.metadata_hook.as_ref(),
-            &self.cancel,
-            upstream.clone(),
-        )
-        .await;
-        if let Err(error) = result {
-            tracing::error!(
-                upstream_id = %upstream.id,
-                upstream_name = upstream.name.as_str(),
-                error = %error,
-                "oauth refresh failed"
-            );
-        }
     }
 }
 
@@ -784,22 +626,6 @@ fn refresh_form_body(client_id: &str, refresh_token: &str) -> String {
     serializer.append_pair("client_id", client_id);
     serializer.append_pair("refresh_token", refresh_token);
     serializer.finish()
-}
-
-fn is_refresh_candidate(record: &UpstreamRecord, aead: &AeadService, now: u64) -> bool {
-    if record.kind != UpstreamKind::AnthropicOauth
-        || !record.enabled
-        || record.deleted_at_unix_secs.is_some()
-    {
-        return false;
-    }
-    let Some(encrypted) = &record.oauth_credentials else {
-        return false;
-    };
-    encrypted
-        .decrypt(aead, record.id.as_bytes())
-        .map(|bundle| bundle.expires_at_unix_secs < now.saturating_add(LOOKAHEAD_SECS))
-        .unwrap_or(false)
 }
 
 fn access_token_fingerprint(access_token: &str) -> String {
