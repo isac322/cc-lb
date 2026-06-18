@@ -1,5 +1,13 @@
-//! cc-lb-scheduler: future home of the apalis-backed job scheduler.
-//!
-//! Currently a spike crate only. See integration tests:
-//!   - `tests/spike_uniqueness_sqlite.rs`
-//!   - `tests/spike_uniqueness_postgres.rs` (requires `--features postgres`)
+//! cc-lb-scheduler: apalis-backed distributed job scheduler with leader election and cron support.
+
+pub mod config;
+pub mod error;
+pub mod pool;
+pub mod migrations;
+pub mod idempotency;
+pub mod jobs;
+pub mod worker;
+pub mod middleware;
+pub mod leader_election;
+pub mod cron;
+pub mod retry;

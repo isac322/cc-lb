@@ -7,7 +7,23 @@ rust-version.workspace = true
 publish = false
 
 [features]
-postgres = []
+default = ["sqlite"]
+sqlite = ["sqlx/sqlite", "apalis-sqlite"]
+postgres = ["sqlx/postgres", "apalis-postgres"]
+
+[dependencies]
+anyhow = { workspace = true }
+apalis-cron = "^1.0.0-rc.8"
+apalis-postgres = { version = "^1.0.0-rc.8", optional = true }
+apalis-sqlite = { version = "^1.0.0-rc.8", optional = true }
+chrono = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
+sqlx = { version = "0.8.6", default-features = false, features = ["chrono", "json", "runtime-tokio", "tls-rustls-ring", "uuid"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tracing = { workspace = true }
+uuid = { workspace = true }
 
 [[test]]
 name = "spike_uniqueness_postgres"
@@ -18,8 +34,6 @@ name = "spike_cron_leader"
 required-features = ["postgres"]
 
 [dev-dependencies]
-apalis-cron = "=1.0.0-rc.8"
 cron = "0.16"
 futures-util = "0.3"
-sqlx = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
