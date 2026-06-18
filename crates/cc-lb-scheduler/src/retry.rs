@@ -100,10 +100,7 @@ impl RetryPolicy {
         let width = jitter.saturating_mul(2).saturating_add(1);
         let slot = mixed_seed(seed) % width;
         let offset = i128::from(slot) - i128::from(jitter);
-        let base_millis = match i128::try_from(base_delay.as_millis()) {
-            Ok(value) => value,
-            Err(_overflow) => i128::MAX,
-        };
+        let base_millis = i128::try_from(base_delay.as_millis()).unwrap_or(i128::MAX);
         let delta = base_millis.saturating_mul(offset) / i128::from(JITTER_DENOMINATOR_PER_MILLE);
         let jittered = base_millis.saturating_add(delta);
 

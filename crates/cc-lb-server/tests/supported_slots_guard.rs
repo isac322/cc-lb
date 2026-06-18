@@ -29,6 +29,7 @@ use cc_lb_server::bootstrap::{BootstrapError, apply_bootstrap};
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::preflight;
 use cc_lb_server::refresh::LazyRefresher;
+use cc_lb_server::scheduler_factory::{SchedulerBackend, SqliteSchedulerStorage};
 use cc_lb_server::warmup::dialect::{WarmupDispatchError, dispatch_warmup_with_dialect};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
@@ -148,6 +149,7 @@ async fn warmup_dialect_returns_registry_unsupported_slot_for_non_shape_plugin()
         Uuid::new_v4(),
         None,
         CancellationToken::new(),
+        sqlite_scheduler_backend().await,
     ));
     let client = warmup_client();
 
@@ -488,6 +490,24 @@ fn warmup_client() -> WarmupClient {
         .enable_http2()
         .build();
     Client::builder(TokioExecutor::new()).build(connector)
+}
+
+async fn sqlite_scheduler_backend() -> SchedulerBackend {
+    let pool = scheduler_sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("scheduler sqlite opens");
+    apalis_sqlite::SqliteStorage::setup(&pool)
+        .await
+        .expect("scheduler sqlite initializes");
+    SchedulerBackend::Sqlite(SqliteSchedulerStorage {
+        pool: pool.clone(),
+        storage: apalis_sqlite::SqliteStorage::new_in_queue(
+            &pool,
+            cc_lb_scheduler::worker::ENTITY_QUEUE,
+        ),
+    })
 }
 
 fn wasm_cache_path(data_dir: &Path, sha256: [u8; 32]) -> PathBuf {

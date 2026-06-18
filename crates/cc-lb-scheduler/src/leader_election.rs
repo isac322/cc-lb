@@ -97,6 +97,14 @@ impl LeaderElection {
             Self::Postgres(postgres) => postgres.release().await,
         }
     }
+
+    pub async fn close(&self) -> Result<(), LeaderError> {
+        match self {
+            Self::Sqlite(sqlite) => sqlite.close().await,
+            #[cfg(feature = "postgres")]
+            Self::Postgres(postgres) => postgres.close().await,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -122,6 +130,10 @@ impl SqliteLeaderElection {
 
     pub async fn release(&self) -> Result<bool, LeaderError> {
         Ok(true)
+    }
+
+    pub async fn close(&self) -> Result<(), LeaderError> {
+        Ok(())
     }
 }
 
@@ -215,6 +227,10 @@ impl PostgresLeaderElection {
             return Ok(false);
         };
         query_bool(connection, "SELECT pg_advisory_unlock($1)", self.lock_key).await
+    }
+
+    pub async fn close(&self) -> Result<(), LeaderError> {
+        self.close_current().await
     }
 
     async fn ensure_connected(&self) -> Result<(), LeaderError> {

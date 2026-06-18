@@ -149,47 +149,35 @@ impl CoreMetadataRefreshRunner {
 }
 
 impl MetadataRefreshRunner for CoreMetadataRefreshRunner {
-    fn load_upstream(
-        &self,
-        upstream_id: Uuid,
-    ) -> impl Future<Output = Result<Option<UpstreamRecord>>> + Send + '_ {
-        async move {
-            UpstreamStore::get_by_id(self.storage.as_ref(), upstream_id)
-                .await
-                .map_err(storage_error)
-        }
+    async fn load_upstream(&self, upstream_id: Uuid) -> Result<Option<UpstreamRecord>> {
+        UpstreamStore::get_by_id(self.storage.as_ref(), upstream_id)
+            .await
+            .map_err(storage_error)
     }
 
-    fn run_metadata_refresh<'a>(
-        &'a self,
-        upstream: &'a UpstreamRecord,
-    ) -> impl Future<Output = Result<()>> + Send + 'a {
-        async move {
-            let access_token = upstream
-                .oauth_credentials
-                .as_ref()
-                .ok_or_else(|| {
-                    SchedulerError::Job("metadata refresh missing oauth credentials".to_owned())
-                })?
-                .decrypt(self.aead.as_ref(), upstream.id.as_bytes())
-                .map_err(|_| {
-                    SchedulerError::Job(
-                        "metadata refresh oauth credentials decrypt failed".to_owned(),
-                    )
-                })?
-                .access_token;
-            let user_agent = self.user_agent().await?;
-            cc_lb_core::subscription_metadata_hook::run_metadata_refresh(
-                self.storage.clone(),
-                &self.client,
-                upstream.id,
-                &access_token,
-                &user_agent,
-                &self.cancel,
-            )
-            .await
-            .map_err(|error| SchedulerError::Job(error.to_string()))
-        }
+    async fn run_metadata_refresh(&self, upstream: &UpstreamRecord) -> Result<()> {
+        let access_token = upstream
+            .oauth_credentials
+            .as_ref()
+            .ok_or_else(|| {
+                SchedulerError::Job("metadata refresh missing oauth credentials".to_owned())
+            })?
+            .decrypt(self.aead.as_ref(), upstream.id.as_bytes())
+            .map_err(|_| {
+                SchedulerError::Job("metadata refresh oauth credentials decrypt failed".to_owned())
+            })?
+            .access_token;
+        let user_agent = self.user_agent().await?;
+        cc_lb_core::subscription_metadata_hook::run_metadata_refresh(
+            self.storage.clone(),
+            &self.client,
+            upstream.id,
+            &access_token,
+            &user_agent,
+            &self.cancel,
+        )
+        .await
+        .map_err(|error| SchedulerError::Job(error.to_string()))
     }
 }
 

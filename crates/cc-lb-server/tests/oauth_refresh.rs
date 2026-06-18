@@ -21,6 +21,7 @@ use cc_lb_plugin_api::{
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::refresh::{LazyRefresher, OAuthRefresher};
+use cc_lb_server::scheduler_factory::{SchedulerBackend, SqliteSchedulerStorage};
 use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh,
 };
@@ -62,6 +63,7 @@ struct Fixture {
     aead: Arc<AeadService>,
     oauth_cfg: Arc<AnthropicOAuthConfig>,
     fake_base: String,
+    scheduler_backend: SchedulerBackend,
 }
 
 impl Fixture {
@@ -75,6 +77,7 @@ impl Fixture {
                 .expect("storage"),
         );
         storage.initialize(BackendKind::Sqlite).await.unwrap();
+        let scheduler_backend = sqlite_scheduler_backend().await;
         let stores = Arc::new(Stores {
             upstreams: storage.clone(),
             principals: storage.clone(),
@@ -102,6 +105,7 @@ impl Fixture {
             aead,
             oauth_cfg,
             fake_base,
+            scheduler_backend,
         }
     }
 
@@ -227,6 +231,7 @@ async fn expired_before_sweep_lazy_fires_and_retry_succeeds() {
         replica_id,
         None,
         CancellationToken::new(),
+        fixture.scheduler_backend.clone(),
     ));
     let base = AnthropicOAuthSignerFactory::for_upstream_name(
         fixture.storage.clone(),
@@ -271,6 +276,7 @@ async fn expired_oauth_upstream_selected_by_router_choice_refreshes_during_messa
         replica_id,
         None,
         cancel,
+        fixture.scheduler_backend.clone(),
     ));
     let runtime = ExtismRuntime::new();
     let view = build_dynamic_view(
@@ -738,6 +744,24 @@ async fn refresh_history_len(base: &str) -> usize {
         .expect("history");
     let body: Value = serde_json::from_slice(&response.body).expect("history json");
     body["refreshes"].as_array().expect("refreshes").len()
+}
+
+async fn sqlite_scheduler_backend() -> SchedulerBackend {
+    let pool = scheduler_sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("scheduler sqlite opens");
+    apalis_sqlite::SqliteStorage::setup(&pool)
+        .await
+        .expect("scheduler sqlite initializes");
+    SchedulerBackend::Sqlite(SqliteSchedulerStorage {
+        pool: pool.clone(),
+        storage: apalis_sqlite::SqliteStorage::new_in_queue(
+            &pool,
+            cc_lb_scheduler::worker::ENTITY_QUEUE,
+        ),
+    })
 }
 
 fn encrypted(

@@ -22,19 +22,17 @@ impl<Store> SubscriptionQuotaGcStore for Store
 where
     Store: UpstreamSubscriptionQuotaStore + ?Sized,
 {
-    fn delete_subscription_quota_before(
+    async fn delete_subscription_quota_before(
         &self,
         cutoff_unix_millis: u64,
         batch_size: u32,
-    ) -> impl Future<Output = StorageResult<u64>> + Send + '_ {
-        async move {
-            UpstreamSubscriptionQuotaStore::delete_subscription_quota_before(
-                self,
-                cutoff_unix_millis,
-                batch_size,
-            )
-            .await
-        }
+    ) -> StorageResult<u64> {
+        UpstreamSubscriptionQuotaStore::delete_subscription_quota_before(
+            self,
+            cutoff_unix_millis,
+            batch_size,
+        )
+        .await
     }
 }
 

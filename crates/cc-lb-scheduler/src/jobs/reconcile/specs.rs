@@ -38,16 +38,10 @@ impl<T> ReconcileUpstreams for T
 where
     T: UpstreamStore + Send + Sync,
 {
-    fn list(
-        &self,
-        after: Option<Uuid>,
-        limit: usize,
-    ) -> impl Future<Output = Result<Vec<UpstreamRecord>>> + Send + '_ {
-        async move {
-            UpstreamStore::list(self, after, limit)
-                .await
-                .map_err(storage_error)
-        }
+    async fn list(&self, after: Option<Uuid>, limit: usize) -> Result<Vec<UpstreamRecord>> {
+        UpstreamStore::list(self, after, limit)
+            .await
+            .map_err(storage_error)
     }
 }
 

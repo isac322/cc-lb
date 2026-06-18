@@ -19,11 +19,8 @@ impl<Store> PromptCacheObservationPurgeStore for Store
 where
     Store: PromptCacheObservationStore,
 {
-    fn purge_expired_before(
-        &self,
-        ts_unix_secs: u64,
-    ) -> impl Future<Output = StorageResult<u64>> + Send + '_ {
-        async move { PromptCacheObservationStore::purge_expired_before(self, ts_unix_secs).await }
+    async fn purge_expired_before(&self, ts_unix_secs: u64) -> StorageResult<u64> {
+        PromptCacheObservationStore::purge_expired_before(self, ts_unix_secs).await
     }
 }
 

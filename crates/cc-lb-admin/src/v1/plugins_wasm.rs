@@ -132,7 +132,7 @@ async fn upload_wasm(
         Err(error) => {
             let status = error.status().as_u16();
             enqueue_upload_attempt_audit(&state, status);
-            error.into_response()
+            (*error).into_response()
         }
     }
 }
@@ -141,39 +141,39 @@ async fn upload_wasm_inner(
     state: &AdminState,
     headers: &HeaderMap,
     multipart: Multipart,
-) -> Result<(StatusCode, UploadResponse), Response> {
+) -> Result<(StatusCode, UploadResponse), Box<Response>> {
     let storage = state.storage.as_deref().ok_or_else(|| {
-        json_error(
+        Box::new(json_error(
             StatusCode::SERVICE_UNAVAILABLE,
             "storage_unavailable",
             "storage required",
-        )
+        ))
     })?;
     let parts = read_upload_parts(multipart).await?;
     let name = parts.name.ok_or_else(|| {
-        json_error(
+        Box::new(json_error(
             StatusCode::BAD_REQUEST,
             "missing_part",
             "missing multipart part: name",
-        )
+        ))
     })?;
     let original_filename = parts.original_filename.ok_or_else(|| {
-        json_error(
+        Box::new(json_error(
             StatusCode::BAD_REQUEST,
             "missing_part",
             "missing multipart part: original_filename",
-        )
+        ))
     })?;
-    validate_original_filename(&original_filename)?;
+    validate_original_filename(&original_filename).map_err(Box::new)?;
     let bytes = parts.bytes.ok_or_else(|| {
-        json_error(
+        Box::new(json_error(
             StatusCode::BAD_REQUEST,
             "missing_part",
             "missing multipart part: bytes",
-        )
+        ))
     })?;
-    validate_wasm_bytes(&bytes)?;
-    validate_extism(&bytes)?;
+    validate_wasm_bytes(&bytes).map_err(Box::new)?;
+    validate_extism(&bytes).map_err(Box::new)?;
 
     let sha256 = tokio::task::spawn_blocking({
         let bytes = bytes.clone();
@@ -182,17 +182,17 @@ async fn upload_wasm_inner(
     .await
     .map_err(|error| {
         tracing::error!(%error, "wasm sha256 worker failed");
-        json_error(
+        Box::new(json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "hash_failed",
             "sha256 computation failed",
-        )
+        ))
     })?;
     let sha256_hex = hex_sha256(sha256);
     let existing = storage
         .get_registry_entry_by_sha(sha256)
         .await
-        .map_err(storage_response)?;
+        .map_err(|error| Box::new(storage_response(error)))?;
     let (supported_slots, fresh_wire_version) = match &existing {
         Some(entry) if !entry.supported_slots.is_empty() => {
             (entry.supported_slots.clone(), entry.wire_version)
@@ -226,25 +226,25 @@ async fn upload_wasm_inner(
         storage
             .update_supported_slots(entry.id, supported_slots.clone())
             .await
-            .map_err(storage_response)?;
+            .map_err(|error| Box::new(storage_response(error)))?;
         entry.supported_slots = supported_slots;
     }
     if existed && entry.wire_version != fresh_wire_version {
         storage
             .update_wire_version(entry.id, fresh_wire_version)
             .await
-            .map_err(storage_response)?;
+            .map_err(|error| Box::new(storage_response(error)))?;
         entry.wire_version = fresh_wire_version;
     }
     materialize_cache(state, &sha256_hex, &bytes)
         .await
         .map_err(|error| {
             tracing::error!(%error, sha256 = %sha256_hex, "wasm cache materialization failed");
-            json_error(
+            Box::new(json_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 "cache_materialization_failed",
                 "failed to write wasm cache file",
-            )
+            ))
         })?;
     enqueue_upload_audit(state, &sha256_hex, bytes.len() as u64, &original_filename);
     let idempotent = existed;
@@ -266,44 +266,47 @@ async fn upload_wasm_inner(
     ))
 }
 
-async fn read_upload_parts(mut multipart: Multipart) -> Result<UploadParts, Response> {
+async fn read_upload_parts(mut multipart: Multipart) -> Result<UploadParts, Box<Response>> {
     let mut parts = UploadParts::default();
     while let Some(field) = multipart
         .next_field()
         .await
-        .map_err(multipart_error_response)?
+        .map_err(|error| Box::new(multipart_error_response(error)))?
     {
         let Some(name) = field.name().map(ToOwned::to_owned) else {
             continue;
         };
         match name.as_str() {
             "bytes" => {
-                let data = field.bytes().await.map_err(multipart_error_response)?;
+                let data = field
+                    .bytes()
+                    .await
+                    .map_err(|error| Box::new(multipart_error_response(error)))?;
                 if data.len() as u64 > MAX_WASM_BLOB_BYTES {
-                    return Err(json_error(
+                    return Err(Box::new(json_error(
                         StatusCode::PAYLOAD_TOO_LARGE,
                         "wasm_too_large",
                         "bytes part exceeds 32 MiB",
-                    ));
+                    )));
                 }
                 parts.bytes = Some(data.to_vec());
             }
             "name" => {
                 parts.name = Some(field.text().await.map_err(|error| {
-                    json_error(
+                    Box::new(json_error(
                         StatusCode::BAD_REQUEST,
                         "invalid_multipart",
                         error.to_string(),
-                    )
+                    ))
                 })?);
             }
             "original_filename" => {
                 parts.original_filename = Some(field.text().await.map_err(|error| {
-                    json_error(
+                    Box::new(json_error(
                         StatusCode::BAD_REQUEST,
                         "invalid_multipart",
                         error.to_string(),
-                    )
+                    ))
                 })?);
             }
             _ => {}
@@ -427,7 +430,7 @@ fn validate_extism(bytes: &[u8]) -> Result<(), Response> {
     reject_removed_router_wire(&plugin)
 }
 
-async fn derive_handshake_metadata(bytes: &[u8]) -> Result<HandshakeMetadata, Response> {
+async fn derive_handshake_metadata(bytes: &[u8]) -> Result<HandshakeMetadata, Box<Response>> {
     let bytes = bytes.to_vec();
     let accept = tokio::task::spawn_blocking(move || {
         let mut offer = build_offer(&BTreeSet::new());
@@ -438,35 +441,39 @@ async fn derive_handshake_metadata(bytes: &[u8]) -> Result<HandshakeMetadata, Re
     .await
     .map_err(|error| {
         tracing::error!(%error, "wasm handshake worker failed");
-        json_error(
+        Box::new(json_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             "handshake_worker_failed",
             "handshake worker panicked",
-        )
+        ))
     })?
     .map_err(|error| {
         let mut message = error.to_string();
         if message.len() > 500 {
             message.truncate(500);
         }
-        json_error(StatusCode::BAD_REQUEST, "handshake_failed", message)
+        Box::new(json_error(
+            StatusCode::BAD_REQUEST,
+            "handshake_failed",
+            message,
+        ))
     })?;
 
     let slots = slot_set_from_handshake(&accept.implemented_functions);
     if slots.is_empty() {
-        return Err(json_error(
+        return Err(Box::new(json_error(
             StatusCode::BAD_REQUEST,
             "no_supported_slot",
             "plugin does not export any of: filter, shape, observe",
-        ));
+        )));
     }
     let wire_version = match accept.chosen_versions.values().copied().max() {
         Some(version) => u8::try_from(version).map_err(|_| {
-            json_error(
+            Box::new(json_error(
                 StatusCode::BAD_REQUEST,
                 "unsupported_wire_version",
                 format!("chosen wire version {version} exceeds registry maximum"),
-            )
+            ))
         })?,
         None => default_wire_version(),
     };

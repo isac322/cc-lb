@@ -16,6 +16,7 @@ use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_core::SubscriptionQuotaSink;
 use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_server::refresh::LazyRefresher;
+use cc_lb_server::scheduler_factory::{SchedulerBackend, SqliteSchedulerStorage};
 use cc_lb_server::upstream_warmup_loop::UpstreamWarmupLoop;
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamLeaseKind, UpstreamStatusUpdate};
 use cc_lb_storage_api::{
@@ -54,6 +55,7 @@ pub struct WarmupFixture {
     pub oauth_cfg: Arc<AnthropicOAuthConfig>,
     pub fake: RunningFakeAnthropic,
     pub replica_id: Uuid,
+    scheduler_backend: SchedulerBackend,
     clock: Arc<AtomicI64>,
     subscription_quota_sink: SubscriptionQuotaSink,
     _quota_receiver: Receiver<SubscriptionQuotaObservationRecord>,
@@ -73,6 +75,7 @@ impl WarmupFixture {
                 .expect("sqlite storage opens"),
         );
         storage.initialize(BackendKind::Sqlite).await.unwrap();
+        let scheduler_backend = sqlite_scheduler_backend().await;
         let clock = Arc::new(AtomicI64::new(real_now_secs()));
         let upstreams = Arc::new(TestClockUpstreamStore::new(storage.clone(), clock.clone()));
         let stores = Arc::new(Stores {
@@ -104,6 +107,7 @@ impl WarmupFixture {
             oauth_cfg,
             fake,
             replica_id: Uuid::new_v4(),
+            scheduler_backend,
             clock,
             subscription_quota_sink,
             _quota_receiver: quota_receiver,
@@ -269,6 +273,7 @@ impl WarmupFixture {
             replica_id,
             None,
             refresh_cancel,
+            self.scheduler_backend.clone(),
         ));
         let mut warmup_loop = UpstreamWarmupLoop::new(
             self.stores.clone(),
@@ -701,6 +706,24 @@ async fn refresh_history_len(base: &str) -> usize {
         .expect("history");
     let body: Value = serde_json::from_slice(&response.body).expect("history json");
     body["refreshes"].as_array().expect("refreshes").len()
+}
+
+async fn sqlite_scheduler_backend() -> SchedulerBackend {
+    let pool = scheduler_sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("scheduler sqlite opens");
+    apalis_sqlite::SqliteStorage::setup(&pool)
+        .await
+        .expect("scheduler sqlite initializes");
+    SchedulerBackend::Sqlite(SqliteSchedulerStorage {
+        pool: pool.clone(),
+        storage: apalis_sqlite::SqliteStorage::new_in_queue(
+            &pool,
+            cc_lb_scheduler::worker::ENTITY_QUEUE,
+        ),
+    })
 }
 
 fn encrypted(

@@ -129,6 +129,7 @@ fn latency_upstream() -> UpstreamCreate {
         kind: UpstreamKind::AnthropicOauth,
         base_url: None,
         api_key_ciphertext: None,
+        oauth_token_generation: None,
         warmup_enabled: false,
         next_warmup_at: None,
         last_warmup_cycle_key: None,

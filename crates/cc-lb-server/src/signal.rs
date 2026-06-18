@@ -1,4 +1,5 @@
 use std::future::Future;
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -7,6 +8,8 @@ use tokio::sync::watch;
 use tokio::task::JoinHandle;
 
 pub type SighupHandler = Arc<dyn Fn() + Send + Sync + 'static>;
+type ShutdownHookFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
+type ShutdownHook = Arc<dyn Fn() -> ShutdownHookFuture + Send + Sync + 'static>;
 
 use crate::drain::DrainController;
 
@@ -19,6 +22,7 @@ pub struct SignalHandle {
     shutdown_started: Arc<AtomicBool>,
     debug_logging: Arc<AtomicBool>,
     tasks: SignalTasks,
+    shutdown_hooks: ShutdownHooks,
 }
 
 impl SignalHandle {
@@ -39,8 +43,16 @@ impl SignalHandle {
         let drain_complete = self.drain_complete.clone();
         let drain = self.drain.clone();
         let drain_timeout = self.drain_timeout;
+        let shutdown_hooks = self.shutdown_hooks.clone();
         self.tasks.spawn(async move {
-            run_shutdown(shutdown, drain_complete, drain, drain_timeout).await;
+            run_shutdown(
+                shutdown,
+                drain_complete,
+                drain,
+                drain_timeout,
+                shutdown_hooks,
+            )
+            .await;
         });
     }
 
@@ -55,6 +67,14 @@ impl SignalHandle {
     pub fn set_draining(&self, draining: bool) {
         self.drain.set_draining(draining);
     }
+
+    pub fn add_shutdown_hook<F, Fut>(&self, hook: F)
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: Future<Output = ()> + Send + 'static,
+    {
+        self.shutdown_hooks.push(Arc::new(move || Box::pin(hook())));
+    }
 }
 
 async fn run_shutdown(
@@ -62,9 +82,11 @@ async fn run_shutdown(
     drain_complete: watch::Sender<bool>,
     drain: DrainController,
     drain_timeout: Duration,
+    shutdown_hooks: ShutdownHooks,
 ) {
     drain.trigger();
     let _ = shutdown.send(true);
+    shutdown_hooks.run_all().await;
 
     let timed_out = drain.await_drained(drain_timeout).await;
     if timed_out {
@@ -93,6 +115,7 @@ pub fn install(
         shutdown_started: Arc::new(AtomicBool::new(false)),
         debug_logging: Arc::new(AtomicBool::new(false)),
         tasks: SignalTasks::default(),
+        shutdown_hooks: ShutdownHooks::default(),
     };
 
     install_sigterm(handle.clone());
@@ -119,6 +142,7 @@ fn install_sigterm(handle: SignalHandle) {
     let drain = handle.drain.clone();
     let drain_timeout = handle.drain_timeout;
     let shutdown_started = handle.shutdown_started.clone();
+    let shutdown_hooks = handle.shutdown_hooks.clone();
     let tasks = handle.tasks;
     tasks.spawn(async move {
         let Ok(mut term) =
@@ -130,7 +154,14 @@ fn install_sigterm(handle: SignalHandle) {
         if shutdown_started.swap(true, Ordering::AcqRel) {
             return;
         }
-        run_shutdown(shutdown, drain_complete, drain, drain_timeout).await;
+        run_shutdown(
+            shutdown,
+            drain_complete,
+            drain,
+            drain_timeout,
+            shutdown_hooks,
+        )
+        .await;
     });
 }
 
@@ -141,13 +172,21 @@ fn install_sigterm(handle: SignalHandle) {
     let drain = handle.drain.clone();
     let drain_timeout = handle.drain_timeout;
     let shutdown_started = handle.shutdown_started.clone();
+    let shutdown_hooks = handle.shutdown_hooks.clone();
     let tasks = handle.tasks;
     tasks.spawn(async move {
         if tokio::signal::ctrl_c().await.is_ok() {
             if shutdown_started.swap(true, Ordering::AcqRel) {
                 return;
             }
-            run_shutdown(shutdown, drain_complete, drain, drain_timeout).await;
+            run_shutdown(
+                shutdown,
+                drain_complete,
+                drain,
+                drain_timeout,
+                shutdown_hooks,
+            )
+            .await;
         }
     });
 }
@@ -207,6 +246,29 @@ fn install_sigusr1(_debug_logging: Arc<AtomicBool>, _tasks: SignalTasks) {}
 #[derive(Clone, Default)]
 struct SignalTasks {
     handles: Arc<Mutex<Vec<JoinHandle<()>>>>,
+}
+
+#[derive(Clone, Default)]
+struct ShutdownHooks {
+    hooks: Arc<Mutex<Vec<ShutdownHook>>>,
+}
+
+impl ShutdownHooks {
+    fn push(&self, hook: ShutdownHook) {
+        if let Ok(mut hooks) = self.hooks.lock() {
+            hooks.push(hook);
+        }
+    }
+
+    async fn run_all(&self) {
+        let hooks = match self.hooks.lock() {
+            Ok(hooks) => hooks.clone(),
+            Err(_) => Vec::new(),
+        };
+        for hook in hooks {
+            hook().await;
+        }
+    }
 }
 
 impl SignalTasks {

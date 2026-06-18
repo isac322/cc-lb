@@ -112,14 +112,17 @@ where
             etag,
             source_url,
         } => {
+            let modified = ModifiedCompatFetch {
+                value,
+                etag,
+                source_url,
+            };
             handle_modified(
                 job,
                 etags,
                 compatibility_kv,
                 stored.as_ref(),
-                value,
-                etag,
-                source_url,
+                modified,
                 now_unix_secs,
             )
             .await
@@ -127,25 +130,29 @@ where
     }
 }
 
+struct ModifiedCompatFetch {
+    value: String,
+    etag: Option<String>,
+    source_url: Option<String>,
+}
+
 async fn handle_modified<E, K>(
     job: AnthropicCompatRefreshJob,
     etags: &E,
     compatibility_kv: &K,
     stored: Option<&AnthropicCompatEtag>,
-    value: String,
-    etag: Option<String>,
-    source_url: Option<String>,
+    modified: ModifiedCompatFetch,
     now_unix_secs: u64,
 ) -> Result<JobOutcome>
 where
     E: CompatEtagRepository + Sync,
     K: AnthropicCompatibilityKvStore + ?Sized,
 {
-    let next_hash = compatibility_value_hash(&value);
+    let next_hash = compatibility_value_hash(&modified.value);
     if let Some(stored) = stored
         && stored.last_value_hash == next_hash
     {
-        let next_etag = etag.as_deref().or(stored.etag.as_deref());
+        let next_etag = modified.etag.as_deref().or(stored.etag.as_deref());
         etags
             .upsert_compat_value(&job.key, next_etag, &next_hash, now_unix_secs)
             .await?;
@@ -154,11 +161,21 @@ where
     }
 
     compatibility_kv
-        .put_compatibility_kv_value(&job.key, &value, now_unix_secs, source_url.as_deref())
+        .put_compatibility_kv_value(
+            &job.key,
+            &modified.value,
+            now_unix_secs,
+            modified.source_url.as_deref(),
+        )
         .await
         .map_err(storage_error)?;
     etags
-        .upsert_compat_value(&job.key, etag.as_deref(), &next_hash, now_unix_secs)
+        .upsert_compat_value(
+            &job.key,
+            modified.etag.as_deref(),
+            &next_hash,
+            now_unix_secs,
+        )
         .await?;
     record_compat_status("applied");
     Ok(JobOutcome::Done)

@@ -9,6 +9,8 @@ use cc_lb_core::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
 };
 use cc_lb_core::{AuditPayload, MetadataHookHandle, MetadataHookRequest};
+use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
+use cc_lb_scheduler::worker::{EntityJob, SchedulerBackend};
 use cc_lb_signer_anthropic_oauth::{LazyRefreshError, LazyRefreshHandle};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{AuditEntry, AuditStore, StorageError, StorageResult, UpstreamRecord};
@@ -219,6 +221,7 @@ pub struct LazyRefresher {
     cancel: CancellationToken,
     claim_guard: Arc<dyn LazyRefreshClaimGuard>,
     contention: LazyRefreshContentionConfig,
+    apalis_handle: SchedulerBackend,
 }
 
 #[derive(Clone, Copy)]
@@ -378,87 +381,87 @@ impl LazyRefresher {
         replica_id: Uuid,
         metadata_hook: Option<MetadataHookHandle>,
         cancel: CancellationToken,
+        apalis_handle: SchedulerBackend,
     ) -> Self {
         let claim_guard = Arc::new(LegacyRefreshLeaseGuard {
             upstreams: stores.upstreams.clone(),
             replica_id,
         });
         Self::new_with_claim_guard(
-            stores,
-            aead,
-            oauth_cfg,
+            LazyRefresherDeps {
+                stores,
+                aead,
+                oauth_cfg,
+            },
             replica_id,
             metadata_hook,
             cancel,
             claim_guard,
+            apalis_handle,
         )
     }
 
     pub fn new_with_claim_guard(
-        stores: Arc<Stores>,
-        aead: Arc<AeadService>,
-        oauth_cfg: Arc<AnthropicOAuthConfig>,
+        deps: LazyRefresherDeps,
         replica_id: Uuid,
         metadata_hook: Option<MetadataHookHandle>,
         cancel: CancellationToken,
         claim_guard: Arc<dyn LazyRefreshClaimGuard>,
+        apalis_handle: SchedulerBackend,
     ) -> Self {
         Self::new_with_claim_guard_and_config(
-            stores,
-            aead,
-            oauth_cfg,
+            deps,
             replica_id,
             metadata_hook,
             cancel,
             claim_guard,
             LazyRefreshContentionConfig::production(),
+            apalis_handle,
         )
     }
 
     #[cfg(test)]
     fn new_with_claim_guard_for_tests(
-        stores: Arc<Stores>,
-        aead: Arc<AeadService>,
-        oauth_cfg: Arc<AnthropicOAuthConfig>,
+        deps: LazyRefresherDeps,
         replica_id: Uuid,
         metadata_hook: Option<MetadataHookHandle>,
         cancel: CancellationToken,
         claim_guard: Arc<dyn LazyRefreshClaimGuard>,
         contention: LazyRefreshContentionConfig,
+        apalis_handle: SchedulerBackend,
     ) -> Self {
         Self::new_with_claim_guard_and_config(
-            stores,
-            aead,
-            oauth_cfg,
+            deps,
             replica_id,
             metadata_hook,
             cancel,
             claim_guard,
             contention,
+            apalis_handle,
         )
     }
 
     fn new_with_claim_guard_and_config(
-        stores: Arc<Stores>,
-        aead: Arc<AeadService>,
-        oauth_cfg: Arc<AnthropicOAuthConfig>,
+        deps: LazyRefresherDeps,
         replica_id: Uuid,
         metadata_hook: Option<MetadataHookHandle>,
         cancel: CancellationToken,
         claim_guard: Arc<dyn LazyRefreshClaimGuard>,
         contention: LazyRefreshContentionConfig,
+        apalis_handle: SchedulerBackend,
     ) -> Self {
         let http = TokenHttpClient::new(Duration::from_secs(30));
         Self {
-            stores,
-            aead,
-            oauth_cfg,
+            stores: deps.stores,
+            aead: deps.aead,
+            oauth_cfg: deps.oauth_cfg,
             replica_id,
             http,
             metadata_hook,
             cancel,
             claim_guard,
             contention,
+            apalis_handle,
         }
     }
 
@@ -502,6 +505,13 @@ impl LazyRefresher {
             }
         }
     }
+}
+
+#[derive(Clone)]
+pub struct LazyRefresherDeps {
+    pub stores: Arc<Stores>,
+    pub aead: Arc<AeadService>,
+    pub oauth_cfg: Arc<AnthropicOAuthConfig>,
 }
 
 #[async_trait]
@@ -565,6 +575,13 @@ impl LazyRefreshHandle for LazyRefresher {
                         reason: "oauth refresh claim was not held at completion".to_owned(),
                     });
                 }
+                self.apalis_handle
+                    .push_job(EntityJob::MetadataRefresh(MetadataRefreshJob::new(
+                        upstream_id,
+                        generation,
+                    )))
+                    .await
+                    .map_err(lazy_scheduler_error)?;
                 Ok(())
             }
             Err(error) => {
@@ -863,6 +880,12 @@ fn lazy_error(error: StorageError) -> LazyRefreshError {
     }
 }
 
+fn lazy_scheduler_error(error: cc_lb_scheduler::error::SchedulerError) -> LazyRefreshError {
+    LazyRefreshError::Failed {
+        reason: error.to_string(),
+    }
+}
+
 fn lazy_refresh_holder(replica_id: Uuid) -> String {
     format!("cc-lb-server:lazy-refresher:{replica_id}")
 }
@@ -900,7 +923,10 @@ mod tests {
     use url::Url;
     use uuid::Uuid;
 
-    use super::{LazyRefreshClaimGuard, LazyRefreshContentionConfig, LazyRefresher};
+    use super::{
+        LazyRefreshClaimGuard, LazyRefreshContentionConfig, LazyRefresher, LazyRefresherDeps,
+        SchedulerBackend,
+    };
 
     #[tokio::test]
     async fn release_lease_on_failure_clears_refresh_lease() {
@@ -998,6 +1024,7 @@ mod tests {
         aead: Arc<AeadService>,
         oauth_cfg: Arc<AnthropicOAuthConfig>,
         refresh_calls: Arc<AtomicUsize>,
+        scheduler_backend: SchedulerBackend,
     }
 
     impl LazyRefreshFixture {
@@ -1019,6 +1046,29 @@ mod tests {
                 .initialize(BackendKind::Sqlite)
                 .await
                 .expect("storage initializes");
+            let scheduler_db_url =
+                format!("sqlite://{}", dir.path().join("scheduler.sqlite").display());
+            use std::str::FromStr as _;
+            let scheduler_options =
+                scheduler_sqlx::sqlite::SqliteConnectOptions::from_str(&scheduler_db_url)
+                    .expect("parse url")
+                    .create_if_missing(true);
+            let scheduler_pool = scheduler_sqlx::sqlite::SqlitePoolOptions::new()
+                .max_connections(5)
+                .connect_with(scheduler_options)
+                .await
+                .expect("scheduler storage opens");
+            apalis_sqlite::SqliteStorage::setup(&scheduler_pool)
+                .await
+                .expect("scheduler storage initializes");
+            let scheduler_backend =
+                SchedulerBackend::Sqlite(cc_lb_scheduler::worker::SqliteSchedulerStorage {
+                    pool: scheduler_pool.clone(),
+                    storage: apalis_sqlite::SqliteStorage::new_in_queue(
+                        &scheduler_pool,
+                        cc_lb_scheduler::worker::ENTITY_QUEUE,
+                    ),
+                });
             let stores = Arc::new(crate::dynamic_view_builder::Stores {
                 upstreams: storage.clone(),
                 principals: storage.clone(),
@@ -1045,6 +1095,7 @@ mod tests {
                 aead,
                 oauth_cfg,
                 refresh_calls,
+                scheduler_backend,
             }
         }
 
@@ -1090,14 +1141,17 @@ mod tests {
             config: LazyRefreshContentionConfig,
         ) -> LazyRefresher {
             LazyRefresher::new_with_claim_guard_for_tests(
-                self.stores.clone(),
-                self.aead.clone(),
-                self.oauth_cfg.clone(),
+                LazyRefresherDeps {
+                    stores: self.stores.clone(),
+                    aead: self.aead.clone(),
+                    oauth_cfg: self.oauth_cfg.clone(),
+                },
                 Uuid::new_v4(),
                 None,
                 CancellationToken::new(),
                 claims,
                 config,
+                self.scheduler_backend.clone(),
             )
         }
 

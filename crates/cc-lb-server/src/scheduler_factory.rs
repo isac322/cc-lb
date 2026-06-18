@@ -1,4 +1,9 @@
+use std::sync::Arc;
+
 use cc_lb_config::{SchedulerConfig, StorageConfig};
+use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
+
 #[cfg(feature = "postgres")]
 pub use cc_lb_scheduler::worker::PostgresSchedulerStorage;
 pub use cc_lb_scheduler::worker::SchedulerBackend;
@@ -11,14 +16,88 @@ pub struct OpenedScheduler {
     pub leader_connection: Option<LeaderConnectionHandle>,
 }
 
+impl OpenedScheduler {
+    pub fn lazy_handle(&self) -> SchedulerBackend {
+        self.backend.clone()
+    }
+
+    pub async fn probe_leader(&self) -> Result<(), SchedulerFactoryError> {
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = self;
+            Ok(())
+        }
+        #[cfg(feature = "postgres")]
+        {
+            let Some(leader) = &self.leader_connection else {
+                return Ok(());
+            };
+            let acquired = leader
+                .election
+                .try_acquire()
+                .await
+                .map_err(leader_lock_error)?;
+            if acquired {
+                leader.election.release().await.map_err(leader_lock_error)?;
+            }
+            Ok(())
+        }
+    }
+
+    pub fn spawn(
+        &self,
+        config: cc_lb_config::Config,
+        cancel: CancellationToken,
+    ) -> Result<Vec<JoinHandle<()>>, SchedulerFactoryError> {
+        self.backend
+            .spawn(config, self.leader_election(), cancel)
+            .map_err(|error| SchedulerFactoryError::StartupFailed {
+                message: error.to_string(),
+            })
+    }
+
+    pub fn leader_election(&self) -> Arc<cc_lb_scheduler::leader_election::LeaderElection> {
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = self;
+            Arc::new(cc_lb_scheduler::leader_election::LeaderElection::sqlite())
+        }
+        #[cfg(feature = "postgres")]
+        {
+            self.leader_connection
+                .as_ref()
+                .map(|connection| connection.election.clone())
+                .unwrap_or_else(|| {
+                    Arc::new(cc_lb_scheduler::leader_election::LeaderElection::sqlite())
+                })
+        }
+    }
+
+    pub fn leader_shutdown_election(
+        &self,
+    ) -> Option<Arc<cc_lb_scheduler::leader_election::LeaderElection>> {
+        #[cfg(not(feature = "postgres"))]
+        {
+            let _ = self;
+            None
+        }
+        #[cfg(feature = "postgres")]
+        {
+            self.leader_connection
+                .as_ref()
+                .map(|connection| connection.election.clone())
+        }
+    }
+}
+
 #[cfg(feature = "postgres")]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct LeaderConnectionHandle {
-    pub election: cc_lb_scheduler::leader_election::LeaderElection,
+    pub election: Arc<cc_lb_scheduler::leader_election::LeaderElection>,
 }
 
 #[cfg(not(feature = "postgres"))]
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct LeaderConnectionHandle;
 
 #[derive(Debug, thiserror::Error)]
@@ -31,6 +110,8 @@ pub enum SchedulerFactoryError {
     MigrationFailed { message: String },
     #[error("scheduler leader connection failed: {message}")]
     LeaderConnectionFailed { message: String },
+    #[error("scheduler startup failed: {message}")]
+    StartupFailed { message: String },
 }
 
 pub async fn open_scheduler_storage(
@@ -65,7 +146,8 @@ async fn open_sqlite(
         SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous,
     };
 
-    let database_url = format!("sqlite://{}", path.display());
+    let scheduler_path = scheduler_sqlite_path(path);
+    let database_url = format!("sqlite://{}", scheduler_path.display());
     let options = SqliteConnectOptions::from_str(&database_url)
         .map_err(connection_error)?
         .create_if_missing(true)
@@ -91,11 +173,17 @@ async fn open_sqlite(
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool)
         .await
         .map_err(migration_error)?;
-    let storage = apalis_sqlite::SqliteStorage::new(&pool);
+    let storage =
+        apalis_sqlite::SqliteStorage::new_in_queue(&pool, cc_lb_scheduler::worker::ENTITY_QUEUE);
     Ok(OpenedScheduler {
         backend: SchedulerBackend::Sqlite(SqliteSchedulerStorage { pool, storage }),
         leader_connection: None,
     })
+}
+
+#[cfg(feature = "sqlite")]
+fn scheduler_sqlite_path(path: &std::path::Path) -> std::path::PathBuf {
+    path.with_extension("scheduler.sqlite")
 }
 
 #[cfg(not(feature = "postgres"))]
@@ -162,11 +250,25 @@ async fn open_postgres(
         leader,
         scheduler.leader_lock_key,
     );
-    let storage = apalis_postgres::PostgresStorage::new(&pool);
+    let storage = apalis_postgres::PostgresStorage::new_with_config(
+        &pool,
+        &apalis_postgres::Config::new(cc_lb_scheduler::worker::ENTITY_QUEUE),
+    );
     Ok(OpenedScheduler {
         backend: SchedulerBackend::Postgres(PostgresSchedulerStorage { pool, storage }),
-        leader_connection: Some(LeaderConnectionHandle { election }),
+        leader_connection: Some(LeaderConnectionHandle {
+            election: Arc::new(election),
+        }),
     })
+}
+
+#[cfg(feature = "postgres")]
+fn leader_lock_error(
+    error: cc_lb_scheduler::leader_election::LeaderError,
+) -> SchedulerFactoryError {
+    SchedulerFactoryError::LeaderConnectionFailed {
+        message: error.to_string(),
+    }
 }
 
 #[cfg(feature = "sqlite")]

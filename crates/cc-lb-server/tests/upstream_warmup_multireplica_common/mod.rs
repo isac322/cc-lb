@@ -18,7 +18,9 @@ use axum::response::IntoResponse;
 use axum::routing::post;
 use cc_lb_admin::{AdminState, CurrentConfig};
 use cc_lb_aead::{AeadEncryptedField, AeadService, OAuthTokenBundle};
-use cc_lb_config::{AnthropicOAuthConfig, Config};
+use cc_lb_config::{
+    AnthropicOAuthConfig, Config, PostgresPoolConfig, SchedulerConfig, StorageConfig,
+};
 use cc_lb_core::api_keys::concurrent_guard::KeyConcurrencyManager;
 use cc_lb_core::api_keys::limit_engine::LimitEngine;
 use cc_lb_core::api_keys::principal_view::PrincipalView;
@@ -33,6 +35,7 @@ use cc_lb_plugin_api::{
 };
 use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_server::refresh::LazyRefresher;
+use cc_lb_server::scheduler_factory::SchedulerBackend;
 use cc_lb_server::upstream_warmup_loop::UpstreamWarmupLoop;
 use cc_lb_server::warmup::stable_jitter_ms;
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -78,6 +81,7 @@ pub struct PostgresWarmupFixture {
     pub storage: Arc<PostgresStorage>,
     pub stores: Arc<Stores>,
     pub aead: Arc<AeadService>,
+    scheduler_backend: SchedulerBackend,
 }
 
 impl PostgresWarmupFixture {
@@ -117,6 +121,14 @@ impl PostgresWarmupFixture {
 
         let stores = stores_from_postgres(storage.clone());
         let aead = Arc::new(AeadService::from_master_key([17; 32]));
+        let opened_scheduler = cc_lb_server::open_scheduler_storage(
+            &StorageConfig::Postgres {
+                url: url.clone(),
+                pool: PostgresPoolConfig::default(),
+            },
+            &SchedulerConfig::default(),
+        )
+        .await?;
 
         Ok(Some(Self {
             schema,
@@ -125,6 +137,7 @@ impl PostgresWarmupFixture {
             storage,
             stores,
             aead,
+            scheduler_backend: opened_scheduler.backend,
         }))
     }
 
@@ -148,6 +161,7 @@ impl PostgresWarmupFixture {
             replica_id,
             None,
             CancellationToken::new(),
+            self.scheduler_backend.clone(),
         ));
         let (subscription_quota_sink, _subscription_quota_rx) =
             SubscriptionQuotaSink::with_capacity(16);

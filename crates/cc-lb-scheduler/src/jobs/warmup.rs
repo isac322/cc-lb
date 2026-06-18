@@ -96,62 +96,45 @@ pub trait WarmupCycleEffects {
 
 #[cfg(feature = "sqlite")]
 impl WarmupCycleEffects for WarmupEffectsStore<sqlx::Sqlite> {
-    fn try_acquire_cycle(
+    async fn try_acquire_cycle(
         &self,
         upstream_id: Uuid,
         cycle_key: u64,
         completed_at_unix_secs: u64,
-    ) -> impl Future<Output = Result<bool>> + Send + '_ {
-        async move {
-            WarmupEffectsStore::<sqlx::Sqlite>::try_acquire_cycle(
-                self,
-                upstream_id,
-                cycle_key,
-                completed_at_unix_secs,
-            )
-            .await
-        }
+    ) -> Result<bool> {
+        WarmupEffectsStore::<sqlx::Sqlite>::try_acquire_cycle(
+            self,
+            upstream_id,
+            cycle_key,
+            completed_at_unix_secs,
+        )
+        .await
     }
 
-    fn is_already_done(
-        &self,
-        upstream_id: Uuid,
-        cycle_key: u64,
-    ) -> impl Future<Output = Result<bool>> + Send + '_ {
-        async move {
-            WarmupEffectsStore::<sqlx::Sqlite>::is_already_done(self, upstream_id, cycle_key).await
-        }
+    async fn is_already_done(&self, upstream_id: Uuid, cycle_key: u64) -> Result<bool> {
+        WarmupEffectsStore::<sqlx::Sqlite>::is_already_done(self, upstream_id, cycle_key).await
     }
 }
 
 #[cfg(feature = "postgres")]
 impl WarmupCycleEffects for WarmupEffectsStore<sqlx::Postgres> {
-    fn try_acquire_cycle(
+    async fn try_acquire_cycle(
         &self,
         upstream_id: Uuid,
         cycle_key: u64,
         completed_at_unix_secs: u64,
-    ) -> impl Future<Output = Result<bool>> + Send + '_ {
-        async move {
-            WarmupEffectsStore::<sqlx::Postgres>::try_acquire_cycle(
-                self,
-                upstream_id,
-                cycle_key,
-                completed_at_unix_secs,
-            )
-            .await
-        }
+    ) -> Result<bool> {
+        WarmupEffectsStore::<sqlx::Postgres>::try_acquire_cycle(
+            self,
+            upstream_id,
+            cycle_key,
+            completed_at_unix_secs,
+        )
+        .await
     }
 
-    fn is_already_done(
-        &self,
-        upstream_id: Uuid,
-        cycle_key: u64,
-    ) -> impl Future<Output = Result<bool>> + Send + '_ {
-        async move {
-            WarmupEffectsStore::<sqlx::Postgres>::is_already_done(self, upstream_id, cycle_key)
-                .await
-        }
+    async fn is_already_done(&self, upstream_id: Uuid, cycle_key: u64) -> Result<bool> {
+        WarmupEffectsStore::<sqlx::Postgres>::is_already_done(self, upstream_id, cycle_key).await
     }
 }
 

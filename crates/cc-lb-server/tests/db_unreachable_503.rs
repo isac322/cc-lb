@@ -17,7 +17,7 @@ use cc_lb_config::{Config, DownstreamAuthMode, PostgresPoolConfig, StorageConfig
 use cc_lb_server::app::{
     App, build_app_for_testing_postgres, build_app_with_storage, seed_app_testing_storage,
 };
-use cc_lb_storage_api::{BackendKind, ManagedKeyStore, Storage as StorageTrait};
+use cc_lb_storage_api::{BackendKind, ManagedKeyStore, MetaStore, Storage as StorageTrait};
 use cc_lb_storage_postgres::adapter::retry::RetryPolicy;
 use cc_lb_storage_postgres::{PostgresManagedKeyStore, PostgresStorage};
 use http::header::RETRY_AFTER;

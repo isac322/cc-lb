@@ -28,12 +28,9 @@ where
     Store: ?Sized,
     Arc<Store>: IntoUsagePrunerStorage + Clone + Send + Sync + 'static,
 {
-    fn prune_once_for_retention(
-        &self,
-        retention_days: u64,
-    ) -> impl Future<Output = PruneResult> + Send + '_ {
+    async fn prune_once_for_retention(&self, retention_days: u64) -> PruneResult {
         let storage = Arc::clone(self);
-        async move { UsagePruner::new(storage, retention_days).prune_once().await }
+        UsagePruner::new(storage, retention_days).prune_once().await
     }
 }
 

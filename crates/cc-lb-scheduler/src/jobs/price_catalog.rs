@@ -77,17 +77,15 @@ pub trait PriceCatalogRefreshLoader {
 }
 
 impl PriceCatalogRefreshLoader for LiteLlmLoader {
-    fn fetch_and_fingerprint(
-        &self,
-    ) -> impl Future<Output = std::result::Result<FetchedCatalog, LoaderError>> + Send + '_ {
-        async move { LiteLlmLoader::fetch_and_fingerprint(self).await }
+    async fn fetch_and_fingerprint(&self) -> std::result::Result<FetchedCatalog, LoaderError> {
+        LiteLlmLoader::fetch_and_fingerprint(self).await
     }
 
-    fn persist_snapshot<'a>(
-        &'a self,
-        fetched: &'a FetchedCatalog,
-    ) -> impl Future<Output = std::result::Result<(), LoaderError>> + Send + 'a {
-        async move { LiteLlmLoader::persist_snapshot(self, fetched).await }
+    async fn persist_snapshot(
+        &self,
+        fetched: &FetchedCatalog,
+    ) -> std::result::Result<(), LoaderError> {
+        LiteLlmLoader::persist_snapshot(self, fetched).await
     }
 }
 
@@ -107,55 +105,51 @@ pub trait PriceCatalogVersionRepository: Clone + Send + Sync {
 
 #[cfg(feature = "sqlite")]
 impl PriceCatalogVersionRepository for PriceCatalogVersionsStore<sqlx::Sqlite> {
-    fn read_price_catalog_version<'a>(
-        &'a self,
-        source: &'a str,
-    ) -> impl Future<Output = Result<Option<PriceCatalogVersion>>> + Send + 'a {
-        async move { PriceCatalogVersionsStore::<sqlx::Sqlite>::read(self, source).await }
+    async fn read_price_catalog_version(
+        &self,
+        source: &str,
+    ) -> Result<Option<PriceCatalogVersion>> {
+        PriceCatalogVersionsStore::<sqlx::Sqlite>::read(self, source).await
     }
 
-    fn upsert_price_catalog_fingerprint<'a>(
-        &'a self,
-        source: &'a str,
-        fingerprint: &'a str,
+    async fn upsert_price_catalog_fingerprint(
+        &self,
+        source: &str,
+        fingerprint: &str,
         fetched_at_unix_secs: u64,
-    ) -> impl Future<Output = Result<()>> + Send + 'a {
-        async move {
-            PriceCatalogVersionsStore::<sqlx::Sqlite>::upsert_fingerprint(
-                self,
-                source,
-                fingerprint,
-                fetched_at_unix_secs,
-            )
-            .await
-        }
+    ) -> Result<()> {
+        PriceCatalogVersionsStore::<sqlx::Sqlite>::upsert_fingerprint(
+            self,
+            source,
+            fingerprint,
+            fetched_at_unix_secs,
+        )
+        .await
     }
 }
 
 #[cfg(feature = "postgres")]
 impl PriceCatalogVersionRepository for PriceCatalogVersionsStore<sqlx::Postgres> {
-    fn read_price_catalog_version<'a>(
-        &'a self,
-        source: &'a str,
-    ) -> impl Future<Output = Result<Option<PriceCatalogVersion>>> + Send + 'a {
-        async move { PriceCatalogVersionsStore::<sqlx::Postgres>::read(self, source).await }
+    async fn read_price_catalog_version(
+        &self,
+        source: &str,
+    ) -> Result<Option<PriceCatalogVersion>> {
+        PriceCatalogVersionsStore::<sqlx::Postgres>::read(self, source).await
     }
 
-    fn upsert_price_catalog_fingerprint<'a>(
-        &'a self,
-        source: &'a str,
-        fingerprint: &'a str,
+    async fn upsert_price_catalog_fingerprint(
+        &self,
+        source: &str,
+        fingerprint: &str,
         fetched_at_unix_secs: u64,
-    ) -> impl Future<Output = Result<()>> + Send + 'a {
-        async move {
-            PriceCatalogVersionsStore::<sqlx::Postgres>::upsert_fingerprint(
-                self,
-                source,
-                fingerprint,
-                fetched_at_unix_secs,
-            )
-            .await
-        }
+    ) -> Result<()> {
+        PriceCatalogVersionsStore::<sqlx::Postgres>::upsert_fingerprint(
+            self,
+            source,
+            fingerprint,
+            fetched_at_unix_secs,
+        )
+        .await
     }
 }
 
