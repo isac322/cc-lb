@@ -1,6 +1,48 @@
-import { useEffect, useMemo, useReducer } from 'react';
+import { useMemo, useSyncExternalStore } from 'react';
 import { formatAbsolute, useLocale, useTimezone } from '../../lib/locale';
 import { cx, Hint } from './primitives';
+
+const RELATIVE_TIME_TICK_MS = 1_000;
+
+let currentNowMs = Date.now();
+let clockIntervalId: number | undefined;
+const clockSubscribers = new Set<() => void>();
+
+function emitClockTick() {
+  currentNowMs = Date.now();
+  for (const subscriber of clockSubscribers) {
+    subscriber();
+  }
+}
+
+function subscribeToClock(subscriber: () => void): () => void {
+  clockSubscribers.add(subscriber);
+  if (clockSubscribers.size === 1 && typeof window !== 'undefined') {
+    currentNowMs = Date.now();
+    clockIntervalId = window.setInterval(emitClockTick, RELATIVE_TIME_TICK_MS);
+  }
+
+  return () => {
+    clockSubscribers.delete(subscriber);
+    if (clockSubscribers.size === 0 && clockIntervalId !== undefined) {
+      window.clearInterval(clockIntervalId);
+      clockIntervalId = undefined;
+    }
+  };
+}
+
+function getClockSnapshot(): number {
+  return currentNowMs;
+}
+
+function useClockNow(): Date {
+  const nowMs = useSyncExternalStore(
+    subscribeToClock,
+    getClockSnapshot,
+    getClockSnapshot,
+  );
+  return useMemo(() => new Date(nowMs), [nowMs]);
+}
 
 const UNITS: { unit: Intl.RelativeTimeFormatUnit; ms: number }[] = [
   { unit: 'year', ms: 365 * 24 * 60 * 60 * 1000 },
@@ -48,13 +90,9 @@ export function RelativeTime({
     if (typeof ts === 'number') return new Date(ts);
     return ts;
   }, [ts]);
-  const [, force] = useReducer((x) => x + 1, 0);
-  useEffect(() => {
-    const id = setInterval(force, 30_000);
-    return () => clearInterval(id);
-  }, []);
+  const now = useClockNow();
   if (!date) return <span className={cx('text-text-faint', className)}>—</span>;
-  const rel = formatRelative(date, locale);
+  const rel = formatRelative(date, locale, now);
   const abs = formatAbsolute(date, locale, timezone);
   return (
     <Hint label={abs}>
@@ -81,15 +119,10 @@ export function ResetCountdown({
     if (typeof ts === 'number') return new Date(ts);
     return ts;
   }, [ts]);
-  const [, force] = useReducer((x) => x + 1, 0);
-  useEffect(() => {
-    const id = setInterval(force, 60_000);
-    return () => clearInterval(id);
-  }, []);
+  const now = useClockNow();
 
   if (!date) return <span className={cx('text-text-faint', className)}>—</span>;
 
-  const now = new Date();
   const diffMs = date.getTime() - now.getTime();
   const absMs = Math.abs(diffMs);
   const abs = formatAbsolute(date, locale, timezone);
