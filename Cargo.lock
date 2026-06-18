@@ -123,6 +123,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
+name = "apalis"
+version = "1.0.0-rc.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7780d1e7082500a4fdb463b0a6fc1c00e4012cd9b2af101c26fcabbb2f390f2c"
+dependencies = [
+ "apalis-core",
+ "futures-util",
+ "metrics",
+ "metrics-exporter-prometheus",
+ "pin-project",
+ "thiserror 2.0.18",
+ "tower",
+]
+
+[[package]]
 name = "apalis-codec"
 version = "0.1.0-rc.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -938,12 +953,15 @@ name = "cc-lb-scheduler"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "apalis",
+ "apalis-codec",
  "apalis-core",
  "apalis-cron",
  "apalis-postgres",
  "apalis-sqlite",
  "async-trait",
  "cc-lb-aead",
+ "cc-lb-config",
  "cc-lb-core",
  "cc-lb-pricing",
  "cc-lb-storage-api",

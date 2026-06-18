@@ -118,9 +118,9 @@ async fn cron_sqlite_records_one_tick_across_replicas() -> Result<(), Box<dyn st
 #[cfg(feature = "postgres")]
 mod postgres_tests {
     use super::*;
-    use std::str::FromStr as _;
     use apalis_postgres::{Config, PgPool, PostgresStorage};
     use sqlx::postgres::{PgConnectOptions, PgPoolOptions};
+    use std::str::FromStr as _;
     use uuid::Uuid;
 
     fn is_safe_database_url(url: &str) -> bool {
@@ -158,7 +158,9 @@ mod postgres_tests {
         Ok(())
     }
 
-    async fn assert_postgres_cron_behavior(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
+    async fn assert_postgres_cron_behavior(
+        pool: &PgPool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let queue = "cron_conformance_postgres";
         PostgresStorage::setup(pool).await?;
 
@@ -198,7 +200,8 @@ mod postgres_tests {
     }
 
     #[tokio::test]
-    async fn cron_postgres_records_one_tick_across_replicas() -> Result<(), Box<dyn std::error::Error>> {
+    async fn cron_postgres_records_one_tick_across_replicas()
+    -> Result<(), Box<dyn std::error::Error>> {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             eprintln!("SKIP: DATABASE_URL not set; skipping postgres cron conformance test");
             return Ok(());

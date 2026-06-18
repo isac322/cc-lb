@@ -1,47 +1,14 @@
 use cc_lb_config::{SchedulerConfig, StorageConfig};
+#[cfg(feature = "postgres")]
+pub use cc_lb_scheduler::worker::PostgresSchedulerStorage;
+pub use cc_lb_scheduler::worker::SchedulerBackend;
+#[cfg(feature = "sqlite")]
+pub use cc_lb_scheduler::worker::SqliteSchedulerStorage;
 
 #[derive(Debug)]
 pub struct OpenedScheduler {
     pub backend: SchedulerBackend,
     pub leader_connection: Option<LeaderConnectionHandle>,
-}
-
-#[derive(Debug)]
-pub enum SchedulerBackend {
-    #[cfg(feature = "sqlite")]
-    Sqlite(SqliteSchedulerStorage),
-    #[cfg(feature = "postgres")]
-    Postgres(PostgresSchedulerStorage),
-}
-
-#[cfg(feature = "sqlite")]
-pub type SqliteApalisStorage = apalis_sqlite::SqliteStorage<
-    serde_json::Value,
-    apalis_codec::json::JsonCodec<apalis_sqlite::CompactType>,
-    apalis_sqlite::fetcher::SqliteFetcher,
->;
-
-#[cfg(feature = "sqlite")]
-#[derive(Debug)]
-pub struct SqliteSchedulerStorage {
-    pub pool: scheduler_sqlx::SqlitePool,
-    pub storage: SqliteApalisStorage,
-}
-
-#[cfg(feature = "postgres")]
-pub struct PostgresSchedulerStorage {
-    pub pool: scheduler_sqlx::PgPool,
-    pub storage: apalis_postgres::PostgresStorage<serde_json::Value>,
-}
-
-#[cfg(feature = "postgres")]
-impl std::fmt::Debug for PostgresSchedulerStorage {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("PostgresSchedulerStorage")
-            .field("pool", &self.pool)
-            .finish_non_exhaustive()
-    }
 }
 
 #[cfg(feature = "postgres")]

@@ -13,11 +13,14 @@ postgres = ["sqlx/postgres", "apalis-postgres"]
 
 [dependencies]
 anyhow = { workspace = true }
+apalis = { version = "^1.0.0-rc.9", features = ["catch-panic", "limit", "prometheus", "timeout"], default-features = false }
+apalis-codec = { version = "0.1.0-rc.9", default-features = false, features = ["json"] }
 apalis-core = "^1.0.0-rc.9"
 apalis-cron = "^1.0.0-rc.8"
 apalis-postgres = { version = "^1.0.0-rc.8", optional = true }
 apalis-sqlite = { version = "^1.0.0-rc.8", optional = true }
 cc-lb-aead = { path = "../cc-lb-aead" }
+cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-core = { path = "../cc-lb-core" }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }

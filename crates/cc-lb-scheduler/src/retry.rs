@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::task::{Context as TaskContext, Poll};
 use std::time::Duration;
 
+use serde::{Deserialize, Serialize};
 use tower::{Layer, Service};
 
 type RetryFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
@@ -132,7 +133,7 @@ impl JitterRatio {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum JobOutcome {
     Done,
     Retry { delay: Duration },
@@ -190,17 +191,18 @@ where
     }
 
     fn call(&mut self, payload: P) -> Self::Future {
-        let Some(delay) = self
-            .class
-            .next_delay_with_seed(payload.attempt_count(), payload.retry_seed())
-        else {
-            return Box::pin(async { Ok(JobOutcome::DeadLetter) });
-        };
-
+        let attempt_count = payload.attempt_count();
+        let retry_seed = payload.retry_seed();
+        let class = self.class;
         let future = self.inner.call(payload);
         Box::pin(async move {
             match future.await? {
-                JobOutcome::Retry { delay: _inner } => Ok(JobOutcome::Retry { delay }),
+                JobOutcome::Retry { delay: _inner } => {
+                    let Some(delay) = class.next_delay_with_seed(attempt_count, retry_seed) else {
+                        return Ok(JobOutcome::DeadLetter);
+                    };
+                    Ok(JobOutcome::Retry { delay })
+                }
                 JobOutcome::Done => Ok(JobOutcome::Done),
                 JobOutcome::DeadLetter => Ok(JobOutcome::DeadLetter),
             }
