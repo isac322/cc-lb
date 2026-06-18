@@ -219,7 +219,7 @@ function AuditPage() {
                       onClick={() => setSelected(e)}
                     >
                       <td className="px-3 py-2 text-text-faint whitespace-nowrap">
-                        <RelativeTime ts={eventTime(e)} />
+                        <RelativeTime compact ts={eventTime(e)} />
                       </td>
                       <td className="px-3 py-2 truncate max-w-[160px]">
                         {principalNameMap.get(e.principal_id ?? '') ??
