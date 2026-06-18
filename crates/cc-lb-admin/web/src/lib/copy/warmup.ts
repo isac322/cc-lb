@@ -22,6 +22,8 @@ export const COPY = {
   dialectPluginClearSuccess: 'Shape plugin cleared',
   disabledEmpty:
     'Warmup is off for this upstream. Enable to keep the 5h OAuth window primed.',
+  upstreamPausedEmpty:
+    'Upstream is disabled, so warmup is paused. Re-enable the upstream to resume scheduled warmups.',
   nextNull: 'Not yet scheduled — will fire on next tick or use Fire warmup now',
   lastNull: 'Never warmed',
   confirmFireBody:
