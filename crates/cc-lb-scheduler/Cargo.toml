@@ -1,0 +1,25 @@
+[package]
+name = "cc-lb-scheduler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[features]
+postgres = []
+
+[[test]]
+name = "spike_uniqueness_postgres"
+required-features = ["postgres"]
+
+[[test]]
+name = "spike_cron_leader"
+required-features = ["postgres"]
+
+[dev-dependencies]
+apalis-cron = "=1.0.0-rc.8"
+cron = "0.16"
+futures-util = "0.3"
+sqlx = { workspace = true }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
