@@ -146,6 +146,7 @@ impl SubscriptionQuotaStatus {
         Some(match value {
             "allowed" => Self::Allowed,
             "allowed_warning" => Self::AllowedWarning,
+            "exceeded" | "exceeded_overage" => Self::Rejected,
             "rejected" => Self::Rejected,
             _ => return None,
         })
@@ -223,6 +224,7 @@ pub struct SubscriptionQuotaObservationRecord {
     pub resets_at_unix_secs: Option<u64>,
     pub surpassed_threshold: Option<bool>,
     pub representative_claim: Option<String>,
+    pub fallback_percentage: Option<f64>,
     pub disabled_reason: Option<String>,
 
     pub extra_usage_enabled: Option<bool>,

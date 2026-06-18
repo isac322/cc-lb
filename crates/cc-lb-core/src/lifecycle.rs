@@ -2329,6 +2329,7 @@ pub fn observe_subscription_quota_headers(
             resets_at_unix_secs: observation.resets_at_unix_secs,
             surpassed_threshold: observation.surpassed_threshold,
             representative_claim: observation.representative_claim,
+            fallback_percentage: observation.fallback_percentage,
             disabled_reason: observation.disabled_reason,
             extra_usage_enabled: None,
             extra_usage_monthly_limit: None,
@@ -4271,6 +4272,10 @@ mod tests {
             HeaderName::from_static("anthropic-ratelimit-unified-7d-sonnet-status"),
             HeaderValue::from_static("allowed_warning"),
         );
+        headers.insert(
+            HeaderName::from_static("anthropic-ratelimit-unified-7d-sonnet-fallback-percentage"),
+            HeaderValue::from_static("0.5"),
+        );
 
         let records = observe_subscription_quota_headers(&headers, upstream_id, 123_456);
 
@@ -4287,6 +4292,7 @@ mod tests {
             records[0].status,
             Some(SubscriptionQuotaStatus::AllowedWarning)
         );
+        assert_eq!(records[0].fallback_percentage, Some(0.5));
     }
 
     #[test]

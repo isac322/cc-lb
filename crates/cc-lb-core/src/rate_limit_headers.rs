@@ -16,6 +16,7 @@ pub struct UnifiedQuotaObservation {
     pub resets_at_unix_secs: Option<u64>,
     pub surpassed_threshold: Option<bool>,
     pub representative_claim: Option<String>,
+    pub fallback_percentage: Option<f64>,
     pub disabled_reason: Option<String>,
 }
 
@@ -28,6 +29,7 @@ impl Default for UnifiedQuotaObservation {
             resets_at_unix_secs: None,
             surpassed_threshold: None,
             representative_claim: None,
+            fallback_percentage: None,
             disabled_reason: None,
         }
     }
@@ -61,6 +63,7 @@ enum UnifiedQuotaField {
     Status,
     SurpassedThreshold,
     RepresentativeClaim,
+    FallbackPercentage,
     DisabledReason,
 }
 
@@ -71,6 +74,7 @@ struct PartialUnifiedQuotaObservation {
     resets_at_unix_secs: Option<u64>,
     surpassed_threshold: Option<bool>,
     representative_claim: Option<String>,
+    fallback_percentage: Option<f64>,
     disabled_reason: Option<String>,
 }
 
@@ -81,6 +85,7 @@ impl PartialUnifiedQuotaObservation {
             && self.resets_at_unix_secs.is_none()
             && self.surpassed_threshold.is_none()
             && self.representative_claim.is_none()
+            && self.fallback_percentage.is_none()
             && self.disabled_reason.is_none()
         {
             return None;
@@ -93,6 +98,7 @@ impl PartialUnifiedQuotaObservation {
             resets_at_unix_secs: self.resets_at_unix_secs,
             surpassed_threshold: self.surpassed_threshold,
             representative_claim: self.representative_claim,
+            fallback_percentage: self.fallback_percentage,
             disabled_reason: self.disabled_reason,
         })
     }
@@ -192,6 +198,11 @@ pub fn parse_anthropic_unified_headers(headers: &HeaderMap) -> Vec<UnifiedQuotaO
             UnifiedQuotaField::RepresentativeClaim => {
                 if let Some(parsed) = parse_string(value) {
                     partial.representative_claim = Some(parsed);
+                }
+            }
+            UnifiedQuotaField::FallbackPercentage => {
+                if let Some(parsed) = parse_f64(value) {
+                    partial.fallback_percentage = Some(clamp_utilization_fraction(parsed));
                 }
             }
             UnifiedQuotaField::DisabledReason => {
@@ -360,6 +371,7 @@ fn parse_unified_field(value: &str) -> Option<UnifiedQuotaField> {
         "status" => Some(UnifiedQuotaField::Status),
         "surpassed-threshold" => Some(UnifiedQuotaField::SurpassedThreshold),
         "representative-claim" => Some(UnifiedQuotaField::RepresentativeClaim),
+        "fallback-percentage" => Some(UnifiedQuotaField::FallbackPercentage),
         "disabled-reason" => Some(UnifiedQuotaField::DisabledReason),
         _ => None,
     }
@@ -610,6 +622,18 @@ mod tests {
     }
 
     #[test]
+    fn unified_top_level_fallback_percentage_is_clamped() {
+        let observations = parse_anthropic_unified_headers(&headers(&[(
+            "anthropic-ratelimit-unified-fallback-percentage",
+            "1.5",
+        )]));
+
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].window, SubscriptionQuotaWindow::Unified);
+        assert_eq!(observations[0].fallback_percentage, Some(1.0));
+    }
+
+    #[test]
     fn unified_five_hour_utilization_emits_five_hour_window() {
         let observations = parse_anthropic_unified_headers(&headers(&[(
             "anthropic-ratelimit-unified-5h-utilization",
@@ -630,6 +654,27 @@ mod tests {
         assert_eq!(
             observations[0].status,
             Some(SubscriptionQuotaStatus::AllowedWarning)
+        );
+    }
+
+    #[test]
+    fn unified_exceeded_statuses_map_to_rejected() {
+        let observations = parse_anthropic_unified_headers(&headers(&[
+            ("anthropic-ratelimit-unified-5h-status", "exceeded"),
+            (
+                "anthropic-ratelimit-unified-overage-status",
+                "exceeded_overage",
+            ),
+        ]));
+
+        assert_eq!(observations.len(), 2);
+        assert_eq!(
+            observations[0].status,
+            Some(SubscriptionQuotaStatus::Rejected)
+        );
+        assert_eq!(
+            observations[1].status,
+            Some(SubscriptionQuotaStatus::Rejected)
         );
     }
 
@@ -842,6 +887,7 @@ mod tests {
             observations[0].representative_claim.as_deref(),
             Some("org:claim")
         );
+        assert_eq!(observations[0].fallback_percentage, Some(0.5));
         assert_eq!(observations[1].window, SubscriptionQuotaWindow::FiveHour);
         assert_eq!(observations[1].utilization, Some(0.10));
         assert_eq!(

@@ -37,6 +37,7 @@ pub fn unified_observation_to_record(
         resets_at_unix_secs: observation.resets_at_unix_secs,
         surpassed_threshold: observation.surpassed_threshold,
         representative_claim: observation.representative_claim,
+        fallback_percentage: observation.fallback_percentage,
         disabled_reason: observation.disabled_reason,
         extra_usage_enabled: None,
         extra_usage_monthly_limit: None,
@@ -261,6 +262,10 @@ impl From<&SubscriptionQuotaObservationRecord> for Fingerprint {
         record.resets_at_unix_secs.hash(&mut hasher);
         record.surpassed_threshold.hash(&mut hasher);
         record.representative_claim.hash(&mut hasher);
+        record
+            .fallback_percentage
+            .map(f64::to_bits)
+            .hash(&mut hasher);
         record.disabled_reason.hash(&mut hasher);
         record.extra_usage_enabled.hash(&mut hasher);
         record
