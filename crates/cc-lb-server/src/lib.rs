@@ -6,7 +6,6 @@
 // 2: startup validation/preflight/storage kind fatal errors
 
 pub(crate) mod admin_plugins;
-pub mod anthropic_compat_poller;
 pub mod app;
 pub mod bootstrap;
 pub mod build_meta;
@@ -36,7 +35,6 @@ pub mod validate;
 pub mod version;
 pub mod warmup;
 
-pub use anthropic_compat_poller::{AnthropicCompatPoller, spawn_anthropic_compat_poller};
 pub use app::{App, BuildError, build_app, build_app_with_path, run_serve};
 #[cfg(any(feature = "sqlite", feature = "postgres"))]
 pub use scheduler_factory::{

@@ -55,8 +55,6 @@ pub struct Config {
     pub oauth: OAuthConfig,
     #[serde(default)]
     pub subscription_quota: SubscriptionQuotaConfig,
-    #[serde(default)]
-    pub anthropic_compat_poller: AnthropicCompatPollerConfig,
     pub runtime: RuntimeConfig,
     pub circuit_breaker: CircuitBreakerConfig,
     pub bulkhead: BulkheadConfig,
@@ -628,30 +626,6 @@ impl Default for SubscriptionQuotaConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct AnthropicCompatPollerConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default = "default_anthropic_compat_poller_tick_interval_secs")]
-    pub tick_interval_secs: u64,
-    #[serde(default = "default_anthropic_compat_poller_jitter_secs")]
-    pub jitter_secs: u64,
-    #[serde(default = "default_anthropic_compat_poller_request_timeout_secs")]
-    pub request_timeout_secs: u64,
-}
-
-impl Default for AnthropicCompatPollerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            tick_interval_secs: 3600,
-            jitter_secs: 60,
-            request_timeout_secs: 10,
-        }
-    }
-}
-
 /// Prompt cache shadow mode configuration.
 ///
 /// Controls the prompt cache observation cache behavior. When `enabled=false`, the cache layer
@@ -1148,18 +1122,6 @@ fn default_subscription_quota_dedup_elapsed_override_secs() -> u64 {
 
 fn default_subscription_quota_routing_max_staleness_secs() -> u64 {
     SubscriptionQuotaConfig::default().routing_max_staleness_secs
-}
-
-fn default_anthropic_compat_poller_tick_interval_secs() -> u64 {
-    AnthropicCompatPollerConfig::default().tick_interval_secs
-}
-
-fn default_anthropic_compat_poller_jitter_secs() -> u64 {
-    AnthropicCompatPollerConfig::default().jitter_secs
-}
-
-fn default_anthropic_compat_poller_request_timeout_secs() -> u64 {
-    AnthropicCompatPollerConfig::default().request_timeout_secs
 }
 
 fn default_prompt_cache_shadow_grace_margin_secs() -> u64 {

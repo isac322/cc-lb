@@ -15,15 +15,6 @@
         "key_env": "CC_LB_MASTER_KEY"
       }
     },
-    "anthropic_compat_poller": {
-      "$ref": "#/$defs/AnthropicCompatPollerConfig",
-      "default": {
-        "enabled": true,
-        "jitter_secs": 60,
-        "request_timeout_secs": 10,
-        "tick_interval_secs": 3600
-      }
-    },
     "api_keys": {
       "$ref": "#/$defs/ApiKeysConfig",
       "default": {
@@ -246,33 +237,6 @@
         "key_env": {
           "type": "string",
           "default": "CC_LB_MASTER_KEY"
-        }
-      }
-    },
-    "AnthropicCompatPollerConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        },
-        "jitter_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 60,
-          "minimum": 0
-        },
-        "request_timeout_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 10,
-          "minimum": 0
-        },
-        "tick_interval_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 3600,
-          "minimum": 0
         }
       }
     },
