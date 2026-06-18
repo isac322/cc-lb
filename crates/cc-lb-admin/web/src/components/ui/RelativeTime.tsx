@@ -4,38 +4,75 @@ import { makeIntlFormatter } from 'react-timeago/defaultFormatter';
 import { formatAbsolute, useLocale, useTimezone } from '../../lib/locale';
 import { cx, Hint } from './primitives';
 
-function formatDuration(value: number, unit: string, compact: boolean): string {
-  if (!compact) return `${value} ${unit}${value === 1 ? '' : 's'}`;
-  if (unit === 'year') return `${value}y`;
-  if (unit === 'month') return `${value}mo`;
-  if (unit === 'week') return `${value}w`;
-  if (unit === 'day') return `${value}d`;
-  if (unit === 'hour') return `${value}h`;
-  if (unit === 'minute') return `${value}m`;
-  return `${value}s`;
+function isKoreanLocale(locale: string): boolean {
+  return locale.toLowerCase().startsWith('ko');
 }
 
-function makeResetFormatter(
-  futureVerb: string,
-  pastVerb: string,
-  compact: boolean,
-): Formatter {
+const KO_UNIT: Record<string, string> = {
+  year: '년',
+  month: '개월',
+  week: '주',
+  day: '일',
+  hour: '시간',
+  minute: '분',
+  second: '초',
+};
+
+const EN_COMPACT_UNIT: Record<string, string> = {
+  year: 'y',
+  month: 'mo',
+  week: 'w',
+  day: 'd',
+  hour: 'h',
+  minute: 'm',
+  second: 's',
+};
+
+function compactDuration(value: number, unit: string, locale: string): string {
+  if (isKoreanLocale(locale)) {
+    return `${value}${KO_UNIT[unit] ?? unit}`;
+  }
+  return `${value}${EN_COMPACT_UNIT[unit] ?? unit}`;
+}
+
+function makeCompactRelativeFormatter(locale: string): Formatter {
   return (value, unit, suffix) => {
-    const duration = formatDuration(value, unit, compact);
-    if (suffix === 'from now') return `${futureVerb} in ${duration}`;
-    if (unit === 'day' && value > 1 && compact) {
-      return `${pastVerb} >1d ago (stale)`;
+    const duration = compactDuration(value, unit, locale);
+    if (isKoreanLocale(locale)) {
+      return suffix === 'from now' ? `${duration} 후` : `${duration} 전`;
     }
-    return `${pastVerb} ${duration} ago`;
+    return suffix === 'from now' ? `in ${duration}` : `${duration} ago`;
+  };
+}
+
+function makeResetFormatter(locale: string, compact: boolean): Formatter {
+  return (value, unit, suffix) => {
+    const korean = isKoreanLocale(locale);
+    const duration =
+      compact || korean
+        ? compactDuration(value, unit, locale)
+        : `${value} ${unit}${value === 1 ? '' : 's'}`;
+    if (korean) {
+      return suffix === 'from now'
+        ? `${duration} 후 초기화`
+        : `${duration} 전 초기화됨`;
+    }
+    if (suffix === 'from now') return `Resets in ${duration}`;
+    if (compact && unit === 'day' && value > 1) {
+      return 'Reset >1d ago (stale)';
+    }
+    return `Reset ${duration} ago`;
   };
 }
 
 export function RelativeTime({
   ts,
   className,
+  compact = false,
 }: {
   ts: Date | number | null | undefined;
   className?: string;
+  compact?: boolean;
 }) {
   const { effective: locale } = useLocale();
   const { effective: timezone } = useTimezone();
@@ -45,8 +82,11 @@ export function RelativeTime({
     return ts;
   }, [ts]);
   const formatter = useMemo(
-    () => makeIntlFormatter({ locale, numeric: 'auto', style: 'long' }),
-    [locale],
+    () =>
+      compact
+        ? makeCompactRelativeFormatter(locale)
+        : makeIntlFormatter({ locale, numeric: 'auto', style: 'long' }),
+    [locale, compact],
   );
   if (!date) return <span className={cx('text-text-faint', className)}>—</span>;
   const abs = formatAbsolute(date, locale, timezone);
@@ -64,17 +104,30 @@ export function RelativeTime({
   );
 }
 
+export function RelativeOffsetTime({
+  offsetSeconds,
+  className,
+  compact = false,
+}: {
+  offsetSeconds: number | null | undefined;
+  className?: string;
+  compact?: boolean;
+}) {
+  const ts = useMemo(() => {
+    if (offsetSeconds == null) return null;
+    return Date.now() + offsetSeconds * 1000;
+  }, [offsetSeconds]);
+
+  return <RelativeTime className={className} compact={compact} ts={ts} />;
+}
+
 export function ResetCountdown({
   ts,
   className,
-  futureVerb = 'Resets',
-  pastVerb = 'Reset',
   compact = false,
 }: {
   ts: Date | number | null | undefined;
   className?: string;
-  futureVerb?: string;
-  pastVerb?: string;
   compact?: boolean;
 }) {
   const { effective: locale } = useLocale();
@@ -85,8 +138,8 @@ export function ResetCountdown({
     return ts;
   }, [ts]);
   const formatter = useMemo(
-    () => makeResetFormatter(futureVerb, pastVerb, compact),
-    [futureVerb, pastVerb, compact],
+    () => makeResetFormatter(locale, compact),
+    [locale, compact],
   );
 
   if (!date) return <span className={cx('text-text-faint', className)}>—</span>;
