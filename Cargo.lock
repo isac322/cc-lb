@@ -962,6 +962,9 @@ name = "cc-lb-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "apalis-codec",
+ "apalis-postgres",
+ "apalis-sqlite",
  "arc-swap",
  "async-stream",
  "async-trait",
@@ -978,6 +981,7 @@ dependencies = [
  "cc-lb-plugin-wire",
  "cc-lb-pricing",
  "cc-lb-runtime-extism",
+ "cc-lb-scheduler",
  "cc-lb-signer-anthropic-key",
  "cc-lb-signer-anthropic-oauth",
  "cc-lb-storage-api",
@@ -1005,6 +1009,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "siphasher",
+ "sqlx 0.8.6",
  "sqlx 0.9.0",
  "tempfile",
  "thiserror 2.0.18",

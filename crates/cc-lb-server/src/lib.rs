@@ -25,6 +25,7 @@ pub mod refresh;
 pub mod reload;
 pub mod replica;
 pub(crate) mod revision_hash;
+pub mod scheduler_factory;
 pub mod signal;
 pub mod startup_handshake;
 pub mod state_machine;
@@ -40,5 +41,10 @@ pub mod warmup;
 pub use anthropic_compat_poller::{AnthropicCompatPoller, spawn_anthropic_compat_poller};
 pub use app::{App, BuildError, build_app, build_app_with_path, run_serve};
 pub use oauth_usage_poller::{OAuthUsagePoller, spawn_oauth_usage_poller};
+#[cfg(any(feature = "sqlite", feature = "postgres"))]
+pub use scheduler_factory::{
+    LeaderConnectionHandle, OpenedScheduler, SchedulerBackend, SchedulerFactoryError,
+    open_scheduler_storage,
+};
 pub use subscription_quota_cache::{MergedQuotaSnapshot, MergedSource, SubscriptionQuotaCache};
 pub use subscription_quota_gc::spawn_subscription_quota_gc;
