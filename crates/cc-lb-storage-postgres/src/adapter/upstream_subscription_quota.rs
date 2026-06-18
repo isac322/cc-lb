@@ -126,9 +126,9 @@ async fn insert_observation(
     sqlx::query(
         "INSERT INTO upstream_subscription_quota_observations_v1 \
          (upstream_id, \"window\", source, sample_kind, observed_at_unix_millis, sample_id, \
-          utilization, status, resets_at_unix_secs, surpassed_threshold, representative_claim, disabled_reason, \
-          extra_usage_enabled, extra_usage_monthly_limit, extra_usage_used_credits, ingested_at_unix_millis) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) \
+           utilization, status, resets_at_unix_secs, surpassed_threshold, representative_claim, fallback_percentage, disabled_reason, \
+           extra_usage_enabled, extra_usage_monthly_limit, extra_usage_used_credits, ingested_at_unix_millis) \
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) \
          ON CONFLICT DO NOTHING",
     )
     .bind(record.upstream_id)
@@ -142,6 +142,7 @@ async fn insert_observation(
     .bind(record.resets_at_unix_secs.map(|value| u64_to_i64(value, "subscription quota resets_at_unix_secs")).transpose()?)
     .bind(record.surpassed_threshold)
     .bind(&record.representative_claim)
+    .bind(record.fallback_percentage)
     .bind(&record.disabled_reason)
     .bind(record.extra_usage_enabled)
     .bind(record.extra_usage_monthly_limit)
@@ -160,14 +161,15 @@ async fn upsert_latest(
     sqlx::query(
         "INSERT INTO upstream_subscription_quota_latest_v1 \
          (upstream_id, \"window\", source, sample_kind, observed_at_unix_millis, sample_id, \
-          utilization, status, resets_at_unix_secs, surpassed_threshold, representative_claim, disabled_reason, \
-          extra_usage_enabled, extra_usage_monthly_limit, extra_usage_used_credits, ingested_at_unix_millis) \
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) \
+           utilization, status, resets_at_unix_secs, surpassed_threshold, representative_claim, fallback_percentage, disabled_reason, \
+           extra_usage_enabled, extra_usage_monthly_limit, extra_usage_used_credits, ingested_at_unix_millis) \
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17) \
          ON CONFLICT (upstream_id, \"window\", source) DO UPDATE SET \
          sample_kind = EXCLUDED.sample_kind, observed_at_unix_millis = EXCLUDED.observed_at_unix_millis, \
          sample_id = EXCLUDED.sample_id, utilization = EXCLUDED.utilization, status = EXCLUDED.status, \
          resets_at_unix_secs = EXCLUDED.resets_at_unix_secs, surpassed_threshold = EXCLUDED.surpassed_threshold, \
-         representative_claim = EXCLUDED.representative_claim, disabled_reason = EXCLUDED.disabled_reason, \
+          representative_claim = EXCLUDED.representative_claim, fallback_percentage = EXCLUDED.fallback_percentage, \
+          disabled_reason = EXCLUDED.disabled_reason, \
          extra_usage_enabled = EXCLUDED.extra_usage_enabled, extra_usage_monthly_limit = EXCLUDED.extra_usage_monthly_limit, \
          extra_usage_used_credits = EXCLUDED.extra_usage_used_credits, ingested_at_unix_millis = EXCLUDED.ingested_at_unix_millis \
          WHERE EXCLUDED.observed_at_unix_millis >= upstream_subscription_quota_latest_v1.observed_at_unix_millis",
@@ -183,6 +185,7 @@ async fn upsert_latest(
     .bind(record.resets_at_unix_secs.map(|value| u64_to_i64(value, "subscription quota resets_at_unix_secs")).transpose()?)
     .bind(record.surpassed_threshold)
     .bind(&record.representative_claim)
+    .bind(record.fallback_percentage)
     .bind(&record.disabled_reason)
     .bind(record.extra_usage_enabled)
     .bind(record.extra_usage_monthly_limit)
@@ -229,6 +232,7 @@ fn row_to_record(row: PgRow) -> StorageResult<SubscriptionQuotaObservationRecord
         representative_claim: row
             .try_get("representative_claim")
             .map_err(map_sqlx_error)?,
+        fallback_percentage: row.try_get("fallback_percentage").map_err(map_sqlx_error)?,
         disabled_reason: row.try_get("disabled_reason").map_err(map_sqlx_error)?,
         extra_usage_enabled: row.try_get("extra_usage_enabled").map_err(map_sqlx_error)?,
         extra_usage_monthly_limit: row
