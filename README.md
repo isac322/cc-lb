@@ -15,6 +15,7 @@ See [docs/runtime-management.md](docs/runtime-management.md) for the full API an
 ## Operator Guides
 
 - [Upstream warm-up](./docs/upstream-warmup.md): keep Anthropic 5h windows ticking
+- [Distributed Scheduler](./docs/scheduler.md): topology, retry classes, metrics, and runbook
 
 ## Plugin authors
 
@@ -44,7 +45,7 @@ any of the four integers below does.
 
 Plugins compiled against `cc-lb-pdk` 0.1 emit ABI envelope `1` and handshake
 schema `1`. The host (via `cc-lb-runtime-extism`) accepts plugin call wire
-versions 1 – 3, with V1 as fallback when the plugin manifest omits
+versions 1 to 3, with V1 as fallback when the plugin manifest omits
 `wire_version`. Drop legacy wire support only by bumping the host's major
 version and updating this matrix.
 
