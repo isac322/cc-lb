@@ -30,7 +30,7 @@ use crate::jobs::price_catalog::PriceCatalogRefreshJob;
 use crate::jobs::prompt_cache_purge::PromptCacheObservationPurgeJob;
 use crate::jobs::quota_gc::SubscriptionQuotaGcJob;
 use crate::jobs::usage_prune::UsagePruneJob;
-use crate::jobs::usage_rollup::UsageRollupJob;
+use crate::jobs::usage_rollup::UsageRollupTask;
 use crate::jobs::warmup::UpstreamWarmupJob;
 use crate::leader_election::LeaderElection;
 use crate::middleware::{TraceparentCarrier, TraceparentLayer};
@@ -54,7 +54,7 @@ pub enum EntityJob {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum SingletonJob {
-    UsageRollup(UsageRollupJob),
+    UsageRollup(UsageRollupTask),
     UsagePrune(UsagePruneJob),
     QuotaGc(SubscriptionQuotaGcJob),
     PromptCachePurge(PromptCacheObservationPurgeJob),
@@ -665,7 +665,7 @@ fn singleton_cron_specs(config: &Config) -> Vec<SingletonCronSpec> {
         &mut specs,
         config,
         "usage_rollup",
-        SingletonJob::UsageRollup(UsageRollupJob::default()),
+        SingletonJob::UsageRollup(UsageRollupTask::default()),
     );
     push_singleton_spec(
         &mut specs,

@@ -8,18 +8,18 @@ use serde::{Deserialize, Serialize};
 pub const USAGE_ROLLUP_RETRY_DELAY: Duration = Duration::from_secs(30);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct UsageRollupJob {
+pub struct UsageRollupTask {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub traceparent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum UsageRollupJobResult {
+pub enum UsageRollupResult {
     Done { run: UsageRollupRun },
     Retry { delay: Duration, error: String },
 }
 
-pub async fn handle_usage_rollup_job<S>(job: UsageRollupJob, storage: &S) -> UsageRollupJobResult
+pub async fn handle_usage_rollup_job<S>(job: UsageRollupTask, storage: &S) -> UsageRollupResult
 where
     S: UsageRollupStore + ?Sized,
 {
@@ -38,11 +38,11 @@ where
                 checkpoint = ?run.checkpoint,
                 "usage rollup job complete",
             );
-            UsageRollupJobResult::Done { run }
+            UsageRollupResult::Done { run }
         }
         Err(error) => {
             tracing::warn!(%error, "usage rollup job failed");
-            UsageRollupJobResult::Retry {
+            UsageRollupResult::Retry {
                 delay: USAGE_ROLLUP_RETRY_DELAY,
                 error: error.to_string(),
             }

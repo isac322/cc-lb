@@ -6,7 +6,7 @@ mod jobs {
 
         use async_trait::async_trait;
         use cc_lb_scheduler::jobs::usage_rollup::{
-            USAGE_ROLLUP_RETRY_DELAY, UsageRollupJob, UsageRollupJobResult, handle_usage_rollup_job,
+            USAGE_ROLLUP_RETRY_DELAY, UsageRollupResult, UsageRollupTask, handle_usage_rollup_job,
         };
         use cc_lb_storage_api::{
             StorageError, StorageResult, UsageRollup, UsageRollupResolution, UsageRollupRun,
@@ -22,12 +22,12 @@ mod jobs {
                 checkpoint: Some(42),
             })]);
 
-            let result = handle_usage_rollup_job(UsageRollupJob::default(), &store).await;
+            let result = handle_usage_rollup_job(UsageRollupTask::default(), &store).await;
 
             assert_eq!(store.calls.load(Ordering::SeqCst), 1);
             assert_eq!(
                 result,
-                UsageRollupJobResult::Done {
+                UsageRollupResult::Done {
                     run: UsageRollupRun {
                         processed_events: 7,
                         updated_rollups: 3,
@@ -43,12 +43,12 @@ mod jobs {
                 message: "database unavailable".to_owned(),
             })]);
 
-            let result = handle_usage_rollup_job(UsageRollupJob::default(), &store).await;
+            let result = handle_usage_rollup_job(UsageRollupTask::default(), &store).await;
 
             assert_eq!(store.calls.load(Ordering::SeqCst), 1);
             assert_eq!(
                 result,
-                UsageRollupJobResult::Retry {
+                UsageRollupResult::Retry {
                     delay: USAGE_ROLLUP_RETRY_DELAY,
                     error: "unavailable: database unavailable".to_owned(),
                 }
@@ -61,12 +61,12 @@ mod jobs {
             let store = Arc::new(AdvisoryRollupStore::new(entered_tx));
             let first_store = Arc::clone(&store);
             let first = tokio::spawn(async move {
-                handle_usage_rollup_job(UsageRollupJob::default(), first_store.as_ref()).await
+                handle_usage_rollup_job(UsageRollupTask::default(), first_store.as_ref()).await
             });
 
             entered_rx.await.expect("first rollup enters advisory lock");
 
-            let second = handle_usage_rollup_job(UsageRollupJob::default(), store.as_ref()).await;
+            let second = handle_usage_rollup_job(UsageRollupTask::default(), store.as_ref()).await;
             store.release.notify_waiters();
             let first = first.await.expect("first rollup task joins");
 
@@ -74,7 +74,7 @@ mod jobs {
             assert_eq!(store.lock_contention.load(Ordering::SeqCst), 1);
             assert_eq!(
                 first,
-                UsageRollupJobResult::Done {
+                UsageRollupResult::Done {
                     run: UsageRollupRun {
                         processed_events: 11,
                         updated_rollups: 4,
@@ -84,7 +84,7 @@ mod jobs {
             );
             assert_eq!(
                 second,
-                UsageRollupJobResult::Done {
+                UsageRollupResult::Done {
                     run: UsageRollupRun {
                         processed_events: 0,
                         updated_rollups: 0,

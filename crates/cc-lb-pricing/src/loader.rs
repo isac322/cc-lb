@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -14,9 +13,7 @@ use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
-use tokio::task::JoinHandle;
-use tokio::time::{self, Instant, MissedTickBehavior};
-use tracing::{error, info, warn};
+use tokio::time::{self, Instant};
 
 use cc_lb_storage_api::{PriceCatalogCache, PriceCatalogSnapshotRecord};
 
@@ -28,10 +25,8 @@ pub struct LiteLlmLoader {
     catalog: Arc<PriceCatalog>,
     storage: Arc<dyn PriceCatalogCache>,
     url: String,
-    refresh_interval: Duration,
     cache_path: PathBuf,
     http: HttpClient,
-    failure_count: Arc<AtomicU64>,
     last_failure_kind: Arc<Mutex<Option<String>>>,
 }
 
@@ -81,7 +76,7 @@ impl LiteLlmLoader {
         catalog: Arc<PriceCatalog>,
         storage: Arc<dyn PriceCatalogCache>,
         url: String,
-        refresh_interval: Duration,
+        _refresh_interval: Duration,
         cache_path: PathBuf,
     ) -> Self {
         let http = build_http_client();
@@ -90,35 +85,10 @@ impl LiteLlmLoader {
             catalog,
             storage,
             url,
-            refresh_interval,
             cache_path,
             http,
-            failure_count: Arc::new(AtomicU64::new(0)),
             last_failure_kind: Arc::new(Mutex::new(None)),
         }
-    }
-
-    pub fn start_daemon(self) -> JoinHandle<()> {
-        tokio::spawn(async move {
-            self.cold_start().await;
-
-            let mut interval = time::interval(self.refresh_interval);
-            interval.set_missed_tick_behavior(MissedTickBehavior::Delay);
-            interval.tick().await;
-
-            loop {
-                interval.tick().await;
-                if let Err(error) = self.fetch_install_persist().await {
-                    self.record_failure(&error);
-                    let failures = self.failure_count.load(Ordering::Relaxed);
-                    warn!(
-                        error = %error,
-                        failures,
-                        "litellm price catalog refresh failed"
-                    );
-                }
-            }
-        })
     }
 
     pub async fn wait_for_first_snapshot(catalog: &Arc<PriceCatalog>, timeout: Duration) -> bool {
@@ -164,75 +134,7 @@ impl LiteLlmLoader {
         }
     }
 
-    async fn cold_start(&self) {
-        let mut last_error = None;
-        for attempt in 0..3 {
-            match self.fetch_install_persist().await {
-                Ok(fetched_at_ms) => {
-                    self.record_success();
-                    info!(fetched_at_ms, "litellm price catalog cold start fetched");
-                    return;
-                }
-                Err(error) => {
-                    self.record_failure(&error);
-                    warn!(
-                        attempt = attempt + 1,
-                        error = %error,
-                        "litellm price catalog cold start fetch failed"
-                    );
-                    last_error = Some(error);
-                    if attempt < 2 {
-                        time::sleep(Duration::from_secs(1)).await;
-                    }
-                }
-            }
-        }
-
-        match self.install_latest_local().await {
-            Ok(true) => {
-                let fetched_at_ms = self.catalog.current().fetched_at_ms;
-                warn!(
-                    fetched_at_ms,
-                    "using local cache for litellm price catalog cold start"
-                );
-            }
-            Ok(false) => {
-                if matches!(self.catalog.status(), CatalogStatus::Ok) {
-                    warn!(
-                        last_error = ?last_error,
-                        "litellm price catalog unavailable; keeping pre-installed fallback snapshot"
-                    );
-                } else {
-                    self.catalog
-                        .install_snapshot(CatalogSnapshot::empty_cost_disabled());
-                    error!(
-                        last_error = ?last_error,
-                        "litellm price catalog unavailable; cost pricing disabled"
-                    );
-                }
-            }
-            Err(error) => {
-                self.record_failure(&error);
-                if matches!(self.catalog.status(), CatalogStatus::Ok) {
-                    warn!(
-                        error = %error,
-                        last_error = ?last_error,
-                        "litellm price catalog cache fallback failed; keeping pre-installed fallback snapshot"
-                    );
-                } else {
-                    self.catalog
-                        .install_snapshot(CatalogSnapshot::empty_cost_disabled());
-                    error!(
-                        error = %error,
-                        last_error = ?last_error,
-                        "litellm price catalog cache fallback failed; cost pricing disabled"
-                    );
-                }
-            }
-        }
-    }
-
-    async fn fetch_install_persist(&self) -> Result<u64, LoaderError> {
+    pub async fn refresh_once(&self) -> Result<u64, LoaderError> {
         let fetched = self.fetch_and_fingerprint().await?;
         let fetched_at_ms = fetched.fetched_at_ms;
         self.persist_snapshot(&fetched).await?;
@@ -311,33 +213,11 @@ impl LiteLlmLoader {
         }
     }
 
-    fn record_failure(&self, error: &LoaderError) {
-        self.failure_count.fetch_add(1, Ordering::Relaxed);
-        metrics::counter!("cclb_price_catalog_refresh_failures_total").increment(1);
-        if matches!(error, LoaderError::Validation(_)) {
-            metrics::counter!("cclb_price_catalog_validation_failures_total").increment(1);
-        }
-        if let Ok(mut guard) = self.last_failure_kind.lock() {
-            *guard = Some(error.kind().to_owned());
-        }
-    }
-
     fn last_failure_kind(&self) -> Option<String> {
         self.last_failure_kind
             .lock()
             .ok()
             .and_then(|guard| guard.clone())
-    }
-}
-
-impl LoaderError {
-    fn kind(&self) -> &'static str {
-        match self {
-            Self::Http(_) => "http",
-            Self::Json(_) => "json",
-            Self::Validation(_) => "validation",
-            Self::Storage(_) => "storage",
-        }
     }
 }
 

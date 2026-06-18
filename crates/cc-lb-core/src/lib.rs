@@ -56,7 +56,6 @@ pub mod tokenizer;
 pub mod upstream_rate_limit_events;
 #[cfg(not(loom))]
 pub mod usage_pruner;
-pub mod usage_rollup_job;
 #[cfg(not(loom))]
 pub use anthropic_metadata::make_metadata_http_client;
 pub use audit_payload::AuditPayload;

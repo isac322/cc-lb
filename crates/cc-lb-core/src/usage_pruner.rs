@@ -65,7 +65,6 @@ impl UsagePruner {
         })
     }
 
-    /// One-shot prune (used by tests + by start_daemon each tick).
     pub async fn prune_once(&self) -> PruneResult {
         if self.retention_days == 0 {
             return PruneResult::default();
