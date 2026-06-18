@@ -324,7 +324,7 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
         subtitle={COPY.cardSubtitle}
         action={
           <div className="flex items-center gap-3">
-            {upstream.warmup_enabled && (
+            {upstream.enabled && upstream.warmup_enabled && (
               <Button
                 variant="secondary"
                 size="sm"
@@ -371,7 +371,9 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
           </div>
         )}
 
-        {!upstream.warmup_enabled ? (
+        {!upstream.enabled ? (
+          <EmptyState title={COPY.upstreamPausedEmpty} />
+        ) : !upstream.warmup_enabled ? (
           <EmptyState
             title={COPY.disabledEmpty}
             action={
