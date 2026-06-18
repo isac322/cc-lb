@@ -5,9 +5,6 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_core::anthropic_compat::{
-    CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
-};
 use cc_lb_core::{AuditPayload, MetadataHookHandle, MetadataHookRequest};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::worker::{EntityJob, SchedulerBackend};
@@ -391,22 +388,12 @@ impl LazyRefreshHandle for LazyRefresher {
             &self.oauth_cfg,
             self.replica_id,
             &self.http,
-            self.metadata_hook.as_ref(),
             &self.cancel,
             upstream,
         )
         .await;
         match result {
-            Ok(()) => {
-                let generation = self
-                    .stores
-                    .upstreams
-                    .read_oauth_token_generation(upstream_id)
-                    .await
-                    .map_err(lazy_error)?
-                    .ok_or_else(|| LazyRefreshError::Failed {
-                        reason: "oauth upstream not found".to_owned(),
-                    })?;
+            Ok(generation) => {
                 let completed = self
                     .claim_guard
                     .complete_and_bump_generation(upstream_id, &holder, generation)
@@ -417,13 +404,24 @@ impl LazyRefreshHandle for LazyRefresher {
                         reason: "oauth refresh claim was not held at completion".to_owned(),
                     });
                 }
-                self.apalis_handle
-                    .push_job(EntityJob::MetadataRefresh(MetadataRefreshJob::new(
-                        upstream_id,
-                        generation,
-                    )))
-                    .await
-                    .map_err(lazy_scheduler_error)?;
+                if let Some(metadata_hook) = &self.metadata_hook {
+                    metadata_hook
+                        .enqueue(MetadataHookRequest {
+                            upstream_id,
+                            credential_generation: generation,
+                            traceparent: None,
+                        })
+                        .await
+                        .map_err(lazy_metadata_hook_error)?;
+                } else {
+                    self.apalis_handle
+                        .push_job(EntityJob::MetadataRefresh(MetadataRefreshJob::new(
+                            upstream_id,
+                            generation,
+                        )))
+                        .await
+                        .map_err(lazy_scheduler_error)?;
+                }
                 Ok(())
             }
             Err(error) => {
@@ -478,10 +476,9 @@ async fn refresh_flow(
     oauth_cfg: &AnthropicOAuthConfig,
     replica_id: Uuid,
     http: &TokenHttpClient,
-    metadata_hook: Option<&MetadataHookHandle>,
     cancel: &CancellationToken,
     upstream: UpstreamRecord,
-) -> Result<(), RefreshError> {
+) -> Result<u64, RefreshError> {
     let previous = upstream
         .oauth_credentials
         .as_ref()
@@ -507,19 +504,10 @@ async fn refresh_flow(
             let expires_at = bundle.expires_at_unix_secs;
             let encrypted = EncryptedOAuthTokens::encrypt(aead, &bundle, upstream.id.as_bytes())
                 .map_err(|_| RefreshError::Encrypt)?;
-            stores
+            let updated = stores
                 .upstreams
                 .complete_refresh(upstream.id, replica_id, encrypted)
                 .await?;
-            if let Some(metadata_hook) = metadata_hook {
-                enqueue_metadata_hook(
-                    stores,
-                    metadata_hook,
-                    upstream.id,
-                    bundle.access_token.clone(),
-                )
-                .await;
-            }
             increment_metric(&upstream.name, "success");
             emit_audit(
                 audit,
@@ -534,7 +522,7 @@ async fn refresh_flow(
                 200,
             )
             .await;
-            Ok(())
+            Ok(updated.oauth_token_generation)
         }
         Err(error) => {
             increment_metric(&upstream.name, "failure");
@@ -559,26 +547,6 @@ async fn refresh_flow(
             Err(error)
         }
     }
-}
-
-async fn enqueue_metadata_hook(
-    stores: &Stores,
-    metadata_hook: &MetadataHookHandle,
-    upstream_id: Uuid,
-    access_token: String,
-) {
-    let version = stores
-        .anthropic_compatibility_kv
-        .get_compatibility_kv(CLAUDE_CODE_STABLE_VERSION_KEY)
-        .await
-        .map(|record| record.map(|record| record.value))
-        .unwrap_or(None)
-        .unwrap_or_else(|| CLAUDE_CODE_STABLE_VERSION_FALLBACK.to_owned());
-    metadata_hook.enqueue(MetadataHookRequest {
-        upstream_id,
-        access_token,
-        user_agent: claude_code_user_agent(&version),
-    });
 }
 
 async fn request_refresh(
@@ -707,6 +675,12 @@ fn lazy_error(error: StorageError) -> LazyRefreshError {
 }
 
 fn lazy_scheduler_error(error: cc_lb_scheduler::error::SchedulerError) -> LazyRefreshError {
+    LazyRefreshError::Failed {
+        reason: error.to_string(),
+    }
+}
+
+fn lazy_metadata_hook_error(error: cc_lb_core::MetadataHookEnqueueError) -> LazyRefreshError {
     LazyRefreshError::Failed {
         reason: error.to_string(),
     }

@@ -119,8 +119,9 @@ pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};
 pub use sse_relay::{RelayError, SseBatchConfig, SseRelay, StreamingUsage};
 #[cfg(not(loom))]
 pub use subscription_metadata_hook::{
-    MetadataHookHandle, MetadataHookRequest, MetadataRefreshError, MetadataRefreshRecords,
-    fetch_metadata_only, run_metadata_refresh, start_subscription_metadata_hook,
+    MetadataHookEnqueueError, MetadataHookHandle, MetadataHookRequest, MetadataRefreshEnqueue,
+    MetadataRefreshError, MetadataRefreshRecords, fetch_metadata_only, run_metadata_refresh,
+    start_subscription_metadata_hook,
 };
 #[cfg(not(loom))]
 pub use subscription_quota_events::{

@@ -684,7 +684,11 @@ async fn build_app_with_storage_inner(
         },
         subscription_quota_writer_cancel.clone(),
     );
-    let subscription_metadata_hook: Option<cc_lb_core::MetadataHookHandle> = None;
+    let subscription_metadata_hook = Some(cc_lb_core::start_subscription_metadata_hook(Arc::new(
+        ServerMetadataRefreshEnqueue {
+            handle: scheduler_lazy_handle.clone(),
+        },
+    )));
     let runtime = Arc::new(ExtismRuntime::new());
     let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
     let storage_for_dynamic = storage.clone();
@@ -1042,6 +1046,28 @@ struct ServerWarmupDialectDispatcher {
     stores: Arc<DynamicStores>,
     aead: Arc<AeadService>,
     lazy_refresher: Arc<LazyRefresher>,
+}
+
+struct ServerMetadataRefreshEnqueue {
+    handle: crate::scheduler_factory::SchedulerBackend,
+}
+
+#[async_trait]
+impl cc_lb_core::MetadataRefreshEnqueue for ServerMetadataRefreshEnqueue {
+    async fn push_metadata_refresh(
+        &self,
+        request: cc_lb_core::MetadataHookRequest,
+    ) -> Result<(), cc_lb_core::MetadataHookEnqueueError> {
+        let job = cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob {
+            upstream_id: request.upstream_id,
+            credential_generation: request.credential_generation,
+            traceparent: request.traceparent,
+        };
+        self.handle
+            .push_job(cc_lb_scheduler::worker::EntityJob::MetadataRefresh(job))
+            .await
+            .map_err(|error| cc_lb_core::MetadataHookEnqueueError::Enqueue(error.to_string()))
+    }
 }
 
 #[async_trait]

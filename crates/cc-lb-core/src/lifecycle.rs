@@ -847,18 +847,22 @@ impl Lifecycle {
         self
     }
 
-    pub fn enqueue_metadata_refresh(
+    pub async fn enqueue_metadata_refresh(
         &self,
         upstream_id: Uuid,
-        access_token: String,
-        user_agent: String,
+        credential_generation: u64,
+        traceparent: Option<String>,
     ) {
-        if let Some(hook) = &self.subscription_metadata_hook {
-            hook.enqueue(MetadataHookRequest {
-                upstream_id,
-                access_token,
-                user_agent,
-            });
+        if let Some(hook) = &self.subscription_metadata_hook
+            && let Err(error) = hook
+                .enqueue(MetadataHookRequest {
+                    upstream_id,
+                    credential_generation,
+                    traceparent,
+                })
+                .await
+        {
+            tracing::warn!(%error, %upstream_id, "metadata refresh enqueue failed");
         }
     }
 
@@ -4819,6 +4823,7 @@ mod tests {
             last_apply_at_unix_secs: None,
             deleted_at_unix_secs: None,
             revision: 1,
+            oauth_token_generation: 0,
             created_at_unix_secs: 0,
             updated_at_unix_secs: 0,
             warmup_enabled: false,

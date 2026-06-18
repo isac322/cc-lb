@@ -744,17 +744,16 @@ async fn complete_oauth(
     };
 
     if let Some(hook) = &state.subscription_metadata_hook {
-        let version = storage
-            .get_compatibility_kv(CLAUDE_CODE_STABLE_VERSION_KEY)
+        if let Err(error) = hook
+            .enqueue(MetadataHookRequest {
+                upstream_id,
+                credential_generation: updated.oauth_token_generation,
+                traceparent: None,
+            })
             .await
-            .map(|record| record.map(|record| record.value))
-            .unwrap_or(None)
-            .unwrap_or_else(|| CLAUDE_CODE_STABLE_VERSION_FALLBACK.to_owned());
-        hook.enqueue(MetadataHookRequest {
-            upstream_id,
-            access_token: bundle.access_token.clone(),
-            user_agent: claude_code_user_agent(&version),
-        });
+        {
+            tracing::warn!(%error, %upstream_id, "metadata refresh enqueue failed after oauth complete");
+        }
     }
 
     enqueue_upstream_audit(

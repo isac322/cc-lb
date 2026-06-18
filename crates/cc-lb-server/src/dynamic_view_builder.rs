@@ -217,11 +217,6 @@ pub async fn build_dynamic_view(
                 new_prompt_cache_observation_cache(prompt_cache_shadow)
             }
         };
-        let cache_clone = Arc::clone(&cache);
-        let store_clone = stores.prompt_cache_observations.clone();
-        let interval_secs = prompt_cache_shadow.sweeper_interval_secs;
-        let _sweeper = cache_clone.spawn_sweeper(store_clone, interval_secs);
-
         // Spawn the async observation sink writer. The JoinHandle is intentionally
         // dropped: when the sender is dropped on the next rebind the mpsc channel
         // closes and the writer task exits naturally.

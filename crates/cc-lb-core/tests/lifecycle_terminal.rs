@@ -256,6 +256,7 @@ fn upstream_record(id: Uuid, name: &str) -> UpstreamRecord {
         last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
         revision: 1,
+        oauth_token_generation: 0,
         created_at_unix_secs: 0,
         updated_at_unix_secs: 0,
         warmup_enabled: false,
