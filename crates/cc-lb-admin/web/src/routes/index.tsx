@@ -115,24 +115,24 @@ function OverviewPage() {
   }, [range]);
 
   const quotaLatest = useSubscriptionQuotaLatest({
-    windows: '5h,7d',
+    windows: '5h,7d,7d_sonnet,7d_opus,overage',
     source: 'merged',
   });
   const quotaSeries = useSubscriptionQuotaSeries({
-    windows: '5h,7d',
+    windows: '5h,7d,7d_sonnet,7d_opus,overage',
     source: 'merged',
     sinceUnixSecs,
     untilUnixSecs: nowUnixSecs,
     bucketSecs: bucketSecsForRange,
   });
   const quotaAnalysis = useSubscriptionQuotaAnalysis({
-    windows: '5h,7d',
+    windows: '5h,7d,7d_sonnet,7d_opus,overage',
     source: 'merged',
     sinceUnixSecs,
     untilUnixSecs: nowUnixSecs,
   });
   const quotaAggregate = useSubscriptionQuotaAggregate({
-    windows: '5h,7d',
+    windows: '5h,7d,7d_sonnet,7d_opus,overage',
     source: 'merged',
   });
 
