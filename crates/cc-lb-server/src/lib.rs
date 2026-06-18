@@ -29,7 +29,6 @@ pub mod startup_handshake;
 pub mod state_machine;
 pub mod storage_factory;
 pub mod subscription_quota_cache;
-pub mod subscription_quota_gc;
 pub mod tls;
 pub mod validate;
 pub mod version;
@@ -42,4 +41,3 @@ pub use scheduler_factory::{
     open_scheduler_storage,
 };
 pub use subscription_quota_cache::{MergedQuotaSnapshot, MergedSource, SubscriptionQuotaCache};
-pub use subscription_quota_gc::spawn_subscription_quota_gc;
