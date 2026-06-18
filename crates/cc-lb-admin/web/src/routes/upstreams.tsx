@@ -607,7 +607,7 @@ function DetailView({
   });
   const quotaSeries = useSubscriptionQuotaSeries({
     upstreamIds: upstream.id,
-    windows: '5h,7d',
+    windows: '5h,7d,7d_sonnet,7d_opus,overage',
     source: 'merged',
     sinceUnixSecs,
     untilUnixSecs: nowUnixSecs,
@@ -615,7 +615,7 @@ function DetailView({
   });
   const quotaAnalysis = useSubscriptionQuotaAnalysis({
     upstreamIds: upstream.id,
-    windows: '5h,7d',
+    windows: '5h,7d,7d_sonnet,7d_opus,overage',
     source: 'merged',
     sinceUnixSecs,
     untilUnixSecs: nowUnixSecs,
