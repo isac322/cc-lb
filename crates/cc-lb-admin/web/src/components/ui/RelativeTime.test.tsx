@@ -18,11 +18,13 @@ describe('RelativeTime', () => {
 
     render(<RelativeTime ts={eventTime} />);
 
-    expect(screen.getByText('now').textContent).toBe('now');
+    expect(screen.getByText('1 second ago').textContent).toBe('1 second ago');
 
-    act(() => {
-      vi.advanceTimersByTime(4_000);
-    });
+    for (let i = 0; i < 4; i += 1) {
+      act(() => {
+        vi.advanceTimersByTime(1_000);
+      });
+    }
 
     expect(screen.getByText('5 seconds ago').textContent).toBe('5 seconds ago');
   });
