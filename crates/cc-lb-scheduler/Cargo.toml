@@ -17,12 +17,16 @@ apalis-cron = "^1.0.0-rc.8"
 apalis-postgres = { version = "^1.0.0-rc.8", optional = true }
 apalis-sqlite = { version = "^1.0.0-rc.8", optional = true }
 chrono = { workspace = true }
+opentelemetry = { workspace = true }
+opentelemetry_sdk = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 sqlx = { version = "0.8.6", default-features = false, features = ["chrono", "json", "runtime-tokio", "tls-rustls-ring", "uuid"] }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["rt", "sync", "time"] }
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tower = { workspace = true, features = ["util"] }
 tracing = { workspace = true }
+tracing-opentelemetry = { workspace = true }
 uuid = { workspace = true }
 
 [[test]]
@@ -36,4 +40,6 @@ required-features = ["postgres"]
 [dev-dependencies]
 cron = "0.16"
 futures-util = "0.3"
+proptest = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
+tracing-subscriber = { workspace = true }

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -34,6 +34,7 @@ pub const DEFAULT_FILES_CAP_BYTES: u64 = 100 * 1024 * 1024;
 pub const DEFAULT_OAUTH_AEAD_KEY_ENV: &str = "CC_LB_MASTER_KEY";
 pub const DEFAULT_ADMIN_TOKEN_ENV: &str = "CC_LB_ADMIN_TOKEN";
 pub const DEFAULT_SQLITE_PATH: &str = "/var/lib/cc-lb/storage.sqlite";
+pub const DEFAULT_SCHEDULER_LEADER_LOCK_KEY: i64 = 0xCC1B_5CDE_0001_i64;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -46,6 +47,8 @@ pub struct Config {
     pub downstream_auth: DownstreamAuthConfig,
     pub api_keys: ApiKeysConfig,
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
     pub aead: AeadConfig,
     pub observability: ObservabilityConfig,
     pub admin: AdminConfig,
@@ -377,6 +380,175 @@ impl Default for PostgresPoolConfig {
             idle_timeout_secs: default_idle_timeout_secs(),
             statement_timeout_secs: default_statement_timeout_secs(),
             sslmode: default_sslmode(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SchedulerConfig {
+    #[serde(default)]
+    pub separate_pool: SchedulerPoolConfig,
+    #[serde(default = "default_scheduler_leader_lock_key")]
+    pub leader_lock_key: i64,
+    #[serde(default = "default_scheduler_reconcile_interval_secs")]
+    pub reconcile_interval_secs: u64,
+    #[serde(default)]
+    pub retry_classes: SchedulerRetryClasses,
+    #[serde(
+        default = "default_scheduler_recurring_jobs",
+        serialize_with = "serialize_recurring_jobs"
+    )]
+    pub recurring_jobs: HashMap<String, RecurringJobConfig>,
+    #[serde(default)]
+    pub idempotency: SchedulerIdempotencyConfig,
+    #[serde(default = "default_scheduler_dlq_retention_days")]
+    pub dlq_retention_days: u32,
+    #[serde(default = "default_scheduler_entity_concurrency")]
+    pub entity_concurrency: usize,
+    #[serde(default = "default_scheduler_singleton_concurrency")]
+    pub singleton_concurrency: usize,
+    #[serde(default)]
+    pub staleness: SchedulerStalenessConfig,
+    #[serde(default)]
+    pub pgbouncer_transaction_mode: bool,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            separate_pool: SchedulerPoolConfig::default(),
+            leader_lock_key: DEFAULT_SCHEDULER_LEADER_LOCK_KEY,
+            reconcile_interval_secs: 300,
+            retry_classes: SchedulerRetryClasses::default(),
+            recurring_jobs: default_scheduler_recurring_jobs(),
+            idempotency: SchedulerIdempotencyConfig::default(),
+            dlq_retention_days: 30,
+            entity_concurrency: 8,
+            singleton_concurrency: 2,
+            staleness: SchedulerStalenessConfig::default(),
+            pgbouncer_transaction_mode: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SchedulerPoolConfig {
+    #[serde(default = "default_scheduler_pool_max_connections")]
+    pub max_connections: u32,
+    #[serde(default = "default_scheduler_pool_min_connections")]
+    pub min_connections: u32,
+    #[serde(default = "default_acquire_timeout_secs")]
+    pub acquire_timeout_secs: u64,
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+    #[serde(default = "default_statement_timeout_secs")]
+    pub statement_timeout_secs: u64,
+    #[serde(default = "default_sslmode")]
+    pub sslmode: String,
+}
+
+impl Default for SchedulerPoolConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 5,
+            min_connections: 1,
+            acquire_timeout_secs: default_acquire_timeout_secs(),
+            idle_timeout_secs: default_idle_timeout_secs(),
+            statement_timeout_secs: default_statement_timeout_secs(),
+            sslmode: default_sslmode(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SchedulerRetryClasses {
+    #[serde(default = "default_scheduler_retry_probe")]
+    pub probe: SchedulerRetryConfig,
+    #[serde(default = "default_scheduler_retry_entity")]
+    pub entity: SchedulerRetryConfig,
+    #[serde(default = "default_scheduler_retry_maintenance")]
+    pub maintenance: SchedulerRetryConfig,
+}
+
+impl Default for SchedulerRetryClasses {
+    fn default() -> Self {
+        Self {
+            probe: default_scheduler_retry_probe(),
+            entity: default_scheduler_retry_entity(),
+            maintenance: default_scheduler_retry_maintenance(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SchedulerRetryConfig {
+    #[serde(default = "default_scheduler_retry_max_attempts")]
+    pub max_attempts: u32,
+    #[serde(default = "default_scheduler_retry_base_secs")]
+    pub base_secs: u64,
+    #[serde(default = "default_scheduler_retry_max_secs")]
+    pub max_secs: u64,
+}
+
+impl Default for SchedulerRetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            base_secs: 1,
+            max_secs: 5,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct RecurringJobConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_recurring_job_interval_secs")]
+    pub interval_secs: u64,
+    #[serde(default = "default_recurring_job_jitter_secs")]
+    pub jitter_secs: u64,
+}
+
+impl Default for RecurringJobConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_secs: 3600,
+            jitter_secs: 30,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SchedulerIdempotencyConfig {
+    #[serde(default = "default_scheduler_claim_ttl_secs")]
+    pub claim_ttl_secs: u64,
+}
+
+impl Default for SchedulerIdempotencyConfig {
+    fn default() -> Self {
+        Self { claim_ttl_secs: 60 }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SchedulerStalenessConfig {
+    #[serde(default = "default_scheduler_warmup_effect_retention_days")]
+    pub warmup_effect_retention_days: u32,
+}
+
+impl Default for SchedulerStalenessConfig {
+    fn default() -> Self {
+        Self {
+            warmup_effect_retention_days: 30,
         }
     }
 }
@@ -820,6 +992,141 @@ fn default_statement_timeout_secs() -> u64 {
 
 fn default_sslmode() -> String {
     "prefer".to_owned()
+}
+
+fn default_scheduler_pool_max_connections() -> u32 {
+    SchedulerPoolConfig::default().max_connections
+}
+
+fn default_scheduler_pool_min_connections() -> u32 {
+    SchedulerPoolConfig::default().min_connections
+}
+
+fn default_scheduler_leader_lock_key() -> i64 {
+    DEFAULT_SCHEDULER_LEADER_LOCK_KEY
+}
+
+fn default_scheduler_reconcile_interval_secs() -> u64 {
+    SchedulerConfig::default().reconcile_interval_secs
+}
+
+fn default_scheduler_recurring_jobs() -> HashMap<String, RecurringJobConfig> {
+    HashMap::from([
+        (
+            "usage_rollup".to_owned(),
+            recurring_job_config(30, scheduler_jitter_secs(30)),
+        ),
+        (
+            "usage_prune".to_owned(),
+            recurring_job_config(86_400, scheduler_jitter_secs(86_400)),
+        ),
+        (
+            "quota_gc".to_owned(),
+            recurring_job_config(3600, scheduler_jitter_secs(3600)),
+        ),
+        (
+            "prompt_cache_purge".to_owned(),
+            recurring_job_config(600, scheduler_jitter_secs(600)),
+        ),
+        (
+            "price_catalog_refresh".to_owned(),
+            recurring_job_config(3600, scheduler_jitter_secs(3600)),
+        ),
+        (
+            "apalis_housekeeping".to_owned(),
+            recurring_job_config(3600, scheduler_jitter_secs(3600)),
+        ),
+    ])
+}
+
+fn serialize_recurring_jobs<S>(
+    jobs: &HashMap<String, RecurringJobConfig>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let ordered = jobs
+        .iter()
+        .map(|(name, config)| (name.as_str(), config))
+        .collect::<BTreeMap<_, _>>();
+    ordered.serialize(serializer)
+}
+
+fn scheduler_jitter_secs(interval_secs: u64) -> u64 {
+    (interval_secs / 10).min(30)
+}
+
+fn recurring_job_config(interval_secs: u64, jitter_secs: u64) -> RecurringJobConfig {
+    RecurringJobConfig {
+        enabled: true,
+        interval_secs,
+        jitter_secs,
+    }
+}
+
+fn default_scheduler_retry_probe() -> SchedulerRetryConfig {
+    SchedulerRetryConfig {
+        max_attempts: 3,
+        base_secs: 1,
+        max_secs: 5,
+    }
+}
+
+fn default_scheduler_retry_entity() -> SchedulerRetryConfig {
+    SchedulerRetryConfig {
+        max_attempts: 5,
+        base_secs: 30,
+        max_secs: 600,
+    }
+}
+
+fn default_scheduler_retry_maintenance() -> SchedulerRetryConfig {
+    SchedulerRetryConfig {
+        max_attempts: 1,
+        base_secs: 60,
+        max_secs: 60,
+    }
+}
+
+fn default_scheduler_retry_max_attempts() -> u32 {
+    SchedulerRetryConfig::default().max_attempts
+}
+
+fn default_scheduler_retry_base_secs() -> u64 {
+    SchedulerRetryConfig::default().base_secs
+}
+
+fn default_scheduler_retry_max_secs() -> u64 {
+    SchedulerRetryConfig::default().max_secs
+}
+
+fn default_recurring_job_interval_secs() -> u64 {
+    RecurringJobConfig::default().interval_secs
+}
+
+fn default_recurring_job_jitter_secs() -> u64 {
+    RecurringJobConfig::default().jitter_secs
+}
+
+fn default_scheduler_claim_ttl_secs() -> u64 {
+    SchedulerIdempotencyConfig::default().claim_ttl_secs
+}
+
+fn default_scheduler_dlq_retention_days() -> u32 {
+    SchedulerConfig::default().dlq_retention_days
+}
+
+fn default_scheduler_entity_concurrency() -> usize {
+    SchedulerConfig::default().entity_concurrency
+}
+
+fn default_scheduler_singleton_concurrency() -> usize {
+    SchedulerConfig::default().singleton_concurrency
+}
+
+fn default_scheduler_warmup_effect_retention_days() -> u32 {
+    SchedulerStalenessConfig::default().warmup_effect_retention_days
 }
 
 fn default_tracing_level() -> String {

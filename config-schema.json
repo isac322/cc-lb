@@ -138,6 +138,80 @@
         }
       }
     },
+    "scheduler": {
+      "$ref": "#/$defs/SchedulerConfig",
+      "default": {
+        "dlq_retention_days": 30,
+        "entity_concurrency": 8,
+        "idempotency": {
+          "claim_ttl_secs": 60
+        },
+        "leader_lock_key": 224417894236161,
+        "pgbouncer_transaction_mode": false,
+        "reconcile_interval_secs": 300,
+        "recurring_jobs": {
+          "apalis_housekeeping": {
+            "enabled": true,
+            "interval_secs": 3600,
+            "jitter_secs": 30
+          },
+          "price_catalog_refresh": {
+            "enabled": true,
+            "interval_secs": 3600,
+            "jitter_secs": 30
+          },
+          "prompt_cache_purge": {
+            "enabled": true,
+            "interval_secs": 600,
+            "jitter_secs": 30
+          },
+          "quota_gc": {
+            "enabled": true,
+            "interval_secs": 3600,
+            "jitter_secs": 30
+          },
+          "usage_prune": {
+            "enabled": true,
+            "interval_secs": 86400,
+            "jitter_secs": 30
+          },
+          "usage_rollup": {
+            "enabled": true,
+            "interval_secs": 30,
+            "jitter_secs": 3
+          }
+        },
+        "retry_classes": {
+          "entity": {
+            "base_secs": 30,
+            "max_attempts": 5,
+            "max_secs": 600
+          },
+          "maintenance": {
+            "base_secs": 60,
+            "max_attempts": 1,
+            "max_secs": 60
+          },
+          "probe": {
+            "base_secs": 1,
+            "max_attempts": 3,
+            "max_secs": 5
+          }
+        },
+        "separate_pool": {
+          "acquire_timeout_secs": 5,
+          "idle_timeout_secs": 600,
+          "max_connections": 5,
+          "min_connections": 1,
+          "sslmode": "prefer",
+          "statement_timeout_secs": 30
+        },
+        "singleton_concurrency": 2,
+        "staleness": {
+          "warmup_effect_retention_days": 30
+        }
+      }
+    },
     "storage": {
       "$ref": "#/$defs/StorageConfig",
       "default": {
@@ -744,6 +818,28 @@
         }
       }
     },
+    "RecurringJobConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "interval_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 3600,
+          "minimum": 0
+        },
+        "jitter_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
     "RuntimeConfig": {
       "type": "object",
       "properties": {
@@ -761,6 +857,244 @@
           }
         }
       }
+    },
+    "SchedulerConfig": {
+      "type": "object",
+      "properties": {
+        "dlq_retention_days": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 30,
+          "minimum": 0
+        },
+        "entity_concurrency": {
+          "type": "integer",
+          "format": "uint",
+          "default": 8,
+          "minimum": 0
+        },
+        "idempotency": {
+          "$ref": "#/$defs/SchedulerIdempotencyConfig",
+          "default": {
+            "claim_ttl_secs": 60
+          }
+        },
+        "leader_lock_key": {
+          "type": "integer",
+          "format": "int64",
+          "default": 224417894236161
+        },
+        "pgbouncer_transaction_mode": {
+          "type": "boolean",
+          "default": false
+        },
+        "reconcile_interval_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 300,
+          "minimum": 0
+        },
+        "recurring_jobs": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RecurringJobConfig"
+          },
+          "default": {
+            "apalis_housekeeping": {
+              "enabled": true,
+              "interval_secs": 3600,
+              "jitter_secs": 30
+            },
+            "price_catalog_refresh": {
+              "enabled": true,
+              "interval_secs": 3600,
+              "jitter_secs": 30
+            },
+            "prompt_cache_purge": {
+              "enabled": true,
+              "interval_secs": 600,
+              "jitter_secs": 30
+            },
+            "quota_gc": {
+              "enabled": true,
+              "interval_secs": 3600,
+              "jitter_secs": 30
+            },
+            "usage_prune": {
+              "enabled": true,
+              "interval_secs": 86400,
+              "jitter_secs": 30
+            },
+            "usage_rollup": {
+              "enabled": true,
+              "interval_secs": 30,
+              "jitter_secs": 3
+            }
+          }
+        },
+        "retry_classes": {
+          "$ref": "#/$defs/SchedulerRetryClasses",
+          "default": {
+            "entity": {
+              "base_secs": 30,
+              "max_attempts": 5,
+              "max_secs": 600
+            },
+            "maintenance": {
+              "base_secs": 60,
+              "max_attempts": 1,
+              "max_secs": 60
+            },
+            "probe": {
+              "base_secs": 1,
+              "max_attempts": 3,
+              "max_secs": 5
+            }
+          }
+        },
+        "separate_pool": {
+          "$ref": "#/$defs/SchedulerPoolConfig",
+          "default": {
+            "acquire_timeout_secs": 5,
+            "idle_timeout_secs": 600,
+            "max_connections": 5,
+            "min_connections": 1,
+            "sslmode": "prefer",
+            "statement_timeout_secs": 30
+          }
+        },
+        "singleton_concurrency": {
+          "type": "integer",
+          "format": "uint",
+          "default": 2,
+          "minimum": 0
+        },
+        "staleness": {
+          "$ref": "#/$defs/SchedulerStalenessConfig",
+          "default": {
+            "warmup_effect_retention_days": 30
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "SchedulerIdempotencyConfig": {
+      "type": "object",
+      "properties": {
+        "claim_ttl_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 60,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "SchedulerPoolConfig": {
+      "type": "object",
+      "properties": {
+        "acquire_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 5,
+          "minimum": 0
+        },
+        "idle_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 600,
+          "minimum": 0
+        },
+        "max_connections": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 5,
+          "minimum": 0
+        },
+        "min_connections": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        },
+        "sslmode": {
+          "type": "string",
+          "default": "prefer"
+        },
+        "statement_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "SchedulerRetryClasses": {
+      "type": "object",
+      "properties": {
+        "entity": {
+          "$ref": "#/$defs/SchedulerRetryConfig",
+          "default": {
+            "base_secs": 30,
+            "max_attempts": 5,
+            "max_secs": 600
+          }
+        },
+        "maintenance": {
+          "$ref": "#/$defs/SchedulerRetryConfig",
+          "default": {
+            "base_secs": 60,
+            "max_attempts": 1,
+            "max_secs": 60
+          }
+        },
+        "probe": {
+          "$ref": "#/$defs/SchedulerRetryConfig",
+          "default": {
+            "base_secs": 1,
+            "max_attempts": 3,
+            "max_secs": 5
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "SchedulerRetryConfig": {
+      "type": "object",
+      "properties": {
+        "base_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 1,
+          "minimum": 0
+        },
+        "max_attempts": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 3,
+          "minimum": 0
+        },
+        "max_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 5,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "SchedulerStalenessConfig": {
+      "type": "object",
+      "properties": {
+        "warmup_effect_retention_days": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 30,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     },
     "StartupHandshakeConfig": {
       "type": "object",
