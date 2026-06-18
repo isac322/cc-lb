@@ -271,8 +271,15 @@ fn merge_header_api(
 }
 
 fn is_fresh(snapshot: &MergedQuotaSnapshot, now_unix_millis: u64, max_staleness_secs: u64) -> bool {
-    now_unix_millis.saturating_sub(snapshot.observed_at_unix_millis)
-        <= max_staleness_secs.saturating_mul(1_000)
+    let age_ok = now_unix_millis.saturating_sub(snapshot.observed_at_unix_millis)
+        <= max_staleness_secs.saturating_mul(1_000);
+    let reset_ok = match snapshot.resets_at_unix_secs {
+        Some(resets_at_unix_secs) => {
+            now_unix_millis < resets_at_unix_secs.saturating_mul(1_000)
+        }
+        None => true,
+    };
+    age_ok && reset_ok
 }
 
 fn candidate_from_snapshot(
