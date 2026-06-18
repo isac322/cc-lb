@@ -7,9 +7,10 @@ use uuid::Uuid;
 
 use crate::{StorageError, StorageResult};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UpstreamKind {
+    #[default]
     AnthropicApiKey,
     AnthropicOauth,
 }
@@ -40,7 +41,7 @@ pub struct UpstreamWarmupDialectPlugin {
     pub wire_version: Option<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct UpstreamRecord {
     pub id: Uuid,
     pub name: String,
@@ -49,7 +50,13 @@ pub struct UpstreamRecord {
     pub enabled: bool,
     pub oauth_credentials: Option<EncryptedOAuthTokens>,
     pub api_key_ciphertext: Option<Vec<u8>>,
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     pub refresh_lease_holder: Option<Uuid>,
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     pub refresh_lease_until_unix_secs: Option<u64>,
     pub last_apply_error: Option<String>,
     pub last_apply_at_unix_secs: Option<u64>,
@@ -61,12 +68,24 @@ pub struct UpstreamRecord {
     #[serde(default)]
     pub warmup_enabled: bool,
     #[serde(default)]
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     pub next_warmup_at: Option<DateTime<Utc>>,
     #[serde(default)]
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     pub last_warmup_cycle_key: Option<i64>,
     #[serde(default)]
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     pub warmup_lease_holder: Option<String>,
     #[serde(default)]
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     pub warmup_lease_until_unix_secs: Option<i64>,
     #[serde(default)]
     pub warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
@@ -84,7 +103,7 @@ impl UpstreamRecord {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UpstreamCreate {
     pub name: String,
     pub kind: UpstreamKind,
@@ -92,9 +111,21 @@ pub struct UpstreamCreate {
     pub api_key_ciphertext: Option<Vec<u8>>,
     pub oauth_token_generation: Option<u64>,
     pub warmup_enabled: bool,
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     pub next_warmup_at: Option<DateTime<Utc>>,
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     pub last_warmup_cycle_key: Option<i64>,
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     pub warmup_lease_holder: Option<String>,
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     pub warmup_lease_until_unix_secs: Option<i64>,
     pub warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
 }
@@ -107,9 +138,21 @@ pub struct UpstreamUpdate {
     pub api_key_ciphertext: Option<Vec<u8>>,
     pub oauth_token_generation: Option<u64>,
     pub warmup_enabled: Option<bool>,
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     pub next_warmup_at: Option<DateTime<Utc>>,
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     pub last_warmup_cycle_key: Option<i64>,
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     pub warmup_lease_holder: Option<String>,
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     pub warmup_lease_until_unix_secs: Option<i64>,
     pub warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
 }
@@ -118,14 +161,18 @@ pub struct UpstreamUpdate {
 #[serde(rename_all = "snake_case")]
 pub enum UpstreamLeaseKind {
     Refresh,
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     Warmup,
 }
 
 impl UpstreamLeaseKind {
     pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Refresh => "refresh",
-            Self::Warmup => "warmup",
+        if matches!(self, Self::Refresh) {
+            "refresh"
+        } else {
+            "warmup"
         }
     }
 }
@@ -137,7 +184,13 @@ pub struct UpstreamStatusUpdate {
     pub observed_spec_revision: Option<Option<u64>>,
     pub observed_api_key_secret_revision: Option<Option<u64>>,
     pub observed_oauth_token_revision: Option<Option<u64>>,
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     pub next_warmup_at: Option<Option<DateTime<Utc>>>,
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     pub last_warmup_cycle_key: Option<Option<i64>>,
 }
 
@@ -176,6 +229,9 @@ pub trait UpstreamStore: Send + Sync {
         tokens: EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord>;
     async fn set_status(&self, id: Uuid, status: UpstreamStatusUpdate) -> StorageResult<()>;
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     async fn claim_lease(
         &self,
         id: Uuid,
@@ -183,6 +239,9 @@ pub trait UpstreamStore: Send + Sync {
         holder: String,
         ttl_secs: i64,
     ) -> StorageResult<bool>;
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     async fn renew_lease(
         &self,
         id: Uuid,
@@ -190,6 +249,9 @@ pub trait UpstreamStore: Send + Sync {
         holder: String,
         ttl_secs: i64,
     ) -> StorageResult<bool>;
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     async fn release_lease(
         &self,
         id: Uuid,
@@ -202,6 +264,9 @@ pub trait UpstreamStore: Send + Sync {
         expected_revision: u64,
         tokens: EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord>;
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     async fn claim_refresh_lease(
         &self,
         id: Uuid,
@@ -220,6 +285,9 @@ pub trait UpstreamStore: Send + Sync {
             .await?
             .map(|record| record.oauth_token_generation))
     }
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     async fn release_lease_on_failure(
         &self,
         id: Uuid,
@@ -230,6 +298,9 @@ pub trait UpstreamStore: Send + Sync {
     async fn soft_delete(&self, id: Uuid, expected_revision: u64) -> StorageResult<()>;
     async fn hard_delete(&self, id: Uuid) -> StorageResult<()>;
     // Mirrors claim_refresh_lease verbatim; do NOT refactor into a generic claim_lease(kind).
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     async fn claim_warmup_lease(
         &self,
         upstream_id: Uuid,
@@ -241,6 +312,9 @@ pub trait UpstreamStore: Send + Sync {
     /// WHERE matches iff: id == upstream_id AND warmup_lease_holder == holder
     ///   AND warmup_lease_until_unix_secs > db_now() AND last_warmup_cycle_key IS DISTINCT FROM new_cycle_key
     ///   AND deleted_at_unix_secs IS NULL.
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     async fn write_warmup_cycle_key(
         &self,
         upstream_id: Uuid,
@@ -248,15 +322,24 @@ pub trait UpstreamStore: Send + Sync {
         new_cycle_key: i64,
         next_warmup_at: Option<DateTime<Utc>>,
     ) -> StorageResult<bool>;
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     async fn release_warmup_lease(&self, id: Uuid, holder: &str) -> StorageResult<bool>;
     async fn clear_warmup_dialect_plugin(
         &self,
         id: Uuid,
         expected_revision: u64,
     ) -> StorageResult<Option<UpstreamRecord>>;
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     async fn warmup_now_unix_secs(&self) -> StorageResult<i64> {
         Ok(Utc::now().timestamp())
     }
+    #[deprecated(
+        note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
+    )]
     async fn write_warmup_next_at(
         &self,
         upstream_id: Uuid,

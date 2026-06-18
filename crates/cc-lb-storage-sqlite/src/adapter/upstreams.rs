@@ -108,6 +108,7 @@ impl UpstreamStore for SqliteStorage {
         tx.commit().await.map_err(map_sqlx_error)
     }
 
+    #[allow(deprecated)]
     async fn claim_lease(
         &self,
         id: Uuid,
@@ -118,6 +119,7 @@ impl UpstreamStore for SqliteStorage {
         claim_split_lease(self.pool(), id, lease_kind, &holder, ttl_secs).await
     }
 
+    #[allow(deprecated)]
     async fn renew_lease(
         &self,
         id: Uuid,
@@ -128,6 +130,7 @@ impl UpstreamStore for SqliteStorage {
         renew_split_lease(self.pool(), id, lease_kind, &holder, ttl_secs).await
     }
 
+    #[allow(deprecated)]
     async fn release_lease(
         &self,
         id: Uuid,
@@ -146,6 +149,7 @@ impl UpstreamStore for SqliteStorage {
         update_split_oauth_token(self, id, tokens, Some(expected_revision)).await
     }
 
+    #[allow(deprecated)]
     async fn claim_refresh_lease(
         &self,
         id: Uuid,
@@ -177,6 +181,7 @@ impl UpstreamStore for SqliteStorage {
         read_split_oauth_token_generation(self.pool(), id).await
     }
 
+    #[allow(deprecated)]
     async fn release_lease_on_failure(
         &self,
         id: Uuid,
@@ -238,6 +243,7 @@ impl UpstreamStore for SqliteStorage {
         tx.commit().await.map_err(map_sqlx_error)
     }
 
+    #[allow(deprecated)]
     async fn claim_warmup_lease(
         &self,
         upstream_id: Uuid,
@@ -253,6 +259,7 @@ impl UpstreamStore for SqliteStorage {
         .await
     }
 
+    #[allow(deprecated)]
     async fn write_warmup_cycle_key(
         &self,
         upstream_id: Uuid,
@@ -270,6 +277,7 @@ impl UpstreamStore for SqliteStorage {
         .await
     }
 
+    #[allow(deprecated)]
     async fn release_warmup_lease(&self, id: Uuid, holder: &str) -> StorageResult<bool> {
         self.release_lease(id, UpstreamLeaseKind::Warmup, holder.to_owned())
             .await
@@ -296,6 +304,7 @@ impl UpstreamStore for SqliteStorage {
         get_split_by_id(self.pool(), id).await
     }
 
+    #[allow(deprecated)]
     async fn warmup_now_unix_secs(&self) -> StorageResult<i64> {
         sqlx::query_scalar("SELECT unixepoch()")
             .fetch_one(self.pool())
@@ -303,6 +312,7 @@ impl UpstreamStore for SqliteStorage {
             .map_err(map_sqlx_error)
     }
 
+    #[allow(deprecated)]
     async fn write_warmup_next_at(
         &self,
         upstream_id: Uuid,

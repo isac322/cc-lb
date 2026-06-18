@@ -55,6 +55,7 @@ pub(super) struct ReconcileJobSpec {
 pub(super) async fn collect_specs<Upstreams>(
     upstreams: &Upstreams,
     job: &SchedulerReconcileJob,
+    now_unix_secs: u64,
 ) -> Result<(Vec<ReconcileJobSpec>, HashSet<String>)>
 where
     Upstreams: ReconcileUpstreams,
@@ -69,7 +70,13 @@ where
         }
         after = page.last().map(|record| record.id);
         for upstream in page {
-            append_upstream_specs(&mut specs, &mut upstream_keys, &upstream, job)?;
+            append_upstream_specs(
+                &mut specs,
+                &mut upstream_keys,
+                &upstream,
+                job,
+                now_unix_secs,
+            )?;
         }
     }
     for key in COMPATIBILITY_KEYS {
@@ -85,6 +92,7 @@ fn append_upstream_specs(
     upstream_keys: &mut HashSet<String>,
     upstream: &UpstreamRecord,
     job: &SchedulerReconcileJob,
+    now_unix_secs: u64,
 ) -> Result<()> {
     if !is_reconcilable_oauth(upstream) {
         return Ok(());
@@ -110,17 +118,12 @@ fn append_upstream_specs(
         },
     )?;
     if upstream.warmup_enabled {
-        let cycle_key = upstream
-            .last_warmup_cycle_key
-            .and_then(|key| u64::try_from(key).ok())
-            .unwrap_or(0)
-            .saturating_add(1);
         push_upstream_spec(
             specs,
             upstream_keys,
             WARMUP_JOB_TYPE,
             upstream.id,
-            &UpstreamWarmupJob::new(upstream.id, cycle_key),
+            &UpstreamWarmupJob::new(upstream.id, now_unix_secs),
         )?;
     }
     Ok(())

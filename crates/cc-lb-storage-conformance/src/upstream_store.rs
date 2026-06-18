@@ -40,6 +40,7 @@ impl UpstreamStore for MemoryUpstreamStore {
             last_apply_at_unix_secs: None,
             deleted_at_unix_secs: None,
             revision: 1,
+            oauth_token_generation: create.oauth_token_generation.unwrap_or_default(),
             created_at_unix_secs: now,
             updated_at_unix_secs: now,
             warmup_enabled: create.warmup_enabled,
@@ -115,6 +116,9 @@ impl UpstreamStore for MemoryUpstreamStore {
             }
             if let Some(api_key_ciphertext) = update.api_key_ciphertext {
                 record.api_key_ciphertext = Some(api_key_ciphertext);
+            }
+            if let Some(oauth_token_generation) = update.oauth_token_generation {
+                record.oauth_token_generation = oauth_token_generation;
             }
             if let Some(warmup_enabled) = update.warmup_enabled {
                 record.warmup_enabled = warmup_enabled;
@@ -617,6 +621,7 @@ async fn create_default(store: &MemoryUpstreamStore, name: &str) -> UpstreamReco
             kind: UpstreamKind::AnthropicOauth,
             base_url: Some(Url::parse("https://api.anthropic.com").unwrap()),
             api_key_ciphertext: None,
+            oauth_token_generation: None,
             warmup_enabled: false,
             next_warmup_at: None,
             last_warmup_cycle_key: None,
@@ -912,6 +917,7 @@ scenario!(
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: None,
                 api_key_ciphertext: None,
+                oauth_token_generation: None,
                 warmup_enabled: false,
                 next_warmup_at: None,
                 last_warmup_cycle_key: None,

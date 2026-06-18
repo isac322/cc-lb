@@ -259,12 +259,10 @@ impl SchedulerBackend {
     pub async fn push_job(&self, job: EntityJob) -> Result<(), SchedulerError> {
         match self {
             #[cfg(feature = "sqlite")]
-            Self::Sqlite(sqlite) => sqlite
-                .storage
-                .clone()
-                .push(job)
-                .await
-                .map_err(|error| SchedulerError::Job(error.to_string()))?,
+            Self::Sqlite(sqlite) => {
+                let queue = sqlite.storage.config().queue().as_ref().to_owned();
+                crate::sqlite_enqueue::push_entity_job(&sqlite.pool, &queue, job).await?;
+            }
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => postgres
                 .storage

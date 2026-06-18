@@ -501,6 +501,9 @@ async fn sqlite_scheduler_backend() -> SchedulerBackend {
     apalis_sqlite::SqliteStorage::setup(&pool)
         .await
         .expect("scheduler sqlite initializes");
+    cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool)
+        .await
+        .expect("scheduler post-setup migrations apply");
     SchedulerBackend::Sqlite(SqliteSchedulerStorage {
         pool: pool.clone(),
         storage: apalis_sqlite::SqliteStorage::new_in_queue(

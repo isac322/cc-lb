@@ -40,6 +40,7 @@ tokio-util = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
+ulid = "1"
 uuid = { workspace = true }
 
 [[test]]

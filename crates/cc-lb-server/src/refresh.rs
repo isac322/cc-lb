@@ -109,39 +109,6 @@ pub trait LazyRefreshClaimGuard: Send + Sync {
     async fn release_if_holder(&self, upstream_id: Uuid, holder: &str) -> StorageResult<bool>;
 }
 
-struct LegacyRefreshLeaseGuard {
-    upstreams: Arc<dyn cc_lb_storage_api::UpstreamStore>,
-    replica_id: Uuid,
-}
-
-#[async_trait]
-impl LazyRefreshClaimGuard for LegacyRefreshLeaseGuard {
-    async fn try_acquire(
-        &self,
-        upstream_id: Uuid,
-        _holder: &str,
-        ttl_secs: u64,
-        _now_unix_secs: u64,
-    ) -> StorageResult<bool> {
-        self.upstreams
-            .claim_refresh_lease(upstream_id, self.replica_id, ttl_secs)
-            .await
-    }
-
-    async fn complete_and_bump_generation(
-        &self,
-        _upstream_id: Uuid,
-        _holder: &str,
-        _generation: u64,
-    ) -> StorageResult<bool> {
-        Ok(true)
-    }
-
-    async fn release_if_holder(&self, _upstream_id: Uuid, _holder: &str) -> StorageResult<bool> {
-        Ok(true)
-    }
-}
-
 #[cfg(feature = "sqlite")]
 #[async_trait]
 impl LazyRefreshClaimGuard
@@ -222,10 +189,7 @@ impl LazyRefresher {
         cancel: CancellationToken,
         apalis_handle: SchedulerBackend,
     ) -> Self {
-        let claim_guard = Arc::new(LegacyRefreshLeaseGuard {
-            upstreams: stores.upstreams.clone(),
-            replica_id,
-        });
+        let claim_guard = lazy_refresh_claim_guard_from_scheduler(&apalis_handle);
         Self::new_with_claim_guard(
             LazyRefresherDeps {
                 stores,
@@ -343,6 +307,21 @@ impl LazyRefresher {
                 _ = tokio::time::sleep(sleep_for) => {}
             }
         }
+    }
+}
+
+fn lazy_refresh_claim_guard_from_scheduler(
+    scheduler_backend: &SchedulerBackend,
+) -> Arc<dyn LazyRefreshClaimGuard> {
+    match scheduler_backend {
+        #[cfg(feature = "sqlite")]
+        SchedulerBackend::Sqlite(sqlite) => Arc::new(
+            cc_lb_scheduler::idempotency::OAuthRefreshClaimsStore::new(sqlite.pool.clone()),
+        ),
+        #[cfg(feature = "postgres")]
+        SchedulerBackend::Postgres(postgres) => Arc::new(
+            cc_lb_scheduler::idempotency::OAuthRefreshClaimsStore::new(postgres.pool.clone()),
+        ),
     }
 }
 
@@ -527,9 +506,9 @@ async fn refresh_flow(
         Err(error) => {
             increment_metric(&upstream.name, "failure");
             let reason = reason_for(&error);
-            let release_result = stores
+            let status_result = stores
                 .upstreams
-                .release_lease_on_failure(upstream.id, replica_id, reason.clone())
+                .set_last_apply_error(upstream.id, Some(reason.clone()))
                 .await;
             emit_audit(
                 audit,
@@ -543,7 +522,7 @@ async fn refresh_flow(
                 500,
             )
             .await;
-            release_result?;
+            status_result?;
             Err(error)
         }
     }
@@ -729,52 +708,6 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn release_lease_on_failure_clears_refresh_lease() {
-        let storage = cc_lb_storage_sqlite::open_sqlite("sqlite::memory:")
-            .await
-            .expect("storage opens");
-        storage.initialize(BackendKind::Sqlite).await.unwrap();
-        let record = storage
-            .create(UpstreamCreate {
-                name: "failure-clear".to_owned(),
-                kind: UpstreamKind::AnthropicOauth,
-                base_url: None,
-                api_key_ciphertext: None,
-                oauth_token_generation: None,
-                warmup_enabled: false,
-                next_warmup_at: None,
-                last_warmup_cycle_key: None,
-                warmup_lease_holder: None,
-                warmup_lease_until_unix_secs: None,
-                warmup_dialect_plugin: None,
-            })
-            .await
-            .expect("upstream created");
-        let holder = Uuid::new_v4();
-        assert!(
-            storage
-                .claim_refresh_lease(record.id, holder, 60)
-                .await
-                .expect("lease claimed")
-        );
-
-        storage
-            .release_lease_on_failure(record.id, holder, "status_401".to_owned())
-            .await
-            .expect("failure marker written");
-
-        let stored = storage
-            .get_by_id(record.id)
-            .await
-            .expect("read upstream")
-            .expect("upstream exists");
-        assert_eq!(stored.refresh_lease_holder, None);
-        assert_eq!(stored.refresh_lease_until_unix_secs, None);
-        assert_eq!(stored.last_apply_error.as_deref(), Some("status_401"));
-        assert!(stored.last_apply_at_unix_secs.is_some());
-    }
-
-    #[tokio::test]
     async fn lazy_refresher_single_flight_under_concurrency() {
         let fixture = LazyRefreshFixture::new(Duration::from_millis(50)).await;
         let upstream_id = fixture.create_oauth_upstream().await;
@@ -909,11 +842,8 @@ mod tests {
                     api_key_ciphertext: None,
                     oauth_token_generation: None,
                     warmup_enabled: false,
-                    next_warmup_at: None,
-                    last_warmup_cycle_key: None,
-                    warmup_lease_holder: None,
-                    warmup_lease_until_unix_secs: None,
                     warmup_dialect_plugin: None,
+                    ..UpstreamCreate::default()
                 })
                 .await
                 .expect("upstream created");

@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
-use std::sync::{Arc, OnceLock};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::body::Bytes;
 use axum::http::{HeaderMap, Method, StatusCode};
@@ -458,6 +458,9 @@ async fn sqlite_scheduler_backend() -> SchedulerBackend {
     apalis_sqlite::SqliteStorage::setup(&pool)
         .await
         .expect("scheduler sqlite initializes");
+    cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool)
+        .await
+        .expect("scheduler post-setup migrations apply");
     SchedulerBackend::Sqlite(SqliteSchedulerStorage {
         pool: pool.clone(),
         storage: apalis_sqlite::SqliteStorage::new_in_queue(

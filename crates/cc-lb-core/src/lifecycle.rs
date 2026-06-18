@@ -4813,25 +4813,11 @@ mod tests {
             id,
             name: format!("upstream-{id}"),
             kind: StorageRecordKind::AnthropicApiKey,
-            base_url: None,
             enabled: true,
-            oauth_credentials: None,
-            api_key_ciphertext: None,
-            refresh_lease_holder: None,
-            refresh_lease_until_unix_secs: None,
-            last_apply_error: None,
-            last_apply_at_unix_secs: None,
-            deleted_at_unix_secs: None,
             revision: 1,
-            oauth_token_generation: 0,
             created_at_unix_secs: 0,
             updated_at_unix_secs: 0,
-            warmup_enabled: false,
-            next_warmup_at: None,
-            last_warmup_cycle_key: None,
-            warmup_lease_holder: None,
-            warmup_lease_until_unix_secs: None,
-            warmup_dialect_plugin: None,
+            ..UpstreamRecord::default()
         }
     }
 

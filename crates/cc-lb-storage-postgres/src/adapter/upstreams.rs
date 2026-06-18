@@ -112,6 +112,7 @@ impl UpstreamStore for PostgresStorage {
         set_split_status(&self.pool, id, status).await
     }
 
+    #[allow(deprecated)]
     async fn claim_lease(
         &self,
         id: Uuid,
@@ -122,6 +123,7 @@ impl UpstreamStore for PostgresStorage {
         claim_split_lease(&self.pool, id, lease_kind, &holder, ttl_secs).await
     }
 
+    #[allow(deprecated)]
     async fn renew_lease(
         &self,
         id: Uuid,
@@ -132,6 +134,7 @@ impl UpstreamStore for PostgresStorage {
         renew_split_lease(&self.pool, id, lease_kind, &holder, ttl_secs).await
     }
 
+    #[allow(deprecated)]
     async fn release_lease(
         &self,
         id: Uuid,
@@ -151,6 +154,7 @@ impl UpstreamStore for PostgresStorage {
         self.update_oauth_token(id, tokens).await
     }
 
+    #[allow(deprecated)]
     async fn claim_refresh_lease(
         &self,
         id: Uuid,
@@ -184,6 +188,7 @@ impl UpstreamStore for PostgresStorage {
         read_split_oauth_token_generation(&self.pool, id).await
     }
 
+    #[allow(deprecated)]
     async fn release_lease_on_failure(
         &self,
         id: Uuid,
@@ -234,6 +239,7 @@ impl UpstreamStore for PostgresStorage {
         tx.commit().await.map_err(map_sqlx_error)
     }
 
+    #[allow(deprecated)]
     async fn claim_warmup_lease(
         &self,
         id: Uuid,
@@ -244,6 +250,7 @@ impl UpstreamStore for PostgresStorage {
             .await
     }
 
+    #[allow(deprecated)]
     async fn write_warmup_cycle_key(
         &self,
         id: Uuid,
@@ -254,6 +261,7 @@ impl UpstreamStore for PostgresStorage {
         write_split_warmup_cycle_key(&self.pool, id, holder, new_cycle_key, next_warmup_at).await
     }
 
+    #[allow(deprecated)]
     async fn release_warmup_lease(&self, id: Uuid, holder: &str) -> StorageResult<bool> {
         self.release_lease(id, UpstreamLeaseKind::Warmup, holder.to_owned())
             .await
@@ -267,6 +275,7 @@ impl UpstreamStore for PostgresStorage {
         clear_split_warmup_dialect_plugin(&self.pool, id, expected_revision).await
     }
 
+    #[allow(deprecated)]
     async fn warmup_now_unix_secs(&self) -> StorageResult<i64> {
         let row = sqlx::query("SELECT extract(epoch from now())::bigint AS now_unix_secs")
             .fetch_one(&self.pool)
@@ -275,6 +284,7 @@ impl UpstreamStore for PostgresStorage {
         row.try_get("now_unix_secs").map_err(map_sqlx_error)
     }
 
+    #[allow(deprecated)]
     async fn write_warmup_next_at(
         &self,
         id: Uuid,

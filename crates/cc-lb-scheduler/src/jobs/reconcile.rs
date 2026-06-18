@@ -133,7 +133,8 @@ where
         job: SchedulerReconcileJob,
         now_unix_secs: u64,
     ) -> Result<SchedulerReconcileStats> {
-        let (jobs, live_upstream_keys) = specs::collect_specs(&self.upstreams, &job).await?;
+        let (jobs, live_upstream_keys) =
+            specs::collect_specs(&self.upstreams, &job, now_unix_secs).await?;
         let mut jobs_ensured = 0;
         for job in &jobs {
             jobs_ensured += sqlite::ensure_job(&self.pool, job, now_unix_secs).await?;
@@ -166,7 +167,8 @@ where
         job: SchedulerReconcileJob,
         now_unix_secs: u64,
     ) -> Result<SchedulerReconcileStats> {
-        let (jobs, live_upstream_keys) = specs::collect_specs(&self.upstreams, &job).await?;
+        let (jobs, live_upstream_keys) =
+            specs::collect_specs(&self.upstreams, &job, now_unix_secs).await?;
         let mut jobs_ensured = 0;
         for job in &jobs {
             jobs_ensured += postgres::ensure_job(&self.pool, job, now_unix_secs).await?;
