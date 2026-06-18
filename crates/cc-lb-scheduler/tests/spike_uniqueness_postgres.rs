@@ -47,10 +47,12 @@ async fn setup_full_index(pool: &PgPool) {
     .execute(pool)
     .await
     .unwrap();
-    sqlx::query("CREATE UNIQUE INDEX idx_idempotency ON apalis_spike_full.jobs(job_type, idempotency_key)")
-        .execute(pool)
-        .await
-        .unwrap();
+    sqlx::query(
+        "CREATE UNIQUE INDEX idx_idempotency ON apalis_spike_full.jobs(job_type, idempotency_key)",
+    )
+    .execute(pool)
+    .await
+    .unwrap();
 }
 
 async fn setup_partial_index(pool: &PgPool) {
@@ -96,7 +98,7 @@ async fn push_job_pg_full(
 ) -> Result<u64, sqlx::Error> {
     sqlx::query(
         "INSERT INTO apalis_spike_full.jobs (id, job_type, idempotency_key)
-         VALUES ($1, $2, $3)"
+         VALUES ($1, $2, $3)",
     )
     .bind(id)
     .bind(job_type)
@@ -114,7 +116,7 @@ async fn push_job_pg_partial(
 ) -> Result<u64, sqlx::Error> {
     sqlx::query(
         "INSERT INTO apalis_spike_partial.jobs (id, job_type, idempotency_key)
-         VALUES ($1, $2, $3)"
+         VALUES ($1, $2, $3)",
     )
     .bind(id)
     .bind(job_type)
@@ -126,10 +128,10 @@ async fn push_job_pg_partial(
 
 async fn mark_done_pg(pool: &PgPool, id: &str) {
     sqlx::query("UPDATE apalis_spike_partial.jobs SET status = 'Done' WHERE id = $1")
-    .bind(id)
-    .execute(pool)
-    .await
-    .unwrap();
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
 }
 
 async fn teardown_full(pool: &PgPool) {

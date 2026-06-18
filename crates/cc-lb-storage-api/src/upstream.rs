@@ -55,6 +55,7 @@ pub struct UpstreamRecord {
     pub last_apply_at_unix_secs: Option<u64>,
     pub deleted_at_unix_secs: Option<u64>,
     pub revision: u64,
+    pub oauth_token_generation: u64,
     pub created_at_unix_secs: u64,
     pub updated_at_unix_secs: u64,
     #[serde(default)]
@@ -89,6 +90,7 @@ pub struct UpstreamCreate {
     pub kind: UpstreamKind,
     pub base_url: Option<Url>,
     pub api_key_ciphertext: Option<Vec<u8>>,
+    pub oauth_token_generation: Option<u64>,
     pub warmup_enabled: bool,
     pub next_warmup_at: Option<DateTime<Utc>>,
     pub last_warmup_cycle_key: Option<i64>,
@@ -103,6 +105,7 @@ pub struct UpstreamUpdate {
     pub base_url: Option<Url>,
     pub enabled: Option<bool>,
     pub api_key_ciphertext: Option<Vec<u8>>,
+    pub oauth_token_generation: Option<u64>,
     pub warmup_enabled: Option<bool>,
     pub next_warmup_at: Option<DateTime<Utc>>,
     pub last_warmup_cycle_key: Option<i64>,
@@ -211,6 +214,12 @@ pub trait UpstreamStore: Send + Sync {
         holder: Uuid,
         tokens: EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord>;
+    async fn read_oauth_token_generation(&self, id: Uuid) -> StorageResult<Option<u64>> {
+        Ok(self
+            .get_by_id(id)
+            .await?
+            .map(|record| record.oauth_token_generation))
+    }
     async fn release_lease_on_failure(
         &self,
         id: Uuid,

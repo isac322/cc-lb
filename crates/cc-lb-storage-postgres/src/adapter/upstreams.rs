@@ -22,7 +22,7 @@ const CHANNEL: &str = "cclb_upstream_changed";
 
 macro_rules! split_upstream_columns {
     () => {
-        "spec.id, spec.name, spec.kind, spec.base_url, spec.enabled, token.oauth_credentials_ciphertext AS oauth_credentials, secret.api_key_ciphertext, refresh_lease.holder AS refresh_lease_holder, refresh_lease.until_unix_secs AS refresh_lease_until_unix_secs, status.last_apply_error, status.last_apply_at, spec.deleted_at, spec.spec_revision AS revision, spec.created_at, spec.updated_at, spec.warmup_enabled, status.next_warmup_at, status.last_warmup_cycle_key, warmup_lease.holder AS warmup_lease_holder, warmup_lease.until_unix_secs AS warmup_lease_until_unix_secs, spec.warmup_dialect_plugin"
+        "spec.id, spec.name, spec.kind, spec.base_url, spec.enabled, token.oauth_credentials_ciphertext AS oauth_credentials, secret.api_key_ciphertext, refresh_lease.holder AS refresh_lease_holder, refresh_lease.until_unix_secs AS refresh_lease_until_unix_secs, status.last_apply_error, status.last_apply_at, spec.deleted_at, spec.spec_revision AS revision, COALESCE(token.oauth_token_generation, 0) AS oauth_token_generation, spec.created_at, spec.updated_at, spec.warmup_enabled, status.next_warmup_at, status.last_warmup_cycle_key, warmup_lease.holder AS warmup_lease_holder, warmup_lease.until_unix_secs AS warmup_lease_until_unix_secs, spec.warmup_dialect_plugin"
     };
 }
 
@@ -174,24 +174,14 @@ impl UpstreamStore for PostgresStorage {
         holder: Uuid,
         tokens: EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord> {
-        let released = self
-            .release_lease(id, UpstreamLeaseKind::Refresh, holder.to_string())
-            .await?;
-        if !released {
-            return Err(conflict("refresh lease holder mismatch"));
-        }
-        self.update_oauth_token(id, tokens).await?;
-        self.set_status(
-            id,
-            UpstreamStatusUpdate {
-                last_apply_error: Some(None),
-                ..UpstreamStatusUpdate::default()
-            },
-        )
-        .await?;
+        complete_split_refresh(self, id, holder, tokens).await?;
         get_split_by_id(&self.pool, id)
             .await?
             .ok_or_else(|| conflict("upstream not found"))
+    }
+
+    async fn read_oauth_token_generation(&self, id: Uuid) -> StorageResult<Option<u64>> {
+        read_split_oauth_token_generation(&self.pool, id).await
     }
 
     async fn release_lease_on_failure(
@@ -331,6 +321,17 @@ async fn create_split(
         .map_err(map_sqlx_error)?;
     }
 
+    if let Some(oauth_token_generation) = create.oauth_token_generation {
+        sqlx::query(
+            "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, token_revision, oauth_token_generation, refreshed_at, created_at, updated_at) VALUES ($1, NULL, 1, $2, NULL, NOW(), NOW())",
+        )
+        .bind(id)
+        .bind(u64_to_i64(oauth_token_generation, "oauth token generation")?)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    }
+
     if create.next_warmup_at.is_some() || create.last_warmup_cycle_key.is_some() {
         sqlx::query(
             "INSERT INTO upstream_status_v1 (upstream_id, next_warmup_at, last_warmup_cycle_key, updated_at) VALUES ($1, $2, $3, NOW())",
@@ -439,6 +440,7 @@ async fn update_split(
         || update.warmup_enabled.is_some()
         || update.warmup_dialect_plugin.is_some();
     let api_key_ciphertext = update.api_key_ciphertext.take();
+    let oauth_token_generation = update.oauth_token_generation.take();
     let status = UpstreamStatusUpdate {
         next_warmup_at: update.next_warmup_at.take().map(Some),
         last_warmup_cycle_key: update.last_warmup_cycle_key.take().map(Some),
@@ -457,6 +459,9 @@ async fn update_split(
     }
     if has_status_update {
         set_split_status(&storage.pool, id, status).await?;
+    }
+    if let Some(generation) = oauth_token_generation {
+        update_split_oauth_token_generation(storage, id, generation).await?;
     }
     get_split_by_id(&storage.pool, id)
         .await?
@@ -564,6 +569,117 @@ async fn update_split_oauth_token(
     get_split_by_id(&storage.pool, id)
         .await?
         .ok_or_else(|| conflict("upstream not found"))
+}
+
+async fn update_split_oauth_token_generation(
+    storage: &PostgresStorage,
+    id: Uuid,
+    generation: u64,
+) -> StorageResult<()> {
+    let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
+    ensure_split_spec_active_in_tx(&mut tx, id).await?;
+    sqlx::query(
+        "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, token_revision, oauth_token_generation, refreshed_at, created_at, updated_at)
+         VALUES ($1, NULL, 1, $2, NULL, NOW(), NOW())
+         ON CONFLICT (upstream_id) DO UPDATE
+         SET oauth_token_generation = EXCLUDED.oauth_token_generation,
+             updated_at = NOW()",
+    )
+    .bind(id)
+    .bind(u64_to_i64(generation, "oauth token generation")?)
+    .execute(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    notify(&mut tx, id).await?;
+    tx.commit().await.map_err(map_sqlx_error)
+}
+
+async fn complete_split_refresh(
+    storage: &PostgresStorage,
+    id: Uuid,
+    holder: Uuid,
+    tokens: EncryptedOAuthTokens,
+) -> StorageResult<()> {
+    let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
+    ensure_split_spec_active_in_tx(&mut tx, id).await?;
+    let holder = holder.to_string();
+    let existing_holder: Option<String> = sqlx::query_scalar(
+        "SELECT holder FROM upstream_lease_v1 WHERE upstream_id = $1 AND lease_kind = 'refresh' FOR UPDATE",
+    )
+    .bind(id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    if existing_holder
+        .as_deref()
+        .is_some_and(|stored| stored != holder)
+    {
+        return Err(conflict("refresh lease holder mismatch"));
+    }
+    if existing_holder.is_some() {
+        sqlx::query(
+            "DELETE FROM upstream_lease_v1 WHERE upstream_id = $1 AND lease_kind = 'refresh'",
+        )
+        .bind(id)
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    }
+    sqlx::query(
+        "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, token_revision, oauth_token_generation, refreshed_at, created_at, updated_at)
+         VALUES ($1, $2, 1, 1, NOW(), NOW(), NOW())
+         ON CONFLICT (upstream_id) DO UPDATE
+         SET oauth_credentials_ciphertext = EXCLUDED.oauth_credentials_ciphertext,
+             token_revision = upstream_oauth_token_v1.token_revision + 1,
+             oauth_token_generation = upstream_oauth_token_v1.oauth_token_generation + 1,
+             refreshed_at = NOW(),
+             updated_at = NOW()",
+    )
+    .bind(id)
+    .bind(tokens.ciphertext())
+    .execute(&mut *tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    clear_split_apply_error_in_tx(&mut tx, id).await?;
+    notify(&mut tx, id).await?;
+    tx.commit().await.map_err(map_sqlx_error)
+}
+
+async fn read_split_oauth_token_generation(
+    pool: &sqlx::PgPool,
+    id: Uuid,
+) -> StorageResult<Option<u64>> {
+    let generation: Option<i64> = sqlx::query_scalar(
+        "SELECT COALESCE(token.oauth_token_generation, 0)
+           FROM upstream_spec_v1 spec
+           LEFT JOIN upstream_oauth_token_v1 token ON token.upstream_id = spec.id
+          WHERE spec.id = $1 AND spec.deleted_at IS NULL",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx_error)?;
+    generation
+        .map(|value| i64_to_u64(value, "oauth token generation"))
+        .transpose()
+}
+
+async fn clear_split_apply_error_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    id: Uuid,
+) -> StorageResult<()> {
+    sqlx::query(
+        "INSERT INTO upstream_status_v1 (upstream_id, last_apply_error, updated_at)
+         VALUES ($1, NULL, NOW())
+         ON CONFLICT (upstream_id) DO UPDATE
+         SET last_apply_error = NULL,
+             updated_at = NOW()",
+    )
+    .bind(id)
+    .execute(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+    Ok(())
 }
 
 async fn ensure_split_spec_revision(
@@ -984,6 +1100,11 @@ fn split_row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<UpstreamReco
         revision: i64_to_u64(
             row.try_get("revision").map_err(map_sqlx_error)?,
             "upstream spec revision",
+        )?,
+        oauth_token_generation: i64_to_u64(
+            row.try_get("oauth_token_generation")
+                .map_err(map_sqlx_error)?,
+            "oauth token generation",
         )?,
         created_at_unix_secs: datetime_to_unix_secs(
             row.try_get("created_at").map_err(map_sqlx_error)?,

@@ -155,6 +155,7 @@ pub async fn apply_bootstrap(
                 kind: parse_upstream_kind(&upstream.kind)?,
                 base_url: upstream.base_url,
                 api_key_ciphertext: None,
+                oauth_token_generation: None,
                 warmup_enabled: false,
                 next_warmup_at: None,
                 last_warmup_cycle_key: None,

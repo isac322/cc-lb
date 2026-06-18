@@ -71,7 +71,8 @@ macro_rules! exercise_stores {
         let config = OAuthUsagePollScheduleConfig {
             success_window_secs: 300,
             success_capacity: 2,
-            throttle_backoff_secs: 60,
+            success_safety_secs: 0,
+            ..OAuthUsagePollScheduleConfig::default()
         };
         assert_eq!(
             cursors.compute_next_run_at(2_210, &config, Some(&cursor)),

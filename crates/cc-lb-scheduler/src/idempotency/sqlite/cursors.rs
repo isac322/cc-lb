@@ -64,6 +64,7 @@ impl OAuthUsagePollCursorsStore<Sqlite> {
             .unwrap_or_else(|| OAuthUsagePollCursor::new(upstream_id));
         cursor.last_throttle_at_unix_secs = Some(observed_at_unix_secs);
         cursor.last_throttle_count = throttle_count;
+        cursor.last_status = Some(429);
         cursor.attempt_count = cursor.attempt_count.saturating_add(1);
         cursor.last_observed_at_unix_secs = Some(observed_at_unix_secs);
         cursor.recent_throttles_unix_secs = append_bounded(
@@ -89,7 +90,7 @@ impl OAuthUsagePollCursorsStore<Sqlite> {
         cursor.last_window_start_unix_millis = Some(window_start_unix_millis);
         cursor.last_window_end_unix_millis = Some(window_end_unix_millis);
         cursor.last_status = Some(200);
-        cursor.attempt_count = 0;
+        cursor.attempt_count = cursor.attempt_count.saturating_add(1);
         cursor.last_observed_at_unix_secs = Some(observed_at_unix_secs);
         cursor.recent_successes_unix_secs = append_bounded(
             &cursor.recent_successes_unix_secs,

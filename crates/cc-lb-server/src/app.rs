@@ -86,6 +86,7 @@ use cc_lb_admin::{
 };
 
 const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_millis(500);
+const PRICE_CATALOG_LOCAL_INSTALL_INTERVAL: Duration = Duration::from_secs(60);
 
 pub const PROXY_FILES_ROUTE_COLLECTION: &str = "/v1/files";
 pub const PROXY_FILES_ROUTE_ITEM: &str = "/v1/files/{id}";
@@ -105,6 +106,8 @@ pub struct App {
     notify_cancel: Option<CancellationToken>,
     notifier_task: Option<JoinHandle<()>>,
     notify_listener_task: Option<JoinHandle<()>>,
+    price_catalog_install_cancel: Option<CancellationToken>,
+    price_catalog_install_task: Option<JoinHandle<()>>,
     audit_writer_task: Option<JoinHandle<()>>,
     upstream_rate_limit_writer_task: Option<JoinHandle<()>>,
     subscription_quota_writer_task: Option<JoinHandle<()>>,
@@ -182,6 +185,8 @@ impl App {
             notify_cancel,
             notifier_task,
             notify_listener_task,
+            price_catalog_install_cancel,
+            price_catalog_install_task,
             audit_writer_task,
             upstream_rate_limit_writer_task,
             subscription_quota_writer_task,
@@ -238,6 +243,12 @@ impl App {
             await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
         }
         if let Some(task) = notify_listener_task {
+            await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        }
+        if let Some(cancel) = price_catalog_install_cancel {
+            cancel.cancel();
+        }
+        if let Some(task) = price_catalog_install_task {
             await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
         }
         let _ = admin_stop_tx.send(true);
@@ -620,7 +631,8 @@ async fn build_app_with_storage_inner(
     let server_state = Arc::new(ServerStateHandle::new_starting());
     let key_store = Arc::new(KeyStore::new(managed_store));
     let price_catalog = cc_lb_pricing::global_catalog().clone();
-    spawn_price_catalog_loader(&config, storage.clone(), price_catalog.clone());
+    let (price_catalog_install_cancel, price_catalog_install_task) =
+        spawn_price_catalog_local_installer(&config, storage.clone(), price_catalog.clone());
     let pruner = UsagePruner::new(storage.clone(), config.api_keys.usage_retention_days);
     let _usage_pruner_task = tokio::spawn(pruner.start_daemon());
     let _usage_rollup_task = UsageRollupJob::new(storage.clone()).start_daemon();
@@ -1042,6 +1054,8 @@ async fn build_app_with_storage_inner(
         notify_cancel: Some(notify_cancel),
         notifier_task,
         notify_listener_task,
+        price_catalog_install_cancel: Some(price_catalog_install_cancel),
+        price_catalog_install_task: Some(price_catalog_install_task),
         audit_writer_task: Some(audit_writer_task),
         upstream_rate_limit_writer_task: Some(upstream_rate_limit_writer_task),
         subscription_quota_writer_task: Some(subscription_quota_writer_task),
@@ -1621,11 +1635,11 @@ struct ProxyState {
     builtin_authn: Option<Arc<BuiltinAuthn>>,
 }
 
-fn spawn_price_catalog_loader(
+fn spawn_price_catalog_local_installer(
     config: &Config,
     storage: Arc<dyn Storage>,
     price_catalog: Arc<cc_lb_pricing::PriceCatalog>,
-) {
+) -> (CancellationToken, JoinHandle<()>) {
     install_default_fallback_if_uninitialized(&price_catalog);
 
     let cfg = &config.api_keys.price_catalog;
@@ -1638,12 +1652,33 @@ fn spawn_price_catalog_loader(
         cfg.cache_path.clone(),
     );
     tracing::info!(
-        url = %cfg.url,
-        refresh_interval_secs = cfg.refresh_interval.as_secs(),
+        local_install_interval_secs = PRICE_CATALOG_LOCAL_INSTALL_INTERVAL.as_secs(),
         cache_path = %cfg.cache_path.display(),
-        "starting LiteLLM price catalog loader",
+        "starting LiteLLM price catalog local installer",
     );
-    let _handle = loader.start_daemon();
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let task = tokio::spawn(async move {
+        run_price_catalog_local_install(&loader).await;
+        let mut interval = tokio::time::interval(PRICE_CATALOG_LOCAL_INSTALL_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = task_cancel.cancelled() => return,
+                _ = interval.tick() => {}
+            }
+            run_price_catalog_local_install(&loader).await;
+        }
+    });
+    (cancel, task)
+}
+
+async fn run_price_catalog_local_install(loader: &cc_lb_pricing::LiteLlmLoader) {
+    match loader.install_latest_local().await {
+        Ok(true) => tracing::info!("installed latest local LiteLLM price catalog"),
+        Ok(false) => tracing::debug!("LiteLLM price catalog local snapshot already current"),
+        Err(error) => tracing::warn!(error = %error, "LiteLLM price catalog local install failed"),
+    }
 }
 
 fn install_default_fallback_if_uninitialized(price_catalog: &cc_lb_pricing::PriceCatalog) {

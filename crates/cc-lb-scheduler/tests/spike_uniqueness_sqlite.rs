@@ -98,13 +98,11 @@ async fn push_job_with_partial_conflict_target(
 }
 
 async fn mark_done(pool: &SqlitePool, id: &str) {
-    sqlx::query(
-        "UPDATE Jobs SET status = 'Done', done_at = strftime('%s','now') WHERE id = ?",
-    )
-    .bind(id)
-    .execute(pool)
-    .await
-    .expect("mark_done failed");
+    sqlx::query("UPDATE Jobs SET status = 'Done', done_at = strftime('%s','now') WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("mark_done failed");
 }
 
 // ── Test 1: duplicate push is silently ignored ────────────────────────────────
@@ -163,7 +161,10 @@ async fn sqlite_partial_index_allows_repush_after_done() {
     let pool = SqlitePool::connect(":memory:").await.unwrap();
     sqlx::query(CREATE_JOBS).execute(&pool).await.unwrap();
     // Use the partial index migration instead
-    sqlx::query(PARTIAL_UNIQUE_IDX).execute(&pool).await.unwrap();
+    sqlx::query(PARTIAL_UNIQUE_IDX)
+        .execute(&pool)
+        .await
+        .unwrap();
 
     // Push and complete the first job
     assert_eq!(

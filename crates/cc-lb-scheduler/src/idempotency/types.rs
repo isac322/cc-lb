@@ -62,20 +62,126 @@ impl OAuthUsagePollCursor {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OAuthUsagePollScheduleConfig {
+    pub bootstrap_attempts: u32,
+    pub bootstrap_default_interval_secs: u64,
+    pub min_interval_secs: u64,
+    pub max_interval_secs: u64,
+    pub fallback_interval_secs: u64,
+    pub history_capacity: usize,
+    pub throttle_ladder_secs: Vec<u64>,
     pub success_window_secs: u64,
     pub success_capacity: usize,
-    pub throttle_backoff_secs: u64,
+    pub success_safety_secs: u64,
 }
 
 impl Default for OAuthUsagePollScheduleConfig {
     fn default() -> Self {
         Self {
+            bootstrap_attempts: 0,
+            bootstrap_default_interval_secs: 60,
+            min_interval_secs: 60,
+            max_interval_secs: 3_600,
+            fallback_interval_secs: 60,
+            history_capacity: 8,
+            throttle_ladder_secs: vec![300, 300, 300, 300, 300],
             success_window_secs: 300,
             success_capacity: 5,
-            throttle_backoff_secs: 60,
+            success_safety_secs: 5,
         }
+    }
+}
+
+impl OAuthUsagePollScheduleConfig {
+    pub fn compute_next_run_at(
+        &self,
+        now_unix_secs: u64,
+        cursor: Option<&OAuthUsagePollCursor>,
+    ) -> u64 {
+        let Some(cursor) = cursor else {
+            return now_unix_secs;
+        };
+        match cursor.last_status {
+            Some(200) => self.success_next_run_at(now_unix_secs, cursor),
+            Some(429) => cursor
+                .last_throttle_at_unix_secs
+                .unwrap_or(now_unix_secs)
+                .saturating_add(self.throttle_interval(cursor.last_throttle_count)),
+            Some(_) | None => cursor
+                .last_observed_at_unix_secs
+                .unwrap_or(now_unix_secs)
+                .saturating_add(self.failure_interval(cursor.attempt_count)),
+        }
+    }
+
+    pub fn throttle_interval(&self, consecutive_throttles: u32) -> u64 {
+        if self.throttle_ladder_secs.is_empty() {
+            return self.clamp_interval(self.fallback_interval_secs);
+        }
+        let index = consecutive_throttles
+            .saturating_sub(1)
+            .min((self.throttle_ladder_secs.len() - 1) as u32) as usize;
+        self.clamp_interval(self.throttle_ladder_secs[index])
+    }
+
+    pub fn success_history_cap(&self) -> usize {
+        self.success_capacity
+    }
+
+    fn success_next_run_at(&self, now_unix_secs: u64, cursor: &OAuthUsagePollCursor) -> u64 {
+        let observed_at = cursor.last_observed_at_unix_secs.unwrap_or(now_unix_secs);
+        let base = if self.success_capacity > 0 {
+            self.min_interval_secs.max(
+                self.sliding_window_unlock_at(now_unix_secs, cursor)
+                    .saturating_sub(observed_at),
+            )
+        } else if cursor.attempt_count < self.bootstrap_attempts {
+            self.bootstrap_backoff(cursor.attempt_count)
+        } else {
+            self.fallback_interval_secs
+        };
+        observed_at.saturating_add(self.clamp_interval(base))
+    }
+
+    fn sliding_window_unlock_at(&self, now_unix_secs: u64, cursor: &OAuthUsagePollCursor) -> u64 {
+        let cutoff = now_unix_secs.saturating_sub(
+            self.success_window_secs
+                .saturating_add(self.success_safety_secs),
+        );
+        let mut recent_successes = cursor
+            .recent_successes_unix_secs
+            .iter()
+            .copied()
+            .filter(|observed_at| *observed_at >= cutoff)
+            .collect::<Vec<_>>();
+        recent_successes.sort_unstable();
+        if recent_successes.len() < self.success_capacity {
+            return now_unix_secs;
+        }
+        recent_successes[recent_successes.len() - self.success_capacity]
+            .saturating_add(self.success_window_secs)
+            .saturating_add(self.success_safety_secs)
+    }
+
+    fn failure_interval(&self, attempt_count: u32) -> u64 {
+        if attempt_count < self.bootstrap_attempts {
+            self.bootstrap_backoff(attempt_count)
+        } else {
+            self.clamp_interval(self.fallback_interval_secs)
+        }
+    }
+
+    fn bootstrap_backoff(&self, attempt_count: u32) -> u64 {
+        let multiplier = 1_u64 << attempt_count.saturating_sub(1).min(6);
+        self.clamp_interval(
+            self.bootstrap_default_interval_secs
+                .saturating_mul(multiplier),
+        )
+    }
+
+    fn clamp_interval(&self, interval_secs: u64) -> u64 {
+        interval_secs.clamp(self.min_interval_secs, self.max_interval_secs)
     }
 }
 
@@ -86,31 +192,7 @@ impl<Db: Database> OAuthUsagePollCursorsStore<Db> {
         config: &OAuthUsagePollScheduleConfig,
         cursor: Option<&OAuthUsagePollCursor>,
     ) -> u64 {
-        let Some(cursor) = cursor else {
-            return now_unix_secs;
-        };
-        let mut next_run_at = now_unix_secs;
-        if let Some(last_throttle_at) = cursor.last_throttle_at_unix_secs {
-            next_run_at =
-                next_run_at.max(last_throttle_at.saturating_add(config.throttle_backoff_secs));
-        }
-        if config.success_capacity > 0 {
-            let cutoff = now_unix_secs.saturating_sub(config.success_window_secs);
-            let mut recent_successes = cursor
-                .recent_successes_unix_secs
-                .iter()
-                .copied()
-                .filter(|observed_at| *observed_at >= cutoff)
-                .collect::<Vec<_>>();
-            recent_successes.sort_unstable();
-            if recent_successes.len() >= config.success_capacity {
-                let first_counted =
-                    recent_successes[recent_successes.len() - config.success_capacity];
-                next_run_at =
-                    next_run_at.max(first_counted.saturating_add(config.success_window_secs));
-            }
-        }
-        next_run_at
+        config.compute_next_run_at(now_unix_secs, cursor)
     }
 }
 

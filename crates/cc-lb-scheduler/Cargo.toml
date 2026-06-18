@@ -13,17 +13,26 @@ postgres = ["sqlx/postgres", "apalis-postgres"]
 
 [dependencies]
 anyhow = { workspace = true }
+apalis-core = "^1.0.0-rc.9"
 apalis-cron = "^1.0.0-rc.8"
 apalis-postgres = { version = "^1.0.0-rc.8", optional = true }
 apalis-sqlite = { version = "^1.0.0-rc.8", optional = true }
+cc-lb-aead = { path = "../cc-lb-aead" }
+cc-lb-core = { path = "../cc-lb-core" }
+cc-lb-pricing = { path = "../cc-lb-pricing" }
+cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 chrono = { workspace = true }
+hex = { workspace = true }
+metrics = { workspace = true }
 opentelemetry = { workspace = true }
 opentelemetry_sdk = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 sqlx = { version = "0.8.6", default-features = false, features = ["chrono", "json", "runtime-tokio", "tls-rustls-ring", "uuid"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }
+tokio-util = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 tracing = { workspace = true }
 tracing-opentelemetry = { workspace = true }
@@ -38,6 +47,7 @@ name = "spike_cron_leader"
 required-features = ["postgres"]
 
 [dev-dependencies]
+async-trait = { workspace = true }
 cron = "0.16"
 futures-util = "0.3"
 proptest = { workspace = true }

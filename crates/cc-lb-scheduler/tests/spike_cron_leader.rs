@@ -3,9 +3,9 @@ use std::time::Duration;
 use apalis_cron::CronStream;
 use cron::Schedule;
 use futures_util::StreamExt as _;
-use sqlx::postgres::PgConnection;
 use sqlx::Connection as _;
 use sqlx::PgPool;
+use sqlx::postgres::PgConnection;
 use std::str::FromStr;
 use tokio::sync::oneshot;
 
@@ -62,7 +62,10 @@ async fn connect_dedicated(url: &str) -> PgConnection {
 
 async fn setup(pool: &PgPool, table: &SpikeTable) {
     sqlx::query(table.drop_schema).execute(pool).await.unwrap();
-    sqlx::query(table.create_schema).execute(pool).await.unwrap();
+    sqlx::query(table.create_schema)
+        .execute(pool)
+        .await
+        .unwrap();
     sqlx::query(table.create_table).execute(pool).await.unwrap();
 }
 

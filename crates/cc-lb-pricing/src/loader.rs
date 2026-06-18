@@ -13,6 +13,7 @@ use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
 use serde_json::Value;
+use sha2::{Digest as _, Sha256};
 use tokio::task::JoinHandle;
 use tokio::time::{self, Instant, MissedTickBehavior};
 use tracing::{error, info, warn};
@@ -44,6 +45,13 @@ pub enum PriceCatalogStatus {
         last_failure_kind: String,
     },
     CostDisabled,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FetchedCatalog {
+    pub fetched_at_ms: u64,
+    pub fingerprint: String,
+    pub bytes: Vec<u8>,
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -180,14 +188,15 @@ impl LiteLlmLoader {
             }
         }
 
-        match self.install_from_cache().await {
-            Ok(Some(fetched_at_ms)) => {
+        match self.install_latest_local().await {
+            Ok(true) => {
+                let fetched_at_ms = self.catalog.current().fetched_at_ms;
                 warn!(
                     fetched_at_ms,
-                    "using disk cache for litellm price catalog cold start"
+                    "using local cache for litellm price catalog cold start"
                 );
             }
-            Ok(None) => {
+            Ok(false) => {
                 if matches!(self.catalog.status(), CatalogStatus::Ok) {
                     warn!(
                         last_error = ?last_error,
@@ -224,15 +233,32 @@ impl LiteLlmLoader {
     }
 
     async fn fetch_install_persist(&self) -> Result<u64, LoaderError> {
-        let bytes = self.fetch_bytes().await?;
-        let mut snapshot = parse_litellm_json(&bytes)?;
-        let fetched_at_ms = snapshot.fetched_at_ms;
-        snapshot.raw_json = bytes.clone();
-        self.catalog.install_snapshot(snapshot);
-        put_storage_snapshot(self.storage.clone(), bytes.clone(), fetched_at_ms).await?;
-        write_disk_cache(self.cache_path.clone(), &bytes).await?;
+        let fetched = self.fetch_and_fingerprint().await?;
+        let fetched_at_ms = fetched.fetched_at_ms;
+        self.persist_snapshot(&fetched).await?;
+        let _installed = install_cached_bytes(&self.catalog, fetched.bytes, Some(fetched_at_ms))?;
         self.record_success();
         Ok(fetched_at_ms)
+    }
+
+    pub async fn fetch_and_fingerprint(&self) -> Result<FetchedCatalog, LoaderError> {
+        let bytes = self.fetch_bytes().await?;
+        let snapshot = parse_litellm_json(&bytes)?;
+        Ok(FetchedCatalog {
+            fetched_at_ms: snapshot.fetched_at_ms,
+            fingerprint: catalog_fingerprint(&bytes),
+            bytes,
+        })
+    }
+
+    pub async fn persist_snapshot(&self, fetched: &FetchedCatalog) -> Result<(), LoaderError> {
+        put_storage_snapshot(
+            self.storage.clone(),
+            fetched.bytes.clone(),
+            fetched.fetched_at_ms,
+        )
+        .await?;
+        write_disk_cache(self.cache_path.clone(), &fetched.bytes).await
     }
 
     async fn fetch_bytes(&self) -> Result<Vec<u8>, LoaderError> {
@@ -256,16 +282,27 @@ impl LiteLlmLoader {
         Ok(bytes.to_vec())
     }
 
-    async fn install_from_cache(&self) -> Result<Option<u64>, LoaderError> {
+    pub async fn install_latest_local(&self) -> Result<bool, LoaderError> {
+        let storage_error = match get_storage_snapshot(self.storage.clone()).await {
+            Ok(Some(snapshot)) => {
+                return install_cached_bytes(
+                    &self.catalog,
+                    snapshot.json_bytes,
+                    Some(snapshot.fetched_at_ms),
+                );
+            }
+            Ok(None) => None,
+            Err(error) => Some(error),
+        };
+
         if let Some(bytes) = read_disk_cache(self.cache_path.clone()).await? {
-            return install_cached_bytes(&self.catalog, bytes, None).map(Some);
+            return install_cached_bytes(&self.catalog, bytes, None);
         }
 
-        let Some(snapshot) = get_storage_snapshot(self.storage.clone()).await? else {
-            return Ok(None);
-        };
-        let fetched_at_ms = snapshot.fetched_at_ms;
-        install_cached_bytes(&self.catalog, snapshot.json_bytes, Some(fetched_at_ms)).map(Some)
+        match storage_error {
+            Some(error) => Err(error),
+            None => Ok(false),
+        }
     }
 
     fn record_success(&self) {
@@ -469,14 +506,17 @@ fn install_cached_bytes(
     catalog: &Arc<PriceCatalog>,
     bytes: Vec<u8>,
     fetched_at_ms: Option<u64>,
-) -> Result<u64, LoaderError> {
+) -> Result<bool, LoaderError> {
+    let current = catalog.current();
+    if matches!(current.status, CatalogStatus::Ok) && current.raw_json == bytes {
+        return Ok(false);
+    }
     let mut snapshot = parse_litellm_json(&bytes)?;
     if let Some(fetched_at_ms) = fetched_at_ms {
         snapshot.fetched_at_ms = fetched_at_ms;
     }
-    let fetched_at_ms = snapshot.fetched_at_ms;
     catalog.install_snapshot(snapshot);
-    Ok(fetched_at_ms)
+    Ok(true)
 }
 
 fn tmp_cache_path(cache_path: &Path) -> PathBuf {
@@ -490,4 +530,8 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
         .unwrap_or(0)
+}
+
+fn catalog_fingerprint(bytes: &[u8]) -> String {
+    hex::encode(Sha256::digest(bytes))
 }
