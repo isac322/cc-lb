@@ -33,7 +33,6 @@ pub mod storage_factory;
 pub mod subscription_quota_cache;
 pub mod subscription_quota_gc;
 pub mod tls;
-pub mod upstream_warmup_loop;
 pub mod validate;
 pub mod version;
 pub mod warmup;
