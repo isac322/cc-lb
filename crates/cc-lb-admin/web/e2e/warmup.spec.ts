@@ -416,32 +416,30 @@ test.describe('WarmupCard', () => {
     await page.screenshot({ path: evidencePath('scenario-8-stale-revision.png'), fullPage: true });
   });
 
-  test('Scenario 9: Disabled-state EmptyState + Enable', async ({ page }) => {
-    let patchBody: unknown;
-    let ifMatch: string | null = null;
-    await installAppFixtures(page, {
-      upstreams: [oauthHealthy(), oauthDisabled(), apiKeyUpstream()],
-      onPatch: async (request, upstream) => {
-        patchBody = request.postDataJSON();
-        ifMatch = request.headers()['if-match'] ?? null;
-        upstream.warmup_enabled = true;
-        upstream.status.next_warmup_at = new Date(Date.now() + 30 * 60 * 1000).toISOString();
-        upstream.status.last_warmup_cycle_key = Math.floor(Date.now() / 1000) - 20 * 60;
-        upstream.spec_revision += 1;
-        return { status: 200, body: upstream };
+  test('Scenario 9: Disabled upstream pauses stale warmup schedule', async ({ page }) => {
+    const stalePaused = oauthHealthy({
+      id: 'oauth-paused-stale',
+      name: 'oauth-paused-stale',
+      enabled: false,
+      warmup_enabled: true,
+      status: {
+        last_apply_error: null,
+        last_apply_at_unix_secs: null,
+        next_warmup_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+        last_warmup_cycle_key: Math.floor(Date.now() / 1000) - 2 * 60 * 60,
       },
     });
-    await openUpstreams(page, 'oauth-disabled');
+    await installAppFixtures(page, {
+      upstreams: [oauthHealthy(), stalePaused, apiKeyUpstream()],
+    });
+    await openUpstreams(page, 'oauth-paused-stale');
 
     await expect(page.getByTestId('warmup-card')).toBeVisible();
-    await expect(page.getByText(COPY.disabledEmpty)).toBeVisible();
-    await expect(page.getByTestId('warmup-enable-btn')).toBeVisible();
+    await expect(page.getByText(COPY.upstreamPausedEmpty)).toBeVisible();
+    await expect(page.getByText(/Overdue/)).toHaveCount(0);
+    await expect(page.getByTestId('warmup-fire-now')).toHaveCount(0);
+    await expect(page.getByTestId('warmup-enable-btn')).toHaveCount(0);
     await page.screenshot({ path: evidencePath('scenario-9-disabled-state-before.png'), fullPage: true });
-    await page.getByTestId('warmup-enable-btn').click();
-    await expect.poll(() => patchBody).toEqual({ warmup_enabled: true });
-    expect(ifMatch).toBe('W/"2"');
-    await expect(page.getByTestId('warmup-fire-now')).toBeVisible();
-    await page.screenshot({ path: evidencePath('scenario-9-disabled-state.png'), fullPage: true });
   });
 
   test('Scenario 10: api_key upstream renders nothing', async ({ page }) => {

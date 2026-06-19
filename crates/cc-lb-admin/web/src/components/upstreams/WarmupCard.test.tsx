@@ -249,6 +249,43 @@ describe('WarmupCard', () => {
     expect(nextEl.textContent).toContain('Overdue');
   });
 
+  test('OAuth next warmup label updates without new props', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-06-18T00:00:00.000Z'));
+    const upstream = makeOauthUpstream({
+      next_warmup_at: new Date('2026-06-18T00:00:04.000Z').toISOString(),
+      last_warmup_cycle_key: null,
+    });
+
+    renderWarmup(upstream);
+
+    expect(screen.getByTestId('warmup-next').textContent).toContain(
+      'any moment',
+    );
+
+    act(() => {
+      vi.advanceTimersByTime(10_000);
+    });
+
+    expect(screen.getByTestId('warmup-next').textContent).toContain('Overdue');
+  });
+
+  test('OAuth upstream disabled with stale next_warmup_at renders paused copy instead of Overdue', () => {
+    const overdueMs = Date.now() - 30 * 60 * 1000;
+
+    renderWarmup(
+      makeOauthUpstream({
+        enabled: false,
+        warmup_enabled: true,
+        next_warmup_at: new Date(overdueMs).toISOString(),
+      }),
+    );
+
+    expect(screen.getByText(COPY.upstreamPausedEmpty)).toBeDefined();
+    expect(screen.queryByText(/Overdue/)).toBeNull();
+    expect(screen.queryByTestId('warmup-fire-now')).toBeNull();
+  });
+
   test('zero shape plugins renders notice and Plugins link without select', () => {
     mockHooks({ registryEntries: [makeRouterPlugin('r1', 'router-only')] });
 

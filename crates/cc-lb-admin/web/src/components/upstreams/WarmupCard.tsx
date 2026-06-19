@@ -8,7 +8,6 @@ import {
   TOAST_DURATIONS,
 } from '../../lib/copy/warmup';
 import { formatRelativeUnixSeconds } from '../../lib/format';
-import { formatAbsolute, useLocale, useTimezone } from '../../lib/locale';
 import {
   type FireNowResponse,
   type PluginEntry,
@@ -26,52 +25,16 @@ import {
   ConfirmDialog,
   cx,
   EmptyState,
-  Hint,
   INPUT_CLASS,
 } from '../ui/primitives';
 import { RelativeTime } from '../ui/RelativeTime';
+import { NextWarmupDisplay } from './NextWarmupDisplay';
 
 function pluginSupportsSlot(
   p: { supported_slots?: string[]; slot?: string },
   slot: string,
 ): boolean {
   return p.supported_slots?.includes(slot) ?? p.slot === slot;
-}
-
-const OVERDUE_TOLERANCE_MS = 5_000;
-
-function formatRelativeDelta(diffMs: number): string {
-  const absMs = Math.abs(diffMs);
-  const totalMin = Math.floor(absMs / 60_000);
-  const d = Math.floor(totalMin / 1440);
-  const h = Math.floor((totalMin % 1440) / 60);
-  const m = totalMin % 60;
-  if (d > 0) return `${d}d ${h}h`;
-  if (h > 0) return `${h}h ${m}m`;
-  return `${Math.max(1, m)}m`;
-}
-
-function NextWarmupDisplay({ value }: { value: string }) {
-  const { effective: locale } = useLocale();
-  const { effective: timezone } = useTimezone();
-  const date = new Date(value);
-  const diffMs = date.getTime() - Date.now();
-  const abs = formatAbsolute(date, locale, timezone);
-  let text: string;
-  let tone = '';
-  if (diffMs < -OVERDUE_TOLERANCE_MS) {
-    text = `Overdue by ${formatRelativeDelta(diffMs)}`;
-    tone = 'text-amber-300';
-  } else if (diffMs < OVERDUE_TOLERANCE_MS) {
-    text = 'any moment';
-  } else {
-    text = `in ${formatRelativeDelta(diffMs)}`;
-  }
-  return (
-    <Hint label={abs} side="top">
-      <span className={cx('cursor-help', tone)}>{text}</span>
-    </Hint>
-  );
 }
 
 function LastCycleDisplay({ cycleKeyUnixSecs }: { cycleKeyUnixSecs: number }) {
@@ -324,7 +287,7 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
         subtitle={COPY.cardSubtitle}
         action={
           <div className="flex items-center gap-3">
-            {upstream.warmup_enabled && (
+            {upstream.enabled && upstream.warmup_enabled && (
               <Button
                 variant="secondary"
                 size="sm"
@@ -371,7 +334,9 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
           </div>
         )}
 
-        {!upstream.warmup_enabled ? (
+        {!upstream.enabled ? (
+          <EmptyState title={COPY.upstreamPausedEmpty} />
+        ) : !upstream.warmup_enabled ? (
           <EmptyState
             title={COPY.disabledEmpty}
             action={

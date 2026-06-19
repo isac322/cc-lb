@@ -41,10 +41,15 @@ import {
   Skeleton,
   StatusBadge,
 } from '../components/ui/primitives';
-import { RelativeTime } from '../components/ui/RelativeTime';
+import {
+  RelativeOffsetTime,
+  RelativeTime,
+  ResetCountdown,
+} from '../components/ui/RelativeTime';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { ApiUsageCard } from '../components/upstreams/ApiUsageCard';
 import { InlineNameEditor } from '../components/upstreams/InlineNameEditor';
+import { QuotaObservedAt } from '../components/upstreams/QuotaObservedAt';
 import { SettingsCard } from '../components/upstreams/SettingsCard';
 import { WarmupCard } from '../components/upstreams/WarmupCard';
 import { ApiError } from '../lib/api';
@@ -288,7 +293,16 @@ function UpstreamsPage() {
                             <div className="hidden @[240px]:flex w-2 shrink-0 justify-end">
                               {stateDot && (
                                 <Hint
-                                  label={`${snap?.state} · ${snap?.source} · ${snap?.age_secs ?? 0}s`}
+                                  label={
+                                    <span>
+                                      {snap?.state} · {snap?.source} ·{' '}
+                                      {snap ? (
+                                        <QuotaObservedAt snapshot={snap} />
+                                      ) : (
+                                        '—'
+                                      )}
+                                    </span>
+                                  }
                                 >
                                   <div
                                     className={cx(
@@ -371,7 +385,6 @@ function UpstreamsPage() {
   );
 }
 
-// Mirrors credentials.tsx fmtRelExpiry "warn" window; never synthesize success.
 const OAUTH_EXPIRING_SOON_SECS = 600;
 
 type OAuthBadge = { tone: 'ok' | 'warn' | 'danger' | 'neutral'; label: string };
@@ -416,29 +429,7 @@ function windowLabel(windowName: string): string {
   }
 }
 
-function formatEta(secs: number | null | undefined): string {
-  if (secs == null) return '—';
-  if (secs <= 0) return 'Already saturated';
-  if (secs > 86400) {
-    return `${Math.floor(secs / 86400)}d ${Math.floor((secs % 86400) / 3600)}h`;
-  }
-  if (secs > 3600) {
-    return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
-  }
-  return `${Math.floor(secs / 60)}m`;
-}
-
 function SnapshotStatusComposite({ snap }: { snap: any }) {
-  const age =
-    snap.age_secs == null
-      ? 'recently'
-      : snap.age_secs < 60
-        ? `${snap.age_secs}s old`
-        : snap.age_secs < 3600
-          ? `${Math.floor(snap.age_secs / 60)}m old`
-          : snap.age_secs < 86400
-            ? `${Math.floor(snap.age_secs / 3600)}h old`
-            : `${Math.floor(snap.age_secs / 86400)}d old`;
   const source =
     snap.source === 'api' ? 'API' : snap.source === 'header' ? 'Header' : '—';
   const label =
@@ -455,11 +446,11 @@ function SnapshotStatusComposite({ snap }: { snap: any }) {
         : 'bg-gray-400';
   return (
     <Hint
-      label={`observed at ${
-        snap.observed_at_unix_millis
-          ? new Date(snap.observed_at_unix_millis).toLocaleString()
-          : 'unknown'
-      } · source: ${source} · age: ${age}`}
+      label={
+        <span>
+          observed <QuotaObservedAt snapshot={snap} /> · source: {source}
+        </span>
+      }
     >
       <div className="flex items-center gap-1.5 mt-0.5">
         <div
@@ -471,7 +462,7 @@ function SnapshotStatusComposite({ snap }: { snap: any }) {
           }
         />
         <span className="text-[9px] text-text-faint font-mono">
-          {label} · {source} · {age}
+          {label} · {source} · <QuotaObservedAt snapshot={snap} />
         </span>
       </div>
     </Hint>
@@ -607,7 +598,7 @@ function DetailView({
   });
   const quotaSeries = useSubscriptionQuotaSeries({
     upstreamIds: upstream.id,
-    windows: '5h,7d',
+    windows: '5h,7d,7d_sonnet,7d_opus,overage',
     source: 'merged',
     sinceUnixSecs,
     untilUnixSecs: nowUnixSecs,
@@ -615,7 +606,7 @@ function DetailView({
   });
   const quotaAnalysis = useSubscriptionQuotaAnalysis({
     upstreamIds: upstream.id,
-    windows: '5h,7d',
+    windows: '5h,7d,7d_sonnet,7d_opus,overage',
     source: 'merged',
     sinceUnixSecs,
     untilUnixSecs: nowUnixSecs,
@@ -1186,9 +1177,7 @@ function DetailView({
                                     }}
                                   >
                                     from: {first.source} · observed{' '}
-                                    {first.age_secs == null
-                                      ? 'recently'
-                                      : `${first.age_secs}s ago`}
+                                    <QuotaObservedAt snapshot={first} />
                                   </div>
                                 )}
                               </div>
@@ -1494,8 +1483,8 @@ function DetailView({
                                 </div>
                               ) : snap.resets_at_unix_secs ? (
                                 <div className="text-[10px] text-text-faint font-mono mt-1">
-                                  resets{' '}
-                                  <RelativeTime
+                                  <ResetCountdown
+                                    compact
                                     ts={snap.resets_at_unix_secs * 1000}
                                   />
                                 </div>
@@ -1507,7 +1496,14 @@ function DetailView({
                                       ETA to limit
                                     </span>
                                     <span className="font-mono tabular-nums text-sm">
-                                      {formatEta(eta)}
+                                      {eta != null && eta <= 0 ? (
+                                        'Already saturated'
+                                      ) : (
+                                        <RelativeOffsetTime
+                                          compact
+                                          offsetSeconds={eta}
+                                        />
+                                      )}
                                     </span>
                                   </div>
                                   <div className="flex items-center justify-between gap-2 text-[10px] font-mono text-text-faint">
@@ -1699,16 +1695,18 @@ function DetailView({
                                   Expires
                                 </div>
                                 <div className="font-mono mt-0.5">
-                                  <RelativeTime
-                                    ts={
-                                      principalEntry.expires_at_unix_secs
-                                        ? new Date(
-                                            principalEntry.expires_at_unix_secs *
-                                              1000,
-                                          )
-                                        : null
-                                    }
-                                  />
+                                  <Badge tone={oauthBadge(principalEntry).tone}>
+                                    <RelativeTime
+                                      ts={
+                                        principalEntry.expires_at_unix_secs
+                                          ? new Date(
+                                              principalEntry.expires_at_unix_secs *
+                                                1000,
+                                            )
+                                          : null
+                                      }
+                                    />
+                                  </Badge>
                                 </div>
                               </div>
                               <div>
@@ -2173,6 +2171,7 @@ function CreateUpstreamModal({
           label: 'Subscribed',
           value: (
             <RelativeTime
+              compact
               ts={new Date(orgMeta.subscription_created_at_unix_secs * 1000)}
             />
           ),

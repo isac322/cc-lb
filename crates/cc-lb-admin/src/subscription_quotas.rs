@@ -94,7 +94,7 @@ struct LatestWindowResponse {
     utilization: Option<f64>,
     status: Option<String>,
     resets_at_unix_secs: Option<u64>,
-    surpassed_threshold: Option<bool>,
+    surpassed_threshold: Option<f64>,
     representative_claim: Option<String>,
     disabled_reason: Option<String>,
     extra_usage_enabled: Option<bool>,
@@ -102,6 +102,14 @@ struct LatestWindowResponse {
     extra_usage_used_credits: Option<f64>,
     observed_at_unix_millis: Option<u64>,
     age_secs: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fallback_available: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    overage_in_use: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    overage_period_monthly_utilization: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    upgrade_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1665,6 +1673,10 @@ fn latest_window_response(
         extra_usage_used_credits: snapshot.extra_usage_used_credits,
         observed_at_unix_millis: snapshot.observed_at_unix_millis,
         age_secs,
+        fallback_available: snapshot.fallback_available,
+        overage_in_use: snapshot.overage_in_use,
+        overage_period_monthly_utilization: snapshot.overage_period_monthly_utilization,
+        upgrade_paths: snapshot.upgrade_paths,
     }
 }
 

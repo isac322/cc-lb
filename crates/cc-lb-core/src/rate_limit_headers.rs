@@ -14,8 +14,13 @@ pub struct UnifiedQuotaObservation {
     pub utilization: Option<f64>,
     pub status: Option<SubscriptionQuotaStatus>,
     pub resets_at_unix_secs: Option<u64>,
-    pub surpassed_threshold: Option<bool>,
+    pub surpassed_threshold: Option<f64>,
     pub representative_claim: Option<String>,
+    pub fallback_percentage: Option<f64>,
+    pub fallback_available: Option<bool>,
+    pub overage_in_use: Option<bool>,
+    pub overage_period_monthly_utilization: Option<f64>,
+    pub upgrade_paths: Option<Vec<String>>,
     pub disabled_reason: Option<String>,
 }
 
@@ -28,6 +33,11 @@ impl Default for UnifiedQuotaObservation {
             resets_at_unix_secs: None,
             surpassed_threshold: None,
             representative_claim: None,
+            fallback_percentage: None,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
             disabled_reason: None,
         }
     }
@@ -61,6 +71,11 @@ enum UnifiedQuotaField {
     Status,
     SurpassedThreshold,
     RepresentativeClaim,
+    FallbackPercentage,
+    FallbackAvailable,
+    OverageInUse,
+    OverageMonthlyUtilization,
+    UpgradePaths,
     DisabledReason,
 }
 
@@ -69,8 +84,13 @@ struct PartialUnifiedQuotaObservation {
     utilization: Option<f64>,
     status: Option<SubscriptionQuotaStatus>,
     resets_at_unix_secs: Option<u64>,
-    surpassed_threshold: Option<bool>,
+    surpassed_threshold: Option<f64>,
     representative_claim: Option<String>,
+    fallback_percentage: Option<f64>,
+    fallback_available: Option<bool>,
+    overage_in_use: Option<bool>,
+    overage_period_monthly_utilization: Option<f64>,
+    upgrade_paths: Option<Vec<String>>,
     disabled_reason: Option<String>,
 }
 
@@ -81,6 +101,11 @@ impl PartialUnifiedQuotaObservation {
             && self.resets_at_unix_secs.is_none()
             && self.surpassed_threshold.is_none()
             && self.representative_claim.is_none()
+            && self.fallback_percentage.is_none()
+            && self.fallback_available.is_none()
+            && self.overage_in_use.is_none()
+            && self.overage_period_monthly_utilization.is_none()
+            && self.upgrade_paths.is_none()
             && self.disabled_reason.is_none()
         {
             return None;
@@ -93,6 +118,11 @@ impl PartialUnifiedQuotaObservation {
             resets_at_unix_secs: self.resets_at_unix_secs,
             surpassed_threshold: self.surpassed_threshold,
             representative_claim: self.representative_claim,
+            fallback_percentage: self.fallback_percentage,
+            fallback_available: self.fallback_available,
+            overage_in_use: self.overage_in_use,
+            overage_period_monthly_utilization: self.overage_period_monthly_utilization,
+            upgrade_paths: self.upgrade_paths,
             disabled_reason: self.disabled_reason,
         })
     }
@@ -185,13 +215,35 @@ pub fn parse_anthropic_unified_headers(headers: &HeaderMap) -> Vec<UnifiedQuotaO
                 }
             }
             UnifiedQuotaField::SurpassedThreshold => {
-                if let Some(parsed) = parse_bool(value) {
-                    partial.surpassed_threshold = Some(parsed);
+                if let Some(parsed) = parse_f64(value) {
+                    partial.surpassed_threshold = Some(clamp_utilization_fraction(parsed));
                 }
             }
             UnifiedQuotaField::RepresentativeClaim => {
                 if let Some(parsed) = parse_string(value) {
                     partial.representative_claim = Some(parsed);
+                }
+            }
+            UnifiedQuotaField::FallbackPercentage => {
+                if let Some(parsed) = parse_f64(value) {
+                    partial.fallback_percentage = Some(clamp_utilization_fraction(parsed));
+                }
+            }
+            UnifiedQuotaField::FallbackAvailable => {
+                partial.fallback_available = Some(value.trim() == "available");
+            }
+            UnifiedQuotaField::OverageInUse => {
+                partial.overage_in_use = Some(value.trim() == "true");
+            }
+            UnifiedQuotaField::OverageMonthlyUtilization => {
+                if let Some(parsed) = parse_f64(value) {
+                    partial.overage_period_monthly_utilization =
+                        Some(clamp_utilization_fraction(parsed));
+                }
+            }
+            UnifiedQuotaField::UpgradePaths => {
+                if let Some(parsed) = parse_csv_list(value) {
+                    partial.upgrade_paths = Some(parsed);
                 }
             }
             UnifiedQuotaField::DisabledReason => {
@@ -326,6 +378,9 @@ fn parse_reset(value: &str) -> Option<String> {
 
 fn parse_unified_header_name(name: &str) -> Option<(SubscriptionQuotaWindow, UnifiedQuotaField)> {
     let suffix = name.strip_prefix(HEADER_PREFIX)?.strip_prefix("unified-")?;
+    if let Some(field) = parse_unified_top_level_only_field(suffix) {
+        return Some((SubscriptionQuotaWindow::Unified, field));
+    }
     if let Some(field) = suffix.strip_prefix("5h-").and_then(parse_unified_field) {
         return Some((SubscriptionQuotaWindow::FiveHour, field));
     }
@@ -353,6 +408,14 @@ fn parse_unified_header_name(name: &str) -> Option<(SubscriptionQuotaWindow, Uni
     parse_unified_field(suffix).map(|field| (SubscriptionQuotaWindow::Unified, field))
 }
 
+fn parse_unified_top_level_only_field(value: &str) -> Option<UnifiedQuotaField> {
+    match value {
+        "overage-in-use" => Some(UnifiedQuotaField::OverageInUse),
+        "overage-period-monthly-utilization" => Some(UnifiedQuotaField::OverageMonthlyUtilization),
+        _ => None,
+    }
+}
+
 fn parse_unified_field(value: &str) -> Option<UnifiedQuotaField> {
     match value {
         "utilization" => Some(UnifiedQuotaField::Utilization),
@@ -360,6 +423,9 @@ fn parse_unified_field(value: &str) -> Option<UnifiedQuotaField> {
         "status" => Some(UnifiedQuotaField::Status),
         "surpassed-threshold" => Some(UnifiedQuotaField::SurpassedThreshold),
         "representative-claim" => Some(UnifiedQuotaField::RepresentativeClaim),
+        "fallback-percentage" => Some(UnifiedQuotaField::FallbackPercentage),
+        "fallback" => Some(UnifiedQuotaField::FallbackAvailable),
+        "upgrade-paths" => Some(UnifiedQuotaField::UpgradePaths),
         "disabled-reason" => Some(UnifiedQuotaField::DisabledReason),
         _ => None,
     }
@@ -384,13 +450,24 @@ fn parse_subscription_quota_status(value: &str) -> Option<SubscriptionQuotaStatu
     SubscriptionQuotaStatus::from_str(value.trim())
 }
 
-fn parse_bool(value: &str) -> Option<bool> {
-    value.trim().parse::<bool>().ok()
-}
-
 fn parse_string(value: &str) -> Option<String> {
     let value = value.trim();
     (!value.is_empty()).then(|| value.to_owned())
+}
+
+fn parse_csv_list(value: &str) -> Option<Vec<String>> {
+    let mut entries: Vec<String> = value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+    if entries.is_empty() {
+        return None;
+    }
+    entries.sort();
+    entries.dedup();
+    Some(entries)
 }
 
 fn header_string(headers: &HeaderMap, name: &str) -> Option<String> {
@@ -610,6 +687,18 @@ mod tests {
     }
 
     #[test]
+    fn unified_top_level_fallback_percentage_is_clamped() {
+        let observations = parse_anthropic_unified_headers(&headers(&[(
+            "anthropic-ratelimit-unified-fallback-percentage",
+            "1.5",
+        )]));
+
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].window, SubscriptionQuotaWindow::Unified);
+        assert_eq!(observations[0].fallback_percentage, Some(1.0));
+    }
+
+    #[test]
     fn unified_five_hour_utilization_emits_five_hour_window() {
         let observations = parse_anthropic_unified_headers(&headers(&[(
             "anthropic-ratelimit-unified-5h-utilization",
@@ -634,6 +723,27 @@ mod tests {
     }
 
     #[test]
+    fn unified_exceeded_statuses_map_to_rejected() {
+        let observations = parse_anthropic_unified_headers(&headers(&[
+            ("anthropic-ratelimit-unified-5h-status", "exceeded"),
+            (
+                "anthropic-ratelimit-unified-overage-status",
+                "exceeded_overage",
+            ),
+        ]));
+
+        assert_eq!(observations.len(), 2);
+        assert_eq!(
+            observations[0].status,
+            Some(SubscriptionQuotaStatus::Rejected)
+        );
+        assert_eq!(
+            observations[1].status,
+            Some(SubscriptionQuotaStatus::Rejected)
+        );
+    }
+
+    #[test]
     fn unified_five_hour_reset_uses_numeric_only() {
         let observations = parse_anthropic_unified_headers(&headers(&[(
             "anthropic-ratelimit-unified-5h-reset",
@@ -644,13 +754,23 @@ mod tests {
     }
 
     #[test]
-    fn unified_five_hour_surpassed_threshold_parses_bool() {
+    fn unified_five_hour_surpassed_threshold_parses_numeric_fraction() {
         let observations = parse_anthropic_unified_headers(&headers(&[(
             "anthropic-ratelimit-unified-5h-surpassed-threshold",
-            "true",
+            "0.75",
         )]));
 
-        assert_eq!(observations[0].surpassed_threshold, Some(true));
+        assert_eq!(observations[0].surpassed_threshold, Some(0.75));
+    }
+
+    #[test]
+    fn unified_surpassed_threshold_above_one_is_clamped() {
+        let observations = parse_anthropic_unified_headers(&headers(&[(
+            "anthropic-ratelimit-unified-overage-surpassed-threshold",
+            "1.5",
+        )]));
+
+        assert_eq!(observations[0].surpassed_threshold, Some(1.0));
     }
 
     #[test]
@@ -814,6 +934,7 @@ mod tests {
             ("anthropic-ratelimit-unified-5h-utilization", "0.10"),
             ("anthropic-ratelimit-unified-5h-status", "allowed_warning"),
             ("anthropic-ratelimit-unified-5h-reset", "1800000001"),
+            ("anthropic-ratelimit-unified-5h-surpassed-threshold", "0.75"),
             ("anthropic-ratelimit-unified-7d-utilization", "0.25"),
             ("anthropic-ratelimit-unified-7d-status", "allowed"),
             ("anthropic-ratelimit-unified-7d-reset", "1800000002"),
@@ -829,6 +950,16 @@ mod tests {
                 "org:claim",
             ),
             ("anthropic-ratelimit-unified-fallback-percentage", "0.5"),
+            ("anthropic-ratelimit-unified-fallback", "available"),
+            ("anthropic-ratelimit-unified-overage-in-use", "true"),
+            (
+                "anthropic-ratelimit-unified-overage-period-monthly-utilization",
+                "0.20",
+            ),
+            (
+                "anthropic-ratelimit-unified-upgrade-paths",
+                "team_growth,max_5x",
+            ),
         ]));
 
         assert_eq!(observations.len(), 4);
@@ -842,6 +973,17 @@ mod tests {
             observations[0].representative_claim.as_deref(),
             Some("org:claim")
         );
+        assert_eq!(observations[0].fallback_percentage, Some(0.5));
+        assert_eq!(observations[0].fallback_available, Some(true));
+        assert_eq!(observations[0].overage_in_use, Some(true));
+        assert_eq!(
+            observations[0].overage_period_monthly_utilization,
+            Some(0.20)
+        );
+        assert_eq!(
+            observations[0].upgrade_paths.as_deref(),
+            Some(["max_5x".to_owned(), "team_growth".to_owned()].as_slice())
+        );
         assert_eq!(observations[1].window, SubscriptionQuotaWindow::FiveHour);
         assert_eq!(observations[1].utilization, Some(0.10));
         assert_eq!(
@@ -849,6 +991,7 @@ mod tests {
             Some(SubscriptionQuotaStatus::AllowedWarning)
         );
         assert_eq!(observations[1].resets_at_unix_secs, Some(1_800_000_001));
+        assert_eq!(observations[1].surpassed_threshold, Some(0.75));
         assert_eq!(observations[2].window, SubscriptionQuotaWindow::SevenDay);
         assert_eq!(observations[2].utilization, Some(0.25));
         assert_eq!(
@@ -864,6 +1007,82 @@ mod tests {
         assert_eq!(
             observations[3].disabled_reason.as_deref(),
             Some("quota exhausted")
+        );
+    }
+
+    #[test]
+    fn unified_fallback_available_signals_true_only_for_available_value() {
+        let observations = parse_anthropic_unified_headers(&headers(&[(
+            "anthropic-ratelimit-unified-fallback",
+            "available",
+        )]));
+
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].window, SubscriptionQuotaWindow::Unified);
+        assert_eq!(observations[0].fallback_available, Some(true));
+    }
+
+    #[test]
+    fn unified_fallback_non_available_value_signals_false() {
+        let observations = parse_anthropic_unified_headers(&headers(&[(
+            "anthropic-ratelimit-unified-fallback",
+            "unavailable",
+        )]));
+
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].window, SubscriptionQuotaWindow::Unified);
+        assert_eq!(observations[0].fallback_available, Some(false));
+    }
+
+    #[test]
+    fn unified_overage_in_use_is_top_level_not_overage_window() {
+        let observations = parse_anthropic_unified_headers(&headers(&[(
+            "anthropic-ratelimit-unified-overage-in-use",
+            "true",
+        )]));
+
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].window, SubscriptionQuotaWindow::Unified);
+        assert_eq!(observations[0].overage_in_use, Some(true));
+    }
+
+    #[test]
+    fn unified_overage_in_use_non_true_value_signals_false() {
+        let observations = parse_anthropic_unified_headers(&headers(&[(
+            "anthropic-ratelimit-unified-overage-in-use",
+            "false",
+        )]));
+
+        assert_eq!(observations[0].overage_in_use, Some(false));
+    }
+
+    #[test]
+    fn unified_overage_period_monthly_utilization_is_top_level_and_clamped() {
+        let observations = parse_anthropic_unified_headers(&headers(&[(
+            "anthropic-ratelimit-unified-overage-period-monthly-utilization",
+            "1.5",
+        )]));
+
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].window, SubscriptionQuotaWindow::Unified);
+        assert_eq!(
+            observations[0].overage_period_monthly_utilization,
+            Some(1.0)
+        );
+    }
+
+    #[test]
+    fn unified_upgrade_paths_csv_is_split_and_normalized() {
+        let observations = parse_anthropic_unified_headers(&headers(&[(
+            "anthropic-ratelimit-unified-upgrade-paths",
+            "team_growth , max_5x,team_growth, ",
+        )]));
+
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].window, SubscriptionQuotaWindow::Unified);
+        assert_eq!(
+            observations[0].upgrade_paths.as_deref(),
+            Some(["max_5x".to_owned(), "team_growth".to_owned()].as_slice())
         );
     }
 

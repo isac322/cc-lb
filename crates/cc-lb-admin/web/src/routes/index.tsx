@@ -17,6 +17,7 @@ import {
   StatusBadge,
 } from '../components/ui/primitives';
 import { QuotaUpstreamMiniChart } from '../components/ui/QuotaUpstreamMiniChart';
+import { RelativeOffsetTime } from '../components/ui/RelativeTime';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { eventTime, type RequestEvent, streamEventsFetch } from '../lib/api';
 import { getUpstreamColor } from '../lib/colors';
@@ -115,24 +116,24 @@ function OverviewPage() {
   }, [range]);
 
   const quotaLatest = useSubscriptionQuotaLatest({
-    windows: '5h,7d',
+    windows: '5h,7d,7d_sonnet,7d_opus,overage',
     source: 'merged',
   });
   const quotaSeries = useSubscriptionQuotaSeries({
-    windows: '5h,7d',
+    windows: '5h,7d,7d_sonnet,7d_opus,overage',
     source: 'merged',
     sinceUnixSecs,
     untilUnixSecs: nowUnixSecs,
     bucketSecs: bucketSecsForRange,
   });
   const quotaAnalysis = useSubscriptionQuotaAnalysis({
-    windows: '5h,7d',
+    windows: '5h,7d,7d_sonnet,7d_opus,overage',
     source: 'merged',
     sinceUnixSecs,
     untilUnixSecs: nowUnixSecs,
   });
   const quotaAggregate = useSubscriptionQuotaAggregate({
-    windows: '5h,7d',
+    windows: '5h,7d,7d_sonnet,7d_opus,overage',
     source: 'merged',
   });
 
@@ -413,15 +414,6 @@ function OverviewPage() {
                 const w7d = u.windows.find((w) => w.window === '7d');
                 const a5h = analysis?.windows.find((w) => w.window === '5h');
 
-                const formatEta = (secs: number | null | undefined) => {
-                  if (secs == null) return '—';
-                  if (secs > 86400)
-                    return `${Math.floor(secs / 86400)}d ${Math.floor((secs % 86400) / 3600)}h`;
-                  if (secs > 3600)
-                    return `${Math.floor(secs / 3600)}h ${Math.floor((secs % 3600) / 60)}m`;
-                  return `${Math.floor(secs / 60)}m`;
-                };
-
                 return (
                   <div
                     key={u.upstream_id}
@@ -472,13 +464,23 @@ function OverviewPage() {
                     <div className="flex items-center gap-1.5">
                       <span className="text-text-faint">ETA (Acct):</span>
                       <span className="font-mono">
-                        {formatEta(a5h?.actual_account_burn.eta_to_limit_secs)}
+                        <RelativeOffsetTime
+                          compact
+                          offsetSeconds={
+                            a5h?.actual_account_burn.eta_to_limit_secs
+                          }
+                        />
                       </span>
                     </div>
                     <div className="flex items-center gap-1.5">
                       <span className="text-text-faint">ETA (Proxy):</span>
                       <span className="font-mono">
-                        {formatEta(a5h?.proxy_projected_burn.eta_to_limit_secs)}
+                        <RelativeOffsetTime
+                          compact
+                          offsetSeconds={
+                            a5h?.proxy_projected_burn.eta_to_limit_secs
+                          }
+                        />
                       </span>
                     </div>
                     <div className="flex items-center gap-1.5">

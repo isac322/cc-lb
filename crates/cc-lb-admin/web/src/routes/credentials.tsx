@@ -19,7 +19,6 @@ import {
 } from '../components/ui/primitives';
 import { RelativeTime } from '../components/ui/RelativeTime';
 import { postJson } from '../lib/api';
-import { formatAbsolute, useLocale, useTimezone } from '../lib/locale';
 import {
   useCredentials,
   useOAuthStatus,
@@ -44,40 +43,29 @@ interface CredentialLike {
   cred_id?: string;
 }
 
-function fmtTs(
+function expiryTone(
   secs?: number | null,
-  locale: string = 'en-US',
-  timezone?: string,
-) {
-  if (!secs) return '—';
-  return formatAbsolute(new Date(secs * 1000), locale, timezone);
-}
-
-function fmtRelExpiry(secs?: number | null): {
-  label: string;
-  tone: 'ok' | 'warn' | 'danger' | 'neutral';
-} {
-  if (!secs) return { label: 'never', tone: 'neutral' };
+): 'ok' | 'warn' | 'danger' | 'neutral' {
+  if (!secs) return 'neutral';
   const now = Math.floor(Date.now() / 1000);
   const delta = secs - now;
-  if (delta < 0)
-    return {
-      label: `expired ${Math.abs(Math.floor(delta / 60))}m ago`,
-      tone: 'danger',
-    };
-  if (delta < 60 * 10)
-    return { label: `in ${Math.floor(delta / 60)}m`, tone: 'warn' };
-  if (delta < 60 * 60 * 24)
-    return { label: `in ${Math.floor(delta / 3600)}h`, tone: 'ok' };
-  return { label: `in ${Math.floor(delta / 86400)}d`, tone: 'ok' };
+  if (delta < 0) return 'danger';
+  if (delta < 60 * 10) return 'warn';
+  return 'ok';
+}
+
+function ExpiryBadge({ secs }: { readonly secs?: number | null }) {
+  return (
+    <Badge tone={expiryTone(secs)}>
+      <RelativeTime compact ts={secs ? secs * 1000 : null} />
+    </Badge>
+  );
 }
 
 function CredentialsPage() {
   const credsQ = useCredentials();
   const oauthQ = useOAuthStatus();
   const principalNameMap = usePrincipalNameMap();
-  const { effective: effectiveLocale } = useLocale();
-  const { effective: effectiveTz } = useTimezone();
   const qc = useQueryClient();
   const [confirm, setConfirm] = useState<{
     kind: 'rotate' | 'revoke';
@@ -166,7 +154,6 @@ function CredentialsPage() {
                 </thead>
                 <tbody>
                   {apiKeyRows.map((c, i) => {
-                    const exp = fmtRelExpiry(c.expires_at_unix_secs);
                     return (
                       <tr
                         key={`${c.provider}-${c.cred_id ?? i}`}
@@ -192,15 +179,7 @@ function CredentialsPage() {
                           />
                         </td>
                         <td className="px-4 py-2 text-text-muted">
-                          <span
-                            title={fmtTs(
-                              c.expires_at_unix_secs,
-                              effectiveLocale,
-                              effectiveTz,
-                            )}
-                          >
-                            <Badge tone={exp.tone}>{exp.label}</Badge>
-                          </span>
+                          <ExpiryBadge secs={c.expires_at_unix_secs} />
                         </td>
                         <td className="px-4 py-2 text-right">
                           <div className="flex items-center justify-end gap-1">
@@ -251,7 +230,6 @@ function CredentialsPage() {
         ) : oauthRows.length ? (
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
             {oauthRows.map((o, i) => {
-              const exp = fmtRelExpiry(o.expires_at_unix_secs);
               return (
                 <Card key={`${o.provider}-${o.principal_id ?? 'shared'}-${i}`}>
                   <CardHeader
@@ -266,18 +244,7 @@ function CredentialsPage() {
                         ? `principal: ${principalNameMap.get(o.principal_id) ?? o.principal_id}`
                         : 'shared / global'
                     }
-                    action={
-                      <StatusBadge
-                        tone={
-                          exp.tone === 'danger'
-                            ? 'danger'
-                            : exp.tone === 'warn'
-                              ? 'warn'
-                              : 'ok'
-                        }
-                        label={exp.label}
-                      />
-                    }
+                    action={<ExpiryBadge secs={o.expires_at_unix_secs} />}
                   />
                   <CardBody className="space-y-2 text-xs">
                     <Row
