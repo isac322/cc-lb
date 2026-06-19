@@ -23,7 +23,10 @@ import {
   Skeleton,
   StatusBadge,
 } from '../components/ui/primitives';
-import { RelativeTime } from '../components/ui/RelativeTime';
+import {
+  RelativeOffsetTime,
+  RelativeTime,
+} from '../components/ui/RelativeTime';
 import { downloadJson } from '../lib/api';
 import { formatAbsolute, useLocale, useTimezone } from '../lib/locale';
 import {
@@ -231,9 +234,16 @@ function SettingsPage() {
           <CardHeader
             title="Version"
             subtitle={
-              status.data
-                ? `cc-lb ${status.data.version} · ${status.data.git_sha} · uptime ${Math.floor(status.data.uptime_secs / 60)}m`
-                : '—'
+              status.data ? (
+                <>
+                  cc-lb {status.data.version} · {status.data.git_sha} · started{' '}
+                  <RelativeOffsetTime
+                    offsetSeconds={-status.data.uptime_secs}
+                  />
+                </>
+              ) : (
+                '—'
+              )
             }
           />
           <CardBody className="space-y-3 text-xs">

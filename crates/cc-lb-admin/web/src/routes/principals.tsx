@@ -2060,10 +2060,14 @@ function ApiKeysCard({ principal }: { principal: Principal }) {
                     {k.last_4 ? `···${k.last_4}` : '—'}
                   </td>
                   <td className="px-4 py-2">
-                    <RelativeTime ts={new Date(k.issued_at_unix_secs * 1000)} />
+                    <RelativeTime
+                      compact
+                      ts={new Date(k.issued_at_unix_secs * 1000)}
+                    />
                   </td>
                   <td className="px-4 py-2">
                     <RelativeTime
+                      compact
                       ts={
                         k.last_used_at_unix_secs
                           ? new Date(k.last_used_at_unix_secs * 1000)

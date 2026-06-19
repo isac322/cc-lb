@@ -108,7 +108,7 @@ export function RequestEventsTable({
                         : 'ok',
                   )}
                 />
-                <RelativeTime ts={eventTime(e)} />
+                <RelativeTime compact ts={eventTime(e)} />
               </td>
               {showPrincipal && (
                 <td className="px-3 py-2 whitespace-nowrap truncate max-w-[160px]">

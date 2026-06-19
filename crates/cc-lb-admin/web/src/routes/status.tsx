@@ -29,6 +29,25 @@ export const Route = createFileRoute('/status')({
   component: StatusPage,
 });
 
+function expiryTone(
+  secs?: number | null,
+): 'ok' | 'warn' | 'danger' | 'neutral' {
+  if (!secs) return 'neutral';
+  const now = Math.floor(Date.now() / 1000);
+  const delta = secs - now;
+  if (delta < 0) return 'danger';
+  if (delta < 60 * 10) return 'warn';
+  return 'ok';
+}
+
+function ExpiryBadge({ secs }: { readonly secs?: number | null }) {
+  return (
+    <Badge tone={expiryTone(secs)}>
+      <RelativeTime compact ts={secs ? secs * 1000 : null} />
+    </Badge>
+  );
+}
+
 function StatusPage() {
   const status = useStatus();
   const creds = useCredentials();
@@ -84,7 +103,19 @@ function StatusPage() {
             <CardBody className="space-y-2 text-xs">
               <Row label="Kind" value="postgres" />
               <Row label="Pool" value="10/10 idle" />
-              <Row label="Reconciler" value="45s ago" />
+              <Row
+                label="Last reload"
+                value={
+                  <RelativeTime
+                    ts={
+                      status.data?.last_reload_status?.applied_at_unix_secs
+                        ? status.data.last_reload_status.applied_at_unix_secs *
+                          1000
+                        : null
+                    }
+                  />
+                }
+              />
             </CardBody>
           </Card>
           <Card>
@@ -180,13 +211,7 @@ function StatusPage() {
                       </td>
                       <td className="px-4 py-2">{c.identity ?? '—'}</td>
                       <td className="px-4 py-2">
-                        <RelativeTime
-                          ts={
-                            c.expires_at_unix_secs
-                              ? new Date(c.expires_at_unix_secs * 1000)
-                              : null
-                          }
-                        />
+                        <ExpiryBadge secs={c.expires_at_unix_secs} />
                       </td>
                       <td className="px-4 py-2">
                         <StatusBadge
@@ -245,15 +270,7 @@ function StatusPage() {
                 <CardBody className="space-y-2 text-xs">
                   <Row
                     label="Expires"
-                    value={
-                      <RelativeTime
-                        ts={
-                          o.expires_at_unix_secs
-                            ? new Date(o.expires_at_unix_secs * 1000)
-                            : null
-                        }
-                      />
-                    }
+                    value={<ExpiryBadge secs={o.expires_at_unix_secs} />}
                   />
                   <Row
                     label="Refresh token"

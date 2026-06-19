@@ -388,6 +388,7 @@ function RegistryTab() {
                     </td>
                     <td className="px-4 py-2">
                       <RelativeTime
+                        compact
                         ts={new Date(p.uploaded_at_unix_secs * 1000)}
                       />
                     </td>
