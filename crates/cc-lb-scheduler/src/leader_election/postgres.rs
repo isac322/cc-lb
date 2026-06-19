@@ -1,178 +1,17 @@
-//! Leader election via advisory locks for cron scheduling.
-
 use std::future::Future;
-#[cfg(feature = "postgres")]
 use std::sync::atomic::{AtomicU8, Ordering};
-#[cfg(feature = "postgres")]
 use std::time::Duration;
 
-use thiserror::Error;
-
-#[cfg(feature = "postgres")]
 use sqlx::Connection as _;
-#[cfg(feature = "postgres")]
 use sqlx::postgres::PgConnection;
-#[cfg(feature = "postgres")]
 use tokio::sync::Mutex;
 
-#[cfg(feature = "postgres")]
+use super::{LeaderError, LeaderState};
+
 const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
-#[cfg(feature = "postgres")]
 const LEADER_STATE_FOLLOWER: u8 = 0;
-#[cfg(feature = "postgres")]
 const LEADER_STATE_LEADER: u8 = 1;
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LeaderState {
-    Leader,
-    Follower,
-    Single,
-}
-
-impl LeaderState {
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Leader => "leader",
-            Self::Follower => "follower",
-            Self::Single => "single",
-        }
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum LeaderError {
-    #[cfg(feature = "postgres")]
-    #[error("leader database error: {0}")]
-    Database(#[from] sqlx::Error),
-    #[error("leader connection is not available")]
-    NotConnected,
-    #[error("leader lock lost: {reason}")]
-    LockLost { reason: String },
-}
-
-#[derive(Debug)]
-pub enum LeaderElection {
-    Sqlite(SqliteLeaderElection),
-    #[cfg(feature = "postgres")]
-    Postgres(PostgresLeaderElection),
-}
-
-impl LeaderElection {
-    pub const fn sqlite() -> Self {
-        Self::Sqlite(SqliteLeaderElection)
-    }
-
-    #[cfg(feature = "postgres")]
-    pub async fn postgres(
-        database_url: impl Into<String>,
-        lock_key: i64,
-    ) -> Result<Self, LeaderError> {
-        PostgresLeaderElection::connect(database_url, lock_key)
-            .await
-            .map(Self::Postgres)
-    }
-
-    #[cfg(feature = "postgres")]
-    pub fn from_postgres_connection(
-        database_url: impl Into<String>,
-        connection: PgConnection,
-        lock_key: i64,
-    ) -> Self {
-        Self::Postgres(PostgresLeaderElection::from_connection(
-            database_url,
-            connection,
-            lock_key,
-        ))
-    }
-
-    pub async fn run<F, Fut>(&self, work: F) -> Result<(), LeaderError>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = ()>,
-    {
-        match self {
-            Self::Sqlite(sqlite) => sqlite.run(work).await,
-            #[cfg(feature = "postgres")]
-            Self::Postgres(postgres) => postgres.run(work).await,
-        }
-    }
-
-    pub async fn try_acquire(&self) -> Result<bool, LeaderError> {
-        let acquired = match self {
-            Self::Sqlite(sqlite) => sqlite.try_acquire().await,
-            #[cfg(feature = "postgres")]
-            Self::Postgres(postgres) => postgres.try_acquire().await,
-        }?;
-        if acquired {
-            crate::scheduler_metrics::record_leader_acquired(1);
-        }
-        Ok(acquired)
-    }
-
-    pub async fn heartbeat(&self) -> Result<(), LeaderError> {
-        match self {
-            Self::Sqlite(sqlite) => sqlite.heartbeat().await,
-            #[cfg(feature = "postgres")]
-            Self::Postgres(postgres) => postgres.heartbeat().await,
-        }
-    }
-
-    pub async fn release(&self) -> Result<bool, LeaderError> {
-        match self {
-            Self::Sqlite(sqlite) => sqlite.release().await,
-            #[cfg(feature = "postgres")]
-            Self::Postgres(postgres) => postgres.release().await,
-        }
-    }
-
-    pub async fn close(&self) -> Result<(), LeaderError> {
-        match self {
-            Self::Sqlite(sqlite) => sqlite.close().await,
-            #[cfg(feature = "postgres")]
-            Self::Postgres(postgres) => postgres.close().await,
-        }
-    }
-
-    pub fn current_state(&self) -> LeaderState {
-        match self {
-            Self::Sqlite(_sqlite) => LeaderState::Single,
-            #[cfg(feature = "postgres")]
-            Self::Postgres(postgres) => postgres.current_state(),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Default)]
-pub struct SqliteLeaderElection;
-
-impl SqliteLeaderElection {
-    pub async fn run<F, Fut>(&self, work: F) -> Result<(), LeaderError>
-    where
-        F: FnOnce() -> Fut,
-        Fut: Future<Output = ()>,
-    {
-        work().await;
-        Ok(())
-    }
-
-    pub async fn try_acquire(&self) -> Result<bool, LeaderError> {
-        Ok(true)
-    }
-
-    pub async fn heartbeat(&self) -> Result<(), LeaderError> {
-        Ok(())
-    }
-
-    pub async fn release(&self) -> Result<bool, LeaderError> {
-        Ok(true)
-    }
-
-    pub async fn close(&self) -> Result<(), LeaderError> {
-        Ok(())
-    }
-}
-
-#[cfg(feature = "postgres")]
 #[derive(Debug)]
 pub struct PostgresLeaderElection {
     database_url: String,
@@ -182,7 +21,6 @@ pub struct PostgresLeaderElection {
     state: AtomicU8,
 }
 
-#[cfg(feature = "postgres")]
 impl PostgresLeaderElection {
     pub async fn connect(
         database_url: impl Into<String>,
@@ -317,17 +155,14 @@ impl PostgresLeaderElection {
     }
 }
 
-#[cfg(feature = "postgres")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LeaderLockKey(i64);
 
-#[cfg(feature = "postgres")]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ConnectionReclaimer {
     heartbeat_interval: Duration,
 }
 
-#[cfg(feature = "postgres")]
 impl ConnectionReclaimer {
     pub const fn new(heartbeat_interval: Duration) -> Self {
         Self { heartbeat_interval }
@@ -339,7 +174,6 @@ impl ConnectionReclaimer {
     }
 }
 
-#[cfg(feature = "postgres")]
 async fn query_bool(
     connection: &mut PgConnection,
     query: &str,

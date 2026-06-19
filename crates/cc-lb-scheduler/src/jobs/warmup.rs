@@ -35,7 +35,7 @@ static AFTER_DISPATCH_HOOK: std::sync::Mutex<Option<HookFn>> = std::sync::Mutex:
 
 #[cfg(any(test, debug_assertions))]
 pub fn set_after_dispatch_hook(hook: HookFn) {
-    *AFTER_DISPATCH_HOOK.lock().unwrap() = Some(hook);
+    *after_dispatch_hook_lock() = Some(hook);
 }
 
 #[derive(Clone, Debug)]
@@ -82,7 +82,7 @@ where
         #[cfg(any(test, debug_assertions))]
         {
             let hook_opt = {
-                let mut lock = AFTER_DISPATCH_HOOK.lock().unwrap();
+                let mut lock = after_dispatch_hook_lock();
                 lock.take()
             };
             if let Some(hook) = hook_opt {
@@ -99,6 +99,14 @@ where
         } else {
             Ok(UpstreamWarmupOutcome::AlreadyCompleted)
         }
+    }
+}
+
+#[cfg(any(test, debug_assertions))]
+fn after_dispatch_hook_lock() -> std::sync::MutexGuard<'static, Option<HookFn>> {
+    match AFTER_DISPATCH_HOOK.lock() {
+        Ok(lock) => lock,
+        Err(poisoned) => poisoned.into_inner(),
     }
 }
 
