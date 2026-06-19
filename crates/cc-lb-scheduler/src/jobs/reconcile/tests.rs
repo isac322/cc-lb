@@ -87,6 +87,7 @@ fn oauth_record(upstream_id: Uuid, warmup_enabled: bool) -> UpstreamRecord {
         enabled: true,
         oauth_credentials: Some(EncryptedOAuthTokens::from_ciphertext(vec![1])),
         revision: 1,
+        oauth_token_generation: 0,
         created_at_unix_secs: 1,
         updated_at_unix_secs: 1,
         warmup_enabled,

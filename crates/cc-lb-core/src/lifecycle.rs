@@ -4815,6 +4815,7 @@ mod tests {
             kind: StorageRecordKind::AnthropicApiKey,
             enabled: true,
             revision: 1,
+            oauth_token_generation: 0,
             created_at_unix_secs: 0,
             updated_at_unix_secs: 0,
             ..UpstreamRecord::default()

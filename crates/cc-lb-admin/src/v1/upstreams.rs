@@ -1600,6 +1600,7 @@ mod tests {
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: None,
                 api_key_ciphertext: Some(vec![1, 2, 3]),
+                oauth_token_generation: None,
                 warmup_enabled,
                 warmup_dialect_plugin: None,
                 ..UpstreamCreate::default()
@@ -1630,6 +1631,7 @@ mod tests {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url,
                 api_key_ciphertext: None,
+                oauth_token_generation: None,
                 warmup_enabled,
                 warmup_dialect_plugin,
                 ..UpstreamCreate::default()
@@ -1783,6 +1785,7 @@ mod tests {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: None,
                 api_key_ciphertext: None,
+                oauth_token_generation: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
                 ..UpstreamCreate::default()
@@ -1830,6 +1833,7 @@ mod tests {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: None,
                 api_key_ciphertext: None,
+                oauth_token_generation: None,
                 warmup_enabled: true,
                 warmup_dialect_plugin: None,
                 ..UpstreamCreate::default()

@@ -1,4 +1,6 @@
 use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Mutex, MutexGuard, OnceLock};
 
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -27,15 +29,15 @@ pub enum UpstreamWarmupOutcome {
     UpstreamDeleted,
 }
 
-#[cfg(any(test, debug_assertions))]
-type HookFn = Box<dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+#[doc(hidden)]
+pub type HookFn = Box<dyn Fn() -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
-#[cfg(any(test, debug_assertions))]
-static AFTER_DISPATCH_HOOK: std::sync::Mutex<Option<HookFn>> = std::sync::Mutex::new(None);
+static AFTER_DISPATCH_HOOK: OnceLock<Mutex<Option<HookFn>>> = OnceLock::new();
 
-#[cfg(any(test, debug_assertions))]
+#[doc(hidden)]
 pub fn set_after_dispatch_hook(hook: HookFn) {
-    *after_dispatch_hook_lock() = Some(hook);
+    let lock = AFTER_DISPATCH_HOOK.get_or_init(|| Mutex::new(None));
+    *after_dispatch_hook_lock(lock) = Some(hook);
 }
 
 #[derive(Clone, Debug)]
@@ -79,11 +81,10 @@ where
 
         fire(job).await?;
 
-        #[cfg(any(test, debug_assertions))]
-        {
+        if let Some(lock) = AFTER_DISPATCH_HOOK.get() {
             let hook_opt = {
-                let mut lock = after_dispatch_hook_lock();
-                lock.take()
+                let mut guard = after_dispatch_hook_lock(lock);
+                guard.take()
             };
             if let Some(hook) = hook_opt {
                 hook().await;
@@ -102,10 +103,11 @@ where
     }
 }
 
-#[cfg(any(test, debug_assertions))]
-fn after_dispatch_hook_lock() -> std::sync::MutexGuard<'static, Option<HookFn>> {
-    match AFTER_DISPATCH_HOOK.lock() {
-        Ok(lock) => lock,
+fn after_dispatch_hook_lock(
+    lock: &'static Mutex<Option<HookFn>>,
+) -> MutexGuard<'static, Option<HookFn>> {
+    match lock.lock() {
+        Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
     }
 }

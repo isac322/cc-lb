@@ -76,6 +76,7 @@ async fn run_warmup_dialect_guard(url: &str) -> Result<()> {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: None,
                 api_key_ciphertext: None,
+                oauth_token_generation: None,
                 warmup_enabled: true,
                 next_warmup_at: None,
                 last_warmup_cycle_key: None,
