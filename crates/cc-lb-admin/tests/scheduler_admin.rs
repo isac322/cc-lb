@@ -3,10 +3,9 @@ mod admin_test_common;
 mod support;
 
 use axum::http::StatusCode;
-#[cfg(feature = "postgres")]
 use cc_lb_scheduler::jobs::reconcile::SchedulerReconcileJob;
 #[cfg(feature = "sqlite")]
-use cc_lb_scheduler::jobs::reconcile::{ReconcileUpstreams, SchedulerReconcileJob};
+use cc_lb_scheduler::jobs::reconcile::ReconcileUpstreams;
 #[cfg(feature = "sqlite")]
 use std::future::Future;
 
