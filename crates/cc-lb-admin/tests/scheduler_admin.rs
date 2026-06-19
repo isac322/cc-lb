@@ -3,9 +3,9 @@ mod admin_test_common;
 mod support;
 
 use axum::http::StatusCode;
-use cc_lb_scheduler::jobs::reconcile::SchedulerReconcileJob;
 #[cfg(feature = "sqlite")]
 use cc_lb_scheduler::jobs::reconcile::ReconcileUpstreams;
+use cc_lb_scheduler::jobs::reconcile::SchedulerReconcileJob;
 #[cfg(feature = "sqlite")]
 use std::future::Future;
 
