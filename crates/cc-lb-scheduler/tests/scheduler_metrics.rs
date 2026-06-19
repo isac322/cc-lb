@@ -49,7 +49,7 @@ fn scheduler_metrics_cover_worker_lifecycle_and_reconcile_done() -> Result<(), B
             assert_counter_eq(
                 &rendered,
                 scheduler_metrics::JOBS_TOTAL,
-                &[("job_type", "entity:warmup"), ("status", "done")],
+                &[("job_type", "upstream_warmup"), ("status", "done")],
                 1.0,
             );
             assert_counter_eq(

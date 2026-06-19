@@ -19,7 +19,7 @@ pub const PROMPT_CACHE_PURGE_ROWS_REMOVED_TOTAL: &str =
 pub const METADATA_REFRESH_STATUS_TOTAL: &str = "cclb_scheduler_metadata_refresh_status_total";
 
 const JOB_TYPES: &[&str] = &[
-    "entity:warmup",
+    "upstream_warmup",
     "entity:oauth_refresh",
     "entity:oauth_usage_poll",
     "entity:anthropic_compat_refresh",

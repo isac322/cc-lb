@@ -54,7 +54,7 @@ where
 impl SchedulerMetricPayload for EntityJob {
     fn scheduler_job_type(&self) -> &'static str {
         match self {
-            Self::Warmup(_) => "entity:warmup",
+            Self::Warmup(_) => "upstream_warmup",
             Self::OAuthRefresh(_) => "entity:oauth_refresh",
             Self::OAuthUsagePoll(_) => "entity:oauth_usage_poll",
             Self::AnthropicCompatRefresh(_) => "entity:anthropic_compat_refresh",

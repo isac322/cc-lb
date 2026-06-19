@@ -56,5 +56,6 @@ async-trait = { workspace = true }
 cron = "0.16"
 metrics-exporter-prometheus.workspace = true
 proptest = { workspace = true }
+testcontainers-modules = { version = "0.15.0", features = ["postgres"] }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time"] }
 tracing-subscriber = { workspace = true }

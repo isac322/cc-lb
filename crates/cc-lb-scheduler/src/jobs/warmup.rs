@@ -27,6 +27,17 @@ pub enum UpstreamWarmupOutcome {
     UpstreamDeleted,
 }
 
+#[cfg(any(test, debug_assertions))]
+type HookFn = Box<dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
+
+#[cfg(any(test, debug_assertions))]
+static AFTER_DISPATCH_HOOK: std::sync::Mutex<Option<HookFn>> = std::sync::Mutex::new(None);
+
+#[cfg(any(test, debug_assertions))]
+pub fn set_after_dispatch_hook(hook: HookFn) {
+    *AFTER_DISPATCH_HOOK.lock().unwrap() = Some(hook);
+}
+
 #[derive(Clone, Debug)]
 pub struct UpstreamWarmupJobHandler<Effects> {
     effects: Effects,
@@ -67,6 +78,18 @@ where
         }
 
         fire(job).await?;
+
+        #[cfg(any(test, debug_assertions))]
+        {
+            let hook_opt = {
+                let mut lock = AFTER_DISPATCH_HOOK.lock().unwrap();
+                lock.take()
+            };
+            if let Some(hook) = hook_opt {
+                hook().await;
+            }
+        }
+
         if self
             .effects
             .try_acquire_cycle(job.upstream_id, job.cycle_key, completed_at_unix_secs)
