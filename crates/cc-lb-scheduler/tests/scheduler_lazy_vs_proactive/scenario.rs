@@ -1,3 +1,5 @@
+#![allow(deprecated, clippy::manual_async_fn, clippy::too_many_arguments)]
+
 use std::future::Future;
 
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;

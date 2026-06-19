@@ -26,6 +26,12 @@ impl fmt::Debug for OAuthRefreshPause {
     }
 }
 
+impl Default for OAuthRefreshPause {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl OAuthRefreshPause {
     pub fn new() -> Self {
         Self {

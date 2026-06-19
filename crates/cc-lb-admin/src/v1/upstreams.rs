@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
@@ -151,16 +153,28 @@ struct SubscriptionMetadataResponse {
 enum UpstreamError {
     StorageUnavailable,
     NotFound,
-    BadRequest { error: &'static str, detail: String },
+    BadRequest {
+        error: &'static str,
+        detail: String,
+    },
     MissingIfMatch,
-    StaleRevision { current_revision: u64 },
-    Conflict { detail: String },
+    StaleRevision {
+        current_revision: u64,
+    },
+    Conflict {
+        detail: String,
+    },
     NotOauthUpstream,
     CredentialDecrypt,
     RefreshUnavailable,
-    RefreshFailed { detail: String },
+    RefreshFailed {
+        detail: String,
+    },
     MetadataRefreshTimeout,
-    Internal { detail: String },
+    #[allow(dead_code)]
+    Internal {
+        detail: String,
+    },
     Storage(StorageError),
 }
 

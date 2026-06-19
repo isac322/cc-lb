@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 #[path = "scheduler_usage_poll_durability/common.rs"]
 mod common;
 #[path = "scheduler_lazy_vs_proactive/fake.rs"]

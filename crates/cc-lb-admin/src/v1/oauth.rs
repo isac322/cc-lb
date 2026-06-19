@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -737,17 +739,16 @@ async fn complete_oauth(
         Err(error) => return storage_error_response(&error),
     };
 
-    if let Some(hook) = &state.subscription_metadata_hook {
-        if let Err(error) = hook
+    if let Some(hook) = &state.subscription_metadata_hook
+        && let Err(error) = hook
             .enqueue(MetadataHookRequest {
                 upstream_id,
                 credential_generation: updated.oauth_token_generation,
                 traceparent: None,
             })
             .await
-        {
-            tracing::warn!(%error, %upstream_id, "metadata refresh enqueue failed after oauth complete");
-        }
+    {
+        tracing::warn!(%error, %upstream_id, "metadata refresh enqueue failed after oauth complete");
     }
 
     enqueue_upstream_audit(

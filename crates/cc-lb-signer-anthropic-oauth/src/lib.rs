@@ -902,6 +902,7 @@ fn now_epoch_secs() -> u64 {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;

@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 pub mod harness;
 pub mod plugin_registry;
 pub mod plugin_registry_store;

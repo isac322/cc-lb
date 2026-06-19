@@ -15,6 +15,7 @@ async fn scheduler_factory_sqlite_happy_path_sets_up_tables_and_partial_index() 
         .await
         .expect("sqlite scheduler opens");
 
+    #[allow(clippy::infallible_destructuring_match)]
     let sqlite = match opened.backend {
         SchedulerBackend::Sqlite(sqlite) => sqlite,
         #[cfg(feature = "postgres")]

@@ -32,6 +32,7 @@ impl FakeReconcileUpstreams {
 }
 
 impl ReconcileUpstreams for FakeReconcileUpstreams {
+    #[allow(clippy::manual_async_fn)]
     fn list(
         &self,
         after: Option<Uuid>,

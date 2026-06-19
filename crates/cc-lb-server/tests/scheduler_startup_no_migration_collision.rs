@@ -31,6 +31,7 @@ async fn sqlite_main_storage_and_apalis_setup_share_file_without_migration_colli
         .await
         .expect("scheduler storage opens after main migrations using derived sqlite file");
 
+    #[allow(clippy::infallible_destructuring_match)]
     let sqlite_scheduler = match opened_scheduler.backend {
         SchedulerBackend::Sqlite(sqlite_scheduler) => sqlite_scheduler,
         #[cfg(feature = "postgres")]

@@ -237,6 +237,7 @@ mod tests {
     }
 
     impl SubscriptionQuotaGcStore for FakeQuotaStore {
+        #[allow(clippy::manual_async_fn)]
         fn delete_subscription_quota_before(
             &self,
             cutoff_unix_millis: u64,

@@ -340,6 +340,7 @@ pub trait UpstreamStore: Send + Sync {
     #[deprecated(
         note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
     )]
+    #[allow(deprecated)]
     async fn write_warmup_next_at(
         &self,
         upstream_id: Uuid,

@@ -1,3 +1,10 @@
+#![allow(
+    deprecated,
+    dead_code,
+    clippy::manual_async_fn,
+    clippy::too_many_arguments
+)]
+
 use std::net::SocketAddr;
 
 use axum::body::Bytes;

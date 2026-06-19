@@ -1,3 +1,10 @@
+// Storage adapter for the deprecated lease/warmup fields on `UpstreamRecord`,
+// `UpstreamCreate`, `UpstreamUpdate`, and `UpstreamStatusUpdate`.
+// The deprecated columns still exist in the schema until the Wave 8 follow-up PR
+// drops them; until then the adapter must read/write them, so we silence the
+// trait-level deprecation warnings at the module boundary per the plan.
+#![allow(deprecated)]
+
 use async_trait::async_trait;
 use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_storage_api::upstream::{
