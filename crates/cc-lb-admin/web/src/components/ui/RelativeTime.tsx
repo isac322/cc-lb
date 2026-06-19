@@ -1,45 +1,78 @@
-import { useEffect, useMemo, useReducer } from 'react';
+import { useMemo } from 'react';
+import TimeAgo, { type Formatter } from 'react-timeago';
+import { makeIntlFormatter } from 'react-timeago/defaultFormatter';
 import { formatAbsolute, useLocale, useTimezone } from '../../lib/locale';
 import { cx, Hint } from './primitives';
 
-const UNITS: { unit: Intl.RelativeTimeFormatUnit; ms: number }[] = [
-  { unit: 'year', ms: 365 * 24 * 60 * 60 * 1000 },
-  { unit: 'month', ms: 30 * 24 * 60 * 60 * 1000 },
-  { unit: 'day', ms: 24 * 60 * 60 * 1000 },
-  { unit: 'hour', ms: 60 * 60 * 1000 },
-  { unit: 'minute', ms: 60 * 1000 },
-  { unit: 'second', ms: 1000 },
-];
+function isKoreanLocale(locale: string): boolean {
+  return locale.toLowerCase().startsWith('ko');
+}
 
-export function formatRelative(
-  d: Date,
-  locale: string,
-  now: Date = new Date(),
-): string {
-  const diffMs = d.getTime() - now.getTime();
-  const absMs = Math.abs(diffMs);
-  const rtf = new Intl.RelativeTimeFormat(locale, { numeric: 'auto' });
+const KO_UNIT: Record<string, string> = {
+  year: '년',
+  month: '개월',
+  week: '주',
+  day: '일',
+  hour: '시간',
+  minute: '분',
+  second: '초',
+};
 
-  // <5s → locale-natural "now"
-  if (absMs < 5_000) {
-    return rtf.format(0, 'second');
+const EN_COMPACT_UNIT: Record<string, string> = {
+  year: 'y',
+  month: 'mo',
+  week: 'w',
+  day: 'd',
+  hour: 'h',
+  minute: 'm',
+  second: 's',
+};
+
+function compactDuration(value: number, unit: string, locale: string): string {
+  if (isKoreanLocale(locale)) {
+    return `${value}${KO_UNIT[unit] ?? unit}`;
   }
+  return `${value}${EN_COMPACT_UNIT[unit] ?? unit}`;
+}
 
-  for (const { unit, ms } of UNITS) {
-    if (absMs >= ms) {
-      const value = Math.round(diffMs / ms);
-      return rtf.format(value, unit);
+function makeCompactRelativeFormatter(locale: string): Formatter {
+  return (value, unit, suffix) => {
+    const duration = compactDuration(value, unit, locale);
+    if (isKoreanLocale(locale)) {
+      return suffix === 'from now' ? `${duration} 후` : `${duration} 전`;
     }
-  }
-  return rtf.format(0, 'second');
+    return suffix === 'from now' ? `in ${duration}` : `${duration} ago`;
+  };
+}
+
+function makeResetFormatter(locale: string, compact: boolean): Formatter {
+  return (value, unit, suffix) => {
+    const korean = isKoreanLocale(locale);
+    const duration =
+      compact || korean
+        ? compactDuration(value, unit, locale)
+        : `${value} ${unit}${value === 1 ? '' : 's'}`;
+    if (korean) {
+      return suffix === 'from now'
+        ? `${duration} 후 초기화`
+        : `${duration} 전 초기화됨`;
+    }
+    if (suffix === 'from now') return `Resets in ${duration}`;
+    if (compact && unit === 'day' && value > 1) {
+      return 'Reset >1d ago (stale)';
+    }
+    return `Reset ${duration} ago`;
+  };
 }
 
 export function RelativeTime({
   ts,
   className,
+  compact = false,
 }: {
   ts: Date | number | null | undefined;
   className?: string;
+  compact?: boolean;
 }) {
   const { effective: locale } = useLocale();
   const { effective: timezone } = useTimezone();
@@ -48,31 +81,54 @@ export function RelativeTime({
     if (typeof ts === 'number') return new Date(ts);
     return ts;
   }, [ts]);
-  const [, force] = useReducer((x) => x + 1, 0);
-  useEffect(() => {
-    const id = setInterval(force, 30_000);
-    return () => clearInterval(id);
-  }, []);
+  const formatter = useMemo(
+    () =>
+      compact
+        ? makeCompactRelativeFormatter(locale)
+        : makeIntlFormatter({ locale, numeric: 'auto', style: 'long' }),
+    [locale, compact],
+  );
   if (!date) return <span className={cx('text-text-faint', className)}>—</span>;
-  const rel = formatRelative(date, locale);
   const abs = formatAbsolute(date, locale, timezone);
   return (
     <Hint label={abs}>
-      <span className={cx('cursor-help', className)}>{rel}</span>
+      <span className={cx('cursor-help', className)}>
+        <TimeAgo
+          component="span"
+          date={date}
+          formatter={formatter}
+          title={abs}
+        />
+      </span>
     </Hint>
   );
+}
+
+export function RelativeOffsetTime({
+  offsetSeconds,
+  className,
+  compact = false,
+}: {
+  offsetSeconds: number | null | undefined;
+  className?: string;
+  compact?: boolean;
+}) {
+  const ts = useMemo(() => {
+    if (offsetSeconds == null) return null;
+    return Date.now() + offsetSeconds * 1000;
+  }, [offsetSeconds]);
+
+  return <RelativeTime className={className} compact={compact} ts={ts} />;
 }
 
 export function ResetCountdown({
   ts,
   className,
-  futureVerb = 'Resets',
-  pastVerb = 'Reset',
+  compact = false,
 }: {
   ts: Date | number | null | undefined;
   className?: string;
-  futureVerb?: string;
-  pastVerb?: string;
+  compact?: boolean;
 }) {
   const { effective: locale } = useLocale();
   const { effective: timezone } = useTimezone();
@@ -81,45 +137,25 @@ export function ResetCountdown({
     if (typeof ts === 'number') return new Date(ts);
     return ts;
   }, [ts]);
-  const [, force] = useReducer((x) => x + 1, 0);
-  useEffect(() => {
-    const id = setInterval(force, 60_000);
-    return () => clearInterval(id);
-  }, []);
+  const formatter = useMemo(
+    () => makeResetFormatter(locale, compact),
+    [locale, compact],
+  );
 
   if (!date) return <span className={cx('text-text-faint', className)}>—</span>;
 
-  const now = new Date();
-  const diffMs = date.getTime() - now.getTime();
-  const absMs = Math.abs(diffMs);
   const abs = formatAbsolute(date, locale, timezone);
-
-  let text = '';
-  if (diffMs > 0) {
-    const totalMin = Math.floor(absMs / 60000);
-    const d = Math.floor(totalMin / 1440);
-    const h = Math.floor((totalMin % 1440) / 60);
-    const m = totalMin % 60;
-    if (d > 0) text = `${futureVerb} in ${d}d ${h}h`;
-    else if (h > 0) text = `${futureVerb} in ${h}h ${m}m`;
-    else text = `${futureVerb} in ${m}m`;
-  } else {
-    if (absMs > 24 * 3600000) {
-      text = `${pastVerb} >1d ago (stale)`;
-    } else {
-      const h = Math.floor(absMs / 3600000);
-      const m = Math.floor((absMs % 3600000) / 60000);
-      if (h > 0) {
-        text = `${pastVerb} ${h}h ${m}m ago`;
-      } else {
-        text = `${pastVerb} ${m}m ago`;
-      }
-    }
-  }
 
   return (
     <Hint label={abs} side="top">
-      <span className={cx('cursor-help', className)}>{text}</span>
+      <span className={cx('cursor-help', className)}>
+        <TimeAgo
+          component="span"
+          date={date}
+          formatter={formatter}
+          title={abs}
+        />
+      </span>
     </Hint>
   );
 }
