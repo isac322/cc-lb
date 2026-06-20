@@ -764,6 +764,10 @@ async fn build_app_with_storage_inner(
         replica_identity,
         prompt_cache_shadow: config.prompt_cache_shadow.clone(),
     };
+    let scheduler_replica_id = lifecycle_config
+        .replica_identity
+        .as_ref()
+        .map(|identity| identity.id);
     if let Some(startup_preflight) = startup_preflight {
         let report = preflight::run_preflight(&stores, &lifecycle_config, &data_dir).await?;
         print_preflight_report(&report);
@@ -953,7 +957,26 @@ async fn build_app_with_storage_inner(
         });
     }
     let scheduler_cancel = CancellationToken::new();
-    let scheduler_tasks = opened_scheduler.spawn(config.clone(), scheduler_cancel.clone())?;
+    let scheduler_ctx = crate::scheduler_dispatch::build_scheduler_ctx(
+        crate::scheduler_dispatch::SchedulerDispatchDeps {
+            backend: opened_scheduler.backend.clone(),
+            config: config.clone(),
+            storage: storage.clone(),
+            stores: stores.clone(),
+            aead: aead.clone(),
+            oauth_cfg: oauth_cfg.clone(),
+            runtime: runtime.clone(),
+            data_dir: data_dir.clone(),
+            lazy_refresher: lazy_refresher_concrete.clone(),
+            subscription_quota_sink: subscription_quota_sink.clone(),
+            subscription_quota_cache: subscription_quota_cache.clone(),
+            cancel: scheduler_cancel.clone(),
+            replica_id: scheduler_replica_id,
+            price_catalog: price_catalog.clone(),
+        },
+    );
+    let scheduler_tasks =
+        opened_scheduler.spawn(config.clone(), scheduler_ctx, scheduler_cancel.clone())?;
     spawn_reconcile_shutdown(signals.subscribe(), scheduler_cancel.clone());
     spawn_reconcile_shutdown(signals.subscribe(), subscription_quota_writer_cancel);
     spawn_reconcile_shutdown(signals.subscribe(), refresh_cancel);

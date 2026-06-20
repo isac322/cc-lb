@@ -50,10 +50,11 @@ impl OpenedScheduler {
     pub fn spawn(
         &self,
         config: cc_lb_config::Config,
+        ctx: cc_lb_scheduler::worker::SchedulerCtx,
         cancel: CancellationToken,
     ) -> Result<Vec<JoinHandle<()>>, SchedulerFactoryError> {
         self.backend
-            .spawn(config, self.leader_election(), cancel)
+            .spawn(config, ctx, self.leader_election(), cancel)
             .map_err(|error| SchedulerFactoryError::StartupFailed {
                 message: error.to_string(),
             })

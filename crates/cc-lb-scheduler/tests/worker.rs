@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use std::time::Duration;
 
 use apalis::prelude::{IntervalStrategy, Status, StrategyBuilder, TaskSink};
@@ -6,7 +7,9 @@ use cc_lb_scheduler::jobs::compat::AnthropicCompatRefreshJob;
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollJob;
+use cc_lb_scheduler::jobs::reconcile::{SchedulerReconcileJobResult, SchedulerReconcileStats};
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
+use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{
     EntityJob, SchedulerBackend, SchedulerCtx, SqliteSchedulerStorage, build_entity_worker,
 };
@@ -31,7 +34,7 @@ async fn worker_sqlite_runs_one_of_each_entity_job_to_done()
         pool: pool.clone(),
         storage: apalis_sqlite::SqliteStorage::<EntityJob, (), ()>::new_with_config(&pool, &config),
     });
-    let worker = build_entity_worker(&backend, SchedulerCtx::default())?;
+    let worker = build_entity_worker(&backend, done_scheduler_ctx())?;
     worker.run_for(Duration::from_secs(2)).await?;
 
     let done_count: i64 =
@@ -58,22 +61,6 @@ fn fast_queue_config(queue: &str) -> apalis_sqlite::Config {
     apalis_sqlite::Config::new(queue)
         .with_poll_interval(poll_strategy)
         .set_buffer_size(5)
-}
-
-#[cfg(feature = "sqlite")]
-#[tokio::test]
-async fn worker_sqlite_rejects_duplicate_entity_handler_registration() {
-    use cc_lb_scheduler::worker::{EntityHandlerRegistry, EntityJobKind};
-
-    let mut registry = EntityHandlerRegistry::default();
-    registry
-        .register(EntityJobKind::Warmup)
-        .expect("first registration succeeds");
-    let error = registry
-        .register(EntityJobKind::Warmup)
-        .expect_err("duplicate registration is rejected");
-
-    assert!(error.to_string().contains("duplicate entity handler"));
 }
 
 #[cfg(feature = "sqlite")]
@@ -162,4 +149,22 @@ fn entity_jobs(upstream_id: Uuid) -> [EntityJob; 5] {
         )),
         EntityJob::MetadataRefresh(MetadataRefreshJob::new(upstream_id, 1)),
     ]
+}
+
+fn done_scheduler_ctx() -> SchedulerCtx {
+    SchedulerCtx::new(
+        SchedulerConfig::default(),
+        Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+        Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+        Arc::new(|_job| Box::pin(async { done_reconcile() })),
+    )
+}
+
+fn done_reconcile() -> SchedulerReconcileJobResult {
+    SchedulerReconcileJobResult::Done(SchedulerReconcileStats {
+        jobs_ensured: 1,
+        jobs_pruned: 0,
+        failures_recorded: 0,
+        reconcile_interval_secs: 300,
+    })
 }

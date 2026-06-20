@@ -23,6 +23,7 @@ pub mod refresh;
 pub mod reload;
 pub mod replica;
 pub(crate) mod revision_hash;
+pub(crate) mod scheduler_dispatch;
 pub mod scheduler_factory;
 pub mod signal;
 pub mod startup_handshake;

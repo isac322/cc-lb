@@ -1,5 +1,7 @@
 //! Worker pool for executing entity jobs.
 
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
 
 #[cfg(feature = "postgres")]
@@ -9,24 +11,72 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::SchedulerError;
+use crate::jobs::reconcile::{SchedulerReconcileJob, SchedulerReconcileJobResult};
 use crate::leader_election::LeaderElection;
+use crate::retry::JobOutcome;
 
 mod cron;
 mod dispatch;
 mod jobs;
 mod layers;
-mod registry;
 
 pub use jobs::{EntityJob, SingletonJob};
-pub use layers::{EntityWorker, SingletonWorker, build_singleton_worker};
-pub use registry::{EntityHandlerRegistry, EntityJobKind};
+pub use layers::{EntityWorker, ReconcileWorker, SingletonWorker, build_singleton_worker};
 
 pub const ENTITY_QUEUE: &str = "entity";
 pub const SINGLETON_QUEUE: &str = "singleton";
 
-#[derive(Clone, Debug, Default)]
+pub type EntityDispatchFuture =
+    Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>>;
+pub type SingletonDispatchFuture =
+    Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>>;
+pub type ReconcileDispatchFuture =
+    Pin<Box<dyn Future<Output = SchedulerReconcileJobResult> + Send>>;
+
+pub type EntityDispatchFn = Arc<dyn Fn(EntityJob) -> EntityDispatchFuture + Send + Sync>;
+pub type SingletonDispatchFn = Arc<dyn Fn(SingletonJob) -> SingletonDispatchFuture + Send + Sync>;
+pub type ReconcileDispatchFn =
+    Arc<dyn Fn(SchedulerReconcileJob) -> ReconcileDispatchFuture + Send + Sync>;
+
+#[derive(Clone)]
 pub struct SchedulerCtx {
     pub config: SchedulerConfig,
+    pub entity_dispatch: EntityDispatchFn,
+    pub singleton_dispatch: SingletonDispatchFn,
+    pub reconcile_dispatch: ReconcileDispatchFn,
+}
+
+impl SchedulerCtx {
+    pub fn new(
+        config: SchedulerConfig,
+        entity_dispatch: EntityDispatchFn,
+        singleton_dispatch: SingletonDispatchFn,
+        reconcile_dispatch: ReconcileDispatchFn,
+    ) -> Self {
+        Self {
+            config,
+            entity_dispatch,
+            singleton_dispatch,
+            reconcile_dispatch,
+        }
+    }
+}
+
+impl Default for SchedulerCtx {
+    fn default() -> Self {
+        Self {
+            config: SchedulerConfig::default(),
+            entity_dispatch: Arc::new(|_job| {
+                Box::pin(async { panic!("SchedulerCtx is missing real entity dispatch wiring") })
+            }),
+            singleton_dispatch: Arc::new(|_job| {
+                Box::pin(async { panic!("SchedulerCtx is missing real singleton dispatch wiring") })
+            }),
+            reconcile_dispatch: Arc::new(|_job| {
+                Box::pin(async { panic!("SchedulerCtx is missing real reconcile dispatch wiring") })
+            }),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -65,10 +115,11 @@ impl SchedulerBackend {
     pub fn spawn(
         &self,
         config: Config,
+        ctx: SchedulerCtx,
         leader: Arc<LeaderElection>,
         cancel: CancellationToken,
     ) -> Result<Vec<JoinHandle<()>>, SchedulerError> {
-        let mut handles = self.spawn_consumers(config.scheduler.clone(), cancel.clone())?;
+        let mut handles = self.spawn_consumers(ctx, cancel.clone())?;
         handles.push(cron::spawn_cron_producer(
             self.clone(),
             config,
@@ -98,18 +149,15 @@ impl SchedulerBackend {
 
     fn spawn_consumers(
         &self,
-        config: SchedulerConfig,
+        ctx: SchedulerCtx,
         cancel: CancellationToken,
     ) -> Result<Vec<JoinHandle<()>>, SchedulerError> {
-        let entity_worker = build_entity_worker(
-            self,
-            SchedulerCtx {
-                config: config.clone(),
-            },
-        )?;
-        let singleton_worker = build_singleton_worker(self, SchedulerCtx { config })?;
+        let entity_worker = build_entity_worker(self, ctx.clone())?;
+        let singleton_worker = build_singleton_worker(self, ctx.clone())?;
+        let reconcile_worker = layers::build_reconcile_worker(self, ctx)?;
         let entity_cancel = cancel.clone();
-        let singleton_cancel = cancel;
+        let singleton_cancel = cancel.clone();
+        let reconcile_cancel = cancel;
         Ok(vec![
             tokio::spawn(async move {
                 if let Err(error) = entity_worker.run_until_cancelled(entity_cancel).await {
@@ -119,6 +167,11 @@ impl SchedulerBackend {
             tokio::spawn(async move {
                 if let Err(error) = singleton_worker.run_until_cancelled(singleton_cancel).await {
                     tracing::error!(error = %error, "scheduler singleton worker exited with error");
+                }
+            }),
+            tokio::spawn(async move {
+                if let Err(error) = reconcile_worker.run_until_cancelled(reconcile_cancel).await {
+                    tracing::error!(error = %error, "scheduler reconcile worker exited with error");
                 }
             }),
         ])
@@ -139,6 +192,5 @@ pub fn build_entity_worker(
     backend: &SchedulerBackend,
     ctx: SchedulerCtx,
 ) -> Result<EntityWorker, SchedulerError> {
-    let _registry = EntityHandlerRegistry::register_all_entity_handlers()?;
     layers::build_backend_entity_worker(backend, ctx)
 }

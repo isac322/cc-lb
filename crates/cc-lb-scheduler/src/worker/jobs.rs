@@ -9,13 +9,12 @@ use crate::jobs::oauth_usage_poll::OAuthUsagePollJob;
 use crate::jobs::price_catalog::PriceCatalogRefreshJob;
 use crate::jobs::prompt_cache_purge::PromptCacheObservationPurgeJob;
 use crate::jobs::quota_gc::SubscriptionQuotaGcJob;
+use crate::jobs::reconcile::SchedulerReconcileJob;
 use crate::jobs::usage_prune::UsagePruneJob;
 use crate::jobs::usage_rollup::UsageRollupTask;
 use crate::jobs::warmup::UpstreamWarmupJob;
 use crate::middleware::TraceparentCarrier;
 use crate::retry::RetryPayload;
-
-use super::EntityJobKind;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
@@ -47,18 +46,6 @@ impl SingletonJob {
             Self::PromptCachePurge(_) => "prompt_cache_purge",
             Self::PriceCatalogRefresh(_) => "price_catalog_refresh",
             Self::ApalisHousekeeping(_) => "apalis_housekeeping",
-        }
-    }
-}
-
-impl EntityJob {
-    pub const fn kind(&self) -> EntityJobKind {
-        match self {
-            Self::Warmup(_) => EntityJobKind::Warmup,
-            Self::OAuthRefresh(_) => EntityJobKind::OAuthRefresh,
-            Self::OAuthUsagePoll(_) => EntityJobKind::OAuthUsagePoll,
-            Self::AnthropicCompatRefresh(_) => EntityJobKind::AnthropicCompatRefresh,
-            Self::MetadataRefresh(_) => EntityJobKind::MetadataRefresh,
         }
     }
 }
@@ -136,6 +123,22 @@ impl<Ctx, IdType> TraceparentCarrier for Task<SingletonJob, Ctx, IdType> {
 }
 
 impl<Ctx, IdType> RetryPayload for Task<SingletonJob, Ctx, IdType> {
+    fn attempt_count(&self) -> u32 {
+        u32::try_from(self.parts.attempt.current()).unwrap_or(u32::MAX)
+    }
+}
+
+impl<Ctx, IdType> TraceparentCarrier for Task<SchedulerReconcileJob, Ctx, IdType> {
+    fn traceparent(&self) -> Option<&str> {
+        self.args.traceparent()
+    }
+
+    fn set_traceparent(&mut self, traceparent: Option<String>) {
+        self.args.set_traceparent(traceparent);
+    }
+}
+
+impl<Ctx, IdType> RetryPayload for Task<SchedulerReconcileJob, Ctx, IdType> {
     fn attempt_count(&self) -> u32 {
         u32::try_from(self.parts.attempt.current()).unwrap_or(u32::MAX)
     }
