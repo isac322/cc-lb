@@ -40,10 +40,12 @@ pub(super) fn i32_to_u32(value: i32, field: &str) -> Result<u32> {
     u32::try_from(value).map_err(|_| SchedulerError::Job(format!("{field} is negative")))
 }
 
+#[cfg(feature = "sqlite")]
 pub(super) fn i64_to_u32(value: i64, field: &str) -> Result<u32> {
     u32::try_from(value).map_err(|_| SchedulerError::Job(format!("{field} is outside u32")))
 }
 
+#[cfg(feature = "sqlite")]
 pub(super) fn option_i64_to_i32(value: Option<i64>, field: &str) -> Result<Option<i32>> {
     value
         .map(|inner| {

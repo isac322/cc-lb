@@ -62,7 +62,7 @@ fn app_config(storage: StorageConfig) -> Config {
         upstream_kind: NoneModeUpstreamKind::AnthropicKey,
     });
     config.scheduler.separate_pool.min_connections = 0;
-    config.scheduler.separate_pool.acquire_timeout_secs = 1;
+    config.scheduler.separate_pool.acquire_timeout_secs = 10;
     config
 }
 

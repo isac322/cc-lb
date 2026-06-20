@@ -12,8 +12,11 @@ use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::routing::any;
 use cc_lb_aead::AeadService;
-use cc_lb_config::{Config, DownstreamAuthMode, PostgresPoolConfig, StorageConfig};
+use cc_lb_config::{
+    Config, DownstreamAuthMode, PostgresPoolConfig, SchedulerConfig, StorageConfig,
+};
 use cc_lb_server::app::{App, build_app_with_storage, seed_app_testing_storage};
+use cc_lb_server::scheduler_factory::open_scheduler_storage;
 use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind};
 use cc_lb_storage_api::{
     BackendKind, ManagedKeyStore, PrincipalStore, Storage as StorageTrait, StorageError,
@@ -282,6 +285,24 @@ async fn reset_managed_key_tables(database_url: &str) -> TestResult<()> {
         .execute(&pool)
         .await?;
     pool.close().await;
+
+    // Concurrent cold instances race on apalis migration #1's pg_type catalog
+    // entries because the apalis Migrator's `_sqlx_migrations` lookup resolves
+    // to cc-lb-storage-postgres's `public._sqlx_migrations` (no apalis row,
+    // even after our session-scoped pg_advisory_lock serializes setups).
+    // Mirror the production deployment pattern of running scheduler migrations
+    // once before instances scale up; the test then exercises post-init
+    // multi-instance behavior, not the cold-start migration race.
+    let opened = open_scheduler_storage(
+        &StorageConfig::Postgres {
+            url: database_url.to_owned(),
+            pool: PostgresPoolConfig::default(),
+        },
+        &SchedulerConfig::default(),
+    )
+    .await?;
+    drop(opened);
+
     Ok(())
 }
 
