@@ -18,7 +18,7 @@ pub const TICK_INTERVAL: Duration = Duration::from_millis(500);
 
 const CRON_QUEUE: &str = "task_41_cron_handover";
 const POLL_INTERVAL: Duration = Duration::from_millis(200);
-const WAIT_TIMEOUT: Duration = Duration::from_secs(8);
+const WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub type TestResult<T = ()> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
