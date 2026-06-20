@@ -1399,7 +1399,6 @@ function DetailView({
                         const windowNotStarted =
                           !isOverage &&
                           (snap.utilization == null ||
-                            snap.utilization === 0 ||
                             snap.resets_at_unix_secs == null ||
                             snap.resets_at_unix_secs <= nowUnixSecs);
                         const waitingForGrowth =
