@@ -128,6 +128,7 @@ fn push_window(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn base_record(
     upstream_id: Uuid,
     window: SubscriptionQuotaWindow,
