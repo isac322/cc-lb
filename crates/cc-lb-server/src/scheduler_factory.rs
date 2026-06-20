@@ -5,6 +5,9 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 #[cfg(feature = "postgres")]
+const SCHEDULER_SETUP_LOCK_KEY: i64 = 0x_CC1B_5CDE_0002_i64;
+
+#[cfg(feature = "postgres")]
 pub use cc_lb_scheduler::worker::PostgresSchedulerStorage;
 pub use cc_lb_scheduler::worker::SchedulerBackend;
 #[cfg(feature = "sqlite")]
@@ -230,7 +233,7 @@ async fn open_postgres(
                 scheduler_sqlx::query(&statement_timeout)
                     .execute(&mut *connection)
                     .await?;
-                scheduler_sqlx::query("SET search_path = apalis, public")
+                scheduler_sqlx::query("SET search_path = cc_lb_scheduler, apalis, public")
                     .execute(&mut *connection)
                     .await?;
                 Ok(())
@@ -239,23 +242,25 @@ async fn open_postgres(
         .connect_with(connect_options.clone())
         .await
         .map_err(|error| connection_error_with_host(url, error))?;
-    // Pin apalis's sqlx migration tracker to `apalis._sqlx_migrations` so it
-    // does not collide with the main storage's `public._sqlx_migrations`,
+    // Pin apalis's sqlx migration tracker to `cc_lb_scheduler._sqlx_migrations`
+    // so it cannot collide with the main storage's `public._sqlx_migrations`,
     // which already records versions 1..N from `cc-lb-storage-postgres`.
-    // Without this, a second cc-lb-server instance opening the same DB sees
-    // main migrations recorded as "previously applied" and apalis `setup`
-    // fails with `migration 1 was previously applied but is missing in the
-    // resolved migrations`. sqlx 0.8's `Migrator` has no public table-name
-    // setter, so we pin pool sessions to the `apalis` search path via
-    // `after_connect` above. `PostgresStorage::setup` then writes
-    // `_sqlx_migrations` inside the `apalis` schema. Idempotent on reboot.
-    scheduler_sqlx::query("CREATE SCHEMA IF NOT EXISTS apalis")
-        .execute(&pool)
-        .await
-        .map_err(migration_error)?;
-    apalis_postgres::PostgresStorage::setup(&pool)
-        .await
-        .map_err(migration_error)?;
+    // Without isolation, a second cc-lb-server instance opening the same DB
+    // would see the main migrations as "previously applied" and apalis
+    // `setup` would abort with `migration 1 was previously applied but is
+    // missing in the resolved migrations`. The pool's `after_connect` pins
+    // the session search_path to `cc_lb_scheduler, apalis, public` so the
+    // migration tracker lands in `cc_lb_scheduler`; apalis migration #1
+    // creates the `apalis` schema that holds the actual job tables.
+    //
+    // Concurrent boots also need a session-scoped `pg_advisory_lock` held
+    // across the migration run to serialize schema/type creation across
+    // instances. Without the lock the simultaneous `CREATE SCHEMA apalis` /
+    // `CREATE TYPE` statements from apalis migration #1 race on
+    // `pg_type_typname_nsp_index`. A transaction-scoped lock would release
+    // before sqlx's `Migrator::run` starts its own transactions, so we
+    // hold a dedicated connection for the full setup window.
+    run_postgres_scheduler_setup(&connect_options, &pool).await?;
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool)
         .await
         .map_err(migration_error)?;
@@ -279,6 +284,43 @@ async fn open_postgres(
             election: Arc::new(election),
         }),
     })
+}
+
+#[cfg(feature = "postgres")]
+async fn run_postgres_scheduler_setup(
+    connect_options: &scheduler_sqlx::postgres::PgConnectOptions,
+    _pool: &scheduler_sqlx::PgPool,
+) -> Result<(), SchedulerFactoryError> {
+    let connect_options = connect_options.clone();
+    tokio::spawn(async move {
+        use scheduler_sqlx::Connection as _;
+
+        let mut conn = scheduler_sqlx::PgConnection::connect_with(&connect_options)
+            .await
+            .map_err(migration_error)?;
+        scheduler_sqlx::query("SET search_path = cc_lb_scheduler, apalis, public")
+            .execute(&mut conn)
+            .await
+            .map_err(migration_error)?;
+        scheduler_sqlx::query("SELECT pg_advisory_lock($1)")
+            .bind(SCHEDULER_SETUP_LOCK_KEY)
+            .execute(&mut conn)
+            .await
+            .map_err(migration_error)?;
+        scheduler_sqlx::query("CREATE SCHEMA IF NOT EXISTS cc_lb_scheduler")
+            .execute(&mut conn)
+            .await
+            .map_err(migration_error)?;
+        let migrator = apalis_postgres::PostgresStorage::<(), (), ()>::migrations();
+        let result = migrator.run_direct(&mut conn).await;
+        let _ = scheduler_sqlx::query("SELECT pg_advisory_unlock($1)")
+            .bind(SCHEDULER_SETUP_LOCK_KEY)
+            .execute(&mut conn)
+            .await;
+        result.map_err(migration_error)
+    })
+    .await
+    .map_err(migration_error)?
 }
 
 #[cfg(feature = "postgres")]

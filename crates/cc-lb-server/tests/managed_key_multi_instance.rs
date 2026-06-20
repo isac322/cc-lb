@@ -278,6 +278,9 @@ async fn reset_managed_key_tables(database_url: &str) -> TestResult<()> {
     sqlx::query("DROP SCHEMA IF EXISTS apalis CASCADE")
         .execute(&pool)
         .await?;
+    sqlx::query("DROP SCHEMA IF EXISTS cc_lb_scheduler CASCADE")
+        .execute(&pool)
+        .await?;
     pool.close().await;
     Ok(())
 }
