@@ -275,6 +275,9 @@ async fn reset_managed_key_tables(database_url: &str) -> TestResult<()> {
     sqlx::query("TRUNCATE managed_api_key_index_v1, managed_api_keys_v1")
         .execute(&pool)
         .await?;
+    sqlx::query("DROP SCHEMA IF EXISTS apalis CASCADE")
+        .execute(&pool)
+        .await?;
     pool.close().await;
     Ok(())
 }
