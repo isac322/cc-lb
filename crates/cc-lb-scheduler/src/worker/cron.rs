@@ -1,7 +1,6 @@
-use std::error::Error;
 use std::sync::Arc;
+use std::time::Duration;
 
-use apalis::prelude::TaskSink;
 use cc_lb_config::Config;
 use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
@@ -9,6 +8,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cron::WorkerBuilder as CronWorkerBuilder;
 use crate::leader_election::LeaderElection;
+
+const LEADER_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 
 #[cfg(feature = "postgres")]
 use super::PostgresSchedulerStorage;
@@ -45,18 +46,12 @@ async fn run_sqlite_cron_producer(
 ) {
     let mut handles = Vec::new();
     for spec in singleton_cron_specs(&config) {
-        let storage = apalis_sqlite::SqliteStorage::<SingletonJob, (), ()>::new_in_queue(
-            &sqlite.pool,
-            SINGLETON_QUEUE,
-        );
-        let worker =
-            CronWorkerBuilder::singleton_queue(SINGLETON_QUEUE, spec.schedule, storage, spec.job);
-        handles.push(spawn_cron_worker(
-            spec.name,
-            worker,
-            leader.clone(),
-            cancel.clone(),
-        ));
+        let pool = sqlite.pool.clone();
+        let leader = leader.clone();
+        let cancel = cancel.clone();
+        handles.push(tokio::spawn(async move {
+            run_sqlite_singleton_cron_loop(pool, spec, leader, cancel).await;
+        }));
     }
     cancel.cancelled().await;
     abort_join_handles(handles).await;
@@ -71,43 +66,101 @@ async fn run_postgres_cron_producer(
 ) {
     let mut handles = Vec::new();
     for spec in singleton_cron_specs(&config) {
-        let storage = apalis_postgres::PostgresStorage::<SingletonJob>::new_with_config(
-            &postgres.pool,
-            &apalis_postgres::Config::new(SINGLETON_QUEUE),
-        );
-        let worker =
-            CronWorkerBuilder::singleton_queue(SINGLETON_QUEUE, spec.schedule, storage, spec.job);
-        handles.push(spawn_cron_worker(
-            spec.name,
-            worker,
-            leader.clone(),
-            cancel.clone(),
-        ));
+        let pool = postgres.pool.clone();
+        let leader = leader.clone();
+        let cancel = cancel.clone();
+        handles.push(tokio::spawn(async move {
+            run_postgres_singleton_cron_loop(pool, spec, leader, cancel).await;
+        }));
     }
     cancel.cancelled().await;
     abort_join_handles(handles).await;
 }
 
-fn spawn_cron_worker<Storage>(
-    name: &'static str,
-    worker: CronWorkerBuilder<SingletonJob, IntervalSchedule, Storage>,
+#[cfg(feature = "postgres")]
+async fn run_postgres_singleton_cron_loop(
+    pool: sqlx::PgPool,
+    spec: SingletonCronSpec,
     leader: Arc<LeaderElection>,
     cancel: CancellationToken,
-) -> JoinHandle<()>
-where
-    Storage: TaskSink<SingletonJob> + Send + 'static,
-    Storage::Error: Error + Send + Sync + 'static,
-{
-    tokio::spawn(async move {
-        tokio::select! {
-            result = worker.run(leader.as_ref()) => {
-                if let Err(error) = result {
-                    tracing::error!(job = name, error = %error, "scheduler cron producer exited with error");
-                }
-            }
-            _ = cancel.cancelled() => {}
+) {
+    loop {
+        if cancel.is_cancelled() {
+            break;
         }
-    })
+        let storage = apalis_postgres::PostgresStorage::<SingletonJob>::new_with_config(
+            &pool,
+            &apalis_postgres::Config::new(SINGLETON_QUEUE),
+        );
+        let worker = CronWorkerBuilder::singleton_queue(
+            SINGLETON_QUEUE,
+            spec.schedule.clone(),
+            storage,
+            spec.job.clone(),
+        );
+        run_one_cron_attempt(spec.name, worker, &leader, &cancel).await;
+        if !sleep_or_cancel(LEADER_RETRY_INTERVAL, &cancel).await {
+            break;
+        }
+    }
+}
+
+#[cfg(feature = "sqlite")]
+async fn run_sqlite_singleton_cron_loop(
+    pool: sqlx::SqlitePool,
+    spec: SingletonCronSpec,
+    leader: Arc<LeaderElection>,
+    cancel: CancellationToken,
+) {
+    loop {
+        if cancel.is_cancelled() {
+            break;
+        }
+        let storage = apalis_sqlite::SqliteStorage::<SingletonJob, (), ()>::new_in_queue(
+            &pool,
+            SINGLETON_QUEUE,
+        );
+        let worker = CronWorkerBuilder::singleton_queue(
+            SINGLETON_QUEUE,
+            spec.schedule.clone(),
+            storage,
+            spec.job.clone(),
+        );
+        run_one_cron_attempt(spec.name, worker, &leader, &cancel).await;
+        if !sleep_or_cancel(LEADER_RETRY_INTERVAL, &cancel).await {
+            break;
+        }
+    }
+}
+
+async fn run_one_cron_attempt<Storage>(
+    name: &'static str,
+    worker: CronWorkerBuilder<SingletonJob, IntervalSchedule, Storage>,
+    leader: &Arc<LeaderElection>,
+    cancel: &CancellationToken,
+) where
+    Storage: apalis::prelude::TaskSink<SingletonJob> + Send + 'static,
+    Storage::Error: std::error::Error + Send + Sync + 'static,
+{
+    tokio::select! {
+        result = worker.run(leader.as_ref()) => {
+            if let Err(error) = result {
+                tracing::warn!(
+                    job = name,
+                    error = %error,
+                    "scheduler cron producer worker exited with error; retrying after backoff",
+                );
+            }
+        }
+        _ = cancel.cancelled() => {}
+    }
+}
+
+async fn sleep_or_cancel(duration: Duration, cancel: &CancellationToken) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(duration) => true,
+        _ = cancel.cancelled() => false,
+    }
 }
 
 async fn abort_join_handles(handles: Vec<JoinHandle<()>>) {
