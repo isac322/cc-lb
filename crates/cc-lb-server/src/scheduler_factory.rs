@@ -228,7 +228,10 @@ async fn open_postgres(
                 let statement_timeout =
                     format!("SET statement_timeout = '{statement_timeout_ms}ms'");
                 scheduler_sqlx::query(&statement_timeout)
-                    .execute(connection)
+                    .execute(&mut *connection)
+                    .await?;
+                scheduler_sqlx::query("SET search_path = apalis, public")
+                    .execute(&mut *connection)
                     .await?;
                 Ok(())
             })
@@ -236,6 +239,20 @@ async fn open_postgres(
         .connect_with(connect_options.clone())
         .await
         .map_err(|error| connection_error_with_host(url, error))?;
+    // Pin apalis's sqlx migration tracker to `apalis._sqlx_migrations` so it
+    // does not collide with the main storage's `public._sqlx_migrations`,
+    // which already records versions 1..N from `cc-lb-storage-postgres`.
+    // Without this, a second cc-lb-server instance opening the same DB sees
+    // main migrations recorded as "previously applied" and apalis `setup`
+    // fails with `migration 1 was previously applied but is missing in the
+    // resolved migrations`. sqlx 0.8's `Migrator` has no public table-name
+    // setter, so we pin pool sessions to the `apalis` search path via
+    // `after_connect` above. `PostgresStorage::setup` then writes
+    // `_sqlx_migrations` inside the `apalis` schema. Idempotent on reboot.
+    scheduler_sqlx::query("CREATE SCHEMA IF NOT EXISTS apalis")
+        .execute(&pool)
+        .await
+        .map_err(migration_error)?;
     apalis_postgres::PostgresStorage::setup(&pool)
         .await
         .map_err(migration_error)?;
