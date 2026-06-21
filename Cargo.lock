@@ -556,6 +556,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-lb-bdd-tests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "cc-lb-core",
+ "cc-lb-storage-api",
+ "cc-lb-storage-postgres",
+ "cc-lb-storage-sqlite",
+ "sqlx",
+ "tempfile",
+ "tokio",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "cc-lb-config"
 version = "0.1.0"
 dependencies = [

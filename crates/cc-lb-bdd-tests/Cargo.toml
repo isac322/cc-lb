@@ -1,0 +1,35 @@
+[package]
+name = "cc-lb-bdd-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+# BDD scenario test harness for the v5.2 BDD corpus
+# (321 scenarios / 27 features / 4 writer streams). See docs/ for the v3.2
+# conversion plan, the scenario-to-function map, and the persona helper /
+# BddCtx specifications. Each scenario is realised as a `#[tokio::test]`
+# pair (sqlite + postgres) emitted by the `bdd_scenario!` macro.
+
+[features]
+default = ["sqlite"]
+postgres = ["dep:cc-lb-storage-postgres", "dep:sqlx"]
+sqlite = []
+
+[dependencies]
+cc-lb-core = { path = "../cc-lb-core" }
+cc-lb-storage-api = { path = "../cc-lb-storage-api" }
+cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
+cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres", optional = true }
+sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-ring"], optional = true }
+
+anyhow = { workspace = true }
+async-trait = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+uuid = { workspace = true, features = ["v4"] }
+tempfile = { workspace = true }
+url = { workspace = true }
+
+[dev-dependencies]
+# Integration tests under tests/w<N>.rs use the same crate as a library.
