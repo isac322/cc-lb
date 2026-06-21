@@ -25,9 +25,10 @@ use cc_lb_core::{
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{
     OrganizationMetadataRecord, Storage, StorageError, SubscriptionQuotaLatestRecord,
-    SubscriptionQuotaWindow, UpstreamCreate, UpstreamRecord, UpstreamStore,
+    SubscriptionQuotaWindow, UpstreamCreate, UpstreamRecord, UpstreamStatusUpdate, UpstreamStore,
     UpstreamSubscriptionMetadataRecord, UpstreamUpdate,
 };
+use chrono::{DateTime, TimeZone, Utc};
 use http_body_util::Full;
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::{Client, connect::HttpConnector};
@@ -51,8 +52,59 @@ const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
 const WARMUP_MODEL: &str = "claude-haiku-4-5-20251001";
 const WARMUP_MAX_TOKENS: u32 = 1;
 const WARMUP_ANTHROPIC_BETA: &str = "oauth-2025-04-20";
+const FIRE_NOW_POST_RESET_GUARD_SECS: i64 = 30;
+const FIRE_NOW_JITTER_SPREAD_MS: u64 = 30_000;
+const FIVE_HOURS_SECS: i64 = 5 * 3600;
 
 type WarmupHttpClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
+
+fn fire_now_stable_jitter_ms(upstream_id: Uuid, candidate_resets_at_unix_secs: u64) -> u64 {
+    use std::hash::Hasher;
+    let mut hasher = siphasher::sip::SipHasher13::new_with_keys(0, 0);
+    hasher.write(upstream_id.as_bytes());
+    hasher.write(&candidate_resets_at_unix_secs.to_le_bytes());
+    hasher.finish() % FIRE_NOW_JITTER_SPREAD_MS
+}
+
+fn fire_now_next_warmup_at(
+    upstream_id: Uuid,
+    candidate_cycle_key: i64,
+    response_cycle_key: i64,
+) -> Option<DateTime<Utc>> {
+    let schedule_anchor = if response_cycle_key > candidate_cycle_key {
+        response_cycle_key
+    } else {
+        candidate_cycle_key.saturating_add(FIVE_HOURS_SECS)
+    };
+    let anchor_u64 = u64::try_from(schedule_anchor).ok()?;
+    let jitter_ms = fire_now_stable_jitter_ms(upstream_id, anchor_u64);
+    let base = Utc.timestamp_opt(schedule_anchor, 0).single()?;
+    base.checked_add_signed(chrono::Duration::seconds(FIRE_NOW_POST_RESET_GUARD_SECS))
+        .and_then(|value| {
+            value.checked_add_signed(chrono::Duration::milliseconds(jitter_ms as i64))
+        })
+}
+
+async fn write_warmup_status_after_success(
+    storage: &dyn Storage,
+    upstream_id: Uuid,
+    candidate_cycle_key: i64,
+    response_cycle_key: i64,
+) {
+    let Some(next_warmup_at) =
+        fire_now_next_warmup_at(upstream_id, candidate_cycle_key, response_cycle_key)
+    else {
+        return;
+    };
+    let status = UpstreamStatusUpdate {
+        next_warmup_at: Some(Some(next_warmup_at)),
+        last_warmup_cycle_key: Some(Some(response_cycle_key.max(candidate_cycle_key))),
+        ..UpstreamStatusUpdate::default()
+    };
+    if let Err(error) = UpstreamStore::set_status(storage, upstream_id, status).await {
+        tracing::warn!(target: "warmup", upstream_id = %upstream_id, %error, "fire_now writeback failed");
+    }
+}
 
 pub fn router() -> Router<AdminState> {
     Router::new()
@@ -542,6 +594,13 @@ async fn fire_now_upstream_warmup(
             cycle_key: response_cycle_key,
         } => {
             tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, cycle_key = %candidate_cycle_key, response_cycle_key = %response_cycle_key, action = "dispatch_succeeded");
+            write_warmup_status_after_success(
+                storage.as_ref(),
+                upstream_id,
+                candidate_cycle_key,
+                response_cycle_key,
+            )
+            .await;
             Ok(Json(json!({ "fired": true, "cycle_key": response_cycle_key })).into_response())
         }
         FireNowWarmupResult::AbandonCyclePermanent(reason) => {
@@ -793,6 +852,7 @@ async fn update_upstream(
     .await
     {
         Ok(updated) => {
+            bootstrap_next_warmup_at_if_toggled(storage, &current, &updated).await;
             enqueue_upstream_audit(
                 &state,
                 &updated,
@@ -809,6 +869,28 @@ async fn update_upstream(
             stale_or_conflict(&state, &id, expected_revision, message).await
         }
         Err(error) => Err(error.into()),
+    }
+}
+
+async fn bootstrap_next_warmup_at_if_toggled(
+    storage: &dyn Storage,
+    before: &UpstreamRecord,
+    after: &UpstreamRecord,
+) {
+    let toggled_on = !before.warmup_enabled && after.warmup_enabled;
+    let null_repair = after.warmup_enabled && after.next_warmup_at.is_none();
+    if !(toggled_on || null_repair) {
+        return;
+    }
+    if after.kind != UpstreamKind::AnthropicOauth || after.oauth_credentials.is_none() {
+        return;
+    }
+    let status = UpstreamStatusUpdate {
+        next_warmup_at: Some(Some(Utc::now())),
+        ..UpstreamStatusUpdate::default()
+    };
+    if let Err(error) = UpstreamStore::set_status(storage, after.id, status).await {
+        tracing::warn!(target: "warmup", upstream_id = %after.id, %error, "next_warmup_at bootstrap failed");
     }
 }
 
