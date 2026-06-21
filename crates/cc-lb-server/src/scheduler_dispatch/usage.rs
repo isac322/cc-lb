@@ -11,13 +11,9 @@ use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
 #[derive(Debug, Deserialize)]
 struct UsageBody {
-    #[serde(rename = "5h")]
     five_hour: Option<UsageWindow>,
-    #[serde(rename = "7d")]
     seven_day: Option<UsageWindow>,
-    #[serde(rename = "7d_sonnet")]
     seven_day_sonnet: Option<UsageWindow>,
-    #[serde(rename = "7d_opus")]
     seven_day_opus: Option<UsageWindow>,
     extra_usage: Option<ExtraUsage>,
 }
@@ -48,6 +44,7 @@ fn resets_at_to_unix_secs(value: ResetsAt) -> Option<u64> {
 
 #[derive(Debug, Deserialize)]
 struct ExtraUsage {
+    #[serde(rename = "is_enabled")]
     enabled: Option<bool>,
     monthly_limit: Option<f64>,
     used_credits: Option<f64>,
@@ -204,7 +201,7 @@ mod tests {
     #[test]
     fn rfc3339_resets_at_is_accepted() {
         let records = parse(
-            r#"{"5h":{"utilization":42,"resets_at":"2026-06-21T20:30:00Z"}}"#,
+            r#"{"five_hour":{"utilization":42,"resets_at":"2026-06-21T20:30:00Z"}}"#,
         );
         let five_hour = records
             .iter()
@@ -215,7 +212,8 @@ mod tests {
 
     #[test]
     fn numeric_resets_at_is_accepted() {
-        let records = parse(r#"{"7d":{"utilization":12,"resets_at":1800000000}}"#);
+        let records =
+            parse(r#"{"seven_day":{"utilization":12,"resets_at":1800000000}}"#);
         let seven_day = records
             .iter()
             .find(|r| r.window == SubscriptionQuotaWindow::SevenDay)
@@ -225,7 +223,8 @@ mod tests {
 
     #[test]
     fn float_resets_at_is_accepted() {
-        let records = parse(r#"{"5h":{"utilization":1,"resets_at":1800000000.5}}"#);
+        let records =
+            parse(r#"{"five_hour":{"utilization":1,"resets_at":1800000000.5}}"#);
         let five_hour = records
             .iter()
             .find(|r| r.window == SubscriptionQuotaWindow::FiveHour)
@@ -236,8 +235,30 @@ mod tests {
     #[test]
     fn string_resets_at_does_not_poison_other_windows() {
         let records = parse(
-            r#"{"5h":{"utilization":10,"resets_at":"2026-06-21T20:30:00Z"},"7d":{"utilization":3,"resets_at":1800000000}}"#,
+            r#"{"five_hour":{"utilization":10,"resets_at":"2026-06-21T20:30:00Z"},"seven_day":{"utilization":3,"resets_at":1800000000}}"#,
         );
         assert_eq!(records.len(), 2);
+    }
+
+    #[test]
+    fn full_production_body_produces_all_four_records() {
+        let body = r#"{"five_hour":{"utilization":60.0,"resets_at":"2026-06-21T08:10:00.885300+00:00"},"seven_day":{"utilization":21.0,"resets_at":"2026-06-25T19:00:00.885325+00:00"},"seven_day_oauth_apps":null,"seven_day_opus":null,"seven_day_sonnet":{"utilization":0.0,"resets_at":"2026-06-25T18:59:59.885338+00:00"},"extra_usage":{"is_enabled":false,"monthly_limit":null,"used_credits":null}}"#;
+        let records = parse(body);
+        let windows: Vec<_> = records.iter().map(|r| r.window).collect();
+        assert_eq!(records.len(), 4, "expected 4 records, got windows={:?}", windows);
+    }
+
+    #[test]
+    fn extra_usage_is_enabled_field_is_parsed() {
+        let records = parse(
+            r#"{"extra_usage":{"is_enabled":true,"monthly_limit":30000,"used_credits":15000}}"#,
+        );
+        let overage = records
+            .iter()
+            .find(|r| r.window == SubscriptionQuotaWindow::Overage)
+            .expect("overage record");
+        assert_eq!(overage.extra_usage_enabled, Some(true));
+        assert_eq!(overage.extra_usage_monthly_limit, Some(30000.0));
+        assert_eq!(overage.extra_usage_used_credits, Some(15000.0));
     }
 }
