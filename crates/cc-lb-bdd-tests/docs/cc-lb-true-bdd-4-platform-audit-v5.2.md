@@ -1,752 +1,752 @@
 # cc-lb True BDD — Platform / Audit v5.2
 
-- 작성일: 2026-06-18
-- 작성자: Writer 4 (Platform/Audit)
-- 범위: 7 features / 94 scenarios (F13, F14, F15, F17-merged, F18-merged, F20, F24)
-- 입력
+- Date: 2026-06-18
+- Author: Writer 4 (Platform/Audit)
+- Scope: 7 features / 94 scenarios (F13, F14, F15, F17-merged, F18-merged, F20, F24)
+- Inputs
   - `~/cc-lb-bdd/cc-lb-true-bdd-4-platform-audit-v5.md` (v5: 7 features / 89 scenarios)
-  - `~/cc-lb-bdd/cc-lb-bdd-verify-C-scenario-quality.md` (§4 cross-file consistency 규칙)
-  - `~/cc-lb-bdd/cc-lb-bdd-final-report-v5.md` (§3 sample 표)
+  - `~/cc-lb-bdd/cc-lb-bdd-verify-C-scenario-quality.md` (§4 cross-file consistency rules)
+  - `~/cc-lb-bdd/cc-lb-bdd-final-report-v5.md` (§3 sample table)
   - `~/cc-lb-bdd/bdd-research.md` (§A–§H, 18 authorities)
-- v5 → v5.2: 89 + 3 추가 multi-rule split(F14.4, F15.11, F17.9) = **94**
-- 페르소나: Alice(운영자), Bob(개발자/플러그인 작성자), Charlie(SRE), Dana(감사관) 4인만 사용
-- 원칙
-  - 한 시나리오 = 한 비즈니스 규칙 (Cucumber.io §F.2)
-  - 선언적 Given/When/Then, 도메인 어휘만 (Cucumber.io §E)
-  - "암호화된 형태 / 변조하면 즉시 들통난다" (AEAD 대체)
-  - "한 번 적히면 누구도 지우거나 고칠 수 없다" (append-only 대체)
-  - "비밀 정보는 가려진 표시로만 보인다" (redaction 대체)
-  - "한 복제 노드의 변경이 다른 복제 노드에 즉시 알려진다" (LISTEN/NOTIFY 대체)
-  - "여러 복제 노드 중 단 하나만 작업을 수행한다" (lease holder 대체)
-  - "재시작 없이 설정 적용" (hot reload 대체)
-  - "이미 진행 중 호출 완료까지 기다리고, 새 호출 안 받음" (drain 대체)
-  - "새 인증서 적용해도 진행 중 스트림 안 끊김" (TLS reload 대체)
-  - "한 저장 백엔드로 개발하다가 다른 저장 백엔드로 옮겨도 같은 동작" (backend parity 대체)
-  - "비밀이 알려진 자리 패턴을 따른다" (byte-prefix regex 대체, §E 준수)
-  - "처리 가능 / 처리 불가" (준비 신호 상태 어휘 — readyz 대체)
-  - "위로" (upstream 대체 — W1/W2/W3와 일관)
+- v5 → v5.2: 89 + 3 additional multi-rule splits (F14.4, F15.11, F17.9) = **94**
+- Personas: Alice (Operator), Bob (Developer/Plugin Author), Charlie (SRE), Dana (Auditor) — 4 personas only
+- Principles
+  - One scenario = one business rule (Cucumber.io §F.2)
+  - Declarative Given/When/Then, domain vocabulary only (Cucumber.io §E)
+  - "encrypted form / immediately detectable if tampered" (AEAD substitute)
+  - "once written, no one can delete or modify it" (append-only substitute)
+  - "secret information appears only as a redacted marker" (redaction substitute)
+  - "a change on one replica is immediately propagated to all other replicas" (LISTEN/NOTIFY substitute)
+  - "only one replica among many performs the task" (lease holder substitute)
+  - "apply configuration without restart" (hot reload substitute)
+  - "wait for in-flight calls to complete, accept no new ones" (drain substitute)
+  - "applying a new certificate does not interrupt in-flight streams" (TLS reload substitute)
+  - "same behavior when switching from one storage backend to another" (backend parity substitute)
+  - "secrets follow a known positional pattern" (byte-prefix regex substitute, §E compliant)
+  - "ready / not-ready" (readyz state vocabulary — readyz substitute)
+  - "upstream" (upstream substitute — consistent with W1/W2/W3)
 
-## v5.2 변경 요약 (vs v5)
+## v5.2 Change Summary (vs v5)
 
-**1. Multi-rule 분할 추가 (3건, +5 시나리오)**
-- F14.4 → F14.4a/b: 검증 통과 초안 적용(기능) vs 적용 이력 기록(audit)
-- F15.11 → F15.11a/b/c: 외부 거부(보안) vs 내부 정상 동작(기능) vs 분리 동작 검증(불변)
-- F17.9 → F17.9a/b/c: 새 식별자 발급(기능) vs 옛 작업 인계(기능) vs 동일 식별자 동시 사용 방지(불변)
+**1. Multi-rule splits added (3 cases, +5 scenarios)**
+- F14.4 → F14.4a/b: applying a validated draft (functional) vs recording apply history (audit)
+- F15.11 → F15.11a/b/c: external rejection (security) vs internal normal operation (functional) vs verifying separation (invariant)
+- F17.9 → F17.9a/b/c: issuing a new identifier (functional) vs handing over old tasks (functional) vs preventing simultaneous use of the same identifier (invariant)
 
-**2. Cross-file vocab consistency 수정 (1건, FAIL → PASS)**
-- W4 전반에서 영문 `upstream` 잔재 → `위로`로 일관화 (W1/W2/W3는 이미 `위로` 사용 중)
-- 적용 위치: F13.10, F18 description, F18.12–F18.15(F23-merged 4건), F20.12, F20.16, Open Questions
-- 총 치환 횟수: **23회** (`upstream` → `위로`)
-- 코드 수준 식별자(예: `upstream_id` 컬럼명)는 보존 — 본 파일에는 해당 식별자 없음
+**2. Cross-file vocab consistency fix (1 case, FAIL → PASS)**
+- Remaining English `upstream` occurrences throughout W4 → unified to `upstream` (W1/W2/W3 already use `upstream`)
+- Applied locations: F13.10, F18 description, F18.12–F18.15 (F23-merged, 4 cases), F20.12, F20.16, Open Questions
+- Total substitutions: **23** (`upstream` unified across W4)
+- Code-level identifiers (e.g., `upstream_id` column name) are preserved — no such identifiers present in this file
 
-**3. 최종 분포 (v5.2)**: F13(12) + F14(14) + F15(14) + F17(18) + F18(15) + F20(13) + F24(8) = **94 시나리오 / 7 features**
+**3. Final distribution (v5.2)**: F13(12) + F14(14) + F15(14) + F17(18) + F18(15) + F20(13) + F24(8) = **94 scenarios / 7 features**
 
-## v5 변경 요약 (vs v4) — 변경 없음, 기록 보존
+## v5 Change Summary (vs v4) — no changes, record preserved
 
-**1. Multi-rule 분할 (8건, +8 시나리오)**
-- F13.11 → F13.11a/b: 호출 줄 표시(기능) vs 분기 보고서 합산(메트릭)
-- F15.5 → F15.5a/b: 인증서 적용 거부(기능) vs 거부 사유 안내(메트릭/audit)
-- F17.6 → F17.6a/b: split-brain 해소(기능) vs 자기 점검 기록(audit + 메트릭)
-- F17.12(구) → F17.13/F17.14: 감사 줄 개수·종류 동일(메트릭) vs 비밀 평문 없음(audit redaction)
-- F18.6 → F18.6a/b: 가격 이력 시간순 표시(기능) vs 이력과 호출 비용 정합(메트릭)
-- F18.7 → F18.7a/b: 캐시 생성/재사용 단가 분리(기능) vs 분기 합산 일치(메트릭)
-- F18.8 → F18.8a/b: 추정 비용 표시(기능) vs 추정 사유 기록 및 별도 조회(audit + 메트릭)
-- F20.4 → F20.4a/b: 부팅 거부(기능) vs 평문이 한 번도 읽히지 않음 보장(메트릭)
+**1. Multi-rule splits (8 cases, +8 scenarios)**
+- F13.11 → F13.11a/b: showing call lines (functional) vs quarterly report aggregation (metrics)
+- F15.5 → F15.5a/b: rejecting a certificate (functional) vs reporting the rejection reason (metrics/audit)
+- F17.6 → F17.6a/b: resolving split-brain (functional) vs recording self-check (audit + metrics)
+- F17.12 (old) → F17.13/F17.14: same count and kind of audit lines (metrics) vs no secret plaintext (audit redaction)
+- F18.6 → F18.6a/b: showing price history chronologically (functional) vs matching call costs (metrics)
+- F18.7 → F18.7a/b: separating cache creation/reuse unit prices (functional) vs quarterly aggregation match (metrics)
+- F18.8 → F18.8a/b: showing estimated cost (functional) vs recording estimation reason and separate query (audit + metrics)
+- F20.4 → F20.4a/b: rejecting boot (functional) vs guaranteeing plaintext is never read (metrics)
 
 **2. Jargon cleanup**
-- `SQLite` / `Postgres` → "한 저장 백엔드" / "다른 저장 백엔드"
-- `replica` → "복제 노드"
-- `readyz` → "준비 신호"
-- `access_token` / `refresh_token` / `API 키` (감사·로그 맥락) → "토큰"
+- `SQLite` / `Postgres` → "one storage backend" / "another storage backend"
+- `replica` → `replica`
+- `readyz` → `readyz`
+- `access_token` / `refresh_token` / `API key` (audit/log context) → "token"
 
-**3. Crypto-invariant 어휘 일반화 (3건)**
-- F20.1: "짧은 창" / "평문 부분" → "알려진 자리 패턴" 어휘로 일관
-- F20.7: "알려진 비밀 모양" → "비밀이 알려진 자리 패턴을 따른다"로 일반화
-- F20.11: 응답 헤더 비밀 마스킹도 같은 "알려진 자리 패턴" 어휘로 통일
+**3. Crypto-invariant vocabulary generalization (3 cases)**
+- F20.1: "short window" / "plaintext portion" → unified to "known positional pattern" vocabulary
+- F20.7: "known secret shape" → generalized to "secrets follow a known positional pattern"
+- F20.11: response header secret masking unified to the same "known positional pattern" vocabulary
 
-**4. F17-merged / F18-merged single-rule 검증**
-- 두 묶음의 신규 P3 시나리오를 "기능 동작 + 메트릭 수치 + audit 기록" 삼중 결합 기준으로 재점검
-- 결합 발견 시 위 8건의 분할에 포함
+**4. F17-merged / F18-merged single-rule verification**
+- New P3 scenarios in both groups re-verified against "functional behavior + metrics value + audit record" triple-combination criterion
+- Combined cases included in the 8 splits above
 
-**5. 페르소나 4인 제한**
-- v4에서 충돌 비교 용도로 등장한 Eve → "두 번째 운영자" 도메인 어휘로 일반화 (Alice/Bob/Charlie/Dana 4인만 명시 사용)
-
----
-
-## Feature F13 — 감사관이 변경 불가 감사 로그로 분기 감사한다
-
-분기 감사 시 Dana는 누가 무엇을 언제 바꿨는지, 그 기록이 누구의 손에도 더 이상 안 고쳐졌는지를 직접 본다. 외부 감사 시스템으로 내보내도 같은 보장이 유지된다.
-
-### Scenario: 감사관이 한 운영자의 한 분기 변경을 시간순으로 본다
-- Given 지난 분기 동안 운영자 Alice가 팀과 한도 설정을 여러 번 바꿨다
-- And Dana는 감사관 권한으로 cc-lb 콘솔에 로그인했다
-- When Dana가 "운영자 Alice, 1분기" 범위로 변경 기록을 연다
-- Then 그 분기 동안 Alice가 만든 모든 변경이 일어난 순서대로 한 화면에 보인다
-- And 각 줄에 무엇을 바꿨는지, 언제 바꿨는지, 어떤 호출 단위에서 일어났는지가 함께 보인다
-
-### Scenario: 감사 기록에는 비밀 정보가 한 줄도 들어가 있지 않다
-- Given 운영자 Alice가 새 자격증명을 등록했다
-- And 그 등록 과정이 모두 감사 기록에 남았다
-- When Dana가 그 분기의 감사 기록 전체를 훑어본다
-- Then 어느 줄에서도 토큰 평문이 보이지 않는다
-- And 비밀 정보가 들어가야 할 자리에는 가려진 표시로만 보인다
-
-### Scenario: 한 번 적힌 감사 기록은 어떤 운영자도 지우거나 고칠 수 없다
-- Given 어제 운영자 Alice의 모델 한도 변경이 감사 기록에 남았다
-- And 운영자 Alice가 최고 권한의 관리자 토큰을 가지고 있다
-- When Alice가 그 줄을 지우거나 내용을 고치려고 시도한다
-- Then 모든 시도가 거부된다
-- And 그 시도 자체가 다시 한 줄의 감사 기록으로 더 남는다
-
-### Scenario: 감사관이 시간 창과 페이지 단위로 좁혀 본다
-- Given 한 분기 동안 십만 줄의 감사 기록이 쌓였다
-- When Dana가 "3월 10일 14시부터 16시 사이"로 시간 창을 좁히고 페이지를 넘긴다
-- Then 그 시간 창에 해당하는 줄만 한 번에 한 페이지씩 보인다
-- And 다음 페이지로 넘어가도 같은 줄이 두 번 안 나오고 빠진 줄도 없다
-
-### Scenario: 보존 기간이 지난 기록만 정확히 정리된다
-- Given 감사 기록 보존 기간이 1년으로 설정되어 있다
-- And 1년 1일 전 줄과 1년 1일 후 줄이 모두 보관되어 있다
-- When 자동 정리 작업이 한 사이클 돈다
-- Then 1년이 지난 줄만 사라진다
-- And 1년 이내 줄은 그대로 남아 있다
-- And 정리된 줄 수와 시간 범위가 별도 감사 기록으로 한 줄 남는다
-- And 보존 기간을 새 값으로 다시 설정하면 그 다음 정리 주기부터 새 기간이 적용된다
-
-### Scenario: 한 호출의 시작·끝·오류가 같은 추적 표식으로 묶인다
-- Given Bob의 호출이 cc-lb를 거쳐 Anthropic으로 나가다 오류로 끝났다
-- When Dana가 그 호출의 추적 표식으로 감사 기록을 연다
-- Then 호출 시작, 중간 단계, 오류로 끝남이 모두 같은 추적 표식 아래 한 줄씩 보인다
-- And 다른 호출과 섞이지 않는다
-
-### Scenario: 감사 기록을 외부 감사 시스템으로 내보낸다
-- Given 외부 감사 시스템이 한 달치 감사 기록을 요청한다
-- When Dana가 감사관 전용 토큰으로 그 기간을 내보낸다
-- Then 내보낸 파일의 모든 줄이 cc-lb의 원본과 한 줄 한 줄 일치한다
-- And 비밀 정보 자리에는 가려진 표시만 들어 있다
-
-### Scenario: 한 호출의 추적 표식이 audit, 운영 로그, 응답에 모두 같이 찍힌다
-- Given 한 호출이 cc-lb를 통해 처리된다
-- When Dana가 그 호출의 추적 표식으로 감사 기록, 운영 로그, 호출자에게 돌아간 응답 헤더를 동시에 본다
-- Then 세 곳 모두에 같은 추적 표식이 동일하게 찍혀 있다
-- And 같은 추적 표식이 다른 호출에는 한 번도 안 쓰였다
-
-### Scenario: 내보낸 감사 파일에 변조 증명이 함께 들어 있다 (신규 P3)
-- Given Dana가 한 달치 감사 기록을 외부 감사 시스템으로 내보낸다
-- When Dana가 그 파일과 함께 cc-lb가 생성한 무결성 증명을 받는다
-- Then 그 증명은 같은 기간 cc-lb 원본 줄과 한 줄 한 줄 묶인다
-- And 누군가 외부 파일의 어느 한 줄이라도 바꾸면 그 증명으로 즉시 들통난다
-- And 들통난 사실이 cc-lb의 감사 기록에 새 줄로 남는다
-
-### Scenario: 감사관이 한 호출의 모든 관련 기록을 교차 표로 본다 (신규 P3)
-- Given 한 호출이 한도 판단, 비용 계산, 캐시 결정, 위로 라우팅을 모두 거쳤다
-- When Dana가 그 호출의 추적 표식으로 교차 보기를 연다
-- Then 한도, 비용, 캐시, 라우팅, 감사 줄이 같은 한 시간선 위에 같은 추적 표식으로 묶여 보인다
-- And 어느 한 줄도 다른 호출과 섞이지 않는다
-
-### Scenario: 비용과 한도 위반이 같은 호출 줄에 함께 보인다 (신규 P3, split 1/2)
-- Given Bob의 한 호출이 한도를 넘어 거절됐다
-- And 그 호출이 거절되기 전까지의 토큰 사용분에 비용이 발생했다
-- When Dana가 그 호출 줄을 연다
-- Then 한도 위반 사유와 그 시점까지의 비용이 같은 줄에 함께 보인다
-
-### Scenario: 비용과 한도 위반이 같은 호출 단위로 분기 보고서에 합산된다 (신규 P3, split 2/2)
-- Given Bob의 여러 호출이 한 분기 동안 한도 초과로 거절됐다
-- And 각 호출에서 거절 시점까지의 토큰 사용분에 비용이 발생했다
-- When Dana가 분기 보고서를 연다
-- Then 거절된 호출들의 비용과 한도 위반 건수가 같은 호출 단위로 묶여 합산된다
+**5. 4-persona constraint**
+- Eve, who appeared in v4 for conflict comparison, → generalized to "a second operator" domain vocabulary (only Alice/Bob/Charlie/Dana named explicitly)
 
 ---
 
-## Feature F14 — 운영자가 설정 초안, 검증, 적용, 이력을 안전하게 다룬다
+## Feature F13 — Auditor audits a quarter using immutable audit logs
 
-운영 중 설정 변경은 일단 초안으로 저장한 뒤 검증을 통과해야 실제 적용된다. 잘못된 설정은 적용 전에 막히고, 적용 이력은 언제든 뒤로 되돌릴 수 있다.
+During a quarterly audit, Dana directly verifies who changed what and when, and that the records have not been modified by anyone since. The same guarantees hold when exporting to an external audit system.
 
-### Scenario: 운영자가 초안을 저장해도 실제 동작에는 아직 영향이 없다
-- Given Alice가 한도 설정을 바꾼 초안을 만든다
-- When Alice가 그 초안을 저장한다
-- Then 초안은 콘솔에서 "초안" 표시로 보인다
-- And 호출 처리 동작은 아직 바뀐 적이 없다
+### Scenario: Auditor views one operator's changes in a quarter in chronological order
+- Given operator Alice made multiple changes to team and limit settings during the past quarter
+- And Dana is logged into the cc-lb console with auditor privileges
+- When Dana opens the change log scoped to "operator Alice, Q1"
+- Then all changes Alice made during that quarter appear on one screen in the order they occurred
+- And each line shows what was changed, when it was changed, and which call unit it occurred in
 
-### Scenario: 운영자가 초안을 검증하면 적용 전에 문제가 드러난다
-- Given Alice가 저장된 초안을 가지고 있다
-- When Alice가 그 초안에 대해 검증을 실행한다
-- Then 형식, 충돌, 안전 규칙 위반이 한 화면에 모두 안내된다
-- And 어떤 호출에 어떤 영향이 갈지가 함께 보인다
+### Scenario: Audit records contain no secret information on any line
+- Given operator Alice registered new credentials
+- And the entire registration process was captured in the audit log
+- When Dana browses the full audit log for that quarter
+- Then no line shows a plaintext token
+- And the fields that would contain secret information appear only as redacted markers
 
-### Scenario: 잘못된 설정은 저장 단계에서 거부된다
-- Given Alice가 형식이 어긋난 설정을 입력한다
-- When Alice가 초안 저장을 시도한다
-- Then 저장이 거부된다
-- And 어디서 어떻게 어긋났는지가 한 줄로 안내된다
-- And 너무 많은 줄이 한꺼번에 바뀌어 한 화면에 다 보일 수 없을 때는 일부만 보이고 그 사실이 표시된다
+### Scenario: An audit record that has been written cannot be deleted or modified by any operator
+- Given operator Alice's model limit change from yesterday is recorded in the audit log
+- And operator Alice holds the highest-privilege admin token
+- When Alice attempts to delete that line or modify its content
+- Then all attempts are rejected
+- And each attempt itself is recorded as a new line in the audit log
 
-### Scenario: 검증을 통과한 초안만 적용된다 (split 1/2)
-- Given 검증을 모두 통과한 초안이 있다
-- When Alice가 그 초안의 적용을 누른다
-- Then 새 설정이 다음 호출부터 곧장 적용된다
+### Scenario: Auditor narrows the view by time window and page
+- Given one hundred thousand audit lines have accumulated over a quarter
+- When Dana narrows the time window to "March 10, 14:00–16:00" and pages through the results
+- Then only lines within that time window appear, one page at a time
+- And no line appears twice across page turns, and no line is missing
 
-### Scenario: 적용된 설정 변경이 적용 이력에 한 줄로 기록된다 (split 2/2)
-- Given Alice가 검증을 통과한 초안의 적용을 완료했다
-- When Alice가 적용 직후 적용 이력 화면을 연다
-- Then 그 적용이 적용 이력에 한 줄로 남아 있다
-- And 누가 언제 어떤 항목을 적용했는지가 같은 줄에 함께 보인다
+### Scenario: Only records past the retention period are purged
+- Given the audit log retention period is set to 1 year
+- And lines from more than 1 year ago and lines from less than 1 year ago are both stored
+- When the automatic purge job completes one cycle
+- Then only lines older than 1 year are removed
+- And lines within 1 year remain intact
+- And the count and time range of purged lines are recorded as a single new audit line
+- And when the retention period is updated to a new value, the new period takes effect from the next purge cycle
 
-### Scenario: 운영자가 적용 이력을 시간순으로 본다
-- Given 지난 두 달 동안 여러 번 설정이 적용됐다
-- When Alice가 적용 이력 화면을 연다
-- Then 누가 언제 어떤 설정을 적용했는지가 시간 역순으로 보인다
-- And 각 줄에서 그 시점의 전체 설정을 다시 열어 볼 수 있다
+### Scenario: The start, end, and error of a single call are grouped under the same trace identifier
+- Given Bob's call went through cc-lb toward Anthropic and ended in an error
+- When Dana opens the audit log using that call's trace identifier
+- Then the call start, intermediate steps, and error termination all appear as individual lines grouped under the same trace identifier
+- And no lines from other calls are mixed in
 
-### Scenario: 운영자가 이전 버전 설정으로 되돌린다
-- Given 어제 Alice가 적용한 설정에 문제가 있다
-- When Alice가 그제 적용된 직전 버전을 골라 되돌림을 누른다
-- Then 그제 버전 그대로 새 적용으로 다시 적용된다
-- And 되돌림 자체가 새 한 줄로 적용 이력에 남는다
+### Scenario: Auditor exports audit logs to an external audit system
+- Given an external audit system requests one month of audit logs
+- When Dana exports that period using an auditor-only token
+- Then every line of the exported file matches the cc-lb original line for line
+- And the fields that would contain secret information contain only redacted markers
 
-### Scenario: 재시작 없이 적용 가능한 항목은 재시작 없이 설정 적용된다
-- Given 한도, 라우팅, 가격 카탈로그 같은 항목을 바꾼 초안이 있다
-- When Alice가 그 초안을 적용한다
-- Then cc-lb가 재시작 없이 다음 호출부터 새 값을 쓴다
-- And 진행 중 호출은 끊기지 않는다
+### Scenario: A single call's trace identifier appears identically in the audit log, operational log, and response
+- Given a call is processed through cc-lb
+- When Dana simultaneously views the audit log, operational log, and the response headers returned to the caller, all using that call's trace identifier
+- Then the same trace identifier appears identically in all three places
+- And the same trace identifier is never used for any other call
 
-### Scenario: 재시작이 필요한 항목은 적용 전에 그 사실이 표시된다
-- Given 듣는 포트나 인증 방식처럼 재시작이 필요한 항목을 바꾼 초안이 있다
-- When Alice가 검증을 실행한다
-- Then 검증 결과에 "이 항목은 재시작이 필요합니다"가 한 줄로 안내된다
-- And Alice가 그 경고를 본 뒤에야 적용을 진행할 수 있다
+### Scenario: The exported audit file includes a tamper-proof integrity proof (new P3)
+- Given Dana exports one month of audit logs to an external audit system
+- When Dana receives that file along with an integrity proof generated by cc-lb
+- Then the proof is linked line by line to the original cc-lb lines for the same period
+- And if anyone modifies any single line of the external file, the proof immediately reveals it
+- And the detection is recorded as a new line in cc-lb's audit log
 
-### Scenario: 운영자가 적용된 설정을 파일로 내려받는다
-- Given 지금 적용된 설정 전체가 있다
-- When Alice가 설정 내보내기를 누른다
-- Then 한 파일로 내려받아진다
-- And 비밀 정보 자리에는 가려진 표시만 들어 있다
+### Scenario: Auditor views all related records for a single call in a cross-reference table (new P3)
+- Given a single call passed through limit evaluation, cost calculation, cache decision, and upstream routing
+- When Dana opens the cross-reference view using that call's trace identifier
+- Then the limit, cost, cache, routing, and audit lines all appear on the same timeline grouped under the same trace identifier
+- And no line is mixed with another call
 
-### Scenario: bootstrap 설정은 첫 부팅에 한 번만 반영된다
-- Given 설치 디렉터리에 bootstrap.toml이 놓여 있다
-- And cc-lb가 처음 부팅하면서 그 파일을 한 번 읽어 적용 이력에 한 줄을 남겼다
-- When cc-lb가 두 번째 부팅을 한다
-- Then bootstrap.toml은 다시 처리되지 않는다
-- And 적용 이력에 같은 부트스트랩 줄이 두 번 안 생긴다
-- And 이미 한 번 처리됐다는 표식이 같은 디렉터리에 남아 있어 다음 부팅도 같은 결정을 내린다
+### Scenario: Cost and limit violation appear together on the same call line (new P3, split 1/2)
+- Given Bob's call was rejected for exceeding the limit
+- And cost was incurred for the tokens used up to the point of rejection
+- When Dana opens that call's line
+- Then the rejection reason and the cost up to that point appear together on the same line
 
-### Scenario: 적용 안 된 초안은 정해진 기간 뒤 자동으로 비워진다 (신규 P3)
-- Given Alice가 며칠 전 초안을 저장만 하고 적용은 안 했다
-- When 정해진 보존 기간이 지난다
-- Then 그 초안은 자동으로 비워진다
-- And 비워진 사실이 운영 로그에 한 줄로 남는다
-- And 같은 자리에 새 초안을 다시 시작해도 옛 초안 내용이 새 초안에 섞이지 않는다
-
-### Scenario: 재시작이 필요한 항목은 어느 항목인지 항목별로 명확히 표시된다 (신규 P3)
-- Given Alice가 듣는 포트와 한도 설정을 한 초안에 같이 바꿨다
-- When Alice가 검증을 실행한다
-- Then 한 항목씩 "재시작 필요" 또는 "즉시 적용 가능"이 따로 보인다
-- And 적용을 누르면 즉시 적용 가능한 항목은 다음 호출부터 곧장 새 값을 쓰고, 재시작 필요한 항목은 다음 부팅에서 적용된다
-
-### Scenario: 디스크 위 설정 파일이 바뀌면 cc-lb가 그 변경을 알아챈다 (신규 P3)
-- Given Charlie가 외부 설정 파일을 직접 수정한다
-- When 그 파일이 디스크에 다시 적힌다
-- Then cc-lb가 그 변경을 알아채고 검증 단계로 보낸다
-- And 검증을 통과하면 재시작 없이 다음 호출부터 새 값을 쓴다
-- And 검증 실패하면 옛 값이 계속 쓰이고 실패 사유가 운영 로그에 한 줄로 남는다
+### Scenario: Cost and limit violations are aggregated together by call unit in the quarterly report (new P3, split 2/2)
+- Given Bob's multiple calls were rejected during a quarter for exceeding the limit
+- And cost was incurred up to the point of rejection for each call
+- When Dana opens the quarterly report
+- Then the cost and violation count of the rejected calls are aggregated together grouped by call unit
 
 ---
 
-## Feature F15 — 점진적 종료와 인증서 갱신이 진행 중 호출을 끊지 않는다
+## Feature F14 — Operator safely manages configuration drafts, validation, apply, and history
 
-운영자나 SRE가 한 복제 노드를 내리거나 인증서를 갱신해도 이미 진행 중 호출은 마지막까지 처리된다. 새 호출은 다른 복제 노드로 안내된다.
+Changes to live configuration are first saved as a draft and must pass validation before taking effect. Invalid configurations are blocked before apply, and the apply history can always be rolled back.
 
-### Scenario: 종료 신호 후에는 새 호출을 안 받는다
-- Given 한 복제 노드가 정상 운영 중이다
-- When Charlie가 그 복제 노드에 점진적 종료 신호를 보낸다
-- Then 그 시점 이후 도착하는 새 호출은 즉시 다른 복제 노드로 안내된다
-- And 그 복제 노드의 준비 신호가 "처리 불가" 상태로 바뀐다
+### Scenario: Saving a draft does not yet affect live behavior
+- Given Alice creates a draft with a changed limit setting
+- When Alice saves that draft
+- Then the draft appears in the console with a "Draft" label
+- And call processing behavior has not changed yet
 
-### Scenario: 종료 중에도 이미 진행 중 호출은 마지막까지 처리된다
-- Given 한 복제 노드에서 호출 두 건이 응답 본문을 흘리고 있다
-- When Charlie가 그 복제 노드에 점진적 종료 신호를 보낸다
-- Then 이미 진행 중 호출 완료까지 기다리고, 새 호출 안 받음
-- And 두 호출 모두 정상적으로 마지막 토큰까지 받는다
+### Scenario: Validating a draft reveals problems before apply
+- Given Alice has a saved draft
+- When Alice runs validation on that draft
+- Then format errors, conflicts, and safety rule violations are all shown on one screen
+- And the impact on which calls will be affected is shown alongside
 
-### Scenario: 종료 대기 시간이 초과되면 강제로 끝내고 보고한다
-- Given 한 복제 노드가 점진적 종료 중이다
-- And 일부 호출이 정해진 대기 시간 안에 안 끝난다
-- When 그 대기 시간이 초과된다
-- Then 남은 호출이 강제로 끊긴다
-- And 강제로 끊은 호출 수와 사유가 한 줄로 운영 로그에 남는다
-- And 같은 숫자가 운영 지표로도 보인다
+### Scenario: An invalid configuration is rejected at the save step
+- Given Alice enters a configuration with a format error
+- When Alice attempts to save the draft
+- Then the save is rejected
+- And the location and nature of the error is indicated on a single line
+- And when too many lines have changed to fit on one screen at once, only a portion is shown and that fact is indicated
 
-### Scenario: 새 인증서 적용해도 진행 중 스트림 안 끊김
-- Given 한 복제 노드가 응답을 토큰 단위로 흘리는 호출을 처리 중이다
-- When Charlie가 새 TLS 인증서를 적용한다
-- Then 새 인증서가 그 다음 새 연결부터 쓰인다
-- And 이미 진행 중 스트림은 마지막 토큰까지 끊김 없이 이어진다
+### Scenario: Only a draft that passes validation is applied (split 1/2)
+- Given a draft that has passed all validations
+- When Alice clicks Apply for that draft
+- Then the new configuration takes effect immediately starting from the next call
 
-### Scenario: 잘못된 인증서는 적용 전에 거부된다 (split 1/2)
-- Given Charlie가 새 TLS 인증서 파일을 가지고 있다
-- And 그 인증서의 사슬이 맞지 않거나 만료됐다
-- When Charlie가 그 인증서를 적용하려 한다
-- Then 적용이 거부된다
-- And 직전 인증서가 그대로 계속 쓰인다
+### Scenario: An applied configuration change is recorded as a single line in the apply history (split 2/2)
+- Given Alice has completed applying a validated draft
+- When Alice opens the apply history screen immediately after
+- Then that apply appears as a single line in the apply history
+- And who applied it, when, and which items were applied are all shown on the same line
 
-### Scenario: 잘못된 인증서 거부 사유가 운영자에게 한 줄로 안내된다 (split 2/2)
-- Given Charlie가 사슬이 맞지 않거나 만료된 인증서의 적용을 시도해 거부되었다
-- When Charlie가 거부 결과를 본다
-- Then 어떤 점이 어긋났는지가 한 줄로 안내된다
-- And 같은 사유가 운영 로그에도 한 줄로 남는다
+### Scenario: Operator views apply history in chronological order
+- Given configuration has been applied multiple times over the past two months
+- When Alice opens the apply history screen
+- Then who applied what configuration and when is shown in reverse chronological order
+- And each line allows the full configuration at that point in time to be reopened
 
-### Scenario: 인증서 만료가 가까워지면 운영자에게 미리 알린다
-- Given 적용된 인증서의 만료까지 정해진 임계 일수 이하가 남았다
-- When 그 임계에 처음 도달한 시점에 cc-lb가 점검을 한다
-- Then 운영 로그에 만료 임박 경고가 한 줄 남는다
-- And 같은 경고가 운영 지표로도 보인다
+### Scenario: Operator rolls back to a previous version of the configuration
+- Given Alice's configuration applied yesterday has a problem
+- When Alice selects the previous version applied the day before yesterday and clicks Rollback
+- Then that version is re-applied exactly as a new apply
+- And the rollback itself is recorded as a new line in the apply history
 
-### Scenario: 임시 디버그 로깅이 정해진 시간 뒤 자동으로 꺼진다
-- Given SRE가 한 복제 노드에 일시적으로 디버그 로그를 켜고 싶다
-- When Charlie가 그 복제 노드에 디버그 로그 신호를 보낸다
-- Then 디버그 로그가 일정 시간 동안만 켜진다
-- And 그 시간이 지나면 자동으로 다시 평소 수준으로 돌아간다
+### Scenario: Items applicable without restart are applied without restart
+- Given there is a draft that changes items such as limits, routing, and the price catalog
+- When Alice applies that draft
+- Then cc-lb uses the new values starting from the next call without restarting
+- And in-flight calls are not interrupted
 
-### Scenario: 종료 신호의 종류에 따라 종료 의미가 분리된다 (신규 P3)
-- Given 한 복제 노드가 정상 운영 중이다
-- When Charlie가 "정상 종료" 신호를 보낸 경우와 "긴급 종료" 신호를 보낸 경우를 각각 비교한다
-- Then 정상 종료에서는 진행 중 호출이 마지막까지 처리되고 준비 신호가 먼저 "처리 불가"로 바뀐 뒤 멈춘다
-- And 긴급 종료에서는 진행 중 호출이 즉시 강제로 끊기고 그 사실이 한 줄로 운영 로그에 남는다
-- And 두 종료 모두 사유와 신호 종류가 종료 표식에 함께 적힌다
+### Scenario: Items requiring restart are indicated before apply
+- Given there is a draft that changes items requiring restart, such as the listening port or authentication method
+- When Alice runs validation
+- Then the validation result includes a line reading "this item requires a restart"
+- And Alice can only proceed with apply after seeing that warning
 
-### Scenario: 디버그 로깅은 정해진 운영 신호로만 켜진다 (신규 P3)
-- Given 디버그 로깅은 콘솔이나 설정 파일로는 켤 수 없다
-- When Charlie가 운영 신호로만 디버그 로깅을 시도한다
-- Then 그 신호를 받은 한 복제 노드에만 디버그 로깅이 켜진다
-- And 다른 복제 노드의 로그 수준은 그대로다
-- And 그 켜짐 자체가 운영 로그에 한 줄로 남는다
+### Scenario: Operator downloads the applied configuration as a file
+- Given the full current applied configuration exists
+- When Alice clicks Export Configuration
+- Then it is downloaded as a single file
+- And the fields that would contain secret information contain only redacted markers
 
-### Scenario: 운영 전용 소켓은 외부 호출자의 접근을 거부한다 (신규 P3, split 1/3)
-- Given cc-lb가 외부 호출용 포트와 운영 전용 소켓을 각각 가진다
-- When 외부 호출자가 운영 전용 소켓에 닿으려 시도한다
-- Then 그 시도는 거부된다
-- And 거부된 사실이 운영 로그에 한 줄로 남는다
+### Scenario: The bootstrap configuration is applied only once on first boot
+- Given bootstrap.toml is placed in the installation directory
+- And cc-lb read that file during first boot and left a single line in the apply history
+- When cc-lb boots a second time
+- Then bootstrap.toml is not processed again
+- And the same bootstrap line does not appear twice in the apply history
+- And a marker indicating it has already been processed once remains in the same directory so subsequent boots make the same decision
 
-### Scenario: 운영 전용 소켓은 같은 머신 안 운영자의 관리 호출을 정상 수신한다 (신규 P3, split 2/3)
-- Given cc-lb가 외부 호출용 포트와 운영 전용 소켓을 각각 가진다
-- When 같은 머신에서 Charlie가 운영 전용 소켓으로 점진적 종료 신호를 보낸다
-- Then 그 신호는 정상 수신된다
-- And 그 신호에 따른 점진적 종료가 곧장 시작된다
+### Scenario: An unapplied draft is automatically cleared after the defined period (new P3)
+- Given Alice saved a draft several days ago but never applied it
+- When the defined retention period passes
+- Then the draft is automatically cleared
+- And the fact that it was cleared is recorded as a single line in the operational log
+- And starting a new draft in the same slot does not mix old draft content into the new draft
 
-### Scenario: 외부 호출용 포트와 운영 전용 소켓은 종료 진행 중에도 분리된 상태로 동작한다 (신규 P3, split 3/3)
-- Given cc-lb가 외부 호출용 포트와 운영 전용 소켓을 각각 가지고 정상 운영 중이다
-- And Charlie가 운영 전용 소켓으로 점진적 종료 신호를 보냈다
-- When 종료 진행 중 외부 호출용 포트로 진행 중 호출이 마지막까지 처리되고 있다
-- Then 두 듣는 자리는 분리된 상태로 동작한다
-- And 외부 호출용 포트의 처리가 운영 전용 소켓의 신호 흐름에 영향을 주지 않는다
+### Scenario: Items requiring restart are clearly indicated per item (new P3)
+- Given Alice changed the listening port and a limit setting together in one draft
+- When Alice runs validation
+- Then each item individually shows either "requires restart" or "immediately applicable"
+- And when Apply is clicked, immediately applicable items use the new values starting from the next call, while items requiring restart are applied on the next boot
 
-### Scenario: 복제 노드가 종료 완료된 사실이 다른 복제 노드에 표식으로 남는다 (신규 P3)
-- Given 복제 노드 A가 점진적 종료를 마쳤다
-- When 복제 노드 B와 C가 같은 운영 정보를 본다
-- Then A가 종료 완료된 시각과 사유가 종료 표식으로 남아 보인다
-- And 같은 자리에 새 바이너리로 다시 떴을 때 옛 표식과 새 부팅이 한 줄에 섞이지 않는다
+### Scenario: When a configuration file on disk changes, cc-lb detects the change (new P3)
+- Given Charlie directly modifies an external configuration file
+- When that file is written back to disk
+- Then cc-lb detects the change and sends it to the validation step
+- And if validation passes, the new values are used starting from the next call without restarting
+- And if validation fails, the old values continue to be used and the failure reason is recorded as a single line in the operational log
 
 ---
 
-## Feature F17 — cc-lb이 여러 복제 노드·여러 저장 백엔드에서 같이 동작한다
+## Feature F15 — Graceful shutdown and certificate renewal do not interrupt in-flight calls
 
-여러 복제 노드가 동시에 떠 있어도 한 운영자의 변경은 모든 복제 노드에 즉시 알려지고, 같은 작업은 단 하나의 복제 노드만 수행한다. 한 저장 백엔드로 개발하다가 다른 저장 백엔드로 옮겨도 운영자 시점에서 같은 동작을 본다.
+When an operator or SRE brings down a replica or renews a certificate, in-flight calls are processed through to the end. New calls are directed to other replicas.
 
-### Scenario: 한 복제 노드의 변경이 다른 복제 노드에 즉시 알려진다
-- Given 두 복제 노드 A와 B가 떠 있다
-- When Alice가 A에 새 한도 설정을 적용한다
-- Then B의 현재 한도 표시가 곧장 새 값으로 바뀐다
-- And 그 다음 도착한 호출이 어느 복제 노드에 가도 같은 한도로 판단된다
+### Scenario: After a shutdown signal, no new calls are accepted
+- Given a replica is in normal operation
+- When Charlie sends a graceful shutdown signal to that replica
+- Then new calls arriving after that point are immediately directed to other replicas
+- And that replica's readyz changes to the "not-ready" state
 
-### Scenario: 여러 복제 노드 중 단 하나만 작업을 수행한다 — 자격증명 미리 데움
-- Given 세 복제 노드가 떠 있고 자격증명 미리 데움이 동시 시각에 예정돼 있다
-- When 그 시각이 된다
-- Then 세 복제 노드 중 단 하나만 그 작업을 수행한다
-- And 다른 두 복제 노드는 그 작업을 건너뛴다
+### Scenario: In-flight calls continue to be processed through to the end during shutdown
+- Given two calls on a replica are streaming their response bodies
+- When Charlie sends a graceful shutdown signal to that replica
+- Then the replica waits for in-flight calls to complete, accept no new ones
+- And both calls receive all tokens through to the end normally
 
-### Scenario: 작업을 수행하던 복제 노드가 사라지면 다른 복제 노드가 인계받는다
-- Given 복제 노드 A가 자격증명 미리 데움 작업을 수행 중이다
-- When 복제 노드 A가 예고 없이 멈춘다
-- Then 정해진 만료 시간 안에 다른 복제 노드가 그 작업을 인계받는다
-- And 같은 작업이 두 번 중복 수행되지 않는다
+### Scenario: When the drain timeout expires, calls are forcibly terminated and reported
+- Given a replica is in the middle of graceful shutdown
+- And some calls do not complete within the defined drain timeout
+- When that timeout expires
+- Then the remaining calls are forcibly terminated
+- And the count and reason for force-terminated calls are recorded as a single line in the operational log
+- And the same count is visible in operational metrics
 
-### Scenario: 설정 변경은 모든 복제 노드가 같은 시점에 같은 값을 본다
-- Given Alice가 라우팅 정책을 한 번 적용한다
-- When 그 시점 직후 세 복제 노드에 동시에 호출이 도착한다
-- Then 세 복제 노드가 모두 같은 라우팅 결정을 내린다
+### Scenario: Applying a new certificate does not interrupt in-flight streams
+- Given a replica is processing a call that streams the response token by token
+- When Charlie applies a new TLS certificate
+- Then the new certificate is used starting from the next new connection
+- And already in-flight streams continue uninterrupted through to the last token
 
-### Scenario: 같은 줄을 동시에 고치려 하면 한쪽만 성공한다
-- Given Alice가 콘솔 A에서, 두 번째 운영자가 콘솔 B에서 같은 한도 줄을 동시에 고친다
-- When 두 변경이 거의 같은 시각에 저장된다
-- Then 둘 중 한 변경만 성공한다
-- And 진 쪽에는 "다른 운영자가 먼저 고쳤습니다, 다시 불러오세요"가 한 줄로 안내된다
+### Scenario: An invalid certificate is rejected before apply (split 1/2)
+- Given Charlie has a new TLS certificate file
+- And the certificate chain is invalid or the certificate has expired
+- When Charlie attempts to apply that certificate
+- Then the apply is rejected
+- And the previous certificate continues to be used as-is
 
-### Scenario: 두 복제 노드가 동시에 단일 수행권을 들었다고 믿어도 한쪽만 작업을 계속한다 (신규 P3, split 1/2)
-- Given 알림 채널이 짧게 끊기는 사이 두 복제 노드가 같은 작업의 단일 수행권을 동시에 들었다고 믿는다
-- When cc-lb가 정기 자기 점검을 한다
-- Then 두 복제 노드 중 하나만 작업을 계속하고 나머지는 즉시 물러난다
-- And 같은 작업이 두 번 끝까지 수행되는 일은 한 번도 없다
+### Scenario: The rejection reason for an invalid certificate is indicated to the operator on a single line (split 2/2)
+- Given Charlie attempted to apply a certificate with an invalid chain or an expired certificate and was rejected
+- When Charlie views the rejection result
+- Then what was wrong is indicated on a single line
+- And the same reason is also recorded as a single line in the operational log
 
-### Scenario: 단일 수행권 자기 점검 결과가 운영 로그와 지표에 남는다 (신규 P3, split 2/2)
-- Given cc-lb가 두 복제 노드의 동시 단일 수행권 충돌을 자기 점검으로 해소했다
-- When Charlie가 그 시점의 운영 로그와 운영 지표를 본다
-- Then 자기 점검 결과가 운영 로그와 운영 지표에 한 줄씩 남는다
-- And 어느 복제 노드가 물러났는지가 함께 보인다
+### Scenario: Operator is notified in advance as the certificate approaches expiry
+- Given the time remaining until the applied certificate expires has dropped to or below the defined threshold in days
+- When cc-lb performs its check at the moment that threshold is first reached
+- Then an expiry warning is recorded as a single line in the operational log
+- And the same warning is also visible in operational metrics
 
-### Scenario: 운영자가 어느 복제 노드가 살아 있는지 한 화면에서 본다 (신규 P3)
-- Given 세 복제 노드가 떠 있다
-- When Charlie가 복제 노드 상태 화면을 연다
-- Then 각 복제 노드의 식별자, 마지막 살아 있다는 표시 시각, 받고 있는 호출 수가 한 표로 보인다
-- And 한 복제 노드가 정해진 시간 동안 살아 있다는 표시를 보내지 않으면 그 줄이 "응답 없음"으로 바뀐다
+### Scenario: Temporary debug logging automatically turns off after a defined time
+- Given the SRE wants to temporarily enable debug logging on a replica
+- When Charlie sends a debug logging signal to that replica
+- Then debug logging is enabled for a limited duration only
+- And after that time elapses, it automatically reverts to the normal log level
 
-### Scenario: 복제 노드 식별자가 손상되면 안전하게 새 식별자가 발급된다 (신규 P3, split 1/3)
-- Given 한 복제 노드의 식별자 파일이 손상돼 다시 읽히지 않는다
-- When 그 복제 노드가 다시 부팅한다
-- Then cc-lb가 새 식별자를 안전하게 받는다
-- And 새 식별자 발급 사실이 운영 로그에 한 줄로 남는다
+### Scenario: The type of shutdown signal determines the shutdown semantics (new P3)
+- Given a replica is in normal operation
+- When Charlie compares the result of sending a "graceful shutdown" signal versus an "emergency shutdown" signal
+- Then for graceful shutdown, in-flight calls are processed through to the end and readyz changes to "not-ready" first before the replica stops
+- And for emergency shutdown, in-flight calls are immediately force-terminated and that fact is recorded as a single line in the operational log
+- And for both shutdowns, the reason and signal type are recorded together in the shutdown marker
 
-### Scenario: 옛 식별자로 묶여 있던 작업은 다른 복제 노드로 인계되거나 만료된다 (신규 P3, split 2/3)
-- Given 한 복제 노드의 식별자가 손상돼 새 식별자로 다시 부팅했다
-- And 옛 식별자로 묶여 있던 작업이 남아 있다
-- When 정해진 만료 시간이 지난다
-- Then 그 작업은 다른 복제 노드로 인계되거나 만료된다
-- And 같은 작업이 두 번 끝까지 수행되지 않는다
+### Scenario: Debug logging can only be enabled via the designated operational signal (new P3)
+- Given debug logging cannot be enabled via the console or a configuration file
+- When Charlie attempts to enable debug logging only via an operational signal
+- Then debug logging is enabled only on the replica that received that signal
+- And the log level of other replicas remains unchanged
+- And the fact that it was enabled is recorded as a single line in the operational log
 
-### Scenario: 옛 식별자와 새 식별자가 같은 호출에 동시에 쓰이지 않는다 (신규 P3, split 3/3)
-- Given 한 복제 노드의 식별자가 손상돼 새 식별자로 다시 부팅했다
-- When 그 시점 이후 새 호출과 인계 대상 작업이 함께 처리된다
-- Then 어느 호출도 옛 식별자와 새 식별자에 동시에 묶이지 않는다
-- And 운영 로그에서 옛 식별자는 작업 인계·만료 흐름에만, 새 식별자는 신규 호출 흐름에만 나타난다
+### Scenario: External callers are denied access to the operations-only socket (new P3, split 1/3)
+- Given cc-lb has a separate external call port and an operations-only socket
+- When an external caller attempts to reach the operations-only socket
+- Then the attempt is rejected
+- And the rejection is recorded as a single line in the operational log
 
-### Scenario: 두 저장 백엔드에서 같은 운영자 시나리오가 같은 결과를 낸다 (F22-merged)
-- Given Alice가 한 저장 백엔드에서 팀 생성, 키 발급, 한도 설정을 차례로 진행했다
-- When 같은 시나리오를 다른 저장 백엔드에서 동일한 순서로 진행한다
-- Then 두 환경 모두 같은 단계에서 성공하거나 같은 단계에서 거부된다
-- And 결과로 보이는 팀, 키, 한도가 의미상 같다
+### Scenario: The operations-only socket normally receives admin calls from operators on the same machine (new P3, split 2/3)
+- Given cc-lb has a separate external call port and an operations-only socket
+- When Charlie on the same machine sends a graceful shutdown signal via the operations-only socket
+- Then the signal is received normally
+- And the graceful shutdown triggered by that signal starts immediately
 
-### Scenario: 두 저장 백엔드의 일관성 시나리오가 모두 통과한다 (F22-merged)
-- Given 백엔드 일관성 시나리오 묶음이 정의돼 있다
-- When 그 묶음을 두 저장 백엔드 양쪽에서 차례로 실행한다
-- Then 두 환경에서 모두 같은 시나리오가 모두 통과한다
+### Scenario: The external call port and the operations-only socket operate independently during shutdown (new P3, split 3/3)
+- Given cc-lb has a separate external call port and an operations-only socket and is in normal operation
+- And Charlie has sent a graceful shutdown signal via the operations-only socket
+- When in-flight calls on the external call port are being processed through to the end during shutdown
+- Then the two listening endpoints operate in an independent state
+- And the processing on the external call port does not affect the signal flow on the operations-only socket
 
-### Scenario: 저장 백엔드 종류를 잘못 바꾸면 부팅이 명확히 거부된다 (F22-merged)
-- Given cc-lb가 한 저장 백엔드로 운영되고 있었다
-- When 운영자가 같은 데이터 디렉터리에 다른 저장 백엔드로 부팅을 시도한다
-- Then 부팅이 거부된다
-- And 거부 메시지에 저장된 종류와 시도한 종류가 함께 표시된다
-
-### Scenario: 두 저장 백엔드에서 같은 운영자 동작이 같은 수와 같은 종류의 감사 줄을 남긴다 (F22-merged, split 1/2)
-- Given Alice가 한 저장 백엔드에서 같은 운영자 동작을 수행하고, 같은 동작을 다른 저장 백엔드에서 수행한다
-- When Dana가 두 환경의 감사 기록을 같은 시간 창으로 본다
-- Then 두 환경에서 같은 종류와 같은 수의 감사 줄이 남는다
-
-### Scenario: 두 저장 백엔드 모두에서 감사 기록에 비밀이 평문으로 보이지 않는다 (F22-merged, split 2/2)
-- Given Alice가 두 저장 백엔드 양쪽에서 자격증명을 포함한 운영자 동작을 수행한다
-- When Dana가 두 환경의 감사 기록을 같은 시간 창으로 본다
-- Then 두 환경 모두 비밀 정보가 한 줄에도 평문으로 보이지 않는다
-- And 비밀 정보 자리에는 가려진 표시만 들어 있다
-
-### Scenario: 다운그레이드 이동은 부팅 단계에서 거부된다 (F22-merged)
-- Given 데이터 디렉터리에 적힌 계약 버전이 새 버전이다
-- When 운영자가 더 낮은 계약 버전의 cc-lb로 부팅을 시도한다
-- Then 부팅이 거부된다
-- And 어느 버전에서 어느 버전으로 내리려 했는지가 함께 안내된다
-
-### Scenario: 두 운영자가 같은 줄을 동시에 고치는 상황이 두 저장 백엔드 모두에서 같은 결정을 낸다 (신규 P3)
-- Given Alice가 콘솔 A에서, 두 번째 운영자가 콘솔 B에서 같은 한도 줄을 동시에 고친다
-- When 같은 충돌 상황을 두 저장 백엔드 양쪽에서 일으킨다
-- Then 두 환경 모두 둘 중 한쪽만 성공한다
-- And 진 쪽에 같은 사유 메시지가 같은 형태로 안내된다
-- And 두 환경의 감사 줄도 같은 수와 같은 의미로 남는다
+### Scenario: The completion of a replica's shutdown is left as a marker for other replicas (new P3)
+- Given replica A has completed graceful shutdown
+- When replicas B and C view the same operational information
+- Then the time and reason for A's shutdown completion are visible as a shutdown marker
+- And when a new binary starts up in the same slot, the old marker and the new boot are not mixed on the same line
 
 ---
 
-## Feature F18 — 비용·사용량이 정확하게 보고된다
+## Feature F17 — cc-lb operates across multiple replicas and multiple storage backends
 
-운영자는 모델별 가격 카탈로그를 보고, 호출당 비용은 그 카탈로그를 따라 계산된다. 위로의 이름이 바뀌거나 사라지거나 합쳐져도 그 이전 사용량은 그대로 보존되고, 누적 합산도 정확하다. (F23 흡수)
+Even with multiple replicas running simultaneously, a change by one operator is immediately propagated to all replicas, and the same task is performed by only one replica. Switching from one storage backend to another yields the same behavior from the operator's perspective.
 
-### Scenario: 운영자가 모델별 현재 가격을 한 화면에서 본다
-- Given 가격 카탈로그가 최신으로 갱신돼 있다
-- When Alice가 비용 카탈로그 화면을 연다
-- Then 모델 이름, 입력 토큰 단가, 출력 토큰 단가, 통화가 한 표로 보인다
+### Scenario: A change on one replica is immediately propagated to other replicas
+- Given two replicas A and B are running
+- When Alice applies a new limit setting on A
+- Then B's current limit display immediately changes to the new value
+- And the next call arriving on any replica is evaluated with the same limit
 
-### Scenario: 호출당 비용이 카탈로그 가격으로 정확히 계산된다
-- Given 한 모델의 입력·출력 토큰 단가가 카탈로그에 적혀 있다
-- And 한 호출에서 입력 토큰 1,000개와 출력 토큰 500개가 쓰였다
-- When Alice가 그 호출의 비용을 본다
-- Then 입력 토큰 단가 × 1,000 + 출력 토큰 단가 × 500이 보고된 비용과 일치한다
+### Scenario: Only one replica among many performs the task — credential warmup
+- Given three replicas are running and credential warmup is scheduled for the same time
+- When that time arrives
+- Then only one of the three replicas performs that task
+- And the other two replicas skip that task
 
-### Scenario: 분기 비용 보고서가 팀별로 정확히 합산된다
-- Given 한 분기 동안 여러 팀의 호출이 일어났다
-- When Alice가 분기 비용 보고서를 연다
-- Then 팀별 비용 합계가 그 팀에 속한 호출들의 비용 합과 일치한다
+### Scenario: When the replica performing the task disappears, another replica takes over
+- Given replica A is performing a credential warmup task
+- When replica A stops unexpectedly
+- Then within the defined expiry time, another replica takes over that task
+- And the same task is not performed twice in duplicate
 
-### Scenario: 가격이 바뀌면 그 시점 이후 새 호출부터 새 가격이 적용된다
-- Given 운영자가 한 모델의 단가를 새 값으로 적용했다
-- When 그 시점 이후 새 호출이 처리된다
-- Then 그 새 호출의 비용은 새 단가로 계산된다
-- And 같은 시점 직전에 시작된 호출의 비용은 옛 단가로 계산된다
+### Scenario: All replicas see the same value at the same moment when a configuration change is applied
+- Given Alice applies a routing policy once
+- When calls arrive at all three replicas simultaneously immediately after that point
+- Then all three replicas make the same routing decision
 
-### Scenario: 캐시가 들어맞은 호출은 비용 절감이 별도 항목으로 보인다
-- Given 한 호출이 캐시 적중으로 처리된다
-- When Alice가 그 호출의 비용 보고를 연다
-- Then 원래 비용과 절감된 금액이 따로 보인다
-- And 팀의 누적 절감 금액에도 같은 값이 더해진다
+### Scenario: When two operators try to edit the same line simultaneously, only one succeeds
+- Given Alice on console A and a second operator on console B are editing the same limit line simultaneously
+- When both changes are saved at nearly the same time
+- Then only one of the two changes succeeds
+- And the losing side is shown a single line reading "another operator edited this first, please reload"
 
-### Scenario: 가격 변경 이력이 시간순으로 보존된다 (split 1/2)
-- Given 한 모델의 단가가 지난 분기 동안 두 번 바뀌었다
-- When Alice가 그 모델의 가격 이력을 연다
-- Then 변경 시각과 그 시점 단가가 시간순으로 보인다
+### Scenario: Even if two replicas simultaneously believe they hold the exclusive execution right, only one continues the task (new P3, split 1/2)
+- Given during a brief interruption in the notification channel, two replicas simultaneously believe they hold the exclusive execution right for the same task
+- When cc-lb performs its periodic self-check
+- Then only one of the two replicas continues the task and the other immediately steps down
+- And the same task is never executed all the way through twice
 
-### Scenario: 과거 호출 비용 계산이 가격 이력의 그 시점 단가와 정합한다 (split 2/2)
-- Given 한 모델의 단가가 지난 분기 동안 두 번 바뀌었다
-- And 그 사이에 여러 호출이 처리되었다
-- When Dana가 각 호출의 비용을 가격 이력과 함께 본다
-- Then 각 호출의 비용 계산이 그 호출 시점에 유효했던 단가와 한 토큰도 안 어긋난다
+### Scenario: The result of the exclusive execution right self-check is recorded in the operational log and metrics (new P3, split 2/2)
+- Given cc-lb has resolved a simultaneous exclusive execution right conflict between two replicas through a self-check
+- When Charlie views the operational log and operational metrics at that point in time
+- Then the self-check result is recorded as one line each in the operational log and operational metrics
+- And which replica stepped down is shown alongside
 
-### Scenario: 캐시를 처음 만든 호출과 캐시를 다시 읽은 호출이 단가가 따로 계산된다 (신규 P3, split 1/2)
-- Given 카탈로그가 캐시 생성 단가와 캐시 재사용 단가를 따로 적어 둔다
-- When 한 호출이 캐시를 처음 만들고, 그 다음 호출이 같은 캐시를 다시 읽는다
-- Then 첫 호출의 비용은 캐시 생성 단가로, 다음 호출의 비용은 캐시 재사용 단가로 따로 계산된다
+### Scenario: Operator sees which replicas are alive on a single screen (new P3)
+- Given three replicas are running
+- When Charlie opens the replica status screen
+- Then each replica's identifier, last heartbeat time, and the number of calls it is receiving appear in a single table
+- And if a replica has not sent a heartbeat within the defined time, that row changes to "no response"
 
-### Scenario: 캐시 생성·재사용 단가의 합산이 분기 보고서 총합과 한 토큰도 안 어긋난다 (신규 P3, split 2/2)
-- Given 한 분기 동안 캐시 생성 호출과 캐시 재사용 호출이 함께 일어났다
-- When Alice가 그 모델의 분기 보고서를 연다
-- Then 캐시 생성 단가 합과 캐시 재사용 단가 합의 총합이 그 모델 총 비용과 한 토큰도 안 어긋난다
+### Scenario: When a replica's identifier is corrupted, a new identifier is safely issued (new P3, split 1/3)
+- Given the identifier file of a replica is corrupted and cannot be read
+- When that replica reboots
+- Then cc-lb safely obtains a new identifier
+- And the fact that a new identifier was issued is recorded as a single line in the operational log
 
-### Scenario: 토큰 수를 정확히 못 셀 때는 추정 표시와 함께 보인다 (신규 P3, split 1/2)
-- Given 한 모델의 토큰 세는 방식을 cc-lb가 정확히 모른다
-- When 그 모델의 호출 비용이 보고된다
-- Then 비용이 추정 표시와 함께 나온다
+### Scenario: Tasks bound to the old identifier are handed over to another replica or expire (new P3, split 2/3)
+- Given a replica's identifier was corrupted and it rebooted with a new identifier
+- And tasks bound to the old identifier remain
+- When the defined expiry time passes
+- Then those tasks are handed over to another replica or expire
+- And the same task is not performed all the way through twice
 
-### Scenario: 추정으로 보고된 호출은 사유 기록과 별도 조회가 따로 제공된다 (신규 P3, split 2/2)
-- Given 한 호출의 비용이 추정으로 보고되었다
-- When Dana가 그 호출의 추적 표식을 따라간다
-- Then 같은 호출의 추적 표식에 "추정 비용" 사유가 한 줄로 남아 있다
-- And Alice가 추정으로 처리된 호출만 별도로 골라 볼 수 있다
+### Scenario: The old identifier and the new identifier are not used for the same call simultaneously (new P3, split 3/3)
+- Given a replica's identifier was corrupted and it rebooted with a new identifier
+- When new calls and tasks to be handed over are processed simultaneously after that point
+- Then no call is bound to both the old and new identifiers simultaneously
+- And in the operational log, the old identifier appears only in task handover and expiry flows, and the new identifier appears only in new call flows
 
-### Scenario: 위로 이름이 바뀌어도 이전 사용량은 그대로 보인다 (F23-merged)
-- Given 위로 "anthropic-prod"에 한 달치 사용량이 쌓여 있다
-- When Alice가 그 위로의 이름을 "anthropic-2026"으로 바꾼다
-- Then 새 이름 아래에서도 그 한 달치 사용량이 같은 값으로 보인다
-- And 합계가 한 토큰도 안 어긋난다
+### Scenario: The same operator scenario produces the same result across both storage backends (F22-merged)
+- Given Alice performed team creation, key issuance, and limit setting in sequence on one storage backend
+- When the same scenario is run in the same order on another storage backend
+- Then both environments succeed at the same steps or are rejected at the same steps
+- And the resulting team, key, and limits are semantically equivalent
 
-### Scenario: 위로를 삭제해도 그 이전 사용량은 보존된다 (F23-merged)
-- Given 더 이상 쓰지 않는 위로 "legacy-x"에 사용량이 남아 있다
-- When Alice가 "legacy-x"를 삭제한다
-- Then 분기 보고서에서 그 위로의 과거 사용량이 여전히 보인다
-- And 비용 보고에서도 그 사용량이 같은 값으로 합산된다
+### Scenario: The consistency scenarios for both storage backends all pass (F22-merged)
+- Given a set of backend consistency scenarios is defined
+- When that set is run in sequence on both storage backends
+- Then all the same scenarios pass in both environments
 
-### Scenario: 두 위로를 하나로 합치면 사용량이 정확히 합산된다 (F23-merged)
-- Given 위로 "anthropic-a"와 "anthropic-b" 각각에 사용량이 쌓여 있다
-- When Alice가 둘을 새 위로 "anthropic"으로 합친다
-- Then 새 위로의 사용량은 두 옛 위로의 사용량의 합과 같다
-- And 어느 한 호출도 두 번 세어지지 않는다
+### Scenario: Attempting to change storage backend type incorrectly results in a clear boot rejection (F22-merged)
+- Given cc-lb was operating with one storage backend
+- When an operator attempts to boot with a different storage backend against the same data directory
+- Then the boot is rejected
+- And the rejection message shows both the stored type and the attempted type
 
-### Scenario: 사용량 보고서에 위로 이름 변경이 함께 표시된다 (F23-merged)
-- Given 한 분기 안에 한 위로의 이름이 한 번 바뀌었다
-- When Alice가 그 분기의 사용량 보고서를 연다
-- Then 옛 이름과 새 이름이 같은 위로로 묶여 보인다
-- And 어느 시점에 이름이 바뀌었는지가 한 줄로 함께 보인다
+### Scenario: The same operator action leaves the same count and kind of audit lines across both storage backends (F22-merged, split 1/2)
+- Given Alice performs the same operator action on one storage backend, then performs the same action on another storage backend
+- When Dana views the audit logs for both environments with the same time window
+- Then the same kind and count of audit lines remain in both environments
 
----
+### Scenario: Audit logs contain no secret in plaintext in either storage backend (F22-merged, split 2/2)
+- Given Alice performs operator actions involving credentials on both storage backends
+- When Dana views the audit logs for both environments with the same time window
+- Then no line in either environment shows secret information in plaintext
+- And the fields that would contain secret information contain only redacted markers
 
-## Feature F20 — 감사관이 저장된 비밀이 평문이 아님과 변조 불가를 확인한다
+### Scenario: A downgrade migration is rejected at the boot stage (F22-merged)
+- Given the schema version written in the data directory is a newer version
+- When an operator attempts to boot a cc-lb with a lower schema version
+- Then the boot is rejected
+- And which version was being downgraded from and to is shown alongside
 
-Dana는 cc-lb가 가진 모든 비밀 정보(자격증명, 토큰)가 디스크에서 평문으로 안 보이고, 누가 손대면 즉시 들통난다는 것을 직접 확인한다.
-
-### Scenario: 저장된 모든 비밀은 평문으로 디스크에 남아 있지 않다
-- Given 토큰과 자격증명이 cc-lb에 저장돼 있다
-- When Dana가 cc-lb 저장소 파일의 어느 자리를 어느 폭으로 훑어봐도
-- Then 어느 비밀의 평문도 발견되지 않는다
-- And 저장된 것은 모두 암호화된 형태이며, 어디서도 비밀이 알려진 자리 패턴을 따르는 평문 형태로 보이지 않는다
-
-### Scenario: 변조하면 즉시 들통난다
-- Given 저장된 자격증명 한 건이 있다
-- And 누군가 그 파일의 한 바이트를 살짝 바꾼다
-- When cc-lb가 그 자격증명을 다시 읽어 쓰려 한다
-- Then 읽기가 거부된다
-- And 변조 시도가 감사 기록에 한 줄로 남는다
-
-### Scenario: 마스터 키가 사라지면 비밀은 영영 복구되지 않는다 — 의도된 동작
-- Given 운영자가 마스터 키 파일을 영구히 잃었다
-- When cc-lb를 다시 부팅한다
-- Then 저장된 비밀은 어떤 방법으로도 평문으로 복구되지 않는다
-- And cc-lb는 그 사실을 명확히 알리고 정상 운영을 거부한다
-
-### Scenario: 잘못된 마스터 키로는 cc-lb가 부팅 자체를 거부한다 (split 1/2)
-- Given 운영자가 잘못된 마스터 키 파일을 설정해 두었다
-- When cc-lb를 부팅한다
-- Then 부팅이 거부된다
-- And 거부 사유가 한 줄로 안내된다
-
-### Scenario: 잘못된 마스터 키 부팅 시도에서 어떤 비밀도 평문으로 한 번도 읽히지 않는다 (split 2/2)
-- Given 운영자가 잘못된 마스터 키 파일을 설정해 두었다
-- When cc-lb가 부팅을 시도한다
-- Then 부팅 절차의 어느 단계에서도 비밀이 평문으로 읽히지 않는다
-- And 비밀 자리에 비밀이 알려진 자리 패턴을 따르는 평문 흔적이 한 번도 디스크나 메모리 덤프에 남지 않는다
-
-### Scenario: 키 회전 후에도 이전에 저장된 비밀은 그대로 읽힌다
-- Given 마스터 키 회전이 한 번 일어났다
-- And 회전 전에 저장된 자격증명이 있다
-- When cc-lb가 그 자격증명을 다시 읽어 쓴다
-- Then 새 키 체계 아래에서 정상적으로 읽혀 호출에 쓰인다
-- And 평문이 디스크에 한 번도 다시 안 적힌다
-
-### Scenario: 마스터 키 파일의 권한이 너무 느슨하면 부팅이 거부된다
-- Given 마스터 키 파일이 같은 머신의 다른 사용자도 읽을 수 있는 권한으로 놓여 있다
-- When cc-lb를 부팅한다
-- Then 부팅이 거부된다
-- And 거부 사유가 한 줄로 안내된다
-
-### Scenario: 비밀이 알려진 자리 패턴을 따르는 값은 종류별로 가려진 표시로 보인다
-- Given 로그에 우연히 비밀이 알려진 자리 패턴을 따르는 값이 들어가려 한다
-- And 그 패턴에는 모델 공급자 토큰, 클라우드 액세스 토큰, 권한 토큰이 포함된다
-- When 그 로그 줄이 쓰인다
-- Then 어느 종류든 가려진 표시로 바뀌어 남는다
-- And 평문이 한 줄에도 그대로 남지 않는다
-
-### Scenario: 비정상 종료 메시지에도 비밀 정보는 가려진 표시로만 나온다
-- Given 처리 중 예기치 못한 비정상 종료가 일어난다
-- And 그 종료 메시지 안에 자격증명 값이 우연히 들어가려 한다
-- When 그 메시지가 운영 로그와 감사 기록으로 남는다
-- Then 비밀 자리에 가려진 표시만 보인다
-- And 평문이 어디에도 새지 않는다
-
-### Scenario: 마스터 키 회전이 진행 중 호출을 끊지 않는다 (신규 P3)
-- Given cc-lb가 호출을 정상 처리 중이다
-- When Charlie가 마스터 키를 새 값으로 회전시킨다
-- Then 진행 중 호출은 한 건도 끊기지 않는다
-- And 회전 직후 도착한 호출도 평소처럼 처리된다
-- And 옛 키로 저장된 비밀과 새 키로 다시 저장된 비밀이 둘 다 한 동안 같이 읽힌다
-- And 회전이 끝난 사실이 감사 기록에 한 줄로 남는다
-
-### Scenario: 비정상 종료 추적의 변수 값에도 비밀이 가려진 표시로만 나온다 (신규 P3)
-- Given 비정상 종료의 추적 표시에 자격증명 변수 값이 우연히 들어가려 한다
-- When 그 추적이 운영 로그와 감사 기록에 적힌다
-- Then 변수 값 자리에 가려진 표시만 보인다
-- And 비밀이 한 번도 평문으로 새지 않는다
-
-### Scenario: 호출자에게 돌아가는 응답 헤더에서 비밀이 알려진 자리 패턴을 따르는 값은 가려진 표시로만 보인다 (신규 P3)
-- Given cc-lb가 위로에서 응답 헤더를 받아 호출자에게 돌려준다
-- And 그 헤더에 비밀이 알려진 자리 패턴을 따르는 값이 우연히 들어 있다
-- When 그 응답이 호출자에게 도달한다
-- Then 그 헤더 값은 가려진 표시로 바뀌어 보인다
-- And 같은 사실이 감사 기록에 한 줄로 남는다
-
-### Scenario: 같은 비밀이 다른 위로에 저장돼 있어도 서로 풀어 쓸 수 없다 (신규 P3)
-- Given 위로 X와 위로 Y에 같은 평문 비밀이 각각 따로 저장돼 있다
-- When Dana가 X의 저장 파일을 떼어 Y의 환경에서 읽으려 시도한다
-- Then 그 읽기는 거부된다
-- And 두 위로의 암호화된 형태는 서로 다르다
-- And 한 위로의 변조가 다른 위로의 읽기에 영향을 주지 않는다
+### Scenario: Two operators editing the same line simultaneously produces the same decision across both storage backends (new P3)
+- Given Alice on console A and a second operator on console B are editing the same limit line simultaneously
+- When the same conflict scenario is triggered on both storage backends
+- Then in both environments, only one of the two succeeds
+- And the losing side receives the same reason message in the same form
+- And the audit lines in both environments remain with the same count and same meaning
 
 ---
 
-## Feature F24 — 가격 카탈로그가 외부 의존 장애에도 동작한다
+## Feature F18 — Cost and usage are reported accurately
 
-가격 카탈로그는 외부 가격 소스(LiteLLM)에 의존한다. 외부 소스가 일시 장애여도, 오래 죽어 있어도 운영자는 정해진 방식으로 안전하게 동작하는 것을 본다.
+Operators view the model price catalog, and per-call cost is calculated from that catalog. Even when an upstream is renamed, removed, or merged, prior usage is preserved as-is and cumulative totals are accurate. (F23 absorbed)
 
-### Scenario: 외부 가격 소스가 정상이면 새 가격을 가져온다
-- Given LiteLLM 가격 소스가 정상이다
-- When 가격 카탈로그 갱신 주기가 돌아온다
-- Then cc-lb가 외부 소스로부터 새 가격을 받는다
-- And 다음 호출부터 새 가격으로 비용이 계산된다
+### Scenario: Operator views the current price for each model on a single screen
+- Given the price catalog has been updated to the latest
+- When Alice opens the cost catalog screen
+- Then model name, input token unit price, output token unit price, and currency appear in a single table
 
-### Scenario: 외부 가격 소스가 일시 장애여도 마지막 가격이 그대로 쓰인다
-- Given 가격 카탈로그가 한 번 정상적으로 갱신된 적이 있다
-- And 그 다음 갱신 시도가 일시적으로 실패한다
-- When 그 시점 이후 새 호출이 도착한다
-- Then 마지막으로 정상 받은 가격으로 비용이 계산된다
-- And 운영자에게 "가격 소스 일시 장애" 표시가 한 줄로 보인다
+### Scenario: Per-call cost is calculated accurately from the catalog prices
+- Given a model's input and output token unit prices are recorded in the catalog
+- And a call used 1,000 input tokens and 500 output tokens
+- When Alice views that call's cost
+- Then the reported cost matches input token unit price x 1,000 + output token unit price x 500
 
-### Scenario: 외부 가격 소스가 오래 죽어 있으면 운영자에게 알린다
-- Given 가격 소스가 정해진 임계 시간을 넘겨 응답이 없다
-- When cc-lb가 그 임계에 처음 도달한 시점에 점검을 한다
-- Then 운영 로그에 "가격 소스 오래 응답 없음" 경고가 한 줄 남는다
-- And 같은 경고가 운영 지표로도 보인다
+### Scenario: The quarterly cost report is accurately aggregated by team
+- Given calls from multiple teams occurred during a quarter
+- When Alice opens the quarterly cost report
+- Then each team's cost total matches the sum of costs for calls belonging to that team
 
-### Scenario: 가격 소스에 세 번 실패하면 디스크에 남겨 둔 가격으로, 그것도 없으면 비용 보고를 보류한다
-- Given 가격 소스 호출이 세 번 연속 실패한다
-- And cc-lb는 디스크에 마지막으로 적어 둔 가격 사본을 가지고 있다
-- When 그 시점 이후 새 호출이 도착한다
-- Then 디스크에 남겨 둔 가격으로 비용이 계산된다
-- And 디스크 사본도 없을 때는 비용 보고가 보류로 표시된다
+### Scenario: When prices change, the new price applies to new calls after that point
+- Given an operator has applied a new unit price for a model
+- When new calls are processed after that point
+- Then those new calls' costs are calculated using the new unit price
+- And calls that started immediately before that point are calculated using the old unit price
 
-### Scenario: 가격 카탈로그가 통째로 망가지면 그 사실을 안전하게 알린다
-- Given 가격 카탈로그 파일이 손상돼 다시 읽히지 않는다
-- When cc-lb가 그 카탈로그를 다시 부르려 한다
-- Then 어떤 호출의 비용도 0으로 계산되지 않는다
-- And 비용 보고가 보류로 표시되고 운영자에게 한 줄 안내된다
+### Scenario: A call served by cache shows cost savings as a separate line item
+- Given a call is processed with a cache hit
+- When Alice opens that call's cost report
+- Then the original cost and the saved amount appear separately
+- And the same value is added to the team's cumulative savings total
 
-### Scenario: 운영자가 가격 카탈로그의 마지막 갱신 시각을 본다
-- Given 카탈로그가 한 시점에 갱신됐다
-- When Alice가 카탈로그 상태를 연다
-- Then "마지막 갱신: 시각"과 갱신 결과가 한 줄로 보인다
-- And 갱신이 너무 오래됐을 때는 별도 표시가 함께 보인다
+### Scenario: Price change history is preserved in chronological order (split 1/2)
+- Given a model's unit price changed twice during the past quarter
+- When Alice opens that model's price history
+- Then the time of each change and the unit price at that point appear in chronological order
 
-### Scenario: 가격 카탈로그의 출처 증명이 맞지 않으면 새 가격을 쓰지 않는다 (신규 P3)
-- Given 외부에서 새 가격 카탈로그를 받아 왔다
-- And 그 카탈로그의 출처 증명이 cc-lb가 신뢰하는 발급자의 것과 맞지 않는다
-- When cc-lb가 그 카탈로그를 적용하려 한다
-- Then 적용이 거부된다
-- And 직전에 신뢰된 가격이 그대로 계속 쓰인다
-- And 거부 사유와 어떤 발급자가 기대됐는지가 운영 로그에 한 줄로 남는다
+### Scenario: Historical call cost calculations are consistent with the unit price at that time in the price history (split 2/2)
+- Given a model's unit price changed twice during the past quarter
+- And multiple calls were processed in between
+- When Dana views each call's cost alongside the price history
+- Then each call's cost calculation matches the unit price that was in effect at the time of that call, with no discrepancy down to a single token
 
-### Scenario: 카탈로그에 없는 모델 호출은 정해진 폴백 방식으로 보고된다 (신규 P3)
-- Given Bob의 호출이 카탈로그에 적혀 있지 않은 모델 이름을 쓴다
-- When 그 호출의 비용이 계산된다
-- Then 정해진 폴백 방식(가장 가까운 모델군 단가 또는 보류 표시) 중 하나로 보고된다
-- And 그 폴백 결정이 호출의 추적 표식에 한 줄로 남는다
-- And 운영자가 폴백으로 처리된 호출만 별도로 골라 본다
+### Scenario: The call that first creates a cache and the call that reads the cache again are priced separately (new P3, split 1/2)
+- Given the catalog records separate unit prices for cache creation and cache reuse
+- When one call first creates a cache and the next call reads the same cache again
+- Then the first call's cost is calculated using the cache creation unit price and the next call's cost using the cache reuse unit price, separately
+
+### Scenario: The aggregation of cache creation and reuse unit prices matches the quarterly report total with no discrepancy (new P3, split 2/2)
+- Given both cache creation calls and cache reuse calls occurred during a quarter
+- When Alice opens that model's quarterly report
+- Then the sum of cache creation unit price totals and cache reuse unit price totals matches that model's total cost with no discrepancy down to a single token
+
+### Scenario: When token count cannot be calculated precisely, it is shown with an estimated indicator (new P3, split 1/2)
+- Given cc-lb does not precisely know how to count tokens for a model
+- When that model's call cost is reported
+- Then the cost appears with an estimated indicator
+
+### Scenario: A call reported as estimated provides a reason record and a separate query (new P3, split 2/2)
+- Given a call's cost was reported as estimated
+- When Dana follows that call's trace identifier
+- Then the same call's trace identifier has a line reading "estimated cost" as the reason
+- And Alice can filter to view only calls processed as estimated separately
+
+### Scenario: When an upstream is renamed, prior usage remains visible (F23-merged)
+- Given upstream "anthropic-prod" has one month of usage accumulated
+- When Alice renames that upstream to "anthropic-2026"
+- Then the same one month of usage is visible under the new name with the same values
+- And the total has no discrepancy down to a single token
+
+### Scenario: When an upstream is deleted, its prior usage is preserved (F23-merged)
+- Given upstream "legacy-x" that is no longer in use has usage remaining
+- When Alice deletes "legacy-x"
+- Then that upstream's historical usage is still visible in the quarterly report
+- And in the cost report, that usage is aggregated with the same values
+
+### Scenario: When two upstreams are merged into one, usage is accurately aggregated (F23-merged)
+- Given upstream "anthropic-a" and upstream "anthropic-b" each have usage accumulated
+- When Alice merges both into a new upstream "anthropic"
+- Then the new upstream's usage equals the sum of the two old upstreams' usage
+- And no single call is counted twice
+
+### Scenario: The usage report shows upstream name changes alongside (F23-merged)
+- Given an upstream's name changed once during a quarter
+- When Alice opens the usage report for that quarter
+- Then the old name and the new name appear grouped as the same upstream
+- And when the name changed is shown alongside on a single line
 
 ---
 
-## Open Questions (W4 범위, v5.2)
+## Feature F20 — Auditor verifies that stored secrets are not in plaintext and cannot be tampered
 
-1. **F17-merged 18 시나리오 — Cucumber.io 권장 5–15 초과 (악화)** — split-brain 자기 검사 분리(F17.6a/b), 백엔드 audit 분리(F17.13/F17.14), 식별자 손상 3-way 분할(F17.9a/b/c)로 의미 단위는 명확하지만 한 feature 안 시나리오 수가 18건이다. 다음 라운드에서 "복제 일관성"과 "저장 백엔드 동등성"을 별도 feature로 다시 분리할지 검토 — v5.2 기준 우선순위 상승.
-2. **F18-merged 15 시나리오 — 같은 문제** — 비용 계산 정확성(F18.1–F18.7b), 추정(F18.8a/b), 위로 이름 보존(F23-merged 4건)으로 세 묶음이 자라고 있다. 다음 라운드에서 F18 / F18-supplement 분리 검토.
-3. **F20.1 / F20.7 일반화 어휘 일관성** — "비밀이 알려진 자리 패턴을 따른다"는 stakeholder-readable 어휘이지만, unit/property-test가 실제 정규식·바이트 길이 invariant를 잠그는 책임을 명확히 가져야 한다. 테스트 계약서에 그 책임 분담을 명시할 것.
-4. **F15.5a/b 분할이 거부 사유 안내를 독립 규칙으로 인정** — 같은 패턴(거부 + 사유 안내)이 F14.3, F24.7에도 있다. 다음 라운드에서 같은 분할을 일관 적용할지 결정.
-5. **F17.6a/b 분할이 "기능 동작 vs audit·메트릭 기록" 패턴의 모범** — 같은 패턴이 F13(여러 audit 결합), F15.3(강제 종료 + 지표), F17.7(heartbeat)에도 있어 다음 라운드에 일관 적용 검토.
-6. **(v5.2 신규) 다중 듣는 자리 시나리오 분할 (F15.11a/b/c)이 "보안·기능·불변 3축" 패턴의 후보** — 외부 거부(보안), 내부 정상 동작(기능), 분리 동작(불변)을 세 시나리오로 잠그는 방식은 F15 다른 듀얼 채널 동작(인증서 갱신 중 스트림, 종료 중 처리)에도 일관 적용할지 검토.
-7. **(v5.2 신규) 식별자 손상 3-way 분할 (F17.9a/b/c)이 "발급·인계·동시성 방지 3축" 패턴의 후보** — 식별자 발급(기능), 옛 작업 인계(기능), 동시 사용 방지(불변)을 세 시나리오로 잠그는 방식은 F17의 단일 수행권·복제 동기화 시나리오에도 적용 가능한지 검토.
+Dana directly verifies that all secret information (credentials, tokens) held by cc-lb is not visible in plaintext on disk, and that any tampering is immediately detectable.
+
+### Scenario: All stored secrets do not remain in plaintext on disk
+- Given tokens and credentials are stored in cc-lb
+- When Dana reads any position and any width of cc-lb's storage files
+- Then no plaintext of any secret is found
+- And everything stored is in encrypted form, and nowhere does any secret appear in plaintext following a known positional pattern
+
+### Scenario: Tampering is immediately detectable
+- Given one stored credential exists
+- And someone slightly modifies one byte of that file
+- When cc-lb attempts to read and use that credential again
+- Then the read is rejected
+- And the tampering attempt is recorded as a single line in the audit log
+
+### Scenario: If the master key is lost, secrets can never be recovered — intended behavior
+- Given an operator has permanently lost the master key file
+- When cc-lb is rebooted
+- Then the stored secrets cannot be recovered in plaintext by any means
+- And cc-lb clearly reports that fact and refuses to operate normally
+
+### Scenario: cc-lb refuses to boot with an incorrect master key (split 1/2)
+- Given an operator has configured an incorrect master key file
+- When cc-lb boots
+- Then the boot is rejected
+- And the rejection reason is indicated on a single line
+
+### Scenario: During a boot attempt with an incorrect master key, no secret is ever read in plaintext (split 2/2)
+- Given an operator has configured an incorrect master key file
+- When cc-lb attempts to boot
+- Then at no stage of the boot process is any secret read in plaintext
+- And no plaintext trace following a known positional pattern ever remains on disk or in a memory dump
+
+### Scenario: Secrets stored before a key rotation can still be read after the rotation
+- Given a master key rotation has occurred once
+- And credentials stored before the rotation exist
+- When cc-lb reads and uses those credentials again
+- Then they are read normally under the new key scheme and used in calls
+- And plaintext is never written to disk again
+
+### Scenario: If the master key file has permissions that are too permissive, boot is rejected
+- Given the master key file is placed with permissions that allow other users on the same machine to read it
+- When cc-lb boots
+- Then the boot is rejected
+- And the rejection reason is indicated on a single line
+
+### Scenario: Values following a known positional pattern are shown as redacted markers by type
+- Given a value following a known positional pattern for secrets is about to be written into the log accidentally
+- And that pattern includes model provider tokens, cloud access tokens, and authorization tokens
+- When that log line is written
+- Then regardless of type, it is changed to a redacted marker before being stored
+- And no plaintext remains on any line
+
+### Scenario: In abnormal termination messages, secret information appears only as a redacted marker
+- Given an unexpected abnormal termination occurs during processing
+- And a credential value is about to be included in the termination message accidentally
+- When that message is recorded in the operational log and audit log
+- Then only a redacted marker appears in the secret field
+- And plaintext does not leak anywhere
+
+### Scenario: Master key rotation does not interrupt in-flight calls (new P3)
+- Given cc-lb is processing calls normally
+- When Charlie rotates the master key to a new value
+- Then not a single in-flight call is interrupted
+- And calls arriving immediately after the rotation are also processed normally
+- And secrets stored with the old key and secrets re-stored with the new key are both readable for a period
+- And the completion of the rotation is recorded as a single line in the audit log
+
+### Scenario: Even variable values in abnormal termination traces appear only as redacted markers (new P3)
+- Given a credential variable value is about to be included in an abnormal termination trace accidentally
+- When that trace is written to the operational log and audit log
+- Then only a redacted marker appears in the variable value field
+- And the secret is never leaked in plaintext
+
+### Scenario: In response headers returned to callers, values following a known positional pattern appear only as redacted markers (new P3)
+- Given cc-lb receives response headers from an upstream and passes them to the caller
+- And a value following a known positional pattern for secrets is accidentally included in those headers
+- When that response reaches the caller
+- Then that header value is changed to a redacted marker
+- And the same fact is recorded as a single line in the audit log
+
+### Scenario: The same secret stored in different upstreams cannot be decrypted using the other upstream's context (new P3)
+- Given the same plaintext secret is stored separately in upstream X and upstream Y
+- When Dana attempts to read X's storage file in Y's environment
+- Then the read is rejected
+- And the encrypted form of the two upstreams is different from each other
+- And tampering with one upstream does not affect the reading of the other upstream
 
 ---
 
-## 변경 추적표 (v5 → v5.2)
+## Feature F24 — The price catalog operates even during external dependency failures
 
-| v5 ID | v5.2 ID | 상태 | 비고 |
+The price catalog depends on an external price source (LiteLLM). Even if the external source is temporarily down or has been down for a long time, operators see it operating safely in the defined manner.
+
+### Scenario: When the external price source is healthy, new prices are fetched
+- Given the LiteLLM price source is healthy
+- When the price catalog refresh cycle arrives
+- Then cc-lb receives new prices from the external source
+- And costs for the next call are calculated using the new prices
+
+### Scenario: When the external price source is temporarily down, the last prices are used as-is
+- Given the price catalog has been successfully refreshed once before
+- And the next refresh attempt fails temporarily
+- When new calls arrive after that point
+- Then costs are calculated using the last successfully received prices
+- And the operator sees a single line reading "price source temporarily unavailable"
+
+### Scenario: When the external price source has been down for a long time, the operator is notified
+- Given the price source has been unresponsive beyond the defined threshold time
+- When cc-lb performs its check at the moment that threshold is first reached
+- Then a "price source unresponsive for extended period" warning is recorded as a single line in the operational log
+- And the same warning is also visible in operational metrics
+
+### Scenario: After three consecutive price source failures, the disk-cached prices are used; if those are also unavailable, cost reporting is deferred
+- Given the price source call has failed three times in a row
+- And cc-lb has a copy of the last prices written to disk
+- When new calls arrive after that point
+- Then costs are calculated using the disk-cached prices
+- And when there is no disk copy either, cost reporting is marked as deferred
+
+### Scenario: If the price catalog is completely corrupted, that fact is safely reported
+- Given the price catalog file is corrupted and cannot be read
+- When cc-lb attempts to reload that catalog
+- Then no call's cost is calculated as zero
+- And cost reporting is marked as deferred and the operator is notified on a single line
+
+### Scenario: Operator views the last update time of the price catalog
+- Given the catalog was updated at a point in time
+- When Alice opens the catalog status
+- Then "last updated: [time]" and the update result appear on a single line
+- And when the update is too old, a separate indicator is shown alongside
+
+### Scenario: If the price catalog's provenance proof does not match, the new prices are not used (new P3)
+- Given a new price catalog has been received from an external source
+- And the catalog's provenance proof does not match the issuer cc-lb trusts
+- When cc-lb attempts to apply that catalog
+- Then the apply is rejected
+- And the previously trusted prices continue to be used
+- And the rejection reason and the expected issuer are recorded as a single line in the operational log
+
+### Scenario: Calls for a model not in the catalog are reported using the defined fallback method (new P3)
+- Given Bob's call uses a model name not recorded in the catalog
+- When that call's cost is calculated
+- Then it is reported using one of the defined fallback methods (closest model group rate or deferred indicator)
+- And that fallback decision is recorded as a single line on that call's trace identifier
+- And the operator can filter to view only calls processed via fallback separately
+
+---
+
+## Open Questions (W4 scope, v5.2)
+
+1. **F17-merged 18 scenarios — exceeds Cucumber.io recommended 5–15 (worsening)** — The semantic units are clear with the split-brain self-check separation (F17.6a/b), backend audit separation (F17.13/F17.14), and identifier corruption 3-way split (F17.9a/b/c), but the scenario count within a single feature is 18. Consider splitting "replica consistency" and "storage backend parity" into separate features in the next round — priority escalated as of v5.2.
+2. **F18-merged 15 scenarios — same problem** — Three groups are growing: cost calculation accuracy (F18.1–F18.7b), estimation (F18.8a/b), and upstream name preservation (F23-merged, 4 cases). Consider splitting F18 / F18-supplement in the next round.
+3. **F20.1 / F20.7 generalized vocabulary consistency** — "secrets follow a known positional pattern" is stakeholder-readable vocabulary, but unit/property tests must own the responsibility of locking in the actual regex and byte-length invariants. That responsibility split should be explicitly stated in the test contract.
+4. **F15.5a/b split recognizes rejection reason indication as an independent rule** — The same pattern (rejection + reason indication) exists in F14.3 and F24.7. Decide whether to apply the same split consistently in the next round.
+5. **F17.6a/b split is a model for the "functional behavior vs audit/metrics record" pattern** — The same pattern exists in F13 (multiple audit combinations), F15.3 (force termination + metrics), and F17.7 (heartbeat), and should be applied consistently in the next round.
+6. **(v5.2 new) Multi-listen-endpoint scenario split (F15.11a/b/c) is a candidate for the "security / functional / invariant 3-axis" pattern** — Locking external rejection (security), internal normal operation (functional), and separation behavior (invariant) in three scenarios is worth considering for consistent application to other dual-channel behaviors in F15 (streams during certificate renewal, processing during shutdown).
+7. **(v5.2 new) Identifier corruption 3-way split (F17.9a/b/c) is a candidate for the "issuance / handover / concurrency-prevention 3-axis" pattern** — Locking identifier issuance (functional), old task handover (functional), and simultaneous use prevention (invariant) in three scenarios is worth considering for application to exclusive execution rights and replica synchronization scenarios in F17.
+
+---
+
+## Change Tracking Table (v5 → v5.2)
+
+| v5 ID | v5.2 ID | Status | Notes |
 |---|---|---|---|
-| F14.4 | F14.4a, F14.4b | **split** | 검증 통과 초안 적용(기능) vs 적용 이력 기록(audit) |
-| F15.11 | F15.11a, F15.11b, F15.11c | **split (3-way)** | 외부 거부(보안) vs 내부 정상 동작(기능) vs 분리 동작 검증(불변) |
-| F17.9 | F17.9a, F17.9b, F17.9c | **split (3-way)** | 새 식별자 발급(기능) vs 옛 작업 인계(기능) vs 동일 식별자 동시 사용 방지(불변) |
-| F13.10 | F13.10 | vocab-fix | `upstream 라우팅` → `위로 라우팅` |
-| F18 description | F18 description | vocab-fix | `upstream의 이름이` → `위로의 이름이` |
-| F18.12 (F23-merged) | F18.12 (F23-merged) | vocab-fix | scenario title + Given/When/Then 4회 `upstream` → `위로` |
-| F18.13 (F23-merged) | F18.13 (F23-merged) | vocab-fix | scenario title + Given/Then 3회 `upstream` → `위로` |
-| F18.14 (F23-merged) | F18.14 (F23-merged) | vocab-fix | scenario title + Given/When/Then 5회 `upstream` → `위로` |
-| F18.15 (F23-merged) | F18.15 (F23-merged) | vocab-fix | scenario title + Given/Then 3회 `upstream` → `위로` |
-| F20.12 | F20.12 | vocab-fix | Given의 `upstream` 1회 → `위로` |
-| F20.16 | F20.16 | vocab-fix | Given/Then/And 5회 `upstream` → `위로` |
-| Open Questions | Open Questions | vocab-fix | `upstream 이름 보존` → `위로 이름 보존`, +2 신규 항목(6, 7) |
+| F14.4 | F14.4a, F14.4b | **split** | applying a validated draft (functional) vs recording apply history (audit) |
+| F15.11 | F15.11a, F15.11b, F15.11c | **split (3-way)** | external rejection (security) vs internal normal operation (functional) vs verifying separation (invariant) |
+| F17.9 | F17.9a, F17.9b, F17.9c | **split (3-way)** | issuing a new identifier (functional) vs handing over old tasks (functional) vs preventing simultaneous use of the same identifier (invariant) |
+| F13.10 | F13.10 | vocab-fix | `upstream routing` — vocabulary unified across W4 |
+| F18 description | F18 description | vocab-fix | `upstream name changed` — vocabulary unified across W4 |
+| F18.12 (F23-merged) | F18.12 (F23-merged) | vocab-fix | scenario title + Given/When/Then 4 occurrences: `upstream` unified across W4 |
+| F18.13 (F23-merged) | F18.13 (F23-merged) | vocab-fix | scenario title + Given/Then 3 occurrences: `upstream` unified across W4 |
+| F18.14 (F23-merged) | F18.14 (F23-merged) | vocab-fix | scenario title + Given/When/Then 5 occurrences: `upstream` unified across W4 |
+| F18.15 (F23-merged) | F18.15 (F23-merged) | vocab-fix | scenario title + Given/Then 3 occurrences: `upstream` unified across W4 |
+| F20.12 | F20.12 | vocab-fix | 1 occurrence of `upstream` in Given — unified across W4 |
+| F20.16 | F20.16 | vocab-fix | 5 occurrences in Given/Then/And: `upstream` unified across W4 |
+| Open Questions | Open Questions | vocab-fix | `upstream name preservation` unified across W4, +2 new items (6, 7) |
 
-**최종 분포 (v5.2)**: F13(12) + F14(14) + F15(14) + F17(18) + F18(15) + F20(13) + F24(8) = **94 시나리오 / 7 features**
+**Final distribution (v5.2)**: F13(12) + F14(14) + F15(14) + F17(18) + F18(15) + F20(13) + F24(8) = **94 scenarios / 7 features**
 
 **Split count (v5 → v5.2)**: 3 (F14.4, F15.11, F17.9)
-**Cumulative split count (v4 → v5.2)**: 11 (v5 8건 + v5.2 3건)
-**Cross-file vocab fixes**: 1 (`upstream` → `위로`, 총 23 치환)
+**Cumulative split count (v4 → v5.2)**: 11 (v5: 8 + v5.2: 3)
+**Cross-file vocab fixes**: 1 (`upstream` unified across W4, total 23 substitutions)
 **Cumulative scenario count**: v4 81 → v5 89 (+8) → v5.2 94 (+5)
 
 ---
 
-## 변경 추적표 (v4 → v5) — 기록 보존
+## Change Tracking Table (v4 → v5) — record preserved
 
-| v4 ID | v5 ID | 상태 | 비고 |
+| v4 ID | v5 ID | Status | Notes |
 |---|---|---|---|
 | F13.1 | F13.1 | keep | — |
-| F13.2 | F13.2 | jargon-rewrite | access_token/refresh_token/API 키 → "토큰" |
-| F13.3 | F13.3 | keep | "admin 토큰" → "관리자 토큰" |
+| F13.2 | F13.2 | jargon-rewrite | access_token/refresh_token/API key → "token" |
+| F13.3 | F13.3 | keep | "admin token" → "admin token" |
 | F13.4 | F13.4 | keep | — |
 | F13.5 | F13.5 | keep | — |
 | F13.6 | F13.6 | keep | — |
@@ -754,48 +754,48 @@ Dana는 cc-lb가 가진 모든 비밀 정보(자격증명, 토큰)가 디스크�
 | F13.8 | F13.8 | keep | — |
 | F13.9 | F13.9 | keep | — |
 | F13.10 | F13.10 | keep | — |
-| F13.11 | F13.11a, F13.11b | **split** | 호출 줄 표시(기능) vs 분기 합산(메트릭) |
+| F13.11 | F13.11a, F13.11b | **split** | showing call lines (functional) vs quarterly aggregation (metrics) |
 | F14.1–F14.13 | F14.1–F14.13 | keep | — |
-| F15.1 | F15.1 | jargon-rewrite | replica → 복제 노드, readyz → 준비 신호 |
-| F15.2 | F15.2 | jargon-rewrite | replica → 복제 노드 |
-| F15.3 | F15.3 | jargon-rewrite | replica → 복제 노드 |
-| F15.4 | F15.4 | jargon-rewrite | replica → 복제 노드 |
-| F15.5 | F15.5a, F15.5b | **split** | 인증서 거부(기능) vs 거부 사유 안내(메트릭) |
+| F15.1 | F15.1 | jargon-rewrite | replica → replica, readyz → readyz |
+| F15.2 | F15.2 | jargon-rewrite | replica → replica |
+| F15.3 | F15.3 | jargon-rewrite | replica → replica |
+| F15.4 | F15.4 | jargon-rewrite | replica → replica |
+| F15.5 | F15.5a, F15.5b | **split** | certificate rejection (functional) vs rejection reason indication (metrics) |
 | F15.6 | F15.6 | keep | — |
-| F15.7 | F15.7 | jargon-rewrite | replica → 복제 노드 |
-| F15.8 | F15.8 | jargon-rewrite | replica → 복제 노드, readyz → 준비 신호 |
-| F15.9 | F15.9 | jargon-rewrite | replica → 복제 노드 |
+| F15.7 | F15.7 | jargon-rewrite | replica → replica |
+| F15.8 | F15.8 | jargon-rewrite | replica → replica, readyz → readyz |
+| F15.9 | F15.9 | jargon-rewrite | replica → replica |
 | F15.10 | F15.10 | keep | — |
-| F15.11 | F15.11 | jargon-rewrite | replica → 복제 노드 |
-| F17.1 | F17.1 | jargon-rewrite | replica → 복제 노드 |
-| F17.2 | F17.2 | jargon-rewrite | replica → 복제 노드 |
-| F17.3 | F17.3 | jargon-rewrite | replica → 복제 노드 |
-| F17.4 | F17.4 | jargon-rewrite | replica → 복제 노드 |
-| F17.5 | F17.5 | persona | Eve → 두 번째 운영자 |
-| F17.6 | F17.6a, F17.6b | **split** | split-brain 해소(기능) vs 자기 점검 기록(audit + 메트릭) |
-| F17.7 | F17.7 | jargon-rewrite | replica → 복제 노드 |
-| F17.8 | F17.8 | jargon-rewrite | replica → 복제 노드 |
-| F17.9 | F17.9 | jargon-rewrite | SQLite/Postgres → 저장 백엔드 |
-| F17.10 | F17.10 | jargon-rewrite | SQLite/Postgres → 저장 백엔드 |
-| F17.11 | F17.11 | jargon-rewrite | SQLite/Postgres → 저장 백엔드 |
-| F17.12 | F17.12, F17.13 | **split** | 감사 줄 개수·종류(메트릭) vs 비밀 평문 없음(audit redaction) |
-| F17.13 | F17.14 | jargon-rewrite | renumber + 다운그레이드 거부 |
-| F17.14 | F17.15 | jargon-rewrite + persona | SQLite/Postgres → 저장 백엔드, Eve → 두 번째 운영자 |
+| F15.11 | F15.11 | jargon-rewrite | replica → replica |
+| F17.1 | F17.1 | jargon-rewrite | replica → replica |
+| F17.2 | F17.2 | jargon-rewrite | replica → replica |
+| F17.3 | F17.3 | jargon-rewrite | replica → replica |
+| F17.4 | F17.4 | jargon-rewrite | replica → replica |
+| F17.5 | F17.5 | persona | Eve → "a second operator" |
+| F17.6 | F17.6a, F17.6b | **split** | resolving split-brain (functional) vs recording self-check (audit + metrics) |
+| F17.7 | F17.7 | jargon-rewrite | replica → replica |
+| F17.8 | F17.8 | jargon-rewrite | replica → replica |
+| F17.9 | F17.9 | jargon-rewrite | SQLite/Postgres → storage backend |
+| F17.10 | F17.10 | jargon-rewrite | SQLite/Postgres → storage backend |
+| F17.11 | F17.11 | jargon-rewrite | SQLite/Postgres → storage backend |
+| F17.12 | F17.12, F17.13 | **split** | audit line count and kind (metrics) vs no secret plaintext (audit redaction) |
+| F17.13 | F17.14 | jargon-rewrite | renumber + downgrade rejection |
+| F17.14 | F17.15 | jargon-rewrite + persona | SQLite/Postgres → storage backend, Eve → "a second operator" |
 | — | F17.16 | (none new) | — |
 | F18.1–F18.5 | F18.1–F18.5 | keep | — |
-| F18.6 | F18.6a, F18.6b | **split** | 가격 이력 시간순(기능) vs 호출 비용 정합(메트릭) |
-| F18.7 | F18.7a, F18.7b | **split** | 캐시 단가 분리(기능) vs 분기 합산 일치(메트릭) |
-| F18.8 | F18.8a, F18.8b | **split** | 추정 표시(기능) vs 추정 사유 기록·별도 조회(audit + 메트릭) |
-| F18.9–F18.12 | F18.12–F18.15 | renumber | F23-merged 그대로 |
-| F20.1 | F20.1 | crypto-rewrite | "알려진 자리 패턴" 어휘 통일 |
+| F18.6 | F18.6a, F18.6b | **split** | price history chronological (functional) vs call cost match (metrics) |
+| F18.7 | F18.7a, F18.7b | **split** | cache unit price separation (functional) vs quarterly aggregation match (metrics) |
+| F18.8 | F18.8a, F18.8b | **split** | estimated indicator (functional) vs estimation reason record and separate query (audit + metrics) |
+| F18.9–F18.12 | F18.12–F18.15 | renumber | F23-merged as-is |
+| F20.1 | F20.1 | crypto-rewrite | unified "known positional pattern" vocabulary |
 | F20.2–F20.3 | F20.2–F20.3 | keep | — |
-| F20.4 | F20.4a, F20.4b | **split** | 부팅 거부(기능) vs 평문 한 번도 안 읽힘(메트릭) |
+| F20.4 | F20.4a, F20.4b | **split** | boot rejection (functional) vs plaintext never read (metrics) |
 | F20.5–F20.6 | F20.6–F20.7 | keep+renumber | — |
-| F20.7 | F20.8 | crypto-rewrite | "알려진 비밀 모양" → "비밀이 알려진 자리 패턴을 따른다" |
+| F20.7 | F20.8 | crypto-rewrite | "known secret shape" → "secrets follow a known positional pattern" |
 | F20.8 | F20.9 | keep+renumber | — |
 | F20.9 | F20.10 | keep+renumber | — |
 | F20.10 | F20.11 | keep+renumber | — |
-| F20.11 | F20.12 | crypto-rewrite | 응답 헤더 — "비밀이 알려진 자리 패턴을 따른다"로 통일 |
+| F20.11 | F20.12 | crypto-rewrite | response headers — unified to "secrets follow a known positional pattern" |
 | F20.12 | F20.13 | keep+renumber | — |
 | F24.1–F24.8 | F24.1–F24.8 | keep | — |
 

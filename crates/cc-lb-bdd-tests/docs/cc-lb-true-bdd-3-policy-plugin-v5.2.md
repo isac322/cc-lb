@@ -1,517 +1,517 @@
-# cc-lb True BDD v5.2 — Part 3: Policy & Plugin
+# cc-lb True BDD v5.2: Part 3: Policy & Plugin
 
-- 작성일: 2026-06-18
-- 범위: 6 features / 63 scenarios
-- 출처: `cc-lb-true-bdd-3-policy-plugin-v5.md` (62), `cc-lb-bdd-final-report-v5.md` §3 sample table, `cc-lb-bdd-verify-C-scenario-quality.md` (검증 C 결과), `bdd-research.md` §A–§H, `cc-lb-bdd-v3-final-consensus.md`
-- v5 대비 변경(Changelog)
-  - F29.3 한 시나리오가 (1) 외부 연결 끊김 시 대체 동작과 (2) 그 대체 동작에 대한 감사 식별자라는 두 비즈니스 규칙을 한꺼번에 다루던 멀티룰 패턴을 F29.3a / F29.3b 두 개의 독립 시나리오로 분리했다 (final report §3 sample table fix와 정렬).
-  - 그 외 61개 시나리오의 비즈니스 규칙·본문·어휘는 v5에서 변경되지 않는다.
-- v4 대비 변경(누적 Changelog)
-  - F12.10 한 시나리오가 준비·적용·정리 세 비즈니스 규칙을 한꺼번에 다루던 멀티룰 패턴을 F12.10a / F12.10b / F12.10c 세 개의 독립 시나리오로 분리했다 (검증 C §5 1순위 fix와 정렬).
-  - 어휘 치환을 다음과 같이 일괄 적용했다 — `체인`(plugin chain)→`플러그인 줄`, `격벽`→`기능별 칸막이`, `endpoint`/`종단점`→`화면`.
-  - `보관소`는 비즈니스 용어로 받아들이고 그대로 둔다 (검증 C §2 S18에서 borderline로만 표기됨).
-  - F9·F21·F25·F27·F29의 시나리오 본문에는 비즈니스 규칙 변경이 없다. 머리말과 본문의 어휘만 정합화했다.
-- 적용 규칙
-  - 페르소나는 Alice(운영자) / Bob(개발자 + 플러그인 작성자) / Charlie(SRE) / Dana(감사관) 4명만 등장한다.
-  - 한 시나리오는 한 비즈니스 규칙만 다룬다. 성공·실패가 한 시나리오에 섞이지 않는다.
-  - HTTP status, AEAD 알고리즘 이름, schema constant, hook 메서드 이름, SQL 표현은 시나리오에 등장하지 않는다.
-  - 어휘 치환은 본문 머리말의 매핑을 따른다 (plugin filter chain → "운영자가 정의한 라우팅·응답 가공 규칙 묶음" 등).
-
----
-
-## Feature: F9 — 팀에 부착되는 라우팅 정책과 규칙 묶음
-
-페르소나: Alice (운영자), Charlie (SRE)
-도메인 가치: 운영자가 팀별로 어떤 호출이 어떤 모델·플러그인으로 흐를지 한 곳에서 정한다.
-
-### Scenario: F9.1 팀에 정책을 부착하면 다음 호출부터 즉시 적용된다
-
-- Given Alice가 한 팀에 "운영자가 정의한 라우팅·응답 가공 규칙 묶음" 하나를 부착했다
-- When 그 팀의 Bob이 다음 호출을 보낸다
-- Then 그 호출은 부착된 규칙 묶음대로 라우팅되고 응답이 가공된다
-- And 부착 사실이 감사 기록에 한 줄로 남는다
-
-### Scenario: F9.2 정책을 떼면 그 후 호출에만 영향이 간다
-
-- Given 한 팀에 라우팅·응답 가공 규칙 묶음이 부착되어 있다
-- And 그 팀의 호출 하나가 이미 진행 중이다
-- When Alice가 그 팀에서 규칙 묶음을 뗀다
-- Then 진행 중이던 호출은 부착되어 있던 규칙대로 끝까지 처리된다
-- And 그 후 새 호출부터는 기본 규칙으로 흐른다
-
-### Scenario: F9.3 형식이 잘못된 정책은 저장 단계에서 거부된다
-
-- Given Alice가 라우팅·응답 가공 규칙 묶음의 초안을 만들었다
-- And 그 초안은 cc-lb이 이해할 수 없는 모양으로 망가져 있다
-- When Alice가 초안을 저장하려 한다
-- Then 저장이 거부되고 어디가 문제인지 운영 화면에 안내된다
-- And 어느 팀에도 부착되지 않는다
-
-### Scenario: F9.4 정책 변경은 cc-lb 재시작 없이 다음 호출에 반영된다
-
-- Given 한 팀에 부착된 라우팅·응답 가공 규칙 묶음이 있다
-- When Alice가 그 규칙 묶음의 내용을 바꿔 적용한다
-- Then cc-lb을 다시 시작하지 않아도 다음 호출부터 새 규칙이 쓰인다
-- And 변경 사실이 감사 기록에 시간순으로 남는다
-
-### Scenario: F9.5 한 팀의 정책 변경은 다른 팀의 호출에 영향을 주지 않는다
-
-- Given 두 팀에 각각 다른 라우팅·응답 가공 규칙 묶음이 부착되어 있다
-- When Alice가 한쪽 팀의 규칙 묶음만 바꾼다
-- Then 바꾼 팀의 다음 호출은 새 규칙대로 흐른다
-- And 다른 팀의 호출은 원래대로 흐른다
-
-### Scenario: F9.6 전역 규칙이 먼저, 팀 규칙이 나중에 적용된다
-
-- Given Alice가 모든 팀에 공통으로 적용되는 전역 규칙 묶음을 둔다
-- And 그중 한 팀에 그 팀만의 규칙 묶음을 추가로 부착한다
-- When 그 팀의 호출이 들어온다
-- Then 호출은 전역 규칙을 먼저 통과한 다음 팀 규칙을 통과한다
-- And 같은 종류의 결정이 둘에 있으면 팀 규칙이 마지막 결정이 된다
-
-### Scenario: F9.8 운영자는 정책을 부착하기 전 미리 흐름을 검증할 수 있다
-
-- Given Alice가 새 라우팅·응답 가공 규칙 묶음 초안을 가지고 있다
-- And 부착하지는 않은 상태다
-- When Alice가 그 초안을 가지고 한 팀의 최근 호출 샘플로 검증을 돌린다
-- Then 운영 화면에 그 호출들이 새 규칙으로 어떻게 라우팅·가공되었을지 결과가 보인다
-- And 실제 호출 흐름과 감사 기록에는 어떤 영향도 가지 않는다
+- Date: 2026-06-18
+- Scope: 6 features / 63 scenarios
+- Source: `cc-lb-true-bdd-3-policy-plugin-v5.md` (62), `cc-lb-bdd-final-report-v5.md` §3 sample table, `cc-lb-bdd-verify-C-scenario-quality.md` (Verification C results), `bdd-research.md` §A to §H, `cc-lb-bdd-v3-final-consensus.md`
+- Changes from v5 (Changelog)
+  - Split the multi-rule pattern in scenario F29.3, which previously handled two business rules at once, (1) fallback behavior on external connection loss and (2) the audit identifier for that fallback behavior, into two independent scenarios F29.3a and F29.3b. This aligns with the final report §3 sample table fix.
+  - The business rules, text, and vocabulary of the other 61 scenarios remain unchanged from v5.
+- Changes from v4 (Cumulative Changelog)
+  - Split the multi-rule pattern in scenario F12.10, which previously handled three business rules at once, preparation, application, and cleanup, into three independent scenarios F12.10a, F12.10b, and F12.10c. This aligns with the Verification C §5 priority 1 fix.
+  - Applied vocabulary replacements as follows: `chain` (plugin chain) to `plugin queue`, `bulkhead` to `functional partition`, `endpoint` or `terminal` to `screen`.
+  - `repository` is accepted as a business term and kept as is, which was marked only as borderline in Verification C §2 S18.
+  - There are no business rule changes in the scenario bodies of F9, F21, F25, F27, and F29. Only the vocabulary in the headers and bodies has been aligned.
+- Rules of Application
+  - Only four personas appear: Alice (operator), Bob (developer and plugin author), Charlie (SRE), and Dana (auditor).
+  - Each scenario covers exactly one business rule. Success and failure cases are not mixed in a single scenario.
+  - HTTP status, AEAD algorithm names, schema constants, hook method names, and SQL expressions do not appear in the scenarios.
+  - Vocabulary replacements follow the mapping in the header, such as plugin filter chain to "routing and response processing rule set defined by the operator".
 
 ---
 
-## Feature: F12 — 플러그인 업로드, 등록, 플러그인 줄 순서
+## Feature: F9: Routing Policies and Rule Sets Attached to Teams
 
-페르소나: Alice (운영자), Bob (플러그인 작성자)
-도메인 가치: 운영자가 정의한 라우팅·응답 가공 규칙 묶음을 안전하게 들이고, 순서를 바꾸고, 안 쓰는 것을 치운다.
+Personas: Alice (operator), Charlie (SRE)
+Domain value: The operator centrally defines how calls route to specific models and plugins for each team.
 
-### Scenario: F12.1 같은 인장의 플러그인을 두 번 올리면 두 번째는 거부된다
+### Scenario: F9.1 Attaching a policy to a team applies it immediately to subsequent calls
 
-- Given Alice가 어떤 플러그인 파일을 cc-lb에 올려 둔 상태다
-- When Alice가 같은 내용의 파일을 다시 올린다
-- Then 두 번째 업로드는 이미 올라간 것과 같다는 안내와 함께 거부된다
-- And 저장된 플러그인은 한 벌만 남는다
+- Given Alice attached a routing and response processing rule set to a team
+- When Bob from that team sends the next call
+- Then the call routes and the response is processed according to the attached rule set
+- And the attachment is recorded as a single line in the audit log
 
-### Scenario: F12.2 플러그인은 라벨과 버전으로 구분되어 관리된다
+### Scenario: F9.2 Detaching a policy only affects subsequent calls
 
-- Given Alice가 같은 라벨의 플러그인을 두 개의 버전으로 올린다
-- When Alice가 그중 한 버전을 골라 팀의 규칙 묶음에 부착한다
-- Then 부착된 버전만 그 팀의 호출에서 쓰인다
-- And 다른 버전은 보관소에 그대로 남아 있다
+- Given a routing and response processing rule set is attached to a team
+- And a call from that team is already in progress
+- When Alice detaches the rule set from that team
+- Then the in-progress call is processed to completion using the previously attached rules
+- And subsequent new calls route using the default rules
 
-### Scenario: F12.3 운영자가 플러그인 줄의 순서를 바꾸면 다음 호출부터 새 순서로 동작한다
+### Scenario: F9.3 Malformed policies are rejected during the save phase
 
-- Given 한 팀의 규칙 묶음에 여러 플러그인이 순서대로 부착되어 있다
-- When Alice가 그 순서를 다른 순서로 바꾸어 적용한다
-- Then 다음 호출부터 새 순서대로 플러그인이 동작한다
-- And 진행 중이던 호출은 이전 순서대로 끝까지 처리된다
+- Given Alice created a draft routing and response processing rule set
+- And the draft is malformed in a shape that cc-lb cannot understand
+- When Alice attempts to save the draft
+- Then the save is rejected and the issue is displayed on the operator screen
+- And it is not attached to any team
 
-### Scenario: F12.4 어디선가 쓰이는 플러그인은 삭제할 수 없다
+### Scenario: F9.4 Policy changes apply to subsequent calls without restarting cc-lb
 
-- Given Bob이 올린 플러그인이 한 팀의 규칙 묶음에 부착되어 있다
-- When Alice가 그 플러그인을 보관소에서 지우려 한다
-- Then 삭제가 거부되고 어느 팀에서 쓰이는지 안내된다
-- And 모든 부착을 먼저 떼야 지울 수 있다는 안내가 함께 나간다
+- Given a routing and response processing rule set is attached to a team
+- When Alice modifies and applies the rule set
+- Then the new rules apply to subsequent calls without restarting cc-lb
+- And the change is recorded chronologically in the audit log
 
-### Scenario: F12.5 한 플러그인 줄에 넣을 수 있는 플러그인 수를 넘기면 거부된다
+### Scenario: F9.5 Policy changes for one team do not affect calls from other teams
 
-- Given 한 팀의 규칙 묶음이 cc-lb이 정한 최대치만큼 플러그인을 이미 가지고 있다
-- When Alice가 그 묶음에 플러그인 하나를 더 부착하려 한다
-- Then 부착이 거부되고 정원 초과라는 안내가 나간다
-- And 기존 부착은 그대로 유지된다
+- Given different routing and response processing rule sets are attached to two teams
+- When Alice modifies the rule set of only one team
+- Then subsequent calls from the modified team route according to the new rules
+- And calls from the other team route as originally configured
 
-### Scenario: F12.6 한 분에 올릴 수 있는 플러그인 수는 정해져 있다
+### Scenario: F9.6 Global rules apply first, followed by team rules
 
-- Given Alice가 짧은 시간 안에 여러 개의 플러그인을 연달아 올리고 있다
-- When 한 분 동안 올린 수가 정해진 상한을 넘어선다
-- Then 그 분 안의 추가 업로드는 잠시 후 다시 시도하라는 안내와 함께 거부된다
-- And 다음 분이 되면 다시 올릴 수 있게 된다
+- Given Alice configures a global rule set that applies to all teams
+- And attaches an additional team-specific rule set to one of the teams
+- When a call from that team arrives
+- Then the call passes through the global rules first and then the team rules
+- And if there are conflicting decisions of the same type, the team rule takes precedence as the final decision
 
-### Scenario: F12.7 현재 cc-lb은 응답을 다듬는 슬롯의 플러그인만 받는다
+### Scenario: F9.8 Operators can validate the flow before attaching a policy
 
-- Given Bob이 응답을 다듬는 슬롯, 필터 슬롯, 관찰 슬롯 중 어느 하나에 끼울 플러그인을 만들었다
-- When Bob이 응답을 다듬는 슬롯이 아닌 종류의 플러그인을 올린다
-- Then 등록이 거부되고 이 cc-lb이 지금 받는 슬롯 종류가 무엇인지 안내된다
-- And 응답을 다듬는 슬롯의 플러그인은 그대로 받아진다
-
-### Scenario: F12.8 인장이 검증되지 않는 플러그인은 등록 단계에서 거부된다
-
-- Given Alice가 외부에서 받은 플러그인 파일을 올리려 한다
-- And 그 파일에 붙은 인장이 cc-lb이 신뢰하는 발행자에서 나온 것이 아니다
-- When Alice가 그 파일을 올린다
-- Then 등록이 거부되고 인장 검증이 실패했음이 운영 화면에 안내된다
-- And 그 플러그인은 어떤 팀의 규칙 묶음에도 부착될 수 없는 상태로 남는다
-
-### Scenario: F12.9 한 플러그인이 자기 한도 안에서 자원을 다 써도 다른 플러그인은 영향을 받지 않는다
-
-- Given 한 팀의 규칙 묶음에 여러 플러그인이 부착되어 있다
-- And 그중 한 플러그인이 cc-lb이 정한 자기 자원 한도까지 차오른다
-- When 같은 호출 안의 다른 플러그인들이 자기 일을 한다
-- Then 한도까지 차오른 플러그인은 그 호출에서 안전하게 멈춰진다
-- And 다른 플러그인들의 동작과 자원 셈은 영향을 받지 않는다
-
-### Scenario: F12.10a 플러그인 줄 변경의 준비 단계에서는 옛 묶음이 그대로 쓰인다 (v5 분리)
-
-- Given Alice가 한 팀의 규칙 묶음에 여러 플러그인을 한꺼번에 바꿔 부착하는 변경을 시작했다
-- When cc-lb이 새 부착을 적용 전 준비 단계로 들여 둔다
-- Then 그 팀의 진행 중인 호출과 새로 들어오는 호출은 여전히 옛 묶음으로 처리된다
-- And 준비 단계가 시작되었다는 사실이 감사 기록에 한 줄로 남는다
-
-### Scenario: F12.10b 적용 시점에 새 묶음으로 한꺼번에 바뀐다 (v5 분리)
-
-- Given Alice의 플러그인 줄 변경이 준비 단계를 통과했다
-- When Alice가 적용을 누른다
-- Then 그 시점 이후의 새 호출은 모두 같은 새 묶음으로 처리된다
-- And 적용 시점이 감사 기록에 한 줄로 남는다
-
-### Scenario: F12.10c 적용이 끝나면 더 이상 쓰이지 않는 옛 부착이 보관소에서 정리된다 (v5 분리)
-
-- Given Alice의 플러그인 줄 변경이 적용을 마쳤다
-- And 옛 묶음으로 진행되던 호출은 모두 끝났다
-- When cc-lb이 정리 단계에 들어간다
-- Then 더 이상 어떤 팀의 호출에도 쓰이지 않는 옛 부착이 보관소에서 치워진다
-- And 정리된 항목 목록이 감사 기록에 한 줄로 남는다
-
-### Scenario: F12.11 운영자는 새 플러그인을 플러그인 줄 안에서 위치를 지정해 끼울 수 있다
-
-- Given 한 팀의 규칙 묶음에 여러 플러그인이 이미 순서대로 부착되어 있다
-- When Alice가 새 플러그인을 그 묶음 안에 기존 플러그인 이름 기준 앞 또는 뒤로 위치를 지정해 끼운다
-- Then 새 플러그인이 지정된 자리에 들어가고, 다른 플러그인들의 순서는 변하지 않는다
-- And 끼운 사실이 어디에 어떻게 끼웠는지와 함께 감사 기록에 남는다
-
-### Scenario: F12.12 적용 전 사전 점검에서 슬롯 종류가 안 맞으면 변경이 거부된다
-
-- Given Alice가 플러그인 줄 변경 초안을 만들었다
-- And 그 초안에는 cc-lb이 지금 받지 않는 슬롯 종류의 플러그인이 포함되어 있다
-- When Alice가 적용 전에 사전 점검을 돌린다
-- Then 점검 결과로 슬롯 종류가 맞지 않는 부분이 어디인지 안내된다
-- And 그 초안은 적용 단계로 넘어가지 못한다
-
-### Scenario: F12.13 어디에도 부착되지 않은 플러그인 줄 항목은 별도 목록으로 보인다
-
-- Given 운영 화면에 플러그인 줄 변경 이력이 있다
-- And 그중 어디에도 더는 부착되지 않은 항목이 남아 있다
-- When Alice가 보관소를 본다
-- Then 어디에도 부착되지 않은 항목들이 별도 목록으로 모여서 보인다
-- And 그 목록의 항목을 골라 한 번에 보관소에서 치울 수 있다
-
-### Scenario: F12.14 운영자는 플러그인 줄 안의 항목을 한 번에 다시 정렬할 수 있다
-
-- Given 한 팀의 규칙 묶음에 여러 플러그인이 순서대로 부착되어 있다
-- When Alice가 새 순서를 한 번에 지정해서 적용한다
-- Then 다음 호출부터 새 순서로 플러그인이 동작한다
-- And 한 번에 다시 정렬된 사실이 어떤 옛 순서가 어떤 새 순서로 바뀌었는지 함께 감사 기록에 남는다
-
-### Scenario: F12.15 정원이 하나로 정해진 슬롯에는 두 번째 부착이 거부된다
-
-- Given 한 팀의 규칙 묶음에 정원이 하나로 정해진 슬롯의 플러그인이 이미 부착되어 있다
-- When Alice가 같은 슬롯에 다른 플러그인을 하나 더 부착하려 한다
-- Then 부착이 거부되고 그 슬롯은 한 자리만 가질 수 있다는 안내가 나간다
-- And 기존 부착은 그대로 유지된다
+- Given Alice has a draft of a new routing and response processing rule set
+- And it is not yet attached
+- When Alice runs a validation using the draft against recent call samples from a team
+- Then the operator screen displays how those calls would have been routed and processed under the new rules
+- And the actual call flow and audit logs remain unaffected
 
 ---
 
-## Feature: F21 — 라이프사이클 사건마다 관찰성 기록이 작동한다
+## Feature: F12: Plugin Upload, Registration, and Plugin Queue Ordering
 
-페르소나: Charlie (SRE), Dana (감사관)
-도메인 가치: 한 호출의 처음·중간·끝, 그리고 인증·드롭 같은 사건이 운영 대시보드와 감사 기록에서 같은 사실로 보인다.
+Personas: Alice (operator), Bob (plugin author)
+Domain value: The operator safely imports, reorders, and removes unused routing and response processing rule sets.
 
-### Scenario: F21.1 호출 한 건이 누구의 어떤 모델 호출인지 별도로 셈해진다
+### Scenario: F12.1 Uploading a plugin with the same signature twice rejects the second upload
 
-- Given Charlie가 운영 대시보드에서 누가 어떤 모델을 얼마나 썼는지를 본다
-- When 한 팀의 한 키가 한 모델을 한 번 부른다
-- Then 그 팀·그 키·그 모델에 해당하는 셈이 한 번 늘어난다
-- And 다른 팀·다른 모델의 셈은 그대로 있다
+- Given Alice has already uploaded a plugin file to cc-lb
+- When Alice uploads the same file again
+- Then the second upload is rejected with a message stating it is identical to the existing one
+- And only a single copy of the plugin is retained
 
-### Scenario: F21.2 한 호출이 시작과 끝, 또는 오류로 끝났음이 한 번씩 기록된다
+### Scenario: F12.2 Plugins are managed and distinguished by label and version
 
-- Given 한 호출이 cc-lb에 들어온다
-- When 그 호출이 정상으로 끝나거나 오류로 끝난다
-- Then 시작 사건이 한 번, 종료 또는 오류 사건이 한 번 관찰 기록에 남는다
-- And 같은 호출에 대해 종료와 오류 사건이 동시에 두 번 남지 않는다
+- Given Alice uploads two versions of a plugin with the same label
+- When Alice selects one of the versions and attaches it to a team rule set
+- Then only the attached version is used in calls for that team
+- And the other version remains in the repository
 
-### Scenario: F21.3 스트리밍 응답의 부분 전송 횟수가 운영 대시보드에 모인다
+### Scenario: F12.3 Reordering the plugin queue applies the new order to subsequent calls
 
-- Given Bob이 스트리밍으로 응답을 받는 호출을 한다
-- When 응답이 여러 부분으로 나뉘어 차례로 전달된다
-- Then 그 호출에 대해 전달된 부분 수가 운영 대시보드에 모인다
-- And 끊기거나 중단된 사건은 전달 수와 분리되어 따로 보인다
+- Given multiple plugins are attached in order to a team rule set
+- When Alice changes and applies a different order
+- Then the plugins operate in the new order starting from the next call
+- And in-progress calls are processed to completion using the previous order
 
-### Scenario: F21.4 인증 실패는 사유 종류별로 셈해진다
+### Scenario: F12.4 Plugins currently in use cannot be deleted
 
-- Given Dana가 분 단위로 인증 실패를 본다
-- When 잘못된 키, 만료된 자격증명, 자격 없음 같은 서로 다른 사유로 실패가 일어난다
-- Then 각 사유에 해당하는 셈이 따로 늘어난다
-- And 같은 사유끼리는 같은 줄에 모여서 보인다
+- Given a plugin uploaded by Bob is attached to a team rule set
+- When Alice attempts to delete the plugin from the repository
+- Then the deletion is rejected and the screen displays which team is using it
+- And a message is displayed stating that all attachments must be detached first
 
-### Scenario: F21.5 백프레셔로 호출이 떨궈지면 그 사실이 운영 대시보드에 남는다
+### Scenario: F12.5 Exceeding the maximum number of plugins in a plugin queue is rejected
 
-- Given cc-lb이 정해진 처리 한계에 가까워졌다
-- When 들어오는 호출 중 일부가 큐가 차서 떨궈진다
-- Then 떨궈진 호출 수가 운영 대시보드에 늘어난다
-- And 떨궈지지 않고 처리된 호출의 셈은 영향을 받지 않는다
+- Given a team rule set already has the maximum number of plugins allowed by cc-lb
+- When Alice attempts to attach one more plugin to the rule set
+- Then the attachment is rejected with a message stating the limit is exceeded
+- And the existing attachments remain unchanged
 
-### Scenario: F21.7 응답을 받은 사람도 그 호출의 식별자를 본다
+### Scenario: F12.6 The number of plugins that can be uploaded per minute is limited
 
-- Given Bob이 cc-lb을 통해 한 호출을 보낸다
-- When 응답이 Bob에게 돌아온다
-- Then Bob은 응답에서 그 호출의 식별자를 확인할 수 있다
-- And 그 식별자는 같은 호출에 대해 운영 로그가 가진 식별자와 같다
+- Given Alice is uploading multiple plugins in rapid succession
+- When the number of uploads within a single minute exceeds the limit
+- Then further uploads within that minute are rejected with a message to try again later
+- And uploads are allowed again when the next minute begins
 
-### Scenario: F21.8 운영자가 정한 외부 관찰 도구로 같은 사건이 전송된다
+### Scenario: F12.7 Currently cc-lb only accepts plugins for response shaping slots
 
-- Given Charlie가 외부 관찰 도구를 cc-lb에 연결해 두었다
-- When cc-lb 안에서 한 호출의 사건이 일어난다
-- Then 같은 사건이 외부 관찰 도구에도 도착한다
-- And 운영 대시보드와 외부 도구의 셈이 일정 시간 안에 일치한다
+- Given Bob created a plugin designed for either a response shaping slot, a filter slot, or an observability slot
+- When Bob uploads a plugin for a slot other than response shaping
+- Then the registration is rejected and the screen displays the slot types currently accepted by cc-lb
+- And plugins for response shaping slots are accepted normally
 
-### Scenario: F21.9 한 호출의 식별자는 감사 기록·운영 로그·외부 추적·응답까지 동일하다
+### Scenario: F12.8 Plugins with unverified signatures are rejected during registration
 
-- Given Dana가 한 호출에 대해 사후 분석을 한다
-- When Dana가 감사 기록, 운영 로그, 외부 추적 도구, 그리고 응답을 함께 본다
-- Then 네 곳 모두에서 그 호출의 식별자가 같은 값으로 보인다
-- And 다른 호출의 식별자와 섞이지 않는다
+- Given Alice attempts to upload a plugin file received from an external source
+- And the signature on the file is not from a publisher trusted by cc-lb
+- When Alice uploads the file
+- Then the registration is rejected and the signature verification failure is displayed on the operator screen
+- And the plugin remains in a state where it cannot be attached to any team rule set
 
-### Scenario: F21.11 한 호출의 단계별 소요 시간이 사용량 보고에 함께 들어간다
+### Scenario: F12.9 A plugin exhausting its resource limit does not affect other plugins
 
-- Given Charlie가 느린 호출의 원인을 찾는다
-- When 한 호출이 끝난다
-- Then 그 호출의 단계별 소요 시간이 사용량 보고에 함께 들어간다
-- And 단계별 합이 그 호출의 전체 소요 시간과 일관된다
+- Given multiple plugins are attached to a team rule set
+- And one of the plugins reaches its resource limit defined by cc-lb
+- When other plugins in the same call perform their tasks
+- Then the plugin that reached its limit is safely stopped for that call
+- And the operations and resource tracking of other plugins remain unaffected
 
-### Scenario: F21.12 외부 관찰 도구로의 사건 전송이 실패해도 호출 처리에는 영향이 없다
+### Scenario: F12.10a The old rule set is used during the preparation phase of a plugin queue change
 
-- Given Charlie가 외부 관찰 도구를 cc-lb에 연결해 두었다
-- When 외부 관찰 도구로의 전송이 잠시 실패한다
-- Then cc-lb의 본 호출 처리는 그 실패와 무관하게 계속된다
-- And 전송이 실패한 사실은 운영 대시보드에 별도로 보인다
+- Given Alice initiated a change to replace multiple attached plugins at once in a team rule set
+- When cc-lb places the new attachments into a preparation phase before application
+- Then in-progress calls and new incoming calls for that team are still processed using the old rule set
+- And the start of the preparation phase is recorded as a single line in the audit log
 
-### Scenario: F21.13 관찰 사건 큐가 차면 떨궈진 묶음이 별도로 보인다
+### Scenario: F12.10b The new rule set is applied all at once at the application point
 
-- Given 관찰 사건이 cc-lb 안에서 모이는 큐가 있다
-- When 그 큐가 가득 차서 일부 사건 묶음이 떨궈진다
-- Then 떨궈진 묶음 수가 운영 대시보드에 별도 줄로 보인다
-- And 떨궈지지 않고 처리된 사건의 셈은 영향을 받지 않는다
+- Given Alice's plugin queue change has passed the preparation phase
+- When Alice triggers the application
+- Then all new calls after that point are processed using the same new rule set
+- And the application point is recorded as a single line in the audit log
 
-### Scenario: F21.14 한 팀의 관찰 사슬이 자원을 다 써도 다른 팀의 관찰 사슬은 영향을 받지 않는다
+### Scenario: F12.10c Unused old attachments are cleaned up from the repository after application
 
-- Given 두 팀에 각각의 관찰 사슬이 부착되어 있다
-- When 한 팀의 관찰 사슬이 자기 자원 한도까지 차오른다
-- Then 그 팀의 관찰 사슬은 그 시점부터 안전하게 멈춰진다
-- And 다른 팀의 관찰 사슬은 영향을 받지 않고 계속 동작한다
+- Given Alice's plugin queue change has been applied
+- And all calls processed under the old rule set have completed
+- When cc-lb enters the cleanup phase
+- Then old attachments no longer used by any team calls are removed from the repository
+- And the list of cleaned items is recorded as a single line in the audit log
 
----
+### Scenario: F12.11 Operators can insert a new plugin at a specified position in the plugin queue
 
-## Feature: F25 — 플러그인 작성자가 안정된 약속을 의지한다
+- Given multiple plugins are already attached in order to a team rule set
+- When Alice inserts a new plugin into the rule set by specifying its position either before or after an existing plugin name
+- Then the new plugin is inserted at the specified position, and the order of other plugins remains unchanged
+- And the insertion is recorded in the audit log along with where and how it was inserted
 
-페르소나: Bob (플러그인 작성자)
-도메인 가치: Bob이 cc-lb의 깊은 내부를 모르고도 자기 플러그인이 안전하게 등록·동작한다고 의지할 수 있다.
+### Scenario: F12.12 Changes are rejected if slot types do not match during pre-application checks
 
-### Scenario: F25.1 cc-lb이 지원하는 플러그인 형식 안에서 만든 플러그인은 받아들여진다
+- Given Alice created a draft of a plugin queue change
+- And the draft includes a plugin for a slot type that cc-lb does not currently accept
+- When Alice runs a pre-check before application
+- Then the check results display where the slot types do not match
+- And the draft cannot proceed to the application phase
 
-- Given Bob이 이 cc-lb이 지원하는 플러그인 형식에 맞춰 플러그인을 만들었다
-- When Bob이 그 플러그인을 cc-lb에 올린다
-- Then 플러그인이 자기 소개를 한 뒤 cc-lb이 능력을 확인하고 등록을 마친다
-- And 다음 호출부터 그 플러그인이 동작한다
+### Scenario: F12.13 Unattached plugin queue items are displayed in a separate list
 
-### Scenario: F25.2 cc-lb이 지원하지 않는 플러그인 형식은 거부된다
+- Given there is a plugin queue change history on the operator screen
+- And some items remain that are no longer attached anywhere
+- When Alice views the repository
+- Then the unattached items are displayed together in a separate list
+- And items from that list can be selected and removed from the repository all at once
 
-- Given Bob이 만든 플러그인이 이 cc-lb이 지원하지 않는 플러그인 형식에 맞춰 있다
-- When Bob이 그 플러그인을 cc-lb에 올린다
-- Then cc-lb이 그 형식을 받지 않는다는 안내와 함께 등록이 거부된다
-- And 어떤 호출에도 그 플러그인은 끼어들지 않는다
+### Scenario: F12.14 Operators can reorder all items in the plugin queue at once
 
-### Scenario: F25.3 같은 내용의 플러그인은 같은 인장을 가진다
+- Given multiple plugins are attached in order to a team rule set
+- When Alice specifies and applies a new order all at once
+- Then the plugins operate in the new order starting from the next call
+- And the reordering is recorded in the audit log along with the mapping from the old order to the new order
 
-- Given Bob이 같은 소스로 두 번 빌드한 두 개의 플러그인 파일을 가지고 있다
-- When Bob이 두 파일의 인장을 비교한다
-- Then 두 인장은 동일하다
-- And cc-lb은 같은 인장의 파일을 같은 플러그인으로 다룬다
+### Scenario: F12.15 Attaching a second plugin to a single-capacity slot is rejected
 
-### Scenario: F25.5 사전 검사를 통과하지 못한 플러그인은 등록 단계에서 막힌다
-
-- Given Bob이 만든 플러그인은 이름 규칙, 자기 점검, 능력 선언 같은 사전 검사를 받아야 한다
-- When 그중 어느 하나라도 사전 검사를 통과하지 못한다
-- Then 등록이 거부되고 어디서 막혔는지 Bob에게 안내된다
-- And 통과 못한 플러그인은 어떤 호출에도 끼어들지 않는다
-
-### Scenario: F25.7 작성자는 함수별로 실패 시 동작을 미리 정해 둘 수 있다
-
-- Given Bob이 자기 플러그인의 각 함수마다 실패 시 동작을 미리 정해 둔다
-- When 그 함수가 호출 중 실패한다
-- Then cc-lb은 Bob이 정해 둔 동작(거부, 조용히 건너뛰기, 기본값 사용, 그대로 통과 중 하나)을 따라간다
-- And 정해지지 않은 함수는 cc-lb의 기본 동작을 따른다
-
-### Scenario: F25.8 cc-lb이 지원하는 플러그인 형식이 여러 세대일 때 가장 잘 맞는 세대로 합의된다
-
-- Given 이 cc-lb이 여러 세대의 플러그인 형식을 동시에 지원한다
-- And Bob의 플러그인은 그중 한 세대 이상에 맞는다
-- When Bob의 플러그인이 자기 소개를 한다
-- Then 양쪽이 함께 동의할 수 있는 가장 새 세대로 합의된다
-- And 어느 세대로 합의되었는지 등록 기록에 남는다
-
-### Scenario: F25.9 작성자는 cc-lb이 제공하는 보조 기능을 통해서만 외부와 통신한다
-
-- Given Bob의 플러그인은 무작위 값, 현재 시각, 짧은 메모리 같은 보조 기능이 필요하다
-- When Bob의 플러그인이 그 기능을 쓴다
-- Then 플러그인은 cc-lb이 노출한 보조 기능을 통해서만 그 값을 받는다
-- And 그 외의 길로는 외부에 닿지 못한다
-
-### Scenario: F25.11 등록된 플러그인은 자기 이름·버전·할 수 있는 일을 운영자에게 보인다
-
-- Given Bob의 플러그인이 등록되어 있다
-- When Alice가 플러그인 목록을 본다
-- Then 그 플러그인의 이름, 버전, 어떤 슬롯에서 무엇을 할 수 있는지가 함께 보인다
-- And 같은 이름의 다른 버전은 같은 줄에 모여서 보인다
-
-### Scenario: F25.12 등록된 플러그인이 많아도 cc-lb 재시작 시 부팅을 지연시키지 않는다
-
-- Given Bob이 만든 여러 개의 플러그인이 이미 등록되어 있다
-- When Charlie가 cc-lb을 재시작한다
-- Then cc-lb은 정해진 시간 안에 들어오는 호출을 다시 받을 준비를 마친다
-- And 어느 한 플러그인의 자기 소개가 다른 플러그인의 자기 소개를 지연시키지 않는다
-
-### Scenario: F25.13 플러그인의 본 단계가 정해진 시간을 넘기면 호출은 대체 동작으로 마무리된다
-
-- Given Bob의 플러그인이 한 팀의 규칙 묶음에 부착되어 있다
-- And 그 플러그인의 본 단계에 정해진 최대 시간이 있다
-- When 한 호출에서 그 본 단계가 정해진 시간을 넘긴다
-- Then cc-lb은 Bob이 그 함수에 미리 정해 둔 대체 동작으로 그 호출을 마무리한다
-- And 그 사건은 운영 로그와 감사 기록에 같은 호출 식별자로 남는다
-
-### Scenario: F25.14 cc-lb 경계에서 비밀은 플러그인에 닿기 전 가려져 전달된다
-
-- Given Bob의 플러그인이 호출 본문과 응답을 보는 슬롯에 부착되어 있다
-- And 그 호출에는 자격증명·토큰 같은 비밀이 포함되어 있다
-- When cc-lb이 그 호출을 플러그인에 넘긴다
-- Then 비밀에 해당하는 자리에는 가려진 자리표시가 들어가서 플러그인에 전달된다
-- And 플러그인이 본문과 응답을 어떻게 가공해도 원래 비밀 값에 닿지 못한다
-
-### Scenario: F25.15 플러그인이 더 낮은 세대로 강제 합의를 요청하면 거부된다
-
-- Given Bob의 플러그인이 자기 소개를 한다
-- And 이 cc-lb이 받는 형식 세대 범위가 정해져 있다
-- When 자기 소개에서 Bob의 플러그인이 그 범위보다 낮은 세대로 합의하자고 요청한다
-- Then cc-lb은 그 요청을 거부하고 받는 세대 범위를 안내한다
-- And 그 플러그인은 등록되지 않은 상태로 남는다
-
-### Scenario: F25.16 능력 선언에서 슬롯이 요구하는 능력이 빠진 플러그인은 거부된다
-
-- Given Bob의 플러그인이 한 슬롯을 겨냥해 능력을 선언한다
-- And 그 슬롯에는 cc-lb이 요구하는 능력 목록이 있다
-- When Bob의 선언에서 그중 하나라도 빠져 있다
-- Then 등록이 거부되고 어떤 능력이 빠졌는지 Bob에게 안내된다
-- And 그 플러그인은 어떤 호출에도 끼어들지 않는다
-
-### Scenario: F25.17 cc-lb이 받는 형식 세대 범위 바깥의 플러그인은 거부된다
-
-- Given Bob의 플러그인이 자기가 따른 형식 세대를 선언한다
-- And 그 세대가 cc-lb이 받는 가장 낮은 세대보다 낮거나 가장 높은 세대보다 높다
-- When Bob이 그 플러그인을 올린다
-- Then 등록이 거부되고 받는 세대 범위가 무엇인지 안내된다
-- And 그 플러그인은 등록되지 않은 상태로 남는다
+- Given a plugin is already attached to a single-capacity slot in a team rule set
+- When Alice attempts to attach another plugin to the same slot
+- Then the attachment is rejected with a message stating that the slot can only hold a single plugin
+- And the existing attachment remains unchanged
 
 ---
 
-## Feature: F27 — 관리자가 실수와 공격으로부터 보호받는다
+## Feature: F21: Observability Logging Operates on Every Lifecycle Event
 
-페르소나: Alice (운영자), Dana (감사관)
-도메인 가치: 운영 화면이 공격 표면이라는 사실을 가정하고, 잘못된 입력과 폭주, 위험한 한 번의 클릭으로부터 운영자를 막는다.
+Personas: Charlie (SRE), Dana (auditor)
+Domain value: Events such as the start, middle, and end of a call, as well as authentication and drops, appear as consistent facts on the operator dashboard and audit logs.
 
-### Scenario: F27.3 짧은 시간 안의 플러그인 업로드 폭주는 잠시 멈춰진다
+### Scenario: F21.1 Each call is counted separately by principal and model
 
-- Given 운영 화면이 짧은 시간 안에 여러 번의 업로드 요청을 받는다
-- When 정해진 분당 상한을 넘는 업로드가 들어온다
-- Then 추가 업로드는 잠시 후 다시 시도하라는 안내와 함께 멈춰진다
-- And 다음 시간 창이 열리면 다시 받을 수 있게 된다
+- Given Charlie views who used which model and how much on the operator dashboard
+- When a key from a team calls a model once
+- Then the count corresponding to that team, key, and model increases by one
+- And the counts for other teams and models remain unchanged
 
-### Scenario: F27.4 비상 차단은 두 단계 확인 후에만 효력이 생긴다
+### Scenario: F21.2 The start, completion, or error of a call is recorded exactly once
 
-- Given Alice가 비상 차단 버튼을 누른다
-- When 두 번째 확인 단계가 아직 끝나지 않은 상태다
-- Then 비상 차단은 효력이 생기지 않는다
-- And 두 번째 확인이 끝났을 때에만 즉시 효력이 생기고 감사 기록에 남는다
+- Given a call arrives at cc-lb
+- When the call completes normally or ends with an error
+- Then one start event and one completion or error event are recorded in the observability logs
+- And completion and error events are not recorded simultaneously for the same call
 
-### Scenario: F27.5 관리자 세션이 일정 시간을 넘기면 위험 동작 전 다시 신원 확인을 요구한다
+### Scenario: F21.3 The number of partial transmissions for streaming responses is aggregated on the operator dashboard
 
-- Given Alice가 관리자 토큰으로 운영 화면에 들어와 있다
-- And 마지막 활동으로부터 정해진 시간이 지났다
-- When Alice가 비상 차단·플러그인 삭제 같은 위험 동작을 시도한다
-- Then 그 동작은 곧바로 일어나지 않고, Alice에게 다시 한 번 신원 확인을 요구하는 단계가 끼어든다
-- And 다시 확인을 끝낸 후에만 그 동작이 실행되고 감사 기록에 한 줄로 남는다
+- Given Bob makes a call that receives a streaming response
+- When the response is delivered sequentially in multiple parts
+- Then the number of delivered parts for that call is aggregated on the operator dashboard
+- And disconnected or interrupted events are displayed separately from the delivery count
 
-### Scenario: F27.6 다른 출처에서 시작된 관리자 요청은 의도치 않게 실행되지 않는다
+### Scenario: F21.4 Authentication failures are counted by failure reason
 
-- Given Alice가 운영 화면에 들어와 있는 상태에서 다른 웹페이지를 방문하고 있다
-- When 그 다른 페이지가 Alice의 관리자 권한으로 위험 동작을 일으키려 한다
-- Then cc-lb은 그 요청이 운영 화면에서 시작되지 않았음을 확인하고 실행을 거부한다
-- And 그 거부된 시도는 어디서 비롯되었는지와 함께 감사 기록에 남는다
+- Given Dana views authentication failures on a minute-by-minute basis
+- When failures occur due to different reasons such as an invalid key, expired credentials, or lack of authorization
+- Then the count for each reason increases separately
+- And failures with the same reason are grouped together on the same line
 
-### Scenario: F27.7 관리자 토큰 값은 운영 화면 어디에서도 평문으로 보이지 않는다
+### Scenario: F21.5 Calls dropped due to backpressure are recorded on the operator dashboard
 
-- Given Alice가 관리자 토큰이 어디서 읽혀 들어왔는지를 운영 화면에서 점검한다
-- When 운영 화면이 그 출처와 길이, 마지막으로 바뀐 시각을 보여 준다
-- Then 토큰 값 자체는 가려진 형태로만 보인다
-- And 같은 토큰이 운영 로그·감사 기록에 남을 때에도 평문은 보이지 않는다
+- Given cc-lb is close to its configured processing limit
+- When some incoming calls are dropped because the queue is full
+- Then the number of dropped calls increases on the operator dashboard
+- And the count of successfully processed calls remains unaffected
+
+### Scenario: F21.7 The recipient of the response also sees the call identifier
+
+- Given Bob sends a call through cc-lb
+- When the response is returned to Bob
+- Then Bob can verify the call identifier in the response
+- And the identifier matches the one in the operator logs for the same call
+
+### Scenario: F21.8 The same event is transmitted to an external observability tool configured by the operator
+
+- Given Charlie has connected an external observability tool to cc-lb
+- When a call event occurs within cc-lb
+- Then the same event arrives at the external observability tool
+- And the counts on the operator dashboard and the external tool align within a certain timeframe
+
+### Scenario: F21.9 The call identifier is identical across audit logs, operator logs, external traces, and responses
+
+- Given Dana performs a post-incident analysis on a call
+- When Dana views the audit logs, operator logs, external tracing tools, and the response together
+- Then the call identifier appears as the same value in all four places
+- And it is not mixed with identifiers of other calls
+
+### Scenario: F21.11 The duration of each call phase is included in the usage report
+
+- Given Charlie searches for the cause of slow calls
+- When a call completes
+- Then the duration of each phase of that call is included in the usage report
+- And the sum of the phase durations is consistent with the total duration of the call
+
+### Scenario: F21.12 Failure to transmit events to an external observability tool does not affect call processing
+
+- Given Charlie has connected an external observability tool to cc-lb
+- When transmission to the external observability tool temporarily fails
+- Then the core call processing of cc-lb continues unaffected by the failure
+- And the transmission failure is displayed separately on the operator dashboard
+
+### Scenario: F21.13 Dropped batches are displayed separately when the observability event queue is full
+
+- Given there is a queue in cc-lb where observability events are collected
+- When the queue becomes full and some event batches are dropped
+- Then the number of dropped batches is displayed on a separate line on the operator dashboard
+- And the count of successfully processed events remains unaffected
+
+### Scenario: F21.14 One team's observability chain exhausting its resources does not affect other teams' observability chains
+
+- Given separate observability chains are attached to two teams
+- When the observability chain of one team reaches its resource limit
+- Then the observability chain of that team is safely stopped from that point onward
+- And the observability chain of the other team continues to operate unaffected
 
 ---
 
-## Feature: F29 — cc-lb는 의도된 결함 주입에도 정해진 방식으로 견딘다
+## Feature: F25: Plugin Authors Rely on Stable Commitments
 
-페르소나: Charlie (SRE), Dana (감사관)
-도메인 가치: 운영자가 의도적으로 결함을 주입해 회복력을 시험할 때에도 비밀이 새지 않고, 정해진 방식으로 회복한다.
+Personas: Bob (plugin author)
+Domain value: Bob can rely on his plugins registering and operating safely without needing to know the deep internals of cc-lb.
 
-### Scenario: F29.1 갑작스러운 충돌 메시지에도 비밀은 가려진다
+### Scenario: F25.1 Plugins built within the plugin format supported by cc-lb are accepted
 
-- Given cc-lb 안에서 한 부분이 예기치 못한 상태로 충돌한다
-- When 그 충돌의 사유가 로그·감사 기록·외부 추적으로 흘러간다
-- Then 자격증명·토큰 같은 비밀은 가려진 형태로만 보인다
-- And 사건 자체는 가려지지 않고 시간순으로 남는다
+- Given Bob created a plugin matching the plugin format supported by cc-lb
+- When Bob uploads the plugin to cc-lb
+- Then the plugin introduces itself, and cc-lb verifies its capabilities and completes registration
+- And the plugin operates starting from subsequent calls
 
-### Scenario: F29.2 운영자가 의도적으로 결함을 주입해 회복력을 시험한다
+### Scenario: F25.2 Plugins with unsupported formats are rejected
 
-- Given Charlie가 운영자가 의도적으로 결함을 주입해 회복력을 시험한다
-- When 정해진 비율과 지점에서 결함이 일어난다
-- Then cc-lb은 미리 정해진 방식으로 그 호출을 안전하게 마무리하거나 다른 길로 보낸다
-- And 시험이 끝나면 결함 주입 자체를 거두는 방법도 같은 화면에서 제공된다
+- Given Bob created a plugin in a format not supported by cc-lb
+- When Bob uploads the plugin to cc-lb
+- Then the registration is rejected with a message stating that cc-lb does not support the format
+- And the plugin does not intercept any calls
 
-### Scenario: F29.3a 외부 연결이 갑자기 끊겨도 정해진 대체 동작으로 호출이 마무리된다 (v5.2 분리)
+### Scenario: F25.3 Plugins with identical content share the same signature
 
-- Given 한 호출이 외부 모델 공급자로 이미 흘러가 있다
-- When 그 외부 연결이 응답 중간에 갑자기 끊긴다
-- Then cc-lb은 미리 정해진 대체 동작으로 그 호출을 마무리한다
-- And 그 호출은 본래 외부 응답이 아니라 대체 동작의 결과로 마무리되었음이 응답에 표시된다
+- Given Bob has two plugin files built twice from the same source
+- When Bob compares the signatures of the two files
+- Then the two signatures are identical
+- And cc-lb treats files with the same signature as the same plugin
 
-### Scenario: F29.3b 외부 연결 끊김으로 인한 대체 동작은 같은 호출 식별자로 운영 로그와 감사 기록에 남는다 (v5.2 분리)
+### Scenario: F25.5 Plugins failing pre-checks are blocked during registration
 
-- Given F29.3a에 따라 한 호출이 대체 동작으로 마무리되었다
-- When Dana가 그 시점의 운영 로그와 감사 기록을 함께 본다
-- Then 같은 호출 식별자로 외부 연결 끊김 사건과 대체 동작 적용 사실이 두 곳 모두에 남아 있다
-- And 그 식별자는 같은 호출에 대해 응답이 가진 식별자와도 일치한다
+- Given Bob's plugin must undergo pre-checks such as naming rules, self-checks, and capability declarations
+- When any of the pre-checks fail
+- Then the registration is rejected and Bob is notified of where it failed
+- And the failed plugin does not intercept any calls
 
-### Scenario: F29.4 한도 엔진이 차갑게 다시 시작해도 진행 중이던 계산은 이어진다
+### Scenario: F25.7 Authors can predefine fallback behaviors for each function on failure
 
-- Given 분·시간·일 단위 한도를 셈하는 부분이 차갑게 다시 시작된다
-- When 그 시점에 진행 중이던 셈이 있다
-- Then 다시 시작한 후에도 같은 시간 창 안의 셈이 끊기지 않고 이어진다
-- And 셈의 한 칸이 두 번 더해지거나 빠지지 않는다
+- Given Bob predefines the fallback behavior for each function of his plugin on failure
+- When the function fails during a call
+- Then cc-lb follows the behavior predefined by Bob, which is one of rejection, silent bypass, default value usage, or transparent pass-through
+- And functions without predefined behaviors follow the default behavior of cc-lb
 
-### Scenario: F29.5 결함 주입을 한 팀에만 한정하면 다른 팀의 호출은 영향을 받지 않는다
+### Scenario: F25.8 The most compatible generation is negotiated when cc-lb supports multiple plugin format generations
 
-- Given Charlie가 결함 주입을 켤 때 적용 범위를 한 팀으로 한정한다
-- When 결함 주입이 그 비율과 지점에서 일어난다
-- Then 한정된 팀의 호출만 정해진 방식으로 결함을 겪고 대체 동작으로 마무리된다
-- And 다른 팀의 호출은 결함 주입이 켜져 있다는 사실과 무관하게 평소대로 처리된다
+- Given cc-lb supports multiple generations of plugin formats simultaneously
+- And Bob's plugin is compatible with one or more of those generations
+- When Bob's plugin introduces itself
+- Then the most recent generation that both sides can agree on is negotiated
+- And the negotiated generation is recorded in the registration log
 
-### Scenario: F29.6 결함 주입을 켜고 끄는 동작 자체가 감사 기록에 남는다
+### Scenario: F25.9 Authors communicate with the external environment only through auxiliary functions provided by cc-lb
 
-- Given Charlie가 결함 주입을 켜고 일정 시간 뒤에 다시 끈다
-- When Dana가 그 시간대의 감사 기록을 본다
-- Then 누가 언제 어느 범위에 어떤 종류의 결함을 켰고 언제 껐는지가 한 줄씩 시간순으로 보인다
-- And 결함 주입으로 영향을 받은 호출의 식별자도 같은 시간대 운영 로그에서 짚어 낼 수 있다
+- Given Bob's plugin requires auxiliary functions such as random values, current time, or short-term memory
+- When Bob's plugin uses those functions
+- Then the plugin receives those values only through the auxiliary functions exposed by cc-lb
+- And it cannot access the external environment through any other path
 
-### Scenario: F29.7 결함 주입은 미리 정해진 지점에서만 일어난다
+### Scenario: F25.11 Registered plugins display their name, version, and capabilities to the operator
 
-- Given cc-lb 안에 결함 주입이 허용된 지점이 미리 정해져 있다
-- When Charlie가 그 지점 목록에 없는 곳에 결함을 켜려 한다
-- Then 그 시도는 거부되고 허용된 지점이 어디인지 안내된다
-- And 허용되지 않은 지점의 호출 흐름은 어떤 결함도 겪지 않는다
+- Given Bob's plugin is registered
+- When Alice views the plugin list
+- Then the name, version, and capabilities of the plugin, along with which slot it occupies, are displayed
+- And other versions with the same name are grouped together on the same line
+
+### Scenario: F25.12 Having many registered plugins does not delay booting during cc-lb restart
+
+- Given multiple plugins created by Bob are already registered
+- When Charlie restarts cc-lb
+- Then cc-lb completes its preparation to receive incoming calls within a designated timeframe
+- And the introduction of one plugin does not delay the introduction of other plugins
+
+### Scenario: F25.13 If the core phase of a plugin exceeds the designated time, the call completes with a fallback behavior
+
+- Given Bob's plugin is attached to a team rule set
+- And there is a designated maximum time for the core phase of the plugin
+- When the core phase exceeds the designated time during a call
+- Then cc-lb completes the call using the fallback behavior predefined by Bob for that function
+- And the event is recorded in the operator logs and audit logs with the same call identifier
+
+### Scenario: F25.14 Secrets are masked at the cc-lb boundary before being passed to plugins
+
+- Given Bob's plugin is attached to a slot that views the call body and response
+- And the call contains secrets such as credentials or tokens
+- When cc-lb passes the call to the plugin
+- Then masked placeholders are inserted in place of the secrets before being passed to the plugin
+- And the plugin cannot access the original secret values regardless of how it processes the body and response
+
+### Scenario: F25.15 Plugins requesting negotiation for a lower generation than supported are rejected
+
+- Given Bob's plugin introduces itself
+- And the range of format generations accepted by cc-lb is defined
+- When Bob's plugin requests negotiation for a generation lower than that range in its introduction
+- Then cc-lb rejects the request and displays the accepted range of generations
+- And the plugin remains unregistered
+
+### Scenario: F25.16 Plugins missing capabilities required by a slot are rejected
+
+- Given Bob's plugin declares capabilities targeting a specific slot
+- And the slot has a list of capabilities required by cc-lb
+- When any of those capabilities are missing from Bob's declaration
+- Then the registration is rejected and Bob is notified of which capabilities are missing
+- And the plugin does not intercept any calls
+
+### Scenario: F25.17 Plugins with format generations outside the range accepted by cc-lb are rejected
+
+- Given Bob's plugin declares the format generation it follows
+- And the generation is lower than the lowest or higher than the highest generation accepted by cc-lb
+- When Bob uploads the plugin
+- Then the registration is rejected and the accepted range of generations is displayed
+- And the plugin remains unregistered
+
+---
+
+## Feature: F27: Administrators are Protected from Mistakes and Attacks
+
+Personas: Alice (operator), Dana (auditor)
+Domain value: Assuming the operator screen is an attack surface, the system protects the operator from invalid inputs, traffic spikes, and accidental high-risk clicks.
+
+### Scenario: F27.3 Rapid plugin upload spikes within a short timeframe are temporarily throttled
+
+- Given the operator screen receives multiple upload requests within a short timeframe
+- When uploads exceeding the designated limit per minute arrive
+- Then further uploads are throttled with a message to try again later
+- And uploads are accepted again when the next time window opens
+
+### Scenario: F27.4 Emergency shutdown takes effect only after two-step verification
+
+- Given Alice clicks the emergency shutdown button
+- When the second verification step is not yet completed
+- Then the emergency shutdown does not take effect
+- And it takes effect immediately and is recorded in the audit log only when the second verification is completed
+
+### Scenario: F27.5 Admin sessions require re-authentication before high-risk operations after a certain period of inactivity
+
+- Given Alice is logged into the operator screen with an admin token
+- And a designated period has passed since the last activity
+- When Alice attempts a high-risk operation such as emergency shutdown or plugin deletion
+- Then the operation does not execute immediately, and a step requiring Alice to re-authenticate is interposed
+- And the operation executes and is recorded as a single line in the audit log only after re-authentication is completed
+
+### Scenario: F27.6 Admin requests originating from other sources are not executed unintentionally
+
+- Given Alice is visiting other web pages while logged into the operator screen
+- When the other page attempts to trigger a high-risk operation using Alice's admin privileges
+- Then cc-lb verifies that the request did not originate from the operator screen and rejects execution
+- And the rejected attempt is recorded in the audit log along with its origin
+
+### Scenario: F27.7 Admin token values are never displayed in plaintext anywhere on the operator screen
+
+- Given Alice inspects where the admin token was loaded from on the operator screen
+- When the operator screen displays its source, length, and last modified time
+- Then the token value itself is displayed only in a masked format
+- And the plaintext is not visible even when the same token is recorded in operator logs or audit logs
+
+---
+
+## Feature: F29: cc-lb Tolerates Intentional Fault Injection in a Defined Manner
+
+Personas: Charlie (SRE), Dana (auditor)
+Domain value: Even when the operator intentionally injects faults to test resilience, secrets are not leaked, and the system recovers in a defined manner.
+
+### Scenario: F29.1 Secrets are masked even in sudden crash messages
+
+- Given a component within cc-lb crashes unexpectedly
+- When the cause of the crash is propagated to logs, audit logs, and external traces
+- Then secrets such as credentials or tokens are displayed only in a masked format
+- And the event itself is recorded chronologically without being masked
+
+### Scenario: F29.2 Operators intentionally inject faults to test resilience
+
+- Given Charlie configures intentional fault injection to test resilience
+- When faults occur at the designated rate and points
+- Then cc-lb safely completes the call or reroutes it in a predefined manner
+- And a method to withdraw the fault injection is provided on the same screen when the test ends
+
+### Scenario: F29.3a Calls complete with a designated fallback behavior even if the external connection is suddenly lost
+
+- Given a call has already routed to an external model provider
+- When the external connection is suddenly lost in the middle of the response
+- Then cc-lb completes the call using a predefined fallback behavior
+- And the response indicates that the call completed with a fallback behavior rather than the original external response
+
+### Scenario: F29.3b Fallback behavior due to external connection loss is recorded in operator logs and audit logs with the same call identifier
+
+- Given a call completed with a fallback behavior according to F29.3a
+- When Dana views the operator logs and audit logs from that timeframe together
+- Then the external connection loss event and the application of the fallback behavior are recorded in both places with the same call identifier
+- And the identifier matches the one in the response for the same call
+
+### Scenario: F29.4 Ongoing tracking continues even if the limit engine undergoes a cold restart
+
+- Given the component tracking minute, hour, and daily limits undergoes a cold restart
+- When there is tracking in progress at that moment
+- Then the tracking continues uninterrupted within the same time window after the restart
+- And no tracking interval is double-counted or omitted
+
+### Scenario: F29.5 Limiting fault injection to a single team does not affect calls from other teams
+
+- Given Charlie limits the scope of fault injection to a single team when enabling it
+- When fault injection occurs at the designated rate and points
+- Then only calls from the scoped team experience faults and complete with the fallback behavior
+- And calls from other teams are processed normally, unaffected by the enabled fault injection
+
+### Scenario: F29.6 Enabling and disabling fault injection is recorded in the audit log
+
+- Given Charlie enables fault injection and disables it after a certain period
+- When Dana views the audit logs from that timeframe
+- Then who enabled what type of fault, when, for which scope, and when they disabled it are displayed chronologically line by line
+- And the identifiers of calls affected by the fault injection can be traced in the operator logs from the same timeframe
+
+### Scenario: F29.7 Fault injection occurs only at predefined points
+
+- Given the points allowed for fault injection are predefined within cc-lb
+- When Charlie attempts to enable faults at a point not in the allowed list
+- Then the attempt is rejected and the allowed points are displayed
+- And call flows at unauthorized points do not experience any faults

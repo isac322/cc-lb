@@ -1,584 +1,584 @@
 # cc-lb True BDD — Writer 2: Credential & Incident (v5.2)
 
-- 작성일: 2026-06-18
-- Writer: 2 of 4 (Credential & Incident — Anthropic 자격증명·OAuth·구독 신선도·장애 대응)
-- 입력: v4 62 scenarios + `~/cc-lb-bdd/cc-lb-bdd-verify-C-scenario-quality.md` + `~/cc-lb-bdd/cc-lb-bdd-v3-final-consensus.md` Open Question #3
-- 변경 요약 (v5 → v5.2): 66 그대로, 본문 영문 replica 5건만 복제 노드로 치환. cross-file 5/5 PASS 달성.
-- 변경 요약 (v4 → v5): v4 62 → v5 66 (multi-rule 분할 +4; F11 통합 27 → F11A/F11B/F11C 분리)
-- Features: 7 — F5, F7, F8, F10, F11A, F11B, F11C (consensus OQ#3 분리 적용으로 5 → 7)
-- 주요 변경 (v5 → v5.2):
-  - 어휘 일관성 마무리 (verify-C §4 cross-file consistency 잔여 1건 해소): Charlie 페르소나 설명 + F11B.4 본문 5건의 영문 replica를 W4와 동일한 도메인 어휘 복제 노드로 일괄 치환. cross-file 5/5 PASS 달성.
-  - 변경 범위: 본문 5건 단어 치환만. 시나리오 ID·수·feature 구조·multi-rule 분할 결과 모두 변동 없음.
-- 주요 변경 (v4 → v5):
-  - **F11 분리 (consensus OQ#3 적용)**: v4 F11 통합 27 → F11A "구독 한도 가시성" 11 + F11B "구독 한도 신선도" 11 + F11C "조직 메타·호환성 캐시" 7. Cucumber.io 권장 한 feature 5-15 시나리오 범위 안으로 들어옴.
-  - **어휘 일관성 정리 (verify-C §4 적용)**: `upstream`(영문) → `위로`(우리말) 일괄 치환, `warmup`(영문) → `미리 데움`(우리말) 일괄 치환, OAuth 화면 흐름의 `callback`(영문) → `되돌아옴`(우리말) 일괄 치환. OAuth는 표준 프로토콜 고유명사라 보존.
-  - **Multi-rule Then 분할 (verify-C §5 적용)**: v4 F5.2(알림+백오프) → v5 F5.2+F5.3, v4 F8.1(사용자 UX+운영자 대시보드) → v5 F8.1+F8.2, v4 F11.14(기본/초과 구분+초과 진입 명시) → v5 F11A.3+F11A.4, v4 F11.26(옛 값 유지+마지막 성공 시각) → v5 F11C.5+F11C.6.
-  - **F11 내부 시나리오 재번호**: F11.1-F11.11(미리 데움) → F11B.1-F11B.11; F11.12-F11.21(5h/7d 가시성) → F11A.1-F11A.11(F11.14 분할 반영); F11.22-F11.27(조직 메타·호환성 캐시) → F11C.1-F11C.7(F11.26 분할 반영).
+- Date: 2026-06-18
+- Writer: 2 of 4 (Credential & Incident — Anthropic credentials, OAuth, subscription freshness, incident response)
+- Input: v4 62 scenarios + `~/cc-lb-bdd/cc-lb-bdd-verify-C-scenario-quality.md` + `~/cc-lb-bdd/cc-lb-bdd-v3-final-consensus.md` Open Question #3
+- Change summary (v5 → v5.2): 66 unchanged; only 5 occurrences of the English word "replica" in body text replaced with "replica node". cross-file 5/5 PASS achieved.
+- Change summary (v4 → v5): v4 62 → v5 66 (multi-rule split +4; consolidated F11 27 → F11A/F11B/F11C separated)
+- Features: 7 — F5, F7, F8, F10, F11A, F11B, F11C (5 → 7 by applying consensus OQ#3 separation)
+- Key changes (v5 → v5.2):
+  - Vocabulary consistency finalized (resolving the 1 remaining verify-C §4 cross-file consistency item): the English word "replica" in the Charlie persona description and in 5 occurrences in the F11B.4 body text was replaced with the domain term "replica node", matching W4. cross-file 5/5 PASS achieved.
+  - Scope of change: word substitution in 5 body occurrences only. Scenario IDs, count, feature structure, and multi-rule split results are all unchanged.
+- Key changes (v4 → v5):
+  - **F11 split (consensus OQ#3 applied)**: consolidated v4 F11 27 → F11A "Subscription Quota Visibility" 11 + F11B "Subscription Quota Freshness" 11 + F11C "Organization Metadata and Compatibility Cache" 7. Now within Cucumber.io's recommended 5-15 scenarios per feature.
+  - **Vocabulary consistency cleanup (verify-C §4 applied)**: batch substitution of `upstream` (English) → `wiro` (Korean), `warmup` (English) → `miri-deum` (Korean), `callback` (English) in the OAuth screen flow → `doedol-aom` (Korean). OAuth preserved as a standard protocol proper noun.
+  - **Multi-rule Then split (verify-C §5 applied)**: v4 F5.2 (notification + backoff) → v5 F5.2 + F5.3, v4 F8.1 (user UX + operator dashboard) → v5 F8.1 + F8.2, v4 F11.14 (base/overage distinction + overage entry explicit) → v5 F11A.3 + F11A.4, v4 F11.26 (retain stale value + last success time) → v5 F11C.5 + F11C.6.
+  - **F11 internal scenario renumbering**: F11.1-F11.11 (warmup) → F11B.1-F11B.11; F11.12-F11.21 (5h/7d visibility) → F11A.1-F11A.11 (incorporating F11.14 split); F11.22-F11.27 (organization metadata and compatibility cache) → F11C.1-F11C.7 (incorporating F11.26 split).
 - Personas
-  - **Alice** — 운영자(Operator). 팀·자격증명·구독 한도·캐시 신선도를 본다.
-  - **Bob** — 개발자/플러그인 작성자. cc-lb을 통해 Claude를 호출한다.
-  - **Charlie** — SRE. 장애·재시작·미리 데움·다중 복제 노드를 본다.
-  - **Dana** — 감사관. 감사 기록·비밀 보호·redaction을 본다.
+  - **Alice** — Operator. Oversees teams, credentials, subscription quotas, and cache freshness.
+  - **Bob** — Developer / plugin author. Calls Claude through cc-lb.
+  - **Charlie** — SRE. Handles incidents, restarts, warmup, and multi-replica node operations.
+  - **Dana** — Auditor. Reviews audit records, secret protection, and redaction.
 
 ---
 
-## Feature F5: 운영자가 Anthropic 자격증명을 안전하게 관리한다
+## Feature F5: The operator manages Anthropic credentials securely
 
-운영자(Alice)는 Anthropic을 호출하기 위한 자격증명을 등록·갱신·회수하고, 사고가 났을 때 즉시 멈출 수 있어야 한다. 자격증명의 상태와 보호 키의 권한 변화는 운영자가 한 화면에서 본다.
+The operator (Alice) registers, rotates, and revokes the credentials used to call Anthropic, and must be able to stop all traffic immediately when an incident occurs. The state of credentials and any permission changes to the protection key are visible to the operator in a single view.
 
-### Scenario F5.1: 만료가 임박한 자격증명을 cc-lb이 자동으로 갱신한다
+### Scenario F5.1: cc-lb automatically rotates a credential that is close to expiry
 
-- Given Alice가 등록한 자격증명이 만료 시각 30분 안에 들어왔다
-- When cc-lb이 다음 갱신 주기에 들어선다
-- Then cc-lb은 운영자 개입 없이 새 자격증명을 받아 둔다
-- And Bob의 호출은 한 건도 끊기지 않는다
-- And 갱신 사실이 감사 기록에 남는다
+- Given a credential registered by Alice has entered the 30-minute window before its expiry time
+- When cc-lb enters the next rotation cycle
+- Then cc-lb fetches and stores a new credential without operator intervention
+- And none of Bob's calls are interrupted
+- And the rotation is recorded in the audit log
 
-### Scenario F5.2: 자동 갱신이 반복 실패하면 운영자에게 알린다 (v4 F5.2 split — 알림 규칙)
+### Scenario F5.2: cc-lb notifies the operator when automatic rotation fails repeatedly (v4 F5.2 split — notification rule)
 
-- Given cc-lb이 같은 자격증명의 자동 갱신을 정해진 횟수만큼 연달아 실패했다
-- When 다음 갱신 시도가 또 실패한다
-- Then Alice의 알림 채널에 "이 자격증명은 사람의 손이 필요하다"는 안내가 도착한다
+- Given cc-lb has failed to auto-rotate the same credential for the configured number of consecutive attempts
+- When the next rotation attempt also fails
+- Then Alice's notification channel receives a message indicating this credential requires manual intervention
 
-### Scenario F5.3: 자동 갱신이 반복 실패하면 cc-lb은 백오프 간격을 늘린다 (v4 F5.2 split — 백오프 규칙)
+### Scenario F5.3: cc-lb increases the backoff interval when automatic rotation fails repeatedly (v4 F5.2 split — backoff rule)
 
-- Given cc-lb이 같은 자격증명의 자동 갱신을 정해진 횟수만큼 연달아 실패했다
-- When 다음 갱신 시도가 또 실패한다
-- Then cc-lb은 백오프 간격을 늘려 무한 재시도로 Anthropic을 두들기지 않는다
+- Given cc-lb has failed to auto-rotate the same credential for the configured number of consecutive attempts
+- When the next rotation attempt also fails
+- Then cc-lb increases the backoff interval to avoid hammering Anthropic with infinite retries
 
-### Scenario F5.4: 잘못된 자격증명은 등록 단계에서 거부된다
+### Scenario F5.4: A malformed credential is rejected at registration time
 
-- Given Alice가 형식이 깨졌거나 권한 검사가 통과되지 않는 자격증명을 입력했다
-- When 등록을 시도한다
-- Then cc-lb은 자격증명을 저장하지 않고 친절한 안내와 함께 거부한다
-- And Bob의 호출 경로에는 이 자격증명이 추가되지 않는다
+- Given Alice has entered a credential that is malformed or fails the authorization check
+- When registration is attempted
+- Then cc-lb rejects the credential without storing it and returns a clear explanation
+- And this credential is not added to Bob's call path
 
-### Scenario F5.5: 자격증명을 회수하면 그 자격증명을 쓰던 모든 호출이 즉시 멈춘다
+### Scenario F5.5: Revoking a credential immediately stops all calls that used it
 
-- Given Bob의 호출이 자격증명 K를 통해 진행 중이다
-- When Alice가 관리 화면에서 K를 회수한다
-- Then 새 호출은 회수 직후부터 더 이상 K를 쓰지 못한다
-- And 이미 진행 중인 호출도 K로 다음 단계를 진행하지 않는다
-- And Bob에게는 "관리자가 이 자격증명을 회수했다"는 의미가 전달된다
+- Given Bob's calls are in progress using credential K
+- When Alice revokes K from the management screen
+- Then new calls can no longer use K from the moment it is revoked
+- And calls already in progress do not proceed to the next step using K
+- And Bob receives a message indicating the administrator has revoked this credential
 
-### Scenario F5.6: 회수된 자격증명에 대한 감사 기록은 그대로 남는다
+### Scenario F5.6: Audit records for a revoked credential remain intact
 
-- Given Alice가 자격증명 K를 회수했다
-- When Dana가 한 달 뒤 K로 일어났던 모든 호출을 감사 화면에서 찾아본다
-- Then K의 평문은 어디에도 보이지 않는다
-- And K로 일어났던 호출의 시점·팀·결과는 변조 흔적 없이 그대로 보인다
+- Given Alice has revoked credential K
+- When Dana looks up all calls that occurred under K in the audit view one month later
+- Then the plaintext of K does not appear anywhere
+- And the timestamp, team, and outcome of calls made under K are visible with no sign of tampering
 
-### Scenario F5.7: 자격증명 보호 키의 권한이 흐트러지면 운영자가 알아챈다 (신규 P3)
+### Scenario F5.7: The operator is notified when the permission on the credential protection key drifts (new P3)
 
-- Given Charlie가 cc-lb의 자격증명을 보호하는 마스터 보호 키를 안전한 위치에 두었다
-- When 그 보호 키의 접근 권한이 평소와 다르게 바뀐다
-- Then cc-lb은 다음 점검에서 권한 변화를 알아내고 Alice·Dana에게 한 줄로 알린다
-- And 권한이 원래대로 돌아올 때까지 새 자격증명 등록 경로는 친절히 막힌다
+- Given Charlie has placed the master protection key that guards cc-lb credentials in a safe location
+- When the access permission on that protection key changes from its normal state
+- Then cc-lb detects the permission change on the next inspection and notifies Alice and Dana in a single line
+- And the path to register new credentials is blocked with a clear message until the permission is restored
 
-### Scenario F5.8: 자격증명의 상태가 한 화면에서 사람이 읽을 수 있게 보인다 (신규 P3)
+### Scenario F5.8: The state of a credential is displayed in a human-readable form in a single view (new P3)
 
-- Given Alice가 자격증명 K의 상세 화면을 연다
-- When 화면이 그려진다
-- Then K의 상태가 "정상으로 찾아짐"·"보이지 않음"·"훼손 흔적이 있음"·"만료됨" 중 하나로 사람이 읽을 수 있게 표시된다
-- And Alice는 다음에 무엇을 해야 하는지 같은 화면에서 안내받는다
+- Given Alice opens the detail view for credential K
+- When the view renders
+- Then the state of K is displayed in a human-readable form as one of: "found and healthy", "not visible", "shows signs of tampering", or "expired"
+- And Alice receives guidance on what to do next within the same view
 
-### Scenario F5.9: 같은 자격증명을 두 명이 동시에 고치려 하면 한쪽만 받아들여진다 (신규 P3)
+### Scenario F5.9: When two people try to edit the same credential simultaneously, only one is accepted (new P3)
 
-- Given Alice와 다른 운영자가 같은 자격증명 K를 거의 같은 시각에 수정한다
-- When 두 변경이 cc-lb에 도달한다
-- Then 먼저 도달한 변경만 적용된다
-- And 나중에 도달한 쪽에는 "다른 사람이 먼저 바꿨다"는 의미가 전달되고 새로 읽고 다시 시도하라는 안내가 보인다
-
----
-
-## Feature F7: 운영자가 비상 차단을 발동한다
-
-운영자(Alice)는 사고가 났을 때 cc-lb의 모든 외부 호출을 한 번에 멈출 수 있어야 한다. 실수로 발동되어도 두 단계 확인이 막아주고, 발동과 해제의 사유는 감사 기록에 남는다.
-
-### Scenario F7.1: 비상 차단을 켜면 모든 호출이 거부된다
-
-- Given Alice가 비상 차단 스위치를 켤 권한을 가지고 있다
-- When Alice가 비상 차단을 발동한다
-- Then 그 시점 이후 Bob의 어떤 호출도 Anthropic으로 나가지 않는다
-- And Bob에게는 "지금은 운영자가 일시 차단했다"는 의미가 전달된다
-
-### Scenario F7.2: 비상 차단을 풀면 정상 상태로 돌아온다
-
-- Given 비상 차단이 켜져 있다
-- When Alice가 두 단계 확인을 거쳐 차단을 해제한다
-- Then 그 시점 이후 Bob의 호출은 다시 평소처럼 Anthropic으로 나간다
-- And 차단 해제 사실이 감사 기록에 남는다
-
-### Scenario F7.3: cc-lb이 재시작되어도 비상 차단 상태는 유지된다
-
-- Given Alice가 비상 차단을 켠 상태에서 Charlie가 cc-lb 프로세스를 새 바이너리로 교체한다
-- When cc-lb이 다시 준비 상태가 된다
-- Then 비상 차단은 여전히 켜져 있다
-- And Bob의 첫 호출도 거부된다
-
-### Scenario F7.4: 비상 차단 중에도 관리 화면과 대시보드는 작동한다
-
-- Given 비상 차단이 켜져 있다
-- When Alice가 대시보드에 접속해서 사용량과 자격증명 목록을 본다
-- Then 화면은 평소대로 열린다
-- And Alice는 차단을 해제할 수 있고 자격증명도 회수할 수 있다
-
-### Scenario F7.5: 차단으로 거부된 응답에는 "운영자가 일시 차단" 의미가 명시된다
-
-- Given 비상 차단이 켜져 있다
-- When Bob이 cc-lb으로 호출한다
-- Then 응답에는 "운영자가 일시 차단했다"는 의미가 사람이 읽을 수 있게 적혀 있다
-- And Bob은 이것이 Anthropic의 장애가 아니라 운영자의 결정임을 구분할 수 있다
-
-### Scenario F7.6: 발동과 해제는 두 단계 확인을 요구한다
-
-- Given Alice가 비상 차단 버튼을 처음 누른다
-- When 한 번의 클릭만으로 끝내려 한다
-- Then cc-lb은 "정말 이 환경에서 차단을 발동할 것인가"라는 두 번째 확인을 요구한다
-- And 두 번째 확인이 없으면 차단은 발동되지 않는다
-- And 같은 규칙이 해제 시점에도 적용된다
-
-### Scenario F7.7: 비상 차단의 발동·해제 사유가 감사 대상이 된다 (신규 P3)
-
-- Given Alice가 비상 차단을 발동하거나 해제하려 한다
-- When Alice는 두 단계 확인을 거치며 "왜 이렇게 결정했는가"를 사람이 읽을 수 있게 입력한다
-- Then cc-lb은 사유·결정한 사람·시각을 감사 기록에 남긴다
-- And Dana는 한 달 뒤에도 그 사고가 왜 발동·해제되었는지 같은 사유로 추적할 수 있다
+- Given Alice and another operator modify the same credential K at nearly the same time
+- When both changes arrive at cc-lb
+- Then only the change that arrives first is applied
+- And the party that arrives second receives a message indicating someone else changed it first, along with guidance to re-read and retry
 
 ---
 
-## Feature F8: SRE가 Anthropic 장애에 대응한다
+## Feature F7: The operator activates the emergency killswitch
 
-SRE(Charlie)는 Anthropic 위로가 느려지거나 장애가 났을 때 사용자에게 친절히 안내하면서 cc-lb 자체는 안정적으로 버틴다. 자격증명·위로에는 서로 다른 격벽이 있고, 위로의 한도 안내는 사용자에게 그대로 전달된다.
+The operator (Alice) must be able to stop all outbound calls from cc-lb at once when an incident occurs. A two-step confirmation guards against accidental activation, and the reason for each activation and deactivation is recorded in the audit log.
 
-### Scenario F8.1: 위로가 일시적으로 느려지면 사용자에게 지연을 알린다 (v4 F8.1 split — 사용자 UX 규칙)
+### Scenario F7.1: Activating the emergency killswitch causes all calls to be rejected
 
-- Given Anthropic이 평소보다 응답이 느리다
-- When Bob의 호출이 정해진 시간을 넘긴다
-- Then cc-lb은 호출을 끊지 않고 "지금 위쪽이 느리니 잠시 기다려달라"는 의미를 사용자에게 보낸다
+- Given Alice has the authority to activate the emergency killswitch
+- When Alice activates the emergency killswitch
+- Then no call from Bob reaches Anthropic after that point
+- And Bob receives a message indicating the operator has temporarily blocked all traffic
 
-### Scenario F8.2: 위로가 느려지면 운영자 대시보드에 사유가 표시된다 (v4 F8.1 split — 운영자 가시성 규칙)
+### Scenario F7.2: Deactivating the emergency killswitch restores normal operation
 
-- Given Anthropic이 평소보다 응답이 느리다
-- When Bob의 호출이 정해진 시간을 넘긴다
-- Then Charlie의 대시보드에는 "위로 지연" 사유가 표시된다
+- Given the emergency killswitch is active
+- When Alice deactivates the killswitch after completing the two-step confirmation
+- Then Bob's calls reach Anthropic again normally after that point
+- And the deactivation is recorded in the audit log
 
-### Scenario F8.3: Anthropic의 시간당 한도 초과 응답은 사용자에게 그대로 전달된다
+### Scenario F7.3: The emergency killswitch state persists across a cc-lb restart
 
-- Given Anthropic이 "이 자격증명은 한도를 다 썼다"고 알려준다
-- When Bob의 호출이 그 자격증명을 쓴다
-- Then cc-lb은 이 사실을 가공 없이 Bob에게 같은 의미로 전달한다
-- And 다른 자격증명의 호출은 영향을 받지 않는다
+- Given while the emergency killswitch is active, Charlie replaces the cc-lb process with a new binary
+- When cc-lb becomes ready again
+- Then the emergency killswitch remains active
+- And Bob's first call after restart is also rejected
 
-### Scenario F8.4: 같은 자격증명이 연속으로 실패하면 잠시 그 자격증명만 막는다
+### Scenario F7.4: The management screen and dashboard remain operational during an emergency killswitch
 
-- Given 자격증명 K로 가는 호출이 연달아 실패하고 있다
-- When 실패 횟수가 정해진 임계를 넘는다
-- Then cc-lb은 K를 통해 나가는 새 호출을 잠시 거부한다
-- And 다른 자격증명을 쓰는 호출은 평소대로 진행된다
+- Given the emergency killswitch is active
+- When Alice accesses the dashboard and views usage and the credential list
+- Then the screen opens normally
+- And Alice can deactivate the killswitch and revoke credentials
 
-### Scenario F8.5: 잠시 막아둔 동안의 새 호출은 빠르게 거부된다
+### Scenario F7.5: Responses rejected by the killswitch clearly indicate an operator-imposed block
 
-- Given 자격증명 K가 차단기에 걸려 잠시 막혀 있다
-- When Bob이 같은 자격증명으로 호출한다
-- Then cc-lb은 위로 보내지 않고 즉시 "잠깐 막혀 있다"는 의미를 돌려준다
-- And Bob은 다시 시도해야 할 시점을 안내받는다
+- Given the emergency killswitch is active
+- When Bob sends a call to cc-lb
+- Then the response contains a human-readable message indicating the operator has temporarily blocked all traffic
+- And Bob can distinguish that this is an operator decision, not an Anthropic outage
 
-### Scenario F8.6: Anthropic이 5xx로 답하면 사용자에게 일시 장애를 안내한다
+### Scenario F7.6: Activation and deactivation require a two-step confirmation
 
-- Given Anthropic이 자기 쪽 일시 장애를 알린다
-- When Bob의 호출이 진행 중이다
-- Then cc-lb은 "지금 위쪽에 일시 장애가 있다"는 의미를 사람이 읽을 수 있게 전달한다
-- And 같은 호출을 곧 다시 시도해도 안전하다는 안내가 함께 간다
+- Given Alice presses the emergency killswitch button for the first time
+- When only a single click is attempted
+- Then cc-lb requires a second confirmation asking "are you sure you want to activate the killswitch in this environment?"
+- And the killswitch is not activated without the second confirmation
+- And the same rule applies at the time of deactivation
 
-### Scenario F8.7: 한 위로가 죽으면 다른 위로로 자동 우회한다
+### Scenario F7.7: The reason for each killswitch activation and deactivation is subject to audit (new P3)
 
-- Given Charlie가 같은 자격증명에 대해 여러 위로를 등록해 두었다
-- When 그중 한 위로가 응답을 멈춘다
-- Then 새 호출은 살아 있는 다른 위로로 흘러간다
-- And Bob의 호출은 중단을 알아채지 못한 채 정상 응답을 받는다
-
-### Scenario F8.8: 모든 위로가 동시에 죽으면 일관된 응답을 돌려준다
-
-- Given 같은 자격증명의 모든 위로가 동시에 응답을 멈췄다
-- When Bob의 호출이 들어온다
-- Then cc-lb은 "지금은 위쪽 전체가 닿지 않는다"는 한 가지 의미만을 사용자에게 보낸다
-- And 같은 사고 동안 같은 메시지가 일관되게 나간다
-
-### Scenario F8.9: 라우팅 추적이 너무 길어지면 잘림 표시와 함께 보인다
-
-- Given Charlie가 한 호출이 어떤 자격증명·위로·차단기 상태로 결정되었는지 알고 싶다
-- When Charlie가 그 호출의 추적 표식을 가지고 cc-lb 화면을 연다
-- Then 결정 경로의 주요 단계가 한눈에 보인다
-- And 경로가 화면 한계를 넘어 더 보여 줄 수 없는 부분이 생기면 "여기서 잘렸다"는 사실이 사람이 읽을 수 있게 표시된다
-
-### Scenario F8.10: backpressure가 걸리면 새 호출은 친절히 거부된다
-
-- Given cc-lb이 받아들일 수 있는 동시 호출 수를 넘기 직전이다
-- When 새 호출이 한 건 더 들어온다
-- Then cc-lb은 그 호출을 받지 않고 "지금은 받을 자리가 없다"는 의미를 친절히 돌려준다
-- And 이미 진행 중인 호출은 영향을 받지 않는다
-
-### Scenario F8.11: 위로 별로 동시 호출 격벽이 따로 적용된다 (신규 P3)
-
-- Given Charlie가 같은 자격증명에 두 위로를 등록해 두었다
-- When 한 위로로 가는 동시 호출이 그 위로의 격벽 한도까지 찬다
-- Then 그 위로로 가는 새 호출은 친절히 거부된다
-- And 다른 위로를 쓰는 호출은 평소대로 진행된다
-
-### Scenario F8.12: 안전한 호출만 자동으로 다시 시도된다 (신규 P3)
-
-- Given Bob의 호출이 위쪽 일시 장애로 실패했다
-- When cc-lb이 그 호출을 다시 보낼지 결정한다
-- Then 같은 결과를 보장할 수 있다고 분류된 호출만 자동으로 다시 시도된다
-- And 같은 결과를 보장할 수 없다고 분류된 호출은 다시 시도되지 않고 사용자에게 결과가 그대로 전달된다
-
-### Scenario F8.13: Anthropic이 보낸 한도 안내 헤더가 사용자에게 그대로 전달된다 (신규 P3)
-
-- Given Anthropic이 응답에 "다음 시도까지 얼마를 기다려라"는 안내를 헤더로 담아 보낸다
-- When cc-lb이 그 응답을 Bob에게 전달한다
-- Then 그 한도 안내 헤더는 잘리거나 가공되지 않고 그대로 보인다
-- And Bob은 자기 클라이언트에서 같은 안내를 그대로 읽고 다음 시도 시점을 정한다
+- Given Alice intends to activate or deactivate the emergency killswitch
+- When Alice enters a human-readable explanation of the reason for the decision during the two-step confirmation
+- Then cc-lb records the reason, the decision-maker, and the timestamp in the audit log
+- And Dana can trace why the killswitch was activated or deactivated using that same reason one month later
 
 ---
 
-## Feature F10: 운영자가 Anthropic OAuth로 자격증명을 등록한다
+## Feature F8: The SRE responds to Anthropic outages
 
-운영자(Alice)는 브라우저로 Anthropic에 동의해서 자격증명을 등록한다. 동시 동의·세션 만료·취소도 안전하게 처리된다. OAuth는 표준 프로토콜 이름이라 그대로 두고, 동의가 끝난 뒤 cc-lb으로 되돌아오는 흐름은 "되돌아옴"이라 부른다.
+The SRE (Charlie) keeps cc-lb stable while giving users a clear explanation when an Anthropic upstream slows down or fails. Credentials and upstreams each have their own bulkhead, and rate-limit guidance from the upstream is passed through to users as-is.
 
-### Scenario F10.1: 운영자가 브라우저로 Anthropic에 동의한다
+### Scenario F8.1: When the upstream slows temporarily, users are notified of the delay (v4 F8.1 split — user UX rule)
 
-- Given Alice가 새 OAuth 자격증명을 만들기 시작한다
-- When Alice는 cc-lb이 안내하는 주소로 브라우저를 옮겨 Anthropic에 동의한다
-- Then 동의가 끝나면 cc-lb으로 다시 돌아온다
-- And Alice가 시작한 그 세션 외의 다른 사람은 이 동의를 이어받을 수 없다
+- Given Anthropic is responding more slowly than usual
+- When Bob's call exceeds the configured time limit
+- Then cc-lb does not drop the call and sends the user a message indicating the upstream is slow and to wait a moment
 
-### Scenario F10.2: 되돌아옴은 cc-lb이 검증한 뒤에만 받아들인다
+### Scenario F8.2: When the upstream slows, the reason is shown on the operator dashboard (v4 F8.1 split — operator visibility rule)
 
-- Given Alice가 동의를 끝내고 cc-lb으로 돌아온다
-- When cc-lb이 돌아온 정보를 검사한다
-- Then cc-lb은 자기가 발급한 세션에 맞는 되돌아옴만 받아들인다
-- And 검사를 통과하지 못한 되돌아옴은 자격증명을 만들지 않는다
+- Given Anthropic is responding more slowly than usual
+- When Bob's call exceeds the configured time limit
+- Then Charlie's dashboard shows the reason as "upstream delay"
 
-### Scenario F10.3: 동의가 끝나면 자격증명이 등록되고 활성으로 표시된다
+### Scenario F8.3: Anthropic's rate-limit-exceeded response is passed through to users as-is
 
-- Given Alice가 동의를 정상으로 끝냈다
-- When cc-lb이 받은 자격증명을 저장한다
-- Then 새 자격증명은 활성 상태로 목록에 나타난다
-- And 같은 시점에 Bob의 호출에 곧바로 사용 가능하다
+- Given Anthropic signals that this credential has exhausted its quota
+- When Bob's call uses that credential
+- Then cc-lb passes this information through to Bob with the same meaning and without modification
+- And calls using other credentials are not affected
 
-### Scenario F10.4: 잘못된 되돌아옴 주소는 거부된다
+### Scenario F8.4: When the same credential fails consecutively, that credential alone is temporarily blocked
 
-- Given Alice가 cc-lb에 등록되지 않은 되돌아옴 주소로 돌아오려 한다
-- When cc-lb이 그 주소를 검사한다
-- Then cc-lb은 자격증명을 만들지 않고 친절한 안내와 함께 거부한다
-- And 이 시도는 감사 기록에 남는다
+- Given calls going through credential K are failing consecutively
+- When the failure count exceeds the configured threshold
+- Then cc-lb temporarily refuses new calls going out through K
+- And calls using other credentials proceed normally
 
-### Scenario F10.5: 동의 세션을 가리키는 표식이 빠지거나 바뀌면 거부된다
+### Scenario F8.5: New calls during the temporary block are rejected quickly
 
-- Given Alice가 동의를 시작할 때 cc-lb이 임시 표식을 발급했다
-- When 돌아온 되돌아옴의 표식이 빠져 있거나 변조된 흔적이 있다
-- Then cc-lb은 자격증명을 만들지 않는다
-- And Alice에게는 "동의를 다시 시작해 달라"는 의미가 전달된다
+- Given credential K is currently blocked by the circuit breaker
+- When Bob sends a call using the same credential
+- Then cc-lb immediately returns a message indicating the credential is temporarily blocked, without sending the call upstream
+- And Bob receives guidance on when to retry
 
-### Scenario F10.6: 운영자가 동의를 취소하면 자격증명은 만들어지지 않는다
+### Scenario F8.6: When Anthropic responds with 5xx, users are informed of the temporary outage
 
-- Given Alice가 Anthropic 동의 화면에서 "동의하지 않음"을 골랐다
-- When cc-lb으로 돌아온다
-- Then 자격증명은 생성되지 않는다
-- And Alice에게는 "동의를 받지 못해 등록하지 않았다"는 안내가 보인다
+- Given Anthropic signals a temporary outage on its side
+- When Bob's call is in progress
+- Then cc-lb delivers a human-readable message indicating there is a temporary outage on the upstream
+- And guidance indicating it is safe to retry the same call shortly is included
 
-### Scenario F10.7: 두 운영자가 동시에 OAuth 동의를 진행해도 서로 섞이지 않는다 (신규 P3)
+### Scenario F8.7: When one upstream goes down, traffic is automatically rerouted to another upstream
 
-- Given Alice와 다른 운영자가 거의 같은 시각에 각자 자기 브라우저에서 OAuth 동의를 시작했다
-- When 두 사람의 동의가 cc-lb으로 거의 같은 시각에 돌아온다
-- Then 각자가 시작한 동의 세션은 그 사람이 시작한 되돌아옴에만 매칭된다
-- And 한쪽의 동의가 다른 한쪽의 자격증명을 가로채지 못한다
+- Given Charlie has registered multiple upstreams for the same credential
+- When one of those upstreams stops responding
+- Then new calls flow to the other upstreams that are still alive
+- And Bob's calls receive normal responses without noticing the disruption
 
-### Scenario F10.8: 동의 세션은 일정 시간이 지나면 만료된다 (신규 P3)
+### Scenario F8.8: When all upstreams go down simultaneously, a consistent response is returned
 
-- Given Alice가 OAuth 동의를 시작했고 cc-lb이 임시 표식을 발급했다
-- When 정해진 시간이 지나도 되돌아옴이 일어나지 않는다
-- Then 그 표식은 더 이상 유효하지 않다
-- And 그 표식을 들고 뒤늦게 일어나는 되돌아옴은 거부되고 Alice에게는 "동의를 다시 시작해 달라"는 안내가 보인다
+- Given all upstreams for the same credential have stopped responding simultaneously
+- When Bob's call arrives
+- Then cc-lb sends users a single message indicating the entire upstream is currently unreachable
+- And the same message is sent consistently throughout the incident
 
----
+### Scenario F8.9: When the routing trace becomes too long, it is shown with a truncation indicator
 
-## Feature F11A: 구독 한도 가시성 (5h/7d 한도 화면)
+- Given Charlie wants to know how a call was routed — which credential, upstream, and circuit breaker state were used
+- When Charlie opens the cc-lb screen with that call's trace identifier
+- Then the major steps of the routing decision are visible at a glance
+- And when the path exceeds the display limit and further detail cannot be shown, the fact that the trace was truncated here is indicated in a human-readable way
 
-운영자(Alice)는 자격증명마다 5시간 창·7일 창의 현재 사용량·한도·임박·합치기 방식을 한 화면에서 본다. 화면에서 즉시 새로고침해 콘솔 변경을 끌어올 수도 있다. (consensus OQ#3 적용으로 v4 F11.12-F11.21 분리. v4 F11.14는 multi-rule이라 F11A.3+F11A.4로 split.)
+### Scenario F8.10: When backpressure is applied, new calls are rejected gracefully
 
-### Scenario F11A.1: 5시간 한도의 현재 사용량이 보인다
+- Given cc-lb is about to exceed the number of concurrent calls it can accept
+- When one more new call arrives
+- Then cc-lb does not accept the call and returns a graceful message indicating there is no capacity at this time
+- And calls already in progress are not affected
 
-- Given Alice가 활성 자격증명 K의 상세를 연다
-- When 화면이 그려진다
-- Then K가 현재 5시간 창에서 얼마나 썼는지가 숫자와 함께 보인다
-- And 창이 시작한 시각과 끝나는 시각이 같이 보인다
+### Scenario F8.11: Each upstream has its own concurrent call bulkhead (new P3)
 
-### Scenario F11A.2: 7일 한도의 현재 사용량이 보인다
+- Given Charlie has registered two upstreams for the same credential
+- When the concurrent calls going to one upstream reach that upstream's bulkhead limit
+- Then new calls going to that upstream are rejected gracefully
+- And calls using the other upstream proceed normally
 
-- Given Alice가 활성 자격증명 K의 상세를 연다
-- When 화면이 그려진다
-- Then K가 현재 7일 창에서 얼마나 썼는지가 숫자와 함께 보인다
-- And 창의 시작 시각과 다음 갱신 시각이 같이 보인다
+### Scenario F8.12: Only idempotent calls are retried automatically (new P3)
 
-### Scenario F11A.3: 기본 한도와 초과 한도가 서로 구분되어 보인다 (v4 F11.14 split — 구분 표시 규칙)
+- Given Bob's call has failed due to a temporary upstream outage
+- When cc-lb decides whether to resend the call
+- Then only calls classified as safe to retry with the same outcome are retried automatically
+- And calls that cannot be classified as safe to retry are not retried and their result is passed to the user as-is
 
-- Given 자격증명 K에 기본 한도와 초과 한도가 모두 부여되어 있다
-- When Alice가 K의 상세를 본다
-- Then 기본 한도의 사용량과 초과 한도의 사용량이 서로 구분되어 표시된다
+### Scenario F8.13: Rate-limit guidance headers from Anthropic are passed through to users as-is (new P3)
 
-### Scenario F11A.4: 초과 한도에 들어선 사실이 운영자에게 명시된다 (v4 F11.14 split — 진입 상태 규칙)
-
-- Given 자격증명 K가 기본 한도를 넘어 초과 한도에 들어서 있다
-- When Alice가 K의 상세를 본다
-- Then "지금 초과 한도에 들어섰다"는 사실이 사람이 읽을 수 있게 명시된다
-- And Alice는 같은 화면에서 초과 한도가 얼마나 남았는지 본다
-
-### Scenario F11A.5: 사용량이 80%에 임박하면 화면에서 경고로 보인다
-
-- Given 자격증명 K의 5시간 창 사용량이 80%에 다가간다
-- When Alice가 대시보드를 본다
-- Then K의 행은 평소와 다른 강조 표시로 "한도가 임박했다"는 의미를 전한다
-- And 같은 안내가 알림 채널로도 한 번 도착한다
-
-### Scenario F11A.6: 운영자가 한도 메타 정보를 즉시 새로고침한다
-
-- Given Alice가 방금 Anthropic 콘솔에서 한도를 바꿨다
-- When Alice가 자격증명 K의 화면에서 "지금 새로고침"을 누른다
-- Then cc-lb은 다음 자동 주기를 기다리지 않고 곧바로 메타를 다시 받아 온다
-- And 새 한도가 그 즉시 화면에 반영된다
-
-### Scenario F11A.7: 한도 합치기 방식을 운영자가 고른다
-
-- Given Alice의 팀이 같은 조직 안에 여러 자격증명을 가지고 있다
-- When Alice가 "자격증명별로 따로 본다"와 "조직 단위로 합쳐 본다" 중에서 한 가지를 고른다
-- Then 화면의 사용량과 한도 표시는 고른 방식에 맞춰 일관되게 다시 그려진다
-- And Alice는 언제든 다른 방식으로 바꿔 다시 볼 수 있다
-
-### Scenario F11A.8: 5시간 창 안에서도 시간대별 사용량이 따로 보인다 (신규 P3)
-
-- Given Alice가 자격증명 K의 5시간 한도 상세를 연다
-- When 사용량 막대를 펼친다
-- Then 5시간 창을 시간대 단위로 나눈 사용량이 함께 보인다
-- And Alice는 "어느 시간대에 호출이 몰렸는가"를 같은 화면에서 한눈에 본다
-
-### Scenario F11A.9: 자격증명에 붙은 사용 제한 조건이 사람이 읽을 수 있게 보인다 (신규 P3)
-
-- Given Anthropic이 자격증명 K에 사용 제한 조건을 함께 알린다
-- When Alice가 K의 상세를 본다
-- Then 그 제한 조건이 사람이 읽을 수 있는 안내로 풀어서 보인다
-- And Alice는 "이 자격증명은 어떤 호출에 쓰일 수 있고 어떤 호출에 쓸 수 없다"를 같은 화면에서 본다
-
-### Scenario F11A.10: 한도가 모자라면 부족분이 운영자에게 보인다 (신규 P3)
-
-- Given 자격증명 K가 한도 창에서 한도를 다 썼다
-- When Alice가 K의 분석 창 상세를 본다
-- Then 부족분이 사람이 읽을 수 있게 수치로 표시된다
-- And Alice는 "지금 한도가 얼마만큼 모자란가"를 한눈에 본다
-
-### Scenario F11A.11: 자격증명을 지워도 마지막으로 본 한도 값은 잠시 남는다 (신규 P3)
-
-- Given Alice가 자격증명 K를 화면에서 지운다
-- When Alice가 같은 자리에 새 자격증명 K'을 곧바로 등록한다
-- Then K가 마지막으로 보여 준 한도 값은 잠시 그대로 보존된다
-- And Alice는 K의 마지막 상태와 K'의 새 상태를 같은 화면에서 비교할 수 있다
+- Given Anthropic includes a header in its response indicating how long to wait before the next attempt
+- When cc-lb forwards that response to Bob
+- Then the rate-limit guidance header is passed through unmodified and untruncated
+- And Bob reads the same guidance in his client and determines when to make the next attempt
 
 ---
 
-## Feature F11B: 구독 한도 신선도 (미리 데움)
+## Feature F10: The operator registers credentials via Anthropic OAuth
 
-cc-lb은 Anthropic 구독의 5시간 창을 활성으로 유지하기 위해 작은 신호를 주기적으로 보낸다(이 신호를 "미리 데움"이라 부른다). SRE(Charlie)는 미리 데움 일정·재시도·격리·OAuth 전용성·위로 주소 변동을 한 화면에서 본다. (consensus OQ#3 적용으로 v4 F11.1-F11.11 분리.)
+The operator (Alice) registers credentials by consenting to Anthropic in a browser. Concurrent consent flows, session expiry, and cancellation are all handled safely. OAuth is preserved as a standard protocol name; the flow of returning to cc-lb after consent is called a "callback".
 
-### Scenario F11B.1: Anthropic 한도가 활성 상태로 유지되도록 주기적으로 알린다
+### Scenario F10.1: The operator consents to Anthropic through a browser
 
-- Given cc-lb이 활성 자격증명을 가지고 있다
-- When 정해진 주기가 돌아온다
-- Then cc-lb은 한도가 활성 상태로 유지되도록 Anthropic에 작은 신호를 보낸다
-- And 다음 주기 시각은 5시간 창의 시작 시각을 기준으로 보정되어 결정된다
-- And Bob의 호출 없이도 5시간 창이 계속 살아 있다
+- Given Alice begins creating a new OAuth credential
+- When Alice navigates her browser to the address cc-lb provides and consents with Anthropic
+- Then when consent is complete, the flow returns to cc-lb
+- And no one other than Alice who started the session can take over this consent flow
 
-### Scenario F11B.2: 미리 데움 호출은 사용량·비용에 반영되지 않는다
+### Scenario F10.2: The callback is accepted only after cc-lb validates it
 
-- Given cc-lb이 미리 데움을 위해 작은 신호를 보내고 있다
-- When Alice가 같은 시간 창의 사용량과 비용을 본다
-- Then 미리 데움 신호는 사용량 숫자와 비용 보고 어느 쪽에도 더해지지 않는다
-- And Bob이 실제로 보낸 호출만 사용량으로 잡힌다
+- Given Alice finishes consent and the callback arrives at cc-lb
+- When cc-lb inspects the returned information
+- Then cc-lb accepts only callbacks that match a session it issued
+- And callbacks that fail the check do not result in a credential being created
 
-### Scenario F11B.3: Anthropic이 자주 보내지 말라고 하면 폴링 간격을 늘린다
+### Scenario F10.3: When consent completes, the credential is registered and marked active
 
-- Given Anthropic이 "이 자격증명은 자주 보내지 말라"고 응답한다
-- When cc-lb이 다음 미리 데움 시점을 결정한다
-- Then 폴링 간격은 자동으로 늘어난다
-- And Anthropic의 안내가 다시 평소로 돌아오면 간격도 되돌아온다
+- Given Alice has completed consent successfully
+- When cc-lb stores the received credential
+- Then the new credential appears in the list as active
+- And it is immediately available for use in Bob's calls at that same moment
 
-### Scenario F11B.4: 여러 복제 노드 중 한 곳만 미리 데움을 수행한다
+### Scenario F10.4: An invalid callback address is rejected
 
-- Given Charlie가 cc-lb을 세 복제 노드로 띄워 두었다
-- When 미리 데움 주기가 돌아온다
-- Then 그 자격증명에 대한 미리 데움 신호는 셋 중 한 복제 노드만 보낸다
-- And 같은 주기에 다른 복제 노드가 같은 신호를 다시 보내지 않는다
+- Given Alice attempts to return via a callback address that is not registered with cc-lb
+- When cc-lb inspects the address
+- Then cc-lb rejects the request with a clear explanation and does not create a credential
+- And this attempt is recorded in the audit log
 
-### Scenario F11B.5: 미리 데움이 실패하면 백오프를 두고 다시 시도한다
+### Scenario F10.5: A missing or tampered session marker is rejected
 
-- Given 직전 미리 데움이 실패했다
-- When cc-lb이 다음 시도를 결정한다
-- Then 다음 시도는 곧바로 같은 시점에 일어나지 않고 백오프 간격이 적용된다
-- And 정상 응답이 돌아오면 백오프는 평소 간격으로 다시 줄어든다
+- Given cc-lb issued a temporary marker when Alice started the consent flow
+- When the marker in the returning callback is absent or shows signs of tampering
+- Then cc-lb does not create a credential
+- And Alice receives a message indicating she should restart the consent flow
 
-### Scenario F11B.6: 미리 데움 상태를 운영자가 화면에서 본다
+### Scenario F10.6: If the operator cancels consent, no credential is created
 
-- Given Alice가 운영 화면을 연다
-- When 자격증명 한 줄을 펼친다
-- Then "마지막 미리 데움 성공 시각"·"다음 시도 시각"·"현재 한도 창의 끝 시각"이 함께 보인다
-- And Alice는 한 번에 "지금 미리 데움이 살아 있다"를 판단한다
+- Given Alice selected "deny" on the Anthropic consent screen
+- When the callback arrives at cc-lb
+- Then no credential is created
+- And Alice sees a message indicating the credential was not registered because consent was not granted
 
-### Scenario F11B.7: 끊긴 동안의 변경은 다시 붙은 뒤 reconciler가 따라잡는다
+### Scenario F10.7: Two operators conducting OAuth consent simultaneously do not interfere with each other (new P3)
 
-- Given cc-lb의 알림 구독이 잠시 끊긴 사이에 Alice가 자격증명을 회수하고 새 위로를 등록했다
-- When 구독이 다시 붙는다
-- Then 정기 reconciler가 끊긴 동안의 변경을 한 차례 훑어서 cc-lb의 현재 상태에 반영한다
-- And 회수된 자격증명으로는 더 이상 호출이 나가지 않고, 새 위로가 라우팅에 포함된다
+- Given Alice and another operator have each started an OAuth consent flow in their own browsers at nearly the same time
+- When the callbacks from both arrive at cc-lb at nearly the same time
+- Then each person's consent session is matched only to the callback that person initiated
+- And one person's consent cannot capture the other person's credential
 
-### Scenario F11B.8: 비상 차단 중에는 미리 데움이 멈춘다 (신규 P3)
+### Scenario F10.8: A consent session expires after a set period of time (new P3)
 
-- Given cc-lb의 비상 차단이 켜져 있다
-- When 미리 데움 주기가 돌아온다
-- Then cc-lb은 미리 데움 신호를 보내지 않는다
-- And 비상 차단이 풀리고 나면 다음 주기부터 미리 데움이 평소처럼 다시 시작된다
-
-### Scenario F11B.9: 미리 데움 대상 위로와 다음 시도 시각을 운영자가 본다 (신규 P3)
-
-- Given Alice가 미리 데움 상세 화면을 연다
-- When 자격증명에 묶인 여러 위로를 펼친다
-- Then 위로별 다음 미리 데움 시도 시각과 마지막 결과가 함께 보인다
-- And 같은 자격증명이라도 위로마다 일정이 다를 수 있음을 같은 화면에서 읽을 수 있다
-
-### Scenario F11B.10: 미리 데움은 OAuth 자격증명에서만 동작한다는 사실이 운영자에게 보인다 (신규 P3)
-
-- Given Alice가 OAuth가 아닌 방식으로 등록된 자격증명을 가지고 있다
-- When Alice가 그 자격증명의 미리 데움 상태를 본다
-- Then 화면에는 "이 자격증명에는 미리 데움을 적용하지 않는다"는 의미가 사람이 읽을 수 있게 표시된다
-- And Alice는 미리 데움을 받으려면 OAuth 자격증명이 필요하다는 사실을 같은 화면에서 안내받는다
-
-### Scenario F11B.11: Anthropic 위로 주소 변동이 운영자에게 보이고 호출은 끊기지 않는다 (신규 P3)
-
-- Given cc-lb이 Anthropic 위로로 가는 도메인을 자체 주기로 다시 확인한다
-- When 위로 주소가 평소와 다른 값으로 바뀐다
-- Then 진행 중인 Bob의 호출은 끊기지 않는다
-- And Charlie의 화면에는 "위로 주소가 새 값으로 갱신되었다"는 한 줄이 표시된다
+- Given Alice has started an OAuth consent flow and cc-lb has issued a temporary marker
+- When the callback does not arrive within the configured time
+- Then that marker is no longer valid
+- And a callback that arrives late with that marker is rejected, and Alice sees a message indicating she should restart the consent flow
 
 ---
 
-## Feature F11C: 조직 메타·호환성 캐시 신선도
+## Feature F11A: Subscription Quota Visibility (5h/7d quota screen)
 
-cc-lb은 조직 메타(요금 등급·청구 형태)와 호환성 캐시를 정기적으로 갱신하고, 갱신 실패·재시작·신선도 시각을 운영자에게 그대로 보인다. (consensus OQ#3 적용으로 v4 F11.22-F11.27 분리. v4 F11.26은 multi-rule이라 F11C.5+F11C.6로 split.)
+The operator (Alice) views the current usage, quota, proximity warning, and aggregation mode for each credential's 5-hour window and 7-day window in a single screen. The screen can be refreshed immediately to pull in console changes. (Split from v4 F11.12-F11.21 by applying consensus OQ#3. v4 F11.14 was multi-rule and is split into F11A.3 + F11A.4.)
 
-### Scenario F11C.1: 호환성 캐시가 한 시간 주기로 자동 갱신된다
+### Scenario F11A.1: Current usage against the 5-hour quota is visible
 
-- Given cc-lb이 떠 있고 호환성 캐시가 들어 있다
-- When 정해진 한 시간 주기가 돌아온다
-- Then cc-lb은 캐시를 새 값으로 갈아 끼운다
-- And Bob의 호출은 갱신 사이에도 한 건도 끊기지 않는다
+- Given Alice opens the detail view for active credential K
+- When the screen renders
+- Then how much K has used in the current 5-hour window is shown with a number
+- And the window's start time and end time are shown alongside
 
-### Scenario F11C.2: 조직 메타가 한도 차이를 추적할 수 있게 보관된다
+### Scenario F11A.2: Current usage against the 7-day quota is visible
 
-- Given Alice의 조직이 요금 등급 또는 청구 형태가 다른 두 자격증명을 가지고 있다
-- When Alice가 대시보드를 연다
-- Then 자격증명별로 어떤 등급·어떤 청구 형태인지가 사람이 읽을 수 있게 보인다
-- And Alice는 한도 차이가 등급에서 오는 것임을 한눈에 본다
+- Given Alice opens the detail view for active credential K
+- When the screen renders
+- Then how much K has used in the current 7-day window is shown with a number
+- And the window's start time and next renewal time are shown alongside
 
-### Scenario F11C.3: 운영자가 구독 메타를 직접 새로고침한다
+### Scenario F11A.3: The base quota and overage quota are displayed separately (v4 F11.14 split — distinction display rule)
 
-- Given Alice가 방금 Anthropic 콘솔에서 청구 형태를 바꿨다
-- When Alice가 cc-lb 화면에서 "구독 메타 새로고침"을 누른다
-- Then cc-lb은 다음 자동 주기를 기다리지 않고 구독 메타를 새로 받아 온다
-- And 새 정보가 그 즉시 화면에 반영된다
+- Given credential K has both a base quota and an overage quota assigned
+- When Alice views the detail for K
+- Then the usage against the base quota and the usage against the overage quota are displayed separately
 
-### Scenario F11C.4: 프로세스 재시작 표식은 한도 spike로 오해되지 않는다
+### Scenario F11A.4: The fact that the overage quota has been entered is explicitly shown to the operator (v4 F11.14 split — entry state rule)
 
-- Given Charlie가 cc-lb 프로세스를 새 바이너리로 교체했다
-- When cc-lb이 다시 떠서 사용량을 다시 계산한다
-- Then 재시작 표식은 한도 사용량 그래프에서 spike로 그려지지 않고 별도의 표시로 구분된다
-- And Alice는 "지금 한도가 갑자기 올라간 것이 아니라 재시작이 있었다"를 그래프에서 읽는다
+- Given credential K has exceeded the base quota and entered the overage quota
+- When Alice views the detail for K
+- Then the fact that the overage quota has been entered is stated explicitly in a human-readable form
+- And Alice sees how much of the overage quota remains within the same screen
 
-### Scenario F11C.5: 호환성 캐시 갱신이 실패하면 옛 값을 그대로 유지한다 (v4 F11.26 split — 옛 값 유지 규칙)
+### Scenario F11A.5: A warning is shown on screen when usage approaches 80%
 
-- Given cc-lb이 호환성 캐시를 한 시간 주기로 다시 받는다
-- When 그중 한 번의 갱신이 실패한다
-- Then cc-lb은 직전에 받아 두었던 옛 값을 그대로 유지한다
+- Given usage in credential K's 5-hour window approaches 80%
+- When Alice views the dashboard
+- Then K's row uses a distinct highlight to convey that the quota is approaching its limit
+- And the same notification also arrives once on the notification channel
 
-### Scenario F11C.6: 호환성 캐시의 마지막 성공 갱신 시각이 운영자에게 보인다 (v4 F11.26 split — 신선도 표시 규칙)
+### Scenario F11A.6: The operator refreshes quota metadata immediately
 
-- Given cc-lb의 호환성 캐시 갱신이 한 번 실패했다
-- When Alice가 호환성 캐시 상세를 본다
-- Then "마지막 성공 갱신은 언제였다"는 사실이 사람이 읽을 수 있게 표시된다
+- Given Alice has just changed the quota in the Anthropic console
+- When Alice presses "Refresh now" on credential K's screen
+- Then cc-lb fetches the metadata again immediately without waiting for the next automatic cycle
+- And the new quota is reflected on the screen immediately
 
-### Scenario F11C.7: 마지막 시도 시각과 마지막 성공 시각이 따로 보인다 (신규 P3)
+### Scenario F11A.7: The operator chooses the quota aggregation mode
 
-- Given Alice가 구독 메타의 상세를 연다
-- When 화면이 그려진다
-- Then "마지막으로 시도한 시각"과 "마지막으로 성공한 시각"이 따로 표시된다
-- And Alice는 "지금 보이는 값이 얼마나 신선한가"를 한눈에 본다
+- Given Alice's team has multiple credentials in the same organization
+- When Alice selects one of "view per credential" or "view aggregated by organization"
+- Then the usage and quota display on screen is redrawn consistently according to the selected mode
+- And Alice can switch to the other mode and view it again at any time
+
+### Scenario F11A.8: Usage by time slot within the 5-hour window is shown separately (new P3)
+
+- Given Alice opens the 5-hour quota detail for credential K
+- When the usage bar is expanded
+- Then usage broken down by time slot within the 5-hour window is shown alongside
+- And Alice can see at a glance which time slots had the highest call volume within the same screen
+
+### Scenario F11A.9: Usage restrictions attached to a credential are displayed in a human-readable form (new P3)
+
+- Given Anthropic communicates usage restrictions alongside credential K
+- When Alice views the detail for K
+- Then those restrictions are presented as human-readable guidance
+- And Alice sees within the same screen which calls this credential can and cannot be used for
+
+### Scenario F11A.10: When the quota is exhausted, the shortfall is shown to the operator (new P3)
+
+- Given credential K has exhausted its quota within the quota window
+- When Alice views the analytics window detail for K
+- Then the shortfall is shown as a human-readable number
+- And Alice can see at a glance how much quota is currently short
+
+### Scenario F11A.11: The last known quota value is temporarily retained after a credential is deleted (new P3)
+
+- Given Alice deletes credential K from the screen
+- When Alice immediately registers a new credential K' in the same slot
+- Then the last quota value K showed is temporarily preserved
+- And Alice can compare K's last state and K's new state within the same screen
 
 ---
 
-작성 종료: 2026-06-18
+## Feature F11B: Subscription Quota Freshness (warmup)
+
+cc-lb periodically sends small signals to keep the Anthropic subscription's 5-hour window active (these signals are called "warmup"). The SRE (Charlie) views the warmup schedule, retries, isolation, OAuth exclusivity, and upstream address changes in a single screen. (Split from v4 F11.1-F11.11 by applying consensus OQ#3.)
+
+### Scenario F11B.1: Anthropic is signaled periodically to keep the quota active
+
+- Given cc-lb has an active credential
+- When the configured cycle arrives
+- Then cc-lb sends a small signal to Anthropic to keep the quota active
+- And the next cycle time is determined by adjusting from the start time of the 5-hour window
+- And the 5-hour window remains alive even without any calls from Bob
+
+### Scenario F11B.2: Warmup calls are not counted toward usage or cost
+
+- Given cc-lb is sending small signals for warmup
+- When Alice views the usage and cost for the same time window
+- Then warmup signals are not added to either the usage figure or the cost report
+- And only calls actually sent by Bob are counted as usage
+
+### Scenario F11B.3: When Anthropic signals to back off, the polling interval is increased
+
+- Given Anthropic responds indicating that requests for this credential should be sent less frequently
+- When cc-lb determines the next warmup time
+- Then the polling interval increases automatically
+- And when Anthropic's guidance returns to normal, the interval returns to normal as well
+
+### Scenario F11B.4: Only one of multiple replica nodes performs warmup
+
+- Given Charlie has cc-lb running as three replica nodes
+- When the warmup cycle arrives
+- Then only one of the three replica nodes sends the warmup signal for that credential
+- And no other replica node sends the same signal again during the same cycle
+
+### Scenario F11B.5: When warmup fails, the next attempt uses a backoff interval
+
+- Given the previous warmup attempt failed
+- When cc-lb determines the next attempt
+- Then the next attempt does not happen immediately and a backoff interval is applied
+- And when a successful response is returned, the backoff shrinks back to the normal interval
+
+### Scenario F11B.6: The operator views warmup status on screen
+
+- Given Alice opens the operations screen
+- When she expands a credential row
+- Then "last successful warmup time", "next attempt time", and "end time of the current quota window" are shown together
+- And Alice can determine at a glance that warmup is currently alive
+
+### Scenario F11B.7: Changes that occurred while the subscription was disconnected are caught up by the reconciler after reconnection
+
+- Given while cc-lb's notification subscription was briefly disconnected, Alice revoked a credential and registered a new upstream
+- When the subscription reconnects
+- Then the periodic reconciler sweeps through the changes that occurred during the disconnection and applies them to cc-lb's current state
+- And no further calls go out using the revoked credential, and the new upstream is included in routing
+
+### Scenario F11B.8: Warmup is suspended during an emergency killswitch (new P3)
+
+- Given cc-lb's emergency killswitch is active
+- When the warmup cycle arrives
+- Then cc-lb does not send the warmup signal
+- And after the killswitch is deactivated, warmup resumes as normal from the next cycle
+
+### Scenario F11B.9: The operator views the warmup target upstream and next attempt time (new P3)
+
+- Given Alice opens the warmup detail screen
+- When she expands the multiple upstreams bound to a credential
+- Then the next warmup attempt time and last result for each upstream are shown together
+- And Alice can read within the same screen that even for the same credential, the schedule may differ per upstream
+
+### Scenario F11B.10: The operator is shown that warmup applies only to OAuth credentials (new P3)
+
+- Given Alice has a credential registered by a method other than OAuth
+- When Alice views the warmup status of that credential
+- Then the screen shows in a human-readable form that warmup does not apply to this credential
+- And Alice is informed within the same screen that an OAuth credential is required to receive warmup
+
+### Scenario F11B.11: Upstream address changes at Anthropic are shown to the operator and calls are not interrupted (new P3)
+
+- Given cc-lb re-checks the domain for the Anthropic upstream on its own cycle
+- When the upstream address changes to a different value from normal
+- Then Bob's calls in progress are not interrupted
+- And Charlie's screen displays a single line indicating the upstream address has been updated to a new value
+
+---
+
+## Feature F11C: Organization Metadata and Compatibility Cache Freshness
+
+cc-lb periodically refreshes organization metadata (pricing tier, billing type) and the compatibility cache, and shows refresh failures, restarts, and freshness timestamps to the operator as-is. (Split from v4 F11.22-F11.27 by applying consensus OQ#3. v4 F11.26 was multi-rule and is split into F11C.5 + F11C.6.)
+
+### Scenario F11C.1: The compatibility cache is automatically refreshed on a one-hour cycle
+
+- Given cc-lb is running and the compatibility cache is populated
+- When the configured one-hour cycle arrives
+- Then cc-lb replaces the cache with new values
+- And none of Bob's calls are interrupted between refreshes
+
+### Scenario F11C.2: Organization metadata is stored in a way that allows quota differences to be traced
+
+- Given Alice's organization has two credentials with different pricing tiers or billing types
+- When Alice opens the dashboard
+- Then each credential's pricing tier and billing type are shown in a human-readable form
+- And Alice can see at a glance that the quota difference comes from the tier
+
+### Scenario F11C.3: The operator manually refreshes subscription metadata
+
+- Given Alice has just changed the billing type in the Anthropic console
+- When Alice presses "Refresh subscription metadata" on the cc-lb screen
+- Then cc-lb fetches the subscription metadata again without waiting for the next automatic cycle
+- And the new information is reflected on the screen immediately
+
+### Scenario F11C.4: Process restart markers are not mistaken for quota spikes
+
+- Given Charlie has replaced the cc-lb process with a new binary
+- When cc-lb starts up again and recalculates usage
+- Then the restart marker is not drawn as a spike on the quota usage graph but is shown as a distinct indicator
+- And Alice can read from the graph that there was a restart, not a sudden increase in quota usage
+
+### Scenario F11C.5: When a compatibility cache refresh fails, the previous value is retained (v4 F11.26 split — stale value retention rule)
+
+- Given cc-lb receives the compatibility cache on a one-hour cycle
+- When one of the refresh attempts fails
+- Then cc-lb retains the previous value it received
+
+### Scenario F11C.6: The time of the last successful compatibility cache refresh is shown to the operator (v4 F11.26 split — freshness display rule)
+
+- Given a compatibility cache refresh for cc-lb has failed once
+- When Alice views the compatibility cache detail
+- Then the time of the last successful refresh is displayed in a human-readable form
+
+### Scenario F11C.7: The last attempt time and last success time are shown separately (new P3)
+
+- Given Alice opens the subscription metadata detail
+- When the screen renders
+- Then "last attempt time" and "last success time" are shown separately
+- And Alice can see at a glance how fresh the currently displayed values are
+
+---
+
+Completed: 2026-06-18
 Writer: 2 of 4 (Credential & Incident)
-Features: 7 — F5, F7, F8, F10, F11A(가시성), F11B(신선도), F11C(조직 메타·호환성 캐시)
+Features: 7 — F5, F7, F8, F10, F11A (visibility), F11B (freshness), F11C (organization metadata and compatibility cache)
 Scenarios: 66 (9 + 7 + 13 + 8 + 11 + 11 + 7)
-참조: `~/cc-lb-bdd/cc-lb-true-bdd-2-credential-incident-v4.md`, `~/cc-lb-bdd/cc-lb-bdd-verify-C-scenario-quality.md`, `~/cc-lb-bdd/cc-lb-bdd-v3-final-consensus.md`
+References: `~/cc-lb-bdd/cc-lb-true-bdd-2-credential-incident-v4.md`, `~/cc-lb-bdd/cc-lb-bdd-verify-C-scenario-quality.md`, `~/cc-lb-bdd/cc-lb-bdd-v3-final-consensus.md`
 
 ---
 
-## 변경 기록 (v4 → v5)
+## Change Log (v4 → v5)
 
-### 1) F11 분리 (consensus Open Question #3 적용)
+### 1) F11 Split (consensus Open Question #3 applied)
 
-v4 F11 통합 (27 scenarios)이 Cucumber.io 권장 한 feature 5-15 시나리오 범위를 두 배 가까이 초과했다. 다음과 같이 셋으로 분리:
+The consolidated v4 F11 (27 scenarios) exceeded Cucumber.io's recommended 5-15 scenarios per feature by nearly double. Split into three as follows:
 
-| v5 feature | 명칭 | v4 출처 범위 | 시나리오 수 | 운영 관심사 |
+| v5 feature | Name | v4 source range | Scenario count | Operational concern |
 |---|---|---|---:|---|
-| **F11A** | 구독 한도 가시성 | v4 F11.12-F11.21 + split | 11 | 5h/7d 한도·사용량·임박·합치기·시간대 등 화면에서 보이는 쪽 |
-| **F11B** | 구독 한도 신선도 | v4 F11.1-F11.11 | 11 | 주기·격리·재시도·OAuth 전용·위로 주소 변동 등 신호 보내는 쪽 |
-| **F11C** | 조직 메타·호환성 캐시 신선도 | v4 F11.22-F11.27 + split | 7 | 한 시간 주기·재시작 표식·옛 값 유지·신선도 시각 등 메타 신선도 |
+| **F11A** | Subscription Quota Visibility | v4 F11.12-F11.21 + split | 11 | visibility side: 5h/7d quota, usage, proximity warning, aggregation mode, time slot breakdown, etc. |
+| **F11B** | Subscription Quota Freshness | v4 F11.1-F11.11 | 11 | signal-sending side: cycle, isolation, retries, OAuth exclusivity, upstream address changes, etc. |
+| **F11C** | Organization Metadata and Compatibility Cache Freshness | v4 F11.22-F11.27 + split | 7 | metadata freshness: one-hour cycle, restart markers, stale value retention, freshness timestamps, etc. |
 
-세 feature 모두 5-15 권장 범위 안.
+All three features fall within the recommended 5-15 range.
 
-### 2) Multi-rule Then 분할 (verify-C §5 적용)
+### 2) Multi-rule Then Split (verify-C §5 applied)
 
-verify-C 표본 30개 중 53.3%가 multi-rule이라는 진단에 따라, v4 W2에서 가장 명확히 두 규칙을 묶은 4개 시나리오를 split:
+Based on the diagnosis that 53.3% of 30 sampled verify-C scenarios were multi-rule, the 4 scenarios in v4 W2 that most clearly combined two rules are split:
 
-| v4 ID | 묶여 있던 두 규칙 | v5 분할 결과 |
+| v4 ID | Two bundled rules | v5 split result |
 |---|---|---|
-| F5.2 | (a) 운영자에게 알림 도착 (b) 백오프 적용 | F5.2(알림) + F5.3(백오프) |
-| F8.1 | (a) 사용자에게 지연 안내 (b) 운영자 대시보드에 사유 표시 | F8.1(사용자 UX) + F8.2(운영자 가시성) |
-| F11.14 | (a) 기본/초과 구분 표시 (b) 초과 진입 사실 명시 | F11A.3(구분 표시) + F11A.4(진입 상태) |
-| F11.26 | (a) 옛 값 그대로 유지 (b) 마지막 성공 시각 표시 | F11C.5(옛 값 유지) + F11C.6(신선도 표시) |
+| F5.2 | (a) notification delivered to operator (b) backoff applied | F5.2 (notification) + F5.3 (backoff) |
+| F8.1 | (a) delay notice to user (b) reason shown on operator dashboard | F8.1 (user UX) + F8.2 (operator visibility) |
+| F11.14 | (a) base/overage distinction display (b) overage entry state made explicit | F11A.3 (distinction display) + F11A.4 (entry state) |
+| F11.26 | (a) retain previous value (b) display last success time | F11C.5 (stale value retention) + F11C.6 (freshness display) |
 
-총 +4 scenarios. 다른 multi-rule 의심 시나리오 (F5.1 갱신+감사, F7.2 해제+감사, F10.4 거부+감사 등)는 같은 운영자 관심사에 한 줄 audit 보조선이 붙은 형태로 판정해 split 보류 (verify-C §7 fix #4 "audit sibling 분리"는 다음 라운드 권고).
+Total +4 scenarios. Other scenarios suspected of being multi-rule (F5.1 rotation+audit, F7.2 deactivation+audit, F10.4 rejection+audit, etc.) were judged to have a single-line audit companion attached to the same operator concern, and their split was deferred (verify-C §7 fix #4 "audit sibling separation" recommended for the next round).
 
-### 3) 어휘 일관성 정리 (verify-C §4 적용)
+### 3) Vocabulary Consistency Cleanup (verify-C §4 applied)
 
-| v4 영문 어휘 | 빈도 | v5 우리말 어휘 | 비고 |
+| v4 English vocabulary | Frequency | v5 Korean vocabulary | Notes |
 |---|---:|---|---|
-| `upstream` | 18 (feature 설명 1 + F8.7×4 + F8.8×2 + F8.11×5 + F11B.9×4 + 본문 분포) | `위로` | F8.1이 이미 "위로"로 번역해 두었음. 일괄 통일. |
-| `warmup` | 25+ (Charlie persona 설명 + F8 intro + F11B.1-F11B.10 본문 전반) | `미리 데움` | verify-C가 권고. F11B feature 전체에 적용. |
-| `callback` | 9 (F10.2×3 + F10.4×2 + F10.5×1 + F10.7×1 + F10.8×2) | `되돌아옴` | F10 OAuth 흐름에 일괄 적용. OAuth는 표준 프로토콜 이름이라 보존. |
-| `OAuth` | n/a | `OAuth` (보존) | 표준 프로토콜 이름으로 그대로. |
-| `access_token` / `refresh_token` / `API 키` | n/a (W2엔 없음) | "토큰 / 갱신 토큰 / API 키" | 본 W2에는 미발생. W4 도큐먼트가 가질 책무. |
+| `upstream` | 18 (feature description 1 + F8.7×4 + F8.8×2 + F8.11×5 + F11B.9×4 + body distribution) | `wiro` | F8.1 had already used "wiro". Unified throughout. |
+| `warmup` | 25+ (Charlie persona description + F8 intro + F11B.1-F11B.10 body overall) | `miri-deum` | Recommended by verify-C. Applied across the entire F11B feature. |
+| `callback` | 9 (F10.2×3 + F10.4×2 + F10.5×1 + F10.7×1 + F10.8×2) | `doedol-aom` | Applied uniformly in the F10 OAuth flow. OAuth preserved as a standard protocol name. |
+| `OAuth` | n/a | `OAuth` (preserved) | Preserved as a standard protocol name. |
+| `access_token` / `refresh_token` / `API key` | n/a (not in W2) | "token / refresh token / API key" | Does not occur in this W2. W4 document's responsibility. |
 
-총 vocab 치환: **52건** (upstream 18 + warmup 25 + callback 9).
+Total vocabulary replacements: **52** (upstream 18 + warmup 25 + callback 9).
 
-### 4) 페르소나
+### 4) Personas
 
-Alice (운영자) · Bob (개발자) · Charlie (SRE) · Dana (감사관) 4인만 사용. v4와 동일.
+Four personas only: Alice (Operator), Bob (Developer), Charlie (SRE), Dana (Auditor). Unchanged from v4.
 
-### 5) v4 → v5 시나리오 매핑
+### 5) v4 → v5 Scenario Mapping
 
 ```
 v4 F5.1 → v5 F5.1
-v4 F5.2 → v5 F5.2 (알림) + F5.3 (백오프)        [SPLIT]
+v4 F5.2 → v5 F5.2 (notification) + F5.3 (backoff)        [SPLIT]
 v4 F5.3 → v5 F5.4
 v4 F5.4 → v5 F5.5
 v4 F5.5 → v5 F5.6
@@ -586,45 +586,45 @@ v4 F5.6 → v5 F5.7
 v4 F5.7 → v5 F5.8
 v4 F5.8 → v5 F5.9
 
-v4 F7.1-F7.7 → v5 F7.1-F7.7 (변동 없음)
+v4 F7.1-F7.7 → v5 F7.1-F7.7 (no change)
 
-v4 F8.1 → v5 F8.1 (사용자 UX) + F8.2 (운영자 가시성)  [SPLIT]
+v4 F8.1 → v5 F8.1 (user UX) + F8.2 (operator visibility)  [SPLIT]
 v4 F8.2 → v5 F8.3
 v4 F8.3 → v5 F8.4
 v4 F8.4 → v5 F8.5
 v4 F8.5 → v5 F8.6
-v4 F8.6 → v5 F8.7 (upstream→위로)
-v4 F8.7 → v5 F8.8 (upstream→위로)
-v4 F8.8 → v5 F8.9 (upstream→위로)
+v4 F8.6 → v5 F8.7 (upstream → "wiro" substitution)
+v4 F8.7 → v5 F8.8 (upstream → "wiro" substitution)
+v4 F8.8 → v5 F8.9 (upstream → "wiro" substitution)
 v4 F8.9 → v5 F8.10
-v4 F8.10 → v5 F8.11 (upstream→위로 4×)
+v4 F8.10 → v5 F8.11 (upstream → "wiro" substitution, 4×)
 v4 F8.11 → v5 F8.12
 v4 F8.12 → v5 F8.13
 
 v4 F10.1 → v5 F10.1
-v4 F10.2 → v5 F10.2 (callback→되돌아옴 3×)
+v4 F10.2 → v5 F10.2 (callback → "doedol-aom" substitution, 3×)
 v4 F10.3 → v5 F10.3
-v4 F10.4 → v5 F10.4 (callback→되돌아옴 2×)
-v4 F10.5 → v5 F10.5 (callback→되돌아옴 1×)
+v4 F10.4 → v5 F10.4 (callback → "doedol-aom" substitution, 2×)
+v4 F10.5 → v5 F10.5 (callback → "doedol-aom" substitution, 1×)
 v4 F10.6 → v5 F10.6
-v4 F10.7 → v5 F10.7 (callback→되돌아옴 1×)
-v4 F10.8 → v5 F10.8 (callback→되돌아옴 2×)
+v4 F10.7 → v5 F10.7 (callback → "doedol-aom" substitution, 1×)
+v4 F10.8 → v5 F10.8 (callback → "doedol-aom" substitution, 2×)
 
-v4 F11.1 → v5 F11B.1 (warmup→미리 데움)
-v4 F11.2 → v5 F11B.2 (warmup→미리 데움)
-v4 F11.3 → v5 F11B.3 (warmup→미리 데움)
-v4 F11.4 → v5 F11B.4 (warmup→미리 데움)
-v4 F11.5 → v5 F11B.5 (warmup→미리 데움)
-v4 F11.6 → v5 F11B.6 (warmup→미리 데움)
-v4 F11.7 → v5 F11B.7 (upstream→위로)
-v4 F11.8 → v5 F11B.8 (warmup→미리 데움 4×)
-v4 F11.9 → v5 F11B.9 (warmup·upstream 일괄 치환)
-v4 F11.10 → v5 F11B.10 (warmup→미리 데움)
-v4 F11.11 → v5 F11B.11 (upstream/위쪽 → 위로 일괄)
+v4 F11.1 → v5 F11B.1 (warmup → "miri-deum" substitution)
+v4 F11.2 → v5 F11B.2 (warmup → "miri-deum" substitution)
+v4 F11.3 → v5 F11B.3 (warmup → "miri-deum" substitution)
+v4 F11.4 → v5 F11B.4 (warmup → "miri-deum" substitution)
+v4 F11.5 → v5 F11B.5 (warmup → "miri-deum" substitution)
+v4 F11.6 → v5 F11B.6 (warmup → "miri-deum" substitution)
+v4 F11.7 → v5 F11B.7 (upstream → "wiro" substitution)
+v4 F11.8 → v5 F11B.8 (warmup → "miri-deum" substitution, 4×)
+v4 F11.9 → v5 F11B.9 (warmup and upstream batch substitution)
+v4 F11.10 → v5 F11B.10 (warmup → "miri-deum" substitution)
+v4 F11.11 → v5 F11B.11 (upstream / "wijjok" → "wiro" batch substitution)
 
 v4 F11.12 → v5 F11A.1
 v4 F11.13 → v5 F11A.2
-v4 F11.14 → v5 F11A.3 (구분) + F11A.4 (진입)        [SPLIT]
+v4 F11.14 → v5 F11A.3 (distinction) + F11A.4 (entry)        [SPLIT]
 v4 F11.15 → v5 F11A.5
 v4 F11.16 → v5 F11A.6
 v4 F11.17 → v5 F11A.7
@@ -637,28 +637,28 @@ v4 F11.22 → v5 F11C.1
 v4 F11.23 → v5 F11C.2
 v4 F11.24 → v5 F11C.3
 v4 F11.25 → v5 F11C.4
-v4 F11.26 → v5 F11C.5 (옛 값 유지) + F11C.6 (신선도 표시)   [SPLIT]
+v4 F11.26 → v5 F11C.5 (stale value retention) + F11C.6 (freshness display)   [SPLIT]
 v4 F11.27 → v5 F11C.7
 ```
 
-### 6) 카운트 변화
+### 6) Count Changes
 
-| 카테고리 | v4 | 분할/치환 결과 | v5 |
+| Category | v4 | Split / substitution result | v5 |
 |---|---:|---|---:|
 | F5 | 8 | +1 (F5.2 split) | 9 |
-| F7 | 7 | 변동 없음 | 7 |
+| F7 | 7 | no change | 7 |
 | F8 | 12 | +1 (F8.1 split) | 13 |
-| F10 | 8 | 변동 없음 (callback 치환만) | 8 |
-| F11A | n/a (v4 F11 일부) | F11.12-F11.21 + F11.14 split | 11 |
-| F11B | n/a (v4 F11 일부) | F11.1-F11.11 | 11 |
-| F11C | n/a (v4 F11 일부) | F11.22-F11.27 + F11.26 split | 7 |
-| **합계** | **62** | **+4** | **66** |
+| F10 | 8 | no change (callback substitution only) | 8 |
+| F11A | n/a (part of v4 F11) | F11.12-F11.21 + F11.14 split | 11 |
+| F11B | n/a (part of v4 F11) | F11.1-F11.11 | 11 |
+| F11C | n/a (part of v4 F11) | F11.22-F11.27 + F11.26 split | 7 |
+| **Total** | **62** | **+4** | **66** |
 
-Features: 5 → 7 (F11 단일이 F11A/F11B/F11C로 분리).
+Features: 5 → 7 (single F11 split into F11A/F11B/F11C).
 
-### 7) 다음 라운드 안건 (v5 → v6 예고)
+### 7) Next Round Items (v5 → v6 preview)
 
-- verify-C §7 fix #4 "behavior + audit sibling 분리" 본격 적용 검토 — F5.1, F7.2, F10.4가 후보.
-- F11A·F11B·F11C 분리 후 운영자 화면 navigation에 영향이 있는지 stakeholder review.
-- consensus Open Question #2 (F8.9 reframe)은 v4에서 이미 처리 완료, v5 본문에 그대로 유지.
-- consensus Count discrepancy 메모 (W2 +21 claim vs 실제 +19)는 본 v5에서도 +19 명시 add 기준 유지.
+- Consider full application of verify-C §7 fix #4 "behavior + audit sibling separation" — F5.1, F7.2, F10.4 are candidates.
+- Stakeholder review of whether the F11A/F11B/F11C split affects operator screen navigation.
+- Consensus Open Question #2 (F8.9 reframe) was already resolved in v4 and is retained in the v5 body as-is.
+- The consensus count discrepancy note (W2 +21 claim vs. actual +19) is maintained in this v5 with the explicit +19 baseline.

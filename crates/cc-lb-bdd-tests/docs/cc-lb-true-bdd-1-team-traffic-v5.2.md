@@ -1,1005 +1,1005 @@
-# cc-lb 진정한 BDD — v5.2 Writer 1 (Team / Traffic / Dashboard / Cache / Health)
+# cc-lb True BDD — v5.2 Writer 1 (Team / Traffic / Dashboard / Cache / Health)
 
 ## Scope
-- F1, F2, F3, F4, F6, F19, F26 (병합 영향 없음)
-- 작성일: 2026-06-18
-- 작성자: v5.2 Writer 1
-- 페르소나: Alice (운영자), Bob (구현자), Charlie (SRE), Dana (감사관)
-- 출처: `cc-lb-true-bdd-1-team-traffic-v5.md` (87 scenarios) + `cc-lb-bdd-final-report-v5.md` §3 PARTIAL 사유 표
-- 어휘 규칙: HTTP/DB/Rust/바이트/환경변수 노출 금지. 도메인 언어만 사용.
-- v5 대비 변경 (v5.2 changelog):
-  - **다중 규칙 분리 6 시나리오 추가 (6 → 17, +11):** v5 단계에서 남아 있던 multi-rule PARTIAL 시나리오를 한 시나리오 = 한 규칙 원칙에 맞춰 분리.
-    - F3.5 → F3.5a (허용되지 않은 모델 거부) + F3.5b (거부 사유 메시지 형식) + F3.5c (audit-bundle 보고 추가)
-    - F4.1 → F4.1a (어제 가장 많이 쓴 팀 비용 순서) + F4.1b (호출 대 거부 비율) + F4.1c (drill-down 네비게이션)
-    - F4.11 → F4.11a ("0건" vs "아직 모름" 표 구분) + F4.11b (사용자 인지 도움말) + F4.11c (시간대별 그림)
-    - F6.10 → F6.10a (경로별 본문 크기 한도 적용) + F6.10b (다른 경로 격리)
-    - F19.3 → F19.3a (캐시 적중 비용 절감) + F19.3b (가상 비용 라벨) + F19.3c (시간대별 비교)
-    - F26.2 → F26.2a (회복 불가 시 "준비 안 됨" 유지) + F26.2b (liveness 신호 분리) + F26.2c (자동 복귀 시도 표시)
-  - **v5 changelog 유지:** v4 → v5 단계에서 분리된 11 → 22 항목과 신규 F2.14는 변동 없음.
-  - **유지:** 분리되지 않은 ID는 그대로. v3에서 잘려나간 11개 ID는 다시 채우지 않음.
-- 총 시나리오: 87 → **98**
-- Feature 수: 7 (변동 없음)
+- F1, F2, F3, F4, F6, F19, F26 (no merge impact)
+- Date: 2026-06-18
+- Author: v5.2 Writer 1
+- Personas: Alice (operator), Bob (developer), Charlie (SRE), Dana (auditor)
+- Source: `cc-lb-true-bdd-1-team-traffic-v5.md` (87 scenarios) + `cc-lb-bdd-final-report-v5.md` §3 PARTIAL reason table
+- Vocabulary rule: No HTTP/DB/Rust/byte/env-var exposure. Domain language only.
+- Changes from v5 (v5.2 changelog):
+  - **6 multi-rule scenarios split (6 → 17, +11):** PARTIAL scenarios remaining from v5 that contained multiple rules were split to enforce the one scenario = one rule principle.
+    - F3.5 → F3.5a (unauthorized model rejected) + F3.5b (rejection message format) + F3.5c (audit-bundle report added)
+    - F4.1 → F4.1a (yesterday's top teams by cost) + F4.1b (call-to-rejection ratio) + F4.1c (drill-down navigation)
+    - F4.11 → F4.11a ("zero calls" vs "not yet known" table distinction) + F4.11b (user comprehension tooltip) + F4.11c (time-period chart)
+    - F6.10 → F6.10a (per-path body size limit applied) + F6.10b (other path isolation)
+    - F19.3 → F19.3a (cache-hit cost savings) + F19.3b (hypothetical cost label) + F19.3c (time-period comparison)
+    - F26.2 → F26.2a ("not ready" maintained when unrecoverable) + F26.2b (liveness signal separated) + F26.2c (auto-reconnect attempt indicator)
+  - **v5 changelog retained:** The 11 → 22 items split in the v4 → v5 phase and the new F2.14 are unchanged.
+  - **Retained:** IDs that were not split remain as-is. The 11 IDs dropped in v3 are not backfilled.
+- Total scenarios: 87 → **98**
+- Feature count: 7 (unchanged)
 
 ---
 
-## Feature F1: 운영자가 새 팀을 cc-lb에 온보딩한다
+## Feature F1: Operator onboards a new team onto cc-lb
 
-Alice는 새로운 팀을 cc-lb에 받아들이고, 그 팀이 첫 호출을 할 수 있는 상태까지 데려간다. 이 feature는 등록·식별자 검증·동시 편집 보호·비활성/활성 회복·삭제 후 감사 보존을 다룬다.
+Alice accepts a new team into cc-lb and brings that team to a state where it can make its first call. This feature covers registration, identifier validation, concurrent-edit protection, inactive/active recovery, and audit preservation after deletion.
 
-### Scenario F1.1a: 새 팀 등록은 활성 상태와 첫 키를 같은 화면에서 한 번에 마무리한다
+### Scenario F1.1a: New team registration finishes with active status and first key on the same screen in one step
 
 ```gherkin
-Given Alice는 운영자로 로그인되어 있다
-And cc-lb에는 아직 그 팀 이름이 등록되어 있지 않다
-When Alice가 새 팀 이름과 사용 한도를 입력해 등록한다
-Then 그 팀이 활성 상태로 만들어진다
-And 그 팀의 첫 클라이언트 키가 같은 화면에서 한 번만 보여진다
+Given Alice is logged in as an operator
+And the team name is not yet registered in cc-lb
+When Alice enters the new team name and usage limit and submits the registration
+Then the team is created in active status
+And the team's first client key is shown exactly once on the same screen
 ```
 
-### Scenario F1.1b: 새 팀 등록은 누가 언제 만들었는지를 감사 기록에 남긴다
+### Scenario F1.1b: New team registration leaves an audit record of who created it and when
 
 ```gherkin
-Given Alice는 운영자로 로그인되어 있다
-And cc-lb에는 아직 그 팀 이름이 등록되어 있지 않다
-When Alice가 새 팀 이름과 사용 한도를 입력해 등록한다
-Then 감사 기록에는 "누가 언제 어떤 팀을 만들었고 첫 키가 발급되었다"가 함께 남는다
+Given Alice is logged in as an operator
+And the team name is not yet registered in cc-lb
+When Alice enters the new team name and usage limit and submits the registration
+Then the audit log records who created which team, when, and that the first key was issued
 ```
 
-### Scenario F1.2: 발급된 키는 등록 직후 한 번만 보여진다
+### Scenario F1.2: The issued key is shown exactly once immediately after registration
 
 ```gherkin
-Given Alice가 새 팀을 등록하고 첫 키 발급 화면을 보고 있다
-When Alice가 그 화면을 벗어났다가 다시 같은 팀을 연다
-Then 비밀 키 전체는 다시 보여지지 않는다
-And 대신 마지막 몇 자리와 발급 시각만 보여진다
-And Alice가 비밀을 다시 보려 하면 "새로 발급해야만 한다"고 안내된다
+Given Alice has registered a new team and is viewing the first key issuance screen
+When Alice navigates away from that screen and then opens the same team again
+Then the full secret key is not shown again
+And only the last few characters and the issuance time are shown instead
+And if Alice tries to view the secret again, she is informed that a new key must be issued
 ```
 
-### Scenario F1.3: 다른 운영자가 그 사이 같은 팀을 바꿨다면 두 번째 저장은 멈춰진다
+### Scenario F1.3: If another operator changed the same team in the meantime, the second save is stopped
 
 ```gherkin
-Given Alice와 다른 운영자가 동시에 같은 팀의 한도 편집 화면을 열었다
-And 다른 운영자가 먼저 저장을 끝냈다
-When Alice가 자신의 변경을 저장하려 한다
-Then Alice의 저장은 "다른 사람이 그 사이 바꿨다"고 친절히 거부된다
-And Alice는 최신 값을 다시 본 뒤에만 자신의 변경을 다시 시도할 수 있다
+Given Alice and another operator have both opened the limit-editing screen for the same team at the same time
+And the other operator finished saving first
+When Alice tries to save her own changes
+Then Alice's save is gracefully rejected with a message that someone else changed it in the meantime
+And Alice can only retry her changes after viewing the latest values again
 ```
 
-### Scenario F1.4: 비활성화된 팀의 호출은 받아들여지지 않는다
+### Scenario F1.4: Calls from a deactivated team are not accepted
 
 ```gherkin
-Given Alice가 한 팀을 비활성 상태로 바꿔 두었다
-When 그 팀의 키를 가진 Bob이 cc-lb를 통해 Claude를 호출한다
-Then 그 호출은 친절히 거부된다
-And Bob에게는 "팀이 잠시 멈춰져 있다"는 의미만 전달된다
-And 그 거부 사실은 사용량 보고에서 "거부 사유 종류별"로 한눈에 보인다
+Given Alice has set a team to inactive status
+When Bob, who holds that team's key, calls Claude through cc-lb
+Then that call is gracefully rejected
+And Bob receives only the message that the team is temporarily paused
+And the rejection is visible in the usage report broken down by rejection reason type
 ```
 
-### Scenario F1.5: 팀에 허용된 모델 범위를 벗어나는 호출은 거부된다
+### Scenario F1.5: Calls that exceed the model set allowed for the team are rejected
 
 ```gherkin
-Given Alice는 한 팀에 "특정 모델 묶음만" 허용해 두었다
-When 그 팀의 Bob이 허용 묶음 밖의 모델로 호출한다
-Then 그 호출은 친절히 거부된다
-And Bob에게는 "이 팀에서는 그 모델을 쓸 수 없다"는 의미만 전달된다
-And 같은 사실이 Alice의 거부 사유 보고에 종류별로 남는다
+Given Alice has allowed only a specific model bundle for a team
+When Bob on that team calls with a model outside the allowed bundle
+Then that call is gracefully rejected
+And Bob receives only the message that the model cannot be used by this team
+And the same fact appears in Alice's rejection-reason report by type
 ```
 
-### Scenario F1.7: 팀을 삭제해도 그 팀이 했던 일의 감사 흔적은 사라지지 않는다
+### Scenario F1.7: Deleting a team does not erase the audit trail of what that team did
 
 ```gherkin
-Given 한 팀이 이미 여러 호출과 발급/회수 이력을 갖고 있다
-When Alice가 그 팀을 영구 삭제한다
-Then 그 팀의 활성/비활성 흔적은 없어진다
-And 그러나 그 팀이 남긴 감사 사건들은 "지워진 팀 X"로 그대로 조회된다
-And Dana가 분기 감사 때 같은 사건들을 시간순으로 다시 볼 수 있다
+Given a team already has multiple call records and key issuance/revocation history
+When Alice permanently deletes that team
+Then the team's active/inactive record disappears
+And the audit events left by that team remain queryable as "deleted team X"
+And Dana can review the same events in chronological order during a quarterly audit
 ```
 
-### Scenario F1.8: 식별자에 금지 문자나 예약된 머리말이 들어가면 등록이 거부된다
+### Scenario F1.8: Registration is rejected if the identifier contains forbidden characters or a reserved prefix
 
 ```gherkin
-Given Alice가 새 팀을 등록하려 한다
-When Alice가 보이지 않는 문자나 시스템 예약 머리말이 섞인 이름을 넣는다
-Then 그 등록은 친절히 거부된다
-And Alice에게는 "이 이름은 시스템 예약이거나 보이지 않는 문자가 섞여 있다"는 의미가 전달된다
-And 그 거부는 사용량 보고에 영향을 주지 않는다
+Given Alice is trying to register a new team
+When Alice enters a name containing invisible characters or a system-reserved prefix
+Then the registration is gracefully rejected
+And Alice receives only the message that this name is system-reserved or contains invisible characters
+And the rejection does not affect the usage report
 ```
 
-### Scenario F1.10: 비활성 팀을 다시 활성으로 되돌리면 같은 비밀로 곧 받아들여진다
+### Scenario F1.10: Restoring a deactivated team to active status lets the same secrets be accepted again immediately
 
 ```gherkin
-Given Alice가 한 팀을 비활성 상태로 바꿔 두었다
-When Alice가 그 팀을 다시 활성 상태로 되돌린다
-Then 그 팀의 키들이 같은 비밀로 다시 받아들여진다
-And Bob의 코드는 새 키를 받지 않고 별다른 절차 없이 호출을 다시 보낸다
-And 누가 언제 비활성/활성을 바꿨는지가 한 쌍으로 감사 기록에 남는다
+Given Alice has set a team to inactive status
+When Alice restores that team to active status
+Then the team's keys are accepted again with the same secrets
+And Bob's code can send calls again without receiving a new key or taking any extra steps
+And who changed the status and when — both the deactivation and reactivation — appear as a pair in the audit log
 ```
 
-### Scenario F1.11: 비활성화 직전에 시작된 호출은 마무리되고 새 호출만 거부된다
+### Scenario F1.11: Calls in progress just before deactivation are completed; only new calls are rejected
 
 ```gherkin
-Given 한 팀의 키로 진행 중인 호출이 여러 건 있다
-When Alice가 그 팀을 비활성 상태로 바꾼다
-Then 이미 진행 중인 호출은 정상 응답으로 마무리된다
-And 그 시점 이후의 새 호출은 친절히 거부된다
-And 두 무리가 거부 사유 종류별 보고에서 "비활성 전/후"로 분리되어 보인다
-```
-
----
-
-## Feature F2: 운영자가 클라이언트 키를 발급/표시/회수한다
-
-Alice는 팀의 키를 만들고, 꼭 필요한 만큼만 보여주고, 위험 신호가 들 때 회수한다. 이 feature는 키의 한 번만 보이기·회전·회수·만료·소유자 표시·상태 전이·보유자당 한도·열람 감사·회전 미지원 안내를 다룬다.
-
-### Scenario F2.1: 새 키 발급 시 비밀은 단 한 번만 보여진다
-
-```gherkin
-Given Alice가 한 팀의 키 발급 화면을 열었다
-When Alice가 새 키를 발급한다
-Then 비밀 키 전체는 그 자리에서 한 번만 보여진다
-And 같은 화면을 다시 열어도 그 비밀은 더 이상 보이지 않는다
-And 마지막 몇 자리와 보유자 이름만 남는다
-```
-
-### Scenario F2.2: 키 회전 시 새 키와 옛 키가 짧은 겹침 기간을 갖는다
-
-```gherkin
-Given 한 팀에 활성 키 한 개가 이미 있다
-When Alice가 그 키의 회전을 시작한다
-Then 새 키가 발급되고 그 자리에서 한 번만 보여진다
-And 옛 키는 미리 정한 짧은 기간 동안 함께 쓰일 수 있다
-And 그 기간이 끝나면 옛 키는 자동으로 받아들여지지 않는다
-```
-
-### Scenario F2.3: 키 회수 즉시 다음 호출부터 거부된다
-
-```gherkin
-Given Bob이 자기 키로 정상 호출을 하고 있다
-When Alice가 그 키를 회수한다
-Then 그 시점 이후의 모든 호출은 친절히 거부된다
-And Bob에게는 "키가 더 이상 받아들여지지 않는다"는 의미만 전달된다
-And 회수 사실이 누가 언제 회수했는지와 함께 감사 기록에 남는다
-```
-
-### Scenario F2.4a: 정해진 시점에 자동으로 만료되는 키는 그 시점에 끊긴다
-
-```gherkin
-Given Alice가 한 키에 만료 시점을 정해 두었다
-When 그 만료 시점이 지난다
-Then 그 키로 들어오는 호출은 친절히 거부된다
-And 거부 사유 보고에서 "만료된 키"가 종류별로 한눈에 보인다
-```
-
-### Scenario F2.4b: 만료 임박 알림이 운영자에게 미리 도착한다
-
-```gherkin
-Given Alice가 한 키에 만료 시점을 정해 두었다
-When 만료 시점이 가까워진다
-Then Alice는 미리 정한 시점에 "이 키가 곧 만료된다"는 알림을 받는다
-And 같은 알림이 누구에게 언제 갔는지가 감사 기록에 남는다
-```
-
-### Scenario F2.5: 키 목록 화면에는 비밀이 결코 함께 보이지 않는다
-
-```gherkin
-Given Alice가 한 팀의 키 여러 개를 갖고 있다
-When Alice가 그 팀의 키 목록을 연다
-Then 각 키는 보유자·발급 시각·마지막 사용 시각만 보여진다
-And 비밀은 어느 줄에서도 보이지 않는다
-And 어떤 검색이나 정렬을 해도 비밀이 노출되지 않는다
-```
-
-### Scenario F2.6: 키 보유자 이름과 메모를 운영자가 나중에 고칠 수 있다
-
-```gherkin
-Given Alice가 발급된 키에 보유자 이름을 처음에 잘못 적었다
-When Alice가 그 키의 보유자 이름과 메모를 고친다
-Then 새 이름이 곧 목록에 반영된다
-And 옛 이름과 새 이름이 누가 언제 바꿨는지와 함께 감사 기록에 남는다
-And 그 키의 비밀은 다시 보여지지 않는다
-```
-
-### Scenario F2.8a: 사용량 보고는 키 보유자 단위로 호출 수와 거부 사유를 나눠 보여준다
-
-```gherkin
-Given 한 팀에 보유자가 다른 키 여러 개가 있다
-When 그 팀의 사용량 보고를 본다
-Then 각 보유자 단위로 호출 수와 거부 사유가 따로 보인다
-And 회수된 키의 과거 사용량도 그 보유자 이름으로 그대로 보인다
-```
-
-### Scenario F2.8b: 보유자 이름을 고치면 옛 사용량도 새 이름으로 통일되어 보인다
-
-```gherkin
-Given 한 보유자의 키에 옛 사용량이 누적되어 있다
-When Alice가 그 보유자 이름을 고친다
-Then 그 보유자의 옛 사용량과 새 사용량이 새 이름 하나로 통일되어 보인다
-And 옛 이름은 같은 보고 화면에서 더 이상 따로 나타나지 않는다
-```
-
-### Scenario F2.10: 한 보유자가 동시에 가질 수 있는 활성 키 수가 정해져 있다
-
-```gherkin
-Given Alice가 한 팀에 "한 사람당 동시에 가질 수 있는 활성 키 개수"를 정해 두었다
-When 같은 보유자에게 그 개수만큼 키가 이미 있는 상태에서 새 키를 발급하려 한다
-Then 그 발급은 친절히 거부된다
-And Alice에게는 "이 보유자는 활성 키 한도에 닿았다"는 의미가 전달된다
-And 옛 키 하나를 회수해야만 새 키를 다시 발급할 수 있다
-```
-
-### Scenario F2.11: 키의 마지막 몇 자리를 다시 들여다본 사실도 감사 대상이 된다
-
-```gherkin
-Given Alice가 한 키의 마지막 몇 자리를 다시 본다
-When Dana가 분기 감사 때 같은 흔적을 들춰 본다
-Then 누가 언제 어떤 키의 마지막 몇 자리를 다시 봤는지가 감사 기록에 따로 남아 있다
-And 비밀 전체는 그 기록 어디에도 다시 나타나지 않는다
-And Dana가 그 기록만으로 들여다본 흐름을 시간순으로 재구성할 수 있다
-```
-
-### Scenario F2.12a: 키 보유자가 사람인지 머신인지가 목록 화면에서 한눈에 구분된다
-
-```gherkin
-Given 한 팀에 사람 보유자 키와 머신 보유자 키가 섞여 있다
-When Alice가 그 팀의 키 목록을 연다
-Then 각 줄 옆에 "사람"인지 "머신"인지가 분명히 보인다
-And Alice가 같은 종류로만 좁혀 보는 보기를 곧장 열 수 있다
-```
-
-### Scenario F2.12b: 사용량 보고에서도 사람/머신 단위가 따로 합산되어 보인다
-
-```gherkin
-Given 한 팀에 사람 보유자 키와 머신 보유자 키가 섞여 있다
-When Alice가 그 팀의 사용량 보고를 본다
-Then 사람 보유자 합과 머신 보유자 합이 같은 보고에서 따로 보인다
-And 두 합의 비율이 시간대별 흐름 위에 함께 보인다
-```
-
-### Scenario F2.13a: 키 상태는 활성→일시중지→회수의 순서로 다뤄진다
-
-```gherkin
-Given Alice가 한 키를 활성 상태로 갖고 있다
-When Alice가 그 키를 잠시 일시중지로 바꿨다가 나중에 영구 회수한다
-Then 키 상태가 "활성→일시중지→회수" 순서로 분명히 보인다
-And 일시중지 동안에는 회수와 같은 거부가 일어나지만 다시 활성으로 되돌릴 수 있다
-```
-
-### Scenario F2.13b: 키 상태 전이마다 누가 언제 바꿨는지가 감사 기록에 남는다
-
-```gherkin
-Given Alice가 한 키를 활성→일시중지→회수의 순서로 바꿨다
-When Dana가 분기 감사 때 그 키의 흔적을 들춰 본다
-Then 세 단계 전이가 모두 누가 언제 바꿨는지와 함께 감사 기록에 남아 있다
-And Dana가 그 기록만으로 상태 전이의 흐름을 시간순으로 재구성할 수 있다
-```
-
-### Scenario F2.14: 회전을 지원하지 않는 저장 백엔드에서 키 회전을 시도하면 친절히 거부된다 (신규 v5)
-
-```gherkin
-Given cc-lb의 저장 백엔드 종류가 키 회전을 지원하지 않는 상태다
-And Alice가 한 팀의 키 회전을 운영 화면에서 시도한다
-When Alice의 회전 요청이 cc-lb에 닿는다
-Then 그 회전은 친절히 거부된다
-And Alice에게는 "지금 저장 백엔드 종류에서는 회전을 지원하지 않으니 다른 흐름을 쓰라"는 의미가 Claude 형식의 오류 봉투로 전달된다
-And 같은 거부 사실이 누가 언제 시도했는지와 함께 감사 기록에 남는다
+Given multiple calls are in progress using that team's key
+When Alice sets the team to inactive status
+Then calls already in progress are completed with normal responses
+And new calls after that point are gracefully rejected
+And the two groups appear separated as "before deactivation / after deactivation" in the rejection-reason report by type
 ```
 
 ---
 
-## Feature F3: 구현자가 cc-lb를 통해 Claude를 호출한다
+## Feature F2: Operator issues, displays, and revokes client keys
 
-Bob은 cc-lb를 일반 Anthropic 서비스처럼 부른다. 이 feature는 정상 호출·스트리밍·잘못된 키·파일 흐름·알 수 없는 경로의 오류 봉투·응답 크기 상한·외부 호스트 통로 강제·전달 표식 정리·인증 끄기 모드를 다룬다.
+Alice creates keys for a team, shows them only as much as necessary, and revokes them when a risk signal appears. This feature covers one-time-display of keys, rotation, revocation, expiry, owner display, state transitions, per-holder limits, access auditing, and a notice when rotation is unsupported.
 
-### Scenario F3.1: 정상 키로 정상 모델을 부르면 응답이 그대로 도착한다
+### Scenario F2.1: When a new key is issued, the secret is shown exactly once
 
 ```gherkin
-Given Bob은 자기 팀의 활성 키를 갖고 있다
-When Bob이 자기 팀에 허용된 모델로 한 번 호출한다
-Then Claude의 응답이 Bob에게 그대로 전달된다
-And 그 호출은 사용량 보고에 한 번의 성공으로 더해진다
-And Bob의 코드 입장에서는 cc-lb가 끼어든 흔적이 보이지 않는다
+Given Alice has opened the key issuance screen for a team
+When Alice issues a new key
+Then the full secret key is shown exactly once right there
+And reopening the same screen no longer shows that secret
+And only the last few characters and the holder name remain
 ```
 
-### Scenario F3.2: 스트리밍 응답이 끊김 없이 끝까지 흐른다
+### Scenario F2.2: When a key is rotated, the new key and the old key have a short overlap period
 
 ```gherkin
-Given Bob이 스트리밍을 켜고 한 호출을 보낸다
-When Claude가 조각조각 응답을 보내는 동안 cc-lb가 중간에 있다
-Then Bob은 조각들을 받은 순서 그대로 받는다
-And 마지막 조각이 끝났음을 분명히 알 수 있다
-And 그 호출은 사용량 보고에 한 번의 스트리밍 성공으로 더해진다
+Given a team already has one active key
+When Alice initiates rotation of that key
+Then a new key is issued and shown exactly once right there
+And the old key can be used alongside it for a short preset period
+And when that period ends, the old key is no longer accepted automatically
 ```
 
-### Scenario F3.3: 알 수 없는 키로 보낸 호출은 친절히 거부된다
+### Scenario F2.3: A revoked key is rejected starting from the very next call
 
 ```gherkin
-Given 어떤 키도 발급한 적이 없는 비밀로 한 호출이 들어온다
-When cc-lb가 그 호출의 주인을 알아내려 한다
-Then 그 호출은 친절히 거부된다
-And 거부 메시지는 Anthropic이 보낼 법한 형식의 오류 봉투로 전달된다
-And 그 거부가 사용량 보고의 "거부 사유 종류별"에 더해진다
+Given Bob is making normal calls with his key
+When Alice revokes that key
+Then all calls after that point are gracefully rejected
+And Bob receives only the message that the key is no longer accepted
+And the revocation — including who revoked it and when — is recorded in the audit log
 ```
 
-### Scenario F3.4: 비활성 팀의 키로 보낸 호출은 거부된다
+### Scenario F2.4a: A key with a set expiry time is cut off at that time
 
 ```gherkin
-Given Alice가 한 팀을 비활성 상태로 바꿔 두었다
-When 그 팀의 키로 Bob이 호출을 보낸다
-Then 그 호출은 친절히 거부된다
-And Bob에게는 Claude 형식의 오류 봉투가 전달된다
-And 같은 사실이 거부 사유 종류별 보고에 더해진다
+Given Alice has set an expiry time on a key
+When that expiry time passes
+Then calls coming in on that key are gracefully rejected
+And "expired key" is visible by type in the rejection-reason report
 ```
 
-### Scenario F3.5a: 자기 팀에 허용되지 않은 모델을 부르면 그 호출이 거부된다
+### Scenario F2.4b: An upcoming-expiry notification reaches the operator in advance
 
 ```gherkin
-Given Bob의 팀은 "특정 모델 묶음만" 허용된다
-When Bob이 허용 묶음 밖의 모델로 호출한다
-Then 그 호출은 친절히 거부된다
+Given Alice has set an expiry time on a key
+When the expiry time is approaching
+Then Alice receives a notification at a preset time that "this key is about to expire"
+And who received that notification and when is recorded in the audit log
 ```
 
-### Scenario F3.5b: 허용되지 않은 모델 거부 메시지는 Claude 형식의 오류 봉투로 전달된다
+### Scenario F2.5: The key list screen never shows the secret alongside the key
 
 ```gherkin
-Given Bob이 자기 팀에 허용되지 않은 모델로 호출했다가 거부되고 있다
-When 그 거부 메시지가 Bob에게 도착한다
-Then Bob에게는 "이 팀에서는 그 모델을 쓸 수 없다"는 의미가 Claude 형식의 오류 봉투로 전달된다
-And 같은 봉투는 다른 거부 사유의 오류 봉투와 같은 형식 규칙을 따른다
+Given Alice has multiple keys for a team
+When Alice opens the key list for that team
+Then each key shows only the holder name, issuance time, and last-used time
+And the secret is not visible on any row
+And no search or sort action exposes the secret
 ```
 
-### Scenario F3.5c: 허용되지 않은 모델 거부가 사용량 보고와 감사 묶음에 함께 더해진다
+### Scenario F2.6: The operator can later edit the key holder name and note
 
 ```gherkin
-Given Bob이 허용 묶음 밖의 모델로 호출했다가 거부되었다
-When Alice가 거부 사유 종류별 보고를 본다
-Then 그 거부가 "허용되지 않은 모델" 종류로 한 번 더해져 보인다
-And 같은 사실이 Dana가 분기 감사 때 다시 볼 수 있도록 감사 묶음에 함께 남는다
+Given Alice initially entered the holder name incorrectly for an issued key
+When Alice edits the holder name and note on that key
+Then the new name is reflected in the list immediately
+And the old name and new name — along with who changed them and when — are recorded in the audit log
+And the secret for that key is not shown again
 ```
 
-### Scenario F3.8: 응답 도중에 cc-lb 안에서 갑작스런 문제가 생기면 Claude 형식의 오류로 마감된다
+### Scenario F2.8a: The usage report breaks down call count and rejection reasons per key holder
 
 ```gherkin
-Given Bob의 스트리밍 호출이 중간까지 정상으로 흐르고 있다
-When cc-lb 안쪽에서 갑작스런 문제가 일어난다
-Then 스트리밍은 Claude 형식의 오류 봉투로 마감된다
-And Bob에게는 "응답이 도중에 끊긴 이유"가 같은 형식으로 전달된다
-And 사용량 보고에는 "도중 끊김"이 종류별로 더해진다
+Given a team has multiple keys with different holders
+When the usage report for that team is viewed
+Then call count and rejection reasons are shown separately for each holder
+And past usage from revoked keys is still shown under that holder's name
 ```
 
-### Scenario F3.9: Bob은 파일을 올리고 받고 지우는 흐름을 cc-lb를 통해 마무리한다
+### Scenario F2.8b: Editing a holder name unifies past usage under the new name
 
 ```gherkin
-Given Bob의 팀이 파일 기능을 쓸 수 있다
-When Bob이 cc-lb를 통해 파일을 올리고, 같은 파일을 다시 받고, 마지막에 지운다
-Then 각 단계가 Anthropic이 줄 법한 형식 그대로 응답한다
-And 같은 파일 식별자가 세 단계에서 일관되게 이어진다
-And 사용량 보고에는 업로드/다운로드/삭제가 종류별로 더해진다
+Given past usage has accumulated under a holder's key
+When Alice edits that holder's name
+Then the holder's past usage and new usage are shown unified under the single new name
+And the old name no longer appears separately on the same report screen
 ```
 
-### Scenario F3.11a: 알 수 없는 경로나 알 수 없는 동작으로 보낸 호출은 Claude 형식의 오류 봉투로 돌아온다
+### Scenario F2.10: There is a set limit on how many active keys one holder can have at the same time
 
 ```gherkin
-Given Bob이 실수로 존재하지 않는 경로나 잘못된 동작으로 호출한다
-When cc-lb가 그 호출을 받는다
-Then Bob에게는 Claude 형식의 오류 봉투가 전달된다
-And 그 봉투 안에는 "이 경로/동작을 알지 못한다"는 의미가 담긴다
+Given Alice has set a limit on "the number of active keys one person can hold at the same time" for a team
+When a new key is about to be issued while that holder already has that many keys
+Then the issuance is gracefully rejected
+And Alice receives only the message that this holder has reached the active key limit
+And a new key can only be issued again after one old key is revoked
 ```
 
-### Scenario F3.11b: 알 수 없는 경로/동작의 거부가 사용량 보고의 거부 사유 종류별에 더해진다
+### Scenario F2.11: Viewing the last few characters of a key is itself subject to auditing
 
 ```gherkin
-Given Bob이 실수로 존재하지 않는 경로나 잘못된 동작으로 호출한다
-When cc-lb가 그 호출을 거부한다
-Then 같은 거부가 사용량 보고의 "거부 사유 종류별"에 한 번 더해진다
-And Alice가 같은 종류의 거부 흐름을 시간대별로 본다
+Given Alice views the last few characters of a key
+When Dana reviews the same record during a quarterly audit
+Then the audit log contains a separate entry for who viewed the last few characters of which key and when
+And the full secret does not appear anywhere in that record
+And Dana can reconstruct the viewing history in chronological order from that record alone
 ```
 
-### Scenario F3.12: 한도로 거부될 때 "언제 다시 시도하면 되는지"가 같은 응답에 들어 있다
+### Scenario F2.12a: Whether a key holder is a person or a machine is clearly visible at a glance on the list screen
 
 ```gherkin
-Given Bob의 팀이 분당 한도를 넘겨 잠시 거부되고 있다
-When 그 시점에 Bob의 코드가 같은 호출을 한 번 더 보낸다
-Then 그 호출도 친절히 거부된다
-And 응답 안에는 "언제쯤 다시 시도하면 되는지"가 운영자가 정한 단위로 함께 전달된다
-And Bob의 코드는 그 시점을 기다린 뒤에 자연스럽게 다시 호출할 수 있다
+Given a team has a mix of person-holder keys and machine-holder keys
+When Alice opens the key list for that team
+Then each row clearly shows whether the holder is a "person" or a "machine"
+And Alice can immediately open a filtered view showing only one type
 ```
 
-### Scenario F3.13: 응답 본문이 미리 정한 상한을 넘기면 친절히 끊긴다
+### Scenario F2.12b: The usage report also shows person and machine totals separately
 
 ```gherkin
-Given Bob이 매우 큰 응답을 만들어 낼 만한 호출을 보낸다
-When cc-lb가 Claude의 응답을 Bob에게 전달하기 시작한다
-Then 응답 본문이 미리 정한 상한에 닿는 순간 친절히 끊긴다
-And Bob에게는 "응답이 상한에 닿아 중간에 끊겼다"는 의미가 전달된다
-And 같은 사실이 사용량 보고에 "상한 넘침" 종류로 한 번 더해진다
+Given a team has a mix of person-holder keys and machine-holder keys
+When Alice views the usage report for that team
+Then the person-holder total and machine-holder total are shown separately in the same report
+And the ratio of the two totals is shown together on the time-period trend
 ```
 
-### Scenario F3.14: 등록된 통로 외의 외부 호스트로 곧장 나가려 하면 막힌다
+### Scenario F2.13a: A key's state is managed in the order active → suspended → revoked
 
 ```gherkin
-Given Charlie가 cc-lb에 등록된 Anthropic 통로만 외부로 나갈 수 있다고 정해 두었다
-When 한 호출이 등록된 통로를 거치지 않고 외부 호스트로 곧장 나가려 한다
-Then 그 호출은 친절히 거부된다
-And 호출자에게는 "등록된 통로로만 나갈 수 있다"는 의미가 전달된다
-And 같은 사실이 거부 사유 종류별 보고에 따로 보인다
+Given Alice has a key in active status
+When Alice changes that key to suspended for a while and then permanently revokes it
+Then the key state is clearly visible as "active → suspended → revoked"
+And while suspended, the same rejection as revocation occurs, but it can be restored to active
 ```
 
-### Scenario F3.15: 한 단계만 머무는 전달 표식들은 응답 경계에서 정리된다
+### Scenario F2.13b: Who changed the key state and when is recorded in the audit log for each transition
 
 ```gherkin
-Given Claude가 한 호출에 대해 응답을 보낸다
-When cc-lb가 그 응답을 Bob에게 전달한다
-Then "한 단계만 머무는" 전달 표식들은 그 경계에서 정리된다
-And Bob에게는 의미 있는 응답 정보만 남아 전달된다
-And 같은 정리가 정상 응답과 오류 봉투 양쪽에 똑같이 일어난다
+Given Alice has changed a key through active → suspended → revoked
+When Dana reviews the trail of that key during a quarterly audit
+Then all three state transitions appear in the audit log with who changed them and when
+And Dana can reconstruct the flow of state transitions in chronological order from that record alone
 ```
 
-### Scenario F3.16: 격리 시험 환경에서 인증을 임시로 끈 사실은 분명히 표시된다
+### Scenario F2.14: Attempting key rotation on a storage backend that does not support rotation is gracefully rejected (new in v5)
 
 ```gherkin
-Given Charlie가 격리된 시험 환경에서 cc-lb의 인증을 임시로 꺼 두었다
-When Bob이 그 환경에서 키 없이 호출한다
-Then cc-lb는 그 호출을 받아들이지만 "지금은 인증이 꺼져 있다"는 표식이 감사 기록에 함께 남는다
-And 같은 표식이 운영 화면 위쪽에 띠 모양으로 분명히 보인다
-And 같은 설정은 운영 환경에서는 자리잡지 않는다
-```
-
----
-
-## Feature F4: 운영자가 매일 사용량과 비용 대시보드를 본다
-
-Alice는 매일 한 화면에서 어제 가장 많이 쓴 팀, 비용, 한도와의 거리, 실시간 흐름을 본다. 이 feature는 일/주/달 보기·기간/팀/보유자/모델 필터·실시간 스트림·로그 필터·빈 값과 미측정의 구분·단계별 지연 자세히 보기를 다룬다.
-
-### Scenario F4.1a: 어제 가장 많이 쓴 팀이 비용 순서로 한눈에 보인다
-
-```gherkin
-Given Alice가 매일 아침 대시보드를 연다
-When 어제 호출이 있었던 팀들이 표로 정리된다
-Then 비용이 큰 순서로 상위 팀들이 위쪽에 보인다
-And 같은 순서가 화면을 새로 고쳐도 그대로 유지된다
-```
-
-### Scenario F4.1b: 같은 표에 호출 수 대 거부 비율이 함께 보인다
-
-```gherkin
-Given Alice가 어제 가장 많이 쓴 팀 표를 보고 있다
-When 같은 표의 각 줄이 그려진다
-Then 각 팀의 호출 수와 거부 비율이 같은 줄에 함께 보인다
-And 호출 수와 거부 비율 사이의 단위가 헷갈리지 않게 분명히 구분되어 보인다
-```
-
-### Scenario F4.1c: 한 팀 줄을 누르면 그 팀의 자세한 보기로 이어진다
-
-```gherkin
-Given Alice가 어제 가장 많이 쓴 팀 표를 보고 있다
-When Alice가 한 팀의 줄을 누른다
-Then 그 팀의 자세한 보기 화면으로 곧장 이어진다
-And 같은 화면에서 곧장 다른 팀으로 옮겨 볼 수 있다
-```
-
-### Scenario F4.2: 기간·팀·키 보유자·모델 중 골라서 좁혀 본다
-
-```gherkin
-Given Alice가 대시보드의 한 표를 보고 있다
-When Alice가 기간, 팀, 키 보유자, 모델 중에서 골라서 좁혀 본다
-Then 표 전체가 그 조건에 맞춰 다시 정리된다
-And 비용/호출 수/거부 비율이 같은 조건으로 다시 계산된다
-And 같은 조건이 주소창에 남아 다시 열면 같은 화면이 보인다
-```
-
-### Scenario F4.3: 한 달 비용이 정해진 한도에 가까워지면 같은 화면에서 미리 보인다
-
-```gherkin
-Given 한 팀에 월 비용 한도가 설정되어 있다
-When 누적 비용이 한도의 일정 비율을 넘긴다
-Then 대시보드 상단에 "이 팀은 한도에 가까워지고 있다"는 안내가 보인다
-And Alice는 그 안내를 누르면 한도 편집 화면으로 곧장 갈 수 있다
-And 같은 사실이 거부가 일어나기 전부터 미리 보인다
-```
-
-### Scenario F4.4a: 모델별 호출 점유율과 비용 점유율이 같은 화면에서 한눈에 보인다
-
-```gherkin
-Given Alice가 한 팀의 대시보드를 보고 있다
-When 그 팀이 여러 모델을 섞어 쓴다
-Then 각 모델의 호출 점유율과 비용 점유율이 함께 보인다
-And 가장 비싼 모델이 비용 점유율 위쪽에 보인다
-```
-
-### Scenario F4.4b: 모델 점유율 표에서 한 모델을 누르면 시간대별 흐름으로 이어진다
-
-```gherkin
-Given Alice가 모델별 점유율 표를 보고 있다
-When Alice가 한 모델 줄을 누른다
-Then 그 모델의 시간대별 호출 흐름 화면으로 이어진다
-And 같은 화면에서 곧장 다른 모델로 옮겨 볼 수 있다
-```
-
-### Scenario F4.5: 시간대별 사용 흐름이 끊김 없이 이어진다
-
-```gherkin
-Given Alice가 한 팀의 하루 흐름을 보고 있다
-When 호출이 시간대별로 들어왔다
-Then 시간대별 막대가 끊김 없이 이어진다
-And 호출이 한 건도 없었던 시간대는 "0"으로 분명히 표시된다
-And 막대를 누르면 그 시간대의 자세한 로그로 이어진다
-```
-
-### Scenario F4.6: 거부 사유가 종류별로 한눈에 보인다
-
-```gherkin
-Given 한 팀에서 어제 여러 종류의 거부가 있었다
-When Alice가 그 팀의 거부 보기를 연다
-Then 거부 사유가 종류별로 묶여 보인다
-And 각 종류의 비율과 시간대별 흐름이 함께 보인다
-And 가장 큰 종류가 위쪽에 보인다
-```
-
-### Scenario F4.7: 보고 화면을 표 형식으로 내려받을 수 있다
-
-```gherkin
-Given Alice가 좁혀 본 보고 화면이 있다
-When Alice가 "내려받기"를 누른다
-Then 화면에 보이던 같은 내용이 표 형식 파일로 만들어진다
-And 비밀이나 키 전체 값은 그 파일 어디에도 들어가지 않는다
-And 같은 파일을 Dana가 분기 감사 때 그대로 다시 열 수 있다
-```
-
-### Scenario F4.8: 실시간 흐름이 끊겼다는 사실이 같은 화면에서 분명히 보인다
-
-```gherkin
-Given Alice가 실시간 흐름을 켜 두고 대시보드를 보고 있다
-When 실시간 흐름이 어떤 이유로 잠시 끊긴다
-Then 화면에는 "실시간 흐름이 끊겼다"는 표식이 분명히 보인다
-And 누적 보고 숫자는 그 사이에도 정확하게 유지된다
-And 실시간 흐름이 다시 붙으면 같은 표식이 사라진다
-```
-
-### Scenario F4.10: 로그 페이지에서 종류·팀·보유자를 골라 좁혀 본다
-
-```gherkin
-Given Alice가 cc-lb의 로그 페이지를 보고 있다
-When Alice가 종류·팀·보유자 중에서 골라 좁혀 본다
-Then 같은 페이지가 그 조건에 맞춰 다시 정리된다
-And 비밀이나 키 전체 값은 어느 줄에도 보이지 않는다
-And 같은 조건이 주소창에 남아 다시 열면 같은 화면이 보인다
-```
-
-### Scenario F4.11a: "0건"과 "아직 모름"이 같은 표 안에서 분명히 구분된다
-
-```gherkin
-Given Alice가 한 팀의 사용량 보고를 본다
-When 어떤 시간대에는 호출이 한 건도 없었고 다른 시간대에는 측정이 아직 끝나지 않았다
-Then "0건"과 "아직 모름"이 같은 표 안에서 분명히 구분되어 보인다
-And 두 표식이 같은 줄에 섞여 있어도 서로 다른 표식 모양으로 그려진다
-```
-
-### Scenario F4.11b: 두 표식의 의미가 사용자 인지 도움말로 함께 안내된다
-
-```gherkin
-Given Alice가 한 팀의 사용량 보고 표에서 "0건"과 "아직 모름"이 섞여 있는 줄을 본다
-When Alice가 두 표식의 의미를 알아내려 한다
-Then 같은 표 안에 두 표식의 차이를 알려 주는 도움말이 함께 보인다
-And Alice가 두 가지를 헷갈리지 않고 한눈에 알아본다
-```
-
-### Scenario F4.11c: 같은 구분이 시간대별 흐름 그림 위에도 그대로 표시된다
-
-```gherkin
-Given Alice가 한 팀의 시간대별 사용 흐름 그림을 본다
-When 어떤 시간대에는 호출이 한 건도 없었고 다른 시간대에는 측정이 아직 끝나지 않았다
-Then "0건" 시간대와 "아직 모름" 시간대가 같은 흐름 그림 위에 서로 다른 표식으로 보인다
-And 두 표식의 의미가 그림 옆 범례에도 똑같이 안내된다
-```
-
-### Scenario F4.12: 한 호출의 단계별 머문 시간을 자세히 본다
-
-```gherkin
-Given Alice가 한 팀의 느린 호출 한 건을 자세히 본다
-When Alice가 그 호출의 단계별 보기를 연다
-Then "키 인식·한도 확인·외부 호출·응답 전달" 같은 단계마다의 머문 시간이 따로 보인다
-And 가장 오래 머문 단계가 같은 화면에서 강조되어 보인다
-And Alice가 그 강조를 보고 어느 단계가 느렸는지를 곧장 짚어낸다
+Given the cc-lb storage backend type does not support key rotation
+And Alice tries to rotate a team's key from the operations screen
+When Alice's rotation request reaches cc-lb
+Then the rotation is gracefully rejected
+And Alice receives the message "rotation is not supported on the current storage backend type; use a different flow" delivered as a Claude-format error envelope
+And the same rejection — including who attempted it and when — is recorded in the audit log
 ```
 
 ---
 
-## Feature F6: 팀별 예산·모델 ACL·속도 제한이 강제된다
+## Feature F3: Developer calls Claude through cc-lb
 
-Alice가 정한 한도가 cc-lb 안에서 실제로 작동한다. 이 feature는 분당 한도·일일 한도·월 비용 한도·모델 묶음·외부 호스트 허용 목록·경로별 본문 크기·동시 처리 한도·한도 적용 단위·키별 덮어쓰기·회복·팀 간 격리를 다룬다.
+Bob calls cc-lb as if it were a standard Anthropic service. This feature covers normal calls, streaming, invalid keys, file flow, error envelopes for unknown paths, response size caps, enforcement of the registered tunnel for external hosts, forwarding-header cleanup, and authentication-disabled mode.
 
-### Scenario F6.1: 분당 한도를 넘으면 그 팀의 다음 호출이 잠시 거부된다
+### Scenario F3.1: Calling a normal model with a valid key delivers the response unchanged
 
 ```gherkin
-Given 한 팀의 분당 한도가 정해져 있다
-When 그 팀의 키들이 짧은 시간 안에 한도를 넘는다
-Then 한도를 넘긴 다음 호출은 친절히 거부된다
-And Bob에게는 "잠시 뒤에 다시 시도하라"는 의미가 전달된다
-And 같은 사실이 거부 사유 종류별 보고에 더해진다
+Given Bob holds an active key for his team
+When Bob makes one call using a model allowed for his team
+Then Claude's response is delivered to Bob unchanged
+And that call is counted as one success in the usage report
+And from Bob's code's perspective, there is no visible sign that cc-lb was in the middle
 ```
 
-### Scenario F6.2a: 일일 한도가 차면 그날의 나머지 호출이 거부되고 다음 날 같은 시각에 다시 비워진다
+### Scenario F3.2: A streaming response flows through to the end without interruption
 
 ```gherkin
-Given 한 팀의 하루 한도가 정해져 있다
-When 그 팀이 하루 한도를 다 쓴다
-Then 그날 남은 시간 동안 그 팀의 호출은 친절히 거부된다
-And 다음 날 같은 시각이 되면 한도가 다시 비워진다
+Given Bob sends a call with streaming enabled
+When Claude is sending responses piece by piece with cc-lb in the middle
+Then Bob receives the pieces in the exact order they were received
+And the end of the last piece is clearly signaled
+And that call is counted as one streaming success in the usage report
 ```
 
-### Scenario F6.2b: 일일 한도 거부 안내에는 한도가 다시 비워지는 시점이 들어 있다
+### Scenario F3.3: A call sent with an unknown key is gracefully rejected
 
 ```gherkin
-Given 한 팀이 일일 한도를 다 써서 거부되고 있다
-When Bob의 호출이 그 거부에 부딪힌다
-Then 응답 안내에 "한도가 다시 비워지는 시점"이 운영자가 정한 단위로 함께 전달된다
-And Bob의 코드는 그 시점을 기다린 뒤에 자연스럽게 다시 호출할 수 있다
+Given a call comes in with a secret that has never been issued as any key
+When cc-lb tries to identify the owner of that call
+Then the call is gracefully rejected
+And the rejection message is delivered as an error envelope in the format Anthropic would use
+And that rejection is added to the "by rejection reason type" section of the usage report
 ```
 
-### Scenario F6.3: 월 비용 한도가 가까워지면 새 호출이 미리 거부된다
+### Scenario F3.4: A call sent with a key from an inactive team is rejected
 
 ```gherkin
-Given 한 팀에 월 비용 한도가 설정되어 있다
-When 누적 비용이 한도에 거의 닿는다
-Then 그 팀의 새 호출은 친절히 거부된다
-And Bob에게는 "이 팀의 월 한도가 거의 다 찼다"는 의미가 전달된다
-And 같은 사실이 거부 전에 대시보드에서 미리 보인다
+Given Alice has set a team to inactive status
+When Bob sends a call using that team's key
+Then the call is gracefully rejected
+And Bob receives a Claude-format error envelope
+And the same fact is added to the rejection-reason-by-type report
 ```
 
-### Scenario F6.4: 허용 모델 묶음 밖으로 부르면 거부된다
+### Scenario F3.5a: Calling a model not allowed for the team results in that call being rejected
 
 ```gherkin
-Given Alice가 한 팀에 "특정 모델 묶음만" 허용해 두었다
-When 그 팀의 Bob이 묶음 밖의 모델로 호출한다
-Then 그 호출은 친절히 거부된다
-And 거부 사유 종류별 보고에 "허용되지 않은 모델"이 더해진다
-And Alice가 그 모델을 묶음에 추가하기 전까지는 같은 거부가 계속된다
+Given Bob's team allows only a specific model bundle
+When Bob calls with a model outside the allowed bundle
+Then that call is gracefully rejected
 ```
 
-### Scenario F6.5: 한도 편집 직후의 호출에 새 한도가 곧 반영된다
+### Scenario F3.5b: The rejection message for a disallowed model is delivered as a Claude-format error envelope
 
 ```gherkin
-Given Alice가 한 팀의 분당 한도를 더 늘렸다
-When 그 변경이 저장된 직후 Bob이 호출을 보낸다
-Then 새 한도 기준으로 호출이 받아들여진다
-And 옛 한도 기준이 잠시도 함께 적용되지 않는다
-And 변경 사실이 누가 언제 바꿨는지와 함께 감사 기록에 남는다
+Given Bob has called with a model not allowed for his team and is being rejected
+When that rejection message arrives for Bob
+Then Bob receives only the message "this model cannot be used by this team" delivered as a Claude-format error envelope
+And the same envelope follows the same formatting rules as error envelopes for other rejection reasons
 ```
 
-### Scenario F6.8: 한도 위반이 거부 사유 종류별 보고에서 따로 보인다
+### Scenario F3.5c: The disallowed-model rejection is added to both the usage report and the audit bundle
 
 ```gherkin
-Given 한 팀에 여러 종류의 거부가 일어났다
-When Alice가 거부 사유 종류별 보고를 본다
-Then 분당 위반·일일 위반·월 위반·허용되지 않은 모델이 종류별로 따로 보인다
-And 각 종류의 비율과 시간대별 흐름도 함께 보인다
-And 위반이 가장 많은 종류가 위쪽에 보인다
+Given Bob called with a model outside the allowed bundle and was rejected
+When Alice views the rejection-reason-by-type report
+Then that rejection appears counted once under the "disallowed model" type
+And the same fact is preserved in the audit bundle so Dana can review it during a quarterly audit
 ```
 
-### Scenario F6.9: 외부 호스트 허용 목록 밖의 곳으로는 cc-lb가 나가지 않는다
+### Scenario F3.8: If a sudden problem occurs inside cc-lb during a response, it is closed with a Claude-format error
 
 ```gherkin
-Given Charlie가 외부 호스트 허용 목록을 정해 두었다
-When 한 호출이 허용 목록 밖의 외부 호스트로 나가려 한다
-Then cc-lb는 그 외부 호출을 막는다
-And Bob에게는 "이 외부 호스트로는 나갈 수 없다"는 의미가 전달된다
-And 같은 사실이 감사 기록에 외부 호스트 이름과 함께 남는다
+Given Bob's streaming call is flowing normally up to the midpoint
+When a sudden problem occurs inside cc-lb
+Then the stream is closed with a Claude-format error envelope
+And Bob receives the reason "the response was interrupted midway" in the same format
+And "interrupted midway" is added by type to the usage report
 ```
 
-### Scenario F6.10a: 특정 경로의 본문 크기 한도가 그 경로의 호출에 적용된다
+### Scenario F3.9: Bob completes the flow of uploading, downloading, and deleting a file through cc-lb
 
 ```gherkin
-Given Alice가 특정 경로에 더 작은 본문 크기 한도를 정해 두었다
-When Bob이 그 경로로 본문 한도를 넘기는 호출을 보낸다
-Then 그 호출은 친절히 거부된다
-And Bob에게는 "이 경로의 본문 한도를 넘었다"는 의미가 전달된다
+Given Bob's team has access to the file feature
+When Bob uploads a file through cc-lb, retrieves the same file, and finally deletes it
+Then each step responds in the exact format Anthropic would use
+And the same file identifier is used consistently across all three steps
+And upload, download, and delete are each added by type to the usage report
 ```
 
-### Scenario F6.10b: 한 경로의 본문 한도 변경이 다른 경로의 본문 한도에 영향을 주지 않는다
+### Scenario F3.11a: A call sent to an unknown path or with an unknown operation returns a Claude-format error envelope
 
 ```gherkin
-Given Alice가 특정 경로에만 더 작은 본문 크기 한도를 정해 두었다
-When Bob이 다른 경로로 같은 크기의 본문을 보낸다
-Then 그 호출의 본문 한도는 영향 없이 그대로 유지된다
-And 다른 경로의 받아들임은 한 경로의 한도 변경과 분리되어 보인다
+Given Bob accidentally calls with a non-existent path or an invalid operation
+When cc-lb receives that call
+Then Bob receives a Claude-format error envelope
+And the envelope contains the message "this path/operation is not recognized"
 ```
 
-### Scenario F6.12: 한도 위반으로 잠시 거부되던 팀이 시간이 지나 회복한다
+### Scenario F3.11b: The rejection for an unknown path/operation is added to the usage report's rejection-reason-by-type section
 
 ```gherkin
-Given 한 팀이 분당 한도를 넘겨 잠시 거부되고 있다
-When 미리 정해진 회복 시점이 지난다
-Then 그 팀의 호출이 다시 받아들여지기 시작한다
-And Bob의 코드는 같은 키로 별다른 절차 없이 다시 호출을 보낼 수 있다
-And 회복 사건이 거부 사유 종류별 보고의 흐름 위에 표시되어 보인다
+Given Bob accidentally calls with a non-existent path or an invalid operation
+When cc-lb rejects that call
+Then the same rejection is added once to the "by rejection reason type" section of the usage report
+And Alice can view the trend of rejections of the same type by time period
 ```
 
-### Scenario F6.13: 일일 한도를 다 쓴 팀은 다음 날 같은 시각에 자동으로 다시 받아들여진다
+### Scenario F3.12: When rejected due to a limit, "when to retry" is included in the same response
 
 ```gherkin
-Given 한 팀이 일일 한도를 다 써서 거부되고 있다
-When 다음 날 같은 시각이 지난다
-Then 일일 한도가 자동으로 다시 비워진다
-And Bob의 코드는 별다른 절차 없이 호출을 다시 보낼 수 있다
-And 회복 사건이 거부 사유 종류별 보고의 흐름 위에 표시되어 보인다
+Given Bob's team is temporarily being rejected for exceeding the per-minute limit
+When Bob's code sends the same call one more time at that point
+Then that call is also gracefully rejected
+And the response includes "approximately when to retry" in the units set by the operator
+And Bob's code can naturally retry after waiting until that time
 ```
 
-### Scenario F6.14a: 한 팀의 분당 한도 위반이 다른 팀의 호출 받아들임에 영향을 주지 않는다
+### Scenario F3.13: If the response body exceeds a preset cap, it is gracefully cut off
 
 ```gherkin
-Given 두 팀이 같은 cc-lb 안에서 각자 따로 한도를 갖고 있다
-When 한 팀이 자기 분당 한도를 넘겨 거부되고 있다
-Then 다른 팀의 호출은 그 영향 없이 그대로 받아들여진다
-And 두 팀의 한도 거리와 거부 흐름이 화면에서 따로 보인다
+Given Bob sends a call likely to produce a very large response
+When cc-lb starts delivering Claude's response to Bob
+Then the moment the response body reaches the preset cap, it is gracefully cut off
+And Bob receives the message that the response was cut off midway because it reached the cap
+And the same fact is added once under the "cap exceeded" type to the usage report
 ```
 
-### Scenario F6.14b: 한 팀의 폭주가 다른 팀의 회복 시점을 늦추지 않는다
+### Scenario F3.14: Attempts to go directly to an external host not in the registered tunnel are blocked
 
 ```gherkin
-Given 두 팀이 같은 cc-lb 안에서 각자 따로 한도를 갖고 있다
-When 한 팀이 자기 분당 한도를 크게 넘긴다
-Then 다른 팀의 회복 시점은 미리 정한 그대로 유지된다
-And 두 팀의 회복 흐름이 거부 사유 종류별 보고에서 따로 보인다
+Given Charlie has set that only the registered Anthropic tunnel in cc-lb can exit to the outside
+When a call tries to exit directly to an external host without going through the registered tunnel
+Then that call is gracefully rejected
+And the caller receives only the message "only the registered tunnel may be used to exit"
+And the same fact appears separately in the rejection-reason-by-type report
 ```
 
-### Scenario F6.15: 동시에 처리 중인 호출 수에 따로 한도를 정할 수 있다
+### Scenario F3.15: Hop-by-hop forwarding headers are cleaned up at the response boundary
 
 ```gherkin
-Given 한 팀에 "동시에 처리 중인 호출 수" 한도가 정해져 있다
-When 그 팀의 진행 중 호출이 그 수에 닿은 상태에서 새 호출이 들어온다
-Then 새 호출은 친절히 거부된다
-And Bob에게는 "지금 동시 처리 한도에 닿았다"는 의미가 전달된다
-And 진행 중 호출 한 건이 끝나면 다음 호출이 곧 받아들여진다
+Given Claude sends a response for a call
+When cc-lb delivers that response to Bob
+Then the "hop-by-hop" forwarding headers are cleaned up at that boundary
+And only meaningful response information remains when delivered to Bob
+And the same cleanup happens equally to both normal responses and error envelopes
 ```
 
-### Scenario F6.16: 한도가 "팀"인지 "보유자"인지 "키"인지에 따라 적용 단위가 달라진다
+### Scenario F3.16: The fact that authentication is temporarily disabled in an isolated test environment is clearly marked
 
 ```gherkin
-Given Alice가 한 한도의 적용 단위를 "팀"·"보유자"·"키" 중에서 고를 수 있다
-When Alice가 그 한도를 보유자 단위로 정해 둔다
-Then 한 보유자가 한도를 넘기면 그 보유자의 키들만 거부된다
-And 같은 팀의 다른 보유자는 영향 없이 호출을 보낸다
-And 한도가 누구를 향해 걸려 있는지가 같은 화면에 분명히 보인다
-```
-
-### Scenario F6.17: 한 키에만 더 작은 한도를 따로 정해 둘 수 있다
-
-```gherkin
-Given 한 팀의 기본 한도가 정해져 있다
-When Alice가 그 팀 안의 한 키에만 더 작은 한도를 따로 정해 둔다
-Then 그 키의 호출은 작은 한도를 먼저 따른다
-And 같은 팀의 다른 키들은 팀 기본 한도를 그대로 따른다
-And 키별 한도 설정이 누가 언제 정했는지와 함께 감사 기록에 남는다
+Given Charlie has temporarily disabled authentication in cc-lb in an isolated test environment
+When Bob calls without a key in that environment
+Then cc-lb accepts that call but a marker that "authentication is currently disabled" is recorded in the audit log alongside it
+And the same marker is clearly visible as a banner at the top of the operations screen
+And the same setting cannot take effect in the production environment
 ```
 
 ---
 
-## Feature F19: 캐시 적중 라우팅이 실제로 비용을 절감한다
+## Feature F4: Operator views the daily usage and cost dashboard
 
-같은 의미의 호출이 두 번째에는 더 싸게 끝난다. 이 feature는 캐시 친화 라우팅·캐시 적중률·비용 절감·캐시 등급 분리·비활성 팀 우회 차단·캐시 상태 분류·토큰 어긋남 가시성을 다룬다.
+Alice views the previous day's top teams by usage, costs, distance from limits, and real-time trends — all on one screen every day. This feature covers daily/weekly/monthly views, period/team/holder/model filters, real-time stream, log filters, distinction between zero values and unmeasured values, and per-step latency detail views.
 
-### Scenario F19.1: 같은 의미의 호출이 두 번째에는 같은 곳으로 모인다
+### Scenario F4.1a: Yesterday's top teams by usage are visible at a glance sorted by cost
 
 ```gherkin
-Given Bob의 팀이 같은 입력으로 두 번 호출한다
-When 두 번째 호출이 cc-lb에 닿는다
-Then 첫 번째 호출과 같은 처리 경로로 모인다
-And 두 호출 사이에 다른 팀의 호출이 끼어들어도 그 친화가 유지된다
-And 같은 사실이 사용량 보고의 "캐시 친화 흐름"에 보인다
+Given Alice opens the dashboard every morning
+When the teams that had calls yesterday are organized into a table
+Then the top teams are shown at the top in descending order by cost
+And the same order is maintained even after the screen is refreshed
 ```
 
-### Scenario F19.2: 캐시 적중률이 같은 화면에서 한눈에 보인다
+### Scenario F4.1b: The same table also shows the call count to rejection ratio
 
 ```gherkin
-Given Alice가 한 팀의 대시보드를 본다
-When 그 팀이 캐시 친화 흐름을 쓰고 있다
-Then "캐시 적중률"이 시간대별로 보인다
-And 적중률이 높을수록 비용 절감 폭이 같은 화면에 함께 보인다
-And 적중률이 떨어지면 그 시점이 흐름 위에 분명히 보인다
+Given Alice is viewing the table of yesterday's top teams by usage
+When each row of the same table is rendered
+Then each team's call count and rejection ratio are shown together on the same row
+And the units between call count and rejection ratio are clearly distinguished so there is no confusion
 ```
 
-### Scenario F19.3a: 캐시 적중으로 아낀 비용이 비용 보고에 따로 표시된다
+### Scenario F4.1c: Clicking a team row navigates to that team's detail view
 
 ```gherkin
-Given 한 팀이 같은 입력을 자주 반복한다
-When 그날 누적 비용이 계산된다
-Then "캐시 적중으로 아낀 비용"이 비용 보고에 따로 표시된다
-And 그 숫자가 그날 누적 비용 옆에 분명히 보인다
+Given Alice is viewing the table of yesterday's top teams by usage
+When Alice clicks a team's row
+Then it navigates directly to that team's detail view screen
+And from that screen, Alice can navigate directly to another team
 ```
 
-### Scenario F19.3b: "캐시 없이라면 들었을 비용"이 가상 비용 라벨로 함께 보인다
+### Scenario F4.2: Filter by selecting from period, team, key holder, or model
 
 ```gherkin
-Given Alice가 한 팀의 비용 보고를 본다
-When 그날 캐시 적중이 일어났다
-Then 같은 보고에 "캐시 없이라면 들었을 비용"이 가상 비용 라벨로 함께 보인다
-And 그 가상 비용 숫자가 실제로 든 비용과 분명히 구분되어 보인다
+Given Alice is viewing a table on the dashboard
+When Alice selects and filters by period, team, key holder, or model
+Then the entire table is reorganized to match those conditions
+And cost, call count, and rejection ratio are recalculated with the same conditions
+And the same conditions remain in the URL bar so reopening it shows the same screen
 ```
 
-### Scenario F19.3c: 실제 비용과 가상 비용이 시간대별 흐름으로 비교되어 보인다
+### Scenario F4.3: When monthly cost approaches the set limit, it is shown on the same screen in advance
 
 ```gherkin
-Given Alice가 한 팀의 비용 보고를 본다
-When 그날 캐시 적중과 미적중이 시간대별로 섞여 일어났다
-Then "캐시 적중으로 아낀 비용"과 "캐시 없이라면 들었을 비용"이 같은 시간대별 흐름 위에 함께 그려진다
-And 두 숫자의 차이가 어느 시간대에 가장 컸는지가 한눈에 보인다
+Given a team has a monthly cost limit set
+When accumulated cost exceeds a certain percentage of the limit
+Then a notice that "this team is approaching its limit" appears at the top of the dashboard
+And Alice can click that notice to go directly to the limit editing screen
+And the same fact is shown before a rejection occurs
 ```
 
-### Scenario F19.4: 캐시 친화가 끊기는 경우에는 새로 처리된다
+### Scenario F4.4a: Model-by-model call share and cost share are visible at a glance on the same screen
 
 ```gherkin
-Given 한 팀의 캐시 친화 흐름이 어떤 이유로 깨진다
-When 같은 의미의 호출이 다시 들어온다
-Then 그 호출은 새로 처리되어 정상 응답을 받는다
-And Bob에게는 "캐시가 적중하지 않았다"는 사실이 직접 보이지 않는다
-And 같은 사실이 운영자에게는 캐시 적중률 떨어짐으로 보인다
+Given Alice is viewing the dashboard for a team
+When that team uses a mix of models
+Then the call share and cost share for each model are shown together
+And the most expensive model appears at the top of the cost share
 ```
 
-### Scenario F19.5: 캐시 친화는 팀 경계를 넘지 않는다
+### Scenario F4.4b: Clicking a model in the model share table navigates to the time-period trend for that model
 
 ```gherkin
-Given 두 팀이 같은 입력을 우연히 같이 쓴다
-When 두 팀의 호출이 cc-lb에 들어온다
-Then 한 팀의 캐시 적중이 다른 팀의 호출에 흘러가지 않는다
-And 비용 절감과 적중률은 각 팀 단위로 따로 계산된다
-And 감사 기록에도 두 팀의 호출은 분리되어 남는다
+Given Alice is viewing the model share table
+When Alice clicks a model row
+Then it navigates to the time-period call trend screen for that model
+And from that screen, Alice can navigate directly to another model
 ```
 
-### Scenario F19.6a: 캐시 친화가 작동하는 동안에도 한도와 모델 묶음 위반은 그대로 거부된다
+### Scenario F4.5: The time-period usage trend continues without gaps
 
 ```gherkin
-Given 한 팀이 캐시 친화 흐름을 잘 쓰고 있다
-When 같은 팀이 분당 한도나 모델 묶음을 어긴다
-Then 캐시 적중 여부와 무관하게 그 호출은 친절히 거부된다
-And 거부 사유 종류별 보고에 정상적으로 한 번 더해진다
+Given Alice is viewing a team's daily trend
+When calls came in by time period
+Then the time-period bars continue without gaps
+And time periods with zero calls are clearly marked as "0"
+And clicking a bar navigates to the detailed log for that time period
 ```
 
-### Scenario F19.6b: 캐시 적중률은 거부된 호출을 빼고 계산된다
+### Scenario F4.6: Rejection reasons are visible at a glance by type
 
 ```gherkin
-Given 한 팀에서 캐시 친화 흐름과 한도 거부가 함께 일어났다
-When Alice가 그 팀의 캐시 적중률을 본다
-Then 거부된 호출은 적중률 계산에 들어가지 않는다
-And 거부 호출 수와 적중률이 같은 화면에서 따로 보인다
+Given a team had multiple types of rejections yesterday
+When Alice opens the rejection view for that team
+Then rejection reasons are grouped and shown by type
+And the ratio and time-period trend for each type are shown together
+And the largest type appears at the top
 ```
 
-### Scenario F19.7: 짧게 유지되는 캐시와 길게 유지되는 캐시가 등급으로 분리되어 보인다
+### Scenario F4.7: The report screen can be downloaded in table format
 
 ```gherkin
-Given 한 팀이 짧게 유효한 입력과 길게 유효한 입력을 함께 쓴다
-When Alice가 그 팀의 캐시 보기를 연다
-Then 짧은 등급과 긴 등급이 같은 화면에서 따로 보인다
-And 각 등급의 적중률과 절감 비용이 따로 계산되어 보인다
-And 등급의 의미가 운영자가 이해할 수 있는 도메인 어휘로 안내된다
+Given Alice has a filtered report screen
+When Alice clicks "Download"
+Then the same content visible on the screen is produced as a table-format file
+And no secrets or full key values appear anywhere in that file
+And Dana can open the same file again during a quarterly audit
 ```
 
-### Scenario F19.8: 비활성 팀의 호출은 캐시 적중을 통해서도 받아들여지지 않는다
+### Scenario F4.8: The fact that the real-time stream has been interrupted is clearly visible on the same screen
 
 ```gherkin
-Given Alice가 한 팀을 비활성 상태로 바꿔 두었다
-When 그 팀의 키로 들어온 호출이 캐시 친화 흐름에 잘 맞는 입력을 갖고 있다
-Then 그 호출은 캐시 적중 여부와 무관하게 친절히 거부된다
-And 캐시가 비활성 팀의 우회로가 되지 않는다
-And 같은 사실이 거부 사유 종류별 보고에 정상적으로 보인다
+Given Alice has the real-time stream enabled and is viewing the dashboard
+When the real-time stream is interrupted for some reason
+Then a marker that "the real-time stream has been interrupted" is clearly visible on the screen
+And the accumulated report numbers remain accurate during that time
+And when the real-time stream reconnects, the same marker disappears
 ```
 
-### Scenario F19.9: 한 호출의 캐시 상태가 분명한 분류로 한눈에 보인다
+### Scenario F4.10: On the log page, filter by selecting type, team, or holder
 
 ```gherkin
-Given Alice가 한 팀의 캐시 보기를 자세히 본다
-When 어떤 호출은 처음 들어왔고 어떤 호출은 이미 모인 입력에 닿았으며 어떤 호출은 일부만 다시 썼다
-Then 각 호출 옆에 "적중·미적중·일부 적중·만들기·건너뜀·알 수 없음" 같은 분명한 상태가 보인다
-And 각 상태의 비율이 같은 화면에서 한눈에 보인다
-And Alice가 한 상태로 좁혀 그 호출 무리만 따로 본다
+Given Alice is viewing the cc-lb log page
+When Alice selects and filters by type, team, or holder
+Then the same page is reorganized to match those conditions
+And no secrets or full key values appear on any row
+And the same conditions remain in the URL bar so reopening it shows the same screen
 ```
 
-### Scenario F19.10: 캐시 적중인데 비용 단위가 처음과 어긋난 경우가 따로 표시된다
+### Scenario F4.11a: "Zero calls" and "not yet known" are clearly distinguished within the same table
 
 ```gherkin
-Given Alice가 한 팀의 캐시 보기를 본다
-When 같은 의미의 호출이 적중했지만 비용 계산용 단위가 처음 호출과 어긋난다
-Then "캐시 토큰 어긋남"이 그 호출 옆에 분명히 표시된다
-And Alice는 어긋난 정도가 시간대별로 어떻게 흐르는지를 함께 본다
-And 그 어긋남이 비용 절감 숫자에 끼치는 영향이 같은 화면에 함께 보인다
+Given Alice is viewing a team's usage report
+When some time periods had zero calls and other time periods have not yet finished measuring
+Then "zero calls" and "not yet known" are clearly distinguished within the same table
+And even if the two markers appear on the same row, they are rendered with different marker shapes
+```
+
+### Scenario F4.11b: The meaning of the two markers is explained together as a user-comprehension tooltip
+
+```gherkin
+Given Alice is viewing a row in a team's usage report table where "zero calls" and "not yet known" are mixed
+When Alice tries to learn the meaning of the two markers
+Then a tooltip explaining the difference between the two markers is shown within the same table
+And Alice can recognize both at a glance without confusion
+```
+
+### Scenario F4.11c: The same distinction is also shown on the time-period trend chart
+
+```gherkin
+Given Alice is viewing a team's time-period usage trend chart
+When some time periods had zero calls and other time periods have not yet finished measuring
+Then the "zero calls" time periods and "not yet known" time periods appear with different markers on the same trend chart
+And the meaning of the two markers is explained in the legend beside the chart
+```
+
+### Scenario F4.12: Per-step time spent for a single call is viewed in detail
+
+```gherkin
+Given Alice is looking at one slow call from a team in detail
+When Alice opens the per-step detail view for that call
+Then the time spent at each stage — such as "key recognition, limit check, external call, response delivery" — is shown separately
+And the stage that took the longest is highlighted on the same screen
+And Alice can immediately identify which stage was slow from that highlight
 ```
 
 ---
 
-## Feature F26: 운영자/SRE가 cc-lb의 살아 있음과 처리 가능을 분리해서 본다
+## Feature F6: Per-team budget, model ACL, and rate limits are enforced
 
-Charlie는 cc-lb가 살아 있는지와 일을 받아들일 준비가 되었는지를 따로 본다. 이 feature는 두 가지의 분리·영구 거절·본문 표시·재연결 추적·재시작 표식·진행 중 호출 게이지·drain 중 분리를 다룬다.
+The limits Alice has set actually work inside cc-lb. This feature covers per-minute limits, daily limits, monthly cost limits, model bundles, external host allowlists, per-path body size, concurrency limits, limit application scope, per-key overrides, recovery, and inter-team isolation.
 
-### Scenario F26.1: 살아 있음과 처리 가능이 분리되어 보인다
+### Scenario F6.1: Exceeding the per-minute limit causes the team's next calls to be temporarily rejected
 
 ```gherkin
-Given Charlie가 cc-lb의 상태를 본다
-When Charlie가 "살아 있는가"와 "일을 받을 준비가 되었는가"를 각각 묻는다
-Then "살아 있는가"는 cc-lb 자체가 동작하면 그렇다고 답한다
-And "일을 받을 준비가 되었는가"는 외부 의존이 모두 준비된 경우에만 그렇다고 답한다
-And 두 답이 서로 영향을 주지 않고 분리되어 본다
+Given a team has a set per-minute limit
+When the team's keys exceed the limit within a short time
+Then the next call after exceeding the limit is gracefully rejected
+And Bob receives only the message "please retry shortly"
+And the same fact is added to the rejection-reason-by-type report
 ```
 
-### Scenario F26.2a: 처리 가능 상태가 회복 불가일 때는 계속 "준비 안 됨"으로 답한다
+### Scenario F6.2a: When the daily limit is exhausted, the remaining calls that day are rejected and the limit resets at the same time the next day
 
 ```gherkin
-Given cc-lb가 의지하는 외부 의존이 영구히 닿지 않는다
-When Charlie가 "일을 받을 준비가 되었는가"를 다시 묻는다
-Then 그 답은 계속 "준비 안 됨"이다
-And 그 답은 외부 의존이 다시 닿기 전까지 표면에서 바뀌지 않는다
+Given a team has a set daily limit
+When the team uses up the daily limit
+Then the team's calls are gracefully rejected for the rest of that day
+And the limit resets automatically at the same time the next day
 ```
 
-### Scenario F26.2b: 처리 가능이 "준비 안 됨"인 동안에도 살아 있음 신호는 분리되어 유지된다
+### Scenario F6.2b: The daily-limit rejection notice includes when the limit will reset
 
 ```gherkin
-Given cc-lb의 처리 가능 답이 계속 "준비 안 됨"인 상태다
-When Charlie가 그 사이에 "살아 있는가"를 다시 묻는다
-Then 그 답은 계속 "살아 있다"이다
-And "살아 있다"와 "준비 안 됨"이 같은 화면에서 서로 영향을 주지 않고 분리되어 보인다
+Given a team is being rejected because it has exhausted the daily limit
+When Bob's call hits that rejection
+Then the response notice includes "when the limit will reset" in the units set by the operator
+And Bob's code can naturally retry after waiting until that time
 ```
 
-### Scenario F26.2c: 무대 뒤의 자동 복귀 시도가 운영 화면에 표식으로 보인다
+### Scenario F6.3: When the monthly cost limit is near, new calls are rejected in advance
 
 ```gherkin
-Given cc-lb의 처리 가능 답이 계속 "준비 안 됨"인 상태다
-When 무대 뒤에서 cc-lb가 외부 의존에 자동 복귀를 반복해서 시도한다
-Then 같은 화면에 "자동 복귀가 시도되고 있다"는 표식이 분명히 보인다
-And 표면의 "준비 안 됨" 답은 자동 복귀가 성공하기 전까지 바뀌지 않는다
+Given a team has a set monthly cost limit
+When accumulated cost is nearly at the limit
+Then the team's new calls are gracefully rejected
+And Bob receives only the message "this team's monthly limit is nearly exhausted"
+And the same fact is visible on the dashboard before a rejection occurs
 ```
 
-### Scenario F26.3: 살아 있음 본문에 버전·가동 시간·빌드 표식이 함께 보인다
+### Scenario F6.4: Calling outside the allowed model bundle is rejected
 
 ```gherkin
-Given Charlie가 "살아 있는가"의 자세한 답을 본다
-When 그 답의 본문이 도착한다
-Then 본문에는 cc-lb의 버전·가동 시간·빌드 표식이 함께 보인다
-And 같은 표식이 재시작 전과 후에 분명히 달라진다
-And 표식만 보고도 Charlie가 어떤 버전이 돌고 있는지 알 수 있다
+Given Alice has allowed only a specific model bundle for a team
+When Bob on that team calls with a model outside the bundle
+Then that call is gracefully rejected
+And "disallowed model" is added to the rejection-reason-by-type report
+And the same rejection continues until Alice adds that model to the bundle
 ```
 
-### Scenario F26.4: 알림 구독이 끊겼다가 다시 붙으면 그 사이의 변경분을 따라잡는다
+### Scenario F6.5: A new limit takes effect immediately for calls right after it is edited
 
 ```gherkin
-Given cc-lb의 알림 구독이 잠시 끊긴다
-When 그 구독이 다시 붙는다
-Then 끊긴 사이에 일어난 설정과 한도 변경이 정기 따라잡기로 반영된다
-And Charlie에게는 끊김과 다시 붙음이 같은 흐름 위에서 분명히 보인다
-And 끊긴 동안에도 누적 보고 숫자는 정확하게 유지된다
+Given Alice has increased the per-minute limit for a team
+When Bob sends a call immediately after that change is saved
+Then the call is accepted under the new limit
+And the old limit is not applied even briefly alongside it
+And the change — including who made it and when — is recorded in the audit log
 ```
 
-### Scenario F26.5a: cc-lb가 재시작했음을 분명한 표식으로 알린다
+### Scenario F6.8: Limit violations are shown separately in the rejection-reason-by-type report
 
 ```gherkin
-Given cc-lb가 어떤 이유로 재시작한다
-When Charlie가 같은 cc-lb를 다시 본다
-Then 재시작이 일어났다는 표식이 분명히 보인다
-And 그 표식은 옛 가동 시간과 새 가동 시간 사이의 경계를 명확히 한다
+Given multiple types of rejections occurred for a team
+When Alice views the rejection-reason-by-type report
+Then per-minute violations, daily violations, monthly violations, and disallowed models are shown separately by type
+And the ratio and time-period trend for each type are also shown together
+And the type with the most violations appears at the top
 ```
 
-### Scenario F26.5b: 재시작 표식이 시간과 함께 감사 기록에 남는다
+### Scenario F6.9: cc-lb does not exit to hosts outside the external host allowlist
 
 ```gherkin
-Given cc-lb가 어떤 이유로 재시작한다
-When Dana가 분기 감사 때 같은 흔적을 들춰 본다
-Then 같은 재시작 표식이 시간과 함께 감사 기록에 남아 있다
-And Dana가 그 기록만으로 재시작 흐름을 시간순으로 재구성할 수 있다
+Given Charlie has set the external host allowlist
+When a call tries to exit to an external host outside the allowlist
+Then cc-lb blocks that external call
+And Bob receives only the message "this external host cannot be exited to"
+And the same fact is recorded in the audit log together with the external host name
 ```
 
-### Scenario F26.6: 지금 진행 중인 호출 수가 같은 화면에서 게이지로 보인다
+### Scenario F6.10a: A per-path body size limit is applied to calls on that path
 
 ```gherkin
-Given Charlie가 cc-lb의 처리 가능 상태 화면을 본다
-When 진행 중인 호출 수가 시간에 따라 오르내린다
-Then 같은 화면에 "지금 진행 중인 호출 수" 게이지가 함께 보인다
-And 그 숫자가 동시 처리 한도와 비교해 얼마나 가까운지가 한눈에 보인다
-And 게이지가 0이 되는 시점이 분명히 표시된다
+Given Alice has set a smaller body size limit for a specific path
+When Bob sends a call on that path with a body exceeding the limit
+Then that call is gracefully rejected
+And Bob receives only the message "the body size limit for this path was exceeded"
 ```
 
-### Scenario F26.7: 점진적 종료 중에는 살아 있음과 처리 가능이 따로 답한다
+### Scenario F6.10b: Changing the body size limit for one path does not affect the body size limit for other paths
 
 ```gherkin
-Given cc-lb가 점진적 종료를 시작했다
-When Charlie가 "살아 있는가"와 "일을 받을 준비가 되었는가"를 각각 묻는다
-Then "살아 있는가"는 그동안에도 계속 그렇다고 답한다
-And "일을 받을 준비가 되었는가"는 곧 "준비 안 됨"으로 바뀐다
-And 그 분리 덕에 외부 부하 분배가 새 호출만 막고 진행 중 호출은 마무리될 시간을 갖는다
+Given Alice has set a smaller body size limit only for a specific path
+When Bob sends a body of the same size on a different path
+Then that call's body size limit is maintained without being affected
+And the acceptance on other paths is shown as separate from the limit change on the one path
+```
+
+### Scenario F6.12: A team temporarily rejected for a limit violation recovers when time passes
+
+```gherkin
+Given a team is temporarily being rejected for exceeding the per-minute limit
+When the preset recovery time passes
+Then that team's calls start being accepted again
+And Bob's code can send calls again with the same key without any extra steps
+And the recovery event is shown on the rejection-reason-by-type report trend
+```
+
+### Scenario F6.13: A team that has exhausted its daily limit is automatically accepted again at the same time the next day
+
+```gherkin
+Given a team is being rejected because it has exhausted its daily limit
+When the same time the next day passes
+Then the daily limit is automatically reset
+And Bob's code can send calls again without any extra steps
+And the recovery event is shown on the rejection-reason-by-type report trend
+```
+
+### Scenario F6.14a: One team's per-minute limit violation does not affect another team's call acceptance
+
+```gherkin
+Given two teams each have their own separate limits within the same cc-lb
+When one team is being rejected for exceeding its per-minute limit
+Then the other team's calls are accepted without being affected
+And both teams' limit headroom and rejection trends are shown separately on screen
+```
+
+### Scenario F6.14b: One team's burst does not delay the other team's recovery time
+
+```gherkin
+Given two teams each have their own separate limits within the same cc-lb
+When one team greatly exceeds its per-minute limit
+Then the other team's recovery time is maintained exactly as preset
+And both teams' recovery trends are shown separately in the rejection-reason-by-type report
+```
+
+### Scenario F6.15: A separate limit can be set on the number of concurrently in-progress calls
+
+```gherkin
+Given a team has a set limit on "the number of concurrently in-progress calls"
+When a new call comes in while the team's in-progress calls have reached that number
+Then the new call is gracefully rejected
+And Bob receives only the message "the concurrent call limit has been reached"
+And once one in-progress call finishes, the next call is accepted immediately
+```
+
+### Scenario F6.16: The application scope changes depending on whether the limit is set to "team", "holder", or "key"
+
+```gherkin
+Given Alice can choose the application scope of a limit from "team", "holder", or "key"
+When Alice sets that limit to the holder scope
+Then when one holder exceeds the limit, only that holder's keys are rejected
+And other holders on the same team send calls without being affected
+And which scope the limit is applied to is clearly visible on the same screen
+```
+
+### Scenario F6.17: A smaller limit can be set separately for just one key
+
+```gherkin
+Given the default limit for a team is set
+When Alice sets a smaller limit separately for just one key within that team
+Then that key's calls follow the smaller limit first
+And the other keys in the same team follow the team default limit as before
+And the per-key limit setting — including who set it and when — is recorded in the audit log
+```
+
+---
+
+## Feature F19: Cache-affinity routing actually reduces cost
+
+The same semantic call costs less the second time. This feature covers cache-affinity routing, cache hit rate, cost savings, cache tier separation, bypass blocking for inactive teams, cache state classification, and token-mismatch visibility.
+
+### Scenario F19.1: The same semantic call is routed to the same place the second time
+
+```gherkin
+Given Bob's team makes two calls with the same input
+When the second call reaches cc-lb
+Then it is routed to the same processing path as the first call
+And even if another team's call comes in between the two calls, the affinity is maintained
+And the same fact is visible in the "cache-affinity trend" section of the usage report
+```
+
+### Scenario F19.2: The cache hit rate is visible at a glance on the same screen
+
+```gherkin
+Given Alice is viewing the dashboard for a team
+When that team is using cache-affinity routing
+Then the "cache hit rate" is shown by time period
+And the higher the hit rate, the greater the cost savings visible on the same screen
+And when the hit rate drops, that point is clearly visible on the trend
+```
+
+### Scenario F19.3a: The cost saved by cache hits is shown separately in the cost report
+
+```gherkin
+Given a team frequently repeats the same input
+When the accumulated cost for that day is calculated
+Then "cost saved by cache hits" is shown separately in the cost report
+And that number is clearly visible alongside that day's accumulated cost
+```
+
+### Scenario F19.3b: "What the cost would have been without cache" is shown together as a hypothetical cost label
+
+```gherkin
+Given Alice is viewing the cost report for a team
+When cache hits occurred that day
+Then "what the cost would have been without cache" is shown together as a hypothetical cost label in the same report
+And the hypothetical cost figure is clearly distinguished from the actual cost incurred
+```
+
+### Scenario F19.3c: Actual cost and hypothetical cost are compared on the same time-period trend
+
+```gherkin
+Given Alice is viewing the cost report for a team
+When cache hits and misses occurred mixed by time period that day
+Then "cost saved by cache hits" and "what the cost would have been without cache" are plotted together on the same time-period trend
+And it is visible at a glance which time period had the greatest difference between the two figures
+```
+
+### Scenario F19.4: When cache affinity is broken, the call is processed fresh
+
+```gherkin
+Given a team's cache-affinity routing is broken for some reason
+When the same semantic call comes in again
+Then that call is processed fresh and receives a normal response
+And the fact that the cache did not hit is not directly visible to Bob
+And the same fact is visible to the operator as a drop in the cache hit rate
+```
+
+### Scenario F19.5: Cache affinity does not cross team boundaries
+
+```gherkin
+Given two teams happen to use the same input
+When both teams' calls come into cc-lb
+Then one team's cache hit does not flow to the other team's calls
+And cost savings and hit rate are calculated separately per team
+And the two teams' calls also appear separated in the audit log
+```
+
+### Scenario F19.6a: Even while cache affinity is working, limit and model bundle violations are still rejected
+
+```gherkin
+Given a team is making good use of cache-affinity routing
+When the same team violates the per-minute limit or model bundle
+Then the call is gracefully rejected regardless of whether the cache hit
+And it is added once to the rejection-reason-by-type report normally
+```
+
+### Scenario F19.6b: The cache hit rate is calculated excluding rejected calls
+
+```gherkin
+Given cache-affinity routing and limit rejections both occurred for a team
+When Alice views that team's cache hit rate
+Then rejected calls are not included in the hit rate calculation
+And the rejected call count and hit rate are shown separately on the same screen
+```
+
+### Scenario F19.7: Short-lived cache and long-lived cache are shown separated by tier
+
+```gherkin
+Given a team uses both short-lived inputs and long-lived inputs
+When Alice opens the cache view for that team
+Then the short tier and long tier are shown separately on the same screen
+And the hit rate and cost savings for each tier are calculated and shown separately
+And the meaning of the tiers is explained in domain vocabulary that the operator can understand
+```
+
+### Scenario F19.8: Calls from an inactive team are not accepted even through a cache hit
+
+```gherkin
+Given Alice has set a team to inactive status
+When a call coming in on that team's key has an input that matches the cache-affinity routing well
+Then that call is gracefully rejected regardless of whether the cache hits
+And the cache does not become a bypass route for an inactive team
+And the same fact appears normally in the rejection-reason-by-type report
+```
+
+### Scenario F19.9: The cache state of a single call is visible at a glance with a clear classification
+
+```gherkin
+Given Alice is viewing the cache detail view for a team
+When some calls arrived fresh, some reached an already-accumulated input, and some partially reused
+Then each call shows a clear state such as "hit, miss, partial-hit, create, skip, unknown"
+And the ratio of each state is visible at a glance on the same screen
+And Alice can filter to one state and view only that group of calls separately
+```
+
+### Scenario F19.10: Cache hits where the cost unit mismatches the original are marked separately
+
+```gherkin
+Given Alice is viewing the cache view for a team
+When the same semantic call hit the cache but the cost-calculation unit mismatches the original call
+Then "cache token mismatch" is clearly marked beside that call
+And Alice also views how the degree of mismatch trends by time period
+And the impact of that mismatch on the cost savings figure is shown together on the same screen
+```
+
+---
+
+## Feature F26: Operator/SRE views cc-lb liveness and readiness separately
+
+Charlie views whether cc-lb is alive and whether it is ready to accept work as separate signals. This feature covers the separation of the two signals, permanent failure, body display, reconnection tracking, restart markers, in-progress call gauge, and separate behavior during drain.
+
+### Scenario F26.1: Liveness and readiness are shown separately
+
+```gherkin
+Given Charlie is viewing the status of cc-lb
+When Charlie asks "is it alive?" and "is it ready to accept work?" separately
+Then "is it alive?" answers yes if cc-lb itself is operating
+And "is it ready to accept work?" answers yes only if all external dependencies are ready
+And the two answers are seen separated without influencing each other
+```
+
+### Scenario F26.2a: When readiness is unrecoverable, it continues to answer "not ready"
+
+```gherkin
+Given the external dependency that cc-lb relies on is permanently unreachable
+When Charlie asks "is it ready to accept work?" again
+Then the answer continues to be "not ready"
+And that answer does not change on the surface until the external dependency becomes reachable again
+```
+
+### Scenario F26.2b: Even while readiness is "not ready", the liveness signal remains separate and maintained
+
+```gherkin
+Given cc-lb's readiness answer continues to be "not ready"
+When Charlie asks "is it alive?" again in the meantime
+Then the answer continues to be "alive"
+And "alive" and "not ready" are seen separated on the same screen without influencing each other
+```
+
+### Scenario F26.2c: The background auto-reconnect attempts are visible as a marker on the operations screen
+
+```gherkin
+Given cc-lb's readiness answer continues to be "not ready"
+When cc-lb repeatedly attempts automatic reconnection to the external dependency in the background
+Then a marker that "auto-reconnect is being attempted" is clearly visible on the same screen
+And the "not ready" answer on the surface does not change until the auto-reconnect succeeds
+```
+
+### Scenario F26.3: The liveness body shows version, uptime, and build marker together
+
+```gherkin
+Given Charlie is viewing the detailed answer to "is it alive?"
+When the body of that answer arrives
+Then the body shows cc-lb's version, uptime, and build marker together
+And the same markers change clearly between before and after a restart
+And Charlie can tell which version is running just from the markers
+```
+
+### Scenario F26.4: When notification subscription is interrupted and reconnects, the changes in between are caught up
+
+```gherkin
+Given cc-lb's notification subscription is briefly interrupted
+When that subscription reconnects
+Then configuration and limit changes that occurred during the interruption are reflected via periodic catch-up
+And Charlie can clearly see the interruption and the reconnection on the same trend
+And the accumulated report numbers remain accurate during the interruption
+```
+
+### Scenario F26.5a: cc-lb announces clearly with a marker that it has restarted
+
+```gherkin
+Given cc-lb restarts for some reason
+When Charlie views the same cc-lb again
+Then a marker clearly showing that a restart occurred is visible
+And that marker clearly marks the boundary between the old uptime and the new uptime
+```
+
+### Scenario F26.5b: The restart marker remains in the audit log with a timestamp
+
+```gherkin
+Given cc-lb restarts for some reason
+When Dana reviews the same trail during a quarterly audit
+Then the same restart marker remains in the audit log with a timestamp
+And Dana can reconstruct the restart flow in chronological order from that record alone
+```
+
+### Scenario F26.6: The current number of in-progress calls is visible as a gauge on the same screen
+
+```gherkin
+Given Charlie is viewing cc-lb's readiness status screen
+When the number of in-progress calls rises and falls over time
+Then a gauge showing "the current number of in-progress calls" is visible on the same screen
+And it is visible at a glance how close that number is to the concurrency limit
+And the moment the gauge reaches zero is clearly marked
+```
+
+### Scenario F26.7: During graceful shutdown, liveness and readiness answer separately
+
+```gherkin
+Given cc-lb has begun graceful shutdown
+When Charlie asks "is it alive?" and "is it ready to accept work?" separately
+Then "is it alive?" continues to answer yes during that time
+And "is it ready to accept work?" changes to "not ready" soon
+And because of that separation, the external load balancer has time to block only new calls while letting in-progress calls finish
 ```
