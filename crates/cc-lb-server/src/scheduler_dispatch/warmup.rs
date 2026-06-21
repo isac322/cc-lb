@@ -5,6 +5,7 @@ use cc_lb_scheduler::idempotency::WarmupEffectsStore;
 use cc_lb_scheduler::jobs::warmup::{UpstreamWarmupJob, UpstreamWarmupJobHandler};
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::SchedulerBackend;
+use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{UpstreamRecord, UpstreamStore};
 use http::HeaderMap;
@@ -16,6 +17,8 @@ use crate::scheduler_dispatch::time::{now_unix_millis, now_unix_secs};
 use crate::warmup::{WarmupAbandonReason, WarmupResult, classify_response, dispatch_warmup};
 
 use super::SchedulerDispatch;
+
+const TOKEN_REFRESH_LOOKAHEAD_SECS: u64 = 60;
 
 impl SchedulerDispatch {
     pub(super) async fn dispatch_warmup(
@@ -56,26 +59,101 @@ impl SchedulerDispatch {
     }
 
     async fn fire_warmup(&self, job: UpstreamWarmupJob) -> SchedulerResult<()> {
-        let upstream = UpstreamStore::get_by_id(self.storage.as_ref(), job.upstream_id)
+        let mut upstream = UpstreamStore::get_by_id(self.storage.as_ref(), job.upstream_id)
             .await
             .map_err(storage_scheduler_error)?
             .ok_or_else(|| SchedulerError::Job("warmup upstream disappeared".to_owned()))?;
         let cycle_key = i64::try_from(job.cycle_key)
             .map_err(|_| SchedulerError::Job("warmup cycle key exceeds i64".to_owned()))?;
+        self.ensure_fresh_oauth_token(&mut upstream).await?;
         let (status, observations) = self.dispatch_warmup_request(&upstream).await?;
-        match classify_response(status, &observations, cycle_key) {
+        let result = classify_response(status, &observations, cycle_key);
+        let (final_status, final_observations, final_result) = if matches!(
+            result,
+            WarmupResult::AbandonCyclePermanent(WarmupAbandonReason::AuthFailed)
+        ) {
+            match self.force_refresh_oauth_token(&mut upstream).await {
+                Ok(true) => {
+                    let (status, observations) = self.dispatch_warmup_request(&upstream).await?;
+                    let result = classify_response(status, &observations, cycle_key);
+                    (status, observations, result)
+                }
+                Ok(false) => (status, observations, result),
+                Err(error) => {
+                    tracing::warn!(upstream_id = %upstream.id, %error, "warmup oauth force-refresh failed");
+                    (status, observations, result)
+                }
+            }
+        } else {
+            (status, observations, result)
+        };
+        match final_result {
             WarmupResult::Success { cycle_key: _ }
             | WarmupResult::WindowAlreadyActive { cycle_key: _ } => {
-                self.record_warmup_observations(upstream.id, observations)
+                self.record_warmup_observations(upstream.id, final_observations)
             }
             WarmupResult::RetryableTransient => Err(SchedulerError::Job(format!(
-                "warmup returned transient status {status}"
+                "warmup returned transient status {final_status}"
             ))),
             WarmupResult::AbandonCyclePermanent(reason) => {
                 tracing::warn!(upstream_id = %upstream.id, reason = reason.as_str(), "warmup cycle abandoned");
                 Ok(())
             }
         }
+    }
+
+    async fn ensure_fresh_oauth_token(
+        &self,
+        upstream: &mut UpstreamRecord,
+    ) -> SchedulerResult<()> {
+        if upstream.warmup_dialect_plugin.is_some() {
+            return Ok(());
+        }
+        let Some(lazy_refresher) = self.lazy_refresher.as_ref() else {
+            return Ok(());
+        };
+        let bundle = decrypt_bundle(upstream, self.aead.as_ref())?;
+        if bundle
+            .expires_at_unix_secs
+            .saturating_sub(TOKEN_REFRESH_LOOKAHEAD_SECS)
+            > now_unix_secs()
+        {
+            return Ok(());
+        }
+        if let Err(error) = lazy_refresher.refresh_one(upstream.id).await {
+            tracing::warn!(upstream_id = %upstream.id, %error, "warmup proactive oauth refresh failed");
+            return Ok(());
+        }
+        if let Some(refreshed) = UpstreamStore::get_by_id(self.storage.as_ref(), upstream.id)
+            .await
+            .map_err(storage_scheduler_error)?
+        {
+            *upstream = refreshed;
+        }
+        Ok(())
+    }
+
+    async fn force_refresh_oauth_token(
+        &self,
+        upstream: &mut UpstreamRecord,
+    ) -> SchedulerResult<bool> {
+        if upstream.warmup_dialect_plugin.is_some() {
+            return Ok(false);
+        }
+        let Some(lazy_refresher) = self.lazy_refresher.as_ref() else {
+            return Ok(false);
+        };
+        lazy_refresher
+            .refresh_one(upstream.id)
+            .await
+            .map_err(|error| SchedulerError::Job(error.to_string()))?;
+        if let Some(refreshed) = UpstreamStore::get_by_id(self.storage.as_ref(), upstream.id)
+            .await
+            .map_err(storage_scheduler_error)?
+        {
+            *upstream = refreshed;
+        }
+        Ok(true)
     }
 
     async fn dispatch_warmup_request(

@@ -10,6 +10,7 @@ use cc_lb_scheduler::jobs::oauth_usage_poll::{
 };
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{EntityJob, SchedulerBackend};
+use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{UpstreamRecord, UpstreamStore};
 
@@ -19,6 +20,8 @@ use crate::scheduler_dispatch::time::{now_unix_millis, now_unix_secs};
 use crate::scheduler_dispatch::usage::observe_usage_body;
 
 use super::SchedulerDispatch;
+
+const TOKEN_REFRESH_LOOKAHEAD_SECS: u64 = 60;
 
 impl SchedulerDispatch {
     pub(super) async fn dispatch_oauth_refresh(
@@ -123,7 +126,7 @@ impl SchedulerDispatch {
         &self,
         job: OAuthUsagePollJob,
     ) -> SchedulerResult<OAuthUsagePollObservation> {
-        let Some(upstream) = UpstreamStore::get_by_id(self.storage.as_ref(), job.upstream_id)
+        let Some(mut upstream) = UpstreamStore::get_by_id(self.storage.as_ref(), job.upstream_id)
             .await
             .map_err(storage_scheduler_error)?
         else {
@@ -135,23 +138,34 @@ impl SchedulerDispatch {
         {
             return Ok(OAuthUsagePollObservation::Skip);
         }
-        let bundle = decrypt_bundle(&upstream, self.aead.as_ref())?;
+        self.ensure_fresh_usage_token(&mut upstream).await?;
         let observed_at_unix_secs = now_unix_secs();
-        let response = match fetch_usage(
-            &self.http,
-            &bundle.access_token,
-            "cc-lb scheduler oauth usage poller",
-            &self.cancel,
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                tracing::warn!(upstream_id = %upstream.id, error = %error, "oauth usage poll failed");
+        let first_response = match self.fetch_usage_with_current_token(&upstream).await {
+            FetchOutcome::Response(response) => response,
+            FetchOutcome::Network => {
                 return Ok(OAuthUsagePollObservation::NetworkFailure {
                     observed_at_unix_secs,
                 });
             }
+        };
+        let response = if first_response.status == http::StatusCode::UNAUTHORIZED {
+            match self.force_refresh_usage_token(&mut upstream).await {
+                Ok(true) => match self.fetch_usage_with_current_token(&upstream).await {
+                    FetchOutcome::Response(retry_response) => retry_response,
+                    FetchOutcome::Network => {
+                        return Ok(OAuthUsagePollObservation::NetworkFailure {
+                            observed_at_unix_secs,
+                        });
+                    }
+                },
+                Ok(false) => first_response,
+                Err(error) => {
+                    tracing::warn!(upstream_id = %upstream.id, %error, "oauth usage force-refresh failed");
+                    first_response
+                }
+            }
+        } else {
+            first_response
         };
         if response.status == http::StatusCode::TOO_MANY_REQUESTS {
             return Ok(OAuthUsagePollObservation::Throttled {
@@ -178,4 +192,81 @@ impl SchedulerDispatch {
             window_end_unix_millis: observed_at_unix_millis,
         })
     }
+
+    async fn fetch_usage_with_current_token(&self, upstream: &UpstreamRecord) -> FetchOutcome {
+        let bundle = match decrypt_bundle(upstream, self.aead.as_ref()) {
+            Ok(bundle) => bundle,
+            Err(error) => {
+                tracing::warn!(upstream_id = %upstream.id, %error, "oauth usage decrypt bundle failed");
+                return FetchOutcome::Network;
+            }
+        };
+        match fetch_usage(
+            &self.http,
+            &bundle.access_token,
+            "cc-lb scheduler oauth usage poller",
+            &self.cancel,
+        )
+        .await
+        {
+            Ok(response) => FetchOutcome::Response(response),
+            Err(error) => {
+                tracing::warn!(upstream_id = %upstream.id, %error, "oauth usage poll fetch failed");
+                FetchOutcome::Network
+            }
+        }
+    }
+
+    async fn ensure_fresh_usage_token(
+        &self,
+        upstream: &mut UpstreamRecord,
+    ) -> SchedulerResult<()> {
+        let Some(lazy_refresher) = self.lazy_refresher.as_ref() else {
+            return Ok(());
+        };
+        let bundle = decrypt_bundle(upstream, self.aead.as_ref())?;
+        if bundle
+            .expires_at_unix_secs
+            .saturating_sub(TOKEN_REFRESH_LOOKAHEAD_SECS)
+            > now_unix_secs()
+        {
+            return Ok(());
+        }
+        if let Err(error) = lazy_refresher.refresh_one(upstream.id).await {
+            tracing::warn!(upstream_id = %upstream.id, %error, "oauth usage proactive refresh failed");
+            return Ok(());
+        }
+        if let Some(refreshed) = UpstreamStore::get_by_id(self.storage.as_ref(), upstream.id)
+            .await
+            .map_err(storage_scheduler_error)?
+        {
+            *upstream = refreshed;
+        }
+        Ok(())
+    }
+
+    async fn force_refresh_usage_token(
+        &self,
+        upstream: &mut UpstreamRecord,
+    ) -> SchedulerResult<bool> {
+        let Some(lazy_refresher) = self.lazy_refresher.as_ref() else {
+            return Ok(false);
+        };
+        lazy_refresher
+            .refresh_one(upstream.id)
+            .await
+            .map_err(|error| SchedulerError::Job(error.to_string()))?;
+        if let Some(refreshed) = UpstreamStore::get_by_id(self.storage.as_ref(), upstream.id)
+            .await
+            .map_err(storage_scheduler_error)?
+        {
+            *upstream = refreshed;
+        }
+        Ok(true)
+    }
+}
+
+enum FetchOutcome {
+    Response(crate::scheduler_dispatch::http::UsageFetchResponse),
+    Network,
 }
