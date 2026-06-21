@@ -1,0 +1,12 @@
+-- Add `last_warmup_at` (unix seconds, BIGINT) to `upstream_status_v1`.
+--
+-- Distinct from `last_warmup_cycle_key`, which encodes the 5h-reset boundary
+-- (or scheduled fire time) used for warmup idempotency. `last_warmup_at`
+-- captures the wall-clock time the most recent successful warmup HTTP call
+-- completed, so the admin UI can show "Last cycle ran <X> ago" instead of
+-- "Last cycle ran <future 5h reset boundary>".
+--
+-- Stored as BIGINT (unix seconds) to match adapter conventions for the other
+-- unix-seconds columns on this table; avoids TIMESTAMPTZ <-> u64 round-trip in
+-- the shared `UpstreamRecord`.
+ALTER TABLE upstream_status_v1 ADD COLUMN IF NOT EXISTS last_warmup_at BIGINT;

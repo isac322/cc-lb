@@ -37,8 +37,8 @@ function pluginSupportsSlot(
   return p.supported_slots?.includes(slot) ?? p.slot === slot;
 }
 
-function LastCycleDisplay({ cycleKeyUnixSecs }: { cycleKeyUnixSecs: number }) {
-  return <RelativeTime ts={formatRelativeUnixSeconds(cycleKeyUnixSecs)} />;
+function LastCycleDisplay({ unixSecs }: { unixSecs: number }) {
+  return <RelativeTime ts={formatRelativeUnixSeconds(unixSecs)} />;
 }
 
 function isStaleRevisionError(err: unknown): boolean {
@@ -371,9 +371,9 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
                   {COPY.lastCycleLabel}
                 </div>
                 <div className="text-text" data-testid="warmup-last">
-                  {upstream.status.last_warmup_cycle_key ? (
+                  {upstream.status.last_warmup_at_unix_secs ? (
                     <LastCycleDisplay
-                      cycleKeyUnixSecs={upstream.status.last_warmup_cycle_key}
+                      unixSecs={upstream.status.last_warmup_at_unix_secs}
                     />
                   ) : (
                     <span className="text-text-muted">{COPY.lastNull}</span>

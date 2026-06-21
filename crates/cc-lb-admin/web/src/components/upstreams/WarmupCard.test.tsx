@@ -206,6 +206,7 @@ describe('WarmupCard', () => {
         warmup_enabled: true,
         next_warmup_at: null,
         last_warmup_cycle_key: null,
+        last_warmup_at_unix_secs: null,
       }),
     );
 
@@ -217,7 +218,7 @@ describe('WarmupCard', () => {
     const futureNextMs = Date.now() + 4 * 60 * 60 * 1000;
     const upstream = makeOauthUpstream({
       next_warmup_at: new Date(futureNextMs).toISOString(),
-      last_warmup_cycle_key: 1718380800,
+      last_warmup_at_unix_secs: 1718380800,
     });
 
     renderWarmup(upstream);
@@ -226,7 +227,7 @@ describe('WarmupCard', () => {
     expect(nextEl.textContent).toMatch(/^in \d/);
     expect(nextEl.textContent).not.toMatch(/Warms/);
     expect(formatRelativeUnixSeconds).toHaveBeenCalledWith(
-      upstream.status.last_warmup_cycle_key,
+      upstream.status.last_warmup_at_unix_secs,
     );
     const formattedLast = vi.mocked(formatRelativeUnixSeconds).mock.results[0]
       ?.value as Date;

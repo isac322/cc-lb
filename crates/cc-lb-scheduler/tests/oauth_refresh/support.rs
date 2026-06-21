@@ -156,6 +156,7 @@ pub fn refreshable_record(upstream_id: Uuid, generation: u64) -> UpstreamRecord 
         warmup_lease_holder: None,
         warmup_lease_until_unix_secs: None,
         warmup_dialect_plugin: None,
+        last_warmup_at_unix_secs: None,
     }
 }
 

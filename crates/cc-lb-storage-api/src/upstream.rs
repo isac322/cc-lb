@@ -89,6 +89,12 @@ pub struct UpstreamRecord {
     pub warmup_lease_until_unix_secs: Option<i64>,
     #[serde(default)]
     pub warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
+    /// Wall-clock unix seconds when the most recent successful warmup HTTP call
+    /// completed. Distinct from `last_warmup_cycle_key`, which encodes the
+    /// 5h-reset boundary used for idempotency. Used by the admin UI to render
+    /// "Last cycle ran <X> ago".
+    #[serde(default)]
+    pub last_warmup_at_unix_secs: Option<u64>,
 }
 
 impl UpstreamRecord {
@@ -192,6 +198,9 @@ pub struct UpstreamStatusUpdate {
         note = "removed in scheduler-migration follow-up PR; see .omo/plans/cc-lb-apalis-scheduler-migration.md Wave 8"
     )]
     pub last_warmup_cycle_key: Option<Option<i64>>,
+    /// When `Some(value)`, write `value` to `upstream_status_v1.last_warmup_at`.
+    /// `Some(None)` clears it; `None` leaves it untouched.
+    pub last_warmup_at_unix_secs: Option<Option<u64>>,
 }
 
 #[async_trait]

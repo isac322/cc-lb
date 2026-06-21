@@ -134,6 +134,7 @@ impl SchedulerDispatch {
         let status = UpstreamStatusUpdate {
             next_warmup_at: Some(Some(next_warmup_at)),
             last_warmup_cycle_key: Some(Some(response_cycle_key.max(candidate_cycle_key))),
+            last_warmup_at_unix_secs: Some(Some(now_unix_secs())),
             ..UpstreamStatusUpdate::default()
         };
         if let Err(error) = UpstreamStore::set_status(self.storage.as_ref(), upstream_id, status)

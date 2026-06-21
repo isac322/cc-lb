@@ -210,6 +210,7 @@ fn test_upstream_record() -> UpstreamRecord {
         warmup_lease_holder: None,
         warmup_lease_until_unix_secs: None,
         warmup_dialect_plugin: None,
+        last_warmup_at_unix_secs: None,
     }
 }
 

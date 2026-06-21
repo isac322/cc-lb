@@ -51,6 +51,7 @@ export interface UpstreamStatus {
   last_apply_at_unix_secs: number | null;
   next_warmup_at: string | null;
   last_warmup_cycle_key: number | null;
+  last_warmup_at_unix_secs: number | null;
 }
 
 export interface Upstream {

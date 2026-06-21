@@ -11,6 +11,7 @@ type UpstreamFixtureOverrides = Partial<Upstream> & {
   revision?: number;
   next_warmup_at?: string | null;
   last_warmup_cycle_key?: number | null;
+  last_warmup_at_unix_secs?: number | null;
   status?: Partial<Upstream['status']>;
 };
 
@@ -18,8 +19,14 @@ function mergeUpstreamOverrides(
   base: Upstream,
   overrides: UpstreamFixtureOverrides = {},
 ): Upstream {
-  const { revision, next_warmup_at, last_warmup_cycle_key, status, ...rest } =
-    overrides;
+  const {
+    revision,
+    next_warmup_at,
+    last_warmup_cycle_key,
+    last_warmup_at_unix_secs,
+    status,
+    ...rest
+  } = overrides;
   const mergedStatus: Upstream['status'] = {
     ...base.status,
     ...status,
@@ -29,6 +36,9 @@ function mergeUpstreamOverrides(
   }
   if ('last_warmup_cycle_key' in overrides) {
     mergedStatus.last_warmup_cycle_key = last_warmup_cycle_key ?? null;
+  }
+  if ('last_warmup_at_unix_secs' in overrides) {
+    mergedStatus.last_warmup_at_unix_secs = last_warmup_at_unix_secs ?? null;
   }
   return {
     ...base,
@@ -54,7 +64,8 @@ export function makeOauthUpstream(
         last_apply_error: null,
         last_apply_at_unix_secs: null,
         next_warmup_at: '2026-06-14T23:04:12Z',
-        last_warmup_cycle_key: 1718380800, // 2024-06-14T17:50:00Z
+        last_warmup_cycle_key: 1718380800,
+        last_warmup_at_unix_secs: 1718380800,
       },
     },
     overrides,
@@ -78,6 +89,7 @@ export function makeApiKeyUpstream(
         last_apply_at_unix_secs: null,
         next_warmup_at: null,
         last_warmup_cycle_key: null,
+        last_warmup_at_unix_secs: null,
       },
     },
     overrides,

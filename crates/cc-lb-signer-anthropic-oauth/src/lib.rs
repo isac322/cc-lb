@@ -966,6 +966,7 @@ mod tests {
                 warmup_lease_holder: create.warmup_lease_holder,
                 warmup_lease_until_unix_secs: create.warmup_lease_until_unix_secs,
                 warmup_dialect_plugin: None,
+                last_warmup_at_unix_secs: None,
             };
             records.push(record.clone());
             Ok(record)

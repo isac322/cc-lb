@@ -227,6 +227,7 @@ fn test_upstream_record() -> UpstreamRecord {
         updated_at_unix_secs: 0,
         warmup_enabled: false,
         warmup_dialect_plugin: None,
+        last_warmup_at_unix_secs: None,
         next_warmup_at: None,
         last_warmup_cycle_key: None,
         warmup_lease_holder: None,

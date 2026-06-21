@@ -22,7 +22,7 @@ use crate::{SqliteStorage, map_sqlx_error};
 
 macro_rules! split_upstream_columns {
     () => {
-        "spec.id, spec.name, spec.kind, spec.base_url, spec.enabled, token.oauth_credentials_ciphertext AS oauth_credentials, secret.api_key_ciphertext, refresh_lease.holder AS refresh_lease_holder, refresh_lease.until_unix_secs AS refresh_lease_until_unix_secs, status.last_apply_error, status.last_apply_at, spec.deleted_at, spec.spec_revision AS revision, COALESCE(token.oauth_token_generation, 0) AS oauth_token_generation, spec.created_at, spec.updated_at, spec.warmup_enabled, status.next_warmup_at, status.last_warmup_cycle_key, warmup_lease.holder AS warmup_lease_holder, warmup_lease.until_unix_secs AS warmup_lease_until_unix_secs, spec.warmup_dialect_plugin"
+        "spec.id, spec.name, spec.kind, spec.base_url, spec.enabled, token.oauth_credentials_ciphertext AS oauth_credentials, secret.api_key_ciphertext, refresh_lease.holder AS refresh_lease_holder, refresh_lease.until_unix_secs AS refresh_lease_until_unix_secs, status.last_apply_error, status.last_apply_at, spec.deleted_at, spec.spec_revision AS revision, COALESCE(token.oauth_token_generation, 0) AS oauth_token_generation, spec.created_at, spec.updated_at, spec.warmup_enabled, status.next_warmup_at, status.last_warmup_cycle_key, status.last_warmup_at, warmup_lease.holder AS warmup_lease_holder, warmup_lease.until_unix_secs AS warmup_lease_until_unix_secs, spec.warmup_dialect_plugin"
     };
 }
 
@@ -759,7 +759,7 @@ async fn set_split_status_in_tx(
 ) -> StorageResult<()> {
     let id = patch;
     let row = sqlx::query(
-        "SELECT last_apply_error, last_apply_at, observed_spec_revision, observed_api_key_secret_revision, observed_oauth_token_revision, next_warmup_at, last_warmup_cycle_key FROM upstream_status_v1 WHERE upstream_id = ?",
+        "SELECT last_apply_error, last_apply_at, observed_spec_revision, observed_api_key_secret_revision, observed_oauth_token_revision, next_warmup_at, last_warmup_cycle_key, last_warmup_at FROM upstream_status_v1 WHERE upstream_id = ?",
     )
     .bind(id.to_string())
     .fetch_optional(&mut **tx)
@@ -798,10 +798,15 @@ async fn set_split_status_in_tx(
     if let Some(value) = status.last_warmup_cycle_key {
         current.last_warmup_cycle_key = value.map(|value| value.to_string());
     }
+    if let Some(value) = status.last_warmup_at_unix_secs {
+        current.last_warmup_at = value
+            .map(|unix_secs| u64_to_i64(unix_secs, "last_warmup_at"))
+            .transpose()?;
+    }
 
     sqlx::query(
-        "INSERT INTO upstream_status_v1 (upstream_id, last_apply_error, last_apply_at, observed_spec_revision, observed_api_key_secret_revision, observed_oauth_token_revision, next_warmup_at, last_warmup_cycle_key, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, unixepoch())
+        "INSERT INTO upstream_status_v1 (upstream_id, last_apply_error, last_apply_at, observed_spec_revision, observed_api_key_secret_revision, observed_oauth_token_revision, next_warmup_at, last_warmup_cycle_key, last_warmup_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch())
          ON CONFLICT (upstream_id) DO UPDATE
          SET last_apply_error = excluded.last_apply_error,
              last_apply_at = excluded.last_apply_at,
@@ -810,6 +815,7 @@ async fn set_split_status_in_tx(
              observed_oauth_token_revision = excluded.observed_oauth_token_revision,
              next_warmup_at = excluded.next_warmup_at,
              last_warmup_cycle_key = excluded.last_warmup_cycle_key,
+             last_warmup_at = excluded.last_warmup_at,
              updated_at = unixepoch()",
     )
     .bind(id.to_string())
@@ -820,6 +826,7 @@ async fn set_split_status_in_tx(
     .bind(current.observed_oauth_token_revision)
     .bind(current.next_warmup_at)
     .bind(current.last_warmup_cycle_key)
+    .bind(current.last_warmup_at)
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
@@ -1098,6 +1105,10 @@ fn split_row_to_record(row: SqliteRow) -> StorageResult<UpstreamRecord> {
             .try_get("warmup_lease_until_unix_secs")
             .map_err(map_sqlx_error)?,
         warmup_dialect_plugin,
+        last_warmup_at_unix_secs: optional_i64_to_u64(
+            row.try_get("last_warmup_at").map_err(map_sqlx_error)?,
+            "last_warmup_at",
+        )?,
     })
 }
 
@@ -1110,6 +1121,7 @@ struct StatusFields {
     observed_oauth_token_revision: Option<i64>,
     next_warmup_at: Option<i64>,
     last_warmup_cycle_key: Option<String>,
+    last_warmup_at: Option<i64>,
 }
 
 impl StatusFields {
@@ -1133,6 +1145,7 @@ impl StatusFields {
             last_warmup_cycle_key: row
                 .try_get("last_warmup_cycle_key")
                 .map_err(map_sqlx_error)?,
+            last_warmup_at: row.try_get("last_warmup_at").map_err(map_sqlx_error)?,
         })
     }
 }

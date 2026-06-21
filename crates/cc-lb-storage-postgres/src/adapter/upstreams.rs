@@ -29,7 +29,7 @@ const CHANNEL: &str = "cclb_upstream_changed";
 
 macro_rules! split_upstream_columns {
     () => {
-        "spec.id, spec.name, spec.kind, spec.base_url, spec.enabled, token.oauth_credentials_ciphertext AS oauth_credentials, secret.api_key_ciphertext, refresh_lease.holder AS refresh_lease_holder, refresh_lease.until_unix_secs AS refresh_lease_until_unix_secs, status.last_apply_error, status.last_apply_at, spec.deleted_at, spec.spec_revision AS revision, COALESCE(token.oauth_token_generation, 0) AS oauth_token_generation, spec.created_at, spec.updated_at, spec.warmup_enabled, status.next_warmup_at, status.last_warmup_cycle_key, warmup_lease.holder AS warmup_lease_holder, warmup_lease.until_unix_secs AS warmup_lease_until_unix_secs, spec.warmup_dialect_plugin"
+        "spec.id, spec.name, spec.kind, spec.base_url, spec.enabled, token.oauth_credentials_ciphertext AS oauth_credentials, secret.api_key_ciphertext, refresh_lease.holder AS refresh_lease_holder, refresh_lease.until_unix_secs AS refresh_lease_until_unix_secs, status.last_apply_error, status.last_apply_at, spec.deleted_at, spec.spec_revision AS revision, COALESCE(token.oauth_token_generation, 0) AS oauth_token_generation, spec.created_at, spec.updated_at, spec.warmup_enabled, status.next_warmup_at, status.last_warmup_cycle_key, status.last_warmup_at, warmup_lease.holder AS warmup_lease_holder, warmup_lease.until_unix_secs AS warmup_lease_until_unix_secs, spec.warmup_dialect_plugin"
     };
 }
 
@@ -745,7 +745,7 @@ async fn set_split_status(
     let mut tx = pool.begin().await.map_err(map_sqlx_error)?;
     ensure_split_spec_active_in_tx(&mut tx, id).await?;
     let row = sqlx::query(
-        "SELECT last_apply_error, last_apply_at, observed_spec_revision, observed_api_key_secret_revision, observed_oauth_token_revision, next_warmup_at, last_warmup_cycle_key FROM upstream_status_v1 WHERE upstream_id = $1",
+        "SELECT last_apply_error, last_apply_at, observed_spec_revision, observed_api_key_secret_revision, observed_oauth_token_revision, next_warmup_at, last_warmup_cycle_key, last_warmup_at FROM upstream_status_v1 WHERE upstream_id = $1",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
@@ -800,6 +800,14 @@ async fn set_split_status(
         .transpose()
         .map_err(map_sqlx_error)?
         .flatten();
+    let mut last_warmup_at = optional_i64_to_u64(
+        row.as_ref()
+            .map(|row| row.try_get::<Option<i64>, _>("last_warmup_at"))
+            .transpose()
+            .map_err(map_sqlx_error)?
+            .flatten(),
+        "last_warmup_at",
+    )?;
 
     if let Some(value) = patch.last_apply_error {
         last_apply_error = value;
@@ -824,10 +832,13 @@ async fn set_split_status(
     if let Some(value) = patch.last_warmup_cycle_key {
         last_warmup_cycle_key = value;
     }
+    if let Some(value) = patch.last_warmup_at_unix_secs {
+        last_warmup_at = value;
+    }
 
     sqlx::query(
-        "INSERT INTO upstream_status_v1 (upstream_id, last_apply_error, last_apply_at, observed_spec_revision, observed_api_key_secret_revision, observed_oauth_token_revision, next_warmup_at, last_warmup_cycle_key, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW())
+        "INSERT INTO upstream_status_v1 (upstream_id, last_apply_error, last_apply_at, observed_spec_revision, observed_api_key_secret_revision, observed_oauth_token_revision, next_warmup_at, last_warmup_cycle_key, last_warmup_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
          ON CONFLICT (upstream_id) DO UPDATE
          SET last_apply_error = EXCLUDED.last_apply_error,
              last_apply_at = EXCLUDED.last_apply_at,
@@ -836,6 +847,7 @@ async fn set_split_status(
              observed_oauth_token_revision = EXCLUDED.observed_oauth_token_revision,
              next_warmup_at = EXCLUDED.next_warmup_at,
              last_warmup_cycle_key = EXCLUDED.last_warmup_cycle_key,
+             last_warmup_at = EXCLUDED.last_warmup_at,
              updated_at = NOW()",
     )
     .bind(id)
@@ -858,6 +870,11 @@ async fn set_split_status(
     )
     .bind(next_warmup_at)
     .bind(last_warmup_cycle_key)
+    .bind(
+        last_warmup_at
+            .map(|value| u64_to_i64(value, "last_warmup_at"))
+            .transpose()?,
+    )
     .execute(&mut *tx)
     .await
     .map_err(map_sqlx_error)?;
@@ -1146,6 +1163,10 @@ fn split_row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<UpstreamReco
             .map(serde_json::from_value)
             .transpose()
             .map_err(StorageError::Serialization)?,
+        last_warmup_at_unix_secs: optional_i64_to_u64(
+            row.try_get("last_warmup_at").map_err(map_sqlx_error)?,
+            "last_warmup_at",
+        )?,
     })
 }
 

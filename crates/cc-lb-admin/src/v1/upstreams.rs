@@ -195,6 +195,7 @@ struct UpstreamStatusResponse {
     last_apply_at_unix_secs: Option<u64>,
     next_warmup_at: Option<chrono::DateTime<chrono::Utc>>,
     last_warmup_cycle_key: Option<i64>,
+    last_warmup_at_unix_secs: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1150,6 +1151,7 @@ fn upstream_response(record: &UpstreamRecord) -> UpstreamResponse {
             last_apply_at_unix_secs: record.last_apply_at_unix_secs,
             next_warmup_at: record.next_warmup_at,
             last_warmup_cycle_key: record.last_warmup_cycle_key,
+            last_warmup_at_unix_secs: record.last_warmup_at_unix_secs,
         },
     }
 }
