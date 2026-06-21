@@ -28,6 +28,7 @@ async fn adds_and_prunes_upstream_entity_jobs() -> Result<()> {
     assert_done(&first, 4, 0, 0);
     assert_done(&second, 0, 0, 0);
     assert_eq!(active_keys(&pool).await?, expected_keys(upstream_id));
+    assert_eq!(active_job_types(&pool).await?, vec!["entity"; 4]);
 
     upstreams.replace(Vec::new());
     let pruned = handler
@@ -36,6 +37,7 @@ async fn adds_and_prunes_upstream_entity_jobs() -> Result<()> {
 
     assert_done(&pruned, 0, 3, 0);
     assert_eq!(active_keys(&pool).await?, compat_keys_only());
+    assert_eq!(active_job_types(&pool).await?, vec!["entity"]);
     Ok(())
 }
 
@@ -70,12 +72,7 @@ async fn admin_sla_uses_five_second_reconcile_interval() -> Result<()> {
 #[tokio::test]
 async fn surfaces_exhausted_apalis_jobs_once() -> Result<()> {
     let pool = setup().await?;
-    seed_failed_job(
-        &pool,
-        "entity:oauth_refresh",
-        "entity:oauth_refresh:missing",
-    )
-    .await?;
+    seed_failed_job(&pool, "entity", "entity:oauth_refresh:missing").await?;
     let handler =
         SchedulerReconcileJobHandler::new(pool.clone(), FakeReconcileUpstreams::new(Vec::new()));
 
@@ -89,6 +86,10 @@ async fn surfaces_exhausted_apalis_jobs_once() -> Result<()> {
     assert_done(&first, 1, 0, 1);
     assert_done(&second, 0, 0, 0);
     assert_eq!(failure_count(&pool).await?, 1);
+    assert_eq!(
+        failure_job_types(&pool).await?,
+        vec!["entity:oauth_refresh"]
+    );
     Ok(())
 }
 
@@ -106,6 +107,10 @@ async fn setup() -> Result<SqlitePool> {
 
 async fn active_keys(pool: &SqlitePool) -> Result<Vec<String>> {
     Ok(sqlx::query_scalar("SELECT idempotency_key FROM Jobs WHERE status IN ('Pending','Running','Queued') ORDER BY idempotency_key").fetch_all(pool).await?)
+}
+
+async fn active_job_types(pool: &SqlitePool) -> Result<Vec<String>> {
+    Ok(sqlx::query_scalar("SELECT job_type FROM Jobs WHERE status IN ('Pending','Running','Queued') ORDER BY idempotency_key").fetch_all(pool).await?)
 }
 
 async fn has_key(pool: &SqlitePool, key: String) -> Result<bool> {
@@ -129,6 +134,14 @@ async fn failure_count(pool: &SqlitePool) -> Result<i64> {
     Ok(
         sqlx::query_scalar("SELECT COUNT(*) FROM scheduler_failures")
             .fetch_one(pool)
+            .await?,
+    )
+}
+
+async fn failure_job_types(pool: &SqlitePool) -> Result<Vec<String>> {
+    Ok(
+        sqlx::query_scalar("SELECT job_type FROM scheduler_failures ORDER BY job_type")
+            .fetch_all(pool)
             .await?,
     )
 }

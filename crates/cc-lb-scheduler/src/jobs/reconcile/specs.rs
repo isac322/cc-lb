@@ -12,19 +12,18 @@ use crate::jobs::compat::AnthropicCompatRefreshJob;
 use crate::jobs::oauth_refresh::OAuthRefreshJob;
 use crate::jobs::oauth_usage_poll::OAuthUsagePollJob;
 use crate::jobs::warmup::UpstreamWarmupJob;
+use crate::worker::EntityJob;
 
 const PAGE_LIMIT: usize = 100;
 pub(super) const ENTITY_MAX_ATTEMPTS: i32 = 5;
-const WARMUP_JOB_TYPE: &str = "entity:warmup";
-const OAUTH_REFRESH_JOB_TYPE: &str = "entity:oauth_refresh";
-const OAUTH_USAGE_POLL_JOB_TYPE: &str = "entity:oauth_usage_poll";
-const COMPAT_REFRESH_JOB_TYPE: &str = "entity:anthropic_compat_refresh";
-#[cfg(feature = "postgres")]
-pub(super) const UPSTREAM_ENTITY_TYPES: [&str; 3] = [
-    WARMUP_JOB_TYPE,
-    OAUTH_REFRESH_JOB_TYPE,
-    OAUTH_USAGE_POLL_JOB_TYPE,
-];
+const WARMUP_JOB_TYPE: &str = "entity";
+const OAUTH_REFRESH_JOB_TYPE: &str = "entity";
+const OAUTH_USAGE_POLL_JOB_TYPE: &str = "entity";
+const COMPAT_REFRESH_JOB_TYPE: &str = "entity";
+const WARMUP_ENTITY_KIND: &str = "warmup";
+const OAUTH_REFRESH_ENTITY_KIND: &str = "oauth_refresh";
+const OAUTH_USAGE_POLL_ENTITY_KIND: &str = "oauth_usage_poll";
+const COMPAT_REFRESH_ENTITY_KIND: &str = "anthropic_compat_refresh";
 
 pub trait ReconcileUpstreams: Send + Sync {
     fn list(
@@ -82,7 +81,12 @@ where
     for key in COMPATIBILITY_KEYS {
         let mut payload = AnthropicCompatRefreshJob::new(key.name);
         payload.traceparent = job.traceparent.clone();
-        specs.push(spec(COMPAT_REFRESH_JOB_TYPE, key.name, &payload)?);
+        specs.push(spec(
+            COMPAT_REFRESH_JOB_TYPE,
+            COMPAT_REFRESH_ENTITY_KIND,
+            key.name,
+            &EntityJob::AnthropicCompatRefresh(payload),
+        )?);
     }
     Ok((specs, upstream_keys))
 }
@@ -101,29 +105,32 @@ fn append_upstream_specs(
         specs,
         upstream_keys,
         OAUTH_REFRESH_JOB_TYPE,
+        OAUTH_REFRESH_ENTITY_KIND,
         upstream.id,
-        &OAuthRefreshJob {
+        &EntityJob::OAuthRefresh(OAuthRefreshJob {
             upstream_id: upstream.id,
             traceparent: job.traceparent.clone(),
-        },
+        }),
     )?;
     push_upstream_spec(
         specs,
         upstream_keys,
         OAUTH_USAGE_POLL_JOB_TYPE,
+        OAUTH_USAGE_POLL_ENTITY_KIND,
         upstream.id,
-        &OAuthUsagePollJob {
+        &EntityJob::OAuthUsagePoll(OAuthUsagePollJob {
             upstream_id: upstream.id,
             traceparent: job.traceparent.clone(),
-        },
+        }),
     )?;
     if upstream.warmup_enabled {
         push_upstream_spec(
             specs,
             upstream_keys,
             WARMUP_JOB_TYPE,
+            WARMUP_ENTITY_KIND,
             upstream.id,
-            &UpstreamWarmupJob::new(upstream.id, now_unix_secs),
+            &EntityJob::Warmup(UpstreamWarmupJob::new(upstream.id, now_unix_secs)),
         )?;
     }
     Ok(())
@@ -133,13 +140,11 @@ fn push_upstream_spec<Payload: Serialize>(
     specs: &mut Vec<ReconcileJobSpec>,
     upstream_keys: &mut HashSet<String>,
     job_type: &'static str,
+    entity_kind: &str,
     upstream_id: Uuid,
     payload: &Payload,
 ) -> Result<()> {
-    let id = job_type
-        .strip_prefix("entity:")
-        .ok_or_else(|| SchedulerError::Job(format!("invalid entity job_type {job_type}")))?;
-    let key = format!("entity:{id}:{upstream_id}");
+    let key = entity_idempotency_key(entity_kind, &upstream_id.to_string());
     upstream_keys.insert(key.clone());
     specs.push(spec_with_key(job_type, key, payload)?);
     Ok(())
@@ -147,10 +152,11 @@ fn push_upstream_spec<Payload: Serialize>(
 
 fn spec<Payload: Serialize>(
     job_type: &'static str,
+    entity_kind: &str,
     id: &str,
     payload: &Payload,
 ) -> Result<ReconcileJobSpec> {
-    spec_with_key(job_type, format!("{job_type}:{id}"), payload)
+    spec_with_key(job_type, entity_idempotency_key(entity_kind, id), payload)
 }
 
 fn spec_with_key<Payload: Serialize>(
@@ -164,6 +170,10 @@ fn spec_with_key<Payload: Serialize>(
         payload: serde_json::to_vec(payload)
             .map_err(|error| SchedulerError::Job(error.to_string()))?,
     })
+}
+
+fn entity_idempotency_key(entity_kind: &str, id: &str) -> String {
+    format!("entity:{entity_kind}:{id}")
 }
 
 fn is_reconcilable_oauth(upstream: &UpstreamRecord) -> bool {

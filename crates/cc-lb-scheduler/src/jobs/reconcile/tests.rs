@@ -80,6 +80,49 @@ fn warmup_key(upstream_id: Uuid) -> String {
     format!("entity:warmup:{upstream_id}")
 }
 
+#[test]
+fn entity_job_type_from_idempotency_key_handles_all_entity_subtypes() {
+    let upstream_id = Uuid::new_v4();
+
+    assert_eq!(
+        super::entity_job_type_from_idempotency_key(&format!("entity:warmup:{upstream_id}")),
+        Some("entity:warmup"),
+    );
+    assert_eq!(
+        super::entity_job_type_from_idempotency_key(&format!("entity:oauth_refresh:{upstream_id}")),
+        Some("entity:oauth_refresh"),
+    );
+    assert_eq!(
+        super::entity_job_type_from_idempotency_key(&format!(
+            "entity:oauth_usage_poll:{upstream_id}"
+        )),
+        Some("entity:oauth_usage_poll"),
+    );
+    assert_eq!(
+        super::entity_job_type_from_idempotency_key(
+            "entity:anthropic_compat_refresh:claude_code_stable_version"
+        ),
+        Some("entity:anthropic_compat_refresh"),
+    );
+    assert_eq!(
+        super::entity_job_type_from_idempotency_key(&format!(
+            "entity:metadata_refresh:{upstream_id}:7"
+        )),
+        Some("entity:metadata_refresh"),
+    );
+    assert_eq!(
+        super::entity_job_type_from_idempotency_key("singleton:usage_rollup"),
+        None,
+    );
+}
+
+#[test]
+fn row_id_is_valid_ulid_for_apalis_task_id() {
+    let id = super::row_id("entity:oauth_refresh:missing", NOW_SECS);
+
+    assert!(id.parse::<ulid::Ulid>().is_ok(), "row id was {id}");
+}
+
 fn oauth_record(upstream_id: Uuid, warmup_enabled: bool) -> UpstreamRecord {
     UpstreamRecord {
         id: upstream_id,

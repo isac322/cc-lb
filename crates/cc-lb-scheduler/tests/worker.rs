@@ -7,11 +7,15 @@ use cc_lb_scheduler::jobs::compat::AnthropicCompatRefreshJob;
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollJob;
-use cc_lb_scheduler::jobs::reconcile::{SchedulerReconcileJobResult, SchedulerReconcileStats};
+use cc_lb_scheduler::jobs::reconcile::{
+    SchedulerReconcileJob, SchedulerReconcileJobResult, SchedulerReconcileStats,
+};
+use cc_lb_scheduler::jobs::usage_prune::UsagePruneJob;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{
-    EntityJob, SchedulerBackend, SchedulerCtx, SqliteSchedulerStorage, build_entity_worker,
+    EntityJob, SchedulerBackend, SchedulerCtx, SingletonJob, SqliteSchedulerStorage,
+    build_entity_worker,
 };
 use uuid::Uuid;
 
@@ -127,6 +131,24 @@ async fn worker_sqlite_uses_default_entity_concurrency() {
 }
 
 #[cfg(feature = "sqlite")]
+#[tokio::test]
+async fn scheduler_ctx_default_dispatches_succeed() -> Result<(), Box<dyn std::error::Error>> {
+    let ctx = SchedulerCtx::default();
+    let upstream_id = Uuid::new_v4();
+
+    let entity =
+        (ctx.entity_dispatch)(EntityJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1))).await?;
+    let singleton =
+        (ctx.singleton_dispatch)(SingletonJob::UsagePrune(UsagePruneJob::default())).await?;
+    let reconcile = (ctx.reconcile_dispatch)(SchedulerReconcileJob::default()).await;
+
+    assert_eq!(entity, JobOutcome::Done);
+    assert_eq!(singleton, JobOutcome::Done);
+    assert_eq!(reconcile, done_empty_reconcile());
+    Ok(())
+}
+
+#[cfg(feature = "sqlite")]
 async fn sqlite_memory() -> Result<sqlx::SqlitePool, Box<dyn std::error::Error>> {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
         .max_connections(1)
@@ -163,6 +185,15 @@ fn done_scheduler_ctx() -> SchedulerCtx {
 fn done_reconcile() -> SchedulerReconcileJobResult {
     SchedulerReconcileJobResult::Done(SchedulerReconcileStats {
         jobs_ensured: 1,
+        jobs_pruned: 0,
+        failures_recorded: 0,
+        reconcile_interval_secs: 300,
+    })
+}
+
+fn done_empty_reconcile() -> SchedulerReconcileJobResult {
+    SchedulerReconcileJobResult::Done(SchedulerReconcileStats {
+        jobs_ensured: 0,
         jobs_pruned: 0,
         failures_recorded: 0,
         reconcile_interval_secs: 300,

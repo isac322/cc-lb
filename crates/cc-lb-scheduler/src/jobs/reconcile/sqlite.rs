@@ -3,7 +3,10 @@ use std::collections::HashSet;
 use sqlx::{Pool, Row, Sqlite};
 
 use super::specs::{ENTITY_MAX_ATTEMPTS, ReconcileJobSpec};
-use super::{i64_to_u32, i64_to_u64, row_id, safe_summary, u64_to_i64};
+use super::{
+    entity_job_type_from_idempotency_key, i64_to_u32, i64_to_u64,
+    is_reconcile_upstream_entity_job_type, row_id, safe_summary, u64_to_i64,
+};
 use crate::error::Result;
 use crate::idempotency::SchedulerFailuresStore;
 
@@ -32,23 +35,31 @@ pub(super) async fn ensure_job(
 
 pub(super) async fn prune_orphans(pool: &Pool<Sqlite>, live_keys: &HashSet<String>) -> Result<u64> {
     let rows = sqlx::query(
-        "SELECT job_type, idempotency_key FROM Jobs WHERE job_type IN ('entity:warmup','entity:oauth_refresh','entity:oauth_usage_poll') AND status IN ('Pending','Running','Queued')",
+        "SELECT idempotency_key FROM Jobs WHERE job_type = 'entity' AND idempotency_key LIKE 'entity:%' AND status IN ('Pending','Running','Queued')",
     )
     .fetch_all(pool)
     .await?;
     let mut pruned = 0;
     for row in rows {
         let key: String = row.try_get("idempotency_key")?;
+        let Some(job_type) = entity_job_type_from_idempotency_key(&key) else {
+            continue;
+        };
+        if !is_reconcile_upstream_entity_job_type(job_type) {
+            continue;
+        }
         if !live_keys.contains(&key) {
-            let job_type: String = row.try_get("job_type")?;
             let rows = sqlx::query(
-                "DELETE FROM Jobs WHERE idempotency_key = ?1 AND status IN ('Pending','Running','Queued')",
+                "DELETE FROM Jobs WHERE job_type = 'entity' AND idempotency_key = ?1 AND status IN ('Pending','Running','Queued')",
             )
             .bind(key)
             .execute(pool)
             .await?
             .rows_affected();
-            crate::scheduler_metrics::record_reconcile_orphan_pruned(&job_type, rows);
+            crate::scheduler_metrics::record_reconcile_orphan_pruned(
+                failure_job_type(job_type),
+                rows,
+            );
             pruned += rows;
         }
     }
@@ -57,21 +68,24 @@ pub(super) async fn prune_orphans(pool: &Pool<Sqlite>, live_keys: &HashSet<Strin
 
 pub(super) async fn surface_failures(pool: &Pool<Sqlite>, now_unix_secs: u64) -> Result<u64> {
     let rows = sqlx::query(
-        "SELECT job_type, idempotency_key, COALESCE(last_result, 'unknown') AS last_error, attempts, COALESCE(done_at, run_at) AS failed_at \
-         FROM Jobs WHERE status = 'Failed' AND attempts >= max_attempts",
+        "SELECT idempotency_key, COALESCE(last_result, 'unknown') AS last_error, attempts, COALESCE(done_at, run_at) AS failed_at \
+         FROM Jobs WHERE idempotency_key LIKE 'entity:%' AND status = 'Failed' AND attempts >= max_attempts",
     )
     .fetch_all(pool)
     .await?;
     let store = SchedulerFailuresStore::new(pool.clone());
     let mut recorded = 0;
     for row in rows {
-        let job_type: String = row.try_get("job_type")?;
-        let summary = safe_summary(&job_type, row.try_get("idempotency_key")?);
+        let key: String = row.try_get("idempotency_key")?;
+        let Some(job_type) = entity_job_type_from_idempotency_key(&key) else {
+            continue;
+        };
+        let summary = safe_summary(job_type, Some(key));
         let failed_at = i64_to_u64(row.try_get("failed_at")?, "failed_at")?;
-        if failure_exists(pool, &job_type, &summary, failed_at).await? {
+        let failure_job_type = failure_job_type(job_type);
+        if failure_exists(pool, failure_job_type, &summary, failed_at).await? {
             continue;
         }
-        let failure_job_type = failure_job_type(&job_type);
         let attempts = i64_to_u32(row.try_get("attempts")?, "attempts")?;
         let last_error: String = row.try_get("last_error")?;
         store

@@ -116,10 +116,8 @@ async fn run_sqlite_singleton_cron_loop(
         if cancel.is_cancelled() {
             break;
         }
-        let storage = apalis_sqlite::SqliteStorage::<SingletonJob, (), ()>::new_in_queue(
-            &pool,
-            SINGLETON_QUEUE,
-        );
+        let storage =
+            crate::sqlite_enqueue::SqliteSingletonCronStorage::new(pool.clone(), SINGLETON_QUEUE);
         let worker = CronWorkerBuilder::singleton_queue(
             SINGLETON_QUEUE,
             spec.schedule.clone(),

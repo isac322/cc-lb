@@ -6,6 +6,7 @@ use sqlx::Postgres;
 use sqlx::Sqlite;
 use sqlx::{Database, Pool};
 
+mod entity_key;
 #[cfg(feature = "postgres")]
 mod postgres;
 mod specs;
@@ -18,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Result, SchedulerError};
 use crate::middleware::TraceparentCarrier;
+use entity_key::{entity_job_type_from_idempotency_key, is_reconcile_upstream_entity_job_type};
 
 const RETRY_DELAY_SECS: u64 = 60;
 
@@ -193,8 +195,8 @@ fn finish(result: Result<SchedulerReconcileStats>) -> SchedulerReconcileJobResul
     }
 }
 
-fn row_id(idempotency_key: &str, now_unix_secs: u64) -> String {
-    format!("{idempotency_key}:{now_unix_secs}")
+fn row_id(_idempotency_key: &str, _now_unix_secs: u64) -> String {
+    ulid::Ulid::new().to_string()
 }
 
 fn safe_summary(job_type: &str, idempotency_key: Option<String>) -> String {

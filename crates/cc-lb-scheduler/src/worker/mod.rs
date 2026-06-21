@@ -11,7 +11,10 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::SchedulerError;
-use crate::jobs::reconcile::{SchedulerReconcileJob, SchedulerReconcileJobResult};
+use crate::jobs::reconcile::{
+    SchedulerReconcileConfig, SchedulerReconcileJob, SchedulerReconcileJobResult,
+    SchedulerReconcileStats,
+};
 use crate::leader_election::LeaderElection;
 use crate::retry::JobOutcome;
 
@@ -66,17 +69,20 @@ impl Default for SchedulerCtx {
     fn default() -> Self {
         Self {
             config: SchedulerConfig::default(),
-            entity_dispatch: Arc::new(|_job| {
-                Box::pin(async { panic!("SchedulerCtx is missing real entity dispatch wiring") })
-            }),
-            singleton_dispatch: Arc::new(|_job| {
-                Box::pin(async { panic!("SchedulerCtx is missing real singleton dispatch wiring") })
-            }),
-            reconcile_dispatch: Arc::new(|_job| {
-                Box::pin(async { panic!("SchedulerCtx is missing real reconcile dispatch wiring") })
-            }),
+            entity_dispatch: Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+            singleton_dispatch: Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+            reconcile_dispatch: Arc::new(|_job| Box::pin(async { done_empty_reconcile() })),
         }
     }
+}
+
+fn done_empty_reconcile() -> SchedulerReconcileJobResult {
+    SchedulerReconcileJobResult::Done(SchedulerReconcileStats {
+        jobs_ensured: 0,
+        jobs_pruned: 0,
+        failures_recorded: 0,
+        reconcile_interval_secs: SchedulerReconcileConfig::default().reconcile_interval_secs,
+    })
 }
 
 #[derive(Clone, Debug)]
