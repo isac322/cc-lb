@@ -128,6 +128,12 @@ impl SchedulerBackend {
         let mut handles = self.spawn_consumers(ctx, cancel.clone())?;
         handles.push(cron::spawn_cron_producer(
             self.clone(),
+            config.clone(),
+            leader.clone(),
+            cancel.clone(),
+        ));
+        handles.push(cron::spawn_reconcile_producer(
+            self.clone(),
             config,
             leader,
             cancel,
