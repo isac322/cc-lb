@@ -25,7 +25,25 @@ struct UsageBody {
 #[derive(Debug, Deserialize)]
 struct UsageWindow {
     utilization: Option<f64>,
-    resets_at: Option<u64>,
+    resets_at: Option<ResetsAt>,
+}
+
+// Anthropic's /api/oauth/usage emits `resets_at` as a Unix-seconds number or an RFC3339 string; accept both.
+#[derive(Debug, Deserialize)]
+#[serde(untagged)]
+enum ResetsAt {
+    Number(f64),
+    String(String),
+}
+
+fn resets_at_to_unix_secs(value: ResetsAt) -> Option<u64> {
+    match value {
+        ResetsAt::Number(value) if value.is_finite() && value >= 0.0 => Some(value as u64),
+        ResetsAt::Number(_) => None,
+        ResetsAt::String(value) => chrono::DateTime::parse_from_rfc3339(value.trim())
+            .ok()
+            .and_then(|dt| u64::try_from(dt.timestamp()).ok()),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,7 +138,7 @@ fn push_window(
             usage
                 .utilization
                 .map(|value| (value / 100.0).clamp(0.0, 1.0)),
-            usage.resets_at,
+            usage.resets_at.and_then(resets_at_to_unix_secs),
             None,
             None,
             None,
@@ -171,5 +189,55 @@ fn status_from_utilization(utilization: f64) -> SubscriptionQuotaStatus {
         SubscriptionQuotaStatus::AllowedWarning
     } else {
         SubscriptionQuotaStatus::Allowed
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(body: &str) -> Vec<SubscriptionQuotaObservationRecord> {
+        let usage: UsageBody = serde_json::from_str(body).expect("usage body parses");
+        records_from_usage(Uuid::nil(), usage, 1_700_000_000_000)
+    }
+
+    #[test]
+    fn rfc3339_resets_at_is_accepted() {
+        let records = parse(
+            r#"{"5h":{"utilization":42,"resets_at":"2026-06-21T20:30:00Z"}}"#,
+        );
+        let five_hour = records
+            .iter()
+            .find(|r| r.window == SubscriptionQuotaWindow::FiveHour)
+            .expect("five hour record");
+        assert_eq!(five_hour.resets_at_unix_secs, Some(1_782_073_800));
+    }
+
+    #[test]
+    fn numeric_resets_at_is_accepted() {
+        let records = parse(r#"{"7d":{"utilization":12,"resets_at":1800000000}}"#);
+        let seven_day = records
+            .iter()
+            .find(|r| r.window == SubscriptionQuotaWindow::SevenDay)
+            .expect("seven day record");
+        assert_eq!(seven_day.resets_at_unix_secs, Some(1_800_000_000));
+    }
+
+    #[test]
+    fn float_resets_at_is_accepted() {
+        let records = parse(r#"{"5h":{"utilization":1,"resets_at":1800000000.5}}"#);
+        let five_hour = records
+            .iter()
+            .find(|r| r.window == SubscriptionQuotaWindow::FiveHour)
+            .expect("five hour record");
+        assert_eq!(five_hour.resets_at_unix_secs, Some(1_800_000_000));
+    }
+
+    #[test]
+    fn string_resets_at_does_not_poison_other_windows() {
+        let records = parse(
+            r#"{"5h":{"utilization":10,"resets_at":"2026-06-21T20:30:00Z"},"7d":{"utilization":3,"resets_at":1800000000}}"#,
+        );
+        assert_eq!(records.len(), 2);
     }
 }
