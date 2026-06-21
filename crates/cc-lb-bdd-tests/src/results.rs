@@ -27,3 +27,29 @@ pub struct AuditEntrySummary {
     pub principal_id: String,
     pub ts: u64,
 }
+
+#[derive(Debug, Clone)]
+pub struct PrincipalDisableResult {
+    pub id: Uuid,
+    pub is_active: bool,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct PrincipalModelAclResult {
+    pub id: Uuid,
+    pub allowed_models: Vec<String>,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct KillswitchState {
+    pub enabled: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct HealthSnapshot {
+    pub liveness_ok: bool,
+    pub readiness_ok: bool,
+    pub killswitch_enabled: bool,
+}

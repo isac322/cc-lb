@@ -3,13 +3,16 @@
 //! upstreams (Writer stream W1 plus parts of W2).
 
 use anyhow::Result;
-use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind};
+use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind, PrincipalUpdate};
 use cc_lb_storage_api::{AuditEntry, AuditStore, PrincipalStore};
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::backend::StorageHandle;
-use crate::results::{AuditEntrySummary, PrincipalCreateResult, PrincipalSoftDeleteResult};
+use crate::results::{
+    AuditEntrySummary, PrincipalCreateResult, PrincipalDisableResult, PrincipalModelAclResult,
+    PrincipalSoftDeleteResult,
+};
 
 pub struct Alice {
     storage: StorageHandle,
@@ -75,6 +78,73 @@ impl Alice {
         Ok(PrincipalSoftDeleteResult {
             id: record.id,
             deleted_at_unix_secs: record.deleted_at_unix_secs,
+            revision: record.revision,
+        })
+    }
+
+    pub async fn disable_principal(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+    ) -> Result<PrincipalDisableResult> {
+        let now = unix_now_secs();
+        let record =
+            PrincipalStore::set_enabled(self.storage.as_ref(), id, expected_revision, false, now)
+                .await?;
+        let Some(record) = record else {
+            anyhow::bail!("set_enabled returned None for {id}");
+        };
+        self.append_admin_audit(
+            now,
+            record.id,
+            "PrincipalDisable",
+            json!({ "principal_id": record.id.to_string() }),
+        )
+        .await?;
+        Ok(PrincipalDisableResult {
+            id: record.id,
+            is_active: record.enabled,
+            revision: record.revision,
+        })
+    }
+
+    pub async fn set_allowed_models(
+        &self,
+        id: Uuid,
+        expected_revision: u64,
+        allowed_models: Vec<String>,
+    ) -> Result<PrincipalModelAclResult> {
+        let now = unix_now_secs();
+        let record = PrincipalStore::update(
+            self.storage.as_ref(),
+            id,
+            expected_revision,
+            PrincipalUpdate {
+                name: None,
+                allowed_models: Some(allowed_models.clone()),
+                allowed_upstreams: None,
+                default_limits: None,
+                router_terminal_strategy: None,
+            },
+            now,
+        )
+        .await?;
+        let Some(record) = record else {
+            anyhow::bail!("update returned None for {id}");
+        };
+        self.append_admin_audit(
+            now,
+            record.id,
+            "PrincipalModelAclUpdate",
+            json!({
+                "principal_id": record.id.to_string(),
+                "allowed_models": allowed_models,
+            }),
+        )
+        .await?;
+        Ok(PrincipalModelAclResult {
+            id: record.id,
+            allowed_models: record.allowed_models,
             revision: record.revision,
         })
     }

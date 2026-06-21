@@ -27,12 +27,20 @@ pub type StorageHandle = Arc<dyn FullStorage>;
 /// concrete backend that already satisfies the underlying traits in
 /// `cc_lb_storage_api`.
 pub trait FullStorage:
-    cc_lb_storage_api::PrincipalStore + cc_lb_storage_api::AuditStore + Send + Sync
+    cc_lb_storage_api::PrincipalStore
+    + cc_lb_storage_api::AuditStore
+    + cc_lb_storage_api::MetaStore
+    + Send
+    + Sync
 {
 }
 
 impl<T> FullStorage for T where
-    T: cc_lb_storage_api::PrincipalStore + cc_lb_storage_api::AuditStore + Send + Sync
+    T: cc_lb_storage_api::PrincipalStore
+        + cc_lb_storage_api::AuditStore
+        + cc_lb_storage_api::MetaStore
+        + Send
+        + Sync
 {
 }
 

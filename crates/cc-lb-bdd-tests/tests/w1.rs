@@ -10,7 +10,8 @@
 //! `fast_` prefix budget.
 
 use cc_lb_bdd_tests::{
-    AuditEntrySummary, PrincipalCreateResult, PrincipalSoftDeleteResult, bdd_scenario,
+    AuditEntrySummary, HealthSnapshot, PrincipalCreateResult, PrincipalDisableResult,
+    PrincipalModelAclResult, PrincipalSoftDeleteResult, bdd_scenario,
 };
 
 mod w1_f1 {
@@ -103,6 +104,95 @@ mod w1_f1 {
     }
 
     bdd_scenario! {
+        id: "F1.4",
+        fn_name: fast_f1_4,
+        persona: Alice,
+        title: "Disabling a principal flips its active flag off",
+        description:
+            "Alice creates a principal, then disables it. The persisted \
+             record carries enabled=false (the user-facing 'inactive' \
+             signal) and the audit log gains a PrincipalDisable row. \
+             The downstream contract — subsequent calls are refused — \
+             is enforced by the request pipeline and lives in W1 F3 / \
+             F1.4 integration scenarios; the storage-side invariant is \
+             that the flag actually flips.",
+        given: |ctx| {
+            ctx.alice().await
+        },
+        when: |alice| {
+            let created = alice.create_principal("team-disable").await?;
+            let disabled = alice
+                .disable_principal(created.id, created.revision)
+                .await?;
+            let audit = alice.query_audit_for_principal(created.id).await?;
+            (disabled, audit)
+        },
+        then: |pair, ctx| {
+            let (disabled, audit): (PrincipalDisableResult, Vec<AuditEntrySummary>) = pair;
+            ctx.assert(
+                !disabled.is_active,
+                format!(
+                    "disable did not flip enabled flag: actual={}",
+                    disabled.is_active
+                ),
+            );
+            ctx.assert(
+                audit.iter().any(|e| e.kind == "PrincipalDisable"),
+                format!(
+                    "PrincipalDisable audit row missing: kinds = {:?}",
+                    audit.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>()
+                ),
+            );
+        },
+    }
+
+    bdd_scenario! {
+        id: "F1.5",
+        fn_name: fast_f1_5,
+        persona: Alice,
+        title: "Setting allowed models pins the principal's model ACL",
+        description:
+            "Alice creates a principal then restricts it to a single \
+             explicit allow-list, e.g. ['claude-opus-4']. The store \
+             returns the same list verbatim — the ACL is the storage \
+             ground truth that the downstream proxy uses to reject \
+             out-of-list models in F3.x. Storage-side invariant: the \
+             list round-trips and the principal revision moves forward.",
+        given: |ctx| {
+            ctx.alice().await
+        },
+        when: |alice| {
+            let created = alice.create_principal("team-models").await?;
+            let acl = alice
+                .set_allowed_models(
+                    created.id,
+                    created.revision,
+                    vec!["claude-opus-4".to_owned()],
+                )
+                .await?;
+            (created, acl)
+        },
+        then: |pair, ctx| {
+            let (created, acl): (PrincipalCreateResult, PrincipalModelAclResult) = pair;
+            ctx.assert(
+                acl.allowed_models == vec!["claude-opus-4".to_owned()],
+                format!(
+                    "allowed_models did not round-trip: expected=[claude-opus-4], \
+                     actual={:?}",
+                    acl.allowed_models
+                ),
+            );
+            ctx.assert(
+                acl.revision > created.revision,
+                format!(
+                    "revision did not advance after update: created={}, after_update={}",
+                    created.revision, acl.revision
+                ),
+            );
+        },
+    }
+
+    bdd_scenario! {
         id: "F1.7",
         fn_name: fast_f1_7,
         persona: Alice,
@@ -156,6 +246,45 @@ mod w1_f1 {
                     "PrincipalSoftDelete audit row missing: kinds = {:?}",
                     kinds
                 ),
+            );
+        },
+    }
+}
+
+mod w1_f26 {
+    use super::*;
+
+    bdd_scenario! {
+        id: "F26.1",
+        fn_name: fast_f26_1,
+        persona: Charlie,
+        title: "Liveness and readiness are reported as two separate signals",
+        description:
+            "Charlie checks the health snapshot. The 'liveness' signal \
+             only reports the process is up, while the 'readiness' \
+             signal reports the storage contract is initialised. They \
+             MUST be distinct: a process is alive long before it is \
+             ready to serve traffic, and v5.2 F26.1 requires the two \
+             to never collapse into a single flag.",
+        given: |ctx| {
+            ctx.charlie().await
+        },
+        when: |charlie| {
+            charlie.check_health().await?
+        },
+        then: |health, ctx| {
+            let health: HealthSnapshot = health;
+            ctx.assert(
+                health.liveness_ok,
+                "liveness signal must be true after harness boot",
+            );
+            ctx.assert(
+                health.readiness_ok,
+                "readiness signal must be true after storage initialise",
+            );
+            ctx.assert(
+                !health.killswitch_enabled,
+                "killswitch must default to disabled on fresh init",
             );
         },
     }
