@@ -118,13 +118,14 @@ pub struct PostgresSchedulerStorage {
 }
 
 impl SchedulerBackend {
-    pub fn spawn(
+    pub async fn spawn(
         &self,
         config: Config,
         ctx: SchedulerCtx,
         leader: Arc<LeaderElection>,
         cancel: CancellationToken,
     ) -> Result<Vec<JoinHandle<()>>, SchedulerError> {
+        self.reclaim_orphans_on_startup().await?;
         let mut handles = self.spawn_consumers(ctx, cancel.clone())?;
         handles.push(cron::spawn_cron_producer(
             self.clone(),
@@ -139,6 +140,57 @@ impl SchedulerBackend {
             cancel,
         ));
         Ok(handles)
+    }
+
+    async fn reclaim_orphans_on_startup(&self) -> Result<(), SchedulerError> {
+        match self {
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite(sqlite) => {
+                let result = sqlx::query(
+                    "UPDATE Jobs \
+                     SET status = 'Pending', \
+                         lock_at = NULL, \
+                         lock_by = NULL, \
+                         attempts = attempts + 1, \
+                         last_result = '{\"Err\":\"Reclaimed at scheduler startup (previous worker process exited mid-job)\"}' \
+                     WHERE status IN ('Running', 'Queued')",
+                )
+                .execute(&sqlite.pool)
+                .await
+                .map_err(|error| SchedulerError::Job(format!("startup orphan reclaim failed: {error}")))?;
+                let rows = result.rows_affected();
+                if rows > 0 {
+                    tracing::warn!(
+                        rows_reclaimed = rows,
+                        "scheduler reclaimed orphaned jobs at startup; previous worker process exited mid-job",
+                    );
+                }
+                Ok(())
+            }
+            #[cfg(feature = "postgres")]
+            Self::Postgres(postgres) => {
+                let result = sqlx::query(
+                    "UPDATE apalis.jobs \
+                     SET status = 'Pending', \
+                         lock_at = NULL, \
+                         lock_by = NULL, \
+                         attempts = attempts + 1, \
+                         last_error = '{\"Err\":\"Reclaimed at scheduler startup (previous worker process exited mid-job)\"}' \
+                     WHERE status IN ('Running', 'Queued')",
+                )
+                .execute(&postgres.pool)
+                .await
+                .map_err(|error| SchedulerError::Job(format!("startup orphan reclaim failed: {error}")))?;
+                let rows = result.rows_affected();
+                if rows > 0 {
+                    tracing::warn!(
+                        rows_reclaimed = rows,
+                        "scheduler reclaimed orphaned jobs at startup; previous worker process exited mid-job",
+                    );
+                }
+                Ok(())
+            }
+        }
     }
 
     pub async fn push_job(&self, job: EntityJob) -> Result<(), SchedulerError> {

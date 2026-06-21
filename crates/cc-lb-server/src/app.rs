@@ -975,8 +975,9 @@ async fn build_app_with_storage_inner(
             price_catalog: price_catalog.clone(),
         },
     );
-    let scheduler_tasks =
-        opened_scheduler.spawn(config.clone(), scheduler_ctx, scheduler_cancel.clone())?;
+    let scheduler_tasks = opened_scheduler
+        .spawn(config.clone(), scheduler_ctx, scheduler_cancel.clone())
+        .await?;
     spawn_reconcile_shutdown(signals.subscribe(), scheduler_cancel.clone());
     spawn_reconcile_shutdown(signals.subscribe(), subscription_quota_writer_cancel);
     spawn_reconcile_shutdown(signals.subscribe(), refresh_cancel);
