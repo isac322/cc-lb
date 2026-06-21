@@ -103,7 +103,16 @@ jobs:
       - uses: actions/checkout@v6
       - name: Reject real Anthropic URLs in BDD harness
         run: |
-          if grep -RIn -E 'api\.anthropic\.com' crates/cc-lb-bdd-tests/; then
+          # Scan only executable harness code. Exclude:
+          #   - docs/         : v3.2 plan + spec docs intentionally cite the
+          #                     literal as part of explaining the policy
+          #   - no_real_api.rs: the lint itself; the literal is the const
+          #                     it is searching for
+          if grep -RIn -E 'api\.anthropic\.com' \
+               --exclude-dir=docs \
+               --exclude=no_real_api.rs \
+               crates/cc-lb-bdd-tests/src/ \
+               crates/cc-lb-bdd-tests/tests/; then
             echo "::error::BDD harness must never reference api.anthropic.com directly."
             exit 1
           fi
