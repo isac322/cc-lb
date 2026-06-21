@@ -1936,6 +1936,24 @@ async fn lifecycle_handler(
     State(state): State<ProxyState>,
     request: Request<Body>,
 ) -> Response<Body> {
+    match state.storage.killswitch_enabled().await {
+        Ok(true) => {
+            return anthropic_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service_unavailable",
+                "operator temporarily blocked proxy traffic with the killswitch",
+            );
+        }
+        Ok(false) => {}
+        Err(error) => {
+            tracing::error!(%error, "killswitch state read failed");
+            return anthropic_error_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "service_unavailable",
+                "operator safety state is temporarily unavailable",
+            );
+        }
+    }
     let (parts, body) = request.into_parts();
     let body = match body.collect().await {
         Ok(collected) => collected.to_bytes(),

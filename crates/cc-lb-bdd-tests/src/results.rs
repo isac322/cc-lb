@@ -274,13 +274,3 @@ pub struct W2CompatibilityCacheResult {
     pub last_success_visible: bool,
     pub attempt_success_separated: bool,
 }
-
-#[derive(Debug, Clone, Default)]
-pub struct W3ScenarioResult {
-    pub accepted: bool,
-    pub primary_count: usize,
-    pub secondary_count: usize,
-    pub audit_kinds: Vec<String>,
-    pub message: String,
-    pub request_id: String,
-}

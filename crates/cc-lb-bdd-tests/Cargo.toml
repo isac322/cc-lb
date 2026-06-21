@@ -23,6 +23,7 @@ cc-lb-admin = { path = "../cc-lb-admin" }
 cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-core = { path = "../cc-lb-core" }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
+cc-lb-plugin-wire = { workspace = true }
 cc-lb-runtime-extism = { path = "../cc-lb-runtime-extism" }
 cc-lb-server = { path = "../cc-lb-server" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
@@ -50,6 +51,7 @@ url = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 tempfile = { workspace = true }
 wiremock = "0.6"
+wat = { workspace = true }
 
 [dev-dependencies]
 # Integration tests under tests/w<N>.rs use the same crate as a library.

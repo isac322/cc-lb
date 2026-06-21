@@ -23,7 +23,6 @@ pub use results::{
     PrincipalDisableResult, PrincipalModelAclResult, PrincipalSoftDeleteResult, W1ObservableSpec,
     W1ScenarioEvidence, W2CompatibilityCacheResult, W2CredentialIncidentResult, W2KillswitchResult,
     W2OAuthConsentResult, W2QuotaVisibilityResult, W2UpstreamOutageResult, W2WarmupResult,
-    W3ScenarioResult,
 };
 
 /// Marker enum used by the macro `persona = ...` attribute. The variant

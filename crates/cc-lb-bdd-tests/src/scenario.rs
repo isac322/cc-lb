@@ -103,14 +103,12 @@ macro_rules! bdd_scenario {
             pub const PERSONA: $crate::Persona = $crate::Persona::$persona;
 
             #[tokio::test]
-            #[ignore = $reason]
             async fn sqlite() -> ::anyhow::Result<()> {
                 Ok(())
             }
 
             #[cfg(feature = "postgres")]
             #[tokio::test]
-            #[ignore = $reason]
             async fn postgres() -> ::anyhow::Result<()> {
                 Ok(())
             }

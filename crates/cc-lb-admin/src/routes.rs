@@ -7,9 +7,13 @@ use axum::{
     response::IntoResponse,
     routing::{get, post},
 };
+use bytes::Bytes;
 use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_storage_api::{Storage, StorageError};
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, Full};
+use hyper::Request;
+use hyper_rustls::HttpsConnectorBuilder;
+use hyper_util::{client::legacy::Client, rt::TokioExecutor};
 use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -68,11 +72,15 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/admin/v1/config/schema", get(get_config_schema))
         .route(
             "/admin/config/draft",
-            get(get_config_draft).put(put_config_draft),
+            get(get_config_draft)
+                .put(put_config_draft)
+                .post(put_config_draft),
         )
         .route(
             "/admin/v1/config/draft",
-            get(get_config_draft).put(put_config_draft),
+            get(get_config_draft)
+                .put(put_config_draft)
+                .post(put_config_draft),
         )
         .route("/admin/config/draft/validate", post(validate_config_draft))
         .route(
@@ -87,6 +95,11 @@ pub fn build_router(state: AdminState) -> Router {
         .route("/admin/v1/config/diff", get(get_config_diff))
         .route("/admin/config/reload", post(reload_config))
         .route("/admin/v1/config/reload", post(reload_config))
+        .route("/admin/v1/retention", post(apply_retention))
+        .route(
+            "/admin/v1/price-catalog/refresh",
+            post(refresh_price_catalog),
+        )
         .route(
             "/admin/v1/dashboard/summary",
             get(crate::dashboard_routes::handle_dashboard_summary),
@@ -615,6 +628,13 @@ fn unix_now_secs() -> u64 {
         .as_secs()
 }
 
+fn unix_now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().try_into().unwrap_or(u64::MAX))
+        .unwrap_or_default()
+}
+
 async fn reload_config(State(_state): State<AdminState>) -> Result<Json<Value>, StatusCode> {
     #[cfg(unix)]
     {
@@ -626,6 +646,99 @@ async fn reload_config(State(_state): State<AdminState>) -> Result<Json<Value>, 
         }
     }
     Ok(Json(json!({ "status": "ok", "reloading": true })))
+}
+
+#[derive(Deserialize)]
+struct RetentionRequest {
+    older_than_unix_secs: Option<u64>,
+    retention_days: Option<u64>,
+}
+
+async fn apply_retention(
+    State(state): State<AdminState>,
+    Json(request): Json<RetentionRequest>,
+) -> axum::response::Response {
+    let Some(storage) = &state.storage else {
+        return storage_unavailable_response("storage_unavailable");
+    };
+    let cutoff = request.older_than_unix_secs.unwrap_or_else(|| {
+        let days = request.retention_days.unwrap_or(365);
+        unix_now_secs().saturating_sub(days.saturating_mul(86_400))
+    });
+    match storage.prune_audit(cutoff).await {
+        Ok(pruned) => {
+            emit_admin_action(&state, "retention_prune", "admin_retention", None, 200);
+            Json(json!({ "status": "ok", "older_than_unix_secs": cutoff, "pruned": pruned }))
+                .into_response()
+        }
+        Err(error) => storage_error_response(&error, "retention_failed"),
+    }
+}
+
+#[derive(Deserialize)]
+struct PriceCatalogRefreshRequest {
+    source_url: Option<String>,
+    catalog: Option<Value>,
+    provenance: Option<String>,
+}
+
+async fn refresh_price_catalog(
+    State(state): State<AdminState>,
+    Json(request): Json<PriceCatalogRefreshRequest>,
+) -> axum::response::Response {
+    let Some(storage) = &state.storage else {
+        return storage_unavailable_response("storage_unavailable");
+    };
+    let fetched = match price_catalog_bytes(&request).await {
+        Ok(bytes) => bytes,
+        Err(error) => {
+            tracing::error!(error = %error, "admin price catalog refresh failed");
+            return dashboard_error(StatusCode::BAD_GATEWAY, "price_catalog_refresh_failed");
+        }
+    };
+    let fetched_at_ms = unix_now_millis();
+    match storage.put_price_snapshot(&fetched, fetched_at_ms).await {
+        Ok(()) => {
+            emit_admin_action(
+                &state,
+                "price_catalog_refresh",
+                "admin_price_catalog",
+                None,
+                200,
+            );
+            Json(json!({
+                "status": "refreshed",
+                "fetched_at_ms": fetched_at_ms,
+                "provenance": request.provenance.as_deref().unwrap_or("source"),
+            }))
+            .into_response()
+        }
+        Err(error) => storage_error_response(&error, "price_catalog_store_failed"),
+    }
+}
+
+async fn price_catalog_bytes(request: &PriceCatalogRefreshRequest) -> anyhow::Result<Vec<u8>> {
+    if let Some(catalog) = &request.catalog {
+        return Ok(serde_json::to_vec(catalog)?);
+    }
+    let Some(source_url) = &request.source_url else {
+        anyhow::bail!("source_url or catalog is required");
+    };
+    let connector = HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_http1()
+        .build();
+    let client = Client::builder(TokioExecutor::new()).build::<_, Full<Bytes>>(connector);
+    let response = client
+        .request(Request::get(source_url).body(Full::new(Bytes::new()))?)
+        .await?;
+    anyhow::ensure!(
+        response.status().is_success(),
+        "price source returned {}",
+        response.status()
+    );
+    Ok(response.into_body().collect().await?.to_bytes().to_vec())
 }
 
 fn emit_admin_action(

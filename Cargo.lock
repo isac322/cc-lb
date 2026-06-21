@@ -568,6 +568,7 @@ dependencies = [
  "cc-lb-config",
  "cc-lb-core",
  "cc-lb-plugin-api",
+ "cc-lb-plugin-wire",
  "cc-lb-runtime-extism",
  "cc-lb-server",
  "cc-lb-storage-api",
@@ -589,6 +590,7 @@ dependencies = [
  "tower",
  "url",
  "uuid",
+ "wat",
  "wiremock",
 ]
 

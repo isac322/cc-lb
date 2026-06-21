@@ -7,7 +7,8 @@
 
 use std::cell::RefCell;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
+use axum::Router;
 use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind};
 use cc_lb_storage_api::{AuditEntry, AuditStore, PrincipalStore, RequestEvent, RequestEventStore};
 use serde_json::json;
@@ -108,6 +109,20 @@ impl BddCtx {
 
     pub fn storage(&self) -> &StorageHandle {
         &self.storage
+    }
+
+    pub fn harness(&self) -> Result<&BddHarness> {
+        self.bdd_harness
+            .as_ref()
+            .context("scenario was not started with a live BDD harness")
+    }
+
+    pub fn admin_router(&self) -> Option<Router> {
+        self.bdd_harness.as_ref().map(BddHarness::admin_router)
+    }
+
+    pub fn proxy_router(&self) -> Option<Router> {
+        self.bdd_harness.as_ref().map(BddHarness::proxy_router)
     }
 
     /// Alice — operator. Holds admin privileges; default actor for

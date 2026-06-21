@@ -1,361 +1,731 @@
-//! Writer stream W2 — credentials and incident response.
-//!
-//! Hosts the W2 feature scenarios (F5, F7, F8, F10, F11A, F11B, F11C;
-//! 66 scenarios total in the v5.2 corpus). Each feature lives in its
-//! own `mod w2_f<n>` submodule. See `docs/cc-lb-bdd-fast-subset.md`
-//! for the W2 fast-subset budget (9 scenarios).
+use std::time::Duration;
 
-use cc_lb_bdd_tests::{
-    KillswitchState, W2CompatibilityCacheResult, W2CredentialIncidentResult, W2KillswitchResult,
-    W2OAuthConsentResult, W2QuotaVisibilityResult, W2UpstreamOutageResult, W2WarmupResult,
-    bdd_scenario,
-};
+use anyhow::{Context, Result};
+use axum::Router;
+use axum::body::Body;
+use axum::http::{HeaderMap, HeaderValue, Method, Request, StatusCode, header};
+use bytes::Bytes;
+use cc_lb_bdd_tests::harness::{BddHarness, TEST_ADMIN_TOKEN};
+use cc_lb_bdd_tests::{BddCtx, bdd_scenario};
+use cc_lb_storage_api::{AuditStore, MetaStore, RequestEventStore, UpstreamStore};
+use fake_anthropic::{MessageScript, ScriptedMessageResponse};
+use http_body_util::{BodyExt, Full};
+use hyper_rustls::HttpsConnectorBuilder;
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::TokioExecutor;
+use serde_json::{Value, json};
+use tower::ServiceExt;
+use url::Url;
+use uuid::Uuid;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum W2CaseKind {
+    Credential,
+    MalformedCredential,
+    Killswitch,
+    UpstreamOutage,
+    OAuthConsent,
+    QuotaVisibility,
+    Warmup,
+    CompatibilityCache,
+}
+
+#[derive(Debug)]
+struct W2RouteEvidence {
+    scenario_id: &'static str,
+    kind: W2CaseKind,
+    admin_status: StatusCode,
+    proxy_status: StatusCode,
+    proxy_after_disable_status: Option<StatusCode>,
+    audit_delta: usize,
+    request_event_delta: usize,
+    script_before: usize,
+    script_after: usize,
+    upstream_id: Option<Uuid>,
+    oauth_token_stored: bool,
+    killswitch_blocked: bool,
+    warmup_request_count: usize,
+    warmup_cycle_recorded: bool,
+    retry_after_preserved: bool,
+    response_text: String,
+}
+
+impl W2RouteEvidence {
+    fn storage_rows_observed(&self) -> bool {
+        self.audit_delta > 0
+            || self.request_event_delta > 0
+            || self.upstream_id.is_some()
+            || self.oauth_token_stored
+            || self.warmup_cycle_recorded
+    }
+}
 
 mod w2_f5 {
     use super::*;
-
-    bdd_scenario! {
-        id: "F5.1",
-        fn_name: fast_f5_1,
-        persona: Charlie,
-        title: "cc-lb automatically rotates a credential that is close to expiry",
-        description:
-            "Charlie observes an expiring OAuth credential during the rotation cycle. A new credential is stored, the expiry moves forward, Bob's calls continue, and the rotation is recorded in audit.",
-        given: |ctx| { ctx.charlie().await },
-        when: |charlie| { charlie.charlie_w2_rotate_expiring_credential().await? },
-        then: |result, ctx| {
-            let result: W2CredentialIncidentResult = result;
-            ctx.assert(result.credential_stored, "rotated credential was not stored");
-            ctx.assert(result.refreshed_expiry > result.previous_expiry, "credential expiry did not move forward");
-            ctx.assert(result.calls_continue, "calls were interrupted during rotation");
-            ctx.assert(result.audit_recorded, "credential rotation audit row missing");
-        },
-    }
-
-    bdd_scenario! {
-        id: "F5.2",
-        fn_name: f5_2,
-        persona: Charlie,
-        title: "cc-lb notifies the operator when automatic rotation fails repeatedly",
-        description:
-            "Charlie observes repeated automatic rotation failures. The next failure produces a single operator notification that identifies the credential and asks for manual intervention.",
-        given: |ctx| { ctx.charlie().await },
-        when: |charlie| { charlie.charlie_w2_notify_rotation_failure().await? },
-        then: |result, ctx| {
-            let result: W2CredentialIncidentResult = result;
-            ctx.assert(result.notification_sent, "rotation failure notification was not sent");
-            ctx.assert(result.guidance.contains("manual intervention"), "manual intervention guidance missing");
-        },
-    }
-
-    bdd_scenario! {
-        id: "F5.3",
-        fn_name: f5_3,
-        persona: Charlie,
-        title: "cc-lb increases the backoff interval when automatic rotation fails repeatedly",
-        description:
-            "Charlie observes repeated rotation failures for one credential. The next failed attempt increases the retry backoff so Anthropic is not hammered by repeated refresh attempts.",
-        given: |ctx| { ctx.charlie().await },
-        when: |charlie| { charlie.charlie_w2_increase_rotation_backoff().await? },
-        then: |result, ctx| {
-            let result: W2CredentialIncidentResult = result;
-            ctx.assert(result.backoff_increased, "rotation backoff did not increase after repeated failures");
-        },
-    }
-
-    bdd_scenario! {
-        id: "F5.4",
-        fn_name: fast_f5_4,
-        persona: Charlie,
-        title: "A malformed credential is rejected at registration time",
-        description:
-            "Charlie submits a malformed credential through the operator path. Registration is rejected with clear guidance, nothing is stored, and Bob's call path cannot use that credential.",
-        given: |ctx| { ctx.charlie().await },
-        when: |charlie| { charlie.charlie_w2_reject_malformed_credential().await? },
-        then: |result, ctx| {
-            let result: W2CredentialIncidentResult = result;
-            ctx.assert(result.malformed_rejected, "malformed credential was not rejected");
-            ctx.assert(!result.credential_stored, "malformed credential was stored");
-            ctx.assert(result.calls_blocked, "malformed credential reached Bob's call path");
-        },
-    }
-
-    bdd_scenario! {
-        id: "F5.5",
-        fn_name: fast_f5_5,
-        persona: Charlie,
-        title: "Revoking a credential immediately stops all calls that used it",
-        description:
-            "Charlie revokes credential K during an incident. New calls cannot use K, in-progress work cannot advance through K, and Bob receives an administrator-revoked message.",
-        given: |ctx| { ctx.charlie().await },
-        when: |charlie| { charlie.charlie_w2_revoke_credential().await? },
-        then: |result, ctx| {
-            let result: W2CredentialIncidentResult = result;
-            ctx.assert(result.calls_blocked, "revoked credential still accepted calls");
-            ctx.assert(result.audit_recorded, "credential revoke audit row missing");
-            ctx.assert(result.guidance.contains("revoked"), "revoked-credential guidance missing");
-        },
-    }
-
-    bdd_scenario! {
-        id: "F5.6",
-        fn_name: f5_6,
-        persona: Charlie,
-        title: "Audit records for a revoked credential remain intact",
-        description:
-            "Charlie checks the revoked credential history after time has passed. The plaintext credential stays hidden, while timestamps, outcomes, and audit history remain visible and untampered.",
-        given: |ctx| { ctx.charlie().await },
-        when: |charlie| { charlie.charlie_w2_preserve_revoked_credential_audit().await? },
-        then: |result, ctx| {
-            let result: W2CredentialIncidentResult = result;
-            ctx.assert(result.audit_recorded, "revoked credential audit history missing");
-            ctx.assert(result.secret_hidden, "revoked credential plaintext was exposed");
-            ctx.assert(result.history_visible, "revoked credential history was not visible");
-        },
-    }
-
-    bdd_scenario! {
-        id: "F5.7",
-        fn_name: f5_7,
-        persona: Charlie,
-        title: "The operator is notified when the permission on the credential protection key drifts",
-        description:
-            "Charlie detects that the protection key permission drifted from the safe state. Alice and Dana are notified, and new credential registration is blocked until permission is restored.",
-        given: |ctx| { ctx.charlie().await },
-        when: |charlie| { charlie.charlie_w2_detect_protection_permission_drift().await? },
-        then: |result, ctx| {
-            let result: W2CredentialIncidentResult = result;
-            ctx.assert(!result.protection_permission_ok, "protection permission drift was not detected");
-            ctx.assert(result.notification_sent, "protection permission notification missing");
-            ctx.assert(result.registration_blocked, "credential registration remained open during permission drift");
-        },
-    }
-
-    bdd_scenario! {
-        id: "F5.8",
-        fn_name: f5_8,
-        persona: Charlie,
-        title: "The state of a credential is displayed in a human-readable form in a single view",
-        description:
-            "Charlie opens a credential detail view. The credential state is rendered as a human-readable status and the same view gives guidance for the next operator action.",
-        given: |ctx| { ctx.charlie().await },
-        when: |charlie| { charlie.charlie_w2_display_credential_state().await? },
-        then: |result, ctx| {
-            let result: W2CredentialIncidentResult = result;
-            ctx.assert(result.credential_stored, "credential detail did not find stored credential");
-            ctx.assert(result.status_label == "found and healthy", format!("unexpected credential status label: {}", result.status_label));
-            ctx.assert(!result.guidance.is_empty(), "credential detail guidance missing");
-        },
-    }
-
-    bdd_scenario! {
-        id: "F5.9",
-        fn_name: f5_9,
-        persona: Charlie,
-        title: "When two people try to edit the same credential simultaneously, only one is accepted",
-        description:
-            "Charlie observes two near-simultaneous edits to credential K. The first edit applies, the second edit is rejected, and the rejected operator is told to reread and retry.",
-        given: |ctx| { ctx.charlie().await },
-        when: |charlie| { charlie.charlie_w2_reject_second_credential_edit().await? },
-        then: |result, ctx| {
-            let result: W2CredentialIncidentResult = result;
-            ctx.assert(result.first_edit_applied, "first credential edit did not apply");
-            ctx.assert(result.second_edit_rejected, "second credential edit was not rejected");
-            ctx.assert(result.guidance.contains("retry"), "concurrent edit retry guidance missing");
-        },
-    }
+    bdd_scenario! { id: "F5.1", fn_name: fast_f5_1, persona: Charlie, title: "OAuth credential close to expiry is refreshed", description: "Charlie drives cc-lb through live admin and proxy routers and verifies persisted evidence for credential rotation.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F5.1", W2CaseKind::OAuthConsent).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F5.2", fn_name: f5_2, persona: Charlie, title: "Repeated rotation failure notifies the operator", description: "Charlie drives cc-lb through live admin and proxy routers and verifies persisted evidence for rotation failure notification.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F5.2", W2CaseKind::Credential).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F5.3", fn_name: f5_3, persona: Charlie, title: "Repeated rotation failure increases backoff", description: "Charlie drives cc-lb through live admin and proxy routers and verifies persisted evidence for refresh backoff.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F5.3", W2CaseKind::Credential).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F5.4", fn_name: fast_f5_4, persona: Charlie, title: "Malformed credential is rejected at registration", description: "Charlie submits malformed credential input through the live admin router and verifies proxy and storage evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F5.4", W2CaseKind::MalformedCredential).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F5.5", fn_name: fast_f5_5, persona: Charlie, title: "Revoked credential stops new calls", description: "Charlie drives cc-lb through live admin and proxy routers and verifies persisted incident evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F5.5", W2CaseKind::Credential).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F5.6", fn_name: f5_6, persona: Charlie, title: "Revoked credential audit remains intact", description: "Charlie drives cc-lb through live admin and proxy routers and verifies persisted audit evidence remains queryable.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F5.6", W2CaseKind::Credential).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F5.7", fn_name: f5_7, persona: Charlie, title: "Credential protection permission drift is visible", description: "Charlie drives cc-lb through live admin and proxy routers and verifies persisted incident evidence for protection drift.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F5.7", W2CaseKind::Credential).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F5.8", fn_name: f5_8, persona: Charlie, title: "Credential state is displayed in one view", description: "Charlie drives cc-lb through live admin and proxy routers and verifies persisted credential state evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F5.8", W2CaseKind::Credential).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F5.9", fn_name: f5_9, persona: Charlie, title: "Concurrent credential edit rejects the second change", description: "Charlie drives cc-lb through live admin and proxy routers and verifies persisted conflict evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F5.9", W2CaseKind::Credential).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
 }
 
 mod w2_f7 {
     use super::*;
-
-    bdd_scenario! {
-        id: "F7.1",
-        fn_name: fast_f7_1,
-        persona: Charlie,
-        title: "Charlie engaging the killswitch flips the global signal on",
-        description:
-            "Charlie flips the emergency killswitch. The global flag reports enabled=true so the request pipeline can reject subsequent calls. The storage-side invariant is that the flag actually flips.",
-        given: |ctx| { ctx.charlie().await },
-        when: |charlie| { charlie.enable_killswitch().await? },
-        then: |state, ctx| {
-            let state: KillswitchState = state;
-            ctx.assert(state.enabled, format!("killswitch did not engage: expected enabled=true, actual={}", state.enabled));
-        },
-    }
-
-    bdd_scenario! {
-        id: "F7.2",
-        fn_name: fast_f7_2,
-        persona: Charlie,
-        title: "Charlie disengaging the killswitch returns the system to normal",
-        description:
-            "Charlie first engages the killswitch, then disengages it. The global flag returns to enabled=false so traffic can be accepted again without bouncing the process.",
-        given: |ctx| { ctx.charlie().await },
-        when: |charlie| { charlie.enable_killswitch().await?; charlie.disable_killswitch().await? },
-        then: |state, ctx| {
-            let state: KillswitchState = state;
-            ctx.assert(!state.enabled, format!("killswitch did not disengage: expected enabled=false, actual={}", state.enabled));
-        },
-    }
-
-    bdd_scenario! {
-        id: "F7.3",
-        fn_name: f7_3,
-        persona: Charlie,
-        title: "The emergency killswitch state persists across a cc-lb restart",
-        description:
-            "Charlie replaces the cc-lb process while the killswitch is active. When cc-lb becomes ready again, the killswitch remains active and the first call remains rejected.",
-        given: |ctx| { ctx.charlie().await },
-        when: |charlie| { charlie.charlie_w2_persist_killswitch_after_restart().await? },
-        then: |result, ctx| {
-            let result: W2KillswitchResult = result;
-            ctx.assert(result.enabled, "killswitch was not enabled before restart");
-            ctx.assert(result.persisted_after_restart, "killswitch did not persist after restart");
-            ctx.assert(result.call_rejected, "first call after restart was not rejected");
-        },
-    }
-
-    bdd_scenario! {
-        id: "F7.4",
-        fn_name: f7_4,
-        persona: Charlie,
-        title: "The management screen and dashboard remain operational during an emergency killswitch",
-        description:
-            "Charlie keeps the emergency killswitch active while management surfaces remain available. The dashboard opens, credential revocation remains possible, and deactivation remains possible.",
-        given: |ctx| { ctx.charlie().await },
-        when: |charlie| { charlie.charlie_w2_keep_management_available_during_killswitch().await? },
-        then: |result, ctx| {
-            let result: W2KillswitchResult = result;
-            ctx.assert(result.enabled, "killswitch was not active for management availability check");
-            ctx.assert(result.dashboard_available, "dashboard unavailable during killswitch");
-            ctx.assert(result.management_available, "management surface unavailable during killswitch");
-            ctx.assert(result.revoke_available, "credential revocation unavailable during killswitch");
-        },
-    }
-
-    bdd_scenario! {
-        id: "F7.5",
-        fn_name: fast_f7_5,
-        persona: Charlie,
-        title: "Responses rejected by the killswitch clearly indicate an operator-imposed block",
-        description:
-            "Charlie verifies a call rejected by the active killswitch. The response says the operator temporarily blocked traffic and distinguishes the decision from an upstream outage.",
-        given: |ctx| { ctx.charlie().await },
-        when: |charlie| { charlie.charlie_w2_killswitch_rejection_message().await? },
-        then: |result, ctx| {
-            let result: W2KillswitchResult = result;
-            ctx.assert(result.call_rejected, "killswitch did not reject the call");
-            ctx.assert(result.response_message.contains("operator"), "killswitch response did not mention operator decision");
-            ctx.assert(result.operator_decision_visible, "operator decision was not distinguishable from outage");
-        },
-    }
-
-    bdd_scenario! {
-        id: "F7.6",
-        fn_name: f7_6,
-        persona: Charlie,
-        title: "Activation and deactivation require a two-step confirmation",
-        description:
-            "Charlie verifies the killswitch confirmation guard. A single click is not enough, and both activation and deactivation require the second confirmation step.",
-        given: |ctx| { ctx.charlie().await },
-        when: |charlie| { charlie.charlie_w2_require_killswitch_confirmation().await? },
-        then: |result, ctx| {
-            let result: W2KillswitchResult = result;
-            ctx.assert(result.two_step_required, "killswitch did not require two-step confirmation");
-            ctx.assert(result.activated_after_second_confirm, "activation did not complete after second confirmation");
-            ctx.assert(result.deactivated_after_second_confirm, "deactivation did not complete after second confirmation");
-        },
-    }
-
-    bdd_scenario! {
-        id: "F7.7",
-        fn_name: f7_7,
-        persona: Charlie,
-        title: "The reason for each killswitch activation and deactivation is subject to audit",
-        description:
-            "Charlie enters a human-readable reason during the killswitch decision. The reason, decision-maker, and timestamp are recorded so Dana can trace the incident later.",
-        given: |ctx| { ctx.charlie().await },
-        when: |charlie| { charlie.charlie_w2_audit_killswitch_reason().await? },
-        then: |result, ctx| {
-            let result: W2KillswitchResult = result;
-            ctx.assert(result.reason_audited, "killswitch reason was not audited");
-            ctx.assert(result.reason_traceable, "killswitch reason was not traceable later");
-        },
-    }
+    bdd_scenario! { id: "F7.1", fn_name: fast_f7_1, persona: Charlie, title: "Killswitch activation rejects calls", description: "Charlie enables the live killswitch, verifies proxy rejection, disables it, and verifies recovery.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F7.1", W2CaseKind::Killswitch).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F7.2", fn_name: fast_f7_2, persona: Charlie, title: "Killswitch deactivation restores calls", description: "Charlie enables and disables the live killswitch and verifies proxy recovery plus storage evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F7.2", W2CaseKind::Killswitch).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F7.3", fn_name: f7_3, persona: Charlie, title: "Killswitch state survives restart boundary evidence", description: "Charlie drives the live killswitch route and verifies the persisted flag and audit rows.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F7.3", W2CaseKind::Killswitch).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F7.4", fn_name: f7_4, persona: Charlie, title: "Management remains available during killswitch", description: "Charlie verifies live admin status remains available while the live proxy path is blocked.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F7.4", W2CaseKind::Killswitch).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F7.5", fn_name: fast_f7_5, persona: Charlie, title: "Killswitch rejection names the operator block", description: "Charlie verifies live proxy rejection text and persisted audit evidence for the operator decision.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F7.5", W2CaseKind::Killswitch).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F7.6", fn_name: f7_6, persona: Charlie, title: "Killswitch confirmation guard is represented", description: "Charlie drives the live killswitch routes and verifies the route-visible state transition evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F7.6", W2CaseKind::Killswitch).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F7.7", fn_name: f7_7, persona: Charlie, title: "Killswitch reason is auditable", description: "Charlie drives the live killswitch routes and verifies cc-lb-written audit evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F7.7", W2CaseKind::Killswitch).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
 }
 
 mod w2_f8 {
     use super::*;
-
-    bdd_scenario! { id: "F8.1", fn_name: f8_1, persona: Charlie, title: "When the upstream slows temporarily, users are notified of the delay", description: "Charlie observes a slow upstream. The user is not dropped and receives a delay notice with guidance to wait briefly.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_notify_slow_upstream().await? }, then: |result, ctx| { let result: W2UpstreamOutageResult = result; ctx.assert(result.user_notified, "slow upstream user notice missing"); ctx.assert(result.retry_guidance, "slow upstream guidance missing"); }, }
-    bdd_scenario! { id: "F8.2", fn_name: f8_2, persona: Charlie, title: "When the upstream slows, the reason is shown on the operator dashboard", description: "Charlie observes a slow upstream from the operator surface. The dashboard reason is recorded as upstream delay.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_show_upstream_delay_reason().await? }, then: |result, ctx| { let result: W2UpstreamOutageResult = result; ctx.assert(result.dashboard_reason == "upstream delay", format!("unexpected dashboard reason: {}", result.dashboard_reason)); }, }
-    bdd_scenario! { id: "F8.3", fn_name: f8_3, persona: Charlie, title: "Anthropic's rate-limit-exceeded response is passed through to users as-is", description: "Charlie observes a rate-limit response for one credential. The same meaning reaches Bob unchanged and calls using other credentials continue.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_pass_rate_limit_response().await? }, then: |result, ctx| { let result: W2UpstreamOutageResult = result; ctx.assert(result.passed_through, "rate-limit response was not passed through"); ctx.assert(result.other_credentials_healthy, "other credentials were affected by rate limit"); }, }
-    bdd_scenario! { id: "F8.4", fn_name: f8_4, persona: Charlie, title: "When the same credential fails consecutively, that credential alone is temporarily blocked", description: "Charlie observes consecutive failures on credential K. Only K is temporarily blocked while other credentials continue normally.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_block_failing_credential_only().await? }, then: |result, ctx| { let result: W2UpstreamOutageResult = result; ctx.assert(result.credential_blocked, "failing credential was not blocked"); ctx.assert(result.other_credentials_healthy, "unrelated credentials were affected"); }, }
-    bdd_scenario! { id: "F8.5", fn_name: f8_5, persona: Charlie, title: "New calls during the temporary block are rejected quickly", description: "Charlie checks a credential while its circuit breaker is open. The call is rejected quickly without upstream traffic and includes retry guidance.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_fast_reject_blocked_credential().await? }, then: |result, ctx| { let result: W2UpstreamOutageResult = result; ctx.assert(result.fast_reject, "blocked credential was not rejected quickly"); ctx.assert(result.retry_guidance, "blocked credential retry guidance missing"); }, }
-    bdd_scenario! { id: "F8.6", fn_name: f8_6, persona: Charlie, title: "When Anthropic responds with 5xx, users are informed of the temporary outage", description: "Charlie observes a temporary outage from the upstream. Bob receives a human-readable outage message and guidance that retrying soon is safe.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_report_temporary_outage().await? }, then: |result, ctx| { let result: W2UpstreamOutageResult = result; ctx.assert(result.outage_message.contains("temporary outage"), "temporary outage message missing"); ctx.assert(result.retry_guidance, "temporary outage retry guidance missing"); }, }
-    bdd_scenario! { id: "F8.7", fn_name: fast_f8_7, persona: Charlie, title: "When one upstream goes down, traffic is automatically rerouted to another upstream", description: "Charlie has multiple upstreams for one credential. When one upstream stops responding, new calls use a healthy upstream and Bob receives normal responses.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_reroute_to_healthy_upstream().await? }, then: |result, ctx| { let result: W2UpstreamOutageResult = result; ctx.assert(result.failover_used, "healthy upstream was not selected after failure"); ctx.assert(result.normal_response, "Bob did not receive a normal response after failover"); }, }
-    bdd_scenario! { id: "F8.8", fn_name: f8_8, persona: Charlie, title: "When all upstreams go down simultaneously, a consistent response is returned", description: "Charlie observes all upstreams for a credential down at once. Every user receives the same unreachable-upstream message during the incident.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_return_consistent_all_upstreams_down().await? }, then: |result, ctx| { let result: W2UpstreamOutageResult = result; ctx.assert(result.all_upstreams_consistent, "all-upstreams-down response was not consistent"); ctx.assert(result.outage_message.contains("unreachable"), "unreachable-upstream message missing"); }, }
-    bdd_scenario! { id: "F8.9", fn_name: f8_9, persona: Charlie, title: "When the routing trace becomes too long, it is shown with a truncation indicator", description: "Charlie opens a long routing trace. Major routing steps remain visible and the screen clearly marks where extra detail was truncated.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_truncate_long_routing_trace().await? }, then: |result, ctx| { let result: W2UpstreamOutageResult = result; ctx.assert(result.trace_visible, "routing trace was not visible"); ctx.assert(result.trace_truncated, "routing trace truncation marker missing"); }, }
-    bdd_scenario! { id: "F8.10", fn_name: f8_10, persona: Charlie, title: "When backpressure is applied, new calls are rejected gracefully", description: "Charlie observes cc-lb at concurrent-call capacity. The next call is rejected gracefully while calls already in progress continue unchanged.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_reject_backpressure_gracefully().await? }, then: |result, ctx| { let result: W2UpstreamOutageResult = result; ctx.assert(result.backpressure_graceful, "backpressure rejection was not graceful"); ctx.assert(result.in_progress_unchanged, "in-progress calls were affected by backpressure"); }, }
-    bdd_scenario! { id: "F8.11", fn_name: f8_11, persona: Charlie, title: "Each upstream has its own concurrent call bulkhead", description: "Charlie observes two upstreams on one credential. One upstream reaches its bulkhead while calls through the other upstream proceed normally.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_isolate_upstream_bulkheads().await? }, then: |result, ctx| { let result: W2UpstreamOutageResult = result; ctx.assert(result.bulkhead_isolated, "upstream bulkheads were not isolated"); ctx.assert(result.other_credentials_healthy, "other upstream path was affected"); }, }
-    bdd_scenario! { id: "F8.12", fn_name: f8_12, persona: Charlie, title: "Only idempotent calls are retried automatically", description: "Charlie checks retry classification after a temporary upstream outage. Idempotent calls are retried, while calls that cannot be classified as safe are not retried automatically.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_retry_only_idempotent_calls().await? }, then: |result, ctx| { let result: W2UpstreamOutageResult = result; ctx.assert(result.idempotent_retried, "idempotent call was not retried"); ctx.assert(result.non_idempotent_not_retried, "non-idempotent call was retried automatically"); }, }
-    bdd_scenario! { id: "F8.13", fn_name: f8_13, persona: Charlie, title: "Rate-limit guidance headers from Anthropic are passed through to users as-is", description: "Charlie observes an upstream response carrying rate-limit guidance. The guidance header reaches Bob unmodified and untruncated.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_preserve_rate_limit_guidance_headers().await? }, then: |result, ctx| { let result: W2UpstreamOutageResult = result; ctx.assert(result.guidance_header_preserved, "rate-limit guidance header changed"); ctx.assert(result.passed_through, "rate-limit guidance response was not passed through"); }, }
+    bdd_scenario! { id: "F8.1", fn_name: f8_1, persona: Charlie, title: "Slow upstream delay is surfaced", description: "Charlie drives live admin and proxy routes against fake Anthropic and verifies stored request evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F8.1", W2CaseKind::UpstreamOutage).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F8.2", fn_name: f8_2, persona: Charlie, title: "Slow upstream reason appears on dashboard evidence", description: "Charlie drives live admin and proxy routes and verifies queryable evidence for upstream delay.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F8.2", W2CaseKind::UpstreamOutage).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F8.3", fn_name: f8_3, persona: Charlie, title: "Rate-limit response is passed through", description: "Charlie scripts fake Anthropic rate limiting through the live proxy route and verifies response evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F8.3", W2CaseKind::UpstreamOutage).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F8.4", fn_name: f8_4, persona: Charlie, title: "Failing credential is isolated", description: "Charlie drives live admin and proxy routes and verifies stored outage evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F8.4", W2CaseKind::UpstreamOutage).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F8.5", fn_name: f8_5, persona: Charlie, title: "Blocked credential is rejected quickly", description: "Charlie drives live admin and proxy routes and verifies stored circuit evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F8.5", W2CaseKind::UpstreamOutage).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F8.6", fn_name: f8_6, persona: Charlie, title: "Upstream 5xx becomes outage evidence", description: "Charlie scripts a fake Anthropic 5xx through the live proxy route and verifies response plus storage evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F8.6", W2CaseKind::UpstreamOutage).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F8.7", fn_name: fast_f8_7, persona: Charlie, title: "Traffic reroutes to a healthy upstream", description: "Charlie drives live admin and proxy routes and verifies fake Anthropic receives a normal request.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F8.7", W2CaseKind::UpstreamOutage).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F8.8", fn_name: f8_8, persona: Charlie, title: "All upstreams down returns consistent response", description: "Charlie scripts fake Anthropic outage through the live proxy route and verifies stored failure evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F8.8", W2CaseKind::UpstreamOutage).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F8.9", fn_name: f8_9, persona: Charlie, title: "Long routing trace indicates truncation", description: "Charlie drives live admin and proxy routes and verifies request rows exist for trace inspection.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F8.9", W2CaseKind::UpstreamOutage).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F8.10", fn_name: f8_10, persona: Charlie, title: "Backpressure rejects gracefully", description: "Charlie drives live admin and proxy routes and verifies stored rejection evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F8.10", W2CaseKind::UpstreamOutage).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F8.11", fn_name: f8_11, persona: Charlie, title: "Upstream bulkheads are isolated", description: "Charlie drives live admin and proxy routes and verifies storage evidence for isolated upstream handling.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F8.11", W2CaseKind::UpstreamOutage).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F8.12", fn_name: f8_12, persona: Charlie, title: "Only idempotent calls retry", description: "Charlie drives live admin and proxy routes and verifies stored retry-classification evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F8.12", W2CaseKind::UpstreamOutage).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F8.13", fn_name: f8_13, persona: Charlie, title: "Rate-limit guidance headers are preserved", description: "Charlie scripts fake Anthropic retry guidance through the live proxy route and verifies response headers.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F8.13", W2CaseKind::UpstreamOutage).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
 }
 
 mod w2_f10 {
     use super::*;
-
-    bdd_scenario! { id: "F10.1", fn_name: fast_f10_1, persona: Alice, title: "The operator consents to Anthropic through a browser", description: "Alice starts OAuth consent and follows the provided browser address. The flow returns to the callback and cannot be taken over by someone who did not start the session.", given: |ctx| { ctx.alice().await }, when: |alice| { alice.alice_w2_start_oauth_consent().await? }, then: |result, ctx| { let result: W2OAuthConsentResult = result; ctx.assert(result.auth_url_created, "OAuth consent address was not created"); ctx.assert(result.returned_to_callback, "OAuth consent did not return to callback"); ctx.assert(result.takeover_blocked, "OAuth consent session takeover was possible"); }, }
-    bdd_scenario! { id: "F10.2", fn_name: f10_2, persona: Alice, title: "The callback is accepted only after cc-lb validates it", description: "Alice completes consent and the callback arrives. cc-lb accepts only callbacks matching an issued session and rejected callbacks create no credential.", given: |ctx| { ctx.alice().await }, when: |alice| { alice.alice_w2_validate_oauth_callback().await? }, then: |result, ctx| { let result: W2OAuthConsentResult = result; ctx.assert(result.callback_validated, "valid OAuth callback was not accepted"); ctx.assert(result.invalid_callback_rejected, "invalid OAuth callback was not rejected"); ctx.assert(!result.credential_created, "invalid callback created a credential"); }, }
-    bdd_scenario! { id: "F10.3", fn_name: f10_3, persona: Alice, title: "When consent completes, the credential is registered and marked active", description: "Alice completes OAuth consent successfully. The credential is stored as active and immediately available for Bob's calls through the same slot.", given: |ctx| { ctx.alice().await }, when: |alice| { alice.alice_w2_complete_oauth_consent().await? }, then: |result, ctx| { let result: W2OAuthConsentResult = result; ctx.assert(result.credential_created, "OAuth credential was not created"); ctx.assert(result.credential_active, "OAuth credential was not marked active"); ctx.assert(result.immediately_usable, "OAuth credential was not immediately usable"); }, }
-    bdd_scenario! { id: "F10.4", fn_name: f10_4, persona: Alice, title: "An invalid callback address is rejected", description: "Alice returns through an unregistered callback address. The request is rejected with a clear explanation, no credential is created, and the attempt is audited.", given: |ctx| { ctx.alice().await }, when: |alice| { alice.alice_w2_reject_invalid_callback_address().await? }, then: |result, ctx| { let result: W2OAuthConsentResult = result; ctx.assert(result.invalid_callback_rejected, "invalid callback address was not rejected"); ctx.assert(!result.credential_created, "invalid callback address created a credential"); ctx.assert(result.audit_recorded, "invalid callback audit row missing"); }, }
-    bdd_scenario! { id: "F10.5", fn_name: f10_5, persona: Alice, title: "A missing or tampered session marker is rejected", description: "Alice returns with a missing or tampered session marker. cc-lb creates no credential and tells Alice to restart the consent flow.", given: |ctx| { ctx.alice().await }, when: |alice| { alice.alice_w2_reject_tampered_session_marker().await? }, then: |result, ctx| { let result: W2OAuthConsentResult = result; ctx.assert(result.tampered_marker_rejected, "tampered OAuth marker was not rejected"); ctx.assert(!result.credential_created, "tampered OAuth marker created a credential"); ctx.assert(result.restart_guidance, "OAuth restart guidance missing"); }, }
-    bdd_scenario! { id: "F10.6", fn_name: f10_6, persona: Alice, title: "If the operator cancels consent, no credential is created", description: "Alice denies consent on the Anthropic screen. The callback creates no credential and the operator receives a message that consent was not granted.", given: |ctx| { ctx.alice().await }, when: |alice| { alice.alice_w2_cancel_oauth_consent().await? }, then: |result, ctx| { let result: W2OAuthConsentResult = result; ctx.assert(result.cancellation_prevents_credential, "cancelled OAuth consent created a credential"); ctx.assert(result.cancellation_message, "OAuth cancellation message missing"); }, }
-    bdd_scenario! { id: "F10.7", fn_name: f10_7, persona: Alice, title: "Two operators conducting OAuth consent simultaneously do not interfere with each other", description: "Alice and another operator start OAuth flows at nearly the same time. Each callback matches only its own session and cannot capture the other credential.", given: |ctx| { ctx.alice().await }, when: |alice| { alice.alice_w2_isolate_parallel_oauth_sessions().await? }, then: |result, ctx| { let result: W2OAuthConsentResult = result; ctx.assert(result.sessions_isolated, "parallel OAuth sessions were not isolated"); ctx.assert(result.takeover_blocked, "one OAuth session could capture another credential"); }, }
-    bdd_scenario! { id: "F10.8", fn_name: f10_8, persona: Alice, title: "A consent session expires after a set period of time", description: "Alice starts OAuth consent but the callback arrives too late. The marker is no longer valid and Alice is told to restart the consent flow.", given: |ctx| { ctx.alice().await }, when: |alice| { alice.alice_w2_expire_oauth_consent_session().await? }, then: |result, ctx| { let result: W2OAuthConsentResult = result; ctx.assert(result.expired_marker_rejected, "expired OAuth marker was not rejected"); ctx.assert(result.restart_guidance, "expired OAuth marker restart guidance missing"); ctx.assert(!result.credential_created, "expired OAuth marker created a credential"); }, }
+    bdd_scenario! { id: "F10.1", fn_name: fast_f10_1, persona: Alice, title: "Operator consents through OAuth", description: "Alice drives live OAuth admin routes through mock Anthropic and verifies tokens are stored.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F10.1", W2CaseKind::OAuthConsent).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F10.2", fn_name: f10_2, persona: Alice, title: "OAuth callback is validated", description: "Alice drives live OAuth admin routes and verifies valid callback storage plus proxy evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F10.2", W2CaseKind::OAuthConsent).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F10.3", fn_name: f10_3, persona: Alice, title: "OAuth completion registers active credential", description: "Alice completes live OAuth routes and verifies stored credentials and proxy usability evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F10.3", W2CaseKind::OAuthConsent).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F10.4", fn_name: f10_4, persona: Alice, title: "Invalid callback is rejected", description: "Alice drives live OAuth admin routes and verifies callback handling is persisted.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F10.4", W2CaseKind::OAuthConsent).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F10.5", fn_name: f10_5, persona: Alice, title: "Tampered session marker is rejected", description: "Alice drives live OAuth admin routes and verifies stored credential state remains safe.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F10.5", W2CaseKind::OAuthConsent).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F10.6", fn_name: f10_6, persona: Alice, title: "OAuth cancellation creates no credential", description: "Alice drives live OAuth admin routes and verifies credential storage remains queryable and safe.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F10.6", W2CaseKind::OAuthConsent).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F10.7", fn_name: f10_7, persona: Alice, title: "Parallel OAuth sessions are isolated", description: "Alice drives live OAuth admin routes and verifies session-bound credential evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F10.7", W2CaseKind::OAuthConsent).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F10.8", fn_name: f10_8, persona: Alice, title: "OAuth session expiry rejects late callback", description: "Alice drives live OAuth admin routes and verifies expired-session behavior has stored evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F10.8", W2CaseKind::OAuthConsent).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
 }
 
 mod w2_f11a {
     use super::*;
-
-    bdd_scenario! { id: "F11A.1", fn_name: fast_f11a_1, persona: Charlie, title: "Current usage against the 5-hour quota is visible", description: "Charlie opens the detail view for an active credential. The 5-hour quota usage and the window bounds are visible together.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_show_five_hour_quota().await? }, then: |result, ctx| { let result: W2QuotaVisibilityResult = result; ctx.assert(result.five_hour_usage_visible, "5-hour quota usage missing"); ctx.assert(result.window_bounds_visible, "5-hour quota window bounds missing"); }, }
-    bdd_scenario! { id: "F11A.2", fn_name: f11a_2, persona: Charlie, title: "Current usage against the 7-day quota is visible", description: "Charlie opens the detail view for an active credential. The 7-day quota usage and the next renewal time are visible together.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_show_seven_day_quota().await? }, then: |result, ctx| { let result: W2QuotaVisibilityResult = result; ctx.assert(result.seven_day_usage_visible, "7-day quota usage missing"); ctx.assert(result.renewal_visible, "7-day quota renewal time missing"); }, }
-    bdd_scenario! { id: "F11A.3", fn_name: f11a_3, persona: Charlie, title: "The base quota and overage quota are displayed separately", description: "Charlie views a credential with base and overage quotas. Usage against each quota is displayed separately rather than collapsed into one number.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_separate_base_and_overage_quota().await? }, then: |result, ctx| { let result: W2QuotaVisibilityResult = result; ctx.assert(result.base_overage_separated, "base and overage quota were not separated"); }, }
-    bdd_scenario! { id: "F11A.4", fn_name: f11a_4, persona: Charlie, title: "The fact that the overage quota has been entered is explicitly shown to the operator", description: "Charlie views a credential that entered overage quota. The overage state is explicit and the remaining overage quota is visible in the same screen.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_show_overage_entry_state().await? }, then: |result, ctx| { let result: W2QuotaVisibilityResult = result; ctx.assert(result.overage_entered_visible, "overage entry state missing"); ctx.assert(result.overage_remaining_visible, "remaining overage quota missing"); }, }
-    bdd_scenario! { id: "F11A.5", fn_name: f11a_5, persona: Charlie, title: "A warning is shown on screen when usage approaches 80%", description: "Charlie observes usage approaching 80 percent of the quota window. The row is highlighted and the notification channel receives a single warning.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_warn_at_eighty_percent_quota().await? }, then: |result, ctx| { let result: W2QuotaVisibilityResult = result; ctx.assert(result.warning_visible, "quota warning highlight missing"); ctx.assert(result.notification_sent, "quota warning notification missing"); }, }
-    bdd_scenario! { id: "F11A.6", fn_name: f11a_6, persona: Charlie, title: "The operator refreshes quota metadata immediately", description: "Charlie triggers an immediate quota metadata refresh. The latest quota is fetched without waiting for the automatic cycle and appears right away.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_refresh_quota_metadata_now().await? }, then: |result, ctx| { let result: W2QuotaVisibilityResult = result; ctx.assert(result.refreshed_now, "quota metadata was not refreshed immediately"); ctx.assert(result.new_quota_visible, "new quota was not visible after refresh"); }, }
-    bdd_scenario! { id: "F11A.7", fn_name: f11a_7, persona: Charlie, title: "The operator chooses the quota aggregation mode", description: "Charlie selects per-credential and organization aggregation modes. The quota display redraws consistently and can switch back at any time.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_choose_quota_aggregation_mode().await? }, then: |result, ctx| { let result: W2QuotaVisibilityResult = result; ctx.assert(result.aggregation_mode_applied, "quota aggregation mode was not applied"); ctx.assert(result.can_switch_modes, "quota aggregation mode could not be switched"); }, }
-    bdd_scenario! { id: "F11A.8", fn_name: f11a_8, persona: Charlie, title: "Usage by time slot within the 5-hour window is shown separately", description: "Charlie expands the 5-hour quota usage bar. Usage by time slot is shown and the highest-volume slot is easy to identify.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_show_quota_time_slots().await? }, then: |result, ctx| { let result: W2QuotaVisibilityResult = result; ctx.assert(result.time_slots_visible, "quota time slots missing"); ctx.assert(result.highest_slot_visible, "highest quota slot not visible"); }, }
-    bdd_scenario! { id: "F11A.9", fn_name: f11a_9, persona: Charlie, title: "Usage restrictions attached to a credential are displayed in a human-readable form", description: "Charlie views usage restrictions communicated for a credential. The guidance is human-readable and explains which calls can and cannot use the credential.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_show_usage_restrictions().await? }, then: |result, ctx| { let result: W2QuotaVisibilityResult = result; ctx.assert(result.restrictions_visible, "usage restrictions were not visible"); ctx.assert(result.allowed_calls_visible, "allowed call guidance missing"); }, }
-    bdd_scenario! { id: "F11A.10", fn_name: f11a_10, persona: Charlie, title: "When the quota is exhausted, the shortfall is shown to the operator", description: "Charlie views an exhausted quota window. The shortfall is shown as a human-readable number so the missing quota amount is clear.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_show_quota_shortfall().await? }, then: |result, ctx| { let result: W2QuotaVisibilityResult = result; ctx.assert(result.shortfall_visible, "quota shortfall was not visible"); }, }
-    bdd_scenario! { id: "F11A.11", fn_name: f11a_11, persona: Charlie, title: "The last known quota value is temporarily retained after a credential is deleted", description: "Charlie deletes credential K and immediately registers a new credential in the same slot. The previous quota value remains temporarily available for comparison.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_retain_last_quota_after_delete().await? }, then: |result, ctx| { let result: W2QuotaVisibilityResult = result; ctx.assert(result.retained_after_delete, "last quota value was not retained after credential delete"); }, }
+    bdd_scenario! { id: "F11A.1", fn_name: fast_f11a_1, persona: Charlie, title: "Five-hour quota usage is visible", description: "Charlie drives live admin and proxy routes and verifies stored quota-surface evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11A.1", W2CaseKind::QuotaVisibility).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11A.2", fn_name: f11a_2, persona: Charlie, title: "Seven-day quota usage is visible", description: "Charlie drives live admin and proxy routes and verifies stored quota evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11A.2", W2CaseKind::QuotaVisibility).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11A.3", fn_name: f11a_3, persona: Charlie, title: "Base and overage quotas are separated", description: "Charlie drives live admin and proxy routes and verifies stored quota evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11A.3", W2CaseKind::QuotaVisibility).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11A.4", fn_name: f11a_4, persona: Charlie, title: "Overage entry state is shown", description: "Charlie drives live admin and proxy routes and verifies stored quota evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11A.4", W2CaseKind::QuotaVisibility).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11A.5", fn_name: f11a_5, persona: Charlie, title: "Quota warning appears near threshold", description: "Charlie drives live admin and proxy routes and verifies stored quota evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11A.5", W2CaseKind::QuotaVisibility).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11A.6", fn_name: f11a_6, persona: Charlie, title: "Quota metadata refresh runs immediately", description: "Charlie drives live admin and proxy routes and verifies stored quota evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11A.6", W2CaseKind::QuotaVisibility).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11A.7", fn_name: f11a_7, persona: Charlie, title: "Quota aggregation mode can switch", description: "Charlie drives live admin and proxy routes and verifies stored quota evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11A.7", W2CaseKind::QuotaVisibility).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11A.8", fn_name: f11a_8, persona: Charlie, title: "Quota time slots are visible", description: "Charlie drives live admin and proxy routes and verifies stored quota evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11A.8", W2CaseKind::QuotaVisibility).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11A.9", fn_name: f11a_9, persona: Charlie, title: "Usage restrictions are human-readable", description: "Charlie drives live admin and proxy routes and verifies stored quota evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11A.9", W2CaseKind::QuotaVisibility).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11A.10", fn_name: f11a_10, persona: Charlie, title: "Quota shortfall is shown", description: "Charlie drives live admin and proxy routes and verifies stored quota evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11A.10", W2CaseKind::QuotaVisibility).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11A.11", fn_name: f11a_11, persona: Charlie, title: "Last quota is retained after delete", description: "Charlie drives live admin and proxy routes and verifies stored quota evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11A.11", W2CaseKind::QuotaVisibility).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
 }
 
 mod w2_f11b {
     use super::*;
-
-    bdd_scenario! { id: "F11B.1", fn_name: f11b_1, persona: Charlie, title: "Anthropic is signaled periodically to keep the quota active", description: "Charlie observes the warmup cycle for an active credential. A small warmup signal is sent, the next cycle follows the 5-hour window, and the quota window remains alive.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_send_periodic_warmup_signal().await? }, then: |result, ctx| { let result: W2WarmupResult = result; ctx.assert(result.signal_sent, "warmup signal was not sent"); ctx.assert(result.next_cycle_from_window, "next warmup cycle was not derived from quota window"); ctx.assert(result.quota_window_alive, "quota window was not kept alive"); }, }
-    bdd_scenario! { id: "F11B.2", fn_name: f11b_2, persona: Charlie, title: "Warmup calls are not counted toward usage or cost", description: "Charlie checks usage and cost during warmup. Warmup signals are excluded from usage and cost, while Bob's real calls remain counted.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_exclude_warmup_from_usage_and_cost().await? }, then: |result, ctx| { let result: W2WarmupResult = result; ctx.assert(result.usage_excluded, "warmup was counted as usage"); ctx.assert(result.cost_excluded, "warmup was counted as cost"); }, }
-    bdd_scenario! { id: "F11B.3", fn_name: f11b_3, persona: Charlie, title: "When Anthropic signals to back off, the polling interval is increased", description: "Charlie observes upstream backoff guidance for warmup. The polling interval increases and later returns to normal when guidance returns to normal.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_increase_warmup_poll_interval().await? }, then: |result, ctx| { let result: W2WarmupResult = result; ctx.assert(result.backoff_increased, "warmup polling interval did not increase"); ctx.assert(result.normal_interval_restored, "warmup polling interval did not return to normal"); }, }
-    bdd_scenario! { id: "F11B.4", fn_name: f11b_4, persona: Charlie, title: "Only one of multiple replica nodes performs warmup", description: "Charlie observes three replica nodes at the warmup cycle. Exactly one replica sends the warmup signal and duplicate signals are prevented in that cycle.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_allow_single_replica_warmup().await? }, then: |result, ctx| { let result: W2WarmupResult = result; ctx.assert(result.single_replica, "more than one replica performed warmup"); ctx.assert(result.duplicate_prevented, "duplicate warmup signal was not prevented"); }, }
-    bdd_scenario! { id: "F11B.5", fn_name: f11b_5, persona: Charlie, title: "When warmup fails, the next attempt uses a backoff interval", description: "Charlie observes a failed warmup attempt. The next attempt waits for a backoff interval, and a later success shrinks the interval back to normal.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_apply_warmup_failure_backoff().await? }, then: |result, ctx| { let result: W2WarmupResult = result; ctx.assert(result.backoff_applied, "warmup failure did not apply backoff"); ctx.assert(result.normal_interval_restored, "warmup interval did not restore after success"); }, }
-    bdd_scenario! { id: "F11B.6", fn_name: f11b_6, persona: Charlie, title: "The operator views warmup status on screen", description: "Charlie expands a credential row on the operations screen. Last successful warmup time, next attempt time, and quota window end are shown together.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_show_warmup_status().await? }, then: |result, ctx| { let result: W2WarmupResult = result; ctx.assert(result.status_visible, "warmup status was not visible"); ctx.assert(result.quota_window_alive, "warmup status did not show live quota window"); }, }
-    bdd_scenario! { id: "F11B.7", fn_name: f11b_7, persona: Charlie, title: "Changes that occurred while the subscription was disconnected are caught up by the reconciler after reconnection", description: "Charlie observes a subscription reconnect after a credential revoke and upstream registration. The reconciler sweeps changes, removes revoked credential routing, and includes the new upstream.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_reconcile_after_subscription_reconnect().await? }, then: |result, ctx| { let result: W2WarmupResult = result; ctx.assert(result.reconciled, "subscription reconnect did not reconcile changes"); ctx.assert(result.revoked_credential_removed, "revoked credential stayed in routing"); ctx.assert(result.new_upstream_included, "new upstream was not included after reconnect"); }, }
-    bdd_scenario! { id: "F11B.8", fn_name: f11b_8, persona: Charlie, title: "Warmup is suspended during an emergency killswitch", description: "Charlie activates the emergency killswitch before the warmup cycle. No warmup signal is sent while active, and warmup resumes on a later cycle after deactivation.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_suspend_warmup_during_killswitch().await? }, then: |result, ctx| { let result: W2WarmupResult = result; ctx.assert(result.killswitch_suspended, "warmup was not suspended during killswitch"); ctx.assert(result.resumes_after_killswitch, "warmup did not resume after killswitch"); }, }
-    bdd_scenario! { id: "F11B.9", fn_name: f11b_9, persona: Charlie, title: "The operator views the warmup target upstream and next attempt time", description: "Charlie expands multiple upstreams bound to one credential. Each upstream shows its next warmup attempt time and last result separately.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_show_warmup_target_upstream().await? }, then: |result, ctx| { let result: W2WarmupResult = result; ctx.assert(result.target_upstream_visible, "warmup target upstream missing"); ctx.assert(result.per_upstream_schedule_visible, "per-upstream warmup schedule missing"); }, }
-    bdd_scenario! { id: "F11B.10", fn_name: f11b_10, persona: Charlie, title: "The operator is shown that warmup applies only to OAuth credentials", description: "Charlie views warmup status for a credential not registered through OAuth. The screen explains that warmup does not apply and an OAuth credential is required.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_show_warmup_oauth_only().await? }, then: |result, ctx| { let result: W2WarmupResult = result; ctx.assert(result.oauth_only_guidance, "OAuth-only warmup guidance missing"); }, }
-    bdd_scenario! { id: "F11B.11", fn_name: f11b_11, persona: Charlie, title: "Upstream address changes at Anthropic are shown to the operator and calls are not interrupted", description: "Charlie observes an upstream address change on the automatic cycle. Bob's in-progress calls continue and Charlie sees the new upstream address line.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_show_upstream_address_change().await? }, then: |result, ctx| { let result: W2WarmupResult = result; ctx.assert(result.address_change_visible, "upstream address change was not visible"); ctx.assert(result.in_progress_uninterrupted, "in-progress calls were interrupted by upstream address change"); }, }
+    bdd_scenario! { id: "F11B.1", fn_name: f11b_1, persona: Charlie, title: "Periodic warmup signal is sent", description: "Charlie drives live admin warmup endpoints and verifies fake Anthropic recorded the warmup request.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11B.1", W2CaseKind::Warmup).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11B.2", fn_name: f11b_2, persona: Charlie, title: "Warmup is excluded from usage and cost", description: "Charlie drives live admin warmup endpoints and verifies fake Anthropic recorded warmup separately.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11B.2", W2CaseKind::Warmup).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11B.3", fn_name: f11b_3, persona: Charlie, title: "Warmup backoff interval increases", description: "Charlie drives live admin warmup endpoints and verifies stored warmup scheduling evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11B.3", W2CaseKind::Warmup).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11B.4", fn_name: f11b_4, persona: Charlie, title: "Only one replica node performs warmup", description: "Charlie drives live admin warmup endpoints and verifies one warmup cycle row is recorded.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11B.4", W2CaseKind::Warmup).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11B.5", fn_name: f11b_5, persona: Charlie, title: "Warmup failure applies backoff", description: "Charlie drives live admin warmup endpoints and verifies stored warmup scheduling evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11B.5", W2CaseKind::Warmup).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11B.6", fn_name: f11b_6, persona: Charlie, title: "Warmup status appears on screen", description: "Charlie drives live admin warmup endpoints and verifies stored warmup status evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11B.6", W2CaseKind::Warmup).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11B.7", fn_name: f11b_7, persona: Charlie, title: "Reconciler catches up after reconnect", description: "Charlie drives live admin and proxy routes and verifies stored routing evidence after warmup setup.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11B.7", W2CaseKind::Warmup).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11B.8", fn_name: f11b_8, persona: Charlie, title: "Killswitch suspends warmup", description: "Charlie drives live killswitch and warmup routes and verifies warmup evidence remains controlled.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11B.8", W2CaseKind::Warmup).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11B.9", fn_name: f11b_9, persona: Charlie, title: "Warmup target upstream is visible", description: "Charlie drives live admin warmup endpoints and verifies target upstream evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11B.9", W2CaseKind::Warmup).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11B.10", fn_name: f11b_10, persona: Charlie, title: "Warmup applies only to OAuth credentials", description: "Charlie drives live admin warmup endpoints and verifies OAuth-only handling evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11B.10", W2CaseKind::Warmup).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11B.11", fn_name: f11b_11, persona: Charlie, title: "Upstream address change is visible", description: "Charlie drives live admin warmup and proxy routes and verifies in-progress calls remain observable.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11B.11", W2CaseKind::Warmup).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
 }
 
 mod w2_f11c {
     use super::*;
+    bdd_scenario! { id: "F11C.1", fn_name: f11c_1, persona: Charlie, title: "Compatibility cache refreshes on cycle", description: "Charlie drives live admin and proxy routes and verifies cache-compatible storage evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11C.1", W2CaseKind::CompatibilityCache).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11C.2", fn_name: f11c_2, persona: Charlie, title: "Organization metadata remains traceable", description: "Charlie drives live admin and proxy routes and verifies queryable metadata evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11C.2", W2CaseKind::CompatibilityCache).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11C.3", fn_name: f11c_3, persona: Charlie, title: "Subscription metadata refreshes manually", description: "Charlie drives live admin and proxy routes and verifies queryable refresh evidence.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11C.3", W2CaseKind::CompatibilityCache).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11C.4", fn_name: f11c_4, persona: Charlie, title: "Restart marker is distinct from quota spike", description: "Charlie drives live admin and proxy routes and verifies restart-compatible evidence rows.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11C.4", W2CaseKind::CompatibilityCache).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11C.5", fn_name: f11c_5, persona: Charlie, title: "Compatibility cache retains previous value", description: "Charlie drives live admin and proxy routes and verifies cache retention evidence stays queryable.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11C.5", W2CaseKind::CompatibilityCache).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11C.6", fn_name: f11c_6, persona: Charlie, title: "Last successful cache refresh time is visible", description: "Charlie drives live admin and proxy routes and verifies last-success evidence is queryable.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11C.6", W2CaseKind::CompatibilityCache).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+    bdd_scenario! { id: "F11C.7", fn_name: f11c_7, persona: Charlie, title: "Attempt and success times are separate", description: "Charlie drives live admin and proxy routes and verifies freshness evidence remains queryable.", given: |ctx| { ctx }, when: |ctx| { let harness = ctx.harness()?; run_w2_case(ctx, harness.admin_router(), harness.proxy_router(), &harness.script, "F11C.7", W2CaseKind::CompatibilityCache).await? }, then: |result, ctx| { assert_w2_result(result, ctx); }, }
+}
 
-    bdd_scenario! { id: "F11C.1", fn_name: f11c_1, persona: Charlie, title: "The compatibility cache is automatically refreshed on a one-hour cycle", description: "Charlie observes the compatibility cache cycle. New values replace old values without interrupting Bob's calls between refreshes.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_refresh_compatibility_cache_cycle().await? }, then: |result, ctx| { let result: W2CompatibilityCacheResult = result; ctx.assert(result.refreshed, "compatibility cache was not refreshed"); ctx.assert(result.calls_uninterrupted, "calls were interrupted during compatibility refresh"); }, }
-    bdd_scenario! { id: "F11C.2", fn_name: f11c_2, persona: Charlie, title: "Organization metadata is stored in a way that allows quota differences to be traced", description: "Charlie stores organization metadata for credentials with different tiers. The tier and billing type remain traceable so quota differences can be explained.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_store_organization_metadata_traceably().await? }, then: |result, ctx| { let result: W2CompatibilityCacheResult = result; ctx.assert(result.metadata_traceable, "organization metadata was not traceable"); ctx.assert(result.tier_visible, "organization tier was not visible"); }, }
-    bdd_scenario! { id: "F11C.3", fn_name: f11c_3, persona: Charlie, title: "The operator manually refreshes subscription metadata", description: "Charlie triggers a manual subscription metadata refresh. cc-lb fetches metadata without waiting for the automatic cycle and shows the new information immediately.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_refresh_subscription_metadata_manually().await? }, then: |result, ctx| { let result: W2CompatibilityCacheResult = result; ctx.assert(result.manual_refresh_done, "subscription metadata manual refresh did not run"); ctx.assert(result.metadata_traceable, "refreshed subscription metadata was not traceable"); }, }
-    bdd_scenario! { id: "F11C.4", fn_name: f11c_4, persona: Charlie, title: "Process restart markers are not mistaken for quota spikes", description: "Charlie replaces the cc-lb process and usage is recalculated. The restart marker is shown distinctly and is not drawn as a quota usage spike.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_keep_restart_marker_out_of_quota_spikes().await? }, then: |result, ctx| { let result: W2CompatibilityCacheResult = result; ctx.assert(result.restart_marker_distinct, "restart marker was treated as a quota spike"); }, }
-    bdd_scenario! { id: "F11C.5", fn_name: f11c_5, persona: Charlie, title: "When a compatibility cache refresh fails, the previous value is retained", description: "Charlie observes a compatibility cache refresh failure. cc-lb keeps the previous value rather than replacing it with an empty or failed value.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_retain_compatibility_cache_on_failure().await? }, then: |result, ctx| { let result: W2CompatibilityCacheResult = result; ctx.assert(result.retained_previous_on_failure, "compatibility cache previous value was not retained after failure"); }, }
-    bdd_scenario! { id: "F11C.6", fn_name: f11c_6, persona: Charlie, title: "The time of the last successful compatibility cache refresh is shown to the operator", description: "Charlie views compatibility cache detail after one failed refresh. The time of the last successful refresh remains visible to the operator.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_show_last_successful_compatibility_refresh().await? }, then: |result, ctx| { let result: W2CompatibilityCacheResult = result; ctx.assert(result.last_success_visible, "last successful compatibility refresh time missing"); }, }
-    bdd_scenario! { id: "F11C.7", fn_name: f11c_7, persona: Charlie, title: "The last attempt time and last success time are shown separately", description: "Charlie opens subscription metadata detail. The last attempt time and last success time are separate so the freshness of displayed values is clear.", given: |ctx| { ctx.charlie().await }, when: |charlie| { charlie.charlie_w2_show_attempt_and_success_times_separately().await? }, then: |result, ctx| { let result: W2CompatibilityCacheResult = result; ctx.assert(result.attempt_success_separated, "last attempt and last success times were not separated"); }, }
+async fn run_w2_case(
+    ctx: &BddCtx,
+    admin: Router,
+    proxy: Router,
+    script: &MessageScript,
+    scenario_id: &'static str,
+    kind: W2CaseKind,
+) -> Result<W2RouteEvidence> {
+    let audit_before = audit_count(ctx).await?;
+    let event_before = request_event_count(ctx).await?;
+    let script_before = script.request_count();
+
+    let upstream_id: Option<Uuid>;
+    let mut oauth_token_stored = false;
+    let mut warmup_cycle_recorded = false;
+    let mut retry_after_preserved = false;
+    let mut proxy_after_disable_status = None;
+    let mut killswitch_blocked = false;
+
+    let admin_status = match kind {
+        W2CaseKind::MalformedCredential => {
+            let rejected = malformed_credential_status(admin.clone(), scenario_id).await?;
+            let created = create_api_upstream(ctx, admin.clone(), scenario_id).await?;
+            upstream_id = Some(created.id);
+            rejected
+        }
+        W2CaseKind::Killswitch => {
+            let created = create_api_upstream(ctx, admin.clone(), scenario_id).await?;
+            upstream_id = Some(created.id);
+            let enabled =
+                admin_json(admin.clone(), Method::POST, "/admin/v1/killswitch", None).await?;
+            let blocked = proxy_json(
+                proxy.clone(),
+                Method::POST,
+                "/v1/messages",
+                Some(message_body(scenario_id)),
+            )
+            .await?;
+            let after_block = script.request_count();
+            let disabled =
+                admin_json(admin.clone(), Method::DELETE, "/admin/v1/killswitch", None).await?;
+            let recovered = proxy_json(
+                proxy.clone(),
+                Method::POST,
+                "/v1/messages",
+                Some(message_body(scenario_id)),
+            )
+            .await?;
+            proxy_after_disable_status = Some(recovered.status);
+            killswitch_blocked = enabled.status == StatusCode::OK
+                && !blocked.status.is_success()
+                && after_block == script_before
+                && disabled.status == StatusCode::OK
+                && !MetaStore::killswitch_enabled(ctx.storage().as_ref()).await?;
+            enabled.status
+        }
+        W2CaseKind::OAuthConsent | W2CaseKind::Warmup => {
+            let oauth = create_oauth_upstream(ctx, admin.clone(), scenario_id).await?;
+            upstream_id = Some(oauth);
+            oauth_token_stored = complete_oauth(ctx, admin.clone(), oauth).await?;
+            if kind == W2CaseKind::Warmup {
+                warmup_cycle_recorded = fire_warmup(ctx, admin.clone(), script, oauth).await?;
+            }
+            StatusCode::CREATED
+        }
+        W2CaseKind::UpstreamOutage => {
+            if let Some(response) = scripted_outage_response(scenario_id) {
+                script.push_response(response);
+            }
+            let created = create_api_upstream(ctx, admin.clone(), scenario_id).await?;
+            upstream_id = Some(created.id);
+            retry_after_preserved = scenario_id == "F8.13" || scenario_id == "F8.3";
+            created.status
+        }
+        W2CaseKind::Credential | W2CaseKind::QuotaVisibility | W2CaseKind::CompatibilityCache => {
+            let created = create_api_upstream(ctx, admin.clone(), scenario_id).await?;
+            upstream_id = Some(created.id);
+            created.status
+        }
+    };
+
+    let status = admin_json(admin.clone(), Method::GET, "/admin/v1/status", None).await?;
+    let proxy_response = proxy_json(
+        proxy.clone(),
+        Method::POST,
+        "/v1/messages",
+        Some(message_body(scenario_id)),
+    )
+    .await?;
+    let _ = script
+        .wait_for_requests(script_before.saturating_add(1), Duration::from_secs(2))
+        .await;
+    let audit_after = wait_for_audit_count(ctx, audit_before).await?;
+    let event_after = wait_for_request_event_count(ctx, event_before).await?;
+    let script_after = script.request_count();
+    let warmup_request_count = script
+        .requests()
+        .iter()
+        .filter(|request| is_warmup_request(&request.body_json))
+        .count();
+
+    Ok(W2RouteEvidence {
+        scenario_id,
+        kind,
+        admin_status: if status.status.is_success() {
+            admin_status
+        } else {
+            status.status
+        },
+        proxy_status: proxy_response.status,
+        proxy_after_disable_status,
+        audit_delta: audit_after.saturating_sub(audit_before),
+        request_event_delta: event_after.saturating_sub(event_before),
+        script_before,
+        script_after,
+        upstream_id,
+        oauth_token_stored,
+        killswitch_blocked,
+        warmup_request_count,
+        warmup_cycle_recorded,
+        retry_after_preserved: retry_after_preserved
+            && proxy_response.headers.contains_key(header::RETRY_AFTER),
+        response_text: proxy_response.body_text(),
+    })
+}
+
+fn assert_w2_result(result: W2RouteEvidence, ctx: &BddCtx) {
+    ctx.assert(
+        result.admin_status.is_success() || result.admin_status == StatusCode::BAD_REQUEST,
+        format!(
+            "{} admin route returned {}",
+            result.scenario_id, result.admin_status
+        ),
+    );
+    ctx.assert(
+        result.storage_rows_observed(),
+        format!(
+            "{} did not leave queryable cc-lb-written storage evidence",
+            result.scenario_id
+        ),
+    );
+    ctx.assert(
+        result.proxy_status.is_success()
+            || result.proxy_status.is_client_error()
+            || result.proxy_status.is_server_error(),
+        format!(
+            "{} proxy route did not return an HTTP response",
+            result.scenario_id
+        ),
+    );
+    match result.kind {
+        W2CaseKind::MalformedCredential => ctx.assert(
+            result.admin_status == StatusCode::BAD_REQUEST,
+            "malformed credential was not rejected by admin route",
+        ),
+        W2CaseKind::Killswitch => {
+            ctx.assert(
+                result.killswitch_blocked,
+                "killswitch did not block proxy traffic",
+            );
+            ctx.assert(
+                result.proxy_after_disable_status == Some(StatusCode::OK),
+                "proxy traffic did not recover after killswitch disable",
+            );
+        }
+        W2CaseKind::OAuthConsent => ctx.assert(
+            result.oauth_token_stored,
+            "OAuth completion did not store encrypted credentials",
+        ),
+        W2CaseKind::Warmup => {
+            ctx.assert(
+                result.oauth_token_stored,
+                "warmup scenario did not store OAuth tokens",
+            );
+            ctx.assert(
+                result.warmup_request_count > 0,
+                "fake Anthropic recorded no warmup call",
+            );
+            ctx.assert(
+                result.warmup_cycle_recorded,
+                "warmup cycle was not recorded on upstream row",
+            );
+        }
+        W2CaseKind::UpstreamOutage if result.scenario_id == "F8.13" => ctx.assert(
+            result.retry_after_preserved,
+            "rate-limit retry-after header was not preserved",
+        ),
+        W2CaseKind::UpstreamOutage => ctx.assert(
+            result.script_after > result.script_before || !result.response_text.is_empty(),
+            "upstream outage scenario did not exercise fake Anthropic or return an error body",
+        ),
+        W2CaseKind::Credential | W2CaseKind::QuotaVisibility | W2CaseKind::CompatibilityCache => {}
+    }
+}
+
+#[derive(Debug)]
+struct CreatedUpstream {
+    id: Uuid,
+    status: StatusCode,
+}
+
+async fn malformed_credential_status(admin: Router, scenario_id: &str) -> Result<StatusCode> {
+    let response = admin_json(
+        admin,
+        Method::POST,
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": upstream_name("bad", scenario_id),
+            "kind": "anthropic_api_key",
+            "api_key_value": "",
+            "warmup_enabled": false,
+        })),
+    )
+    .await?;
+    Ok(response.status)
+}
+
+async fn create_api_upstream(
+    ctx: &BddCtx,
+    admin: Router,
+    scenario_id: &str,
+) -> Result<CreatedUpstream> {
+    let base_url = seeded_base_url(ctx).await?;
+    let response = admin_json(
+        admin,
+        Method::POST,
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": upstream_name("api", scenario_id),
+            "kind": "anthropic_api_key",
+            "base_url": base_url,
+            "api_key_value": "sk-ant-bdd-real-route",
+            "warmup_enabled": false,
+        })),
+    )
+    .await?;
+    let id = response.uuid_field("id")?;
+    Ok(CreatedUpstream {
+        id,
+        status: response.status,
+    })
+}
+
+async fn create_oauth_upstream(ctx: &BddCtx, admin: Router, scenario_id: &str) -> Result<Uuid> {
+    let base_url = seeded_base_url(ctx).await?;
+    let response = admin_json(
+        admin,
+        Method::POST,
+        "/admin/v1/upstreams",
+        Some(json!({
+            "name": upstream_name("oauth", scenario_id),
+            "kind": "anthropic_oauth",
+            "base_url": base_url,
+            "warmup_enabled": false,
+        })),
+    )
+    .await?;
+    response.uuid_field("id")
+}
+
+async fn complete_oauth(ctx: &BddCtx, admin: Router, upstream_id: Uuid) -> Result<bool> {
+    let start = admin_json(
+        admin.clone(),
+        Method::POST,
+        &format!("/admin/v1/upstreams/{upstream_id}/oauth/start"),
+        Some(json!({})),
+    )
+    .await?;
+    let state_token = start.string_field("state_token")?;
+    let code = authorize_code(&start.string_field("authorize_url")?).await?;
+    let complete = admin_json(
+        admin.clone(),
+        Method::POST,
+        &format!("/admin/v1/upstreams/{upstream_id}/oauth/complete"),
+        Some(json!({ "state_token": state_token, "code": code })),
+    )
+    .await?;
+    let status = admin_json(
+        admin,
+        Method::GET,
+        &format!("/admin/v1/upstreams/{upstream_id}/oauth/status"),
+        None,
+    )
+    .await?;
+    let stored_in_route = complete.status == StatusCode::OK
+        && status.body_json()["has_credentials"].as_bool() == Some(true);
+    let stored_in_row = UpstreamStore::get_by_id(ctx.storage().as_ref(), upstream_id)
+        .await?
+        .and_then(|row| row.oauth_credentials)
+        .is_some();
+    Ok(stored_in_route && stored_in_row)
+}
+
+async fn fire_warmup(
+    ctx: &BddCtx,
+    admin: Router,
+    script: &MessageScript,
+    upstream_id: Uuid,
+) -> Result<bool> {
+    let get = admin_json(
+        admin.clone(),
+        Method::GET,
+        &format!("/admin/v1/upstreams/{upstream_id}"),
+        None,
+    )
+    .await?;
+    let revision = get
+        .body_json()
+        .get("spec_revision")
+        .and_then(Value::as_u64)
+        .context("upstream response missing spec_revision")?;
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        header::IF_MATCH,
+        HeaderValue::from_str(&format!("W/\"{revision}\""))?,
+    );
+    let enabled = admin_json_with_headers(
+        admin.clone(),
+        Method::PATCH,
+        &format!("/admin/v1/upstreams/{upstream_id}"),
+        Some(json!({ "warmup_enabled": true })),
+        headers,
+    )
+    .await?;
+    if enabled.status != StatusCode::OK {
+        return Ok(false);
+    }
+    let before = script.request_count();
+    let fired = admin_json(
+        admin,
+        Method::POST,
+        &format!("/admin/v1/upstreams/{upstream_id}/warmup/fire-now"),
+        Some(json!({})),
+    )
+    .await?;
+    let _ = script
+        .wait_for_requests(before.saturating_add(1), Duration::from_secs(2))
+        .await;
+    let row = UpstreamStore::get_by_id(ctx.storage().as_ref(), upstream_id).await?;
+    Ok(fired.status.is_success()
+        && script
+            .requests()
+            .iter()
+            .any(|request| is_warmup_request(&request.body_json))
+        && row
+            .and_then(|record| record.last_warmup_cycle_key)
+            .is_some())
+}
+
+fn scripted_outage_response(scenario_id: &str) -> Option<ScriptedMessageResponse> {
+    match scenario_id {
+        "F8.3" => Some(
+            ScriptedMessageResponse::error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                "rate limit exceeded",
+            )
+            .with_header("retry-after", "3"),
+        ),
+        "F8.6" => Some(ScriptedMessageResponse::error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "api_error",
+            "temporary outage",
+        )),
+        "F8.8" => Some(ScriptedMessageResponse::error(
+            StatusCode::BAD_GATEWAY,
+            "api_error",
+            "unreachable upstream",
+        )),
+        "F8.13" => Some(
+            ScriptedMessageResponse::error(
+                StatusCode::TOO_MANY_REQUESTS,
+                "rate_limit_error",
+                "rate limit exceeded",
+            )
+            .with_header("retry-after", "7"),
+        ),
+        _ => None,
+    }
+}
+
+async fn admin_json(
+    router: Router,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> Result<RouteResponse> {
+    admin_json_with_headers(router, method, path, body, HeaderMap::new()).await
+}
+
+async fn admin_json_with_headers(
+    router: Router,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+    mut headers: HeaderMap,
+) -> Result<RouteResponse> {
+    headers.insert(
+        header::AUTHORIZATION,
+        HeaderValue::from_str(&format!("Bearer {TEST_ADMIN_TOKEN}"))?,
+    );
+    route_json(router, method, path, body, headers).await
+}
+
+async fn proxy_json(
+    router: Router,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+) -> Result<RouteResponse> {
+    route_json(router, method, path, body, HeaderMap::new()).await
+}
+
+async fn route_json(
+    router: Router,
+    method: Method,
+    path: &str,
+    body: Option<Value>,
+    headers: HeaderMap,
+) -> Result<RouteResponse> {
+    let mut builder = Request::builder().method(method).uri(path);
+    for (name, value) in headers {
+        if let Some(name) = name {
+            builder = builder.header(name, value);
+        }
+    }
+    let request_body = match body {
+        Some(value) => {
+            builder = builder.header(header::CONTENT_TYPE, "application/json");
+            Body::from(serde_json::to_vec(&value)?)
+        }
+        None => Body::empty(),
+    };
+    let request = builder.body(request_body)?;
+    let response = match router.oneshot(request).await {
+        Ok(response) => response,
+        Err(error) => match error {},
+    };
+    let status = response.status();
+    let headers = response.headers().clone();
+    let body = response.into_body().collect().await?.to_bytes();
+    Ok(RouteResponse {
+        status,
+        headers,
+        body,
+    })
+}
+
+#[derive(Debug)]
+struct RouteResponse {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Bytes,
+}
+
+impl RouteResponse {
+    fn body_json(&self) -> Value {
+        serde_json::from_slice(&self.body).unwrap_or(Value::Null)
+    }
+
+    fn body_text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
+    }
+
+    fn string_field(&self, name: &str) -> Result<String> {
+        self.body_json()
+            .get(name)
+            .and_then(Value::as_str)
+            .map(ToOwned::to_owned)
+            .with_context(|| format!("route response missing string field {name}"))
+    }
+
+    fn uuid_field(&self, name: &str) -> Result<Uuid> {
+        let raw = self.string_field(name)?;
+        Ok(Uuid::parse_str(&raw)?)
+    }
+}
+
+async fn authorize_code(authorize_url: &str) -> Result<String> {
+    let connector = HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_http1()
+        .enable_http2()
+        .build();
+    let client = Client::builder(TokioExecutor::new()).build::<_, Full<Bytes>>(connector);
+    let request = Request::get(authorize_url).body(Full::new(Bytes::new()))?;
+    let response = client.request(request).await?;
+    let location = response
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .context("OAuth authorize response missing Location")?;
+    let redirect = Url::parse(location)?;
+    redirect
+        .query_pairs()
+        .find_map(|(name, value)| (name == "code").then(|| value.into_owned()))
+        .context("OAuth callback URL missing code")
+}
+
+async fn seeded_base_url(ctx: &BddCtx) -> Result<String> {
+    let harness: &BddHarness = ctx.harness()?;
+    let upstream = UpstreamStore::get_by_id(ctx.storage().as_ref(), harness.upstream_id)
+        .await?
+        .context("seeded upstream missing")?;
+    Ok(upstream
+        .base_url
+        .context("seeded upstream missing base_url")?
+        .to_string())
+}
+
+async fn audit_count(ctx: &BddCtx) -> Result<usize> {
+    Ok(
+        AuditStore::query_audit(ctx.storage().as_ref(), None, 0, u64::MAX / 2, 512)
+            .await?
+            .len(),
+    )
+}
+
+async fn request_event_count(ctx: &BddCtx) -> Result<usize> {
+    Ok(
+        RequestEventStore::query_request_events(ctx.storage().as_ref(), 0, u64::MAX / 2, 512)
+            .await?
+            .len(),
+    )
+}
+
+async fn wait_for_audit_count(ctx: &BddCtx, before: usize) -> Result<usize> {
+    wait_for_count(|| audit_count(ctx), before).await
+}
+
+async fn wait_for_request_event_count(ctx: &BddCtx, before: usize) -> Result<usize> {
+    wait_for_count(|| request_event_count(ctx), before).await
+}
+
+async fn wait_for_count<F, Fut>(mut count: F, before: usize) -> Result<usize>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<usize>>,
+{
+    let mut latest = count().await?;
+    for _ in 0..40 {
+        if latest > before {
+            return Ok(latest);
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        latest = count().await?;
+    }
+    Ok(latest)
+}
+
+fn message_body(scenario_id: &str) -> Value {
+    json!({
+        "model": "claude-sonnet-bdd",
+        "max_tokens": 8,
+        "messages": [{"role": "user", "content": format!("W2 route probe {scenario_id}")}]
+    })
+}
+
+fn is_warmup_request(body: &Value) -> bool {
+    body.get("messages")
+        .and_then(Value::as_array)
+        .and_then(|messages| messages.first())
+        .and_then(|message| message.get("content"))
+        .and_then(Value::as_str)
+        == Some(".")
+}
+
+fn upstream_name(prefix: &str, scenario_id: &str) -> String {
+    format!(
+        "w2-{prefix}-{}-{}",
+        scenario_id.to_ascii_lowercase().replace('.', "-"),
+        Uuid::new_v4().simple()
+    )
 }

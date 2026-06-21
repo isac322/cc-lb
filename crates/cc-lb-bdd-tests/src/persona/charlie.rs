@@ -28,7 +28,7 @@ use crate::persona::http;
 use crate::results::{
     HealthSnapshot, HttpResponse, KillswitchState, W2CompatibilityCacheResult,
     W2CredentialIncidentResult, W2KillswitchResult, W2QuotaVisibilityResult,
-    W2UpstreamOutageResult, W2WarmupResult, W3ScenarioResult,
+    W2UpstreamOutageResult, W2WarmupResult,
 };
 
 pub struct Charlie<'a> {
@@ -1051,83 +1051,6 @@ impl<'a> Charlie<'a> {
         )
         .await?;
         Ok(metadata.is_some() && compat.is_some())
-    }
-
-    pub async fn charlie_w3_crash_messages_mask_secrets(&self) -> Result<W3ScenarioResult> {
-        self.charlie_w3_fault_flow(
-            "FaultCrashMasked",
-            "secret value masked in crash records",
-            true,
-        )
-        .await
-    }
-
-    pub async fn charlie_w3_fault_injection_is_withdrawable(&self) -> Result<W3ScenarioResult> {
-        self.charlie_w3_fault_flow("FaultInjectionEnabled", "withdraw action available", true)
-            .await
-    }
-
-    pub async fn charlie_w3_external_loss_uses_fallback(&self) -> Result<W3ScenarioResult> {
-        self.charlie_w3_fault_flow("ExternalLossFallback", "fallback response returned", true)
-            .await
-    }
-
-    pub async fn charlie_w3_external_loss_audited_with_same_identifier(
-        &self,
-    ) -> Result<W3ScenarioResult> {
-        self.charlie_w3_fault_flow("ExternalLossAudit", "same call id in records", true)
-            .await
-    }
-
-    pub async fn charlie_w3_tracking_survives_limit_restart(&self) -> Result<W3ScenarioResult> {
-        self.charlie_w3_fault_flow("LimitColdRestart", "tracking continues once", true)
-            .await
-    }
-
-    pub async fn charlie_w3_fault_scope_is_team_only(&self) -> Result<W3ScenarioResult> {
-        self.charlie_w3_fault_flow("FaultTeamScope", "other team unaffected", true)
-            .await
-    }
-
-    pub async fn charlie_w3_fault_enable_disable_audited(&self) -> Result<W3ScenarioResult> {
-        self.charlie_w3_fault_flow("FaultEnableDisable", "enable and disable recorded", true)
-            .await
-    }
-
-    pub async fn charlie_w3_fault_points_are_predefined(&self) -> Result<W3ScenarioResult> {
-        self.charlie_w3_fault_flow("FaultPointRejected", "allowed points displayed", false)
-            .await
-    }
-
-    async fn charlie_w3_fault_flow(
-        &self,
-        kind: &str,
-        message: &str,
-        accepted: bool,
-    ) -> Result<W3ScenarioResult> {
-        let request_id = format!("w3-{}", Uuid::new_v4().simple());
-        self.append_operation_audit(
-            request_id.as_str(),
-            kind,
-            json!({ "message": message, "accepted": accepted, "secret": "***" }),
-        )
-        .await?;
-        let entries = AuditStore::query_audit(
-            self.storage.as_ref(),
-            Some(request_id.as_str()),
-            0,
-            u64::MAX / 2,
-            16,
-        )
-        .await?;
-        Ok(W3ScenarioResult {
-            accepted,
-            primary_count: entries.len(),
-            secondary_count: usize::from(!accepted),
-            audit_kinds: entries.into_iter().filter_map(|entry| entry.kind).collect(),
-            message: message.to_owned(),
-            request_id,
-        })
     }
 
     async fn append_operation_audit(
