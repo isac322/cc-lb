@@ -20,15 +20,7 @@ use cc_lb_storage_sqlite::open_sqlite;
 /// macro chose: `SqliteStorage` for `_sqlite` tests and
 /// `PostgresStorage` for `_postgres` tests (behind the `postgres`
 /// feature flag).
-pub type StorageHandle = Arc<dyn FullStorage>;
-
-/// Convenience super-trait that aggregates the storage trait surface
-/// the BDD persona clients actually use. Implemented for free by every
-/// concrete backend that already satisfies the underlying traits in
-/// `cc_lb_storage_api`.
-pub trait FullStorage: cc_lb_storage_api::Storage {}
-
-impl<T> FullStorage for T where T: cc_lb_storage_api::Storage {}
+pub type StorageHandle = Arc<dyn cc_lb_storage_api::Storage>;
 
 /// Opaque ownership of the on-disk fixture for a single scenario. Held
 /// by `BddCtx` so the underlying tempdir / schema lives for the entire
@@ -113,7 +105,7 @@ pub async fn bootstrap_sqlite() -> Result<(StorageHandle, StorageFixture)> {
     let url = format!("sqlite://{}", path.display());
     let storage = open_sqlite(&url).await?;
     storage.initialize(BackendKind::Sqlite).await?;
-    let handle: StorageHandle = Arc::new(storage) as Arc<dyn FullStorage>;
+    let handle: StorageHandle = Arc::new(storage) as Arc<dyn cc_lb_storage_api::Storage>;
     Ok((handle, StorageFixture::new_sqlite(dir)))
 }
 
@@ -153,7 +145,7 @@ pub async fn bootstrap_postgres() -> Result<Option<(StorageHandle, StorageFixtur
     let storage = PostgresStorage::new(pool.clone());
     storage.initialize(BackendKind::Postgres).await?;
 
-    let handle: StorageHandle = Arc::new(storage) as Arc<dyn FullStorage>;
+    let handle: StorageHandle = Arc::new(storage) as Arc<dyn cc_lb_storage_api::Storage>;
     Ok(Some((
         handle,
         StorageFixture::new_postgres(url, schema, pool),

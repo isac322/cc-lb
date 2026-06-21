@@ -1,22 +1,107 @@
+use std::time::Duration;
+
 use anyhow::Result;
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind};
 use cc_lb_storage_api::{
-    AuditEntry, AuditStore, PluginChainEntryInput, PluginSlot, PrincipalStore, WasmBlob,
-    WasmRegistryEntryInput,
+    AuditEntry, AuditStore, BUILTIN_CACHE_AFFINITY_ID, PluginChainEntryInput, PluginSlot,
+    PrincipalStore, WasmBlob, WasmRegistryEntryInput,
 };
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::backend::StorageHandle;
-use crate::results::W3ScenarioResult;
+use crate::harness::BddHarness;
+use crate::persona::http;
+use crate::results::{HttpResponse, W3ScenarioResult};
 
-pub struct Bob {
+pub struct Bob<'a> {
     storage: StorageHandle,
+    harness: Option<&'a BddHarness>,
 }
 
-impl Bob {
+impl<'a> Bob<'a> {
     pub(crate) fn new(storage: StorageHandle) -> Self {
-        Self { storage }
+        Self {
+            storage,
+            harness: None,
+        }
+    }
+
+    pub(crate) fn from_harness(harness: &'a BddHarness) -> Self {
+        Self {
+            storage: harness.storage.clone(),
+            harness: Some(harness),
+        }
+    }
+
+    pub async fn admin_request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> HttpResponse {
+        match self.harness {
+            Some(harness) => http::admin_request(harness.admin_router(), method, path, body).await,
+            None => http::json_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({ "error": "bdd_harness_unavailable" }),
+            ),
+        }
+    }
+
+    pub async fn proxy_request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> HttpResponse {
+        match self.harness {
+            Some(harness) => http::proxy_request(harness.proxy_router(), method, path, body).await,
+            None => http::json_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({ "error": "bdd_harness_unavailable" }),
+            ),
+        }
+    }
+
+    pub async fn proxy_request_with_headers(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+        headers: HeaderMap,
+    ) -> HttpResponse {
+        match self.harness {
+            Some(harness) => {
+                http::proxy_request_with_headers(
+                    harness.proxy_router(),
+                    method,
+                    path,
+                    body,
+                    headers,
+                )
+                .await
+            }
+            None => http::json_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({ "error": "bdd_harness_unavailable" }),
+            ),
+        }
+    }
+
+    pub async fn bob_send_message(&self, body: serde_json::Value) -> HttpResponse {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-api-key", HeaderValue::from_static("sk-ant-bdd"));
+        headers.insert("anthropic-version", HeaderValue::from_static("2023-06-01"));
+        self.proxy_request_with_headers(Method::POST, "/v1/messages", Some(body), headers)
+            .await
+    }
+
+    pub fn recorded_message_count(&self) -> usize {
+        self.harness
+            .map(|harness| harness.script.request_count())
+            .unwrap_or_default()
     }
 
     pub async fn bob_w3_duplicate_plugin_upload_rejected(&self) -> Result<W3ScenarioResult> {
@@ -289,37 +374,81 @@ impl Bob {
         primary_count: usize,
         secondary_count: usize,
     ) -> Result<W3ScenarioResult> {
-        let principal =
-            PrincipalStore::create(self.storage.as_ref(), principal_create(), unix_now_secs())
+        let principal_id = if let Some(harness) = self.harness {
+            let before_requests = harness.script.request_count();
+            let attach = self
+                .admin_request(
+                    Method::POST,
+                    &format!("/admin/v1/principals/{}/plugin-chain", harness.principal_id),
+                    Some(json!({
+                        "slot": "router",
+                        "wasm_registry_id": BUILTIN_CACHE_AFFINITY_ID,
+                        "config": {},
+                        "wire_version": 3,
+                    })),
+                )
+                .await;
+            if attach.status != StatusCode::CREATED {
+                anyhow::bail!(
+                    "plugin-chain admin attach failed: status={} body={}",
+                    attach.status,
+                    String::from_utf8_lossy(&attach.body)
+                );
+            }
+            let response = self.bob_send_message(w3_message_body()).await;
+            if !response.status.is_success() {
+                anyhow::bail!(
+                    "proxy call through plugin chain failed: status={} body={}",
+                    response.status,
+                    String::from_utf8_lossy(&response.body)
+                );
+            }
+            let recorded = harness
+                .script
+                .wait_for_requests(before_requests + 1, Duration::from_secs(2))
+                .await;
+            if !recorded {
+                anyhow::bail!("fake-anthropic did not record the plugin-chain proxy call");
+            }
+            harness.principal_id
+        } else {
+            let principal =
+                PrincipalStore::create(self.storage.as_ref(), principal_create(), unix_now_secs())
+                    .await?;
+            let plugin = self
+                .bob_w3_upload_plugin(
+                    &format!("chain-{}", Uuid::new_v4().simple()),
+                    55,
+                    PluginSlot::Router,
+                )
                 .await?;
-        let plugin = self
-            .bob_w3_upload_plugin(
-                &format!("chain-{}", Uuid::new_v4().simple()),
-                55,
-                PluginSlot::Router,
-            )
-            .await?;
-        let plugin_id = Uuid::parse_str(&plugin.request_id)?;
-        self.storage
-            .insert_chain_entry(chain_entry(
-                principal.id,
-                plugin_id,
-                PluginSlot::Router,
-                1_000,
-            ))
-            .await?;
+            let plugin_id = Uuid::parse_str(&plugin.request_id)?;
+            self.storage
+                .insert_chain_entry(chain_entry(
+                    principal.id,
+                    plugin_id,
+                    PluginSlot::Router,
+                    1_000,
+                ))
+                .await?;
+            principal.id
+        };
         self.append_bob_audit(
             kind,
-            json!({ "principal_id": principal.id, "message": message }),
+            json!({ "principal_id": principal_id, "message": message }),
         )
         .await?;
+        let observed_requests = self
+            .harness
+            .map(|harness| harness.script.request_count())
+            .unwrap_or(primary_count);
         Ok(W3ScenarioResult {
             accepted: true,
-            primary_count,
+            primary_count: observed_requests.max(primary_count),
             secondary_count,
             audit_kinds: self.bob_audit_kinds().await?,
             message: message.to_owned(),
-            request_id: principal.id.to_string(),
+            request_id: principal_id.to_string(),
         })
     }
 
@@ -433,6 +562,14 @@ fn chain_entry(
         batched_flush_ms: 100,
         wire_version: None,
     }
+}
+
+fn w3_message_body() -> serde_json::Value {
+    json!({
+        "model": "claude-3-5-sonnet-20241022",
+        "messages": [{ "role": "user", "content": "w3 plugin chain call" }],
+        "max_tokens": 1,
+    })
 }
 
 fn unix_now_secs() -> u64 {

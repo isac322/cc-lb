@@ -8,6 +8,7 @@ pub mod alice;
 pub mod bob;
 pub mod charlie;
 pub mod dana;
+pub(crate) mod http;
 
 pub use alice::Alice;
 pub use bob::Bob;

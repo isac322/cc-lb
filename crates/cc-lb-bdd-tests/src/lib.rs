@@ -10,6 +10,7 @@
 
 pub mod backend;
 pub mod ctx;
+pub mod harness;
 pub mod persona;
 pub mod results;
 #[macro_use]
@@ -18,7 +19,7 @@ pub mod scenario;
 pub use ctx::BddCtx;
 pub use persona::{Alice, Bob, Charlie, Dana};
 pub use results::{
-    AuditEntrySummary, HealthSnapshot, KillswitchState, PrincipalCreateResult,
+    AuditEntrySummary, HealthSnapshot, HttpResponse, KillswitchState, PrincipalCreateResult,
     PrincipalDisableResult, PrincipalModelAclResult, PrincipalSoftDeleteResult, W1ObservableSpec,
     W1ScenarioEvidence, W2CompatibilityCacheResult, W2CredentialIncidentResult, W2KillswitchResult,
     W2OAuthConsentResult, W2QuotaVisibilityResult, W2UpstreamOutageResult, W2WarmupResult,

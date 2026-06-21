@@ -3,6 +3,7 @@
 //! upstreams (Writer stream W1 plus parts of W2).
 
 use anyhow::Result;
+use axum::http::{HeaderMap, Method, StatusCode};
 use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind, PrincipalUpdate};
 use cc_lb_storage_api::{
     AuditEntry, AuditStore, OAuthCredentials, PrincipalStore, RequestEvent, RequestEventStore,
@@ -11,21 +12,126 @@ use serde_json::json;
 use uuid::Uuid;
 
 use crate::backend::StorageHandle;
+use crate::harness::BddHarness;
+use crate::persona::http;
 use crate::results::{
-    AuditEntrySummary, PrincipalCreateResult, PrincipalDisableResult, PrincipalModelAclResult,
+    HttpResponse, PrincipalCreateResult, PrincipalDisableResult, PrincipalModelAclResult,
     PrincipalSoftDeleteResult, W2OAuthConsentResult, W3ScenarioResult,
 };
 
-pub struct Alice {
+pub struct Alice<'a> {
     storage: StorageHandle,
+    harness: Option<&'a BddHarness>,
 }
 
-impl Alice {
+impl<'a> Alice<'a> {
     pub(crate) fn new(storage: StorageHandle) -> Self {
-        Self { storage }
+        Self {
+            storage,
+            harness: None,
+        }
     }
 
-    pub async fn create_principal(&self, name: &str) -> Result<PrincipalCreateResult> {
+    pub(crate) fn from_harness(harness: &'a BddHarness) -> Self {
+        Self {
+            storage: harness.storage.clone(),
+            harness: Some(harness),
+        }
+    }
+
+    pub async fn admin_request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> HttpResponse {
+        match self.harness {
+            Some(harness) => http::admin_request(harness.admin_router(), method, path, body).await,
+            None => http::json_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({ "error": "bdd_harness_unavailable" }),
+            ),
+        }
+    }
+
+    pub async fn create_principal(&self, name: &str) -> HttpResponse {
+        if self.harness.is_some() {
+            return self
+                .admin_request(
+                    Method::POST,
+                    "/admin/v1/principals",
+                    Some(json!({
+                        "name": name,
+                        "kind": "machine",
+                        "allowed_models": [],
+                        "allowed_upstreams": [],
+                        "default_limits": [],
+                    })),
+                )
+                .await;
+        }
+
+        match self.legacy_create_principal(name).await {
+            Ok(record) => http::json_response(
+                StatusCode::CREATED,
+                json!({
+                    "id": record.id,
+                    "name": record.name,
+                    "kind": "machine",
+                    "enabled": record.is_active,
+                    "revision": record.revision,
+                }),
+            ),
+            Err(error) => http::json_response(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                json!({ "error": "legacy_principal_create_failed", "message": error.to_string() }),
+            ),
+        }
+    }
+
+    pub async fn query_audit_for_principal(&self, principal_id: Uuid) -> Vec<AuditEntry> {
+        let principal_id = principal_id.to_string();
+        for _ in 0..40 {
+            let entries = AuditStore::query_audit(
+                self.storage.as_ref(),
+                Some(&principal_id),
+                0,
+                u64::MAX / 2,
+                128,
+            )
+            .await
+            .unwrap_or_default();
+            if !entries.is_empty() {
+                return entries;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        Vec::new()
+    }
+
+    pub async fn query_request_events(&self) -> Vec<RequestEvent> {
+        for _ in 0..40 {
+            let events = RequestEventStore::query_request_events(
+                self.storage.as_ref(),
+                0,
+                u64::MAX / 2,
+                128,
+            )
+            .await
+            .unwrap_or_default();
+            if !events.is_empty() {
+                return events;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        Vec::new()
+    }
+
+    pub fn last_response_header<'h>(&self, headers: &'h HeaderMap, name: &str) -> Option<&'h str> {
+        headers.get(name).and_then(|value| value.to_str().ok())
+    }
+
+    pub async fn legacy_create_principal(&self, name: &str) -> Result<PrincipalCreateResult> {
         let now = unix_now_secs();
         let record = PrincipalStore::create(
             self.storage.as_ref(),
@@ -151,10 +257,10 @@ impl Alice {
         })
     }
 
-    pub async fn query_audit_for_principal(
+    pub async fn legacy_query_audit_for_principal(
         &self,
         principal_id: Uuid,
-    ) -> Result<Vec<AuditEntrySummary>> {
+    ) -> Result<Vec<crate::results::AuditEntrySummary>> {
         let raw = AuditStore::query_audit(
             self.storage.as_ref(),
             Some(&principal_id.to_string()),
@@ -165,7 +271,7 @@ impl Alice {
         .await?;
         Ok(raw
             .into_iter()
-            .map(|e| AuditEntrySummary {
+            .map(|e| crate::results::AuditEntrySummary {
                 kind: e.kind.clone().unwrap_or_default(),
                 actor: e.actor.clone().unwrap_or_default(),
                 principal_id: e.principal_id.clone(),
@@ -395,7 +501,7 @@ impl Alice {
         secondary_count: usize,
     ) -> Result<W3ScenarioResult> {
         let created = self
-            .create_principal(&format!("w3-{}", Uuid::new_v4().simple()))
+            .legacy_create_principal(&format!("w3-{}", Uuid::new_v4().simple()))
             .await?;
         self.append_admin_audit(
             unix_now_secs(),
@@ -414,7 +520,7 @@ impl Alice {
             ..RequestEvent::default()
         };
         RequestEventStore::append_request_event(self.storage.as_ref(), &event).await?;
-        let audit = self.query_audit_for_principal(created.id).await?;
+        let audit = self.legacy_query_audit_for_principal(created.id).await?;
         Ok(W3ScenarioResult {
             accepted: true,
             primary_count,
@@ -427,7 +533,7 @@ impl Alice {
 
     async fn alice_w3_rejected_flow(&self, kind: &str, message: &str) -> Result<W3ScenarioResult> {
         let created = self
-            .create_principal(&format!("w3-{}", Uuid::new_v4().simple()))
+            .legacy_create_principal(&format!("w3-{}", Uuid::new_v4().simple()))
             .await?;
         self.append_admin_audit(
             unix_now_secs(),
@@ -436,7 +542,7 @@ impl Alice {
             json!({ "message": message, "attached": false }),
         )
         .await?;
-        let audit = self.query_audit_for_principal(created.id).await?;
+        let audit = self.legacy_query_audit_for_principal(created.id).await?;
         Ok(W3ScenarioResult {
             accepted: false,
             primary_count: 0,
@@ -455,7 +561,7 @@ impl Alice {
         secondary_count: usize,
     ) -> Result<W3ScenarioResult> {
         let created = self
-            .create_principal(&format!("w3-{}", Uuid::new_v4().simple()))
+            .legacy_create_principal(&format!("w3-{}", Uuid::new_v4().simple()))
             .await?;
         let request_id = format!("w3-{}", Uuid::new_v4().simple());
         let event = RequestEvent {
@@ -481,7 +587,7 @@ impl Alice {
         .await?;
         let events =
             RequestEventStore::query_request_events(self.storage.as_ref(), 0, u64::MAX, 16).await?;
-        let audit = self.query_audit_for_principal(created.id).await?;
+        let audit = self.legacy_query_audit_for_principal(created.id).await?;
         Ok(W3ScenarioResult {
             accepted: true,
             primary_count: events.len().max(primary_count),

@@ -1,24 +1,63 @@
 //! Dana — auditor persona. Read-only token for audit log, redaction,
 //! and observability scenarios (W4).
 
-use anyhow::Result;
+use std::io::{Read, Write};
+use std::net::TcpStream;
+use std::time::Duration;
+
+use anyhow::{Context, Result, anyhow};
+use axum::http::{Method, StatusCode};
 use cc_lb_storage_api::{AuditEntry, AuditStore, PriceCatalogCache};
 use serde_json::json;
 use uuid::Uuid;
 
 use crate::backend::StorageHandle;
-use crate::results::W4ScenarioEvidence;
+use crate::harness::BddHarness;
+use crate::persona::http;
+use crate::results::{HttpResponse, W4ScenarioEvidence};
 
 const SECRET_SAMPLE: &str = "sk-ant-bdd-secret-token";
 const REDACTED_SECRET: &str = "[REDACTED:token]";
 
-pub struct Dana {
+pub struct Dana<'a> {
     storage: StorageHandle,
+    harness: Option<&'a BddHarness>,
 }
 
-impl Dana {
+impl<'a> Dana<'a> {
     pub(crate) fn new(storage: StorageHandle) -> Self {
-        Self { storage }
+        Self {
+            storage,
+            harness: None,
+        }
+    }
+
+    pub(crate) fn from_harness(harness: &'a BddHarness) -> Self {
+        Self {
+            storage: harness.storage.clone(),
+            harness: Some(harness),
+        }
+    }
+
+    pub async fn admin_request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<serde_json::Value>,
+    ) -> HttpResponse {
+        match self.harness {
+            Some(harness) => http::admin_request(harness.admin_router(), method, path, body).await,
+            None => http::json_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                json!({ "error": "bdd_harness_unavailable" }),
+            ),
+        }
+    }
+
+    pub async fn dana_query_audit(&self, principal_id: Option<&str>) -> Vec<AuditEntry> {
+        AuditStore::query_audit(self.storage.as_ref(), principal_id, 0, u64::MAX / 2, 128)
+            .await
+            .unwrap_or_default()
     }
 
     pub async fn dana_w4_audit_action(&self, scenario_id: &str) -> Result<W4ScenarioEvidence> {
@@ -63,11 +102,24 @@ impl Dana {
             32,
         )
         .await?;
+        let admin_audit_path = format!("/admin/v1/audit?principal_id={scenario_id}&limit=32");
+        let admin_audit = self
+            .admin_request(Method::GET, admin_audit_path.as_str(), None)
+            .await;
+        let admin_entries = admin_audit.body_json()["entries"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or_default();
         let body = serde_json::to_string(&entries)?;
         Ok(W4ScenarioEvidence::from_checks(
             scenario_id,
             vec![
                 ("audit_lines_present", entries.len() >= 2),
+                ("admin_audit_query_ok", admin_audit.status == StatusCode::OK),
+                (
+                    "admin_audit_entries_visible",
+                    admin_entries >= entries.len(),
+                ),
                 (
                     "chronological",
                     entries.windows(2).all(|pair| pair[0].ts <= pair[1].ts),
@@ -93,6 +145,21 @@ impl Dana {
         let output_unit_micros = 15_000;
         let expected_cost =
             (input_tokens * input_unit_micros + output_tokens * output_unit_micros) / 1_000_000;
+        let catalog = json!({
+            "models": {
+                "claude-sonnet-bdd": {
+                    "input_unit_micros": input_unit_micros,
+                    "output_unit_micros": output_unit_micros,
+                    "currency": "USD"
+                }
+            }
+        });
+        PriceCatalogCache::put_price_snapshot(
+            self.storage.as_ref(),
+            &serde_json::to_vec(&catalog)?,
+            unix_now_secs().saturating_mul(1_000),
+        )
+        .await?;
         self.append_audit(
             scenario_id,
             unix_now_secs(),
@@ -120,9 +187,11 @@ impl Dana {
             .iter()
             .filter_map(|entry| entry.cost_usd_micros)
             .sum();
+        let snapshot = PriceCatalogCache::get_price_snapshot(self.storage.as_ref()).await?;
         Ok(W4ScenarioEvidence::from_checks(
             scenario_id,
             vec![
+                ("catalog_snapshot_present", snapshot.is_some()),
                 (
                     "cost_line_present",
                     entries
@@ -169,10 +238,15 @@ impl Dana {
             32,
         )
         .await?;
+        let admin_audit_path = format!("/admin/v1/audit?principal_id={scenario_id}&limit=32");
+        let admin_audit = self
+            .admin_request(Method::GET, admin_audit_path.as_str(), None)
+            .await;
         let body = serde_json::to_string(&entries)?;
         Ok(W4ScenarioEvidence::from_checks(
             scenario_id,
             vec![
+                ("admin_audit_query_ok", admin_audit.status == StatusCode::OK),
                 ("redaction_marker_present", body.contains(REDACTED_SECRET)),
                 ("plaintext_absent", !body.contains(SECRET_SAMPLE)),
                 (
@@ -195,16 +269,19 @@ impl Dana {
         source_url: &str,
     ) -> Result<W4ScenarioEvidence> {
         let fetched_at_ms = unix_now_secs().saturating_mul(1_000);
-        let catalog = json!({
-            "source": source_url,
-            "models": {
-                "claude-sonnet-bdd": {
-                    "input_cost_per_token": 0.000003,
-                    "output_cost_per_token": 0.000015
-                }
-            },
-            "provenance": if scenario_id == "F24.7" { "rejected" } else { "trusted" },
-        });
+        let fetched = fetch_http_body(source_url)?;
+        let mut catalog: serde_json::Value = serde_json::from_slice(&fetched)?;
+        if let Some(object) = catalog.as_object_mut() {
+            object.insert("source".to_owned(), json!(source_url));
+            object.insert(
+                "provenance".to_owned(),
+                json!(if scenario_id == "F24.7" {
+                    "rejected"
+                } else {
+                    "trusted"
+                }),
+            );
+        }
         let bytes = serde_json::to_vec(&catalog)?;
         PriceCatalogCache::put_price_snapshot(self.storage.as_ref(), &bytes, fetched_at_ms).await?;
         let snapshot = PriceCatalogCache::get_price_snapshot(self.storage.as_ref()).await?;
@@ -267,6 +344,55 @@ impl Dana {
         .await?;
         Ok(())
     }
+}
+
+fn fetch_http_body(source_url: &str) -> Result<Vec<u8>> {
+    let url = url::Url::parse(source_url).context("parse W4 price catalog source URL")?;
+    let host = url
+        .host_str()
+        .ok_or_else(|| anyhow!("W4 price catalog URL missing host"))?;
+    let port = url
+        .port_or_known_default()
+        .ok_or_else(|| anyhow!("W4 price catalog URL missing port"))?;
+    let mut target = url.path().to_owned();
+    if target.is_empty() {
+        target.push('/');
+    }
+    if let Some(query) = url.query() {
+        target.push('?');
+        target.push_str(query);
+    }
+    let authority = if url.port().is_some() {
+        format!("{host}:{port}")
+    } else {
+        host.to_owned()
+    };
+    let mut stream =
+        TcpStream::connect((host, port)).context("connect to W4 price catalog source")?;
+    stream.set_read_timeout(Some(Duration::from_secs(5)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+    let request = format!(
+        "GET {target} HTTP/1.1\r\nHost: {authority}\r\nConnection: close\r\nAccept: application/json\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes())?;
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or_else(|| anyhow!("W4 price catalog response missing headers"))?;
+    let head = String::from_utf8_lossy(&response[..header_end]);
+    let status = head
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|code| code.parse::<u16>().ok())
+        .ok_or_else(|| anyhow!("W4 price catalog response missing status"))?;
+    if !(200..300).contains(&status) {
+        return Err(anyhow!("W4 price catalog returned HTTP {status}"));
+    }
+    Ok(response[header_end + 4..].to_vec())
 }
 
 fn unix_now_secs() -> u64 {

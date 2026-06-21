@@ -2,7 +2,27 @@
 //! types referenced verbatim in the `then` closures of `bdd_scenario!`
 //! invocations and therefore form part of the test surface.
 
+use axum::http::{HeaderMap, StatusCode};
+use bytes::Bytes;
+use serde_json::Value;
 use uuid::Uuid;
+
+#[derive(Debug, Clone)]
+pub struct HttpResponse {
+    pub status: StatusCode,
+    pub headers: HeaderMap,
+    pub body: Bytes,
+}
+
+impl HttpResponse {
+    pub fn body_json(&self) -> Value {
+        serde_json::from_slice(&self.body).unwrap_or(Value::Null)
+    }
+
+    pub fn body_text(&self) -> String {
+        String::from_utf8_lossy(&self.body).to_string()
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct W1ObservableSpec {

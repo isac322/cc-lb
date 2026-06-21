@@ -104,7 +104,9 @@ macro_rules! bdd_scenario {
             #[tokio::test]
             async fn sqlite() -> ::anyhow::Result<()> {
                 let ctx = $crate::BddCtx::new_sqlite(SCENARIO_ID, PERSONA).await?;
-                body(&ctx).await
+                body(&ctx).await?;
+                ctx.finish();
+                Ok(())
             }
 
             #[cfg(feature = "postgres")]
@@ -114,7 +116,9 @@ macro_rules! bdd_scenario {
                     eprintln!("[{}] skip: CI_POSTGRES_URL not set", SCENARIO_ID,);
                     return Ok(());
                 };
-                body(&ctx).await
+                body(&ctx).await?;
+                ctx.finish();
+                Ok(())
             }
         }
     };

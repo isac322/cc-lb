@@ -5,6 +5,8 @@
 //! and is dropped (releasing the tempfile / postgres schema) when the
 //! test function returns.
 
+use std::cell::RefCell;
+
 use anyhow::Result;
 use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind};
 use cc_lb_storage_api::{AuditEntry, AuditStore, PrincipalStore, RequestEvent, RequestEventStore};
@@ -13,6 +15,7 @@ use uuid::Uuid;
 
 use crate::Persona;
 use crate::backend::{StorageFixture, StorageHandle, bootstrap_sqlite};
+use crate::harness::BddHarness;
 use crate::persona::{Alice, Bob, Charlie, Dana};
 use crate::results::{W1ObservableSpec, W1ScenarioEvidence};
 
@@ -22,19 +25,42 @@ pub struct BddCtx {
     scenario_id: &'static str,
     persona: Persona,
     storage: StorageHandle,
-    _fixture: StorageFixture,
+    _fixture: Option<StorageFixture>,
+    bdd_harness: Option<BddHarness>,
+    failures: RefCell<Vec<String>>,
 }
 
 impl BddCtx {
     /// Create a fresh SQLite-backed context. Used by the macro-emitted
     /// `sqlite` test function.
     pub async fn new_sqlite(scenario_id: &'static str, persona: Persona) -> Result<Self> {
+        Self::new_sqlite_with_harness(scenario_id, persona).await
+    }
+
+    pub async fn new_sqlite_with_harness(
+        scenario_id: &'static str,
+        persona: Persona,
+    ) -> Result<Self> {
+        let harness = BddHarness::spawn_sqlite().await?;
+        Ok(Self {
+            scenario_id,
+            persona,
+            storage: harness.storage.clone(),
+            _fixture: None,
+            bdd_harness: Some(harness),
+            failures: RefCell::new(Vec::new()),
+        })
+    }
+
+    pub async fn new_sqlite_legacy(scenario_id: &'static str, persona: Persona) -> Result<Self> {
         let (storage, fixture) = bootstrap_sqlite().await?;
         Ok(Self {
             scenario_id,
             persona,
             storage,
-            _fixture: fixture,
+            _fixture: Some(fixture),
+            bdd_harness: None,
+            failures: RefCell::new(Vec::new()),
         })
     }
 
@@ -46,14 +72,24 @@ impl BddCtx {
     /// `cargo test`.
     #[cfg(feature = "postgres")]
     pub async fn new_postgres(scenario_id: &'static str, persona: Persona) -> Result<Option<Self>> {
-        let Some((storage, fixture)) = crate::backend::bootstrap_postgres().await? else {
+        Self::new_postgres_with_harness(scenario_id, persona).await
+    }
+
+    #[cfg(feature = "postgres")]
+    pub async fn new_postgres_with_harness(
+        scenario_id: &'static str,
+        persona: Persona,
+    ) -> Result<Option<Self>> {
+        let Some(harness) = BddHarness::spawn_postgres().await? else {
             return Ok(None);
         };
         Ok(Some(Self {
             scenario_id,
             persona,
-            storage,
-            _fixture: fixture,
+            storage: harness.storage.clone(),
+            _fixture: None,
+            bdd_harness: Some(harness),
+            failures: RefCell::new(Vec::new()),
         }))
     }
 
@@ -72,28 +108,40 @@ impl BddCtx {
     /// Alice — operator. Holds admin privileges; default actor for
     /// principal / key / upstream registration and day-to-day
     /// configuration scenarios in writer stream W1.
-    pub async fn alice(&self) -> Alice {
-        Alice::new(self.storage.clone())
+    pub async fn alice(&self) -> Alice<'_> {
+        match self.bdd_harness.as_ref() {
+            Some(harness) => Alice::from_harness(harness),
+            None => Alice::new(self.storage.clone()),
+        }
     }
 
     /// Bob — developer / plugin author. Carries a per-principal API
     /// key; default actor for the plugin authoring and developer flow
     /// scenarios in writer streams W3 and parts of W1.
-    pub async fn bob(&self) -> Bob {
-        Bob::new(self.storage.clone())
+    pub async fn bob(&self) -> Bob<'_> {
+        match self.bdd_harness.as_ref() {
+            Some(harness) => Bob::from_harness(harness),
+            None => Bob::new(self.storage.clone()),
+        }
     }
 
     /// Charlie — SRE. Admin token; default actor for incident
     /// response, drain, multi-replica, backend parity, and warmup
     /// lease scenarios in writer stream W2 and parts of W4.
-    pub async fn charlie(&self) -> Charlie {
-        Charlie::new(self.storage.clone())
+    pub async fn charlie(&self) -> Charlie<'_> {
+        match self.bdd_harness.as_ref() {
+            Some(harness) => Charlie::from_harness(harness),
+            None => Charlie::new(self.storage.clone()),
+        }
     }
 
     /// Dana — auditor. Read-only token; default actor for audit log,
     /// redaction, and observability scenarios in writer stream W4.
-    pub async fn dana(&self) -> Dana {
-        Dana::new(self.storage.clone())
+    pub async fn dana(&self) -> Dana<'_> {
+        match self.bdd_harness.as_ref() {
+            Some(harness) => Dana::from_harness(harness),
+            None => Dana::new(self.storage.clone()),
+        }
     }
 
     /// Assertion helper that prefixes every failure message with the
@@ -109,6 +157,25 @@ impl BddCtx {
                 self.persona.label(),
                 message.as_ref()
             );
+        }
+    }
+
+    pub fn defer_assert(&self, condition: bool, message: impl AsRef<str>) {
+        if !condition {
+            self.failures.borrow_mut().push(format!(
+                "[{} · {}] {}",
+                self.scenario_id,
+                self.persona.label(),
+                message.as_ref()
+            ));
+        }
+    }
+
+    #[track_caller]
+    pub fn finish(&self) {
+        let failures = self.failures.borrow();
+        if !failures.is_empty() {
+            panic!("{}", failures.join("\n"));
         }
     }
 

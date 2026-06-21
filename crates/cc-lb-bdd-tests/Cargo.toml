@@ -18,7 +18,13 @@ postgres = ["dep:cc-lb-storage-postgres", "dep:sqlx"]
 sqlite = []
 
 [dependencies]
+cc-lb-aead = { path = "../cc-lb-aead" }
+cc-lb-admin = { path = "../cc-lb-admin" }
+cc-lb-config = { path = "../cc-lb-config" }
 cc-lb-core = { path = "../cc-lb-core" }
+cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
+cc-lb-runtime-extism = { path = "../cc-lb-runtime-extism" }
+cc-lb-server = { path = "../cc-lb-server" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
 cc-lb-storage-postgres = { path = "../cc-lb-storage-postgres", optional = true }
@@ -26,12 +32,21 @@ sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-
 
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+axum = { workspace = true }
+bytes = { workspace = true }
+chrono = { workspace = true }
+fake-anthropic = { path = "../../tests/fixtures/fake-anthropic" }
+http = { workspace = true }
+http-body-util = { workspace = true }
+mock-anthropic-oauth-server = { path = "../../tests/fixtures/mock-anthropic-oauth-server" }
 serde_json = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
+sha2 = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "net"] }
+tower = { workspace = true }
+url = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 tempfile = { workspace = true }
-url = { workspace = true }
+wiremock = "0.6"
 
 [dev-dependencies]
 # Integration tests under tests/w<N>.rs use the same crate as a library.
-wiremock = "0.6"
