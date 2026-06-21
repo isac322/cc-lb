@@ -26,12 +26,14 @@ async fn sqlite_cron_producer_runs_after_partial_idempotency_index()
         ),
     });
     let cancel = CancellationToken::new();
-    let handles = backend.spawn(
-        fast_singleton_config(),
-        SchedulerCtx::default(),
-        Arc::new(LeaderElection::sqlite()),
-        cancel.clone(),
-    )?;
+    let handles = backend
+        .spawn(
+            fast_singleton_config(),
+            SchedulerCtx::default(),
+            Arc::new(LeaderElection::sqlite()),
+            cancel.clone(),
+        )
+        .await?;
 
     let done_count = wait_for_done_singleton(&pool).await;
     cancel.cancel();
