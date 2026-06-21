@@ -143,6 +143,8 @@ struct UpstreamResponse {
 struct UpstreamStatusResponse {
     last_apply_error: Option<String>,
     last_apply_at_unix_secs: Option<u64>,
+    next_warmup_at: Option<chrono::DateTime<chrono::Utc>>,
+    last_warmup_cycle_key: Option<i64>,
 }
 
 #[derive(Clone)]
@@ -980,6 +982,8 @@ fn upstream_response(record: &UpstreamRecord) -> UpstreamResponse {
         status: UpstreamStatusResponse {
             last_apply_error: record.last_apply_error.clone(),
             last_apply_at_unix_secs: record.last_apply_at_unix_secs,
+            next_warmup_at: record.next_warmup_at,
+            last_warmup_cycle_key: record.last_warmup_cycle_key,
         },
     }
 }
