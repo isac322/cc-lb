@@ -2,13 +2,14 @@
 use std::collections::HashMap;
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
+use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use axum::body::Bytes;
+use axum::body::{Body, Bytes};
 use axum::extract::{DefaultBodyLimit, Path, State};
-use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, RETRY_AFTER};
+use axum::http::header::{ACCEPT, AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use axum::http::{HeaderMap, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
@@ -51,9 +52,13 @@ pub struct MessageScript {
 
 struct MessageScriptInner {
     responses: Mutex<VecDeque<ScriptedMessageResponse>>,
+    conditionals: Mutex<Vec<ConditionalMessageResponse>>,
     requests: Mutex<Vec<RecordedMessageRequest>>,
     notify: Notify,
 }
+
+type ConditionalMessageResponse =
+    Box<dyn Fn(&RecordedMessageRequest) -> Option<ScriptedMessageResponse> + Send + Sync>;
 
 #[derive(Clone, Debug)]
 pub struct RecordedMessageRequest {
@@ -63,11 +68,35 @@ pub struct RecordedMessageRequest {
 }
 
 #[derive(Clone, Debug)]
-pub struct ScriptedMessageResponse {
-    pub status: StatusCode,
-    pub headers: BTreeMap<String, String>,
-    pub body: Value,
-    pub delay: Duration,
+pub struct SseEvent {
+    pub event_type: String,
+    pub data: String,
+}
+
+#[non_exhaustive]
+#[derive(Clone, Debug)]
+pub enum ScriptedMessageResponse {
+    Json(Value),
+    Error {
+        status: StatusCode,
+        error_type: String,
+        message: String,
+    },
+    Sse(Vec<SseEvent>),
+    DropAfterBytes(Vec<u8>, usize),
+    Detailed {
+        status: StatusCode,
+        headers: BTreeMap<String, String>,
+        body: ScriptedResponseBody,
+        delay: Duration,
+    },
+}
+
+#[derive(Clone, Debug)]
+pub enum ScriptedResponseBody {
+    Json(Value),
+    Sse(Vec<SseEvent>),
+    DropAfterBytes(Vec<u8>, usize),
 }
 
 impl Default for MessageScript {
@@ -75,6 +104,7 @@ impl Default for MessageScript {
         Self {
             inner: Arc::new(MessageScriptInner {
                 responses: Mutex::new(VecDeque::new()),
+                conditionals: Mutex::new(Vec::new()),
                 requests: Mutex::new(Vec::new()),
                 notify: Notify::new(),
             }),
@@ -93,6 +123,14 @@ impl MessageScript {
             .lock()
             .expect("message script response lock")
             .push_back(response);
+    }
+
+    pub fn push_conditional(&self, predicate: ConditionalMessageResponse) {
+        self.inner
+            .conditionals
+            .lock()
+            .expect("message script conditional lock")
+            .push(predicate);
     }
 
     pub fn requests(&self) -> Vec<RecordedMessageRequest> {
@@ -124,7 +162,7 @@ impl MessageScript {
         .is_ok()
     }
 
-    fn record(&self, headers: &HeaderMap, body: &Bytes) {
+    fn record(&self, headers: &HeaderMap, body: &Bytes) -> RecordedMessageRequest {
         let headers = headers
             .iter()
             .filter_map(|(name, value)| {
@@ -135,24 +173,41 @@ impl MessageScript {
             })
             .collect::<BTreeMap<_, _>>();
         let body_json = serde_json::from_slice::<Value>(body).unwrap_or(Value::Null);
+        let request = RecordedMessageRequest {
+            headers,
+            body: body.to_vec(),
+            body_json,
+        };
         self.inner
             .requests
             .lock()
             .expect("message script request lock")
-            .push(RecordedMessageRequest {
-                headers,
-                body: body.to_vec(),
-                body_json,
-            });
+            .push(request.clone());
         self.inner.notify.notify_waiters();
+        request
     }
 
-    fn pop_response(&self) -> Option<ScriptedMessageResponse> {
+    fn response_for(&self, request: &RecordedMessageRequest) -> Option<ScriptedMessageResponse> {
+        if let Some(response) = self.conditional_response(request) {
+            return Some(response);
+        }
         self.inner
             .responses
             .lock()
             .expect("message script response lock")
             .pop_front()
+    }
+
+    fn conditional_response(
+        &self,
+        request: &RecordedMessageRequest,
+    ) -> Option<ScriptedMessageResponse> {
+        self.inner
+            .conditionals
+            .lock()
+            .expect("message script conditional lock")
+            .iter()
+            .find_map(|predicate| predicate(request))
     }
 }
 
@@ -167,61 +222,76 @@ impl fmt::Debug for MessageScript {
 
 impl ScriptedMessageResponse {
     pub fn ok() -> Self {
-        Self {
-            status: StatusCode::OK,
-            headers: BTreeMap::new(),
-            body: json!({
-                "id": "msg_fake_warmup_000000000000000000",
-                "type": "message",
-                "role": "assistant",
-                "model": "claude-haiku-4-5-20251001",
-                "content": [{
-                    "type": "text",
-                    "text": "fake anthropic fixture response HELLO"
-                }],
-                "stop_reason": "end_turn",
-                "stop_sequence": null,
-                "usage": {
-                    "input_tokens": 1,
-                    "output_tokens": 1
-                }
-            }),
-            delay: Duration::ZERO,
-        }
+        Self::Json(json!({
+            "id": "msg_fake_warmup",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-haiku-4-5-20251001",
+            "content": [{
+                "type": "text",
+                "text": "HELLO"
+            }],
+            "stop_reason": "end_turn",
+            "stop_sequence": null,
+            "usage": {
+                "input_tokens": 1,
+                "output_tokens": 1
+            }
+        }))
     }
 
     pub fn error(status: StatusCode, error_type: &str, message: &str) -> Self {
-        Self {
+        Self::Error {
             status,
-            headers: BTreeMap::new(),
-            body: json!({
-                "type": "error",
-                "error": {
-                    "type": error_type,
-                    "message": message
-                }
-            }),
-            delay: Duration::ZERO,
+            error_type: error_type.to_owned(),
+            message: message.to_owned(),
         }
     }
 
-    pub fn with_header(mut self, name: impl Into<String>, value: impl Into<String>) -> Self {
-        self.headers.insert(name.into(), value.into());
-        self
+    pub fn sse(events: Vec<SseEvent>) -> Self {
+        Self::Sse(events)
     }
 
-    pub fn with_delay(mut self, delay: Duration) -> Self {
-        self.delay = delay;
-        self
+    pub fn drop_after_bytes(bytes: Vec<u8>, after_bytes: usize) -> Self {
+        Self::DropAfterBytes(bytes, after_bytes)
+    }
+
+    pub fn with_header(self, name: impl Into<String>, value: impl Into<String>) -> Self {
+        let mut details = self.into_details();
+        details.headers.insert(name.into(), value.into());
+        Self::Detailed {
+            status: details.status,
+            headers: details.headers,
+            body: details.body,
+            delay: details.delay,
+        }
+    }
+
+    pub fn with_delay(self, delay: Duration) -> Self {
+        let mut details = self.into_details();
+        details.delay = delay;
+        Self::Detailed {
+            status: details.status,
+            headers: details.headers,
+            body: details.body,
+            delay: details.delay,
+        }
     }
 
     async fn into_response(self) -> Response {
-        if self.delay > Duration::ZERO {
-            sleep(self.delay).await;
+        let details = self.into_details();
+        if details.delay > Duration::ZERO {
+            sleep(details.delay).await;
         }
-        let mut response = Json(self.body).into_response();
-        *response.status_mut() = self.status;
-        for (name, value) in self.headers {
+        let mut response = match details.body {
+            ScriptedResponseBody::Json(body) => Json(body).into_response(),
+            ScriptedResponseBody::Sse(events) => sse_script_response(events),
+            ScriptedResponseBody::DropAfterBytes(bytes, after_bytes) => {
+                drop_after_bytes_response(bytes, after_bytes)
+            }
+        };
+        *response.status_mut() = details.status;
+        for (name, value) in details.headers {
             if let (Ok(name), Ok(value)) = (
                 http::header::HeaderName::from_bytes(name.as_bytes()),
                 HeaderValue::from_str(&value),
@@ -231,6 +301,96 @@ impl ScriptedMessageResponse {
         }
         with_fixture_headers(response)
     }
+
+    fn into_details(self) -> ScriptedResponseDetails {
+        match self {
+            Self::Json(body) => {
+                ScriptedResponseDetails::new(StatusCode::OK, ScriptedResponseBody::Json(body))
+            }
+            Self::Error {
+                status,
+                error_type,
+                message,
+            } => ScriptedResponseDetails::new(
+                status,
+                ScriptedResponseBody::Json(json!({
+                    "type": "error",
+                    "error": {
+                        "type": error_type,
+                        "message": message
+                    }
+                })),
+            ),
+            Self::Sse(events) => {
+                ScriptedResponseDetails::new(StatusCode::OK, ScriptedResponseBody::Sse(events))
+            }
+            Self::DropAfterBytes(bytes, after_bytes) => ScriptedResponseDetails::new(
+                StatusCode::OK,
+                ScriptedResponseBody::DropAfterBytes(bytes, after_bytes),
+            ),
+            Self::Detailed {
+                status,
+                headers,
+                body,
+                delay,
+            } => ScriptedResponseDetails {
+                status,
+                headers,
+                body,
+                delay,
+            },
+        }
+    }
+}
+
+struct ScriptedResponseDetails {
+    status: StatusCode,
+    headers: BTreeMap<String, String>,
+    body: ScriptedResponseBody,
+    delay: Duration,
+}
+
+impl ScriptedResponseDetails {
+    fn new(status: StatusCode, body: ScriptedResponseBody) -> Self {
+        Self {
+            status,
+            headers: BTreeMap::new(),
+            body,
+            delay: Duration::ZERO,
+        }
+    }
+}
+
+fn sse_script_response(events: Vec<SseEvent>) -> Response {
+    let stream = async_stream::stream! {
+        for event in events {
+            yield Ok::<_, io::Error>(Bytes::from(format!(
+                "event: {}\ndata: {}\n\n",
+                event.event_type, event.data
+            )));
+        }
+    };
+    let mut response = Response::new(Body::from_stream(stream));
+    response.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_static("text/event-stream; charset=utf-8"),
+    );
+    response
+}
+
+fn drop_after_bytes_response(bytes: Vec<u8>, after_bytes: usize) -> Response {
+    let bytes_to_send = bytes.len().min(after_bytes);
+    let chunk = Bytes::from(bytes[..bytes_to_send].to_vec());
+    let stream = async_stream::stream! {
+        if !chunk.is_empty() {
+            yield Ok::<_, io::Error>(chunk);
+        }
+        yield Err::<Bytes, _>(io::Error::new(
+            io::ErrorKind::ConnectionAborted,
+            "scripted fake-anthropic connection drop",
+        ));
+    };
+    Response::new(Body::from_stream(stream))
 }
 
 #[derive(Debug)]
@@ -376,8 +536,8 @@ async fn messages(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
     }
 
     if let Some(script) = state.config.message_script.as_ref() {
-        script.record(&headers, &body);
-        if let Some(response) = script.pop_response() {
+        let recorded = script.record(&headers, &body);
+        if let Some(response) = script.response_for(&recorded) {
             return response.into_response().await;
         }
     }
@@ -399,13 +559,13 @@ async fn messages(State(state): State<Arc<AppState>>, headers: HeaderMap, body: 
     }
 
     let response_body = json!({
-        "id": "msg_fake_000000000000000000000000",
+        "id": "msg_fake",
         "type": "message",
         "role": "assistant",
         "model": model,
         "content": [{
             "type": "text",
-            "text": "fake anthropic fixture response HELLO"
+            "text": "HELLO"
         }],
         "stop_reason": "end_turn",
         "stop_sequence": null,

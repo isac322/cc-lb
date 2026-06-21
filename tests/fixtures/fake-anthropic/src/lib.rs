@@ -5,4 +5,6 @@ pub mod oauth;
 pub mod routes;
 pub mod sse;
 
-pub use routes::{AppConfig, MessageScript, RecordedMessageRequest, ScriptedMessageResponse, app};
+pub use routes::{
+    AppConfig, MessageScript, RecordedMessageRequest, ScriptedMessageResponse, SseEvent, app,
+};

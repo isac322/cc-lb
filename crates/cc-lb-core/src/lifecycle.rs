@@ -34,7 +34,7 @@ use cc_lb_storage_api::{
     },
     upstream::UpstreamKind as StorageUpstreamKind,
 };
-use http::header::{CONTENT_TYPE, RETRY_AFTER};
+use http::header::{CONTENT_LENGTH, CONTENT_TYPE, RETRY_AFTER};
 use http::{HeaderMap, HeaderName, HeaderValue, Request, Response, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper_util::client::legacy::Client;
@@ -65,6 +65,7 @@ use crate::rate_limit_headers::{
 use crate::request_timing::{
     REQUEST_STAGE_TIMINGS, RequestStageTimings, finalize_connection_reused_if_unset,
 };
+use crate::sse_error_frame::make_error_frame;
 use crate::sse_relay;
 use crate::subscription_metadata_hook::{MetadataHookHandle, MetadataHookRequest};
 use crate::subscription_quota_events::SubscriptionQuotaSink;
@@ -1309,6 +1310,44 @@ impl Lifecycle {
             Err(response) => {
                 let mut response = *response;
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
+                if let (Some(storage), Some(active_limit)) =
+                    (self.request_event_storage.as_ref(), active_limit.as_ref())
+                {
+                    let now_ms = unix_now_ms();
+                    let event = RequestEvent {
+                        ts: now_ms / 1_000,
+                        ts_ms: Some(now_ms),
+                        request_id: ctx.request_id.clone(),
+                        principal_id: Some(active_limit.subject.principal_id.clone()),
+                        key_id: Some(active_limit.subject.key_id.clone()),
+                        principal_kind: Some(principal_kind_as_str(&principal.kind).to_owned()),
+                        upstream_id: Some(resolved_upstream_id),
+                        upstream_name: Some(router_chosen_upstream_name.clone()),
+                        model: Some(active_limit.request.model.clone()),
+                        auth_ms: attempt_timings.auth_ms,
+                        route_ms: attempt_timings.route_ms,
+                        limit_reserve_ms: attempt_timings.limit_reserve_ms,
+                        bulkhead_wait_ms: attempt_timings.bulkhead_wait_ms,
+                        dns_ms: attempt_timings.dns_ms,
+                        connect_ms: attempt_timings.connect_ms,
+                        connection_reused: attempt_timings.connection_reused,
+                        proxy_setup_ms: Some(proxy_setup_ms),
+                        shape_ms: attempt_timings.shape_ms,
+                        sign_ms: attempt_timings.sign_ms,
+                        upstream_ttfb_ms: attempt_timings.upstream_ttfb_ms,
+                        duration_ms: duration_to_ms(started.elapsed()),
+                        status: response.status().as_u16(),
+                        error_code: Some("upstream_body_interrupted".to_owned()),
+                        routing_trace: Some(
+                            pipeline_result.routing_trace(terminal_decision.clone()),
+                        ),
+                        internal_errors: internal_errors.clone(),
+                        ..Default::default()
+                    };
+                    if let Err(error) = storage.append_request_event(&event).await {
+                        tracing::warn!(%error, "failed to append upstream error request event");
+                    }
+                }
                 observe_finished_for_principal(
                     hooks,
                     response.status(),
@@ -1428,6 +1467,7 @@ impl Lifecycle {
                 &metric_context,
                 started.elapsed(),
                 status,
+                body_cap_for_path(&self.config, &ctx.path),
                 hooks,
                 stream_hooks,
                 RequestEventContext {
@@ -1527,6 +1567,7 @@ impl Lifecycle {
         metric_context: &ApiKeyMetricContext,
         duration: Duration,
         status: StatusCode,
+        response_body_cap_bytes: usize,
         hooks: &[Arc<dyn ObservabilityHook>],
         stream_hooks: StreamHooks,
         event_ctx: RequestEventContext,
@@ -1543,6 +1584,7 @@ impl Lifecycle {
                 response,
                 response_status,
                 Instant::now() - duration,
+                response_body_cap_bytes,
                 stream_hooks,
                 active_limit.take(),
                 metric_context.clone(),
@@ -1558,6 +1600,8 @@ impl Lifecycle {
         let mut first_body_chunk_at: Option<Instant> = None;
         let mut body_buf: Vec<u8> = Vec::new();
         let mut body_chunk_count: u64 = 0;
+        let mut final_status = status;
+        let mut error_code = None;
         while let Some(frame) = body.frame().await {
             match frame {
                 Ok(frame) => {
@@ -1566,11 +1610,38 @@ impl Lifecycle {
                             first_body_chunk_at = Some(Instant::now());
                         }
                         body_chunk_count = body_chunk_count.saturating_add(1);
+                        if body_buf.len().saturating_add(data.len()) > response_body_cap_bytes {
+                            final_status = StatusCode::PAYLOAD_TOO_LARGE;
+                            error_code = Some("body_too_large".to_owned());
+                            body_buf = anthropic_error_body_bytes(
+                                "body_too_large",
+                                "response body exceeds configured cap",
+                            )
+                            .to_vec();
+                            break;
+                        }
                         body_buf.extend_from_slice(&data);
                     }
                 }
-                Err(_source) => break,
+                Err(_source) => {
+                    final_status = StatusCode::BAD_GATEWAY;
+                    error_code = Some("upstream_body_interrupted".to_owned());
+                    body_buf = anthropic_error_body_bytes(
+                        "api_error",
+                        "the response was interrupted midway",
+                    )
+                    .to_vec();
+                    break;
+                }
             }
+        }
+        parts.status = final_status;
+        if error_code.is_some() {
+            parts.headers.remove(CONTENT_LENGTH);
+            parts.headers.insert(
+                CONTENT_TYPE,
+                HeaderValue::from_static("application/json; charset=utf-8"),
+            );
         }
         let body = Bytes::from(body_buf);
         let body_collect_ms = duration_to_ms(body_collect_started.elapsed());
@@ -1578,7 +1649,7 @@ impl Lifecycle {
             .map(|t| duration_to_ms(t.saturating_duration_since(body_collect_started)));
         tracing::info!(
             request_id = %event_ctx.request_id,
-            status = status.as_u16(),
+            status = final_status.as_u16(),
             proxy_setup_ms = event_ctx.proxy_setup_ms,
             shape_ms = ?event_ctx.stage_timings.shape_ms,
             sign_ms = ?event_ctx.stage_timings.sign_ms,
@@ -1597,7 +1668,7 @@ impl Lifecycle {
                 PromptCacheUsage::from(&usage),
             );
             record_prompt_cache_observations_for_response_status(
-                status,
+                final_status,
                 prompt_cache_observation_context.as_ref(),
                 PromptCacheUsage::from(&usage),
             );
@@ -1607,7 +1678,7 @@ impl Lifecycle {
             observe_many(
                 hooks,
                 ObserveEvent::RequestFinished {
-                    status,
+                    status: final_status,
                     input_tokens: Some(usage.input_tokens),
                     output_tokens: Some(usage.output_tokens),
                     cache_creation_input_tokens: Some(usage.cache_creation_input_tokens),
@@ -1619,7 +1690,8 @@ impl Lifecycle {
         } else {
             None
         };
-        if status == StatusCode::OK && !event_ctx.cache_metadata.cache_breakpoints.is_empty() {
+        if final_status == StatusCode::OK && !event_ctx.cache_metadata.cache_breakpoints.is_empty()
+        {
             let upstream = event_ctx.upstream_name.as_deref().unwrap_or("unknown");
             let model = &event_ctx.cache_metadata.canonical_model_id;
             if usage.cache_read_input_tokens > 0 {
@@ -1719,7 +1791,8 @@ impl Lifecycle {
                 first_body_chunk_ms,
                 body_chunk_count: Some(body_chunk_count),
                 body_bytes: Some(body.len() as u64),
-                status: status.as_u16(),
+                status: final_status.as_u16(),
+                error_code: error_code.clone(),
                 routing_trace: event_ctx.routing_trace.clone(),
                 internal_errors: event_ctx.internal_errors.clone(),
                 ..Default::default()
@@ -1961,7 +2034,7 @@ impl Lifecycle {
                 | DispatchError::Transport { .. } => Box::new(anthropic_error_response(
                     StatusCode::BAD_GATEWAY,
                     "api_error",
-                    "upstream request failed",
+                    "the response was interrupted midway",
                 )),
             }
         })?;
@@ -1976,6 +2049,7 @@ impl Lifecycle {
         response: Response<Body>,
         status: StatusCode,
         started: Instant,
+        response_body_cap_bytes: usize,
         hooks: StreamHooks,
         active_limit: Option<ActiveLimit>,
         metric_context: ApiKeyMetricContext,
@@ -2007,6 +2081,8 @@ impl Lifecycle {
             let mut content_delta_count: u64 = 0;
             let mut ping_count: u64 = 0;
             let mut total_bytes: u64 = 0;
+            let mut final_status = status;
+            let mut error_code: Option<String> = None;
             while let Some(frame) = body.frame().await {
                 match frame {
                     Ok(frame) => {
@@ -2016,7 +2092,17 @@ impl Lifecycle {
                                 first_chunk_at = Some(now);
                             }
                             last_chunk_at = Some(now);
-                            total_bytes = total_bytes.saturating_add(data.len() as u64);
+                            let next_total_bytes = total_bytes.saturating_add(data.len() as u64);
+                            if next_total_bytes > response_body_cap_bytes as u64 {
+                                final_status = StatusCode::PAYLOAD_TOO_LARGE;
+                                error_code = Some("body_too_large".to_owned());
+                                yield Ok::<Bytes, Infallible>(make_error_frame(
+                                    "body_too_large",
+                                    "response body exceeds configured cap",
+                                ));
+                                break;
+                            }
+                            total_bytes = next_total_bytes;
                             buffer.extend_from_slice(&data);
                             while let Some(end) = sse_relay::find_sse_event_end(&buffer) {
                                 let raw = buffer.drain(..end).collect::<Vec<u8>>();
@@ -2109,10 +2195,18 @@ impl Lifecycle {
                             yield Ok::<Bytes, Infallible>(data);
                         }
                     }
-                    Err(_source) => break,
+                    Err(_source) => {
+                        final_status = StatusCode::BAD_GATEWAY;
+                        error_code = Some("upstream_body_interrupted".to_owned());
+                        yield Ok::<Bytes, Infallible>(make_error_frame(
+                            "api_error",
+                            "the response was interrupted midway",
+                        ));
+                        break;
+                    }
                 }
             }
-            if status == StatusCode::OK
+            if final_status == StatusCode::OK
                 && prompt_cache_shadow_enabled
                 && usage.present
                 && !prompt_cache_drift_observed
@@ -2122,7 +2216,7 @@ impl Lifecycle {
                     PromptCacheUsage::from(&usage),
                 );
             }
-            if status == StatusCode::OK
+            if final_status == StatusCode::OK
                 && prompt_cache_shadow_enabled
                 && prompt_cache_upserted
                 && !prompt_cache_enqueued
@@ -2142,7 +2236,7 @@ impl Lifecycle {
             let total_duration_ms = started.elapsed().as_millis().try_into().unwrap_or(u64::MAX);
             let observability_post_start = Instant::now();
             observe_many(hooks.as_slice(), ObserveEvent::RequestFinished {
-                status,
+                status: final_status,
                 input_tokens,
                 output_tokens,
                 cache_creation_input_tokens: usage
@@ -2164,7 +2258,7 @@ impl Lifecycle {
                 _ => None,
             };
             tracing::info!(
-                status = status.as_u16(),
+                status = final_status.as_u16(),
                 stream_first_chunk_ms = ?elapsed_ms(first_chunk_at),
                 stream_message_start_ms = ?elapsed_ms(message_start_at),
                 stream_content_block_start_ms = ?elapsed_ms(content_block_start_at),
@@ -2267,7 +2361,8 @@ impl Lifecycle {
                         content_delta_count: Some(content_delta_count),
                         ping_count: Some(ping_count),
                         inter_token_avg_ms,
-                        status: status.as_u16(),
+                        status: final_status.as_u16(),
+                        error_code,
                         routing_trace: event_ctx.routing_trace.clone(),
                         internal_errors: event_ctx.internal_errors.clone(),
                         ..Default::default()
@@ -2756,8 +2851,10 @@ impl UpstreamDialect for RawPassthroughDialect {
 fn body_cap_for_path(config: &LifecycleConfig, path: &str) -> usize {
     if path.starts_with("/v1/files") {
         config.files_body_cap_bytes
-    } else {
+    } else if path == "/v1/messages" || path == "/v1/messages/count_tokens" {
         config.messages_body_cap_bytes
+    } else {
+        usize::MAX
     }
 }
 
@@ -3733,6 +3830,19 @@ fn limit_rejection_response(
         response.headers_mut().insert(RETRY_AFTER, value);
     }
     response
+}
+
+fn anthropic_error_body_bytes(error_type: &str, message: &str) -> Bytes {
+    Bytes::from(
+        json!({
+            "type": "error",
+            "error": {
+                "type": error_type,
+                "message": message,
+            }
+        })
+        .to_string(),
+    )
 }
 
 fn limit_retry_after_secs(reason: RejectReason) -> Option<u64> {

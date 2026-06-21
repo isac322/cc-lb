@@ -7,6 +7,7 @@ use cc_lb_storage_api::{
     AuditEntry, AuditStore, BUILTIN_CACHE_AFFINITY_ID, PluginChainEntryInput, PluginSlot,
     PrincipalStore, WasmBlob, WasmRegistryEntryInput,
 };
+use fake_anthropic::{ScriptedMessageResponse, SseEvent};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -102,6 +103,37 @@ impl<'a> Bob<'a> {
         self.harness
             .map(|harness| harness.script.request_count())
             .unwrap_or_default()
+    }
+
+    pub fn push_sse_response(&self, events: Vec<SseEvent>) -> Result<()> {
+        let Some(harness) = self.harness else {
+            anyhow::bail!("bdd harness unavailable for scripted SSE response");
+        };
+        harness
+            .script
+            .push_response(ScriptedMessageResponse::sse(events));
+        Ok(())
+    }
+
+    pub fn push_drop_response(&self, bytes: Vec<u8>, after_bytes: usize) -> Result<()> {
+        let Some(harness) = self.harness else {
+            anyhow::bail!("bdd harness unavailable for scripted drop response");
+        };
+        harness.script.push_response(
+            ScriptedMessageResponse::drop_after_bytes(bytes, after_bytes)
+                .with_header("content-type", "text/event-stream; charset=utf-8"),
+        );
+        Ok(())
+    }
+
+    pub fn push_json_response(&self, body: serde_json::Value) -> Result<()> {
+        let Some(harness) = self.harness else {
+            anyhow::bail!("bdd harness unavailable for scripted JSON response");
+        };
+        harness
+            .script
+            .push_response(ScriptedMessageResponse::Json(body));
+        Ok(())
     }
 
     pub async fn bob_w3_duplicate_plugin_upload_rejected(&self) -> Result<W3ScenarioResult> {

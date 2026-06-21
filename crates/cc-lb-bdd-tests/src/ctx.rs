@@ -41,7 +41,7 @@ impl BddCtx {
         scenario_id: &'static str,
         persona: Persona,
     ) -> Result<Self> {
-        let harness = BddHarness::spawn_sqlite().await?;
+        let harness = BddHarness::spawn_sqlite_with_oauth_mock().await?;
         Ok(Self {
             scenario_id,
             persona,
@@ -80,7 +80,7 @@ impl BddCtx {
         scenario_id: &'static str,
         persona: Persona,
     ) -> Result<Option<Self>> {
-        let Some(harness) = BddHarness::spawn_postgres().await? else {
+        let Some(harness) = BddHarness::spawn_postgres_with_oauth_mock().await? else {
             return Ok(None);
         };
         Ok(Some(Self {

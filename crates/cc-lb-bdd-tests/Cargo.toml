@@ -38,10 +38,13 @@ chrono = { workspace = true }
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic" }
 http = { workspace = true }
 http-body-util = { workspace = true }
+hyper-rustls = { workspace = true }
+hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
 mock-anthropic-oauth-server = { path = "../../tests/fixtures/mock-anthropic-oauth-server" }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time", "net"] }
+tokio-util = { workspace = true }
 tower = { workspace = true }
 url = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }

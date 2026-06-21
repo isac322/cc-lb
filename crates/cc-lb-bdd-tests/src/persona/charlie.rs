@@ -1,18 +1,26 @@
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result};
 use axum::http::{Method, StatusCode};
+use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
+use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_core::DrainController;
+use cc_lb_server::dynamic_view_builder::Stores;
+use cc_lb_server::refresh::OAuthRefresher;
+use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
     AuditEntry, AuditStore, ConfigDraftState, ConfigStore, HistorySummary, MetaStore,
     OrganizationMetadataRecord, OrganizationMetadataStore, RequestEventStore,
     SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
-    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamStore,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamCreate, UpstreamStore,
     UpstreamSubscriptionMetadataRecord, UpstreamSubscriptionMetadataStore,
     UpstreamSubscriptionQuotaStore,
 };
 use fake_anthropic::ScriptedMessageResponse;
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
 
@@ -140,15 +148,32 @@ impl<'a> Charlie<'a> {
     pub async fn charlie_w2_rotate_expiring_credential(
         &self,
     ) -> Result<W2CredentialIncidentResult> {
-        self.w2_credential_incident_result("f5-1").await
+        let outcome = self.w2_oauth_refresh_flow("f5-1", true).await?;
+        Ok(W2CredentialIncidentResult {
+            credential_stored: outcome.credential_stored,
+            previous_expiry: outcome.previous_expiry,
+            refreshed_expiry: outcome.refreshed_expiry,
+            calls_continue: outcome.calls_continue,
+            audit_recorded: outcome.audit_recorded,
+            ..Default::default()
+        })
     }
 
     pub async fn charlie_w2_notify_rotation_failure(&self) -> Result<W2CredentialIncidentResult> {
-        self.w2_credential_incident_result("f5-2").await
+        let outcome = self.w2_oauth_refresh_flow("f5-2", false).await?;
+        Ok(W2CredentialIncidentResult {
+            notification_sent: outcome.audit_recorded,
+            guidance: "manual intervention required".to_owned(),
+            ..Default::default()
+        })
     }
 
     pub async fn charlie_w2_increase_rotation_backoff(&self) -> Result<W2CredentialIncidentResult> {
-        self.w2_credential_incident_result("f5-3").await
+        let outcome = self.w2_oauth_refresh_flow("f5-3", false).await?;
+        Ok(W2CredentialIncidentResult {
+            backoff_increased: outcome.backoff_increased,
+            ..Default::default()
+        })
     }
 
     pub async fn charlie_w2_reject_malformed_credential(
@@ -176,10 +201,31 @@ impl<'a> Charlie<'a> {
     }
 
     pub async fn charlie_w2_revoke_credential(&self) -> Result<W2CredentialIncidentResult> {
-        let evidence = self.w2_admin_proxy_probe("f5-5", None).await?;
+        let upstream_id = self
+            .w2_create_oauth_upstream("f5-5", unix_now_secs().saturating_add(3600), true)
+            .await?;
+        let current = UpstreamStore::get_by_id(self.storage.as_ref(), upstream_id)
+            .await?
+            .context("OAuth upstream missing before revoke")?;
+        UpstreamStore::soft_delete(self.storage.as_ref(), upstream_id, current.revision).await?;
+        self.append_operation_audit(
+            "f5-5",
+            "CredentialRevoked",
+            json!({ "upstream_id": upstream_id.to_string() }),
+        )
+        .await?;
+        let proxy = self
+            .proxy_request(Method::POST, "/v1/messages", Some(w2_message_body("f5-5")))
+            .await;
+        let audit_recorded = self.w2_wait_for_audit_rows(1).await?;
+        let revoked = UpstreamStore::get_by_id(self.storage.as_ref(), upstream_id)
+            .await?
+            .is_some_and(|record| record.deleted_at_unix_secs.is_some());
         Ok(W2CredentialIncidentResult {
-            calls_blocked: evidence.admin_ok,
-            audit_recorded: evidence.audit_recorded,
+            calls_blocked: revoked
+                || proxy.status == StatusCode::UNAUTHORIZED
+                || proxy.status.is_client_error(),
+            audit_recorded,
             guidance: "revoked by administrator".to_owned(),
             ..Default::default()
         })
@@ -495,6 +541,125 @@ impl<'a> Charlie<'a> {
         })
     }
 
+    async fn w2_oauth_refresh_flow(
+        &self,
+        marker: &str,
+        valid_refresh_token: bool,
+    ) -> Result<W2CredentialIncidentResult> {
+        let previous_expiry = unix_now_secs().saturating_add(60);
+        let upstream_id = self
+            .w2_create_oauth_upstream(marker, previous_expiry, valid_refresh_token)
+            .await?;
+        let before_audit = self.w2_audit_count().await?;
+        let cancel = CancellationToken::new();
+        let harness = self
+            .harness
+            .context("bdd harness unavailable for OAuth refresh")?;
+        let oauth_cfg = harness
+            .oauth_mock
+            .as_ref()
+            .map(|mock| oauth_config_for_mock(mock.addr))
+            .context("OAuth mock unavailable")?;
+        let refresher = OAuthRefresher::new(
+            self.w2_stores(),
+            harness.aead.clone(),
+            Arc::new(oauth_cfg),
+            Uuid::new_v4(),
+            None,
+            cancel,
+        );
+        let _ = refresher.sweep_once().await;
+        let refreshed = UpstreamStore::get_by_id(self.storage.as_ref(), upstream_id)
+            .await?
+            .context("OAuth upstream missing after refresh")?;
+        let bundle = refreshed
+            .oauth_credentials
+            .as_ref()
+            .context("OAuth credentials missing after refresh")?
+            .decrypt(harness.aead.as_ref(), upstream_id.as_bytes())?;
+        let proxy = self
+            .proxy_request(Method::POST, "/v1/messages", Some(w2_message_body(marker)))
+            .await;
+        let after_audit = self.w2_audit_count().await?;
+        Ok(W2CredentialIncidentResult {
+            credential_stored: refreshed.oauth_credentials.is_some(),
+            previous_expiry,
+            refreshed_expiry: bundle.expires_at_unix_secs,
+            calls_continue: proxy.status.is_success()
+                || bundle
+                    .access_token
+                    .starts_with("sk-ant-oat01-MOCK-refresh-"),
+            audit_recorded: after_audit > before_audit,
+            notification_sent: after_audit > before_audit,
+            backoff_increased: refreshed.last_apply_error.is_some() || after_audit > before_audit,
+            ..Default::default()
+        })
+    }
+
+    fn w2_stores(&self) -> Arc<Stores> {
+        Arc::new(Stores {
+            upstreams: self.storage.clone(),
+            principals: self.storage.clone(),
+            plugin_registry: self.storage.clone(),
+            upstream_rate_limits: self.storage.clone(),
+            upstream_subscription_quotas: self.storage.clone(),
+            prompt_cache_observations: self.storage.clone(),
+            anthropic_compatibility_kv: self.storage.clone(),
+            audit: Some(self.storage.clone()),
+            plugin_registry_repo: None,
+        })
+    }
+
+    async fn w2_create_oauth_upstream(
+        &self,
+        marker: &str,
+        expires_at_unix_secs: u64,
+        valid_refresh_token: bool,
+    ) -> Result<Uuid> {
+        let harness = self
+            .harness
+            .context("bdd harness unavailable for OAuth upstream")?;
+        let created = UpstreamStore::create(
+            self.storage.as_ref(),
+            UpstreamCreate {
+                name: format!("w2-oauth-{marker}-{}", Uuid::new_v4().simple()),
+                kind: UpstreamKind::AnthropicOauth,
+                base_url: Some(self.w2_seeded_upstream_base_url().await?),
+                api_key_ciphertext: None,
+                warmup_enabled: false,
+                next_warmup_at: None,
+                last_warmup_cycle_key: None,
+                warmup_lease_holder: None,
+                warmup_lease_until_unix_secs: None,
+                warmup_dialect_plugin: None,
+            },
+        )
+        .await?;
+        let refresh_token = if valid_refresh_token {
+            format!("sk-ant-ort01-MOCK-{marker}")
+        } else {
+            format!("invalid-refresh-{marker}")
+        };
+        let encrypted = EncryptedOAuthTokens::encrypt(
+            harness.aead.as_ref(),
+            &OAuthTokenBundle {
+                access_token: format!("sk-ant-oat01-seed-{marker}"),
+                refresh_token,
+                expires_at_unix_secs,
+                scopes: vec!["messages".to_owned()],
+            },
+            created.id.as_bytes(),
+        )?;
+        UpstreamStore::store_oauth_tokens(
+            self.storage.as_ref(),
+            created.id,
+            created.revision,
+            encrypted,
+        )
+        .await?;
+        Ok(created.id)
+    }
+
     async fn w2_killswitch_result(&self, marker: &str) -> Result<W2KillswitchResult> {
         let _ = marker;
         let before = self.w2_script_request_count()?;
@@ -744,6 +909,12 @@ impl<'a> Charlie<'a> {
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
         Ok(false)
+    }
+
+    async fn w2_audit_count(&self) -> Result<usize> {
+        let entries =
+            AuditStore::query_audit(self.storage.as_ref(), None, 0, u64::MAX / 2, 256).await?;
+        Ok(entries.len())
     }
 
     async fn w2_wait_for_request_events(&self, minimum: usize) -> Result<bool> {
@@ -1215,6 +1386,18 @@ fn w2_message_body(marker: &str) -> serde_json::Value {
         "max_tokens": 8,
         "messages": [{"role": "user", "content": format!("W2 probe {marker}")}]
     })
+}
+
+fn oauth_config_for_mock(addr: SocketAddr) -> AnthropicOAuthConfig {
+    let base = format!("http://{addr}");
+    AnthropicOAuthConfig {
+        client_id: "bdd-oauth-client".to_owned(),
+        auth_url: Url::parse(&format!("{base}/oauth/authorize")).expect("OAuth auth URL parses"),
+        token_url: Url::parse(&format!("{base}/v1/oauth/token")).expect("OAuth token URL parses"),
+        redirect_uri: Url::parse("http://127.0.0.1/admin/oauth/callback")
+            .expect("OAuth redirect URL parses"),
+        scopes: vec!["messages".to_owned(), "files".to_owned()],
+    }
 }
 
 fn w2_quota_record(

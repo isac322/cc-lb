@@ -15,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, anyhow};
 use axum::Router;
 use cc_lb_aead::AeadService;
+use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_config::{
     AdminConfig, Config, DownstreamAuthConfig, DownstreamAuthMode, NoneModeConfig,
     NoneModeUpstreamKind, StorageConfig,
@@ -27,6 +28,7 @@ use cc_lb_storage_api::{
 };
 use cc_lb_storage_sqlite::open_sqlite;
 use fake_anthropic::{AppConfig as FakeAnthropicConfig, MessageScript, app as fake_anthropic_app};
+use mock_anthropic_oauth_server::app as oauth_mock_app;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use url::Url;
@@ -66,12 +68,19 @@ pub struct BddHarness {
     pub backend: HarnessBackend,
     pub storage: Arc<dyn StorageTrait>,
     pub managed: Arc<dyn ManagedKeyStore>,
+    pub aead: Arc<AeadService>,
     pub app: App,
     pub script: MessageScript,
     pub upstream_id: Uuid,
     pub principal_id: Uuid,
+    pub oauth_mock: Option<OAuthMockHandle>,
     _upstream_task: JoinHandle<std::io::Result<()>>,
     _state: BackendState,
+}
+
+pub struct OAuthMockHandle {
+    pub addr: SocketAddr,
+    _task: JoinHandle<std::io::Result<()>>,
 }
 
 enum BackendState {
@@ -120,6 +129,14 @@ impl BddHarness {
     /// Build a sqlite-backed harness: tempdir + open_sqlite + fake-anthropic
     /// TcpListener + cc-lb-server App + seeded principal + seeded upstream.
     pub async fn spawn_sqlite() -> Result<Self> {
+        Self::spawn_sqlite_inner(false).await
+    }
+
+    pub async fn spawn_sqlite_with_oauth_mock() -> Result<Self> {
+        Self::spawn_sqlite_inner(true).await
+    }
+
+    async fn spawn_sqlite_inner(with_oauth_mock: bool) -> Result<Self> {
         let dir = tempfile::tempdir().context("create scenario tempdir")?;
         let storage_path = dir.path().join("bdd.sqlite");
         let database_url = format!("sqlite://{}", storage_path.display());
@@ -129,13 +146,26 @@ impl BddHarness {
         let managed_dyn: Arc<dyn ManagedKeyStore> = storage_arc.clone();
 
         let (script, upstream_addr, upstream_task) = spawn_fake_anthropic().await?;
+        let oauth_mock = if with_oauth_mock {
+            Some(spawn_oauth_mock().await?)
+        } else {
+            None
+        };
 
-        let config = base_config_sqlite(storage_path.clone());
+        let config = base_config_sqlite(
+            storage_path.clone(),
+            oauth_mock.as_ref().map(|mock| mock.addr),
+        );
         let aead = Arc::new(AeadService::from_master_key([0u8; 32]));
-        let app =
-            build_app_with_storage(config, None, managed_dyn.clone(), storage_dyn.clone(), aead)
-                .await
-                .map_err(|e| anyhow!("build_app_with_storage failed: {e}"))?;
+        let app = build_app_with_storage(
+            config,
+            None,
+            managed_dyn.clone(),
+            storage_dyn.clone(),
+            aead.clone(),
+        )
+        .await
+        .map_err(|e| anyhow!("build_app_with_storage failed: {e}"))?;
 
         let principal_id = seed_principal(storage_dyn.as_ref(), TEST_PRINCIPAL_NAME).await?;
         let upstream_id =
@@ -145,10 +175,12 @@ impl BddHarness {
             backend: HarnessBackend::Sqlite,
             storage: storage_dyn,
             managed: managed_dyn,
+            aead,
             app,
             script,
             upstream_id,
             principal_id,
+            oauth_mock,
             _upstream_task: upstream_task,
             _state: BackendState::Sqlite { _dir: dir },
         })
@@ -159,6 +191,16 @@ impl BddHarness {
     /// skipped instead of failing.
     #[cfg(feature = "postgres")]
     pub async fn spawn_postgres() -> Result<Option<Self>> {
+        Self::spawn_postgres_inner(false).await
+    }
+
+    #[cfg(feature = "postgres")]
+    pub async fn spawn_postgres_with_oauth_mock() -> Result<Option<Self>> {
+        Self::spawn_postgres_inner(true).await
+    }
+
+    #[cfg(feature = "postgres")]
+    async fn spawn_postgres_inner(with_oauth_mock: bool) -> Result<Option<Self>> {
         let Some(url) = std::env::var("CI_POSTGRES_URL")
             .ok()
             .or_else(|| std::env::var("DATABASE_URL").ok())
@@ -194,13 +236,23 @@ impl BddHarness {
         postgres.initialize(BackendKind::Postgres).await?;
 
         let (script, upstream_addr, upstream_task) = spawn_fake_anthropic().await?;
+        let oauth_mock = if with_oauth_mock {
+            Some(spawn_oauth_mock().await?)
+        } else {
+            None
+        };
 
-        let config = base_config_postgres(&url, &schema);
+        let config = base_config_postgres(&url, &schema, oauth_mock.as_ref().map(|mock| mock.addr));
         let aead = Arc::new(AeadService::from_master_key([0u8; 32]));
-        let app =
-            build_app_with_storage(config, None, managed_dyn.clone(), storage_dyn.clone(), aead)
-                .await
-                .map_err(|e| anyhow!("build_app_with_storage failed: {e}"))?;
+        let app = build_app_with_storage(
+            config,
+            None,
+            managed_dyn.clone(),
+            storage_dyn.clone(),
+            aead.clone(),
+        )
+        .await
+        .map_err(|e| anyhow!("build_app_with_storage failed: {e}"))?;
 
         let principal_id = seed_principal(storage_dyn.as_ref(), TEST_PRINCIPAL_NAME).await?;
         let upstream_id =
@@ -210,10 +262,12 @@ impl BddHarness {
             backend: HarnessBackend::Postgres,
             storage: storage_dyn,
             managed: managed_dyn,
+            aead,
             app,
             script,
             upstream_id,
             principal_id,
+            oauth_mock,
             _upstream_task: upstream_task,
             _state: BackendState::Postgres { url, schema, pool },
         }))
@@ -230,8 +284,8 @@ impl BddHarness {
     }
 }
 
-fn base_config_sqlite(path: PathBuf) -> Config {
-    Config {
+fn base_config_sqlite(path: PathBuf, oauth_addr: Option<SocketAddr>) -> Config {
+    let mut config = Config {
         storage: StorageConfig::Sqlite { path },
         admin: AdminConfig {
             token: Some(TEST_ADMIN_TOKEN.to_owned()),
@@ -245,12 +299,16 @@ fn base_config_sqlite(path: PathBuf) -> Config {
             }),
         },
         ..Config::default()
+    };
+    if let Some(addr) = oauth_addr {
+        config.oauth.anthropic = Some(oauth_config(addr));
     }
+    config
 }
 
 #[cfg(feature = "postgres")]
-fn base_config_postgres(url: &str, _schema: &str) -> Config {
-    Config {
+fn base_config_postgres(url: &str, _schema: &str, oauth_addr: Option<SocketAddr>) -> Config {
+    let mut config = Config {
         storage: StorageConfig::Postgres {
             url: url.to_owned(),
             pool: PostgresPoolConfig {
@@ -270,6 +328,22 @@ fn base_config_postgres(url: &str, _schema: &str) -> Config {
             }),
         },
         ..Config::default()
+    };
+    if let Some(addr) = oauth_addr {
+        config.oauth.anthropic = Some(oauth_config(addr));
+    }
+    config
+}
+
+fn oauth_config(addr: SocketAddr) -> AnthropicOAuthConfig {
+    let base = format!("http://{addr}");
+    AnthropicOAuthConfig {
+        client_id: "bdd-oauth-client".to_owned(),
+        auth_url: Url::parse(&format!("{base}/oauth/authorize")).expect("oauth auth URL parses"),
+        token_url: Url::parse(&format!("{base}/v1/oauth/token")).expect("oauth token URL parses"),
+        redirect_uri: Url::parse("http://127.0.0.1/admin/oauth/callback")
+            .expect("oauth redirect URL parses"),
+        scopes: vec!["messages".to_owned(), "files".to_owned()],
     }
 }
 
@@ -285,6 +359,13 @@ async fn spawn_fake_anthropic()
     let addr = listener.local_addr()?;
     let task = tokio::spawn(async move { axum::serve(listener, app).await });
     Ok((script, addr, task))
+}
+
+async fn spawn_oauth_mock() -> Result<OAuthMockHandle> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let task = tokio::spawn(async move { axum::serve(listener, oauth_mock_app()).await });
+    Ok(OAuthMockHandle { addr, _task: task })
 }
 
 async fn seed_principal(storage: &dyn StorageTrait, name: &str) -> Result<Uuid> {

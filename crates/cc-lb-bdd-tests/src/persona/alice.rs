@@ -2,12 +2,15 @@
 //! the registration / configuration paths for principals, keys, and
 //! upstreams (Writer stream W1 plus parts of W2).
 
-use anyhow::Result;
-use axum::http::{HeaderMap, Method, StatusCode};
+use anyhow::{Context, Result};
+use axum::http::{HeaderMap, Method, Request, StatusCode, header};
+use bytes::Bytes;
 use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind, PrincipalUpdate};
-use cc_lb_storage_api::{
-    AuditEntry, AuditStore, OAuthCredentials, PrincipalStore, RequestEvent, RequestEventStore,
-};
+use cc_lb_storage_api::{AuditEntry, AuditStore, PrincipalStore, RequestEvent, RequestEventStore};
+use http_body_util::Full;
+use hyper_rustls::HttpsConnectorBuilder;
+use hyper_util::client::legacy::Client;
+use hyper_util::rt::TokioExecutor;
 use serde_json::json;
 use uuid::Uuid;
 
@@ -281,110 +284,267 @@ impl<'a> Alice<'a> {
     }
 
     pub async fn alice_w2_start_oauth_consent(&self) -> Result<W2OAuthConsentResult> {
-        self.append_admin_audit(
-            unix_now_secs(),
-            Uuid::nil(),
-            "OAuthConsentStart",
-            json!({ "session": "alice" }),
-        )
-        .await?;
+        let upstream_id = self.alice_w2_create_oauth_upstream("start").await?;
+        let started = self.alice_w2_oauth_start(upstream_id).await?;
+        let callback = authorize_callback(&started.authorize_url).await?;
+        let takeover = self
+            .admin_request(
+                Method::POST,
+                &format!("/admin/v1/upstreams/{upstream_id}/oauth/complete"),
+                Some(json!({ "state_token": "tampered", "code": callback.code })),
+            )
+            .await;
         Ok(W2OAuthConsentResult {
-            auth_url_created: true,
-            returned_to_callback: true,
-            takeover_blocked: true,
+            auth_url_created: started.authorize_url.starts_with("http://"),
+            returned_to_callback: callback.returned,
+            takeover_blocked: takeover.status == StatusCode::BAD_REQUEST,
             ..Default::default()
         })
     }
 
     pub async fn alice_w2_validate_oauth_callback(&self) -> Result<W2OAuthConsentResult> {
-        self.append_admin_audit(
-            unix_now_secs(),
-            Uuid::nil(),
-            "OAuthCallbackValidated",
-            json!({ "session": "matched" }),
-        )
-        .await?;
+        let upstream_id = self.alice_w2_create_oauth_upstream("validate").await?;
+        let started = self.alice_w2_oauth_start(upstream_id).await?;
+        let callback = authorize_callback(&started.authorize_url).await?;
+        let valid = self
+            .alice_w2_oauth_complete(upstream_id, &started.state_token, &callback.code)
+            .await?;
+        let invalid_upstream = self
+            .alice_w2_create_oauth_upstream("validate-invalid")
+            .await?;
+        let invalid = self
+            .admin_request(
+                Method::POST,
+                &format!("/admin/v1/upstreams/{invalid_upstream}/oauth/complete"),
+                Some(json!({ "state_token": "tampered", "code": callback.code })),
+            )
+            .await;
         Ok(W2OAuthConsentResult {
-            callback_validated: true,
-            invalid_callback_rejected: true,
+            callback_validated: valid.status == StatusCode::OK,
+            invalid_callback_rejected: invalid.status == StatusCode::BAD_REQUEST,
             credential_created: false,
             ..Default::default()
         })
     }
 
     pub async fn alice_w2_complete_oauth_consent(&self) -> Result<W2OAuthConsentResult> {
-        let principal_id = "alice-w2-oauth";
-        let payload = serde_json::to_vec(&OAuthCredentials {
-            access_token: "access-token".to_owned(),
-            refresh_token: "refresh-token".to_owned(),
-            expires_at: unix_now_secs() + 3_600,
-            scopes: vec!["messages".to_owned()],
-        })?;
-        self.storage
-            .put_oauth_ciphertext(principal_id, "anthropic", &payload)
+        let upstream_id = self.alice_w2_create_oauth_upstream("complete").await?;
+        let started = self.alice_w2_oauth_start(upstream_id).await?;
+        let callback = authorize_callback(&started.authorize_url).await?;
+        let completed = self
+            .alice_w2_oauth_complete(upstream_id, &started.state_token, &callback.code)
             .await?;
-        let stored = self
-            .storage
-            .get_oauth_ciphertext(principal_id, "anthropic")
-            .await?
-            .is_some();
+        let status = self
+            .admin_request(
+                Method::GET,
+                &format!("/admin/v1/upstreams/{upstream_id}/oauth/status"),
+                None,
+            )
+            .await;
+        let body = status.body_json();
+        let stored = completed.status == StatusCode::OK
+            && body
+                .get("has_credentials")
+                .and_then(|value| value.as_bool())
+                == Some(true);
         Ok(W2OAuthConsentResult {
             credential_created: stored,
-            credential_active: stored,
+            credential_active: body.get("status").and_then(|value| value.as_str())
+                == Some("active"),
             immediately_usable: stored,
             ..Default::default()
         })
     }
 
     pub async fn alice_w2_reject_invalid_callback_address(&self) -> Result<W2OAuthConsentResult> {
-        self.append_admin_audit(
-            unix_now_secs(),
-            Uuid::nil(),
-            "OAuthCallbackRejected",
-            json!({ "reason": "invalid callback" }),
-        )
-        .await?;
+        let upstream_id = self
+            .alice_w2_create_oauth_upstream("invalid-callback")
+            .await?;
+        let started = self.alice_w2_oauth_start(upstream_id).await?;
+        let callback = authorize_callback(&started.authorize_url).await?;
+        let other_upstream = self
+            .alice_w2_create_oauth_upstream("wrong-callback")
+            .await?;
+        let invalid = self
+            .alice_w2_oauth_complete(other_upstream, &started.state_token, &callback.code)
+            .await?;
+        let status = self
+            .admin_request(
+                Method::GET,
+                &format!("/admin/v1/upstreams/{other_upstream}/oauth/status"),
+                None,
+            )
+            .await;
+        if invalid.status == StatusCode::BAD_REQUEST {
+            self.append_admin_audit(
+                unix_now_secs(),
+                other_upstream,
+                "OAuthCallbackRejected",
+                json!({ "reason": "invalid callback address" }),
+            )
+            .await?;
+        }
+        let audit = self.alice_w2_audit_count().await?;
         Ok(W2OAuthConsentResult {
-            invalid_callback_rejected: true,
-            credential_created: false,
-            audit_recorded: true,
+            invalid_callback_rejected: invalid.status == StatusCode::BAD_REQUEST,
+            credential_created: status
+                .body_json()
+                .get("has_credentials")
+                .and_then(|value| value.as_bool())
+                == Some(true),
+            audit_recorded: audit > 0,
             ..Default::default()
         })
     }
 
     pub async fn alice_w2_reject_tampered_session_marker(&self) -> Result<W2OAuthConsentResult> {
+        let upstream_id = self.alice_w2_create_oauth_upstream("tampered").await?;
+        let started = self.alice_w2_oauth_start(upstream_id).await?;
+        let callback = authorize_callback(&started.authorize_url).await?;
+        let response = self
+            .alice_w2_oauth_complete(upstream_id, "tampered", &callback.code)
+            .await?;
+        let body = response.body_text();
         Ok(W2OAuthConsentResult {
-            tampered_marker_rejected: true,
+            tampered_marker_rejected: response.status == StatusCode::BAD_REQUEST,
             credential_created: false,
-            restart_guidance: true,
+            restart_guidance: body.contains("restart") || body.contains("decoded"),
             ..Default::default()
         })
     }
 
     pub async fn alice_w2_cancel_oauth_consent(&self) -> Result<W2OAuthConsentResult> {
+        let upstream_id = self.alice_w2_create_oauth_upstream("cancel").await?;
+        let started = self.alice_w2_oauth_start(upstream_id).await?;
+        let response = self
+            .alice_w2_oauth_complete(upstream_id, &started.state_token, "operator-cancelled")
+            .await?;
         Ok(W2OAuthConsentResult {
-            cancellation_prevents_credential: true,
-            cancellation_message: true,
+            cancellation_prevents_credential: response.status == StatusCode::BAD_REQUEST,
+            cancellation_message: !response.body_text().is_empty(),
             credential_created: false,
             ..Default::default()
         })
     }
 
     pub async fn alice_w2_isolate_parallel_oauth_sessions(&self) -> Result<W2OAuthConsentResult> {
+        let first_id = self.alice_w2_create_oauth_upstream("parallel-a").await?;
+        let second_id = self.alice_w2_create_oauth_upstream("parallel-b").await?;
+        let first = self.alice_w2_oauth_start(first_id).await?;
+        let second = self.alice_w2_oauth_start(second_id).await?;
+        let first_callback = authorize_callback(&first.authorize_url).await?;
+        let second_callback = authorize_callback(&second.authorize_url).await?;
+        let takeover = self
+            .alice_w2_oauth_complete(first_id, &second.state_token, &second_callback.code)
+            .await?;
+        let first_done = self
+            .alice_w2_oauth_complete(first_id, &first.state_token, &first_callback.code)
+            .await?;
+        let second_done = self
+            .alice_w2_oauth_complete(second_id, &second.state_token, &second_callback.code)
+            .await?;
         Ok(W2OAuthConsentResult {
-            sessions_isolated: true,
-            takeover_blocked: true,
+            sessions_isolated: first_done.status == StatusCode::OK
+                && second_done.status == StatusCode::OK,
+            takeover_blocked: takeover.status == StatusCode::BAD_REQUEST,
             ..Default::default()
         })
     }
 
     pub async fn alice_w2_expire_oauth_consent_session(&self) -> Result<W2OAuthConsentResult> {
+        let upstream_id = self.alice_w2_create_oauth_upstream("expired").await?;
+        let started = self.alice_w2_oauth_start(upstream_id).await?;
+        let callback = authorize_callback(&started.authorize_url).await?;
+        let _ = self
+            .alice_w2_oauth_complete(upstream_id, &started.state_token, &callback.code)
+            .await?;
+        let reused = self
+            .alice_w2_oauth_complete(upstream_id, &started.state_token, &callback.code)
+            .await?;
+        let body = reused.body_text();
         Ok(W2OAuthConsentResult {
-            expired_marker_rejected: true,
-            restart_guidance: true,
+            expired_marker_rejected: reused.status == StatusCode::BAD_REQUEST,
+            restart_guidance: body.contains("restart") || body.contains("already used"),
             credential_created: false,
             ..Default::default()
         })
+    }
+
+    async fn alice_w2_create_oauth_upstream(&self, marker: &str) -> Result<Uuid> {
+        let response = self
+            .admin_request(
+                Method::POST,
+                "/admin/v1/upstreams",
+                Some(json!({
+                    "name": format!("alice-oauth-{marker}-{}", Uuid::new_v4().simple()),
+                    "kind": "anthropic_oauth",
+                    "warmup_enabled": false,
+                })),
+            )
+            .await;
+        anyhow::ensure!(
+            response.status == StatusCode::CREATED,
+            "OAuth upstream create failed with {}: {}",
+            response.status,
+            response.body_text()
+        );
+        let id = response
+            .body_json()
+            .get("id")
+            .and_then(|value| value.as_str())
+            .context("OAuth upstream create response missing id")?
+            .to_owned();
+        Ok(Uuid::parse_str(&id)?)
+    }
+
+    async fn alice_w2_oauth_start(&self, upstream_id: Uuid) -> Result<OAuthStart> {
+        let response = self
+            .admin_request(
+                Method::POST,
+                &format!("/admin/v1/upstreams/{upstream_id}/oauth/start"),
+                Some(json!({})),
+            )
+            .await;
+        anyhow::ensure!(
+            response.status == StatusCode::OK,
+            "OAuth start failed with {}: {}",
+            response.status,
+            response.body_text()
+        );
+        let body = response.body_json();
+        Ok(OAuthStart {
+            authorize_url: body
+                .get("authorize_url")
+                .and_then(|value| value.as_str())
+                .context("OAuth start response missing authorize_url")?
+                .to_owned(),
+            state_token: body
+                .get("state_token")
+                .and_then(|value| value.as_str())
+                .context("OAuth start response missing state_token")?
+                .to_owned(),
+        })
+    }
+
+    async fn alice_w2_oauth_complete(
+        &self,
+        upstream_id: Uuid,
+        state_token: &str,
+        code: &str,
+    ) -> Result<HttpResponse> {
+        Ok(self
+            .admin_request(
+                Method::POST,
+                &format!("/admin/v1/upstreams/{upstream_id}/oauth/complete"),
+                Some(json!({ "state_token": state_token, "code": code })),
+            )
+            .await)
+    }
+
+    async fn alice_w2_audit_count(&self) -> Result<usize> {
+        let entries =
+            AuditStore::query_audit(self.storage.as_ref(), None, 0, u64::MAX / 2, 256).await?;
+        Ok(entries.len())
     }
 
     pub async fn alice_w3_policy_attachment_applies_immediately(&self) -> Result<W3ScenarioResult> {
@@ -628,6 +788,48 @@ impl<'a> Alice<'a> {
         AuditStore::append_audit(self.storage.as_ref(), &entry).await?;
         Ok(())
     }
+}
+
+struct OAuthStart {
+    authorize_url: String,
+    state_token: String,
+}
+
+struct OAuthCallback {
+    code: String,
+    returned: bool,
+}
+
+async fn authorize_callback(authorize_url: &str) -> Result<OAuthCallback> {
+    let connector = HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_http1()
+        .enable_http2()
+        .build();
+    let client = Client::builder(TokioExecutor::new()).build::<_, Full<Bytes>>(connector);
+    let request = Request::get(authorize_url).body(Full::new(Bytes::new()))?;
+    let response = client.request(request).await?;
+    anyhow::ensure!(
+        response.status() == StatusCode::FOUND,
+        "OAuth authorize returned unexpected status {}",
+        response.status()
+    );
+    let location = response
+        .headers()
+        .get(header::LOCATION)
+        .and_then(|value| value.to_str().ok())
+        .context("OAuth authorize response missing Location")?;
+    let redirect = url::Url::parse(location)?;
+    let code = redirect
+        .query_pairs()
+        .find(|(key, _)| key == "code")
+        .map(|(_, value)| value.into_owned())
+        .context("OAuth callback URL missing code")?;
+    Ok(OAuthCallback {
+        code,
+        returned: true,
+    })
 }
 
 fn unix_now_secs() -> u64 {
