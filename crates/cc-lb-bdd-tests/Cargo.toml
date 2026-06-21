@@ -34,3 +34,4 @@ url = { workspace = true }
 
 [dev-dependencies]
 # Integration tests under tests/w<N>.rs use the same crate as a library.
+wiremock = "0.6"

@@ -19,7 +19,10 @@ pub use ctx::BddCtx;
 pub use persona::{Alice, Bob, Charlie, Dana};
 pub use results::{
     AuditEntrySummary, HealthSnapshot, KillswitchState, PrincipalCreateResult,
-    PrincipalDisableResult, PrincipalModelAclResult, PrincipalSoftDeleteResult,
+    PrincipalDisableResult, PrincipalModelAclResult, PrincipalSoftDeleteResult, W1ObservableSpec,
+    W1ScenarioEvidence, W2CompatibilityCacheResult, W2CredentialIncidentResult, W2KillswitchResult,
+    W2OAuthConsentResult, W2QuotaVisibilityResult, W2UpstreamOutageResult, W2WarmupResult,
+    W3ScenarioResult, W4ScenarioEvidence,
 };
 
 /// Marker enum used by the macro `persona = ...` attribute. The variant

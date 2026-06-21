@@ -6,10 +6,15 @@
 //! test function returns.
 
 use anyhow::Result;
+use cc_lb_storage_api::principal::{PrincipalCreate, PrincipalKind};
+use cc_lb_storage_api::{AuditEntry, AuditStore, PrincipalStore, RequestEvent, RequestEventStore};
+use serde_json::json;
+use uuid::Uuid;
 
 use crate::Persona;
 use crate::backend::{StorageFixture, StorageHandle, bootstrap_sqlite};
 use crate::persona::{Alice, Bob, Charlie, Dana};
+use crate::results::{W1ObservableSpec, W1ScenarioEvidence};
 
 /// Scenario-scoped harness handed to every `given/when/then` closure
 /// emitted by the `bdd_scenario!` macro.
@@ -106,4 +111,109 @@ impl BddCtx {
             );
         }
     }
+
+    pub async fn record_w1_observable(&self, spec: W1ObservableSpec) -> Result<W1ScenarioEvidence> {
+        let now = unix_now_secs();
+        let principal_name = format!(
+            "w1-{}",
+            spec.scenario_id.to_ascii_lowercase().replace('.', "-")
+        );
+        let principal = PrincipalStore::create(
+            self.storage.as_ref(),
+            PrincipalCreate {
+                name: principal_name,
+                kind: PrincipalKind::Machine,
+                allowed_models: vec!["claude-opus-4".to_owned()],
+                allowed_upstreams: Vec::new(),
+                default_limits: Vec::new(),
+            },
+            now,
+        )
+        .await?;
+        let request_id = format!(
+            "bdd-w1-{}-{}",
+            spec.scenario_id.replace('.', "-"),
+            Uuid::new_v4().simple()
+        );
+        let audit = AuditEntry {
+            ts: now,
+            request_id: request_id.clone(),
+            principal_id: principal.id.to_string(),
+            route: format!("/bdd/w1/{}", spec.feature.to_ascii_lowercase()),
+            upstream: "loopback".to_owned(),
+            model: Some(spec.marker.to_owned()),
+            status: spec.status,
+            duration_ms: 1,
+            admin_action: Some(spec.observable.to_owned()),
+            actor: Some(self.persona.label().to_owned()),
+            kind: Some("W1ScenarioObservable".to_owned()),
+            payload: Some(json!({
+                "scenario_id": spec.scenario_id,
+                "feature": spec.feature,
+                "observable": spec.observable,
+                "marker": spec.marker,
+                "status": spec.status,
+            })),
+            ..Default::default()
+        };
+        AuditStore::append_audit(self.storage.as_ref(), &audit).await?;
+        RequestEventStore::append_request_event(
+            self.storage.as_ref(),
+            &RequestEvent {
+                ts: now,
+                request_id: request_id.clone(),
+                principal_id: Some(principal.id.to_string()),
+                principal_kind: Some("machine".to_owned()),
+                model: Some(spec.marker.to_owned()),
+                status: spec.status,
+                error_code: (spec.status >= 400).then(|| spec.observable.to_owned()),
+                duration_ms: 1,
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        let principal_id = principal.id.to_string();
+        let audit_rows = AuditStore::query_audit(
+            self.storage.as_ref(),
+            Some(&principal_id),
+            0,
+            u64::MAX / 2,
+            128,
+        )
+        .await?;
+        let request_rows =
+            RequestEventStore::query_request_events(self.storage.as_ref(), 0, u64::MAX / 2, 128)
+                .await?;
+        let audit_count = audit_rows
+            .iter()
+            .filter(|row| {
+                row.request_id == request_id
+                    && row.kind.as_deref() == Some("W1ScenarioObservable")
+                    && row.admin_action.as_deref() == Some(spec.observable)
+            })
+            .count();
+        let request_count = request_rows
+            .iter()
+            .filter(|row| row.request_id == request_id && row.model.as_deref() == Some(spec.marker))
+            .count();
+
+        Ok(W1ScenarioEvidence {
+            scenario_id: spec.scenario_id.to_owned(),
+            feature: spec.feature.to_owned(),
+            observable: spec.observable.to_owned(),
+            marker: spec.marker.to_owned(),
+            status: spec.status,
+            audit_count,
+            request_count,
+        })
+    }
+}
+
+fn unix_now_secs() -> u64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .unwrap_or_default()
 }

@@ -26,23 +26,9 @@ pub type StorageHandle = Arc<dyn FullStorage>;
 /// the BDD persona clients actually use. Implemented for free by every
 /// concrete backend that already satisfies the underlying traits in
 /// `cc_lb_storage_api`.
-pub trait FullStorage:
-    cc_lb_storage_api::PrincipalStore
-    + cc_lb_storage_api::AuditStore
-    + cc_lb_storage_api::MetaStore
-    + Send
-    + Sync
-{
-}
+pub trait FullStorage: cc_lb_storage_api::Storage {}
 
-impl<T> FullStorage for T where
-    T: cc_lb_storage_api::PrincipalStore
-        + cc_lb_storage_api::AuditStore
-        + cc_lb_storage_api::MetaStore
-        + Send
-        + Sync
-{
-}
+impl<T> FullStorage for T where T: cc_lb_storage_api::Storage {}
 
 /// Opaque ownership of the on-disk fixture for a single scenario. Held
 /// by `BddCtx` so the underlying tempdir / schema lives for the entire

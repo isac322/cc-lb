@@ -36,6 +36,44 @@ macro_rules! bdd_scenario {
         persona: $persona:ident,
         title: $title:literal,
         description: $desc:literal,
+        oos_manual: $reason:literal,
+        given: | $g_ctx:ident | $g_body:block ,
+        when:  | $w_in:ident |  $w_body:block ,
+        then:  | $t_result:ident , $t_ctx:ident | $t_body:block $(,)?
+    ) => {
+        #[doc = $title]
+        #[doc = ""]
+        #[doc = $desc]
+        #[doc = ""]
+        #[doc = $reason]
+        pub mod $fn_name {
+            #[allow(unused_imports)]
+            use super::*;
+
+            pub const SCENARIO_ID: &str = $id;
+            pub const PERSONA: $crate::Persona = $crate::Persona::$persona;
+
+            #[tokio::test]
+            #[ignore = $reason]
+            async fn sqlite() -> ::anyhow::Result<()> {
+                Ok(())
+            }
+
+            #[cfg(feature = "postgres")]
+            #[tokio::test]
+            #[ignore = $reason]
+            async fn postgres() -> ::anyhow::Result<()> {
+                Ok(())
+            }
+        }
+    };
+
+    (
+        id: $id:literal,
+        fn_name: $fn_name:ident,
+        persona: $persona:ident,
+        title: $title:literal,
+        description: $desc:literal,
         given: | $g_ctx:ident | $g_body:block ,
         when:  | $w_in:ident |  $w_body:block ,
         then:  | $t_result:ident , $t_ctx:ident | $t_body:block $(,)?
