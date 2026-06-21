@@ -4,21 +4,26 @@
 
 use uuid::Uuid;
 
-/// Outcome of `Alice::create_principal`. The shape matches the
-/// expectations of W1 registration scenarios (F1.1a etc.): the
-/// scenario verifies that the new principal is active and that a
-/// first managed key was issued in the same flow.
 #[derive(Debug, Clone)]
 pub struct PrincipalCreateResult {
     pub id: Uuid,
     pub name: String,
-    /// `true` when the principal record carries `enabled = true`
-    /// immediately after creation — the user-visible "active" signal
-    /// in the v5.2 BDD source.
     pub is_active: bool,
     pub revision: u64,
-    /// First managed key value emitted alongside the principal, if
-    /// the registration flow issued one. `None` until the managed-key
-    /// helper is wired into `Alice::create_principal` (M2 follow-up).
     pub first_key: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PrincipalSoftDeleteResult {
+    pub id: Uuid,
+    pub deleted_at_unix_secs: Option<u64>,
+    pub revision: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuditEntrySummary {
+    pub kind: String,
+    pub actor: String,
+    pub principal_id: String,
+    pub ts: u64,
 }

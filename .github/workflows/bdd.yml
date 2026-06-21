@@ -1,0 +1,109 @@
+name: bdd
+
+env:
+  CC_LB_ADMIN_SKIP_SPA: "1"
+
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'crates/cc-lb-bdd-tests/**'
+      - 'crates/cc-lb-storage-api/**'
+      - 'crates/cc-lb-storage-sqlite/**'
+      - 'crates/cc-lb-storage-postgres/**'
+      - '.github/workflows/bdd*.yml'
+  push:
+    branches:
+      - master
+    paths:
+      - 'crates/cc-lb-bdd-tests/**'
+      - 'crates/cc-lb-storage-api/**'
+      - 'crates/cc-lb-storage-sqlite/**'
+      - 'crates/cc-lb-storage-postgres/**'
+      - '.github/workflows/bdd*.yml'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bdd-fast-sqlite:
+    name: BDD fast subset (sqlite)
+    runs-on: oracle4-cc-lb
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust-cache
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Run fast subset (sqlite)
+        run: |
+          cargo nextest run \
+            -p cc-lb-bdd-tests \
+            -E 'test(/fast_/)'
+      - name: Upload captures on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bdd-captures-sqlite
+          path: crates/cc-lb-bdd-tests/tests/__captures__/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  bdd-fast-postgres:
+    name: BDD fast subset (postgres)
+    runs-on: oracle4-cc-lb
+
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: testpw
+          POSTGRES_DB: cc_lb_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    env:
+      CI_POSTGRES_URL: postgres://postgres:testpw@localhost:5432/cc_lb_test
+
+    steps:
+      - uses: actions/checkout@v6
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/setup-rust-cache
+      - name: Install nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: Run fast subset (postgres)
+        run: |
+          cargo nextest run \
+            -p cc-lb-bdd-tests \
+            --features postgres \
+            -E 'test(/fast_/)'
+      - name: Upload captures on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bdd-captures-postgres
+          path: crates/cc-lb-bdd-tests/tests/__captures__/
+          retention-days: 14
+          if-no-files-found: ignore
+
+  bdd-no-real-api:
+    name: BDD no-real-API lint
+    runs-on: oracle4-cc-lb
+    steps:
+      - uses: actions/checkout@v6
+      - name: Reject real Anthropic URLs in BDD harness
+        run: |
+          if grep -RIn -E 'api\.anthropic\.com' crates/cc-lb-bdd-tests/; then
+            echo "::error::BDD harness must never reference api.anthropic.com directly."
+            exit 1
+          fi

@@ -565,6 +565,7 @@ dependencies = [
  "cc-lb-storage-api",
  "cc-lb-storage-postgres",
  "cc-lb-storage-sqlite",
+ "serde_json",
  "sqlx",
  "tempfile",
  "tokio",

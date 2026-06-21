@@ -11,23 +11,22 @@
 //!
 //! ### Required attributes
 //!
-//! - `id`           — scenario id (string literal) used as the panic
-//!                    prefix and as the doc-comment first line.
-//! - `fn_name`      — Rust identifier used as the module name.
-//!                    Prefix with `fast_` to include in the PR-gate
-//!                    fast subset.
-//! - `persona`      — `Alice` / `Bob` / `Charlie` / `Dana`.
-//! - `title`        — short, English, one-line scenario title.
-//! - `description`  — multi-sentence English description; required
-//!                    by the v3.2 plan §3.5 to guarantee static
-//!                    extractability by the lint described in §12.1.
-//! - `given`        — block `|ctx| { ... }`; returns the subject the
-//!                    `when` block consumes.
-//! - `when`         — block `|subject| { ... }`; returns the action
-//!                    result the `then` block consumes.
-//! - `then`         — block `|result, ctx| { ... }`; performs
-//!                    assertions. `result` must be type-annotated by
-//!                    the caller via `let result: T = result;`.
+//! - `id` — scenario id (string literal) used as the panic prefix
+//!   and as the doc-comment first line.
+//! - `fn_name` — Rust identifier used as the module name. Prefix
+//!   with `fast_` to include in the PR-gate fast subset.
+//! - `persona` — `Alice` / `Bob` / `Charlie` / `Dana`.
+//! - `title` — short, English, one-line scenario title.
+//! - `description` — multi-sentence English description; required by
+//!   the v3.2 plan §3.5 to guarantee static extractability by the
+//!   lint described in §12.1.
+//! - `given` — block `|ctx| { ... }`; returns the subject the `when`
+//!   block consumes.
+//! - `when` — block `|subject| { ... }`; returns the action result
+//!   the `then` block consumes.
+//! - `then` — block `|result, ctx| { ... }`; performs assertions.
+//!   `result` must be type-annotated by the caller via
+//!   `let result: T = result;`.
 
 #[macro_export]
 macro_rules! bdd_scenario {
@@ -51,20 +50,33 @@ macro_rules! bdd_scenario {
             pub const SCENARIO_ID: &str = $id;
             pub const PERSONA: $crate::Persona = $crate::Persona::$persona;
 
-            #[tokio::test]
-            async fn sqlite() -> ::anyhow::Result<()> {
-                let ctx =
-                    $crate::BddCtx::new_sqlite(SCENARIO_ID, PERSONA).await?;
+            async fn body(ctx: &$crate::BddCtx) -> ::anyhow::Result<()> {
                 let $w_in = {
-                    let $g_ctx = &ctx;
+                    let $g_ctx = ctx;
                     $g_body
                 };
                 let $t_result = $w_body;
                 {
-                    let $t_ctx = &ctx;
+                    let $t_ctx = ctx;
                     $t_body
                 }
                 Ok(())
+            }
+
+            #[tokio::test]
+            async fn sqlite() -> ::anyhow::Result<()> {
+                let ctx = $crate::BddCtx::new_sqlite(SCENARIO_ID, PERSONA).await?;
+                body(&ctx).await
+            }
+
+            #[cfg(feature = "postgres")]
+            #[tokio::test]
+            async fn postgres() -> ::anyhow::Result<()> {
+                let Some(ctx) = $crate::BddCtx::new_postgres(SCENARIO_ID, PERSONA).await? else {
+                    eprintln!("[{}] skip: CI_POSTGRES_URL not set", SCENARIO_ID,);
+                    return Ok(());
+                };
+                body(&ctx).await
             }
         }
     };

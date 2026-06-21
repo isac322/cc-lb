@@ -26,6 +26,7 @@ sqlx = { workspace = true, features = ["postgres", "runtime-tokio", "tls-rustls-
 
 anyhow = { workspace = true }
 async-trait = { workspace = true }
+serde_json = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }
 uuid = { workspace = true, features = ["v4"] }
 tempfile = { workspace = true }

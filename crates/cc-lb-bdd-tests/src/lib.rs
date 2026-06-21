@@ -17,7 +17,7 @@ pub mod scenario;
 
 pub use ctx::BddCtx;
 pub use persona::{Alice, Bob, Charlie, Dana};
-pub use results::PrincipalCreateResult;
+pub use results::{AuditEntrySummary, PrincipalCreateResult, PrincipalSoftDeleteResult};
 
 /// Marker enum used by the macro `persona = ...` attribute. The variant
 /// names match the v5.2 persona vocabulary exactly: Alice (operator),

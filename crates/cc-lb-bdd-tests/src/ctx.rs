@@ -22,7 +22,7 @@ pub struct BddCtx {
 
 impl BddCtx {
     /// Create a fresh SQLite-backed context. Used by the macro-emitted
-    /// `_sqlite` test function.
+    /// `sqlite` test function.
     pub async fn new_sqlite(scenario_id: &'static str, persona: Persona) -> Result<Self> {
         let (storage, fixture) = bootstrap_sqlite().await?;
         Ok(Self {
@@ -31,6 +31,25 @@ impl BddCtx {
             storage,
             _fixture: fixture,
         })
+    }
+
+    /// Create a fresh PostgreSQL-backed context. Used by the macro-emitted
+    /// `postgres` test function. Returns `Ok(None)` when the
+    /// `CI_POSTGRES_URL` env var is unset so the scenario can declare
+    /// itself skipped rather than fail — matches the existing conformance
+    /// crate's behavior so a missing local Postgres does not break
+    /// `cargo test`.
+    #[cfg(feature = "postgres")]
+    pub async fn new_postgres(scenario_id: &'static str, persona: Persona) -> Result<Option<Self>> {
+        let Some((storage, fixture)) = crate::backend::bootstrap_postgres().await? else {
+            return Ok(None);
+        };
+        Ok(Some(Self {
+            scenario_id,
+            persona,
+            storage,
+            _fixture: fixture,
+        }))
     }
 
     pub fn scenario_id(&self) -> &'static str {
