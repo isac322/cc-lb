@@ -100,6 +100,7 @@ function UpstreamsPage() {
     upstreamIds,
     windows: '5h,7d,overage',
     source: 'merged',
+    refetchInterval: 5_000,
   });
 
   const listUsage = useUsage('7d', 'hour', 'upstream');
@@ -431,7 +432,13 @@ function windowLabel(windowName: string): string {
 
 function SnapshotStatusComposite({ snap }: { snap: any }) {
   const source =
-    snap.source === 'api' ? 'API' : snap.source === 'header' ? 'Header' : '—';
+    snap.source === 'api'
+      ? 'API'
+      : snap.source === 'header'
+        ? 'Header'
+        : snap.source === 'merged'
+          ? 'Header + API'
+          : '—';
   const label =
     snap.state === 'fresh'
       ? 'live'
@@ -595,6 +602,7 @@ function DetailView({
     upstreamIds: upstream.id,
     windows: '5h,7d,overage,7d_sonnet,7d_opus',
     source: 'merged',
+    refetchInterval: 5_000,
   });
   const quotaSeries = useSubscriptionQuotaSeries({
     upstreamIds: upstream.id,

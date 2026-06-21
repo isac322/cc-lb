@@ -491,6 +491,7 @@ export function useSubscriptionQuotaLatest(params: {
   windows?: string;
   source?: string;
   maxStalenessSecs?: number;
+  refetchInterval?: number;
 }) {
   const searchParams = new URLSearchParams();
   if (params.upstreamIds) searchParams.set('upstream_ids', params.upstreamIds);
@@ -505,7 +506,7 @@ export function useSubscriptionQuotaLatest(params: {
       getJson<LatestResponse>(
         `/admin/v1/subscription-quotas/latest?${searchParams.toString()}`,
       ),
-    refetchInterval: 30_000,
+    refetchInterval: params.refetchInterval ?? 30_000,
   });
 }
 
