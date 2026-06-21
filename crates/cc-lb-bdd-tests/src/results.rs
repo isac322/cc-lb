@@ -284,26 +284,3 @@ pub struct W3ScenarioResult {
     pub message: String,
     pub request_id: String,
 }
-
-#[derive(Debug, Clone)]
-pub struct W4ScenarioEvidence {
-    pub scenario_id: String,
-    pub passed: bool,
-    pub observations: Vec<String>,
-}
-
-impl W4ScenarioEvidence {
-    pub fn from_checks(scenario_id: &str, checks: Vec<(&str, bool)>) -> Self {
-        let passed = checks.iter().all(|(_, passed)| *passed);
-        let observations = checks
-            .into_iter()
-            .map(|(name, passed)| format!("{name}={passed}"))
-            .collect();
-
-        Self {
-            scenario_id: scenario_id.to_owned(),
-            passed,
-            observations,
-        }
-    }
-}

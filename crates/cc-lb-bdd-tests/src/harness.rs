@@ -92,6 +92,11 @@ enum BackendState {
         url: String,
         schema: String,
         pool: sqlx::PgPool,
+        _dir: tempfile::TempDir,
+    },
+    #[cfg(feature = "postgres")]
+    PostgresReplica {
+        _dir: tempfile::TempDir,
     },
     #[allow(dead_code)]
     None,
@@ -100,7 +105,10 @@ enum BackendState {
 impl Drop for BackendState {
     fn drop(&mut self) {
         #[cfg(feature = "postgres")]
-        if let BackendState::Postgres { url, schema, pool } = self {
+        if let BackendState::Postgres {
+            url, schema, pool, ..
+        } = self
+        {
             let url = std::mem::take(url);
             let schema = std::mem::take(schema);
             let pool = pool.clone();
@@ -154,6 +162,7 @@ impl BddHarness {
 
         let config = base_config_sqlite(
             storage_path.clone(),
+            dir.path().join("data"),
             oauth_mock.as_ref().map(|mock| mock.addr),
         );
         let aead = Arc::new(AeadService::from_master_key([0u8; 32]));
@@ -242,7 +251,13 @@ impl BddHarness {
             None
         };
 
-        let config = base_config_postgres(&url, &schema, oauth_mock.as_ref().map(|mock| mock.addr));
+        let dir = tempfile::tempdir().context("create postgres scenario tempdir")?;
+        let config = base_config_postgres(
+            &url,
+            &schema,
+            dir.path().join("data"),
+            oauth_mock.as_ref().map(|mock| mock.addr),
+        );
         let aead = Arc::new(AeadService::from_master_key([0u8; 32]));
         let app = build_app_with_storage(
             config,
@@ -269,8 +284,113 @@ impl BddHarness {
             principal_id,
             oauth_mock,
             _upstream_task: upstream_task,
-            _state: BackendState::Postgres { url, schema, pool },
+            _state: BackendState::Postgres {
+                url,
+                schema,
+                pool,
+                _dir: dir,
+            },
         }))
+    }
+
+    #[cfg(feature = "postgres")]
+    pub async fn spawn_postgres_replica_pair() -> Result<Option<(Self, Self)>> {
+        let Some(url) = std::env::var("CI_POSTGRES_URL")
+            .ok()
+            .or_else(|| std::env::var("DATABASE_URL").ok())
+        else {
+            return Ok(None);
+        };
+
+        let schema = format!("bdd_{}", Uuid::new_v4().simple());
+        let admin = PgPoolOptions::new()
+            .max_connections(1)
+            .connect_with(PgConnectOptions::from_str(&url)?)
+            .await?;
+        sqlx::query(AssertSqlSafe(format!("CREATE SCHEMA {}", schema)))
+            .execute(&admin)
+            .await?;
+        admin.close().await;
+
+        let pool = PgPoolOptions::new()
+            .max_connections(8)
+            .connect_with(
+                PgConnectOptions::from_str(&url)?.options([("search_path", schema.as_str())]),
+            )
+            .await?;
+        for migration in POSTGRES_MIGRATIONS {
+            sqlx::raw_sql(*migration).execute(&pool).await?;
+        }
+        let postgres = Arc::new(PostgresStorage::new(pool.clone()));
+        let storage_dyn: Arc<dyn StorageTrait> = postgres.clone();
+        let managed_dyn: Arc<dyn ManagedKeyStore> = Arc::new(PostgresManagedKeyStore::new(
+            pool.clone(),
+            Arc::new(cc_lb_storage_postgres::adapter::retry::RetryPolicy::default()),
+        ));
+        postgres.initialize(BackendKind::Postgres).await?;
+
+        let (script_a, upstream_addr_a, upstream_task_a) = spawn_fake_anthropic().await?;
+        let upstream_id =
+            seed_upstream(storage_dyn.as_ref(), TEST_UPSTREAM_NAME, upstream_addr_a).await?;
+        let principal_id = seed_principal(storage_dyn.as_ref(), TEST_PRINCIPAL_NAME).await?;
+
+        let (script_b, _upstream_addr_b, upstream_task_b) = spawn_fake_anthropic().await?;
+        let dir_a = tempfile::tempdir().context("create postgres replica A tempdir")?;
+        let dir_b = tempfile::tempdir().context("create postgres replica B tempdir")?;
+        let config_a = base_config_postgres(&url, &schema, dir_a.path().join("data"), None);
+        let config_b = base_config_postgres(&url, &schema, dir_b.path().join("data"), None);
+        let aead = Arc::new(AeadService::from_master_key([0u8; 32]));
+        let app_a = build_app_with_storage(
+            config_a,
+            None,
+            managed_dyn.clone(),
+            storage_dyn.clone(),
+            aead.clone(),
+        )
+        .await
+        .map_err(|e| anyhow!("build_app_with_storage replica A failed: {e}"))?;
+        let app_b = build_app_with_storage(
+            config_b,
+            None,
+            managed_dyn.clone(),
+            storage_dyn.clone(),
+            aead.clone(),
+        )
+        .await
+        .map_err(|e| anyhow!("build_app_with_storage replica B failed: {e}"))?;
+
+        let replica_a = Self {
+            backend: HarnessBackend::Postgres,
+            storage: storage_dyn.clone(),
+            managed: managed_dyn.clone(),
+            aead: aead.clone(),
+            app: app_a,
+            script: script_a,
+            upstream_id,
+            principal_id,
+            oauth_mock: None,
+            _upstream_task: upstream_task_a,
+            _state: BackendState::PostgresReplica { _dir: dir_a },
+        };
+        let replica_b = Self {
+            backend: HarnessBackend::Postgres,
+            storage: storage_dyn,
+            managed: managed_dyn,
+            aead,
+            app: app_b,
+            script: script_b,
+            upstream_id,
+            principal_id,
+            oauth_mock: None,
+            _upstream_task: upstream_task_b,
+            _state: BackendState::Postgres {
+                url,
+                schema,
+                pool,
+                _dir: dir_b,
+            },
+        };
+        Ok(Some((replica_a, replica_b)))
     }
 
     /// Admin router clone for tower::ServiceExt::oneshot.
@@ -282,9 +402,13 @@ impl BddHarness {
     pub fn proxy_router(&self) -> Router {
         self.app.router.clone()
     }
+
+    pub fn charlie(&self) -> crate::persona::Charlie<'_> {
+        crate::persona::Charlie::from_harness(self)
+    }
 }
 
-fn base_config_sqlite(path: PathBuf, oauth_addr: Option<SocketAddr>) -> Config {
+fn base_config_sqlite(path: PathBuf, data_dir: PathBuf, oauth_addr: Option<SocketAddr>) -> Config {
     let mut config = Config {
         storage: StorageConfig::Sqlite { path },
         admin: AdminConfig {
@@ -300,6 +424,7 @@ fn base_config_sqlite(path: PathBuf, oauth_addr: Option<SocketAddr>) -> Config {
         },
         ..Config::default()
     };
+    config.runtime.data_dir = Some(data_dir);
     if let Some(addr) = oauth_addr {
         config.oauth.anthropic = Some(oauth_config(addr));
     }
@@ -307,7 +432,12 @@ fn base_config_sqlite(path: PathBuf, oauth_addr: Option<SocketAddr>) -> Config {
 }
 
 #[cfg(feature = "postgres")]
-fn base_config_postgres(url: &str, _schema: &str, oauth_addr: Option<SocketAddr>) -> Config {
+fn base_config_postgres(
+    url: &str,
+    _schema: &str,
+    data_dir: PathBuf,
+    oauth_addr: Option<SocketAddr>,
+) -> Config {
     let mut config = Config {
         storage: StorageConfig::Postgres {
             url: url.to_owned(),
@@ -329,6 +459,7 @@ fn base_config_postgres(url: &str, _schema: &str, oauth_addr: Option<SocketAddr>
         },
         ..Config::default()
     };
+    config.runtime.data_dir = Some(data_dir);
     if let Some(addr) = oauth_addr {
         config.oauth.anthropic = Some(oauth_config(addr));
     }

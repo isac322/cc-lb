@@ -93,6 +93,11 @@ impl BddCtx {
         }))
     }
 
+    #[cfg(feature = "postgres")]
+    pub async fn spawn_postgres_replica_pair() -> Result<Option<(BddHarness, BddHarness)>> {
+        BddHarness::spawn_postgres_replica_pair().await
+    }
+
     pub fn scenario_id(&self) -> &'static str {
         self.scenario_id
     }

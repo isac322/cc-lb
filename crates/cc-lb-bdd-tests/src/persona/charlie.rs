@@ -6,16 +6,14 @@ use anyhow::{Context, Result};
 use axum::http::{Method, StatusCode};
 use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_core::DrainController;
 use cc_lb_server::dynamic_view_builder::Stores;
 use cc_lb_server::refresh::OAuthRefresher;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
-    AuditEntry, AuditStore, ConfigDraftState, ConfigStore, HistorySummary, MetaStore,
-    OrganizationMetadataRecord, OrganizationMetadataStore, RequestEventStore,
-    SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
-    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamCreate, UpstreamStore,
-    UpstreamSubscriptionMetadataRecord, UpstreamSubscriptionMetadataStore,
+    AuditEntry, AuditStore, MetaStore, OrganizationMetadataRecord, OrganizationMetadataStore,
+    RequestEventStore, SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind,
+    SubscriptionQuotaSource, SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamCreate,
+    UpstreamStore, UpstreamSubscriptionMetadataRecord, UpstreamSubscriptionMetadataStore,
     UpstreamSubscriptionQuotaStore,
 };
 use fake_anthropic::ScriptedMessageResponse;
@@ -30,7 +28,7 @@ use crate::persona::http;
 use crate::results::{
     HealthSnapshot, HttpResponse, KillswitchState, W2CompatibilityCacheResult,
     W2CredentialIncidentResult, W2KillswitchResult, W2QuotaVisibilityResult,
-    W2UpstreamOutageResult, W2WarmupResult, W3ScenarioResult, W4ScenarioEvidence,
+    W2UpstreamOutageResult, W2WarmupResult, W3ScenarioResult,
 };
 
 pub struct Charlie<'a> {
@@ -1053,227 +1051,6 @@ impl<'a> Charlie<'a> {
         )
         .await?;
         Ok(metadata.is_some() && compat.is_some())
-    }
-
-    pub async fn charlie_w4_config_action(&self, scenario_id: &str) -> Result<W4ScenarioEvidence> {
-        let before = ConfigStore::get_config_draft(self.storage.as_ref()).await?;
-        let revision = ConfigStore::put_config_draft(
-            self.storage.as_ref(),
-            ConfigDraftState {
-                draft: Some(json!({
-                    "scenario_id": scenario_id,
-                    "limit": { "requests_per_minute": 42 },
-                    "restart_required": scenario_id.ends_with('9') || scenario_id.ends_with("13"),
-                })),
-                saved_at_unix_secs: Some(unix_now_secs()),
-                ..ConfigDraftState::default()
-            },
-            before.revision,
-        )
-        .await?;
-
-        let validation_error = if scenario_id == "F14.3" {
-            Some("format error at config.limit".to_owned())
-        } else {
-            None
-        };
-        ConfigStore::set_last_validated_revision(self.storage.as_ref(), revision, validation_error)
-            .await?;
-        ConfigStore::append_config_history(
-            self.storage.as_ref(),
-            revision,
-            format!("scenario = \"{scenario_id}\"\n"),
-            unix_now_secs(),
-            HistorySummary {
-                upstreams: 1,
-                principals: 1,
-                plugin_count: 0,
-                tls_enabled: scenario_id.starts_with("F15"),
-            },
-        )
-        .await?;
-
-        let draft = ConfigStore::get_config_draft(self.storage.as_ref()).await?;
-        let history = ConfigStore::list_config_history(self.storage.as_ref(), 10).await?;
-        let admin_draft = self
-            .admin_request(Method::GET, "/admin/v1/config/draft", None)
-            .await;
-        let admin_history = self
-            .admin_request(Method::GET, "/admin/v1/config/history", None)
-            .await;
-        Ok(W4ScenarioEvidence::from_checks(
-            scenario_id,
-            vec![
-                ("draft_revision_advanced", revision > before.revision),
-                ("draft_visible", draft.revision == revision),
-                ("admin_draft_visible", admin_draft.status == StatusCode::OK),
-                (
-                    "history_recorded",
-                    history.iter().any(|entry| entry.revision == revision),
-                ),
-                (
-                    "admin_history_visible",
-                    admin_history.status == StatusCode::OK,
-                ),
-                (
-                    "apply_has_summary",
-                    history.iter().any(|entry| entry.summary.principals == 1),
-                ),
-            ],
-        ))
-    }
-
-    pub async fn charlie_w4_drain_action(&self, scenario_id: &str) -> Result<W4ScenarioEvidence> {
-        if let Some(harness) = self.harness {
-            let health_before = self.proxy_request(Method::GET, "/healthz", None).await;
-            let ready_before = self.proxy_request(Method::GET, "/readyz", None).await;
-            harness.app.set_draining(true);
-            let ready_after = self.proxy_request(Method::GET, "/readyz", None).await;
-            let rejected_call = self
-                .proxy_request(
-                    Method::POST,
-                    "/v1/messages",
-                    Some(json!({
-                        "model": "claude-sonnet-bdd",
-                        "max_tokens": 1,
-                        "messages": [{"role": "user", "content": "drain check"}]
-                    })),
-                )
-                .await;
-            harness.app.set_draining(false);
-
-            self.append_operation_audit(
-                scenario_id,
-                "DrainMarker",
-                json!({
-                    "health_before": health_before.status.as_u16(),
-                    "ready_before": ready_before.status.as_u16(),
-                    "ready_after": ready_after.status.as_u16(),
-                    "rejected_call": rejected_call.status.as_u16(),
-                }),
-            )
-            .await?;
-            let entries = AuditStore::query_audit(
-                self.storage.as_ref(),
-                Some(scenario_id),
-                0,
-                u64::MAX / 2,
-                16,
-            )
-            .await?;
-            let ready_after_body = ready_after.body_json();
-
-            return Ok(W4ScenarioEvidence::from_checks(
-                scenario_id,
-                vec![
-                    ("healthz_ok", health_before.status == StatusCode::OK),
-                    (
-                        "readyz_observable",
-                        ready_before.status.is_success()
-                            || ready_before.status == StatusCode::SERVICE_UNAVAILABLE,
-                    ),
-                    (
-                        "readyz_draining",
-                        ready_after.status == StatusCode::SERVICE_UNAVAILABLE,
-                    ),
-                    (
-                        "readyz_reason_draining",
-                        ready_after_body["reason"] == "draining",
-                    ),
-                    (
-                        "new_calls_rejected",
-                        rejected_call.status == StatusCode::SERVICE_UNAVAILABLE,
-                    ),
-                    (
-                        "operation_audit_written",
-                        entries
-                            .iter()
-                            .any(|entry| entry.kind.as_deref() == Some("DrainMarker")),
-                    ),
-                ],
-            ));
-        }
-
-        let controller = DrainController::new();
-        let initially_ready = !controller.is_draining();
-        controller.trigger();
-        let draining = controller.is_draining();
-        let forced = controller.mark_force_closed();
-        self.append_operation_audit(scenario_id, "DrainMarker", json!({ "forced": forced }))
-            .await?;
-        let entries = AuditStore::query_audit(
-            self.storage.as_ref(),
-            Some(scenario_id),
-            0,
-            u64::MAX / 2,
-            16,
-        )
-        .await?;
-
-        Ok(W4ScenarioEvidence::from_checks(
-            scenario_id,
-            vec![
-                ("initially_ready", initially_ready),
-                ("drain_signal_recorded", draining),
-                ("force_count_non_negative", forced == 0),
-                (
-                    "operation_audit_written",
-                    entries
-                        .iter()
-                        .any(|entry| entry.kind.as_deref() == Some("DrainMarker")),
-                ),
-            ],
-        ))
-    }
-
-    pub async fn charlie_w4_replica_action(&self, scenario_id: &str) -> Result<W4ScenarioEvidence> {
-        let backend = MetaStore::backend_kind(self.storage.as_ref()).await?;
-        let version = MetaStore::contract_version(self.storage.as_ref()).await?;
-        self.append_operation_audit(
-            scenario_id,
-            "ReplicaHeartbeat",
-            json!({
-                "replicas": [Uuid::new_v4().to_string(), Uuid::new_v4().to_string()],
-                "backend": backend.as_str(),
-            }),
-        )
-        .await?;
-        self.append_operation_audit(
-            scenario_id,
-            "LeaseWinner",
-            json!({ "winner_count": 1, "contract_version": version }),
-        )
-        .await?;
-        let entries = AuditStore::query_audit(
-            self.storage.as_ref(),
-            Some(scenario_id),
-            0,
-            u64::MAX / 2,
-            16,
-        )
-        .await?;
-
-        Ok(W4ScenarioEvidence::from_checks(
-            scenario_id,
-            vec![
-                ("backend_initialized", !backend.as_str().is_empty()),
-                ("contract_version_known", version > 0),
-                (
-                    "heartbeat_recorded",
-                    entries
-                        .iter()
-                        .any(|entry| entry.kind.as_deref() == Some("ReplicaHeartbeat")),
-                ),
-                (
-                    "single_lease_winner",
-                    entries
-                        .iter()
-                        .filter(|entry| entry.kind.as_deref() == Some("LeaseWinner"))
-                        .count()
-                        == 1,
-                ),
-            ],
-        ))
     }
 
     pub async fn charlie_w3_crash_messages_mask_secrets(&self) -> Result<W3ScenarioResult> {

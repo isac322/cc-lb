@@ -36,6 +36,55 @@ macro_rules! bdd_scenario {
         persona: $persona:ident,
         title: $title:literal,
         description: $desc:literal,
+        backend: postgres_only,
+        given: | $g_ctx:ident | $g_body:block ,
+        when:  | $w_in:ident |  $w_body:block ,
+        then:  | $t_result:ident , $t_ctx:ident | $t_body:block $(,)?
+    ) => {
+        #[doc = $title]
+        #[doc = ""]
+        #[doc = $desc]
+        pub mod $fn_name {
+            #[allow(unused_imports)]
+            use super::*;
+
+            pub const SCENARIO_ID: &str = $id;
+            pub const PERSONA: $crate::Persona = $crate::Persona::$persona;
+
+            #[cfg(feature = "postgres")]
+            async fn body(ctx: &$crate::BddCtx) -> ::anyhow::Result<()> {
+                let $w_in = {
+                    let $g_ctx = ctx;
+                    $g_body
+                };
+                let $t_result = $w_body;
+                {
+                    let $t_ctx = ctx;
+                    $t_body
+                }
+                Ok(())
+            }
+
+            #[cfg(feature = "postgres")]
+            #[tokio::test]
+            async fn postgres() -> ::anyhow::Result<()> {
+                let Some(ctx) = $crate::BddCtx::new_postgres(SCENARIO_ID, PERSONA).await? else {
+                    eprintln!("[{}] skip: CI_POSTGRES_URL not set", SCENARIO_ID,);
+                    return Ok(());
+                };
+                body(&ctx).await?;
+                ctx.finish();
+                Ok(())
+            }
+        }
+    };
+
+    (
+        id: $id:literal,
+        fn_name: $fn_name:ident,
+        persona: $persona:ident,
+        title: $title:literal,
+        description: $desc:literal,
         oos_manual: $reason:literal,
         given: | $g_ctx:ident | $g_body:block ,
         when:  | $w_in:ident |  $w_body:block ,
