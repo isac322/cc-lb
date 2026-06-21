@@ -17,7 +17,9 @@ use crate::scheduler_dispatch::http::{decrypt_bundle, upstream_base_url};
 use crate::scheduler_dispatch::outcomes::warmup_outcome;
 use crate::scheduler_dispatch::storage::storage_scheduler_error;
 use crate::scheduler_dispatch::time::{now_unix_millis, now_unix_secs};
-use crate::warmup::{WarmupAbandonReason, WarmupResult, classify_response, dispatch_warmup, stable_jitter_ms};
+use crate::warmup::{
+    WarmupAbandonReason, WarmupResult, classify_response, dispatch_warmup, stable_jitter_ms,
+};
 
 use super::SchedulerDispatch;
 
@@ -98,12 +100,8 @@ impl SchedulerDispatch {
             | WarmupResult::WindowAlreadyActive {
                 cycle_key: response_cycle_key,
             } => {
-                self.write_status_after_warmup_success(
-                    upstream.id,
-                    cycle_key,
-                    response_cycle_key,
-                )
-                .await;
+                self.write_status_after_warmup_success(upstream.id, cycle_key, response_cycle_key)
+                    .await;
                 self.record_warmup_observations(upstream.id, final_observations)
             }
             WarmupResult::RetryableTransient => Err(SchedulerError::Job(format!(
@@ -122,11 +120,9 @@ impl SchedulerDispatch {
         candidate_cycle_key: i64,
         response_cycle_key: i64,
     ) {
-        let Some(next_warmup_at) = next_warmup_at_after_success(
-            upstream_id,
-            candidate_cycle_key,
-            response_cycle_key,
-        ) else {
+        let Some(next_warmup_at) =
+            next_warmup_at_after_success(upstream_id, candidate_cycle_key, response_cycle_key)
+        else {
             tracing::warn!(upstream_id = %upstream_id, cycle_key = candidate_cycle_key, "could not compute next_warmup_at; admin status will lag");
             return;
         };
@@ -137,17 +133,14 @@ impl SchedulerDispatch {
             last_warmup_at_unix_secs: Some(Some(now_unix_secs())),
             ..UpstreamStatusUpdate::default()
         };
-        if let Err(error) = UpstreamStore::set_status(self.storage.as_ref(), upstream_id, status)
-            .await
+        if let Err(error) =
+            UpstreamStore::set_status(self.storage.as_ref(), upstream_id, status).await
         {
             tracing::warn!(upstream_id = %upstream_id, %error, "warmup status writeback failed; admin UI may show stale data");
         }
     }
 
-    async fn ensure_fresh_oauth_token(
-        &self,
-        upstream: &mut UpstreamRecord,
-    ) -> SchedulerResult<()> {
+    async fn ensure_fresh_oauth_token(&self, upstream: &mut UpstreamRecord) -> SchedulerResult<()> {
         let Some(lazy_refresher) = self.lazy_refresher.as_ref() else {
             return Ok(());
         };
@@ -256,7 +249,9 @@ fn next_warmup_at_after_success(
     let jitter_ms = stable_jitter_ms(upstream_id, anchor_u64);
     let base = Utc.timestamp_opt(schedule_anchor, 0).single()?;
     base.checked_add_signed(chrono::Duration::seconds(POST_RESET_GUARD_SECS))
-        .and_then(|value| value.checked_add_signed(chrono::Duration::milliseconds(jitter_ms as i64)))
+        .and_then(|value| {
+            value.checked_add_signed(chrono::Duration::milliseconds(jitter_ms as i64))
+        })
 }
 
 fn is_warmup_live(upstream: &UpstreamRecord) -> bool {

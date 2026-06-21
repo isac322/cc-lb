@@ -217,10 +217,7 @@ impl SchedulerDispatch {
         }
     }
 
-    async fn ensure_fresh_usage_token(
-        &self,
-        upstream: &mut UpstreamRecord,
-    ) -> SchedulerResult<()> {
+    async fn ensure_fresh_usage_token(&self, upstream: &mut UpstreamRecord) -> SchedulerResult<()> {
         let Some(lazy_refresher) = self.lazy_refresher.as_ref() else {
             return Ok(());
         };

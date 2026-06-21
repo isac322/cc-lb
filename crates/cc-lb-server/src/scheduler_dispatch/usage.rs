@@ -200,9 +200,8 @@ mod tests {
 
     #[test]
     fn rfc3339_resets_at_is_accepted() {
-        let records = parse(
-            r#"{"five_hour":{"utilization":42,"resets_at":"2026-06-21T20:30:00Z"}}"#,
-        );
+        let records =
+            parse(r#"{"five_hour":{"utilization":42,"resets_at":"2026-06-21T20:30:00Z"}}"#);
         let five_hour = records
             .iter()
             .find(|r| r.window == SubscriptionQuotaWindow::FiveHour)
@@ -212,8 +211,7 @@ mod tests {
 
     #[test]
     fn numeric_resets_at_is_accepted() {
-        let records =
-            parse(r#"{"seven_day":{"utilization":12,"resets_at":1800000000}}"#);
+        let records = parse(r#"{"seven_day":{"utilization":12,"resets_at":1800000000}}"#);
         let seven_day = records
             .iter()
             .find(|r| r.window == SubscriptionQuotaWindow::SevenDay)
@@ -223,8 +221,7 @@ mod tests {
 
     #[test]
     fn float_resets_at_is_accepted() {
-        let records =
-            parse(r#"{"five_hour":{"utilization":1,"resets_at":1800000000.5}}"#);
+        let records = parse(r#"{"five_hour":{"utilization":1,"resets_at":1800000000.5}}"#);
         let five_hour = records
             .iter()
             .find(|r| r.window == SubscriptionQuotaWindow::FiveHour)
@@ -245,7 +242,12 @@ mod tests {
         let body = r#"{"five_hour":{"utilization":60.0,"resets_at":"2026-06-21T08:10:00.885300+00:00"},"seven_day":{"utilization":21.0,"resets_at":"2026-06-25T19:00:00.885325+00:00"},"seven_day_oauth_apps":null,"seven_day_opus":null,"seven_day_sonnet":{"utilization":0.0,"resets_at":"2026-06-25T18:59:59.885338+00:00"},"extra_usage":{"is_enabled":false,"monthly_limit":null,"used_credits":null}}"#;
         let records = parse(body);
         let windows: Vec<_> = records.iter().map(|r| r.window).collect();
-        assert_eq!(records.len(), 4, "expected 4 records, got windows={:?}", windows);
+        assert_eq!(
+            records.len(),
+            4,
+            "expected 4 records, got windows={:?}",
+            windows
+        );
     }
 
     #[test]

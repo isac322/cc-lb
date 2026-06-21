@@ -338,9 +338,7 @@ pub(super) fn spawn_reconcile_producer(
     })
 }
 
-async fn enqueue_recurring_reconcile(
-    backend: &SchedulerBackend,
-) -> Result<bool, SchedulerError> {
+async fn enqueue_recurring_reconcile(backend: &SchedulerBackend) -> Result<bool, SchedulerError> {
     let job = SchedulerReconcileJob { traceparent: None };
     let payload = apalis_codec::json::JsonCodec::<Vec<u8>>::encode(&job)
         .map_err(|error| SchedulerError::Job(format!("encode recurring reconcile job: {error}")))?;
@@ -372,9 +370,10 @@ async fn enqueue_recurring_reconcile(
         }
         #[cfg(feature = "postgres")]
         SchedulerBackend::Postgres(postgres) => {
-            let run_at = chrono::DateTime::<chrono::Utc>::from_timestamp(now_i64, 0).ok_or_else(
-                || SchedulerError::Job("run_at outside chrono timestamp range".to_owned()),
-            )?;
+            let run_at =
+                chrono::DateTime::<chrono::Utc>::from_timestamp(now_i64, 0).ok_or_else(|| {
+                    SchedulerError::Job("run_at outside chrono timestamp range".to_owned())
+                })?;
             let result = sqlx::query(
                 "INSERT INTO apalis.jobs (job, id, job_type, status, attempts, max_attempts, run_at, priority, metadata, idempotency_key) \
                  VALUES ($1, $2, $3, 'Pending', 0, $4, $5, 0, $6, $7) \

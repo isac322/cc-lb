@@ -163,6 +163,7 @@ fn encode_singleton_job(
         .map_err(|error| TaskSinkError::CodecError(error.into()))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn insert_singleton_job(
     pool: &SqlitePool,
     queue: &str,
