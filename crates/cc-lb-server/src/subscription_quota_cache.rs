@@ -233,8 +233,13 @@ fn merge_header_api(
     header: &MergedQuotaSnapshot,
     api: &MergedQuotaSnapshot,
 ) -> MergedQuotaSnapshot {
+    let source = if api.observed_at_unix_millis > header.observed_at_unix_millis {
+        MergedSource::Api
+    } else {
+        MergedSource::Header
+    };
     MergedQuotaSnapshot {
-        source: MergedSource::Merged,
+        source,
         utilization: header.utilization.or(api.utilization),
         status: header.status.or(api.status),
         resets_at_unix_secs: header.resets_at_unix_secs.or(api.resets_at_unix_secs),

@@ -432,13 +432,7 @@ function windowLabel(windowName: string): string {
 
 function SnapshotStatusComposite({ snap }: { snap: any }) {
   const source =
-    snap.source === 'api'
-      ? 'API'
-      : snap.source === 'header'
-        ? 'Header'
-        : snap.source === 'merged'
-          ? 'Header + API'
-          : '—';
+    snap.source === 'api' ? 'API' : snap.source === 'header' ? 'Header' : '—';
   const label =
     snap.state === 'fresh'
       ? 'live'
