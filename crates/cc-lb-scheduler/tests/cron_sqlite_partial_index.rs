@@ -7,8 +7,7 @@ use cc_lb_config::{Config, RecurringJobConfig};
 use cc_lb_scheduler::leader_election::LeaderElection;
 use cc_lb_scheduler::migrations::apply_post_setup_migrations;
 use cc_lb_scheduler::worker::{
-    ADAPTIVE_QUEUE, AdaptiveJob, CRON_QUEUE, SchedulerBackend, SchedulerCtx,
-    SqliteSchedulerStorage,
+    ADAPTIVE_QUEUE, AdaptiveJob, CRON_QUEUE, SchedulerBackend, SchedulerCtx, SqliteSchedulerStorage,
 };
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;

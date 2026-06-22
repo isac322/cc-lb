@@ -5,7 +5,7 @@ use apalis::prelude::{IntervalStrategy, StrategyBuilder, TaskSink};
 use cc_lb_scheduler::jobs::apalis_housekeeping::ApalisHousekeepingJob;
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
-use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollJob;
+use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
 use cc_lb_scheduler::jobs::price_catalog::PriceCatalogRefreshJob;
 use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeJob;
 use cc_lb_scheduler::jobs::quota_gc::SubscriptionQuotaGcJob;
@@ -14,7 +14,7 @@ use cc_lb_scheduler::jobs::usage_rollup::UsageRollupTask;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::scheduler_metrics;
 use cc_lb_scheduler::worker::{
-    ADAPTIVE_QUEUE, AdaptiveJob, CRON_QUEUE, SchedulerBackend, SchedulerCtx, CronJob,
+    ADAPTIVE_QUEUE, AdaptiveJob, CRON_QUEUE, CronJob, SchedulerBackend, SchedulerCtx,
 };
 #[cfg(feature = "sqlite")]
 use cc_lb_scheduler::worker::{SqliteSchedulerStorage, build_adaptive_worker, build_cron_worker};
@@ -69,10 +69,12 @@ async fn run_entity_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error>> 
 
     let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
         pool: pool.clone(),
-        storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(pool, &config),
+        storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(
+            pool, &config,
+        ),
     });
     build_adaptive_worker(&backend, SchedulerCtx::default())?
-        .run_for(Duration::from_secs(2))
+        .run_for(Duration::from_secs(5))
         .await?;
     Ok(())
 }
@@ -96,7 +98,7 @@ async fn run_singleton_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error
     let cancel = CancellationToken::new();
     let stop = cancel.clone();
     tokio::spawn(async move {
-        tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_secs(5)).await;
         stop.cancel();
     });
     build_cron_worker(&backend, SchedulerCtx::default())?
@@ -126,19 +128,15 @@ fn fast_queue_config(queue: &str) -> apalis_sqlite::Config {
         .set_buffer_size(16)
 }
 
-fn entity_jobs(upstream_id: Uuid) -> [AdaptiveJob; 4] {
+fn entity_jobs(upstream_id: Uuid) -> [AdaptiveJob; 3] {
     [
         AdaptiveJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1)),
         AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
-        AdaptiveJob::OAuthUsagePoll(OAuthUsagePollJob {
-            upstream_id,
-            traceparent: None,
-        }),
         AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(upstream_id, 1)),
     ]
 }
 
-fn singleton_jobs() -> [CronJob; 6] {
+fn singleton_jobs() -> [CronJob; 7] {
     [
         CronJob::UsageRollup(UsageRollupTask::default()),
         CronJob::UsagePrune(UsagePruneJob::default()),
@@ -146,6 +144,7 @@ fn singleton_jobs() -> [CronJob; 6] {
         CronJob::PromptCachePurge(PromptCacheObservationPurgeJob::default()),
         CronJob::PriceCatalogRefresh(PriceCatalogRefreshJob::default()),
         CronJob::ApalisHousekeeping(ApalisHousekeepingJob::default()),
+        CronJob::OAuthUsagePoll(OAuthUsagePollCronJob::new(1_800_000_000)),
     ]
 }
 

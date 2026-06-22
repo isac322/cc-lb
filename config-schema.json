@@ -130,10 +130,10 @@
             "interval_secs": 9360,
             "jitter_secs": 30
           },
-          "oauth_usage_poll_watchdog": {
+          "oauth_usage_poll": {
             "enabled": true,
-            "interval_secs": 900,
-            "jitter_secs": 30
+            "interval_secs": 60,
+            "jitter_secs": 0
           },
           "price_catalog_refresh": {
             "enabled": true,
@@ -725,10 +725,10 @@
               "interval_secs": 9360,
               "jitter_secs": 30
             },
-            "oauth_usage_poll_watchdog": {
+            "oauth_usage_poll": {
               "enabled": true,
-              "interval_secs": 900,
-              "jitter_secs": 30
+              "interval_secs": 60,
+              "jitter_secs": 0
             },
             "price_catalog_refresh": {
               "enabled": true,

@@ -15,11 +15,7 @@ type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 #[tokio::test]
 async fn watchdog_seeds_only_when_primary_is_inactive() -> TestResult<()> {
-    for kind in [
-        WatchdogEntityKind::Warmup,
-        WatchdogEntityKind::OAuthRefresh,
-        WatchdogEntityKind::OAuthUsagePoll,
-    ] {
+    for kind in [WatchdogEntityKind::Warmup, WatchdogEntityKind::OAuthRefresh] {
         for scenario in scenarios() {
             let fixture = Fixture::new().await?;
             let upstream_id = Uuid::new_v4();
@@ -63,11 +59,7 @@ async fn watchdog_seeds_only_when_primary_is_inactive() -> TestResult<()> {
 
 #[tokio::test]
 async fn watchdog_concurrent_same_tick_uses_one_bootstrap_key() -> TestResult<()> {
-    for kind in [
-        WatchdogEntityKind::Warmup,
-        WatchdogEntityKind::OAuthRefresh,
-        WatchdogEntityKind::OAuthUsagePoll,
-    ] {
+    for kind in [WatchdogEntityKind::Warmup, WatchdogEntityKind::OAuthRefresh] {
         let fixture = Fixture::new().await?;
         let upstream_id = Uuid::new_v4();
         let upstream_ids = [upstream_id];
@@ -233,9 +225,6 @@ fn entity_job(kind: WatchdogEntityKind, upstream_id: Uuid) -> AdaptiveJob {
         ),
         WatchdogEntityKind::OAuthRefresh => AdaptiveJob::OAuthRefresh(
             cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob::new(upstream_id),
-        ),
-        WatchdogEntityKind::OAuthUsagePoll => AdaptiveJob::OAuthUsagePoll(
-            cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollJob::new(upstream_id),
         ),
     }
 }

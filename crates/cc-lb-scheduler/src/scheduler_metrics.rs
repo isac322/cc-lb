@@ -20,7 +20,6 @@ pub const METADATA_REFRESH_STATUS_TOTAL: &str = "cclb_scheduler_metadata_refresh
 const JOB_TYPES: &[&str] = &[
     "upstream_warmup",
     "adaptive:oauth_refresh",
-    "adaptive:oauth_usage_poll",
     "adaptive:metadata_refresh",
     "cron:usage_rollup",
     "cron:usage_prune",
@@ -30,7 +29,7 @@ const JOB_TYPES: &[&str] = &[
     "cron:apalis_housekeeping",
     "cron:warmup_watchdog",
     "cron:oauth_refresh_watchdog",
-    "cron:oauth_usage_poll_watchdog",
+    "cron:oauth_usage_poll",
     "cron:anthropic_compat_refresh",
 ];
 

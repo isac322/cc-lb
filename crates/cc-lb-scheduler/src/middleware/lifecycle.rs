@@ -55,7 +55,6 @@ impl SchedulerMetricPayload for AdaptiveJob {
         match self {
             Self::Warmup(_) => "upstream_warmup",
             Self::OAuthRefresh(_) => "adaptive:oauth_refresh",
-            Self::OAuthUsagePoll(_) => "adaptive:oauth_usage_poll",
             Self::MetadataRefresh(_) => "adaptive:metadata_refresh",
         }
     }
@@ -72,7 +71,7 @@ impl SchedulerMetricPayload for CronJob {
             Self::ApalisHousekeeping(_) => "cron:apalis_housekeeping",
             Self::WarmupWatchdog(_) => "cron:warmup_watchdog",
             Self::OAuthRefreshWatchdog(_) => "cron:oauth_refresh_watchdog",
-            Self::OAuthUsagePollWatchdog(_) => "cron:oauth_usage_poll_watchdog",
+            Self::OAuthUsagePoll(_) => "cron:oauth_usage_poll",
             Self::AnthropicCompatRefresh(_) => "cron:anthropic_compat_refresh",
         }
     }

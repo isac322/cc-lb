@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 
 use crate::error::SchedulerError;
 
-use super::{ADAPTIVE_QUEUE, AdaptiveJob, CRON_QUEUE, SchedulerBackend, CronJob};
+use super::{ADAPTIVE_QUEUE, AdaptiveJob, CRON_QUEUE, CronJob, SchedulerBackend};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SchedulerTaskRow<Args> {
@@ -39,7 +39,8 @@ impl SchedulerBackend {
             }
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => {
-                insert_postgres_task(&postgres.pool, ADAPTIVE_QUEUE, build_postgres_task(task)).await
+                insert_postgres_task(&postgres.pool, ADAPTIVE_QUEUE, build_postgres_task(task))
+                    .await
             }
         }
     }
@@ -55,8 +56,7 @@ impl SchedulerBackend {
             }
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => {
-                insert_postgres_task(&postgres.pool, CRON_QUEUE, build_postgres_task(task))
-                    .await
+                insert_postgres_task(&postgres.pool, CRON_QUEUE, build_postgres_task(task)).await
             }
         }
     }

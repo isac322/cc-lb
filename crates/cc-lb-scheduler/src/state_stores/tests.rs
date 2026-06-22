@@ -7,27 +7,22 @@ macro_rules! exercise_stores {
         let upstream_id = Uuid::new_v4();
         let cursors = OAuthUsagePollCursorsStore::new($pool.clone());
         assert!(cursors.read(upstream_id).await?.is_none());
-        cursors
-            .record_success(upstream_id, 2_000, 10_000, 20_000, 2)
-            .await?;
-        cursors.record_throttle(upstream_id, 2_100, 3, 2).await?;
-        cursors
-            .record_success(upstream_id, 2_200, 20_000, 30_000, 2)
-            .await?;
+        let mut cursor = OAuthUsagePollCursor::new(upstream_id);
+        cursor.last_observed_at_unix_secs = Some(2_000);
+        cursor.last_status = Some(200);
+        cursor.attempt_count = 1;
+        cursors.upsert(&cursor).await?;
+
+        cursor.last_observed_at_unix_secs = Some(2_100);
+        cursor.last_status = Some(429);
+        cursor.attempt_count = 2;
+        cursors.upsert(&cursor).await?;
+
         let cursor = cursors.read(upstream_id).await?.unwrap();
-        assert_eq!(cursor.recent_successes_unix_secs, vec![2_000, 2_200]);
-        assert_eq!(cursor.recent_throttles_unix_secs, vec![2_100]);
-        assert_eq!(cursor.last_throttle_count, 3);
-        let config = OAuthUsagePollScheduleConfig {
-            success_window_secs: 300,
-            success_capacity: 2,
-            success_safety_secs: 0,
-            ..OAuthUsagePollScheduleConfig::default()
-        };
-        assert_eq!(
-            cursors.compute_next_run_at(2_210, &config, Some(&cursor)),
-            2_300
-        );
+        assert_eq!(cursor.upstream_id, upstream_id);
+        assert_eq!(cursor.last_observed_at_unix_secs, Some(2_100));
+        assert_eq!(cursor.last_status, Some(429));
+        assert_eq!(cursor.attempt_count, 2);
 
         let compat = AnthropicCompatEtagsStore::new($pool.clone());
         compat
@@ -58,6 +53,11 @@ async fn idempotency_sqlite_stores_cover_insert_read_ttl_and_atomic_bump() -> Re
     ))
     .execute(&pool)
     .await?;
+    sqlx::raw_sql(include_str!(
+        "../../migrations/sqlite/0008_slim_oauth_usage_poll_cursors.sql"
+    ))
+    .execute(&pool)
+    .await?;
     exercise_stores!(pool)
 }
 
@@ -84,6 +84,10 @@ async fn idempotency_postgres_stores_cover_insert_read_ttl_and_atomic_bump() -> 
         .await?;
     pool.execute(include_str!(
         "../../migrations/postgres/0002_idempotency_tables.sql"
+    ))
+    .await?;
+    pool.execute(include_str!(
+        "../../migrations/postgres/0008_slim_oauth_usage_poll_cursors.sql"
     ))
     .await?;
     let outcome = exercise_stores!(pool);

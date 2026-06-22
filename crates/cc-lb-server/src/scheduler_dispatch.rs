@@ -1,7 +1,7 @@
+mod cron;
 mod http;
 mod oauth;
 mod outcomes;
-mod cron;
 mod storage;
 mod time;
 mod usage;
@@ -113,7 +113,6 @@ impl SchedulerDispatch {
         match job {
             AdaptiveJob::Warmup(job) => self.dispatch_warmup(job).await,
             AdaptiveJob::OAuthRefresh(job) => self.dispatch_oauth_refresh(job).await,
-            AdaptiveJob::OAuthUsagePoll(job) => self.dispatch_oauth_usage_poll(job).await,
             AdaptiveJob::MetadataRefresh(job) => {
                 let runner = CoreMetadataRefreshRunner::new(
                     self.storage.clone(),

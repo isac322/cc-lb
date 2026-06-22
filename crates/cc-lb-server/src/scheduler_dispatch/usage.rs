@@ -1,11 +1,5 @@
 use cc_lb_core::SubscriptionQuotaSink;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
-use cc_lb_scheduler::jobs::oauth_usage_poll::{
-    OAuthUsagePollHandler, OAuthUsagePollJob, compute_next_run_at,
-};
-use cc_lb_scheduler::retry::JobOutcome;
-use cc_lb_scheduler::state_stores::{OAuthUsagePollCursorsStore, OAuthUsagePollScheduleConfig};
-use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerBackend, SchedulerPushTask};
 use cc_lb_storage_api::{
     SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
     SubscriptionQuotaStatus, SubscriptionQuotaWindow,
@@ -13,10 +7,7 @@ use cc_lb_storage_api::{
 use serde::Deserialize;
 use uuid::Uuid;
 
-use crate::scheduler_dispatch::time::now_unix_secs;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
-
-use super::SchedulerDispatch;
 
 #[derive(Debug, Deserialize)]
 struct UsageBody {
@@ -74,61 +65,6 @@ pub(super) fn observe_usage_body(
             .map_err(|error| SchedulerError::Job(error.to_string()))?;
     }
     Ok(())
-}
-
-impl SchedulerDispatch {
-    pub(super) async fn dispatch_oauth_usage_poll(
-        &self,
-        job: OAuthUsagePollJob,
-    ) -> SchedulerResult<JobOutcome> {
-        match &self.backend {
-            #[cfg(feature = "sqlite")]
-            SchedulerBackend::Sqlite(sqlite) => {
-                let config = OAuthUsagePollScheduleConfig::default();
-                let cursors = OAuthUsagePollCursorsStore::new(sqlite.pool.clone());
-                let outcome = OAuthUsagePollHandler::new(cursors.clone(), config.clone())
-                    .handle(job.clone(), now_unix_secs(), |job| self.poll_usage(job))
-                    .await?;
-                let Some(cursor) = cursors.read(job.upstream_id).await? else {
-                    return Ok(outcome);
-                };
-                let next_run_at = compute_next_run_at(now_unix_secs(), &config, Some(&cursor));
-                push_next_oauth_usage_poll_task(&self.backend, job, next_run_at).await?;
-                Ok(outcome)
-            }
-            #[cfg(feature = "postgres")]
-            SchedulerBackend::Postgres(postgres) => {
-                let config = OAuthUsagePollScheduleConfig::default();
-                let cursors = OAuthUsagePollCursorsStore::new(postgres.pool.clone());
-                let outcome = OAuthUsagePollHandler::new(cursors.clone(), config.clone())
-                    .handle(job.clone(), now_unix_secs(), |job| self.poll_usage(job))
-                    .await?;
-                let Some(cursor) = cursors.read(job.upstream_id).await? else {
-                    return Ok(outcome);
-                };
-                let next_run_at = compute_next_run_at(now_unix_secs(), &config, Some(&cursor));
-                push_next_oauth_usage_poll_task(&self.backend, job, next_run_at).await?;
-                Ok(outcome)
-            }
-        }
-    }
-}
-
-pub(super) async fn push_next_oauth_usage_poll_task(
-    backend: &SchedulerBackend,
-    job: OAuthUsagePollJob,
-    unlock_at_unix_secs: u64,
-) -> SchedulerResult<()> {
-    let idempotency_key = job.idempotency_key(unlock_at_unix_secs);
-    let task = SchedulerPushTask {
-        args: AdaptiveJob::OAuthUsagePoll(job),
-        idempotency_key: Some(idempotency_key),
-        run_at_unix_secs: Some(unlock_at_unix_secs),
-    };
-    match backend.push_adaptive_task(task).await {
-        Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
-        Err(error) => Err(error),
-    }
 }
 
 fn records_from_usage(

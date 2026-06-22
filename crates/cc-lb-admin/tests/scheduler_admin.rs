@@ -40,12 +40,12 @@ async fn scheduler_admin_sqlite_status_and_failures() -> Result<(), Box<dyn std:
     let (failures_status, failures_body) = support::authed_json(
         app.clone(),
         "GET",
-        "/admin/scheduler/failures?job_type=adaptive:warmup",
+        "/admin/scheduler/failures?job_type=adaptive",
         &[],
     )
     .await?;
     assert_eq!(failures_status, StatusCode::OK);
-    assert_eq!(failures_body["failures"][0]["job_type"], "adaptive:warmup");
+    assert_eq!(failures_body["failures"][0]["job_type"], "adaptive");
     assert_eq!(
         failures_body["failures"][0]["payload_summary"],
         "adaptive:warmup:test"
@@ -75,12 +75,12 @@ async fn scheduler_admin_postgres_status_and_failures() -> Result<(), Box<dyn st
         let (failures_status, failures_body) = support::authed_json(
             app.clone(),
             "GET",
-            "/admin/scheduler/failures?job_type=adaptive:warmup",
+            "/admin/scheduler/failures?job_type=adaptive",
             &[],
         )
         .await?;
         assert_eq!(failures_status, StatusCode::OK);
-        assert_eq!(failures_body["failures"][0]["job_type"], "adaptive:warmup");
+        assert_eq!(failures_body["failures"][0]["job_type"], "adaptive");
         let response = support::request(app, "POST", "/admin/scheduler/reconcile", &[]).await?;
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
         Ok::<(), Box<dyn std::error::Error>>(())

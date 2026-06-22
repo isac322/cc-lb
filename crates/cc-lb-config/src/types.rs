@@ -944,10 +944,7 @@ fn default_scheduler_recurring_jobs() -> HashMap<String, RecurringJobConfig> {
             "oauth_refresh_watchdog".to_owned(),
             recurring_job_config(9360, scheduler_jitter_secs(9360)),
         ),
-        (
-            "oauth_usage_poll_watchdog".to_owned(),
-            recurring_job_config(900, scheduler_jitter_secs(900)),
-        ),
+        ("oauth_usage_poll".to_owned(), recurring_job_config(60, 0)),
     ])
 }
 

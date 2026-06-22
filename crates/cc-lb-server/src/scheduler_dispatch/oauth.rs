@@ -4,7 +4,7 @@ use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::{
     OAuthRefreshJob, OAuthRefreshJobHandler, RefreshedOAuthTokens,
 };
-use cc_lb_scheduler::jobs::oauth_usage_poll::{OAuthUsagePollJob, OAuthUsagePollObservation};
+use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollObservation;
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
@@ -74,7 +74,9 @@ impl SchedulerDispatch {
     }
 
     async fn enqueue_metadata_refresh(&self, job: MetadataRefreshJob) -> SchedulerResult<()> {
-        self.backend.push_job(AdaptiveJob::MetadataRefresh(job)).await
+        self.backend
+            .push_job(AdaptiveJob::MetadataRefresh(job))
+            .await
     }
 
     async fn push_next_oauth_refresh_task(
@@ -97,9 +99,10 @@ impl SchedulerDispatch {
 
     pub(super) async fn poll_usage(
         &self,
-        job: OAuthUsagePollJob,
+        upstream_id: uuid::Uuid,
+        _traceparent: Option<&str>,
     ) -> SchedulerResult<OAuthUsagePollObservation> {
-        let Some(mut upstream) = UpstreamStore::get_by_id(self.storage.as_ref(), job.upstream_id)
+        let Some(mut upstream) = UpstreamStore::get_by_id(self.storage.as_ref(), upstream_id)
             .await
             .map_err(storage_scheduler_error)?
         else {

@@ -6,7 +6,7 @@ use apalis::prelude::Data;
 use crate::error::SchedulerError;
 use crate::retry::JobOutcome;
 
-use super::{AdaptiveJob, SchedulerCtx, CronJob};
+use super::{AdaptiveJob, CronJob, SchedulerCtx};
 
 pub(super) type EntityHandlerFn =
     fn(
@@ -37,7 +37,7 @@ pub(super) fn singleton_job_handler(
         CronJob::AnthropicCompatRefresh(_) => {}
         CronJob::WarmupWatchdog(_) => {}
         CronJob::OAuthRefreshWatchdog(_) => {}
-        CronJob::OAuthUsagePollWatchdog(_) => {}
+        CronJob::OAuthUsagePoll(_) => {}
         _ => {}
     }
     Box::pin(async move { dispatch(job).await })
@@ -54,7 +54,7 @@ mod tests {
     use crate::jobs::metadata_refresh::MetadataRefreshJob;
     use crate::jobs::usage_prune::UsagePruneJob;
     use crate::retry::JobOutcome;
-    use crate::worker::{AdaptiveJob, SchedulerCtx, CronJob};
+    use crate::worker::{AdaptiveJob, CronJob, SchedulerCtx};
 
     use super::{entity_job_handler, singleton_job_handler};
 

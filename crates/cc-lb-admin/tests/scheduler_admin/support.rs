@@ -106,7 +106,7 @@ pub async fn seed_sqlite_failed_warmup(
 ) -> scheduler_sqlx::Result<()> {
     scheduler_sqlx::query(
         "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, last_result, done_at, idempotency_key) \
-         VALUES (?1, 'failed-warmup', 'entity:warmup', 'Failed', 5, 5, ?2, 'dial timeout', ?2, ?3)",
+         VALUES (?1, 'failed-warmup', 'adaptive', 'Failed', 5, 5, ?2, 'dial timeout', ?2, ?3)",
     )
     .bind(Vec::<u8>::new())
     .bind(i64::try_from(NOW_SECS).expect("test timestamp fits"))
@@ -122,7 +122,7 @@ pub async fn seed_postgres_failed_warmup(
 ) -> scheduler_sqlx::Result<()> {
     scheduler_sqlx::query(
         "INSERT INTO apalis.jobs (job, id, job_type, status, attempts, max_attempts, run_at, last_result, done_at, idempotency_key) \
-         VALUES ($1, 'failed-warmup', 'entity:warmup', 'Failed', 5, 5, to_timestamp($2), '{\"Err\":\"dial timeout\"}'::jsonb, to_timestamp($2), $3)",
+         VALUES ($1, 'failed-warmup', 'adaptive', 'Failed', 5, 5, to_timestamp($2), '{\"Err\":\"dial timeout\"}'::jsonb, to_timestamp($2), $3)",
     )
     .bind(Vec::<u8>::new())
     .bind(i64::try_from(NOW_SECS).expect("test timestamp fits"))
@@ -142,7 +142,7 @@ pub async fn seed_sqlite_usage_rollup(
     .map_err(|error| scheduler_sqlx::Error::Protocol(error.to_string()))?;
     scheduler_sqlx::query(
         "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, idempotency_key) \
-         VALUES (?1, 'usage-rollup', ?2, 'Pending', 0, 1, ?3, 'singleton:usage_rollup')",
+         VALUES (?1, 'usage-rollup', ?2, 'Pending', 0, 1, ?3, 'cron:usage_rollup')",
     )
     .bind(payload)
     .bind(cc_lb_scheduler::worker::CRON_QUEUE)

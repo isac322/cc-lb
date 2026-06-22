@@ -847,7 +847,9 @@ fn warmup_bootstrap_task(upstream_id: Uuid, seed_secs: u64) -> SchedulerPushTask
     let job = UpstreamWarmupJob::new(upstream_id, seed_secs);
     SchedulerPushTask {
         args: AdaptiveJob::Warmup(job),
-        idempotency_key: Some(format!("adaptive:warmup:{upstream_id}:bootstrap:{seed_secs}")),
+        idempotency_key: Some(format!(
+            "adaptive:warmup:{upstream_id}:bootstrap:{seed_secs}"
+        )),
         run_at_unix_secs: Some(seed_secs),
     }
 }

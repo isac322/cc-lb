@@ -14,7 +14,7 @@ use crate::middleware::TraceparentLayer;
 use crate::retry::RetryClass;
 
 use super::super::dispatch::{SingletonHandlerFn, singleton_job_handler};
-use super::super::{CRON_QUEUE, SchedulerBackend, SchedulerCtx, CronJob};
+use super::super::{CRON_QUEUE, CronJob, SchedulerBackend, SchedulerCtx};
 
 const SINGLETON_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -44,10 +44,7 @@ pub fn build_cron_worker(
     match backend {
         #[cfg(feature = "sqlite")]
         SchedulerBackend::Sqlite(sqlite) => Ok(build_sqlite_singleton_worker(
-            apalis_sqlite::SqliteStorage::<CronJob, (), ()>::new_in_queue(
-                &sqlite.pool,
-                CRON_QUEUE,
-            ),
+            apalis_sqlite::SqliteStorage::<CronJob, (), ()>::new_in_queue(&sqlite.pool, CRON_QUEUE),
             ctx,
         )),
         #[cfg(feature = "postgres")]
@@ -62,10 +59,7 @@ pub fn build_cron_worker(
 }
 
 #[cfg(feature = "sqlite")]
-fn build_sqlite_singleton_worker(
-    storage: SqliteSingletonStorage,
-    ctx: SchedulerCtx,
-) -> CronWorker {
+fn build_sqlite_singleton_worker(storage: SqliteSingletonStorage, ctx: SchedulerCtx) -> CronWorker {
     let concurrency = ctx.config.singleton_concurrency;
     CronWorker {
         run: Box::new(move |cancel| {

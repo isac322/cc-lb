@@ -9,9 +9,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::cron::WorkerBuilder as CronWorkerBuilder;
 use crate::jobs::compat::AnthropicCompatRefreshJob;
-use crate::jobs::watchdog::{
-    OAuthRefreshWatchdogJob, OAuthUsagePollWatchdogJob, WarmupWatchdogJob,
-};
+use crate::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
+use crate::jobs::watchdog::{OAuthRefreshWatchdogJob, WarmupWatchdogJob};
 use crate::leader_election::LeaderElection;
 
 const LEADER_RETRY_INTERVAL: Duration = Duration::from_secs(5);
@@ -20,7 +19,7 @@ const LEADER_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 use super::PostgresSchedulerStorage;
 #[cfg(feature = "sqlite")]
 use super::SqliteSchedulerStorage;
-use super::{CRON_QUEUE, SchedulerBackend, CronJob};
+use super::{CRON_QUEUE, CronJob, SchedulerBackend};
 
 type CronJobFactory = fn(u64) -> CronJob;
 
@@ -217,12 +216,9 @@ fn singleton_cron_specs(config: &Config) -> Vec<SingletonCronSpec> {
     push_singleton_spec(&mut specs, config, "oauth_refresh_watchdog", |tick_secs| {
         CronJob::OAuthRefreshWatchdog(OAuthRefreshWatchdogJob::new(tick_secs))
     });
-    push_singleton_spec(
-        &mut specs,
-        config,
-        "oauth_usage_poll_watchdog",
-        |tick_secs| CronJob::OAuthUsagePollWatchdog(OAuthUsagePollWatchdogJob::new(tick_secs)),
-    );
+    push_singleton_spec(&mut specs, config, "oauth_usage_poll", |tick_secs| {
+        CronJob::OAuthUsagePoll(OAuthUsagePollCronJob::new(tick_secs))
+    });
     specs
 }
 

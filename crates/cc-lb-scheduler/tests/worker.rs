@@ -5,12 +5,11 @@ use apalis::prelude::{IntervalStrategy, Status, StrategyBuilder, TaskSink};
 use cc_lb_config::SchedulerConfig;
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
-use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollJob;
 use cc_lb_scheduler::jobs::usage_prune::UsagePruneJob;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{
-    AdaptiveJob, SchedulerBackend, SchedulerCtx, CronJob, SqliteSchedulerStorage,
+    AdaptiveJob, CronJob, SchedulerBackend, SchedulerCtx, SqliteSchedulerStorage,
     build_adaptive_worker,
 };
 use uuid::Uuid;
@@ -32,10 +31,12 @@ async fn worker_sqlite_runs_one_of_each_entity_job_to_done()
 
     let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
         pool: pool.clone(),
-        storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(&pool, &config),
+        storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(
+            &pool, &config,
+        ),
     });
     let worker = build_adaptive_worker(&backend, done_scheduler_ctx())?;
-    worker.run_for(Duration::from_secs(2)).await?;
+    worker.run_for(Duration::from_secs(5)).await?;
 
     let done_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM Jobs WHERE job_type = ? AND status = ?")
@@ -49,7 +50,7 @@ async fn worker_sqlite_runs_one_of_each_entity_job_to_done()
     .bind(queue)
     .fetch_all(&pool)
     .await?;
-    assert_eq!(done_count, 4, "statuses: {statuses:?}");
+    assert_eq!(done_count, 3, "statuses: {statuses:?}");
     Ok(())
 }
 
@@ -72,7 +73,9 @@ async fn scheduler_backend_sqlite_push_job_uses_full_idempotency_index()
     let config = fast_queue_config("adaptive");
     let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
         pool: pool.clone(),
-        storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(&pool, &config),
+        storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(
+            &pool, &config,
+        ),
     });
     let upstream_id = Uuid::new_v4();
 
@@ -133,9 +136,9 @@ async fn scheduler_ctx_default_dispatches_succeed() -> Result<(), Box<dyn std::e
     let upstream_id = Uuid::new_v4();
 
     let entity =
-        (ctx.adaptive_dispatch)(AdaptiveJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1))).await?;
-    let singleton =
-        (ctx.cron_dispatch)(CronJob::UsagePrune(UsagePruneJob::default())).await?;
+        (ctx.adaptive_dispatch)(AdaptiveJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1)))
+            .await?;
+    let singleton = (ctx.cron_dispatch)(CronJob::UsagePrune(UsagePruneJob::default())).await?;
 
     assert_eq!(entity, JobOutcome::Done);
     assert_eq!(singleton, JobOutcome::Done);
@@ -153,14 +156,10 @@ async fn sqlite_memory() -> Result<sqlx::SqlitePool, Box<dyn std::error::Error>>
     Ok(pool)
 }
 
-fn entity_jobs(upstream_id: Uuid) -> [AdaptiveJob; 4] {
+fn entity_jobs(upstream_id: Uuid) -> [AdaptiveJob; 3] {
     [
         AdaptiveJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1)),
         AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
-        AdaptiveJob::OAuthUsagePoll(OAuthUsagePollJob {
-            upstream_id,
-            traceparent: None,
-        }),
         AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(upstream_id, 1)),
     ]
 }

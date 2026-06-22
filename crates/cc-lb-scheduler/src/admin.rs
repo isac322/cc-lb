@@ -7,9 +7,7 @@ use sqlx::Row as _;
 
 use crate::error::{Result, SchedulerError};
 use crate::leader_election::{LeaderElection, LeaderState};
-use crate::worker::{
-    AdaptiveJob, CRON_QUEUE, SchedulerBackend, SchedulerPushTask, CronJob,
-};
+use crate::worker::{AdaptiveJob, CRON_QUEUE, CronJob, SchedulerBackend, SchedulerPushTask};
 
 #[derive(Clone, Debug)]
 pub struct SchedulerAdminHandle {

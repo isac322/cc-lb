@@ -8,9 +8,9 @@ The cc-lb scheduler uses a hybrid job model to coordinate background tasks acros
 
 The system consists of the following components:
 
-- **Entity Jobs**: Dynamic background tasks enqueued per-upstream or per-entity. Examples include warmup cycles, OAuth token refreshes, and usage polling.
+- **Entity Jobs**: Dynamic background tasks enqueued per-upstream or per-entity. Examples include warmup cycles and OAuth token refreshes.
 - **Singleton Jobs**: Periodic maintenance tasks that must run on exactly one replica at any given time. Examples include usage rollups, database pruning, and quota garbage collection.
-- **Watchdogs**: Periodic singleton jobs that scan active upstreams/cursors and enqueue missing entity jobs into Apalis storage.
+- **Watchdogs**: Periodic singleton jobs that scan active upstreams and enqueue missing entity jobs into Apalis storage.
 - **Cron Leader**: A single replica elected via database advisory locks to run the cron scheduler and enqueue singleton jobs.
 
 ### Worker Layout Diagram
@@ -53,7 +53,6 @@ The table below lists every job type registered in the scheduler. This list is d
 |---|---|---|---|---|---|---|
 | **UpstreamWarmupJob** | Entity | `entity:warmup:<upstream_id>:<cycle_key>` | Entity | Enqueued by watchdog when warmup is due (every 5 hours) | `apalis.jobs` full unique idempotency key | 10s |
 | **OAuthRefreshJob** | Entity | `entity:oauth_refresh:<upstream_id>:<expires_at_unix_secs>` | Entity | Enqueued by watchdog, proactively, or lazily when token is near expiry | `apalis.jobs` full unique idempotency key | 10s |
-| **OAuthUsagePollJob** | Entity | `entity:oauth_usage_poll:<upstream_id>` | Entity | Enqueued via Reconcile or after usage events | `oauth_usage_poll_cursors` | 10s |
 | **AnthropicCompatRefreshJob** | Entity | `entity:anthropic_compat_refresh:<key>` | Entity | Enqueued via Reconcile for each compatibility key | `anthropic_compat_refresh_claims` | 10s |
 | **MetadataRefreshJob** | Entity | `entity:metadata_refresh:<upstream_id>:<generation>` | Entity | Enqueued after OAuth refresh completes | `metadata_refresh_claims` | 10s |
 | **UsageRollupJob** | Singleton | `singleton:usage_rollup` | Maintenance | Every 30s (with jitter) | `usage_rollups` | 5s |
@@ -62,9 +61,9 @@ The table below lists every job type registered in the scheduler. This list is d
 | **PromptCacheObservationPurgeJob** | Singleton | `singleton:prompt_cache_purge` | Maintenance | Every 10m (600s) | `prompt_cache_observations` | 10s |
 | **PriceCatalogRefreshJob** | Singleton | `singleton:price_catalog_refresh` | Maintenance | Every 1h (3600s) | `price_catalog` | 10s |
 | **ApalisHousekeepingJob** | Singleton | `singleton:apalis_housekeeping` | Maintenance | Every 1h (3600s) | `apalis.jobs` | 10s |
+| **OAuthUsagePollCronJob** | Singleton | `cron:oauth_usage_poll:<tick_unix_secs>` | Maintenance | Every 60s (no jitter) | `oauth_usage_poll_cursors` | 60s |
 | **WarmupWatchdogJob** | Singleton | `maintenance:warmup_watchdog:<tick_unix_secs>` | Maintenance | Configured recurring cadence | `apalis.jobs` | 10s |
 | **OAuthRefreshWatchdogJob** | Singleton | `maintenance:oauth_refresh_watchdog:<tick_unix_secs>` | Maintenance | Configured recurring cadence | `apalis.jobs` | 10s |
-| **OAuthUsagePollWatchdogJob** | Singleton | `maintenance:oauth_usage_poll_watchdog:<tick_unix_secs>` | Maintenance | Configured recurring cadence | `apalis.jobs` | 10s |
 
 ## 3. DB Pool Isolation
 

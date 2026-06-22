@@ -5,7 +5,6 @@ use uuid::Uuid;
 
 use crate::error::{Result, SchedulerError};
 use crate::jobs::oauth_refresh::OAuthRefreshJob;
-use crate::jobs::oauth_usage_poll::OAuthUsagePollJob;
 use crate::jobs::warmup::UpstreamWarmupJob;
 use crate::worker::{AdaptiveJob, SchedulerBackend, SchedulerPushTask, TaskStatus};
 
@@ -21,7 +20,6 @@ const ACTIVE_STATUSES: [TaskStatus; 4] = [
 pub enum WatchdogEntityKind {
     Warmup,
     OAuthRefresh,
-    OAuthUsagePoll,
 }
 
 impl WatchdogEntityKind {
@@ -29,7 +27,6 @@ impl WatchdogEntityKind {
         match self {
             Self::Warmup => "warmup",
             Self::OAuthRefresh => "oauth_refresh",
-            Self::OAuthUsagePoll => "oauth_usage_poll",
         }
     }
 
@@ -44,9 +41,10 @@ impl WatchdogEntityKind {
 
     fn job(self, upstream_id: Uuid, tick_unix_secs: u64) -> AdaptiveJob {
         match self {
-            Self::Warmup => AdaptiveJob::Warmup(UpstreamWarmupJob::new(upstream_id, tick_unix_secs)),
+            Self::Warmup => {
+                AdaptiveJob::Warmup(UpstreamWarmupJob::new(upstream_id, tick_unix_secs))
+            }
             Self::OAuthRefresh => AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
-            Self::OAuthUsagePoll => AdaptiveJob::OAuthUsagePoll(OAuthUsagePollJob::new(upstream_id)),
         }
     }
 }

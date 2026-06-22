@@ -77,8 +77,8 @@ mod postgres {
     use uuid::Uuid;
 
     use super::{
-        ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler,
-        NOW_SECS, expected_job_ids, expected_result, jobs, workers,
+        ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler, NOW_SECS,
+        expected_job_ids, expected_result, jobs, workers,
     };
 
     #[tokio::test]

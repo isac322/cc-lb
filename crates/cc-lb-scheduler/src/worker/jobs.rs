@@ -5,16 +5,14 @@ use crate::jobs::apalis_housekeeping::ApalisHousekeepingJob;
 use crate::jobs::compat::AnthropicCompatRefreshJob;
 use crate::jobs::metadata_refresh::MetadataRefreshJob;
 use crate::jobs::oauth_refresh::OAuthRefreshJob;
-use crate::jobs::oauth_usage_poll::OAuthUsagePollJob;
+use crate::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
 use crate::jobs::price_catalog::PriceCatalogRefreshJob;
 use crate::jobs::prompt_cache_purge::PromptCacheObservationPurgeJob;
 use crate::jobs::quota_gc::SubscriptionQuotaGcJob;
 use crate::jobs::usage_prune::UsagePruneJob;
 use crate::jobs::usage_rollup::UsageRollupTask;
 use crate::jobs::warmup::UpstreamWarmupJob;
-use crate::jobs::watchdog::{
-    OAuthRefreshWatchdogJob, OAuthUsagePollWatchdogJob, WarmupWatchdogJob,
-};
+use crate::jobs::watchdog::{OAuthRefreshWatchdogJob, WarmupWatchdogJob};
 use crate::middleware::TraceparentCarrier;
 use crate::retry::RetryPayload;
 
@@ -24,8 +22,6 @@ pub enum AdaptiveJob {
     Warmup(UpstreamWarmupJob),
     #[serde(rename = "oauth_refresh", alias = "o_auth_refresh")]
     OAuthRefresh(OAuthRefreshJob),
-    #[serde(rename = "oauth_usage_poll", alias = "o_auth_usage_poll")]
-    OAuthUsagePoll(OAuthUsagePollJob),
     MetadataRefresh(MetadataRefreshJob),
 }
 
@@ -41,8 +37,8 @@ pub enum CronJob {
     WarmupWatchdog(WarmupWatchdogJob),
     #[serde(rename = "oauth_refresh_watchdog", alias = "o_auth_refresh_watchdog")]
     OAuthRefreshWatchdog(OAuthRefreshWatchdogJob),
-    #[serde(rename = "oauth_usage_poll_watchdog", alias = "o_auth_usage_poll_watchdog")]
-    OAuthUsagePollWatchdog(OAuthUsagePollWatchdogJob),
+    #[serde(rename = "oauth_usage_poll", alias = "o_auth_usage_poll")]
+    OAuthUsagePoll(OAuthUsagePollCronJob),
     AnthropicCompatRefresh(AnthropicCompatRefreshJob),
 }
 
@@ -57,7 +53,7 @@ impl CronJob {
             Self::ApalisHousekeeping(_) => "apalis_housekeeping",
             Self::WarmupWatchdog(_) => "warmup_watchdog",
             Self::OAuthRefreshWatchdog(_) => "oauth_refresh_watchdog",
-            Self::OAuthUsagePollWatchdog(_) => "oauth_usage_poll_watchdog",
+            Self::OAuthUsagePoll(_) => "oauth_usage_poll",
             Self::AnthropicCompatRefresh(_) => "anthropic_compat_refresh",
         }
     }
@@ -68,7 +64,6 @@ impl TraceparentCarrier for AdaptiveJob {
         match self {
             Self::Warmup(_) => None,
             Self::OAuthRefresh(job) => job.traceparent(),
-            Self::OAuthUsagePoll(job) => job.traceparent(),
             Self::MetadataRefresh(job) => job.traceparent(),
         }
     }
@@ -77,7 +72,6 @@ impl TraceparentCarrier for AdaptiveJob {
         match self {
             Self::Warmup(_) => {}
             Self::OAuthRefresh(job) => job.set_traceparent(traceparent),
-            Self::OAuthUsagePoll(job) => job.set_traceparent(traceparent),
             Self::MetadataRefresh(job) => job.set_traceparent(traceparent),
         }
     }
@@ -110,7 +104,7 @@ impl TraceparentCarrier for CronJob {
             Self::ApalisHousekeeping(job) => job.traceparent(),
             Self::WarmupWatchdog(job) => job.traceparent(),
             Self::OAuthRefreshWatchdog(job) => job.traceparent(),
-            Self::OAuthUsagePollWatchdog(job) => job.traceparent(),
+            Self::OAuthUsagePoll(job) => job.traceparent(),
             Self::AnthropicCompatRefresh(job) => job.traceparent(),
         }
     }
@@ -125,7 +119,7 @@ impl TraceparentCarrier for CronJob {
             Self::ApalisHousekeeping(job) => job.set_traceparent(traceparent),
             Self::WarmupWatchdog(job) => job.set_traceparent(traceparent),
             Self::OAuthRefreshWatchdog(job) => job.set_traceparent(traceparent),
-            Self::OAuthUsagePollWatchdog(job) => job.set_traceparent(traceparent),
+            Self::OAuthUsagePoll(job) => job.set_traceparent(traceparent),
             Self::AnthropicCompatRefresh(job) => job.set_traceparent(traceparent),
         }
     }

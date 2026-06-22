@@ -9,8 +9,7 @@ mod tests;
 
 pub use types::{
     AnthropicCompatEtag, AnthropicCompatEtagsStore, OAuthUsagePollCursor,
-    OAuthUsagePollCursorsStore, OAuthUsagePollScheduleConfig, PriceCatalogVersion,
-    PriceCatalogVersionsStore,
+    OAuthUsagePollCursorsStore, PriceCatalogVersion, PriceCatalogVersionsStore,
 };
 
 use crate::error::{Result, SchedulerError};
@@ -52,26 +51,4 @@ pub(super) fn option_i64_to_i32(value: Option<i64>, field: &str) -> Result<Optio
             i32::try_from(inner).map_err(|_| SchedulerError::Job(format!("{field} is outside i32")))
         })
         .transpose()
-}
-
-pub(super) fn history_to_json(history: &[u64]) -> Result<String> {
-    serde_json::to_string(history).map_err(|error| SchedulerError::Job(error.to_string()))
-}
-
-pub(super) fn parse_history(raw: &str, field: &str) -> Result<Vec<u64>> {
-    serde_json::from_str(raw)
-        .map_err(|error| SchedulerError::Job(format!("{field} has invalid JSON: {error}")))
-}
-
-pub(super) fn append_bounded(history: &[u64], observed_at_unix_secs: u64, cap: usize) -> Vec<u64> {
-    if cap == 0 {
-        return Vec::new();
-    }
-    let mut next = history.to_vec();
-    next.push(observed_at_unix_secs);
-    let overflow = next.len().saturating_sub(cap);
-    if overflow > 0 {
-        next.drain(0..overflow);
-    }
-    next
 }

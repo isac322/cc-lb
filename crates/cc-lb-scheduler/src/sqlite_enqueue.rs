@@ -49,10 +49,7 @@ impl Backend for SqliteSingletonCronStorage {
 }
 
 impl TaskSink<CronJob> for SqliteSingletonCronStorage {
-    async fn push(
-        &mut self,
-        job: CronJob,
-    ) -> std::result::Result<(), TaskSinkError<Self::Error>> {
+    async fn push(&mut self, job: CronJob) -> std::result::Result<(), TaskSinkError<Self::Error>> {
         let payload = encode_singleton_job(&job)?;
         insert_singleton_job(
             &self.pool,
@@ -135,7 +132,11 @@ impl TaskSink<CronJob> for SqliteSingletonCronStorage {
     }
 }
 
-pub(crate) async fn push_entity_job(pool: &SqlitePool, queue: &str, job: AdaptiveJob) -> Result<()> {
+pub(crate) async fn push_entity_job(
+    pool: &SqlitePool,
+    queue: &str,
+    job: AdaptiveJob,
+) -> Result<()> {
     let payload = apalis_codec::json::JsonCodec::<Vec<u8>>::encode(&job)
         .map_err(|error| SchedulerError::Job(format!("encode entity job: {error}")))?;
     let run_at = now_unix_secs()?;
@@ -157,9 +158,7 @@ pub(crate) async fn push_entity_job(pool: &SqlitePool, queue: &str, job: Adaptiv
     Ok(())
 }
 
-fn encode_singleton_job(
-    job: &CronJob,
-) -> std::result::Result<Vec<u8>, TaskSinkError<sqlx::Error>> {
+fn encode_singleton_job(job: &CronJob) -> std::result::Result<Vec<u8>, TaskSinkError<sqlx::Error>> {
     apalis_codec::json::JsonCodec::<Vec<u8>>::encode(job)
         .map_err(|error| TaskSinkError::CodecError(error.into()))
 }
@@ -207,7 +206,6 @@ fn entity_idempotency_key(job: &AdaptiveJob, run_at_unix_secs: i64) -> Result<St
     match job {
         AdaptiveJob::Warmup(job) => Ok(job.idempotency_key(job.cycle_key)),
         AdaptiveJob::OAuthRefresh(job) => Ok(job.idempotency_key(run_at_unix_secs)),
-        AdaptiveJob::OAuthUsagePoll(job) => Ok(job.idempotency_key(run_at_unix_secs)),
         AdaptiveJob::MetadataRefresh(job) => Ok(job.idempotency_key()),
     }
 }

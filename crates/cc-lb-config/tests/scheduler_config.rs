@@ -35,7 +35,7 @@ max_attempts = 2
 base_secs = 1
 max_secs = 4
 
-[scheduler.retry_classes.entity]
+[scheduler.retry_classes.adaptive]
 max_attempts = 6
 base_secs = 10
 max_secs = 120
@@ -65,7 +65,7 @@ warmup_effect_retention_days = 14
     assert_eq!(reparsed.scheduler, config.scheduler);
     assert_eq!(reparsed.scheduler.leader_lock_key, 42);
     assert_eq!(reparsed.scheduler.separate_pool.max_connections, 3);
-    assert_eq!(reparsed.scheduler.retry_classes.entity.max_attempts, 6);
+    assert_eq!(reparsed.scheduler.retry_classes.adaptive.max_attempts, 6);
     assert_eq!(
         reparsed
             .scheduler
