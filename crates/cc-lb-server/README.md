@@ -6,7 +6,7 @@ Anthropic-compatible multi-principal reverse proxy server. Supports sqlite and p
 
 ### Minimum postgres version
 
-Tested against postgres:17-alpine; minimum postgres version is postgres 17. Migrations in `crates/cc-lb-storage-postgres/migrations/` target postgres 17+ features and semantics.
+Tested against postgres:18-alpine; minimum postgres version is postgres 17. Migrations in `crates/cc-lb-storage-postgres/migrations/` target postgres 17+ features and semantics.
 
 ### Connection string format
 

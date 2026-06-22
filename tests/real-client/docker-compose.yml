@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:16
+    image: postgres:18
     environment:
       POSTGRES_USER: cc_lb
       POSTGRES_PASSWORD: cc_lb
