@@ -18,7 +18,7 @@ pub(super) fn entity_job_handler(
     job: AdaptiveJob,
     ctx: Data<SchedulerCtx>,
 ) -> Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>> {
-    let dispatch = ctx.entity_dispatch.clone();
+    let dispatch = ctx.adaptive_dispatch.clone();
     Box::pin(async move { dispatch(job).await })
 }
 
@@ -32,7 +32,7 @@ pub(super) fn singleton_job_handler(
     job: CronJob,
     ctx: Data<SchedulerCtx>,
 ) -> Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>> {
-    let dispatch = ctx.singleton_dispatch.clone();
+    let dispatch = ctx.cron_dispatch.clone();
     match &job {
         CronJob::AnthropicCompatRefresh(_) => {}
         CronJob::WarmupWatchdog(_) => {}

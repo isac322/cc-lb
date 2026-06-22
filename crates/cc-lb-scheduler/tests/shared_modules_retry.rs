@@ -36,7 +36,7 @@ fn shared_modules_retry_curves_match_named_classes() {
         vec![Some(1), Some(2), Some(4), None]
     );
     assert_eq!(
-        base_curve(RetryClass::Entity, 6),
+        base_curve(RetryClass::Adaptive, 6),
         vec![Some(30), Some(60), Some(120), Some(240), Some(480), None]
     );
     assert_eq!(base_curve(RetryClass::Maintenance, 2), vec![Some(60), None]);
@@ -48,7 +48,7 @@ fn shared_modules_retry_entity_jitter_distribution_is_uniform_enough() {
     let mut buckets = [0_u32; 10];
 
     for seed in 0_u64..1_000 {
-        let delay = RetryClass::Entity.jitter_delay(base, seed);
+        let delay = RetryClass::Adaptive.jitter_delay(base, seed);
         assert!(delay >= Duration::from_secs(540));
         assert!(delay <= Duration::from_secs(660));
 
@@ -72,7 +72,7 @@ fn shared_modules_retry_entity_jitter_distribution_is_uniform_enough() {
 fn retry_class_strategy() -> impl Strategy<Value = RetryClass> {
     prop::sample::select(vec![
         RetryClass::Probe,
-        RetryClass::Entity,
+        RetryClass::Adaptive,
         RetryClass::Maintenance,
     ])
 }

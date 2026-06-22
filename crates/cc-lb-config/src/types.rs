@@ -462,8 +462,8 @@ impl Default for SchedulerPoolConfig {
 pub struct SchedulerRetryClasses {
     #[serde(default = "default_scheduler_retry_probe")]
     pub probe: SchedulerRetryConfig,
-    #[serde(default = "default_scheduler_retry_entity")]
-    pub entity: SchedulerRetryConfig,
+    #[serde(default = "default_scheduler_retry_adaptive")]
+    pub adaptive: SchedulerRetryConfig,
     #[serde(default = "default_scheduler_retry_maintenance")]
     pub maintenance: SchedulerRetryConfig,
 }
@@ -472,7 +472,7 @@ impl Default for SchedulerRetryClasses {
     fn default() -> Self {
         Self {
             probe: default_scheduler_retry_probe(),
-            entity: default_scheduler_retry_entity(),
+            adaptive: default_scheduler_retry_adaptive(),
             maintenance: default_scheduler_retry_maintenance(),
         }
     }
@@ -985,7 +985,7 @@ fn default_scheduler_retry_probe() -> SchedulerRetryConfig {
     }
 }
 
-fn default_scheduler_retry_entity() -> SchedulerRetryConfig {
+fn default_scheduler_retry_adaptive() -> SchedulerRetryConfig {
     SchedulerRetryConfig {
         max_attempts: 5,
         base_secs: 30,

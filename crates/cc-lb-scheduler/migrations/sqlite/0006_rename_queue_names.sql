@@ -23,3 +23,4 @@ SET idempotency_key = 'cron:' || substr(idempotency_key, 11)
 WHERE idempotency_key LIKE 'singleton:%';
 
 DELETE FROM Jobs WHERE job_type = 'scheduler_reconcile';
+DELETE FROM Workers WHERE worker_type IN ('entity', 'singleton', 'scheduler_reconcile');

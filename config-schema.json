@@ -167,7 +167,7 @@
           }
         },
         "retry_classes": {
-          "entity": {
+          "adaptive": {
             "base_secs": 30,
             "max_attempts": 5,
             "max_secs": 600
@@ -765,7 +765,7 @@
         "retry_classes": {
           "$ref": "#/$defs/SchedulerRetryClasses",
           "default": {
-            "entity": {
+            "adaptive": {
               "base_secs": 30,
               "max_attempts": 5,
               "max_secs": 600
@@ -863,7 +863,7 @@
     "SchedulerRetryClasses": {
       "type": "object",
       "properties": {
-        "entity": {
+        "adaptive": {
           "$ref": "#/$defs/SchedulerRetryConfig",
           "default": {
             "base_secs": 30,

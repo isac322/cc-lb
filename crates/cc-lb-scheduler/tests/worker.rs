@@ -133,9 +133,9 @@ async fn scheduler_ctx_default_dispatches_succeed() -> Result<(), Box<dyn std::e
     let upstream_id = Uuid::new_v4();
 
     let entity =
-        (ctx.entity_dispatch)(AdaptiveJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1))).await?;
+        (ctx.adaptive_dispatch)(AdaptiveJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1))).await?;
     let singleton =
-        (ctx.singleton_dispatch)(CronJob::UsagePrune(UsagePruneJob::default())).await?;
+        (ctx.cron_dispatch)(CronJob::UsagePrune(UsagePruneJob::default())).await?;
 
     assert_eq!(entity, JobOutcome::Done);
     assert_eq!(singleton, JobOutcome::Done);

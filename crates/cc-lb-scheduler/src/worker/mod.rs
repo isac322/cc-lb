@@ -32,26 +32,26 @@ pub type AdaptiveDispatchFuture =
 pub type CronDispatchFuture =
     Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>>;
 
-pub type EntityDispatchFn = Arc<dyn Fn(AdaptiveJob) -> AdaptiveDispatchFuture + Send + Sync>;
-pub type SingletonDispatchFn = Arc<dyn Fn(CronJob) -> CronDispatchFuture + Send + Sync>;
+pub type AdaptiveDispatchFn = Arc<dyn Fn(AdaptiveJob) -> AdaptiveDispatchFuture + Send + Sync>;
+pub type CronDispatchFn = Arc<dyn Fn(CronJob) -> CronDispatchFuture + Send + Sync>;
 
 #[derive(Clone)]
 pub struct SchedulerCtx {
     pub config: SchedulerConfig,
-    pub entity_dispatch: EntityDispatchFn,
-    pub singleton_dispatch: SingletonDispatchFn,
+    pub adaptive_dispatch: AdaptiveDispatchFn,
+    pub cron_dispatch: CronDispatchFn,
 }
 
 impl SchedulerCtx {
     pub fn new(
         config: SchedulerConfig,
-        entity_dispatch: EntityDispatchFn,
-        singleton_dispatch: SingletonDispatchFn,
+        adaptive_dispatch: AdaptiveDispatchFn,
+        cron_dispatch: CronDispatchFn,
     ) -> Self {
         Self {
             config,
-            entity_dispatch,
-            singleton_dispatch,
+            adaptive_dispatch,
+            cron_dispatch,
         }
     }
 }
@@ -60,8 +60,8 @@ impl Default for SchedulerCtx {
     fn default() -> Self {
         Self {
             config: SchedulerConfig::default(),
-            entity_dispatch: Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
-            singleton_dispatch: Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+            adaptive_dispatch: Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+            cron_dispatch: Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
         }
     }
 }

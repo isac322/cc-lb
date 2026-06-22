@@ -40,7 +40,7 @@ async fn scheduler_admin_sqlite_status_and_failures() -> Result<(), Box<dyn std:
     let (failures_status, failures_body) = support::authed_json(
         app.clone(),
         "GET",
-        "/admin/scheduler/failures?job_type=entity:warmup",
+        "/admin/scheduler/failures?job_type=adaptive:warmup",
         &[],
     )
     .await?;
@@ -75,7 +75,7 @@ async fn scheduler_admin_postgres_status_and_failures() -> Result<(), Box<dyn st
         let (failures_status, failures_body) = support::authed_json(
             app.clone(),
             "GET",
-            "/admin/scheduler/failures?job_type=entity:warmup",
+            "/admin/scheduler/failures?job_type=adaptive:warmup",
             &[],
         )
         .await?;

@@ -155,9 +155,6 @@ The scheduler emits a comprehensive set of Prometheus metrics to monitor health 
   - Cardinality: 1
 - `cclb_scheduler_leader_lost_total` (Counter): Tracks leader lock losses.
   - Cardinality: 1
-- `cclb_scheduler_reconcile_orphan_pruned_total` (Counter): Tracks pruned orphan queue rows.
-  - Labels: `job_type`
-  - Cardinality: 12
 - `cclb_scheduler_init_failure` (Gauge): Tracks scheduler initialization failure state (0 or 1).
   - Cardinality: 1
 - `cclb_scheduler_lazy_refresh_timeout_total` (Counter): Tracks timed-out lazy OAuth refresh waits.

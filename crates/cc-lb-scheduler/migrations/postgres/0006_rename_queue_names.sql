@@ -16,3 +16,4 @@ SET idempotency_key = 'cron:' || substring(idempotency_key FROM 11)
 WHERE idempotency_key LIKE 'singleton:%';
 
 DELETE FROM apalis.jobs WHERE job_type = 'scheduler_reconcile';
+DELETE FROM apalis.workers WHERE worker_type IN ('entity', 'singleton', 'scheduler_reconcile');

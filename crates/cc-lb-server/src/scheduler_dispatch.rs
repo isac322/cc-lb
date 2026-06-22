@@ -69,8 +69,8 @@ pub(crate) fn build_scheduler_ctx(deps: SchedulerDispatchDeps) -> SchedulerCtx {
     let dispatch = SchedulerDispatch::new(deps);
     SchedulerCtx::new(
         dispatch.config.scheduler.clone(),
-        dispatch.clone().entity_dispatch(),
-        dispatch.clone().singleton_dispatch(),
+        dispatch.clone().adaptive_dispatch(),
+        dispatch.clone().cron_dispatch(),
     )
 }
 
@@ -95,14 +95,14 @@ impl SchedulerDispatch {
         }
     }
 
-    fn entity_dispatch(self) -> cc_lb_scheduler::worker::EntityDispatchFn {
+    fn adaptive_dispatch(self) -> cc_lb_scheduler::worker::AdaptiveDispatchFn {
         Arc::new(move |job| {
             let dispatch = self.clone();
             Box::pin(async move { dispatch.dispatch_entity(job).await })
         })
     }
 
-    fn singleton_dispatch(self) -> cc_lb_scheduler::worker::SingletonDispatchFn {
+    fn cron_dispatch(self) -> cc_lb_scheduler::worker::CronDispatchFn {
         Arc::new(move |job| {
             let dispatch = self.clone();
             Box::pin(async move { dispatch.dispatch_singleton(job).await })
