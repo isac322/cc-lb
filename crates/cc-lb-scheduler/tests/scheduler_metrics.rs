@@ -112,6 +112,7 @@ async fn sqlite_memory() -> Result<sqlx::SqlitePool, Box<dyn Error>> {
         .connect("sqlite::memory:")
         .await?;
     apalis_sqlite::SqliteStorage::setup(&pool).await?;
+    cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
     Ok(pool)
 }
 
