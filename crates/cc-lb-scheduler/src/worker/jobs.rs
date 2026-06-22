@@ -22,7 +22,9 @@ use crate::retry::RetryPayload;
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
 pub enum EntityJob {
     Warmup(UpstreamWarmupJob),
+    #[serde(rename = "oauth_refresh", alias = "o_auth_refresh")]
     OAuthRefresh(OAuthRefreshJob),
+    #[serde(rename = "oauth_usage_poll", alias = "o_auth_usage_poll")]
     OAuthUsagePoll(OAuthUsagePollJob),
     MetadataRefresh(MetadataRefreshJob),
 }
@@ -37,7 +39,9 @@ pub enum SingletonJob {
     PriceCatalogRefresh(PriceCatalogRefreshJob),
     ApalisHousekeeping(ApalisHousekeepingJob),
     WarmupWatchdog(WarmupWatchdogJob),
+    #[serde(rename = "oauth_refresh_watchdog", alias = "o_auth_refresh_watchdog")]
     OAuthRefreshWatchdog(OAuthRefreshWatchdogJob),
+    #[serde(rename = "oauth_usage_poll_watchdog", alias = "o_auth_usage_poll_watchdog")]
     OAuthUsagePollWatchdog(OAuthUsagePollWatchdogJob),
     AnthropicCompatRefresh(AnthropicCompatRefreshJob),
 }
