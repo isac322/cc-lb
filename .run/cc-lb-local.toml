@@ -1,6 +1,6 @@
 # Local dev config for cc-lb against dockerized postgres + fake-anthropic upstream.
 # Brought up by the RustRover run configurations in this directory.
-# Docker container: `cc-lb-postgres` (postgres:17-alpine on 127.0.0.1:5432)
+# Docker container: `cc-lb-postgres` (postgres:18-alpine on 127.0.0.1:5432)
 
 [listener]
 proxy_addr = "0.0.0.0:8080"
