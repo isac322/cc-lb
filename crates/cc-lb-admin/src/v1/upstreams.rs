@@ -20,13 +20,15 @@ use cc_lb_core::{
     AuditEntry, AuditPayload, UnifiedQuotaObservation, make_metadata_http_client,
     observe_subscription_quota_headers, parse_anthropic_unified_headers, run_metadata_refresh,
 };
+use cc_lb_scheduler::error::SchedulerError;
+use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
+use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{
     OrganizationMetadataRecord, Storage, StorageError, SubscriptionQuotaLatestRecord,
-    SubscriptionQuotaWindow, UpstreamCreate, UpstreamRecord, UpstreamStore,
+    SubscriptionQuotaWindow, UpstreamCreate, UpstreamRecord, UpstreamStatusUpdate, UpstreamStore,
     UpstreamSubscriptionMetadataRecord, UpstreamUpdate,
 };
-use chrono::{DateTime, TimeZone, Utc};
 use http_body_util::Full;
 use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::{Client, connect::HttpConnector};
@@ -45,17 +47,23 @@ const MAX_LIMIT: usize = 1000;
 const STORE_PAGE_LIMIT: usize = 1000;
 const METADATA_REFRESH_LOOKAHEAD_SECS: u64 = 60;
 const METADATA_REFRESH_TIMEOUT: Duration = Duration::from_secs(30);
-const FIRE_NOW_LEASE_TTL_SECS: i64 = 120;
 const FIRE_NOW_REQUEST_TIMEOUT_SECS: u64 = 30;
-const FIRE_NOW_POST_RESET_GUARD_SECS: i64 = 30;
-const FIRE_NOW_JITTER_SPREAD_MS: u64 = 30_000;
-const FIVE_HOURS_SECS: i64 = 5 * 60 * 60;
 const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
 const WARMUP_MODEL: &str = "claude-haiku-4-5-20251001";
 const WARMUP_MAX_TOKENS: u32 = 1;
 const WARMUP_ANTHROPIC_BETA: &str = "oauth-2025-04-20";
 
 type WarmupHttpClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
+
+async fn write_warmup_status_after_success(storage: &dyn Storage, upstream_id: Uuid) {
+    let status = UpstreamStatusUpdate {
+        last_warmup_at_unix_secs: Some(Some(unix_now_secs())),
+        ..UpstreamStatusUpdate::default()
+    };
+    if let Err(error) = UpstreamStore::set_status(storage, upstream_id, status).await {
+        tracing::warn!(target: "warmup", upstream_id = %upstream_id, %error, "fire_now writeback failed");
+    }
+}
 
 pub fn router() -> Router<AdminState> {
     Router::new()
@@ -144,8 +152,7 @@ struct UpstreamResponse {
 struct UpstreamStatusResponse {
     last_apply_error: Option<String>,
     last_apply_at_unix_secs: Option<u64>,
-    next_warmup_at: Option<DateTime<Utc>>,
-    last_warmup_cycle_key: Option<i64>,
+    last_warmup_at_unix_secs: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -251,6 +258,14 @@ impl From<StorageError> for UpstreamError {
     }
 }
 
+impl From<SchedulerError> for UpstreamError {
+    fn from(error: SchedulerError) -> Self {
+        Self::Internal {
+            detail: error.to_string(),
+        }
+    }
+}
+
 async fn create_upstream(
     State(state): State<AdminState>,
     Json(body): Json<UpstreamCreateBody>,
@@ -265,11 +280,6 @@ async fn create_upstream(
             detail: "complete OAuth before enabling warmup".to_owned(),
         });
     }
-    let create_next_warmup_at = if body.warmup_enabled {
-        Some(db_now_datetime(storage).await?)
-    } else {
-        None
-    };
     let created = UpstreamStore::create(
         storage,
         UpstreamCreate {
@@ -277,12 +287,9 @@ async fn create_upstream(
             kind,
             base_url: body.base_url,
             api_key_ciphertext,
+            oauth_token_generation: None,
             warmup_enabled: body.warmup_enabled,
             warmup_dialect_plugin: body.warmup_dialect_plugin,
-            next_warmup_at: create_next_warmup_at,
-            last_warmup_cycle_key: None,
-            warmup_lease_holder: None,
-            warmup_lease_until_unix_secs: None,
         },
     )
     .await?;
@@ -443,48 +450,20 @@ async fn fire_now_upstream_warmup(
     }
 
     let holder = format!("fire-now:{}", Uuid::new_v4());
-    let claimed = storage
-        .claim_warmup_lease(upstream_id, &holder, FIRE_NOW_LEASE_TTL_SECS)
-        .await?;
-    if !claimed {
-        let held_by = UpstreamStore::get_by_id(storage.as_ref(), upstream_id)
-            .await?
-            .ok_or(UpstreamError::NotFound)?
-            .warmup_lease_holder
-            .unwrap_or_default();
-        return Ok((
-            StatusCode::ACCEPTED,
-            Json(json!({
-                "fired": false,
-                "reason": "lease_held",
-                "held_by": held_by,
-            })),
-        )
-            .into_response());
-    }
-    let db_now_unix_secs = storage.warmup_now_unix_secs().await?;
-    let lease_until = Utc
-        .timestamp_opt(db_now_unix_secs.saturating_add(FIRE_NOW_LEASE_TTL_SECS), 0)
-        .single()
-        .ok_or_else(|| UpstreamError::Internal {
-            detail: "invalid lease timestamp".to_owned(),
-        })?;
-    tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, lease_until = ?lease_until, action = "lease_claimed");
+    let now_unix_secs = unix_now_secs_i64()?;
+    tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, action = "dispatch_requested");
 
     let latest = latest_five_hour_quota(storage.as_ref(), upstream_id).await?;
     let candidate_cycle_key = latest
         .as_ref()
         .and_then(cycle_key_from_latest_observation)
-        .unwrap_or(db_now_unix_secs);
-    let jitter_ms =
-        fire_now_stable_jitter_ms(upstream_id, u64::try_from(candidate_cycle_key).unwrap_or(0));
+        .unwrap_or(now_unix_secs);
     if upstream.warmup_dialect_plugin.is_some()
         && (state.runtime.is_none()
             || state.data_dir.is_none()
             || state.warmup_dialect_dispatcher.is_none())
     {
         tracing::warn!(target: "warmup", upstream_id = %upstream_id, holder = %holder, action = "cycle_abandoned", reason = "dialect_plugin_failed");
-        release_fire_now_warmup_lease(storage.as_ref(), upstream_id, &holder).await;
         return Ok((
             StatusCode::BAD_GATEWAY,
             Json(json!({ "fired": false, "reason": "dialect_plugin_failed" })),
@@ -498,7 +477,7 @@ async fn fire_now_upstream_warmup(
         Some((runtime, data_dir, dispatcher))
     });
     let dialect_plugin_used = dialect_dispatch_bundle.is_some();
-    tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, cycle_key = %candidate_cycle_key, jitter_ms = %jitter_ms, dialect_plugin_used = dialect_plugin_used, action = "dispatch_start");
+    tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, cycle_key = %candidate_cycle_key, dialect_plugin_used = dialect_plugin_used, action = "dispatch_start");
     let (status, headers, dispatch_error_kind, dispatch_error_detail) =
         if let Some((runtime, data_dir, dispatcher)) = dialect_dispatch_bundle {
             match tokio::time::timeout(
@@ -567,100 +546,24 @@ async fn fire_now_upstream_warmup(
         | FireNowWarmupResult::WindowAlreadyActive {
             cycle_key: response_cycle_key,
         } => {
-            let next_warmup_at =
-                fire_now_next_warmup_at(upstream_id, candidate_cycle_key, response_cycle_key)?;
-            let written = storage
-                .write_warmup_cycle_key(
-                    upstream_id,
-                    &holder,
-                    candidate_cycle_key,
-                    Some(next_warmup_at),
-                )
-                .await?;
-            if written {
-                tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, cycle_key = %candidate_cycle_key, response_cycle_key = %response_cycle_key, next_warmup_at = ?next_warmup_at, action = "cycle_key_written");
-            } else {
-                release_fire_now_warmup_lease(storage.as_ref(), upstream_id, &holder).await;
-            }
+            tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, cycle_key = %candidate_cycle_key, response_cycle_key = %response_cycle_key, action = "dispatch_succeeded");
+            write_warmup_status_after_success(storage.as_ref(), upstream_id).await;
             Ok(Json(json!({ "fired": true, "cycle_key": response_cycle_key })).into_response())
         }
         FireNowWarmupResult::AbandonCyclePermanent(reason) => {
             tracing::warn!(target: "warmup", upstream_id = %upstream_id, reason = %reason.as_str(), action = "cycle_abandoned");
-            let next_warmup_at = fire_now_abandon_next_warmup_at(
-                upstream_id,
-                candidate_cycle_key,
-                db_now_unix_secs,
-            )?;
-            let _ = storage
-                .write_warmup_next_at(upstream_id, &holder, next_warmup_at)
-                .await;
-            release_fire_now_warmup_lease(storage.as_ref(), upstream_id, &holder).await;
             Ok((
                 StatusCode::BAD_GATEWAY,
                 Json(json!({ "fired": false, "reason": reason.as_str() })),
             )
                 .into_response())
         }
-        FireNowWarmupResult::RetryableTransient => {
-            let backoff_at = fire_now_transient_next_warmup_at(storage.as_ref()).await?;
-            let _ = storage
-                .write_warmup_next_at(upstream_id, &holder, backoff_at)
-                .await;
-            release_fire_now_warmup_lease(storage.as_ref(), upstream_id, &holder).await;
-            Ok((
-                StatusCode::SERVICE_UNAVAILABLE,
-                Json(json!({ "fired": false, "reason": "transient" })),
-            )
-                .into_response())
-        }
-    }
-}
-
-fn fire_now_abandon_next_warmup_at(
-    upstream_id: Uuid,
-    candidate_cycle_key: i64,
-    db_now_secs: i64,
-) -> Result<DateTime<Utc>, UpstreamError> {
-    let anchor = candidate_cycle_key.saturating_add(FIVE_HOURS_SECS);
-    let anchor_u64 =
-        u64::try_from(anchor).map_err(|_| invalid_warmup_state("warmup cycle key is negative"))?;
-    let jitter_ms = fire_now_stable_jitter_ms(upstream_id, anchor_u64);
-    let base = Utc
-        .timestamp_opt(anchor, 0)
-        .single()
-        .ok_or_else(|| invalid_warmup_state("invalid warmup cycle timestamp"))?;
-    let mut scheduled = base
-        .checked_add_signed(chrono::Duration::seconds(FIRE_NOW_POST_RESET_GUARD_SECS))
-        .and_then(|value| {
-            value.checked_add_signed(chrono::Duration::milliseconds(jitter_ms as i64))
-        })
-        .ok_or_else(|| invalid_warmup_state("warmup next timestamp overflow"))?;
-    let min_next = Utc
-        .timestamp_opt(
-            db_now_secs.saturating_add(FIRE_NOW_TRANSIENT_BACKOFF_SECS),
-            0,
+        FireNowWarmupResult::RetryableTransient => Ok((
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(json!({ "fired": false, "reason": "transient" })),
         )
-        .single()
-        .ok_or_else(|| invalid_warmup_state("invalid abandon backoff timestamp"))?;
-    if scheduled < min_next {
-        scheduled = min_next;
+            .into_response()),
     }
-    Ok(scheduled)
-}
-
-const FIRE_NOW_TRANSIENT_BACKOFF_SECS: i64 = 60;
-
-async fn fire_now_transient_next_warmup_at(
-    storage: &dyn Storage,
-) -> Result<DateTime<Utc>, UpstreamError> {
-    let now = storage.warmup_now_unix_secs().await?;
-    Utc.timestamp_opt(now.saturating_add(FIRE_NOW_TRANSIENT_BACKOFF_SECS), 0)
-        .single()
-        .ok_or_else(|| invalid_warmup_state("invalid transient backoff timestamp"))
-}
-
-async fn release_fire_now_warmup_lease(storage: &dyn Storage, upstream_id: Uuid, holder: &str) {
-    let _ = storage.release_warmup_lease(upstream_id, holder).await.ok();
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -770,7 +673,7 @@ async fn record_fire_now_subscription_quota_observations(
     if headers.is_empty() {
         return Ok(());
     }
-    let observed_at_unix_millis = warmup_now_unix_millis(storage).await?;
+    let observed_at_unix_millis = unix_now_millis()?;
     if let Some(lifecycle) = &state.lifecycle {
         let observed_at = UNIX_EPOCH
             .checked_add(Duration::from_millis(observed_at_unix_millis))
@@ -783,21 +686,6 @@ async fn record_fire_now_subscription_quota_observations(
         storage.put_subscription_quota_batch(&records).await?;
     }
     Ok(())
-}
-
-async fn warmup_now_unix_millis(storage: &dyn Storage) -> Result<u64, UpstreamError> {
-    let now = storage.warmup_now_unix_secs().await?;
-    let millis = now
-        .checked_mul(1_000)
-        .ok_or_else(|| invalid_warmup_state("warmup db timestamp overflow"))?;
-    u64::try_from(millis).map_err(|_| invalid_warmup_state("warmup db timestamp is negative"))
-}
-
-async fn db_now_datetime(storage: &dyn Storage) -> Result<DateTime<Utc>, UpstreamError> {
-    let secs = storage.warmup_now_unix_secs().await?;
-    Utc.timestamp_opt(secs, 0)
-        .single()
-        .ok_or_else(|| invalid_warmup_state("invalid db now timestamp"))
 }
 
 fn classify_fire_now_response(
@@ -839,44 +727,6 @@ fn five_hour_cycle_key(parsed_headers: &[UnifiedQuotaObservation]) -> Option<i64
         .find(|observation| observation.window == SubscriptionQuotaWindow::FiveHour)
         .and_then(|observation| observation.resets_at_unix_secs)
         .and_then(|resets_at| i64::try_from(resets_at).ok())
-}
-
-fn fire_now_next_warmup_at(
-    upstream_id: Uuid,
-    candidate_cycle_key: i64,
-    response_cycle_key: i64,
-) -> Result<DateTime<Utc>, UpstreamError> {
-    let schedule_anchor = if response_cycle_key > candidate_cycle_key {
-        response_cycle_key
-    } else {
-        candidate_cycle_key.saturating_add(FIVE_HOURS_SECS)
-    };
-    let anchor_u64 = u64::try_from(schedule_anchor)
-        .map_err(|_| invalid_warmup_state("warmup cycle key is negative"))?;
-    let jitter_ms = fire_now_stable_jitter_ms(upstream_id, anchor_u64);
-    let base = Utc
-        .timestamp_opt(schedule_anchor, 0)
-        .single()
-        .ok_or_else(|| invalid_warmup_state("invalid warmup cycle timestamp"))?;
-    base.checked_add_signed(chrono::Duration::seconds(FIRE_NOW_POST_RESET_GUARD_SECS))
-        .and_then(|value| {
-            value.checked_add_signed(chrono::Duration::milliseconds(jitter_ms as i64))
-        })
-        .ok_or_else(|| invalid_warmup_state("warmup next timestamp overflow"))
-}
-
-/// Stable jitter mirroring `cc_lb_server::warmup::helpers::stable_jitter_ms`.
-/// Uses SipHasher13 with the same fixed all-zero 16-byte key to guarantee that
-/// fire-now and the warm-up loop derive the same `next_warmup_at` for the same
-/// `(upstream_id, resets_at)` pair across replicas.
-fn fire_now_stable_jitter_ms(upstream_id: Uuid, candidate_resets_at_unix_secs: u64) -> u64 {
-    use std::hash::Hasher;
-    const SIPHASH_K0: u64 = 0;
-    const SIPHASH_K1: u64 = 0;
-    let mut hasher = siphasher::sip::SipHasher13::new_with_keys(SIPHASH_K0, SIPHASH_K1);
-    hasher.write(upstream_id.as_bytes());
-    hasher.write(&candidate_resets_at_unix_secs.to_le_bytes());
-    hasher.finish() % FIRE_NOW_JITTER_SPREAD_MS
 }
 
 fn upstream_base_url(upstream: &UpstreamRecord) -> Result<Url, UpstreamError> {
@@ -922,7 +772,6 @@ async fn update_upstream(
     let fields_changed = changed_fields(&body);
     let api_key_ciphertext = api_key_ciphertext_for_update(&state, &current, &body)?;
     let storage = storage(&state)?;
-    let final_warmup_enabled = body.warmup_enabled.unwrap_or(current.warmup_enabled);
     if body.warmup_enabled == Some(true)
         && current.kind == UpstreamKind::AnthropicOauth
         && current.oauth_credentials.is_none()
@@ -932,13 +781,6 @@ async fn update_upstream(
             detail: "complete OAuth before enabling warmup".to_owned(),
         });
     }
-    let toggled_to_enabled = body.warmup_enabled == Some(true) && !current.warmup_enabled;
-    let null_repair_needed = final_warmup_enabled && current.next_warmup_at.is_none();
-    let bootstrap_next_warmup_at = if toggled_to_enabled || null_repair_needed {
-        Some(db_now_datetime(storage).await?)
-    } else {
-        None
-    };
     match UpstreamStore::update(
         storage,
         current.id,
@@ -947,18 +789,16 @@ async fn update_upstream(
             name: body.name,
             base_url: body.base_url,
             api_key_ciphertext,
+            oauth_token_generation: None,
             enabled: None,
             warmup_enabled: body.warmup_enabled,
             warmup_dialect_plugin: body.warmup_dialect_plugin,
-            next_warmup_at: bootstrap_next_warmup_at,
-            last_warmup_cycle_key: None,
-            warmup_lease_holder: None,
-            warmup_lease_until_unix_secs: None,
         },
     )
     .await
     {
         Ok(updated) => {
+            seed_warmup_if_toggled(&state, &current, &updated).await?;
             enqueue_upstream_audit(
                 &state,
                 &updated,
@@ -975,6 +815,42 @@ async fn update_upstream(
             stale_or_conflict(&state, &id, expected_revision, message).await
         }
         Err(error) => Err(error.into()),
+    }
+}
+
+async fn seed_warmup_if_toggled(
+    state: &AdminState,
+    before: &UpstreamRecord,
+    after: &UpstreamRecord,
+) -> Result<(), UpstreamError> {
+    let toggled_on = !before.warmup_enabled && after.warmup_enabled;
+    if !toggled_on {
+        return Ok(());
+    }
+    if after.kind != UpstreamKind::AnthropicOauth || after.oauth_credentials.is_none() {
+        return Ok(());
+    }
+    let Some(scheduler) = state.scheduler.as_ref() else {
+        return Ok(());
+    };
+    let seed_secs = unix_now_secs();
+    match scheduler
+        .push_adaptive_task(warmup_bootstrap_task(after.id, seed_secs))
+        .await
+    {
+        Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn warmup_bootstrap_task(upstream_id: Uuid, seed_secs: u64) -> SchedulerPushTask<AdaptiveJob> {
+    let job = UpstreamWarmupJob::new(upstream_id, seed_secs);
+    SchedulerPushTask {
+        args: AdaptiveJob::Warmup(job),
+        idempotency_key: Some(format!(
+            "adaptive:warmup:{upstream_id}:bootstrap:{seed_secs}"
+        )),
+        run_at_unix_secs: Some(seed_secs),
     }
 }
 
@@ -1232,8 +1108,7 @@ fn upstream_response(record: &UpstreamRecord) -> UpstreamResponse {
         status: UpstreamStatusResponse {
             last_apply_error: record.last_apply_error.clone(),
             last_apply_at_unix_secs: record.last_apply_at_unix_secs,
-            next_warmup_at: record.next_warmup_at,
-            last_warmup_cycle_key: record.last_warmup_cycle_key,
+            last_warmup_at_unix_secs: record.last_warmup_at_unix_secs,
         },
     }
 }
@@ -1454,9 +1329,18 @@ fn unix_now_secs() -> u64 {
     u64::try_from(chrono::Utc::now().timestamp()).unwrap_or_default()
 }
 
+fn unix_now_secs_i64() -> Result<i64, UpstreamError> {
+    i64::try_from(unix_now_secs()).map_err(|_| invalid_warmup_state("current timestamp overflow"))
+}
+
+fn unix_now_millis() -> Result<u64, UpstreamError> {
+    unix_now_secs()
+        .checked_mul(1_000)
+        .ok_or_else(|| invalid_warmup_state("current timestamp millis overflow"))
+}
+
 #[cfg(test)]
 mod tests {
-    #![allow(deprecated)]
     use std::collections::HashMap;
 
     use async_trait::async_trait;
@@ -1655,29 +1539,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn fire_now_returns_202_when_lease_held() {
-        let context = test_context().await;
-        let upstream =
-            create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), true, None)
-                .await;
-        assert!(
-            context
-                .storage
-                .claim_warmup_lease(upstream.id, "replica-a", FIRE_NOW_LEASE_TTL_SECS)
-                .await
-                .expect("lease claim succeeds")
-        );
-
-        let (status, body) = fire_now_response(context.state, upstream.id).await;
-
-        assert_eq!(status, StatusCode::ACCEPTED);
-        assert_eq!(body["fired"], false);
-        assert_eq!(body["reason"], "lease_held");
-        assert_eq!(body["held_by"], "replica-a");
-    }
-
-    #[tokio::test]
-    async fn fire_now_returns_200_on_success_and_writes_cycle_key() {
+    async fn fire_now_returns_200_on_success() {
         let context = test_context().await;
         let (base_url, server) = spawn_warmup_server(StatusCode::OK).await;
         let upstream = create_oauth_upstream(
@@ -1692,17 +1554,7 @@ mod tests {
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body["fired"], true);
-        let cycle_key = body["cycle_key"].as_i64().expect("cycle key is i64");
-        let stored = context
-            .storage
-            .get_by_id(upstream.id)
-            .await
-            .expect("read succeeds")
-            .expect("upstream exists");
-        assert_eq!(stored.last_warmup_cycle_key, Some(cycle_key));
-        assert!(stored.next_warmup_at.is_some());
-        assert_eq!(stored.warmup_lease_holder, None);
-        assert_eq!(stored.warmup_lease_until_unix_secs, None);
+        assert!(body["cycle_key"].as_i64().is_some());
         server.abort();
     }
 
@@ -1723,15 +1575,6 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(body["fired"], false);
         assert_eq!(body["reason"], "auth_failed");
-        let stored = context
-            .storage
-            .get_by_id(upstream.id)
-            .await
-            .expect("read succeeds")
-            .expect("upstream exists");
-        assert_eq!(stored.last_warmup_cycle_key, None);
-        assert_eq!(stored.warmup_lease_holder, None);
-        assert_eq!(stored.warmup_lease_until_unix_secs, None);
         server.abort();
     }
 
@@ -1752,15 +1595,6 @@ mod tests {
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body["fired"], false);
         assert_eq!(body["reason"], "transient");
-        let stored = context
-            .storage
-            .get_by_id(upstream.id)
-            .await
-            .expect("read succeeds")
-            .expect("upstream exists");
-        assert_eq!(stored.last_warmup_cycle_key, None);
-        assert_eq!(stored.warmup_lease_holder, None);
-        assert_eq!(stored.warmup_lease_until_unix_secs, None);
         server.abort();
     }
 
@@ -1790,6 +1624,7 @@ mod tests {
             audit_sink: None,
             dynamic_view: Arc::new(DynamicViewHolder::new(test_view())),
             config: Arc::new(Config::default()),
+            scheduler: None,
             admin_token: None,
             start_time: std::time::Instant::now(),
         };
@@ -1824,12 +1659,9 @@ mod tests {
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: None,
                 api_key_ciphertext: Some(vec![1, 2, 3]),
+                oauth_token_generation: None,
                 warmup_enabled,
                 warmup_dialect_plugin: None,
-                next_warmup_at: None,
-                last_warmup_cycle_key: None,
-                warmup_lease_holder: None,
-                warmup_lease_until_unix_secs: None,
             })
             .await
             .expect("upstream create succeeds")
@@ -1857,12 +1689,9 @@ mod tests {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url,
                 api_key_ciphertext: None,
+                oauth_token_generation: None,
                 warmup_enabled,
                 warmup_dialect_plugin,
-                next_warmup_at: None,
-                last_warmup_cycle_key: None,
-                warmup_lease_holder: None,
-                warmup_lease_until_unix_secs: None,
             })
             .await
             .expect("upstream create succeeds");
@@ -1940,13 +1769,6 @@ mod tests {
         assert_eq!(status, StatusCode::BAD_GATEWAY);
         assert_eq!(body["fired"], false);
         assert_eq!(body["reason"], "dialect_plugin_failed");
-        let stored = context
-            .storage
-            .get_by_id(upstream.id)
-            .await
-            .expect("read succeeds")
-            .expect("upstream exists");
-        assert_eq!(stored.warmup_lease_holder, None);
         server.abort();
     }
 
@@ -1985,7 +1807,6 @@ mod tests {
         let upstream =
             create_oauth_upstream(context.storage.as_ref(), context.aead.as_ref(), false, None)
                 .await;
-        assert!(upstream.next_warmup_at.is_none());
 
         let response = router()
             .with_state(context.state)
@@ -2008,11 +1829,27 @@ mod tests {
             .await
             .expect("read succeeds")
             .expect("upstream exists");
-        assert!(
-            stored.next_warmup_at.is_some(),
-            "false→true toggle must bootstrap next_warmup_at"
-        );
         assert!(stored.warmup_enabled);
+    }
+
+    #[test]
+    fn warmup_bootstrap_task_uses_seed_suffix_as_key_and_cycle() {
+        let upstream_id =
+            Uuid::parse_str("12345678-1234-5678-1234-567812345678").expect("uuid parses");
+        let seed_secs = 1_800_000_000;
+
+        let task = warmup_bootstrap_task(upstream_id, seed_secs);
+
+        assert_eq!(
+            task.idempotency_key.as_deref(),
+            Some("adaptive:warmup:12345678-1234-5678-1234-567812345678:bootstrap:1800000000")
+        );
+        assert_eq!(task.run_at_unix_secs, Some(seed_secs));
+        let cc_lb_scheduler::worker::AdaptiveJob::Warmup(job) = task.args else {
+            panic!("expected warmup job");
+        };
+        assert_eq!(job.upstream_id, upstream_id);
+        assert_eq!(job.cycle_key, seed_secs);
     }
 
     #[tokio::test]
@@ -2025,12 +1862,9 @@ mod tests {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: None,
                 api_key_ciphertext: None,
+                oauth_token_generation: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
-                next_warmup_at: None,
-                last_warmup_cycle_key: None,
-                warmup_lease_holder: None,
-                warmup_lease_until_unix_secs: None,
             })
             .await
             .expect("create succeeds");
@@ -2063,7 +1897,6 @@ mod tests {
             .expect("read succeeds")
             .expect("upstream exists");
         assert!(!stored.warmup_enabled);
-        assert!(stored.next_warmup_at.is_none());
     }
 
     #[tokio::test]
@@ -2076,12 +1909,9 @@ mod tests {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: None,
                 api_key_ciphertext: None,
+                oauth_token_generation: None,
                 warmup_enabled: true,
                 warmup_dialect_plugin: None,
-                next_warmup_at: None,
-                last_warmup_cycle_key: None,
-                warmup_lease_holder: None,
-                warmup_lease_until_unix_secs: None,
             })
             .await
             .expect("create succeeds");
@@ -2109,12 +1939,5 @@ mod tests {
         let body: Value = serde_json::from_slice(&bytes).expect("response is json");
         assert_eq!(body["fired"], false);
         assert_eq!(body["reason"], "oauth_credentials_missing");
-        let stored = context
-            .storage
-            .get_by_id(upstream.id)
-            .await
-            .expect("read succeeds")
-            .expect("upstream exists");
-        assert!(stored.warmup_lease_holder.is_none());
     }
 }

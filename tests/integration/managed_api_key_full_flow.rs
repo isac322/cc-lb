@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -664,11 +666,8 @@ async fn seed_runtime_state(
             kind: UpstreamKind::AnthropicApiKey,
             base_url: Some(Url::parse(&upstream_url)?),
             api_key_ciphertext: Some(Vec::new()),
+            oauth_token_generation: None,
             warmup_enabled: false,
-            next_warmup_at: None,
-            last_warmup_cycle_key: None,
-            warmup_lease_holder: None,
-            warmup_lease_until_unix_secs: None,
             warmup_dialect_plugin: None,
         },
     )

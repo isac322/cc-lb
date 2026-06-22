@@ -100,6 +100,7 @@ function UpstreamsPage() {
     upstreamIds,
     windows: '5h,7d,overage',
     source: 'merged',
+    refetchInterval: 5_000,
   });
 
   const listUsage = useUsage('7d', 'hour', 'upstream');
@@ -595,6 +596,7 @@ function DetailView({
     upstreamIds: upstream.id,
     windows: '5h,7d,overage,7d_sonnet,7d_opus',
     source: 'merged',
+    refetchInterval: 5_000,
   });
   const quotaSeries = useSubscriptionQuotaSeries({
     upstreamIds: upstream.id,
@@ -1399,7 +1401,6 @@ function DetailView({
                         const windowNotStarted =
                           !isOverage &&
                           (snap.utilization == null ||
-                            snap.utilization === 0 ||
                             snap.resets_at_unix_secs == null ||
                             snap.resets_at_unix_secs <= nowUnixSecs);
                         const waitingForGrowth =

@@ -49,8 +49,7 @@ import {
 export interface UpstreamStatus {
   last_apply_error: string | null;
   last_apply_at_unix_secs: number | null;
-  next_warmup_at: string | null;
-  last_warmup_cycle_key: number | null;
+  last_warmup_at_unix_secs: number | null;
 }
 
 export interface Upstream {
@@ -491,6 +490,7 @@ export function useSubscriptionQuotaLatest(params: {
   windows?: string;
   source?: string;
   maxStalenessSecs?: number;
+  refetchInterval?: number;
 }) {
   const searchParams = new URLSearchParams();
   if (params.upstreamIds) searchParams.set('upstream_ids', params.upstreamIds);
@@ -505,7 +505,7 @@ export function useSubscriptionQuotaLatest(params: {
       getJson<LatestResponse>(
         `/admin/v1/subscription-quotas/latest?${searchParams.toString()}`,
       ),
-    refetchInterval: 30_000,
+    refetchInterval: params.refetchInterval ?? 30_000,
   });
 }
 

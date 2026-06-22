@@ -17,8 +17,7 @@ type UpstreamFixture = {
   status: {
     last_apply_error: string | null;
     last_apply_at_unix_secs: number | null;
-    next_warmup_at: string | null;
-    last_warmup_cycle_key: number | null;
+    last_warmup_at_unix_secs: number | null;
   };
 };
 type PluginFixture = {
@@ -59,8 +58,7 @@ function oauthHealthy(overrides: Partial<UpstreamFixture> = {}): UpstreamFixture
     status: {
       last_apply_error: null,
       last_apply_at_unix_secs: null,
-      next_warmup_at: new Date(Date.now() + 30 * 60 * 1000).toISOString(),
-      last_warmup_cycle_key: Math.floor(Date.now() / 1000) - 20 * 60,
+      last_warmup_at_unix_secs: Math.floor(Date.now() / 1000) - 20 * 60,
     },
     ...overrides,
   };
@@ -75,8 +73,7 @@ function oauthDisabled(): UpstreamFixture {
     status: {
       last_apply_error: null,
       last_apply_at_unix_secs: null,
-      next_warmup_at: null,
-      last_warmup_cycle_key: null,
+      last_warmup_at_unix_secs: null,
     },
   };
 }
@@ -95,8 +92,7 @@ function apiKeyUpstream(): UpstreamFixture {
     status: {
       last_apply_error: null,
       last_apply_at_unix_secs: null,
-      next_warmup_at: null,
-      last_warmup_cycle_key: null,
+      last_warmup_at_unix_secs: null,
     },
   };
 }
@@ -277,7 +273,6 @@ test.describe('WarmupCard', () => {
 
     await expect(page.getByTestId('warmup-card')).toBeVisible();
     await expect(page.getByTestId('warmup-switch')).toHaveAttribute('aria-checked', 'true');
-    await expect(page.getByTestId('warmup-next')).toHaveText(/in \d+/);
     await expect(page.getByTestId('warmup-last')).toHaveText(/\d+ (minutes?|hours?|days?) ago/);
     await expect(page.getByTestId('warmup-plugin-select')).toHaveValue('anthropic-shape-v2');
     await expect(page.getByTestId('warmup-fire-now')).toBeEnabled();
@@ -416,7 +411,7 @@ test.describe('WarmupCard', () => {
     await page.screenshot({ path: evidencePath('scenario-8-stale-revision.png'), fullPage: true });
   });
 
-  test('Scenario 9: Disabled upstream pauses stale warmup schedule', async ({ page }) => {
+  test('Scenario 9: Disabled upstream pauses warmup controls', async ({ page }) => {
     const stalePaused = oauthHealthy({
       id: 'oauth-paused-stale',
       name: 'oauth-paused-stale',
@@ -425,8 +420,7 @@ test.describe('WarmupCard', () => {
       status: {
         last_apply_error: null,
         last_apply_at_unix_secs: null,
-        next_warmup_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
-        last_warmup_cycle_key: Math.floor(Date.now() / 1000) - 2 * 60 * 60,
+        last_warmup_at_unix_secs: Math.floor(Date.now() / 1000) - 2 * 60 * 60,
       },
     });
     await installAppFixtures(page, {
@@ -436,7 +430,6 @@ test.describe('WarmupCard', () => {
 
     await expect(page.getByTestId('warmup-card')).toBeVisible();
     await expect(page.getByText(COPY.upstreamPausedEmpty)).toBeVisible();
-    await expect(page.getByText(/Overdue/)).toHaveCount(0);
     await expect(page.getByTestId('warmup-fire-now')).toHaveCount(0);
     await expect(page.getByTestId('warmup-enable-btn')).toHaveCount(0);
     await page.screenshot({ path: evidencePath('scenario-9-disabled-state-before.png'), fullPage: true });

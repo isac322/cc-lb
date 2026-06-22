@@ -1,0 +1,94 @@
+---
+source: crates/cc-lb-config/tests/scheduler_config.rs
+expression: "SchedulerConfig::default()"
+---
+{
+  "separate_pool": {
+    "max_connections": 5,
+    "min_connections": 1,
+    "acquire_timeout_secs": 5,
+    "idle_timeout_secs": 600,
+    "statement_timeout_secs": 30,
+    "sslmode": "prefer"
+  },
+  "leader_lock_key": 224417894236161,
+  "retry_classes": {
+    "probe": {
+      "max_attempts": 3,
+      "base_secs": 1,
+      "max_secs": 5
+    },
+    "adaptive": {
+      "max_attempts": 5,
+      "base_secs": 30,
+      "max_secs": 600
+    },
+    "maintenance": {
+      "max_attempts": 1,
+      "base_secs": 60,
+      "max_secs": 60
+    }
+  },
+  "recurring_jobs": {
+    "anthropic_compat_refresh": {
+      "enabled": true,
+      "interval_secs": 86400,
+      "jitter_secs": 30
+    },
+    "apalis_housekeeping": {
+      "enabled": true,
+      "interval_secs": 3600,
+      "jitter_secs": 30
+    },
+    "oauth_refresh_watchdog": {
+      "enabled": true,
+      "interval_secs": 9360,
+      "jitter_secs": 30
+    },
+    "oauth_usage_poll": {
+      "enabled": true,
+      "interval_secs": 60,
+      "jitter_secs": 0
+    },
+    "price_catalog_refresh": {
+      "enabled": true,
+      "interval_secs": 3600,
+      "jitter_secs": 30
+    },
+    "prompt_cache_purge": {
+      "enabled": true,
+      "interval_secs": 600,
+      "jitter_secs": 30
+    },
+    "quota_gc": {
+      "enabled": true,
+      "interval_secs": 3600,
+      "jitter_secs": 30
+    },
+    "usage_prune": {
+      "enabled": true,
+      "interval_secs": 86400,
+      "jitter_secs": 30
+    },
+    "usage_rollup": {
+      "enabled": true,
+      "interval_secs": 30,
+      "jitter_secs": 3
+    },
+    "warmup_watchdog": {
+      "enabled": true,
+      "interval_secs": 6000,
+      "jitter_secs": 30
+    }
+  },
+  "idempotency": {
+    "claim_ttl_secs": 60
+  },
+  "dlq_retention_days": 30,
+  "entity_concurrency": 8,
+  "singleton_concurrency": 2,
+  "staleness": {
+    "warmup_effect_retention_days": 30
+  },
+  "pgbouncer_transaction_mode": false
+}

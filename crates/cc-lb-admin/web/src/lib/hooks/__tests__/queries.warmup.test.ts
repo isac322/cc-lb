@@ -137,7 +137,7 @@ describe('useFireNowUpstreamWarmup', () => {
     [400, makeFireNowError('oauth_credentials_missing')],
     [502, makeFireNowError('auth_failed')],
     [503, makeFireNowError('transient')],
-  ])('returns %i error body and still invalidates queries (backend may have rescheduled next_warmup_at)', async (status, response) => {
+  ])('returns %i error body and still invalidates queries after fire-now attempt', async (status, response) => {
     stubFetchOnce(response, { status });
     const client = makeClient();
     const invalidateSpy = vi.spyOn(client, 'invalidateQueries');

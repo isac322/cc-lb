@@ -38,9 +38,6 @@ pub mod lifecycle;
 pub mod limit_state_writer;
 #[cfg(not(loom))]
 pub mod model_resolution;
-#[cfg(not(loom))]
-pub mod poll_schedule_estimator;
-#[cfg(not(loom))]
 #[allow(dead_code)]
 mod rate_limit_headers;
 #[cfg(not(loom))]
@@ -59,7 +56,6 @@ pub mod tokenizer;
 pub mod upstream_rate_limit_events;
 #[cfg(not(loom))]
 pub mod usage_pruner;
-pub mod usage_rollup_job;
 #[cfg(not(loom))]
 pub use anthropic_metadata::make_metadata_http_client;
 pub use audit_payload::AuditPayload;
@@ -113,9 +109,6 @@ pub use lifecycle::{
 pub use limit_state_writer::{
     PrincipalLimitStateEnqueueError, PrincipalLimitStateSink, start_principal_limit_state_writer,
 };
-#[cfg(not(loom))]
-pub use poll_schedule_estimator::{EstimatorConfig, PollScheduleEstimator, ThrottleObservation};
-#[cfg(not(loom))]
 pub use rate_limit_headers::{
     UnifiedQuotaObservation, clamp_utilization_fraction, parse_anthropic_unified_headers,
     percent_to_utilization_fraction,
@@ -126,8 +119,9 @@ pub use sse_error_frame::{make_error_frame, make_error_frame_from_json};
 pub use sse_relay::{RelayError, SseBatchConfig, SseRelay, StreamingUsage};
 #[cfg(not(loom))]
 pub use subscription_metadata_hook::{
-    MetadataHookHandle, MetadataHookRequest, MetadataRefreshError, MetadataRefreshRecords,
-    fetch_metadata_only, run_metadata_refresh, start_subscription_metadata_hook,
+    MetadataHookEnqueueError, MetadataHookHandle, MetadataHookRequest, MetadataRefreshEnqueue,
+    MetadataRefreshError, MetadataRefreshRecords, fetch_metadata_only, run_metadata_refresh,
+    start_subscription_metadata_hook,
 };
 #[cfg(not(loom))]
 pub use subscription_quota_events::{

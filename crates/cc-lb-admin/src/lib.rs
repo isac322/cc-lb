@@ -9,6 +9,7 @@ pub mod management;
 mod oauth_pkce;
 pub mod principals;
 pub mod routes;
+pub mod scheduler;
 pub mod settings;
 pub mod status;
 pub mod subscription_quotas;
@@ -92,6 +93,7 @@ pub struct AdminState {
     pub audit_sink: Option<Arc<AuditWriterSink>>,
     pub dynamic_view: Arc<DynamicViewHolder>,
     pub config: Arc<dyn CurrentConfig>,
+    pub scheduler: Option<cc_lb_scheduler::admin::SchedulerAdminHandle>,
     pub admin_token: Option<String>,
     pub start_time: std::time::Instant,
 }

@@ -902,6 +902,7 @@ fn now_epoch_secs() -> u64 {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use std::collections::HashMap;
     use std::sync::Arc;
@@ -914,7 +915,7 @@ mod tests {
     use cc_lb_plugin_api::{
         RequestContext, Upstream, UpstreamDialect, shape_request, sign_request,
     };
-    use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamLeaseKind, UpstreamStatusUpdate};
+    use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
     use cc_lb_storage_api::{
         OAuthCredentialStore, StorageError, StorageResult, UpstreamCreate, UpstreamRecord,
         UpstreamRecordId, UpstreamStore, UpstreamUpdate, validate_identifier,
@@ -950,20 +951,16 @@ mod tests {
                 enabled: true,
                 oauth_credentials: None,
                 api_key_ciphertext: create.api_key_ciphertext,
-                refresh_lease_holder: None,
-                refresh_lease_until_unix_secs: None,
                 last_apply_error: None,
                 last_apply_at_unix_secs: None,
                 deleted_at_unix_secs: None,
                 revision: 1,
+                oauth_token_generation: create.oauth_token_generation.unwrap_or_default(),
                 created_at_unix_secs: now,
                 updated_at_unix_secs: now,
                 warmup_enabled: create.warmup_enabled,
-                next_warmup_at: create.next_warmup_at,
-                last_warmup_cycle_key: create.last_warmup_cycle_key,
-                warmup_lease_holder: create.warmup_lease_holder,
-                warmup_lease_until_unix_secs: create.warmup_lease_until_unix_secs,
                 warmup_dialect_plugin: None,
+                last_warmup_at_unix_secs: None,
             };
             records.push(record.clone());
             Ok(record)
@@ -1086,45 +1083,13 @@ mod tests {
                 if let Some(value) = status.last_apply_at_unix_secs {
                     record.last_apply_at_unix_secs = value;
                 }
-                if let Some(value) = status.next_warmup_at {
-                    record.next_warmup_at = value;
-                }
-                if let Some(value) = status.last_warmup_cycle_key {
-                    record.last_warmup_cycle_key = value;
+                if let Some(value) = status.last_warmup_at_unix_secs {
+                    record.last_warmup_at_unix_secs = value;
                 }
                 Ok(())
             })
             .await?;
             Ok(())
-        }
-
-        async fn claim_lease(
-            &self,
-            _id: UpstreamRecordId,
-            _lease_kind: UpstreamLeaseKind,
-            _holder: String,
-            _ttl_secs: i64,
-        ) -> StorageResult<bool> {
-            Ok(false)
-        }
-
-        async fn renew_lease(
-            &self,
-            _id: UpstreamRecordId,
-            _lease_kind: UpstreamLeaseKind,
-            _holder: String,
-            _ttl_secs: i64,
-        ) -> StorageResult<bool> {
-            Ok(false)
-        }
-
-        async fn release_lease(
-            &self,
-            _id: UpstreamRecordId,
-            _lease_kind: UpstreamLeaseKind,
-            _holder: String,
-        ) -> StorageResult<bool> {
-            Ok(false)
         }
 
         async fn store_oauth_tokens(
@@ -1140,15 +1105,6 @@ mod tests {
             .await
         }
 
-        async fn claim_refresh_lease(
-            &self,
-            _id: UpstreamRecordId,
-            _holder: UpstreamRecordId,
-            _ttl_secs: u64,
-        ) -> StorageResult<bool> {
-            Ok(false)
-        }
-
         async fn complete_refresh(
             &self,
             id: UpstreamRecordId,
@@ -1160,15 +1116,6 @@ mod tests {
                 Ok(())
             })
             .await
-        }
-
-        async fn release_lease_on_failure(
-            &self,
-            _id: UpstreamRecordId,
-            _holder: UpstreamRecordId,
-            _reason: String,
-        ) -> StorageResult<()> {
-            Ok(())
         }
 
         async fn set_last_apply_error(
@@ -1195,33 +1142,6 @@ mod tests {
         async fn hard_delete(&self, id: UpstreamRecordId) -> StorageResult<()> {
             self.records.lock().await.retain(|record| record.id != id);
             Ok(())
-        }
-
-        async fn claim_warmup_lease(
-            &self,
-            _upstream_id: UpstreamRecordId,
-            _holder: &str,
-            _ttl_secs: i64,
-        ) -> StorageResult<bool> {
-            Ok(true)
-        }
-
-        async fn write_warmup_cycle_key(
-            &self,
-            _upstream_id: UpstreamRecordId,
-            _holder: &str,
-            _new_cycle_key: i64,
-            _next_warmup_at: Option<chrono::DateTime<chrono::Utc>>,
-        ) -> StorageResult<bool> {
-            Ok(true)
-        }
-
-        async fn release_warmup_lease(
-            &self,
-            _id: UpstreamRecordId,
-            _holder: &str,
-        ) -> StorageResult<bool> {
-            Ok(true)
         }
 
         async fn clear_warmup_dialect_plugin(
@@ -1697,11 +1617,8 @@ mod tests {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: None,
                 api_key_ciphertext: None,
+                oauth_token_generation: None,
                 warmup_enabled: false,
-                next_warmup_at: None,
-                last_warmup_cycle_key: None,
-                warmup_lease_holder: None,
-                warmup_lease_until_unix_secs: None,
                 warmup_dialect_plugin: None,
             })
             .await

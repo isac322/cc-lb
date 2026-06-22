@@ -21,6 +21,7 @@ use tokio::time::sleep;
 
 use crate::modes::FakeMode;
 use crate::oauth::{OAuthState, authorize, refresh_history, token};
+use crate::oauth_pause::OAuthRefreshPause;
 use crate::sse::streaming_response;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -30,6 +31,7 @@ pub struct AppConfig {
     pub slow_mode_bps: u64,
     pub files_cap_bytes: usize,
     pub tokens_expire_in: u64,
+    pub oauth_refresh_pause: Option<OAuthRefreshPause>,
     pub message_script: Option<MessageScript>,
 }
 
@@ -39,6 +41,7 @@ impl Default for AppConfig {
             slow_mode_bps: 1024,
             files_cap_bytes: 104_857_600,
             tokens_expire_in: 3600,
+            oauth_refresh_pause: None,
             message_script: None,
         }
     }

@@ -76,8 +76,7 @@ If an operator keeps a local proxy client key file such as `~/.config/cc-lb/prox
   "status": {
     "last_apply_error": null,
     "last_apply_at_unix_secs": null,
-    "next_warmup_at": null,
-    "last_warmup_cycle_key": null
+    "last_warmup_at_unix_secs": null
   }
 }
 ```

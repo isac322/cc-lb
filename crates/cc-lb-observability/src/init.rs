@@ -65,6 +65,12 @@ impl TracingGuard {
     pub fn prometheus_handle(&self) -> Option<&PrometheusHandle> {
         self.prometheus_handle.as_ref()
     }
+
+    pub fn flush_metrics(&self) {
+        if let Some(handle) = &self.prometheus_handle {
+            let _ = handle.render();
+        }
+    }
 }
 
 #[derive(Debug, Error)]
