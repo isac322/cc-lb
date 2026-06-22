@@ -298,7 +298,7 @@ impl PluginRegistryStore for SqliteStorage {
                 message: "unknown plugin registry entry".to_owned(),
             })?;
         let principal_exists: Option<i64> =
-            sqlx::query_scalar("SELECT 1 FROM principals_v1 WHERE id = ?")
+            sqlx::query_scalar("SELECT 1 FROM principals_v1 WHERE id = ? AND deleted_at IS NULL")
                 .bind(input.principal_id.to_string())
                 .fetch_optional(&mut *tx)
                 .await

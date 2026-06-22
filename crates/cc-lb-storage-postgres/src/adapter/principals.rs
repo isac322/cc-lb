@@ -152,20 +152,60 @@ impl PrincipalStore for PostgresStorage {
         now_unix_secs: u64,
     ) -> StorageResult<Option<PrincipalRecord>> {
         let now = unix_secs_to_datetime(now_unix_secs, "principal.deleted_at")?;
-        self.update_with_query(
-            id,
-            expected_revision,
-            "UPDATE principals_v1 SET deleted_at = $3, updated_at = $3, revision = revision + 1 WHERE id = $1 AND revision = $2 RETURNING *",
-            now,
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
+        let state: Option<(i64, Option<DateTime<Utc>>)> = sqlx::query_as(
+            "SELECT revision, deleted_at FROM principals_v1 WHERE id = $1 FOR UPDATE",
         )
+        .bind(id)
+        .fetch_optional(&mut *tx)
         .await
+        .map_err(map_sqlx_error)?;
+        let Some((current_revision, deleted_at)) = state else {
+            tx.commit().await.map_err(map_sqlx_error)?;
+            return Ok(None);
+        };
+        if deleted_at.is_some() {
+            return Err(conflict(
+                "stale postgres principal revision; principal is already deleted",
+            ));
+        }
+        let current = i64_to_u64(current_revision, "principal.revision")?;
+        if current != expected_revision {
+            return Err(conflict(format!(
+                "stale postgres principal revision; current revision is {current}"
+            )));
+        }
+        sqlx::query("DELETE FROM plugin_chains_v2 WHERE principal_id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        let row = sqlx::query(
+            "UPDATE principals_v1 SET deleted_at = $2, updated_at = $2, revision = revision + 1 WHERE id = $1 AND revision = $3 RETURNING *",
+        )
+        .bind(id)
+        .bind(now)
+        .bind(u64_to_i64(expected_revision, "principal.revision")?)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        sqlx::query(
+            "SELECT pg_notify('cclb_plugin_chain_changed', $1), pg_notify('cclb_principal_changed', $1)",
+        )
+        .bind(id.to_string())
+        .execute(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        principal_from_row(row).map(Some)
     }
 
     async fn hard_delete(&self, id: Uuid) -> StorageResult<bool> {
+        let mut tx = self.pool.begin().await.map_err(map_sqlx_error)?;
         let audit_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM audit_log_v1 WHERE principal_id = $1")
                 .bind(id.to_string())
-                .fetch_one(&self.pool)
+                .fetch_one(&mut *tx)
                 .await
                 .map_err(map_sqlx_error)?;
         if audit_count > 0 {
@@ -173,17 +213,38 @@ impl PrincipalStore for PostgresStorage {
                 "postgres principal {id} is referenced by audit entries"
             )));
         }
-        let result = sqlx::query("DELETE FROM principals_v1 WHERE id = $1")
+        let principal_exists: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM principals_v1 WHERE id = $1 FOR UPDATE")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(map_sqlx_error)?;
+        if principal_exists.is_none() {
+            tx.commit().await.map_err(map_sqlx_error)?;
+            return Ok(false);
+        }
+        sqlx::query("DELETE FROM plugin_chains_v2 WHERE principal_id = $1")
             .bind(id)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
-        if result.rows_affected() == 1 {
-            self.notify_principal_changed(id).await?;
-            Ok(true)
-        } else {
-            Ok(false)
+        let result = sqlx::query("DELETE FROM principals_v1 WHERE id = $1")
+            .bind(id)
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
+        let deleted = result.rows_affected() == 1;
+        if deleted {
+            sqlx::query(
+                "SELECT pg_notify('cclb_plugin_chain_changed', $1), pg_notify('cclb_principal_changed', $1)",
+            )
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await
+            .map_err(map_sqlx_error)?;
         }
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(deleted)
     }
 
     async fn set_last_apply_error(
@@ -246,34 +307,6 @@ impl PostgresStorage {
             .bind(u64_to_i64(expected_revision, "principal.revision")?)
             .bind(enabled)
             .bind(now)
-            .fetch_one(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?;
-        let record = principal_from_row(row)?;
-        self.notify_principal_changed(record.id).await?;
-        Ok(Some(record))
-    }
-
-    async fn update_with_query(
-        &self,
-        id: Uuid,
-        expected_revision: u64,
-        query: &str,
-        value: DateTime<Utc>,
-    ) -> StorageResult<Option<PrincipalRecord>> {
-        let Some(current) = self.get_by_id(id).await? else {
-            return Ok(None);
-        };
-        if current.revision != expected_revision {
-            return Err(conflict(format!(
-                "stale postgres principal revision; current revision is {}",
-                current.revision
-            )));
-        }
-        let row = sqlx::query(AssertSqlSafe(query.to_owned()))
-            .bind(id)
-            .bind(u64_to_i64(expected_revision, "principal.revision")?)
-            .bind(value)
             .fetch_one(&self.pool)
             .await
             .map_err(map_sqlx_error)?;
