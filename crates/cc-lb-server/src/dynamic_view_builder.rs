@@ -1040,7 +1040,6 @@ mod tests {
                 oauth_token_generation: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
-                ..UpstreamCreate::default()
             },
         )
         .await
@@ -1240,7 +1239,6 @@ mod tests {
         config.prompt_cache_shadow.grace_margin_secs = 99;
         config.prompt_cache_shadow.warm_set_cap = 7;
         config.prompt_cache_shadow.refresh_debounce_secs = 123;
-        config.prompt_cache_shadow.sweeper_interval_secs = 456;
 
         let dynamic_view = build_view_with_config(&stores, &runtime, dir.path(), config).await;
 

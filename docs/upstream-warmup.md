@@ -85,11 +85,11 @@ The warm-up system logs its activity using tracing events. All events use the `w
 
 ## Multi-replica notes
 
-Warm-up is implemented as an Apalis entity job (`UpstreamWarmupJob`). The old `next_warmup_at` and warmup-lease columns are deprecated and will be dropped in a follow-up migration. 
+Warm-up is implemented as an Apalis entity job (`UpstreamWarmupJob`). Cross-replica coordination no longer depends on per-upstream scheduling columns.
 
 Cross-replica safety is guaranteed by two layers:
 1. **Apalis claim uniqueness**: Only one worker replica can claim and execute a given `UpstreamWarmupJob` at a time.
-2. **Idempotency effects table**: The `warmup_effects` table acts as the source of truth for completed cycles. Before sending any request to Anthropic, the handler checks if a row already exists for the current `(upstream_id, cycle_key)`. If it does, the job is skipped.
+2. **Apalis idempotency key uniqueness**: The Jobs table enforces one row per `(job_type, idempotency_key)`, so a completed warm-up cycle key cannot be re-enqueued with the same key.
 
 A crash between dispatch and DB write can cause one extra `max_tokens=1` Haiku call. This at-least-once cost is accepted.
 

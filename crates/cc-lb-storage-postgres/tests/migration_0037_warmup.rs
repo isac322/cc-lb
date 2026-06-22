@@ -151,14 +151,6 @@ async fn run_migration_assertions(fixture: &Fixture) -> TestResult {
         "warmup_enabled default mismatch"
     );
     assert_eq!(
-        counts.next_warmup_null, ROW_COUNT,
-        "next_warmup_at default mismatch"
-    );
-    assert_eq!(
-        counts.last_cycle_key_null, ROW_COUNT,
-        "last_warmup_cycle_key default mismatch"
-    );
-    assert_eq!(
         counts.lease_holder_null, ROW_COUNT,
         "warmup_lease_holder default mismatch"
     );
@@ -270,8 +262,6 @@ async fn assert_seeded_rows(pool: &PgPool) -> TestResult {
 struct DefaultCounts {
     total: i64,
     warmup_disabled: i64,
-    next_warmup_null: i64,
-    last_cycle_key_null: i64,
     lease_holder_null: i64,
     lease_until_null: i64,
 }
@@ -281,11 +271,9 @@ async fn warmup_default_counts(pool: &PgPool) -> TestResult<DefaultCounts> {
         "SELECT
              COUNT(*) AS total,
              COUNT(*) FILTER (WHERE warmup_enabled = false) AS warmup_disabled,
-             COUNT(*) FILTER (WHERE next_warmup_at IS NULL) AS next_warmup_null,
-             COUNT(*) FILTER (WHERE last_warmup_cycle_key IS NULL) AS last_cycle_key_null,
              COUNT(*) FILTER (WHERE warmup_lease_holder IS NULL) AS lease_holder_null,
              COUNT(*) FILTER (WHERE warmup_lease_until_unix_secs IS NULL) AS lease_until_null
-         FROM upstreams_v1",
+          FROM upstreams_v1",
     )
     .fetch_one(pool)
     .await?;
@@ -293,8 +281,6 @@ async fn warmup_default_counts(pool: &PgPool) -> TestResult<DefaultCounts> {
     Ok(DefaultCounts {
         total: row.try_get("total")?,
         warmup_disabled: row.try_get("warmup_disabled")?,
-        next_warmup_null: row.try_get("next_warmup_null")?,
-        last_cycle_key_null: row.try_get("last_cycle_key_null")?,
         lease_holder_null: row.try_get("lease_holder_null")?,
         lease_until_null: row.try_get("lease_until_null")?,
     })

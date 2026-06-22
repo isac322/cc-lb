@@ -12,6 +12,12 @@ struct CronConformanceJob {
     name: String,
 }
 
+impl cc_lb_scheduler::cron::SingletonCronJob for CronConformanceJob {
+    fn singleton_kind(&self) -> &'static str {
+        "conformance"
+    }
+}
+
 #[derive(Clone, Debug)]
 struct FixedTicks {
     ticks: Arc<Mutex<VecDeque<DateTime<Utc>>>>,

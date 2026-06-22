@@ -27,6 +27,12 @@ struct CronTickJob {
     replica: String,
 }
 
+impl cc_lb_scheduler::cron::SingletonCronJob for CronTickJob {
+    fn singleton_kind(&self) -> &'static str {
+        "tick"
+    }
+}
+
 #[derive(Clone, Debug)]
 struct FastSchedule {
     next: Option<DateTime<Utc>>,

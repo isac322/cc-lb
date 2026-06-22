@@ -6,7 +6,6 @@ use apalis::layers::catch_panic::CatchPanicLayer;
 use apalis::prelude::{IntervalStrategy, StrategyBuilder, WorkerBuilder, WorkerError};
 use cc_lb_aead::AeadService;
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_scheduler::idempotency::OAuthRefreshClaimsStore;
 use cc_lb_scheduler::middleware::TraceparentLayer;
 use cc_lb_scheduler::retry::RetryClass;
 use cc_lb_scheduler::worker::{ENTITY_QUEUE, SchedulerBackend, SqliteSchedulerStorage};
@@ -61,10 +60,8 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
         fake.initial_tokens().await?,
     )
     .await?;
-    let claims = OAuthRefreshClaimsStore::new(scheduler_pool.clone());
     let probe = OAuthWorkerProbe::new();
     let state = OAuthWorkerState::new(
-        claims.clone(),
         storage.as_ref().clone(),
         Uuid::new_v4(),
         aead.clone(),
@@ -94,10 +91,6 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
         lazy,
         upstream_id,
         || {
-            let claims = claims.clone();
-            async move { Ok(claims.read_current_generation(upstream_id).await?) }
-        },
-        || {
             let storage = storage.clone();
             async move { read_upstream_generation(storage.as_ref(), upstream_id).await }
         },
@@ -118,10 +111,7 @@ async fn sqlite_lazy_refresher_vs_proactive_apalis_oauth_refresh_race() -> TestR
 
 fn spawn_sqlite_worker(
     storage: cc_lb_scheduler::worker::SqliteApalisStorage,
-    state: OAuthWorkerState<
-        OAuthRefreshClaimsStore<sqlx::Sqlite>,
-        cc_lb_storage_sqlite::SqliteStorage,
-    >,
+    state: OAuthWorkerState<cc_lb_storage_sqlite::SqliteStorage>,
     cancel: CancellationToken,
 ) -> JoinHandle<Result<(), WorkerError>> {
     tokio::spawn(async move {
@@ -131,12 +121,7 @@ fn spawn_sqlite_worker(
             .layer(TraceparentLayer::new().with_scheduler_metrics())
             .layer(RetryClass::Probe.layer())
             .layer(CatchPanicLayer::new())
-            .build(
-                entity_job_handler::<
-                    OAuthRefreshClaimsStore<sqlx::Sqlite>,
-                    cc_lb_storage_sqlite::SqliteStorage,
-                >,
-            )
+            .build(entity_job_handler::<cc_lb_storage_sqlite::SqliteStorage>)
             .run_until(async move {
                 cancel.cancelled().await;
                 Ok::<(), WorkerError>(())

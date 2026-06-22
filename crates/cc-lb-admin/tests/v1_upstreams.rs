@@ -120,8 +120,6 @@ async fn create_returns_201_with_body_and_location_header() {
     assert_eq!(body(&response)["spec_revision"], 1);
     assert!(body(&response)["revision"].is_null());
     assert!(body(&response)["status"].is_object());
-    assert!(body(&response)["status"]["next_warmup_at"].is_null());
-    assert!(body(&response)["status"]["last_warmup_cycle_key"].is_null());
     let id = body(&response)["id"].as_str().unwrap();
     assert_eq!(
         response.headers.get(header::LOCATION).unwrap(),

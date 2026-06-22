@@ -657,10 +657,6 @@ async fn spawn_seeded_upstreams(storage: &SqliteStorage) -> TestResult<Vec<Seede
                 oauth_token_generation: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
-                next_warmup_at: None,
-                last_warmup_cycle_key: None,
-                warmup_lease_holder: None,
-                warmup_lease_until_unix_secs: None,
             },
         )
         .await?;

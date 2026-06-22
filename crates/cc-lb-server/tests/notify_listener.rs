@@ -9,7 +9,7 @@ use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::notify_listener::{NotifyListener, NotifyListenerParams};
 use cc_lb_storage_api::BackendKind;
-use cc_lb_storage_api::upstream::{UpstreamLeaseKind, UpstreamStatusUpdate};
+use cc_lb_storage_api::upstream::UpstreamStatusUpdate;
 use cc_lb_storage_api::{
     ChangeChannel, ChangeEvent, RuntimeChangeNotifier, StorageError, StorageResult, UpstreamCreate,
     UpstreamRecord, UpstreamStore, UpstreamUpdate,
@@ -162,35 +162,6 @@ impl UpstreamStore for ControlledUpstreamStore {
         UpstreamStore::set_status(&*self.inner, id, status).await
     }
 
-    async fn claim_lease(
-        &self,
-        id: Uuid,
-        lease_kind: UpstreamLeaseKind,
-        holder: String,
-        ttl_secs: i64,
-    ) -> StorageResult<bool> {
-        UpstreamStore::claim_lease(&*self.inner, id, lease_kind, holder, ttl_secs).await
-    }
-
-    async fn renew_lease(
-        &self,
-        id: Uuid,
-        lease_kind: UpstreamLeaseKind,
-        holder: String,
-        ttl_secs: i64,
-    ) -> StorageResult<bool> {
-        UpstreamStore::renew_lease(&*self.inner, id, lease_kind, holder, ttl_secs).await
-    }
-
-    async fn release_lease(
-        &self,
-        id: Uuid,
-        lease_kind: UpstreamLeaseKind,
-        holder: String,
-    ) -> StorageResult<bool> {
-        UpstreamStore::release_lease(&*self.inner, id, lease_kind, holder).await
-    }
-
     async fn store_oauth_tokens(
         &self,
         id: Uuid,
@@ -200,15 +171,6 @@ impl UpstreamStore for ControlledUpstreamStore {
         UpstreamStore::store_oauth_tokens(&*self.inner, id, expected_revision, tokens).await
     }
 
-    async fn claim_refresh_lease(
-        &self,
-        id: Uuid,
-        holder: Uuid,
-        ttl_secs: u64,
-    ) -> StorageResult<bool> {
-        UpstreamStore::claim_refresh_lease(&*self.inner, id, holder, ttl_secs).await
-    }
-
     async fn complete_refresh(
         &self,
         id: Uuid,
@@ -216,15 +178,6 @@ impl UpstreamStore for ControlledUpstreamStore {
         tokens: cc_lb_aead::EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord> {
         UpstreamStore::complete_refresh(&*self.inner, id, holder, tokens).await
-    }
-
-    async fn release_lease_on_failure(
-        &self,
-        id: Uuid,
-        holder: Uuid,
-        reason: String,
-    ) -> StorageResult<()> {
-        UpstreamStore::release_lease_on_failure(&*self.inner, id, holder, reason).await
     }
 
     async fn set_last_apply_error(&self, id: Uuid, error: Option<String>) -> StorageResult<()> {
@@ -237,36 +190,6 @@ impl UpstreamStore for ControlledUpstreamStore {
 
     async fn hard_delete(&self, id: Uuid) -> StorageResult<()> {
         UpstreamStore::hard_delete(&*self.inner, id).await
-    }
-
-    async fn claim_warmup_lease(
-        &self,
-        upstream_id: Uuid,
-        holder: &str,
-        ttl_secs: i64,
-    ) -> StorageResult<bool> {
-        UpstreamStore::claim_warmup_lease(&*self.inner, upstream_id, holder, ttl_secs).await
-    }
-
-    async fn write_warmup_cycle_key(
-        &self,
-        upstream_id: Uuid,
-        holder: &str,
-        new_cycle_key: i64,
-        next_warmup_at: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> StorageResult<bool> {
-        UpstreamStore::write_warmup_cycle_key(
-            &*self.inner,
-            upstream_id,
-            holder,
-            new_cycle_key,
-            next_warmup_at,
-        )
-        .await
-    }
-
-    async fn release_warmup_lease(&self, id: Uuid, holder: &str) -> StorageResult<bool> {
-        UpstreamStore::release_warmup_lease(&*self.inner, id, holder).await
     }
 
     async fn clear_warmup_dialect_plugin(

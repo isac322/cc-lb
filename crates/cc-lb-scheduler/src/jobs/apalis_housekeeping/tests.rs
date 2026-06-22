@@ -12,20 +12,14 @@ mod sqlite {
     use sqlx::SqlitePool;
 
     use super::{
-        ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler, DAY_SECS,
-        NOW_SECS, expected_job_ids, expected_result, jobs, workers,
+        ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler, NOW_SECS,
+        expected_job_ids, expected_result, jobs, workers,
     };
 
     #[tokio::test]
-    async fn prunes_old_workers_done_failed_jobs_and_scheduler_failures()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn prunes_old_workers_done_and_failed_jobs() -> Result<(), Box<dyn std::error::Error>> {
         let pool = SqlitePool::connect(":memory:").await?;
         SqliteStorage::setup(&pool).await?;
-        sqlx::raw_sql(include_str!(
-            "../../../migrations/sqlite/0002_idempotency_tables.sql"
-        ))
-        .execute(&pool)
-        .await?;
         seed_sqlite(&pool).await?;
 
         let result =
@@ -39,7 +33,6 @@ mod sqlite {
             vec!["worker-cutoff", "worker-live"]
         );
         assert_eq!(ids(&pool, "Jobs").await?, expected_job_ids());
-        assert_eq!(failure_count(&pool).await?, 1);
         Ok(())
     }
 
@@ -61,24 +54,12 @@ mod sqlite {
                 .execute(pool)
                 .await?;
         }
-        for failed_at in [NOW_SECS - (2 * DAY_SECS), NOW_SECS - 60] {
-            sqlx::query("INSERT INTO scheduler_failures (job_type, payload_summary, last_error, attempts, first_failed_at_unix_secs, last_failed_at_unix_secs) VALUES ('job', '{}', 'error', 1, ?1, ?1)")
-                .bind(i64::try_from(failed_at).expect("test timestamp fits i64"))
-                .execute(pool)
-                .await?;
-        }
         Ok(())
     }
 
     async fn ids(pool: &SqlitePool, table: &str) -> Result<Vec<String>, sqlx::Error> {
         sqlx::query_scalar::<_, String>(&format!("SELECT id FROM {table} ORDER BY id"))
             .fetch_all(pool)
-            .await
-    }
-
-    async fn failure_count(pool: &SqlitePool) -> Result<i64, sqlx::Error> {
-        sqlx::query_scalar("SELECT COUNT(*) FROM scheduler_failures")
-            .fetch_one(pool)
             .await
     }
 }
@@ -96,13 +77,12 @@ mod postgres {
     use uuid::Uuid;
 
     use super::{
-        ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler, DAY_SECS,
+        ApalisHousekeepingConfig, ApalisHousekeepingJob, ApalisHousekeepingJobHandler,
         NOW_SECS, expected_job_ids, expected_result, jobs, workers,
     };
 
     #[tokio::test]
-    async fn prunes_old_workers_done_failed_jobs_and_scheduler_failures()
-    -> Result<(), Box<dyn std::error::Error>> {
+    async fn prunes_old_workers_done_and_failed_jobs() -> Result<(), Box<dyn std::error::Error>> {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             eprintln!("SKIP: DATABASE_URL not set; skipping postgres housekeeping test");
             return Ok(());
@@ -142,11 +122,6 @@ mod postgres {
 
     async fn assert_postgres_housekeeping(pool: &PgPool) -> Result<(), Box<dyn std::error::Error>> {
         PostgresStorage::setup(pool).await?;
-        sqlx::raw_sql(include_str!(
-            "../../../migrations/postgres/0002_idempotency_tables.sql"
-        ))
-        .execute(pool)
-        .await?;
         seed_postgres(pool).await?;
         let result =
             ApalisHousekeepingJobHandler::new(pool.clone(), ApalisHousekeepingConfig::new(1))
@@ -158,7 +133,6 @@ mod postgres {
             vec!["worker-cutoff", "worker-live"]
         );
         assert_eq!(ids(pool, "apalis.jobs").await?, expected_job_ids());
-        assert_eq!(failure_count(pool).await?, 1);
         Ok(())
     }
 
@@ -180,24 +154,12 @@ mod postgres {
                 .execute(pool)
                 .await?;
         }
-        for failed_at in [NOW_SECS - (2 * DAY_SECS), NOW_SECS - 60] {
-            sqlx::query("INSERT INTO scheduler_failures (job_type, payload_summary, last_error, attempts, first_failed_at_unix_secs, last_failed_at_unix_secs) VALUES ('job', '{}', 'error', 1, $1, $1)")
-                .bind(i64::try_from(failed_at).expect("test timestamp fits i64"))
-                .execute(pool)
-                .await?;
-        }
         Ok(())
     }
 
     async fn ids(pool: &PgPool, table: &str) -> Result<Vec<String>, sqlx::Error> {
         sqlx::query_scalar::<_, String>(&format!("SELECT id FROM {table} ORDER BY id"))
             .fetch_all(pool)
-            .await
-    }
-
-    async fn failure_count(pool: &PgPool) -> Result<i64, sqlx::Error> {
-        sqlx::query_scalar("SELECT COUNT(*) FROM scheduler_failures")
-            .fetch_one(pool)
             .await
     }
 
@@ -215,7 +177,6 @@ fn expected_result() -> ApalisHousekeepingJobResult {
     ApalisHousekeepingJobResult::Done {
         workers_removed: 1,
         jobs_removed: 2,
-        scheduler_failures_removed: 1,
         cutoff_unix_secs: NOW_SECS - DAY_SECS,
     }
 }

@@ -9,7 +9,7 @@ use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_scheduler::error::{Result, SchedulerError};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::{
-    OAuthRefreshClaims, OAuthRefreshConfig, OAuthRefreshJobHandler, OAuthRefreshUpstreams,
+    OAuthRefreshConfig, OAuthRefreshJobHandler, OAuthRefreshUpstreams, RefreshedOAuthTokens,
 };
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{EntityJob, SchedulerBackend};
@@ -24,8 +24,8 @@ use crate::fake::raw_http;
 pub type HandlerFuture = Pin<Box<dyn Future<Output = Result<JobOutcome>> + Send>>;
 
 #[derive(Clone)]
-pub struct OAuthWorkerState<Claims, Upstreams> {
-    handler: OAuthRefreshJobHandler<Claims, Upstreams>,
+pub struct OAuthWorkerState<Upstreams> {
+    handler: OAuthRefreshJobHandler<Upstreams>,
     aead: Arc<AeadService>,
     oauth_cfg: Arc<AnthropicOAuthConfig>,
     backend: SchedulerBackend,
@@ -62,9 +62,8 @@ impl OAuthWorkerProbe {
     }
 }
 
-impl<Claims, Upstreams> OAuthWorkerState<Claims, Upstreams> {
+impl<Upstreams> OAuthWorkerState<Upstreams> {
     pub fn new(
-        claims: Claims,
         upstreams: Upstreams,
         replica_id: Uuid,
         aead: Arc<AeadService>,
@@ -73,13 +72,10 @@ impl<Claims, Upstreams> OAuthWorkerState<Claims, Upstreams> {
         probe: OAuthWorkerProbe,
     ) -> Self {
         let config = OAuthRefreshConfig {
-            contention_wait: crate::common::WAIT_TIMEOUT,
-            contention_poll_interval: crate::common::POLL_INTERVAL,
             retry_delay: crate::common::POLL_INTERVAL,
-            ..OAuthRefreshConfig::default()
         };
         Self {
-            handler: OAuthRefreshJobHandler::with_config(claims, upstreams, replica_id, config),
+            handler: OAuthRefreshJobHandler::with_config(upstreams, replica_id, config),
             aead,
             oauth_cfg,
             backend,
@@ -88,12 +84,11 @@ impl<Claims, Upstreams> OAuthWorkerState<Claims, Upstreams> {
     }
 }
 
-pub fn entity_job_handler<Claims, Upstreams>(
+pub fn entity_job_handler<Upstreams>(
     job: EntityJob,
-    ctx: Data<OAuthWorkerState<Claims, Upstreams>>,
+    ctx: Data<OAuthWorkerState<Upstreams>>,
 ) -> HandlerFuture
 where
-    Claims: Clone + OAuthRefreshClaims + Send + Sync + 'static,
     Upstreams: Clone + OAuthRefreshUpstreams + Send + Sync + 'static,
 {
     Box::pin(async move {
@@ -110,6 +105,7 @@ where
                 now_secs(),
                 move |upstream| refresh_tokens(aead, oauth_cfg, upstream),
                 move |metadata| enqueue_metadata(backend, metadata),
+                |_upstream_id, _expires_at_unix_secs| async { Ok(()) },
             )
             .await
     })
@@ -123,7 +119,7 @@ async fn refresh_tokens(
     aead: Arc<AeadService>,
     oauth_cfg: Arc<AnthropicOAuthConfig>,
     upstream: UpstreamRecord,
-) -> Result<EncryptedOAuthTokens> {
+) -> Result<RefreshedOAuthTokens> {
     let previous = upstream
         .oauth_credentials
         .as_ref()
@@ -141,17 +137,22 @@ async fn refresh_tokens(
         .as_deref()
         .map(|scope| scope.split_whitespace().map(ToOwned::to_owned).collect())
         .unwrap_or(previous.scopes);
-    EncryptedOAuthTokens::encrypt(
+    let expires_at_unix_secs = now_secs().saturating_add(response.expires_in);
+    let encrypted_tokens = EncryptedOAuthTokens::encrypt(
         aead.as_ref(),
         &OAuthTokenBundle {
             access_token: response.access_token,
             refresh_token: response.refresh_token.unwrap_or(previous.refresh_token),
-            expires_at_unix_secs: now_secs().saturating_add(response.expires_in),
+            expires_at_unix_secs,
             scopes,
         },
         upstream.id.as_bytes(),
     )
-    .map_err(|error| SchedulerError::Job(error.to_string()))
+    .map_err(|error| SchedulerError::Job(error.to_string()))?;
+    Ok(RefreshedOAuthTokens {
+        encrypted_tokens,
+        expires_at_unix_secs,
+    })
 }
 
 #[derive(Deserialize)]

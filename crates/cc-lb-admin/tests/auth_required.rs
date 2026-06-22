@@ -51,7 +51,6 @@ async fn test_auth_required() {
         ("/admin/config/reload", "POST"),
         ("/admin/scheduler/status", "GET"),
         ("/admin/scheduler/failures", "GET"),
-        ("/admin/scheduler/reconcile", "POST"),
         ("/admin/v1/status", "GET"),
         ("/admin/v1/upstreams", "GET"),
         ("/admin/v1/upstreams", "POST"),

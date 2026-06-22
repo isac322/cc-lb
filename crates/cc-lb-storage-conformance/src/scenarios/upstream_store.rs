@@ -4,8 +4,7 @@ use anyhow::{Result, ensure};
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_storage_api::upstream::{
-    UpstreamCreate, UpstreamKind, UpstreamLeaseKind, UpstreamRecord, UpstreamStatusUpdate,
-    UpstreamUpdate,
+    UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStatusUpdate, UpstreamUpdate,
 };
 use cc_lb_storage_api::{StorageError, UpstreamStore};
 use url::Url;
@@ -60,22 +59,15 @@ where
     update_renames_name_index(Arc::clone(&backend)).await?;
     set_enabled_toggle(Arc::clone(&backend)).await?;
     store_oauth_tokens_roundtrip(Arc::clone(&backend)).await?;
-    claim_refresh_lease_success(Arc::clone(&backend)).await?;
-    claim_lease_contention(Arc::clone(&backend)).await?;
-    claim_after_ttl_expiry(Arc::clone(&backend)).await?;
-    complete_refresh_requires_holder_match(Arc::clone(&backend)).await?;
-    complete_refresh_stores_tokens_and_clears_lease(Arc::clone(&backend)).await?;
-    release_lease_on_failure_clears_lease(Arc::clone(&backend)).await?;
+    complete_refresh_stores_tokens(Arc::clone(&backend)).await?;
     set_last_apply_error_roundtrip(Arc::clone(&backend)).await?;
     status_update_does_not_bump_spec_revision(Arc::clone(&backend)).await?;
-    lease_update_does_not_bump_spec_revision(Arc::clone(&backend)).await?;
     secret_and_token_updates_do_not_bump_spec_revision(Arc::clone(&backend)).await?;
     soft_delete_sets_deleted_at(Arc::clone(&backend)).await?;
     update_spec_on_soft_deleted_returns_not_found(Arc::clone(&backend)).await?;
     set_status_on_soft_deleted_returns_not_found(Arc::clone(&backend)).await?;
     secret_update_on_soft_deleted_returns_not_found(Arc::clone(&backend)).await?;
     double_soft_delete_returns_not_found(Arc::clone(&backend)).await?;
-    renew_lease_on_soft_deleted_returns_false(Arc::clone(&backend)).await?;
     recreate_same_name_after_soft_delete_fails(Arc::clone(&backend)).await?;
     hard_delete_removes_row(Arc::clone(&backend)).await?;
     validate_identifier_rejects_bad_name(backend).await
@@ -236,129 +228,20 @@ scenario!(store_oauth_tokens_roundtrip, |store| async move {
     Ok(())
 });
 
-scenario!(claim_refresh_lease_success, |store| async move {
-    let record = create_named(store.as_ref(), "upstream-lease-success").await?;
+scenario!(complete_refresh_stores_tokens, |store| async move {
+    let record = create_named(store.as_ref(), "upstream-refresh-complete").await?;
     let holder = Uuid::new_v4();
+    let aead = AeadService::from_master_key([44; 32]);
+    let bundle = token_bundle("access-b", "refresh-b");
+    let encrypted = EncryptedOAuthTokens::encrypt(&aead, &bundle, record.id.as_bytes())?;
+    let refreshed = store.complete_refresh(record.id, holder, encrypted).await?;
     ensure!(
-        store.claim_refresh_lease(record.id, holder, 60).await?,
-        "claim should succeed"
-    );
-    ensure!(
-        store
-            .get_by_id(record.id)
-            .await?
-            .expect("record")
-            .refresh_lease_holder
-            == Some(holder),
-        "holder mismatch"
-    );
-    Ok(())
-});
-
-scenario!(claim_lease_contention, |store| async move {
-    let record = create_named(store.as_ref(), "upstream-lease-contention").await?;
-    ensure!(
-        store
-            .claim_refresh_lease(record.id, Uuid::new_v4(), 60)
-            .await?,
-        "first claim should win"
-    );
-    ensure!(
-        !store
-            .claim_refresh_lease(record.id, Uuid::new_v4(), 60)
-            .await?,
-        "second claim should lose"
-    );
-    Ok(())
-});
-
-scenario!(claim_after_ttl_expiry, |store| async move {
-    let record = create_named(store.as_ref(), "upstream-lease-expiry").await?;
-    ensure!(
-        store
-            .claim_refresh_lease(record.id, Uuid::new_v4(), 0)
-            .await?,
-        "zero-ttl claim should win"
-    );
-    ensure!(
-        store
-            .claim_refresh_lease(record.id, Uuid::new_v4(), 60)
-            .await?,
-        "expired lease should be claimable"
-    );
-    Ok(())
-});
-
-scenario!(complete_refresh_requires_holder_match, |store| async move {
-    let record = create_named(store.as_ref(), "upstream-refresh-holder").await?;
-    let holder = Uuid::new_v4();
-    store.claim_refresh_lease(record.id, holder, 60).await?;
-    let aead = AeadService::from_master_key([43; 32]);
-    let encrypted =
-        EncryptedOAuthTokens::encrypt(&aead, &token_bundle("a", "r"), record.id.as_bytes())?;
-    let error = store
-        .complete_refresh(record.id, Uuid::new_v4(), encrypted)
-        .await
-        .expect_err("wrong holder should fail");
-    ensure!(
-        matches!(error, StorageError::Conflict { .. }),
-        "expected conflict"
-    );
-    Ok(())
-});
-
-scenario!(
-    complete_refresh_stores_tokens_and_clears_lease,
-    |store| async move {
-        let record = create_named(store.as_ref(), "upstream-refresh-complete").await?;
-        let holder = Uuid::new_v4();
-        store.claim_refresh_lease(record.id, holder, 60).await?;
-        let aead = AeadService::from_master_key([44; 32]);
-        let bundle = token_bundle("access-b", "refresh-b");
-        let encrypted = EncryptedOAuthTokens::encrypt(&aead, &bundle, record.id.as_bytes())?;
-        let refreshed = store.complete_refresh(record.id, holder, encrypted).await?;
-        ensure!(
-            refreshed.refresh_lease_holder.is_none(),
-            "holder should clear"
-        );
-        ensure!(
-            refreshed.refresh_lease_until_unix_secs.is_none(),
-            "ttl should clear"
-        );
-        ensure!(
-            refreshed
-                .oauth_credentials
-                .expect("tokens")
-                .decrypt(&aead, record.id.as_bytes())?
-                == bundle,
-            "tokens mismatch"
-        );
-        Ok(())
-    }
-);
-
-scenario!(release_lease_on_failure_clears_lease, |store| async move {
-    let record = create_named(store.as_ref(), "upstream-release-failure").await?;
-    let holder = Uuid::new_v4();
-    store.claim_refresh_lease(record.id, holder, 60).await?;
-    store
-        .release_lease_on_failure(record.id, holder, "network".to_owned())
-        .await?;
-    let stored = store.get_by_id(record.id).await?.expect("record");
-    ensure!(stored.refresh_lease_holder.is_none(), "holder should clear");
-    ensure!(
-        stored.refresh_lease_until_unix_secs.is_none(),
-        "ttl should clear"
-    );
-    ensure!(
-        stored.last_apply_error == Some("network".to_owned()),
-        "reason mismatch"
-    );
-    ensure!(
-        store
-            .claim_refresh_lease(record.id, Uuid::new_v4(), 60)
-            .await?,
-        "lease should no longer block"
+        refreshed
+            .oauth_credentials
+            .expect("tokens")
+            .decrypt(&aead, record.id.as_bytes())?
+            == bundle,
+        "tokens mismatch"
     );
     Ok(())
 });
@@ -422,52 +305,6 @@ scenario!(
         ensure!(
             spec_updated.revision == record.revision + 1,
             "spec update should still use original revision after status update"
-        );
-        Ok(())
-    }
-);
-
-scenario!(
-    lease_update_does_not_bump_spec_revision,
-    |store| async move {
-        let record = create_named(store.as_ref(), "upstream-lease-stable").await?;
-        let holder = "warmup-holder".to_owned();
-        ensure!(
-            store
-                .claim_lease(record.id, UpstreamLeaseKind::Warmup, holder.clone(), 60)
-                .await?,
-            "warmup lease claim should succeed"
-        );
-        ensure!(
-            store
-                .renew_lease(record.id, UpstreamLeaseKind::Warmup, holder.clone(), 60)
-                .await?,
-            "warmup lease renew should succeed"
-        );
-        ensure!(
-            store
-                .release_lease(record.id, UpstreamLeaseKind::Warmup, holder)
-                .await?,
-            "warmup lease release should succeed"
-        );
-        let lease_updated = store.get_by_id(record.id).await?.expect("record");
-        ensure!(
-            lease_updated.revision == record.revision,
-            "lease updates should not bump spec revision"
-        );
-        let spec_updated = store
-            .update_spec(
-                record.id,
-                record.revision,
-                UpstreamUpdate {
-                    base_url: Some(url("https://lease-stable.example.com")?),
-                    ..UpstreamUpdate::default()
-                },
-            )
-            .await?;
-        ensure!(
-            spec_updated.revision == record.revision + 1,
-            "spec update should still use original revision after lease updates"
         );
         Ok(())
     }
@@ -628,27 +465,6 @@ scenario!(double_soft_delete_returns_not_found, |store| async move {
 });
 
 scenario!(
-    renew_lease_on_soft_deleted_returns_false,
-    |store| async move {
-        let record = create_named(store.as_ref(), "upstream-renew-after-delete").await?;
-        let holder = "warmup-holder-after-delete".to_owned();
-        let claimed = store
-            .claim_lease(record.id, UpstreamLeaseKind::Warmup, holder.clone(), 60)
-            .await?;
-        ensure!(claimed, "initial lease claim should succeed");
-        store.soft_delete(record.id, record.revision).await?;
-        let renewed = store
-            .renew_lease(record.id, UpstreamLeaseKind::Warmup, holder, 60)
-            .await?;
-        ensure!(
-            !renewed,
-            "renew_lease must return false for soft-deleted upstream"
-        );
-        Ok(())
-    }
-);
-
-scenario!(
     recreate_same_name_after_soft_delete_fails,
     |store| async move {
         let record = create_named(store.as_ref(), "upstream-name-reservation").await?;
@@ -661,10 +477,6 @@ scenario!(
                 api_key_ciphertext: None,
                 oauth_token_generation: None,
                 warmup_enabled: false,
-                next_warmup_at: None,
-                last_warmup_cycle_key: None,
-                warmup_lease_holder: None,
-                warmup_lease_until_unix_secs: None,
                 warmup_dialect_plugin: None,
             })
             .await
@@ -700,10 +512,6 @@ scenario!(validate_identifier_rejects_bad_name, |store| async move {
             api_key_ciphertext: None,
             oauth_token_generation: None,
             warmup_enabled: false,
-            next_warmup_at: None,
-            last_warmup_cycle_key: None,
-            warmup_lease_holder: None,
-            warmup_lease_until_unix_secs: None,
             warmup_dialect_plugin: None,
         })
         .await
@@ -737,10 +545,6 @@ async fn create_named(store: &dyn UpstreamStore, name: &str) -> Result<UpstreamR
             api_key_ciphertext: None,
             oauth_token_generation: None,
             warmup_enabled: false,
-            next_warmup_at: None,
-            last_warmup_cycle_key: None,
-            warmup_lease_holder: None,
-            warmup_lease_until_unix_secs: None,
             warmup_dialect_plugin: None,
         })
         .await?)

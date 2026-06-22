@@ -8,7 +8,6 @@ pub const JOB_DURATION_SECONDS: &str = "cclb_scheduler_job_duration_seconds";
 pub const FAILURES_TOTAL: &str = "cclb_scheduler_failures_total";
 pub const LEADER_ACQUIRED_TOTAL: &str = "cclb_scheduler_leader_acquired_total";
 pub const LEADER_LOST_TOTAL: &str = "cclb_scheduler_leader_lost_total";
-pub const RECONCILE_ORPHAN_PRUNED_TOTAL: &str = "cclb_scheduler_reconcile_orphan_pruned_total";
 pub const INIT_FAILURE: &str = "cclb_scheduler_init_failure";
 pub const LAZY_REFRESH_TIMEOUT_TOTAL: &str = "cclb_scheduler_lazy_refresh_timeout_total";
 pub const PRUNE_ROWS_REMOVED_TOTAL: &str = "cclb_scheduler_prune_rows_removed_total";
@@ -22,7 +21,6 @@ const JOB_TYPES: &[&str] = &[
     "upstream_warmup",
     "entity:oauth_refresh",
     "entity:oauth_usage_poll",
-    "entity:anthropic_compat_refresh",
     "entity:metadata_refresh",
     "singleton:usage_rollup",
     "singleton:usage_prune",
@@ -30,7 +28,10 @@ const JOB_TYPES: &[&str] = &[
     "singleton:prompt_cache_purge",
     "singleton:price_catalog_refresh",
     "singleton:apalis_housekeeping",
-    "scheduler_reconcile",
+    "singleton:warmup_watchdog",
+    "singleton:oauth_refresh_watchdog",
+    "singleton:oauth_usage_poll_watchdog",
+    "singleton:anthropic_compat_refresh",
 ];
 
 const JOB_STATUSES: &[&str] = &[
@@ -71,11 +72,6 @@ pub fn describe_scheduler_metrics() {
             LEADER_LOST_TOTAL,
             Unit::Count,
             "Scheduler leader lock losses."
-        );
-        ::metrics::describe_counter!(
-            RECONCILE_ORPHAN_PRUNED_TOTAL,
-            Unit::Count,
-            "Scheduler reconcile orphan queue rows pruned by job type."
         );
         ::metrics::describe_gauge!(INIT_FAILURE, Unit::Count, "Scheduler init failure state.");
         ::metrics::describe_counter!(
@@ -120,7 +116,6 @@ pub fn touch_scheduler_metric_handles() {
         }
         record_scheduler_job_duration(job_type, Duration::ZERO);
         record_scheduler_failure(job_type, 0);
-        record_reconcile_orphan_pruned(job_type, 0);
     }
     record_leader_acquired(0);
     record_leader_lost(0);
@@ -159,12 +154,6 @@ pub fn record_leader_acquired(count: u64) {
 pub fn record_leader_lost(count: u64) {
     describe_scheduler_metrics();
     ::metrics::counter!(LEADER_LOST_TOTAL).increment(count);
-}
-
-pub fn record_reconcile_orphan_pruned(job_type: &str, rows: u64) {
-    describe_scheduler_metrics();
-    ::metrics::counter!(RECONCILE_ORPHAN_PRUNED_TOTAL, "job_type" => job_type.to_owned())
-        .increment(rows);
 }
 
 pub fn set_scheduler_init_failure(failed: bool) {

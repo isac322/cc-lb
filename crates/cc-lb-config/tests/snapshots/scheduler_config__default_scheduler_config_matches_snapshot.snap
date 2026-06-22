@@ -12,7 +12,6 @@ expression: "SchedulerConfig::default()"
     "sslmode": "prefer"
   },
   "leader_lock_key": 224417894236161,
-  "reconcile_interval_secs": 300,
   "retry_classes": {
     "probe": {
       "max_attempts": 3,
@@ -31,9 +30,24 @@ expression: "SchedulerConfig::default()"
     }
   },
   "recurring_jobs": {
+    "anthropic_compat_refresh": {
+      "enabled": true,
+      "interval_secs": 86400,
+      "jitter_secs": 30
+    },
     "apalis_housekeeping": {
       "enabled": true,
       "interval_secs": 3600,
+      "jitter_secs": 30
+    },
+    "oauth_refresh_watchdog": {
+      "enabled": true,
+      "interval_secs": 9360,
+      "jitter_secs": 30
+    },
+    "oauth_usage_poll_watchdog": {
+      "enabled": true,
+      "interval_secs": 900,
       "jitter_secs": 30
     },
     "price_catalog_refresh": {
@@ -60,6 +74,11 @@ expression: "SchedulerConfig::default()"
       "enabled": true,
       "interval_secs": 30,
       "jitter_secs": 3
+    },
+    "warmup_watchdog": {
+      "enabled": true,
+      "interval_secs": 6000,
+      "jitter_secs": 30
     }
   },
   "idempotency": {

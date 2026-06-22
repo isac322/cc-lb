@@ -216,8 +216,6 @@ fn test_upstream_record() -> UpstreamRecord {
         enabled: true,
         oauth_credentials: None,
         api_key_ciphertext: Some(Vec::new()),
-        refresh_lease_holder: None,
-        refresh_lease_until_unix_secs: None,
         last_apply_error: None,
         last_apply_at_unix_secs: None,
         deleted_at_unix_secs: None,
@@ -228,10 +226,6 @@ fn test_upstream_record() -> UpstreamRecord {
         warmup_enabled: false,
         warmup_dialect_plugin: None,
         last_warmup_at_unix_secs: None,
-        next_warmup_at: None,
-        last_warmup_cycle_key: None,
-        warmup_lease_holder: None,
-        warmup_lease_until_unix_secs: None,
     }
 }
 

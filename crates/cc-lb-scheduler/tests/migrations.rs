@@ -24,8 +24,8 @@ mod sqlite {
     }
 
     #[tokio::test]
-    async fn sqlite_migrations_allow_key_reuse_after_done() -> Result<(), Box<dyn std::error::Error>>
-    {
+    async fn sqlite_migrations_restore_full_unique_after_active_priority_vacuum()
+    -> Result<(), Box<dyn std::error::Error>> {
         let pool = SqlitePool::connect(":memory:").await?;
 
         SqliteStorage::setup(&pool).await?;
@@ -38,7 +38,43 @@ mod sqlite {
         )
         .fetch_one(&pool)
         .await?;
-        assert!(index_sql.contains("WHERE status IN ('Pending','Running','Queued')"));
+        assert!(!index_sql.contains("WHERE"));
+
+        sqlx::raw_sql(
+            "DROP INDEX IF EXISTS idx_jobs_idempotency_key;
+             CREATE UNIQUE INDEX idx_jobs_idempotency_key
+             ON Jobs(job_type, idempotency_key)
+             WHERE status IN ('Pending','Running','Queued');",
+        )
+        .execute(&pool)
+        .await?;
+        sqlx::query("INSERT INTO Jobs (job, id, job_type, status, idempotency_key, priority) VALUES (?, ?, ?, 'Done', ?, 0)")
+            .bind(vec![0_u8])
+            .bind("old-done")
+            .bind("q::email")
+            .bind("vacuum-key")
+            .execute(&pool)
+            .await?;
+        sqlx::query("INSERT OR IGNORE INTO Jobs (job, id, job_type, status, idempotency_key, priority) VALUES (?, ?, ?, 'Pending', ?, 10)")
+            .bind(vec![0_u8])
+            .bind("new-pending")
+            .bind("q::email")
+            .bind("vacuum-key")
+        .execute(&pool)
+        .await?;
+        apply_post_setup_migrations(&pool).await?;
+        let index_sql: String = sqlx::query_scalar(
+            "SELECT sql FROM sqlite_master
+             WHERE type = 'index' AND name = 'idx_jobs_idempotency_key'",
+        )
+        .fetch_one(&pool)
+        .await?;
+        assert!(!index_sql.contains("WHERE"));
+        let kept_id: String = sqlx::query_scalar("SELECT id FROM Jobs WHERE idempotency_key = ?")
+            .bind("vacuum-key")
+            .fetch_one(&pool)
+            .await?;
+        assert_eq!(kept_id, "new-pending");
 
         assert_eq!(
             insert_job(&pool, "job-1", "q::email", "key-reuse").await?,
@@ -51,18 +87,14 @@ mod sqlite {
         .execute(&pool)
         .await?;
 
-        assert_eq!(
-            insert_job(&pool, "job-2", "q::email", "key-reuse").await?,
-            1
-        );
-        let active_duplicate = insert_job(&pool, "job-3", "q::email", "key-reuse").await;
-        assert!(active_duplicate.is_err());
+        let done_duplicate = insert_job(&pool, "job-2", "q::email", "key-reuse").await;
+        assert!(done_duplicate.is_err());
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM Jobs WHERE idempotency_key = ?")
             .bind("key-reuse")
             .fetch_one(&pool)
             .await?;
-        assert_eq!(count, 2);
+        assert_eq!(count, 1);
 
         Ok(())
     }
@@ -139,7 +171,7 @@ mod postgres {
         apply_post_setup_migrations(pool).await?;
         apply_post_setup_migrations(pool).await?;
 
-        let predicate: String = sqlx::query_scalar(
+        let predicate: Option<String> = sqlx::query_scalar(
             "SELECT pg_get_expr(indexes.indpred, indexes.indrelid)
              FROM pg_index indexes
              JOIN pg_class classes ON classes.oid = indexes.indexrelid
@@ -149,10 +181,48 @@ mod postgres {
         )
         .fetch_one(pool)
         .await?;
-        assert!(predicate.contains("Pending"));
-        assert!(predicate.contains("Running"));
-        assert!(predicate.contains("Queued"));
-        assert!(!predicate.contains("Done"));
+        assert!(predicate.is_none());
+
+        sqlx::raw_sql(
+            "DROP INDEX IF EXISTS apalis.idx_jobs_idempotency_key;
+             CREATE UNIQUE INDEX idx_jobs_idempotency_key
+             ON apalis.jobs(job_type, idempotency_key)
+             WHERE status IN ('Pending','Running','Queued');",
+        )
+        .execute(pool)
+        .await?;
+        sqlx::query("INSERT INTO apalis.jobs (id, job_type, job, status, idempotency_key, priority) VALUES ($1, $2, $3, 'Done', $4, 0)")
+            .bind("old-done")
+            .bind("q::email")
+            .bind(vec![0_u8])
+            .bind("vacuum-key")
+            .execute(pool)
+            .await?;
+        sqlx::query("INSERT INTO apalis.jobs (id, job_type, job, status, idempotency_key, priority) VALUES ($1, $2, $3, 'Pending', $4, 10) ON CONFLICT DO NOTHING")
+            .bind("new-pending")
+            .bind("q::email")
+            .bind(vec![0_u8])
+            .bind("vacuum-key")
+            .execute(pool)
+            .await?;
+        apply_post_setup_migrations(pool).await?;
+        let predicate: Option<String> = sqlx::query_scalar(
+            "SELECT pg_get_expr(indexes.indpred, indexes.indrelid)
+             FROM pg_index indexes
+             JOIN pg_class classes ON classes.oid = indexes.indexrelid
+             JOIN pg_namespace namespaces ON namespaces.oid = classes.relnamespace
+             WHERE namespaces.nspname = 'apalis'
+               AND classes.relname = 'idx_jobs_idempotency_key'",
+        )
+        .fetch_one(pool)
+        .await?;
+        assert!(predicate.is_none());
+        let kept_id: String =
+            sqlx::query_scalar("SELECT id FROM apalis.jobs WHERE idempotency_key = $1")
+                .bind("vacuum-key")
+                .fetch_one(pool)
+                .await?;
+        assert_eq!(kept_id, "new-pending");
 
         assert_eq!(insert_job(pool, "job-1", "q::email", "key-reuse").await?, 1);
         sqlx::query("UPDATE apalis.jobs SET status = 'Done', done_at = now() WHERE id = $1")
@@ -160,22 +230,21 @@ mod postgres {
             .execute(pool)
             .await?;
 
-        assert_eq!(insert_job(pool, "job-2", "q::email", "key-reuse").await?, 1);
-        let active_duplicate = insert_job(pool, "job-3", "q::email", "key-reuse").await;
-        assert!(active_duplicate.is_err());
+        let done_duplicate = insert_job(pool, "job-2", "q::email", "key-reuse").await;
+        assert!(done_duplicate.is_err());
 
         let count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM apalis.jobs WHERE idempotency_key = $1")
                 .bind("key-reuse")
                 .fetch_one(pool)
                 .await?;
-        assert_eq!(count, 2);
+        assert_eq!(count, 1);
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn postgres_migrations_allow_key_reuse_after_done()
+    async fn postgres_migrations_restore_full_unique_after_active_priority_vacuum()
     -> Result<(), Box<dyn std::error::Error>> {
         let Ok(url) = std::env::var("DATABASE_URL") else {
             eprintln!("SKIP: DATABASE_URL not set; skipping postgres migrations test");

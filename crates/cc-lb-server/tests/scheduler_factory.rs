@@ -35,7 +35,7 @@ async fn scheduler_factory_sqlite_happy_path_sets_up_tables_and_partial_index() 
     .fetch_one(&sqlite.pool)
     .await
     .expect("partial index query succeeds");
-    assert!(index_sql.contains("WHERE status IN ('Pending','Running','Queued')"));
+    assert!(!index_sql.contains("WHERE"));
     sqlite.pool.close().await;
 }
 
@@ -109,13 +109,8 @@ async fn scheduler_factory_postgres_happy_path_sets_up_tables_index_and_leader()
     assert!(leader.election.release().await.expect("leader releases"));
     let table_count: i64 = scheduler_sqlx::query_scalar("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = 'apalis' AND table_name = 'jobs'").fetch_one(&postgres.pool).await.expect("jobs table query succeeds");
     assert_eq!(table_count, 1);
-    let predicate: String = scheduler_sqlx::query_scalar("SELECT pg_get_expr(indexes.indpred, indexes.indrelid) FROM pg_index indexes JOIN pg_class classes ON classes.oid = indexes.indexrelid JOIN pg_namespace namespaces ON namespaces.oid = classes.relnamespace WHERE namespaces.nspname = 'apalis' AND classes.relname = 'idx_jobs_idempotency_key'").fetch_one(&postgres.pool).await.expect("partial index query succeeds");
-    assert!(
-        predicate.contains("Pending")
-            && predicate.contains("Running")
-            && predicate.contains("Queued")
-            && !predicate.contains("Done")
-    );
+    let predicate: Option<String> = scheduler_sqlx::query_scalar("SELECT pg_get_expr(indexes.indpred, indexes.indrelid) FROM pg_index indexes JOIN pg_class classes ON classes.oid = indexes.indexrelid JOIN pg_namespace namespaces ON namespaces.oid = classes.relnamespace WHERE namespaces.nspname = 'apalis' AND classes.relname = 'idx_jobs_idempotency_key'").fetch_one(&postgres.pool).await.expect("idempotency index query succeeds");
+    assert!(predicate.is_none());
     drop(leader);
     postgres.pool.close().await;
     let drop_database = format!(r#"DROP DATABASE IF EXISTS "{database_name}""#);

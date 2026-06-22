@@ -33,19 +33,19 @@ async fn postgres_unreachable_scheduler_connection_failure_aborts_app_build() ->
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn sqlite_idempotency_tables_migration_failure_aborts_app_build() -> TestResult {
+async fn sqlite_apalis_index_migration_failure_aborts_app_build() -> TestResult {
     let directory = tempfile::tempdir()?;
     let main_path = directory.path().join("main-storage.sqlite");
     let scheduler_path = scheduler_sqlite_path(&main_path);
     let main_storage = open_main_sqlite(&main_path).await?;
-    precreate_scheduler_failures_without_columns(&scheduler_path).await?;
+    precreate_jobs_without_idempotency_key(&scheduler_path).await?;
     let mut config = app_config(StorageConfig::Sqlite { path: main_path });
     config.runtime.data_dir = Some(directory.path().join("data"));
 
     let error = build_failing_app(config, main_storage.clone()).await;
 
     assert_scheduler_error(&error, "migration");
-    assert_migration_error_mentions_idempotency_table(&error);
+    assert_migration_error_mentions_apalis_jobs_schema(&error);
     assert_no_main_apalis_tables(main_storage.pool()).await?;
     assert_scheduler_workers_not_spawned(&scheduler_path).await?;
     Ok(())
@@ -116,13 +116,13 @@ fn assert_scheduler_error(error: &BuildError, expected: &str) {
     );
 }
 
-fn assert_migration_error_mentions_idempotency_table(error: &BuildError) {
+fn assert_migration_error_mentions_apalis_jobs_schema(error: &BuildError) {
     let rendered = error.to_string().to_ascii_lowercase();
     assert!(
-        rendered.contains("scheduler_failures")
-            || rendered.contains("last_failed_at_unix_secs")
-            || rendered.contains("job_type"),
-        "sqlite migration failure should come from the idempotency-tables migration: {error:?}"
+        ["idempotency_key", "job_type", "status"]
+            .iter()
+            .any(|token| rendered.contains(token)),
+        "sqlite migration failure should come from the Apalis Jobs schema mismatch: {error:?}"
     );
 }
 
@@ -148,7 +148,7 @@ fn scheduler_sqlite_path(path: &Path) -> std::path::PathBuf {
 }
 
 #[cfg(feature = "sqlite")]
-async fn precreate_scheduler_failures_without_columns(path: &Path) -> TestResult {
+async fn precreate_jobs_without_idempotency_key(path: &Path) -> TestResult {
     use std::str::FromStr as _;
 
     use scheduler_sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -159,7 +159,7 @@ async fn precreate_scheduler_failures_without_columns(path: &Path) -> TestResult
         .max_connections(1)
         .connect_with(options)
         .await?;
-    scheduler_sqlx::query("CREATE TABLE scheduler_failures (id INTEGER PRIMARY KEY)")
+    scheduler_sqlx::query("CREATE TABLE Jobs (id TEXT PRIMARY KEY)")
         .execute(&pool)
         .await?;
     pool.close().await;

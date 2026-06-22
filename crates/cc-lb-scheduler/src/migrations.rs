@@ -14,6 +14,8 @@ impl ApalisPostSetupMigrationDatabase for sqlx::Sqlite {
     const POST_SETUP_MIGRATION_SQL: &'static [&'static str] = &[
         include_str!("../migrations/sqlite/0001_apalis_partial_unique.sql"),
         include_str!("../migrations/sqlite/0002_idempotency_tables.sql"),
+        include_str!("../migrations/sqlite/0003_drop_redundant_state_tables.sql"),
+        include_str!("../migrations/sqlite/0005_drop_partial_unique_restore_apalis.sql"),
     ];
 }
 
@@ -22,6 +24,8 @@ impl ApalisPostSetupMigrationDatabase for sqlx::Postgres {
     const POST_SETUP_MIGRATION_SQL: &'static [&'static str] = &[
         include_str!("../migrations/postgres/0001_apalis_partial_unique.sql"),
         include_str!("../migrations/postgres/0002_idempotency_tables.sql"),
+        include_str!("../migrations/postgres/0003_drop_redundant_state_tables.sql"),
+        include_str!("../migrations/postgres/0005_drop_partial_unique_restore_apalis.sql"),
     ];
 }
 

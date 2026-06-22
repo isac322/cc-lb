@@ -11,7 +11,6 @@ use sqlx::{Database, Pool};
 
 use crate::{
     error::{Result, SchedulerError},
-    idempotency::SchedulerFailuresStore,
     middleware::TraceparentCarrier,
 };
 
@@ -50,7 +49,6 @@ impl ApalisHousekeepingConfig {
 pub struct ApalisHousekeepingJobStats {
     pub workers_removed: u64,
     pub jobs_removed: u64,
-    pub scheduler_failures_removed: u64,
     pub cutoff_unix_secs: u64,
 }
 
@@ -59,7 +57,6 @@ pub enum ApalisHousekeepingJobResult {
     Done {
         workers_removed: u64,
         jobs_removed: u64,
-        scheduler_failures_removed: u64,
         cutoff_unix_secs: u64,
     },
     Retry {
@@ -106,13 +103,9 @@ impl ApalisHousekeepingJobHandler<Sqlite> {
         .execute(&self.pool)
         .await?
         .rows_affected();
-        let scheduler_failures_removed = SchedulerFailuresStore::new(self.pool.clone())
-            .prune_older_than(job_cutoff)
-            .await?;
         Ok(ApalisHousekeepingJobStats {
             workers_removed,
             jobs_removed,
-            scheduler_failures_removed,
             cutoff_unix_secs: job_cutoff,
         })
     }
@@ -148,13 +141,9 @@ impl ApalisHousekeepingJobHandler<Postgres> {
         .execute(&self.pool)
         .await?
         .rows_affected();
-        let scheduler_failures_removed = SchedulerFailuresStore::new(self.pool.clone())
-            .prune_older_than(job_cutoff)
-            .await?;
         Ok(ApalisHousekeepingJobStats {
             workers_removed,
             jobs_removed,
-            scheduler_failures_removed,
             cutoff_unix_secs: job_cutoff,
         })
     }
@@ -169,7 +158,6 @@ fn finish(result: Result<ApalisHousekeepingJobStats>) -> ApalisHousekeepingJobRe
         Ok(stats) => ApalisHousekeepingJobResult::Done {
             workers_removed: stats.workers_removed,
             jobs_removed: stats.jobs_removed,
-            scheduler_failures_removed: stats.scheduler_failures_removed,
             cutoff_unix_secs: stats.cutoff_unix_secs,
         },
         Err(error) => ApalisHousekeepingJobResult::Retry {

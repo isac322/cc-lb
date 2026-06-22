@@ -6,6 +6,7 @@ mod storage;
 mod time;
 mod usage;
 mod warmup;
+mod watchdog;
 
 use std::sync::Arc;
 
@@ -13,14 +14,8 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, Config};
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_scheduler::error::Result as SchedulerResult;
-use cc_lb_scheduler::idempotency::AnthropicCompatEtagsStore;
-use cc_lb_scheduler::jobs::compat::handle_anthropic_compat_refresh_job_with_core_fetcher;
 use cc_lb_scheduler::jobs::metadata_refresh::{
     CoreMetadataRefreshRunner, MetadataRefreshJobHandler,
-};
-use cc_lb_scheduler::jobs::reconcile::{
-    SchedulerReconcileConfig, SchedulerReconcileJob, SchedulerReconcileJobHandler,
-    SchedulerReconcileJobResult,
 };
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{EntityJob, SchedulerBackend, SchedulerCtx};
@@ -32,8 +27,6 @@ use crate::dynamic_view_builder::Stores;
 use crate::refresh::LazyRefresher;
 use crate::scheduler_dispatch::http::{JsonHttpClient, json_http_client};
 use crate::scheduler_dispatch::outcomes::metadata_outcome;
-use crate::scheduler_dispatch::storage::StorageHandle;
-use crate::scheduler_dispatch::time::now_unix_secs;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
 
 pub(crate) struct SchedulerDispatchDeps {
@@ -78,7 +71,6 @@ pub(crate) fn build_scheduler_ctx(deps: SchedulerDispatchDeps) -> SchedulerCtx {
         dispatch.config.scheduler.clone(),
         dispatch.clone().entity_dispatch(),
         dispatch.clone().singleton_dispatch(),
-        dispatch.reconcile_dispatch(),
     )
 }
 
@@ -117,40 +109,11 @@ impl SchedulerDispatch {
         })
     }
 
-    fn reconcile_dispatch(self) -> cc_lb_scheduler::worker::ReconcileDispatchFn {
-        Arc::new(move |job| {
-            let dispatch = self.clone();
-            Box::pin(async move { dispatch.dispatch_reconcile(job).await })
-        })
-    }
-
     async fn dispatch_entity(&self, job: EntityJob) -> SchedulerResult<JobOutcome> {
         match job {
             EntityJob::Warmup(job) => self.dispatch_warmup(job).await,
             EntityJob::OAuthRefresh(job) => self.dispatch_oauth_refresh(job).await,
             EntityJob::OAuthUsagePoll(job) => self.dispatch_oauth_usage_poll(job).await,
-            EntityJob::AnthropicCompatRefresh(job) => match &self.backend {
-                #[cfg(feature = "sqlite")]
-                SchedulerBackend::Sqlite(sqlite) => {
-                    handle_anthropic_compat_refresh_job_with_core_fetcher(
-                        job,
-                        &AnthropicCompatEtagsStore::new(sqlite.pool.clone()),
-                        self.storage.as_ref(),
-                        &self.cancel,
-                    )
-                    .await
-                }
-                #[cfg(feature = "postgres")]
-                SchedulerBackend::Postgres(postgres) => {
-                    handle_anthropic_compat_refresh_job_with_core_fetcher(
-                        job,
-                        &AnthropicCompatEtagsStore::new(postgres.pool.clone()),
-                        self.storage.as_ref(),
-                        &self.cancel,
-                    )
-                    .await
-                }
-            },
             EntityJob::MetadataRefresh(job) => {
                 let runner = CoreMetadataRefreshRunner::new(
                     self.storage.clone(),
@@ -158,33 +121,6 @@ impl SchedulerDispatch {
                     self.cancel.clone(),
                 );
                 metadata_outcome(MetadataRefreshJobHandler::new(runner).handle(job).await?)
-            }
-        }
-    }
-
-    async fn dispatch_reconcile(&self, job: SchedulerReconcileJob) -> SchedulerReconcileJobResult {
-        let config =
-            SchedulerReconcileConfig::new(true, self.config.scheduler.reconcile_interval_secs);
-        match &self.backend {
-            #[cfg(feature = "sqlite")]
-            SchedulerBackend::Sqlite(sqlite) => {
-                SchedulerReconcileJobHandler::with_config(
-                    sqlite.pool.clone(),
-                    StorageHandle::new(self.storage.clone()),
-                    config,
-                )
-                .handle(job, now_unix_secs())
-                .await
-            }
-            #[cfg(feature = "postgres")]
-            SchedulerBackend::Postgres(postgres) => {
-                SchedulerReconcileJobHandler::with_config(
-                    postgres.pool.clone(),
-                    StorageHandle::new(self.storage.clone()),
-                    config,
-                )
-                .handle(job, now_unix_secs())
-                .await
             }
         }
     }

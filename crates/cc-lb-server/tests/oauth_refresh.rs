@@ -16,6 +16,13 @@ use cc_lb_plugin_api::{
     RequestContext, ShapedRequest, Upstream, UpstreamDialect, shape_request, sign_request,
 };
 use cc_lb_runtime_extism::ExtismRuntime;
+use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
+use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
+use cc_lb_scheduler::jobs::oauth_refresh::{
+    OAuthRefreshJob, OAuthRefreshJobHandler, OAuthRefreshUpstreams, RefreshedOAuthTokens,
+};
+use cc_lb_scheduler::retry::JobOutcome;
+use cc_lb_scheduler::worker::{EntityJob, SchedulerCtx, SchedulerPushTask};
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::refresh::LazyRefresher;
 use cc_lb_server::scheduler_factory::{SchedulerBackend, SqliteSchedulerStorage};
@@ -23,7 +30,8 @@ use cc_lb_signer_anthropic_oauth::{
     AnthropicOAuthSignerFactory, AnthropicOAuthSignerFactoryWithLazyRefresh,
 };
 use cc_lb_storage_api::{
-    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, UpstreamCreate, UpstreamStore,
+    BackendKind, MetaStore, PrincipalCreate, PrincipalKind, UpstreamCreate, UpstreamRecord,
+    UpstreamStore,
 };
 
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -37,6 +45,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use url::Url;
 use uuid::Uuid;
@@ -49,6 +58,15 @@ struct Fixture {
     oauth_cfg: Arc<AnthropicOAuthConfig>,
     fake_base: String,
     scheduler_backend: SchedulerBackend,
+    scheduler_cancel: CancellationToken,
+    scheduler_task: JoinHandle<()>,
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        self.scheduler_cancel.cancel();
+        self.scheduler_task.abort();
+    }
 }
 
 impl Fixture {
@@ -83,6 +101,12 @@ impl Fixture {
             redirect_uri: Url::parse("http://localhost/callback").expect("redirect url"),
             scopes: vec!["messages".to_owned()],
         });
+        let (scheduler_cancel, scheduler_task) = spawn_oauth_refresh_worker(
+            scheduler_backend.clone(),
+            storage.clone(),
+            aead.clone(),
+            oauth_cfg.clone(),
+        );
         Self {
             _dir: dir,
             storage,
@@ -91,6 +115,8 @@ impl Fixture {
             oauth_cfg,
             fake_base,
             scheduler_backend,
+            scheduler_cancel,
+            scheduler_task,
         }
     }
 
@@ -116,10 +142,6 @@ impl Fixture {
                 api_key_ciphertext: None,
                 oauth_token_generation: None,
                 warmup_enabled: false,
-                next_warmup_at: None,
-                last_warmup_cycle_key: None,
-                warmup_lease_holder: None,
-                warmup_lease_until_unix_secs: None,
                 warmup_dialect_plugin: None,
             })
             .await
@@ -468,6 +490,199 @@ async fn sqlite_scheduler_backend() -> SchedulerBackend {
             cc_lb_scheduler::worker::ENTITY_QUEUE,
         ),
     })
+}
+
+fn spawn_oauth_refresh_worker(
+    backend: SchedulerBackend,
+    storage: Arc<Storage>,
+    aead: Arc<AeadService>,
+    oauth_cfg: Arc<AnthropicOAuthConfig>,
+) -> (CancellationToken, JoinHandle<()>) {
+    let cancel = CancellationToken::new();
+    let worker = cc_lb_scheduler::worker::build_entity_worker(
+        &backend,
+        SchedulerCtx::new(
+            cc_lb_config::SchedulerConfig::default(),
+            Arc::new({
+                let backend = backend.clone();
+                move |job| {
+                    let backend = backend.clone();
+                    let storage = storage.clone();
+                    let aead = aead.clone();
+                    let oauth_cfg = oauth_cfg.clone();
+                    Box::pin(async move {
+                        dispatch_oauth_refresh_job(backend, storage, aead, oauth_cfg, job).await
+                    })
+                }
+            }),
+            Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
+        ),
+    )
+    .expect("entity worker builds");
+    let worker_cancel = cancel.clone();
+    let task = tokio::spawn(async move {
+        if let Err(error) = worker.run_until_cancelled(worker_cancel).await {
+            panic!("oauth refresh worker failed: {error}");
+        }
+    });
+    (cancel, task)
+}
+
+async fn dispatch_oauth_refresh_job(
+    backend: SchedulerBackend,
+    storage: Arc<Storage>,
+    aead: Arc<AeadService>,
+    oauth_cfg: Arc<AnthropicOAuthConfig>,
+    job: EntityJob,
+) -> SchedulerResult<JobOutcome> {
+    let EntityJob::OAuthRefresh(job) = job else {
+        return Ok(JobOutcome::Done);
+    };
+    OAuthRefreshJobHandler::new(TestOAuthRefreshUpstreams { storage }, Uuid::new_v4())
+        .handle(
+            job,
+            now_secs(),
+            move |upstream| refresh_tokens(aead, oauth_cfg, upstream),
+            {
+                let backend = backend.clone();
+                move |metadata_job| enqueue_metadata_refresh(backend.clone(), metadata_job)
+            },
+            move |upstream_id, expires_at_unix_secs| {
+                enqueue_next_oauth_refresh(backend, upstream_id, expires_at_unix_secs)
+            },
+        )
+        .await
+}
+
+#[derive(Clone)]
+struct TestOAuthRefreshUpstreams {
+    storage: Arc<Storage>,
+}
+
+impl OAuthRefreshUpstreams for TestOAuthRefreshUpstreams {
+    async fn get_by_id(&self, id: Uuid) -> SchedulerResult<Option<UpstreamRecord>> {
+        UpstreamStore::get_by_id(self.storage.as_ref(), id)
+            .await
+            .map_err(storage_scheduler_error)
+    }
+
+    async fn complete_refresh(
+        &self,
+        id: Uuid,
+        holder: Uuid,
+        tokens: EncryptedOAuthTokens,
+    ) -> SchedulerResult<UpstreamRecord> {
+        UpstreamStore::complete_refresh(self.storage.as_ref(), id, holder, tokens)
+            .await
+            .map_err(storage_scheduler_error)
+    }
+
+    async fn read_oauth_token_generation(&self, id: Uuid) -> SchedulerResult<Option<u64>> {
+        UpstreamStore::read_oauth_token_generation(self.storage.as_ref(), id)
+            .await
+            .map_err(storage_scheduler_error)
+    }
+}
+
+async fn refresh_tokens(
+    aead: Arc<AeadService>,
+    oauth_cfg: Arc<AnthropicOAuthConfig>,
+    upstream: UpstreamRecord,
+) -> SchedulerResult<RefreshedOAuthTokens> {
+    let previous = upstream
+        .oauth_credentials
+        .as_ref()
+        .ok_or_else(|| SchedulerError::Job("missing oauth credentials".to_owned()))?
+        .decrypt(aead.as_ref(), upstream.id.as_bytes())
+        .map_err(|error| SchedulerError::Job(error.to_string()))?;
+    let response = request_refresh(oauth_cfg.as_ref(), previous.refresh_token.as_str()).await?;
+    let scopes = response
+        .scope
+        .as_deref()
+        .map(|scope| scope.split_whitespace().map(ToOwned::to_owned).collect())
+        .unwrap_or(previous.scopes);
+    let expires_at_unix_secs = now_secs().saturating_add(response.expires_in);
+    let encrypted_tokens = EncryptedOAuthTokens::encrypt(
+        aead.as_ref(),
+        &OAuthTokenBundle {
+            access_token: response.access_token,
+            refresh_token: response.refresh_token.unwrap_or(previous.refresh_token),
+            expires_at_unix_secs,
+            scopes,
+        },
+        upstream.id.as_bytes(),
+    )
+    .map_err(|error| SchedulerError::Job(error.to_string()))?;
+    Ok(RefreshedOAuthTokens {
+        encrypted_tokens,
+        expires_at_unix_secs,
+    })
+}
+
+async fn request_refresh(
+    oauth_cfg: &AnthropicOAuthConfig,
+    refresh_token: &str,
+) -> SchedulerResult<OAuthTokenResponse> {
+    let body = {
+        let mut serializer = url::form_urlencoded::Serializer::new(String::new());
+        serializer.append_pair("grant_type", "refresh_token");
+        serializer.append_pair("client_id", oauth_cfg.client_id.as_str());
+        serializer.append_pair("refresh_token", refresh_token);
+        serializer.finish()
+    };
+    let response = raw_http(
+        "POST",
+        oauth_cfg.token_url.as_str(),
+        &[("content-type", "application/x-www-form-urlencoded")],
+        body.as_bytes(),
+    )
+    .await
+    .map_err(|error| SchedulerError::Job(error.to_string()))?;
+    if !response.status.is_success() {
+        return Err(SchedulerError::Job(format!(
+            "token endpoint returned {}",
+            response.status
+        )));
+    }
+    serde_json::from_slice(&response.body).map_err(|error| SchedulerError::Job(error.to_string()))
+}
+
+#[derive(Deserialize)]
+struct OAuthTokenResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    expires_in: u64,
+    scope: Option<String>,
+}
+
+async fn enqueue_metadata_refresh(
+    backend: SchedulerBackend,
+    job: MetadataRefreshJob,
+) -> SchedulerResult<()> {
+    backend.push_job(EntityJob::MetadataRefresh(job)).await
+}
+
+async fn enqueue_next_oauth_refresh(
+    backend: SchedulerBackend,
+    upstream_id: Uuid,
+    expires_at_unix_secs: u64,
+) -> SchedulerResult<()> {
+    let job = OAuthRefreshJob::new(upstream_id);
+    let task = SchedulerPushTask {
+        args: EntityJob::OAuthRefresh(job),
+        idempotency_key: Some(
+            OAuthRefreshJob::new(upstream_id).idempotency_key(expires_at_unix_secs),
+        ),
+        run_at_unix_secs: Some(OAuthRefreshJob::run_at_for_expires_at(expires_at_unix_secs)),
+    };
+    match backend.push_entity_task(task).await {
+        Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+fn storage_scheduler_error(error: cc_lb_storage_api::StorageError) -> SchedulerError {
+    SchedulerError::Job(error.to_string())
 }
 
 fn encrypted(

@@ -1,5 +1,4 @@
 use std::future::Future;
-use std::time::Duration;
 
 use apalis_core::task::{Task, builder::TaskBuilder};
 use serde::{Deserialize, Serialize};
@@ -7,11 +6,11 @@ use sqlx::Database;
 use uuid::Uuid;
 
 use crate::error::Result;
-use crate::idempotency::{
-    OAuthUsagePollCursor, OAuthUsagePollCursorsStore, OAuthUsagePollScheduleConfig,
-};
 use crate::middleware::TraceparentCarrier;
 use crate::retry::JobOutcome;
+use crate::state_stores::{
+    OAuthUsagePollCursor, OAuthUsagePollCursorsStore, OAuthUsagePollScheduleConfig,
+};
 
 mod repository;
 pub use repository::{OAuthUsagePollCursorRepository, OAuthUsagePollFuture};
@@ -25,15 +24,25 @@ pub struct OAuthUsagePollJob {
 }
 
 impl OAuthUsagePollJob {
-    pub fn idempotency_key(&self) -> String {
-        format!("entity:oauth_usage_poll:{}", self.upstream_id)
+    pub const fn new(upstream_id: Uuid) -> Self {
+        Self {
+            upstream_id,
+            traceparent: None,
+        }
+    }
+
+    pub fn idempotency_key(&self, unlock_at_unix_secs: u64) -> String {
+        format!(
+            "entity:oauth_usage_poll:{}:{}",
+            self.upstream_id, unlock_at_unix_secs
+        )
     }
 
     pub fn into_apalis_task<Ctx, IdType>(self, run_at_unix_secs: u64) -> Task<Self, Ctx, IdType>
     where
         Ctx: Default,
     {
-        let idempotency_key = self.idempotency_key();
+        let idempotency_key = self.idempotency_key(run_at_unix_secs);
         TaskBuilder::<Self, Ctx, IdType>::new(self)
             .run_at_timestamp(run_at_unix_secs)
             .with_idempotency_key(idempotency_key)
@@ -99,9 +108,7 @@ impl<Db: Database> OAuthUsagePollHandler<Db> {
         let cursor = self.read_cursor(job.upstream_id).await?;
         let next_run_at = compute_next_run_at(now_unix_secs, &self.config, cursor.as_ref());
         if next_run_at > now_unix_secs {
-            return Ok(JobOutcome::Retry {
-                delay: Duration::from_secs(next_run_at.saturating_sub(now_unix_secs)),
-            });
+            return Ok(JobOutcome::Done);
         }
 
         let observation = poll(job.clone()).await?;
@@ -146,9 +153,7 @@ impl<Db: Database> OAuthUsagePollHandler<Db> {
                     self.config.history_capacity,
                 )
                 .await?;
-                Ok(JobOutcome::Retry {
-                    delay: Duration::from_secs(self.config.throttle_interval(throttle_count)),
-                })
+                Ok(JobOutcome::Done)
             }
             OAuthUsagePollObservation::StatusFailure {
                 observed_at_unix_secs,
@@ -191,10 +196,7 @@ impl<Db: Database> OAuthUsagePollHandler<Db> {
         cursor.attempt_count = cursor.attempt_count.saturating_add(1);
         cursor.last_observed_at_unix_secs = Some(observed_at_unix_secs);
         self.upsert_cursor(&cursor).await?;
-        let next_run_at = compute_next_run_at(observed_at_unix_secs, &self.config, Some(&cursor));
-        Ok(JobOutcome::Retry {
-            delay: Duration::from_secs(next_run_at.saturating_sub(observed_at_unix_secs)),
-        })
+        Ok(JobOutcome::Done)
     }
 }
 
@@ -212,5 +214,43 @@ fn next_throttle_count(cursor: Option<&OAuthUsagePollCursor>) -> u32 {
             .map(|cursor| cursor.last_throttle_count.saturating_add(1))
             .unwrap_or(1),
         Some(_) | None => 1,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn idempotency_key_includes_unlock_at_unix_secs() {
+        let upstream_id = Uuid::from_u128(0x12345678123456781234567812345678);
+        let job = OAuthUsagePollJob::new(upstream_id);
+
+        assert_eq!(
+            job.idempotency_key(1_800_000_060),
+            "entity:oauth_usage_poll:12345678-1234-5678-1234-567812345678:1800000060"
+        );
+    }
+
+    #[test]
+    fn compute_next_run_at_returns_one_minute_after_success_cursor() {
+        let upstream_id = Uuid::nil();
+        let observed_at_unix_secs = 1_800_000_000;
+        let cursor = OAuthUsagePollCursor {
+            upstream_id,
+            last_status: Some(200),
+            last_observed_at_unix_secs: Some(observed_at_unix_secs),
+            recent_successes_unix_secs: vec![observed_at_unix_secs],
+            ..OAuthUsagePollCursor::new(upstream_id)
+        };
+
+        assert_eq!(
+            compute_next_run_at(
+                observed_at_unix_secs,
+                &OAuthUsagePollScheduleConfig::default(),
+                Some(&cursor),
+            ),
+            observed_at_unix_secs + 60
+        );
     }
 }

@@ -17,7 +17,6 @@ fn scheduler_toml_round_trips_overrides() {
         r#"
 [scheduler]
 leader_lock_key = 42
-reconcile_interval_secs = 15
 dlq_retention_days = 7
 entity_concurrency = 4
 singleton_concurrency = 1

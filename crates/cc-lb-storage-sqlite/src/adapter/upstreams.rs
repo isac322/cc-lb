@@ -1,20 +1,13 @@
-// Storage adapter for the deprecated lease/warmup fields on `UpstreamRecord`,
-// `UpstreamCreate`, `UpstreamUpdate`, and `UpstreamStatusUpdate`.
-// The deprecated columns still exist in the schema until the Wave 8 follow-up PR
-// drops them; until then the adapter must read/write them, so we silence the
-// trait-level deprecation warnings at the module boundary per the plan.
-#![allow(deprecated)]
-
 use async_trait::async_trait;
 use cc_lb_aead::EncryptedOAuthTokens;
 use cc_lb_storage_api::upstream::{
-    UpstreamKind, UpstreamLeaseKind, UpstreamStatusUpdate, UpstreamWarmupDialectPlugin,
+    UpstreamKind, UpstreamStatusUpdate, UpstreamWarmupDialectPlugin,
 };
 use cc_lb_storage_api::{
     StorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,
     validate_identifier,
 };
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::Utc;
 use sqlx::{Row, Sqlite, SqlitePool, Transaction, sqlite::SqliteRow};
 use uuid::Uuid;
 
@@ -22,13 +15,13 @@ use crate::{SqliteStorage, map_sqlx_error};
 
 macro_rules! split_upstream_columns {
     () => {
-        "spec.id, spec.name, spec.kind, spec.base_url, spec.enabled, token.oauth_credentials_ciphertext AS oauth_credentials, secret.api_key_ciphertext, refresh_lease.holder AS refresh_lease_holder, refresh_lease.until_unix_secs AS refresh_lease_until_unix_secs, status.last_apply_error, status.last_apply_at, spec.deleted_at, spec.spec_revision AS revision, COALESCE(token.oauth_token_generation, 0) AS oauth_token_generation, spec.created_at, spec.updated_at, spec.warmup_enabled, status.next_warmup_at, status.last_warmup_cycle_key, status.last_warmup_at, warmup_lease.holder AS warmup_lease_holder, warmup_lease.until_unix_secs AS warmup_lease_until_unix_secs, spec.warmup_dialect_plugin"
+        "spec.id, spec.name, spec.kind, spec.base_url, spec.enabled, token.oauth_credentials_ciphertext AS oauth_credentials, secret.api_key_ciphertext, status.last_apply_error, status.last_apply_at, spec.deleted_at, spec.spec_revision AS revision, COALESCE(token.oauth_token_generation, 0) AS oauth_token_generation, spec.created_at, spec.updated_at, spec.warmup_enabled, status.last_warmup_at, spec.warmup_dialect_plugin"
     };
 }
 
 macro_rules! split_upstream_joins {
     () => {
-        " FROM upstream_spec_v1 spec LEFT JOIN upstream_api_key_secret_v1 secret ON secret.upstream_id = spec.id LEFT JOIN upstream_oauth_token_v1 token ON token.upstream_id = spec.id LEFT JOIN upstream_status_v1 status ON status.upstream_id = spec.id LEFT JOIN upstream_lease_v1 refresh_lease ON refresh_lease.upstream_id = spec.id AND refresh_lease.lease_kind = 'refresh' LEFT JOIN upstream_lease_v1 warmup_lease ON warmup_lease.upstream_id = spec.id AND warmup_lease.lease_kind = 'warmup' "
+        " FROM upstream_spec_v1 spec LEFT JOIN upstream_api_key_secret_v1 secret ON secret.upstream_id = spec.id LEFT JOIN upstream_oauth_token_v1 token ON token.upstream_id = spec.id LEFT JOIN upstream_status_v1 status ON status.upstream_id = spec.id "
     };
 }
 
@@ -115,38 +108,6 @@ impl UpstreamStore for SqliteStorage {
         tx.commit().await.map_err(map_sqlx_error)
     }
 
-    #[allow(deprecated)]
-    async fn claim_lease(
-        &self,
-        id: Uuid,
-        lease_kind: UpstreamLeaseKind,
-        holder: String,
-        ttl_secs: i64,
-    ) -> StorageResult<bool> {
-        claim_split_lease(self.pool(), id, lease_kind, &holder, ttl_secs).await
-    }
-
-    #[allow(deprecated)]
-    async fn renew_lease(
-        &self,
-        id: Uuid,
-        lease_kind: UpstreamLeaseKind,
-        holder: String,
-        ttl_secs: i64,
-    ) -> StorageResult<bool> {
-        renew_split_lease(self.pool(), id, lease_kind, &holder, ttl_secs).await
-    }
-
-    #[allow(deprecated)]
-    async fn release_lease(
-        &self,
-        id: Uuid,
-        lease_kind: UpstreamLeaseKind,
-        holder: String,
-    ) -> StorageResult<bool> {
-        release_split_lease(self.pool(), id, lease_kind, &holder).await
-    }
-
     async fn store_oauth_tokens(
         &self,
         id: Uuid,
@@ -154,22 +115,6 @@ impl UpstreamStore for SqliteStorage {
         tokens: EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord> {
         update_split_oauth_token(self, id, tokens, Some(expected_revision)).await
-    }
-
-    #[allow(deprecated)]
-    async fn claim_refresh_lease(
-        &self,
-        id: Uuid,
-        holder: Uuid,
-        ttl_secs: u64,
-    ) -> StorageResult<bool> {
-        self.claim_lease(
-            id,
-            UpstreamLeaseKind::Refresh,
-            holder.to_string(),
-            u64_to_i64(ttl_secs, "refresh lease ttl")?,
-        )
-        .await
     }
 
     async fn complete_refresh(
@@ -186,30 +131,6 @@ impl UpstreamStore for SqliteStorage {
 
     async fn read_oauth_token_generation(&self, id: Uuid) -> StorageResult<Option<u64>> {
         read_split_oauth_token_generation(self.pool(), id).await
-    }
-
-    #[allow(deprecated)]
-    async fn release_lease_on_failure(
-        &self,
-        id: Uuid,
-        holder: Uuid,
-        reason: String,
-    ) -> StorageResult<()> {
-        let released = self
-            .release_lease(id, UpstreamLeaseKind::Refresh, holder.to_string())
-            .await?;
-        if !released {
-            return Err(conflict("refresh lease holder mismatch"));
-        }
-        self.set_status(
-            id,
-            UpstreamStatusUpdate {
-                last_apply_error: Some(Some(reason)),
-                last_apply_at_unix_secs: Some(Some(now_unix_secs_u64()?)),
-                ..UpstreamStatusUpdate::default()
-            },
-        )
-        .await
     }
 
     async fn set_last_apply_error(&self, id: Uuid, error: Option<String>) -> StorageResult<()> {
@@ -250,46 +171,6 @@ impl UpstreamStore for SqliteStorage {
         tx.commit().await.map_err(map_sqlx_error)
     }
 
-    #[allow(deprecated)]
-    async fn claim_warmup_lease(
-        &self,
-        upstream_id: Uuid,
-        holder: &str,
-        ttl_secs: i64,
-    ) -> StorageResult<bool> {
-        self.claim_lease(
-            upstream_id,
-            UpstreamLeaseKind::Warmup,
-            holder.to_owned(),
-            ttl_secs,
-        )
-        .await
-    }
-
-    #[allow(deprecated)]
-    async fn write_warmup_cycle_key(
-        &self,
-        upstream_id: Uuid,
-        holder: &str,
-        new_cycle_key: i64,
-        next_warmup_at: Option<DateTime<Utc>>,
-    ) -> StorageResult<bool> {
-        write_split_warmup_cycle_key(
-            self.pool(),
-            upstream_id,
-            holder,
-            new_cycle_key,
-            next_warmup_at,
-        )
-        .await
-    }
-
-    #[allow(deprecated)]
-    async fn release_warmup_lease(&self, id: Uuid, holder: &str) -> StorageResult<bool> {
-        self.release_lease(id, UpstreamLeaseKind::Warmup, holder.to_owned())
-            .await
-    }
-
     async fn clear_warmup_dialect_plugin(
         &self,
         id: Uuid,
@@ -309,24 +190,6 @@ impl UpstreamStore for SqliteStorage {
             return Ok(None);
         }
         get_split_by_id(self.pool(), id).await
-    }
-
-    #[allow(deprecated)]
-    async fn warmup_now_unix_secs(&self) -> StorageResult<i64> {
-        sqlx::query_scalar("SELECT unixepoch()")
-            .fetch_one(self.pool())
-            .await
-            .map_err(map_sqlx_error)
-    }
-
-    #[allow(deprecated)]
-    async fn write_warmup_next_at(
-        &self,
-        upstream_id: Uuid,
-        holder: &str,
-        next_warmup_at: DateTime<Utc>,
-    ) -> StorageResult<bool> {
-        write_split_warmup_next_at(self.pool(), upstream_id, holder, next_warmup_at).await
     }
 }
 
@@ -366,33 +229,6 @@ async fn create_split(
         )
         .bind(id.to_string())
         .bind(u64_to_i64(oauth_token_generation, "oauth token generation")?)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
-    }
-
-    if create.next_warmup_at.is_some() || create.last_warmup_cycle_key.is_some() {
-        sqlx::query(
-            "INSERT INTO upstream_status_v1 (upstream_id, next_warmup_at, last_warmup_cycle_key, updated_at) VALUES (?, ?, ?, unixepoch())",
-        )
-        .bind(id.to_string())
-        .bind(optional_datetime_to_i64(create.next_warmup_at, "next_warmup_at")?)
-        .bind(create.last_warmup_cycle_key.map(|value| value.to_string()))
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
-    }
-
-    if let (Some(holder), Some(until_unix_secs)) = (
-        create.warmup_lease_holder,
-        create.warmup_lease_until_unix_secs,
-    ) {
-        sqlx::query(
-            "INSERT INTO upstream_lease_v1 (upstream_id, lease_kind, holder, until_unix_secs, updated_at) VALUES (?, 'warmup', ?, ?, unixepoch())",
-        )
-        .bind(id.to_string())
-        .bind(holder)
-        .bind(until_unix_secs)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -476,14 +312,6 @@ async fn update_split(
         || update.warmup_dialect_plugin.is_some();
     let api_key_ciphertext = update.api_key_ciphertext.take();
     let oauth_token_generation = update.oauth_token_generation.take();
-    let status = UpstreamStatusUpdate {
-        next_warmup_at: update.next_warmup_at.take().map(Some),
-        last_warmup_cycle_key: update.last_warmup_cycle_key.take().map(Some),
-        ..UpstreamStatusUpdate::default()
-    };
-    let has_status_update =
-        status.next_warmup_at.is_some() || status.last_warmup_cycle_key.is_some();
-
     if has_spec_update {
         update_split_spec(storage, id, expected_revision, update).await?;
     } else {
@@ -491,12 +319,6 @@ async fn update_split(
     }
     if let Some(ciphertext) = api_key_ciphertext {
         update_split_api_key_secret(storage, id, Some(ciphertext)).await?;
-    }
-    if has_status_update {
-        let mut tx = begin_immediate(storage.pool()).await?;
-        ensure_split_spec_active_in_tx(&mut tx, id).await?;
-        set_split_status_in_tx(&mut tx, id, status).await?;
-        tx.commit().await.map_err(map_sqlx_error)?;
     }
     if let Some(generation) = oauth_token_generation {
         update_split_oauth_token_generation(storage, id, generation).await?;
@@ -631,34 +453,11 @@ async fn update_split_oauth_token_generation(
 async fn complete_split_refresh(
     storage: &SqliteStorage,
     id: Uuid,
-    holder: Uuid,
+    _holder: Uuid,
     tokens: EncryptedOAuthTokens,
 ) -> StorageResult<()> {
     let mut tx = begin_immediate(storage.pool()).await?;
     ensure_split_spec_active_in_tx(&mut tx, id).await?;
-    let holder = holder.to_string();
-    let existing_holder: Option<String> = sqlx::query_scalar(
-        "SELECT holder FROM upstream_lease_v1 WHERE upstream_id = ? AND lease_kind = 'refresh'",
-    )
-    .bind(id.to_string())
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(map_sqlx_error)?;
-    if existing_holder
-        .as_deref()
-        .is_some_and(|stored| stored != holder)
-    {
-        return Err(conflict("refresh lease holder mismatch"));
-    }
-    if existing_holder.is_some() {
-        sqlx::query(
-            "DELETE FROM upstream_lease_v1 WHERE upstream_id = ? AND lease_kind = 'refresh'",
-        )
-        .bind(id.to_string())
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
-    }
     sqlx::query(
         "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, token_revision, oauth_token_generation, refreshed_at, created_at, updated_at)
          VALUES (?, ?, 1, 1, unixepoch(), unixepoch(), unixepoch())
@@ -759,7 +558,7 @@ async fn set_split_status_in_tx(
 ) -> StorageResult<()> {
     let id = patch;
     let row = sqlx::query(
-        "SELECT last_apply_error, last_apply_at, observed_spec_revision, observed_api_key_secret_revision, observed_oauth_token_revision, next_warmup_at, last_warmup_cycle_key, last_warmup_at FROM upstream_status_v1 WHERE upstream_id = ?",
+        "SELECT last_apply_error, last_apply_at, observed_spec_revision, observed_api_key_secret_revision, observed_oauth_token_revision, last_warmup_at FROM upstream_status_v1 WHERE upstream_id = ?",
     )
     .bind(id.to_string())
     .fetch_optional(&mut **tx)
@@ -790,14 +589,6 @@ async fn set_split_status_in_tx(
             .map(|value| u64_to_i64(value, "observed_oauth_token_revision"))
             .transpose()?;
     }
-    if let Some(value) = status.next_warmup_at {
-        current.next_warmup_at = value
-            .map(|value| datetime_to_i64(value, "next_warmup_at"))
-            .transpose()?;
-    }
-    if let Some(value) = status.last_warmup_cycle_key {
-        current.last_warmup_cycle_key = value.map(|value| value.to_string());
-    }
     if let Some(value) = status.last_warmup_at_unix_secs {
         current.last_warmup_at = value
             .map(|unix_secs| u64_to_i64(unix_secs, "last_warmup_at"))
@@ -805,16 +596,14 @@ async fn set_split_status_in_tx(
     }
 
     sqlx::query(
-        "INSERT INTO upstream_status_v1 (upstream_id, last_apply_error, last_apply_at, observed_spec_revision, observed_api_key_secret_revision, observed_oauth_token_revision, next_warmup_at, last_warmup_cycle_key, last_warmup_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, unixepoch())
+        "INSERT INTO upstream_status_v1 (upstream_id, last_apply_error, last_apply_at, observed_spec_revision, observed_api_key_secret_revision, observed_oauth_token_revision, last_warmup_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, unixepoch())
          ON CONFLICT (upstream_id) DO UPDATE
          SET last_apply_error = excluded.last_apply_error,
              last_apply_at = excluded.last_apply_at,
              observed_spec_revision = excluded.observed_spec_revision,
              observed_api_key_secret_revision = excluded.observed_api_key_secret_revision,
              observed_oauth_token_revision = excluded.observed_oauth_token_revision,
-             next_warmup_at = excluded.next_warmup_at,
-             last_warmup_cycle_key = excluded.last_warmup_cycle_key,
              last_warmup_at = excluded.last_warmup_at,
              updated_at = unixepoch()",
     )
@@ -824,188 +613,11 @@ async fn set_split_status_in_tx(
     .bind(current.observed_spec_revision)
     .bind(current.observed_api_key_secret_revision)
     .bind(current.observed_oauth_token_revision)
-    .bind(current.next_warmup_at)
-    .bind(current.last_warmup_cycle_key)
     .bind(current.last_warmup_at)
     .execute(&mut **tx)
     .await
     .map_err(map_sqlx_error)?;
     Ok(())
-}
-
-async fn claim_split_lease(
-    pool: &SqlitePool,
-    id: Uuid,
-    lease_kind: UpstreamLeaseKind,
-    holder: &str,
-    ttl_secs: i64,
-) -> StorageResult<bool> {
-    let mut tx = begin_immediate(pool).await?;
-    let row = sqlx::query(
-        "INSERT INTO upstream_lease_v1 (upstream_id, lease_kind, holder, until_unix_secs, updated_at)
-         SELECT ?, ?, ?, unixepoch() + ?, unixepoch()
-         WHERE EXISTS (SELECT 1 FROM upstream_spec_v1 WHERE id = ? AND deleted_at IS NULL)
-         ON CONFLICT (upstream_id, lease_kind) DO UPDATE
-         SET holder = excluded.holder,
-             until_unix_secs = excluded.until_unix_secs,
-             updated_at = unixepoch()
-         WHERE upstream_lease_v1.holder = excluded.holder
-            OR upstream_lease_v1.until_unix_secs <= unixepoch()
-         RETURNING upstream_id",
-    )
-    .bind(id.to_string())
-    .bind(lease_kind.as_str())
-    .bind(holder)
-    .bind(ttl_secs)
-    .bind(id.to_string())
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(map_sqlx_error)?;
-    tx.commit().await.map_err(map_sqlx_error)?;
-    Ok(row.is_some())
-}
-
-async fn renew_split_lease(
-    pool: &SqlitePool,
-    id: Uuid,
-    lease_kind: UpstreamLeaseKind,
-    holder: &str,
-    ttl_secs: i64,
-) -> StorageResult<bool> {
-    let mut tx = begin_immediate(pool).await?;
-    let row = sqlx::query(
-        "UPDATE upstream_lease_v1
-            SET until_unix_secs = unixepoch() + ?,
-                updated_at = unixepoch()
-          WHERE upstream_id = ?
-            AND lease_kind = ?
-            AND holder = ?
-            AND until_unix_secs > unixepoch()
-            AND EXISTS (SELECT 1 FROM upstream_spec_v1 WHERE id = ? AND deleted_at IS NULL)
-          RETURNING upstream_id",
-    )
-    .bind(ttl_secs)
-    .bind(id.to_string())
-    .bind(lease_kind.as_str())
-    .bind(holder)
-    .bind(id.to_string())
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(map_sqlx_error)?;
-    tx.commit().await.map_err(map_sqlx_error)?;
-    Ok(row.is_some())
-}
-
-async fn release_split_lease(
-    pool: &SqlitePool,
-    id: Uuid,
-    lease_kind: UpstreamLeaseKind,
-    holder: &str,
-) -> StorageResult<bool> {
-    let mut tx = begin_immediate(pool).await?;
-    let row = sqlx::query(
-        "DELETE FROM upstream_lease_v1 WHERE upstream_id = ? AND lease_kind = ? AND holder = ? RETURNING upstream_id",
-    )
-    .bind(id.to_string())
-    .bind(lease_kind.as_str())
-    .bind(holder)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(map_sqlx_error)?;
-    tx.commit().await.map_err(map_sqlx_error)?;
-    Ok(row.is_some())
-}
-
-async fn write_split_warmup_cycle_key(
-    pool: &SqlitePool,
-    id: Uuid,
-    holder: &str,
-    new_cycle_key: i64,
-    next_warmup_at: Option<DateTime<Utc>>,
-) -> StorageResult<bool> {
-    let mut tx = begin_immediate(pool).await?;
-    let new_cycle_key = new_cycle_key.to_string();
-    let row = sqlx::query(
-        "DELETE FROM upstream_lease_v1
-          WHERE upstream_id = ?
-            AND lease_kind = 'warmup'
-            AND holder = ?
-            AND until_unix_secs > unixepoch()
-            AND EXISTS (
-                SELECT 1 FROM upstream_spec_v1 spec
-                LEFT JOIN upstream_status_v1 status ON status.upstream_id = spec.id
-                WHERE spec.id = ?
-                  AND spec.deleted_at IS NULL
-                  AND status.last_warmup_cycle_key IS NOT ?
-            )
-          RETURNING upstream_id",
-    )
-    .bind(id.to_string())
-    .bind(holder)
-    .bind(id.to_string())
-    .bind(&new_cycle_key)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(map_sqlx_error)?;
-    if row.is_none() {
-        tx.commit().await.map_err(map_sqlx_error)?;
-        return Ok(false);
-    }
-    set_split_status_in_tx(
-        &mut tx,
-        id,
-        UpstreamStatusUpdate {
-            last_warmup_cycle_key: Some(Some(new_cycle_key.parse::<i64>().map_err(|error| {
-                StorageError::Fatal {
-                    message: format!("invalid warmup cycle key after serialization: {error}"),
-                }
-            })?)),
-            next_warmup_at: Some(next_warmup_at),
-            ..UpstreamStatusUpdate::default()
-        },
-    )
-    .await?;
-    tx.commit().await.map_err(map_sqlx_error)?;
-    Ok(true)
-}
-
-async fn write_split_warmup_next_at(
-    pool: &SqlitePool,
-    id: Uuid,
-    holder: &str,
-    next_warmup_at: DateTime<Utc>,
-) -> StorageResult<bool> {
-    let mut tx = begin_immediate(pool).await?;
-    let row = sqlx::query(
-        "SELECT upstream_id FROM upstream_lease_v1
-          WHERE upstream_id = ?
-            AND lease_kind = 'warmup'
-            AND holder = ?
-            AND until_unix_secs > unixepoch()
-            AND EXISTS (SELECT 1 FROM upstream_spec_v1 WHERE id = ? AND deleted_at IS NULL)
-          LIMIT 1",
-    )
-    .bind(id.to_string())
-    .bind(holder)
-    .bind(id.to_string())
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(map_sqlx_error)?;
-    if row.is_none() {
-        tx.commit().await.map_err(map_sqlx_error)?;
-        return Ok(false);
-    }
-    set_split_status_in_tx(
-        &mut tx,
-        id,
-        UpstreamStatusUpdate {
-            next_warmup_at: Some(Some(next_warmup_at)),
-            ..UpstreamStatusUpdate::default()
-        },
-    )
-    .await?;
-    tx.commit().await.map_err(map_sqlx_error)?;
-    Ok(true)
 }
 
 async fn begin_immediate(pool: &SqlitePool) -> StorageResult<Transaction<'static, Sqlite>> {
@@ -1025,27 +637,11 @@ fn split_row_to_record(row: SqliteRow) -> StorageResult<UpstreamRecord> {
         .map_err(|error| StorageError::Corrupted {
             message: format!("invalid upstream base_url: {error}"),
         })?;
-    let refresh_lease_holder = row
-        .try_get::<Option<String>, _>("refresh_lease_holder")
-        .map_err(map_sqlx_error)?
-        .map(|value| Uuid::parse_str(&value))
-        .transpose()
-        .map_err(|error| StorageError::Corrupted {
-            message: format!("invalid refresh lease holder: {error}"),
-        })?;
     let warmup_dialect_plugin = row
         .try_get::<Option<String>, _>("warmup_dialect_plugin")
         .map_err(map_sqlx_error)?
         .map(|value| serde_json::from_str::<UpstreamWarmupDialectPlugin>(&value))
         .transpose()?;
-    let last_warmup_cycle_key = row
-        .try_get::<Option<String>, _>("last_warmup_cycle_key")
-        .map_err(map_sqlx_error)?
-        .map(|value| value.parse::<i64>())
-        .transpose()
-        .map_err(|error| StorageError::Corrupted {
-            message: format!("invalid warmup cycle key: {error}"),
-        })?;
     Ok(UpstreamRecord {
         id: Uuid::parse_str(&id).map_err(|error| StorageError::Corrupted {
             message: format!("invalid upstream id {id}: {error}"),
@@ -1059,12 +655,6 @@ fn split_row_to_record(row: SqliteRow) -> StorageResult<UpstreamRecord> {
             .map_err(map_sqlx_error)?
             .map(EncryptedOAuthTokens::from_ciphertext),
         api_key_ciphertext: row.try_get("api_key_ciphertext").map_err(map_sqlx_error)?,
-        refresh_lease_holder,
-        refresh_lease_until_unix_secs: optional_i64_to_u64(
-            row.try_get("refresh_lease_until_unix_secs")
-                .map_err(map_sqlx_error)?,
-            "refresh_lease_until_unix_secs",
-        )?,
         last_apply_error: row.try_get("last_apply_error").map_err(map_sqlx_error)?,
         last_apply_at_unix_secs: optional_i64_to_u64(
             row.try_get("last_apply_at").map_err(map_sqlx_error)?,
@@ -1095,15 +685,6 @@ fn split_row_to_record(row: SqliteRow) -> StorageResult<UpstreamRecord> {
             .try_get::<i64, _>("warmup_enabled")
             .map_err(map_sqlx_error)?
             != 0,
-        next_warmup_at: optional_i64_to_datetime(
-            row.try_get("next_warmup_at").map_err(map_sqlx_error)?,
-            "next_warmup_at",
-        )?,
-        last_warmup_cycle_key,
-        warmup_lease_holder: row.try_get("warmup_lease_holder").map_err(map_sqlx_error)?,
-        warmup_lease_until_unix_secs: row
-            .try_get("warmup_lease_until_unix_secs")
-            .map_err(map_sqlx_error)?,
         warmup_dialect_plugin,
         last_warmup_at_unix_secs: optional_i64_to_u64(
             row.try_get("last_warmup_at").map_err(map_sqlx_error)?,
@@ -1119,8 +700,6 @@ struct StatusFields {
     observed_spec_revision: Option<i64>,
     observed_api_key_secret_revision: Option<i64>,
     observed_oauth_token_revision: Option<i64>,
-    next_warmup_at: Option<i64>,
-    last_warmup_cycle_key: Option<String>,
     last_warmup_at: Option<i64>,
 }
 
@@ -1140,10 +719,6 @@ impl StatusFields {
                 .map_err(map_sqlx_error)?,
             observed_oauth_token_revision: row
                 .try_get("observed_oauth_token_revision")
-                .map_err(map_sqlx_error)?,
-            next_warmup_at: row.try_get("next_warmup_at").map_err(map_sqlx_error)?,
-            last_warmup_cycle_key: row
-                .try_get("last_warmup_cycle_key")
                 .map_err(map_sqlx_error)?,
             last_warmup_at: row.try_get("last_warmup_at").map_err(map_sqlx_error)?,
         })
@@ -1169,38 +744,6 @@ fn parse_kind(value: String) -> StorageResult<UpstreamKind> {
 
 fn optional_i64_to_u64(value: Option<i64>, field: &str) -> StorageResult<Option<u64>> {
     value.map(|value| i64_to_u64(value, field)).transpose()
-}
-
-fn optional_i64_to_datetime(
-    value: Option<i64>,
-    field: &str,
-) -> StorageResult<Option<DateTime<Utc>>> {
-    value.map(|value| i64_to_datetime(value, field)).transpose()
-}
-
-fn optional_datetime_to_i64(
-    value: Option<DateTime<Utc>>,
-    field: &str,
-) -> StorageResult<Option<i64>> {
-    value.map(|value| datetime_to_i64(value, field)).transpose()
-}
-
-fn i64_to_datetime(value: i64, field: &str) -> StorageResult<DateTime<Utc>> {
-    Utc.timestamp_opt(value, 0)
-        .single()
-        .ok_or_else(|| StorageError::Corrupted {
-            message: format!("{field} cannot be represented as datetime"),
-        })
-}
-
-fn datetime_to_i64(value: DateTime<Utc>, field: &str) -> StorageResult<i64> {
-    let timestamp = value.timestamp();
-    if timestamp < 0 {
-        return Err(StorageError::Fatal {
-            message: format!("{field} is before the unix epoch"),
-        });
-    }
-    Ok(timestamp)
 }
 
 fn usize_to_i64(value: usize, field: &str) -> StorageResult<i64> {

@@ -6,7 +6,6 @@ use std::time::Instant;
 use apalis_core::task::Task;
 use tower::{Layer, Service};
 
-use crate::jobs::reconcile::SchedulerReconcileJob;
 use crate::retry::JobOutcome;
 use crate::scheduler_metrics;
 use crate::worker::{EntityJob, SingletonJob};
@@ -57,7 +56,6 @@ impl SchedulerMetricPayload for EntityJob {
             Self::Warmup(_) => "upstream_warmup",
             Self::OAuthRefresh(_) => "entity:oauth_refresh",
             Self::OAuthUsagePoll(_) => "entity:oauth_usage_poll",
-            Self::AnthropicCompatRefresh(_) => "entity:anthropic_compat_refresh",
             Self::MetadataRefresh(_) => "entity:metadata_refresh",
         }
     }
@@ -72,13 +70,11 @@ impl SchedulerMetricPayload for SingletonJob {
             Self::PromptCachePurge(_) => "singleton:prompt_cache_purge",
             Self::PriceCatalogRefresh(_) => "singleton:price_catalog_refresh",
             Self::ApalisHousekeeping(_) => "singleton:apalis_housekeeping",
+            Self::WarmupWatchdog(_) => "singleton:warmup_watchdog",
+            Self::OAuthRefreshWatchdog(_) => "singleton:oauth_refresh_watchdog",
+            Self::OAuthUsagePollWatchdog(_) => "singleton:oauth_usage_poll_watchdog",
+            Self::AnthropicCompatRefresh(_) => "singleton:anthropic_compat_refresh",
         }
-    }
-}
-
-impl SchedulerMetricPayload for SchedulerReconcileJob {
-    fn scheduler_job_type(&self) -> &'static str {
-        "scheduler_reconcile"
     }
 }
 

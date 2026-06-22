@@ -6,7 +6,6 @@ use apalis::layers::catch_panic::CatchPanicLayer;
 use apalis::prelude::{IntervalStrategy, StrategyBuilder, WorkerBuilder, WorkerError};
 use cc_lb_aead::AeadService;
 use cc_lb_config::AnthropicOAuthConfig;
-use cc_lb_scheduler::idempotency::OAuthRefreshClaimsStore;
 use cc_lb_scheduler::middleware::TraceparentLayer;
 use cc_lb_scheduler::retry::RetryClass;
 use cc_lb_scheduler::worker::{
@@ -71,10 +70,8 @@ async fn run_postgres_race(url: String) -> TestResult<()> {
         fake.initial_tokens().await?,
     )
     .await?;
-    let claims = OAuthRefreshClaimsStore::new(pool.clone());
     let probe = OAuthWorkerProbe::new();
     let state = OAuthWorkerState::new(
-        claims.clone(),
         storage.as_ref().clone(),
         Uuid::new_v4(),
         aead.clone(),
@@ -103,10 +100,6 @@ async fn run_postgres_race(url: String) -> TestResult<()> {
         backend,
         lazy,
         upstream_id,
-        || {
-            let claims = claims.clone();
-            async move { Ok(claims.read_current_generation(upstream_id).await?) }
-        },
         || {
             let storage = storage.clone();
             async move { read_upstream_generation(storage.as_ref(), upstream_id).await }
@@ -155,10 +148,7 @@ fn database_url(base_url: &str, database: &str) -> TestResult<String> {
 
 fn spawn_postgres_worker(
     storage: PostgresApalisStorage,
-    state: OAuthWorkerState<
-        OAuthRefreshClaimsStore<sqlx::Postgres>,
-        cc_lb_storage_postgres::PostgresStorage,
-    >,
+    state: OAuthWorkerState<cc_lb_storage_postgres::PostgresStorage>,
     cancel: CancellationToken,
 ) -> JoinHandle<Result<(), WorkerError>> {
     tokio::spawn(async move {
@@ -168,12 +158,7 @@ fn spawn_postgres_worker(
             .layer(TraceparentLayer::new().with_scheduler_metrics())
             .layer(RetryClass::Probe.layer())
             .layer(CatchPanicLayer::new())
-            .build(
-                entity_job_handler::<
-                    OAuthRefreshClaimsStore<sqlx::Postgres>,
-                    cc_lb_storage_postgres::PostgresStorage,
-                >,
-            )
+            .build(entity_job_handler::<cc_lb_storage_postgres::PostgresStorage>)
             .run_until(async move {
                 cancel.cancelled().await;
                 Ok::<(), WorkerError>(())

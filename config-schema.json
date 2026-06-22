@@ -92,7 +92,6 @@
         "enabled": false,
         "grace_margin_secs": 30,
         "refresh_debounce_secs": 60,
-        "sweeper_interval_secs": 300,
         "warm_set_cap": 32
       }
     },
@@ -115,11 +114,25 @@
         },
         "leader_lock_key": 224417894236161,
         "pgbouncer_transaction_mode": false,
-        "reconcile_interval_secs": 300,
         "recurring_jobs": {
+          "anthropic_compat_refresh": {
+            "enabled": true,
+            "interval_secs": 86400,
+            "jitter_secs": 30
+          },
           "apalis_housekeeping": {
             "enabled": true,
             "interval_secs": 3600,
+            "jitter_secs": 30
+          },
+          "oauth_refresh_watchdog": {
+            "enabled": true,
+            "interval_secs": 9360,
+            "jitter_secs": 30
+          },
+          "oauth_usage_poll_watchdog": {
+            "enabled": true,
+            "interval_secs": 900,
             "jitter_secs": 30
           },
           "price_catalog_refresh": {
@@ -146,6 +159,11 @@
             "enabled": true,
             "interval_secs": 30,
             "jitter_secs": 3
+          },
+          "warmup_watchdog": {
+            "enabled": true,
+            "interval_secs": 6000,
+            "jitter_secs": 30
           }
         },
         "retry_classes": {
@@ -192,7 +210,6 @@
         "dedup_elapsed_override_secs": 30,
         "enabled": true,
         "gc_batch_size": 10000,
-        "gc_tick_interval_secs": 60,
         "retention_days": 30,
         "routing_max_staleness_secs": 1800,
         "writer_batch_max_records": 256,
@@ -590,7 +607,7 @@
       "additionalProperties": false
     },
     "PromptCacheShadowConfig": {
-      "description": "Prompt cache shadow mode configuration.\n\nControls the prompt cache observation cache behavior. When `enabled=false`, the cache layer\nis not constructed and observation flow is gated off at the lifecycle level for byte-equivalent\npre-T22 behavior (no observation enqueue, no snapshot, no sweeper). When `enabled=true`,\nthe full cache pipeline activates: observations from successful responses are decoded,\nupserted into the in-memory cache, and enqueued for persistent storage; `build_candidates`\nsnapshots cache state per upstream to compute cache scores.\n\nConfiguration keys and defaults:\n- `enabled` (default: false) - gate all observation flow and sweeper spawn\n- `grace_margin_secs` (default: 30) - minimum age before a cache hit is refreshed\n- `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence\n- `sweeper_interval_secs` (default: 300) - interval between expiry purge scans\n- `warm_set_cap` (default: 32) - max snapshot entries per upstream/model",
+      "description": "Prompt cache shadow mode configuration.\n\nControls the prompt cache observation cache behavior. When `enabled=false`, the cache layer\nis not constructed and observation flow is gated off at the lifecycle level for byte-equivalent\npre-T22 behavior (no observation enqueue, no snapshot, no sweeper). When `enabled=true`,\nthe full cache pipeline activates: observations from successful responses are decoded,\nupserted into the in-memory cache, and enqueued for persistent storage; `build_candidates`\nsnapshots cache state per upstream to compute cache scores.\n\nConfiguration keys and defaults:\n- `enabled` (default: false) - gate all observation flow and sweeper spawn\n- `grace_margin_secs` (default: 30) - minimum age before a cache hit is refreshed\n- `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence\n- `warm_set_cap` (default: 32) - max snapshot entries per upstream/model",
       "type": "object",
       "properties": {
         "enabled": {
@@ -607,12 +624,6 @@
           "type": "integer",
           "format": "uint64",
           "default": 60,
-          "minimum": 0
-        },
-        "sweeper_interval_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 300,
           "minimum": 0
         },
         "warm_set_cap": {
@@ -693,21 +704,30 @@
           "type": "boolean",
           "default": false
         },
-        "reconcile_interval_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 300,
-          "minimum": 0
-        },
         "recurring_jobs": {
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/RecurringJobConfig"
           },
           "default": {
+            "anthropic_compat_refresh": {
+              "enabled": true,
+              "interval_secs": 86400,
+              "jitter_secs": 30
+            },
             "apalis_housekeeping": {
               "enabled": true,
               "interval_secs": 3600,
+              "jitter_secs": 30
+            },
+            "oauth_refresh_watchdog": {
+              "enabled": true,
+              "interval_secs": 9360,
+              "jitter_secs": 30
+            },
+            "oauth_usage_poll_watchdog": {
+              "enabled": true,
+              "interval_secs": 900,
               "jitter_secs": 30
             },
             "price_catalog_refresh": {
@@ -734,6 +754,11 @@
               "enabled": true,
               "interval_secs": 30,
               "jitter_secs": 3
+            },
+            "warmup_watchdog": {
+              "enabled": true,
+              "interval_secs": 6000,
+              "jitter_secs": 30
             }
           }
         },
@@ -978,12 +1003,6 @@
           "type": "integer",
           "format": "uint32",
           "default": 10000,
-          "minimum": 0
-        },
-        "gc_tick_interval_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 60,
           "minimum": 0
         },
         "retention_days": {

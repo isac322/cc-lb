@@ -3,13 +3,9 @@ use std::time::Duration;
 
 use apalis::prelude::{IntervalStrategy, Status, StrategyBuilder, TaskSink};
 use cc_lb_config::SchedulerConfig;
-use cc_lb_scheduler::jobs::compat::AnthropicCompatRefreshJob;
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollJob;
-use cc_lb_scheduler::jobs::reconcile::{
-    SchedulerReconcileJob, SchedulerReconcileJobResult, SchedulerReconcileStats,
-};
 use cc_lb_scheduler::jobs::usage_prune::UsagePruneJob;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::retry::JobOutcome;
@@ -53,7 +49,7 @@ async fn worker_sqlite_runs_one_of_each_entity_job_to_done()
     .bind(queue)
     .fetch_all(&pool)
     .await?;
-    assert_eq!(done_count, 5, "statuses: {statuses:?}");
+    assert_eq!(done_count, 4, "statuses: {statuses:?}");
     Ok(())
 }
 
@@ -69,7 +65,7 @@ fn fast_queue_config(queue: &str) -> apalis_sqlite::Config {
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
-async fn scheduler_backend_sqlite_push_job_uses_partial_idempotency_index()
+async fn scheduler_backend_sqlite_push_job_uses_full_idempotency_index()
 -> Result<(), Box<dyn std::error::Error>> {
     let pool = sqlite_memory().await?;
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
@@ -114,7 +110,7 @@ async fn scheduler_backend_sqlite_push_job_uses_partial_idempotency_index()
             .bind(format!("entity:metadata_refresh:{upstream_id}:1"))
             .fetch_one(&pool)
             .await?;
-    assert_eq!(total_count, 2);
+    assert_eq!(total_count, 1);
     Ok(())
 }
 
@@ -140,11 +136,9 @@ async fn scheduler_ctx_default_dispatches_succeed() -> Result<(), Box<dyn std::e
         (ctx.entity_dispatch)(EntityJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1))).await?;
     let singleton =
         (ctx.singleton_dispatch)(SingletonJob::UsagePrune(UsagePruneJob::default())).await?;
-    let reconcile = (ctx.reconcile_dispatch)(SchedulerReconcileJob::default()).await;
 
     assert_eq!(entity, JobOutcome::Done);
     assert_eq!(singleton, JobOutcome::Done);
-    assert_eq!(reconcile, done_empty_reconcile());
     Ok(())
 }
 
@@ -155,10 +149,11 @@ async fn sqlite_memory() -> Result<sqlx::SqlitePool, Box<dyn std::error::Error>>
         .connect("sqlite::memory:")
         .await?;
     apalis_sqlite::SqliteStorage::setup(&pool).await?;
+    cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
     Ok(pool)
 }
 
-fn entity_jobs(upstream_id: Uuid) -> [EntityJob; 5] {
+fn entity_jobs(upstream_id: Uuid) -> [EntityJob; 4] {
     [
         EntityJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1)),
         EntityJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
@@ -166,9 +161,6 @@ fn entity_jobs(upstream_id: Uuid) -> [EntityJob; 5] {
             upstream_id,
             traceparent: None,
         }),
-        EntityJob::AnthropicCompatRefresh(AnthropicCompatRefreshJob::new(
-            "claude_code_stable_version",
-        )),
         EntityJob::MetadataRefresh(MetadataRefreshJob::new(upstream_id, 1)),
     ]
 }
@@ -178,24 +170,5 @@ fn done_scheduler_ctx() -> SchedulerCtx {
         SchedulerConfig::default(),
         Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
         Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
-        Arc::new(|_job| Box::pin(async { done_reconcile() })),
     )
-}
-
-fn done_reconcile() -> SchedulerReconcileJobResult {
-    SchedulerReconcileJobResult::Done(SchedulerReconcileStats {
-        jobs_ensured: 1,
-        jobs_pruned: 0,
-        failures_recorded: 0,
-        reconcile_interval_secs: 300,
-    })
-}
-
-fn done_empty_reconcile() -> SchedulerReconcileJobResult {
-    SchedulerReconcileJobResult::Done(SchedulerReconcileStats {
-        jobs_ensured: 0,
-        jobs_pruned: 0,
-        failures_recorded: 0,
-        reconcile_interval_secs: 300,
-    })
 }

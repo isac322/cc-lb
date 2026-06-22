@@ -1,5 +1,3 @@
-#![allow(deprecated)]
-
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
@@ -19,9 +17,11 @@ use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_core::anthropic_compat::{
     CLAUDE_CODE_STABLE_VERSION_FALLBACK, CLAUDE_CODE_STABLE_VERSION_KEY, claude_code_user_agent,
 };
-use cc_lb_core::{
-    AuditEntry, AuditPayload, MetadataHookRequest, fetch_metadata_only, make_metadata_http_client,
-};
+use cc_lb_core::{AuditEntry, AuditPayload, fetch_metadata_only, make_metadata_http_client};
+use cc_lb_scheduler::error::SchedulerError;
+use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
+use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollJob;
+use cc_lb_scheduler::worker::{EntityJob, SchedulerPushTask};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{
     OrganizationMetadataRecord, Storage, StorageError, UpstreamCreate, UpstreamRecord,
@@ -143,8 +143,6 @@ struct UpstreamResponse {
 struct UpstreamStatusResponse {
     last_apply_error: Option<String>,
     last_apply_at_unix_secs: Option<u64>,
-    next_warmup_at: Option<chrono::DateTime<chrono::Utc>>,
-    last_warmup_cycle_key: Option<i64>,
     last_warmup_at_unix_secs: Option<u64>,
 }
 
@@ -519,7 +517,6 @@ async fn create_upstream_from_oauth_draft(
             oauth_token_generation: None,
             warmup_enabled: false,
             warmup_dialect_plugin: None,
-            ..UpstreamCreate::default()
         },
     )
     .await
@@ -573,6 +570,15 @@ async fn create_upstream_from_oauth_draft(
             .await;
         }
     };
+    if let Err(error) = seed_oauth_bootstrap_tasks(&state, updated.id).await {
+        return rollback_oauth_draft_creation(
+            storage.as_ref(),
+            &payload.state_token,
+            created.id,
+            format!("oauth scheduler seed failed: {error}"),
+        )
+        .await;
+    }
     let _fetched_at_unix_secs = completion.fetched_at_unix_secs;
     let mut subscription_record = completion.subscription_metadata_record;
     subscription_record.upstream_id = created.id;
@@ -742,16 +748,8 @@ async fn complete_oauth(
         Err(error) => return storage_error_response(&error),
     };
 
-    if let Some(hook) = &state.subscription_metadata_hook
-        && let Err(error) = hook
-            .enqueue(MetadataHookRequest {
-                upstream_id,
-                credential_generation: updated.oauth_token_generation,
-                traceparent: None,
-            })
-            .await
-    {
-        tracing::warn!(%error, %upstream_id, "metadata refresh enqueue failed after oauth complete");
+    if let Err(error) = seed_oauth_bootstrap_tasks(&state, upstream_id).await {
+        return scheduler_error_response(&error);
     }
 
     enqueue_upstream_audit(
@@ -950,6 +948,47 @@ fn storage_error_response(error: &StorageError) -> Response {
     }
 }
 
+fn scheduler_error_response(error: &SchedulerError) -> Response {
+    tracing::error!(%error, "admin oauth scheduler seed failed");
+    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+}
+
+async fn seed_oauth_bootstrap_tasks(
+    state: &AdminState,
+    upstream_id: Uuid,
+) -> Result<(), SchedulerError> {
+    let Some(scheduler) = state.scheduler.as_ref() else {
+        return Ok(());
+    };
+    let seed_secs = now_unix_secs();
+    for task in oauth_bootstrap_tasks(upstream_id, seed_secs) {
+        match scheduler.push_entity_task(task).await {
+            Ok(()) | Err(SchedulerError::Conflict(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+fn oauth_bootstrap_tasks(upstream_id: Uuid, seed_secs: u64) -> [SchedulerPushTask<EntityJob>; 2] {
+    [
+        SchedulerPushTask {
+            args: EntityJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
+            idempotency_key: Some(format!(
+                "entity:oauth_refresh:{upstream_id}:bootstrap:{seed_secs}"
+            )),
+            run_at_unix_secs: Some(seed_secs),
+        },
+        SchedulerPushTask {
+            args: EntityJob::OAuthUsagePoll(OAuthUsagePollJob::new(upstream_id)),
+            idempotency_key: Some(format!(
+                "entity:oauth_usage_poll:{upstream_id}:bootstrap:{seed_secs}"
+            )),
+            run_at_unix_secs: Some(seed_secs),
+        },
+    ]
+}
+
 async fn rollback_oauth_draft_creation(
     storage: &dyn Storage,
     state_token: &str,
@@ -983,8 +1022,6 @@ fn upstream_response(record: &UpstreamRecord) -> UpstreamResponse {
         status: UpstreamStatusResponse {
             last_apply_error: record.last_apply_error.clone(),
             last_apply_at_unix_secs: record.last_apply_at_unix_secs,
-            next_warmup_at: record.next_warmup_at,
-            last_warmup_cycle_key: record.last_warmup_cycle_key,
             last_warmup_at_unix_secs: record.last_warmup_at_unix_secs,
         },
     }
@@ -1127,8 +1164,9 @@ fn claude_code_default_oauth() -> AnthropicOAuthConfig {
 #[cfg(test)]
 mod tests {
     use cc_lb_storage_api::OrganizationMetadataRecord;
+    use uuid::Uuid;
 
-    use super::suggest_name;
+    use super::{oauth_bootstrap_tasks, suggest_name};
 
     #[test]
     fn suggest_name_uses_non_generic_org_name_with_rate_suffix() {
@@ -1158,6 +1196,37 @@ mod tests {
             suggest_name(&meta, meta.account_email.as_deref()),
             "isac-max-20x"
         );
+    }
+
+    #[test]
+    fn oauth_bootstrap_tasks_seed_refresh_and_usage_with_same_seed_suffix() {
+        let upstream_id =
+            Uuid::parse_str("12345678-1234-5678-1234-567812345678").expect("uuid parses");
+        let seed_secs = 1_800_000_000;
+
+        let [refresh, usage_poll] = oauth_bootstrap_tasks(upstream_id, seed_secs);
+
+        assert_eq!(
+            refresh.idempotency_key.as_deref(),
+            Some("entity:oauth_refresh:12345678-1234-5678-1234-567812345678:bootstrap:1800000000")
+        );
+        assert_eq!(refresh.run_at_unix_secs, Some(seed_secs));
+        let cc_lb_scheduler::worker::EntityJob::OAuthRefresh(refresh_job) = refresh.args else {
+            panic!("expected oauth refresh job");
+        };
+        assert_eq!(refresh_job.upstream_id, upstream_id);
+
+        assert_eq!(
+            usage_poll.idempotency_key.as_deref(),
+            Some(
+                "entity:oauth_usage_poll:12345678-1234-5678-1234-567812345678:bootstrap:1800000000"
+            )
+        );
+        assert_eq!(usage_poll.run_at_unix_secs, Some(seed_secs));
+        let cc_lb_scheduler::worker::EntityJob::OAuthUsagePoll(usage_job) = usage_poll.args else {
+            panic!("expected oauth usage poll job");
+        };
+        assert_eq!(usage_job.upstream_id, upstream_id);
     }
 
     fn org_meta(

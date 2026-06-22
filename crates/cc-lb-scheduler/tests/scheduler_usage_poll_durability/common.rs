@@ -1,8 +1,7 @@
 use std::time::Duration;
 
 use apalis::prelude::WorkerError;
-use cc_lb_scheduler::idempotency::OAuthUsagePollScheduleConfig;
-use cc_lb_scheduler::retry::JobOutcome;
+use cc_lb_scheduler::state_stores::OAuthUsagePollScheduleConfig;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
@@ -15,7 +14,6 @@ pub const THROTTLE_AT: u64 = 10_010;
 pub const SECOND_SUCCESS_AT: u64 = 10_040;
 pub const RESTART_NOW: u64 = 10_041;
 pub const SUCCESS_INTERVAL_SECS: u64 = 10;
-pub const THROTTLE_INTERVAL_SECS: u64 = 30;
 
 pub type TestResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
@@ -44,7 +42,7 @@ pub fn schedule_config() -> OAuthUsagePollScheduleConfig {
         max_interval_secs: 600,
         fallback_interval_secs: SUCCESS_INTERVAL_SECS,
         history_capacity: 4,
-        throttle_ladder_secs: vec![THROTTLE_INTERVAL_SECS],
+        throttle_ladder_secs: vec![30],
         success_window_secs: 120,
         success_capacity: 3,
         success_safety_secs: 5,
@@ -56,11 +54,4 @@ pub fn usage_url(fake: &FakeAnthropic) -> String {
     url.set_path("/v1/messages");
     url.set_query(None);
     url.to_string()
-}
-
-pub fn retry_delay(outcome: JobOutcome) -> TestResult<Duration> {
-    match outcome {
-        JobOutcome::Retry { delay } => Ok(delay),
-        other => Err(format!("outcome was {other:?}, expected Retry").into()),
-    }
 }

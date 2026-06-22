@@ -1,5 +1,11 @@
 use cc_lb_core::SubscriptionQuotaSink;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
+use cc_lb_scheduler::jobs::oauth_usage_poll::{
+    OAuthUsagePollHandler, OAuthUsagePollJob, compute_next_run_at,
+};
+use cc_lb_scheduler::retry::JobOutcome;
+use cc_lb_scheduler::state_stores::{OAuthUsagePollCursorsStore, OAuthUsagePollScheduleConfig};
+use cc_lb_scheduler::worker::{EntityJob, SchedulerBackend, SchedulerPushTask};
 use cc_lb_storage_api::{
     SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
     SubscriptionQuotaStatus, SubscriptionQuotaWindow,
@@ -7,7 +13,10 @@ use cc_lb_storage_api::{
 use serde::Deserialize;
 use uuid::Uuid;
 
+use crate::scheduler_dispatch::time::now_unix_secs;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
+
+use super::SchedulerDispatch;
 
 #[derive(Debug, Deserialize)]
 struct UsageBody {
@@ -65,6 +74,61 @@ pub(super) fn observe_usage_body(
             .map_err(|error| SchedulerError::Job(error.to_string()))?;
     }
     Ok(())
+}
+
+impl SchedulerDispatch {
+    pub(super) async fn dispatch_oauth_usage_poll(
+        &self,
+        job: OAuthUsagePollJob,
+    ) -> SchedulerResult<JobOutcome> {
+        match &self.backend {
+            #[cfg(feature = "sqlite")]
+            SchedulerBackend::Sqlite(sqlite) => {
+                let config = OAuthUsagePollScheduleConfig::default();
+                let cursors = OAuthUsagePollCursorsStore::new(sqlite.pool.clone());
+                let outcome = OAuthUsagePollHandler::new(cursors.clone(), config.clone())
+                    .handle(job.clone(), now_unix_secs(), |job| self.poll_usage(job))
+                    .await?;
+                let Some(cursor) = cursors.read(job.upstream_id).await? else {
+                    return Ok(outcome);
+                };
+                let next_run_at = compute_next_run_at(now_unix_secs(), &config, Some(&cursor));
+                push_next_oauth_usage_poll_task(&self.backend, job, next_run_at).await?;
+                Ok(outcome)
+            }
+            #[cfg(feature = "postgres")]
+            SchedulerBackend::Postgres(postgres) => {
+                let config = OAuthUsagePollScheduleConfig::default();
+                let cursors = OAuthUsagePollCursorsStore::new(postgres.pool.clone());
+                let outcome = OAuthUsagePollHandler::new(cursors.clone(), config.clone())
+                    .handle(job.clone(), now_unix_secs(), |job| self.poll_usage(job))
+                    .await?;
+                let Some(cursor) = cursors.read(job.upstream_id).await? else {
+                    return Ok(outcome);
+                };
+                let next_run_at = compute_next_run_at(now_unix_secs(), &config, Some(&cursor));
+                push_next_oauth_usage_poll_task(&self.backend, job, next_run_at).await?;
+                Ok(outcome)
+            }
+        }
+    }
+}
+
+pub(super) async fn push_next_oauth_usage_poll_task(
+    backend: &SchedulerBackend,
+    job: OAuthUsagePollJob,
+    unlock_at_unix_secs: u64,
+) -> SchedulerResult<()> {
+    let idempotency_key = job.idempotency_key(unlock_at_unix_secs);
+    let task = SchedulerPushTask {
+        args: EntityJob::OAuthUsagePoll(job),
+        idempotency_key: Some(idempotency_key),
+        run_at_unix_secs: Some(unlock_at_unix_secs),
+    };
+    match backend.push_entity_task(task).await {
+        Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn records_from_usage(
@@ -190,77 +254,4 @@ fn status_from_utilization(utilization: f64) -> SubscriptionQuotaStatus {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn parse(body: &str) -> Vec<SubscriptionQuotaObservationRecord> {
-        let usage: UsageBody = serde_json::from_str(body).expect("usage body parses");
-        records_from_usage(Uuid::nil(), usage, 1_700_000_000_000)
-    }
-
-    #[test]
-    fn rfc3339_resets_at_is_accepted() {
-        let records =
-            parse(r#"{"five_hour":{"utilization":42,"resets_at":"2026-06-21T20:30:00Z"}}"#);
-        let five_hour = records
-            .iter()
-            .find(|r| r.window == SubscriptionQuotaWindow::FiveHour)
-            .expect("five hour record");
-        assert_eq!(five_hour.resets_at_unix_secs, Some(1_782_073_800));
-    }
-
-    #[test]
-    fn numeric_resets_at_is_accepted() {
-        let records = parse(r#"{"seven_day":{"utilization":12,"resets_at":1800000000}}"#);
-        let seven_day = records
-            .iter()
-            .find(|r| r.window == SubscriptionQuotaWindow::SevenDay)
-            .expect("seven day record");
-        assert_eq!(seven_day.resets_at_unix_secs, Some(1_800_000_000));
-    }
-
-    #[test]
-    fn float_resets_at_is_accepted() {
-        let records = parse(r#"{"five_hour":{"utilization":1,"resets_at":1800000000.5}}"#);
-        let five_hour = records
-            .iter()
-            .find(|r| r.window == SubscriptionQuotaWindow::FiveHour)
-            .expect("five hour record");
-        assert_eq!(five_hour.resets_at_unix_secs, Some(1_800_000_000));
-    }
-
-    #[test]
-    fn string_resets_at_does_not_poison_other_windows() {
-        let records = parse(
-            r#"{"five_hour":{"utilization":10,"resets_at":"2026-06-21T20:30:00Z"},"seven_day":{"utilization":3,"resets_at":1800000000}}"#,
-        );
-        assert_eq!(records.len(), 2);
-    }
-
-    #[test]
-    fn full_production_body_produces_all_four_records() {
-        let body = r#"{"five_hour":{"utilization":60.0,"resets_at":"2026-06-21T08:10:00.885300+00:00"},"seven_day":{"utilization":21.0,"resets_at":"2026-06-25T19:00:00.885325+00:00"},"seven_day_oauth_apps":null,"seven_day_opus":null,"seven_day_sonnet":{"utilization":0.0,"resets_at":"2026-06-25T18:59:59.885338+00:00"},"extra_usage":{"is_enabled":false,"monthly_limit":null,"used_credits":null}}"#;
-        let records = parse(body);
-        let windows: Vec<_> = records.iter().map(|r| r.window).collect();
-        assert_eq!(
-            records.len(),
-            4,
-            "expected 4 records, got windows={:?}",
-            windows
-        );
-    }
-
-    #[test]
-    fn extra_usage_is_enabled_field_is_parsed() {
-        let records = parse(
-            r#"{"extra_usage":{"is_enabled":true,"monthly_limit":30000,"used_credits":15000}}"#,
-        );
-        let overage = records
-            .iter()
-            .find(|r| r.window == SubscriptionQuotaWindow::Overage)
-            .expect("overage record");
-        assert_eq!(overage.extra_usage_enabled, Some(true));
-        assert_eq!(overage.extra_usage_monthly_limit, Some(30000.0));
-        assert_eq!(overage.extra_usage_used_credits, Some(15000.0));
-    }
-}
+mod tests;

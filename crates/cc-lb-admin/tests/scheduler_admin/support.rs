@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode, header};
+use axum::response::Response;
 use cc_lb_config::Config;
 use cc_lb_scheduler::admin::SchedulerAdminHandle;
 use cc_lb_scheduler::worker::{ENTITY_QUEUE, EntityJob, SchedulerBackend};
@@ -59,6 +60,22 @@ pub async fn authed_json(
     Ok((status, value))
 }
 
+pub async fn request(
+    app: axum::Router,
+    method: &str,
+    uri: &str,
+    headers: &[(&str, &str)],
+) -> Result<Response, Box<dyn std::error::Error>> {
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header(header::AUTHORIZATION, "Bearer test-token");
+    for (name, value) in headers {
+        builder = builder.header(*name, *value);
+    }
+    Ok(app.oneshot(builder.body(Body::empty())?).await?)
+}
+
 #[cfg(feature = "sqlite")]
 pub async fn sqlite_fixture()
 -> Result<RouteFixture<scheduler_sqlx::SqlitePool>, Box<dyn std::error::Error>> {
@@ -94,6 +111,22 @@ pub async fn seed_sqlite_failed_warmup(
     .bind(Vec::<u8>::new())
     .bind(i64::try_from(NOW_SECS).expect("test timestamp fits"))
     .bind("entity:warmup:test")
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+#[cfg(feature = "postgres")]
+pub async fn seed_postgres_failed_warmup(
+    pool: &scheduler_sqlx::PgPool,
+) -> scheduler_sqlx::Result<()> {
+    scheduler_sqlx::query(
+        "INSERT INTO apalis.jobs (job, id, job_type, status, attempts, max_attempts, run_at, last_result, done_at, idempotency_key) \
+         VALUES ($1, 'failed-warmup', 'entity:warmup', 'Failed', 5, 5, to_timestamp($2), '{\"Err\":\"dial timeout\"}'::jsonb, to_timestamp($2), $3)",
+    )
+    .bind(Vec::<u8>::new())
+    .bind(i64::try_from(NOW_SECS).expect("test timestamp fits"))
+    .bind("entity:warmup:pg")
     .execute(pool)
     .await?;
     Ok(())
@@ -175,17 +208,4 @@ pub async fn postgres_fixture() -> Result<
             ),
         },
     )))
-}
-
-#[cfg(feature = "sqlite")]
-pub fn counter_value(rendered: &str, job_type: &str) -> f64 {
-    rendered
-        .lines()
-        .find(|line| {
-            line.starts_with("cclb_scheduler_failures_total{")
-                && line.contains(&format!(r#"job_type="{job_type}""#))
-        })
-        .and_then(|line| line.split_whitespace().last())
-        .and_then(|value| value.parse::<f64>().ok())
-        .unwrap_or(0.0)
 }

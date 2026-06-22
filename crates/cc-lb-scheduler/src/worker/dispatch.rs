@@ -4,7 +4,6 @@ use std::pin::Pin;
 use apalis::prelude::Data;
 
 use crate::error::SchedulerError;
-use crate::jobs::reconcile::{SchedulerReconcileJob, SchedulerReconcileJobResult};
 use crate::retry::JobOutcome;
 
 use super::{EntityJob, SchedulerCtx, SingletonJob};
@@ -34,28 +33,14 @@ pub(super) fn singleton_job_handler(
     ctx: Data<SchedulerCtx>,
 ) -> Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>> {
     let dispatch = ctx.singleton_dispatch.clone();
-    Box::pin(async move { dispatch(job).await })
-}
-
-pub(super) type ReconcileHandlerFn =
-    fn(
-        SchedulerReconcileJob,
-        Data<SchedulerCtx>,
-    ) -> Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>>;
-
-pub(super) fn reconcile_job_handler(
-    job: SchedulerReconcileJob,
-    ctx: Data<SchedulerCtx>,
-) -> Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>> {
-    let dispatch = ctx.reconcile_dispatch.clone();
-    Box::pin(async move { Ok(reconcile_result_to_outcome(dispatch(job).await)) })
-}
-
-fn reconcile_result_to_outcome(result: SchedulerReconcileJobResult) -> JobOutcome {
-    match result {
-        SchedulerReconcileJobResult::Done(_) => JobOutcome::Done,
-        SchedulerReconcileJobResult::Retry { delay, error: _ } => JobOutcome::Retry { delay },
+    match &job {
+        SingletonJob::AnthropicCompatRefresh(_) => {}
+        SingletonJob::WarmupWatchdog(_) => {}
+        SingletonJob::OAuthRefreshWatchdog(_) => {}
+        SingletonJob::OAuthUsagePollWatchdog(_) => {}
+        _ => {}
     }
+    Box::pin(async move { dispatch(job).await })
 }
 
 #[cfg(test)]
@@ -67,12 +52,11 @@ mod tests {
     use apalis::prelude::Data;
 
     use crate::jobs::metadata_refresh::MetadataRefreshJob;
-    use crate::jobs::reconcile::{SchedulerReconcileJob, SchedulerReconcileStats};
     use crate::jobs::usage_prune::UsagePruneJob;
     use crate::retry::JobOutcome;
     use crate::worker::{EntityJob, SchedulerCtx, SingletonJob};
 
-    use super::{entity_job_handler, reconcile_job_handler, singleton_job_handler};
+    use super::{entity_job_handler, singleton_job_handler};
 
     #[tokio::test]
     async fn entity_handler_invokes_ctx_dispatch_closure() {
@@ -85,7 +69,6 @@ mod tests {
                 Box::pin(async { Ok(JobOutcome::Done) })
             }),
             Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
-            Arc::new(|_job| Box::pin(async { done_reconcile() })),
         );
 
         let outcome = entity_job_handler(
@@ -114,7 +97,6 @@ mod tests {
                     })
                 })
             }),
-            Arc::new(|_job| Box::pin(async { done_reconcile() })),
         );
 
         let outcome = singleton_job_handler(
@@ -131,36 +113,5 @@ mod tests {
             }
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn reconcile_handler_invokes_ctx_dispatch_closure() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let observed = calls.clone();
-        let ctx = SchedulerCtx::new(
-            Default::default(),
-            Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
-            Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
-            Arc::new(move |_job| {
-                observed.fetch_add(1, Ordering::SeqCst);
-                Box::pin(async { done_reconcile() })
-            }),
-        );
-
-        let outcome = reconcile_job_handler(SchedulerReconcileJob::default(), Data::new(ctx))
-            .await
-            .expect("reconcile dispatch succeeds");
-
-        assert_eq!(outcome, JobOutcome::Done);
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    fn done_reconcile() -> crate::jobs::reconcile::SchedulerReconcileJobResult {
-        crate::jobs::reconcile::SchedulerReconcileJobResult::Done(SchedulerReconcileStats {
-            jobs_ensured: 1,
-            jobs_pruned: 0,
-            failures_recorded: 0,
-            reconcile_interval_secs: 300,
-        })
     }
 }

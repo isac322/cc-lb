@@ -2,16 +2,15 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
-use std::time::Duration;
 
 use cc_lb_scheduler::error::{Result, SchedulerError};
-use cc_lb_scheduler::idempotency::{
-    OAuthUsagePollCursor, OAuthUsagePollCursorsStore, OAuthUsagePollScheduleConfig,
-};
 use cc_lb_scheduler::jobs::oauth_usage_poll::{
     OAuthUsagePollHandler, OAuthUsagePollJob, OAuthUsagePollObservation, compute_next_run_at,
 };
 use cc_lb_scheduler::retry::JobOutcome;
+use cc_lb_scheduler::state_stores::{
+    OAuthUsagePollCursor, OAuthUsagePollCursorsStore, OAuthUsagePollScheduleConfig,
+};
 use proptest::prelude::*;
 use uuid::Uuid;
 
@@ -72,7 +71,7 @@ mod jobs {
             }
 
             let pool = sqlite_pool(&url).await?;
-            let handler = sqlite_handler(pool, schedule_config());
+            let handler = sqlite_handler(pool.clone(), schedule_config());
             let outcome = handler
                 .handle(
                     job(upstream_id),
@@ -82,11 +81,14 @@ mod jobs {
                 .await?;
 
             assert_eq!(calls.load(Ordering::SeqCst), 1);
+            assert_eq!(outcome, JobOutcome::Done);
+            let cursor = OAuthUsagePollCursorsStore::new(pool)
+                .read(upstream_id)
+                .await?
+                .expect("cursor exists");
             assert_eq!(
-                outcome,
-                JobOutcome::Retry {
-                    delay: Duration::from_secs(59)
-                }
+                compute_next_run_at(1_001, &schedule_config(), Some(&cursor)),
+                1_060
             );
             let _ = std::fs::remove_file(path);
             Ok(())
@@ -121,17 +123,11 @@ mod jobs {
 
             assert_eq!(calls.load(Ordering::SeqCst), 1);
             assert_eq!(cursor.recent_throttles_unix_secs, vec![2_000]);
+            assert_eq!(first, JobOutcome::Done);
+            assert_eq!(second, JobOutcome::Done);
             assert_eq!(
-                first,
-                JobOutcome::Retry {
-                    delay: Duration::from_secs(300)
-                }
-            );
-            assert_eq!(
-                second,
-                JobOutcome::Retry {
-                    delay: Duration::from_secs(299)
-                }
+                compute_next_run_at(2_001, &schedule_config(), Some(&cursor)),
+                2_300
             );
             Ok(())
         }
@@ -157,7 +153,7 @@ mod jobs {
                 .map_err(|error| SchedulerError::Job(error.to_string()))?;
             let count: i64 =
                 sqlx::query_scalar("SELECT COUNT(*) FROM Jobs WHERE idempotency_key = ?")
-                    .bind(job(upstream_id).idempotency_key())
+                    .bind(job(upstream_id).idempotency_key(1_000))
                     .fetch_one(&pool)
                     .await?;
 

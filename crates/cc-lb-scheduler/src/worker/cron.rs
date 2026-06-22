@@ -1,27 +1,34 @@
 use std::sync::Arc;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
-use apalis_core::backend::codec::Codec as _;
 use cc_lb_config::Config;
+use cc_lb_core::anthropic_compat::CLAUDE_CODE_STABLE_VERSION_KEY;
 use chrono::{DateTime, Utc};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-use crate::admin::SCHEDULER_RECONCILE_QUEUE;
 use crate::cron::WorkerBuilder as CronWorkerBuilder;
-use crate::error::SchedulerError;
-use crate::jobs::reconcile::SchedulerReconcileJob;
+use crate::jobs::compat::AnthropicCompatRefreshJob;
+use crate::jobs::watchdog::{
+    OAuthRefreshWatchdogJob, OAuthUsagePollWatchdogJob, WarmupWatchdogJob,
+};
 use crate::leader_election::LeaderElection;
 
 const LEADER_RETRY_INTERVAL: Duration = Duration::from_secs(5);
-const RECONCILE_RECURRING_IDEMPOTENCY_KEY: &str = "scheduler_reconcile:recurring";
-const RECONCILE_MAX_ATTEMPTS: i32 = 1;
 
 #[cfg(feature = "postgres")]
 use super::PostgresSchedulerStorage;
 #[cfg(feature = "sqlite")]
 use super::SqliteSchedulerStorage;
 use super::{SINGLETON_QUEUE, SchedulerBackend, SingletonJob};
+
+type SingletonJobFactory = fn(u64) -> SingletonJob;
+
+impl crate::cron::SingletonCronJob for SingletonJob {
+    fn singleton_kind(&self) -> &'static str {
+        self.kind()
+    }
+}
 
 pub(super) fn spawn_cron_producer(
     backend: SchedulerBackend,
@@ -98,11 +105,11 @@ async fn run_postgres_singleton_cron_loop(
             &pool,
             &apalis_postgres::Config::new(SINGLETON_QUEUE),
         );
-        let worker = CronWorkerBuilder::singleton_queue(
+        let worker = CronWorkerBuilder::singleton_queue_factory(
             SINGLETON_QUEUE,
             spec.schedule.clone(),
             storage,
-            spec.job.clone(),
+            spec.factory,
         );
         run_one_cron_attempt(spec.name, worker, &leader, &cancel).await;
         if !sleep_or_cancel(LEADER_RETRY_INTERVAL, &cancel).await {
@@ -124,11 +131,11 @@ async fn run_sqlite_singleton_cron_loop(
         }
         let storage =
             crate::sqlite_enqueue::SqliteSingletonCronStorage::new(pool.clone(), SINGLETON_QUEUE);
-        let worker = CronWorkerBuilder::singleton_queue(
+        let worker = CronWorkerBuilder::singleton_queue_factory(
             SINGLETON_QUEUE,
             spec.schedule.clone(),
             storage,
-            spec.job.clone(),
+            spec.factory,
         );
         run_one_cron_attempt(spec.name, worker, &leader, &cancel).await;
         if !sleep_or_cancel(LEADER_RETRY_INTERVAL, &cancel).await {
@@ -139,12 +146,11 @@ async fn run_sqlite_singleton_cron_loop(
 
 async fn run_one_cron_attempt<Storage>(
     name: &'static str,
-    worker: CronWorkerBuilder<SingletonJob, IntervalSchedule, Storage>,
+    worker: CronWorkerBuilder<SingletonJob, IntervalSchedule, Storage, SingletonJobFactory>,
     leader: &Arc<LeaderElection>,
     cancel: &CancellationToken,
 ) where
-    Storage: apalis::prelude::TaskSink<SingletonJob> + Send + 'static,
-    Storage::Error: std::error::Error + Send + Sync + 'static,
+    Storage: apalis::prelude::TaskSink<SingletonJob, Error = sqlx::Error> + Send + 'static,
 {
     tokio::select! {
         result = worker.run(leader.as_ref()) => {
@@ -177,46 +183,45 @@ async fn abort_join_handles(handles: Vec<JoinHandle<()>>) {
 struct SingletonCronSpec {
     name: &'static str,
     schedule: IntervalSchedule,
-    job: SingletonJob,
+    factory: SingletonJobFactory,
 }
 
 fn singleton_cron_specs(config: &Config) -> Vec<SingletonCronSpec> {
     let mut specs = Vec::new();
+    push_singleton_spec(&mut specs, config, "usage_rollup", |_| {
+        SingletonJob::UsageRollup(Default::default())
+    });
+    push_singleton_spec(&mut specs, config, "usage_prune", |_| {
+        SingletonJob::UsagePrune(Default::default())
+    });
+    push_singleton_spec(&mut specs, config, "quota_gc", |_| {
+        SingletonJob::QuotaGc(Default::default())
+    });
+    push_singleton_spec(&mut specs, config, "prompt_cache_purge", |_| {
+        SingletonJob::PromptCachePurge(Default::default())
+    });
+    push_singleton_spec(&mut specs, config, "price_catalog_refresh", |_| {
+        SingletonJob::PriceCatalogRefresh(Default::default())
+    });
+    push_singleton_spec(&mut specs, config, "apalis_housekeeping", |_| {
+        SingletonJob::ApalisHousekeeping(Default::default())
+    });
+    push_singleton_spec(&mut specs, config, "anthropic_compat_refresh", |_| {
+        SingletonJob::AnthropicCompatRefresh(AnthropicCompatRefreshJob::new(
+            CLAUDE_CODE_STABLE_VERSION_KEY,
+        ))
+    });
+    push_singleton_spec(&mut specs, config, "warmup_watchdog", |tick_secs| {
+        SingletonJob::WarmupWatchdog(WarmupWatchdogJob::new(tick_secs))
+    });
+    push_singleton_spec(&mut specs, config, "oauth_refresh_watchdog", |tick_secs| {
+        SingletonJob::OAuthRefreshWatchdog(OAuthRefreshWatchdogJob::new(tick_secs))
+    });
     push_singleton_spec(
         &mut specs,
         config,
-        "usage_rollup",
-        SingletonJob::UsageRollup(Default::default()),
-    );
-    push_singleton_spec(
-        &mut specs,
-        config,
-        "usage_prune",
-        SingletonJob::UsagePrune(Default::default()),
-    );
-    push_singleton_spec(
-        &mut specs,
-        config,
-        "quota_gc",
-        SingletonJob::QuotaGc(Default::default()),
-    );
-    push_singleton_spec(
-        &mut specs,
-        config,
-        "prompt_cache_purge",
-        SingletonJob::PromptCachePurge(Default::default()),
-    );
-    push_singleton_spec(
-        &mut specs,
-        config,
-        "price_catalog_refresh",
-        SingletonJob::PriceCatalogRefresh(Default::default()),
-    );
-    push_singleton_spec(
-        &mut specs,
-        config,
-        "apalis_housekeeping",
-        SingletonJob::ApalisHousekeeping(Default::default()),
+        "oauth_usage_poll_watchdog",
+        |tick_secs| SingletonJob::OAuthUsagePollWatchdog(OAuthUsagePollWatchdogJob::new(tick_secs)),
     );
     specs
 }
@@ -225,7 +230,7 @@ fn push_singleton_spec(
     specs: &mut Vec<SingletonCronSpec>,
     config: &Config,
     name: &'static str,
-    job: SingletonJob,
+    factory: SingletonJobFactory,
 ) {
     let Some(job_config) = config.scheduler.recurring_jobs.get(name) else {
         return;
@@ -236,7 +241,7 @@ fn push_singleton_spec(
     specs.push(SingletonCronSpec {
         name,
         schedule: IntervalSchedule::new(name, job_config.interval_secs, job_config.jitter_secs),
-        job,
+        factory,
     });
 }
 
@@ -279,116 +284,4 @@ fn stable_hash(value: &str) -> u64 {
     value.as_bytes().iter().fold(0_u64, |hash, byte| {
         hash.wrapping_mul(31).wrapping_add(u64::from(*byte))
     })
-}
-
-pub(super) fn spawn_reconcile_producer(
-    backend: SchedulerBackend,
-    config: Config,
-    leader: Arc<LeaderElection>,
-    cancel: CancellationToken,
-) -> JoinHandle<()> {
-    let interval = Duration::from_secs(config.scheduler.reconcile_interval_secs.max(1));
-    tokio::spawn(async move {
-        loop {
-            if cancel.is_cancelled() {
-                break;
-            }
-            let backend_for_work = backend.clone();
-            let cancel_for_work = cancel.clone();
-            let leader_result = leader
-                .run(move || async move {
-                    loop {
-                        if cancel_for_work.is_cancelled() {
-                            break;
-                        }
-                        match enqueue_recurring_reconcile(&backend_for_work).await {
-                            Ok(true) => {
-                                tracing::debug!(
-                                    "scheduler_reconcile recurring tick enqueued"
-                                );
-                            }
-                            Ok(false) => {
-                                tracing::debug!(
-                                    "scheduler_reconcile recurring tick skipped (active job present)"
-                                );
-                            }
-                            Err(error) => {
-                                tracing::warn!(
-                                    error = %error,
-                                    "scheduler_reconcile recurring enqueue failed",
-                                );
-                            }
-                        }
-                        if !sleep_or_cancel(interval, &cancel_for_work).await {
-                            break;
-                        }
-                    }
-                })
-                .await;
-            if let Err(error) = leader_result {
-                tracing::warn!(
-                    error = %error,
-                    "scheduler_reconcile recurring leader run exited; retrying after backoff",
-                );
-            }
-            if !sleep_or_cancel(LEADER_RETRY_INTERVAL, &cancel).await {
-                break;
-            }
-        }
-    })
-}
-
-async fn enqueue_recurring_reconcile(backend: &SchedulerBackend) -> Result<bool, SchedulerError> {
-    let job = SchedulerReconcileJob { traceparent: None };
-    let payload = apalis_codec::json::JsonCodec::<Vec<u8>>::encode(&job)
-        .map_err(|error| SchedulerError::Job(format!("encode recurring reconcile job: {error}")))?;
-    let now_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|error| SchedulerError::Job(format!("system clock before unix epoch: {error}")))?
-        .as_secs();
-    let now_i64 = i64::try_from(now_secs)
-        .map_err(|_| SchedulerError::Job("now_unix_secs exceeds i64::MAX".to_owned()))?;
-    let id = ulid::Ulid::new().to_string();
-    match backend {
-        #[cfg(feature = "sqlite")]
-        SchedulerBackend::Sqlite(sqlite) => {
-            let result = sqlx::query(
-                "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, last_result, lock_at, lock_by, done_at, priority, metadata, idempotency_key) \
-                 VALUES (?1, ?2, ?3, 'Pending', 0, ?4, ?5, NULL, NULL, NULL, NULL, 0, ?6, ?7) \
-                 ON CONFLICT(job_type, idempotency_key) WHERE status IN ('Pending','Running','Queued') DO NOTHING",
-            )
-            .bind(payload)
-            .bind(&id)
-            .bind(SCHEDULER_RECONCILE_QUEUE)
-            .bind(RECONCILE_MAX_ATTEMPTS)
-            .bind(now_i64)
-            .bind("{}")
-            .bind(RECONCILE_RECURRING_IDEMPOTENCY_KEY)
-            .execute(&sqlite.pool)
-            .await?;
-            Ok(result.rows_affected() > 0)
-        }
-        #[cfg(feature = "postgres")]
-        SchedulerBackend::Postgres(postgres) => {
-            let run_at =
-                chrono::DateTime::<chrono::Utc>::from_timestamp(now_i64, 0).ok_or_else(|| {
-                    SchedulerError::Job("run_at outside chrono timestamp range".to_owned())
-                })?;
-            let result = sqlx::query(
-                "INSERT INTO apalis.jobs (job, id, job_type, status, attempts, max_attempts, run_at, priority, metadata, idempotency_key) \
-                 VALUES ($1, $2, $3, 'Pending', 0, $4, $5, 0, $6, $7) \
-                 ON CONFLICT (job_type, idempotency_key) WHERE status IN ('Pending','Running','Queued') DO NOTHING",
-            )
-            .bind(payload)
-            .bind(&id)
-            .bind(SCHEDULER_RECONCILE_QUEUE)
-            .bind(RECONCILE_MAX_ATTEMPTS)
-            .bind(run_at)
-            .bind(serde_json::json!({}))
-            .bind(RECONCILE_RECURRING_IDEMPOTENCY_KEY)
-            .execute(&postgres.pool)
-            .await?;
-            Ok(result.rows_affected() > 0)
-        }
-    }
 }

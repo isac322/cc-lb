@@ -528,7 +528,6 @@ pub async fn seed_app_testing_storage(
                 oauth_token_generation: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
-                ..UpstreamCreate::default()
             },
         )
         .await
@@ -692,7 +691,7 @@ async fn build_app_with_storage_inner(
     );
     let subscription_metadata_hook = Some(cc_lb_core::start_subscription_metadata_hook(Arc::new(
         ServerMetadataRefreshEnqueue {
-            handle: scheduler_lazy_handle.clone(),
+            scheduler_backend: scheduler_lazy_handle.clone(),
         },
     )));
     let runtime = Arc::new(ExtismRuntime::new());
@@ -1005,6 +1004,7 @@ async fn build_app_with_storage_inner(
         drain_controller: drain_controller.clone(),
         aead: aead.clone(),
         storage: storage.clone(),
+        scheduler_backend: scheduler_lazy_handle.clone(),
         dynamic_view: dynamic_view.clone(),
         key_store: Some(key_store.clone()),
         builtin_authn: Some(builtin_authn.clone()),
@@ -1083,7 +1083,7 @@ struct ServerWarmupDialectDispatcher {
 }
 
 struct ServerMetadataRefreshEnqueue {
-    handle: crate::scheduler_factory::SchedulerBackend,
+    scheduler_backend: crate::scheduler_factory::SchedulerBackend,
 }
 
 #[async_trait]
@@ -1097,10 +1097,18 @@ impl cc_lb_core::MetadataRefreshEnqueue for ServerMetadataRefreshEnqueue {
             credential_generation: request.credential_generation,
             traceparent: request.traceparent,
         };
-        self.handle
-            .push_job(cc_lb_scheduler::worker::EntityJob::MetadataRefresh(job))
-            .await
-            .map_err(|error| cc_lb_core::MetadataHookEnqueueError::Enqueue(error.to_string()))
+        let idempotency_key = job.idempotency_key();
+        let task = cc_lb_scheduler::worker::SchedulerPushTask {
+            args: cc_lb_scheduler::worker::EntityJob::MetadataRefresh(job),
+            idempotency_key: Some(idempotency_key),
+            run_at_unix_secs: None,
+        };
+        match self.scheduler_backend.push_entity_task(task).await {
+            Ok(()) | Err(cc_lb_scheduler::error::SchedulerError::Conflict(_)) => Ok(()),
+            Err(error) => Err(cc_lb_core::MetadataHookEnqueueError::Enqueue(
+                error.to_string(),
+            )),
+        }
     }
 }
 
@@ -1649,6 +1657,8 @@ struct ProxyState {
     drain_controller: DrainController,
     aead: Arc<AeadService>,
     storage: Arc<dyn Storage>,
+    #[allow(dead_code)]
+    scheduler_backend: crate::scheduler_factory::SchedulerBackend,
     dynamic_view: Arc<DynamicViewHolder>,
     #[allow(dead_code)]
     key_store: Option<Arc<KeyStore>>,
@@ -2163,7 +2173,7 @@ pub async fn open_storage(config: &Config) -> Result<OpenStorageParts, BuildErro
         crate::scheduler_factory::open_scheduler_storage(&config.storage, &config.scheduler)
             .await?;
     let lazy_refresh_claim_guard =
-        lazy_refresh_claim_guard_from_scheduler(&opened_scheduler.backend);
+        crate::refresh::lazy_refresh_claim_guard_from_scheduler(&opened_scheduler.backend);
     Ok((
         opened.managed_key_store,
         opened.storage,
@@ -2173,21 +2183,6 @@ pub async fn open_storage(config: &Config) -> Result<OpenStorageParts, BuildErro
         lazy_refresh_claim_guard,
         opened_scheduler,
     ))
-}
-
-fn lazy_refresh_claim_guard_from_scheduler(
-    scheduler_backend: &crate::scheduler_factory::SchedulerBackend,
-) -> Arc<dyn LazyRefreshClaimGuard> {
-    match scheduler_backend {
-        #[cfg(feature = "sqlite")]
-        crate::scheduler_factory::SchedulerBackend::Sqlite(sqlite) => Arc::new(
-            cc_lb_scheduler::idempotency::OAuthRefreshClaimsStore::new(sqlite.pool.clone()),
-        ),
-        #[cfg(feature = "postgres")]
-        crate::scheduler_factory::SchedulerBackend::Postgres(postgres) => Arc::new(
-            cc_lb_scheduler::idempotency::OAuthRefreshClaimsStore::new(postgres.pool.clone()),
-        ),
-    }
 }
 
 fn decode_hex_key(value: &str) -> Result<[u8; 32], BuildError> {

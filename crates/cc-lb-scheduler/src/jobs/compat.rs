@@ -6,9 +6,9 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 
 use crate::error::{Result, SchedulerError};
-use crate::idempotency::AnthropicCompatEtag;
 use crate::middleware::TraceparentCarrier;
 use crate::retry::JobOutcome;
+use crate::state_stores::AnthropicCompatEtag;
 
 mod core_fetcher;
 mod etag_repository;

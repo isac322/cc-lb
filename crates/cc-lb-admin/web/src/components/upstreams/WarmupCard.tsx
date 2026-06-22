@@ -28,7 +28,6 @@ import {
   INPUT_CLASS,
 } from '../ui/primitives';
 import { RelativeTime } from '../ui/RelativeTime';
-import { NextWarmupDisplay } from './NextWarmupDisplay';
 
 function pluginSupportsSlot(
   p: { supported_slots?: string[]; slot?: string },
@@ -353,19 +352,6 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
         ) : (
           <div className="flex flex-col gap-6">
             <div className="grid grid-cols-1 gap-4 text-sm sm:grid-cols-2">
-              <div>
-                <div className="text-xs text-text-muted mb-1">
-                  {COPY.nextWarmupLabel}
-                </div>
-                <div className="text-text" data-testid="warmup-next">
-                  {upstream.status.next_warmup_at ? (
-                    <NextWarmupDisplay value={upstream.status.next_warmup_at} />
-                  ) : (
-                    <span className="text-text-muted">{COPY.nextNull}</span>
-                  )}
-                </div>
-              </div>
-
               <div>
                 <div className="text-xs text-text-muted mb-1">
                   {COPY.lastCycleLabel}

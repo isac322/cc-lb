@@ -8,11 +8,11 @@ use std::sync::{Arc, Mutex};
 
 use cc_lb_pricing::{FetchedCatalog, LoaderError};
 use cc_lb_scheduler::error::Result;
-use cc_lb_scheduler::idempotency::PriceCatalogVersionsStore;
 use cc_lb_scheduler::jobs::price_catalog::{
     PriceCatalogRefreshJob, PriceCatalogRefreshJobHandler, PriceCatalogRefreshJobResult,
     PriceCatalogRefreshLoader, PriceCatalogRefreshStatus,
 };
+use cc_lb_scheduler::state_stores::PriceCatalogVersionsStore;
 
 mod jobs {
     pub mod price_catalog {
@@ -88,7 +88,7 @@ where
     assert_eq!(calls.persisted_fingerprints(), Vec::<String>::new());
     assert_eq!(
         versions.read_price_catalog_version("litellm").await?,
-        Some(cc_lb_scheduler::idempotency::PriceCatalogVersion {
+        Some(cc_lb_scheduler::state_stores::PriceCatalogVersion {
             source: "litellm".to_owned(),
             fingerprint: "same".to_owned(),
             fetched_at_unix_secs: 100,
@@ -126,7 +126,7 @@ where
     assert_eq!(calls.persisted_fingerprints(), vec!["new".to_owned()]);
     assert_eq!(
         versions.read_price_catalog_version("litellm").await?,
-        Some(cc_lb_scheduler::idempotency::PriceCatalogVersion {
+        Some(cc_lb_scheduler::state_stores::PriceCatalogVersion {
             source: "litellm".to_owned(),
             fingerprint: "new".to_owned(),
             fetched_at_unix_secs: 300,

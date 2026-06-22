@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use super::OAuthUsagePollHandler;
 use crate::error::Result;
-use crate::idempotency::OAuthUsagePollCursor;
+use crate::state_stores::OAuthUsagePollCursor;
 
 pub type OAuthUsagePollFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 

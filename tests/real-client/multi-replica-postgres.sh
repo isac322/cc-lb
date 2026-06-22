@@ -461,21 +461,6 @@ assert_audit_entries_landed() {
   printf 'audit entries visible in postgres: %s\n' "$count"
 }
 
-assert_refresh_lease_contention() {
-  local upstream_id=$1
-  local holder_a='11111111-1111-4111-8111-111111111111'
-  local holder_b='22222222-2222-4222-8222-222222222222'
-  psql_exec "DELETE FROM upstream_lease_v1 WHERE upstream_id = '$upstream_id' AND lease_kind = 'refresh';"
-  psql_exec "INSERT INTO upstream_lease_v1 (upstream_id, lease_kind, holder, until_unix_secs, updated_at) VALUES ('$upstream_id', 'refresh', '$holder_a', extract(epoch from now())::bigint + 90, NOW()) ON CONFLICT (upstream_id, lease_kind) DO UPDATE SET holder = EXCLUDED.holder, until_unix_secs = EXCLUDED.until_unix_secs, updated_at = NOW() WHERE upstream_lease_v1.holder = EXCLUDED.holder OR upstream_lease_v1.until_unix_secs <= extract(epoch from now())::bigint;"
-  local stolen
-  stolen=$(psql_scalar "WITH stolen AS (INSERT INTO upstream_lease_v1 (upstream_id, lease_kind, holder, until_unix_secs, updated_at) VALUES ('$upstream_id', 'refresh', '$holder_b', extract(epoch from now())::bigint + 90, NOW()) ON CONFLICT (upstream_id, lease_kind) DO UPDATE SET holder = EXCLUDED.holder, until_unix_secs = EXCLUDED.until_unix_secs, updated_at = NOW() WHERE upstream_lease_v1.holder = EXCLUDED.holder OR upstream_lease_v1.until_unix_secs <= extract(epoch from now())::bigint RETURNING 1) SELECT count(*) FROM stolen;")
-  if [ "${stolen:-0}" != "0" ]; then
-    fail "refresh lease contention allowed second holder"
-  fi
-  psql_exec "DELETE FROM upstream_lease_v1 WHERE upstream_id = '$upstream_id' AND lease_kind = 'refresh';"
-  printf 'refresh lease contention preserved single holder\n'
-}
-
 mkdir -p "$EVIDENCE_DIR"
 ensure_port_free "$PROXY_A_PORT" "$ADMIN_A_PORT" "$METRICS_A_PORT" "$PROXY_B_PORT" "$ADMIN_B_PORT" "$METRICS_B_PORT" "$FAKE_PORT"
 DOCKER_HOST=tcp://localhost:2375 docker compose -f "$COMPOSE_FILE" -p "$COMPOSE_PROJECT" up -d postgres
@@ -533,7 +518,6 @@ fi
 sleep 5
 assert_upstream_active_on_b
 proxy_request "$PROXY_A_PORT" "A-rejoined"
-assert_refresh_lease_contention "$upstream_id"
 capture_evidence
 
 printf 'PASS multi-replica postgres smoke; evidence in %s\n' "$EVIDENCE_DIR"

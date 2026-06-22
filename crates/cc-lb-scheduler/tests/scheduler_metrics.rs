@@ -1,35 +1,30 @@
-use std::convert::Infallible;
 use std::error::Error;
 use std::time::Duration;
 
 use apalis::prelude::{IntervalStrategy, StrategyBuilder, TaskSink};
 use cc_lb_scheduler::jobs::apalis_housekeeping::ApalisHousekeepingJob;
-use cc_lb_scheduler::jobs::compat::AnthropicCompatRefreshJob;
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollJob;
 use cc_lb_scheduler::jobs::price_catalog::PriceCatalogRefreshJob;
 use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeJob;
 use cc_lb_scheduler::jobs::quota_gc::SubscriptionQuotaGcJob;
-use cc_lb_scheduler::jobs::reconcile::SchedulerReconcileJob;
 use cc_lb_scheduler::jobs::usage_prune::UsagePruneJob;
 use cc_lb_scheduler::jobs::usage_rollup::UsageRollupTask;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
-use cc_lb_scheduler::middleware::SchedulerMetricsLayer;
-use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::scheduler_metrics;
 use cc_lb_scheduler::worker::{
     ENTITY_QUEUE, EntityJob, SINGLETON_QUEUE, SchedulerBackend, SchedulerCtx, SingletonJob,
-    SqliteSchedulerStorage, build_entity_worker, build_singleton_worker,
 };
+#[cfg(feature = "sqlite")]
+use cc_lb_scheduler::worker::{SqliteSchedulerStorage, build_entity_worker, build_singleton_worker};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use tokio_util::sync::CancellationToken;
-use tower::{Layer, ServiceExt, service_fn};
 use uuid::Uuid;
 
 #[cfg(feature = "sqlite")]
 #[test]
-fn scheduler_metrics_cover_worker_lifecycle_and_reconcile_done() -> Result<(), Box<dyn Error>> {
+fn scheduler_metrics_cover_worker_lifecycle() -> Result<(), Box<dyn Error>> {
     let recorder = PrometheusBuilder::new().build_recorder();
     let handle = recorder.handle();
     let runtime = tokio::runtime::Builder::new_current_thread()
@@ -42,7 +37,6 @@ fn scheduler_metrics_cover_worker_lifecycle_and_reconcile_done() -> Result<(), B
             let pool = sqlite_memory().await?;
             run_entity_jobs(&pool).await?;
             run_singleton_jobs(&pool).await?;
-            run_reconcile_metric_layer().await?;
 
             let rendered = handle.render();
             assert_required_metric_names(&rendered);
@@ -56,12 +50,6 @@ fn scheduler_metrics_cover_worker_lifecycle_and_reconcile_done() -> Result<(), B
                 &rendered,
                 scheduler_metrics::JOBS_TOTAL,
                 &[("job_type", "entity:oauth_refresh"), ("status", "done")],
-                1.0,
-            );
-            assert_counter_eq(
-                &rendered,
-                scheduler_metrics::JOBS_TOTAL,
-                &[("job_type", "scheduler_reconcile"), ("status", "done")],
                 1.0,
             );
             Ok::<(), Box<dyn Error>>(())
@@ -117,15 +105,6 @@ async fn run_singleton_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error
     Ok(())
 }
 
-async fn run_reconcile_metric_layer() -> Result<(), Box<dyn Error>> {
-    let service =
-        SchedulerMetricsLayer::new().layer(service_fn(|_job: SchedulerReconcileJob| async {
-            Ok::<_, Infallible>(JobOutcome::Done)
-        }));
-    service.oneshot(SchedulerReconcileJob::default()).await?;
-    Ok(())
-}
-
 #[cfg(feature = "sqlite")]
 async fn sqlite_memory() -> Result<sqlx::SqlitePool, Box<dyn Error>> {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
@@ -146,7 +125,7 @@ fn fast_queue_config(queue: &str) -> apalis_sqlite::Config {
         .set_buffer_size(16)
 }
 
-fn entity_jobs(upstream_id: Uuid) -> [EntityJob; 5] {
+fn entity_jobs(upstream_id: Uuid) -> [EntityJob; 4] {
     [
         EntityJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1)),
         EntityJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
@@ -154,9 +133,6 @@ fn entity_jobs(upstream_id: Uuid) -> [EntityJob; 5] {
             upstream_id,
             traceparent: None,
         }),
-        EntityJob::AnthropicCompatRefresh(AnthropicCompatRefreshJob::new(
-            "claude_code_stable_version",
-        )),
         EntityJob::MetadataRefresh(MetadataRefreshJob::new(upstream_id, 1)),
     ]
 }
@@ -179,7 +155,6 @@ fn assert_required_metric_names(rendered: &str) {
         scheduler_metrics::FAILURES_TOTAL,
         scheduler_metrics::LEADER_ACQUIRED_TOTAL,
         scheduler_metrics::LEADER_LOST_TOTAL,
-        scheduler_metrics::RECONCILE_ORPHAN_PRUNED_TOTAL,
         scheduler_metrics::INIT_FAILURE,
         scheduler_metrics::LAZY_REFRESH_TIMEOUT_TOTAL,
         scheduler_metrics::PRUNE_ROWS_REMOVED_TOTAL,

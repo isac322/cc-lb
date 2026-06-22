@@ -2,15 +2,13 @@
 use cc_lb_core::subscription_quota_events::unified_observation_to_record;
 use cc_lb_core::{UnifiedQuotaObservation, parse_anthropic_unified_headers};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
-use cc_lb_scheduler::idempotency::WarmupEffectsStore;
 use cc_lb_scheduler::jobs::warmup::{UpstreamWarmupJob, UpstreamWarmupJobHandler};
 use cc_lb_scheduler::retry::JobOutcome;
-use cc_lb_scheduler::worker::SchedulerBackend;
+use cc_lb_scheduler::worker::{EntityJob, SchedulerPushTask};
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use cc_lb_storage_api::UpstreamStatusUpdate;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{UpstreamRecord, UpstreamStore};
-use chrono::{DateTime, TimeZone, Utc};
 use http::HeaderMap;
 
 use crate::scheduler_dispatch::http::{decrypt_bundle, upstream_base_url};
@@ -24,37 +22,23 @@ use crate::warmup::{
 use super::SchedulerDispatch;
 
 const TOKEN_REFRESH_LOOKAHEAD_SECS: u64 = 60;
-const FIVE_HOURS_SECS: i64 = 5 * 3600;
+const POST_RESET_GUARD_SECS: u64 = 30;
 
 impl SchedulerDispatch {
     pub(super) async fn dispatch_warmup(
         &self,
         job: UpstreamWarmupJob,
     ) -> SchedulerResult<JobOutcome> {
-        match &self.backend {
-            #[cfg(feature = "sqlite")]
-            SchedulerBackend::Sqlite(sqlite) => warmup_outcome(
-                UpstreamWarmupJobHandler::new(WarmupEffectsStore::new(sqlite.pool.clone()))
-                    .handle(
-                        job,
-                        now_unix_secs(),
-                        |upstream_id| self.upstream_is_warmup_live(upstream_id),
-                        |job| self.fire_warmup(job),
-                    )
-                    .await?,
-            ),
-            #[cfg(feature = "postgres")]
-            SchedulerBackend::Postgres(postgres) => warmup_outcome(
-                UpstreamWarmupJobHandler::new(WarmupEffectsStore::new(postgres.pool.clone()))
-                    .handle(
-                        job,
-                        now_unix_secs(),
-                        |upstream_id| self.upstream_is_warmup_live(upstream_id),
-                        |job| self.fire_warmup(job),
-                    )
-                    .await?,
-            ),
-        }
+        warmup_outcome(
+            UpstreamWarmupJobHandler::new()
+                .handle(
+                    job,
+                    now_unix_secs(),
+                    |upstream_id| self.upstream_is_warmup_live(upstream_id),
+                    |job| self.fire_warmup(job),
+                )
+                .await?,
+        )
     }
 
     async fn upstream_is_warmup_live(&self, upstream_id: uuid::Uuid) -> SchedulerResult<bool> {
@@ -100,8 +84,8 @@ impl SchedulerDispatch {
             | WarmupResult::WindowAlreadyActive {
                 cycle_key: response_cycle_key,
             } => {
-                self.write_status_after_warmup_success(upstream.id, cycle_key, response_cycle_key)
-                    .await;
+                self.write_status_after_warmup_success(upstream.id, response_cycle_key)
+                    .await?;
                 self.record_warmup_observations(upstream.id, final_observations)
             }
             WarmupResult::RetryableTransient => Err(SchedulerError::Job(format!(
@@ -117,19 +101,13 @@ impl SchedulerDispatch {
     async fn write_status_after_warmup_success(
         &self,
         upstream_id: uuid::Uuid,
-        candidate_cycle_key: i64,
-        response_cycle_key: i64,
-    ) {
-        let Some(next_warmup_at) =
-            next_warmup_at_after_success(upstream_id, candidate_cycle_key, response_cycle_key)
-        else {
-            tracing::warn!(upstream_id = %upstream_id, cycle_key = candidate_cycle_key, "could not compute next_warmup_at; admin status will lag");
-            return;
-        };
-        #[allow(deprecated)]
+        response_resets_at_unix_secs: i64,
+    ) -> SchedulerResult<()> {
+        let response_resets_at_unix_secs =
+            u64::try_from(response_resets_at_unix_secs).map_err(|_| {
+                SchedulerError::Job("warmup response reset time before unix epoch".to_owned())
+            })?;
         let status = UpstreamStatusUpdate {
-            next_warmup_at: Some(Some(next_warmup_at)),
-            last_warmup_cycle_key: Some(Some(response_cycle_key.max(candidate_cycle_key))),
             last_warmup_at_unix_secs: Some(Some(now_unix_secs())),
             ..UpstreamStatusUpdate::default()
         };
@@ -137,6 +115,21 @@ impl SchedulerDispatch {
             UpstreamStore::set_status(self.storage.as_ref(), upstream_id, status).await
         {
             tracing::warn!(upstream_id = %upstream_id, %error, "warmup status writeback failed; admin UI may show stale data");
+        }
+
+        let jitter_secs = stable_jitter_ms(upstream_id, response_resets_at_unix_secs) / 1_000;
+        let run_at_unix_secs = response_resets_at_unix_secs
+            .saturating_add(POST_RESET_GUARD_SECS)
+            .saturating_add(jitter_secs);
+        let job = UpstreamWarmupJob::new(upstream_id, response_resets_at_unix_secs);
+        let task = SchedulerPushTask {
+            args: EntityJob::Warmup(job),
+            idempotency_key: Some(job.idempotency_key(response_resets_at_unix_secs)),
+            run_at_unix_secs: Some(run_at_unix_secs),
+        };
+        match self.backend.push_entity_task(task).await {
+            Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
+            Err(error) => Err(error),
         }
     }
 
@@ -231,27 +224,6 @@ impl SchedulerDispatch {
         }
         Ok(())
     }
-}
-
-const POST_RESET_GUARD_SECS: i64 = 30;
-
-fn next_warmup_at_after_success(
-    upstream_id: uuid::Uuid,
-    candidate_cycle_key: i64,
-    response_cycle_key: i64,
-) -> Option<DateTime<Utc>> {
-    let schedule_anchor = if response_cycle_key > candidate_cycle_key {
-        response_cycle_key
-    } else {
-        candidate_cycle_key.saturating_add(FIVE_HOURS_SECS)
-    };
-    let anchor_u64 = u64::try_from(schedule_anchor).ok()?;
-    let jitter_ms = stable_jitter_ms(upstream_id, anchor_u64);
-    let base = Utc.timestamp_opt(schedule_anchor, 0).single()?;
-    base.checked_add_signed(chrono::Duration::seconds(POST_RESET_GUARD_SECS))
-        .and_then(|value| {
-            value.checked_add_signed(chrono::Duration::milliseconds(jitter_ms as i64))
-        })
 }
 
 fn is_warmup_live(upstream: &UpstreamRecord) -> bool {

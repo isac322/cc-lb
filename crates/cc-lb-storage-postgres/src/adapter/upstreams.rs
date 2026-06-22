@@ -1,13 +1,6 @@
-// Storage adapter for the deprecated lease/warmup fields on `UpstreamRecord`,
-// `UpstreamCreate`, `UpstreamUpdate`, and `UpstreamStatusUpdate`.
-// The deprecated columns still exist in the schema until the Wave 8 follow-up PR
-// drops them; until then the adapter must read/write them, so we silence the
-// trait-level deprecation warnings at the module boundary per the plan.
-#![allow(deprecated)]
-
 use async_trait::async_trait;
 use cc_lb_aead::EncryptedOAuthTokens;
-use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamLeaseKind, UpstreamStatusUpdate};
+use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamStatusUpdate};
 use cc_lb_storage_api::{
     StorageError, StorageResult, UpstreamCreate, UpstreamRecord, UpstreamStore, UpstreamUpdate,
     validate_identifier,
@@ -29,13 +22,13 @@ const CHANNEL: &str = "cclb_upstream_changed";
 
 macro_rules! split_upstream_columns {
     () => {
-        "spec.id, spec.name, spec.kind, spec.base_url, spec.enabled, token.oauth_credentials_ciphertext AS oauth_credentials, secret.api_key_ciphertext, refresh_lease.holder AS refresh_lease_holder, refresh_lease.until_unix_secs AS refresh_lease_until_unix_secs, status.last_apply_error, status.last_apply_at, spec.deleted_at, spec.spec_revision AS revision, COALESCE(token.oauth_token_generation, 0) AS oauth_token_generation, spec.created_at, spec.updated_at, spec.warmup_enabled, status.next_warmup_at, status.last_warmup_cycle_key, status.last_warmup_at, warmup_lease.holder AS warmup_lease_holder, warmup_lease.until_unix_secs AS warmup_lease_until_unix_secs, spec.warmup_dialect_plugin"
+        "spec.id, spec.name, spec.kind, spec.base_url, spec.enabled, token.oauth_credentials_ciphertext AS oauth_credentials, secret.api_key_ciphertext, status.last_apply_error, status.last_apply_at, spec.deleted_at, spec.spec_revision AS revision, COALESCE(token.oauth_token_generation, 0) AS oauth_token_generation, spec.created_at, spec.updated_at, spec.warmup_enabled, status.last_warmup_at, spec.warmup_dialect_plugin"
     };
 }
 
 macro_rules! split_upstream_joins {
     () => {
-        " FROM upstream_spec_v1 spec LEFT JOIN upstream_api_key_secret_v1 secret ON secret.upstream_id = spec.id LEFT JOIN upstream_oauth_token_v1 token ON token.upstream_id = spec.id LEFT JOIN upstream_status_v1 status ON status.upstream_id = spec.id LEFT JOIN upstream_lease_v1 refresh_lease ON refresh_lease.upstream_id = spec.id AND refresh_lease.lease_kind = 'refresh' LEFT JOIN upstream_lease_v1 warmup_lease ON warmup_lease.upstream_id = spec.id AND warmup_lease.lease_kind = 'warmup' "
+        " FROM upstream_spec_v1 spec LEFT JOIN upstream_api_key_secret_v1 secret ON secret.upstream_id = spec.id LEFT JOIN upstream_oauth_token_v1 token ON token.upstream_id = spec.id LEFT JOIN upstream_status_v1 status ON status.upstream_id = spec.id "
     };
 }
 
@@ -119,38 +112,6 @@ impl UpstreamStore for PostgresStorage {
         set_split_status(&self.pool, id, status).await
     }
 
-    #[allow(deprecated)]
-    async fn claim_lease(
-        &self,
-        id: Uuid,
-        lease_kind: UpstreamLeaseKind,
-        holder: String,
-        ttl_secs: i64,
-    ) -> StorageResult<bool> {
-        claim_split_lease(&self.pool, id, lease_kind, &holder, ttl_secs).await
-    }
-
-    #[allow(deprecated)]
-    async fn renew_lease(
-        &self,
-        id: Uuid,
-        lease_kind: UpstreamLeaseKind,
-        holder: String,
-        ttl_secs: i64,
-    ) -> StorageResult<bool> {
-        renew_split_lease(&self.pool, id, lease_kind, &holder, ttl_secs).await
-    }
-
-    #[allow(deprecated)]
-    async fn release_lease(
-        &self,
-        id: Uuid,
-        lease_kind: UpstreamLeaseKind,
-        holder: String,
-    ) -> StorageResult<bool> {
-        release_split_lease(&self.pool, id, lease_kind, &holder).await
-    }
-
     async fn store_oauth_tokens(
         &self,
         id: Uuid,
@@ -159,24 +120,6 @@ impl UpstreamStore for PostgresStorage {
     ) -> StorageResult<UpstreamRecord> {
         ensure_split_spec_revision(&self.pool, id, expected_revision).await?;
         self.update_oauth_token(id, tokens).await
-    }
-
-    #[allow(deprecated)]
-    async fn claim_refresh_lease(
-        &self,
-        id: Uuid,
-        holder: Uuid,
-        ttl_secs: u64,
-    ) -> StorageResult<bool> {
-        self.claim_lease(
-            id,
-            UpstreamLeaseKind::Refresh,
-            holder.to_string(),
-            i64::try_from(ttl_secs).map_err(|_| StorageError::Fatal {
-                message: "refresh lease ttl cannot be represented as bigint".to_owned(),
-            })?,
-        )
-        .await
     }
 
     async fn complete_refresh(
@@ -193,30 +136,6 @@ impl UpstreamStore for PostgresStorage {
 
     async fn read_oauth_token_generation(&self, id: Uuid) -> StorageResult<Option<u64>> {
         read_split_oauth_token_generation(&self.pool, id).await
-    }
-
-    #[allow(deprecated)]
-    async fn release_lease_on_failure(
-        &self,
-        id: Uuid,
-        holder: Uuid,
-        reason: String,
-    ) -> StorageResult<()> {
-        let released = self
-            .release_lease(id, UpstreamLeaseKind::Refresh, holder.to_string())
-            .await?;
-        if !released {
-            return Err(conflict("refresh lease holder mismatch"));
-        }
-        self.set_status(
-            id,
-            UpstreamStatusUpdate {
-                last_apply_error: Some(Some(reason)),
-                last_apply_at_unix_secs: Some(Some(now_unix_secs())),
-                ..UpstreamStatusUpdate::default()
-            },
-        )
-        .await
     }
 
     async fn set_last_apply_error(&self, id: Uuid, error: Option<String>) -> StorageResult<()> {
@@ -246,59 +165,12 @@ impl UpstreamStore for PostgresStorage {
         tx.commit().await.map_err(map_sqlx_error)
     }
 
-    #[allow(deprecated)]
-    async fn claim_warmup_lease(
-        &self,
-        id: Uuid,
-        holder: &str,
-        ttl_secs: i64,
-    ) -> StorageResult<bool> {
-        self.claim_lease(id, UpstreamLeaseKind::Warmup, holder.to_owned(), ttl_secs)
-            .await
-    }
-
-    #[allow(deprecated)]
-    async fn write_warmup_cycle_key(
-        &self,
-        id: Uuid,
-        holder: &str,
-        new_cycle_key: i64,
-        next_warmup_at: Option<DateTime<Utc>>,
-    ) -> StorageResult<bool> {
-        write_split_warmup_cycle_key(&self.pool, id, holder, new_cycle_key, next_warmup_at).await
-    }
-
-    #[allow(deprecated)]
-    async fn release_warmup_lease(&self, id: Uuid, holder: &str) -> StorageResult<bool> {
-        self.release_lease(id, UpstreamLeaseKind::Warmup, holder.to_owned())
-            .await
-    }
-
     async fn clear_warmup_dialect_plugin(
         &self,
         id: Uuid,
         expected_revision: u64,
     ) -> StorageResult<Option<UpstreamRecord>> {
         clear_split_warmup_dialect_plugin(&self.pool, id, expected_revision).await
-    }
-
-    #[allow(deprecated)]
-    async fn warmup_now_unix_secs(&self) -> StorageResult<i64> {
-        let row = sqlx::query("SELECT extract(epoch from now())::bigint AS now_unix_secs")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(map_sqlx_error)?;
-        row.try_get("now_unix_secs").map_err(map_sqlx_error)
-    }
-
-    #[allow(deprecated)]
-    async fn write_warmup_next_at(
-        &self,
-        id: Uuid,
-        holder: &str,
-        next_warmup_at: DateTime<Utc>,
-    ) -> StorageResult<bool> {
-        write_split_warmup_next_at(&self.pool, id, holder, next_warmup_at).await
     }
 }
 
@@ -344,33 +216,6 @@ async fn create_split(
         )
         .bind(id)
         .bind(u64_to_i64(oauth_token_generation, "oauth token generation")?)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
-    }
-
-    if create.next_warmup_at.is_some() || create.last_warmup_cycle_key.is_some() {
-        sqlx::query(
-            "INSERT INTO upstream_status_v1 (upstream_id, next_warmup_at, last_warmup_cycle_key, updated_at) VALUES ($1, $2, $3, NOW())",
-        )
-        .bind(id)
-        .bind(create.next_warmup_at)
-        .bind(create.last_warmup_cycle_key)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
-    }
-
-    if let (Some(holder), Some(until_unix_secs)) = (
-        create.warmup_lease_holder,
-        create.warmup_lease_until_unix_secs,
-    ) {
-        sqlx::query(
-            "INSERT INTO upstream_lease_v1 (upstream_id, lease_kind, holder, until_unix_secs, updated_at) VALUES ($1, 'warmup', $2, $3, NOW())",
-        )
-        .bind(id)
-        .bind(holder)
-        .bind(until_unix_secs)
         .execute(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
@@ -458,14 +303,6 @@ async fn update_split(
         || update.warmup_dialect_plugin.is_some();
     let api_key_ciphertext = update.api_key_ciphertext.take();
     let oauth_token_generation = update.oauth_token_generation.take();
-    let status = UpstreamStatusUpdate {
-        next_warmup_at: update.next_warmup_at.take().map(Some),
-        last_warmup_cycle_key: update.last_warmup_cycle_key.take().map(Some),
-        ..UpstreamStatusUpdate::default()
-    };
-    let has_status_update =
-        status.next_warmup_at.is_some() || status.last_warmup_cycle_key.is_some();
-
     if has_spec_update {
         update_split_spec(storage, id, expected_revision, update).await?;
     } else {
@@ -473,9 +310,6 @@ async fn update_split(
     }
     if let Some(ciphertext) = api_key_ciphertext {
         update_split_api_key_secret(storage, id, Some(ciphertext)).await?;
-    }
-    if has_status_update {
-        set_split_status(&storage.pool, id, status).await?;
     }
     if let Some(generation) = oauth_token_generation {
         update_split_oauth_token_generation(storage, id, generation).await?;
@@ -614,34 +448,11 @@ async fn update_split_oauth_token_generation(
 async fn complete_split_refresh(
     storage: &PostgresStorage,
     id: Uuid,
-    holder: Uuid,
+    _holder: Uuid,
     tokens: EncryptedOAuthTokens,
 ) -> StorageResult<()> {
     let mut tx = storage.pool.begin().await.map_err(map_sqlx_error)?;
     ensure_split_spec_active_in_tx(&mut tx, id).await?;
-    let holder = holder.to_string();
-    let existing_holder: Option<String> = sqlx::query_scalar(
-        "SELECT holder FROM upstream_lease_v1 WHERE upstream_id = $1 AND lease_kind = 'refresh' FOR UPDATE",
-    )
-    .bind(id)
-    .fetch_optional(&mut *tx)
-    .await
-    .map_err(map_sqlx_error)?;
-    if existing_holder
-        .as_deref()
-        .is_some_and(|stored| stored != holder)
-    {
-        return Err(conflict("refresh lease holder mismatch"));
-    }
-    if existing_holder.is_some() {
-        sqlx::query(
-            "DELETE FROM upstream_lease_v1 WHERE upstream_id = $1 AND lease_kind = 'refresh'",
-        )
-        .bind(id)
-        .execute(&mut *tx)
-        .await
-        .map_err(map_sqlx_error)?;
-    }
     sqlx::query(
         "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, token_revision, oauth_token_generation, refreshed_at, created_at, updated_at)
          VALUES ($1, $2, 1, 1, NOW(), NOW(), NOW())
@@ -745,7 +556,7 @@ async fn set_split_status(
     let mut tx = pool.begin().await.map_err(map_sqlx_error)?;
     ensure_split_spec_active_in_tx(&mut tx, id).await?;
     let row = sqlx::query(
-        "SELECT last_apply_error, last_apply_at, observed_spec_revision, observed_api_key_secret_revision, observed_oauth_token_revision, next_warmup_at, last_warmup_cycle_key, last_warmup_at FROM upstream_status_v1 WHERE upstream_id = $1",
+        "SELECT last_apply_error, last_apply_at, observed_spec_revision, observed_api_key_secret_revision, observed_oauth_token_revision, last_warmup_at FROM upstream_status_v1 WHERE upstream_id = $1",
     )
     .bind(id)
     .fetch_optional(&mut *tx)
@@ -788,18 +599,6 @@ async fn set_split_status(
             .flatten(),
         "observed_oauth_token_revision",
     )?;
-    let mut next_warmup_at = row
-        .as_ref()
-        .map(|row| row.try_get::<Option<DateTime<Utc>>, _>("next_warmup_at"))
-        .transpose()
-        .map_err(map_sqlx_error)?
-        .flatten();
-    let mut last_warmup_cycle_key = row
-        .as_ref()
-        .map(|row| row.try_get::<Option<i64>, _>("last_warmup_cycle_key"))
-        .transpose()
-        .map_err(map_sqlx_error)?
-        .flatten();
     let mut last_warmup_at = optional_i64_to_u64(
         row.as_ref()
             .map(|row| row.try_get::<Option<i64>, _>("last_warmup_at"))
@@ -826,27 +625,19 @@ async fn set_split_status(
     if let Some(value) = patch.observed_oauth_token_revision {
         observed_oauth_token_revision = value;
     }
-    if let Some(value) = patch.next_warmup_at {
-        next_warmup_at = value;
-    }
-    if let Some(value) = patch.last_warmup_cycle_key {
-        last_warmup_cycle_key = value;
-    }
     if let Some(value) = patch.last_warmup_at_unix_secs {
         last_warmup_at = value;
     }
 
     sqlx::query(
-        "INSERT INTO upstream_status_v1 (upstream_id, last_apply_error, last_apply_at, observed_spec_revision, observed_api_key_secret_revision, observed_oauth_token_revision, next_warmup_at, last_warmup_cycle_key, last_warmup_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW())
+        "INSERT INTO upstream_status_v1 (upstream_id, last_apply_error, last_apply_at, observed_spec_revision, observed_api_key_secret_revision, observed_oauth_token_revision, last_warmup_at, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
          ON CONFLICT (upstream_id) DO UPDATE
          SET last_apply_error = EXCLUDED.last_apply_error,
              last_apply_at = EXCLUDED.last_apply_at,
              observed_spec_revision = EXCLUDED.observed_spec_revision,
              observed_api_key_secret_revision = EXCLUDED.observed_api_key_secret_revision,
              observed_oauth_token_revision = EXCLUDED.observed_oauth_token_revision,
-             next_warmup_at = EXCLUDED.next_warmup_at,
-             last_warmup_cycle_key = EXCLUDED.last_warmup_cycle_key,
              last_warmup_at = EXCLUDED.last_warmup_at,
              updated_at = NOW()",
     )
@@ -868,8 +659,6 @@ async fn set_split_status(
             .map(|value| u64_to_i64(value, "observed_oauth_token_revision"))
             .transpose()?,
     )
-    .bind(next_warmup_at)
-    .bind(last_warmup_cycle_key)
     .bind(
         last_warmup_at
             .map(|value| u64_to_i64(value, "last_warmup_at"))
@@ -880,163 +669,6 @@ async fn set_split_status(
     .map_err(map_sqlx_error)?;
     tx.commit().await.map_err(map_sqlx_error)?;
     Ok(())
-}
-
-async fn claim_split_lease(
-    pool: &sqlx::PgPool,
-    id: Uuid,
-    lease_kind: UpstreamLeaseKind,
-    holder: &str,
-    ttl_secs: i64,
-) -> StorageResult<bool> {
-    let row = sqlx::query(
-        "INSERT INTO upstream_lease_v1 (upstream_id, lease_kind, holder, until_unix_secs, updated_at)
-         SELECT $1, $2, $3, extract(epoch from now())::bigint + $4, NOW()
-         WHERE EXISTS (SELECT 1 FROM upstream_spec_v1 WHERE id = $1 AND deleted_at IS NULL)
-         ON CONFLICT (upstream_id, lease_kind) DO UPDATE
-         SET holder = EXCLUDED.holder,
-             until_unix_secs = EXCLUDED.until_unix_secs,
-             updated_at = NOW()
-         WHERE upstream_lease_v1.holder = EXCLUDED.holder
-            OR upstream_lease_v1.until_unix_secs <= extract(epoch from now())::bigint
-         RETURNING upstream_id",
-    )
-    .bind(id)
-    .bind(lease_kind.as_str())
-    .bind(holder)
-    .bind(ttl_secs)
-    .fetch_optional(pool)
-    .await
-    .map_err(map_sqlx_error)?;
-    Ok(row.is_some())
-}
-
-async fn renew_split_lease(
-    pool: &sqlx::PgPool,
-    id: Uuid,
-    lease_kind: UpstreamLeaseKind,
-    holder: &str,
-    ttl_secs: i64,
-) -> StorageResult<bool> {
-    let row = sqlx::query(
-        "UPDATE upstream_lease_v1
-            SET until_unix_secs = extract(epoch from now())::bigint + $4,
-                updated_at = NOW()
-          WHERE upstream_id = $1
-            AND lease_kind = $2
-            AND holder = $3
-            AND until_unix_secs > extract(epoch from now())::bigint
-            AND EXISTS (
-                SELECT 1 FROM upstream_spec_v1
-                WHERE id = $1 AND deleted_at IS NULL
-            )
-          RETURNING upstream_id",
-    )
-    .bind(id)
-    .bind(lease_kind.as_str())
-    .bind(holder)
-    .bind(ttl_secs)
-    .fetch_optional(pool)
-    .await
-    .map_err(map_sqlx_error)?;
-    Ok(row.is_some())
-}
-
-async fn release_split_lease(
-    pool: &sqlx::PgPool,
-    id: Uuid,
-    lease_kind: UpstreamLeaseKind,
-    holder: &str,
-) -> StorageResult<bool> {
-    let row = sqlx::query(
-        "DELETE FROM upstream_lease_v1 WHERE upstream_id = $1 AND lease_kind = $2 AND holder = $3 RETURNING upstream_id",
-    )
-    .bind(id)
-    .bind(lease_kind.as_str())
-    .bind(holder)
-    .fetch_optional(pool)
-    .await
-    .map_err(map_sqlx_error)?;
-    Ok(row.is_some())
-}
-
-async fn write_split_warmup_cycle_key(
-    pool: &sqlx::PgPool,
-    id: Uuid,
-    holder: &str,
-    new_cycle_key: i64,
-    next_warmup_at: Option<DateTime<Utc>>,
-) -> StorageResult<bool> {
-    let row = sqlx::query(
-        "DELETE FROM upstream_lease_v1
-          WHERE upstream_id = $1
-            AND lease_kind = 'warmup'
-            AND holder = $2
-            AND until_unix_secs > extract(epoch from now())::bigint
-            AND EXISTS (
-                SELECT 1 FROM upstream_spec_v1 spec
-                LEFT JOIN upstream_status_v1 status ON status.upstream_id = spec.id
-                WHERE spec.id = $1
-                  AND spec.deleted_at IS NULL
-                  AND status.last_warmup_cycle_key IS DISTINCT FROM $3
-            )
-          RETURNING upstream_id",
-    )
-    .bind(id)
-    .bind(holder)
-    .bind(new_cycle_key)
-    .fetch_optional(pool)
-    .await
-    .map_err(map_sqlx_error)?;
-    if row.is_none() {
-        return Ok(false);
-    }
-    set_split_status(
-        pool,
-        id,
-        UpstreamStatusUpdate {
-            last_warmup_cycle_key: Some(Some(new_cycle_key)),
-            next_warmup_at: Some(next_warmup_at),
-            ..UpstreamStatusUpdate::default()
-        },
-    )
-    .await?;
-    Ok(true)
-}
-
-async fn write_split_warmup_next_at(
-    pool: &sqlx::PgPool,
-    id: Uuid,
-    holder: &str,
-    next_warmup_at: DateTime<Utc>,
-) -> StorageResult<bool> {
-    let row = sqlx::query(
-        "SELECT upstream_id FROM upstream_lease_v1
-          WHERE upstream_id = $1
-            AND lease_kind = 'warmup'
-            AND holder = $2
-            AND until_unix_secs > extract(epoch from now())::bigint
-            AND EXISTS (SELECT 1 FROM upstream_spec_v1 WHERE id = $1 AND deleted_at IS NULL)
-          LIMIT 1",
-    )
-    .bind(id)
-    .bind(holder)
-    .fetch_optional(pool)
-    .await
-    .map_err(map_sqlx_error)?;
-    if row.is_none() {
-        return Ok(false);
-    }
-    set_split_status(
-        pool,
-        id,
-        UpstreamStatusUpdate {
-            next_warmup_at: Some(Some(next_warmup_at)),
-            ..UpstreamStatusUpdate::default()
-        },
-    )
-    .await?;
-    Ok(true)
 }
 
 async fn soft_delete_split(
@@ -1097,14 +729,6 @@ fn split_row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<UpstreamReco
         .map_err(|error| StorageError::Corrupted {
             message: format!("invalid upstream base_url: {error}"),
         })?;
-    let refresh_lease_holder = row
-        .try_get::<Option<String>, _>("refresh_lease_holder")
-        .map_err(map_sqlx_error)?
-        .map(|value| Uuid::parse_str(&value))
-        .transpose()
-        .map_err(|error| StorageError::Corrupted {
-            message: format!("invalid refresh lease holder: {error}"),
-        })?;
     Ok(UpstreamRecord {
         id: row.try_get("id").map_err(map_sqlx_error)?,
         name: row.try_get("name").map_err(map_sqlx_error)?,
@@ -1116,12 +740,6 @@ fn split_row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<UpstreamReco
             .map_err(map_sqlx_error)?
             .map(EncryptedOAuthTokens::from_ciphertext),
         api_key_ciphertext: row.try_get("api_key_ciphertext").map_err(map_sqlx_error)?,
-        refresh_lease_holder,
-        refresh_lease_until_unix_secs: optional_i64_to_u64(
-            row.try_get("refresh_lease_until_unix_secs")
-                .map_err(map_sqlx_error)?,
-            "refresh_lease_until_unix_secs",
-        )?,
         last_apply_error: row.try_get("last_apply_error").map_err(map_sqlx_error)?,
         last_apply_at_unix_secs: optional_ts(
             row.try_get("last_apply_at").map_err(map_sqlx_error)?,
@@ -1149,14 +767,6 @@ fn split_row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<UpstreamReco
             "updated_at",
         )?,
         warmup_enabled: row.try_get("warmup_enabled").map_err(map_sqlx_error)?,
-        next_warmup_at: row.try_get("next_warmup_at").map_err(map_sqlx_error)?,
-        last_warmup_cycle_key: row
-            .try_get("last_warmup_cycle_key")
-            .map_err(map_sqlx_error)?,
-        warmup_lease_holder: row.try_get("warmup_lease_holder").map_err(map_sqlx_error)?,
-        warmup_lease_until_unix_secs: row
-            .try_get("warmup_lease_until_unix_secs")
-            .map_err(map_sqlx_error)?,
         warmup_dialect_plugin: row
             .try_get::<Option<serde_json::Value>, _>("warmup_dialect_plugin")
             .map_err(map_sqlx_error)?
@@ -1192,320 +802,4 @@ fn parse_kind(value: String) -> StorageResult<UpstreamKind> {
 
 fn now_unix_secs() -> u64 {
     u64::try_from(Utc::now().timestamp()).unwrap_or_default()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::{error::Error, str::FromStr};
-
-    use cc_lb_storage_api::{BackendKind, MetaStore};
-    use chrono::TimeZone;
-    use sqlx::{
-        AssertSqlSafe, PgPool,
-        postgres::{PgConnectOptions, PgPoolOptions},
-    };
-
-    use super::*;
-
-    type TestResult<T> = Result<T, Box<dyn Error + Send + Sync>>;
-
-    #[tokio::test]
-    async fn pg_claim_warmup_lease_blocks_second_caller() -> TestResult<()> {
-        let Some(fixture) = Fixture::create().await? else {
-            return Ok(());
-        };
-        let store = fixture.store();
-        let upstream = create_warmup_upstream(&store).await?;
-
-        assert!(
-            store
-                .claim_warmup_lease(upstream.id, "replica-a", 60)
-                .await?
-        );
-        assert!(
-            !store
-                .claim_warmup_lease(upstream.id, "replica-b", 60)
-                .await?
-        );
-        let fetched = store
-            .get_by_id(upstream.id)
-            .await?
-            .ok_or("upstream should exist")?;
-        assert_eq!(fetched.warmup_lease_holder.as_deref(), Some("replica-a"));
-
-        fixture.drop_schema().await?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn pg_claim_warmup_lease_unblocks_after_ttl() -> TestResult<()> {
-        let Some(fixture) = Fixture::create().await? else {
-            return Ok(());
-        };
-        let store = fixture.store();
-        let upstream = create_warmup_upstream(&store).await?;
-
-        assert!(
-            store
-                .claim_warmup_lease(upstream.id, "replica-a", 60)
-                .await?
-        );
-        expire_warmup_lease(&fixture.pool, upstream.id).await?;
-        assert!(
-            store
-                .claim_warmup_lease(upstream.id, "replica-b", 60)
-                .await?
-        );
-        let fetched = store
-            .get_by_id(upstream.id)
-            .await?
-            .ok_or("upstream should exist")?;
-        assert_eq!(fetched.warmup_lease_holder.as_deref(), Some("replica-b"));
-
-        fixture.drop_schema().await?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn pg_write_warmup_cycle_key_rejects_expired_lease() -> TestResult<()> {
-        let Some(fixture) = Fixture::create().await? else {
-            return Ok(());
-        };
-        let store = fixture.store();
-        let upstream = create_warmup_upstream(&store).await?;
-
-        assert!(
-            store
-                .claim_warmup_lease(upstream.id, "replica-a", 60)
-                .await?
-        );
-        expire_warmup_lease(&fixture.pool, upstream.id).await?;
-        assert!(
-            !store
-                .write_warmup_cycle_key(upstream.id, "replica-a", 1_700_000_000, Some(next_at(1)))
-                .await?
-        );
-        let fetched = store
-            .get_by_id(upstream.id)
-            .await?
-            .ok_or("upstream should exist")?;
-        assert_eq!(fetched.last_warmup_cycle_key, None);
-        assert_eq!(fetched.next_warmup_at, None);
-
-        fixture.drop_schema().await?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn pg_write_warmup_cycle_key_rejects_wrong_holder() -> TestResult<()> {
-        let Some(fixture) = Fixture::create().await? else {
-            return Ok(());
-        };
-        let store = fixture.store();
-        let upstream = create_warmup_upstream(&store).await?;
-
-        assert!(
-            store
-                .claim_warmup_lease(upstream.id, "replica-a", 60)
-                .await?
-        );
-        assert!(
-            !store
-                .write_warmup_cycle_key(upstream.id, "replica-b", 1_700_000_000, Some(next_at(1)))
-                .await?
-        );
-        let fetched = store
-            .get_by_id(upstream.id)
-            .await?
-            .ok_or("upstream should exist")?;
-        assert_eq!(fetched.last_warmup_cycle_key, None);
-        assert_eq!(fetched.next_warmup_at, None);
-
-        fixture.drop_schema().await?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn pg_write_warmup_cycle_key_rejects_unchanged_key() -> TestResult<()> {
-        let Some(fixture) = Fixture::create().await? else {
-            return Ok(());
-        };
-        let store = fixture.store();
-        let upstream = create_warmup_upstream(&store).await?;
-        let first_next = next_at(1);
-        let second_next = next_at(2);
-
-        assert!(
-            store
-                .claim_warmup_lease(upstream.id, "replica-a", 60)
-                .await?
-        );
-        assert!(
-            store
-                .write_warmup_cycle_key(upstream.id, "replica-a", 1_700_000_000, Some(first_next))
-                .await?
-        );
-        let fetched = store
-            .get_by_id(upstream.id)
-            .await?
-            .ok_or("upstream should exist")?;
-        assert_eq!(fetched.warmup_lease_holder, None);
-        assert_eq!(fetched.warmup_lease_until_unix_secs, None);
-        assert!(
-            store
-                .claim_warmup_lease(upstream.id, "replica-a", 60)
-                .await?
-        );
-        assert!(
-            !store
-                .write_warmup_cycle_key(upstream.id, "replica-a", 1_700_000_000, Some(second_next))
-                .await?
-        );
-        let fetched = store
-            .get_by_id(upstream.id)
-            .await?
-            .ok_or("upstream should exist")?;
-        assert_eq!(fetched.last_warmup_cycle_key, Some(1_700_000_000));
-        assert_eq!(fetched.next_warmup_at, Some(first_next));
-        assert_eq!(fetched.warmup_lease_holder.as_deref(), Some("replica-a"));
-
-        fixture.drop_schema().await?;
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn pg_write_warmup_cycle_key_rejects_soft_deleted_row() -> TestResult<()> {
-        let Some(fixture) = Fixture::create().await? else {
-            return Ok(());
-        };
-        let store = fixture.store();
-        let upstream = create_warmup_upstream(&store).await?;
-
-        assert!(
-            store
-                .claim_warmup_lease(upstream.id, "replica-a", 60)
-                .await?
-        );
-        store.soft_delete(upstream.id, upstream.revision).await?;
-        assert!(
-            !store
-                .write_warmup_cycle_key(upstream.id, "replica-a", 1_700_000_000, Some(next_at(1)))
-                .await?
-        );
-        let fetched = store
-            .get_by_id(upstream.id)
-            .await?
-            .ok_or("upstream should exist")?;
-        assert!(fetched.deleted_at_unix_secs.is_some());
-        assert_eq!(fetched.last_warmup_cycle_key, None);
-
-        fixture.drop_schema().await?;
-        Ok(())
-    }
-
-    struct Fixture {
-        schema: String,
-        admin_pool: PgPool,
-        pool: PgPool,
-    }
-
-    impl Fixture {
-        async fn create() -> TestResult<Option<Self>> {
-            let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
-                eprintln!("skip: CI_POSTGRES_URL not set");
-                return Ok(None);
-            };
-            let schema = format!("test_upstream_warmup_{}", Uuid::new_v4().simple());
-            let admin_pool = PgPoolOptions::new()
-                .max_connections(1)
-                .connect_with(PgConnectOptions::from_str(&url)?)
-                .await?;
-            sqlx::query(AssertSqlSafe(format!(
-                "CREATE SCHEMA {}",
-                quote_ident(&schema)
-            )))
-            .execute(&admin_pool)
-            .await?;
-
-            let pool = PgPoolOptions::new()
-                .max_connections(4)
-                .connect_with(
-                    PgConnectOptions::from_str(&url)?.options([("search_path", schema.as_str())]),
-                )
-                .await?;
-            let store = PostgresStorage::new(pool.clone());
-            store.initialize(BackendKind::Postgres).await?;
-
-            Ok(Some(Self {
-                schema,
-                admin_pool,
-                pool,
-            }))
-        }
-
-        fn store(&self) -> PostgresStorage {
-            PostgresStorage::new(self.pool.clone())
-        }
-
-        async fn drop_schema(self) -> TestResult<()> {
-            self.pool.close().await;
-            sqlx::query(AssertSqlSafe(format!(
-                "DROP SCHEMA IF EXISTS {} CASCADE",
-                quote_ident(&self.schema)
-            )))
-            .execute(&self.admin_pool)
-            .await?;
-            self.admin_pool.close().await;
-            Ok(())
-        }
-    }
-
-    async fn create_warmup_upstream(store: &PostgresStorage) -> StorageResult<UpstreamRecord> {
-        store
-            .create(UpstreamCreate {
-                name: format!("warmup_{}", Uuid::new_v4().simple()),
-                kind: UpstreamKind::AnthropicOauth,
-                base_url: None,
-                api_key_ciphertext: None,
-                oauth_token_generation: None,
-                warmup_enabled: true,
-                next_warmup_at: None,
-                last_warmup_cycle_key: None,
-                warmup_lease_holder: None,
-                warmup_lease_until_unix_secs: None,
-                warmup_dialect_plugin: None,
-            })
-            .await
-    }
-
-    async fn expire_warmup_lease(pool: &PgPool, upstream_id: Uuid) -> TestResult<()> {
-        sqlx::query(
-            "UPDATE upstream_lease_v1
-                SET until_unix_secs = extract(epoch from now())::bigint - 1
-              WHERE upstream_id = $1
-                AND lease_kind = 'warmup'",
-        )
-        .bind(upstream_id)
-        .execute(pool)
-        .await?;
-        Ok(())
-    }
-
-    fn next_at(offset: i64) -> DateTime<Utc> {
-        Utc.timestamp_opt(1_800_000_000 + offset, 0)
-            .single()
-            .expect("valid next_warmup_at")
-    }
-
-    fn quote_ident(identifier: &str) -> String {
-        assert!(
-            identifier
-                .chars()
-                .all(|character| character.is_ascii_lowercase()
-                    || character.is_ascii_digit()
-                    || character == '_'),
-            "unsafe postgres identifier: {identifier}"
-        );
-        format!("\"{identifier}\"")
-    }
 }

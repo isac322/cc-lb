@@ -389,8 +389,6 @@ pub struct SchedulerConfig {
     pub separate_pool: SchedulerPoolConfig,
     #[serde(default = "default_scheduler_leader_lock_key")]
     pub leader_lock_key: i64,
-    #[serde(default = "default_scheduler_reconcile_interval_secs")]
-    pub reconcile_interval_secs: u64,
     #[serde(default)]
     pub retry_classes: SchedulerRetryClasses,
     #[serde(
@@ -417,7 +415,6 @@ impl Default for SchedulerConfig {
         Self {
             separate_pool: SchedulerPoolConfig::default(),
             leader_lock_key: DEFAULT_SCHEDULER_LEADER_LOCK_KEY,
-            reconcile_interval_secs: 300,
             retry_classes: SchedulerRetryClasses::default(),
             recurring_jobs: default_scheduler_recurring_jobs(),
             idempotency: SchedulerIdempotencyConfig::default(),
@@ -596,8 +593,6 @@ pub struct SubscriptionQuotaConfig {
     pub retention_days: u64,
     #[serde(default = "default_subscription_quota_gc_batch_size")]
     pub gc_batch_size: u32,
-    #[serde(default = "default_subscription_quota_gc_tick_interval_secs")]
-    pub gc_tick_interval_secs: u64,
     #[serde(default = "default_subscription_quota_writer_batch_max_records")]
     pub writer_batch_max_records: u32,
     #[serde(default = "default_subscription_quota_writer_flush_ms")]
@@ -616,7 +611,6 @@ impl Default for SubscriptionQuotaConfig {
             enabled: true,
             retention_days: 30,
             gc_batch_size: 10_000,
-            gc_tick_interval_secs: 60,
             writer_batch_max_records: 256,
             writer_flush_ms: 100,
             writer_channel_capacity: 4096,
@@ -639,7 +633,6 @@ impl Default for SubscriptionQuotaConfig {
 /// - `enabled` (default: false) - gate all observation flow and sweeper spawn
 /// - `grace_margin_secs` (default: 30) - minimum age before a cache hit is refreshed
 /// - `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence
-/// - `sweeper_interval_secs` (default: 300) - interval between expiry purge scans
 /// - `warm_set_cap` (default: 32) - max snapshot entries per upstream/model
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -650,8 +643,6 @@ pub struct PromptCacheShadowConfig {
     pub grace_margin_secs: u64,
     #[serde(default = "default_prompt_cache_shadow_refresh_debounce_secs")]
     pub refresh_debounce_secs: u64,
-    #[serde(default = "default_prompt_cache_shadow_sweeper_interval_secs")]
-    pub sweeper_interval_secs: u64,
     #[serde(default = "default_prompt_cache_shadow_warm_set_cap")]
     pub warm_set_cap: usize,
 }
@@ -662,7 +653,6 @@ impl Default for PromptCacheShadowConfig {
             enabled: false,
             grace_margin_secs: 30,
             refresh_debounce_secs: 60,
-            sweeper_interval_secs: 300,
             warm_set_cap: 32,
         }
     }
@@ -916,10 +906,6 @@ fn default_scheduler_leader_lock_key() -> i64 {
     DEFAULT_SCHEDULER_LEADER_LOCK_KEY
 }
 
-fn default_scheduler_reconcile_interval_secs() -> u64 {
-    SchedulerConfig::default().reconcile_interval_secs
-}
-
 fn default_scheduler_recurring_jobs() -> HashMap<String, RecurringJobConfig> {
     HashMap::from([
         (
@@ -945,6 +931,22 @@ fn default_scheduler_recurring_jobs() -> HashMap<String, RecurringJobConfig> {
         (
             "apalis_housekeeping".to_owned(),
             recurring_job_config(3600, scheduler_jitter_secs(3600)),
+        ),
+        (
+            "anthropic_compat_refresh".to_owned(),
+            recurring_job_config(86_400, scheduler_jitter_secs(86_400)),
+        ),
+        (
+            "warmup_watchdog".to_owned(),
+            recurring_job_config(6000, scheduler_jitter_secs(6000)),
+        ),
+        (
+            "oauth_refresh_watchdog".to_owned(),
+            recurring_job_config(9360, scheduler_jitter_secs(9360)),
+        ),
+        (
+            "oauth_usage_poll_watchdog".to_owned(),
+            recurring_job_config(900, scheduler_jitter_secs(900)),
         ),
     ])
 }
@@ -1100,10 +1102,6 @@ fn default_subscription_quota_gc_batch_size() -> u32 {
     SubscriptionQuotaConfig::default().gc_batch_size
 }
 
-fn default_subscription_quota_gc_tick_interval_secs() -> u64 {
-    SubscriptionQuotaConfig::default().gc_tick_interval_secs
-}
-
 fn default_subscription_quota_writer_batch_max_records() -> u32 {
     SubscriptionQuotaConfig::default().writer_batch_max_records
 }
@@ -1130,10 +1128,6 @@ fn default_prompt_cache_shadow_grace_margin_secs() -> u64 {
 
 fn default_prompt_cache_shadow_refresh_debounce_secs() -> u64 {
     PromptCacheShadowConfig::default().refresh_debounce_secs
-}
-
-fn default_prompt_cache_shadow_sweeper_interval_secs() -> u64 {
-    PromptCacheShadowConfig::default().sweeper_interval_secs
 }
 
 fn default_prompt_cache_shadow_warm_set_cap() -> usize {

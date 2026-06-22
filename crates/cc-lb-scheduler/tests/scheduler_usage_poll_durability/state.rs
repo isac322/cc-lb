@@ -6,12 +6,12 @@ use std::sync::{Arc, Mutex};
 
 use apalis::prelude::Data;
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
-use cc_lb_scheduler::idempotency::OAuthUsagePollScheduleConfig;
 use cc_lb_scheduler::jobs::oauth_usage_poll::{
     OAuthUsagePollCursorRepository, OAuthUsagePollHandler, OAuthUsagePollJob,
     OAuthUsagePollObservation,
 };
 use cc_lb_scheduler::retry::JobOutcome;
+use cc_lb_scheduler::state_stores::OAuthUsagePollScheduleConfig;
 use cc_lb_scheduler::worker::EntityJob;
 use http::StatusCode;
 use sqlx::Database;

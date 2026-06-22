@@ -14,12 +14,10 @@ use crate::middleware::TraceparentCarrier;
 use crate::retry::JobOutcome;
 
 mod repository;
-pub use repository::{OAuthRefreshClaims, OAuthRefreshUpstreams};
+pub use repository::OAuthRefreshUpstreams;
 
-const DEFAULT_CLAIM_TTL_SECS: u64 = 60;
-const DEFAULT_CONTENTION_WAIT_SECS: u64 = 50;
-const DEFAULT_CONTENTION_POLL_MILLIS: u64 = 1_000;
 const DEFAULT_RETRY_DELAY_SECS: u64 = 30;
+const REFRESH_BEFORE_EXPIRY_SECS: u64 = 300;
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct OAuthRefreshJob {
@@ -35,19 +33,27 @@ impl OAuthRefreshJob {
         }
     }
 
-    pub fn idempotency_key(&self) -> String {
-        format!("entity:oauth_refresh:{}", self.upstream_id)
+    pub fn idempotency_key(&self, expires_at_unix_secs: u64) -> String {
+        format!(
+            "entity:oauth_refresh:{}:{}",
+            self.upstream_id, expires_at_unix_secs
+        )
     }
 
-    pub fn into_apalis_task<Ctx, IdType>(self, run_at_unix_secs: u64) -> Task<Self, Ctx, IdType>
+    pub fn into_apalis_task<Ctx, IdType>(self, expires_at_unix_secs: u64) -> Task<Self, Ctx, IdType>
     where
         Ctx: Default,
     {
-        let idempotency_key = self.idempotency_key();
+        let run_at_unix_secs = Self::run_at_for_expires_at(expires_at_unix_secs);
+        let idempotency_key = self.idempotency_key(expires_at_unix_secs);
         TaskBuilder::<Self, Ctx, IdType>::new(self)
             .run_at_timestamp(run_at_unix_secs)
             .with_idempotency_key(idempotency_key)
             .build()
+    }
+
+    pub const fn run_at_for_expires_at(expires_at_unix_secs: u64) -> u64 {
+        expires_at_unix_secs.saturating_sub(REFRESH_BEFORE_EXPIRY_SECS)
     }
 }
 
@@ -63,54 +69,44 @@ impl TraceparentCarrier for OAuthRefreshJob {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct OAuthRefreshConfig {
-    pub claim_ttl_secs: u64,
-    pub contention_wait: Duration,
-    pub contention_poll_interval: Duration,
     pub retry_delay: Duration,
 }
 
 impl Default for OAuthRefreshConfig {
     fn default() -> Self {
         Self {
-            claim_ttl_secs: DEFAULT_CLAIM_TTL_SECS,
-            contention_wait: Duration::from_secs(DEFAULT_CONTENTION_WAIT_SECS),
-            contention_poll_interval: Duration::from_millis(DEFAULT_CONTENTION_POLL_MILLIS),
             retry_delay: Duration::from_secs(DEFAULT_RETRY_DELAY_SECS),
         }
     }
 }
 
+pub struct RefreshedOAuthTokens {
+    pub encrypted_tokens: EncryptedOAuthTokens,
+    pub expires_at_unix_secs: u64,
+}
+
 #[derive(Clone, Debug)]
-pub struct OAuthRefreshJobHandler<Claims, Upstreams> {
-    claims: Claims,
+pub struct OAuthRefreshJobHandler<Upstreams> {
     upstreams: Upstreams,
     replica_id: Uuid,
     config: OAuthRefreshConfig,
 }
 
-impl<Claims, Upstreams> OAuthRefreshJobHandler<Claims, Upstreams> {
-    pub const fn new(claims: Claims, upstreams: Upstreams, replica_id: Uuid) -> Self {
+impl<Upstreams> OAuthRefreshJobHandler<Upstreams> {
+    pub fn new(upstreams: Upstreams, replica_id: Uuid) -> Self {
         Self {
-            claims,
             upstreams,
             replica_id,
-            config: OAuthRefreshConfig {
-                claim_ttl_secs: DEFAULT_CLAIM_TTL_SECS,
-                contention_wait: Duration::from_secs(DEFAULT_CONTENTION_WAIT_SECS),
-                contention_poll_interval: Duration::from_millis(DEFAULT_CONTENTION_POLL_MILLIS),
-                retry_delay: Duration::from_secs(DEFAULT_RETRY_DELAY_SECS),
-            },
+            config: OAuthRefreshConfig::default(),
         }
     }
 
     pub const fn with_config(
-        claims: Claims,
         upstreams: Upstreams,
         replica_id: Uuid,
         config: OAuthRefreshConfig,
     ) -> Self {
         Self {
-            claims,
             upstreams,
             replica_id,
             config,
@@ -118,23 +114,25 @@ impl<Claims, Upstreams> OAuthRefreshJobHandler<Claims, Upstreams> {
     }
 }
 
-impl<Claims, Upstreams> OAuthRefreshJobHandler<Claims, Upstreams>
+impl<Upstreams> OAuthRefreshJobHandler<Upstreams>
 where
-    Claims: OAuthRefreshClaims + Send + Sync,
     Upstreams: OAuthRefreshUpstreams + Send + Sync,
 {
-    pub async fn handle<Refresh, Refreshed, Enqueue, Enqueued>(
+    pub async fn handle<Refresh, Refreshed, Enqueue, Enqueued, Schedule, Scheduled>(
         &self,
         job: OAuthRefreshJob,
-        now_unix_secs: u64,
+        _now_unix_secs: u64,
         refresh: Refresh,
         enqueue_metadata: Enqueue,
+        schedule_next_refresh: Schedule,
     ) -> Result<JobOutcome>
     where
         Refresh: FnOnce(UpstreamRecord) -> Refreshed + Send,
-        Refreshed: Future<Output = Result<EncryptedOAuthTokens>> + Send,
+        Refreshed: Future<Output = Result<RefreshedOAuthTokens>> + Send,
         Enqueue: FnOnce(MetadataRefreshJob) -> Enqueued + Send,
         Enqueued: Future<Output = Result<()>> + Send,
+        Schedule: FnOnce(Uuid, u64) -> Scheduled + Send,
+        Scheduled: Future<Output = Result<()>> + Send,
     {
         let Some(upstream) = self.upstreams.get_by_id(job.upstream_id).await? else {
             return Ok(JobOutcome::Skip);
@@ -143,86 +141,29 @@ where
             return Ok(JobOutcome::Skip);
         }
 
-        let holder = holder_name(self.replica_id);
-        if !self
-            .claims
-            .try_acquire(
-                job.upstream_id,
-                &holder,
-                self.config.claim_ttl_secs,
-                now_unix_secs,
-            )
-            .await?
-        {
-            return self
-                .wait_for_other_holder(job.upstream_id, upstream.oauth_token_generation)
-                .await;
-        }
-
         match refresh(upstream).await {
-            Ok(tokens) => {
+            Ok(refreshed) => {
                 let updated = match self
                     .upstreams
-                    .complete_refresh(job.upstream_id, self.replica_id, tokens)
+                    .complete_refresh(job.upstream_id, self.replica_id, refreshed.encrypted_tokens)
                     .await
                 {
                     Ok(updated) => updated,
-                    Err(error) => {
-                        self.claims
-                            .release_if_holder(job.upstream_id, &holder)
-                            .await?;
-                        return Err(error);
-                    }
+                    Err(error) => return Err(error),
                 };
                 let generation = updated.oauth_token_generation;
-                self.claims
-                    .complete_and_bump_generation(job.upstream_id, &holder, generation)
-                    .await?;
                 let mut metadata_job = MetadataRefreshJob::new(job.upstream_id, generation);
                 metadata_job.traceparent = job.traceparent;
                 enqueue_metadata(metadata_job).await?;
+                schedule_next_refresh(job.upstream_id, refreshed.expires_at_unix_secs).await?;
                 Ok(JobOutcome::Done)
             }
             Err(error) => {
-                self.claims
-                    .release_if_holder(job.upstream_id, &holder)
-                    .await?;
                 tracing::warn!(upstream_id = %job.upstream_id, error = %error, "oauth refresh job failed");
                 Ok(JobOutcome::Retry {
                     delay: self.config.retry_delay,
                 })
             }
-        }
-    }
-
-    async fn wait_for_other_holder(
-        &self,
-        upstream_id: Uuid,
-        starting_generation: u64,
-    ) -> Result<JobOutcome> {
-        let deadline = tokio::time::Instant::now() + self.config.contention_wait;
-        loop {
-            match self
-                .upstreams
-                .read_oauth_token_generation(upstream_id)
-                .await?
-            {
-                Some(generation) if generation > starting_generation => {
-                    return Ok(JobOutcome::Done);
-                }
-                Some(_) => {}
-                None => {
-                    return Ok(JobOutcome::Skip);
-                }
-            }
-
-            let now = tokio::time::Instant::now();
-            if now >= deadline {
-                return Ok(JobOutcome::Retry {
-                    delay: self.config.retry_delay,
-                });
-            }
-            tokio::time::sleep(self.config.contention_poll_interval.min(deadline - now)).await;
         }
     }
 }
@@ -232,8 +173,4 @@ fn is_refreshable(upstream: &UpstreamRecord) -> bool {
         && upstream.enabled
         && upstream.deleted_at_unix_secs.is_none()
         && upstream.oauth_credentials.is_some()
-}
-
-fn holder_name(replica_id: Uuid) -> String {
-    format!("apalis-worker:{replica_id}")
 }

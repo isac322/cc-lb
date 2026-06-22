@@ -84,10 +84,6 @@ where
             api_key_ciphertext: None,
             oauth_token_generation: None,
             warmup_enabled: false,
-            next_warmup_at: None,
-            last_warmup_cycle_key: None,
-            warmup_lease_holder: None,
-            warmup_lease_until_unix_secs: None,
             warmup_dialect_plugin: None,
         })
         .await?;
@@ -122,15 +118,4 @@ where
 
 pub fn metadata_key_prefix(upstream_id: Uuid) -> String {
     format!("entity:metadata_refresh:{upstream_id}:%")
-}
-
-pub fn assert_generation_incremented_by_one(
-    label: &str,
-    before: u64,
-    after: u64,
-) -> TestResult<()> {
-    if after != before.saturating_add(1) {
-        return Err(format!("{label} changed from {before} to {after}, expected +1").into());
-    }
-    Ok(())
 }

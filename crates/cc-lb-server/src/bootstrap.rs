@@ -158,7 +158,6 @@ pub async fn apply_bootstrap(
                 oauth_token_generation: None,
                 warmup_enabled: false,
                 warmup_dialect_plugin: None,
-                ..UpstreamCreate::default()
             };
 
             upstream_store

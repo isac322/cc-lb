@@ -25,7 +25,7 @@ const upstreams: any[] = [
     api_key_env: "ANTHROPIC_API_KEY",
     warmup_enabled: false,
     warmup_dialect_plugin: null,
-    status: { last_apply_error: null, last_apply_at_unix_secs: null, next_warmup_at: null, last_warmup_cycle_key: null },
+    status: { last_apply_error: null, last_apply_at_unix_secs: null, last_warmup_at_unix_secs: null },
   },
   {
     id: "us-anthropic-secondary",
@@ -37,7 +37,7 @@ const upstreams: any[] = [
     api_key_env: "ANTHROPIC_API_KEY_2",
     warmup_enabled: false,
     warmup_dialect_plugin: null,
-    status: { last_apply_error: null, last_apply_at_unix_secs: null, next_warmup_at: null, last_warmup_cycle_key: null },
+    status: { last_apply_error: null, last_apply_at_unix_secs: null, last_warmup_at_unix_secs: null },
   },
   {
     id: "us-oauth-healthy",
@@ -48,7 +48,7 @@ const upstreams: any[] = [
     base_url: "https://api.anthropic.com",
     warmup_enabled: true,
     warmup_dialect_plugin: null,
-    status: { last_apply_error: null, last_apply_at_unix_secs: null, next_warmup_at: "2026-06-14T23:04:12Z", last_warmup_cycle_key: 1718380800 },
+    status: { last_apply_error: null, last_apply_at_unix_secs: null, last_warmup_at_unix_secs: 1718380800 },
   },
   {
     id: "us-oauth-disabled",
@@ -59,7 +59,7 @@ const upstreams: any[] = [
     base_url: "https://api.anthropic.com",
     warmup_enabled: false,
     warmup_dialect_plugin: null,
-    status: { last_apply_error: null, last_apply_at_unix_secs: null, next_warmup_at: null, last_warmup_cycle_key: null },
+    status: { last_apply_error: null, last_apply_at_unix_secs: null, last_warmup_at_unix_secs: null },
   },
 ];
 
@@ -604,7 +604,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
     const body = await readJson<any>(req);
     if (!body.name) return err(400, "invalid_input", "name required");
     if (upstreams.find((u) => u.name === body.name)) return err(409, "conflict", "name already exists");
-    const newU = { id: `us-${Date.now().toString(36)}`, name: body.name, kind: body.kind ?? "anthropic_api_key", enabled: true, spec_revision: 1, base_url: body.base_url ?? "https://api.anthropic.com", api_key_env: body.api_key_env ?? null, warmup_enabled: false, warmup_dialect_plugin: null, status: { last_apply_error: null, last_apply_at_unix_secs: null, next_warmup_at: null, last_warmup_cycle_key: null } };
+    const newU = { id: `us-${Date.now().toString(36)}`, name: body.name, kind: body.kind ?? "anthropic_api_key", enabled: true, spec_revision: 1, base_url: body.base_url ?? "https://api.anthropic.com", api_key_env: body.api_key_env ?? null, warmup_enabled: false, warmup_dialect_plugin: null, status: { last_apply_error: null, last_apply_at_unix_secs: null, last_warmup_at_unix_secs: null } };
     upstreams.push(newU);
     return created(newU, { etag: `"${newU.spec_revision}"`, location: `/admin/v1/upstreams/${newU.id}` });
   }

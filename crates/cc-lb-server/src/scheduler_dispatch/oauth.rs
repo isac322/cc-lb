@@ -1,15 +1,12 @@
 use cc_lb_aead::{EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
-use cc_lb_scheduler::idempotency::{
-    OAuthRefreshClaimsStore, OAuthUsagePollCursorsStore, OAuthUsagePollScheduleConfig,
-};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
-use cc_lb_scheduler::jobs::oauth_refresh::{OAuthRefreshJob, OAuthRefreshJobHandler};
-use cc_lb_scheduler::jobs::oauth_usage_poll::{
-    OAuthUsagePollHandler, OAuthUsagePollJob, OAuthUsagePollObservation,
+use cc_lb_scheduler::jobs::oauth_refresh::{
+    OAuthRefreshJob, OAuthRefreshJobHandler, RefreshedOAuthTokens,
 };
+use cc_lb_scheduler::jobs::oauth_usage_poll::{OAuthUsagePollJob, OAuthUsagePollObservation};
 use cc_lb_scheduler::retry::JobOutcome;
-use cc_lb_scheduler::worker::{EntityJob, SchedulerBackend};
+use cc_lb_scheduler::worker::{EntityJob, SchedulerPushTask};
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{UpstreamRecord, UpstreamStore};
@@ -31,70 +28,23 @@ impl SchedulerDispatch {
         let replica_id = self
             .replica_id
             .ok_or_else(|| SchedulerError::Job("scheduler replica id is unavailable".to_owned()))?;
-        match &self.backend {
-            #[cfg(feature = "sqlite")]
-            SchedulerBackend::Sqlite(sqlite) => {
-                OAuthRefreshJobHandler::new(
-                    OAuthRefreshClaimsStore::new(sqlite.pool.clone()),
-                    StorageHandle::new(self.storage.clone()),
-                    replica_id,
-                )
-                .handle(
-                    job,
-                    now_unix_secs(),
-                    |upstream| self.refresh_upstream(upstream),
-                    |metadata_job| self.enqueue_metadata_refresh(metadata_job),
-                )
-                .await
-            }
-            #[cfg(feature = "postgres")]
-            SchedulerBackend::Postgres(postgres) => {
-                OAuthRefreshJobHandler::new(
-                    OAuthRefreshClaimsStore::new(postgres.pool.clone()),
-                    StorageHandle::new(self.storage.clone()),
-                    replica_id,
-                )
-                .handle(
-                    job,
-                    now_unix_secs(),
-                    |upstream| self.refresh_upstream(upstream),
-                    |metadata_job| self.enqueue_metadata_refresh(metadata_job),
-                )
-                .await
-            }
-        }
-    }
-
-    pub(super) async fn dispatch_oauth_usage_poll(
-        &self,
-        job: OAuthUsagePollJob,
-    ) -> SchedulerResult<JobOutcome> {
-        match &self.backend {
-            #[cfg(feature = "sqlite")]
-            SchedulerBackend::Sqlite(sqlite) => {
-                OAuthUsagePollHandler::new(
-                    OAuthUsagePollCursorsStore::new(sqlite.pool.clone()),
-                    OAuthUsagePollScheduleConfig::default(),
-                )
-                .handle(job, now_unix_secs(), |job| self.poll_usage(job))
-                .await
-            }
-            #[cfg(feature = "postgres")]
-            SchedulerBackend::Postgres(postgres) => {
-                OAuthUsagePollHandler::new(
-                    OAuthUsagePollCursorsStore::new(postgres.pool.clone()),
-                    OAuthUsagePollScheduleConfig::default(),
-                )
-                .handle(job, now_unix_secs(), |job| self.poll_usage(job))
-                .await
-            }
-        }
+        OAuthRefreshJobHandler::new(StorageHandle::new(self.storage.clone()), replica_id)
+            .handle(
+                job,
+                now_unix_secs(),
+                |upstream| self.refresh_upstream(upstream),
+                |metadata_job| self.enqueue_metadata_refresh(metadata_job),
+                |upstream_id, expires_at_unix_secs| {
+                    self.push_next_oauth_refresh_task(upstream_id, expires_at_unix_secs)
+                },
+            )
+            .await
     }
 
     async fn refresh_upstream(
         &self,
         upstream: UpstreamRecord,
-    ) -> SchedulerResult<EncryptedOAuthTokens> {
+    ) -> SchedulerResult<RefreshedOAuthTokens> {
         let bundle = decrypt_bundle(&upstream, self.aead.as_ref())?;
         let response = request_refresh(
             &self.http,
@@ -114,15 +64,38 @@ impl SchedulerDispatch {
             expires_at_unix_secs: now_unix_secs().saturating_add(response.expires_in),
             scopes,
         };
-        EncryptedOAuthTokens::encrypt(self.aead.as_ref(), &updated, upstream.id.as_bytes())
-            .map_err(|error| SchedulerError::Job(error.to_string()))
+        let encrypted_tokens =
+            EncryptedOAuthTokens::encrypt(self.aead.as_ref(), &updated, upstream.id.as_bytes())
+                .map_err(|error| SchedulerError::Job(error.to_string()))?;
+        Ok(RefreshedOAuthTokens {
+            encrypted_tokens,
+            expires_at_unix_secs: updated.expires_at_unix_secs,
+        })
     }
 
     async fn enqueue_metadata_refresh(&self, job: MetadataRefreshJob) -> SchedulerResult<()> {
         self.backend.push_job(EntityJob::MetadataRefresh(job)).await
     }
 
-    async fn poll_usage(
+    async fn push_next_oauth_refresh_task(
+        &self,
+        upstream_id: uuid::Uuid,
+        expires_at_unix_secs: u64,
+    ) -> SchedulerResult<()> {
+        let job = OAuthRefreshJob::new(upstream_id);
+        let idempotency_key = job.idempotency_key(expires_at_unix_secs);
+        let task = SchedulerPushTask {
+            args: EntityJob::OAuthRefresh(job),
+            idempotency_key: Some(idempotency_key),
+            run_at_unix_secs: Some(OAuthRefreshJob::run_at_for_expires_at(expires_at_unix_secs)),
+        };
+        match self.backend.push_entity_task(task).await {
+            Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
+            Err(error) => Err(error),
+        }
+    }
+
+    pub(super) async fn poll_usage(
         &self,
         job: OAuthUsagePollJob,
     ) -> SchedulerResult<OAuthUsagePollObservation> {

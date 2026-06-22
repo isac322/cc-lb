@@ -1,12 +1,11 @@
 use axum::{
     Json, Router,
     extract::{Query, State},
-    http::{HeaderMap, StatusCode},
+    http::StatusCode,
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::get,
 };
-use cc_lb_scheduler::admin::SchedulerRecurringJobStatus;
-use cc_lb_scheduler::idempotency::SchedulerFailure;
+use cc_lb_scheduler::admin::{SchedulerFailure, SchedulerRecurringJobStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -23,7 +22,6 @@ pub fn router() -> Router<AdminState> {
     Router::new()
         .route("/admin/scheduler/status", get(status))
         .route("/admin/scheduler/failures", get(failures))
-        .route("/admin/scheduler/reconcile", post(reconcile))
 }
 
 #[derive(Debug, Serialize)]
@@ -47,11 +45,6 @@ struct SchedulerFailuresResponse {
     failures: Vec<SchedulerFailure>,
     limit: u32,
     offset: u32,
-}
-
-#[derive(Debug, Serialize)]
-struct SchedulerReconcileResponse {
-    job_id: String,
 }
 
 async fn status(State(state): State<AdminState>) -> Response {
@@ -96,30 +89,6 @@ async fn failures(
         .into_response(),
         Err(error) => scheduler_error(error),
     }
-}
-
-async fn reconcile(State(state): State<AdminState>, headers: HeaderMap) -> Response {
-    let Some(scheduler) = state.scheduler.as_ref() else {
-        return scheduler_unavailable();
-    };
-    match scheduler
-        .enqueue_reconcile(traceparent_from_headers(&headers))
-        .await
-    {
-        Ok(job_id) => (
-            StatusCode::ACCEPTED,
-            Json(SchedulerReconcileResponse { job_id }),
-        )
-            .into_response(),
-        Err(error) => scheduler_error(error),
-    }
-}
-
-fn traceparent_from_headers(headers: &HeaderMap) -> Option<String> {
-    headers
-        .get("traceparent")
-        .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned)
 }
 
 fn scheduler_unavailable() -> Response {

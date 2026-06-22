@@ -5,8 +5,8 @@ use cc_lb_pricing::{FetchedCatalog, LiteLlmLoader, LoaderError};
 use serde::{Deserialize, Serialize};
 
 use crate::error::Result;
-use crate::idempotency::{PriceCatalogVersion, PriceCatalogVersionsStore};
 use crate::middleware::TraceparentCarrier;
+use crate::state_stores::{PriceCatalogVersion, PriceCatalogVersionsStore};
 
 pub const DEFAULT_PRICE_CATALOG_SOURCE: &str = "litellm";
 pub const PRICE_CATALOG_REFRESH_RETRY_DELAY: Duration = Duration::from_secs(30);

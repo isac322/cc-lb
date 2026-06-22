@@ -7,7 +7,8 @@ use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_core::{AuditPayload, MetadataHookHandle, MetadataHookRequest};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
-use cc_lb_scheduler::worker::{EntityJob, SchedulerBackend};
+use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
+use cc_lb_scheduler::worker::{EntityJob, Filter, SchedulerBackend, SchedulerPushTask, TaskStatus};
 use cc_lb_signer_anthropic_oauth::{LazyRefreshError, LazyRefreshHandle};
 use cc_lb_storage_api::{AuditEntry, AuditStore, StorageError, StorageResult, UpstreamRecord};
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
@@ -24,9 +25,9 @@ use uuid::Uuid;
 
 use crate::dynamic_view_builder::Stores;
 
-const LAZY_REFRESH_CLAIM_TTL_SECS: u64 = 60;
 const LAZY_REFRESH_CONTENTION_WAIT_SECS: u64 = 60;
 const LAZY_REFRESH_POLL_INTERVAL_SECS: u64 = 1;
+const LAZY_REFRESH_TASK_PAGE_SIZE: u32 = 500;
 
 type HyperTokenClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
 
@@ -65,7 +66,6 @@ pub struct LazyRefresher {
 
 #[derive(Clone, Copy)]
 pub struct LazyRefreshContentionConfig {
-    claim_ttl_secs: u64,
     wait_timeout: Duration,
     poll_interval: Duration,
 }
@@ -73,7 +73,6 @@ pub struct LazyRefreshContentionConfig {
 impl LazyRefreshContentionConfig {
     const fn production() -> Self {
         Self {
-            claim_ttl_secs: LAZY_REFRESH_CLAIM_TTL_SECS,
             wait_timeout: Duration::from_secs(LAZY_REFRESH_CONTENTION_WAIT_SECS),
             poll_interval: Duration::from_secs(LAZY_REFRESH_POLL_INTERVAL_SECS),
         }
@@ -82,7 +81,6 @@ impl LazyRefreshContentionConfig {
     #[cfg(test)]
     const fn for_tests(wait_timeout: Duration, poll_interval: Duration) -> Self {
         Self {
-            claim_ttl_secs: LAZY_REFRESH_CLAIM_TTL_SECS,
             wait_timeout,
             poll_interval,
         }
@@ -91,13 +89,13 @@ impl LazyRefreshContentionConfig {
 
 #[async_trait]
 pub trait LazyRefreshClaimGuard: Send + Sync {
-    async fn try_acquire(
+    async fn begin_refresh(
         &self,
         upstream_id: Uuid,
         holder: &str,
-        ttl_secs: u64,
+        expires_at_unix_secs: u64,
         now_unix_secs: u64,
-    ) -> StorageResult<bool>;
+    ) -> StorageResult<LazyRefreshClaim>;
 
     async fn complete_and_bump_generation(
         &self,
@@ -107,75 +105,144 @@ pub trait LazyRefreshClaimGuard: Send + Sync {
     ) -> StorageResult<bool>;
 
     async fn release_if_holder(&self, upstream_id: Uuid, holder: &str) -> StorageResult<bool>;
+
+    async fn task_state(&self, _idempotency_key: &str) -> StorageResult<LazyRefreshTaskState> {
+        Ok(LazyRefreshTaskState::Active)
+    }
 }
 
-#[cfg(feature = "sqlite")]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LazyRefreshClaim {
+    Acquired,
+    Enqueued { idempotency_key: String },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum LazyRefreshTaskState {
+    Active,
+    Done,
+    TerminalFailure { reason: String },
+}
+
+#[derive(Clone, Debug)]
+pub struct ApalisLazyRefreshClaimGuard {
+    scheduler_backend: SchedulerBackend,
+}
+
+impl ApalisLazyRefreshClaimGuard {
+    pub fn new(scheduler_backend: SchedulerBackend) -> Self {
+        Self { scheduler_backend }
+    }
+}
+
 #[async_trait]
-impl LazyRefreshClaimGuard
-    for cc_lb_scheduler::idempotency::OAuthRefreshClaimsStore<scheduler_sqlx::Sqlite>
-{
-    async fn try_acquire(
+impl LazyRefreshClaimGuard for ApalisLazyRefreshClaimGuard {
+    async fn begin_refresh(
         &self,
         upstream_id: Uuid,
-        holder: &str,
-        ttl_secs: u64,
+        _holder: &str,
+        expires_at_unix_secs: u64,
         now_unix_secs: u64,
-    ) -> StorageResult<bool> {
-        self.try_acquire(upstream_id, holder, ttl_secs, now_unix_secs)
-            .await
-            .map_err(scheduler_claim_error)
+    ) -> StorageResult<LazyRefreshClaim> {
+        let job = OAuthRefreshJob::new(upstream_id);
+        let idempotency_key = job.idempotency_key(expires_at_unix_secs);
+        let task = SchedulerPushTask {
+            args: EntityJob::OAuthRefresh(job),
+            idempotency_key: Some(idempotency_key.clone()),
+            run_at_unix_secs: Some(now_unix_secs),
+        };
+        match self.scheduler_backend.push_entity_task(task).await {
+            Ok(()) | Err(cc_lb_scheduler::error::SchedulerError::Conflict(_)) => {
+                Ok(LazyRefreshClaim::Enqueued { idempotency_key })
+            }
+            Err(error) => Err(scheduler_claim_error(error)),
+        }
     }
 
     async fn complete_and_bump_generation(
         &self,
-        upstream_id: Uuid,
-        holder: &str,
-        generation: u64,
+        _upstream_id: Uuid,
+        _holder: &str,
+        _generation: u64,
     ) -> StorageResult<bool> {
-        self.complete_and_bump_generation(upstream_id, holder, generation)
-            .await
-            .map_err(scheduler_claim_error)
+        Ok(false)
     }
 
-    async fn release_if_holder(&self, upstream_id: Uuid, holder: &str) -> StorageResult<bool> {
-        self.release_if_holder(upstream_id, holder)
-            .await
-            .map_err(scheduler_claim_error)
+    async fn release_if_holder(&self, _upstream_id: Uuid, _holder: &str) -> StorageResult<bool> {
+        Ok(false)
+    }
+
+    async fn task_state(&self, idempotency_key: &str) -> StorageResult<LazyRefreshTaskState> {
+        apalis_lazy_refresh_task_state(&self.scheduler_backend, idempotency_key).await
     }
 }
 
-#[cfg(feature = "postgres")]
-#[async_trait]
-impl LazyRefreshClaimGuard
-    for cc_lb_scheduler::idempotency::OAuthRefreshClaimsStore<scheduler_sqlx::Postgres>
-{
-    async fn try_acquire(
-        &self,
-        upstream_id: Uuid,
-        holder: &str,
-        ttl_secs: u64,
-        now_unix_secs: u64,
-    ) -> StorageResult<bool> {
-        self.try_acquire(upstream_id, holder, ttl_secs, now_unix_secs)
-            .await
-            .map_err(scheduler_claim_error)
+async fn apalis_lazy_refresh_task_state(
+    scheduler_backend: &SchedulerBackend,
+    idempotency_key: &str,
+) -> StorageResult<LazyRefreshTaskState> {
+    let mut terminal_state = None;
+    for status in [
+        TaskStatus::Pending,
+        TaskStatus::Queued,
+        TaskStatus::Running,
+        TaskStatus::Failed,
+        TaskStatus::Killed,
+        TaskStatus::Done,
+    ] {
+        let mut page = 1;
+        loop {
+            let filter = Filter {
+                status: Some(status.clone()),
+                page,
+                page_size: Some(LAZY_REFRESH_TASK_PAGE_SIZE),
+            };
+            let tasks = scheduler_backend
+                .list_entity_tasks(&filter)
+                .await
+                .map_err(scheduler_claim_error)?;
+            for task in &tasks {
+                if task.idempotency_key.as_deref() != Some(idempotency_key) {
+                    continue;
+                }
+                match lazy_refresh_task_state_from_row(task) {
+                    LazyRefreshTaskState::Active => return Ok(LazyRefreshTaskState::Active),
+                    state @ LazyRefreshTaskState::TerminalFailure { .. } => {
+                        terminal_state = Some(state);
+                    }
+                    LazyRefreshTaskState::Done => {
+                        terminal_state.get_or_insert(LazyRefreshTaskState::Done);
+                    }
+                }
+            }
+            if tasks.len() < usize::try_from(LAZY_REFRESH_TASK_PAGE_SIZE).unwrap_or(usize::MAX) {
+                break;
+            }
+            page += 1;
+        }
     }
+    Ok(terminal_state.unwrap_or(LazyRefreshTaskState::Active))
+}
 
-    async fn complete_and_bump_generation(
-        &self,
-        upstream_id: Uuid,
-        holder: &str,
-        generation: u64,
-    ) -> StorageResult<bool> {
-        self.complete_and_bump_generation(upstream_id, holder, generation)
-            .await
-            .map_err(scheduler_claim_error)
-    }
-
-    async fn release_if_holder(&self, upstream_id: Uuid, holder: &str) -> StorageResult<bool> {
-        self.release_if_holder(upstream_id, holder)
-            .await
-            .map_err(scheduler_claim_error)
+fn lazy_refresh_task_state_from_row(
+    task: &cc_lb_scheduler::worker::SchedulerTaskRow<EntityJob>,
+) -> LazyRefreshTaskState {
+    match &task.status {
+        TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Running => {
+            LazyRefreshTaskState::Active
+        }
+        TaskStatus::Failed if task.attempts < task.max_attempts => LazyRefreshTaskState::Active,
+        TaskStatus::Failed => LazyRefreshTaskState::TerminalFailure {
+            reason: "oauth refresh job failed permanently".to_owned(),
+        },
+        TaskStatus::Killed => LazyRefreshTaskState::TerminalFailure {
+            reason: "oauth refresh job was killed after exhausting retries".to_owned(),
+        },
+        TaskStatus::Done => LazyRefreshTaskState::Done,
+        _ => {
+            tracing::warn!(status = ?task.status, "unknown oauth refresh task status");
+            LazyRefreshTaskState::Active
+        }
     }
 }
 
@@ -272,6 +339,7 @@ impl LazyRefresher {
         &self,
         upstream_id: Uuid,
         starting_generation: u64,
+        idempotency_key: Option<&str>,
     ) -> Result<(), LazyRefreshError> {
         let deadline = tokio::time::Instant::now() + self.contention.wait_timeout;
         loop {
@@ -288,6 +356,26 @@ impl LazyRefresher {
             };
             if upstream.oauth_token_generation > starting_generation {
                 return Ok(());
+            }
+
+            if let Some(idempotency_key) = idempotency_key {
+                match self
+                    .claim_guard
+                    .task_state(idempotency_key)
+                    .await
+                    .map_err(lazy_error)?
+                {
+                    LazyRefreshTaskState::Active => {}
+                    LazyRefreshTaskState::Done => {
+                        return Err(LazyRefreshError::Failed {
+                            reason: "oauth refresh job completed without advancing generation"
+                                .to_owned(),
+                        });
+                    }
+                    LazyRefreshTaskState::TerminalFailure { reason } => {
+                        return Err(LazyRefreshError::Failed { reason });
+                    }
+                }
             }
 
             let now = tokio::time::Instant::now();
@@ -311,19 +399,10 @@ impl LazyRefresher {
     }
 }
 
-fn lazy_refresh_claim_guard_from_scheduler(
+pub(crate) fn lazy_refresh_claim_guard_from_scheduler(
     scheduler_backend: &SchedulerBackend,
 ) -> Arc<dyn LazyRefreshClaimGuard> {
-    match scheduler_backend {
-        #[cfg(feature = "sqlite")]
-        SchedulerBackend::Sqlite(sqlite) => Arc::new(
-            cc_lb_scheduler::idempotency::OAuthRefreshClaimsStore::new(sqlite.pool.clone()),
-        ),
-        #[cfg(feature = "postgres")]
-        SchedulerBackend::Postgres(postgres) => Arc::new(
-            cc_lb_scheduler::idempotency::OAuthRefreshClaimsStore::new(postgres.pool.clone()),
-        ),
-    }
+    Arc::new(ApalisLazyRefreshClaimGuard::new(scheduler_backend.clone()))
 }
 
 #[derive(Clone)]
@@ -346,19 +425,19 @@ impl LazyRefreshHandle for LazyRefresher {
                 reason: "oauth upstream not found".to_owned(),
             })?;
         let holder = lazy_refresh_holder(self.replica_id);
-        let claimed = self
+        let expires_at_unix_secs = oauth_expires_at(&upstream, &self.aead)?;
+        let claim = self
             .claim_guard
-            .try_acquire(
-                upstream_id,
-                &holder,
-                self.contention.claim_ttl_secs,
-                now_unix_secs(),
-            )
+            .begin_refresh(upstream_id, &holder, expires_at_unix_secs, now_unix_secs())
             .await
             .map_err(lazy_error)?;
-        if !claimed {
+        if let LazyRefreshClaim::Enqueued { idempotency_key } = claim {
             return self
-                .wait_for_token_generation(upstream_id, upstream.oauth_token_generation)
+                .wait_for_token_generation(
+                    upstream_id,
+                    upstream.oauth_token_generation,
+                    Some(&idempotency_key),
+                )
                 .await;
         }
         let result = refresh_flow(
@@ -666,6 +745,25 @@ fn lazy_metadata_hook_error(error: cc_lb_core::MetadataHookEnqueueError) -> Lazy
     }
 }
 
+fn oauth_expires_at(
+    upstream: &UpstreamRecord,
+    aead: &AeadService,
+) -> Result<u64, LazyRefreshError> {
+    let credentials =
+        upstream
+            .oauth_credentials
+            .as_ref()
+            .ok_or_else(|| LazyRefreshError::Failed {
+                reason: "missing oauth credentials".to_owned(),
+            })?;
+    let bundle = credentials
+        .decrypt(aead, upstream.id.as_bytes())
+        .map_err(|_| LazyRefreshError::Failed {
+            reason: "oauth decrypt failed".to_owned(),
+        })?;
+    Ok(bundle.expires_at_unix_secs)
+}
+
 fn lazy_refresh_holder(replica_id: Uuid) -> String {
     format!("cc-lb-server:lazy-refresher:{replica_id}")
 }
@@ -704,8 +802,8 @@ mod tests {
     use uuid::Uuid;
 
     use super::{
-        LazyRefreshClaimGuard, LazyRefreshContentionConfig, LazyRefresher, LazyRefresherDeps,
-        SchedulerBackend,
+        LazyRefreshClaim, LazyRefreshClaimGuard, LazyRefreshContentionConfig, LazyRefresher,
+        LazyRefresherDeps, SchedulerBackend,
     };
 
     #[tokio::test]
@@ -844,7 +942,6 @@ mod tests {
                     oauth_token_generation: None,
                     warmup_enabled: false,
                     warmup_dialect_plugin: None,
-                    ..UpstreamCreate::default()
                 })
                 .await
                 .expect("upstream created");
@@ -963,14 +1060,20 @@ mod tests {
 
     #[async_trait::async_trait]
     impl LazyRefreshClaimGuard for TestOAuthRefreshClaims {
-        async fn try_acquire(
+        async fn begin_refresh(
             &self,
             _upstream_id: Uuid,
             _holder: &str,
-            _ttl_secs: u64,
+            _expires_at_unix_secs: u64,
             _now_unix_secs: u64,
-        ) -> StorageResult<bool> {
-            Ok(self.first_acquire_wins && !self.acquired.swap(true, Ordering::SeqCst))
+        ) -> StorageResult<LazyRefreshClaim> {
+            if self.first_acquire_wins && !self.acquired.swap(true, Ordering::SeqCst) {
+                Ok(LazyRefreshClaim::Acquired)
+            } else {
+                Ok(LazyRefreshClaim::Enqueued {
+                    idempotency_key: "test:oauth-refresh".to_owned(),
+                })
+            }
         }
 
         async fn complete_and_bump_generation(

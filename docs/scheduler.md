@@ -10,7 +10,7 @@ The system consists of the following components:
 
 - **Entity Jobs**: Dynamic background tasks enqueued per-upstream or per-entity. Examples include warmup cycles, OAuth token refreshes, and usage polling.
 - **Singleton Jobs**: Periodic maintenance tasks that must run on exactly one replica at any given time. Examples include usage rollups, database pruning, and quota garbage collection.
-- **Reconciler**: A periodic singleton job (`SchedulerReconcileJob`) that scans active upstreams and ensures the correct set of entity jobs are enqueued in Apalis storage.
+- **Watchdogs**: Periodic singleton jobs that scan active upstreams/cursors and enqueue missing entity jobs into Apalis storage.
 - **Cron Leader**: A single replica elected via database advisory locks to run the cron scheduler and enqueue singleton jobs.
 
 ### Worker Layout Diagram
@@ -19,8 +19,8 @@ The system consists of the following components:
 +---------------------------------------------------------------------------------+
 |                                  Postgres DB                                    |
 |  +-------------------------+  +-------------------------+  +-----------------+  |
-|  |      Apalis Queues      |  |   Idempotency Tables    |  |  Advisory Lock  |  |
-|  |  (apalis.jobs table)    |  | (warmup_effects, etc.)  |  | (0xCC1B...0001) |  |
+|  |      Apalis Queues      |  |     Cursor Tables       |  |  Advisory Lock  |  |
+|  |  (apalis.jobs table)    |  | (usage poll cursors)    |  | (0xCC1B...0001) |  |
 |  +------------^------------+  +------------^------------+  +--------^--------+  |
 +---------------|----------------------------|------------------------|-----------+
                 |                            |                        |
@@ -51,8 +51,8 @@ The table below lists every job type registered in the scheduler. This list is d
 
 | Name | Kind | Idempotency Key Shape | Retry Class | Cadence / Trigger | Idempotency / Effect Table | Max Latency Budget |
 |---|---|---|---|---|---|---|
-| **UpstreamWarmupJob** | Entity | `entity:warmup:<upstream_id>` | Entity | Enqueued via Reconcile when warmup is due (every 5 hours) | `warmup_effects` | 10s |
-| **OAuthRefreshJob** | Entity | `entity:oauth_refresh:<upstream_id>` | Entity | Enqueued via Reconcile or proactively when token is near expiry | `oauth_refresh_claims` | 10s |
+| **UpstreamWarmupJob** | Entity | `entity:warmup:<upstream_id>:<cycle_key>` | Entity | Enqueued by watchdog when warmup is due (every 5 hours) | `apalis.jobs` full unique idempotency key | 10s |
+| **OAuthRefreshJob** | Entity | `entity:oauth_refresh:<upstream_id>:<expires_at_unix_secs>` | Entity | Enqueued by watchdog, proactively, or lazily when token is near expiry | `apalis.jobs` full unique idempotency key | 10s |
 | **OAuthUsagePollJob** | Entity | `entity:oauth_usage_poll:<upstream_id>` | Entity | Enqueued via Reconcile or after usage events | `oauth_usage_poll_cursors` | 10s |
 | **AnthropicCompatRefreshJob** | Entity | `entity:anthropic_compat_refresh:<key>` | Entity | Enqueued via Reconcile for each compatibility key | `anthropic_compat_refresh_claims` | 10s |
 | **MetadataRefreshJob** | Entity | `entity:metadata_refresh:<upstream_id>:<generation>` | Entity | Enqueued after OAuth refresh completes | `metadata_refresh_claims` | 10s |
@@ -62,7 +62,9 @@ The table below lists every job type registered in the scheduler. This list is d
 | **PromptCacheObservationPurgeJob** | Singleton | `singleton:prompt_cache_purge` | Maintenance | Every 10m (600s) | `prompt_cache_observations` | 10s |
 | **PriceCatalogRefreshJob** | Singleton | `singleton:price_catalog_refresh` | Maintenance | Every 1h (3600s) | `price_catalog` | 10s |
 | **ApalisHousekeepingJob** | Singleton | `singleton:apalis_housekeeping` | Maintenance | Every 1h (3600s) | `apalis.jobs` | 10s |
-| **SchedulerReconcileJob** | Singleton | `scheduler_reconcile` | Maintenance | Every 5m (300s) | `apalis.jobs` | 10s |
+| **WarmupWatchdogJob** | Singleton | `maintenance:warmup_watchdog:<tick_unix_secs>` | Maintenance | Configured recurring cadence | `apalis.jobs` | 10s |
+| **OAuthRefreshWatchdogJob** | Singleton | `maintenance:oauth_refresh_watchdog:<tick_unix_secs>` | Maintenance | Configured recurring cadence | `apalis.jobs` | 10s |
+| **OAuthUsagePollWatchdogJob** | Singleton | `maintenance:oauth_usage_poll_watchdog:<tick_unix_secs>` | Maintenance | Configured recurring cadence | `apalis.jobs` | 10s |
 
 ## 3. DB Pool Isolation
 
@@ -88,14 +90,14 @@ With these defaults, the system easily scales up to 10 replicas:
 
 Additionally, the leader election mechanism uses 1 dedicated session-mode connection per leader replica. This connection is not managed by the pool and must be factored into capacity planning.
 
-## 4. Idempotency vs Scheduling State Separation
+## 4. Idempotency and Scheduling State
 
-The scheduler strictly separates scheduling state from idempotency state. This separation ensures correctness in a distributed environment where workers can crash or restart.
+The scheduler now relies on Apalis Jobs as the durable coordination point for scheduler-side effects that do not require separate domain cursors. This keeps queueing, retry attempts, and idempotency keys in one table.
 
-- **Scheduling State (Apalis)**: Apalis owns the queueing state, visibility timeouts, and retry attempts. It determines *what* job should run and *when* it should run. It does not guarantee that the side-effect has not already occurred.
-- **Idempotency State (cc-lb)**: The domain-level effect tables (such as `warmup_effects`, `oauth_refresh_claims`, and `oauth_usage_poll_cursors`) own the record of completed side-effects. Before executing any external action (like sending an HTTP request to Anthropic), the handler must check the corresponding effect table.
+- **Scheduling State (Apalis)**: Apalis owns the queueing state, visibility timeouts, retry attempts, and full `(job_type, idempotency_key)` uniqueness. Warmup and OAuth refresh coordination use this path.
+- **Domain Cursor State (cc-lb)**: Jobs that need domain progress markers, such as OAuth usage polling, keep their own cursor tables. Those tables track business progress, not duplicate scheduler queues.
 
-This design ensures that even if a job is enqueued multiple times or retried after a worker crash, the actual domain side-effect is executed exactly once. This satisfies the at-least-once external execution model defined in D-arch-1.
+This design ensures duplicate enqueues collapse at the Jobs table while retryable `Failed` rows can still be treated as active work. It preserves the at-least-once external execution model defined in D-arch-1 without redundant scheduler-side state tables.
 
 ## 5. Leader Election Semantics
 
@@ -128,13 +130,13 @@ The scheduler defines three distinct retry classes to handle different failure m
   - Max delay: 60s
   - Backoff curve: No retries (fails fast)
 
-## 7. Scheduler Failures Table and Admin Endpoint
+## 7. Scheduler Failures and Admin Endpoint
 
-When a job exhausts its retry class, it is moved to the `Failed` state in Apalis. To prevent silent failures, the reconciler detects these failed jobs and surfaces them to operators.
+When a job exhausts its retry class, it remains in a terminal `Failed` or `Killed` state in Apalis. The admin endpoint reads those Apalis rows directly and surfaces them to operators.
 
-- **Ticket Model**: Instead of automatically retrying indefinitely, failed jobs are recorded as "tickets" in the `scheduler_failures` table. This satisfies the "ticket/metric only, no auto-page" promise defined in D-cut-3.
+- **Ticket Model**: Terminal Apalis rows are the failure tickets. This satisfies the "ticket/metric only, no auto-page" promise defined in D-cut-3 without a `scheduler_failures` table.
 - **Triage Endpoint**: Operators can query `GET /admin/scheduler/failures` to read and triage these failures. The endpoint supports filtering by `job_type` and returns details about the failure, including the last error message and the number of attempts.
-- **Resolution**: Once the underlying issue is resolved (for example, fixing invalid upstream credentials), operators can trigger a manual reconciliation via `POST /admin/scheduler/reconcile` to clear the failures and re-enqueue the jobs.
+- **Resolution**: Once the underlying issue is resolved (for example, fixing invalid upstream credentials), operators can trigger the relevant watchdog or enqueue path to create new work with a new idempotency key.
 
 ## 8. Metrics List
 
@@ -194,8 +196,8 @@ The "local vs durable" rule (defined in D-arch-3 and D-arch-1) governs where bac
 ### Duplicate Effect
 - **Symptom**: Multiple warmup requests or token refreshes are observed for the same cycle.
 - **Triage**:
-  1. Check the idempotency tables (`warmup_effects` or `oauth_refresh_claims`) to see if duplicate rows exist.
-  2. Check the logs for worker crashes between the external HTTP call and the database write.
+  1. Check Apalis Jobs for duplicate or stale idempotency keys.
+  2. Check the logs for worker crashes between the external HTTP call and the Apalis job transition.
 - **Resolution**: This is usually a transient at-least-once cost accepted under D-arch-1. If persistent, check for database transaction isolation level issues or unique constraint violations.
 
 ### Connection Budget Exhausted

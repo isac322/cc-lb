@@ -4,8 +4,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_storage_api::upstream::{
-    UpstreamCreate, UpstreamKind, UpstreamLeaseKind, UpstreamRecord, UpstreamStatusUpdate,
-    UpstreamStore, UpstreamUpdate,
+    UpstreamCreate, UpstreamKind, UpstreamRecord, UpstreamStatusUpdate, UpstreamStore,
+    UpstreamUpdate,
 };
 use cc_lb_storage_api::{StorageError, StorageResult, validate_identifier};
 use tokio::sync::Mutex;
@@ -34,8 +34,6 @@ impl UpstreamStore for MemoryUpstreamStore {
             enabled: true,
             oauth_credentials: None,
             api_key_ciphertext: create.api_key_ciphertext,
-            refresh_lease_holder: None,
-            refresh_lease_until_unix_secs: None,
             last_apply_error: None,
             last_apply_at_unix_secs: None,
             deleted_at_unix_secs: None,
@@ -44,10 +42,6 @@ impl UpstreamStore for MemoryUpstreamStore {
             created_at_unix_secs: now,
             updated_at_unix_secs: now,
             warmup_enabled: create.warmup_enabled,
-            next_warmup_at: create.next_warmup_at,
-            last_warmup_cycle_key: create.last_warmup_cycle_key,
-            warmup_lease_holder: create.warmup_lease_holder,
-            warmup_lease_until_unix_secs: create.warmup_lease_until_unix_secs,
             warmup_dialect_plugin: create.warmup_dialect_plugin,
             last_warmup_at_unix_secs: None,
         };
@@ -123,18 +117,6 @@ impl UpstreamStore for MemoryUpstreamStore {
             }
             if let Some(warmup_enabled) = update.warmup_enabled {
                 record.warmup_enabled = warmup_enabled;
-            }
-            if update.next_warmup_at.is_some() {
-                record.next_warmup_at = update.next_warmup_at;
-            }
-            if let Some(last_warmup_cycle_key) = update.last_warmup_cycle_key {
-                record.last_warmup_cycle_key = Some(last_warmup_cycle_key);
-            }
-            if let Some(warmup_lease_holder) = update.warmup_lease_holder {
-                record.warmup_lease_holder = Some(warmup_lease_holder);
-            }
-            if let Some(warmup_lease_until_unix_secs) = update.warmup_lease_until_unix_secs {
-                record.warmup_lease_until_unix_secs = Some(warmup_lease_until_unix_secs);
             }
             if let Some(warmup_dialect_plugin) = update.warmup_dialect_plugin {
                 record.warmup_dialect_plugin = Some(warmup_dialect_plugin);
@@ -219,153 +201,13 @@ impl UpstreamStore for MemoryUpstreamStore {
             if let Some(value) = status.last_apply_at_unix_secs {
                 record.last_apply_at_unix_secs = value;
             }
-            if let Some(value) = status.next_warmup_at {
-                record.next_warmup_at = value;
-            }
-            if let Some(value) = status.last_warmup_cycle_key {
-                record.last_warmup_cycle_key = value;
+            if let Some(value) = status.last_warmup_at_unix_secs {
+                record.last_warmup_at_unix_secs = value;
             }
             Ok(())
         })
         .await?;
         Ok(())
-    }
-
-    async fn claim_lease(
-        &self,
-        id: Uuid,
-        lease_kind: UpstreamLeaseKind,
-        holder: String,
-        ttl_secs: i64,
-    ) -> StorageResult<bool> {
-        let now_i64 = now_unix_secs_i64()?;
-        let now_u64 =
-            u64::try_from(now_i64).map_err(|_| fatal("current unix timestamp is negative"))?;
-        let until_i64 = now_i64.saturating_add(ttl_secs);
-        let until_u64 = u64::try_from(until_i64).map_err(|_| StorageError::InvalidInput {
-            field: "ttl_secs".to_owned(),
-            reason: "refresh lease expiry cannot be represented as u64".to_owned(),
-        })?;
-        let mut records = self.records.lock().await;
-        let Some(record) = records.iter_mut().find(|record| record.id == id) else {
-            return Ok(false);
-        };
-        if record.deleted_at_unix_secs.is_some() {
-            return Ok(false);
-        }
-        match lease_kind {
-            UpstreamLeaseKind::Refresh => {
-                let holder_id =
-                    Uuid::parse_str(&holder).map_err(|error| StorageError::InvalidInput {
-                        field: "holder".to_owned(),
-                        reason: error.to_string(),
-                    })?;
-                if record
-                    .refresh_lease_until_unix_secs
-                    .is_some_and(|until| until > now_u64)
-                    && record.refresh_lease_holder != Some(holder_id)
-                {
-                    return Ok(false);
-                }
-                record.refresh_lease_holder = Some(holder_id);
-                record.refresh_lease_until_unix_secs = Some(until_u64);
-            }
-            UpstreamLeaseKind::Warmup => {
-                if record
-                    .warmup_lease_until_unix_secs
-                    .is_some_and(|until| until > now_i64)
-                    && record.warmup_lease_holder.as_deref() != Some(holder.as_str())
-                {
-                    return Ok(false);
-                }
-                record.warmup_lease_holder = Some(holder);
-                record.warmup_lease_until_unix_secs = Some(until_i64);
-            }
-        }
-        Ok(true)
-    }
-
-    async fn renew_lease(
-        &self,
-        id: Uuid,
-        lease_kind: UpstreamLeaseKind,
-        holder: String,
-        ttl_secs: i64,
-    ) -> StorageResult<bool> {
-        let now_i64 = now_unix_secs_i64()?;
-        let now_u64 =
-            u64::try_from(now_i64).map_err(|_| fatal("current unix timestamp is negative"))?;
-        let until_i64 = now_i64.saturating_add(ttl_secs);
-        let until_u64 = u64::try_from(until_i64).map_err(|_| StorageError::InvalidInput {
-            field: "ttl_secs".to_owned(),
-            reason: "refresh lease expiry cannot be represented as u64".to_owned(),
-        })?;
-        let mut records = self.records.lock().await;
-        let Some(record) = records.iter_mut().find(|record| record.id == id) else {
-            return Ok(false);
-        };
-        match lease_kind {
-            UpstreamLeaseKind::Refresh => {
-                let holder_id =
-                    Uuid::parse_str(&holder).map_err(|error| StorageError::InvalidInput {
-                        field: "holder".to_owned(),
-                        reason: error.to_string(),
-                    })?;
-                if record.refresh_lease_holder != Some(holder_id)
-                    || record
-                        .refresh_lease_until_unix_secs
-                        .is_none_or(|until| until <= now_u64)
-                {
-                    return Ok(false);
-                }
-                record.refresh_lease_until_unix_secs = Some(until_u64);
-            }
-            UpstreamLeaseKind::Warmup => {
-                if record.warmup_lease_holder.as_deref() != Some(holder.as_str())
-                    || record
-                        .warmup_lease_until_unix_secs
-                        .is_none_or(|until| until <= now_i64)
-                {
-                    return Ok(false);
-                }
-                record.warmup_lease_until_unix_secs = Some(until_i64);
-            }
-        }
-        Ok(true)
-    }
-
-    async fn release_lease(
-        &self,
-        id: Uuid,
-        lease_kind: UpstreamLeaseKind,
-        holder: String,
-    ) -> StorageResult<bool> {
-        let mut records = self.records.lock().await;
-        let Some(record) = records.iter_mut().find(|record| record.id == id) else {
-            return Ok(false);
-        };
-        match lease_kind {
-            UpstreamLeaseKind::Refresh => {
-                let holder_id =
-                    Uuid::parse_str(&holder).map_err(|error| StorageError::InvalidInput {
-                        field: "holder".to_owned(),
-                        reason: error.to_string(),
-                    })?;
-                if record.refresh_lease_holder != Some(holder_id) {
-                    return Ok(false);
-                }
-                record.refresh_lease_holder = None;
-                record.refresh_lease_until_unix_secs = None;
-            }
-            UpstreamLeaseKind::Warmup => {
-                if record.warmup_lease_holder.as_deref() != Some(holder.as_str()) {
-                    return Ok(false);
-                }
-                record.warmup_lease_holder = None;
-                record.warmup_lease_until_unix_secs = None;
-            }
-        }
-        Ok(true)
     }
 
     async fn store_oauth_tokens(
@@ -378,32 +220,12 @@ impl UpstreamStore for MemoryUpstreamStore {
         self.update_oauth_token(id, tokens).await
     }
 
-    async fn claim_refresh_lease(
-        &self,
-        id: Uuid,
-        holder: Uuid,
-        ttl_secs: u64,
-    ) -> StorageResult<bool> {
-        let ttl_secs = i64::try_from(ttl_secs).map_err(|_| StorageError::InvalidInput {
-            field: "ttl_secs".to_owned(),
-            reason: "refresh lease ttl cannot be represented as i64".to_owned(),
-        })?;
-        self.claim_lease(id, UpstreamLeaseKind::Refresh, holder.to_string(), ttl_secs)
-            .await
-    }
-
     async fn complete_refresh(
         &self,
         id: Uuid,
-        holder: Uuid,
+        _holder: Uuid,
         tokens: EncryptedOAuthTokens,
     ) -> StorageResult<UpstreamRecord> {
-        if !self
-            .release_lease(id, UpstreamLeaseKind::Refresh, holder.to_string())
-            .await?
-        {
-            return Err(conflict("holder mismatch"));
-        }
         self.update_oauth_token(id, tokens).await?;
         self.set_status(
             id,
@@ -416,30 +238,6 @@ impl UpstreamStore for MemoryUpstreamStore {
         self.get_by_id(id)
             .await?
             .ok_or_else(|| conflict("upstream not found"))
-    }
-
-    async fn release_lease_on_failure(
-        &self,
-        id: Uuid,
-        holder: Uuid,
-        reason: String,
-    ) -> StorageResult<()> {
-        if !self
-            .release_lease(id, UpstreamLeaseKind::Refresh, holder.to_string())
-            .await?
-        {
-            return Err(conflict("holder mismatch"));
-        }
-        self.set_status(
-            id,
-            UpstreamStatusUpdate {
-                last_apply_error: Some(Some(reason)),
-                last_apply_at_unix_secs: Some(Some(now_unix_secs())),
-                ..UpstreamStatusUpdate::default()
-            },
-        )
-        .await?;
-        Ok(())
     }
 
     async fn set_last_apply_error(&self, id: Uuid, error: Option<String>) -> StorageResult<()> {
@@ -468,49 +266,6 @@ impl UpstreamStore for MemoryUpstreamStore {
         Ok(())
     }
 
-    async fn claim_warmup_lease(
-        &self,
-        id: Uuid,
-        holder: &str,
-        ttl_secs: i64,
-    ) -> StorageResult<bool> {
-        self.claim_lease(id, UpstreamLeaseKind::Warmup, holder.to_owned(), ttl_secs)
-            .await
-    }
-
-    async fn write_warmup_cycle_key(
-        &self,
-        id: Uuid,
-        holder: &str,
-        new_cycle_key: i64,
-        next_warmup_at: Option<chrono::DateTime<chrono::Utc>>,
-    ) -> StorageResult<bool> {
-        let now = now_unix_secs_i64()?;
-        let mut records = self.records.lock().await;
-        let Some(record) = records.iter_mut().find(|record| record.id == id) else {
-            return Ok(false);
-        };
-        if record.deleted_at_unix_secs.is_some()
-            || record.warmup_lease_holder.as_deref() != Some(holder)
-            || record
-                .warmup_lease_until_unix_secs
-                .is_none_or(|until| until <= now)
-            || record.last_warmup_cycle_key == Some(new_cycle_key)
-        {
-            return Ok(false);
-        }
-        record.last_warmup_cycle_key = Some(new_cycle_key);
-        record.next_warmup_at = next_warmup_at;
-        record.warmup_lease_holder = None;
-        record.warmup_lease_until_unix_secs = None;
-        Ok(true)
-    }
-
-    async fn release_warmup_lease(&self, id: Uuid, holder: &str) -> StorageResult<bool> {
-        self.release_lease(id, UpstreamLeaseKind::Warmup, holder.to_owned())
-            .await
-    }
-
     async fn clear_warmup_dialect_plugin(
         &self,
         id: Uuid,
@@ -527,29 +282,6 @@ impl UpstreamStore for MemoryUpstreamStore {
         record.revision += 1;
         record.updated_at_unix_secs = now_unix_secs();
         Ok(Some(record.clone()))
-    }
-
-    async fn write_warmup_next_at(
-        &self,
-        id: Uuid,
-        holder: &str,
-        next_warmup_at: chrono::DateTime<chrono::Utc>,
-    ) -> StorageResult<bool> {
-        let now = now_unix_secs_i64()?;
-        let mut records = self.records.lock().await;
-        let Some(record) = records.iter_mut().find(|record| record.id == id) else {
-            return Ok(false);
-        };
-        if record.deleted_at_unix_secs.is_some()
-            || record.warmup_lease_holder.as_deref() != Some(holder)
-            || record
-                .warmup_lease_until_unix_secs
-                .is_none_or(|until| until <= now)
-        {
-            return Ok(false);
-        }
-        record.next_warmup_at = Some(next_warmup_at);
-        Ok(true)
     }
 }
 
@@ -624,10 +356,6 @@ async fn create_default(store: &MemoryUpstreamStore, name: &str) -> UpstreamReco
             api_key_ciphertext: None,
             oauth_token_generation: None,
             warmup_enabled: false,
-            next_warmup_at: None,
-            last_warmup_cycle_key: None,
-            warmup_lease_holder: None,
-            warmup_lease_until_unix_secs: None,
             warmup_dialect_plugin: None,
         })
         .await
@@ -775,92 +503,18 @@ scenario!(upstream_store_11_oauth_tokens_decrypt_roundtrip, async {
         .unwrap();
     assert_eq!(bundle.refresh_token, "refresh-one");
 });
-scenario!(upstream_store_12_claim_refresh_lease_success, async {
-    let s = store();
-    let r = create_default(&s, "primary").await;
-    assert!(
-        s.claim_refresh_lease(r.id, Uuid::new_v4(), 60)
-            .await
-            .unwrap()
-    );
-});
-scenario!(
-    upstream_store_13_claim_refresh_lease_contention_returns_false,
-    async {
-        let s = store();
-        let r = create_default(&s, "primary").await;
-        assert!(
-            s.claim_refresh_lease(r.id, Uuid::new_v4(), 60)
-                .await
-                .unwrap()
-        );
-        assert!(
-            !s.claim_refresh_lease(r.id, Uuid::new_v4(), 60)
-                .await
-                .unwrap()
-        );
-    }
-);
-scenario!(
-    upstream_store_14_claim_refresh_lease_after_expiry_succeeds,
-    async {
-        let s = store();
-        let r = create_default(&s, "primary").await;
-        assert!(
-            s.claim_refresh_lease(r.id, Uuid::new_v4(), 0)
-                .await
-                .unwrap()
-        );
-        assert!(
-            s.claim_refresh_lease(r.id, Uuid::new_v4(), 60)
-                .await
-                .unwrap()
-        );
-    }
-);
-scenario!(
-    upstream_store_15_complete_refresh_requires_holder_match,
-    async {
-        let s = store();
-        let r = create_default(&s, "primary").await;
-        let h = Uuid::new_v4();
-        s.claim_refresh_lease(r.id, h, 60).await.unwrap();
-        let e = s
-            .complete_refresh(r.id, Uuid::new_v4(), tokens("two"))
-            .await
-            .unwrap_err();
-        assert!(matches!(e, StorageError::Conflict { .. }));
-    }
-);
-scenario!(upstream_store_16_complete_refresh_clears_lease, async {
+scenario!(upstream_store_12_complete_refresh_stores_tokens, async {
     let s = store();
     let r = create_default(&s, "primary").await;
     let h = Uuid::new_v4();
-    s.claim_refresh_lease(r.id, h, 60).await.unwrap();
     assert!(
         s.complete_refresh(r.id, h, tokens("two"))
             .await
             .unwrap()
-            .refresh_lease_holder
-            .is_none()
+            .oauth_credentials
+            .is_some()
     );
 });
-scenario!(
-    upstream_store_17_release_lease_on_failure_clears_lease_and_sets_error,
-    async {
-        let s = store();
-        let r = create_default(&s, "primary").await;
-        let h = Uuid::new_v4();
-        s.claim_refresh_lease(r.id, h, 60).await.unwrap();
-        s.release_lease_on_failure(r.id, h, "network".to_owned())
-            .await
-            .unwrap();
-        let failed = s.get_by_id(r.id).await.unwrap().unwrap();
-        assert_eq!(failed.refresh_lease_holder, None);
-        assert_eq!(failed.refresh_lease_until_unix_secs, None);
-        assert_eq!(failed.last_apply_error.as_deref(), Some("network"));
-    }
-);
 scenario!(
     upstream_store_18_set_last_apply_error_sets_and_clears,
     async {
@@ -920,10 +574,6 @@ scenario!(
                 api_key_ciphertext: None,
                 oauth_token_generation: None,
                 warmup_enabled: false,
-                next_warmup_at: None,
-                last_warmup_cycle_key: None,
-                warmup_lease_holder: None,
-                warmup_lease_until_unix_secs: None,
                 warmup_dialect_plugin: None,
             })
             .await
@@ -938,20 +588,9 @@ fn conflict(message: impl Into<String>) -> StorageError {
     }
 }
 
-fn fatal(message: impl Into<String>) -> StorageError {
-    StorageError::Fatal {
-        message: message.into(),
-    }
-}
-
 fn now_unix_secs() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs()
-}
-
-fn now_unix_secs_i64() -> StorageResult<i64> {
-    i64::try_from(now_unix_secs())
-        .map_err(|_| fatal("current unix timestamp cannot be represented as i64"))
 }

@@ -62,10 +62,6 @@ async fn status_shows_partial_failure_when_upstream_marked_error_in_snapshot() {
             api_key_ciphertext: None,
             oauth_token_generation: None,
             warmup_enabled: false,
-            next_warmup_at: None,
-            last_warmup_cycle_key: None,
-            warmup_lease_holder: None,
-            warmup_lease_until_unix_secs: None,
             warmup_dialect_plugin: None,
         },
     )
@@ -95,10 +91,6 @@ async fn export_contains_no_plaintext_oauth_tokens() {
             api_key_ciphertext: None,
             oauth_token_generation: None,
             warmup_enabled: false,
-            next_warmup_at: None,
-            last_warmup_cycle_key: None,
-            warmup_lease_holder: None,
-            warmup_lease_until_unix_secs: None,
             warmup_dialect_plugin: None,
         },
     )
@@ -233,10 +225,6 @@ async fn seed_upstream(storage: &cc_lb_storage_sqlite::SqliteStorage, name: &str
             api_key_ciphertext: None,
             oauth_token_generation: None,
             warmup_enabled: false,
-            next_warmup_at: None,
-            last_warmup_cycle_key: None,
-            warmup_lease_holder: None,
-            warmup_lease_until_unix_secs: None,
             warmup_dialect_plugin: None,
         },
     )

@@ -4,9 +4,9 @@ use std::time::Duration;
 use apalis::layers::catch_panic::CatchPanicLayer;
 use apalis::prelude::{IntervalStrategy, StrategyBuilder, WorkerBuilder, WorkerError};
 use apalis_core::backend::codec::Codec as _;
-use cc_lb_scheduler::idempotency::OAuthUsagePollCursorsStore;
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollHandler;
 use cc_lb_scheduler::middleware::TraceparentLayer;
+use cc_lb_scheduler::state_stores::OAuthUsagePollCursorsStore;
 use cc_lb_scheduler::worker::{ENTITY_QUEUE, EntityJob, SqliteApalisStorage};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::task::JoinHandle;
@@ -121,7 +121,7 @@ fn sqlite_read_cursor(
 ) -> impl FnMut() -> std::pin::Pin<
     Box<
         dyn std::future::Future<
-                Output = TestResult<Option<cc_lb_scheduler::idempotency::OAuthUsagePollCursor>>,
+                Output = TestResult<Option<cc_lb_scheduler::state_stores::OAuthUsagePollCursor>>,
             > + Send,
     >,
 > {

@@ -2,7 +2,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::error::Result;
-use crate::idempotency::{AnthropicCompatEtag, AnthropicCompatEtagsStore};
+use crate::state_stores::{AnthropicCompatEtag, AnthropicCompatEtagsStore};
 
 pub type CompatJobFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 

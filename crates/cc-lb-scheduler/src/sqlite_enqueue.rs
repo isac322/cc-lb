@@ -98,7 +98,7 @@ impl TaskSink<SingletonJob> for SqliteSingletonCronStorage {
             .parts
             .idempotency_key
             .clone()
-            .unwrap_or_else(|| singleton_idempotency_key(&task.args));
+            .unwrap_or_else(|| singleton_tick_idempotency_key(&task.args, task.parts.run_at));
         let metadata = serde_json::to_string(task.parts.ctx.meta())
             .map_err(|error| TaskSinkError::CodecError(error.into()))?;
         let id = task
@@ -138,17 +138,18 @@ impl TaskSink<SingletonJob> for SqliteSingletonCronStorage {
 pub(crate) async fn push_entity_job(pool: &SqlitePool, queue: &str, job: EntityJob) -> Result<()> {
     let payload = apalis_codec::json::JsonCodec::<Vec<u8>>::encode(&job)
         .map_err(|error| SchedulerError::Job(format!("encode entity job: {error}")))?;
-    let idempotency_key = entity_idempotency_key(&job);
+    let run_at = now_unix_secs()?;
+    let idempotency_key = entity_idempotency_key(&job, run_at)?;
     sqlx::query(
         "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, last_result, lock_at, lock_by, done_at, priority, metadata, idempotency_key) \
          VALUES (?1, ?2, ?3, 'Pending', 0, ?4, ?5, NULL, NULL, NULL, NULL, 0, ?6, ?7) \
-         ON CONFLICT(job_type, idempotency_key) WHERE status IN ('Pending','Running','Queued') DO NOTHING",
+         ON CONFLICT(job_type, idempotency_key) DO NOTHING",
     )
     .bind(payload)
     .bind(ulid::Ulid::new().to_string())
     .bind(queue)
     .bind(DEFAULT_MAX_ATTEMPTS)
-    .bind(now_unix_secs()?)
+    .bind(run_at)
     .bind("{}")
     .bind(idempotency_key)
     .execute(pool)
@@ -177,8 +178,7 @@ async fn insert_singleton_job(
 ) -> std::result::Result<(), sqlx::Error> {
     sqlx::query(
         "INSERT INTO Jobs (job, id, job_type, status, attempts, max_attempts, run_at, last_result, lock_at, lock_by, done_at, priority, metadata, idempotency_key) \
-         VALUES (?1, ?2, ?3, 'Pending', 0, ?4, ?5, NULL, NULL, NULL, NULL, ?6, ?7, ?8) \
-         ON CONFLICT(job_type, idempotency_key) WHERE status IN ('Pending','Running','Queued') DO NOTHING",
+         VALUES (?1, ?2, ?3, 'Pending', 0, ?4, ?5, NULL, NULL, NULL, NULL, ?6, ?7, ?8)",
     )
     .bind(payload)
     .bind(id)
@@ -197,15 +197,18 @@ fn singleton_idempotency_key(job: &SingletonJob) -> String {
     format!("singleton:{}", job.kind())
 }
 
-fn entity_idempotency_key(job: &EntityJob) -> String {
+fn singleton_tick_idempotency_key(job: &SingletonJob, tick_unix_secs: u64) -> String {
+    format!("singleton:{}:{tick_unix_secs}", job.kind())
+}
+
+fn entity_idempotency_key(job: &EntityJob, run_at_unix_secs: i64) -> Result<String> {
+    let run_at_unix_secs = u64::try_from(run_at_unix_secs)
+        .map_err(|_| SchedulerError::Job("run_at_unix_secs is negative".to_owned()))?;
     match job {
-        EntityJob::Warmup(job) => format!("entity:warmup:{}", job.upstream_id),
-        EntityJob::OAuthRefresh(job) => job.idempotency_key(),
-        EntityJob::OAuthUsagePoll(job) => job.idempotency_key(),
-        EntityJob::AnthropicCompatRefresh(job) => {
-            format!("entity:anthropic_compat_refresh:{}", job.key)
-        }
-        EntityJob::MetadataRefresh(job) => job.idempotency_key(),
+        EntityJob::Warmup(job) => Ok(job.idempotency_key(job.cycle_key)),
+        EntityJob::OAuthRefresh(job) => Ok(job.idempotency_key(run_at_unix_secs)),
+        EntityJob::OAuthUsagePoll(job) => Ok(job.idempotency_key(run_at_unix_secs)),
+        EntityJob::MetadataRefresh(job) => Ok(job.idempotency_key()),
     }
 }
 

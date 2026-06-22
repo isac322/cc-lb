@@ -4,11 +4,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use cc_lb_storage_api::Storage;
 
 const DAY_MS: u64 = 86_400_000;
-const DAY_SECS: u64 = 86_400;
 const KEY_SEQUENCE_SCALE: u64 = 1_000_000;
 const PRUNE_BATCH_SIZE: usize = 1_000;
 const PRUNE_BATCH_SLEEP: Duration = Duration::from_millis(50);
-const PRUNE_TICK: Duration = Duration::from_secs(DAY_SECS);
 
 pub struct UsagePruner {
     storage: Arc<dyn Storage>,
@@ -40,29 +38,6 @@ impl UsagePruner {
             storage: storage.into_usage_pruner_storage(),
             retention_days,
         }
-    }
-
-    /// Spawn 24h tick loop that prunes expired rows.
-    /// If retention_days == 0: returns immediately (pruning disabled).
-    pub fn start_daemon(self) -> tokio::task::JoinHandle<()> {
-        if self.retention_days == 0 {
-            return tokio::spawn(async {});
-        }
-
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(PRUNE_TICK);
-            loop {
-                interval.tick().await;
-                let result = self.prune_once().await;
-                tracing::info!(
-                    request_events_removed = result.request_events_removed,
-                    usage_rollups_removed = result.usage_rollups_removed,
-                    principal_limit_states_removed = result.principal_limit_states_removed,
-                    audit_log_removed = result.audit_log_removed,
-                    "usage pruner tick complete"
-                );
-            }
-        })
     }
 
     pub async fn prune_once(&self) -> PruneResult {

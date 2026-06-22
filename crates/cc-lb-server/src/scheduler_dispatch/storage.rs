@@ -5,7 +5,6 @@ use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshUpstreams;
 use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeStore;
 use cc_lb_scheduler::jobs::quota_gc::SubscriptionQuotaGcStore;
-use cc_lb_scheduler::jobs::reconcile::ReconcileUpstreams;
 use cc_lb_scheduler::jobs::usage_prune::UsagePruneRunner;
 use cc_lb_storage_api::{
     PromptCacheObservationStore, Storage, StorageError, StorageResult, UpstreamRecord,
@@ -44,18 +43,6 @@ impl OAuthRefreshUpstreams for StorageHandle {
 
     async fn read_oauth_token_generation(&self, id: Uuid) -> SchedulerResult<Option<u64>> {
         UpstreamStore::read_oauth_token_generation(self.storage.as_ref(), id)
-            .await
-            .map_err(storage_scheduler_error)
-    }
-}
-
-impl ReconcileUpstreams for StorageHandle {
-    async fn list(
-        &self,
-        after: Option<Uuid>,
-        limit: usize,
-    ) -> SchedulerResult<Vec<UpstreamRecord>> {
-        UpstreamStore::list(self.storage.as_ref(), after, limit)
             .await
             .map_err(storage_scheduler_error)
     }

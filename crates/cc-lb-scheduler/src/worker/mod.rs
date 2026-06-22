@@ -11,20 +11,18 @@ use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 use crate::error::SchedulerError;
-use crate::jobs::reconcile::{
-    SchedulerReconcileConfig, SchedulerReconcileJob, SchedulerReconcileJobResult,
-    SchedulerReconcileStats,
-};
 use crate::leader_election::LeaderElection;
 use crate::retry::JobOutcome;
 
+mod backend_api;
 mod cron;
 mod dispatch;
 mod jobs;
 mod layers;
 
+pub use backend_api::{Filter, SchedulerPushTask, SchedulerTaskRow, TaskStatus};
 pub use jobs::{EntityJob, SingletonJob};
-pub use layers::{EntityWorker, ReconcileWorker, SingletonWorker, build_singleton_worker};
+pub use layers::{EntityWorker, SingletonWorker, build_singleton_worker};
 
 pub const ENTITY_QUEUE: &str = "entity";
 pub const SINGLETON_QUEUE: &str = "singleton";
@@ -33,20 +31,15 @@ pub type EntityDispatchFuture =
     Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>>;
 pub type SingletonDispatchFuture =
     Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>>;
-pub type ReconcileDispatchFuture =
-    Pin<Box<dyn Future<Output = SchedulerReconcileJobResult> + Send>>;
 
 pub type EntityDispatchFn = Arc<dyn Fn(EntityJob) -> EntityDispatchFuture + Send + Sync>;
 pub type SingletonDispatchFn = Arc<dyn Fn(SingletonJob) -> SingletonDispatchFuture + Send + Sync>;
-pub type ReconcileDispatchFn =
-    Arc<dyn Fn(SchedulerReconcileJob) -> ReconcileDispatchFuture + Send + Sync>;
 
 #[derive(Clone)]
 pub struct SchedulerCtx {
     pub config: SchedulerConfig,
     pub entity_dispatch: EntityDispatchFn,
     pub singleton_dispatch: SingletonDispatchFn,
-    pub reconcile_dispatch: ReconcileDispatchFn,
 }
 
 impl SchedulerCtx {
@@ -54,13 +47,11 @@ impl SchedulerCtx {
         config: SchedulerConfig,
         entity_dispatch: EntityDispatchFn,
         singleton_dispatch: SingletonDispatchFn,
-        reconcile_dispatch: ReconcileDispatchFn,
     ) -> Self {
         Self {
             config,
             entity_dispatch,
             singleton_dispatch,
-            reconcile_dispatch,
         }
     }
 }
@@ -71,18 +62,8 @@ impl Default for SchedulerCtx {
             config: SchedulerConfig::default(),
             entity_dispatch: Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
             singleton_dispatch: Arc::new(|_job| Box::pin(async { Ok(JobOutcome::Done) })),
-            reconcile_dispatch: Arc::new(|_job| Box::pin(async { done_empty_reconcile() })),
         }
     }
-}
-
-fn done_empty_reconcile() -> SchedulerReconcileJobResult {
-    SchedulerReconcileJobResult::Done(SchedulerReconcileStats {
-        jobs_ensured: 0,
-        jobs_pruned: 0,
-        failures_recorded: 0,
-        reconcile_interval_secs: SchedulerReconcileConfig::default().reconcile_interval_secs,
-    })
 }
 
 #[derive(Clone, Debug)]
@@ -125,72 +106,14 @@ impl SchedulerBackend {
         leader: Arc<LeaderElection>,
         cancel: CancellationToken,
     ) -> Result<Vec<JoinHandle<()>>, SchedulerError> {
-        self.reclaim_orphans_on_startup().await?;
         let mut handles = self.spawn_consumers(ctx, cancel.clone())?;
         handles.push(cron::spawn_cron_producer(
-            self.clone(),
-            config.clone(),
-            leader.clone(),
-            cancel.clone(),
-        ));
-        handles.push(cron::spawn_reconcile_producer(
             self.clone(),
             config,
             leader,
             cancel,
         ));
         Ok(handles)
-    }
-
-    async fn reclaim_orphans_on_startup(&self) -> Result<(), SchedulerError> {
-        match self {
-            #[cfg(feature = "sqlite")]
-            Self::Sqlite(sqlite) => {
-                let result = sqlx::query(
-                    "UPDATE Jobs \
-                     SET status = 'Pending', \
-                         lock_at = NULL, \
-                         lock_by = NULL, \
-                         attempts = attempts + 1, \
-                         last_result = '{\"Err\":\"Reclaimed at scheduler startup (previous worker process exited mid-job)\"}' \
-                     WHERE status IN ('Running', 'Queued')",
-                )
-                .execute(&sqlite.pool)
-                .await
-                .map_err(|error| SchedulerError::Job(format!("startup orphan reclaim failed: {error}")))?;
-                let rows = result.rows_affected();
-                if rows > 0 {
-                    tracing::warn!(
-                        rows_reclaimed = rows,
-                        "scheduler reclaimed orphaned jobs at startup; previous worker process exited mid-job",
-                    );
-                }
-                Ok(())
-            }
-            #[cfg(feature = "postgres")]
-            Self::Postgres(postgres) => {
-                let result = sqlx::query(
-                    "UPDATE apalis.jobs \
-                     SET status = 'Pending', \
-                         lock_at = NULL, \
-                         lock_by = NULL, \
-                         attempts = attempts + 1, \
-                         last_error = '{\"Err\":\"Reclaimed at scheduler startup (previous worker process exited mid-job)\"}' \
-                     WHERE status IN ('Running', 'Queued')",
-                )
-                .execute(&postgres.pool)
-                .await
-                .map_err(|error| SchedulerError::Job(format!("startup orphan reclaim failed: {error}")))?;
-                let rows = result.rows_affected();
-                if rows > 0 {
-                    tracing::warn!(
-                        rows_reclaimed = rows,
-                        "scheduler reclaimed orphaned jobs at startup; previous worker process exited mid-job",
-                    );
-                }
-                Ok(())
-            }
-        }
     }
 
     pub async fn push_job(&self, job: EntityJob) -> Result<(), SchedulerError> {
@@ -217,11 +140,9 @@ impl SchedulerBackend {
         cancel: CancellationToken,
     ) -> Result<Vec<JoinHandle<()>>, SchedulerError> {
         let entity_worker = build_entity_worker(self, ctx.clone())?;
-        let singleton_worker = build_singleton_worker(self, ctx.clone())?;
-        let reconcile_worker = layers::build_reconcile_worker(self, ctx)?;
+        let singleton_worker = build_singleton_worker(self, ctx)?;
         let entity_cancel = cancel.clone();
-        let singleton_cancel = cancel.clone();
-        let reconcile_cancel = cancel;
+        let singleton_cancel = cancel;
         Ok(vec![
             tokio::spawn(async move {
                 if let Err(error) = entity_worker.run_until_cancelled(entity_cancel).await {
@@ -231,11 +152,6 @@ impl SchedulerBackend {
             tokio::spawn(async move {
                 if let Err(error) = singleton_worker.run_until_cancelled(singleton_cancel).await {
                     tracing::error!(error = %error, "scheduler singleton worker exited with error");
-                }
-            }),
-            tokio::spawn(async move {
-                if let Err(error) = reconcile_worker.run_until_cancelled(reconcile_cancel).await {
-                    tracing::error!(error = %error, "scheduler reconcile worker exited with error");
                 }
             }),
         ])

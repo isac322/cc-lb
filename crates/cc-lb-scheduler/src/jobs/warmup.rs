@@ -5,7 +5,7 @@ use std::sync::{Mutex, MutexGuard, OnceLock};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{error::Result, idempotency::WarmupEffectsStore};
+use crate::error::Result;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct UpstreamWarmupJob {
@@ -19,6 +19,10 @@ impl UpstreamWarmupJob {
             upstream_id,
             cycle_key,
         }
+    }
+
+    pub fn idempotency_key(&self, cycle_secs: u64) -> String {
+        format!("entity:warmup:{}:{cycle_secs}", self.upstream_id)
     }
 }
 
@@ -40,25 +44,20 @@ pub fn set_after_dispatch_hook(hook: HookFn) {
     *after_dispatch_hook_lock(lock) = Some(hook);
 }
 
-#[derive(Clone, Debug)]
-pub struct UpstreamWarmupJobHandler<Effects> {
-    effects: Effects,
-}
+#[derive(Clone, Debug, Default)]
+pub struct UpstreamWarmupJobHandler;
 
-impl<Effects> UpstreamWarmupJobHandler<Effects> {
-    pub const fn new(effects: Effects) -> Self {
-        Self { effects }
+impl UpstreamWarmupJobHandler {
+    pub const fn new() -> Self {
+        Self
     }
 }
 
-impl<Effects> UpstreamWarmupJobHandler<Effects>
-where
-    Effects: Send + Sync + WarmupCycleEffects,
-{
+impl UpstreamWarmupJobHandler {
     pub async fn handle<Lookup, LookupFuture, Fire, FireFuture>(
         &self,
         job: UpstreamWarmupJob,
-        completed_at_unix_secs: u64,
+        _completed_at_unix_secs: u64,
         upstream_is_live: Lookup,
         fire: Fire,
     ) -> Result<UpstreamWarmupOutcome>
@@ -70,13 +69,6 @@ where
     {
         if !upstream_is_live(job.upstream_id).await? {
             return Ok(UpstreamWarmupOutcome::UpstreamDeleted);
-        }
-        if self
-            .effects
-            .is_already_done(job.upstream_id, job.cycle_key)
-            .await?
-        {
-            return Ok(UpstreamWarmupOutcome::AlreadyCompleted);
         }
 
         fire(job).await?;
@@ -91,15 +83,7 @@ where
             }
         }
 
-        if self
-            .effects
-            .try_acquire_cycle(job.upstream_id, job.cycle_key, completed_at_unix_secs)
-            .await?
-        {
-            Ok(UpstreamWarmupOutcome::Fired)
-        } else {
-            Ok(UpstreamWarmupOutcome::AlreadyCompleted)
-        }
+        Ok(UpstreamWarmupOutcome::Fired)
     }
 }
 
@@ -109,65 +93,6 @@ fn after_dispatch_hook_lock(
     match lock.lock() {
         Ok(guard) => guard,
         Err(poisoned) => poisoned.into_inner(),
-    }
-}
-
-pub trait WarmupCycleEffects {
-    fn try_acquire_cycle(
-        &self,
-        upstream_id: Uuid,
-        cycle_key: u64,
-        completed_at_unix_secs: u64,
-    ) -> impl Future<Output = Result<bool>> + Send + '_;
-
-    fn is_already_done(
-        &self,
-        upstream_id: Uuid,
-        cycle_key: u64,
-    ) -> impl Future<Output = Result<bool>> + Send + '_;
-}
-
-#[cfg(feature = "sqlite")]
-impl WarmupCycleEffects for WarmupEffectsStore<sqlx::Sqlite> {
-    async fn try_acquire_cycle(
-        &self,
-        upstream_id: Uuid,
-        cycle_key: u64,
-        completed_at_unix_secs: u64,
-    ) -> Result<bool> {
-        WarmupEffectsStore::<sqlx::Sqlite>::try_acquire_cycle(
-            self,
-            upstream_id,
-            cycle_key,
-            completed_at_unix_secs,
-        )
-        .await
-    }
-
-    async fn is_already_done(&self, upstream_id: Uuid, cycle_key: u64) -> Result<bool> {
-        WarmupEffectsStore::<sqlx::Sqlite>::is_already_done(self, upstream_id, cycle_key).await
-    }
-}
-
-#[cfg(feature = "postgres")]
-impl WarmupCycleEffects for WarmupEffectsStore<sqlx::Postgres> {
-    async fn try_acquire_cycle(
-        &self,
-        upstream_id: Uuid,
-        cycle_key: u64,
-        completed_at_unix_secs: u64,
-    ) -> Result<bool> {
-        WarmupEffectsStore::<sqlx::Postgres>::try_acquire_cycle(
-            self,
-            upstream_id,
-            cycle_key,
-            completed_at_unix_secs,
-        )
-        .await
-    }
-
-    async fn is_already_done(&self, upstream_id: Uuid, cycle_key: u64) -> Result<bool> {
-        WarmupEffectsStore::<sqlx::Postgres>::is_already_done(self, upstream_id, cycle_key).await
     }
 }
 

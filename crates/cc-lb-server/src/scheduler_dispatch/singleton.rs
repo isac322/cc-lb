@@ -1,15 +1,22 @@
 use cc_lb_pricing::LiteLlmLoader;
 use cc_lb_scheduler::error::Result as SchedulerResult;
-use cc_lb_scheduler::idempotency::PriceCatalogVersionsStore;
 use cc_lb_scheduler::jobs::apalis_housekeeping::{
     ApalisHousekeepingConfig, ApalisHousekeepingJobHandler,
+};
+use cc_lb_scheduler::jobs::compat::{
+    AnthropicCompatRefreshJob, handle_anthropic_compat_refresh_job_with_core_fetcher,
 };
 use cc_lb_scheduler::jobs::price_catalog::PriceCatalogRefreshJobHandler;
 use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeJobHandler;
 use cc_lb_scheduler::jobs::quota_gc::{SubscriptionQuotaGcConfig, SubscriptionQuotaGcJobHandler};
 use cc_lb_scheduler::jobs::usage_prune::handle_usage_prune_job;
 use cc_lb_scheduler::jobs::usage_rollup::handle_usage_rollup_job;
+use cc_lb_scheduler::jobs::watchdog::{
+    OAuthRefreshWatchdogJob, OAuthUsagePollWatchdogJob, WarmupWatchdogJob, WatchdogEntityKind,
+    run_entity_watchdog,
+};
 use cc_lb_scheduler::retry::JobOutcome;
+use cc_lb_scheduler::state_stores::{AnthropicCompatEtagsStore, PriceCatalogVersionsStore};
 use cc_lb_scheduler::worker::{SchedulerBackend, SingletonJob};
 
 use crate::scheduler_dispatch::outcomes::{
@@ -82,6 +89,102 @@ impl SchedulerDispatch {
                     )
                 }
             },
+            SingletonJob::WarmupWatchdog(job) => self.handle_warmup_watchdog(job).await,
+            SingletonJob::OAuthRefreshWatchdog(job) => {
+                self.handle_oauth_refresh_watchdog(job).await
+            }
+            SingletonJob::OAuthUsagePollWatchdog(job) => {
+                self.handle_oauth_usage_poll_watchdog(job).await
+            }
+            SingletonJob::AnthropicCompatRefresh(job) => self.dispatch_anthropic_compat(job).await,
+        }
+    }
+
+    async fn handle_warmup_watchdog(&self, job: WarmupWatchdogJob) -> SchedulerResult<JobOutcome> {
+        let upstream_ids = self.list_warmup_watchdog_upstream_ids().await?;
+        let stats = run_entity_watchdog(
+            &self.backend,
+            WatchdogEntityKind::Warmup,
+            &upstream_ids,
+            job.tick_unix_secs,
+            now_unix_secs(),
+        )
+        .await?;
+        tracing::info!(
+            tick_unix_secs = job.tick_unix_secs,
+            seeded = stats.seeded,
+            "warmup watchdog completed"
+        );
+        Ok(JobOutcome::Done)
+    }
+
+    async fn handle_oauth_refresh_watchdog(
+        &self,
+        job: OAuthRefreshWatchdogJob,
+    ) -> SchedulerResult<JobOutcome> {
+        let upstream_ids = self.list_oauth_watchdog_upstream_ids().await?;
+        let stats = run_entity_watchdog(
+            &self.backend,
+            WatchdogEntityKind::OAuthRefresh,
+            &upstream_ids,
+            job.tick_unix_secs,
+            now_unix_secs(),
+        )
+        .await?;
+        tracing::info!(
+            tick_unix_secs = job.tick_unix_secs,
+            seeded = stats.seeded,
+            "oauth refresh watchdog completed"
+        );
+        Ok(JobOutcome::Done)
+    }
+
+    async fn handle_oauth_usage_poll_watchdog(
+        &self,
+        job: OAuthUsagePollWatchdogJob,
+    ) -> SchedulerResult<JobOutcome> {
+        let upstream_ids = self.list_oauth_watchdog_upstream_ids().await?;
+        let stats = run_entity_watchdog(
+            &self.backend,
+            WatchdogEntityKind::OAuthUsagePoll,
+            &upstream_ids,
+            job.tick_unix_secs,
+            now_unix_secs(),
+        )
+        .await?;
+        tracing::info!(
+            tick_unix_secs = job.tick_unix_secs,
+            seeded = stats.seeded,
+            "oauth usage poll watchdog completed"
+        );
+        Ok(JobOutcome::Done)
+    }
+
+    async fn dispatch_anthropic_compat(
+        &self,
+        job: AnthropicCompatRefreshJob,
+    ) -> SchedulerResult<JobOutcome> {
+        match &self.backend {
+            #[cfg(feature = "sqlite")]
+            SchedulerBackend::Sqlite(sqlite) => {
+                handle_anthropic_compat_refresh_job_with_core_fetcher(
+                    job,
+                    &AnthropicCompatEtagsStore::new(sqlite.pool.clone()),
+                    self.storage.as_ref(),
+                    &self.cancel,
+                )
+                .await
+            }
+            #[cfg(feature = "postgres")]
+            SchedulerBackend::Postgres(postgres) => {
+                handle_anthropic_compat_refresh_job_with_core_fetcher(
+                    job,
+                    &AnthropicCompatEtagsStore::new(postgres.pool.clone()),
+                    self.storage.as_ref(),
+                    &self.cancel,
+                )
+                .await
+            }
         }
     }
 

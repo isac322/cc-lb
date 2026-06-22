@@ -1,16 +1,14 @@
-use std::future::Future;
-use std::time::Duration;
-
-use cc_lb_scheduler::idempotency::OAuthUsagePollCursor;
 use cc_lb_scheduler::jobs::oauth_usage_poll::{OAuthUsagePollJob, compute_next_run_at};
 use cc_lb_scheduler::retry::JobOutcome;
+use cc_lb_scheduler::state_stores::OAuthUsagePollCursor;
 use cc_lb_scheduler::worker::EntityJob;
 use sqlx::Database;
+use std::future::Future;
 use uuid::Uuid;
 
 use crate::common::{
     FIRST_SUCCESS_AT, RESTART_NOW, SECOND_SUCCESS_AT, SUCCESS_INTERVAL_SECS, THROTTLE_AT,
-    THROTTLE_INTERVAL_SECS, TestResult, retry_delay,
+    TestResult,
 };
 use crate::state::UsagePollWorkerState;
 
@@ -37,12 +35,7 @@ where
     state.set_now(THROTTLE_AT);
     state.enqueue_throttle(THROTTLE_AT)?;
     push_job(oauth_usage_poll_job(upstream_id)).await?;
-    assert_eq!(
-        state.wait_for_outcome_count(2).await?,
-        JobOutcome::Retry {
-            delay: Duration::from_secs(THROTTLE_INTERVAL_SECS)
-        }
-    );
+    assert_eq!(state.wait_for_outcome_count(2).await?, JobOutcome::Done);
     let throttled = require_cursor(read_cursor().await?, "throttle")?;
     assert_throttle_cursor(&throttled, &[FIRST_SUCCESS_AT], &[THROTTLE_AT], 2);
 
@@ -79,11 +72,13 @@ where
     let calls_before = state.http_call_count();
     state.set_now(RESTART_NOW);
     push_job(oauth_usage_poll_job(upstream_id)).await?;
-    let delay = retry_delay(state.wait_for_outcome_count(1).await?)?;
+    assert_eq!(state.wait_for_outcome_count(1).await?, JobOutcome::Done);
     let oracle = compute_next_run_at(RESTART_NOW, state.config(), Some(snapshot));
-    let observed_next_run_after_restart = RESTART_NOW.saturating_add(delay.as_secs());
-    assert_eq!(oracle, observed_next_run_after_restart);
-    assert_eq!(delay, Duration::from_secs(SUCCESS_INTERVAL_SECS - 1));
+    assert_eq!(
+        oracle,
+        SECOND_SUCCESS_AT.saturating_add(SUCCESS_INTERVAL_SECS)
+    );
+    assert!(oracle > RESTART_NOW);
     assert_eq!(state.http_call_count(), calls_before);
     let after_restart = require_cursor(read_cursor().await?, "restart")?;
     assert_eq!(after_restart, *snapshot);

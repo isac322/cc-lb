@@ -1,6 +1,6 @@
 use cc_lb_core::anthropic_compat::CLAUDE_CODE_STABLE_VERSION_KEY;
 
-use crate::idempotency::AnthropicCompatEtagsStore;
+use crate::state_stores::AnthropicCompatEtagsStore;
 
 use super::test_support::RecordingCompatibilityKv;
 use super::*;

@@ -3,9 +3,9 @@ use std::time::Duration;
 
 use apalis::layers::catch_panic::CatchPanicLayer;
 use apalis::prelude::{IntervalStrategy, StrategyBuilder, TaskSink, WorkerBuilder, WorkerError};
-use cc_lb_scheduler::idempotency::OAuthUsagePollCursorsStore;
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollHandler;
 use cc_lb_scheduler::middleware::TraceparentLayer;
+use cc_lb_scheduler::state_stores::OAuthUsagePollCursorsStore;
 use cc_lb_scheduler::worker::{ENTITY_QUEUE, EntityJob, PostgresApalisStorage};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
@@ -108,7 +108,7 @@ fn postgres_read_cursor(
     upstream_id: Uuid,
 ) -> impl FnMut() -> std::pin::Pin<
     Box<
-        dyn Future<Output = TestResult<Option<cc_lb_scheduler::idempotency::OAuthUsagePollCursor>>>
+        dyn Future<Output = TestResult<Option<cc_lb_scheduler::state_stores::OAuthUsagePollCursor>>>
             + Send,
     >,
 > {

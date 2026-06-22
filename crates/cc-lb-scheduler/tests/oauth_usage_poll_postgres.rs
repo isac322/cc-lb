@@ -5,14 +5,13 @@ use std::sync::{
     Arc,
     atomic::{AtomicUsize, Ordering},
 };
-use std::time::Duration;
 
 use cc_lb_scheduler::error::Result;
-use cc_lb_scheduler::idempotency::{OAuthUsagePollCursorsStore, OAuthUsagePollScheduleConfig};
 use cc_lb_scheduler::jobs::oauth_usage_poll::{
     OAuthUsagePollHandler, OAuthUsagePollJob, OAuthUsagePollObservation,
 };
 use cc_lb_scheduler::retry::JobOutcome;
+use cc_lb_scheduler::state_stores::{OAuthUsagePollCursorsStore, OAuthUsagePollScheduleConfig};
 use sqlx::{Executor, PgPool, postgres::PgPoolOptions};
 use uuid::Uuid;
 
@@ -47,12 +46,7 @@ mod jobs {
                 .await?;
 
             assert_eq!(calls.load(Ordering::SeqCst), 1);
-            assert_eq!(
-                outcome,
-                JobOutcome::Retry {
-                    delay: Duration::from_secs(59)
-                }
-            );
+            assert_eq!(outcome, JobOutcome::Done);
             sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
                 .execute(&admin)
                 .await?;
