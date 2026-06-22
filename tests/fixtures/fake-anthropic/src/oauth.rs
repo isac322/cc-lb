@@ -131,7 +131,7 @@ pub async fn token(
     let _client_id = &form.client_id;
     match form.grant_type.as_str() {
         "authorization_code" => exchange_code(state, form),
-        "refresh_token" => rotate_refresh_token(state, form),
+        "refresh_token" => rotate_refresh_token(state, form).await,
         _ => json_error(StatusCode::BAD_REQUEST, "unsupported_grant_type"),
     }
 }
@@ -195,7 +195,7 @@ fn exchange_code(state: Arc<AppState>, form: TokenForm) -> Response {
     )
 }
 
-fn rotate_refresh_token(state: Arc<AppState>, form: TokenForm) -> Response {
+async fn rotate_refresh_token(state: Arc<AppState>, form: TokenForm) -> Response {
     let Some(old_refresh_token) = form.refresh_token else {
         return json_error(StatusCode::BAD_REQUEST, "invalid_request");
     };
@@ -226,6 +226,10 @@ fn rotate_refresh_token(state: Arc<AppState>, form: TokenForm) -> Response {
     match state.oauth.refresh_history.lock() {
         Ok(mut history) => history.push(history_entry),
         Err(_) => return json_error(StatusCode::INTERNAL_SERVER_ERROR, "state_lock_failed"),
+    }
+
+    if let Some(pause) = state.config.oauth_refresh_pause.clone() {
+        pause.pause_response().await;
     }
 
     token_response(

@@ -200,33 +200,26 @@ describe('WarmupCard', () => {
     expect(screen.queryByTestId('warmup-plugin-select')).toBeNull();
   });
 
-  test('OAuth enabled with null fields renders awaiting and never-warmed copy', () => {
+  test('OAuth enabled with null last warmup renders never-warmed copy', () => {
     renderWarmup(
       makeOauthUpstream({
         warmup_enabled: true,
-        next_warmup_at: null,
-        last_warmup_cycle_key: null,
+        last_warmup_at_unix_secs: null,
       }),
     );
 
-    expect(screen.getByText(COPY.nextNull)).toBeDefined();
     expect(screen.getByText(COPY.lastNull)).toBeDefined();
   });
 
-  test('OAuth enabled with populated future fields renders relative time labels', () => {
-    const futureNextMs = Date.now() + 4 * 60 * 60 * 1000;
+  test('OAuth enabled with populated last warmup renders relative time label', () => {
     const upstream = makeOauthUpstream({
-      next_warmup_at: new Date(futureNextMs).toISOString(),
-      last_warmup_cycle_key: 1718380800,
+      last_warmup_at_unix_secs: 1718380800,
     });
 
     renderWarmup(upstream);
 
-    const nextEl = screen.getByTestId('warmup-next');
-    expect(nextEl.textContent).toMatch(/^in \d/);
-    expect(nextEl.textContent).not.toMatch(/Warms/);
     expect(formatRelativeUnixSeconds).toHaveBeenCalledWith(
-      upstream.status.last_warmup_cycle_key,
+      upstream.status.last_warmup_at_unix_secs,
     );
     const formattedLast = vi.mocked(formatRelativeUnixSeconds).mock.results[0]
       ?.value as Date;
@@ -234,56 +227,6 @@ describe('WarmupCard', () => {
     expect(screen.getByTestId('rel-time').textContent).toBe(
       String(formattedLast),
     );
-  });
-
-  test('OAuth enabled with overdue next_warmup_at renders Overdue badge', () => {
-    const overdueMs = Date.now() - 30 * 60 * 1000;
-    const upstream = makeOauthUpstream({
-      next_warmup_at: new Date(overdueMs).toISOString(),
-      last_warmup_cycle_key: null,
-    });
-
-    renderWarmup(upstream);
-
-    const nextEl = screen.getByTestId('warmup-next');
-    expect(nextEl.textContent).toContain('Overdue');
-  });
-
-  test('OAuth next warmup label updates without new props', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-06-18T00:00:00.000Z'));
-    const upstream = makeOauthUpstream({
-      next_warmup_at: new Date('2026-06-18T00:00:04.000Z').toISOString(),
-      last_warmup_cycle_key: null,
-    });
-
-    renderWarmup(upstream);
-
-    expect(screen.getByTestId('warmup-next').textContent).toContain(
-      'any moment',
-    );
-
-    act(() => {
-      vi.advanceTimersByTime(10_000);
-    });
-
-    expect(screen.getByTestId('warmup-next').textContent).toContain('Overdue');
-  });
-
-  test('OAuth upstream disabled with stale next_warmup_at renders paused copy instead of Overdue', () => {
-    const overdueMs = Date.now() - 30 * 60 * 1000;
-
-    renderWarmup(
-      makeOauthUpstream({
-        enabled: false,
-        warmup_enabled: true,
-        next_warmup_at: new Date(overdueMs).toISOString(),
-      }),
-    );
-
-    expect(screen.getByText(COPY.upstreamPausedEmpty)).toBeDefined();
-    expect(screen.queryByText(/Overdue/)).toBeNull();
-    expect(screen.queryByTestId('warmup-fire-now')).toBeNull();
   });
 
   test('zero shape plugins renders notice and Plugins link without select', () => {

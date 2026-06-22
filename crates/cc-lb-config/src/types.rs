@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -34,6 +34,7 @@ pub const DEFAULT_FILES_CAP_BYTES: u64 = 100 * 1024 * 1024;
 pub const DEFAULT_OAUTH_AEAD_KEY_ENV: &str = "CC_LB_MASTER_KEY";
 pub const DEFAULT_ADMIN_TOKEN_ENV: &str = "CC_LB_ADMIN_TOKEN";
 pub const DEFAULT_SQLITE_PATH: &str = "/var/lib/cc-lb/storage.sqlite";
+pub const DEFAULT_SCHEDULER_LEADER_LOCK_KEY: i64 = 0xCC1B_5CDE_0001_i64;
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -46,14 +47,14 @@ pub struct Config {
     pub downstream_auth: DownstreamAuthConfig,
     pub api_keys: ApiKeysConfig,
     pub storage: StorageConfig,
+    #[serde(default)]
+    pub scheduler: SchedulerConfig,
     pub aead: AeadConfig,
     pub observability: ObservabilityConfig,
     pub admin: AdminConfig,
     pub oauth: OAuthConfig,
     #[serde(default)]
     pub subscription_quota: SubscriptionQuotaConfig,
-    #[serde(default)]
-    pub anthropic_compat_poller: AnthropicCompatPollerConfig,
     pub runtime: RuntimeConfig,
     pub circuit_breaker: CircuitBreakerConfig,
     pub bulkhead: BulkheadConfig,
@@ -382,6 +383,172 @@ impl Default for PostgresPoolConfig {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SchedulerConfig {
+    #[serde(default)]
+    pub separate_pool: SchedulerPoolConfig,
+    #[serde(default = "default_scheduler_leader_lock_key")]
+    pub leader_lock_key: i64,
+    #[serde(default)]
+    pub retry_classes: SchedulerRetryClasses,
+    #[serde(
+        default = "default_scheduler_recurring_jobs",
+        serialize_with = "serialize_recurring_jobs"
+    )]
+    pub recurring_jobs: HashMap<String, RecurringJobConfig>,
+    #[serde(default)]
+    pub idempotency: SchedulerIdempotencyConfig,
+    #[serde(default = "default_scheduler_dlq_retention_days")]
+    pub dlq_retention_days: u32,
+    #[serde(default = "default_scheduler_entity_concurrency")]
+    pub entity_concurrency: usize,
+    #[serde(default = "default_scheduler_singleton_concurrency")]
+    pub singleton_concurrency: usize,
+    #[serde(default)]
+    pub staleness: SchedulerStalenessConfig,
+    #[serde(default)]
+    pub pgbouncer_transaction_mode: bool,
+}
+
+impl Default for SchedulerConfig {
+    fn default() -> Self {
+        Self {
+            separate_pool: SchedulerPoolConfig::default(),
+            leader_lock_key: DEFAULT_SCHEDULER_LEADER_LOCK_KEY,
+            retry_classes: SchedulerRetryClasses::default(),
+            recurring_jobs: default_scheduler_recurring_jobs(),
+            idempotency: SchedulerIdempotencyConfig::default(),
+            dlq_retention_days: 30,
+            entity_concurrency: 8,
+            singleton_concurrency: 2,
+            staleness: SchedulerStalenessConfig::default(),
+            pgbouncer_transaction_mode: false,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SchedulerPoolConfig {
+    #[serde(default = "default_scheduler_pool_max_connections")]
+    pub max_connections: u32,
+    #[serde(default = "default_scheduler_pool_min_connections")]
+    pub min_connections: u32,
+    #[serde(default = "default_acquire_timeout_secs")]
+    pub acquire_timeout_secs: u64,
+    #[serde(default = "default_idle_timeout_secs")]
+    pub idle_timeout_secs: u64,
+    #[serde(default = "default_statement_timeout_secs")]
+    pub statement_timeout_secs: u64,
+    #[serde(default = "default_sslmode")]
+    pub sslmode: String,
+}
+
+impl Default for SchedulerPoolConfig {
+    fn default() -> Self {
+        Self {
+            max_connections: 5,
+            min_connections: 1,
+            acquire_timeout_secs: default_acquire_timeout_secs(),
+            idle_timeout_secs: default_idle_timeout_secs(),
+            statement_timeout_secs: default_statement_timeout_secs(),
+            sslmode: default_sslmode(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SchedulerRetryClasses {
+    #[serde(default = "default_scheduler_retry_probe")]
+    pub probe: SchedulerRetryConfig,
+    #[serde(default = "default_scheduler_retry_adaptive")]
+    pub adaptive: SchedulerRetryConfig,
+    #[serde(default = "default_scheduler_retry_maintenance")]
+    pub maintenance: SchedulerRetryConfig,
+}
+
+impl Default for SchedulerRetryClasses {
+    fn default() -> Self {
+        Self {
+            probe: default_scheduler_retry_probe(),
+            adaptive: default_scheduler_retry_adaptive(),
+            maintenance: default_scheduler_retry_maintenance(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SchedulerRetryConfig {
+    #[serde(default = "default_scheduler_retry_max_attempts")]
+    pub max_attempts: u32,
+    #[serde(default = "default_scheduler_retry_base_secs")]
+    pub base_secs: u64,
+    #[serde(default = "default_scheduler_retry_max_secs")]
+    pub max_secs: u64,
+}
+
+impl Default for SchedulerRetryConfig {
+    fn default() -> Self {
+        Self {
+            max_attempts: 3,
+            base_secs: 1,
+            max_secs: 5,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct RecurringJobConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_recurring_job_interval_secs")]
+    pub interval_secs: u64,
+    #[serde(default = "default_recurring_job_jitter_secs")]
+    pub jitter_secs: u64,
+}
+
+impl Default for RecurringJobConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            interval_secs: 3600,
+            jitter_secs: 30,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SchedulerIdempotencyConfig {
+    #[serde(default = "default_scheduler_claim_ttl_secs")]
+    pub claim_ttl_secs: u64,
+}
+
+impl Default for SchedulerIdempotencyConfig {
+    fn default() -> Self {
+        Self { claim_ttl_secs: 60 }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(default, deny_unknown_fields)]
+pub struct SchedulerStalenessConfig {
+    #[serde(default = "default_scheduler_warmup_effect_retention_days")]
+    pub warmup_effect_retention_days: u32,
+}
+
+impl Default for SchedulerStalenessConfig {
+    fn default() -> Self {
+        Self {
+            warmup_effect_retention_days: 30,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
 pub struct AnthropicOAuthConfig {
     pub client_id: String,
@@ -415,8 +582,6 @@ impl Default for AnthropicOAuthConfig {
 pub struct OAuthConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anthropic: Option<AnthropicOAuthConfig>,
-    #[serde(default)]
-    pub usage_poller: OAuthUsagePollerConfig,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -428,8 +593,6 @@ pub struct SubscriptionQuotaConfig {
     pub retention_days: u64,
     #[serde(default = "default_subscription_quota_gc_batch_size")]
     pub gc_batch_size: u32,
-    #[serde(default = "default_subscription_quota_gc_tick_interval_secs")]
-    pub gc_tick_interval_secs: u64,
     #[serde(default = "default_subscription_quota_writer_batch_max_records")]
     pub writer_batch_max_records: u32,
     #[serde(default = "default_subscription_quota_writer_flush_ms")]
@@ -448,98 +611,11 @@ impl Default for SubscriptionQuotaConfig {
             enabled: true,
             retention_days: 30,
             gc_batch_size: 10_000,
-            gc_tick_interval_secs: 60,
             writer_batch_max_records: 256,
             writer_flush_ms: 100,
             writer_channel_capacity: 4096,
             dedup_elapsed_override_secs: 30,
             routing_max_staleness_secs: 1800,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct OAuthUsagePollerConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default = "default_oauth_usage_poller_bootstrap_attempts")]
-    pub bootstrap_attempts: u32,
-    #[serde(default = "default_oauth_usage_poller_bootstrap_default_interval_secs")]
-    pub bootstrap_default_interval_secs: u64,
-    /// CATEGORY-3 CROSS-CRATE INVARIANT: server code converts this divisor into
-    /// a fractional safety factor as `1.0 / safety_divisor`.
-    #[serde(default = "default_oauth_usage_poller_safety_divisor")]
-    pub safety_divisor: u32,
-    #[serde(default = "default_oauth_usage_poller_min_interval_secs")]
-    pub min_interval_secs: u64,
-    #[serde(default = "default_oauth_usage_poller_max_interval_secs")]
-    pub max_interval_secs: u64,
-    #[serde(default = "default_oauth_usage_poller_fallback_interval_secs")]
-    pub fallback_interval_secs: u64,
-    #[serde(default = "default_oauth_usage_poller_history_capacity")]
-    pub history_capacity: u32,
-    #[serde(default = "default_oauth_usage_poller_throttle_ladder_secs")]
-    pub throttle_ladder_secs: Vec<u64>,
-    #[serde(default = "default_oauth_usage_poller_stagger_ms")]
-    pub stagger_ms: u64,
-    #[serde(default = "default_oauth_usage_poller_request_timeout_secs")]
-    pub request_timeout_secs: u64,
-    #[serde(default = "default_oauth_usage_poller_lease_ttl_secs")]
-    pub lease_ttl_secs: u64,
-    #[serde(default = "default_oauth_usage_poller_rate_limit_window_secs")]
-    pub rate_limit_window_secs: u64,
-    #[serde(default = "default_oauth_usage_poller_rate_limit_capacity")]
-    pub rate_limit_capacity: u32,
-    #[serde(default = "default_oauth_usage_poller_rate_limit_safety_secs")]
-    pub rate_limit_safety_secs: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub user_agent_override: Option<String>,
-}
-
-impl Default for OAuthUsagePollerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            bootstrap_attempts: 0,
-            bootstrap_default_interval_secs: 60,
-            safety_divisor: 1,
-            min_interval_secs: 60,
-            max_interval_secs: 3600,
-            fallback_interval_secs: 60,
-            history_capacity: 8,
-            throttle_ladder_secs: vec![300, 300, 300, 300, 300],
-            stagger_ms: 1500,
-            request_timeout_secs: 10,
-            lease_ttl_secs: 90,
-            rate_limit_window_secs: 300,
-            rate_limit_capacity: 5,
-            rate_limit_safety_secs: 5,
-            user_agent_override: None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
-#[serde(default)]
-pub struct AnthropicCompatPollerConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    #[serde(default = "default_anthropic_compat_poller_tick_interval_secs")]
-    pub tick_interval_secs: u64,
-    #[serde(default = "default_anthropic_compat_poller_jitter_secs")]
-    pub jitter_secs: u64,
-    #[serde(default = "default_anthropic_compat_poller_request_timeout_secs")]
-    pub request_timeout_secs: u64,
-}
-
-impl Default for AnthropicCompatPollerConfig {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            tick_interval_secs: 3600,
-            jitter_secs: 60,
-            request_timeout_secs: 10,
         }
     }
 }
@@ -557,7 +633,6 @@ impl Default for AnthropicCompatPollerConfig {
 /// - `enabled` (default: false) - gate all observation flow and sweeper spawn
 /// - `grace_margin_secs` (default: 30) - minimum age before a cache hit is refreshed
 /// - `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence
-/// - `sweeper_interval_secs` (default: 300) - interval between expiry purge scans
 /// - `warm_set_cap` (default: 32) - max snapshot entries per upstream/model
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(default)]
@@ -568,8 +643,6 @@ pub struct PromptCacheShadowConfig {
     pub grace_margin_secs: u64,
     #[serde(default = "default_prompt_cache_shadow_refresh_debounce_secs")]
     pub refresh_debounce_secs: u64,
-    #[serde(default = "default_prompt_cache_shadow_sweeper_interval_secs")]
-    pub sweeper_interval_secs: u64,
     #[serde(default = "default_prompt_cache_shadow_warm_set_cap")]
     pub warm_set_cap: usize,
 }
@@ -580,7 +653,6 @@ impl Default for PromptCacheShadowConfig {
             enabled: false,
             grace_margin_secs: 30,
             refresh_debounce_secs: 60,
-            sweeper_interval_secs: 300,
             warm_set_cap: 32,
         }
     }
@@ -822,6 +894,150 @@ fn default_sslmode() -> String {
     "prefer".to_owned()
 }
 
+fn default_scheduler_pool_max_connections() -> u32 {
+    SchedulerPoolConfig::default().max_connections
+}
+
+fn default_scheduler_pool_min_connections() -> u32 {
+    SchedulerPoolConfig::default().min_connections
+}
+
+fn default_scheduler_leader_lock_key() -> i64 {
+    DEFAULT_SCHEDULER_LEADER_LOCK_KEY
+}
+
+fn default_scheduler_recurring_jobs() -> HashMap<String, RecurringJobConfig> {
+    HashMap::from([
+        (
+            "usage_rollup".to_owned(),
+            recurring_job_config(30, scheduler_jitter_secs(30)),
+        ),
+        (
+            "usage_prune".to_owned(),
+            recurring_job_config(86_400, scheduler_jitter_secs(86_400)),
+        ),
+        (
+            "quota_gc".to_owned(),
+            recurring_job_config(3600, scheduler_jitter_secs(3600)),
+        ),
+        (
+            "prompt_cache_purge".to_owned(),
+            recurring_job_config(600, scheduler_jitter_secs(600)),
+        ),
+        (
+            "price_catalog_refresh".to_owned(),
+            recurring_job_config(3600, scheduler_jitter_secs(3600)),
+        ),
+        (
+            "apalis_housekeeping".to_owned(),
+            recurring_job_config(3600, scheduler_jitter_secs(3600)),
+        ),
+        (
+            "anthropic_compat_refresh".to_owned(),
+            recurring_job_config(86_400, scheduler_jitter_secs(86_400)),
+        ),
+        (
+            "warmup_watchdog".to_owned(),
+            recurring_job_config(6000, scheduler_jitter_secs(6000)),
+        ),
+        (
+            "oauth_refresh_watchdog".to_owned(),
+            recurring_job_config(9360, scheduler_jitter_secs(9360)),
+        ),
+        ("oauth_usage_poll".to_owned(), recurring_job_config(60, 0)),
+    ])
+}
+
+fn serialize_recurring_jobs<S>(
+    jobs: &HashMap<String, RecurringJobConfig>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    let ordered = jobs
+        .iter()
+        .map(|(name, config)| (name.as_str(), config))
+        .collect::<BTreeMap<_, _>>();
+    ordered.serialize(serializer)
+}
+
+fn scheduler_jitter_secs(interval_secs: u64) -> u64 {
+    (interval_secs / 10).min(30)
+}
+
+fn recurring_job_config(interval_secs: u64, jitter_secs: u64) -> RecurringJobConfig {
+    RecurringJobConfig {
+        enabled: true,
+        interval_secs,
+        jitter_secs,
+    }
+}
+
+fn default_scheduler_retry_probe() -> SchedulerRetryConfig {
+    SchedulerRetryConfig {
+        max_attempts: 3,
+        base_secs: 1,
+        max_secs: 5,
+    }
+}
+
+fn default_scheduler_retry_adaptive() -> SchedulerRetryConfig {
+    SchedulerRetryConfig {
+        max_attempts: 5,
+        base_secs: 30,
+        max_secs: 600,
+    }
+}
+
+fn default_scheduler_retry_maintenance() -> SchedulerRetryConfig {
+    SchedulerRetryConfig {
+        max_attempts: 1,
+        base_secs: 60,
+        max_secs: 60,
+    }
+}
+
+fn default_scheduler_retry_max_attempts() -> u32 {
+    SchedulerRetryConfig::default().max_attempts
+}
+
+fn default_scheduler_retry_base_secs() -> u64 {
+    SchedulerRetryConfig::default().base_secs
+}
+
+fn default_scheduler_retry_max_secs() -> u64 {
+    SchedulerRetryConfig::default().max_secs
+}
+
+fn default_recurring_job_interval_secs() -> u64 {
+    RecurringJobConfig::default().interval_secs
+}
+
+fn default_recurring_job_jitter_secs() -> u64 {
+    RecurringJobConfig::default().jitter_secs
+}
+
+fn default_scheduler_claim_ttl_secs() -> u64 {
+    SchedulerIdempotencyConfig::default().claim_ttl_secs
+}
+
+fn default_scheduler_dlq_retention_days() -> u32 {
+    SchedulerConfig::default().dlq_retention_days
+}
+
+fn default_scheduler_entity_concurrency() -> usize {
+    SchedulerConfig::default().entity_concurrency
+}
+
+fn default_scheduler_singleton_concurrency() -> usize {
+    SchedulerConfig::default().singleton_concurrency
+}
+
+fn default_scheduler_warmup_effect_retention_days() -> u32 {
+    SchedulerStalenessConfig::default().warmup_effect_retention_days
+}
+
 fn default_tracing_level() -> String {
     "info".to_owned()
 }
@@ -883,10 +1099,6 @@ fn default_subscription_quota_gc_batch_size() -> u32 {
     SubscriptionQuotaConfig::default().gc_batch_size
 }
 
-fn default_subscription_quota_gc_tick_interval_secs() -> u64 {
-    SubscriptionQuotaConfig::default().gc_tick_interval_secs
-}
-
 fn default_subscription_quota_writer_batch_max_records() -> u32 {
     SubscriptionQuotaConfig::default().writer_batch_max_records
 }
@@ -907,84 +1119,12 @@ fn default_subscription_quota_routing_max_staleness_secs() -> u64 {
     SubscriptionQuotaConfig::default().routing_max_staleness_secs
 }
 
-fn default_oauth_usage_poller_bootstrap_attempts() -> u32 {
-    OAuthUsagePollerConfig::default().bootstrap_attempts
-}
-
-fn default_oauth_usage_poller_bootstrap_default_interval_secs() -> u64 {
-    OAuthUsagePollerConfig::default().bootstrap_default_interval_secs
-}
-
-fn default_oauth_usage_poller_safety_divisor() -> u32 {
-    OAuthUsagePollerConfig::default().safety_divisor
-}
-
-fn default_oauth_usage_poller_min_interval_secs() -> u64 {
-    OAuthUsagePollerConfig::default().min_interval_secs
-}
-
-fn default_oauth_usage_poller_max_interval_secs() -> u64 {
-    OAuthUsagePollerConfig::default().max_interval_secs
-}
-
-fn default_oauth_usage_poller_fallback_interval_secs() -> u64 {
-    OAuthUsagePollerConfig::default().fallback_interval_secs
-}
-
-fn default_oauth_usage_poller_history_capacity() -> u32 {
-    OAuthUsagePollerConfig::default().history_capacity
-}
-
-fn default_oauth_usage_poller_throttle_ladder_secs() -> Vec<u64> {
-    OAuthUsagePollerConfig::default().throttle_ladder_secs
-}
-
-fn default_oauth_usage_poller_stagger_ms() -> u64 {
-    OAuthUsagePollerConfig::default().stagger_ms
-}
-
-fn default_oauth_usage_poller_request_timeout_secs() -> u64 {
-    OAuthUsagePollerConfig::default().request_timeout_secs
-}
-
-fn default_oauth_usage_poller_lease_ttl_secs() -> u64 {
-    OAuthUsagePollerConfig::default().lease_ttl_secs
-}
-
-fn default_oauth_usage_poller_rate_limit_window_secs() -> u64 {
-    OAuthUsagePollerConfig::default().rate_limit_window_secs
-}
-
-fn default_oauth_usage_poller_rate_limit_capacity() -> u32 {
-    OAuthUsagePollerConfig::default().rate_limit_capacity
-}
-
-fn default_oauth_usage_poller_rate_limit_safety_secs() -> u64 {
-    OAuthUsagePollerConfig::default().rate_limit_safety_secs
-}
-
-fn default_anthropic_compat_poller_tick_interval_secs() -> u64 {
-    AnthropicCompatPollerConfig::default().tick_interval_secs
-}
-
-fn default_anthropic_compat_poller_jitter_secs() -> u64 {
-    AnthropicCompatPollerConfig::default().jitter_secs
-}
-
-fn default_anthropic_compat_poller_request_timeout_secs() -> u64 {
-    AnthropicCompatPollerConfig::default().request_timeout_secs
-}
-
 fn default_prompt_cache_shadow_grace_margin_secs() -> u64 {
     PromptCacheShadowConfig::default().grace_margin_secs
 }
 
 fn default_prompt_cache_shadow_refresh_debounce_secs() -> u64 {
     PromptCacheShadowConfig::default().refresh_debounce_secs
-}
-
-fn default_prompt_cache_shadow_sweeper_interval_secs() -> u64 {
-    PromptCacheShadowConfig::default().sweeper_interval_secs
 }
 
 fn default_prompt_cache_shadow_warm_set_cap() -> usize {

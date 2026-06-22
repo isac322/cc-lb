@@ -10,18 +10,29 @@ build = "build.rs"
 [features]
 default = ["sqlite"]
 sqlite = [
+    "cc-lb-scheduler/sqlite",
     "cc-lb-admin/sqlite",
     "cc-lb-core/sqlite",
     "cc-lb-signer-anthropic-key/sqlite",
     "cc-lb-signer-anthropic-oauth/sqlite",
+    "dep:apalis-codec",
+    "dep:apalis-sqlite",
+    "dep:cc-lb-scheduler",
+    "dep:scheduler-sqlx",
+    "scheduler-sqlx/sqlite",
 ]
 postgres = [
+    "cc-lb-scheduler/postgres",
     "cc-lb-admin/postgres",
     "cc-lb-core/postgres",
     "cc-lb-signer-anthropic-key/postgres",
     "cc-lb-signer-anthropic-oauth/postgres",
+    "dep:apalis-postgres",
+    "dep:cc-lb-scheduler",
     "dep:cc-lb-storage-postgres",
+    "dep:scheduler-sqlx",
     "dep:sqlx",
+    "scheduler-sqlx/postgres",
 ]
 wasmtime = []
 
@@ -31,6 +42,9 @@ path = "src/main.rs"
 
 [dependencies]
 anyhow.workspace = true
+apalis-codec = { version = "0.1.0-rc.9", optional = true, default-features = false, features = ["json"] }
+apalis-postgres = { version = "^1.0.0-rc.8", optional = true }
+apalis-sqlite = { version = "^1.0.0-rc.8", optional = true }
 async-stream.workspace = true
 async-trait.workspace = true
 arc-swap.workspace = true
@@ -47,6 +61,7 @@ cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 cc-lb-plugin-wire = { path = "../cc-lb-plugin-wire" }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
 cc-lb-runtime-extism = { path = "../cc-lb-runtime-extism" }
+cc-lb-scheduler = { path = "../cc-lb-scheduler", optional = true, default-features = false }
 cc-lb-signer-anthropic-key = { path = "../cc-lb-signer-anthropic-key" }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
 cc-lb-storage-api = { path = "../cc-lb-storage-api" }
@@ -71,6 +86,7 @@ serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 sha2.workspace = true
 siphasher = "1"
+scheduler-sqlx = { package = "sqlx", version = "=0.8.6", optional = true, default-features = false, features = ["chrono", "json", "migrate", "runtime-tokio", "tls-rustls-ring", "uuid"] }
 sqlx = { workspace = true, optional = true }
 tempfile.workspace = true
 thiserror.workspace = true

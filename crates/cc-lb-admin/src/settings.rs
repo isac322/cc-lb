@@ -24,6 +24,7 @@ pub const COVERAGE_CHECKLIST: &[&str] = &[
     "downstream_auth",
     "api_keys",
     "storage",
+    "scheduler",
     "aead",
     "observability",
     "admin",
@@ -521,6 +522,7 @@ fn reject_unknown_top_level_keys(value: &Value) -> Result<(), String> {
         "downstream_auth",
         "api_keys",
         "storage",
+        "scheduler",
         "aead",
         "observability",
         "admin",
@@ -530,7 +532,6 @@ fn reject_unknown_top_level_keys(value: &Value) -> Result<(), String> {
         "bulkhead",
         "dns",
         "egress",
-        "anthropic_compat_poller",
         "subscription_quota",
         "prompt_cache_shadow",
     ];

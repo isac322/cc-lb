@@ -19,7 +19,7 @@ use cc_lb_storage_conformance::{
         principal_store, prompt_cache_observation_store, storage_roundtrips,
         storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
         upstream_rate_limit_store, upstream_subscription_metadata_store,
-        upstream_subscription_quota_store, warmup_lease,
+        upstream_subscription_quota_store,
     },
 };
 use cc_lb_storage_postgres::PostgresStorage;
@@ -256,11 +256,6 @@ fn upstream_rate_limit_empty_list_for_unknown_id_postgres() {
         "upstream_rate_limit_empty_list_for_unknown_id",
         upstream_rate_limit_store::empty_list_for_unknown_id,
     );
-}
-
-#[test]
-fn warmup_lease_postgres() {
-    run_postgres_scenario("warmup_lease", warmup_lease::run_all);
 }
 
 #[test]

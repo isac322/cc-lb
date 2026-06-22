@@ -28,7 +28,6 @@ import {
   INPUT_CLASS,
 } from '../ui/primitives';
 import { RelativeTime } from '../ui/RelativeTime';
-import { NextWarmupDisplay } from './NextWarmupDisplay';
 
 function pluginSupportsSlot(
   p: { supported_slots?: string[]; slot?: string },
@@ -37,8 +36,8 @@ function pluginSupportsSlot(
   return p.supported_slots?.includes(slot) ?? p.slot === slot;
 }
 
-function LastCycleDisplay({ cycleKeyUnixSecs }: { cycleKeyUnixSecs: number }) {
-  return <RelativeTime ts={formatRelativeUnixSeconds(cycleKeyUnixSecs)} />;
+function LastCycleDisplay({ unixSecs }: { unixSecs: number }) {
+  return <RelativeTime ts={formatRelativeUnixSeconds(unixSecs)} />;
 }
 
 function isStaleRevisionError(err: unknown): boolean {
@@ -355,25 +354,12 @@ function WarmupCardInner({ upstream }: { upstream: Upstream }) {
             <div className="grid grid-cols-1 gap-4 text-sm sm:grid-cols-2">
               <div>
                 <div className="text-xs text-text-muted mb-1">
-                  {COPY.nextWarmupLabel}
-                </div>
-                <div className="text-text" data-testid="warmup-next">
-                  {upstream.status.next_warmup_at ? (
-                    <NextWarmupDisplay value={upstream.status.next_warmup_at} />
-                  ) : (
-                    <span className="text-text-muted">{COPY.nextNull}</span>
-                  )}
-                </div>
-              </div>
-
-              <div>
-                <div className="text-xs text-text-muted mb-1">
                   {COPY.lastCycleLabel}
                 </div>
                 <div className="text-text" data-testid="warmup-last">
-                  {upstream.status.last_warmup_cycle_key ? (
+                  {upstream.status.last_warmup_at_unix_secs ? (
                     <LastCycleDisplay
-                      cycleKeyUnixSecs={upstream.status.last_warmup_cycle_key}
+                      unixSecs={upstream.status.last_warmup_at_unix_secs}
                     />
                   ) : (
                     <span className="text-text-muted">{COPY.lastNull}</span>

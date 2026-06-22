@@ -9,7 +9,7 @@ use std::sync::{Arc, OnceLock};
 use arc_swap::ArcSwap;
 use serde::{Deserialize, Serialize};
 
-pub use loader::{LiteLlmLoader, PriceCatalogStatus};
+pub use loader::{FetchedCatalog, LiteLlmLoader, LoaderError, PriceCatalogStatus};
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Pricing {

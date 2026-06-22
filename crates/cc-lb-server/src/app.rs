@@ -30,11 +30,8 @@ use cc_lb_core::{
         builtin_authn::BuiltinAuthn, concurrent_guard::KeyConcurrencyManager, key_store::KeyStore,
         limit_engine::LimitEngine, principal_view::PrincipalView,
     },
-    make_default_dispatcher, make_metadata_http_client, spawn_audit_writer,
-    start_subscription_metadata_hook, start_subscription_quota_writer,
+    make_default_dispatcher, spawn_audit_writer, start_subscription_quota_writer,
     start_upstream_rate_limit_writer,
-    usage_pruner::UsagePruner,
-    usage_rollup_job::UsageRollupJob,
 };
 use cc_lb_observability::{self, ObservabilityConfig, TracingGuard};
 use cc_lb_runtime_extism::ExtismRuntime;
@@ -55,7 +52,6 @@ use tokio::task::{JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 use tower::ServiceBuilder;
 
-use crate::anthropic_compat_poller::{AnthropicCompatPoller, spawn_anthropic_compat_poller};
 use crate::bootstrap;
 use crate::build_meta::BuildMeta;
 use crate::builtins::NoopObservabilityHook;
@@ -64,10 +60,9 @@ use crate::dynamic_view_builder::{
     Stores as DynamicStores, build_dynamic_view, ensure_wasm_cache_dirs,
 };
 use crate::notify_listener::{NotifyListener, NotifyListenerParams};
-use crate::oauth_usage_poller::{OAuthUsagePoller, spawn_oauth_usage_poller};
 use crate::preflight;
 use crate::reconcile::Reconciler;
-use crate::refresh::{LazyRefresher, OAuthRefresher};
+use crate::refresh::{LazyRefreshClaimGuard, LazyRefresher};
 use crate::reload::{ConfigWatcher, summarize_restart_required};
 use crate::replica;
 use crate::signal;
@@ -78,7 +73,6 @@ use crate::startup_handshake::{
 use crate::state_machine::{ServerState, ServerStateHandle};
 use crate::storage_factory;
 use crate::subscription_quota_cache::SubscriptionQuotaCache;
-use crate::subscription_quota_gc::spawn_subscription_quota_gc;
 use crate::tls::{ReloadableListener, TlsState};
 use cc_lb_admin::{
     AdminState, ConfigDraftError, CurrentConfig, DynamicViewRebinder, WarmupDialectDispatchError,
@@ -86,6 +80,7 @@ use cc_lb_admin::{
 };
 
 const SHUTDOWN_TASK_TIMEOUT: Duration = Duration::from_millis(500);
+const PRICE_CATALOG_LOCAL_INSTALL_INTERVAL: Duration = Duration::from_secs(60);
 
 pub const PROXY_FILES_ROUTE_COLLECTION: &str = "/v1/files";
 pub const PROXY_FILES_ROUTE_ITEM: &str = "/v1/files/{id}";
@@ -105,6 +100,10 @@ pub struct App {
     notify_cancel: Option<CancellationToken>,
     notifier_task: Option<JoinHandle<()>>,
     notify_listener_task: Option<JoinHandle<()>>,
+    price_catalog_install_cancel: Option<CancellationToken>,
+    price_catalog_install_task: Option<JoinHandle<()>>,
+    scheduler_cancel: Option<CancellationToken>,
+    scheduler_tasks: Vec<JoinHandle<()>>,
     audit_writer_task: Option<JoinHandle<()>>,
     upstream_rate_limit_writer_task: Option<JoinHandle<()>>,
     subscription_quota_writer_task: Option<JoinHandle<()>>,
@@ -140,6 +139,8 @@ pub enum BuildError {
     Storage(#[from] cc_lb_storage_api::StorageError),
     #[error(transparent)]
     StorageFactory(#[from] crate::storage_factory::StorageFactoryError),
+    #[error(transparent)]
+    SchedulerFactory(#[from] crate::scheduler_factory::SchedulerFactoryError),
     #[cfg(feature = "postgres")]
     #[error("storage connection failed: {message}")]
     StorageConnect { message: String },
@@ -182,6 +183,10 @@ impl App {
             notify_cancel,
             notifier_task,
             notify_listener_task,
+            price_catalog_install_cancel,
+            price_catalog_install_task,
+            scheduler_cancel,
+            scheduler_tasks,
             audit_writer_task,
             upstream_rate_limit_writer_task,
             subscription_quota_writer_task,
@@ -240,6 +245,18 @@ impl App {
         if let Some(task) = notify_listener_task {
             await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
         }
+        if let Some(cancel) = price_catalog_install_cancel {
+            cancel.cancel();
+        }
+        if let Some(task) = price_catalog_install_task {
+            await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        }
+        if let Some(cancel) = scheduler_cancel {
+            cancel.cancel();
+        }
+        for task in scheduler_tasks {
+            await_or_abort(task, SHUTDOWN_TASK_TIMEOUT).await;
+        }
         let _ = admin_stop_tx.send(true);
         await_or_abort(admin, SHUTDOWN_TASK_TIMEOUT).await;
         if let Some(task) = audit_writer_task {
@@ -270,19 +287,28 @@ pub async fn run_serve(
     cc_lb_observability::install_panic_hook(cc_lb_observability::RedactionPolicy::new(
         config.observability.user_prompt_redaction,
     ));
-    let _guard = init_observability(&mut config)?;
+    let guard = init_observability(&mut config)?;
     let startup_opts = startup_handshake_opts_from_flags(
         skip_handshake_if_fresh,
         force_handshake,
         &config.runtime.startup_handshake,
     );
-    let app = build_app_with_path_inner(
+    let app = match build_app_with_path_inner(
         config,
         Some(config_path),
         Some(StartupPreflight { strict_preflight }),
         startup_opts,
     )
-    .await?;
+    .await
+    {
+        Ok(app) => app,
+        Err(error @ BuildError::SchedulerFactory(_)) => {
+            cc_lb_scheduler::scheduler_metrics::set_scheduler_init_failure(true);
+            guard.flush_metrics();
+            return Err(error.into());
+        }
+        Err(error) => return Err(error.into()),
+    };
     app.start().await?;
     Ok(())
 }
@@ -350,6 +376,9 @@ pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError
     std::mem::forget(dir);
     let plugin_registry_repo = storage_arc.clone() as Arc<dyn PluginRegistryRepo>;
     let plugin_blob_repo = storage_arc.clone() as Arc<dyn PluginBlobRepo>;
+    let opened_scheduler =
+        crate::scheduler_factory::open_scheduler_storage(&config.storage, &config.scheduler)
+            .await?;
     build_app_with_storage_inner(
         config,
         None,
@@ -359,6 +388,8 @@ pub async fn build_app_for_testing(mut config: Config) -> Result<App, BuildError
         Some((plugin_registry_repo, plugin_blob_repo)),
         None,
         StartupHandshakeOpts::default(),
+        opened_scheduler,
+        None,
     )
     .await
 }
@@ -494,11 +525,8 @@ pub async fn seed_app_testing_storage(
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: upstream_base_url,
                 api_key_ciphertext: Some(Vec::new()),
+                oauth_token_generation: None,
                 warmup_enabled: false,
-                next_warmup_at: None,
-                last_warmup_cycle_key: None,
-                warmup_lease_holder: None,
-                warmup_lease_until_unix_secs: None,
                 warmup_dialect_plugin: None,
             },
         )
@@ -543,8 +571,15 @@ async fn build_app_with_path_inner(
     startup_handshake_opts: StartupHandshakeOpts,
 ) -> Result<App, BuildError> {
     config.validate()?;
-    let (managed_store, storage, aead, plugin_registry_repo, plugin_blob_repo) =
-        open_storage(&config).await?;
+    let (
+        managed_store,
+        storage,
+        aead,
+        plugin_registry_repo,
+        plugin_blob_repo,
+        lazy_refresh_claim_guard,
+        opened_scheduler,
+    ) = open_storage(&config).await?;
     build_app_with_storage_inner(
         config,
         config_path,
@@ -554,6 +589,8 @@ async fn build_app_with_path_inner(
         Some((plugin_registry_repo, plugin_blob_repo)),
         startup_preflight,
         startup_handshake_opts,
+        opened_scheduler,
+        Some(lazy_refresh_claim_guard),
     )
     .await
 }
@@ -593,6 +630,9 @@ pub async fn build_app_with_storage(
     storage: Arc<dyn Storage>,
     aead: Arc<AeadService>,
 ) -> Result<App, BuildError> {
+    let opened_scheduler =
+        crate::scheduler_factory::open_scheduler_storage(&config.storage, &config.scheduler)
+            .await?;
     build_app_with_storage_inner(
         config,
         config_path,
@@ -602,6 +642,8 @@ pub async fn build_app_with_storage(
         None,
         None,
         StartupHandshakeOpts::default(),
+        opened_scheduler,
+        None,
     )
     .await
 }
@@ -616,14 +658,16 @@ async fn build_app_with_storage_inner(
     plugin_repos: Option<(Arc<dyn PluginRegistryRepo>, Arc<dyn PluginBlobRepo>)>,
     startup_preflight: Option<StartupPreflight>,
     startup_handshake_opts: StartupHandshakeOpts,
+    opened_scheduler: crate::scheduler_factory::OpenedScheduler,
+    lazy_refresh_claim_guard: Option<Arc<dyn LazyRefreshClaimGuard>>,
 ) -> Result<App, BuildError> {
+    opened_scheduler.probe_leader().await?;
+    let scheduler_lazy_handle = opened_scheduler.lazy_handle();
     let server_state = Arc::new(ServerStateHandle::new_starting());
     let key_store = Arc::new(KeyStore::new(managed_store));
     let price_catalog = cc_lb_pricing::global_catalog().clone();
-    spawn_price_catalog_loader(&config, storage.clone(), price_catalog.clone());
-    let pruner = UsagePruner::new(storage.clone(), config.api_keys.usage_retention_days);
-    let _usage_pruner_task = tokio::spawn(pruner.start_daemon());
-    let _usage_rollup_task = UsageRollupJob::new(storage.clone()).start_daemon();
+    let (price_catalog_install_cancel, price_catalog_install_task) =
+        spawn_price_catalog_local_installer(&config, storage.clone(), price_catalog.clone());
     let (sink, audit_writer_task) = spawn_audit_writer(storage.clone(), 1024);
     let audit_sink = Some(Arc::new(sink));
     let (upstream_rate_limit_sink, upstream_rate_limit_receiver) = UpstreamRateLimitSink::new();
@@ -645,12 +689,11 @@ async fn build_app_with_storage_inner(
         },
         subscription_quota_writer_cancel.clone(),
     );
-    let subscription_metadata_hook_cancel = CancellationToken::new();
-    let subscription_metadata_hook = start_subscription_metadata_hook(
-        storage.clone(),
-        make_metadata_http_client(),
-        subscription_metadata_hook_cancel.clone(),
-    );
+    let subscription_metadata_hook = Some(cc_lb_core::start_subscription_metadata_hook(Arc::new(
+        ServerMetadataRefreshEnqueue {
+            scheduler_backend: scheduler_lazy_handle.clone(),
+        },
+    )));
     let runtime = Arc::new(ExtismRuntime::new());
     let data_dir = resolve_data_dir(None, config.runtime.data_dir.as_deref(), "CC_LB_DATA_DIR")?;
     let storage_for_dynamic = storage.clone();
@@ -720,6 +763,10 @@ async fn build_app_with_storage_inner(
         replica_identity,
         prompt_cache_shadow: config.prompt_cache_shadow.clone(),
     };
+    let scheduler_replica_id = lifecycle_config
+        .replica_identity
+        .as_ref()
+        .map(|identity| identity.id);
     if let Some(startup_preflight) = startup_preflight {
         let report = preflight::run_preflight(&stores, &lifecycle_config, &data_dir).await?;
         print_preflight_report(&report);
@@ -770,16 +817,31 @@ async fn build_app_with_storage_inner(
     let oauth_anthropic = config.oauth.anthropic.clone().unwrap_or_default();
     let oauth_cfg = Arc::new(oauth_anthropic.clone());
     let refresh_cancel = CancellationToken::new();
-    let lazy_refresher_concrete: Option<Arc<LazyRefresher>> =
-        lifecycle_config.replica_identity.as_ref().map(|identity| {
-            Arc::new(LazyRefresher::new(
+    let lazy_refresher_concrete: Option<Arc<LazyRefresher>> = lifecycle_config
+        .replica_identity
+        .as_ref()
+        .map(|identity| match lazy_refresh_claim_guard.clone() {
+            Some(claim_guard) => Arc::new(LazyRefresher::new_with_claim_guard(
+                crate::refresh::LazyRefresherDeps {
+                    stores: stores.clone(),
+                    aead: aead.clone(),
+                    oauth_cfg: oauth_cfg.clone(),
+                },
+                identity.id,
+                subscription_metadata_hook.clone(),
+                refresh_cancel.clone(),
+                claim_guard,
+                scheduler_lazy_handle.clone(),
+            )),
+            None => Arc::new(LazyRefresher::new(
                 stores.clone(),
                 aead.clone(),
                 oauth_cfg.clone(),
                 identity.id,
-                Some(subscription_metadata_hook.clone()),
+                subscription_metadata_hook.clone(),
                 refresh_cancel.clone(),
-            ))
+                scheduler_lazy_handle.clone(),
+            )),
         });
     let lazy_refresher: Option<Arc<dyn cc_lb_signer_anthropic_oauth::LazyRefreshHandle>> =
         lazy_refresher_concrete.as_ref().map(|refresher| {
@@ -829,12 +891,6 @@ async fn build_app_with_storage_inner(
     let notify_listener_task = Some(tokio::spawn(async move {
         notify_listener.run().await;
     }));
-    let replica_id = lifecycle_config
-        .replica_identity
-        .as_ref()
-        .map(|identity| identity.id);
-    let replica_identity_for_tasks = lifecycle_config.replica_identity.clone();
-
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
         dynamic_view_holder,
@@ -847,7 +903,9 @@ async fn build_app_with_storage_inner(
     lifecycle = lifecycle.with_request_event_storage(storage.clone());
     lifecycle = lifecycle.with_upstream_rate_limit_sink(upstream_rate_limit_sink);
     lifecycle = lifecycle.with_subscription_quota_sink(subscription_quota_sink.clone());
-    lifecycle = lifecycle.with_subscription_metadata_hook(subscription_metadata_hook.clone());
+    if let Some(subscription_metadata_hook) = subscription_metadata_hook.clone() {
+        lifecycle = lifecycle.with_subscription_metadata_hook(subscription_metadata_hook);
+    }
     lifecycle = lifecycle.with_subscription_quota_cache(subscription_quota_cache.clone());
     let lifecycle = Arc::new(lifecycle);
     let dynamic_view = lifecycle.dynamic_view();
@@ -887,8 +945,41 @@ async fn build_app_with_storage_inner(
         Duration::from_secs(config.timeouts.drain_secs),
         sighup_handler(reload_tls_state, config_watcher.clone()),
     );
+    if let Some(leader_election) = opened_scheduler.leader_shutdown_election() {
+        signals.add_shutdown_hook(move || {
+            let leader_election = leader_election.clone();
+            async move {
+                if let Err(error) = leader_election.close().await {
+                    tracing::warn!(error = %error, "scheduler leader connection close failed");
+                }
+            }
+        });
+    }
+    let scheduler_cancel = CancellationToken::new();
+    let scheduler_ctx = crate::scheduler_dispatch::build_scheduler_ctx(
+        crate::scheduler_dispatch::SchedulerDispatchDeps {
+            backend: opened_scheduler.backend.clone(),
+            config: config.clone(),
+            storage: storage.clone(),
+            stores: stores.clone(),
+            aead: aead.clone(),
+            oauth_cfg: oauth_cfg.clone(),
+            runtime: runtime.clone(),
+            data_dir: data_dir.clone(),
+            lazy_refresher: lazy_refresher_concrete.clone(),
+            subscription_quota_sink: subscription_quota_sink.clone(),
+            subscription_quota_cache: subscription_quota_cache.clone(),
+            cancel: scheduler_cancel.clone(),
+            replica_id: scheduler_replica_id,
+            price_catalog: price_catalog.clone(),
+        },
+    );
+    let scheduler_tasks = opened_scheduler
+        .spawn(config.clone(), scheduler_ctx, scheduler_cancel.clone())
+        .await?;
+    spawn_reconcile_shutdown(signals.subscribe(), scheduler_cancel.clone());
     spawn_reconcile_shutdown(signals.subscribe(), subscription_quota_writer_cancel);
-    spawn_reconcile_shutdown(signals.subscribe(), subscription_metadata_hook_cancel);
+    spawn_reconcile_shutdown(signals.subscribe(), refresh_cancel);
     let reconcile_cancel = CancellationToken::new();
     spawn_reconciler(ReconcilerParams {
         stores: stores.clone(),
@@ -906,82 +997,6 @@ async fn build_app_with_storage_inner(
         config: Arc::new(config.clone()),
     });
     spawn_reconcile_shutdown(signals.subscribe(), reconcile_cancel);
-    if let Some(replica_id) = replica_id {
-        spawn_oauth_refresher(
-            stores.clone(),
-            aead.clone(),
-            oauth_cfg,
-            replica_id,
-            Some(subscription_metadata_hook.clone()),
-            refresh_cancel.clone(),
-        );
-        spawn_reconcile_shutdown(signals.subscribe(), refresh_cancel);
-    }
-    if config.anthropic_compat_poller.enabled {
-        let cancel = CancellationToken::new();
-        spawn_anthropic_compat_poller(
-            AnthropicCompatPoller::new(stores.clone(), config.anthropic_compat_poller.clone()),
-            cancel.clone(),
-        );
-        spawn_reconcile_shutdown(signals.subscribe(), cancel);
-    }
-    if config.oauth.usage_poller.enabled {
-        match (replica_identity_for_tasks, lazy_refresher_concrete.clone()) {
-            (Some(replica_identity), Some(lazy_refresher)) => {
-                let cancel = CancellationToken::new();
-                spawn_oauth_usage_poller(
-                    OAuthUsagePoller::new(
-                        replica_identity,
-                        stores.clone(),
-                        aead.clone(),
-                        lazy_refresher,
-                        subscription_quota_sink.clone(),
-                        subscription_quota_cache.clone(),
-                        config.oauth.usage_poller.clone(),
-                    ),
-                    cancel.clone(),
-                );
-                spawn_reconcile_shutdown(signals.subscribe(), cancel);
-            }
-            (None, _) => {
-                tracing::warn!("oauth usage poller not started: replica identity unavailable")
-            }
-            (_, None) => {
-                tracing::warn!("oauth usage poller not started: lazy refresher unavailable")
-            }
-        }
-    } else {
-        tracing::warn!("oauth usage poller not started: disabled by config");
-    }
-    if config.subscription_quota.enabled {
-        let cancel = CancellationToken::new();
-        spawn_subscription_quota_gc(
-            stores.clone(),
-            config.subscription_quota.clone(),
-            cancel.clone(),
-        );
-        spawn_reconcile_shutdown(signals.subscribe(), cancel);
-    }
-    if let (Some(replica_id), Some(lazy_refresher)) = (replica_id, lazy_refresher_concrete.clone())
-    {
-        let cancel = CancellationToken::new();
-        let warmup_loop = Arc::new(crate::upstream_warmup_loop::UpstreamWarmupLoop::new(
-            stores.clone(),
-            aead.clone(),
-            lazy_refresher,
-            subscription_quota_sink.clone(),
-            replica_id,
-            Some(runtime.clone()),
-            data_dir.clone(),
-        ));
-        tracing::info!(
-            target: "warmup",
-            replica_id = %replica_id,
-            action = "loop_spawned"
-        );
-        tokio::spawn(warmup_loop.run(cancel.clone()));
-        spawn_reconcile_shutdown(signals.subscribe(), cancel);
-    }
     let state = ProxyState {
         lifecycle: lifecycle.clone(),
         server_state: server_state.clone(),
@@ -989,6 +1004,7 @@ async fn build_app_with_storage_inner(
         drain_controller: drain_controller.clone(),
         aead: aead.clone(),
         storage: storage.clone(),
+        scheduler_backend: scheduler_lazy_handle.clone(),
         dynamic_view: dynamic_view.clone(),
         key_store: Some(key_store.clone()),
         builtin_authn: Some(builtin_authn.clone()),
@@ -1008,7 +1024,7 @@ async fn build_app_with_storage_inner(
         aead: aead.clone(),
         limit_engine: limit_engine.clone(),
         lifecycle: Some(lifecycle.clone()),
-        subscription_metadata_hook: Some(subscription_metadata_hook),
+        subscription_metadata_hook,
         lazy_refresher: lazy_refresher.clone(),
         runtime: Some(runtime.clone()),
         data_dir: Some(data_dir.clone()),
@@ -1022,6 +1038,10 @@ async fn build_app_with_storage_inner(
         audit_sink: audit_sink.clone(),
         dynamic_view: dynamic_view.clone(),
         config: admin_config,
+        scheduler: Some(cc_lb_scheduler::admin::SchedulerAdminHandle::new(
+            scheduler_lazy_handle.clone(),
+            opened_scheduler.leader_election(),
+        )),
         admin_token: config
             .admin
             .token
@@ -1042,6 +1062,10 @@ async fn build_app_with_storage_inner(
         notify_cancel: Some(notify_cancel),
         notifier_task,
         notify_listener_task,
+        price_catalog_install_cancel: Some(price_catalog_install_cancel),
+        price_catalog_install_task: Some(price_catalog_install_task),
+        scheduler_cancel: Some(scheduler_cancel),
+        scheduler_tasks,
         audit_writer_task: Some(audit_writer_task),
         upstream_rate_limit_writer_task: Some(upstream_rate_limit_writer_task),
         subscription_quota_writer_task: Some(subscription_quota_writer_task),
@@ -1056,6 +1080,36 @@ struct ServerWarmupDialectDispatcher {
     stores: Arc<DynamicStores>,
     aead: Arc<AeadService>,
     lazy_refresher: Arc<LazyRefresher>,
+}
+
+struct ServerMetadataRefreshEnqueue {
+    scheduler_backend: crate::scheduler_factory::SchedulerBackend,
+}
+
+#[async_trait]
+impl cc_lb_core::MetadataRefreshEnqueue for ServerMetadataRefreshEnqueue {
+    async fn push_metadata_refresh(
+        &self,
+        request: cc_lb_core::MetadataHookRequest,
+    ) -> Result<(), cc_lb_core::MetadataHookEnqueueError> {
+        let job = cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob {
+            upstream_id: request.upstream_id,
+            credential_generation: request.credential_generation,
+            traceparent: request.traceparent,
+        };
+        let idempotency_key = job.idempotency_key();
+        let task = cc_lb_scheduler::worker::SchedulerPushTask {
+            args: cc_lb_scheduler::worker::AdaptiveJob::MetadataRefresh(job),
+            idempotency_key: Some(idempotency_key),
+            run_at_unix_secs: None,
+        };
+        match self.scheduler_backend.push_adaptive_task(task).await {
+            Ok(()) | Err(cc_lb_scheduler::error::SchedulerError::Conflict(_)) => Ok(()),
+            Err(error) => Err(cc_lb_core::MetadataHookEnqueueError::Enqueue(
+                error.to_string(),
+            )),
+        }
+    }
 }
 
 #[async_trait]
@@ -1453,18 +1507,6 @@ fn spawn_reconciler(params: ReconcilerParams) {
     tokio::spawn(reconciler.run());
 }
 
-fn spawn_oauth_refresher(
-    stores: Arc<DynamicStores>,
-    aead: Arc<AeadService>,
-    oauth_cfg: Arc<cc_lb_config::AnthropicOAuthConfig>,
-    replica_id: uuid::Uuid,
-    metadata_hook: Option<cc_lb_core::MetadataHookHandle>,
-    cancel: CancellationToken,
-) {
-    let refresher = OAuthRefresher::new(stores, aead, oauth_cfg, replica_id, metadata_hook, cancel);
-    tokio::spawn(Arc::new(refresher).run());
-}
-
 fn spawn_reconcile_shutdown(shutdown: watch::Receiver<bool>, cancel: CancellationToken) {
     tokio::spawn(async move {
         signal::wait_for_shutdown(shutdown).await;
@@ -1615,17 +1657,19 @@ struct ProxyState {
     drain_controller: DrainController,
     aead: Arc<AeadService>,
     storage: Arc<dyn Storage>,
+    #[allow(dead_code)]
+    scheduler_backend: crate::scheduler_factory::SchedulerBackend,
     dynamic_view: Arc<DynamicViewHolder>,
     #[allow(dead_code)]
     key_store: Option<Arc<KeyStore>>,
     builtin_authn: Option<Arc<BuiltinAuthn>>,
 }
 
-fn spawn_price_catalog_loader(
+fn spawn_price_catalog_local_installer(
     config: &Config,
     storage: Arc<dyn Storage>,
     price_catalog: Arc<cc_lb_pricing::PriceCatalog>,
-) {
+) -> (CancellationToken, JoinHandle<()>) {
     install_default_fallback_if_uninitialized(&price_catalog);
 
     let cfg = &config.api_keys.price_catalog;
@@ -1638,12 +1682,33 @@ fn spawn_price_catalog_loader(
         cfg.cache_path.clone(),
     );
     tracing::info!(
-        url = %cfg.url,
-        refresh_interval_secs = cfg.refresh_interval.as_secs(),
+        local_install_interval_secs = PRICE_CATALOG_LOCAL_INSTALL_INTERVAL.as_secs(),
         cache_path = %cfg.cache_path.display(),
-        "starting LiteLLM price catalog loader",
+        "starting LiteLLM price catalog local installer",
     );
-    let _handle = loader.start_daemon();
+    let cancel = CancellationToken::new();
+    let task_cancel = cancel.clone();
+    let task = tokio::spawn(async move {
+        run_price_catalog_local_install(&loader).await;
+        let mut interval = tokio::time::interval(PRICE_CATALOG_LOCAL_INSTALL_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            tokio::select! {
+                _ = task_cancel.cancelled() => return,
+                _ = interval.tick() => {}
+            }
+            run_price_catalog_local_install(&loader).await;
+        }
+    });
+    (cancel, task)
+}
+
+async fn run_price_catalog_local_install(loader: &cc_lb_pricing::LiteLlmLoader) {
+    match loader.install_latest_local().await {
+        Ok(true) => tracing::info!("installed latest local LiteLLM price catalog"),
+        Ok(false) => tracing::debug!("LiteLLM price catalog local snapshot already current"),
+        Err(error) => tracing::warn!(error = %error, "LiteLLM price catalog local install failed"),
+    }
 }
 
 fn install_default_fallback_if_uninitialized(price_catalog: &cc_lb_pricing::PriceCatalog) {
@@ -2092,6 +2157,8 @@ type OpenStorageParts = (
     Arc<AeadService>,
     Arc<dyn PluginRegistryRepo>,
     Arc<dyn PluginBlobRepo>,
+    Arc<dyn LazyRefreshClaimGuard>,
+    crate::scheduler_factory::OpenedScheduler,
 );
 
 pub async fn open_storage(config: &Config) -> Result<OpenStorageParts, BuildError> {
@@ -2102,12 +2169,19 @@ pub async fn open_storage(config: &Config) -> Result<OpenStorageParts, BuildErro
     let key = decode_hex_key(&key_hex)?;
     let aead = Arc::new(AeadService::from_master_key(key));
     let opened = storage_factory::open_storage(&config.storage, aead.clone(), key).await?;
+    let opened_scheduler =
+        crate::scheduler_factory::open_scheduler_storage(&config.storage, &config.scheduler)
+            .await?;
+    let lazy_refresh_claim_guard =
+        crate::refresh::lazy_refresh_claim_guard_from_scheduler(&opened_scheduler.backend);
     Ok((
         opened.managed_key_store,
         opened.storage,
         aead,
         opened.plugin_registry_repo,
         opened.plugin_blob_repo,
+        lazy_refresh_claim_guard,
+        opened_scheduler,
     ))
 }
 

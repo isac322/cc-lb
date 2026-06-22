@@ -35,6 +35,7 @@ fn test_state(storage: Arc<Storage>, audit_sink: Option<AuditWriterSink>) -> Adm
         audit_sink: audit_sink.map(Arc::new),
         dynamic_view: admin_test_common::dynamic_view_holder(&config),
         config: Arc::new(config),
+        scheduler: None,
         admin_token: Some("test-token".to_owned()),
         lazy_refresher: None,
         runtime: None,
@@ -119,8 +120,6 @@ async fn create_returns_201_with_body_and_location_header() {
     assert_eq!(body(&response)["spec_revision"], 1);
     assert!(body(&response)["revision"].is_null());
     assert!(body(&response)["status"].is_object());
-    assert!(body(&response)["status"]["next_warmup_at"].is_null());
-    assert!(body(&response)["status"]["last_warmup_cycle_key"].is_null());
     let id = body(&response)["id"].as_str().unwrap();
     assert_eq!(
         response.headers.get(header::LOCATION).unwrap(),

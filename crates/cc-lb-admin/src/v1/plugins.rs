@@ -488,10 +488,10 @@ async fn reorder_chain(
     }
     let (slot, existing) = match infer_reorder_chain(storage, principal_id, &body.entries).await {
         Ok(result) => result,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     if let Err(response) = revalidate_chain_registry_slots(storage, principal_id, &existing).await {
-        return response;
+        return *response;
     }
     let new_orders = body
         .entries
@@ -542,7 +542,7 @@ async fn rebalance_chain(
         Err(error) => return storage_error(error),
     };
     if let Err(response) = revalidate_chain_registry_slots(storage, principal_id, &existing).await {
-        return response;
+        return *response;
     }
     match storage.rebalance_chain(principal_id, slot).await {
         Ok(entries) => {
@@ -665,7 +665,7 @@ async fn infer_reorder_chain(
     storage: &dyn Storage,
     principal_id: Uuid,
     entries: &[ReorderEntry],
-) -> Result<(PluginSlot, Vec<PluginChainEntry>), axum::response::Response> {
+) -> Result<(PluginSlot, Vec<PluginChainEntry>), Box<axum::response::Response>> {
     for slot in [
         PluginSlot::Router,
         PluginSlot::ObservabilityHook,
@@ -674,7 +674,7 @@ async fn infer_reorder_chain(
         let chain = storage
             .list_chain_for_principal(principal_id, slot)
             .await
-            .map_err(storage_error)?;
+            .map_err(|error| Box::new(storage_error(error)))?;
         if entries
             .iter()
             .all(|entry| chain.iter().any(|candidate| candidate.id == entry.id))
@@ -682,14 +682,17 @@ async fn infer_reorder_chain(
             return Ok((slot, chain));
         }
     }
-    Err(error(StatusCode::BAD_REQUEST, "entry_not_in_chain"))
+    Err(Box::new(error(
+        StatusCode::BAD_REQUEST,
+        "entry_not_in_chain",
+    )))
 }
 
 async fn revalidate_chain_registry_slots(
     storage: &dyn Storage,
     principal_id: Uuid,
     entries: &[PluginChainEntry],
-) -> Result<(), axum::response::Response> {
+) -> Result<(), Box<axum::response::Response>> {
     for entry in entries {
         match storage
             .get_registry_entry_by_id(entry.wasm_registry_id)
@@ -697,11 +700,15 @@ async fn revalidate_chain_registry_slots(
         {
             Ok(Some(registry_entry)) => {
                 if registry_entry_unsupported_slot(&registry_entry, entry.slot) {
-                    return Err(chain_drift_detected(principal_id, entry, &registry_entry));
+                    return Err(Box::new(chain_drift_detected(
+                        principal_id,
+                        entry,
+                        &registry_entry,
+                    )));
                 }
             }
             Ok(None) => {}
-            Err(error) => return Err(storage_error(error)),
+            Err(error) => return Err(Box::new(storage_error(error))),
         }
     }
     Ok(())

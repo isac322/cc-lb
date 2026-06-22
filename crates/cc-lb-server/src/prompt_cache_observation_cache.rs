@@ -1,6 +1,4 @@
 use std::collections::HashMap;
-use std::sync::Arc;
-use std::time::Duration;
 
 use cc_lb_core::clock::ClockHandle;
 use cc_lb_core::lifecycle::PromptCacheObservationCacheLike;
@@ -204,24 +202,6 @@ impl PromptCacheObservationCache {
         }
         should_persist
     }
-
-    pub fn spawn_sweeper(
-        self: Arc<Self>,
-        store: Arc<dyn PromptCacheObservationStore + Send + Sync>,
-        interval_secs: u64,
-    ) -> tokio::task::JoinHandle<()> {
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                let purge_before = self.clock.now_unix_secs().saturating_sub(60);
-                if let Err(error) = store.purge_expired_before(purge_before).await {
-                    tracing::warn!(%error, "failed to purge expired prompt cache observations");
-                }
-            }
-        })
-    }
 }
 
 fn ttl_class_from_storage(ttl_class: cc_lb_storage_api::TtlClass) -> TtlClass {
@@ -304,15 +284,13 @@ fn ttl_matches_request(request_ttl: TtlClass, entry_ttl: TtlClass) -> bool {
 
 #[cfg(test)]
 pub(crate) mod tests {
-    use std::sync::{Arc, Mutex};
-    use std::time::Duration;
-
     use async_trait::async_trait;
     use cc_lb_core::clock::{Clock, ClockHandle, TestClock};
     use cc_lb_storage_api::{
         PromptCacheObservationRecord, PromptCacheObservationStore, StorageResult,
         TtlClass as StorageTtlClass,
     };
+    use std::sync::{Arc, Mutex};
 
     use super::*;
 
@@ -358,10 +336,6 @@ pub(crate) mod tests {
                 records: Arc::new(Mutex::new(records)),
                 purge_calls: Arc::new(Mutex::new(Vec::new())),
             }
-        }
-
-        fn purge_calls(&self) -> Vec<u64> {
-            self.purge_calls.lock().unwrap().clone()
         }
     }
 
@@ -546,30 +520,6 @@ pub(crate) mod tests {
             BASE_TS,
         );
         assert!(snapshot.is_empty());
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn sweeper_calls_purge() {
-        tokio::time::pause();
-        let clock: ClockHandle = Arc::new(TestClock::new_at_secs(BASE_TS));
-        let cache = Arc::new(PromptCacheObservationCache::new(clock, 30, 32));
-        let store = Arc::new(MockStore::default());
-
-        let handle = Arc::clone(&cache).spawn_sweeper(store.clone(), 1);
-        tokio::task::yield_now().await;
-
-        for _ in 0..2 {
-            if !store.purge_calls().is_empty() {
-                break;
-            }
-            tokio::time::advance(Duration::from_secs(1)).await;
-            tokio::task::yield_now().await;
-        }
-
-        let purge_calls = store.purge_calls();
-        assert!(!purge_calls.is_empty());
-        assert_eq!(purge_calls[0], BASE_TS - 60);
-        handle.abort();
     }
 
     #[test]

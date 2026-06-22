@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use std::str::FromStr;
 
 use anyhow::Result;
@@ -76,11 +78,8 @@ async fn run_warmup_dialect_guard(url: &str) -> Result<()> {
                 kind: UpstreamKind::AnthropicOauth,
                 base_url: None,
                 api_key_ciphertext: None,
+                oauth_token_generation: None,
                 warmup_enabled: true,
-                next_warmup_at: None,
-                last_warmup_cycle_key: None,
-                warmup_lease_holder: None,
-                warmup_lease_until_unix_secs: None,
                 warmup_dialect_plugin: Some(UpstreamWarmupDialectPlugin {
                     wasm_registry_id: registry.id,
                     config: serde_json::Value::Null,

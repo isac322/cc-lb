@@ -878,10 +878,9 @@ fn parse_window_suffix(window: &str) -> Option<u64> {
         (value, 60)
     } else if let Some(value) = window.strip_suffix('h') {
         (value, 3_600)
-    } else if let Some(value) = window.strip_suffix('d') {
-        (value, 86_400)
     } else {
-        return None;
+        let value = window.strip_suffix('d')?;
+        (value, 86_400)
     };
     value.parse::<u64>().ok()?.checked_mul(multiplier)
 }

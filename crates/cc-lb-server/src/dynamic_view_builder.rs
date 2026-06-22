@@ -217,11 +217,6 @@ pub async fn build_dynamic_view(
                 new_prompt_cache_observation_cache(prompt_cache_shadow)
             }
         };
-        let cache_clone = Arc::clone(&cache);
-        let store_clone = stores.prompt_cache_observations.clone();
-        let interval_secs = prompt_cache_shadow.sweeper_interval_secs;
-        let _sweeper = cache_clone.spawn_sweeper(store_clone, interval_secs);
-
         // Spawn the async observation sink writer. The JoinHandle is intentionally
         // dropped: when the sender is dropped on the next rebind the mpsc channel
         // closes and the writer task exits naturally.
@@ -1042,11 +1037,8 @@ mod tests {
                 kind: UpstreamKind::AnthropicApiKey,
                 base_url: None,
                 api_key_ciphertext: Some(vec![1, 2, 3]),
+                oauth_token_generation: None,
                 warmup_enabled: false,
-                next_warmup_at: None,
-                last_warmup_cycle_key: None,
-                warmup_lease_holder: None,
-                warmup_lease_until_unix_secs: None,
                 warmup_dialect_plugin: None,
             },
         )
@@ -1247,7 +1239,6 @@ mod tests {
         config.prompt_cache_shadow.grace_margin_secs = 99;
         config.prompt_cache_shadow.warm_set_cap = 7;
         config.prompt_cache_shadow.refresh_debounce_secs = 123;
-        config.prompt_cache_shadow.sweeper_interval_secs = 456;
 
         let dynamic_view = build_view_with_config(&stores, &runtime, dir.path(), config).await;
 

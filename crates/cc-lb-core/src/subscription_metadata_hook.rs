@@ -1,9 +1,9 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use cc_lb_storage_api::{OrganizationMetadataRecord, Storage, UpstreamSubscriptionMetadataRecord};
 use thiserror::Error;
-use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -12,76 +12,45 @@ use crate::anthropic_metadata::{
     fetch_claude_cli_roles, fetch_oauth_profile, fetch_overage_credit_grant,
 };
 
-const METADATA_HOOK_CHANNEL_CAPACITY: usize = 128;
-
 #[derive(Clone)]
 pub struct MetadataHookHandle {
-    sender: mpsc::Sender<MetadataHookRequest>,
+    apalis_handle: Arc<dyn MetadataRefreshEnqueue>,
 }
 
 #[derive(Debug, Clone)]
 pub struct MetadataHookRequest {
     pub upstream_id: Uuid,
-    pub access_token: String,
-    pub user_agent: String,
+    pub credential_generation: u64,
+    pub traceparent: Option<String>,
+}
+
+#[derive(Debug, Error)]
+pub enum MetadataHookEnqueueError {
+    #[error("metadata refresh enqueue failed: {0}")]
+    Enqueue(String),
+}
+
+#[async_trait]
+pub trait MetadataRefreshEnqueue: Send + Sync {
+    async fn push_metadata_refresh(
+        &self,
+        request: MetadataHookRequest,
+    ) -> Result<(), MetadataHookEnqueueError>;
 }
 
 pub fn start_subscription_metadata_hook(
-    storage: Arc<dyn Storage>,
-    http_client: MetadataHttpClient,
-    cancel: CancellationToken,
+    apalis_handle: Arc<dyn MetadataRefreshEnqueue>,
 ) -> MetadataHookHandle {
-    let (sender, mut receiver) = mpsc::channel(METADATA_HOOK_CHANNEL_CAPACITY);
-    tokio::spawn(async move {
-        loop {
-            let request = tokio::select! {
-                _ = cancel.cancelled() => return,
-                request = receiver.recv() => request,
-            };
-            let Some(request) = request else {
-                return;
-            };
-            if let Err(error) =
-                process_request(storage.clone(), &http_client, &cancel, request).await
-            {
-                tracing::warn!(error = %error, "subscription metadata hook failed");
-            }
-        }
-    });
-    MetadataHookHandle { sender }
+    MetadataHookHandle { apalis_handle }
 }
 
 impl MetadataHookHandle {
-    pub fn enqueue(&self, request: MetadataHookRequest) {
-        match self.sender.try_send(request) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(_)) => {
-                metrics::counter!("cclb_subscription_metadata_hook_dropped_total").increment(1);
-                tracing::warn!("metadata hook channel full, dropping request");
-            }
-            Err(mpsc::error::TrySendError::Closed(_)) => {
-                tracing::warn!("metadata hook channel closed, dropping request");
-            }
-        }
+    pub async fn enqueue(
+        &self,
+        request: MetadataHookRequest,
+    ) -> Result<(), MetadataHookEnqueueError> {
+        self.apalis_handle.push_metadata_refresh(request).await
     }
-}
-
-async fn process_request(
-    storage: Arc<dyn Storage>,
-    client: &MetadataHttpClient,
-    cancel: &CancellationToken,
-    request: MetadataHookRequest,
-) -> Result<(), String> {
-    run_metadata_refresh(
-        storage,
-        client,
-        request.upstream_id,
-        &request.access_token,
-        &request.user_agent,
-        cancel,
-    )
-    .await
-    .map_err(|error| error.to_string())
 }
 
 #[derive(Debug, Error)]

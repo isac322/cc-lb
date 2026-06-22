@@ -15,15 +15,6 @@
         "key_env": "CC_LB_MASTER_KEY"
       }
     },
-    "anthropic_compat_poller": {
-      "$ref": "#/$defs/AnthropicCompatPollerConfig",
-      "default": {
-        "enabled": true,
-        "jitter_secs": 60,
-        "request_timeout_secs": 10,
-        "tick_interval_secs": 3600
-      }
-    },
     "api_keys": {
       "$ref": "#/$defs/ApiKeysConfig",
       "default": {
@@ -85,31 +76,7 @@
     },
     "oauth": {
       "$ref": "#/$defs/OAuthConfig",
-      "default": {
-        "usage_poller": {
-          "bootstrap_attempts": 0,
-          "bootstrap_default_interval_secs": 60,
-          "enabled": true,
-          "fallback_interval_secs": 60,
-          "history_capacity": 8,
-          "lease_ttl_secs": 90,
-          "max_interval_secs": 3600,
-          "min_interval_secs": 60,
-          "rate_limit_capacity": 5,
-          "rate_limit_safety_secs": 5,
-          "rate_limit_window_secs": 300,
-          "request_timeout_secs": 10,
-          "safety_divisor": 1,
-          "stagger_ms": 1500,
-          "throttle_ladder_secs": [
-            300,
-            300,
-            300,
-            300,
-            300
-          ]
-        }
-      }
+      "default": {}
     },
     "observability": {
       "$ref": "#/$defs/ObservabilityConfig",
@@ -125,7 +92,6 @@
         "enabled": false,
         "grace_margin_secs": 30,
         "refresh_debounce_secs": 60,
-        "sweeper_interval_secs": 300,
         "warm_set_cap": 32
       }
     },
@@ -135,6 +101,99 @@
         "startup_handshake": {
           "force": false,
           "skip_if_fresh": true
+        }
+      }
+    },
+    "scheduler": {
+      "$ref": "#/$defs/SchedulerConfig",
+      "default": {
+        "dlq_retention_days": 30,
+        "entity_concurrency": 8,
+        "idempotency": {
+          "claim_ttl_secs": 60
+        },
+        "leader_lock_key": 224417894236161,
+        "pgbouncer_transaction_mode": false,
+        "recurring_jobs": {
+          "anthropic_compat_refresh": {
+            "enabled": true,
+            "interval_secs": 86400,
+            "jitter_secs": 30
+          },
+          "apalis_housekeeping": {
+            "enabled": true,
+            "interval_secs": 3600,
+            "jitter_secs": 30
+          },
+          "oauth_refresh_watchdog": {
+            "enabled": true,
+            "interval_secs": 9360,
+            "jitter_secs": 30
+          },
+          "oauth_usage_poll": {
+            "enabled": true,
+            "interval_secs": 60,
+            "jitter_secs": 0
+          },
+          "price_catalog_refresh": {
+            "enabled": true,
+            "interval_secs": 3600,
+            "jitter_secs": 30
+          },
+          "prompt_cache_purge": {
+            "enabled": true,
+            "interval_secs": 600,
+            "jitter_secs": 30
+          },
+          "quota_gc": {
+            "enabled": true,
+            "interval_secs": 3600,
+            "jitter_secs": 30
+          },
+          "usage_prune": {
+            "enabled": true,
+            "interval_secs": 86400,
+            "jitter_secs": 30
+          },
+          "usage_rollup": {
+            "enabled": true,
+            "interval_secs": 30,
+            "jitter_secs": 3
+          },
+          "warmup_watchdog": {
+            "enabled": true,
+            "interval_secs": 6000,
+            "jitter_secs": 30
+          }
+        },
+        "retry_classes": {
+          "adaptive": {
+            "base_secs": 30,
+            "max_attempts": 5,
+            "max_secs": 600
+          },
+          "maintenance": {
+            "base_secs": 60,
+            "max_attempts": 1,
+            "max_secs": 60
+          },
+          "probe": {
+            "base_secs": 1,
+            "max_attempts": 3,
+            "max_secs": 5
+          }
+        },
+        "separate_pool": {
+          "acquire_timeout_secs": 5,
+          "idle_timeout_secs": 600,
+          "max_connections": 5,
+          "min_connections": 1,
+          "sslmode": "prefer",
+          "statement_timeout_secs": 30
+        },
+        "singleton_concurrency": 2,
+        "staleness": {
+          "warmup_effect_retention_days": 30
         }
       }
     },
@@ -151,7 +210,6 @@
         "dedup_elapsed_override_secs": 30,
         "enabled": true,
         "gc_batch_size": 10000,
-        "gc_tick_interval_secs": 60,
         "retention_days": 30,
         "routing_max_staleness_secs": 1800,
         "writer_batch_max_records": 256,
@@ -196,33 +254,6 @@
         "key_env": {
           "type": "string",
           "default": "CC_LB_MASTER_KEY"
-        }
-      }
-    },
-    "AnthropicCompatPollerConfig": {
-      "type": "object",
-      "properties": {
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        },
-        "jitter_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 60,
-          "minimum": 0
-        },
-        "request_timeout_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 10,
-          "minimum": 0
-        },
-        "tick_interval_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 3600,
-          "minimum": 0
         }
       }
     },
@@ -486,141 +517,6 @@
               "type": "null"
             }
           ]
-        },
-        "usage_poller": {
-          "$ref": "#/$defs/OAuthUsagePollerConfig",
-          "default": {
-            "bootstrap_attempts": 0,
-            "bootstrap_default_interval_secs": 60,
-            "enabled": true,
-            "fallback_interval_secs": 60,
-            "history_capacity": 8,
-            "lease_ttl_secs": 90,
-            "max_interval_secs": 3600,
-            "min_interval_secs": 60,
-            "rate_limit_capacity": 5,
-            "rate_limit_safety_secs": 5,
-            "rate_limit_window_secs": 300,
-            "request_timeout_secs": 10,
-            "safety_divisor": 1,
-            "stagger_ms": 1500,
-            "throttle_ladder_secs": [
-              300,
-              300,
-              300,
-              300,
-              300
-            ]
-          }
-        }
-      }
-    },
-    "OAuthUsagePollerConfig": {
-      "type": "object",
-      "properties": {
-        "bootstrap_attempts": {
-          "type": "integer",
-          "format": "uint32",
-          "default": 0,
-          "minimum": 0
-        },
-        "bootstrap_default_interval_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 60,
-          "minimum": 0
-        },
-        "enabled": {
-          "type": "boolean",
-          "default": true
-        },
-        "fallback_interval_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 60,
-          "minimum": 0
-        },
-        "history_capacity": {
-          "type": "integer",
-          "format": "uint32",
-          "default": 8,
-          "minimum": 0
-        },
-        "lease_ttl_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 90,
-          "minimum": 0
-        },
-        "max_interval_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 3600,
-          "minimum": 0
-        },
-        "min_interval_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 60,
-          "minimum": 0
-        },
-        "rate_limit_capacity": {
-          "type": "integer",
-          "format": "uint32",
-          "default": 5,
-          "minimum": 0
-        },
-        "rate_limit_safety_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 5,
-          "minimum": 0
-        },
-        "rate_limit_window_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 300,
-          "minimum": 0
-        },
-        "request_timeout_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 10,
-          "minimum": 0
-        },
-        "safety_divisor": {
-          "description": "CATEGORY-3 CROSS-CRATE INVARIANT: server code converts this divisor into\na fractional safety factor as `1.0 / safety_divisor`.",
-          "type": "integer",
-          "format": "uint32",
-          "default": 1,
-          "minimum": 0
-        },
-        "stagger_ms": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 1500,
-          "minimum": 0
-        },
-        "throttle_ladder_secs": {
-          "type": "array",
-          "default": [
-            300,
-            300,
-            300,
-            300,
-            300
-          ],
-          "items": {
-            "type": "integer",
-            "format": "uint64",
-            "minimum": 0
-          }
-        },
-        "user_agent_override": {
-          "type": [
-            "string",
-            "null"
-          ]
         }
       }
     },
@@ -711,7 +607,7 @@
       "additionalProperties": false
     },
     "PromptCacheShadowConfig": {
-      "description": "Prompt cache shadow mode configuration.\n\nControls the prompt cache observation cache behavior. When `enabled=false`, the cache layer\nis not constructed and observation flow is gated off at the lifecycle level for byte-equivalent\npre-T22 behavior (no observation enqueue, no snapshot, no sweeper). When `enabled=true`,\nthe full cache pipeline activates: observations from successful responses are decoded,\nupserted into the in-memory cache, and enqueued for persistent storage; `build_candidates`\nsnapshots cache state per upstream to compute cache scores.\n\nConfiguration keys and defaults:\n- `enabled` (default: false) - gate all observation flow and sweeper spawn\n- `grace_margin_secs` (default: 30) - minimum age before a cache hit is refreshed\n- `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence\n- `sweeper_interval_secs` (default: 300) - interval between expiry purge scans\n- `warm_set_cap` (default: 32) - max snapshot entries per upstream/model",
+      "description": "Prompt cache shadow mode configuration.\n\nControls the prompt cache observation cache behavior. When `enabled=false`, the cache layer\nis not constructed and observation flow is gated off at the lifecycle level for byte-equivalent\npre-T22 behavior (no observation enqueue, no snapshot, no sweeper). When `enabled=true`,\nthe full cache pipeline activates: observations from successful responses are decoded,\nupserted into the in-memory cache, and enqueued for persistent storage; `build_candidates`\nsnapshots cache state per upstream to compute cache scores.\n\nConfiguration keys and defaults:\n- `enabled` (default: false) - gate all observation flow and sweeper spawn\n- `grace_margin_secs` (default: 30) - minimum age before a cache hit is refreshed\n- `refresh_debounce_secs` (default: 60) - debounce window for refresh-on-hit persistence\n- `warm_set_cap` (default: 32) - max snapshot entries per upstream/model",
       "type": "object",
       "properties": {
         "enabled": {
@@ -730,12 +626,6 @@
           "default": 60,
           "minimum": 0
         },
-        "sweeper_interval_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 300,
-          "minimum": 0
-        },
         "warm_set_cap": {
           "type": "integer",
           "format": "uint",
@@ -743,6 +633,28 @@
           "minimum": 0
         }
       }
+    },
+    "RecurringJobConfig": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        },
+        "interval_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 3600,
+          "minimum": 0
+        },
+        "jitter_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     },
     "RuntimeConfig": {
       "type": "object",
@@ -761,6 +673,258 @@
           }
         }
       }
+    },
+    "SchedulerConfig": {
+      "type": "object",
+      "properties": {
+        "dlq_retention_days": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 30,
+          "minimum": 0
+        },
+        "entity_concurrency": {
+          "type": "integer",
+          "format": "uint",
+          "default": 8,
+          "minimum": 0
+        },
+        "idempotency": {
+          "$ref": "#/$defs/SchedulerIdempotencyConfig",
+          "default": {
+            "claim_ttl_secs": 60
+          }
+        },
+        "leader_lock_key": {
+          "type": "integer",
+          "format": "int64",
+          "default": 224417894236161
+        },
+        "pgbouncer_transaction_mode": {
+          "type": "boolean",
+          "default": false
+        },
+        "recurring_jobs": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/RecurringJobConfig"
+          },
+          "default": {
+            "anthropic_compat_refresh": {
+              "enabled": true,
+              "interval_secs": 86400,
+              "jitter_secs": 30
+            },
+            "apalis_housekeeping": {
+              "enabled": true,
+              "interval_secs": 3600,
+              "jitter_secs": 30
+            },
+            "oauth_refresh_watchdog": {
+              "enabled": true,
+              "interval_secs": 9360,
+              "jitter_secs": 30
+            },
+            "oauth_usage_poll": {
+              "enabled": true,
+              "interval_secs": 60,
+              "jitter_secs": 0
+            },
+            "price_catalog_refresh": {
+              "enabled": true,
+              "interval_secs": 3600,
+              "jitter_secs": 30
+            },
+            "prompt_cache_purge": {
+              "enabled": true,
+              "interval_secs": 600,
+              "jitter_secs": 30
+            },
+            "quota_gc": {
+              "enabled": true,
+              "interval_secs": 3600,
+              "jitter_secs": 30
+            },
+            "usage_prune": {
+              "enabled": true,
+              "interval_secs": 86400,
+              "jitter_secs": 30
+            },
+            "usage_rollup": {
+              "enabled": true,
+              "interval_secs": 30,
+              "jitter_secs": 3
+            },
+            "warmup_watchdog": {
+              "enabled": true,
+              "interval_secs": 6000,
+              "jitter_secs": 30
+            }
+          }
+        },
+        "retry_classes": {
+          "$ref": "#/$defs/SchedulerRetryClasses",
+          "default": {
+            "adaptive": {
+              "base_secs": 30,
+              "max_attempts": 5,
+              "max_secs": 600
+            },
+            "maintenance": {
+              "base_secs": 60,
+              "max_attempts": 1,
+              "max_secs": 60
+            },
+            "probe": {
+              "base_secs": 1,
+              "max_attempts": 3,
+              "max_secs": 5
+            }
+          }
+        },
+        "separate_pool": {
+          "$ref": "#/$defs/SchedulerPoolConfig",
+          "default": {
+            "acquire_timeout_secs": 5,
+            "idle_timeout_secs": 600,
+            "max_connections": 5,
+            "min_connections": 1,
+            "sslmode": "prefer",
+            "statement_timeout_secs": 30
+          }
+        },
+        "singleton_concurrency": {
+          "type": "integer",
+          "format": "uint",
+          "default": 2,
+          "minimum": 0
+        },
+        "staleness": {
+          "$ref": "#/$defs/SchedulerStalenessConfig",
+          "default": {
+            "warmup_effect_retention_days": 30
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "SchedulerIdempotencyConfig": {
+      "type": "object",
+      "properties": {
+        "claim_ttl_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 60,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "SchedulerPoolConfig": {
+      "type": "object",
+      "properties": {
+        "acquire_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 5,
+          "minimum": 0
+        },
+        "idle_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 600,
+          "minimum": 0
+        },
+        "max_connections": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 5,
+          "minimum": 0
+        },
+        "min_connections": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 1,
+          "minimum": 0
+        },
+        "sslmode": {
+          "type": "string",
+          "default": "prefer"
+        },
+        "statement_timeout_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 30,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "SchedulerRetryClasses": {
+      "type": "object",
+      "properties": {
+        "adaptive": {
+          "$ref": "#/$defs/SchedulerRetryConfig",
+          "default": {
+            "base_secs": 30,
+            "max_attempts": 5,
+            "max_secs": 600
+          }
+        },
+        "maintenance": {
+          "$ref": "#/$defs/SchedulerRetryConfig",
+          "default": {
+            "base_secs": 60,
+            "max_attempts": 1,
+            "max_secs": 60
+          }
+        },
+        "probe": {
+          "$ref": "#/$defs/SchedulerRetryConfig",
+          "default": {
+            "base_secs": 1,
+            "max_attempts": 3,
+            "max_secs": 5
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "SchedulerRetryConfig": {
+      "type": "object",
+      "properties": {
+        "base_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 1,
+          "minimum": 0
+        },
+        "max_attempts": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 3,
+          "minimum": 0
+        },
+        "max_secs": {
+          "type": "integer",
+          "format": "uint64",
+          "default": 5,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "SchedulerStalenessConfig": {
+      "type": "object",
+      "properties": {
+        "warmup_effect_retention_days": {
+          "type": "integer",
+          "format": "uint32",
+          "default": 30,
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
     },
     "StartupHandshakeConfig": {
       "type": "object",
@@ -839,12 +1003,6 @@
           "type": "integer",
           "format": "uint32",
           "default": 10000,
-          "minimum": 0
-        },
-        "gc_tick_interval_secs": {
-          "type": "integer",
-          "format": "uint64",
-          "default": 60,
           "minimum": 0
         },
         "retention_days": {

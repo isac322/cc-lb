@@ -8,8 +8,8 @@ publish = false
 build = "build.rs"
 
 [features]
-sqlite = []
-postgres = []
+sqlite = ["cc-lb-scheduler/sqlite"]
+postgres = ["cc-lb-scheduler/postgres"]
 
 [dependencies]
 anyhow.workspace = true
@@ -29,6 +29,7 @@ cc-lb-storage-api = { path = "../cc-lb-storage-api" }
 cc-lb-aead = { path = "../cc-lb-aead" }
 cc-lb-core = { path = "../cc-lb-core" }
 cc-lb-config = { path = "../cc-lb-config" }
+cc-lb-scheduler = { path = "../cc-lb-scheduler", default-features = false }
 cc-lb-plugin-api = { path = "../cc-lb-plugin-api" }
 cc-lb-runtime-extism = { path = "../cc-lb-runtime-extism" }
 cc-lb-signer-anthropic-oauth = { path = "../cc-lb-signer-anthropic-oauth" }
@@ -65,3 +66,8 @@ tempfile.workspace = true
 mock-anthropic-oauth-server = { path = "../../tests/fixtures/mock-anthropic-oauth-server" }
 fake-anthropic = { path = "../../tests/fixtures/fake-anthropic" }
 cc-lb-storage-sqlite = { path = "../cc-lb-storage-sqlite" }
+apalis-postgres = "^1.0.0-rc.8"
+apalis-sqlite = "^1.0.0-rc.8"
+metrics-exporter-prometheus.workspace = true
+metrics.workspace = true
+scheduler-sqlx = { package = "sqlx", version = "=0.8.6", default-features = false, features = ["chrono", "json", "migrate", "postgres", "runtime-tokio", "sqlite", "tls-rustls-ring", "uuid"] }

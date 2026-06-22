@@ -158,6 +158,7 @@ async fn create_upstream_rebinds_dynamic_view_before_response_returns() {
         audit_sink: None,
         dynamic_view: holder.clone(),
         config: Arc::new(TestCurrentConfig { config, rebinder }),
+        scheduler: None,
         admin_token: Some("test-token".to_owned()),
         lazy_refresher: None,
         runtime: None,

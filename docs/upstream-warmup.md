@@ -52,40 +52,28 @@ WHERE kind = 'anthropic_oauth' AND deleted_at IS NULL;
 
 ## Manual fire
 
-You can manually trigger a warm-up cycle for a specific upstream by sending a POST request to the fire-now endpoint.
+To manually trigger a warm-up cycle or reconcile all jobs immediately, send a POST request to the scheduler reconcile endpoint. This triggers a full reconciliation of all active upstreams and enqueues any missing warmup jobs.
 
 ```bash
-curl -X POST http://localhost:8080/admin/v1/upstreams/11111111-2222-3333-4444-555555555555/warmup/fire-now \
+curl -X POST http://localhost:8080/admin/scheduler/reconcile \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
-The endpoint returns different response shapes depending on the state of the upstream:
+The endpoint returns:
 
-- **200 OK**: The warm-up request succeeded.
+- **202 Accepted**: The reconciliation job was successfully enqueued.
   ```json
   {
-    "fired": true,
-    "cycle_key": 1718000000
+    "status": "enqueued"
   }
   ```
-- **202 Accepted**: The warm-up was skipped because another replica or process holds the lease.
-  ```json
-  {
-    "fired": false,
-    "reason": "lease_held",
-    "held_by": "replica-abc"
-  }
-  ```
-- **400 Bad Request**: The upstream is not an OAuth upstream, or warm-up is disabled for it.
-- **502 Bad Gateway**: The warm-up failed permanently, for example due to invalid credentials.
-- **503 Service Unavailable**: The warm-up failed due to a transient error, and you should retry later.
+
+Note that there is no per-row manual fire endpoint in this version. All manual triggers are handled via the global scheduler reconciliation endpoint.
 
 ## What you'll see
 
 The warm-up system logs its activity using tracing events. All events use the `warmup` target. You can monitor these logs to track the lifecycle of each warm-up cycle.
 
-- **lease_claimed**: A replica successfully claimed the database lease to perform the warm-up.
-  - Fields: `upstream_id`, `action = "lease_claimed"`
 - **dispatch_start**: The replica started sending the warm-up request to Anthropic.
   - Fields: `upstream_id`, `action = "dispatch_start"`
 - **dispatch_result**: The warm-up request completed, and the replica classified the response.
@@ -97,11 +85,17 @@ The warm-up system logs its activity using tracing events. All events use the `w
 
 ## Multi-replica notes
 
-Each replica scans every ~30s; a row warm-up fires exactly once per observed 5h reset thanks to a per-row DB lease and an authoritative cycle key. Container restarts are handled by lease TTL (120s). A crash between dispatch and DB write can cause one extra `max_tokens=1` Haiku call; this cost is accepted.
+Warm-up is implemented as an Apalis entity job (`UpstreamWarmupJob`). Cross-replica coordination no longer depends on per-upstream scheduling columns.
+
+Cross-replica safety is guaranteed by two layers:
+1. **Apalis claim uniqueness**: Only one worker replica can claim and execute a given `UpstreamWarmupJob` at a time.
+2. **Apalis idempotency key uniqueness**: The Jobs table enforces one row per `(job_type, idempotency_key)`, so a completed warm-up cycle key cannot be re-enqueued with the same key.
+
+A crash between dispatch and DB write can cause one extra `max_tokens=1` Haiku call. This at-least-once cost is accepted.
 
 ## Cost
 
-Each warm-up is one `max_tokens=1` request to `claude-haiku-4-5-20251001`. At one per 5h per opted-in upstream, expected cost is negligible (≪ $0.01/upstream/day).
+Each warm-up is one `max_tokens=1` request to `claude-haiku-4-5-20251001`. At one per 5h per opted-in upstream, expected cost is negligible (less than $0.01/upstream/day).
 
 ## Wave-0 outcomes
 

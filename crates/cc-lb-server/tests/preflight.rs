@@ -212,11 +212,8 @@ async fn seed_upstream(
             kind,
             base_url: base_url.map(|value| value.parse().unwrap()),
             api_key_ciphertext: Some(vec![1, 2, 3]),
+            oauth_token_generation: None,
             warmup_enabled: false,
-            next_warmup_at: None,
-            last_warmup_cycle_key: None,
-            warmup_lease_holder: None,
-            warmup_lease_until_unix_secs: None,
             warmup_dialect_plugin: None,
         },
     )

@@ -29,6 +29,7 @@ use cc_lb_server::bootstrap::{BootstrapError, apply_bootstrap};
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::preflight;
 use cc_lb_server::refresh::LazyRefresher;
+use cc_lb_server::scheduler_factory::{SchedulerBackend, SqliteSchedulerStorage};
 use cc_lb_server::warmup::dialect::{WarmupDispatchError, dispatch_warmup_with_dialect};
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{
@@ -148,6 +149,7 @@ async fn warmup_dialect_returns_registry_unsupported_slot_for_non_shape_plugin()
         Uuid::new_v4(),
         None,
         CancellationToken::new(),
+        sqlite_scheduler_backend().await,
     ));
     let client = warmup_client();
 
@@ -383,11 +385,8 @@ async fn seed_warmup_upstream(
             kind: UpstreamKind::AnthropicOauth,
             base_url: Some(Url::parse("http://127.0.0.1:9/").expect("base url")),
             api_key_ciphertext: None,
+            oauth_token_generation: None,
             warmup_enabled: true,
-            next_warmup_at: None,
-            last_warmup_cycle_key: None,
-            warmup_lease_holder: None,
-            warmup_lease_until_unix_secs: None,
             warmup_dialect_plugin: None,
         },
     )
@@ -489,6 +488,27 @@ fn warmup_client() -> WarmupClient {
     Client::builder(TokioExecutor::new()).build(connector)
 }
 
+async fn sqlite_scheduler_backend() -> SchedulerBackend {
+    let pool = scheduler_sqlx::sqlite::SqlitePoolOptions::new()
+        .max_connections(1)
+        .connect("sqlite::memory:")
+        .await
+        .expect("scheduler sqlite opens");
+    apalis_sqlite::SqliteStorage::setup(&pool)
+        .await
+        .expect("scheduler sqlite initializes");
+    cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool)
+        .await
+        .expect("scheduler post-setup migrations apply");
+    SchedulerBackend::Sqlite(SqliteSchedulerStorage {
+        pool: pool.clone(),
+        storage: apalis_sqlite::SqliteStorage::new_in_queue(
+            &pool,
+            cc_lb_scheduler::worker::ADAPTIVE_QUEUE,
+        ),
+    })
+}
+
 fn wasm_cache_path(data_dir: &Path, sha256: [u8; 32]) -> PathBuf {
     data_dir
         .join("plugins")
@@ -565,6 +585,7 @@ fn admin_state(storage: Arc<Storage>) -> AdminState {
         audit_sink: None,
         dynamic_view,
         config: Arc::new(Config::default()),
+        scheduler: None,
         admin_token: Some(ADMIN_TOKEN.to_owned()),
         start_time: std::time::Instant::now(),
     }

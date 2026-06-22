@@ -53,13 +53,11 @@ fn tracing_events_have_required_fields() {
 
     let upstream_id = uuid::Uuid::new_v4();
     let holder = "test-holder";
-    let cycle_key = 1704000000i64;
     let jitter_ms = 1234u64;
 
     tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, lease_until = ?"2024-01-01T00:00:00Z", action = "lease_claimed");
-    tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, cycle_key = %cycle_key, jitter_ms = %jitter_ms, action = "dispatch_start");
+    tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, jitter_ms = %jitter_ms, action = "dispatch_start");
     tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, status = 200, outcome = "success", action = "dispatch_result");
-    tracing::info!(target: "warmup", upstream_id = %upstream_id, holder = %holder, cycle_key = %cycle_key, next_warmup_at = ?"2024-01-02T00:00:00Z", action = "cycle_key_written");
 
     let output = logs.contents();
 
@@ -76,11 +74,6 @@ fn tracing_events_have_required_fields() {
     assert!(
         output.contains(r#"action="dispatch_result""#),
         "expected dispatch_result event in:\n{}",
-        output
-    );
-    assert!(
-        output.contains(r#"action="cycle_key_written""#),
-        "expected cycle_key_written event in:\n{}",
         output
     );
 
@@ -106,10 +99,6 @@ fn tracing_events_have_required_fields() {
         "dispatch_start missing holder"
     );
     assert!(
-        dispatch_start.contains("cycle_key="),
-        "dispatch_start missing cycle_key"
-    );
-    assert!(
         dispatch_start.contains("jitter_ms="),
         "dispatch_start missing jitter_ms"
     );
@@ -129,22 +118,5 @@ fn tracing_events_have_required_fields() {
     assert!(
         dispatch_result.contains("outcome="),
         "dispatch_result missing outcome"
-    );
-
-    let cycle_key_written = output
-        .lines()
-        .find(|l| l.contains(r#"action="cycle_key_written""#))
-        .expect("cycle_key_written line");
-    assert!(
-        cycle_key_written.contains("holder="),
-        "cycle_key_written missing holder"
-    );
-    assert!(
-        cycle_key_written.contains("cycle_key="),
-        "cycle_key_written missing cycle_key"
-    );
-    assert!(
-        cycle_key_written.contains("next_warmup_at="),
-        "cycle_key_written missing next_warmup_at"
     );
 }
