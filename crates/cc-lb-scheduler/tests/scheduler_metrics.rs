@@ -110,7 +110,10 @@ async fn run_singleton_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error
 #[cfg(feature = "sqlite")]
 async fn sqlite_memory() -> Result<sqlx::SqlitePool, Box<dyn Error>> {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .min_connections(1)
         .max_connections(1)
+        .idle_timeout(None)
+        .max_lifetime(None)
         .connect("sqlite::memory:")
         .await?;
     apalis_sqlite::SqliteStorage::setup(&pool).await?;

@@ -148,7 +148,10 @@ async fn scheduler_ctx_default_dispatches_succeed() -> Result<(), Box<dyn std::e
 #[cfg(feature = "sqlite")]
 async fn sqlite_memory() -> Result<sqlx::SqlitePool, Box<dyn std::error::Error>> {
     let pool = sqlx::sqlite::SqlitePoolOptions::new()
+        .min_connections(1)
         .max_connections(1)
+        .idle_timeout(None)
+        .max_lifetime(None)
         .connect("sqlite::memory:")
         .await?;
     apalis_sqlite::SqliteStorage::setup(&pool).await?;
