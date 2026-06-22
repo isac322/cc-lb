@@ -22,7 +22,7 @@ use cc_lb_scheduler::jobs::oauth_refresh::{
     OAuthRefreshJob, OAuthRefreshJobHandler, OAuthRefreshUpstreams, RefreshedOAuthTokens,
 };
 use cc_lb_scheduler::retry::JobOutcome;
-use cc_lb_scheduler::worker::{EntityJob, SchedulerCtx, SchedulerPushTask};
+use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerCtx, SchedulerPushTask};
 use cc_lb_server::dynamic_view_builder::{Stores, build_dynamic_view};
 use cc_lb_server::refresh::LazyRefresher;
 use cc_lb_server::scheduler_factory::{SchedulerBackend, SqliteSchedulerStorage};
@@ -487,7 +487,7 @@ async fn sqlite_scheduler_backend() -> SchedulerBackend {
         pool: pool.clone(),
         storage: apalis_sqlite::SqliteStorage::new_in_queue(
             &pool,
-            cc_lb_scheduler::worker::ENTITY_QUEUE,
+            cc_lb_scheduler::worker::ADAPTIVE_QUEUE,
         ),
     })
 }
@@ -499,7 +499,7 @@ fn spawn_oauth_refresh_worker(
     oauth_cfg: Arc<AnthropicOAuthConfig>,
 ) -> (CancellationToken, JoinHandle<()>) {
     let cancel = CancellationToken::new();
-    let worker = cc_lb_scheduler::worker::build_entity_worker(
+    let worker = cc_lb_scheduler::worker::build_adaptive_worker(
         &backend,
         SchedulerCtx::new(
             cc_lb_config::SchedulerConfig::default(),
@@ -533,9 +533,9 @@ async fn dispatch_oauth_refresh_job(
     storage: Arc<Storage>,
     aead: Arc<AeadService>,
     oauth_cfg: Arc<AnthropicOAuthConfig>,
-    job: EntityJob,
+    job: AdaptiveJob,
 ) -> SchedulerResult<JobOutcome> {
-    let EntityJob::OAuthRefresh(job) = job else {
+    let AdaptiveJob::OAuthRefresh(job) = job else {
         return Ok(JobOutcome::Done);
     };
     OAuthRefreshJobHandler::new(TestOAuthRefreshUpstreams { storage }, Uuid::new_v4())
@@ -659,7 +659,7 @@ async fn enqueue_metadata_refresh(
     backend: SchedulerBackend,
     job: MetadataRefreshJob,
 ) -> SchedulerResult<()> {
-    backend.push_job(EntityJob::MetadataRefresh(job)).await
+    backend.push_job(AdaptiveJob::MetadataRefresh(job)).await
 }
 
 async fn enqueue_next_oauth_refresh(
@@ -669,13 +669,13 @@ async fn enqueue_next_oauth_refresh(
 ) -> SchedulerResult<()> {
     let job = OAuthRefreshJob::new(upstream_id);
     let task = SchedulerPushTask {
-        args: EntityJob::OAuthRefresh(job),
+        args: AdaptiveJob::OAuthRefresh(job),
         idempotency_key: Some(
             OAuthRefreshJob::new(upstream_id).idempotency_key(expires_at_unix_secs),
         ),
         run_at_unix_secs: Some(OAuthRefreshJob::run_at_for_expires_at(expires_at_unix_secs)),
     };
-    match backend.push_entity_task(task).await {
+    match backend.push_adaptive_task(task).await {
         Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
         Err(error) => Err(error),
     }

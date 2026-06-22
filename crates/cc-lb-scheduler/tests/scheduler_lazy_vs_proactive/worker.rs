@@ -12,7 +12,7 @@ use cc_lb_scheduler::jobs::oauth_refresh::{
     OAuthRefreshConfig, OAuthRefreshJobHandler, OAuthRefreshUpstreams, RefreshedOAuthTokens,
 };
 use cc_lb_scheduler::retry::JobOutcome;
-use cc_lb_scheduler::worker::{EntityJob, SchedulerBackend};
+use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerBackend};
 use cc_lb_storage_api::UpstreamRecord;
 use serde::Deserialize;
 use url::Url;
@@ -85,14 +85,14 @@ impl<Upstreams> OAuthWorkerState<Upstreams> {
 }
 
 pub fn entity_job_handler<Upstreams>(
-    job: EntityJob,
+    job: AdaptiveJob,
     ctx: Data<OAuthWorkerState<Upstreams>>,
 ) -> HandlerFuture
 where
     Upstreams: Clone + OAuthRefreshUpstreams + Send + Sync + 'static,
 {
     Box::pin(async move {
-        let EntityJob::OAuthRefresh(job) = job else {
+        let AdaptiveJob::OAuthRefresh(job) = job else {
             return Ok(JobOutcome::Done);
         };
         ctx.probe.mark_started();
@@ -112,7 +112,7 @@ where
 }
 
 async fn enqueue_metadata(backend: SchedulerBackend, job: MetadataRefreshJob) -> Result<()> {
-    backend.push_job(EntityJob::MetadataRefresh(job)).await
+    backend.push_job(AdaptiveJob::MetadataRefresh(job)).await
 }
 
 async fn refresh_tokens(

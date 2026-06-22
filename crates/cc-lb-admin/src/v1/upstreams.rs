@@ -22,7 +22,7 @@ use cc_lb_core::{
 };
 use cc_lb_scheduler::error::SchedulerError;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
-use cc_lb_scheduler::worker::{EntityJob, SchedulerPushTask};
+use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{
     OrganizationMetadataRecord, Storage, StorageError, SubscriptionQuotaLatestRecord,
@@ -835,7 +835,7 @@ async fn seed_warmup_if_toggled(
     };
     let seed_secs = unix_now_secs();
     match scheduler
-        .push_entity_task(warmup_bootstrap_task(after.id, seed_secs))
+        .push_adaptive_task(warmup_bootstrap_task(after.id, seed_secs))
         .await
     {
         Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
@@ -843,11 +843,11 @@ async fn seed_warmup_if_toggled(
     }
 }
 
-fn warmup_bootstrap_task(upstream_id: Uuid, seed_secs: u64) -> SchedulerPushTask<EntityJob> {
+fn warmup_bootstrap_task(upstream_id: Uuid, seed_secs: u64) -> SchedulerPushTask<AdaptiveJob> {
     let job = UpstreamWarmupJob::new(upstream_id, seed_secs);
     SchedulerPushTask {
-        args: EntityJob::Warmup(job),
-        idempotency_key: Some(format!("entity:warmup:{upstream_id}:bootstrap:{seed_secs}")),
+        args: AdaptiveJob::Warmup(job),
+        idempotency_key: Some(format!("adaptive:warmup:{upstream_id}:bootstrap:{seed_secs}")),
         run_at_unix_secs: Some(seed_secs),
     }
 }
@@ -1840,10 +1840,10 @@ mod tests {
 
         assert_eq!(
             task.idempotency_key.as_deref(),
-            Some("entity:warmup:12345678-1234-5678-1234-567812345678:bootstrap:1800000000")
+            Some("adaptive:warmup:12345678-1234-5678-1234-567812345678:bootstrap:1800000000")
         );
         assert_eq!(task.run_at_unix_secs, Some(seed_secs));
-        let cc_lb_scheduler::worker::EntityJob::Warmup(job) = task.args else {
+        let cc_lb_scheduler::worker::AdaptiveJob::Warmup(job) = task.args else {
             panic!("expected warmup job");
         };
         assert_eq!(job.upstream_id, upstream_id);

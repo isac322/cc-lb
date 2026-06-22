@@ -17,7 +17,7 @@ use cc_lb_scheduler::jobs::watchdog::{
 };
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::state_stores::{AnthropicCompatEtagsStore, PriceCatalogVersionsStore};
-use cc_lb_scheduler::worker::{SchedulerBackend, SingletonJob};
+use cc_lb_scheduler::worker::{SchedulerBackend, CronJob};
 
 use crate::scheduler_dispatch::outcomes::{
     apalis_housekeeping_outcome, price_catalog_outcome, prompt_cache_purge_outcome,
@@ -31,13 +31,13 @@ use super::SchedulerDispatch;
 impl SchedulerDispatch {
     pub(super) async fn dispatch_singleton(
         &self,
-        job: SingletonJob,
+        job: CronJob,
     ) -> SchedulerResult<JobOutcome> {
         match job {
-            SingletonJob::UsageRollup(job) => {
+            CronJob::UsageRollup(job) => {
                 usage_rollup_outcome(handle_usage_rollup_job(job, self.storage.as_ref()).await)
             }
-            SingletonJob::UsagePrune(job) => usage_prune_outcome(
+            CronJob::UsagePrune(job) => usage_prune_outcome(
                 handle_usage_prune_job(
                     job,
                     &StorageHandle::new(self.storage.clone()),
@@ -45,7 +45,7 @@ impl SchedulerDispatch {
                 )
                 .await,
             ),
-            SingletonJob::QuotaGc(job) => {
+            CronJob::QuotaGc(job) => {
                 let config = SubscriptionQuotaGcConfig::new(
                     self.config.subscription_quota.retention_days,
                     self.config.subscription_quota.gc_batch_size,
@@ -59,15 +59,15 @@ impl SchedulerDispatch {
                     .await,
                 )
             }
-            SingletonJob::PromptCachePurge(job) => prompt_cache_purge_outcome(
+            CronJob::PromptCachePurge(job) => prompt_cache_purge_outcome(
                 PromptCacheObservationPurgeJobHandler::new(StorageHandle::new(
                     self.storage.clone(),
                 ))
                 .handle(job, now_unix_secs())
                 .await,
             ),
-            SingletonJob::PriceCatalogRefresh(job) => self.dispatch_price_catalog(job).await,
-            SingletonJob::ApalisHousekeeping(job) => match &self.backend {
+            CronJob::PriceCatalogRefresh(job) => self.dispatch_price_catalog(job).await,
+            CronJob::ApalisHousekeeping(job) => match &self.backend {
                 #[cfg(feature = "sqlite")]
                 SchedulerBackend::Sqlite(sqlite) => {
                     let config =
@@ -89,14 +89,14 @@ impl SchedulerDispatch {
                     )
                 }
             },
-            SingletonJob::WarmupWatchdog(job) => self.handle_warmup_watchdog(job).await,
-            SingletonJob::OAuthRefreshWatchdog(job) => {
+            CronJob::WarmupWatchdog(job) => self.handle_warmup_watchdog(job).await,
+            CronJob::OAuthRefreshWatchdog(job) => {
                 self.handle_oauth_refresh_watchdog(job).await
             }
-            SingletonJob::OAuthUsagePollWatchdog(job) => {
+            CronJob::OAuthUsagePollWatchdog(job) => {
                 self.handle_oauth_usage_poll_watchdog(job).await
             }
-            SingletonJob::AnthropicCompatRefresh(job) => self.dispatch_anthropic_compat(job).await,
+            CronJob::AnthropicCompatRefresh(job) => self.dispatch_anthropic_compat(job).await,
         }
     }
 

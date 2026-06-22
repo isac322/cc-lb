@@ -33,7 +33,7 @@ impl OAuthUsagePollJob {
 
     pub fn idempotency_key(&self, unlock_at_unix_secs: u64) -> String {
         format!(
-            "entity:oauth_usage_poll:{}:{}",
+            "adaptive:oauth_usage_poll:{}:{}",
             self.upstream_id, unlock_at_unix_secs
         )
     }
@@ -228,7 +228,7 @@ mod tests {
 
         assert_eq!(
             job.idempotency_key(1_800_000_060),
-            "entity:oauth_usage_poll:12345678-1234-5678-1234-567812345678:1800000060"
+            "adaptive:oauth_usage_poll:12345678-1234-5678-1234-567812345678:1800000060"
         );
     }
 

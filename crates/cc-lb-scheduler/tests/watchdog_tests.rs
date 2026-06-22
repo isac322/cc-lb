@@ -1,9 +1,9 @@
 use std::str::FromStr as _;
 
 use cc_lb_scheduler::jobs::watchdog::{WatchdogEntityKind, run_entity_watchdog};
-use cc_lb_scheduler::worker::EntityJob;
+use cc_lb_scheduler::worker::AdaptiveJob;
 use cc_lb_scheduler::worker::{
-    ENTITY_QUEUE, SchedulerBackend, SchedulerPushTask, SqliteSchedulerStorage,
+    ADAPTIVE_QUEUE, SchedulerBackend, SchedulerPushTask, SqliteSchedulerStorage,
 };
 use tempfile::TempDir;
 use uuid::Uuid;
@@ -174,9 +174,9 @@ impl Fixture {
             .await?;
         apalis_sqlite::SqliteStorage::setup(&pool).await?;
         cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
-        let storage = apalis_sqlite::SqliteStorage::<EntityJob, (), ()>::new_with_config(
+        let storage = apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(
             &pool,
-            &apalis_sqlite::Config::new(ENTITY_QUEUE),
+            &apalis_sqlite::Config::new(ADAPTIVE_QUEUE),
         );
         let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
             pool: pool.clone(),
@@ -203,7 +203,7 @@ impl Fixture {
             idempotency_key: Some(key.clone()),
             run_at_unix_secs: Some(RUN_AT_UNIX_SECS),
         };
-        self.backend.push_entity_task(task).await?;
+        self.backend.push_adaptive_task(task).await?;
         sqlx::query(
             "UPDATE Jobs SET status = ?1, attempts = ?2, max_attempts = ?3 WHERE idempotency_key = ?4",
         )
@@ -226,15 +226,15 @@ impl Fixture {
     }
 }
 
-fn entity_job(kind: WatchdogEntityKind, upstream_id: Uuid) -> EntityJob {
+fn entity_job(kind: WatchdogEntityKind, upstream_id: Uuid) -> AdaptiveJob {
     match kind {
-        WatchdogEntityKind::Warmup => EntityJob::Warmup(
+        WatchdogEntityKind::Warmup => AdaptiveJob::Warmup(
             cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob::new(upstream_id, TICK_UNIX_SECS),
         ),
-        WatchdogEntityKind::OAuthRefresh => EntityJob::OAuthRefresh(
+        WatchdogEntityKind::OAuthRefresh => AdaptiveJob::OAuthRefresh(
             cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob::new(upstream_id),
         ),
-        WatchdogEntityKind::OAuthUsagePoll => EntityJob::OAuthUsagePoll(
+        WatchdogEntityKind::OAuthUsagePoll => AdaptiveJob::OAuthUsagePoll(
             cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollJob::new(upstream_id),
         ),
     }

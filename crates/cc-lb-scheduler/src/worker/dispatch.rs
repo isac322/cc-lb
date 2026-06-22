@@ -6,16 +6,16 @@ use apalis::prelude::Data;
 use crate::error::SchedulerError;
 use crate::retry::JobOutcome;
 
-use super::{EntityJob, SchedulerCtx, SingletonJob};
+use super::{AdaptiveJob, SchedulerCtx, CronJob};
 
 pub(super) type EntityHandlerFn =
     fn(
-        EntityJob,
+        AdaptiveJob,
         Data<SchedulerCtx>,
     ) -> Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>>;
 
 pub(super) fn entity_job_handler(
-    job: EntityJob,
+    job: AdaptiveJob,
     ctx: Data<SchedulerCtx>,
 ) -> Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>> {
     let dispatch = ctx.entity_dispatch.clone();
@@ -24,20 +24,20 @@ pub(super) fn entity_job_handler(
 
 pub(super) type SingletonHandlerFn =
     fn(
-        SingletonJob,
+        CronJob,
         Data<SchedulerCtx>,
     ) -> Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>>;
 
 pub(super) fn singleton_job_handler(
-    job: SingletonJob,
+    job: CronJob,
     ctx: Data<SchedulerCtx>,
 ) -> Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>> {
     let dispatch = ctx.singleton_dispatch.clone();
     match &job {
-        SingletonJob::AnthropicCompatRefresh(_) => {}
-        SingletonJob::WarmupWatchdog(_) => {}
-        SingletonJob::OAuthRefreshWatchdog(_) => {}
-        SingletonJob::OAuthUsagePollWatchdog(_) => {}
+        CronJob::AnthropicCompatRefresh(_) => {}
+        CronJob::WarmupWatchdog(_) => {}
+        CronJob::OAuthRefreshWatchdog(_) => {}
+        CronJob::OAuthUsagePollWatchdog(_) => {}
         _ => {}
     }
     Box::pin(async move { dispatch(job).await })
@@ -54,7 +54,7 @@ mod tests {
     use crate::jobs::metadata_refresh::MetadataRefreshJob;
     use crate::jobs::usage_prune::UsagePruneJob;
     use crate::retry::JobOutcome;
-    use crate::worker::{EntityJob, SchedulerCtx, SingletonJob};
+    use crate::worker::{AdaptiveJob, SchedulerCtx, CronJob};
 
     use super::{entity_job_handler, singleton_job_handler};
 
@@ -72,7 +72,7 @@ mod tests {
         );
 
         let outcome = entity_job_handler(
-            EntityJob::MetadataRefresh(MetadataRefreshJob::new(uuid::Uuid::new_v4(), 1)),
+            AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(uuid::Uuid::new_v4(), 1)),
             Data::new(ctx),
         )
         .await
@@ -100,7 +100,7 @@ mod tests {
         );
 
         let outcome = singleton_job_handler(
-            SingletonJob::UsagePrune(UsagePruneJob::default()),
+            CronJob::UsagePrune(UsagePruneJob::default()),
             Data::new(ctx),
         )
         .await

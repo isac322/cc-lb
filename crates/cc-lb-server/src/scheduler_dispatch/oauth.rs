@@ -6,7 +6,7 @@ use cc_lb_scheduler::jobs::oauth_refresh::{
 };
 use cc_lb_scheduler::jobs::oauth_usage_poll::{OAuthUsagePollJob, OAuthUsagePollObservation};
 use cc_lb_scheduler::retry::JobOutcome;
-use cc_lb_scheduler::worker::{EntityJob, SchedulerPushTask};
+use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{UpstreamRecord, UpstreamStore};
@@ -74,7 +74,7 @@ impl SchedulerDispatch {
     }
 
     async fn enqueue_metadata_refresh(&self, job: MetadataRefreshJob) -> SchedulerResult<()> {
-        self.backend.push_job(EntityJob::MetadataRefresh(job)).await
+        self.backend.push_job(AdaptiveJob::MetadataRefresh(job)).await
     }
 
     async fn push_next_oauth_refresh_task(
@@ -85,11 +85,11 @@ impl SchedulerDispatch {
         let job = OAuthRefreshJob::new(upstream_id);
         let idempotency_key = job.idempotency_key(expires_at_unix_secs);
         let task = SchedulerPushTask {
-            args: EntityJob::OAuthRefresh(job),
+            args: AdaptiveJob::OAuthRefresh(job),
             idempotency_key: Some(idempotency_key),
             run_at_unix_secs: Some(OAuthRefreshJob::run_at_for_expires_at(expires_at_unix_secs)),
         };
-        match self.backend.push_entity_task(task).await {
+        match self.backend.push_adaptive_task(task).await {
             Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
             Err(error) => Err(error),
         }

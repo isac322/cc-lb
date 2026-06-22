@@ -10,8 +10,8 @@ use cc_lb_scheduler::jobs::usage_prune::UsagePruneJob;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::worker::{
-    EntityJob, SchedulerBackend, SchedulerCtx, SingletonJob, SqliteSchedulerStorage,
-    build_entity_worker,
+    AdaptiveJob, SchedulerBackend, SchedulerCtx, CronJob, SqliteSchedulerStorage,
+    build_adaptive_worker,
 };
 use uuid::Uuid;
 
@@ -23,7 +23,7 @@ async fn worker_sqlite_runs_one_of_each_entity_job_to_done()
     let queue = "entity_worker_sqlite";
     let config = fast_queue_config(queue);
     let mut storage =
-        apalis_sqlite::SqliteStorage::<EntityJob, (), ()>::new_with_config(&pool, &config);
+        apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(&pool, &config);
     let upstream_id = Uuid::new_v4();
 
     for job in entity_jobs(upstream_id) {
@@ -32,9 +32,9 @@ async fn worker_sqlite_runs_one_of_each_entity_job_to_done()
 
     let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
         pool: pool.clone(),
-        storage: apalis_sqlite::SqliteStorage::<EntityJob, (), ()>::new_with_config(&pool, &config),
+        storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(&pool, &config),
     });
-    let worker = build_entity_worker(&backend, done_scheduler_ctx())?;
+    let worker = build_adaptive_worker(&backend, done_scheduler_ctx())?;
     worker.run_for(Duration::from_secs(2)).await?;
 
     let done_count: i64 =
@@ -69,21 +69,21 @@ async fn scheduler_backend_sqlite_push_job_uses_full_idempotency_index()
 -> Result<(), Box<dyn std::error::Error>> {
     let pool = sqlite_memory().await?;
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
-    let config = fast_queue_config("entity");
+    let config = fast_queue_config("adaptive");
     let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
         pool: pool.clone(),
-        storage: apalis_sqlite::SqliteStorage::<EntityJob, (), ()>::new_with_config(&pool, &config),
+        storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(&pool, &config),
     });
     let upstream_id = Uuid::new_v4();
 
     backend
-        .push_job(EntityJob::MetadataRefresh(MetadataRefreshJob::new(
+        .push_job(AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(
             upstream_id,
             1,
         )))
         .await?;
     backend
-        .push_job(EntityJob::MetadataRefresh(MetadataRefreshJob::new(
+        .push_job(AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(
             upstream_id,
             1,
         )))
@@ -91,7 +91,7 @@ async fn scheduler_backend_sqlite_push_job_uses_full_idempotency_index()
     let active_count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM Jobs WHERE idempotency_key = ? AND status IN ('Pending','Running','Queued')",
     )
-    .bind(format!("entity:metadata_refresh:{upstream_id}:1"))
+    .bind(format!("adaptive:metadata_refresh:{upstream_id}:1"))
     .fetch_one(&pool)
     .await?;
     assert_eq!(active_count, 1);
@@ -100,14 +100,14 @@ async fn scheduler_backend_sqlite_push_job_uses_full_idempotency_index()
         .execute(&pool)
         .await?;
     backend
-        .push_job(EntityJob::MetadataRefresh(MetadataRefreshJob::new(
+        .push_job(AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(
             upstream_id,
             1,
         )))
         .await?;
     let total_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM Jobs WHERE idempotency_key = ?")
-            .bind(format!("entity:metadata_refresh:{upstream_id}:1"))
+            .bind(format!("adaptive:metadata_refresh:{upstream_id}:1"))
             .fetch_one(&pool)
             .await?;
     assert_eq!(total_count, 1);
@@ -133,9 +133,9 @@ async fn scheduler_ctx_default_dispatches_succeed() -> Result<(), Box<dyn std::e
     let upstream_id = Uuid::new_v4();
 
     let entity =
-        (ctx.entity_dispatch)(EntityJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1))).await?;
+        (ctx.entity_dispatch)(AdaptiveJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1))).await?;
     let singleton =
-        (ctx.singleton_dispatch)(SingletonJob::UsagePrune(UsagePruneJob::default())).await?;
+        (ctx.singleton_dispatch)(CronJob::UsagePrune(UsagePruneJob::default())).await?;
 
     assert_eq!(entity, JobOutcome::Done);
     assert_eq!(singleton, JobOutcome::Done);
@@ -153,15 +153,15 @@ async fn sqlite_memory() -> Result<sqlx::SqlitePool, Box<dyn std::error::Error>>
     Ok(pool)
 }
 
-fn entity_jobs(upstream_id: Uuid) -> [EntityJob; 4] {
+fn entity_jobs(upstream_id: Uuid) -> [AdaptiveJob; 4] {
     [
-        EntityJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1)),
-        EntityJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
-        EntityJob::OAuthUsagePoll(OAuthUsagePollJob {
+        AdaptiveJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1)),
+        AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
+        AdaptiveJob::OAuthUsagePoll(OAuthUsagePollJob {
             upstream_id,
             traceparent: None,
         }),
-        EntityJob::MetadataRefresh(MetadataRefreshJob::new(upstream_id, 1)),
+        AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(upstream_id, 1)),
     ]
 }
 

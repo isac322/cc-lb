@@ -6,7 +6,7 @@ use apalis::prelude::{IntervalStrategy, StrategyBuilder, TaskSink, WorkerBuilder
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollHandler;
 use cc_lb_scheduler::middleware::TraceparentLayer;
 use cc_lb_scheduler::state_stores::OAuthUsagePollCursorsStore;
-use cc_lb_scheduler::worker::{ENTITY_QUEUE, EntityJob, PostgresApalisStorage};
+use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, AdaptiveJob, PostgresApalisStorage};
 use sqlx::PgPool;
 use sqlx::postgres::PgPoolOptions;
 use testcontainers_modules::{postgres::Postgres, testcontainers::runners::AsyncRunner};
@@ -86,14 +86,14 @@ fn postgres_queue_config() -> apalis_postgres::Config {
     let poll_strategy = StrategyBuilder::new()
         .apply(IntervalStrategy::new(Duration::from_millis(1)))
         .build();
-    apalis_postgres::Config::new(ENTITY_QUEUE)
+    apalis_postgres::Config::new(ADAPTIVE_QUEUE)
         .with_poll_interval(poll_strategy)
         .set_buffer_size(8)
 }
 
 fn postgres_push(
     storage: PostgresApalisStorage,
-) -> impl FnMut(EntityJob) -> std::pin::Pin<Box<dyn Future<Output = TestResult<()>> + Send>> {
+) -> impl FnMut(AdaptiveJob) -> std::pin::Pin<Box<dyn Future<Output = TestResult<()>> + Send>> {
     move |job| {
         let mut storage = storage.clone();
         Box::pin(async move {
@@ -125,7 +125,7 @@ fn spawn_postgres_worker(
     let cancel = CancellationToken::new();
     let worker_cancel = cancel.clone();
     let join: JoinHandle<Result<(), WorkerError>> = tokio::spawn(async move {
-        WorkerBuilder::new(ENTITY_QUEUE)
+        WorkerBuilder::new(ADAPTIVE_QUEUE)
             .backend(storage)
             .data(state)
             .layer(TraceparentLayer::new())

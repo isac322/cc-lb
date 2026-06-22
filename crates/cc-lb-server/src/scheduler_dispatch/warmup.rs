@@ -4,7 +4,7 @@ use cc_lb_core::{UnifiedQuotaObservation, parse_anthropic_unified_headers};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_scheduler::jobs::warmup::{UpstreamWarmupJob, UpstreamWarmupJobHandler};
 use cc_lb_scheduler::retry::JobOutcome;
-use cc_lb_scheduler::worker::{EntityJob, SchedulerPushTask};
+use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use cc_lb_storage_api::UpstreamStatusUpdate;
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -123,11 +123,11 @@ impl SchedulerDispatch {
             .saturating_add(jitter_secs);
         let job = UpstreamWarmupJob::new(upstream_id, response_resets_at_unix_secs);
         let task = SchedulerPushTask {
-            args: EntityJob::Warmup(job),
+            args: AdaptiveJob::Warmup(job),
             idempotency_key: Some(job.idempotency_key(response_resets_at_unix_secs)),
             run_at_unix_secs: Some(run_at_unix_secs),
         };
-        match self.backend.push_entity_task(task).await {
+        match self.backend.push_adaptive_task(task).await {
             Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
             Err(error) => Err(error),
         }

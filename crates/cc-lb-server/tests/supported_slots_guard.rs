@@ -504,7 +504,7 @@ async fn sqlite_scheduler_backend() -> SchedulerBackend {
         pool: pool.clone(),
         storage: apalis_sqlite::SqliteStorage::new_in_queue(
             &pool,
-            cc_lb_scheduler::worker::ENTITY_QUEUE,
+            cc_lb_scheduler::worker::ADAPTIVE_QUEUE,
         ),
     })
 }

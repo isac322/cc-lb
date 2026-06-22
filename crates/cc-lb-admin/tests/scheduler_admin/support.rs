@@ -5,7 +5,7 @@ use axum::http::{Request, StatusCode, header};
 use axum::response::Response;
 use cc_lb_config::Config;
 use cc_lb_scheduler::admin::SchedulerAdminHandle;
-use cc_lb_scheduler::worker::{ENTITY_QUEUE, EntityJob, SchedulerBackend};
+use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, AdaptiveJob, SchedulerBackend};
 use http_body_util::BodyExt;
 use serde_json::Value;
 use tower::ServiceExt;
@@ -86,7 +86,7 @@ pub async fn sqlite_fixture()
     apalis_sqlite::SqliteStorage::setup(&pool).await?;
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
     let storage =
-        apalis_sqlite::SqliteStorage::<EntityJob, (), ()>::new_in_queue(&pool, ENTITY_QUEUE);
+        apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_in_queue(&pool, ADAPTIVE_QUEUE);
     let backend = SchedulerBackend::Sqlite(cc_lb_scheduler::worker::SqliteSchedulerStorage {
         pool: pool.clone(),
         storage,
@@ -110,7 +110,7 @@ pub async fn seed_sqlite_failed_warmup(
     )
     .bind(Vec::<u8>::new())
     .bind(i64::try_from(NOW_SECS).expect("test timestamp fits"))
-    .bind("entity:warmup:test")
+    .bind("adaptive:warmup:test")
     .execute(pool)
     .await?;
     Ok(())
@@ -126,7 +126,7 @@ pub async fn seed_postgres_failed_warmup(
     )
     .bind(Vec::<u8>::new())
     .bind(i64::try_from(NOW_SECS).expect("test timestamp fits"))
-    .bind("entity:warmup:pg")
+    .bind("adaptive:warmup:pg")
     .execute(pool)
     .await?;
     Ok(())
@@ -136,7 +136,7 @@ pub async fn seed_postgres_failed_warmup(
 pub async fn seed_sqlite_usage_rollup(
     pool: &scheduler_sqlx::SqlitePool,
 ) -> scheduler_sqlx::Result<()> {
-    let payload = serde_json::to_vec(&cc_lb_scheduler::worker::SingletonJob::UsageRollup(
+    let payload = serde_json::to_vec(&cc_lb_scheduler::worker::CronJob::UsageRollup(
         cc_lb_scheduler::jobs::usage_rollup::UsageRollupTask::default(),
     ))
     .map_err(|error| scheduler_sqlx::Error::Protocol(error.to_string()))?;
@@ -145,7 +145,7 @@ pub async fn seed_sqlite_usage_rollup(
          VALUES (?1, 'usage-rollup', ?2, 'Pending', 0, 1, ?3, 'singleton:usage_rollup')",
     )
     .bind(payload)
-    .bind(cc_lb_scheduler::worker::SINGLETON_QUEUE)
+    .bind(cc_lb_scheduler::worker::CRON_QUEUE)
     .bind(i64::try_from(NOW_SECS).expect("test timestamp fits"))
     .execute(pool)
     .await?;
@@ -189,9 +189,9 @@ pub async fn postgres_fixture() -> Result<
         .await?;
     apalis_postgres::PostgresStorage::setup(&pool).await?;
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
-    let storage = apalis_postgres::PostgresStorage::<EntityJob>::new_with_config(
+    let storage = apalis_postgres::PostgresStorage::<AdaptiveJob>::new_with_config(
         &pool,
-        &apalis_postgres::Config::new(ENTITY_QUEUE),
+        &apalis_postgres::Config::new(ADAPTIVE_QUEUE),
     );
     let backend = SchedulerBackend::Postgres(cc_lb_scheduler::worker::PostgresSchedulerStorage {
         pool: pool.clone(),

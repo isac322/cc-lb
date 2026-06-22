@@ -22,7 +22,7 @@ mod postgres {
     use cc_lb_scheduler::{
         leader_election::{LeaderElection, LeaderState},
         retry::JobOutcome,
-        worker::{ENTITY_QUEUE, EntityJob, PostgresApalisStorage},
+        worker::{ADAPTIVE_QUEUE, AdaptiveJob, PostgresApalisStorage},
     };
     use tokio::{
         sync::{Mutex, Notify},
@@ -141,7 +141,7 @@ mod postgres {
             let mut storage = PostgresApalisStorage::new_with_config(&pool, &entity_queue_config());
             for cycle_key in 0..12_u64 {
                 storage
-                    .push(EntityJob::Warmup(
+                    .push(AdaptiveJob::Warmup(
                         cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob::new(
                             Uuid::new_v4(),
                             cycle_key,
@@ -187,7 +187,7 @@ mod postgres {
     ) -> JoinHandle<Result<(), WorkerError>> {
         let storage = PostgresApalisStorage::new_with_config(pool, &entity_queue_config());
         tokio::spawn(async move {
-            ApalisWorkerBuilder::new(ENTITY_QUEUE)
+            ApalisWorkerBuilder::new(ADAPTIVE_QUEUE)
                 .backend(storage)
                 .data(EntityState {
                     replica,
@@ -205,7 +205,7 @@ mod postgres {
     }
 
     fn entity_handler(
-        _job: EntityJob,
+        _job: AdaptiveJob,
         ctx: Data<EntityState>,
     ) -> std::pin::Pin<
         Box<dyn Future<Output = Result<JobOutcome, cc_lb_scheduler::error::SchedulerError>> + Send>,
@@ -222,7 +222,7 @@ mod postgres {
         let poll_strategy = StrategyBuilder::new()
             .apply(IntervalStrategy::new(Duration::from_millis(10)))
             .build();
-        apalis_postgres::Config::new(ENTITY_QUEUE)
+        apalis_postgres::Config::new(ADAPTIVE_QUEUE)
             .with_poll_interval(poll_strategy)
             .set_buffer_size(8)
     }

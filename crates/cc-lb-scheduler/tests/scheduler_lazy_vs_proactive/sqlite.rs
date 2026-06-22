@@ -8,7 +8,7 @@ use cc_lb_aead::AeadService;
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_scheduler::middleware::TraceparentLayer;
 use cc_lb_scheduler::retry::RetryClass;
-use cc_lb_scheduler::worker::{ENTITY_QUEUE, SchedulerBackend, SqliteSchedulerStorage};
+use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, SchedulerBackend, SqliteSchedulerStorage};
 use cc_lb_server::refresh::LazyRefresher;
 use cc_lb_storage_api::{BackendKind, MetaStore};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
@@ -115,7 +115,7 @@ fn spawn_sqlite_worker(
     cancel: CancellationToken,
 ) -> JoinHandle<Result<(), WorkerError>> {
     tokio::spawn(async move {
-        WorkerBuilder::new(ENTITY_QUEUE)
+        WorkerBuilder::new(ADAPTIVE_QUEUE)
             .backend(storage)
             .data(state)
             .layer(TraceparentLayer::new().with_scheduler_metrics())
@@ -134,7 +134,7 @@ fn sqlite_queue_config() -> apalis_sqlite::Config {
     let poll_strategy = StrategyBuilder::new()
         .apply(IntervalStrategy::new(Duration::from_millis(1)))
         .build();
-    apalis_sqlite::Config::new(ENTITY_QUEUE)
+    apalis_sqlite::Config::new(ADAPTIVE_QUEUE)
         .with_poll_interval(poll_strategy)
         .set_buffer_size(8)
 }

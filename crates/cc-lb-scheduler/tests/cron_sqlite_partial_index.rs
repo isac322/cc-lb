@@ -7,7 +7,7 @@ use cc_lb_config::{Config, RecurringJobConfig};
 use cc_lb_scheduler::leader_election::LeaderElection;
 use cc_lb_scheduler::migrations::apply_post_setup_migrations;
 use cc_lb_scheduler::worker::{
-    ENTITY_QUEUE, EntityJob, SINGLETON_QUEUE, SchedulerBackend, SchedulerCtx,
+    ADAPTIVE_QUEUE, AdaptiveJob, CRON_QUEUE, SchedulerBackend, SchedulerCtx,
     SqliteSchedulerStorage,
 };
 use tokio::task::JoinHandle;
@@ -20,9 +20,9 @@ async fn sqlite_cron_producer_runs_after_partial_idempotency_index()
     apply_post_setup_migrations(&pool).await?;
     let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
         pool: pool.clone(),
-        storage: apalis_sqlite::SqliteStorage::<EntityJob, (), ()>::new_in_queue(
+        storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_in_queue(
             &pool,
-            ENTITY_QUEUE,
+            ADAPTIVE_QUEUE,
         ),
     });
     let cancel = CancellationToken::new();
@@ -73,7 +73,7 @@ async fn wait_for_done_singleton(pool: &sqlx::SqlitePool) -> Result<i64, sqlx::E
     loop {
         let done_count: i64 =
             sqlx::query_scalar("SELECT COUNT(*) FROM Jobs WHERE job_type = ?1 AND status = 'Done'")
-                .bind(SINGLETON_QUEUE)
+                .bind(CRON_QUEUE)
                 .fetch_one(pool)
                 .await?;
         if done_count > 0 || Instant::now() >= deadline {

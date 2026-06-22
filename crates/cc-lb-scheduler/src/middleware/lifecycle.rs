@@ -8,7 +8,7 @@ use tower::{Layer, Service};
 
 use crate::retry::JobOutcome;
 use crate::scheduler_metrics;
-use crate::worker::{EntityJob, SingletonJob};
+use crate::worker::{AdaptiveJob, CronJob};
 
 type MetricsFuture<T> = Pin<Box<dyn Future<Output = T> + Send>>;
 
@@ -50,30 +50,30 @@ where
     }
 }
 
-impl SchedulerMetricPayload for EntityJob {
+impl SchedulerMetricPayload for AdaptiveJob {
     fn scheduler_job_type(&self) -> &'static str {
         match self {
             Self::Warmup(_) => "upstream_warmup",
-            Self::OAuthRefresh(_) => "entity:oauth_refresh",
-            Self::OAuthUsagePoll(_) => "entity:oauth_usage_poll",
-            Self::MetadataRefresh(_) => "entity:metadata_refresh",
+            Self::OAuthRefresh(_) => "adaptive:oauth_refresh",
+            Self::OAuthUsagePoll(_) => "adaptive:oauth_usage_poll",
+            Self::MetadataRefresh(_) => "adaptive:metadata_refresh",
         }
     }
 }
 
-impl SchedulerMetricPayload for SingletonJob {
+impl SchedulerMetricPayload for CronJob {
     fn scheduler_job_type(&self) -> &'static str {
         match self {
-            Self::UsageRollup(_) => "singleton:usage_rollup",
-            Self::UsagePrune(_) => "singleton:usage_prune",
-            Self::QuotaGc(_) => "singleton:quota_gc",
-            Self::PromptCachePurge(_) => "singleton:prompt_cache_purge",
-            Self::PriceCatalogRefresh(_) => "singleton:price_catalog_refresh",
-            Self::ApalisHousekeeping(_) => "singleton:apalis_housekeeping",
-            Self::WarmupWatchdog(_) => "singleton:warmup_watchdog",
-            Self::OAuthRefreshWatchdog(_) => "singleton:oauth_refresh_watchdog",
-            Self::OAuthUsagePollWatchdog(_) => "singleton:oauth_usage_poll_watchdog",
-            Self::AnthropicCompatRefresh(_) => "singleton:anthropic_compat_refresh",
+            Self::UsageRollup(_) => "cron:usage_rollup",
+            Self::UsagePrune(_) => "cron:usage_prune",
+            Self::QuotaGc(_) => "cron:quota_gc",
+            Self::PromptCachePurge(_) => "cron:prompt_cache_purge",
+            Self::PriceCatalogRefresh(_) => "cron:price_catalog_refresh",
+            Self::ApalisHousekeeping(_) => "cron:apalis_housekeeping",
+            Self::WarmupWatchdog(_) => "cron:warmup_watchdog",
+            Self::OAuthRefreshWatchdog(_) => "cron:oauth_refresh_watchdog",
+            Self::OAuthUsagePollWatchdog(_) => "cron:oauth_usage_poll_watchdog",
+            Self::AnthropicCompatRefresh(_) => "cron:anthropic_compat_refresh",
         }
     }
 }

@@ -21,7 +21,7 @@ use cc_lb_core::{AuditEntry, AuditPayload, fetch_metadata_only, make_metadata_ht
 use cc_lb_scheduler::error::SchedulerError;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollJob;
-use cc_lb_scheduler::worker::{EntityJob, SchedulerPushTask};
+use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerPushTask};
 use cc_lb_storage_api::upstream::{UpstreamKind, UpstreamWarmupDialectPlugin};
 use cc_lb_storage_api::{
     OrganizationMetadataRecord, Storage, StorageError, UpstreamCreate, UpstreamRecord,
@@ -962,7 +962,7 @@ async fn seed_oauth_bootstrap_tasks(
     };
     let seed_secs = now_unix_secs();
     for task in oauth_bootstrap_tasks(upstream_id, seed_secs) {
-        match scheduler.push_entity_task(task).await {
+        match scheduler.push_adaptive_task(task).await {
             Ok(()) | Err(SchedulerError::Conflict(_)) => {}
             Err(error) => return Err(error),
         }
@@ -970,19 +970,19 @@ async fn seed_oauth_bootstrap_tasks(
     Ok(())
 }
 
-fn oauth_bootstrap_tasks(upstream_id: Uuid, seed_secs: u64) -> [SchedulerPushTask<EntityJob>; 2] {
+fn oauth_bootstrap_tasks(upstream_id: Uuid, seed_secs: u64) -> [SchedulerPushTask<AdaptiveJob>; 2] {
     [
         SchedulerPushTask {
-            args: EntityJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
+            args: AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
             idempotency_key: Some(format!(
-                "entity:oauth_refresh:{upstream_id}:bootstrap:{seed_secs}"
+                "adaptive:oauth_refresh:{upstream_id}:bootstrap:{seed_secs}"
             )),
             run_at_unix_secs: Some(seed_secs),
         },
         SchedulerPushTask {
-            args: EntityJob::OAuthUsagePoll(OAuthUsagePollJob::new(upstream_id)),
+            args: AdaptiveJob::OAuthUsagePoll(OAuthUsagePollJob::new(upstream_id)),
             idempotency_key: Some(format!(
-                "entity:oauth_usage_poll:{upstream_id}:bootstrap:{seed_secs}"
+                "adaptive:oauth_usage_poll:{upstream_id}:bootstrap:{seed_secs}"
             )),
             run_at_unix_secs: Some(seed_secs),
         },
@@ -1208,10 +1208,10 @@ mod tests {
 
         assert_eq!(
             refresh.idempotency_key.as_deref(),
-            Some("entity:oauth_refresh:12345678-1234-5678-1234-567812345678:bootstrap:1800000000")
+            Some("adaptive:oauth_refresh:12345678-1234-5678-1234-567812345678:bootstrap:1800000000")
         );
         assert_eq!(refresh.run_at_unix_secs, Some(seed_secs));
-        let cc_lb_scheduler::worker::EntityJob::OAuthRefresh(refresh_job) = refresh.args else {
+        let cc_lb_scheduler::worker::AdaptiveJob::OAuthRefresh(refresh_job) = refresh.args else {
             panic!("expected oauth refresh job");
         };
         assert_eq!(refresh_job.upstream_id, upstream_id);
@@ -1219,11 +1219,11 @@ mod tests {
         assert_eq!(
             usage_poll.idempotency_key.as_deref(),
             Some(
-                "entity:oauth_usage_poll:12345678-1234-5678-1234-567812345678:bootstrap:1800000000"
+                "adaptive:oauth_usage_poll:12345678-1234-5678-1234-567812345678:bootstrap:1800000000"
             )
         );
         assert_eq!(usage_poll.run_at_unix_secs, Some(seed_secs));
-        let cc_lb_scheduler::worker::EntityJob::OAuthUsagePoll(usage_job) = usage_poll.args else {
+        let cc_lb_scheduler::worker::AdaptiveJob::OAuthUsagePoll(usage_job) = usage_poll.args else {
             panic!("expected oauth usage poll job");
         };
         assert_eq!(usage_job.upstream_id, upstream_id);

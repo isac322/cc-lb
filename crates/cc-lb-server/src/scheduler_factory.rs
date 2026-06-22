@@ -181,7 +181,7 @@ async fn open_sqlite(
         .await
         .map_err(migration_error)?;
     let storage =
-        apalis_sqlite::SqliteStorage::new_in_queue(&pool, cc_lb_scheduler::worker::ENTITY_QUEUE);
+        apalis_sqlite::SqliteStorage::new_in_queue(&pool, cc_lb_scheduler::worker::ADAPTIVE_QUEUE);
     Ok(OpenedScheduler {
         backend: SchedulerBackend::Sqlite(SqliteSchedulerStorage { pool, storage }),
         leader_connection: None,
@@ -278,7 +278,7 @@ async fn open_postgres(
     );
     let storage = apalis_postgres::PostgresStorage::new_with_config(
         &pool,
-        &apalis_postgres::Config::new(cc_lb_scheduler::worker::ENTITY_QUEUE),
+        &apalis_postgres::Config::new(cc_lb_scheduler::worker::ADAPTIVE_QUEUE),
     );
     Ok(OpenedScheduler {
         backend: SchedulerBackend::Postgres(PostgresSchedulerStorage { pool, storage }),

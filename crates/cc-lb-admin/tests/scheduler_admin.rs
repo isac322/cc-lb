@@ -45,10 +45,10 @@ async fn scheduler_admin_sqlite_status_and_failures() -> Result<(), Box<dyn std:
     )
     .await?;
     assert_eq!(failures_status, StatusCode::OK);
-    assert_eq!(failures_body["failures"][0]["job_type"], "entity:warmup");
+    assert_eq!(failures_body["failures"][0]["job_type"], "adaptive:warmup");
     assert_eq!(
         failures_body["failures"][0]["payload_summary"],
-        "entity:warmup:test"
+        "adaptive:warmup:test"
     );
 
     let response = support::request(app, "POST", "/admin/scheduler/reconcile", &[]).await?;
@@ -80,7 +80,7 @@ async fn scheduler_admin_postgres_status_and_failures() -> Result<(), Box<dyn st
         )
         .await?;
         assert_eq!(failures_status, StatusCode::OK);
-        assert_eq!(failures_body["failures"][0]["job_type"], "entity:warmup");
+        assert_eq!(failures_body["failures"][0]["job_type"], "adaptive:warmup");
         let response = support::request(app, "POST", "/admin/scheduler/reconcile", &[]).await?;
         assert_eq!(response.status(), StatusCode::METHOD_NOT_ALLOWED);
         Ok::<(), Box<dyn std::error::Error>>(())

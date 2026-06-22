@@ -5,7 +5,7 @@ use cc_lb_scheduler::jobs::oauth_usage_poll::{
 };
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::state_stores::{OAuthUsagePollCursorsStore, OAuthUsagePollScheduleConfig};
-use cc_lb_scheduler::worker::{EntityJob, SchedulerBackend, SchedulerPushTask};
+use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerBackend, SchedulerPushTask};
 use cc_lb_storage_api::{
     SubscriptionQuotaObservationRecord, SubscriptionQuotaSampleKind, SubscriptionQuotaSource,
     SubscriptionQuotaStatus, SubscriptionQuotaWindow,
@@ -121,11 +121,11 @@ pub(super) async fn push_next_oauth_usage_poll_task(
 ) -> SchedulerResult<()> {
     let idempotency_key = job.idempotency_key(unlock_at_unix_secs);
     let task = SchedulerPushTask {
-        args: EntityJob::OAuthUsagePoll(job),
+        args: AdaptiveJob::OAuthUsagePoll(job),
         idempotency_key: Some(idempotency_key),
         run_at_unix_secs: Some(unlock_at_unix_secs),
     };
-    match backend.push_entity_task(task).await {
+    match backend.push_adaptive_task(task).await {
         Ok(()) | Err(SchedulerError::Conflict(_)) => Ok(()),
         Err(error) => Err(error),
     }

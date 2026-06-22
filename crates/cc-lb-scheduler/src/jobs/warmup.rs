@@ -22,7 +22,7 @@ impl UpstreamWarmupJob {
     }
 
     pub fn idempotency_key(&self, cycle_secs: u64) -> String {
-        format!("entity:warmup:{}:{cycle_secs}", self.upstream_id)
+        format!("adaptive:warmup:{}:{cycle_secs}", self.upstream_id)
     }
 }
 

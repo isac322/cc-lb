@@ -1,7 +1,7 @@
 use std::{collections::HashSet, future::Future, sync::Arc, time::Duration};
 
 use cc_lb_scheduler::{
-    cron::WorkerBuilder as CronWorkerBuilder, leader_election::LeaderElection, worker::ENTITY_QUEUE,
+    cron::WorkerBuilder as CronWorkerBuilder, leader_election::LeaderElection, worker::ADAPTIVE_QUEUE,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
 use serde::{Deserialize, Serialize};
@@ -200,7 +200,7 @@ pub async fn wait_for_done_entity_jobs(pool: &PgPool, expected: i64) -> TestResu
             Ok(sqlx::query_scalar::<_, i64>(
                 "SELECT COUNT(*) FROM apalis.jobs WHERE job_type = $1 AND status = 'Done'",
             )
-            .bind(ENTITY_QUEUE)
+            .bind(ADAPTIVE_QUEUE)
             .fetch_one(pool)
             .await?
                 >= expected)

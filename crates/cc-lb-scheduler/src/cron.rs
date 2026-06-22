@@ -184,7 +184,7 @@ where
             let kind = job.singleton_kind();
             let task = TaskBuilder::<Job, Storage::Context, Storage::IdType>::new(job)
                 .run_at_timestamp(tick_secs)
-                .with_idempotency_key(format!("singleton:{kind}:{tick_secs}"))
+                .with_idempotency_key(format!("cron:{kind}:{tick_secs}"))
                 .build();
             match self.storage.push_task(task).await {
                 Ok(()) => {}

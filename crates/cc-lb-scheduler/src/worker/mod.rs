@@ -21,19 +21,19 @@ mod jobs;
 mod layers;
 
 pub use backend_api::{Filter, SchedulerPushTask, SchedulerTaskRow, TaskStatus};
-pub use jobs::{EntityJob, SingletonJob};
-pub use layers::{EntityWorker, SingletonWorker, build_singleton_worker};
+pub use jobs::{AdaptiveJob, CronJob};
+pub use layers::{AdaptiveWorker, CronWorker, build_cron_worker};
 
-pub const ENTITY_QUEUE: &str = "entity";
-pub const SINGLETON_QUEUE: &str = "singleton";
+pub const ADAPTIVE_QUEUE: &str = "adaptive";
+pub const CRON_QUEUE: &str = "cron";
 
-pub type EntityDispatchFuture =
+pub type AdaptiveDispatchFuture =
     Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>>;
-pub type SingletonDispatchFuture =
+pub type CronDispatchFuture =
     Pin<Box<dyn Future<Output = Result<JobOutcome, SchedulerError>> + Send>>;
 
-pub type EntityDispatchFn = Arc<dyn Fn(EntityJob) -> EntityDispatchFuture + Send + Sync>;
-pub type SingletonDispatchFn = Arc<dyn Fn(SingletonJob) -> SingletonDispatchFuture + Send + Sync>;
+pub type EntityDispatchFn = Arc<dyn Fn(AdaptiveJob) -> AdaptiveDispatchFuture + Send + Sync>;
+pub type SingletonDispatchFn = Arc<dyn Fn(CronJob) -> CronDispatchFuture + Send + Sync>;
 
 #[derive(Clone)]
 pub struct SchedulerCtx {
@@ -76,7 +76,7 @@ pub enum SchedulerBackend {
 
 #[cfg(feature = "sqlite")]
 pub type SqliteApalisStorage = apalis_sqlite::SqliteStorage<
-    EntityJob,
+    AdaptiveJob,
     apalis_codec::json::JsonCodec<apalis_sqlite::CompactType>,
     apalis_sqlite::fetcher::SqliteFetcher,
 >;
@@ -89,7 +89,7 @@ pub struct SqliteSchedulerStorage {
 }
 
 #[cfg(feature = "postgres")]
-pub type PostgresApalisStorage = apalis_postgres::PostgresStorage<EntityJob>;
+pub type PostgresApalisStorage = apalis_postgres::PostgresStorage<AdaptiveJob>;
 
 #[cfg(feature = "postgres")]
 #[derive(Clone)]
@@ -116,7 +116,7 @@ impl SchedulerBackend {
         Ok(handles)
     }
 
-    pub async fn push_job(&self, job: EntityJob) -> Result<(), SchedulerError> {
+    pub async fn push_job(&self, job: AdaptiveJob) -> Result<(), SchedulerError> {
         match self {
             #[cfg(feature = "sqlite")]
             Self::Sqlite(sqlite) => {
@@ -139,8 +139,8 @@ impl SchedulerBackend {
         ctx: SchedulerCtx,
         cancel: CancellationToken,
     ) -> Result<Vec<JoinHandle<()>>, SchedulerError> {
-        let entity_worker = build_entity_worker(self, ctx.clone())?;
-        let singleton_worker = build_singleton_worker(self, ctx)?;
+        let entity_worker = build_adaptive_worker(self, ctx.clone())?;
+        let singleton_worker = build_cron_worker(self, ctx)?;
         let entity_cancel = cancel.clone();
         let singleton_cancel = cancel;
         Ok(vec![
@@ -168,9 +168,9 @@ impl std::fmt::Debug for PostgresSchedulerStorage {
     }
 }
 
-pub fn build_entity_worker(
+pub fn build_adaptive_worker(
     backend: &SchedulerBackend,
     ctx: SchedulerCtx,
-) -> Result<EntityWorker, SchedulerError> {
-    layers::build_backend_entity_worker(backend, ctx)
+) -> Result<AdaptiveWorker, SchedulerError> {
+    layers::build_backend_adaptive_worker(backend, ctx)
 }

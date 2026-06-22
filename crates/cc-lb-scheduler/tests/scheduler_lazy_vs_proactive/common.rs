@@ -117,5 +117,5 @@ where
 }
 
 pub fn metadata_key_prefix(upstream_id: Uuid) -> String {
-    format!("entity:metadata_refresh:{upstream_id}:%")
+    format!("adaptive:metadata_refresh:{upstream_id}:%")
 }

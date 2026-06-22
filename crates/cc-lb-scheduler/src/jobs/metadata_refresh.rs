@@ -35,7 +35,7 @@ impl MetadataRefreshJob {
 
     pub fn idempotency_key(&self) -> String {
         format!(
-            "entity:metadata_refresh:{}:{}",
+            "adaptive:metadata_refresh:{}:{}",
             self.upstream_id, self.credential_generation
         )
     }

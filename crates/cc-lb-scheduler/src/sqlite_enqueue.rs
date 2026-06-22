@@ -8,7 +8,7 @@ use futures_util::{Stream, StreamExt as _};
 use sqlx::SqlitePool;
 
 use crate::error::{Result, SchedulerError};
-use crate::worker::{EntityJob, SingletonJob};
+use crate::worker::{AdaptiveJob, CronJob};
 
 const DEFAULT_MAX_ATTEMPTS: i32 = 5;
 const DEFAULT_PRIORITY: i32 = 0;
@@ -26,7 +26,7 @@ impl SqliteSingletonCronStorage {
 }
 
 impl Backend for SqliteSingletonCronStorage {
-    type Args = SingletonJob;
+    type Args = CronJob;
     type IdType = ulid::Ulid;
     type Context = apalis_sqlite::SqliteContext;
     type Error = sqlx::Error;
@@ -48,10 +48,10 @@ impl Backend for SqliteSingletonCronStorage {
     }
 }
 
-impl TaskSink<SingletonJob> for SqliteSingletonCronStorage {
+impl TaskSink<CronJob> for SqliteSingletonCronStorage {
     async fn push(
         &mut self,
-        job: SingletonJob,
+        job: CronJob,
     ) -> std::result::Result<(), TaskSinkError<Self::Error>> {
         let payload = encode_singleton_job(&job)?;
         insert_singleton_job(
@@ -71,7 +71,7 @@ impl TaskSink<SingletonJob> for SqliteSingletonCronStorage {
 
     async fn push_bulk(
         &mut self,
-        jobs: Vec<SingletonJob>,
+        jobs: Vec<CronJob>,
     ) -> std::result::Result<(), TaskSinkError<Self::Error>> {
         for job in jobs {
             self.push(job).await?;
@@ -81,7 +81,7 @@ impl TaskSink<SingletonJob> for SqliteSingletonCronStorage {
 
     async fn push_stream(
         &mut self,
-        mut jobs: impl Stream<Item = SingletonJob> + Unpin + Send,
+        mut jobs: impl Stream<Item = CronJob> + Unpin + Send,
     ) -> std::result::Result<(), TaskSinkError<Self::Error>> {
         while let Some(job) = jobs.next().await {
             self.push(job).await?;
@@ -91,7 +91,7 @@ impl TaskSink<SingletonJob> for SqliteSingletonCronStorage {
 
     async fn push_task(
         &mut self,
-        task: Task<SingletonJob, Self::Context, Self::IdType>,
+        task: Task<CronJob, Self::Context, Self::IdType>,
     ) -> std::result::Result<(), TaskSinkError<Self::Error>> {
         let payload = encode_singleton_job(&task.args)?;
         let idempotency_key = task
@@ -126,7 +126,7 @@ impl TaskSink<SingletonJob> for SqliteSingletonCronStorage {
 
     async fn push_all(
         &mut self,
-        mut tasks: impl Stream<Item = Task<SingletonJob, Self::Context, Self::IdType>> + Unpin + Send,
+        mut tasks: impl Stream<Item = Task<CronJob, Self::Context, Self::IdType>> + Unpin + Send,
     ) -> std::result::Result<(), TaskSinkError<Self::Error>> {
         while let Some(task) = tasks.next().await {
             self.push_task(task).await?;
@@ -135,7 +135,7 @@ impl TaskSink<SingletonJob> for SqliteSingletonCronStorage {
     }
 }
 
-pub(crate) async fn push_entity_job(pool: &SqlitePool, queue: &str, job: EntityJob) -> Result<()> {
+pub(crate) async fn push_entity_job(pool: &SqlitePool, queue: &str, job: AdaptiveJob) -> Result<()> {
     let payload = apalis_codec::json::JsonCodec::<Vec<u8>>::encode(&job)
         .map_err(|error| SchedulerError::Job(format!("encode entity job: {error}")))?;
     let run_at = now_unix_secs()?;
@@ -158,7 +158,7 @@ pub(crate) async fn push_entity_job(pool: &SqlitePool, queue: &str, job: EntityJ
 }
 
 fn encode_singleton_job(
-    job: &SingletonJob,
+    job: &CronJob,
 ) -> std::result::Result<Vec<u8>, TaskSinkError<sqlx::Error>> {
     apalis_codec::json::JsonCodec::<Vec<u8>>::encode(job)
         .map_err(|error| TaskSinkError::CodecError(error.into()))
@@ -193,22 +193,22 @@ async fn insert_singleton_job(
     Ok(())
 }
 
-fn singleton_idempotency_key(job: &SingletonJob) -> String {
-    format!("singleton:{}", job.kind())
+fn singleton_idempotency_key(job: &CronJob) -> String {
+    format!("cron:{}", job.kind())
 }
 
-fn singleton_tick_idempotency_key(job: &SingletonJob, tick_unix_secs: u64) -> String {
-    format!("singleton:{}:{tick_unix_secs}", job.kind())
+fn singleton_tick_idempotency_key(job: &CronJob, tick_unix_secs: u64) -> String {
+    format!("cron:{}:{tick_unix_secs}", job.kind())
 }
 
-fn entity_idempotency_key(job: &EntityJob, run_at_unix_secs: i64) -> Result<String> {
+fn entity_idempotency_key(job: &AdaptiveJob, run_at_unix_secs: i64) -> Result<String> {
     let run_at_unix_secs = u64::try_from(run_at_unix_secs)
         .map_err(|_| SchedulerError::Job("run_at_unix_secs is negative".to_owned()))?;
     match job {
-        EntityJob::Warmup(job) => Ok(job.idempotency_key(job.cycle_key)),
-        EntityJob::OAuthRefresh(job) => Ok(job.idempotency_key(run_at_unix_secs)),
-        EntityJob::OAuthUsagePoll(job) => Ok(job.idempotency_key(run_at_unix_secs)),
-        EntityJob::MetadataRefresh(job) => Ok(job.idempotency_key()),
+        AdaptiveJob::Warmup(job) => Ok(job.idempotency_key(job.cycle_key)),
+        AdaptiveJob::OAuthRefresh(job) => Ok(job.idempotency_key(run_at_unix_secs)),
+        AdaptiveJob::OAuthUsagePoll(job) => Ok(job.idempotency_key(run_at_unix_secs)),
+        AdaptiveJob::MetadataRefresh(job) => Ok(job.idempotency_key()),
     }
 }
 

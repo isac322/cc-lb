@@ -3,7 +3,7 @@
 use std::future::Future;
 
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
-use cc_lb_scheduler::worker::{EntityJob, SchedulerBackend};
+use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerBackend};
 use cc_lb_server::refresh::LazyRefresher;
 use cc_lb_signer_anthropic_oauth::LazyRefreshHandle;
 use uuid::Uuid;
@@ -40,7 +40,7 @@ where
     let upstream_before = read_upstream_generation().await?;
 
     backend
-        .push_job(EntityJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)))
+        .push_job(AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)))
         .await?;
     fake.wait_for_refresh_request().await?;
     if let Err(error) = wait_for_oauth_job_running(&mut oauth_job_running).await {

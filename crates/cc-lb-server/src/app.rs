@@ -1099,11 +1099,11 @@ impl cc_lb_core::MetadataRefreshEnqueue for ServerMetadataRefreshEnqueue {
         };
         let idempotency_key = job.idempotency_key();
         let task = cc_lb_scheduler::worker::SchedulerPushTask {
-            args: cc_lb_scheduler::worker::EntityJob::MetadataRefresh(job),
+            args: cc_lb_scheduler::worker::AdaptiveJob::MetadataRefresh(job),
             idempotency_key: Some(idempotency_key),
             run_at_unix_secs: None,
         };
-        match self.scheduler_backend.push_entity_task(task).await {
+        match self.scheduler_backend.push_adaptive_task(task).await {
             Ok(()) | Err(cc_lb_scheduler::error::SchedulerError::Conflict(_)) => Ok(()),
             Err(error) => Err(cc_lb_core::MetadataHookEnqueueError::Enqueue(
                 error.to_string(),

@@ -14,10 +14,10 @@ use cc_lb_scheduler::jobs::usage_rollup::UsageRollupTask;
 use cc_lb_scheduler::jobs::warmup::UpstreamWarmupJob;
 use cc_lb_scheduler::scheduler_metrics;
 use cc_lb_scheduler::worker::{
-    ENTITY_QUEUE, EntityJob, SINGLETON_QUEUE, SchedulerBackend, SchedulerCtx, SingletonJob,
+    ADAPTIVE_QUEUE, AdaptiveJob, CRON_QUEUE, SchedulerBackend, SchedulerCtx, CronJob,
 };
 #[cfg(feature = "sqlite")]
-use cc_lb_scheduler::worker::{SqliteSchedulerStorage, build_entity_worker, build_singleton_worker};
+use cc_lb_scheduler::worker::{SqliteSchedulerStorage, build_adaptive_worker, build_cron_worker};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -49,7 +49,7 @@ fn scheduler_metrics_cover_worker_lifecycle() -> Result<(), Box<dyn Error>> {
             assert_counter_eq(
                 &rendered,
                 scheduler_metrics::JOBS_TOTAL,
-                &[("job_type", "entity:oauth_refresh"), ("status", "done")],
+                &[("job_type", "adaptive:oauth_refresh"), ("status", "done")],
                 1.0,
             );
             Ok::<(), Box<dyn Error>>(())
@@ -60,18 +60,18 @@ fn scheduler_metrics_cover_worker_lifecycle() -> Result<(), Box<dyn Error>> {
 
 #[cfg(feature = "sqlite")]
 async fn run_entity_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error>> {
-    let config = fast_queue_config(ENTITY_QUEUE);
+    let config = fast_queue_config(ADAPTIVE_QUEUE);
     let mut storage =
-        apalis_sqlite::SqliteStorage::<EntityJob, (), ()>::new_with_config(pool, &config);
+        apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(pool, &config);
     for job in entity_jobs(Uuid::new_v4()) {
         storage.push(job).await?;
     }
 
     let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
         pool: pool.clone(),
-        storage: apalis_sqlite::SqliteStorage::<EntityJob, (), ()>::new_with_config(pool, &config),
+        storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(pool, &config),
     });
-    build_entity_worker(&backend, SchedulerCtx::default())?
+    build_adaptive_worker(&backend, SchedulerCtx::default())?
         .run_for(Duration::from_secs(2))
         .await?;
     Ok(())
@@ -79,18 +79,18 @@ async fn run_entity_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error>> 
 
 #[cfg(feature = "sqlite")]
 async fn run_singleton_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error>> {
-    let config = fast_queue_config(SINGLETON_QUEUE);
+    let config = fast_queue_config(CRON_QUEUE);
     let mut storage =
-        apalis_sqlite::SqliteStorage::<SingletonJob, (), ()>::new_with_config(pool, &config);
+        apalis_sqlite::SqliteStorage::<CronJob, (), ()>::new_with_config(pool, &config);
     for job in singleton_jobs() {
         storage.push(job).await?;
     }
 
     let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
         pool: pool.clone(),
-        storage: apalis_sqlite::SqliteStorage::<EntityJob, (), ()>::new_in_queue(
+        storage: apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_in_queue(
             pool,
-            ENTITY_QUEUE,
+            ADAPTIVE_QUEUE,
         ),
     });
     let cancel = CancellationToken::new();
@@ -99,7 +99,7 @@ async fn run_singleton_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error
         tokio::time::sleep(Duration::from_secs(2)).await;
         stop.cancel();
     });
-    build_singleton_worker(&backend, SchedulerCtx::default())?
+    build_cron_worker(&backend, SchedulerCtx::default())?
         .run_until_cancelled(cancel)
         .await?;
     Ok(())
@@ -126,26 +126,26 @@ fn fast_queue_config(queue: &str) -> apalis_sqlite::Config {
         .set_buffer_size(16)
 }
 
-fn entity_jobs(upstream_id: Uuid) -> [EntityJob; 4] {
+fn entity_jobs(upstream_id: Uuid) -> [AdaptiveJob; 4] {
     [
-        EntityJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1)),
-        EntityJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
-        EntityJob::OAuthUsagePoll(OAuthUsagePollJob {
+        AdaptiveJob::Warmup(UpstreamWarmupJob::new(upstream_id, 1)),
+        AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
+        AdaptiveJob::OAuthUsagePoll(OAuthUsagePollJob {
             upstream_id,
             traceparent: None,
         }),
-        EntityJob::MetadataRefresh(MetadataRefreshJob::new(upstream_id, 1)),
+        AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(upstream_id, 1)),
     ]
 }
 
-fn singleton_jobs() -> [SingletonJob; 6] {
+fn singleton_jobs() -> [CronJob; 6] {
     [
-        SingletonJob::UsageRollup(UsageRollupTask::default()),
-        SingletonJob::UsagePrune(UsagePruneJob::default()),
-        SingletonJob::QuotaGc(SubscriptionQuotaGcJob::default()),
-        SingletonJob::PromptCachePurge(PromptCacheObservationPurgeJob::default()),
-        SingletonJob::PriceCatalogRefresh(PriceCatalogRefreshJob::default()),
-        SingletonJob::ApalisHousekeeping(ApalisHousekeepingJob::default()),
+        CronJob::UsageRollup(UsageRollupTask::default()),
+        CronJob::UsagePrune(UsagePruneJob::default()),
+        CronJob::QuotaGc(SubscriptionQuotaGcJob::default()),
+        CronJob::PromptCachePurge(PromptCacheObservationPurgeJob::default()),
+        CronJob::PriceCatalogRefresh(PriceCatalogRefreshJob::default()),
+        CronJob::ApalisHousekeeping(ApalisHousekeepingJob::default()),
     ]
 }
 

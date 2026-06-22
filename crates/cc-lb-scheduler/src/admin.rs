@@ -8,7 +8,7 @@ use sqlx::Row as _;
 use crate::error::{Result, SchedulerError};
 use crate::leader_election::{LeaderElection, LeaderState};
 use crate::worker::{
-    EntityJob, SINGLETON_QUEUE, SchedulerBackend, SchedulerPushTask, SingletonJob,
+    AdaptiveJob, CRON_QUEUE, SchedulerBackend, SchedulerPushTask, CronJob,
 };
 
 #[derive(Clone, Debug)]
@@ -54,12 +54,12 @@ impl SchedulerAdminHandle {
         Self { backend, leader }
     }
 
-    pub async fn push_entity_task(&self, task: SchedulerPushTask<EntityJob>) -> Result<()> {
-        self.backend.push_entity_task(task).await
+    pub async fn push_adaptive_task(&self, task: SchedulerPushTask<AdaptiveJob>) -> Result<()> {
+        self.backend.push_adaptive_task(task).await
     }
 
-    pub async fn push_singleton_task(&self, task: SchedulerPushTask<SingletonJob>) -> Result<()> {
-        self.backend.push_singleton_task(task).await
+    pub async fn push_cron_task(&self, task: SchedulerPushTask<CronJob>) -> Result<()> {
+        self.backend.push_cron_task(task).await
     }
 
     pub async fn status(&self, config: &SchedulerConfig) -> Result<SchedulerStatusSnapshot> {
@@ -254,7 +254,7 @@ async fn sqlite_recurring_runtime(
     let rows = sqlx::query(
         "SELECT job, status, run_at FROM Jobs WHERE job_type = ?1 ORDER BY run_at ASC, id ASC",
     )
-    .bind(SINGLETON_QUEUE)
+    .bind(CRON_QUEUE)
     .fetch_all(pool)
     .await?;
     let mut runtime = BTreeMap::new();
@@ -277,7 +277,7 @@ async fn postgres_recurring_runtime(
         "SELECT job, status, EXTRACT(EPOCH FROM run_at)::BIGINT AS run_at \
          FROM apalis.jobs WHERE job_type = $1 ORDER BY run_at ASC, id ASC",
     )
-    .bind(SINGLETON_QUEUE)
+    .bind(CRON_QUEUE)
     .fetch_all(pool)
     .await?;
     let mut runtime = BTreeMap::new();
@@ -296,7 +296,7 @@ fn record_recurring_row(
     status: String,
     run_at: u64,
 ) -> Result<()> {
-    let job: SingletonJob = serde_json::from_slice(payload)
+    let job: CronJob = serde_json::from_slice(payload)
         .map_err(|error| SchedulerError::Job(format!("decode singleton job: {error}")))?;
     let entry = runtime.entry(job.kind().to_owned()).or_default();
     if is_active_status(&status) {

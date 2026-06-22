@@ -7,7 +7,7 @@ use apalis_core::backend::codec::Codec as _;
 use cc_lb_scheduler::jobs::oauth_usage_poll::OAuthUsagePollHandler;
 use cc_lb_scheduler::middleware::TraceparentLayer;
 use cc_lb_scheduler::state_stores::OAuthUsagePollCursorsStore;
-use cc_lb_scheduler::worker::{ENTITY_QUEUE, EntityJob, SqliteApalisStorage};
+use cc_lb_scheduler::worker::{ADAPTIVE_QUEUE, AdaptiveJob, SqliteApalisStorage};
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -80,21 +80,21 @@ fn sqlite_handler(pool: sqlx::SqlitePool) -> OAuthUsagePollHandler<sqlx::Sqlite>
 }
 
 fn sqlite_storage(pool: &sqlx::SqlitePool) -> SqliteApalisStorage {
-    apalis_sqlite::SqliteStorage::<EntityJob, (), ()>::new_with_config(pool, &sqlite_queue_config())
+    apalis_sqlite::SqliteStorage::<AdaptiveJob, (), ()>::new_with_config(pool, &sqlite_queue_config())
 }
 
 fn sqlite_queue_config() -> apalis_sqlite::Config {
     let poll_strategy = StrategyBuilder::new()
         .apply(IntervalStrategy::new(Duration::from_millis(1)))
         .build();
-    apalis_sqlite::Config::new(ENTITY_QUEUE)
+    apalis_sqlite::Config::new(ADAPTIVE_QUEUE)
         .with_poll_interval(poll_strategy)
         .set_buffer_size(8)
 }
 
 fn sqlite_push(
     pool: sqlx::SqlitePool,
-) -> impl FnMut(EntityJob) -> std::pin::Pin<Box<dyn std::future::Future<Output = TestResult<()>> + Send>>
+) -> impl FnMut(AdaptiveJob) -> std::pin::Pin<Box<dyn std::future::Future<Output = TestResult<()>> + Send>>
 {
     move |job| {
         let pool = pool.clone();
@@ -106,7 +106,7 @@ fn sqlite_push(
             )
             .bind(payload)
             .bind(ulid::Ulid::new().to_string())
-            .bind(ENTITY_QUEUE)
+            .bind(ADAPTIVE_QUEUE)
             .bind("{}")
             .execute(&pool)
             .await?;
@@ -138,7 +138,7 @@ fn spawn_sqlite_worker(
     let cancel = CancellationToken::new();
     let worker_cancel = cancel.clone();
     let join: JoinHandle<Result<(), WorkerError>> = tokio::spawn(async move {
-        WorkerBuilder::new(ENTITY_QUEUE)
+        WorkerBuilder::new(ADAPTIVE_QUEUE)
             .backend(storage)
             .data(state)
             .layer(TraceparentLayer::new())

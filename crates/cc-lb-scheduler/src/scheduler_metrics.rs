@@ -19,19 +19,19 @@ pub const METADATA_REFRESH_STATUS_TOTAL: &str = "cclb_scheduler_metadata_refresh
 
 const JOB_TYPES: &[&str] = &[
     "upstream_warmup",
-    "entity:oauth_refresh",
-    "entity:oauth_usage_poll",
-    "entity:metadata_refresh",
-    "singleton:usage_rollup",
-    "singleton:usage_prune",
-    "singleton:quota_gc",
-    "singleton:prompt_cache_purge",
-    "singleton:price_catalog_refresh",
-    "singleton:apalis_housekeeping",
-    "singleton:warmup_watchdog",
-    "singleton:oauth_refresh_watchdog",
-    "singleton:oauth_usage_poll_watchdog",
-    "singleton:anthropic_compat_refresh",
+    "adaptive:oauth_refresh",
+    "adaptive:oauth_usage_poll",
+    "adaptive:metadata_refresh",
+    "cron:usage_rollup",
+    "cron:usage_prune",
+    "cron:quota_gc",
+    "cron:prompt_cache_purge",
+    "cron:price_catalog_refresh",
+    "cron:apalis_housekeeping",
+    "cron:warmup_watchdog",
+    "cron:oauth_refresh_watchdog",
+    "cron:oauth_usage_poll_watchdog",
+    "cron:anthropic_compat_refresh",
 ];
 
 const JOB_STATUSES: &[&str] = &[

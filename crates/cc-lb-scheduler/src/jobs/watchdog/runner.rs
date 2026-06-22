@@ -7,7 +7,7 @@ use crate::error::{Result, SchedulerError};
 use crate::jobs::oauth_refresh::OAuthRefreshJob;
 use crate::jobs::oauth_usage_poll::OAuthUsagePollJob;
 use crate::jobs::warmup::UpstreamWarmupJob;
-use crate::worker::{EntityJob, SchedulerBackend, SchedulerPushTask, TaskStatus};
+use crate::worker::{AdaptiveJob, SchedulerBackend, SchedulerPushTask, TaskStatus};
 
 const PAGE_SIZE: u32 = 500;
 const ACTIVE_STATUSES: [TaskStatus; 4] = [
@@ -35,18 +35,18 @@ impl WatchdogEntityKind {
 
     pub fn bootstrap_key(self, upstream_id: Uuid, tick_unix_secs: u64) -> String {
         format!(
-            "entity:{}:{}:bootstrap:{}",
+            "adaptive:{}:{}:bootstrap:{}",
             self.as_key_part(),
             upstream_id,
             tick_unix_secs
         )
     }
 
-    fn job(self, upstream_id: Uuid, tick_unix_secs: u64) -> EntityJob {
+    fn job(self, upstream_id: Uuid, tick_unix_secs: u64) -> AdaptiveJob {
         match self {
-            Self::Warmup => EntityJob::Warmup(UpstreamWarmupJob::new(upstream_id, tick_unix_secs)),
-            Self::OAuthRefresh => EntityJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
-            Self::OAuthUsagePoll => EntityJob::OAuthUsagePoll(OAuthUsagePollJob::new(upstream_id)),
+            Self::Warmup => AdaptiveJob::Warmup(UpstreamWarmupJob::new(upstream_id, tick_unix_secs)),
+            Self::OAuthRefresh => AdaptiveJob::OAuthRefresh(OAuthRefreshJob::new(upstream_id)),
+            Self::OAuthUsagePoll => AdaptiveJob::OAuthUsagePoll(OAuthUsagePollJob::new(upstream_id)),
         }
     }
 }
@@ -74,7 +74,7 @@ pub async fn run_entity_watchdog(
             idempotency_key: Some(kind.bootstrap_key(*upstream_id, tick_unix_secs)),
             run_at_unix_secs: Some(run_at_unix_secs),
         };
-        match backend.push_entity_task(task).await {
+        match backend.push_adaptive_task(task).await {
             Ok(()) => seeded += 1,
             Err(SchedulerError::Conflict(_)) => {}
             Err(error) => return Err(error),
@@ -97,7 +97,7 @@ async fn active_entity_ids(
                 page,
                 page_size: Some(PAGE_SIZE),
             };
-            let tasks = backend.list_entity_tasks(&filter).await?;
+            let tasks = backend.list_adaptive_tasks(&filter).await?;
             for task in &tasks {
                 if is_failed && task.attempts >= task.max_attempts {
                     continue;
@@ -119,7 +119,7 @@ async fn active_entity_ids(
 
 fn parse_entity_uuid(kind: WatchdogEntityKind, idempotency_key: &str) -> Option<Uuid> {
     let mut parts = idempotency_key.split(':');
-    if parts.next()? != "entity" || parts.next()? != kind.as_key_part() {
+    if parts.next()? != "adaptive" || parts.next()? != kind.as_key_part() {
         return None;
     }
     Uuid::parse_str(parts.next()?).ok()

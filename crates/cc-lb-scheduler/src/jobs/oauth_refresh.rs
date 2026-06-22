@@ -35,7 +35,7 @@ impl OAuthRefreshJob {
 
     pub fn idempotency_key(&self, expires_at_unix_secs: u64) -> String {
         format!(
-            "entity:oauth_refresh:{}:{}",
+            "adaptive:oauth_refresh:{}:{}",
             self.upstream_id, expires_at_unix_secs
         )
     }

@@ -20,7 +20,7 @@ use crate::retry::RetryPayload;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
-pub enum EntityJob {
+pub enum AdaptiveJob {
     Warmup(UpstreamWarmupJob),
     #[serde(rename = "oauth_refresh", alias = "o_auth_refresh")]
     OAuthRefresh(OAuthRefreshJob),
@@ -31,7 +31,7 @@ pub enum EntityJob {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", content = "payload", rename_all = "snake_case")]
-pub enum SingletonJob {
+pub enum CronJob {
     UsageRollup(UsageRollupTask),
     UsagePrune(UsagePruneJob),
     QuotaGc(SubscriptionQuotaGcJob),
@@ -46,7 +46,7 @@ pub enum SingletonJob {
     AnthropicCompatRefresh(AnthropicCompatRefreshJob),
 }
 
-impl SingletonJob {
+impl CronJob {
     pub const fn kind(&self) -> &'static str {
         match self {
             Self::UsageRollup(_) => "usage_rollup",
@@ -63,7 +63,7 @@ impl SingletonJob {
     }
 }
 
-impl TraceparentCarrier for EntityJob {
+impl TraceparentCarrier for AdaptiveJob {
     fn traceparent(&self) -> Option<&str> {
         match self {
             Self::Warmup(_) => None,
@@ -83,7 +83,7 @@ impl TraceparentCarrier for EntityJob {
     }
 }
 
-impl<Ctx, IdType> TraceparentCarrier for Task<EntityJob, Ctx, IdType> {
+impl<Ctx, IdType> TraceparentCarrier for Task<AdaptiveJob, Ctx, IdType> {
     fn traceparent(&self) -> Option<&str> {
         self.args.traceparent()
     }
@@ -93,13 +93,13 @@ impl<Ctx, IdType> TraceparentCarrier for Task<EntityJob, Ctx, IdType> {
     }
 }
 
-impl<Ctx, IdType> RetryPayload for Task<EntityJob, Ctx, IdType> {
+impl<Ctx, IdType> RetryPayload for Task<AdaptiveJob, Ctx, IdType> {
     fn attempt_count(&self) -> u32 {
         u32::try_from(self.parts.attempt.current()).unwrap_or(u32::MAX)
     }
 }
 
-impl TraceparentCarrier for SingletonJob {
+impl TraceparentCarrier for CronJob {
     fn traceparent(&self) -> Option<&str> {
         match self {
             Self::UsageRollup(job) => job.traceparent.as_deref(),
@@ -131,7 +131,7 @@ impl TraceparentCarrier for SingletonJob {
     }
 }
 
-impl<Ctx, IdType> TraceparentCarrier for Task<SingletonJob, Ctx, IdType> {
+impl<Ctx, IdType> TraceparentCarrier for Task<CronJob, Ctx, IdType> {
     fn traceparent(&self) -> Option<&str> {
         self.args.traceparent()
     }
@@ -141,7 +141,7 @@ impl<Ctx, IdType> TraceparentCarrier for Task<SingletonJob, Ctx, IdType> {
     }
 }
 
-impl<Ctx, IdType> RetryPayload for Task<SingletonJob, Ctx, IdType> {
+impl<Ctx, IdType> RetryPayload for Task<CronJob, Ctx, IdType> {
     fn attempt_count(&self) -> u32 {
         u32::try_from(self.parts.attempt.current()).unwrap_or(u32::MAX)
     }

@@ -9,7 +9,7 @@ use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_scheduler::middleware::TraceparentLayer;
 use cc_lb_scheduler::retry::RetryClass;
 use cc_lb_scheduler::worker::{
-    ENTITY_QUEUE, PostgresApalisStorage, PostgresSchedulerStorage, SchedulerBackend,
+    ADAPTIVE_QUEUE, PostgresApalisStorage, PostgresSchedulerStorage, SchedulerBackend,
 };
 use cc_lb_server::refresh::LazyRefresher;
 use cc_lb_storage_api::{BackendKind, MetaStore};
@@ -152,7 +152,7 @@ fn spawn_postgres_worker(
     cancel: CancellationToken,
 ) -> JoinHandle<Result<(), WorkerError>> {
     tokio::spawn(async move {
-        WorkerBuilder::new(ENTITY_QUEUE)
+        WorkerBuilder::new(ADAPTIVE_QUEUE)
             .backend(storage)
             .data(state)
             .layer(TraceparentLayer::new().with_scheduler_metrics())
@@ -171,7 +171,7 @@ fn postgres_queue_config() -> apalis_postgres::Config {
     let poll_strategy = StrategyBuilder::new()
         .apply(IntervalStrategy::new(Duration::from_millis(1)))
         .build();
-    apalis_postgres::Config::new(ENTITY_QUEUE)
+    apalis_postgres::Config::new(ADAPTIVE_QUEUE)
         .with_poll_interval(poll_strategy)
         .set_buffer_size(8)
 }
@@ -186,7 +186,7 @@ async fn postgres_metadata_count(pool: &sqlx::PgPool, upstream_id: Uuid) -> Test
          WHERE payload ->> 'type' = 'metadata_refresh'
            AND payload #>> '{payload,upstream_id}' = $2",
     )
-    .bind(ENTITY_QUEUE)
+    .bind(ADAPTIVE_QUEUE)
     .bind(upstream_id.to_string())
     .fetch_one(pool)
     .await?)

@@ -8,7 +8,7 @@ use serde::de::DeserializeOwned;
 
 use crate::error::SchedulerError;
 
-use super::{ENTITY_QUEUE, EntityJob, SINGLETON_QUEUE, SchedulerBackend, SingletonJob};
+use super::{ADAPTIVE_QUEUE, AdaptiveJob, CRON_QUEUE, SchedulerBackend, CronJob};
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SchedulerTaskRow<Args> {
@@ -28,43 +28,43 @@ pub struct SchedulerPushTask<Args> {
 }
 
 impl SchedulerBackend {
-    pub async fn push_entity_task(
+    pub async fn push_adaptive_task(
         &self,
-        task: SchedulerPushTask<EntityJob>,
+        task: SchedulerPushTask<AdaptiveJob>,
     ) -> Result<(), SchedulerError> {
         match self {
             #[cfg(feature = "sqlite")]
             Self::Sqlite(sqlite) => {
-                insert_sqlite_task(&sqlite.pool, ENTITY_QUEUE, build_sqlite_task(task)).await
+                insert_sqlite_task(&sqlite.pool, ADAPTIVE_QUEUE, build_sqlite_task(task)).await
             }
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => {
-                insert_postgres_task(&postgres.pool, ENTITY_QUEUE, build_postgres_task(task)).await
+                insert_postgres_task(&postgres.pool, ADAPTIVE_QUEUE, build_postgres_task(task)).await
             }
         }
     }
 
-    pub async fn push_singleton_task(
+    pub async fn push_cron_task(
         &self,
-        task: SchedulerPushTask<SingletonJob>,
+        task: SchedulerPushTask<CronJob>,
     ) -> Result<(), SchedulerError> {
         match self {
             #[cfg(feature = "sqlite")]
             Self::Sqlite(sqlite) => {
-                insert_sqlite_task(&sqlite.pool, SINGLETON_QUEUE, build_sqlite_task(task)).await
+                insert_sqlite_task(&sqlite.pool, CRON_QUEUE, build_sqlite_task(task)).await
             }
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => {
-                insert_postgres_task(&postgres.pool, SINGLETON_QUEUE, build_postgres_task(task))
+                insert_postgres_task(&postgres.pool, CRON_QUEUE, build_postgres_task(task))
                     .await
             }
         }
     }
 
-    pub async fn list_entity_tasks(
+    pub async fn list_adaptive_tasks(
         &self,
         filter: &Filter,
-    ) -> Result<Vec<SchedulerTaskRow<EntityJob>>, SchedulerError> {
+    ) -> Result<Vec<SchedulerTaskRow<AdaptiveJob>>, SchedulerError> {
         match self {
             #[cfg(feature = "sqlite")]
             Self::Sqlite(sqlite) => sqlite
@@ -87,16 +87,16 @@ impl SchedulerBackend {
         }
     }
 
-    pub async fn list_singleton_tasks(
+    pub async fn list_cron_tasks(
         &self,
         filter: &Filter,
-    ) -> Result<Vec<SchedulerTaskRow<SingletonJob>>, SchedulerError> {
+    ) -> Result<Vec<SchedulerTaskRow<CronJob>>, SchedulerError> {
         match self {
             #[cfg(feature = "sqlite")]
             Self::Sqlite(sqlite) => {
-                let storage = apalis_sqlite::SqliteStorage::<SingletonJob, (), ()>::new_in_queue(
+                let storage = apalis_sqlite::SqliteStorage::<CronJob, (), ()>::new_in_queue(
                     &sqlite.pool,
-                    SINGLETON_QUEUE,
+                    CRON_QUEUE,
                 );
                 storage
                     .list_tasks(filter)
@@ -108,9 +108,9 @@ impl SchedulerBackend {
             }
             #[cfg(feature = "postgres")]
             Self::Postgres(postgres) => {
-                let storage = apalis_postgres::PostgresStorage::<SingletonJob>::new_with_config(
+                let storage = apalis_postgres::PostgresStorage::<CronJob>::new_with_config(
                     &postgres.pool,
-                    &apalis_postgres::Config::new(SINGLETON_QUEUE),
+                    &apalis_postgres::Config::new(CRON_QUEUE),
                 );
                 storage
                     .list_tasks(filter)

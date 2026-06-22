@@ -8,7 +8,7 @@ use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_core::{AuditPayload, MetadataHookHandle, MetadataHookRequest};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
-use cc_lb_scheduler::worker::{EntityJob, Filter, SchedulerBackend, SchedulerPushTask, TaskStatus};
+use cc_lb_scheduler::worker::{AdaptiveJob, Filter, SchedulerBackend, SchedulerPushTask, TaskStatus};
 use cc_lb_signer_anthropic_oauth::{LazyRefreshError, LazyRefreshHandle};
 use cc_lb_storage_api::{AuditEntry, AuditStore, StorageError, StorageResult, UpstreamRecord};
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE};
@@ -147,11 +147,11 @@ impl LazyRefreshClaimGuard for ApalisLazyRefreshClaimGuard {
         let job = OAuthRefreshJob::new(upstream_id);
         let idempotency_key = job.idempotency_key(expires_at_unix_secs);
         let task = SchedulerPushTask {
-            args: EntityJob::OAuthRefresh(job),
+            args: AdaptiveJob::OAuthRefresh(job),
             idempotency_key: Some(idempotency_key.clone()),
             run_at_unix_secs: Some(now_unix_secs),
         };
-        match self.scheduler_backend.push_entity_task(task).await {
+        match self.scheduler_backend.push_adaptive_task(task).await {
             Ok(()) | Err(cc_lb_scheduler::error::SchedulerError::Conflict(_)) => {
                 Ok(LazyRefreshClaim::Enqueued { idempotency_key })
             }
@@ -198,7 +198,7 @@ async fn apalis_lazy_refresh_task_state(
                 page_size: Some(LAZY_REFRESH_TASK_PAGE_SIZE),
             };
             let tasks = scheduler_backend
-                .list_entity_tasks(&filter)
+                .list_adaptive_tasks(&filter)
                 .await
                 .map_err(scheduler_claim_error)?;
             for task in &tasks {
@@ -225,7 +225,7 @@ async fn apalis_lazy_refresh_task_state(
 }
 
 fn lazy_refresh_task_state_from_row(
-    task: &cc_lb_scheduler::worker::SchedulerTaskRow<EntityJob>,
+    task: &cc_lb_scheduler::worker::SchedulerTaskRow<AdaptiveJob>,
 ) -> LazyRefreshTaskState {
     match &task.status {
         TaskStatus::Pending | TaskStatus::Queued | TaskStatus::Running => {
@@ -474,7 +474,7 @@ impl LazyRefreshHandle for LazyRefresher {
                         .map_err(lazy_metadata_hook_error)?;
                 } else {
                     self.apalis_handle
-                        .push_job(EntityJob::MetadataRefresh(MetadataRefreshJob::new(
+                        .push_job(AdaptiveJob::MetadataRefresh(MetadataRefreshJob::new(
                             upstream_id,
                             generation,
                         )))
@@ -898,7 +898,7 @@ mod tests {
                     pool: scheduler_pool.clone(),
                     storage: apalis_sqlite::SqliteStorage::new_in_queue(
                         &scheduler_pool,
-                        cc_lb_scheduler::worker::ENTITY_QUEUE,
+                        cc_lb_scheduler::worker::ADAPTIVE_QUEUE,
                     ),
                 });
             let stores = Arc::new(crate::dynamic_view_builder::Stores {

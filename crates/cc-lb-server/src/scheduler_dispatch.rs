@@ -1,7 +1,7 @@
 mod http;
 mod oauth;
 mod outcomes;
-mod singleton;
+mod cron;
 mod storage;
 mod time;
 mod usage;
@@ -18,7 +18,7 @@ use cc_lb_scheduler::jobs::metadata_refresh::{
     CoreMetadataRefreshRunner, MetadataRefreshJobHandler,
 };
 use cc_lb_scheduler::retry::JobOutcome;
-use cc_lb_scheduler::worker::{EntityJob, SchedulerBackend, SchedulerCtx};
+use cc_lb_scheduler::worker::{AdaptiveJob, SchedulerBackend, SchedulerCtx};
 use cc_lb_storage_api::Storage;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -109,12 +109,12 @@ impl SchedulerDispatch {
         })
     }
 
-    async fn dispatch_entity(&self, job: EntityJob) -> SchedulerResult<JobOutcome> {
+    async fn dispatch_entity(&self, job: AdaptiveJob) -> SchedulerResult<JobOutcome> {
         match job {
-            EntityJob::Warmup(job) => self.dispatch_warmup(job).await,
-            EntityJob::OAuthRefresh(job) => self.dispatch_oauth_refresh(job).await,
-            EntityJob::OAuthUsagePoll(job) => self.dispatch_oauth_usage_poll(job).await,
-            EntityJob::MetadataRefresh(job) => {
+            AdaptiveJob::Warmup(job) => self.dispatch_warmup(job).await,
+            AdaptiveJob::OAuthRefresh(job) => self.dispatch_oauth_refresh(job).await,
+            AdaptiveJob::OAuthUsagePoll(job) => self.dispatch_oauth_usage_poll(job).await,
+            AdaptiveJob::MetadataRefresh(job) => {
                 let runner = CoreMetadataRefreshRunner::new(
                     self.storage.clone(),
                     self.aead.clone(),

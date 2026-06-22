@@ -1,7 +1,7 @@
 use cc_lb_scheduler::jobs::oauth_usage_poll::{OAuthUsagePollJob, compute_next_run_at};
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::state_stores::OAuthUsagePollCursor;
-use cc_lb_scheduler::worker::EntityJob;
+use cc_lb_scheduler::worker::AdaptiveJob;
 use sqlx::Database;
 use std::future::Future;
 use uuid::Uuid;
@@ -20,7 +20,7 @@ pub async fn drive_complete_cycle<Db, Push, PushFuture, Read, ReadFuture>(
 ) -> TestResult<OAuthUsagePollCursor>
 where
     Db: Database,
-    Push: FnMut(EntityJob) -> PushFuture,
+    Push: FnMut(AdaptiveJob) -> PushFuture,
     PushFuture: Future<Output = TestResult<()>>,
     Read: FnMut() -> ReadFuture,
     ReadFuture: Future<Output = TestResult<Option<OAuthUsagePollCursor>>>,
@@ -64,7 +64,7 @@ pub async fn assert_restart_uses_persisted_cursor<Db, Push, PushFuture, Read, Re
 ) -> TestResult<()>
 where
     Db: Database,
-    Push: FnMut(EntityJob) -> PushFuture,
+    Push: FnMut(AdaptiveJob) -> PushFuture,
     PushFuture: Future<Output = TestResult<()>>,
     Read: FnMut() -> ReadFuture,
     ReadFuture: Future<Output = TestResult<Option<OAuthUsagePollCursor>>>,
@@ -85,8 +85,8 @@ where
     Ok(())
 }
 
-fn oauth_usage_poll_job(upstream_id: Uuid) -> EntityJob {
-    EntityJob::OAuthUsagePoll(OAuthUsagePollJob {
+fn oauth_usage_poll_job(upstream_id: Uuid) -> AdaptiveJob {
+    AdaptiveJob::OAuthUsagePoll(OAuthUsagePollJob {
         upstream_id,
         traceparent: None,
     })

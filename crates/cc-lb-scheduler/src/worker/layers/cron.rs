@@ -14,47 +14,47 @@ use crate::middleware::TraceparentLayer;
 use crate::retry::RetryClass;
 
 use super::super::dispatch::{SingletonHandlerFn, singleton_job_handler};
-use super::super::{SINGLETON_QUEUE, SchedulerBackend, SchedulerCtx, SingletonJob};
+use super::super::{CRON_QUEUE, SchedulerBackend, SchedulerCtx, CronJob};
 
 const SINGLETON_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[cfg(feature = "sqlite")]
 type SqliteSingletonStorage = apalis_sqlite::SqliteStorage<
-    SingletonJob,
+    CronJob,
     apalis_codec::json::JsonCodec<apalis_sqlite::CompactType>,
     apalis_sqlite::fetcher::SqliteFetcher,
 >;
 
-type SingletonWorkerFuture = Pin<Box<dyn Future<Output = Result<(), WorkerError>> + Send>>;
+type CronWorkerFuture = Pin<Box<dyn Future<Output = Result<(), WorkerError>> + Send>>;
 
-pub struct SingletonWorker {
-    run: Box<dyn FnOnce(CancellationToken) -> SingletonWorkerFuture + Send>,
+pub struct CronWorker {
+    run: Box<dyn FnOnce(CancellationToken) -> CronWorkerFuture + Send>,
 }
 
-impl SingletonWorker {
+impl CronWorker {
     pub async fn run_until_cancelled(self, cancel: CancellationToken) -> Result<(), WorkerError> {
         (self.run)(cancel).await
     }
 }
 
-pub fn build_singleton_worker(
+pub fn build_cron_worker(
     backend: &SchedulerBackend,
     ctx: SchedulerCtx,
-) -> Result<SingletonWorker, SchedulerError> {
+) -> Result<CronWorker, SchedulerError> {
     match backend {
         #[cfg(feature = "sqlite")]
         SchedulerBackend::Sqlite(sqlite) => Ok(build_sqlite_singleton_worker(
-            apalis_sqlite::SqliteStorage::<SingletonJob, (), ()>::new_in_queue(
+            apalis_sqlite::SqliteStorage::<CronJob, (), ()>::new_in_queue(
                 &sqlite.pool,
-                SINGLETON_QUEUE,
+                CRON_QUEUE,
             ),
             ctx,
         )),
         #[cfg(feature = "postgres")]
         SchedulerBackend::Postgres(postgres) => Ok(build_postgres_singleton_worker(
-            apalis_postgres::PostgresStorage::<SingletonJob>::new_with_config(
+            apalis_postgres::PostgresStorage::<CronJob>::new_with_config(
                 &postgres.pool,
-                &apalis_postgres::Config::new(SINGLETON_QUEUE),
+                &apalis_postgres::Config::new(CRON_QUEUE),
             ),
             ctx,
         )),
@@ -65,12 +65,12 @@ pub fn build_singleton_worker(
 fn build_sqlite_singleton_worker(
     storage: SqliteSingletonStorage,
     ctx: SchedulerCtx,
-) -> SingletonWorker {
+) -> CronWorker {
     let concurrency = ctx.config.singleton_concurrency;
-    SingletonWorker {
+    CronWorker {
         run: Box::new(move |cancel| {
             Box::pin(async move {
-                let worker = ApalisWorkerBuilder::new(SINGLETON_QUEUE)
+                let worker = ApalisWorkerBuilder::new(CRON_QUEUE)
                     .backend(storage)
                     .data(ctx)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
@@ -93,14 +93,14 @@ fn build_sqlite_singleton_worker(
 
 #[cfg(feature = "postgres")]
 fn build_postgres_singleton_worker(
-    storage: apalis_postgres::PostgresStorage<SingletonJob>,
+    storage: apalis_postgres::PostgresStorage<CronJob>,
     ctx: SchedulerCtx,
-) -> SingletonWorker {
+) -> CronWorker {
     let concurrency = ctx.config.singleton_concurrency;
-    SingletonWorker {
+    CronWorker {
         run: Box::new(move |cancel| {
             Box::pin(async move {
-                let worker = ApalisWorkerBuilder::new(SINGLETON_QUEUE)
+                let worker = ApalisWorkerBuilder::new(CRON_QUEUE)
                     .backend(storage)
                     .data(ctx)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())

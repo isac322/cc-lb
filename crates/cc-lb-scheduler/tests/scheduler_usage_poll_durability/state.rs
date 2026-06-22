@@ -12,7 +12,7 @@ use cc_lb_scheduler::jobs::oauth_usage_poll::{
 };
 use cc_lb_scheduler::retry::JobOutcome;
 use cc_lb_scheduler::state_stores::OAuthUsagePollScheduleConfig;
-use cc_lb_scheduler::worker::EntityJob;
+use cc_lb_scheduler::worker::AdaptiveJob;
 use http::StatusCode;
 use sqlx::Database;
 
@@ -224,13 +224,13 @@ impl UsagePollProbe {
     }
 }
 
-pub fn entity_job_handler<Db>(job: EntityJob, ctx: Data<UsagePollWorkerState<Db>>) -> HandlerFuture
+pub fn entity_job_handler<Db>(job: AdaptiveJob, ctx: Data<UsagePollWorkerState<Db>>) -> HandlerFuture
 where
     Db: Database,
     OAuthUsagePollHandler<Db>: OAuthUsagePollCursorRepository + Send + Sync + 'static,
 {
     Box::pin(async move {
-        let EntityJob::OAuthUsagePoll(job) = job else {
+        let AdaptiveJob::OAuthUsagePoll(job) = job else {
             return Ok(JobOutcome::Done);
         };
         let now = ctx.now();

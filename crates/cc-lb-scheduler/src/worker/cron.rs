@@ -20,11 +20,11 @@ const LEADER_RETRY_INTERVAL: Duration = Duration::from_secs(5);
 use super::PostgresSchedulerStorage;
 #[cfg(feature = "sqlite")]
 use super::SqliteSchedulerStorage;
-use super::{SINGLETON_QUEUE, SchedulerBackend, SingletonJob};
+use super::{CRON_QUEUE, SchedulerBackend, CronJob};
 
-type SingletonJobFactory = fn(u64) -> SingletonJob;
+type CronJobFactory = fn(u64) -> CronJob;
 
-impl crate::cron::SingletonCronJob for SingletonJob {
+impl crate::cron::SingletonCronJob for CronJob {
     fn singleton_kind(&self) -> &'static str {
         self.kind()
     }
@@ -101,12 +101,12 @@ async fn run_postgres_singleton_cron_loop(
         if cancel.is_cancelled() {
             break;
         }
-        let storage = apalis_postgres::PostgresStorage::<SingletonJob>::new_with_config(
+        let storage = apalis_postgres::PostgresStorage::<CronJob>::new_with_config(
             &pool,
-            &apalis_postgres::Config::new(SINGLETON_QUEUE),
+            &apalis_postgres::Config::new(CRON_QUEUE),
         );
         let worker = CronWorkerBuilder::singleton_queue_factory(
-            SINGLETON_QUEUE,
+            CRON_QUEUE,
             spec.schedule.clone(),
             storage,
             spec.factory,
@@ -130,9 +130,9 @@ async fn run_sqlite_singleton_cron_loop(
             break;
         }
         let storage =
-            crate::sqlite_enqueue::SqliteSingletonCronStorage::new(pool.clone(), SINGLETON_QUEUE);
+            crate::sqlite_enqueue::SqliteSingletonCronStorage::new(pool.clone(), CRON_QUEUE);
         let worker = CronWorkerBuilder::singleton_queue_factory(
-            SINGLETON_QUEUE,
+            CRON_QUEUE,
             spec.schedule.clone(),
             storage,
             spec.factory,
@@ -146,11 +146,11 @@ async fn run_sqlite_singleton_cron_loop(
 
 async fn run_one_cron_attempt<Storage>(
     name: &'static str,
-    worker: CronWorkerBuilder<SingletonJob, IntervalSchedule, Storage, SingletonJobFactory>,
+    worker: CronWorkerBuilder<CronJob, IntervalSchedule, Storage, CronJobFactory>,
     leader: &Arc<LeaderElection>,
     cancel: &CancellationToken,
 ) where
-    Storage: apalis::prelude::TaskSink<SingletonJob, Error = sqlx::Error> + Send + 'static,
+    Storage: apalis::prelude::TaskSink<CronJob, Error = sqlx::Error> + Send + 'static,
 {
     tokio::select! {
         result = worker.run(leader.as_ref()) => {
@@ -183,45 +183,45 @@ async fn abort_join_handles(handles: Vec<JoinHandle<()>>) {
 struct SingletonCronSpec {
     name: &'static str,
     schedule: IntervalSchedule,
-    factory: SingletonJobFactory,
+    factory: CronJobFactory,
 }
 
 fn singleton_cron_specs(config: &Config) -> Vec<SingletonCronSpec> {
     let mut specs = Vec::new();
     push_singleton_spec(&mut specs, config, "usage_rollup", |_| {
-        SingletonJob::UsageRollup(Default::default())
+        CronJob::UsageRollup(Default::default())
     });
     push_singleton_spec(&mut specs, config, "usage_prune", |_| {
-        SingletonJob::UsagePrune(Default::default())
+        CronJob::UsagePrune(Default::default())
     });
     push_singleton_spec(&mut specs, config, "quota_gc", |_| {
-        SingletonJob::QuotaGc(Default::default())
+        CronJob::QuotaGc(Default::default())
     });
     push_singleton_spec(&mut specs, config, "prompt_cache_purge", |_| {
-        SingletonJob::PromptCachePurge(Default::default())
+        CronJob::PromptCachePurge(Default::default())
     });
     push_singleton_spec(&mut specs, config, "price_catalog_refresh", |_| {
-        SingletonJob::PriceCatalogRefresh(Default::default())
+        CronJob::PriceCatalogRefresh(Default::default())
     });
     push_singleton_spec(&mut specs, config, "apalis_housekeeping", |_| {
-        SingletonJob::ApalisHousekeeping(Default::default())
+        CronJob::ApalisHousekeeping(Default::default())
     });
     push_singleton_spec(&mut specs, config, "anthropic_compat_refresh", |_| {
-        SingletonJob::AnthropicCompatRefresh(AnthropicCompatRefreshJob::new(
+        CronJob::AnthropicCompatRefresh(AnthropicCompatRefreshJob::new(
             CLAUDE_CODE_STABLE_VERSION_KEY,
         ))
     });
     push_singleton_spec(&mut specs, config, "warmup_watchdog", |tick_secs| {
-        SingletonJob::WarmupWatchdog(WarmupWatchdogJob::new(tick_secs))
+        CronJob::WarmupWatchdog(WarmupWatchdogJob::new(tick_secs))
     });
     push_singleton_spec(&mut specs, config, "oauth_refresh_watchdog", |tick_secs| {
-        SingletonJob::OAuthRefreshWatchdog(OAuthRefreshWatchdogJob::new(tick_secs))
+        CronJob::OAuthRefreshWatchdog(OAuthRefreshWatchdogJob::new(tick_secs))
     });
     push_singleton_spec(
         &mut specs,
         config,
         "oauth_usage_poll_watchdog",
-        |tick_secs| SingletonJob::OAuthUsagePollWatchdog(OAuthUsagePollWatchdogJob::new(tick_secs)),
+        |tick_secs| CronJob::OAuthUsagePollWatchdog(OAuthUsagePollWatchdogJob::new(tick_secs)),
     );
     specs
 }
@@ -230,7 +230,7 @@ fn push_singleton_spec(
     specs: &mut Vec<SingletonCronSpec>,
     config: &Config,
     name: &'static str,
-    factory: SingletonJobFactory,
+    factory: CronJobFactory,
 ) {
     let Some(job_config) = config.scheduler.recurring_jobs.get(name) else {
         return;
