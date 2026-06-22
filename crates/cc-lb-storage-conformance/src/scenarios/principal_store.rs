@@ -2,7 +2,8 @@ use std::sync::Arc;
 
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
-    AuditStore, PrincipalStore, StorageError,
+    AuditStore, PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalStore,
+    StorageError, WasmBlob, WasmRegistryEntryInput,
     principal::{
         Limit, LimitKind, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalUpdate,
     },
@@ -19,7 +20,7 @@ const BASE_TS: u64 = 1_900_000_000;
 pub async fn run_all<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,
-    B::Storage: AuditStore + PrincipalStore,
+    B::Storage: AuditStore + PrincipalStore + PluginRegistryStore,
 {
     create_persists_defaults(Arc::clone(&backend)).await?;
     get_by_id_returns_created(Arc::clone(&backend)).await?;
@@ -33,7 +34,9 @@ where
     default_limits_roundtrip(Arc::clone(&backend)).await?;
     router_terminal_strategy_roundtrip(Arc::clone(&backend)).await?;
     soft_delete_excludes_default_list(Arc::clone(&backend)).await?;
+    soft_delete_cascades_plugin_chains(Arc::clone(&backend)).await?;
     hard_delete_removes_unreferenced(Arc::clone(&backend)).await?;
+    hard_delete_cascades_plugin_chains(Arc::clone(&backend)).await?;
     hard_delete_referenced_by_audit_conflicts(Arc::clone(&backend)).await?;
     validate_identifier_rejects_invalid_name(Arc::clone(&backend)).await?;
     set_last_apply_error_roundtrip(backend).await?;
@@ -322,6 +325,30 @@ where
     .await
 }
 
+async fn soft_delete_cascades_plugin_chains<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: AuditStore + PrincipalStore + PluginRegistryStore,
+{
+    with_fixture(backend, |storage| async move {
+        let (principal, plugin_id) = principal_with_plugin(storage.as_ref(), 16).await?;
+        insert_all_slots(storage.as_ref(), principal.id, plugin_id).await?;
+
+        PrincipalStore::soft_delete(
+            storage.as_ref(),
+            principal.id,
+            principal.revision,
+            BASE_TS + 20,
+        )
+        .await?
+        .expect("record should soft delete");
+
+        ensure_all_slots_empty(storage.as_ref(), principal.id).await?;
+        Ok(())
+    })
+    .await
+}
+
 async fn hard_delete_removes_unreferenced<B>(backend: Arc<B>) -> Result<()>
 where
     B: ConformanceBackend,
@@ -336,6 +363,23 @@ where
                 .is_none()
         );
         ensure!(!PrincipalStore::hard_delete(&*storage, record.id).await?);
+        Ok(())
+    })
+    .await
+}
+
+async fn hard_delete_cascades_plugin_chains<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: AuditStore + PrincipalStore + PluginRegistryStore,
+{
+    with_fixture(backend, |storage| async move {
+        let (principal, plugin_id) = principal_with_plugin(storage.as_ref(), 17).await?;
+        insert_all_slots(storage.as_ref(), principal.id, plugin_id).await?;
+
+        ensure!(PrincipalStore::hard_delete(storage.as_ref(), principal.id).await?);
+
+        ensure_all_slots_empty(storage.as_ref(), principal.id).await?;
         Ok(())
     })
     .await
@@ -462,4 +506,78 @@ fn audit_entry(record: &PrincipalRecord) -> AuditEntry {
         payload: None,
         ..Default::default()
     }
+}
+
+async fn principal_with_plugin<S>(storage: &S, seed: u8) -> Result<(PrincipalRecord, Uuid)>
+where
+    S: PrincipalStore + PluginRegistryStore,
+{
+    let principal =
+        PrincipalStore::create(storage, principal_create(seed as usize), BASE_TS).await?;
+    let (plugin, _) = storage
+        .persist_wasm_upload(
+            WasmBlob {
+                sha256: [seed; 32],
+                bytes: vec![seed],
+                size_bytes: 1,
+                parse_validated_at_unix_secs: BASE_TS,
+            },
+            WasmRegistryEntryInput {
+                name: format!("principal-cascade-plugin-{seed}"),
+                original_filename: format!("principal-cascade-plugin-{seed}.wasm"),
+                label: None,
+                uploaded_at_unix_secs: BASE_TS,
+                uploaded_by_admin_id: principal.id,
+                wire_version: 1,
+                supported_slots: Vec::new(),
+            },
+        )
+        .await?;
+    Ok((principal, plugin.id))
+}
+
+async fn insert_all_slots<S>(storage: &S, principal_id: Uuid, plugin_id: Uuid) -> Result<()>
+where
+    S: PluginRegistryStore,
+{
+    for (slot, order) in [
+        (PluginSlot::Router, 100),
+        (PluginSlot::ObservabilityHook, 200),
+        (PluginSlot::Shape, 300),
+    ] {
+        storage
+            .insert_chain_entry(PluginChainEntryInput {
+                principal_id,
+                slot,
+                order,
+                wasm_registry_id: plugin_id,
+                config: json!({}),
+                sse_per_event: false,
+                batched_events_per_flush: 1,
+                batched_flush_ms: 100,
+                wire_version: None,
+            })
+            .await?;
+    }
+    Ok(())
+}
+
+async fn ensure_all_slots_empty<S>(storage: &S, principal_id: Uuid) -> Result<()>
+where
+    S: PluginRegistryStore,
+{
+    for slot in [
+        PluginSlot::Router,
+        PluginSlot::ObservabilityHook,
+        PluginSlot::Shape,
+    ] {
+        ensure!(
+            storage
+                .list_chain_for_principal(principal_id, slot)
+                .await?
+                .is_empty(),
+            "principal-owned {slot:?} chain entries cascade"
+        );
+    }
+    Ok(())
 }

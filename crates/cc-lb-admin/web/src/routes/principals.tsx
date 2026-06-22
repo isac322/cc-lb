@@ -250,6 +250,19 @@ function PrincipalDetail({
 }) {
   const toggle = useTogglePrincipal();
   const del = useDeletePrincipal();
+  const routerChain = usePluginChain(principal.id, 'router');
+  const observabilityChain = usePluginChain(principal.id, 'observability_hook');
+  const shapeChain = usePluginChain(principal.id, 'shape');
+  const deleteChainCount =
+    (routerChain.data?.entries.length ?? 0) +
+    (observabilityChain.data?.entries.length ?? 0) +
+    (shapeChain.data?.entries.length ?? 0);
+  const deleteChainCountLabel =
+    routerChain.isLoading ||
+    observabilityChain.isLoading ||
+    shapeChain.isLoading
+      ? 'Plugin chain count loading...'
+      : `${deleteChainCount} plugin chain ${deleteChainCount === 1 ? 'entry' : 'entries'} will be deleted.`;
   const [confirmDeleteOpen, setConfirmDeleteOpen] = useState(false);
   return (
     <>
@@ -317,6 +330,9 @@ function PrincipalDetail({
           <>
             <span className="font-mono">{principal.name}</span> and all its API
             keys / plugin chain entries will be permanently removed.
+            <span className="block mt-2 text-text-muted">
+              {deleteChainCountLabel}
+            </span>
           </>
         }
         confirmLabel="Delete"

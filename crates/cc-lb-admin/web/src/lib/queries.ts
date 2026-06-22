@@ -839,7 +839,11 @@ export function useDeletePrincipal() {
   return useMutation({
     mutationFn: ({ id, revision }: { id: string; revision: number }) =>
       deleteJson(`/admin/v1/principals/${id}`, { ifMatch: revision }),
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.principals }),
+    onSuccess: (_d, vars) => {
+      qc.invalidateQueries({ queryKey: qk.principals });
+      qc.invalidateQueries({ queryKey: qk.status });
+      qc.invalidateQueries({ queryKey: ['plugin-chain', vars.id] });
+    },
   });
 }
 export function useTogglePrincipal() {

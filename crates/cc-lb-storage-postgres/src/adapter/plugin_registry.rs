@@ -327,12 +327,13 @@ impl PluginRegistryStore for PostgresStorage {
                 message: "missing wasm blob".to_owned(),
             });
         }
-        let principal_exists: Option<i32> =
-            sqlx::query_scalar("SELECT 1 FROM principals_v1 WHERE id = $1")
-                .bind(input.principal_id)
-                .fetch_optional(&mut *tx)
-                .await
-                .map_err(map_sqlx_error)?;
+        let principal_exists: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM principals_v1 WHERE id = $1 AND deleted_at IS NULL FOR UPDATE",
+        )
+        .bind(input.principal_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(map_sqlx_error)?;
         if principal_exists.is_none() {
             return Err(StorageError::PrincipalNotFound {
                 id: input.principal_id.to_string(),
