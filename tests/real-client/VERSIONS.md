@@ -4,8 +4,8 @@ Pinned versions are installed by `tests/real-client/install.sh`. The script pref
 
 | Client | npm package | Binary | Pinned version | Confirmation command | Output |
 | --- | --- | --- | --- | --- | --- |
-| `claude-code` | `@anthropic-ai/claude-code` | `claude` | `2.1.177` | `npm view @anthropic-ai/claude-code version` | `2.1.177` |
-| `opencode` | `opencode-ai` | `opencode` | `1.17.7` | `npm view opencode-ai version` | `1.17.7` |
-| `pi` | `@earendil-works/pi-coding-agent` | `pi` | `0.79.4` | `npm view @earendil-works/pi-coding-agent version` | `0.79.4` |
+| `claude-code` | `@anthropic-ai/claude-code` | `claude` | `2.1.185` | `npm view @anthropic-ai/claude-code version` | `2.1.185` |
+| `opencode` | `opencode-ai` | `opencode` | `1.17.9` | `npm view opencode-ai version` | `1.17.9` |
+| `pi` | `@earendil-works/pi-coding-agent` | `pi` | `0.79.9` | `npm view @earendil-works/pi-coding-agent version` | `0.79.9` |
 
-`@earendil-works/pi-ai` was also publicly resolvable at `0.79.4`, but the executable client harness pins `@earendil-works/pi-coding-agent` because it exposes the `pi` binary.
+`@earendil-works/pi-ai` was also publicly resolvable at `0.79.9`, but the executable client harness pins `@earendil-works/pi-coding-agent` because it exposes the `pi` binary.

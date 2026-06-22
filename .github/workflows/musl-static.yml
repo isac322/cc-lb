@@ -33,8 +33,8 @@ jobs:
     env:
       RUSTUP_TOOLCHAIN: 1.96.0
     steps:
-      - uses: actions/checkout@v6
-      # The messense/rust-musl-cross image ships rustc 1.95.0 but the workspace
+      - uses: actions/checkout@v7
+      # The messense/rust-musl-cross image ships rustc 1.94.0 but the workspace
       # pins channel = "1.96.0" via rust-toolchain.toml. We cannot simply call
       # `rustup update stable` because the image's preinstalled clippy package
       # manifest is corrupt - it claims to own
