@@ -195,13 +195,21 @@ impl SchedulerDispatch {
             #[cfg(feature = "sqlite")]
             SchedulerBackend::Sqlite(sqlite) => {
                 OAuthUsagePollCursorsStore::new(sqlite.pool.clone())
-                    .record_attempt(update.upstream_id, update.observed_at_unix_secs, update.status)
+                    .record_attempt(
+                        update.upstream_id,
+                        update.observed_at_unix_secs,
+                        update.status,
+                    )
                     .await
             }
             #[cfg(feature = "postgres")]
             SchedulerBackend::Postgres(postgres) => {
                 OAuthUsagePollCursorsStore::new(postgres.pool.clone())
-                    .record_attempt(update.upstream_id, update.observed_at_unix_secs, update.status)
+                    .record_attempt(
+                        update.upstream_id,
+                        update.observed_at_unix_secs,
+                        update.status,
+                    )
                     .await
             }
         }
@@ -312,7 +320,6 @@ impl OAuthUsageCursorUpdate {
             }),
         }
     }
-
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
