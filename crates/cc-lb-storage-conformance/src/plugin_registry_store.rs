@@ -71,6 +71,7 @@ where
     persist_wasm_upload_heals_missing_blob_on_storage(storage).await?;
     decrement_blob_refcount_or_delete_skips_registry_backed_on_storage(storage).await?;
     insert_chain_entry_rejects_unknown_principal_on_storage(storage).await?;
+    insert_chain_entry_rejects_soft_deleted_principal_on_storage(storage).await?;
     reorder_chain_rejects_final_chain_gap_on_storage(storage).await?;
     update_chain_entry_rejects_no_op_on_storage(storage).await?;
     upload_returns_existed_flag_on_storage(storage).await?;
@@ -1187,6 +1188,28 @@ async fn insert_chain_entry_rejects_unknown_principal_on_storage<S: PluginRegist
     ensure!(
         matches!(err, StorageError::InvalidInput { .. }) || message.contains("principal"),
         "unknown principal is reported as invalid input or conflict"
+    );
+    Ok(())
+}
+
+async fn insert_chain_entry_rejects_soft_deleted_principal_on_storage<
+    S: PluginRegistryStore + PrincipalStore,
+>(
+    storage: &S,
+) -> Result<()> {
+    let (principal, plugin) =
+        principal_and_plugin(storage, 43, "plugin-soft-deleted-principal").await?;
+    PrincipalStore::soft_delete(storage, principal, 0, BASE_TS + 43)
+        .await?
+        .expect("principal should soft delete");
+
+    let err = storage
+        .insert_chain_entry(chain(principal, plugin.id, sparse_order::STEP))
+        .await
+        .expect_err("chain insert must reject a soft-deleted principal");
+    ensure!(
+        matches!(err, StorageError::PrincipalNotFound { .. }),
+        "soft-deleted principal is rejected as not found"
     );
     Ok(())
 }

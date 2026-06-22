@@ -4,7 +4,7 @@ use cc_lb_storage_api::{
     StorageResult, validate_identifier,
 };
 use serde_json::Value;
-use sqlx::{Row, sqlite::SqliteRow};
+use sqlx::{Row, Sqlite, SqlitePool, Transaction, sqlite::SqliteRow};
 use uuid::Uuid;
 
 use crate::{SqliteStorage, map_sqlx_error};
@@ -159,25 +159,32 @@ impl PrincipalStore for SqliteStorage {
         now_unix_secs: u64,
     ) -> StorageResult<Option<PrincipalRecord>> {
         let now = u64_to_i64(now_unix_secs, "principal.deleted_at")?;
+        let mut tx = begin_immediate(self.pool()).await?;
         let row = sqlx::query(
-            "UPDATE principals_v1 SET deleted_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ? RETURNING id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, revision, created_at, updated_at, last_apply_error, last_apply_at, deleted_at",
+            "UPDATE principals_v1 SET deleted_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ? AND deleted_at IS NULL RETURNING id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, revision, created_at, updated_at, last_apply_error, last_apply_at, deleted_at",
         )
         .bind(now)
         .bind(now)
         .bind(id.to_string())
         .bind(u64_to_i64(expected_revision, "principal.revision")?)
-        .fetch_optional(self.pool())
+        .fetch_optional(&mut *tx)
         .await
         .map_err(map_sqlite_error)?;
-        optional_updated_principal(self, id, row).await
+        if row.is_some() {
+            cascade_plugin_chains_in_tx(&mut tx, id).await?;
+        }
+        let record = optional_updated_principal_in_tx(&mut tx, id, row).await?;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(record)
     }
 
     async fn hard_delete(&self, id: Uuid) -> StorageResult<bool> {
+        let mut tx = begin_immediate(self.pool()).await?;
         let audit_refs = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(1) FROM audit_log_v1 WHERE principal_id = ?",
         )
         .bind(id.to_string())
-        .fetch_one(self.pool())
+        .fetch_one(&mut *tx)
         .await
         .map_err(map_sqlx_error)?;
         if audit_refs > 0 {
@@ -185,12 +192,15 @@ impl PrincipalStore for SqliteStorage {
                 message: "principal is referenced by audit entries".to_owned(),
             });
         }
+        cascade_plugin_chains_in_tx(&mut tx, id).await?;
         let result = sqlx::query("DELETE FROM principals_v1 WHERE id = ?")
             .bind(id.to_string())
-            .execute(self.pool())
+            .execute(&mut *tx)
             .await
             .map_err(map_sqlx_error)?;
-        Ok(result.rows_affected() == 1)
+        let deleted = result.rows_affected() == 1;
+        tx.commit().await.map_err(map_sqlx_error)?;
+        Ok(deleted)
     }
 
     async fn set_last_apply_error(
@@ -288,6 +298,64 @@ async fn optional_updated_principal(
         });
     }
     Ok(None)
+}
+
+async fn optional_updated_principal_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    id: Uuid,
+    row: Option<SqliteRow>,
+) -> StorageResult<Option<PrincipalRecord>> {
+    if let Some(row) = row {
+        return principal_from_row(row).map(Some);
+    }
+    let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(1) FROM principals_v1 WHERE id = ?")
+        .bind(id.to_string())
+        .fetch_one(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?
+        > 0;
+    if exists {
+        return Err(StorageError::Conflict {
+            message: "principal revision conflict".to_owned(),
+        });
+    }
+    Ok(None)
+}
+
+async fn cascade_plugin_chains_in_tx(
+    tx: &mut Transaction<'_, Sqlite>,
+    principal_id: Uuid,
+) -> StorageResult<()> {
+    let shas = sqlx::query_scalar::<_, Vec<u8>>(
+        "SELECT DISTINCT wasm_registry_v2.sha256 FROM plugin_chains_v2 JOIN wasm_registry_v2 ON wasm_registry_v2.id = plugin_chains_v2.wasm_registry_id WHERE plugin_chains_v2.principal_id = ?",
+    )
+    .bind(principal_id.to_string())
+    .fetch_all(&mut **tx)
+    .await
+    .map_err(map_sqlx_error)?;
+
+    sqlx::query("DELETE FROM plugin_chains_v2 WHERE principal_id = ?")
+        .bind(principal_id.to_string())
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlite_error)?;
+
+    for sha in shas {
+        sqlx::query(
+            "UPDATE wasm_blobs_v2 SET refcount = (SELECT COUNT(1) FROM plugin_chains_v2 JOIN wasm_registry_v2 ON wasm_registry_v2.id = plugin_chains_v2.wasm_registry_id WHERE wasm_registry_v2.sha256 = wasm_blobs_v2.sha256) WHERE sha256 = ?",
+        )
+        .bind(sha.as_slice())
+        .execute(&mut **tx)
+        .await
+        .map_err(map_sqlx_error)?;
+    }
+    Ok(())
+}
+
+async fn begin_immediate(pool: &SqlitePool) -> StorageResult<Transaction<'static, Sqlite>> {
+    pool.begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(map_sqlx_error)
 }
 
 fn principal_from_row(row: SqliteRow) -> StorageResult<PrincipalRecord> {

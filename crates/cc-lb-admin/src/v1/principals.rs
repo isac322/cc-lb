@@ -9,8 +9,7 @@ use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_plugin_api::TerminalStrategy;
 use cc_lb_storage_api::principal::Limit;
 use cc_lb_storage_api::{
-    PluginSlot, PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate,
-    StorageError,
+    PrincipalCreate, PrincipalKind, PrincipalRecord, PrincipalStore, PrincipalUpdate, StorageError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -120,12 +119,6 @@ struct AllowedModelsResponse {
 #[derive(Debug, Serialize)]
 struct ListResponse {
     principals: Vec<PrincipalResponse>,
-}
-
-#[derive(Debug, Serialize)]
-struct ReferenceResponse {
-    kind: &'static str,
-    id: String,
 }
 
 async fn create_principal(
@@ -310,31 +303,6 @@ async fn delete_principal(
     let Ok(id) = id.parse() else {
         return error_response(StatusCode::BAD_REQUEST, "invalid_principal_id");
     };
-
-    let mut references = Vec::new();
-    for slot in [
-        PluginSlot::Router,
-        PluginSlot::ObservabilityHook,
-        PluginSlot::Shape,
-    ] {
-        match storage.list_chain_for_principal(id, slot).await {
-            Ok(entries) => references.extend(entries.into_iter().map(|entry| ReferenceResponse {
-                kind: "plugin_chain",
-                id: entry.id.to_string(),
-            })),
-            Err(error) => return storage_error(error),
-        }
-    }
-    if !references.is_empty() {
-        return (
-            StatusCode::CONFLICT,
-            Json(json!({
-                "error": "referenced_by",
-                "references": references,
-            })),
-        )
-            .into_response();
-    }
 
     match PrincipalStore::soft_delete(storage, id, expected_revision, unix_now_secs()).await {
         Ok(Some(record)) => {

@@ -325,7 +325,7 @@ async fn enable_disable_persists_and_audits() {
 }
 
 #[tokio::test]
-async fn delete_cascade_blocks_when_plugin_chain_exists_else_soft_deletes() {
+async fn delete_principal_cascades_owned_plugin_chains() {
     let server = admin_test_common::spawn_admin_server().await;
     let (_, headers, created) = create_principal(&server.client, "alpha").await;
     let id = created_id(&created);
@@ -355,7 +355,7 @@ async fn delete_cascade_blocks_when_plugin_chain_exists_else_soft_deletes() {
         )
         .await
         .unwrap();
-    let chain_entry = server
+    server
         .storage
         .insert_chain_entry(PluginChainEntryInput {
             principal_id,
@@ -375,25 +375,16 @@ async fn delete_cascade_blocks_when_plugin_chain_exists_else_soft_deletes() {
         .client
         .delete(&format!("/admin/v1/principals/{id}"), &etag)
         .await;
-    assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(body["error"], "referenced_by");
-    assert_eq!(body["references"][0]["kind"], "plugin_chain");
-    assert_eq!(body["references"][0]["id"], chain_entry.id.to_string());
-
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(body, Value::Null);
     assert!(
         server
             .storage
-            .delete_chain_entry(chain_entry.id, chain_entry.revision)
+            .list_chain_for_principal(principal_id, PluginSlot::Router)
             .await
             .unwrap()
-            .is_some()
+            .is_empty()
     );
-    let (status, _, body) = server
-        .client
-        .delete(&format!("/admin/v1/principals/{id}"), &etag)
-        .await;
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(body, Value::Null);
 
     let (status, _, body) = server
         .client
