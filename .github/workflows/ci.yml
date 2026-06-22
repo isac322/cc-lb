@@ -29,7 +29,7 @@ jobs:
   fmt:
     runs-on: oracle4-cc-lb
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -41,7 +41,7 @@ jobs:
       matrix:
         features: [sqlite, postgres]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
@@ -68,7 +68,7 @@ jobs:
       CARGO_PROFILE_TEST_DEBUG: line-tables-only
       CC_LB_TEST_READY_TIMEOUT_SECS: "120"
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       - name: Install wasm targets for pinned toolchain
         run: rustup target add wasm32-wasip1 wasm32-unknown-unknown
