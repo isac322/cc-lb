@@ -311,24 +311,28 @@ function PoolQuotaCompactStrip({
 function PoolQuotaThemedChart({
   seriesData,
   maxValue,
+  rangeStartUnix,
+  rangeEndUnix,
 }: {
   seriesData: { unix: number; '5h': number | null; '7d': number | null }[];
   maxValue: number;
+  rangeStartUnix: number;
+  rangeEndUnix: number;
 }) {
   const chartId = useId();
   const c5h = getWindowColor('5h');
   const c7d = getWindowColor('7d');
 
-  if (!seriesData.length) {
-    return (
-      <div className="w-full flex-1 min-h-[240px] flex items-center justify-center text-xs text-text-faint">
-        No timeline data
-      </div>
-    );
-  }
-
   return (
-    <div className="w-full flex-1 min-h-[240px]" style={{ minWidth: 0 }}>
+    <div
+      className="w-full flex-1 min-h-[240px] relative"
+      style={{ minWidth: 0 }}
+    >
+      {!seriesData.length ? (
+        <div className="absolute inset-0 flex items-center justify-center text-xs text-text-faint pointer-events-none z-10">
+          No timeline data yet for this range
+        </div>
+      ) : null}
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart
           data={seriesData}
@@ -360,7 +364,8 @@ function PoolQuotaThemedChart({
           <XAxis
             dataKey="unix"
             type="number"
-            domain={['dataMin', 'dataMax']}
+            domain={[rangeStartUnix, rangeEndUnix]}
+            allowDataOverflow
             tick={{
               fill: 'var(--color-text-faint)',
               fontSize: 10,
@@ -884,6 +889,8 @@ function OverviewPage() {
           <CardBody className="flex-1 flex flex-col min-h-0 p-2 pt-1">
             <PoolQuotaThemedChart
               seriesData={chartData}
+              rangeStartUnix={nowUnixSecs - seriesRangeSecs}
+              rangeEndUnix={nowUnixSecs}
               maxValue={chartMaxValue}
             />
           </CardBody>
