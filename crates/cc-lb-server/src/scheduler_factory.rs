@@ -284,7 +284,10 @@ async fn open_postgres(
         leader,
         scheduler.leader_lock_key,
     );
-    let storage = apalis_postgres::PostgresStorage::new_with_config(
+    // NOTE: use `new_with_notify`; apalis-postgres' polling fetcher ignores
+    // Config::poll_strategy and uses a 1s..5min exponential backoff that
+    // stalls sparse queues and starves follower replicas under bursty pushes.
+    let storage = apalis_postgres::PostgresStorage::new_with_notify(
         &pool,
         &apalis_postgres::Config::new(cc_lb_scheduler::worker::ADAPTIVE_QUEUE),
     );

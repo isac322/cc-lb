@@ -58,7 +58,7 @@ pub fn build_cron_worker_named(
         )),
         #[cfg(feature = "postgres")]
         SchedulerBackend::Postgres(postgres) => Ok(build_postgres_singleton_worker(
-            apalis_postgres::PostgresStorage::<CronJob>::new_with_config(
+            apalis_postgres::PostgresStorage::<CronJob>::new_with_notify(
                 &postgres.pool,
                 &apalis_postgres::Config::new(CRON_QUEUE),
             ),
@@ -101,7 +101,12 @@ fn build_sqlite_singleton_worker(
 
 #[cfg(feature = "postgres")]
 fn build_postgres_singleton_worker(
-    storage: apalis_postgres::PostgresStorage<CronJob>,
+    storage: apalis_postgres::PostgresStorage<
+        CronJob,
+        apalis_postgres::CompactType,
+        apalis_postgres::JsonCodec<apalis_postgres::CompactType>,
+        apalis_postgres::PgNotify,
+    >,
     ctx: SchedulerCtx,
     worker_name: String,
 ) -> CronWorker {

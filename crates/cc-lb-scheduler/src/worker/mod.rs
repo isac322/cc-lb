@@ -91,7 +91,12 @@ pub struct SqliteSchedulerStorage {
 }
 
 #[cfg(feature = "postgres")]
-pub type PostgresApalisStorage = apalis_postgres::PostgresStorage<AdaptiveJob>;
+pub type PostgresApalisStorage = apalis_postgres::PostgresStorage<
+    AdaptiveJob,
+    apalis_postgres::CompactType,
+    apalis_postgres::JsonCodec<apalis_postgres::CompactType>,
+    apalis_postgres::PgNotify,
+>;
 
 #[cfg(feature = "postgres")]
 #[derive(Clone)]

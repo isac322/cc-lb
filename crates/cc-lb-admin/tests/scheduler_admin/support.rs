@@ -189,7 +189,7 @@ pub async fn postgres_fixture() -> Result<
         .await?;
     apalis_postgres::PostgresStorage::setup(&pool).await?;
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
-    let storage = apalis_postgres::PostgresStorage::<AdaptiveJob>::new_with_config(
+    let storage = apalis_postgres::PostgresStorage::<AdaptiveJob>::new_with_notify(
         &pool,
         &apalis_postgres::Config::new(ADAPTIVE_QUEUE),
     );
