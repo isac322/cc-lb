@@ -201,14 +201,32 @@ fn merge_sources(
     header_fresh: bool,
     api_fresh: bool,
 ) -> MergedQuotaSnapshot {
-    match (&sources.header, &sources.api, header_fresh, api_fresh) {
-        (Some(header), Some(api), true, true) => merge_header_api(header, api),
-        (Some(header), _, true, _) => header.clone(),
-        (_, Some(api), _, true) => api.clone(),
-        (Some(header), Some(api), _, _) => merge_header_api(header, api),
-        (Some(header), None, _, _) => header.clone(),
-        (None, Some(api), _, _) => api.clone(),
-        (None, None, _, _) => MergedQuotaSnapshot {
+    // Pure source selection: return exactly one source snapshot wholesale.
+    // Never blend fields between sources — the returned snapshot's `source`
+    // label, `utilization`, `observed_at_unix_millis`, and every other field
+    // must all come from the same physical observation.
+    //
+    // Selection rules:
+    //   1. Only one source has data → return that one as-is.
+    //   2. Both sources present, exactly one fresh → fresh source wins as-is.
+    //   3. Both fresh or both stale → newer `observed_at_unix_millis` wins
+    //      as-is (api wins on tie since it is the higher-fidelity feed).
+    //   4. Neither source has data → empty placeholder.
+    match (sources.header.as_ref(), sources.api.as_ref()) {
+        (Some(header), Some(api)) => match (header_fresh, api_fresh) {
+            (true, false) => header.clone(),
+            (false, true) => api.clone(),
+            _ => {
+                if api.observed_at_unix_millis >= header.observed_at_unix_millis {
+                    api.clone()
+                } else {
+                    header.clone()
+                }
+            }
+        },
+        (Some(header), None) => header.clone(),
+        (None, Some(api)) => api.clone(),
+        (None, None) => MergedQuotaSnapshot {
             source: MergedSource::Merged,
             utilization: None,
             status: None,
@@ -226,52 +244,6 @@ fn merge_sources(
             extra_usage_used_credits: None,
             observed_at_unix_millis: 0,
         },
-    }
-}
-
-fn merge_header_api(
-    header: &MergedQuotaSnapshot,
-    api: &MergedQuotaSnapshot,
-) -> MergedQuotaSnapshot {
-    let source = if api.observed_at_unix_millis > header.observed_at_unix_millis {
-        MergedSource::Api
-    } else {
-        MergedSource::Header
-    };
-    MergedQuotaSnapshot {
-        source,
-        utilization: header.utilization.or(api.utilization),
-        status: header.status.or(api.status),
-        resets_at_unix_secs: header.resets_at_unix_secs.or(api.resets_at_unix_secs),
-        surpassed_threshold: header.surpassed_threshold.or(api.surpassed_threshold),
-        representative_claim: header
-            .representative_claim
-            .clone()
-            .or_else(|| api.representative_claim.clone()),
-        fallback_percentage: header.fallback_percentage.or(api.fallback_percentage),
-        fallback_available: header.fallback_available.or(api.fallback_available),
-        overage_in_use: header.overage_in_use.or(api.overage_in_use),
-        overage_period_monthly_utilization: header
-            .overage_period_monthly_utilization
-            .or(api.overage_period_monthly_utilization),
-        upgrade_paths: header
-            .upgrade_paths
-            .clone()
-            .or_else(|| api.upgrade_paths.clone()),
-        disabled_reason: header
-            .disabled_reason
-            .clone()
-            .or_else(|| api.disabled_reason.clone()),
-        extra_usage_enabled: api.extra_usage_enabled.or(header.extra_usage_enabled),
-        extra_usage_monthly_limit: api
-            .extra_usage_monthly_limit
-            .or(header.extra_usage_monthly_limit),
-        extra_usage_used_credits: api
-            .extra_usage_used_credits
-            .or(header.extra_usage_used_credits),
-        observed_at_unix_millis: header
-            .observed_at_unix_millis
-            .max(api.observed_at_unix_millis),
     }
 }
 
@@ -331,5 +303,128 @@ fn missing_candidate(
         overage_in_use: None,
         overage_period_monthly_utilization: None,
         upgrade_paths: None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snapshot(
+        source: MergedSource,
+        utilization: f64,
+        observed_at_unix_millis: u64,
+    ) -> MergedQuotaSnapshot {
+        MergedQuotaSnapshot {
+            source,
+            utilization: Some(utilization),
+            status: Some(SubscriptionQuotaStatus::Allowed),
+            resets_at_unix_secs: Some(observed_at_unix_millis / 1_000 + 3_600),
+            surpassed_threshold: None,
+            representative_claim: None,
+            fallback_percentage: None,
+            fallback_available: None,
+            overage_in_use: None,
+            overage_period_monthly_utilization: None,
+            upgrade_paths: None,
+            disabled_reason: None,
+            extra_usage_enabled: None,
+            extra_usage_monthly_limit: None,
+            extra_usage_used_credits: None,
+            observed_at_unix_millis,
+        }
+    }
+
+    #[test]
+    fn both_fresh_picks_newer_api_wholesale() {
+        let header = snapshot(MergedSource::Header, 0.01, 1_000);
+        let api = snapshot(MergedSource::Api, 0.37, 5_000);
+        let sources = SourceSnapshots {
+            header: Some(header),
+            api: Some(api.clone()),
+        };
+        let result = merge_sources(&sources, true, true);
+        assert_eq!(result, api);
+    }
+
+    #[test]
+    fn both_fresh_picks_newer_header_wholesale() {
+        let header = snapshot(MergedSource::Header, 0.20, 9_000);
+        let api = snapshot(MergedSource::Api, 0.37, 5_000);
+        let sources = SourceSnapshots {
+            header: Some(header.clone()),
+            api: Some(api),
+        };
+        let result = merge_sources(&sources, true, true);
+        assert_eq!(result, header);
+    }
+
+    #[test]
+    fn fresh_wins_over_stale_even_when_stale_is_newer() {
+        let header = snapshot(MergedSource::Header, 0.01, 10_000);
+        let api = snapshot(MergedSource::Api, 0.37, 5_000);
+        let sources = SourceSnapshots {
+            header: Some(header),
+            api: Some(api.clone()),
+        };
+        let result = merge_sources(&sources, false, true);
+        assert_eq!(result, api);
+    }
+
+    #[test]
+    fn both_stale_picks_newer_observed_at_wholesale() {
+        let header = snapshot(MergedSource::Header, 0.01, 1_000);
+        let api = snapshot(MergedSource::Api, 0.37, 5_000);
+        let sources = SourceSnapshots {
+            header: Some(header),
+            api: Some(api.clone()),
+        };
+        let result = merge_sources(&sources, false, false);
+        assert_eq!(result, api);
+    }
+
+    #[test]
+    fn source_label_matches_utilization_origin() {
+        let stale_header = snapshot(MergedSource::Header, 0.01, 1_000);
+        let fresh_api = snapshot(MergedSource::Api, 0.37, 5_000);
+        let sources = SourceSnapshots {
+            header: Some(stale_header),
+            api: Some(fresh_api),
+        };
+        let result = merge_sources(&sources, true, true);
+        assert_eq!(result.source, MergedSource::Api);
+        assert_eq!(result.utilization, Some(0.37));
+        assert_eq!(result.observed_at_unix_millis, 5_000);
+    }
+
+    #[test]
+    fn only_header_returns_header_wholesale() {
+        let header = snapshot(MergedSource::Header, 0.10, 1_000);
+        let sources = SourceSnapshots {
+            header: Some(header.clone()),
+            api: None,
+        };
+        let result = merge_sources(&sources, true, false);
+        assert_eq!(result, header);
+    }
+
+    #[test]
+    fn only_api_returns_api_wholesale() {
+        let api = snapshot(MergedSource::Api, 0.42, 2_000);
+        let sources = SourceSnapshots {
+            header: None,
+            api: Some(api.clone()),
+        };
+        let result = merge_sources(&sources, false, true);
+        assert_eq!(result, api);
+    }
+
+    #[test]
+    fn neither_returns_empty_placeholder() {
+        let sources = SourceSnapshots::default();
+        let result = merge_sources(&sources, false, false);
+        assert_eq!(result.source, MergedSource::Merged);
+        assert!(result.utilization.is_none());
+        assert_eq!(result.observed_at_unix_millis, 0);
     }
 }
