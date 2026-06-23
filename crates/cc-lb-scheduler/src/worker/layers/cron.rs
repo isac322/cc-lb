@@ -41,11 +41,20 @@ pub fn build_cron_worker(
     backend: &SchedulerBackend,
     ctx: SchedulerCtx,
 ) -> Result<CronWorker, SchedulerError> {
+    build_cron_worker_named(backend, ctx, CRON_QUEUE.to_owned())
+}
+
+pub fn build_cron_worker_named(
+    backend: &SchedulerBackend,
+    ctx: SchedulerCtx,
+    worker_name: String,
+) -> Result<CronWorker, SchedulerError> {
     match backend {
         #[cfg(feature = "sqlite")]
         SchedulerBackend::Sqlite(sqlite) => Ok(build_sqlite_singleton_worker(
             apalis_sqlite::SqliteStorage::<CronJob, (), ()>::new_in_queue(&sqlite.pool, CRON_QUEUE),
             ctx,
+            worker_name,
         )),
         #[cfg(feature = "postgres")]
         SchedulerBackend::Postgres(postgres) => Ok(build_postgres_singleton_worker(
@@ -54,17 +63,22 @@ pub fn build_cron_worker(
                 &apalis_postgres::Config::new(CRON_QUEUE),
             ),
             ctx,
+            worker_name,
         )),
     }
 }
 
 #[cfg(feature = "sqlite")]
-fn build_sqlite_singleton_worker(storage: SqliteSingletonStorage, ctx: SchedulerCtx) -> CronWorker {
+fn build_sqlite_singleton_worker(
+    storage: SqliteSingletonStorage,
+    ctx: SchedulerCtx,
+    worker_name: String,
+) -> CronWorker {
     let concurrency = ctx.config.singleton_concurrency;
     CronWorker {
         run: Box::new(move |cancel| {
             Box::pin(async move {
-                let worker = ApalisWorkerBuilder::new(CRON_QUEUE)
+                let worker = ApalisWorkerBuilder::new(worker_name)
                     .backend(storage)
                     .data(ctx)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
@@ -89,12 +103,13 @@ fn build_sqlite_singleton_worker(storage: SqliteSingletonStorage, ctx: Scheduler
 fn build_postgres_singleton_worker(
     storage: apalis_postgres::PostgresStorage<CronJob>,
     ctx: SchedulerCtx,
+    worker_name: String,
 ) -> CronWorker {
     let concurrency = ctx.config.singleton_concurrency;
     CronWorker {
         run: Box::new(move |cancel| {
             Box::pin(async move {
-                let worker = ApalisWorkerBuilder::new(CRON_QUEUE)
+                let worker = ApalisWorkerBuilder::new(worker_name)
                     .backend(storage)
                     .data(ctx)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())

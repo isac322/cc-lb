@@ -414,6 +414,49 @@ pub struct LazyRefresherDeps {
     pub oauth_cfg: Arc<AnthropicOAuthConfig>,
 }
 
+impl LazyRefresher {
+    async fn in_process_refresh(&self, upstream_id: Uuid) -> Result<(), LazyRefreshError> {
+        let upstream = self
+            .stores
+            .upstreams
+            .get_by_id(upstream_id)
+            .await
+            .map_err(lazy_error)?
+            .ok_or_else(|| LazyRefreshError::Failed {
+                reason: "oauth upstream not found".to_owned(),
+            })?;
+        let result = refresh_flow(
+            &self.stores,
+            self.stores.audit.as_deref(),
+            &self.aead,
+            &self.oauth_cfg,
+            self.replica_id,
+            &self.http,
+            &self.cancel,
+            upstream,
+        )
+        .await;
+        match result {
+            Ok(generation) => {
+                if let Some(metadata_hook) = &self.metadata_hook {
+                    metadata_hook
+                        .enqueue(MetadataHookRequest {
+                            upstream_id,
+                            credential_generation: generation,
+                            traceparent: None,
+                        })
+                        .await
+                        .map_err(lazy_metadata_hook_error)?;
+                }
+                Ok(())
+            }
+            Err(error) => Err(LazyRefreshError::Failed {
+                reason: error.to_string(),
+            }),
+        }
+    }
+}
+
 #[async_trait]
 impl LazyRefreshHandle for LazyRefresher {
     async fn refresh_one(&self, upstream_id: Uuid) -> Result<(), LazyRefreshError> {
@@ -434,13 +477,25 @@ impl LazyRefreshHandle for LazyRefresher {
             .await
             .map_err(lazy_error)?;
         if let LazyRefreshClaim::Enqueued { idempotency_key } = claim {
-            return self
+            match self
                 .wait_for_token_generation(
                     upstream_id,
                     upstream.oauth_token_generation,
                     Some(&idempotency_key),
                 )
-                .await;
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(wait_error) => {
+                    tracing::warn!(
+                        upstream_id = %upstream_id,
+                        error = %wait_error,
+                        "scheduler-backed refresh wait failed; falling back to in-process refresh",
+                    );
+                    ::metrics::counter!("cclb_lazy_refresh_inproc_fallback_total").increment(1);
+                    return self.in_process_refresh(upstream_id).await;
+                }
+            }
         }
         let result = refresh_flow(
             &self.stores,
@@ -498,6 +553,39 @@ impl LazyRefreshHandle for LazyRefresher {
                 })
             }
         }
+    }
+
+    async fn enqueue_only(&self, upstream_id: Uuid) -> Result<(), LazyRefreshError> {
+        let upstream = self
+            .stores
+            .upstreams
+            .get_by_id(upstream_id)
+            .await
+            .map_err(lazy_error)?
+            .ok_or_else(|| LazyRefreshError::Failed {
+                reason: "oauth upstream not found".to_owned(),
+            })?;
+        let holder = lazy_refresh_holder(self.replica_id);
+        let expires_at_unix_secs = oauth_expires_at(&upstream, &self.aead)?;
+        let claim = self
+            .claim_guard
+            .begin_refresh(upstream_id, &holder, expires_at_unix_secs, now_unix_secs())
+            .await
+            .map_err(lazy_error)?;
+        if let LazyRefreshClaim::Acquired = claim {
+            if let Err(release_error) = self
+                .claim_guard
+                .release_if_holder(upstream_id, &holder)
+                .await
+            {
+                tracing::warn!(
+                    error = %release_error,
+                    upstream_id = %upstream_id,
+                    "soft refresh claim release failed",
+                );
+            }
+        }
+        Ok(())
     }
 }
 
@@ -832,7 +920,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lazy_refresher_timeout_when_contended_generation_does_not_advance() {
+    async fn lazy_refresher_falls_back_to_inproc_when_scheduler_wait_times_out() {
         let fixture = LazyRefreshFixture::new(Duration::from_millis(0)).await;
         let upstream_id = fixture.create_oauth_upstream().await;
         let claims = Arc::new(TestOAuthRefreshClaims::always_contended());
@@ -842,13 +930,12 @@ mod tests {
         );
         let refresher = fixture.lazy_refresher(claims, config);
 
-        let error = refresher
+        refresher
             .refresh_one(upstream_id)
             .await
-            .expect_err("contended lazy refresh times out");
+            .expect("scheduler-backed wait times out and falls back to in-proc refresh");
 
-        assert!(error.to_string().contains("timed out"));
-        assert_eq!(fixture.refresh_call_count(), 0);
+        assert_eq!(fixture.refresh_call_count(), 1);
     }
 
     struct LazyRefreshFixture {

@@ -162,9 +162,17 @@ async fn open_sqlite(
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         .busy_timeout(Duration::from_secs(5));
+    // Force pool=1 to serialize heartbeat vs job-write inside the scheduler pool (incident 2026-06-22).
+    let configured_max = scheduler.separate_pool.max_connections;
+    if configured_max != 1 {
+        tracing::warn!(
+            configured = configured_max,
+            "scheduler.separate_pool.max_connections is forced to 1 for SQLite backend; reconfigure to silence this warning",
+        );
+    }
     let pool = SqlitePoolOptions::new()
-        .max_connections(scheduler.separate_pool.max_connections)
-        .min_connections(scheduler.separate_pool.min_connections)
+        .max_connections(1)
+        .min_connections(1)
         .acquire_timeout(Duration::from_secs(
             scheduler.separate_pool.acquire_timeout_secs,
         ))
