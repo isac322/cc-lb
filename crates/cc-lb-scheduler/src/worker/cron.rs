@@ -10,6 +10,7 @@ use tokio_util::sync::CancellationToken;
 use crate::cron::WorkerBuilder as CronWorkerBuilder;
 use crate::jobs::compat::AnthropicCompatRefreshJob;
 use crate::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
+use crate::jobs::pool_quota_snapshot::PoolQuotaSnapshotCronJob;
 use crate::jobs::watchdog::{OAuthRefreshWatchdogJob, WarmupWatchdogJob};
 use crate::leader_election::LeaderElection;
 
@@ -218,6 +219,9 @@ fn singleton_cron_specs(config: &Config) -> Vec<SingletonCronSpec> {
     });
     push_singleton_spec(&mut specs, config, "oauth_usage_poll", |tick_secs| {
         CronJob::OAuthUsagePoll(OAuthUsagePollCronJob::new(tick_secs))
+    });
+    push_singleton_spec(&mut specs, config, "pool_quota_snapshot", |tick_secs| {
+        CronJob::PoolQuotaSnapshot(PoolQuotaSnapshotCronJob::new(tick_secs))
     });
     specs
 }

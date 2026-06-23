@@ -30,6 +30,7 @@ import {
   type LatestResponse,
   type OAuthStatusResponse,
   type PluginsStatusResponse,
+  type PoolHistoryResponse,
   type PrincipalLimitsResponse,
   patchJson,
   postJson,
@@ -229,6 +230,8 @@ export const qk = {
     ['subscription-quota', 'analysis', params] as const,
   subscriptionQuotaAggregate: (params: Record<string, any>) =>
     ['subscription-quota', 'aggregate', params] as const,
+  subscriptionQuotaPoolHistory: (params: Record<string, any>) =>
+    ['subscription-quota', 'pool-history', params] as const,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -584,6 +587,28 @@ export function useSubscriptionQuotaAggregate(params: {
     queryFn: () =>
       getJson<AggregateResponse>(
         `/admin/v1/subscription-quotas/aggregate?${searchParams.toString()}`,
+      ),
+    refetchInterval: 30_000,
+  });
+}
+
+export function useSubscriptionQuotaPoolHistory(params: {
+  windows?: string;
+  sinceUnixSecs?: number;
+  untilUnixSecs?: number;
+}) {
+  const searchParams = new URLSearchParams();
+  if (params.windows) searchParams.set('windows', params.windows);
+  if (params.sinceUnixSecs !== undefined)
+    searchParams.set('since_unix_secs', String(params.sinceUnixSecs));
+  if (params.untilUnixSecs !== undefined)
+    searchParams.set('until_unix_secs', String(params.untilUnixSecs));
+
+  return useQuery({
+    queryKey: qk.subscriptionQuotaPoolHistory(params),
+    queryFn: () =>
+      getJson<PoolHistoryResponse>(
+        `/admin/v1/subscription-quotas/pool-history?${searchParams.toString()}`,
       ),
     refetchInterval: 30_000,
   });

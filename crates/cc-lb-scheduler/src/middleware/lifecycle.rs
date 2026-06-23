@@ -73,6 +73,7 @@ impl SchedulerMetricPayload for CronJob {
             Self::OAuthRefreshWatchdog(_) => "cron:oauth_refresh_watchdog",
             Self::OAuthUsagePoll(_) => "cron:oauth_usage_poll",
             Self::AnthropicCompatRefresh(_) => "cron:anthropic_compat_refresh",
+            Self::PoolQuotaSnapshot(_) => "cron:pool_quota_snapshot",
         }
     }
 }

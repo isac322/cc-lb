@@ -199,6 +199,7 @@ fn organization_record(
         organization_type: organization
             .and_then(|organization| organization.organization_type.clone()),
         rate_limit_tier: organization.and_then(|organization| organization.rate_limit_tier.clone()),
+        seat_tier: organization.and_then(|organization| organization.seat_tier.clone()),
         has_extra_usage_enabled: organization
             .and_then(|organization| organization.has_extra_usage_enabled),
         billing_type: organization.and_then(|organization| organization.billing_type.clone()),

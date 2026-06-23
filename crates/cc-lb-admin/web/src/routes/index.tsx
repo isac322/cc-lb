@@ -46,7 +46,7 @@ import {
   usePrincipalNameMap,
   useRecentEventsInfinite,
   useSubscriptionQuotaAggregate,
-  useSubscriptionQuotaSeries,
+  useSubscriptionQuotaPoolHistory,
   useSummary,
   useUpstreamNameMap,
   useUsage,
@@ -216,12 +216,15 @@ function PoolQuotaInlineRow({
     );
   }
 
-  const used_pct = w.utilization_percent ?? 0;
+  const pctRaw = w.utilization_percent;
+  const has_pct = pctRaw != null;
+  const used_pct = pctRaw ?? 0;
   const used_tokens = w.used_tokens ?? 0;
   const capacity_tokens =
     w.projected_capacity_tokens_estimate ??
     w.capacity_to_now_tokens_estimate ??
     0;
+  const has_capacity = capacity_tokens > 0;
   const nowUnixSecs = Math.floor(Date.now() / 1000);
   const elapsedMin = Math.max(
     1,
@@ -233,11 +236,12 @@ function PoolQuotaInlineRow({
     (w.cc_window_reset_unix_secs - nowUnixSecs) / 60,
   );
   const remainingTokens = Math.max(0, capacity_tokens - used_tokens);
-  const eta_min_raw = burn_per_min > 0 ? remainingTokens / burn_per_min : null;
+  const eta_min_raw =
+    has_capacity && burn_per_min > 0 ? remainingTokens / burn_per_min : null;
   const eta_min =
     eta_min_raw != null && eta_min_raw <= reset_min ? eta_min_raw : null;
-  const c = utilColor(used_pct);
-  const tone = utilTone(used_pct);
+  const c = has_pct ? utilColor(used_pct) : 'var(--color-text-faint)';
+  const tone = has_pct ? utilTone(used_pct) : 'neutral';
 
   return (
     <div className="flex flex-col gap-1.5 min-w-0">
@@ -249,15 +253,13 @@ function PoolQuotaInlineRow({
           className="tabular-nums font-medium text-xl leading-none"
           style={{ color: c }}
         >
-          {used_pct.toFixed(1)}%
+          {has_pct ? `${used_pct.toFixed(1)}%` : '—'}
         </span>
         <span className="text-[11px] text-text-faint tabular-nums truncate ml-auto">
-          {fmtCount(used_tokens)} / {fmtCount(capacity_tokens)} tok
+          {fmtCount(used_tokens)} /{' '}
+          {has_capacity ? fmtCount(capacity_tokens) : '—'} tok
         </span>
-        <StatusBadge
-          tone={tone === 'ok' ? 'neutral' : tone}
-          label={w.confidence ?? 'missing'}
-        />
+        <StatusBadge tone={tone} label={w.confidence ?? 'missing'} />
       </div>
       <ProgressBar pct={used_pct} color={c} height="h-1.5" />
       <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-text-faint tabular-nums">
@@ -319,14 +321,14 @@ function PoolQuotaThemedChart({
 
   if (!seriesData.length) {
     return (
-      <div className="w-full h-[240px] flex items-center justify-center text-xs text-text-faint">
+      <div className="w-full flex-1 min-h-[240px] flex items-center justify-center text-xs text-text-faint">
         No timeline data
       </div>
     );
   }
 
   return (
-    <div className="w-full" style={{ height: 240, minWidth: 0 }}>
+    <div className="w-full flex-1 min-h-[240px]" style={{ minWidth: 0 }}>
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart
           data={seriesData}
@@ -566,14 +568,10 @@ function OverviewPage() {
         : range === '24h'
           ? 86400
           : 604800;
-  const seriesBucketSecs =
-    range === '1h' ? 60 : range === '6h' ? 300 : range === '24h' ? 900 : 3600;
-  const quotaSeries = useSubscriptionQuotaSeries({
+  const quotaPoolHistory = useSubscriptionQuotaPoolHistory({
     windows: '5h,7d',
-    source: 'merged',
     sinceUnixSecs: nowUnixSecs - seriesRangeSecs,
     untilUnixSecs: nowUnixSecs,
-    bucketSecs: seriesBucketSecs,
   });
 
   const [liveEvents, setLiveEvents] = useState<RequestEvent[]>([]);
@@ -685,36 +683,39 @@ function OverviewPage() {
 
   // Chart Data
   const chartData = useMemo(() => {
-    if (!quotaSeries.data?.series.length) {
+    const w5h = quotaPoolHistory.data?.windows.find((x) => x.window === '5h');
+    const w7d = quotaPoolHistory.data?.windows.find((x) => x.window === '7d');
+    if (!w5h?.series.length && !w7d?.series.length) {
       return [] as { unix: number; '5h': number | null; '7d': number | null }[];
     }
     const bucketsByTime = new Map<
       number,
       { '5h': number | null; '7d': number | null }
     >();
-
-    for (const s of quotaSeries.data.series) {
-      const w = s.window as '5h' | '7d';
-      if (w !== '5h' && w !== '7d') continue;
-      for (const b of s.buckets) {
-        const ts = b.bucket_start_unix_secs;
+    const addPoint = (
+      window: '5h' | '7d',
+      points: {
+        snapshot_at_unix_secs: number;
+        utilization_percent: number | null;
+      }[],
+    ) => {
+      for (const point of points) {
+        const ts = point.snapshot_at_unix_secs;
         if (!bucketsByTime.has(ts)) {
           bucketsByTime.set(ts, { '5h': null, '7d': null });
         }
         const row = bucketsByTime.get(ts);
-        if (!row || b.utilization_last == null) continue;
-        const candidate = b.utilization_last * 100;
-        const current = row[w];
-        if (current == null || candidate > current) {
-          row[w] = candidate;
+        if (row && point.utilization_percent != null) {
+          row[window] = point.utilization_percent;
         }
       }
-    }
-
+    };
+    addPoint('5h', w5h?.series ?? []);
+    addPoint('7d', w7d?.series ?? []);
     return Array.from(bucketsByTime.entries())
       .map(([unix, row]) => ({ unix, '5h': row['5h'], '7d': row['7d'] }))
       .sort((a, b) => a.unix - b.unix);
-  }, [quotaSeries.data]);
+  }, [quotaPoolHistory.data]);
 
   const chartMaxValue = useMemo(() => {
     let m = 100;
@@ -726,11 +727,17 @@ function OverviewPage() {
   }, [chartData]);
 
   const upstreamCount = quotaAggregate.data?.upstream_count ?? 0;
-  const seriesUpstreamCount =
-    quotaSeries.data?.series.reduce((set, s) => {
-      set.add(s.upstream_id);
-      return set;
-    }, new Set<string>()).size ?? 0;
+  const seriesUpstreamCount = useMemo(() => {
+    let max = 0;
+    for (const window of quotaPoolHistory.data?.windows ?? []) {
+      for (const point of window.series) {
+        if (point.contributing_upstreams > max) {
+          max = point.contributing_upstreams;
+        }
+      }
+    }
+    return max;
+  }, [quotaPoolHistory.data]);
   const chartLatest = useMemo(() => {
     let latest5h: number | null = null;
     let latest7d: number | null = null;
@@ -862,8 +869,8 @@ function OverviewPage() {
 
       <PoolQuotaCompactStrip aggregate={quotaAggregate} />
 
-      <div className="grid grid-cols-1 xl:grid-cols-[2fr_1fr] gap-3 min-w-0">
-        <Card className="min-w-0">
+      <div className="grid grid-cols-1 xl:grid-cols-[2fr_1fr] gap-3 min-w-0 xl:items-stretch">
+        <Card className="min-w-0 flex flex-col xl:h-96">
           <CardHeader
             title={
               <span className="inline-flex items-center gap-2">
@@ -871,10 +878,10 @@ function OverviewPage() {
                 Pool quota timeline
               </span>
             }
-            subtitle={`Worst-case upstream utilization · ${seriesUpstreamCount || upstreamCount} upstream${(seriesUpstreamCount || upstreamCount) === 1 ? '' : 's'} · ${range}`}
+            subtitle={`Plan-weighted pool utilization · ${seriesUpstreamCount || upstreamCount} upstream${(seriesUpstreamCount || upstreamCount) === 1 ? '' : 's'} · ${range}`}
             action={<PoolQuotaLegend latest={chartLatest} />}
           />
-          <CardBody className="p-2 pt-1">
+          <CardBody className="flex-1 flex flex-col min-h-0 p-2 pt-1">
             <PoolQuotaThemedChart
               seriesData={chartData}
               maxValue={chartMaxValue}
@@ -882,7 +889,7 @@ function OverviewPage() {
           </CardBody>
         </Card>
 
-        <Card className="min-w-0">
+        <Card className="min-w-0 flex flex-col xl:h-96">
           <CardHeader
             title={
               <span className="inline-flex items-center gap-2">
@@ -892,7 +899,7 @@ function OverviewPage() {
             }
             subtitle={`by virtual cost · ${range}`}
           />
-          <div className="overflow-auto max-h-[420px]">
+          <div className="flex-1 overflow-auto min-h-0 max-h-96 xl:max-h-none">
             <div className="flex flex-col">
               {topPrincipals.length === 0 ? (
                 <div className="p-4 text-center text-xs text-text-faint">

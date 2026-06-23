@@ -9,6 +9,7 @@ use cc_lb_scheduler::jobs::compat::{
 use cc_lb_scheduler::jobs::oauth_usage_poll::{
     NETWORK_FAILURE_STATUS, OAuthUsagePollCronJob, OAuthUsagePollObservation,
 };
+use cc_lb_scheduler::jobs::pool_quota_snapshot::PoolQuotaSnapshotCronJob;
 use cc_lb_scheduler::jobs::price_catalog::PriceCatalogRefreshJobHandler;
 use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeJobHandler;
 use cc_lb_scheduler::jobs::quota_gc::{SubscriptionQuotaGcConfig, SubscriptionQuotaGcJobHandler};
@@ -95,7 +96,57 @@ impl SchedulerDispatch {
             CronJob::OAuthRefreshWatchdog(job) => self.handle_oauth_refresh_watchdog(job).await,
             CronJob::OAuthUsagePoll(job) => self.handle_oauth_usage_poll(job).await,
             CronJob::AnthropicCompatRefresh(job) => self.dispatch_anthropic_compat(job).await,
+            CronJob::PoolQuotaSnapshot(job) => self.handle_pool_quota_snapshot(job).await,
         }
+    }
+
+    async fn handle_pool_quota_snapshot(
+        &self,
+        job: PoolQuotaSnapshotCronJob,
+    ) -> SchedulerResult<JobOutcome> {
+        use cc_lb_admin::subscription_quotas::{
+            build_cc_lb_aggregate_response, record_pool_quota_snapshots_now,
+        };
+        use cc_lb_storage_api::SubscriptionQuotaSourceMerge;
+
+        let view = self.dynamic_view.load();
+        let max_staleness_secs = view.subscription_quota_routing_max_staleness_secs;
+        drop(view);
+
+        let aggregate = match build_cc_lb_aggregate_response(
+            self.storage.as_ref(),
+            self.dynamic_view.as_ref(),
+            None,
+            vec![
+                cc_lb_storage_api::SubscriptionQuotaWindow::FiveHour,
+                cc_lb_storage_api::SubscriptionQuotaWindow::SevenDay,
+            ],
+            SubscriptionQuotaSourceMerge::Merged,
+            max_staleness_secs,
+        )
+        .await
+        {
+            Ok(aggregate) => aggregate,
+            Err(error) => {
+                tracing::warn!(
+                    tick_unix_secs = job.tick_unix_secs,
+                    %error,
+                    "pool quota snapshot aggregate build failed",
+                );
+                return Ok(JobOutcome::Done);
+            }
+        };
+
+        if let Err(error) = record_pool_quota_snapshots_now(self.storage.as_ref(), &aggregate).await
+        {
+            tracing::warn!(
+                tick_unix_secs = job.tick_unix_secs,
+                %error,
+                "pool quota snapshot persist failed",
+            );
+        }
+
+        Ok(JobOutcome::Done)
     }
 
     async fn handle_warmup_watchdog(&self, job: WarmupWatchdogJob) -> SchedulerResult<JobOutcome> {

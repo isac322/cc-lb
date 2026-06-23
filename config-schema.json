@@ -135,6 +135,11 @@
             "interval_secs": 60,
             "jitter_secs": 0
           },
+          "pool_quota_snapshot": {
+            "enabled": true,
+            "interval_secs": 60,
+            "jitter_secs": 0
+          },
           "price_catalog_refresh": {
             "enabled": true,
             "interval_secs": 3600,
@@ -726,6 +731,11 @@
               "jitter_secs": 30
             },
             "oauth_usage_poll": {
+              "enabled": true,
+              "interval_secs": 60,
+              "jitter_secs": 0
+            },
+            "pool_quota_snapshot": {
               "enabled": true,
               "interval_secs": 60,
               "jitter_secs": 0

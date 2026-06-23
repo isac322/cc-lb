@@ -9,6 +9,7 @@ pub mod notifier;
 pub mod oauth_credentials;
 pub mod organization_metadata;
 pub mod plugin_registry;
+pub mod pool_quota_history;
 pub mod price_catalog;
 pub mod principals;
 pub mod prompt_cache_observation;

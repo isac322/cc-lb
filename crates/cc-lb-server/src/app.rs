@@ -894,7 +894,7 @@ async fn build_app_with_storage_inner(
     let event_bus: Arc<dyn cc_lb_core::RequestEventBus> = Arc::new(cc_lb_core::InMemoryBus::new());
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
-        dynamic_view_holder,
+        dynamic_view_holder.clone(),
         lifecycle_config,
     );
     if let Some(audit_sink) = audit_sink.clone() {
@@ -974,6 +974,7 @@ async fn build_app_with_storage_inner(
             cancel: scheduler_cancel.clone(),
             replica_id: scheduler_replica_id,
             price_catalog: price_catalog.clone(),
+            dynamic_view: dynamic_view_holder.clone(),
         },
     );
     let scheduler_tasks = opened_scheduler
