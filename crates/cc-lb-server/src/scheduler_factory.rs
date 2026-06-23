@@ -162,9 +162,17 @@ async fn open_sqlite(
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         .busy_timeout(Duration::from_secs(5));
+    // Force pool=1 to serialize heartbeat vs job-write inside the scheduler pool (incident 2026-06-22).
+    let configured_max = scheduler.separate_pool.max_connections;
+    if configured_max != 1 {
+        tracing::warn!(
+            configured = configured_max,
+            "scheduler.separate_pool.max_connections is forced to 1 for SQLite backend; reconfigure to silence this warning",
+        );
+    }
     let pool = SqlitePoolOptions::new()
-        .max_connections(scheduler.separate_pool.max_connections)
-        .min_connections(scheduler.separate_pool.min_connections)
+        .max_connections(1)
+        .min_connections(1)
         .acquire_timeout(Duration::from_secs(
             scheduler.separate_pool.acquire_timeout_secs,
         ))
@@ -276,7 +284,10 @@ async fn open_postgres(
         leader,
         scheduler.leader_lock_key,
     );
-    let storage = apalis_postgres::PostgresStorage::new_with_config(
+    // NOTE: use `new_with_notify`; apalis-postgres' polling fetcher ignores
+    // Config::poll_strategy and uses a 1s..5min exponential backoff that
+    // stalls sparse queues and starves follower replicas under bursty pushes.
+    let storage = apalis_postgres::PostgresStorage::new_with_notify(
         &pool,
         &apalis_postgres::Config::new(cc_lb_scheduler::worker::ADAPTIVE_QUEUE),
     );

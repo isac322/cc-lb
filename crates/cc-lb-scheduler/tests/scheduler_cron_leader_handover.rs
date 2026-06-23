@@ -22,7 +22,7 @@ mod postgres {
     use cc_lb_scheduler::{
         leader_election::{LeaderElection, LeaderState},
         retry::JobOutcome,
-        worker::{ADAPTIVE_QUEUE, AdaptiveJob, PostgresApalisStorage},
+        worker::{ADAPTIVE_QUEUE, AdaptiveJob},
     };
     use tokio::{
         sync::{Mutex, Notify},
@@ -138,7 +138,17 @@ mod postgres {
                 entity_cancel.clone(),
             );
 
-            let mut storage = PostgresApalisStorage::new_with_config(&pool, &entity_queue_config());
+            // Production replicas set up LISTEN once at boot, then jobs trickle
+            // in over time. To mirror that ordering (and avoid losing NOTIFYs
+            // emitted before both PgListener channels are connected), settle
+            // worker setup before pushing, and space pushes so each NOTIFY
+            // gives both workers a chance to win the row-level lock race.
+            tokio::time::sleep(Duration::from_millis(500)).await;
+
+            let mut storage = apalis_postgres::PostgresStorage::<AdaptiveJob>::new_with_notify(
+                &pool,
+                &entity_queue_config(),
+            );
             for cycle_key in 0..12_u64 {
                 storage
                     .push(AdaptiveJob::Warmup(
@@ -148,6 +158,7 @@ mod postgres {
                         ),
                     ))
                     .await?;
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
 
             wait_for_entity_replicas(&seen, &notify).await?;
@@ -185,7 +196,10 @@ mod postgres {
         notify: Arc<Notify>,
         cancel: CancellationToken,
     ) -> JoinHandle<Result<(), WorkerError>> {
-        let storage = PostgresApalisStorage::new_with_config(pool, &entity_queue_config());
+        let storage = apalis_postgres::PostgresStorage::<AdaptiveJob>::new_with_notify(
+            pool,
+            &entity_queue_config(),
+        );
         tokio::spawn(async move {
             ApalisWorkerBuilder::new(ADAPTIVE_QUEUE)
                 .backend(storage)

@@ -13,6 +13,7 @@ use url::Url;
 use crate::http_client::{OAuthHttpClient, OAuthTokenRequest};
 
 pub const REFRESH_BUFFER_SECS: u64 = 60;
+pub const REFRESH_SOFT_BUFFER_SECS: u64 = 300;
 pub const BREAKER_FAILURE_THRESHOLD: u32 = 3;
 
 pub type BreakerMap = Arc<DashMap<String, Arc<CircuitBreakerState>>>;

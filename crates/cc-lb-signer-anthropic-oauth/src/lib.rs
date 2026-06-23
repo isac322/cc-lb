@@ -48,6 +48,10 @@ pub enum LazyRefreshError {
 #[async_trait]
 pub trait LazyRefreshHandle: Send + Sync {
     async fn refresh_one(&self, upstream_id: Uuid) -> Result<(), LazyRefreshError>;
+
+    async fn enqueue_only(&self, upstream_id: Uuid) -> Result<(), LazyRefreshError> {
+        self.refresh_one(upstream_id).await
+    }
 }
 
 pub trait LazyRefreshConfigurable: SignerFactory + Clone {
@@ -738,6 +742,38 @@ impl PersistedAnthropicOAuthSigner {
             refresh_locks: self.refresh_locks.clone(),
         }
     }
+
+    fn maybe_trigger_soft_refresh(&self, now_unix_secs: u64) {
+        if self
+            .expires_at_unix_secs
+            .saturating_sub(refresh::REFRESH_SOFT_BUFFER_SECS)
+            > now_unix_secs
+        {
+            return;
+        }
+        let Some(handle) = self.refresh_handle.clone() else {
+            return;
+        };
+        let lock = single_flight::lock_for(
+            &self.refresh_locks,
+            "soft_refresh",
+            &self.upstream_id.to_string(),
+        );
+        let Ok(guard) = lock.try_lock_owned() else {
+            return;
+        };
+        let upstream_id = self.upstream_id;
+        tokio::spawn(async move {
+            let _guard = guard;
+            if let Err(error) = handle.enqueue_only(upstream_id).await {
+                tracing::warn!(
+                    upstream_id = %upstream_id,
+                    error = %error,
+                    "oauth soft-window background refresh enqueue failed",
+                );
+            }
+        });
+    }
 }
 
 #[async_trait]
@@ -747,11 +783,13 @@ impl Signer for PersistedAnthropicOAuthSigner {
         mut shaped: ShapedRequest,
         capability: &mut SigningCapability,
     ) -> Result<SignedRequest, SignerError> {
-        if self.expires_at_unix_secs <= now_epoch_secs().saturating_add(OAUTH_EXPIRY_SKEW_SECS) {
+        let now = now_epoch_secs();
+        if self.expires_at_unix_secs <= now.saturating_add(OAUTH_EXPIRY_SKEW_SECS) {
             return Err(SignerError::ExpiredToken {
                 reason: "oauth access token expired".to_owned(),
             });
         }
+        self.maybe_trigger_soft_refresh(now);
         let header_value = bearer_header_value(self.access_token.expose_secret())?;
         let headers = shaped.headers_mut();
         headers.remove("x-api-key");

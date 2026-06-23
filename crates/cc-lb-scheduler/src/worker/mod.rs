@@ -2,7 +2,9 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, LazyLock};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(feature = "postgres")]
 use apalis::prelude::TaskSink;
@@ -89,7 +91,12 @@ pub struct SqliteSchedulerStorage {
 }
 
 #[cfg(feature = "postgres")]
-pub type PostgresApalisStorage = apalis_postgres::PostgresStorage<AdaptiveJob>;
+pub type PostgresApalisStorage = apalis_postgres::PostgresStorage<
+    AdaptiveJob,
+    apalis_postgres::CompactType,
+    apalis_postgres::JsonCodec<apalis_postgres::CompactType>,
+    apalis_postgres::PgNotify,
+>;
 
 #[cfg(feature = "postgres")]
 #[derive(Clone)]
@@ -139,22 +146,214 @@ impl SchedulerBackend {
         ctx: SchedulerCtx,
         cancel: CancellationToken,
     ) -> Result<Vec<JoinHandle<()>>, SchedulerError> {
-        let entity_worker = build_adaptive_worker(self, ctx.clone())?;
-        let singleton_worker = build_cron_worker(self, ctx)?;
-        let entity_cancel = cancel.clone();
-        let singleton_cancel = cancel;
+        let backend = self.clone();
         Ok(vec![
-            tokio::spawn(async move {
-                if let Err(error) = entity_worker.run_until_cancelled(entity_cancel).await {
-                    tracing::error!(error = %error, "scheduler entity worker exited with error");
-                }
-            }),
-            tokio::spawn(async move {
-                if let Err(error) = singleton_worker.run_until_cancelled(singleton_cancel).await {
-                    tracing::error!(error = %error, "scheduler singleton worker exited with error");
-                }
-            }),
+            tokio::spawn(run_adaptive_consumer_loop(
+                backend.clone(),
+                ctx.clone(),
+                cancel.clone(),
+            )),
+            tokio::spawn(run_singleton_consumer_loop(backend, ctx, cancel)),
         ])
+    }
+}
+
+const CONSUMER_BACKOFF_INITIAL: Duration = Duration::from_secs(1);
+const CONSUMER_BACKOFF_CAP: Duration = Duration::from_secs(60);
+const CONSUMER_LONG_RUN_THRESHOLD: Duration = Duration::from_secs(30);
+
+static WORKER_INSTANCE_ID: LazyLock<String> = LazyLock::new(|| {
+    let pid = std::process::id();
+    let started_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    format!("{pid}-{started_ms}")
+});
+
+static WORKER_RUN_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn next_worker_name(queue: &str) -> String {
+    let seq = WORKER_RUN_SEQ.fetch_add(1, Ordering::Relaxed);
+    format!("{queue}-{}-{seq}", &*WORKER_INSTANCE_ID)
+}
+
+fn jitter(d: Duration) -> Duration {
+    // Deterministic ~±20% jitter from wall clock nanos; rand is not a workspace dep.
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|t| t.as_nanos() as u64)
+        .unwrap_or(0);
+    let frac = (nanos % 400) as f64 / 1000.0;
+    let factor = 0.8_f64 + frac;
+    Duration::from_secs_f64(d.as_secs_f64() * factor)
+}
+
+async fn sleep_or_cancel(d: Duration, cancel: &CancellationToken) -> bool {
+    tokio::select! {
+        _ = tokio::time::sleep(d) => true,
+        _ = cancel.cancelled() => false,
+    }
+}
+
+async fn run_adaptive_consumer_loop(
+    backend: SchedulerBackend,
+    ctx: SchedulerCtx,
+    cancel: CancellationToken,
+) {
+    let mut backoff = CONSUMER_BACKOFF_INITIAL;
+    loop {
+        if cancel.is_cancelled() {
+            return;
+        }
+        let worker_name = next_worker_name(ADAPTIVE_QUEUE);
+        let worker = match layers::build_backend_adaptive_worker_named(
+            &backend,
+            ctx.clone(),
+            worker_name.clone(),
+        ) {
+            Ok(worker) => worker,
+            Err(error) => {
+                tracing::error!(
+                    error = %error,
+                    worker = %worker_name,
+                    "scheduler adaptive worker build failed; supervising restart",
+                );
+                ::metrics::counter!(
+                    "cclb_scheduler_consumer_restarts_total",
+                    "consumer" => "adaptive",
+                    "reason" => "build_failed",
+                )
+                .increment(1);
+                if !sleep_or_cancel(jitter(backoff), &cancel).await {
+                    return;
+                }
+                backoff = (backoff * 2).min(CONSUMER_BACKOFF_CAP);
+                continue;
+            }
+        };
+        let started_at = Instant::now();
+        let result = worker.run_until_cancelled(cancel.clone()).await;
+        if cancel.is_cancelled() {
+            return;
+        }
+        let elapsed = started_at.elapsed();
+        match result {
+            Ok(()) => {
+                tracing::warn!(
+                    worker = %worker_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "scheduler adaptive worker exited without cancel; supervising restart",
+                );
+                ::metrics::counter!(
+                    "cclb_scheduler_consumer_restarts_total",
+                    "consumer" => "adaptive",
+                    "reason" => "exited_ok",
+                )
+                .increment(1);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    worker = %worker_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    error = %error,
+                    "scheduler adaptive worker exited with error; supervising restart",
+                );
+                ::metrics::counter!(
+                    "cclb_scheduler_consumer_restarts_total",
+                    "consumer" => "adaptive",
+                    "reason" => "exited_error",
+                )
+                .increment(1);
+            }
+        }
+        backoff = if elapsed >= CONSUMER_LONG_RUN_THRESHOLD {
+            CONSUMER_BACKOFF_INITIAL
+        } else {
+            (backoff * 2).min(CONSUMER_BACKOFF_CAP)
+        };
+        if !sleep_or_cancel(jitter(backoff), &cancel).await {
+            return;
+        }
+    }
+}
+
+async fn run_singleton_consumer_loop(
+    backend: SchedulerBackend,
+    ctx: SchedulerCtx,
+    cancel: CancellationToken,
+) {
+    let mut backoff = CONSUMER_BACKOFF_INITIAL;
+    loop {
+        if cancel.is_cancelled() {
+            return;
+        }
+        let worker_name = next_worker_name(CRON_QUEUE);
+        let worker =
+            match layers::build_cron_worker_named(&backend, ctx.clone(), worker_name.clone()) {
+                Ok(worker) => worker,
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        worker = %worker_name,
+                        "scheduler singleton worker build failed; supervising restart",
+                    );
+                    ::metrics::counter!(
+                        "cclb_scheduler_consumer_restarts_total",
+                        "consumer" => "singleton",
+                        "reason" => "build_failed",
+                    )
+                    .increment(1);
+                    if !sleep_or_cancel(jitter(backoff), &cancel).await {
+                        return;
+                    }
+                    backoff = (backoff * 2).min(CONSUMER_BACKOFF_CAP);
+                    continue;
+                }
+            };
+        let started_at = Instant::now();
+        let result = worker.run_until_cancelled(cancel.clone()).await;
+        if cancel.is_cancelled() {
+            return;
+        }
+        let elapsed = started_at.elapsed();
+        match result {
+            Ok(()) => {
+                tracing::warn!(
+                    worker = %worker_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    "scheduler singleton worker exited without cancel; supervising restart",
+                );
+                ::metrics::counter!(
+                    "cclb_scheduler_consumer_restarts_total",
+                    "consumer" => "singleton",
+                    "reason" => "exited_ok",
+                )
+                .increment(1);
+            }
+            Err(error) => {
+                tracing::warn!(
+                    worker = %worker_name,
+                    elapsed_ms = elapsed.as_millis() as u64,
+                    error = %error,
+                    "scheduler singleton worker exited with error; supervising restart",
+                );
+                ::metrics::counter!(
+                    "cclb_scheduler_consumer_restarts_total",
+                    "consumer" => "singleton",
+                    "reason" => "exited_error",
+                )
+                .increment(1);
+            }
+        }
+        backoff = if elapsed >= CONSUMER_LONG_RUN_THRESHOLD {
+            CONSUMER_BACKOFF_INITIAL
+        } else {
+            (backoff * 2).min(CONSUMER_BACKOFF_CAP)
+        };
+        if !sleep_or_cancel(jitter(backoff), &cancel).await {
+            return;
+        }
     }
 }
 
