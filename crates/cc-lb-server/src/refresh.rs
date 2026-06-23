@@ -572,18 +572,17 @@ impl LazyRefreshHandle for LazyRefresher {
             .begin_refresh(upstream_id, &holder, expires_at_unix_secs, now_unix_secs())
             .await
             .map_err(lazy_error)?;
-        if let LazyRefreshClaim::Acquired = claim {
-            if let Err(release_error) = self
+        if let LazyRefreshClaim::Acquired = claim
+            && let Err(release_error) = self
                 .claim_guard
                 .release_if_holder(upstream_id, &holder)
                 .await
-            {
-                tracing::warn!(
-                    error = %release_error,
-                    upstream_id = %upstream_id,
-                    "soft refresh claim release failed",
-                );
-            }
+        {
+            tracing::warn!(
+                error = %release_error,
+                upstream_id = %upstream_id,
+                "soft refresh claim release failed",
+            );
         }
         Ok(())
     }

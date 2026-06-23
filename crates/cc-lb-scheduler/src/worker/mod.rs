@@ -284,31 +284,28 @@ async fn run_singleton_consumer_loop(
             return;
         }
         let worker_name = next_worker_name(CRON_QUEUE);
-        let worker = match layers::build_cron_worker_named(
-            &backend,
-            ctx.clone(),
-            worker_name.clone(),
-        ) {
-            Ok(worker) => worker,
-            Err(error) => {
-                tracing::error!(
-                    error = %error,
-                    worker = %worker_name,
-                    "scheduler singleton worker build failed; supervising restart",
-                );
-                ::metrics::counter!(
-                    "cclb_scheduler_consumer_restarts_total",
-                    "consumer" => "singleton",
-                    "reason" => "build_failed",
-                )
-                .increment(1);
-                if !sleep_or_cancel(jitter(backoff), &cancel).await {
-                    return;
+        let worker =
+            match layers::build_cron_worker_named(&backend, ctx.clone(), worker_name.clone()) {
+                Ok(worker) => worker,
+                Err(error) => {
+                    tracing::error!(
+                        error = %error,
+                        worker = %worker_name,
+                        "scheduler singleton worker build failed; supervising restart",
+                    );
+                    ::metrics::counter!(
+                        "cclb_scheduler_consumer_restarts_total",
+                        "consumer" => "singleton",
+                        "reason" => "build_failed",
+                    )
+                    .increment(1);
+                    if !sleep_or_cancel(jitter(backoff), &cancel).await {
+                        return;
+                    }
+                    backoff = (backoff * 2).min(CONSUMER_BACKOFF_CAP);
+                    continue;
                 }
-                backoff = (backoff * 2).min(CONSUMER_BACKOFF_CAP);
-                continue;
-            }
-        };
+            };
         let started_at = Instant::now();
         let result = worker.run_until_cancelled(cancel.clone()).await;
         if cancel.is_cancelled() {
