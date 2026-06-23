@@ -48,3 +48,32 @@ where
     })
     .await
 }
+
+pub async fn put_same_payload_twice_updates_fetched_at<B>(backend: Arc<B>) -> Result<()>
+where
+    B: ConformanceBackend,
+    B::Storage: PriceCatalogCache,
+{
+    with_conformance_fixture(backend, |storage| async move {
+        let payload = br#"{"models":[{"id":"claude-sonnet-4-5","price":12345}]}"#;
+        storage.put_price_snapshot(payload, 1_000).await?;
+        storage.put_price_snapshot(payload, 2_000).await?;
+        storage.put_price_snapshot(payload, 1_500).await?;
+
+        let snapshot = storage
+            .get_price_snapshot()
+            .await?
+            .context("snapshot should exist after repeated puts")?;
+        ensure!(
+            snapshot.json_bytes == payload,
+            "payload should round-trip after dedup"
+        );
+        ensure!(
+            snapshot.fetched_at_ms == 1_500,
+            "fetched_at_ms should reflect the last put (got {})",
+            snapshot.fetched_at_ms,
+        );
+        Ok(())
+    })
+    .await
+}
