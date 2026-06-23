@@ -261,7 +261,7 @@ export function useSummary(range: string) {
       getJson<DashboardSummaryResponse>(
         `/admin/dashboard/summary?range=${encodeURIComponent(range)}`,
       ),
-    refetchInterval: 30_000,
+    refetchInterval: 5_000,
   });
 }
 export function useUsage(
@@ -283,7 +283,7 @@ export function useUsage(
         `/admin/usage?${params.toString()}`,
       );
     },
-    refetchInterval: 30_000,
+    refetchInterval: 5_000,
   });
 }
 export function useUpstreams() {
@@ -505,7 +505,7 @@ export function useSubscriptionQuotaLatest(params: {
       getJson<LatestResponse>(
         `/admin/v1/subscription-quotas/latest?${searchParams.toString()}`,
       ),
-    refetchInterval: params.refetchInterval ?? 30_000,
+    refetchInterval: params.refetchInterval ?? 5_000,
   });
 }
 
@@ -538,7 +538,7 @@ export function useSubscriptionQuotaSeries(params: {
       getJson<SeriesResponse>(
         `/admin/v1/subscription-quotas/series?${searchParams.toString()}`,
       ),
-    refetchInterval: 60_000,
+    refetchInterval: 30_000,
   });
 }
 
@@ -585,7 +585,7 @@ export function useSubscriptionQuotaAggregate(params: {
       getJson<AggregateResponse>(
         `/admin/v1/subscription-quotas/aggregate?${searchParams.toString()}`,
       ),
-    refetchInterval: 60_000,
+    refetchInterval: 30_000,
   });
 }
 

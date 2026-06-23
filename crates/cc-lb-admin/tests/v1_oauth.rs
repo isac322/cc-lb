@@ -65,6 +65,7 @@ impl Fixture {
             scheduler: None,
             admin_token: Some("test-token".to_owned()),
             start_time: std::time::Instant::now(),
+            event_bus: None,
         };
 
         Self {

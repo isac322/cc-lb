@@ -179,6 +179,7 @@ impl Harness {
             data_dir: None,
             warmup_dialect_dispatcher: None,
             subscription_metadata_hook: None,
+            event_bus: None,
             start_time: Instant::now(),
         });
         std::mem::forget(dir);

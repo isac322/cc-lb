@@ -1123,6 +1123,39 @@ async function handle(req: Request, url: URL): Promise<Response> {
       }))),
     });
   }
+  if (path === "/admin/v1/subscription-quotas/aggregate" && m === "GET") {
+    const now = NOW();
+    const enabledOAuth = upstreams.filter((u) => u.kind === "anthropic_oauth" && u.enabled);
+    const upstreamCount = enabledOAuth.length;
+    const windowSpec = [
+      { window: "5h", utilization: 0.674, capacity: 1_500_000, secs: 5 * 3600 },
+      { window: "7d", utilization: 0.521, capacity: 14_000_000, secs: 7 * 24 * 3600 },
+    ];
+    return ok({
+      now_unix_secs: now,
+      window_anchor_unix_secs: now,
+      max_staleness_secs: 300,
+      upstream_count: upstreamCount,
+      windows: windowSpec.map((w) => ({
+        window: w.window,
+        cc_window_start_unix_secs: now - w.secs,
+        cc_window_reset_unix_secs: now + w.secs,
+        used_tokens: Math.floor(w.capacity * w.utilization),
+        utilization: w.utilization,
+        utilization_percent: w.utilization * 100,
+        capacity_to_now_tokens_estimate: w.capacity,
+        projected_capacity_tokens_estimate: w.capacity,
+        remaining_to_now_tokens_estimate: Math.floor(w.capacity * (1 - w.utilization)),
+        confidence: "high",
+        contributing_upstreams: upstreamCount,
+        stale_upstreams: 0,
+        missing_capacity_upstreams: 0,
+        provider_lots: [],
+        caveats: [],
+      })),
+      caveats: [],
+    });
+  }
   if (path === "/admin/v1/subscription-quotas/analysis" && m === "GET") {
     const now = NOW();
     const range = url.searchParams.get("range") || "7d";

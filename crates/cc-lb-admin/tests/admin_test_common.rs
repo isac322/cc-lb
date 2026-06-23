@@ -135,6 +135,7 @@ pub async fn spawn_admin_server() -> SpawnedAdminServer {
         scheduler: None,
         admin_token: Some("test-token".to_owned()),
         start_time: std::time::Instant::now(),
+        event_bus: None,
     };
     SpawnedAdminServer {
         _dir: dir,

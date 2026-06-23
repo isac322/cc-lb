@@ -78,6 +78,9 @@ pub fn test_state(config: Config, storage: Option<Arc<SqliteStorage>>) -> AdminS
     ));
     let dynamic_view = dynamic_view_holder(principal_view);
     let key_store = storage.clone().map(key_store);
+    let event_bus: Option<Arc<dyn cc_lb_core::RequestEventBus>> = storage
+        .as_ref()
+        .map(|_| Arc::new(cc_lb_core::InMemoryBus::new()) as Arc<dyn cc_lb_core::RequestEventBus>);
     AdminState {
         storage: storage.map(|s| s as Arc<dyn cc_lb_storage_api::Storage>),
         key_store,
@@ -95,6 +98,7 @@ pub fn test_state(config: Config, storage: Option<Arc<SqliteStorage>>) -> AdminS
         warmup_dialect_dispatcher: None,
         subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
+        event_bus,
     }
 }
 
@@ -130,6 +134,7 @@ pub async fn apply_state(
         warmup_dialect_dispatcher: None,
         subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
+        event_bus: None,
     }
 }
 

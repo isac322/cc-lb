@@ -36,6 +36,7 @@ pub fn app_with_scheduler(scheduler: SchedulerAdminHandle) -> axum::Router {
         scheduler: Some(scheduler),
         admin_token: Some("test-token".to_owned()),
         start_time: std::time::Instant::now(),
+        event_bus: None,
     };
     cc_lb_admin::router(state)
 }
