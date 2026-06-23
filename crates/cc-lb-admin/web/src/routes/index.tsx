@@ -22,6 +22,8 @@ import {
   Area,
   AreaChart,
   CartesianGrid,
+  ReferenceArea,
+  ReferenceLine,
   ResponsiveContainer,
   Tooltip as RTooltip,
   XAxis,
@@ -194,99 +196,123 @@ function ProgressBar({
   );
 }
 
-function MetaStat({ label, value }: { label: string; value: React.ReactNode }) {
-  return (
-    <div className="rounded-sm bg-overlay-1 border border-subtle p-2">
-      <div className="text-text-faint text-[10px] uppercase tracking-wider">
-        {label}
+type AggregateWindow = NonNullable<
+  ReturnType<typeof useSubscriptionQuotaAggregate>['data']
+>['windows'][number];
+
+function PoolQuotaInlineRow({
+  window,
+  w,
+}: {
+  window: '5h' | '7d';
+  w: AggregateWindow | undefined;
+}) {
+  if (!w) {
+    return (
+      <div className="flex items-center gap-2 text-xs text-text-faint min-h-[56px]">
+        <span className="uppercase tracking-wider">{window} pool</span>
+        <span>· no data</span>
       </div>
-      <div className="font-mono tabular-nums text-sm">{value}</div>
+    );
+  }
+
+  const used_pct = w.utilization_percent ?? 0;
+  const used_tokens = w.used_tokens ?? 0;
+  const capacity_tokens =
+    w.projected_capacity_tokens_estimate ??
+    w.capacity_to_now_tokens_estimate ??
+    0;
+  const nowUnixSecs = Math.floor(Date.now() / 1000);
+  const elapsedMin = Math.max(
+    1,
+    (nowUnixSecs - w.cc_window_start_unix_secs) / 60,
+  );
+  const burn_per_min = used_tokens / elapsedMin;
+  const reset_min = Math.max(
+    0,
+    (w.cc_window_reset_unix_secs - nowUnixSecs) / 60,
+  );
+  const remainingTokens = Math.max(0, capacity_tokens - used_tokens);
+  const eta_min_raw = burn_per_min > 0 ? remainingTokens / burn_per_min : null;
+  const eta_min =
+    eta_min_raw != null && eta_min_raw <= reset_min ? eta_min_raw : null;
+  const c = utilColor(used_pct);
+  const tone = utilTone(used_pct);
+
+  return (
+    <div className="flex flex-col gap-1.5 min-w-0">
+      <div className="flex items-baseline gap-2 min-w-0">
+        <span className="text-[11px] uppercase tracking-wider text-text-faint shrink-0">
+          {window} pool
+        </span>
+        <span
+          className="tabular-nums font-medium text-xl leading-none"
+          style={{ color: c }}
+        >
+          {used_pct.toFixed(1)}%
+        </span>
+        <span className="text-[11px] text-text-faint tabular-nums truncate ml-auto">
+          {fmtCount(used_tokens)} / {fmtCount(capacity_tokens)} tok
+        </span>
+        <StatusBadge
+          tone={tone === 'ok' ? 'neutral' : tone}
+          label={w.confidence ?? 'missing'}
+        />
+      </div>
+      <ProgressBar pct={used_pct} color={c} height="h-1.5" />
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-text-faint tabular-nums">
+        <span>
+          eta <span className="text-text">{fmtMin(eta_min)}</span>
+        </span>
+        <span>
+          burn <span className="text-text">{fmtCount(burn_per_min)}/min</span>
+        </span>
+        <span>
+          resets <span className="text-text">{fmtMin(reset_min)}</span>
+        </span>
+      </div>
     </div>
   );
 }
 
-function PoolQuotaCard({
-  window,
+function PoolQuotaCompactStrip({
   aggregate,
 }: {
-  window: '5h' | '7d';
   aggregate: ReturnType<typeof useSubscriptionQuotaAggregate>;
 }) {
-  const w = aggregate.data?.windows.find((x) => x.window === window);
-  const used_pct = w?.utilization_percent ?? 0;
-  const used_tokens = w?.used_tokens ?? 0;
-  const capacity_tokens =
-    w?.projected_capacity_tokens_estimate ??
-    w?.capacity_to_now_tokens_estimate ??
-    0;
-
-  const nowUnixSecs = Math.floor(Date.now() / 1000);
-  const elapsedMin = w
-    ? Math.max(1, (nowUnixSecs - w.cc_window_start_unix_secs) / 60)
-    : 1;
-  const burn_per_min = used_tokens / elapsedMin;
-  const reset_min = w
-    ? Math.max(0, (w.cc_window_reset_unix_secs - nowUnixSecs) / 60)
-    : 0;
-  const remainingTokens = Math.max(0, capacity_tokens - used_tokens);
-  const eta_min = burn_per_min > 0 ? remainingTokens / burn_per_min : null;
-  const confidence = w?.confidence ?? 'missing';
-
-  const c = utilColor(used_pct);
-  const tone = utilTone(used_pct);
-  const label = `${window} pool window`;
-
-  if (!w) {
-    return (
-      <Card className="relative overflow-hidden p-3 flex items-center justify-center min-h-[140px]">
-        <span className="text-xs text-text-faint">No {window} quota data</span>
-      </Card>
-    );
-  }
-
+  const w5h = aggregate.data?.windows.find((x) => x.window === '5h');
+  const w7d = aggregate.data?.windows.find((x) => x.window === '7d');
+  const upstreamCount = aggregate.data?.upstream_count ?? 0;
   return (
-    <Card className="relative overflow-hidden">
-      <div className="relative grid gap-3 p-3">
-        <div className="flex flex-col gap-2 min-w-0">
-          <div className="flex items-center justify-between gap-2">
-            <span className="text-[11px] uppercase tracking-wider text-text-faint">
-              {label}
-            </span>
-            <StatusBadge
-              tone={tone === 'ok' ? 'neutral' : tone}
-              label={confidence}
-            />
-          </div>
-          <div className="flex items-baseline gap-2">
-            <span
-              className="tabular-nums font-medium leading-none text-3xl"
-              style={{ color: c }}
-            >
-              {used_pct.toFixed(1)}
-            </span>
-            <span
-              className="tabular-nums font-medium opacity-70 text-lg"
-              style={{ color: c }}
-            >
-              %
-            </span>
-            <span className="text-[11px] text-text-faint ml-1 tabular-nums">
-              {fmtCount(used_tokens)} / {fmtCount(capacity_tokens)} tok
-            </span>
-          </div>
-          <ProgressBar pct={used_pct} color={c} height="h-2" />
-          <div className="grid grid-cols-3 gap-2 mt-1 text-xs">
-            <MetaStat label="eta to cap" value={fmtMin(eta_min)} />
-            <MetaStat label="resets in" value={fmtMin(reset_min)} />
-            <MetaStat label="burn" value={`${fmtCount(burn_per_min)}/min`} />
-          </div>
-        </div>
+    <Card>
+      <CardHeader
+        title={
+          <span className="inline-flex items-center gap-2">
+            <Gauge className="w-3.5 h-3.5 text-text-faint" />
+            Pool quota
+          </span>
+        }
+        subtitle={
+          upstreamCount > 0
+            ? `capacity-weighted · ${upstreamCount} upstream${upstreamCount === 1 ? '' : 's'}`
+            : 'capacity-weighted'
+        }
+      />
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 p-3">
+        <PoolQuotaInlineRow window="5h" w={w5h} />
+        <PoolQuotaInlineRow window="7d" w={w7d} />
       </div>
     </Card>
   );
 }
 
-function PoolQuotaThemedChart({ seriesData }: { seriesData: any[] }) {
+function PoolQuotaThemedChart({
+  seriesData,
+  maxValue,
+}: {
+  seriesData: { unix: number; '5h': number | null; '7d': number | null }[];
+  maxValue: number;
+}) {
   const chartId = useId();
   const c5h = getWindowColor('5h');
   const c7d = getWindowColor('7d');
@@ -304,7 +330,7 @@ function PoolQuotaThemedChart({ seriesData }: { seriesData: any[] }) {
       <ResponsiveContainer width="100%" height="100%">
         <AreaChart
           data={seriesData}
-          margin={{ top: 8, right: 8, bottom: 4, left: -20 }}
+          margin={{ top: 8, right: 8, bottom: 4, left: 0 }}
         >
           <defs>
             <linearGradient
@@ -352,8 +378,35 @@ function PoolQuotaThemedChart({ seriesData }: { seriesData: any[] }) {
             tickFormatter={(v) => `${v}%`}
             axisLine={false}
             tickLine={false}
-            width={40}
-            domain={[0, 100]}
+            width={44}
+            domain={[0, maxValue]}
+            ticks={
+              maxValue <= 100
+                ? [0, 25, 50, 75, 100]
+                : [0, 25, 50, 75, 100, maxValue]
+            }
+            allowDataOverflow={false}
+          />
+          {maxValue > 95 ? (
+            <ReferenceArea
+              y1={95}
+              y2={maxValue}
+              fill="var(--color-danger)"
+              fillOpacity={0.06}
+              ifOverflow="hidden"
+            />
+          ) : null}
+          <ReferenceLine
+            y={80}
+            stroke="var(--color-warn)"
+            strokeOpacity={0.5}
+            strokeDasharray="4 4"
+          />
+          <ReferenceLine
+            y={95}
+            stroke="var(--color-danger)"
+            strokeOpacity={0.6}
+            strokeDasharray="4 4"
           />
           <RTooltip
             cursor={{
@@ -447,9 +500,15 @@ function PoolQuotaThemedChart({ seriesData }: { seriesData: any[] }) {
   );
 }
 
-function PoolQuotaLegend() {
+function PoolQuotaLegend({
+  latest,
+}: {
+  latest?: { '5h': number | null; '7d': number | null };
+}) {
   const c5h = getWindowColor('5h');
   const c7d = getWindowColor('7d');
+  const v5h = latest?.['5h'];
+  const v7d = latest?.['7d'];
   return (
     <div className="flex flex-wrap items-center gap-3 text-[11px] text-text-faint">
       <span className="inline-flex items-center gap-1.5">
@@ -457,16 +516,15 @@ function PoolQuotaLegend() {
           className="w-2 h-2 rounded-sm"
           style={{ background: c5h.stroke }}
         />
-        5h window
+        5h{v5h != null ? ` · ${v5h.toFixed(0)}%` : ''}
       </span>
       <span className="inline-flex items-center gap-1.5">
         <span
           className="w-2 h-2 rounded-sm"
           style={{ background: c7d.stroke }}
         />
-        7d window
+        7d{v7d != null ? ` · ${v7d.toFixed(0)}%` : ''}
       </span>
-      <span className="text-text-faint">· pool aggregate</span>
     </div>
   );
 }
@@ -500,12 +558,22 @@ function OverviewPage() {
     source: 'merged',
   });
 
+  const seriesRangeSecs =
+    range === '1h'
+      ? 3600
+      : range === '6h'
+        ? 21600
+        : range === '24h'
+          ? 86400
+          : 604800;
+  const seriesBucketSecs =
+    range === '1h' ? 60 : range === '6h' ? 300 : range === '24h' ? 900 : 3600;
   const quotaSeries = useSubscriptionQuotaSeries({
     windows: '5h,7d',
     source: 'merged',
-    sinceUnixSecs: nowUnixSecs - 86400, // Timeline is always 24h as per mockup
+    sinceUnixSecs: nowUnixSecs - seriesRangeSecs,
     untilUnixSecs: nowUnixSecs,
-    bucketSecs: 300,
+    bucketSecs: seriesBucketSecs,
   });
 
   const [liveEvents, setLiveEvents] = useState<RequestEvent[]>([]);
@@ -617,38 +685,61 @@ function OverviewPage() {
 
   // Chart Data
   const chartData = useMemo(() => {
-    if (!quotaSeries.data?.series.length) return [];
-    const bucketsByTime = new Map<number, any>();
+    if (!quotaSeries.data?.series.length) {
+      return [] as { unix: number; '5h': number | null; '7d': number | null }[];
+    }
+    const bucketsByTime = new Map<
+      number,
+      { '5h': number | null; '7d': number | null }
+    >();
 
     for (const s of quotaSeries.data.series) {
-      const w = s.window;
+      const w = s.window as '5h' | '7d';
+      if (w !== '5h' && w !== '7d') continue;
       for (const b of s.buckets) {
         const ts = b.bucket_start_unix_secs;
         if (!bucketsByTime.has(ts)) {
-          bucketsByTime.set(ts, {
-            unix: ts,
-            '5h_sum': 0,
-            '5h_count': 0,
-            '7d_sum': 0,
-            '7d_count': 0,
-          });
+          bucketsByTime.set(ts, { '5h': null, '7d': null });
         }
-        const row = bucketsByTime.get(ts)!;
-        if (b.utilization_last != null) {
-          row[`${w}_sum`] += b.utilization_last * 100;
-          row[`${w}_count`] += 1;
+        const row = bucketsByTime.get(ts);
+        if (!row || b.utilization_last == null) continue;
+        const candidate = b.utilization_last * 100;
+        const current = row[w];
+        if (current == null || candidate > current) {
+          row[w] = candidate;
         }
       }
     }
 
-    return Array.from(bucketsByTime.values())
-      .map((row) => ({
-        unix: row.unix,
-        '5h': row['5h_count'] > 0 ? row['5h_sum'] / row['5h_count'] : null,
-        '7d': row['7d_count'] > 0 ? row['7d_sum'] / row['7d_count'] : null,
-      }))
+    return Array.from(bucketsByTime.entries())
+      .map(([unix, row]) => ({ unix, '5h': row['5h'], '7d': row['7d'] }))
       .sort((a, b) => a.unix - b.unix);
   }, [quotaSeries.data]);
+
+  const chartMaxValue = useMemo(() => {
+    let m = 100;
+    for (const row of chartData) {
+      if (row['5h'] != null && row['5h'] > m) m = row['5h'];
+      if (row['7d'] != null && row['7d'] > m) m = row['7d'];
+    }
+    return Math.ceil(m / 10) * 10;
+  }, [chartData]);
+
+  const upstreamCount = quotaAggregate.data?.upstream_count ?? 0;
+  const seriesUpstreamCount =
+    quotaSeries.data?.series.reduce((set, s) => {
+      set.add(s.upstream_id);
+      return set;
+    }, new Set<string>()).size ?? 0;
+  const chartLatest = useMemo(() => {
+    let latest5h: number | null = null;
+    let latest7d: number | null = null;
+    for (const row of chartData) {
+      if (row['5h'] != null) latest5h = row['5h'];
+      if (row['7d'] != null) latest7d = row['7d'];
+    }
+    return { '5h': latest5h, '7d': latest7d };
+  }, [chartData]);
 
   // Principals Data
   const topPrincipals = useMemo(() => {
@@ -769,79 +860,78 @@ function OverviewPage() {
         />
       </div>
 
-      {/* 2-up 5h/7d gauges */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-        <PoolQuotaCard window="5h" aggregate={quotaAggregate} />
-        <PoolQuotaCard window="7d" aggregate={quotaAggregate} />
-      </div>
+      <PoolQuotaCompactStrip aggregate={quotaAggregate} />
 
-      {/* Full-width timeline */}
-      <Card>
-        <CardHeader
-          title={
-            <span className="inline-flex items-center gap-2">
-              <LineIcon className="w-3.5 h-3.5 text-text-faint" />
-              Pool quota timeline
-            </span>
-          }
-          subtitle="5h vs 7d aggregate · % of pool capacity used"
-          action={<PoolQuotaLegend />}
-        />
-        <CardBody className="p-2 pt-1">
-          <PoolQuotaThemedChart seriesData={chartData} />
-        </CardBody>
-      </Card>
+      <div className="grid grid-cols-1 xl:grid-cols-[2fr_1fr] gap-3 min-w-0">
+        <Card className="min-w-0">
+          <CardHeader
+            title={
+              <span className="inline-flex items-center gap-2">
+                <LineIcon className="w-3.5 h-3.5 text-text-faint" />
+                Pool quota timeline
+              </span>
+            }
+            subtitle={`Worst-case upstream utilization · ${seriesUpstreamCount || upstreamCount} upstream${(seriesUpstreamCount || upstreamCount) === 1 ? '' : 's'} · ${range}`}
+            action={<PoolQuotaLegend latest={chartLatest} />}
+          />
+          <CardBody className="p-2 pt-1">
+            <PoolQuotaThemedChart
+              seriesData={chartData}
+              maxValue={chartMaxValue}
+            />
+          </CardBody>
+        </Card>
 
-      {/* Full-width principals */}
-      <Card>
-        <CardHeader
-          title={
-            <span className="inline-flex items-center gap-2">
-              <Users className="w-3.5 h-3.5 text-text-faint" />
-              Top principals
-            </span>
-          }
-          subtitle={`by virtual cost · ${range}`}
-        />
-        <div className="overflow-auto max-h-[420px]">
-          <div className="flex flex-col">
-            {topPrincipals.length === 0 ? (
-              <div className="p-4 text-center text-xs text-text-faint">
-                No usage data
-              </div>
-            ) : (
-              topPrincipals.map((p) => (
-                <div
-                  key={p.id}
-                  className="flex items-center gap-3 px-3 py-2 border-b border-subtle last:border-b-0 hover:bg-overlay-2 transition-colors"
-                >
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm truncate">{p.name}</div>
-                    <div className="text-[11px] text-text-faint truncate">
-                      {p.primary_model} · {p.requests.toLocaleString()} req ·{' '}
-                      {fmtCount(p.tokens)} tok
-                    </div>
-                    <div className="mt-1.5">
-                      <ProgressBar
-                        pct={(p.cost_usd / Math.max(1, p.max_cost)) * 100}
-                        color="var(--color-accent)"
-                      />
-                    </div>
-                  </div>
-                  <div className="text-right shrink-0">
-                    <div className="text-sm font-mono tabular-nums">
-                      {fmtUsd(p.cost_usd)}
-                    </div>
-                    <div className="text-[11px] text-text-faint tabular-nums">
-                      {p.share_pct.toFixed(1)}%
-                    </div>
-                  </div>
+        <Card className="min-w-0">
+          <CardHeader
+            title={
+              <span className="inline-flex items-center gap-2">
+                <Users className="w-3.5 h-3.5 text-text-faint" />
+                Top principals
+              </span>
+            }
+            subtitle={`by virtual cost · ${range}`}
+          />
+          <div className="overflow-auto max-h-[420px]">
+            <div className="flex flex-col">
+              {topPrincipals.length === 0 ? (
+                <div className="p-4 text-center text-xs text-text-faint">
+                  No usage data
                 </div>
-              ))
-            )}
+              ) : (
+                topPrincipals.map((p) => (
+                  <div
+                    key={p.id}
+                    className="flex items-center gap-3 px-3 py-2 border-b border-subtle last:border-b-0 hover:bg-overlay-2 transition-colors"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm truncate">{p.name}</div>
+                      <div className="text-[11px] text-text-faint truncate">
+                        {p.primary_model} · {p.requests.toLocaleString()} req ·{' '}
+                        {fmtCount(p.tokens)} tok
+                      </div>
+                      <div className="mt-1.5">
+                        <ProgressBar
+                          pct={(p.cost_usd / Math.max(1, p.max_cost)) * 100}
+                          color="var(--color-accent)"
+                        />
+                      </div>
+                    </div>
+                    <div className="text-right shrink-0">
+                      <div className="text-sm font-mono tabular-nums">
+                        {fmtUsd(p.cost_usd)}
+                      </div>
+                      <div className="text-[11px] text-text-faint tabular-nums">
+                        {p.share_pct.toFixed(1)}%
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
-        </div>
-      </Card>
+        </Card>
+      </div>
 
       {/* Recent Requests */}
       <Section
