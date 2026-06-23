@@ -664,16 +664,7 @@ export interface LatestResponse {
 
 export interface SeriesBucketResponse {
   bucket_start_unix_secs: number;
-  observed: boolean;
-  sample_count: number;
-  utilization_min: number | null;
-  utilization_avg: number | null;
-  utilization_max: number | null;
   utilization_last: number | null;
-  status_last: string | null;
-  resets_at_unix_secs_last: number | null;
-  observed_at_unix_millis_last: number | null;
-  sources_seen: string[];
 }
 
 export interface SeriesMarkerResponse {
