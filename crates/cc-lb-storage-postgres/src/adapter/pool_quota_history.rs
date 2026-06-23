@@ -162,7 +162,9 @@ impl PoolQuotaHistoryStore for PostgresStorage {
 }
 
 fn row_to_record(row: sqlx::postgres::PgRow) -> StorageResult<PoolQuotaSnapshotRecord> {
-    let window_text = row.try_get::<String, _>("quota_window").map_err(map_sqlx_error)?;
+    let window_text = row
+        .try_get::<String, _>("quota_window")
+        .map_err(map_sqlx_error)?;
     let window =
         SubscriptionQuotaWindow::from_str(&window_text).ok_or_else(|| StorageError::Corrupted {
             message: format!("unknown quota_window in pool quota history: {window_text}"),

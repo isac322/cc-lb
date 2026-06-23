@@ -164,11 +164,10 @@ fn row_to_record(row: sqlx::sqlite::SqliteRow) -> StorageResult<PoolQuotaSnapsho
     let window_text = row
         .try_get::<String, _>("quota_window")
         .map_err(map_sqlx_error)?;
-    let window = SubscriptionQuotaWindow::from_str(&window_text).ok_or_else(|| {
-        StorageError::Corrupted {
+    let window =
+        SubscriptionQuotaWindow::from_str(&window_text).ok_or_else(|| StorageError::Corrupted {
             message: format!("unknown quota_window in pool quota history: {window_text}"),
-        }
-    })?;
+        })?;
     Ok(PoolQuotaSnapshotRecord {
         snapshot_at_unix_secs: row
             .try_get::<i64, _>("snapshot_at_unix_secs")
