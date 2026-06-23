@@ -70,7 +70,7 @@ pub fn spawn_cron_loop(
             if cancel.is_cancelled() {
                 break;
             }
-            let storage = apalis_postgres::PostgresStorage::<CronTickJob>::new_with_config(
+            let storage = apalis_postgres::PostgresStorage::<CronTickJob>::new_with_notify(
                 &pool,
                 &apalis_postgres::Config::new(CRON_QUEUE),
             );

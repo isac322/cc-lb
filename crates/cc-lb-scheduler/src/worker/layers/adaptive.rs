@@ -48,23 +48,41 @@ pub(in crate::worker) fn build_backend_adaptive_worker(
     backend: &SchedulerBackend,
     ctx: SchedulerCtx,
 ) -> Result<AdaptiveWorker, SchedulerError> {
+    build_backend_adaptive_worker_named(backend, ctx, ADAPTIVE_QUEUE.to_owned())
+}
+
+pub(in crate::worker) fn build_backend_adaptive_worker_named(
+    backend: &SchedulerBackend,
+    ctx: SchedulerCtx,
+    worker_name: String,
+) -> Result<AdaptiveWorker, SchedulerError> {
     match backend {
         #[cfg(feature = "sqlite")]
-        SchedulerBackend::Sqlite(sqlite) => Ok(build_sqlite_worker(sqlite.storage.clone(), ctx)),
+        SchedulerBackend::Sqlite(sqlite) => Ok(build_sqlite_worker(
+            sqlite.storage.clone(),
+            ctx,
+            worker_name,
+        )),
         #[cfg(feature = "postgres")]
-        SchedulerBackend::Postgres(postgres) => {
-            Ok(build_postgres_worker(postgres.storage.clone(), ctx))
-        }
+        SchedulerBackend::Postgres(postgres) => Ok(build_postgres_worker(
+            postgres.storage.clone(),
+            ctx,
+            worker_name,
+        )),
     }
 }
 
 #[cfg(feature = "sqlite")]
-fn build_sqlite_worker(storage: SqliteApalisStorage, ctx: SchedulerCtx) -> AdaptiveWorker {
+fn build_sqlite_worker(
+    storage: SqliteApalisStorage,
+    ctx: SchedulerCtx,
+    worker_name: String,
+) -> AdaptiveWorker {
     let concurrency = ctx.config.entity_concurrency;
     AdaptiveWorker {
         run: Box::new(move |cancel| {
             Box::pin(async move {
-                let worker = ApalisWorkerBuilder::new(ADAPTIVE_QUEUE)
+                let worker = ApalisWorkerBuilder::new(worker_name)
                     .backend(storage)
                     .data(ctx)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
@@ -86,12 +104,16 @@ fn build_sqlite_worker(storage: SqliteApalisStorage, ctx: SchedulerCtx) -> Adapt
 }
 
 #[cfg(feature = "postgres")]
-fn build_postgres_worker(storage: PostgresApalisStorage, ctx: SchedulerCtx) -> AdaptiveWorker {
+fn build_postgres_worker(
+    storage: PostgresApalisStorage,
+    ctx: SchedulerCtx,
+    worker_name: String,
+) -> AdaptiveWorker {
     let concurrency = ctx.config.entity_concurrency;
     AdaptiveWorker {
         run: Box::new(move |cancel| {
             Box::pin(async move {
-                let worker = ApalisWorkerBuilder::new(ADAPTIVE_QUEUE)
+                let worker = ApalisWorkerBuilder::new(worker_name)
                     .backend(storage)
                     .data(ctx)
                     .layer(TraceparentLayer::new().with_scheduler_metrics())
