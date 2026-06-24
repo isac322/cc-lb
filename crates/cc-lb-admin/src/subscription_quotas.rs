@@ -14,10 +14,10 @@ use cc_lb_core::DynamicViewHolder;
 use cc_lb_plugin_api::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_storage_api::{
     OrganizationMetadataRecord, POOL_QUOTA_POLICY_VERSION, PoolQuotaHistoryStore,
-    PoolQuotaSnapshotRecord, Storage, StorageError, SubscriptionQuotaBucket,
-    SubscriptionQuotaSeriesQuery, SubscriptionQuotaSource, SubscriptionQuotaSourceMerge,
-    SubscriptionQuotaWindow, UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
-    UsageRollup, UsageRollupResolution, upstream::UpstreamKind,
+    PoolQuotaSnapshotRecord, PoolQuotaSnapshotSummaryRecord, Storage, StorageError,
+    SubscriptionQuotaBucket, SubscriptionQuotaSeriesQuery, SubscriptionQuotaSource,
+    SubscriptionQuotaSourceMerge, SubscriptionQuotaWindow, UpstreamRecord, UpstreamStore,
+    UpstreamSubscriptionMetadataRecord, UsageRollup, UsageRollupResolution, upstream::UpstreamKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -471,13 +471,13 @@ async fn build_pool_history_response(
 
     let mut response_windows = Vec::with_capacity(windows.len());
     for window in windows {
-        let latest_records = PoolQuotaHistoryStore::list_latest_pool_quota_snapshots(
+        let latest_records = PoolQuotaHistoryStore::list_latest_pool_quota_snapshot_summaries(
             storage,
             std::slice::from_ref(&window),
         )
         .await
         .map_err(storage_error)?;
-        let series_records = PoolQuotaHistoryStore::list_pool_quota_snapshots_in_range(
+        let series_records = PoolQuotaHistoryStore::list_pool_quota_snapshot_summaries_in_range(
             storage,
             std::slice::from_ref(&window),
             since_unix_secs,
@@ -549,7 +549,7 @@ fn parse_pool_history_windows(raw: Option<&str>) -> Result<Vec<SubscriptionQuota
     }
 }
 
-fn pool_history_point_from_record(record: &PoolQuotaSnapshotRecord) -> PoolHistoryPoint {
+fn pool_history_point_from_record(record: &PoolQuotaSnapshotSummaryRecord) -> PoolHistoryPoint {
     PoolHistoryPoint {
         snapshot_at_unix_secs: record.snapshot_at_unix_secs,
         utilization: record.utilization,

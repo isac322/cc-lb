@@ -15,6 +15,7 @@ pub mod oauth_credentials;
 pub mod organization_metadata;
 pub mod plugin_registry;
 pub mod pool_quota_history;
+mod pool_quota_history_summary;
 pub mod price_catalog;
 pub mod principals;
 pub mod prompt_cache_observation;
