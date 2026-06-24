@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, StorageError, StorageResult,
-    SubscriptionQuotaWindow,
+    PoolQuotaHistoryStore, PoolQuotaSnapshotRecord, PoolQuotaSnapshotSummaryRecord, StorageError,
+    StorageResult, SubscriptionQuotaWindow,
 };
 use sqlx::Row;
 
@@ -133,6 +133,28 @@ impl PoolQuotaHistoryStore for PostgresStorage {
             }
         }
         Ok(out)
+    }
+
+    async fn list_latest_pool_quota_snapshot_summaries(
+        &self,
+        windows: &[SubscriptionQuotaWindow],
+    ) -> StorageResult<Vec<PoolQuotaSnapshotSummaryRecord>> {
+        super::pool_quota_history_summary::list_latest(self, windows).await
+    }
+
+    async fn list_pool_quota_snapshot_summaries_in_range(
+        &self,
+        windows: &[SubscriptionQuotaWindow],
+        since_unix_secs: i64,
+        until_unix_secs: i64,
+    ) -> StorageResult<Vec<PoolQuotaSnapshotSummaryRecord>> {
+        super::pool_quota_history_summary::list_range(
+            self,
+            windows,
+            since_unix_secs,
+            until_unix_secs,
+        )
+        .await
     }
 
     async fn delete_pool_quota_snapshots_before(
