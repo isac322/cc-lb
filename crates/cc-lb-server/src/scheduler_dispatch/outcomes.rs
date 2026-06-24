@@ -6,7 +6,6 @@ use cc_lb_scheduler::jobs::prompt_cache_purge::PromptCacheObservationPurgeJobRes
 use cc_lb_scheduler::jobs::quota_gc::SubscriptionQuotaGcJobResult;
 use cc_lb_scheduler::jobs::usage_prune::UsagePruneJobResult;
 use cc_lb_scheduler::jobs::usage_rollup::UsageRollupResult;
-use cc_lb_scheduler::jobs::warmup::UpstreamWarmupOutcome;
 use cc_lb_scheduler::retry::JobOutcome;
 
 pub(super) fn metadata_outcome(outcome: MetadataRefreshJobOutcome) -> SchedulerResult<JobOutcome> {
@@ -14,14 +13,6 @@ pub(super) fn metadata_outcome(outcome: MetadataRefreshJobOutcome) -> SchedulerR
         MetadataRefreshJobOutcome::Applied => JobOutcome::Done,
         MetadataRefreshJobOutcome::Stale => JobOutcome::Noop,
         MetadataRefreshJobOutcome::UpstreamRemoved => JobOutcome::Skip,
-    })
-}
-
-pub(super) fn warmup_outcome(outcome: UpstreamWarmupOutcome) -> SchedulerResult<JobOutcome> {
-    Ok(match outcome {
-        UpstreamWarmupOutcome::Fired => JobOutcome::Done,
-        UpstreamWarmupOutcome::AlreadyCompleted => JobOutcome::DuplicateEffect,
-        UpstreamWarmupOutcome::UpstreamDeleted => JobOutcome::Skip,
     })
 }
 
