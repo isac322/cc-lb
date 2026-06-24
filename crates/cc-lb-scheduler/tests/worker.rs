@@ -1,3 +1,4 @@
+use std::str::FromStr as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,13 +13,16 @@ use cc_lb_scheduler::worker::{
     AdaptiveJob, CronJob, SchedulerBackend, SchedulerCtx, SqliteSchedulerStorage,
     build_adaptive_worker,
 };
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use tempfile::TempDir;
 use uuid::Uuid;
 
 #[cfg(feature = "sqlite")]
 #[tokio::test]
 async fn worker_sqlite_runs_one_of_each_entity_job_to_done()
 -> Result<(), Box<dyn std::error::Error>> {
-    let pool = sqlite_memory().await?;
+    let db = sqlite_test_db().await?;
+    let pool = db.pool.clone();
     let queue = "entity_worker_sqlite";
     let config = fast_queue_config(queue);
     let mut storage =
@@ -68,7 +72,8 @@ fn fast_queue_config(queue: &str) -> apalis_sqlite::Config {
 #[tokio::test]
 async fn scheduler_backend_sqlite_push_job_uses_full_idempotency_index()
 -> Result<(), Box<dyn std::error::Error>> {
-    let pool = sqlite_memory().await?;
+    let db = sqlite_test_db().await?;
+    let pool = db.pool.clone();
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
     let config = fast_queue_config("adaptive");
     let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
@@ -146,17 +151,26 @@ async fn scheduler_ctx_default_dispatches_succeed() -> Result<(), Box<dyn std::e
 }
 
 #[cfg(feature = "sqlite")]
-async fn sqlite_memory() -> Result<sqlx::SqlitePool, Box<dyn std::error::Error>> {
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+struct SqliteTestDb {
+    pool: sqlx::SqlitePool,
+    _dir: TempDir,
+}
+
+#[cfg(feature = "sqlite")]
+async fn sqlite_test_db() -> Result<SqliteTestDb, Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let database_url = format!("sqlite://{}", dir.path().join("scheduler.sqlite").display());
+    let options = SqliteConnectOptions::from_str(&database_url)?.create_if_missing(true);
+    let pool = SqlitePoolOptions::new()
         .min_connections(1)
         .max_connections(1)
         .idle_timeout(None)
         .max_lifetime(None)
-        .connect("sqlite::memory:")
+        .connect_with(options)
         .await?;
     apalis_sqlite::SqliteStorage::setup(&pool).await?;
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
-    Ok(pool)
+    Ok(SqliteTestDb { pool, _dir: dir })
 }
 
 fn entity_jobs(upstream_id: Uuid) -> [AdaptiveJob; 3] {

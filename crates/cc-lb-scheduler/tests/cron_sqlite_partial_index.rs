@@ -1,5 +1,6 @@
 #![cfg(feature = "sqlite")]
 
+use std::str::FromStr as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -9,13 +10,16 @@ use cc_lb_scheduler::migrations::apply_post_setup_migrations;
 use cc_lb_scheduler::worker::{
     ADAPTIVE_QUEUE, AdaptiveJob, CRON_QUEUE, SchedulerBackend, SchedulerCtx, SqliteSchedulerStorage,
 };
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use tempfile::TempDir;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
 #[tokio::test]
 async fn sqlite_cron_producer_runs_after_partial_idempotency_index()
 -> Result<(), Box<dyn std::error::Error>> {
-    let pool = sqlite_memory().await?;
+    let db = sqlite_test_db().await?;
+    let pool = db.pool.clone();
     apply_post_setup_migrations(&pool).await?;
     let backend = SchedulerBackend::Sqlite(SqliteSchedulerStorage {
         pool: pool.clone(),
@@ -42,13 +46,24 @@ async fn sqlite_cron_producer_runs_after_partial_idempotency_index()
     Ok(())
 }
 
-async fn sqlite_memory() -> Result<sqlx::SqlitePool, Box<dyn std::error::Error>> {
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+struct SqliteTestDb {
+    pool: sqlx::SqlitePool,
+    _dir: TempDir,
+}
+
+async fn sqlite_test_db() -> Result<SqliteTestDb, Box<dyn std::error::Error>> {
+    let dir = tempfile::tempdir()?;
+    let database_url = format!("sqlite://{}", dir.path().join("scheduler.sqlite").display());
+    let options = SqliteConnectOptions::from_str(&database_url)?.create_if_missing(true);
+    let pool = SqlitePoolOptions::new()
+        .min_connections(1)
         .max_connections(1)
-        .connect("sqlite::memory:")
+        .idle_timeout(None)
+        .max_lifetime(None)
+        .connect_with(options)
         .await?;
     apalis_sqlite::SqliteStorage::setup(&pool).await?;
-    Ok(pool)
+    Ok(SqliteTestDb { pool, _dir: dir })
 }
 
 fn fast_singleton_config() -> Config {
