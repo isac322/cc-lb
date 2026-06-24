@@ -1,4 +1,5 @@
 use std::error::Error;
+use std::str::FromStr as _;
 use std::time::Duration;
 
 use apalis::prelude::{IntervalStrategy, StrategyBuilder, TaskSink};
@@ -19,6 +20,8 @@ use cc_lb_scheduler::worker::{
 #[cfg(feature = "sqlite")]
 use cc_lb_scheduler::worker::{SqliteSchedulerStorage, build_adaptive_worker, build_cron_worker};
 use metrics_exporter_prometheus::PrometheusBuilder;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
+use tempfile::TempDir;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
@@ -34,7 +37,8 @@ fn scheduler_metrics_cover_worker_lifecycle() -> Result<(), Box<dyn Error>> {
     metrics::with_local_recorder(&recorder, || {
         runtime.block_on(async {
             scheduler_metrics::touch_scheduler_metric_handles();
-            let pool = sqlite_memory().await?;
+            let db = sqlite_test_db().await?;
+            let pool = db.pool.clone();
             run_entity_jobs(&pool).await?;
             run_singleton_jobs(&pool).await?;
 
@@ -108,17 +112,26 @@ async fn run_singleton_jobs(pool: &sqlx::SqlitePool) -> Result<(), Box<dyn Error
 }
 
 #[cfg(feature = "sqlite")]
-async fn sqlite_memory() -> Result<sqlx::SqlitePool, Box<dyn Error>> {
-    let pool = sqlx::sqlite::SqlitePoolOptions::new()
+struct SqliteTestDb {
+    pool: sqlx::SqlitePool,
+    _dir: TempDir,
+}
+
+#[cfg(feature = "sqlite")]
+async fn sqlite_test_db() -> Result<SqliteTestDb, Box<dyn Error>> {
+    let dir = tempfile::tempdir()?;
+    let database_url = format!("sqlite://{}", dir.path().join("scheduler.sqlite").display());
+    let options = SqliteConnectOptions::from_str(&database_url)?.create_if_missing(true);
+    let pool = SqlitePoolOptions::new()
         .min_connections(1)
         .max_connections(1)
         .idle_timeout(None)
         .max_lifetime(None)
-        .connect("sqlite::memory:")
+        .connect_with(options)
         .await?;
     apalis_sqlite::SqliteStorage::setup(&pool).await?;
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
-    Ok(pool)
+    Ok(SqliteTestDb { pool, _dir: dir })
 }
 
 #[cfg(feature = "sqlite")]
