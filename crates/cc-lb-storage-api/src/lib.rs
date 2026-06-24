@@ -16,6 +16,7 @@ pub mod upstream_rate_limit;
 pub mod upstream_subscription_metadata;
 pub mod upstream_subscription_quota;
 pub mod validation;
+pub mod warmup_attempts;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
@@ -42,6 +43,7 @@ pub use upstream_subscription_metadata::*;
 pub use upstream_subscription_quota::*;
 pub use uuid::Uuid as UpstreamRecordId;
 pub use validation::validate_identifier;
+pub use warmup_attempts::*;
 
 pub type RepoError = StorageError;
 

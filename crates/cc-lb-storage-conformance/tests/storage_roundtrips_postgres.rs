@@ -19,7 +19,7 @@ use cc_lb_storage_conformance::{
         price_catalog, principal_store, prompt_cache_observation_store, storage_roundtrips,
         storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
         upstream_rate_limit_store, upstream_subscription_metadata_store,
-        upstream_subscription_quota_store,
+        upstream_subscription_quota_store, warmup_attempts_store,
     },
 };
 use cc_lb_storage_postgres::PostgresStorage;
@@ -207,8 +207,8 @@ fn plugin_registry_insert_chain_entry_allows_multi_for_observability_hook_postgr
 
 #[test]
 fn plugin_registry_concurrent_upload_returns_existed_once_postgres() {
-    let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
-        eprintln!("skip: CI_POSTGRES_URL not set");
+    let Some(url) = postgres_url() else {
+        eprintln!("skip: CI_POSTGRES_URL or PG_URL not set");
         return;
     };
 
@@ -272,6 +272,11 @@ fn upstream_subscription_quota_store_postgres() {
         "upstream_subscription_quota_store",
         upstream_subscription_quota_store::run_all,
     );
+}
+
+#[test]
+fn warmup_attempts_store_postgres() {
+    run_postgres_scenario("warmup_attempts_store", warmup_attempts_store::run_all);
 }
 
 #[test]
@@ -343,8 +348,8 @@ where
     F: FnOnce(Arc<PostgresConformanceBackend>) -> Fut,
     Fut: Future<Output = anyhow::Result<()>>,
 {
-    let Some(url) = std::env::var("CI_POSTGRES_URL").ok() else {
-        eprintln!("skip: CI_POSTGRES_URL not set");
+    let Some(url) = postgres_url() else {
+        eprintln!("skip: CI_POSTGRES_URL or PG_URL not set");
         return;
     };
 
@@ -356,6 +361,12 @@ where
 
 fn prompt_cache_clock() -> ClockHandle {
     Arc::new(TestClock::new_at_secs(1_700_000_000))
+}
+
+fn postgres_url() -> Option<String> {
+    std::env::var("CI_POSTGRES_URL")
+        .ok()
+        .or_else(|| std::env::var("PG_URL").ok())
 }
 
 async fn concurrent_upload_returns_existed_once(url: String) -> anyhow::Result<()> {

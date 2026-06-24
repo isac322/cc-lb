@@ -15,6 +15,20 @@ pub(crate) type WarmupHttpClient = Client<
     Full<Bytes>,
 >;
 
+#[derive(Debug)]
+pub enum WarmupRequestAttempt {
+    Response {
+        status: StatusCode,
+        observations: Vec<UnifiedQuotaObservation>,
+    },
+    RequestBuildFailed {
+        error: String,
+    },
+    NetworkError {
+        error: String,
+    },
+}
+
 /// Builds a minimal warmup request for POST /v1/messages.
 pub fn build_warmup_request(
     access_token: &str,
@@ -62,9 +76,27 @@ pub async fn dispatch_warmup(
     base_url: &Url,
     replica_id: &str,
 ) -> (StatusCode, Vec<UnifiedQuotaObservation>) {
+    match dispatch_warmup_attempt(client, access_token, base_url, replica_id).await {
+        WarmupRequestAttempt::Response {
+            status,
+            observations,
+        } => (status, observations),
+        WarmupRequestAttempt::RequestBuildFailed { error: _ } => {
+            (StatusCode::INTERNAL_SERVER_ERROR, vec![])
+        }
+        WarmupRequestAttempt::NetworkError { error: _ } => (StatusCode::BAD_GATEWAY, vec![]),
+    }
+}
+
+pub async fn dispatch_warmup_attempt(
+    client: &WarmupHttpClient,
+    access_token: &str,
+    base_url: &Url,
+    replica_id: &str,
+) -> WarmupRequestAttempt {
     let request = match build_warmup_request(access_token, base_url, replica_id) {
         Ok(req) => req,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, vec![]),
+        Err(error) => return WarmupRequestAttempt::RequestBuildFailed { error },
     };
 
     match client.request(request).await {
@@ -72,9 +104,14 @@ pub async fn dispatch_warmup(
             let status = response.status();
             let headers = response.headers().clone();
             let observations = parse_anthropic_unified_headers(&headers);
-            (status, observations)
+            WarmupRequestAttempt::Response {
+                status,
+                observations,
+            }
         }
-        Err(_) => (StatusCode::BAD_GATEWAY, vec![]),
+        Err(error) => WarmupRequestAttempt::NetworkError {
+            error: error.to_string(),
+        },
     }
 }
 

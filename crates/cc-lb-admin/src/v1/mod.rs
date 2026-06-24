@@ -9,6 +9,7 @@ pub mod plugins;
 pub mod plugins_wasm;
 pub mod principals;
 pub mod status;
+pub(crate) mod upstream_warmup;
 pub mod upstreams;
 mod wasm_cache;
 
