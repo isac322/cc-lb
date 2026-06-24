@@ -1220,6 +1220,7 @@ mod tests {
             organization_name: organization_name.map(str::to_owned),
             organization_type: organization_type.map(str::to_owned),
             rate_limit_tier: rate_limit_tier.map(str::to_owned),
+            seat_tier: None,
             has_extra_usage_enabled: None,
             billing_type: None,
             subscription_created_at_unix_secs: None,

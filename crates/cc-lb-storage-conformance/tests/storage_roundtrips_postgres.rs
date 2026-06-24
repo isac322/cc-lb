@@ -16,7 +16,7 @@ use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
     scenarios::{
         anthropic_compatibility_kv_store, organization_metadata_store, plugin_registry_store,
-        principal_store, prompt_cache_observation_store, storage_roundtrips,
+        price_catalog, principal_store, prompt_cache_observation_store, storage_roundtrips,
         storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
         upstream_rate_limit_store, upstream_subscription_metadata_store,
         upstream_subscription_quota_store,
@@ -321,6 +321,22 @@ prompt_cache_observation_postgres_test!(
     prompt_cache_observation_observation_list_is_sorted_postgres,
     observation_list_is_sorted
 );
+
+#[test]
+fn price_catalog_roundtrip_smoke_postgres() {
+    run_postgres_scenario(
+        "price_catalog_roundtrip_smoke",
+        price_catalog::roundtrip_smoke,
+    );
+}
+
+#[test]
+fn price_catalog_put_same_payload_twice_updates_fetched_at_postgres() {
+    run_postgres_scenario(
+        "price_catalog_put_same_payload_twice_updates_fetched_at",
+        price_catalog::put_same_payload_twice_updates_fetched_at,
+    );
+}
 
 fn run_postgres_scenario<F, Fut>(name: &str, scenario: F)
 where

@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use cc_lb_aead::AeadService;
 use cc_lb_config::{AnthropicOAuthConfig, Config};
+use cc_lb_core::DynamicViewHolder;
 use cc_lb_runtime_extism::ExtismRuntime;
 use cc_lb_scheduler::error::Result as SchedulerResult;
 use cc_lb_scheduler::jobs::metadata_refresh::{
@@ -44,6 +45,7 @@ pub(crate) struct SchedulerDispatchDeps {
     pub cancel: CancellationToken,
     pub replica_id: Option<Uuid>,
     pub price_catalog: Arc<cc_lb_pricing::PriceCatalog>,
+    pub dynamic_view: Arc<DynamicViewHolder>,
 }
 
 #[derive(Clone)]
@@ -63,6 +65,7 @@ pub(super) struct SchedulerDispatch {
     pub(super) replica_id: Option<Uuid>,
     pub(super) price_catalog: Arc<cc_lb_pricing::PriceCatalog>,
     pub(super) http: JsonHttpClient,
+    pub(super) dynamic_view: Arc<DynamicViewHolder>,
 }
 
 pub(crate) fn build_scheduler_ctx(deps: SchedulerDispatchDeps) -> SchedulerCtx {
@@ -92,6 +95,7 @@ impl SchedulerDispatch {
             replica_id: deps.replica_id,
             price_catalog: deps.price_catalog,
             http: json_http_client(),
+            dynamic_view: deps.dynamic_view,
         }
     }
 

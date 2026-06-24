@@ -30,6 +30,7 @@ import {
   type LatestResponse,
   type OAuthStatusResponse,
   type PluginsStatusResponse,
+  type PoolHistoryResponse,
   type PrincipalLimitsResponse,
   patchJson,
   postJson,
@@ -229,6 +230,8 @@ export const qk = {
     ['subscription-quota', 'analysis', params] as const,
   subscriptionQuotaAggregate: (params: Record<string, any>) =>
     ['subscription-quota', 'aggregate', params] as const,
+  subscriptionQuotaPoolHistory: (params: Record<string, any>) =>
+    ['subscription-quota', 'pool-history', params] as const,
 };
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -261,7 +264,7 @@ export function useSummary(range: string) {
       getJson<DashboardSummaryResponse>(
         `/admin/dashboard/summary?range=${encodeURIComponent(range)}`,
       ),
-    refetchInterval: 30_000,
+    refetchInterval: 5_000,
   });
 }
 export function useUsage(
@@ -283,7 +286,7 @@ export function useUsage(
         `/admin/usage?${params.toString()}`,
       );
     },
-    refetchInterval: 30_000,
+    refetchInterval: 5_000,
   });
 }
 export function useUpstreams() {
@@ -505,7 +508,7 @@ export function useSubscriptionQuotaLatest(params: {
       getJson<LatestResponse>(
         `/admin/v1/subscription-quotas/latest?${searchParams.toString()}`,
       ),
-    refetchInterval: params.refetchInterval ?? 30_000,
+    refetchInterval: params.refetchInterval ?? 5_000,
   });
 }
 
@@ -538,7 +541,7 @@ export function useSubscriptionQuotaSeries(params: {
       getJson<SeriesResponse>(
         `/admin/v1/subscription-quotas/series?${searchParams.toString()}`,
       ),
-    refetchInterval: 60_000,
+    refetchInterval: 30_000,
   });
 }
 
@@ -585,7 +588,29 @@ export function useSubscriptionQuotaAggregate(params: {
       getJson<AggregateResponse>(
         `/admin/v1/subscription-quotas/aggregate?${searchParams.toString()}`,
       ),
-    refetchInterval: 60_000,
+    refetchInterval: 30_000,
+  });
+}
+
+export function useSubscriptionQuotaPoolHistory(params: {
+  windows?: string;
+  sinceUnixSecs?: number;
+  untilUnixSecs?: number;
+}) {
+  const searchParams = new URLSearchParams();
+  if (params.windows) searchParams.set('windows', params.windows);
+  if (params.sinceUnixSecs !== undefined)
+    searchParams.set('since_unix_secs', String(params.sinceUnixSecs));
+  if (params.untilUnixSecs !== undefined)
+    searchParams.set('until_unix_secs', String(params.untilUnixSecs));
+
+  return useQuery({
+    queryKey: qk.subscriptionQuotaPoolHistory(params),
+    queryFn: () =>
+      getJson<PoolHistoryResponse>(
+        `/admin/v1/subscription-quotas/pool-history?${searchParams.toString()}`,
+      ),
+    refetchInterval: 30_000,
   });
 }
 

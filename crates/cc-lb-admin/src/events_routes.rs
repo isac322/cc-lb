@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::convert::Infallible;
 use std::time::Duration;
 
 use axum::{
@@ -12,9 +12,9 @@ use axum::{
     },
     routing::get,
 };
-use cc_lb_storage_api::Storage;
+use cc_lb_core::{BusReceiver, record_dashboard_sse_lagged};
 use serde_json::json;
-use tokio::time::sleep;
+use tokio::sync::broadcast::error::RecvError;
 
 use crate::AdminState;
 use crate::events::{
@@ -57,65 +57,62 @@ pub async fn handle_events_stream(
     State(state): State<AdminState>,
     Query(map): Query<HashMap<String, String>>,
 ) -> Response {
-    let Some(storage) = state.storage.as_ref() else {
-        return service_unavailable("storage_unavailable");
+    let Some(bus) = state.event_bus.as_ref() else {
+        return service_unavailable("event_bus_unavailable");
     };
     let filters = match parse_stream_filters(&map) {
         Ok(filters) => filters,
         Err(error) => return bad_request(error.as_str()),
     };
 
-    let storage: Arc<dyn Storage> = storage.clone();
-    let initial_since = now_unix_secs();
-
+    let receiver = bus.subscribe();
     let stream = async_stream::stream! {
-        // First body byte unblocks the client; without it the UI stays
-        // "disconnected" until the 15s keep-alive (or first event).
-        let initial: Result<Event, std::convert::Infallible> =
-            Ok(Event::default().comment("connected"));
+        let initial: Result<Event, Infallible> = Ok(Event::default().comment("connected"));
         yield initial;
 
-        let mut since = initial_since;
-        loop {
-            sleep(Duration::from_millis(1_000)).await;
-            let until = now_unix_secs().saturating_add(1);
-            let events = match storage
-                .query_request_events(since, until, 500)
-                .await
-            {
-                Ok(events) => events,
-                Err(error) => {
-                    tracing::warn!(%error, "event stream poll failed");
-                    continue;
+        match receiver {
+            BusReceiver::InMemory(mut rx) => loop {
+                match rx.recv().await {
+                    Ok(event) => {
+                        if !apply_filters_to_event(&event, &filters) {
+                            continue;
+                        }
+                        let payload = match serde_json::to_string(&event) {
+                            Ok(s) => s,
+                            Err(error) => {
+                                tracing::warn!(%error, "request event serialize failed");
+                                continue;
+                            }
+                        };
+                        let item: Result<Event, Infallible> =
+                            Ok(Event::default().data(payload));
+                        yield item;
+                    }
+                    Err(RecvError::Lagged(skipped)) => {
+                        record_dashboard_sse_lagged(skipped);
+                        let resync: Result<Event, Infallible> =
+                            Ok(Event::default().comment(format!("lagged {skipped}")));
+                        yield resync;
+                    }
+                    Err(RecvError::Closed) => break,
                 }
-            };
-            let mut emitted: Vec<_> = events
-                .into_iter()
-                .filter(|event| event.ts >= since)
-                .filter(|event| apply_filters_to_event(event, &filters))
-                .collect();
-            emitted.sort_by(|left, right| {
-                left.ts
-                    .cmp(&right.ts)
-                    .then_with(|| left.request_id.cmp(&right.request_id))
-            });
-            let mut max_ts = since;
-            for event in &emitted {
-                if event.ts > max_ts {
-                    max_ts = event.ts;
-                }
-                let payload = match serde_json::to_string(event) {
-                    Ok(payload) => payload,
-                    Err(error) => {
-                        tracing::warn!(%error, "event stream serialize failed");
+            },
+            BusReceiver::Remote(mut rx) => {
+                while let Some(event) = rx.recv().await {
+                    if !apply_filters_to_event(&event, &filters) {
                         continue;
                     }
-                };
-                let item: Result<Event, std::convert::Infallible> =
-                    Ok(Event::default().data(payload));
-                yield item;
+                    let payload = match serde_json::to_string(&event) {
+                        Ok(s) => s,
+                        Err(error) => {
+                            tracing::warn!(%error, "request event serialize failed");
+                            continue;
+                        }
+                    };
+                    let item: Result<Event, Infallible> = Ok(Event::default().data(payload));
+                    yield item;
+                }
             }
-            since = max_ts.saturating_add(1).max(since);
         }
     };
 
@@ -142,11 +139,4 @@ fn internal_error(error: &str) -> Response {
         Json(json!({ "error": error })),
     )
         .into_response()
-}
-
-fn now_unix_secs() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs()
 }

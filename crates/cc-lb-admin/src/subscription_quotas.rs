@@ -13,10 +13,11 @@ use axum::{
 use cc_lb_core::DynamicViewHolder;
 use cc_lb_plugin_api::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_storage_api::{
-    Storage, StorageError, SubscriptionQuotaBucket, SubscriptionQuotaSeriesQuery,
-    SubscriptionQuotaSource, SubscriptionQuotaSourceMerge, SubscriptionQuotaStatus,
-    SubscriptionQuotaWindow, UpstreamRecord, UpstreamStore, UsageRollup, UsageRollupResolution,
-    upstream::UpstreamKind,
+    OrganizationMetadataRecord, POOL_QUOTA_POLICY_VERSION, PoolQuotaHistoryStore,
+    PoolQuotaSnapshotRecord, Storage, StorageError, SubscriptionQuotaBucket,
+    SubscriptionQuotaSeriesQuery, SubscriptionQuotaSource, SubscriptionQuotaSourceMerge,
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamRecord, UpstreamStore,
+    UpstreamSubscriptionMetadataRecord, UsageRollup, UsageRollupResolution, upstream::UpstreamKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -40,8 +41,11 @@ const OUTSIDE_TRAFFIC_CAVEAT: &str =
     "actual_account_burn includes traffic outside this cc-lb instance";
 const HEADER_ONLY_CAVEAT: &str =
     "analysis is limited to header-derived observations; API polling data is sparse";
+const HEADER_FALLBACK_CAVEAT: &str = "utilization is the arithmetic mean of header observations; capacity-weighted estimate is unavailable because cc-lb has not proxied enough traffic to back-solve provider capacity";
+const PLAN_RATIO_CAVEAT: &str = "utilization is weighted by subscription plan ratios from Anthropic metadata; 5h and 7d use the same documented plan ratios";
 const STALE_DATA_CAVEAT: &str =
     "latest observation is older than max_staleness_secs; analysis may be outdated";
+const PRO_CAPACITY_RATIO: f64 = 1.0;
 
 pub fn router() -> Router<AdminState> {
     Router::new()
@@ -62,6 +66,14 @@ pub fn router() -> Router<AdminState> {
             get(handle_analysis),
         )
         .route("/admin/subscription-quotas/analysis", get(handle_analysis))
+        .route(
+            "/admin/v1/subscription-quotas/pool-history",
+            get(handle_pool_history),
+        )
+        .route(
+            "/admin/subscription-quotas/pool-history",
+            get(handle_pool_history),
+        )
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -256,6 +268,7 @@ pub struct AggregateProviderLotResponse {
     capacity_to_now_tokens_estimate: Option<f64>,
     projected_capacity_tokens_estimate: Option<f64>,
     confidence: String,
+    capacity_ratio: f64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -378,6 +391,152 @@ async fn handle_aggregate(
     match build_aggregate_response(&state, query).await {
         Ok(response) => Json(response).into_response(),
         Err(response) => response,
+    }
+}
+
+async fn handle_pool_history(
+    State(state): State<AdminState>,
+    Query(query): Query<PoolHistoryQuery>,
+) -> Response {
+    match build_pool_history_response(&state, query).await {
+        Ok(response) => Json(response).into_response(),
+        Err(response) => response,
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PoolHistoryQuery {
+    windows: Option<String>,
+    since_unix_secs: Option<i64>,
+    until_unix_secs: Option<i64>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PoolHistoryResponse {
+    now_unix_secs: i64,
+    windows: Vec<PoolHistoryWindowResponse>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PoolHistoryWindowResponse {
+    window: String,
+    latest: Option<PoolHistoryPoint>,
+    series: Vec<PoolHistoryPoint>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct PoolHistoryPoint {
+    snapshot_at_unix_secs: i64,
+    utilization: Option<f64>,
+    utilization_percent: Option<f64>,
+    contributing_upstreams: i64,
+    eligible_upstreams: i64,
+    stale_upstreams: i64,
+    max_observed_at_unix_millis: Option<i64>,
+}
+
+async fn build_pool_history_response(
+    state: &AdminState,
+    query: PoolHistoryQuery,
+) -> Result<PoolHistoryResponse, Response> {
+    let storage = storage(state)?;
+    let windows = parse_pool_history_windows(query.windows.as_deref())?;
+    let now_unix_secs = (now_unix_millis() / 1_000) as i64;
+    let default_lookback_secs: i64 = 6 * 60 * 60;
+    let since_unix_secs = query
+        .since_unix_secs
+        .unwrap_or(now_unix_secs.saturating_sub(default_lookback_secs));
+    let until_unix_secs = query.until_unix_secs.unwrap_or(now_unix_secs);
+
+    let mut response_windows = Vec::with_capacity(windows.len());
+    for window in windows {
+        let latest_records = PoolQuotaHistoryStore::list_latest_pool_quota_snapshots(
+            storage,
+            std::slice::from_ref(&window),
+        )
+        .await
+        .map_err(storage_error)?;
+        let series_records = PoolQuotaHistoryStore::list_pool_quota_snapshots_in_range(
+            storage,
+            std::slice::from_ref(&window),
+            since_unix_secs,
+            until_unix_secs,
+        )
+        .await
+        .map_err(storage_error)?;
+        let latest = latest_records.first().map(pool_history_point_from_record);
+        let series = series_records
+            .iter()
+            .map(pool_history_point_from_record)
+            .collect::<Vec<_>>();
+        response_windows.push(PoolHistoryWindowResponse {
+            window: window.as_str().to_owned(),
+            latest,
+            series,
+        });
+    }
+
+    Ok(PoolHistoryResponse {
+        now_unix_secs,
+        windows: response_windows,
+    })
+}
+
+fn parse_pool_history_windows(raw: Option<&str>) -> Result<Vec<SubscriptionQuotaWindow>, Response> {
+    let default_windows = vec![
+        SubscriptionQuotaWindow::FiveHour,
+        SubscriptionQuotaWindow::SevenDay,
+    ];
+    let Some(value) = raw else {
+        return Ok(default_windows);
+    };
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Ok(default_windows);
+    }
+    let mut windows = Vec::new();
+    for part in trimmed.split(',') {
+        let token = part.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let window = SubscriptionQuotaWindow::from_str(token).ok_or_else(|| {
+            (
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("unknown pool history window: {token}"),
+            )
+                .into_response()
+        })?;
+        if !matches!(
+            window,
+            SubscriptionQuotaWindow::FiveHour | SubscriptionQuotaWindow::SevenDay
+        ) {
+            return Err((
+                axum::http::StatusCode::BAD_REQUEST,
+                format!("pool history only supports 5h and 7d, got {token}"),
+            )
+                .into_response());
+        }
+        if !windows.contains(&window) {
+            windows.push(window);
+        }
+    }
+    if windows.is_empty() {
+        Ok(default_windows)
+    } else {
+        Ok(windows)
+    }
+}
+
+fn pool_history_point_from_record(record: &PoolQuotaSnapshotRecord) -> PoolHistoryPoint {
+    PoolHistoryPoint {
+        snapshot_at_unix_secs: record.snapshot_at_unix_secs,
+        utilization: record.utilization,
+        utilization_percent: record.utilization.map(|value| value * 100.0),
+        contributing_upstreams: record.contributing_upstreams,
+        eligible_upstreams: record.eligible_upstreams,
+        stale_upstreams: record.stale_upstreams,
+        max_observed_at_unix_millis: record.max_observed_at_unix_millis,
     }
 }
 
@@ -658,19 +817,10 @@ pub async fn build_cc_lb_aggregate_response(
     let now_unix_millis = now_unix_millis();
     let now_unix_secs = now_unix_millis / 1_000;
     let requested = upstream_ids.map(|ids| ids.into_iter().collect::<HashSet<_>>());
-    let mut upstreams = list_all_upstreams_storage(storage)
-        .await?
-        .into_iter()
-        .filter(|upstream| upstream.deleted_at_unix_secs.is_none())
-        .filter(|upstream| upstream.enabled)
-        .filter(|upstream| upstream.kind == UpstreamKind::AnthropicOauth)
-        .filter(|upstream| {
-            requested
-                .as_ref()
-                .map(|ids| ids.contains(&upstream.id))
-                .unwrap_or(true)
-        })
-        .collect::<Vec<_>>();
+    let mut upstreams = pool_quota_upstreams(
+        list_all_upstreams_storage(storage).await?,
+        requested.as_ref(),
+    );
     upstreams.sort_by_key(|upstream| upstream.id);
 
     let duration_windows = windows
@@ -693,6 +843,10 @@ pub async fn build_cc_lb_aggregate_response(
         .cloned()
         .map(|upstream| (upstream.id, upstream))
         .collect::<HashMap<_, _>>();
+    let subscription_metadata = storage.list_upstream_subscription_metadata().await?;
+    let organization_metadata = storage.list_organization_metadata().await?;
+    let capacity_ratios =
+        capacity_ratios_by_upstream(&subscription_metadata, &organization_metadata);
 
     let quota_series = if upstreams.is_empty() || duration_windows.is_empty() {
         Vec::new()
@@ -732,12 +886,17 @@ pub async fn build_cc_lb_aggregate_response(
                 upstream,
                 window,
                 &snapshot,
+                capacity_ratios
+                    .get(&upstream.id)
+                    .copied()
+                    .unwrap_or(PRO_CAPACITY_RATIO),
                 now_unix_secs,
             ));
         }
     }
 
-    let mut lot_inputs = provider_lot_inputs_from_series(&quota_series, &upstream_by_id);
+    let mut lot_inputs =
+        provider_lot_inputs_from_series(&quota_series, &upstream_by_id, &capacity_ratios);
     let covered_by_series = lot_inputs
         .iter()
         .map(|input| (input.upstream.id, input.window))
@@ -793,6 +952,108 @@ pub async fn build_cc_lb_aggregate_response(
     })
 }
 
+pub fn pool_quota_snapshots_from_aggregate(
+    aggregate: &AggregateResponse,
+    snapshot_at_unix_secs: i64,
+    computed_at_unix_millis: i64,
+) -> Vec<PoolQuotaSnapshotRecord> {
+    let eligible_upstreams = i64::try_from(aggregate.upstream_count).unwrap_or(i64::MAX);
+    aggregate
+        .windows
+        .iter()
+        .filter_map(|window_response| {
+            let window = SubscriptionQuotaWindow::from_str(window_response.window.as_str())?;
+            if !matches!(
+                window,
+                SubscriptionQuotaWindow::FiveHour | SubscriptionQuotaWindow::SevenDay
+            ) {
+                return None;
+            }
+            let contributing = window_response
+                .provider_lots
+                .iter()
+                .filter(|lot| lot.utilization.is_some())
+                .collect::<Vec<_>>();
+            let weighted_utilization_sum = contributing
+                .iter()
+                .map(|lot| lot.utilization.unwrap_or(0.0) * lot.capacity_ratio)
+                .sum::<f64>();
+            let capacity_ratio_sum = contributing
+                .iter()
+                .map(|lot| lot.capacity_ratio)
+                .sum::<f64>();
+            let header_contributing = contributing
+                .iter()
+                .filter(|lot| lot.source.as_deref() == Some("header"))
+                .count();
+            let api_contributing = contributing
+                .iter()
+                .filter(|lot| lot.source.as_deref() == Some("api"))
+                .count();
+            let max_observed_at_unix_millis = contributing
+                .iter()
+                .filter_map(|lot| lot.observed_at_unix_millis)
+                .max()
+                .and_then(|millis| i64::try_from(millis).ok());
+            let contributors_payload = contributing
+                .iter()
+                .map(|lot| {
+                    json!({
+                        "upstream_id": lot.upstream_id,
+                        "upstream_name": lot.upstream_name,
+                        "utilization": lot.utilization,
+                        "ratio": lot.capacity_ratio,
+                        "source": lot.source,
+                        "observed_at_unix_millis": lot.observed_at_unix_millis,
+                        "state": lot.state,
+                    })
+                })
+                .collect::<Vec<_>>();
+            let contributors_json = serde_json::to_string(&contributors_payload).ok();
+            Some(PoolQuotaSnapshotRecord {
+                snapshot_at_unix_secs,
+                window,
+                utilization: window_response.utilization,
+                weighted_utilization_sum,
+                capacity_ratio_sum,
+                eligible_upstreams,
+                contributing_upstreams: i64::try_from(window_response.contributing_upstreams)
+                    .unwrap_or(i64::MAX),
+                stale_upstreams: i64::try_from(window_response.stale_upstreams).unwrap_or(i64::MAX),
+                missing_observation_upstreams: i64::try_from(
+                    window_response.missing_capacity_upstreams,
+                )
+                .unwrap_or(i64::MAX),
+                missing_metadata_upstreams: 0,
+                header_contributing_upstreams: i64::try_from(header_contributing)
+                    .unwrap_or(i64::MAX),
+                api_contributing_upstreams: i64::try_from(api_contributing).unwrap_or(i64::MAX),
+                max_observed_at_unix_millis,
+                contributors_json,
+                computed_at_unix_millis,
+                policy_version: POOL_QUOTA_POLICY_VERSION,
+            })
+        })
+        .collect()
+}
+
+pub async fn record_pool_quota_snapshots_now(
+    storage: &dyn Storage,
+    aggregate: &AggregateResponse,
+) -> Result<(), StorageError> {
+    let computed_at_unix_millis = i64::try_from(now_unix_millis()).unwrap_or(i64::MAX);
+    let snapshot_at_unix_secs = computed_at_unix_millis / 1_000;
+    let records = pool_quota_snapshots_from_aggregate(
+        aggregate,
+        snapshot_at_unix_secs,
+        computed_at_unix_millis,
+    );
+    if records.is_empty() {
+        return Ok(());
+    }
+    PoolQuotaHistoryStore::record_pool_quota_snapshots(storage, &records).await
+}
+
 fn build_aggregate_window_response(
     window: SubscriptionQuotaWindow,
     lots: &[AggregateProviderLotResponse],
@@ -809,24 +1070,81 @@ fn build_aggregate_window_response(
         lots.iter()
             .map(|lot| lot.projected_capacity_tokens_estimate),
     );
-    let utilization = capacity_to_now.and_then(|capacity| {
+    let weighted_utilization = capacity_to_now.and_then(|capacity| {
         if capacity > 0.0 {
             Some((used_tokens as f64 / capacity).clamp(0.0, 1.0))
         } else {
             None
         }
     });
-    let stale_upstreams = lots.iter().filter(|lot| lot.state == "stale").count();
+
+    let mut latest_header_per_upstream: HashMap<&str, (u64, f64, f64)> = HashMap::new();
+    for lot in lots {
+        let Some(utilization) = lot.utilization else {
+            continue;
+        };
+        let observed_at = lot.observed_at_unix_millis.unwrap_or(0);
+        latest_header_per_upstream
+            .entry(lot.upstream_id.as_str())
+            .and_modify(|(prev_ts, prev_value, prev_ratio)| {
+                if observed_at >= *prev_ts {
+                    *prev_ts = observed_at;
+                    *prev_value = utilization;
+                    *prev_ratio = lot.capacity_ratio;
+                }
+            })
+            .or_insert((observed_at, utilization, lot.capacity_ratio));
+    }
+    let plan_weighted_utilization = if latest_header_per_upstream.is_empty() {
+        None
+    } else {
+        let weighted_sum: f64 = latest_header_per_upstream
+            .values()
+            .map(|(_, utilization, ratio)| utilization * ratio)
+            .sum();
+        let ratio_sum: f64 = latest_header_per_upstream
+            .values()
+            .map(|(_, _, ratio)| *ratio)
+            .sum();
+        (ratio_sum > 0.0).then(|| (weighted_sum / ratio_sum).clamp(0.0, 1.0))
+    };
+
+    let utilization = plan_weighted_utilization.or(weighted_utilization);
+
+    let stale_upstreams = lots
+        .iter()
+        .filter(|lot| lot.state == "stale")
+        .map(|lot| lot.upstream_id.as_str())
+        .collect::<HashSet<_>>()
+        .len();
     let missing_capacity_upstreams = lots
         .iter()
         .filter(|lot| lot.capacity_estimate_tokens.is_none())
-        .count();
-    let contributing_upstreams = lots
-        .iter()
-        .filter(|lot| lot.capacity_to_now_tokens_estimate.unwrap_or(0.0) > 0.0)
-        .count();
+        .map(|lot| lot.upstream_id.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+    let contributing_upstreams = if plan_weighted_utilization.is_some() {
+        latest_header_per_upstream.len()
+    } else if weighted_utilization.is_some() {
+        lots.iter()
+            .filter(|lot| lot.capacity_to_now_tokens_estimate.unwrap_or(0.0) > 0.0)
+            .map(|lot| lot.upstream_id.as_str())
+            .collect::<HashSet<_>>()
+            .len()
+    } else {
+        lots.iter()
+            .filter(|lot| lot.utilization.is_some())
+            .map(|lot| lot.upstream_id.as_str())
+            .collect::<HashSet<_>>()
+            .len()
+    };
+
     let mut caveats = vec![CAPACITY_CAVEAT.to_owned()];
-    if missing_capacity_upstreams > 0 {
+    if plan_weighted_utilization.is_some() {
+        caveats.push(PLAN_RATIO_CAVEAT.to_owned());
+    } else if weighted_utilization.is_none() {
+        caveats.push(HEADER_FALLBACK_CAVEAT.to_owned());
+    } else if missing_capacity_upstreams > 0 {
         caveats.push(
             "some upstreams lack enough utilization/proxy-token history to infer capacity"
                 .to_owned(),
@@ -847,13 +1165,40 @@ fn build_aggregate_window_response(
         projected_capacity_tokens_estimate: projected_capacity,
         remaining_to_now_tokens_estimate: capacity_to_now
             .map(|capacity| (capacity - used_tokens as f64).max(0.0)),
-        confidence: aggregate_confidence(lots, capacity_to_now),
+        confidence: aggregate_confidence(lots, weighted_utilization, plan_weighted_utilization),
         contributing_upstreams,
         stale_upstreams,
         missing_capacity_upstreams,
-        provider_lots: lots.to_vec(),
+        provider_lots: latest_lot_per_upstream(lots),
         caveats,
     }
+}
+
+/// Collapse a series of provider lots (one per observation) to the latest lot per upstream
+/// (max observed_at_unix_millis). The aggregate response should expose pool-current state,
+/// not raw history; series queries live on a separate endpoint.
+fn latest_lot_per_upstream(
+    lots: &[AggregateProviderLotResponse],
+) -> Vec<AggregateProviderLotResponse> {
+    let mut latest_idx: HashMap<&str, (u64, usize)> = HashMap::new();
+    for (idx, lot) in lots.iter().enumerate() {
+        let observed = lot.observed_at_unix_millis.unwrap_or(0);
+        latest_idx
+            .entry(lot.upstream_id.as_str())
+            .and_modify(|(prev_ts, prev_idx)| {
+                if observed >= *prev_ts {
+                    *prev_ts = observed;
+                    *prev_idx = idx;
+                }
+            })
+            .or_insert((observed, idx));
+    }
+    let mut result: Vec<AggregateProviderLotResponse> = latest_idx
+        .into_values()
+        .map(|(_, idx)| lots[idx].clone())
+        .collect();
+    result.sort_by(|a, b| a.upstream_name.cmp(&b.upstream_name));
+    result
 }
 
 #[derive(Clone)]
@@ -866,12 +1211,14 @@ struct AggregateProviderLotInput {
     provider_reset: Option<u64>,
     observed_at_unix_millis: Option<u64>,
     utilization: Option<f64>,
+    capacity_ratio: f64,
 }
 
 fn provider_lot_input_from_snapshot(
     upstream: &UpstreamRecord,
     window: SubscriptionQuotaWindow,
     snapshot: &SubscriptionQuotaCandidateSnapshot,
+    capacity_ratio: f64,
     now_unix_secs: u64,
 ) -> AggregateProviderLotInput {
     let secs = window_secs(window).expect("aggregate windows are duration-backed");
@@ -885,12 +1232,14 @@ fn provider_lot_input_from_snapshot(
         provider_reset: snapshot.resets_at_unix_secs.or(Some(cc_reset)),
         observed_at_unix_millis: snapshot.observed_at_unix_millis,
         utilization: snapshot.utilization,
+        capacity_ratio,
     }
 }
 
 fn provider_lot_inputs_from_series(
     series: &[cc_lb_storage_api::SubscriptionQuotaSeries],
     upstream_by_id: &HashMap<Uuid, UpstreamRecord>,
+    capacity_ratios: &HashMap<Uuid, f64>,
 ) -> Vec<AggregateProviderLotInput> {
     let mut inputs = Vec::new();
     for series in series {
@@ -923,6 +1272,10 @@ fn provider_lot_inputs_from_series(
                 provider_reset,
                 observed_at_unix_millis: Some(last.observed_at_unix_millis_last),
                 utilization: Some(last.utilization_last),
+                capacity_ratio: capacity_ratios
+                    .get(&upstream.id)
+                    .copied()
+                    .unwrap_or(PRO_CAPACITY_RATIO),
             });
         }
     }
@@ -1009,6 +1362,7 @@ fn build_provider_lot_response(
         capacity_to_now_tokens_estimate: capacity_to_now,
         projected_capacity_tokens_estimate: projected_capacity,
         confidence: confidence.to_owned(),
+        capacity_ratio: input.capacity_ratio,
     }
 }
 
@@ -1184,23 +1538,83 @@ fn sum_optional(values: impl Iterator<Item = Option<f64>>) -> Option<f64> {
     saw_value.then_some(total)
 }
 
+fn capacity_ratios_by_upstream(
+    subscription_metadata: &[UpstreamSubscriptionMetadataRecord],
+    organization_metadata: &[OrganizationMetadataRecord],
+) -> HashMap<Uuid, f64> {
+    let organizations = organization_metadata
+        .iter()
+        .map(|record| (record.organization_uuid.as_str(), record))
+        .collect::<HashMap<_, _>>();
+    subscription_metadata
+        .iter()
+        .filter_map(|record| {
+            let organization = record
+                .organization_uuid
+                .as_deref()
+                .and_then(|organization_uuid| organizations.get(organization_uuid).copied())?;
+            Some((
+                record.upstream_id,
+                plan_capacity_ratio(
+                    organization.organization_type.as_deref(),
+                    organization.rate_limit_tier.as_deref(),
+                    organization.seat_tier.as_deref(),
+                ),
+            ))
+        })
+        .collect()
+}
+
+fn plan_capacity_ratio(
+    organization_type: Option<&str>,
+    rate_limit_tier: Option<&str>,
+    seat_tier: Option<&str>,
+) -> f64 {
+    let organization_type = organization_type.unwrap_or_default().to_ascii_lowercase();
+    let rate_limit_tier = rate_limit_tier.unwrap_or_default().to_ascii_lowercase();
+    let seat_tier = seat_tier.unwrap_or_default().to_ascii_lowercase();
+    if organization_type == "claude_team" {
+        return match seat_tier.as_str() {
+            "team_standard" => 1.25,
+            "team_tier_1" | "team_premium" => 6.25,
+            _ if rate_limit_tier == "default_raven" => 1.25,
+            _ if rate_limit_tier.contains("5x") => 6.25,
+            _ => PRO_CAPACITY_RATIO,
+        };
+    }
+    if rate_limit_tier.contains("20x") || rate_limit_tier.contains("x20") {
+        20.0
+    } else if rate_limit_tier.contains("5x") || rate_limit_tier.contains("x5") {
+        5.0
+    } else {
+        PRO_CAPACITY_RATIO
+    }
+}
+
 fn aggregate_confidence(
     lots: &[AggregateProviderLotResponse],
-    capacity_to_now: Option<f64>,
+    weighted_utilization: Option<f64>,
+    plan_weighted_utilization: Option<f64>,
 ) -> String {
-    if capacity_to_now.unwrap_or(0.0) <= 0.0 || lots.is_empty() {
+    if lots.is_empty() {
         return "low".to_owned();
     }
     if lots.iter().any(|lot| lot.state == "stale") {
         return "stale".to_owned();
     }
-    if lots
-        .iter()
-        .any(|lot| lot.capacity_estimate_tokens.is_none())
-    {
-        return "partial".to_owned();
+    if plan_weighted_utilization.is_some() {
+        return "plan_weighted".to_owned();
     }
-    "estimated".to_owned()
+    if weighted_utilization.is_some() {
+        if lots
+            .iter()
+            .any(|lot| lot.capacity_estimate_tokens.is_none())
+        {
+            return "partial".to_owned();
+        }
+        return "estimated".to_owned();
+    }
+    "low".to_owned()
 }
 
 fn build_analysis_window(
@@ -1591,16 +2005,28 @@ async fn upstreams_for_optional_query(
         Some(value) if !value.trim().is_empty() => Some(parse_upstream_ids(value)?),
         _ => None,
     };
-    let all = list_all_upstreams(storage).await?;
-    Ok(match requested_ids {
-        Some(ids) => {
-            let requested = ids.into_iter().collect::<HashSet<_>>();
-            all.into_iter()
-                .filter(|upstream| requested.contains(&upstream.id))
-                .collect()
-        }
-        None => all,
-    })
+    let requested = requested_ids.map(|ids| ids.into_iter().collect::<HashSet<_>>());
+    Ok(pool_quota_upstreams(
+        list_all_upstreams(storage).await?,
+        requested.as_ref(),
+    ))
+}
+
+fn pool_quota_upstreams(
+    upstreams: Vec<UpstreamRecord>,
+    requested: Option<&HashSet<Uuid>>,
+) -> Vec<UpstreamRecord> {
+    upstreams
+        .into_iter()
+        .filter(|upstream| upstream.deleted_at_unix_secs.is_none())
+        .filter(|upstream| upstream.enabled)
+        .filter(|upstream| upstream.kind == UpstreamKind::AnthropicOauth)
+        .filter(|upstream| {
+            requested
+                .map(|ids| ids.contains(&upstream.id))
+                .unwrap_or(true)
+        })
+        .collect()
 }
 
 async fn list_all_upstreams(storage: &dyn Storage) -> Result<Vec<UpstreamRecord>, Response> {
@@ -2064,7 +2490,8 @@ mod tests {
             ],
         };
         let upstreams = HashMap::from([(upstream_id, upstream)]);
-        let inputs = provider_lot_inputs_from_series(&[series], &upstreams);
+        let ratios = HashMap::from([(upstream_id, PRO_CAPACITY_RATIO)]);
+        let inputs = provider_lot_inputs_from_series(&[series], &upstreams, &ratios);
         let rollups = vec![
             usage_rollup(upstream_id, 40_000, 50),
             usage_rollup(upstream_id, 48_000, 100),
@@ -2086,6 +2513,82 @@ mod tests {
         assert_eq!(response.used_tokens, 150);
         assert_eq!(response.capacity_to_now_tokens_estimate, Some(300.0));
         assert_eq!(response.utilization_percent, Some(50.0));
+    }
+
+    #[test]
+    fn plan_capacity_ratio_classifies_team_standard_and_premium() {
+        assert_eq!(
+            plan_capacity_ratio(
+                Some("claude_team"),
+                Some("default_raven"),
+                Some("team_standard")
+            ),
+            1.25
+        );
+        assert_eq!(
+            plan_capacity_ratio(
+                Some("claude_team"),
+                Some("default_claude_max_5x"),
+                Some("team_tier_1")
+            ),
+            6.25
+        );
+        assert_eq!(
+            plan_capacity_ratio(
+                Some("claude_team"),
+                Some("default_claude_max_5x"),
+                Some("team_premium")
+            ),
+            6.25
+        );
+        assert_eq!(
+            plan_capacity_ratio(Some("claude_max"), Some("default_claude_max_20x"), None),
+            20.0
+        );
+    }
+
+    #[test]
+    fn pool_quota_upstreams_excludes_disabled_oauth_upstreams() {
+        let enabled_oauth_id = Uuid::new_v4();
+        let disabled_oauth_id = Uuid::new_v4();
+        let non_oauth_id = Uuid::new_v4();
+        let mut disabled_oauth = upstream_record(disabled_oauth_id);
+        disabled_oauth.enabled = false;
+        let mut non_oauth = upstream_record(non_oauth_id);
+        non_oauth.kind = UpstreamKind::AnthropicApiKey;
+
+        let upstreams = pool_quota_upstreams(
+            vec![upstream_record(enabled_oauth_id), disabled_oauth, non_oauth],
+            None,
+        );
+
+        assert_eq!(upstreams.len(), 1);
+        assert_eq!(upstreams[0].id, enabled_oauth_id);
+    }
+
+    #[test]
+    fn aggregate_uses_plan_ratio_weighted_latest_observations() {
+        let lots = vec![
+            lot_with_ratio("team-standard", Some(0.50), Some(1_000), None, None, 1.25),
+            lot_with_ratio("team-premium", Some(0.10), Some(1_000), None, None, 6.25),
+        ];
+        let upstream_ids = HashSet::new();
+        let rollups = Vec::<UsageRollup>::new();
+        let response = build_aggregate_window_response(
+            SubscriptionQuotaWindow::FiveHour,
+            &lots,
+            &rollups,
+            &upstream_ids,
+            now_unix_secs_test(),
+        );
+
+        let utilization = response
+            .utilization
+            .expect("plan-ratio fallback should populate utilization");
+        assert!((utilization - (1.25 / 7.5)).abs() < f64::EPSILON);
+        assert_eq!(response.confidence, "plan_weighted");
+        assert_eq!(response.contributing_upstreams, 2);
+        assert!(response.caveats.iter().any(|c| c.contains("plan ratios")));
     }
 
     #[test]
@@ -2218,5 +2721,125 @@ mod tests {
             observed_at_unix_millis_last: at_unix_secs * 1_000,
             sources_seen: vec![SubscriptionQuotaSource::Header],
         }
+    }
+
+    fn lot(
+        upstream_id: &str,
+        utilization: Option<f64>,
+        observed_at_unix_millis: Option<u64>,
+        capacity_estimate_tokens: Option<f64>,
+        capacity_to_now_tokens_estimate: Option<f64>,
+    ) -> AggregateProviderLotResponse {
+        lot_with_ratio(
+            upstream_id,
+            utilization,
+            observed_at_unix_millis,
+            capacity_estimate_tokens,
+            capacity_to_now_tokens_estimate,
+            PRO_CAPACITY_RATIO,
+        )
+    }
+
+    fn lot_with_ratio(
+        upstream_id: &str,
+        utilization: Option<f64>,
+        observed_at_unix_millis: Option<u64>,
+        capacity_estimate_tokens: Option<f64>,
+        capacity_to_now_tokens_estimate: Option<f64>,
+        capacity_ratio: f64,
+    ) -> AggregateProviderLotResponse {
+        AggregateProviderLotResponse {
+            upstream_id: upstream_id.to_owned(),
+            upstream_name: format!("{upstream_id}-name"),
+            window: "5h".to_owned(),
+            source: Some("merged".to_owned()),
+            state: "fresh".to_owned(),
+            provider_start_unix_secs: Some(0),
+            provider_reset_unix_secs: Some(18_000),
+            observed_at_unix_millis,
+            utilization,
+            capacity_estimate_tokens,
+            used_before_cc_window_tokens: 0,
+            capacity_to_now_tokens_estimate,
+            projected_capacity_tokens_estimate: capacity_to_now_tokens_estimate,
+            confidence: "estimated".to_owned(),
+            capacity_ratio,
+        }
+    }
+
+    #[test]
+    fn aggregate_falls_back_to_header_mean_when_capacity_missing() {
+        let lots = vec![
+            lot("u-1", Some(0.10), Some(100_000), None, None),
+            lot("u-2", Some(0.30), Some(100_000), None, None),
+            lot("u-3", None, None, None, None),
+        ];
+        let upstream_ids = HashSet::new();
+        let rollups = Vec::<UsageRollup>::new();
+        let response = build_aggregate_window_response(
+            SubscriptionQuotaWindow::FiveHour,
+            &lots,
+            &rollups,
+            &upstream_ids,
+            now_unix_secs_test(),
+        );
+        let utilization = response
+            .utilization
+            .expect("fallback should populate utilization");
+        assert!((utilization - 0.20).abs() < f64::EPSILON);
+        assert_eq!(response.confidence, "plan_weighted");
+        assert_eq!(response.contributing_upstreams, 2);
+        assert!(response.caveats.iter().any(|c| c.contains("plan ratios")));
+    }
+
+    #[test]
+    fn aggregate_uses_latest_observation_per_upstream_for_fallback() {
+        let lots = vec![
+            lot("u-1", Some(0.40), Some(1_000), None, None),
+            lot("u-1", Some(0.60), Some(2_000), None, None),
+            lot("u-2", Some(0.20), Some(1_500), None, None),
+        ];
+        let upstream_ids = HashSet::new();
+        let rollups = Vec::<UsageRollup>::new();
+        let response = build_aggregate_window_response(
+            SubscriptionQuotaWindow::FiveHour,
+            &lots,
+            &rollups,
+            &upstream_ids,
+            now_unix_secs_test(),
+        );
+        let utilization = response
+            .utilization
+            .expect("fallback should populate utilization");
+        assert!((utilization - 0.40).abs() < f64::EPSILON);
+        assert_eq!(response.confidence, "plan_weighted");
+        assert_eq!(response.contributing_upstreams, 2);
+    }
+
+    #[test]
+    fn aggregate_prefers_capacity_weighted_when_any_lot_has_capacity() {
+        let lots = vec![lot(
+            "u-1",
+            Some(0.50),
+            Some(1_000),
+            Some(1_000_000.0),
+            Some(500_000.0),
+        )];
+        let upstream_ids = HashSet::new();
+        let rollups = Vec::<UsageRollup>::new();
+        let response = build_aggregate_window_response(
+            SubscriptionQuotaWindow::FiveHour,
+            &lots,
+            &rollups,
+            &upstream_ids,
+            now_unix_secs_test(),
+        );
+        assert!(response.utilization.is_some());
+        assert_eq!(response.confidence, "plan_weighted");
+        assert_eq!(response.contributing_upstreams, 1);
+    }
+
+    fn now_unix_secs_test() -> u64 {
+        1_780_000_000
     }
 }

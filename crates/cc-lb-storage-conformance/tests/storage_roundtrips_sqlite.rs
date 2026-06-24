@@ -9,8 +9,8 @@ use cc_lb_storage_conformance::{
     harness::ConformanceBackend,
     scenarios::{
         anthropic_compatibility_kv_store, atomicity, organization_metadata_store,
-        plugin_registry_store, principal_store, prompt_cache_observation_store, storage_roundtrips,
-        storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
+        plugin_registry_store, price_catalog, principal_store, prompt_cache_observation_store,
+        storage_roundtrips, storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
         upstream_rate_limit_store, upstream_subscription_metadata_store,
         upstream_subscription_quota_store,
     },
@@ -358,6 +358,22 @@ plugin_registry_sqlite_test!(
     plugin_registry_same_sha_metadata_mismatch_conflicts_sqlite,
     same_sha_metadata_mismatch_conflicts
 );
+
+#[test]
+fn price_catalog_roundtrip_smoke_sqlite() {
+    run_sqlite_scenario(
+        "price_catalog_roundtrip_smoke",
+        price_catalog::roundtrip_smoke,
+    );
+}
+
+#[test]
+fn price_catalog_put_same_payload_twice_updates_fetched_at_sqlite() {
+    run_sqlite_scenario(
+        "price_catalog_put_same_payload_twice_updates_fetched_at",
+        price_catalog::put_same_payload_twice_updates_fetched_at,
+    );
+}
 
 fn run_sqlite_scenario<F, Fut>(name: &str, scenario: F)
 where

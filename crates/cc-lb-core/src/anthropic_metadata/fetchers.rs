@@ -67,6 +67,8 @@ pub struct ProfileOrganization {
     #[serde(default)]
     pub rate_limit_tier: Option<String>,
     #[serde(default)]
+    pub seat_tier: Option<String>,
+    #[serde(default)]
     pub has_extra_usage_enabled: Option<bool>,
     #[serde(default)]
     pub billing_type: Option<String>,

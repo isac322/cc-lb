@@ -12,15 +12,16 @@ impl OrganizationMetadataStore for PostgresStorage {
     ) -> StorageResult<()> {
         sqlx::query(
             "INSERT INTO organization_metadata_v1 \
-             (organization_uuid, organization_name, organization_type, rate_limit_tier, has_extra_usage_enabled, \
+             (organization_uuid, organization_name, organization_type, rate_limit_tier, seat_tier, has_extra_usage_enabled, \
               billing_type, subscription_created_at_unix_secs, account_email, account_display_name, account_uuid, \
               overage_credit_amount_minor_units, overage_credit_currency, overage_credit_granted, overage_credit_eligible, \
               observed_at_unix_millis, last_error, raw_profile, raw_overage_grant) \
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18) \
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) \
              ON CONFLICT (organization_uuid) DO UPDATE SET \
               organization_name = EXCLUDED.organization_name, \
               organization_type = EXCLUDED.organization_type, \
               rate_limit_tier = EXCLUDED.rate_limit_tier, \
+              seat_tier = EXCLUDED.seat_tier, \
               has_extra_usage_enabled = EXCLUDED.has_extra_usage_enabled, \
               billing_type = EXCLUDED.billing_type, \
               subscription_created_at_unix_secs = EXCLUDED.subscription_created_at_unix_secs, \
@@ -40,6 +41,7 @@ impl OrganizationMetadataStore for PostgresStorage {
         .bind(&record.organization_name)
         .bind(&record.organization_type)
         .bind(&record.rate_limit_tier)
+        .bind(&record.seat_tier)
         .bind(record.has_extra_usage_enabled)
         .bind(&record.billing_type)
         .bind(record.subscription_created_at_unix_secs)
@@ -65,7 +67,7 @@ impl OrganizationMetadataStore for PostgresStorage {
         organization_uuid: &str,
     ) -> StorageResult<Option<OrganizationMetadataRecord>> {
         let row = sqlx::query(
-            "SELECT organization_uuid, organization_name, organization_type, rate_limit_tier, has_extra_usage_enabled, \
+            "SELECT organization_uuid, organization_name, organization_type, rate_limit_tier, seat_tier, has_extra_usage_enabled, \
              billing_type, subscription_created_at_unix_secs, account_email, account_display_name, account_uuid, \
              overage_credit_amount_minor_units, overage_credit_currency, overage_credit_granted, overage_credit_eligible, \
              observed_at_unix_millis, last_error, raw_profile, raw_overage_grant \
@@ -80,7 +82,7 @@ impl OrganizationMetadataStore for PostgresStorage {
 
     async fn list_organization_metadata(&self) -> StorageResult<Vec<OrganizationMetadataRecord>> {
         let rows = sqlx::query(
-            "SELECT organization_uuid, organization_name, organization_type, rate_limit_tier, has_extra_usage_enabled, \
+            "SELECT organization_uuid, organization_name, organization_type, rate_limit_tier, seat_tier, has_extra_usage_enabled, \
              billing_type, subscription_created_at_unix_secs, account_email, account_display_name, account_uuid, \
              overage_credit_amount_minor_units, overage_credit_currency, overage_credit_granted, overage_credit_eligible, \
              observed_at_unix_millis, last_error, raw_profile, raw_overage_grant \
@@ -99,6 +101,7 @@ fn row_to_record(row: PgRow) -> StorageResult<OrganizationMetadataRecord> {
         organization_name: row.try_get("organization_name").map_err(map_sqlx_error)?,
         organization_type: row.try_get("organization_type").map_err(map_sqlx_error)?,
         rate_limit_tier: row.try_get("rate_limit_tier").map_err(map_sqlx_error)?,
+        seat_tier: row.try_get("seat_tier").map_err(map_sqlx_error)?,
         has_extra_usage_enabled: row
             .try_get("has_extra_usage_enabled")
             .map_err(map_sqlx_error)?,

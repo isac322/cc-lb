@@ -43,6 +43,7 @@ fn test_state(storage: Arc<Storage>, audit_sink: Option<AuditWriterSink>) -> Adm
         warmup_dialect_dispatcher: None,
         subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
+        event_bus: None,
     }
 }
 
