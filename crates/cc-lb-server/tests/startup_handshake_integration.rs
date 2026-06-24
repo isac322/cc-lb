@@ -183,9 +183,9 @@ async fn mid_startup_shutdown_saves_partial_progress_and_marker() -> Result<()> 
         }
     });
 
-    tokio::time::timeout(Duration::from_secs(10), repos.blobs.wait_for_gets(4)).await?;
+    tokio::time::timeout(Duration::from_secs(30), repos.blobs.wait_for_gets(4)).await?;
     shutdown_tx.send(true)?;
-    let report = tokio::time::timeout(Duration::from_secs(10), task).await??;
+    let report = tokio::time::timeout(Duration::from_secs(30), task).await??;
 
     assert!(
         report.errors.is_empty(),

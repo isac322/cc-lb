@@ -325,9 +325,7 @@ export function PoolQuotaStackedBar({
     w.provider_lots.map((lot, i) => {
       const util = lot.utilization ?? 0;
       const weightedContribution =
-        totalRatio > 0
-          ? ((util * lot.capacity_ratio) / totalRatio) * 100
-          : 0;
+        totalRatio > 0 ? ((util * lot.capacity_ratio) / totalRatio) * 100 : 0;
       if (weightedContribution <= 0) return null;
 
       const idColor = poolSegmentColor(window, i);
@@ -503,189 +501,177 @@ export function PoolQuotaThemedChart({
         data={seriesData}
         margin={{ top: 0, right: 0, bottom: 0, left: 0 }}
       >
-          <defs>
-            <linearGradient
-              id={`${chartId}-grad-5h`}
-              x1="0"
-              y1="0"
-              x2="0"
-              y2="1"
-            >
-              <stop offset="0%" stopColor={c5h.stroke} stopOpacity={0.55} />
-              <stop offset="100%" stopColor={c5h.stroke} stopOpacity={0} />
-            </linearGradient>
-            <linearGradient
-              id={`${chartId}-grad-7d`}
-              x1="0"
-              y1="0"
-              x2="0"
-              y2="1"
-            >
-              <stop offset="0%" stopColor={c7d.stroke} stopOpacity={0.55} />
-              <stop offset="100%" stopColor={c7d.stroke} stopOpacity={0} />
-            </linearGradient>
-          </defs>
-          <CartesianGrid stroke="var(--color-border)" />
-          <XAxis
-            dataKey="unix"
-            type="number"
-            domain={[rangeStartUnix, rangeEndUnix]}
-            allowDataOverflow
-            tick={{
-              fill: 'var(--color-text-muted)',
-              fontSize: 10,
-            }}
-            tickFormatter={fmtChartTick}
-            axisLine={false}
-            tickLine={false}
-            minTickGap={40}
-            tickMargin={8}
+        <defs>
+          <linearGradient id={`${chartId}-grad-5h`} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={c5h.stroke} stopOpacity={0.55} />
+            <stop offset="100%" stopColor={c5h.stroke} stopOpacity={0} />
+          </linearGradient>
+          <linearGradient id={`${chartId}-grad-7d`} x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" stopColor={c7d.stroke} stopOpacity={0.55} />
+            <stop offset="100%" stopColor={c7d.stroke} stopOpacity={0} />
+          </linearGradient>
+        </defs>
+        <CartesianGrid stroke="var(--color-border)" />
+        <XAxis
+          dataKey="unix"
+          type="number"
+          domain={[rangeStartUnix, rangeEndUnix]}
+          allowDataOverflow
+          tick={{
+            fill: 'var(--color-text-muted)',
+            fontSize: 10,
+          }}
+          tickFormatter={fmtChartTick}
+          axisLine={false}
+          tickLine={false}
+          minTickGap={40}
+          tickMargin={8}
+        />
+        <YAxis
+          tick={{
+            fill: 'var(--color-text-muted)',
+            fontSize: 10,
+          }}
+          tickFormatter={(v) => `${v}%`}
+          axisLine={false}
+          tickLine={false}
+          width={48}
+          tickMargin={8}
+          domain={[0, maxValue]}
+          ticks={
+            maxValue <= 100
+              ? [0, 25, 50, 75, 100]
+              : [0, 25, 50, 75, 100, maxValue]
+          }
+          allowDataOverflow={false}
+        />
+        {maxValue > 95 ? (
+          <ReferenceArea
+            y1={95}
+            y2={maxValue}
+            fill="var(--color-danger)"
+            fillOpacity={0.06}
+            ifOverflow="hidden"
           />
-          <YAxis
-            tick={{
-              fill: 'var(--color-text-muted)',
-              fontSize: 10,
-            }}
-            tickFormatter={(v) => `${v}%`}
-            axisLine={false}
-            tickLine={false}
-            width={48}
-            tickMargin={8}
-            domain={[0, maxValue]}
-            ticks={
-              maxValue <= 100
-                ? [0, 25, 50, 75, 100]
-                : [0, 25, 50, 75, 100, maxValue]
-            }
-            allowDataOverflow={false}
-          />
-          {maxValue > 95 ? (
-            <ReferenceArea
-              y1={95}
-              y2={maxValue}
-              fill="var(--color-danger)"
-              fillOpacity={0.06}
-              ifOverflow="hidden"
-            />
-          ) : null}
-          <ReferenceLine
-            y={80}
-            stroke="var(--color-warn)"
-            strokeOpacity={0.5}
-            strokeDasharray="4 4"
-            label={{
-              position: 'insideBottomLeft',
-              value: '80% Warn',
-              fill: 'var(--color-text-muted)',
-              fontSize: 11,
-              opacity: 0.9,
-            }}
-          />
-          <ReferenceLine
-            y={95}
-            stroke="var(--color-danger)"
-            strokeOpacity={0.6}
-            strokeDasharray="4 4"
-            label={{
-              position: 'insideBottomLeft',
-              value: '95% Critical',
-              fill: 'var(--color-text-muted)',
-              fontSize: 11,
-              opacity: 0.9,
-            }}
-          />
-          <RTooltip
-            cursor={{
-              stroke: 'var(--color-accent)',
-              strokeWidth: 1,
-              strokeOpacity: 0.3,
-            }}
-            content={({ active, payload, label }) => {
-              if (!active || !payload?.length) return null;
-              return (
+        ) : null}
+        <ReferenceLine
+          y={80}
+          stroke="var(--color-warn)"
+          strokeOpacity={0.5}
+          strokeDasharray="4 4"
+          label={{
+            position: 'insideBottomLeft',
+            value: '80% Warn',
+            fill: 'var(--color-text-muted)',
+            fontSize: 11,
+            opacity: 0.9,
+          }}
+        />
+        <ReferenceLine
+          y={95}
+          stroke="var(--color-danger)"
+          strokeOpacity={0.6}
+          strokeDasharray="4 4"
+          label={{
+            position: 'insideBottomLeft',
+            value: '95% Critical',
+            fill: 'var(--color-text-muted)',
+            fontSize: 11,
+            opacity: 0.9,
+          }}
+        />
+        <RTooltip
+          cursor={{
+            stroke: 'var(--color-accent)',
+            strokeWidth: 1,
+            strokeOpacity: 0.3,
+          }}
+          content={({ active, payload, label }) => {
+            if (!active || !payload?.length) return null;
+            return (
+              <div
+                style={{
+                  background: 'var(--color-bg-sub)',
+                  border: '1px solid var(--color-subtle-strong)',
+                  borderRadius: 6,
+                  color: 'var(--color-text)',
+                  fontSize: 11,
+                  padding: '8px 12px',
+                  boxShadow: '0 8px 24px rgba(0,0,0,0.32)',
+                  minWidth: 140,
+                }}
+              >
                 <div
                   style={{
-                    background: 'var(--color-bg-sub)',
-                    border: '1px solid var(--color-subtle-strong)',
-                    borderRadius: 6,
-                    color: 'var(--color-text)',
-                    fontSize: 11,
-                    padding: '8px 12px',
-                    boxShadow: '0 8px 24px rgba(0,0,0,0.32)',
-                    minWidth: 140,
+                    color: 'var(--color-text-muted)',
+                    marginBottom: 6,
+                    fontWeight: 500,
                   }}
                 >
-                  <div
-                    style={{
-                      color: 'var(--color-text-muted)',
-                      marginBottom: 6,
-                      fontWeight: 500,
-                    }}
-                  >
-                    {fmtChartTooltip(Number(label))}
-                  </div>
-                  {payload.map((p, i) => {
-                    const w = String(p.dataKey);
-                    const wLabel =
-                      w === '5h' ? '5h window' : w === '7d' ? '7d window' : w;
-                    return (
-                      <div
-                        key={i}
+                  {fmtChartTooltip(Number(label))}
+                </div>
+                {payload.map((p, i) => {
+                  const w = String(p.dataKey);
+                  const wLabel =
+                    w === '5h' ? '5h window' : w === '7d' ? '7d window' : w;
+                  return (
+                    <div
+                      key={i}
+                      style={{
+                        padding: '2px 0',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        gap: 12,
+                      }}
+                    >
+                      <span
                         style={{
-                          padding: '2px 0',
-                          display: 'flex',
-                          justifyContent: 'space-between',
-                          gap: 12,
+                          color:
+                            typeof p.color === 'string'
+                              ? p.color
+                              : 'var(--color-text)',
+                          fontWeight: 500,
                         }}
                       >
-                        <span
-                          style={{
-                            color:
-                              typeof p.color === 'string'
-                                ? p.color
-                                : 'var(--color-text)',
-                            fontWeight: 500,
-                          }}
-                        >
-                          {wLabel}
-                        </span>
-                        <span
-                          style={{
-                            fontVariantNumeric: 'tabular-nums',
-                            fontWeight: 500,
-                          }}
-                        >
-                          {typeof p.value === 'number'
-                            ? `${p.value.toFixed(1)}%`
-                            : '—'}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              );
-            }}
-          />
-          <Area
-            type="monotone"
-            dataKey="7d"
-            stroke={c7d.stroke}
-            strokeWidth={1.4}
-            fill={`url(#${chartId}-grad-7d)`}
-            fillOpacity={1}
-            isAnimationActive={false}
-            connectNulls={false}
-          />
-          <Area
-            type="monotone"
-            dataKey="5h"
-            stroke={c5h.stroke}
-            strokeWidth={1.4}
-            fill={`url(#${chartId}-grad-5h)`}
-            fillOpacity={1}
-            isAnimationActive={false}
-            connectNulls={false}
-          />
+                        {wLabel}
+                      </span>
+                      <span
+                        style={{
+                          fontVariantNumeric: 'tabular-nums',
+                          fontWeight: 500,
+                        }}
+                      >
+                        {typeof p.value === 'number'
+                          ? `${p.value.toFixed(1)}%`
+                          : '—'}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
+            );
+          }}
+        />
+        <Area
+          type="monotone"
+          dataKey="7d"
+          stroke={c7d.stroke}
+          strokeWidth={1.4}
+          fill={`url(#${chartId}-grad-7d)`}
+          fillOpacity={1}
+          isAnimationActive={false}
+          connectNulls={false}
+        />
+        <Area
+          type="monotone"
+          dataKey="5h"
+          stroke={c5h.stroke}
+          strokeWidth={1.4}
+          fill={`url(#${chartId}-grad-5h)`}
+          fillOpacity={1}
+          isAnimationActive={false}
+          connectNulls={false}
+        />
       </AreaChart>
     </div>
   );
@@ -840,10 +826,8 @@ function OverviewPage() {
     totals && totals.request_count > 0
       ? (totals.error_count / totals.request_count) * 100
       : 0;
-  const latency =
-    (totals as any)?.p95_latency_ms ?? totals?.avg_latency_ms ?? 0;
-  const latencyLabel =
-    (totals as any)?.p95_latency_ms !== undefined ? 'p95' : 'Avg latency';
+  const latency = totals?.avg_latency_ms ?? 0;
+  const latencyLabel = 'Avg latency';
 
   const sparkRate =
     summary.data?.sparkline.buckets.map(
@@ -925,7 +909,15 @@ function OverviewPage() {
   // Principals Data
   const topPrincipals = useMemo(() => {
     const series = principalUsage.data?.series ?? [];
-    const byId = new Map<string, any>();
+    type PrincipalRow = {
+      id: string;
+      name: string;
+      cost_usd: number;
+      tokens: number;
+      requests: number;
+      primary_model: string;
+    };
+    const byId = new Map<string, PrincipalRow>();
     let maxCost = 0;
     let totalCost = 0;
 
@@ -1046,7 +1038,7 @@ function OverviewPage() {
           }}
         />
 
-    <Card className="min-w-0 flex flex-col h-full">
+        <Card className="min-w-0 flex flex-col h-full">
           <CardHeader
             title={
               <span className="inline-flex items-center gap-2">
