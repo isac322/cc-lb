@@ -5,6 +5,7 @@ pub mod compat;
 pub mod metadata_refresh;
 pub mod oauth_refresh;
 pub mod oauth_usage_poll;
+pub mod pool_quota_snapshot;
 pub mod price_catalog;
 pub mod prompt_cache_purge;
 pub mod quota_gc;

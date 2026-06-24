@@ -76,6 +76,7 @@ fn record(organization_uuid: &str) -> OrganizationMetadataRecord {
         organization_name: Some(format!("Org {organization_uuid}")),
         organization_type: Some("claude_max".to_owned()),
         rate_limit_tier: Some("tier-1".to_owned()),
+        seat_tier: Some("team_standard".to_owned()),
         has_extra_usage_enabled: Some(true),
         billing_type: Some("subscription".to_owned()),
         subscription_created_at_unix_secs: Some(1_700_000_000),

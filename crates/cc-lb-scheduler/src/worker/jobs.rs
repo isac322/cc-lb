@@ -6,6 +6,7 @@ use crate::jobs::compat::AnthropicCompatRefreshJob;
 use crate::jobs::metadata_refresh::MetadataRefreshJob;
 use crate::jobs::oauth_refresh::OAuthRefreshJob;
 use crate::jobs::oauth_usage_poll::OAuthUsagePollCronJob;
+use crate::jobs::pool_quota_snapshot::PoolQuotaSnapshotCronJob;
 use crate::jobs::price_catalog::PriceCatalogRefreshJob;
 use crate::jobs::prompt_cache_purge::PromptCacheObservationPurgeJob;
 use crate::jobs::quota_gc::SubscriptionQuotaGcJob;
@@ -40,6 +41,7 @@ pub enum CronJob {
     #[serde(rename = "oauth_usage_poll", alias = "o_auth_usage_poll")]
     OAuthUsagePoll(OAuthUsagePollCronJob),
     AnthropicCompatRefresh(AnthropicCompatRefreshJob),
+    PoolQuotaSnapshot(PoolQuotaSnapshotCronJob),
 }
 
 impl CronJob {
@@ -55,6 +57,7 @@ impl CronJob {
             Self::OAuthRefreshWatchdog(_) => "oauth_refresh_watchdog",
             Self::OAuthUsagePoll(_) => "oauth_usage_poll",
             Self::AnthropicCompatRefresh(_) => "anthropic_compat_refresh",
+            Self::PoolQuotaSnapshot(_) => "pool_quota_snapshot",
         }
     }
 }
@@ -106,6 +109,7 @@ impl TraceparentCarrier for CronJob {
             Self::OAuthRefreshWatchdog(job) => job.traceparent(),
             Self::OAuthUsagePoll(job) => job.traceparent(),
             Self::AnthropicCompatRefresh(job) => job.traceparent(),
+            Self::PoolQuotaSnapshot(job) => job.traceparent(),
         }
     }
 
@@ -121,6 +125,7 @@ impl TraceparentCarrier for CronJob {
             Self::OAuthRefreshWatchdog(job) => job.set_traceparent(traceparent),
             Self::OAuthUsagePoll(job) => job.set_traceparent(traceparent),
             Self::AnthropicCompatRefresh(job) => job.set_traceparent(traceparent),
+            Self::PoolQuotaSnapshot(job) => job.set_traceparent(traceparent),
         }
     }
 }

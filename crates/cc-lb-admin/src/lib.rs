@@ -28,6 +28,7 @@ use serde::Serialize;
 
 use cc_lb_core::{
     AuditWriterSink, DynamicView, DynamicViewHolder, Lifecycle, MetadataHookHandle,
+    RequestEventBus,
     api_keys::{key_store::KeyStore, limit_engine::LimitEngine},
 };
 use cc_lb_runtime_extism::ExtismRuntime;
@@ -96,6 +97,7 @@ pub struct AdminState {
     pub scheduler: Option<cc_lb_scheduler::admin::SchedulerAdminHandle>,
     pub admin_token: Option<String>,
     pub start_time: std::time::Instant,
+    pub event_bus: Option<Arc<dyn RequestEventBus>>,
 }
 
 #[derive(Debug, thiserror::Error)]

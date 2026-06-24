@@ -57,6 +57,7 @@ use crate::dynamic_view::{
 };
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
 use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
+use crate::event_bus::RequestEventBus;
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
 use crate::rate_limit_headers::{
@@ -737,6 +738,10 @@ pub struct Lifecycle {
     limit_subject_provider: Option<Arc<dyn LimitSubjectProvider>>,
     audit_sink: Option<Arc<AuditWriterSink>>,
     request_event_storage: Option<Arc<dyn Storage>>,
+    /// Live-tail bus for freshly-finalized `RequestEvent`s. When wired, every
+    /// event appended to storage is also published here so admin dashboards
+    /// can subscribe without polling the DB.
+    event_bus: Option<Arc<dyn RequestEventBus>>,
     upstream_rate_limit_sink: Option<UpstreamRateLimitSink>,
     subscription_quota_sink: Option<SubscriptionQuotaSink>,
     subscription_metadata_hook: Option<MetadataHookHandle>,
@@ -771,6 +776,7 @@ impl Lifecycle {
             limit_subject_provider: None,
             audit_sink: None,
             request_event_storage: None,
+            event_bus: None,
             upstream_rate_limit_sink: None,
             subscription_quota_sink: None,
             subscription_metadata_hook: None,
@@ -792,6 +798,7 @@ impl Lifecycle {
             limit_subject_provider: None,
             audit_sink: None,
             request_event_storage: None,
+            event_bus: None,
             upstream_rate_limit_sink: None,
             subscription_quota_sink: None,
             subscription_metadata_hook: None,
@@ -829,6 +836,11 @@ impl Lifecycle {
 
     pub fn with_request_event_storage(mut self, storage: Arc<dyn Storage>) -> Self {
         self.request_event_storage = Some(storage);
+        self
+    }
+
+    pub fn with_event_bus(mut self, bus: Arc<dyn RequestEventBus>) -> Self {
+        self.event_bus = Some(bus);
         self
     }
 
@@ -1732,6 +1744,9 @@ impl Lifecycle {
             if let Err(error) = storage.append_request_event(&event).await {
                 tracing::warn!(%error, "failed to append api key request event");
             }
+            if let Some(bus) = self.event_bus.as_ref() {
+                bus.publish(event).await;
+            }
         }
         Response::from_parts(parts, Body::from(body))
     }
@@ -1990,6 +2005,7 @@ impl Lifecycle {
         strip_hop_by_hop(&mut parts.headers);
         let relay_start = Instant::now();
         let storage = self.request_event_storage.clone();
+        let event_bus = self.event_bus.clone();
         let limit_engine = self.limit_engine.clone();
         let prompt_cache_shadow_enabled = self.config.prompt_cache_shadow.enabled;
         let stream = async_stream::stream! {
@@ -2279,6 +2295,9 @@ impl Lifecycle {
                     event_ctx.cache_metadata.apply_to(&mut event, &usage);
                     if let Err(error) = storage.append_request_event(&event).await {
                         tracing::warn!(%error, "failed to append streaming request event");
+                    }
+                    if let Some(bus) = event_bus.as_ref() {
+                        bus.publish(event).await;
                     }
                 }
             }

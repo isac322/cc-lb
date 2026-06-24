@@ -891,9 +891,10 @@ async fn build_app_with_storage_inner(
     let notify_listener_task = Some(tokio::spawn(async move {
         notify_listener.run().await;
     }));
+    let event_bus: Arc<dyn cc_lb_core::RequestEventBus> = Arc::new(cc_lb_core::InMemoryBus::new());
     let mut lifecycle = Lifecycle::new_with_dynamic_view(
         builtin_authn.clone(),
-        dynamic_view_holder,
+        dynamic_view_holder.clone(),
         lifecycle_config,
     );
     if let Some(audit_sink) = audit_sink.clone() {
@@ -901,6 +902,7 @@ async fn build_app_with_storage_inner(
     }
     lifecycle = lifecycle.with_limit_engine(limit_engine.clone(), builtin_authn.clone());
     lifecycle = lifecycle.with_request_event_storage(storage.clone());
+    lifecycle = lifecycle.with_event_bus(event_bus.clone());
     lifecycle = lifecycle.with_upstream_rate_limit_sink(upstream_rate_limit_sink);
     lifecycle = lifecycle.with_subscription_quota_sink(subscription_quota_sink.clone());
     if let Some(subscription_metadata_hook) = subscription_metadata_hook.clone() {
@@ -972,6 +974,7 @@ async fn build_app_with_storage_inner(
             cancel: scheduler_cancel.clone(),
             replica_id: scheduler_replica_id,
             price_catalog: price_catalog.clone(),
+            dynamic_view: dynamic_view_holder.clone(),
         },
     );
     let scheduler_tasks = opened_scheduler
@@ -1048,6 +1051,7 @@ async fn build_app_with_storage_inner(
             .clone()
             .or_else(|| std::env::var(&config.admin.token_env).ok()),
         start_time,
+        event_bus: Some(event_bus.clone()),
     };
     let reload_task = config_watcher.clone().map(spawn_reload_watcher);
 

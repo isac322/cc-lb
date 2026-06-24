@@ -1123,6 +1123,188 @@ async function handle(req: Request, url: URL): Promise<Response> {
       }))),
     });
   }
+  if (path === "/admin/v1/subscription-quotas/aggregate" && m === "GET") {
+    const now = NOW();
+    const enabledOAuth = upstreams.filter((u) => u.kind === "anthropic_oauth" && u.enabled);
+    const upstreamCount = 3; // Mocking 3 upstreams
+    
+    const providerLots5h = [
+      {
+        upstream_id: "us-bear-max",
+        upstream_name: "bear-max",
+        window: "5h",
+        source: "header",
+        state: "fresh",
+        provider_start_unix_secs: now - 5 * 3600,
+        provider_reset_unix_secs: now + 4.3 * 3600,
+        observed_at_unix_millis: (now - 30) * 1000,
+        utilization: 0.10,
+        capacity_estimate_tokens: Math.floor(1500000 * (20 / 45)),
+        used_before_cc_window_tokens: 0,
+        capacity_to_now_tokens_estimate: Math.floor(1500000 * (20 / 45)),
+        projected_capacity_tokens_estimate: Math.floor(1500000 * (20 / 45)),
+        confidence: "high",
+        capacity_ratio: 20.0,
+      },
+      {
+        upstream_id: "us-bh322yoo-max",
+        upstream_name: "bh322yoo-max",
+        window: "5h",
+        source: "header",
+        state: "fresh",
+        provider_start_unix_secs: now - 5 * 3600,
+        provider_reset_unix_secs: now + 0.6 * 3600,
+        observed_at_unix_millis: (now - 25) * 1000,
+        utilization: 0.16,
+        capacity_estimate_tokens: Math.floor(1500000 * (5 / 45)),
+        used_before_cc_window_tokens: 0,
+        capacity_to_now_tokens_estimate: Math.floor(1500000 * (5 / 45)),
+        projected_capacity_tokens_estimate: Math.floor(1500000 * (5 / 45)),
+        confidence: "high",
+        capacity_ratio: 5.0,
+      },
+      {
+        upstream_id: "us-isac-personal",
+        upstream_name: "isac-personal",
+        window: "5h",
+        source: "header",
+        state: "fresh",
+        provider_start_unix_secs: now - 5 * 3600,
+        provider_reset_unix_secs: now + 2.1 * 3600,
+        observed_at_unix_millis: (now - 28) * 1000,
+        utilization: 0.0,
+        capacity_estimate_tokens: Math.floor(1500000 * (20 / 45)),
+        used_before_cc_window_tokens: 0,
+        capacity_to_now_tokens_estimate: Math.floor(1500000 * (20 / 45)),
+        projected_capacity_tokens_estimate: Math.floor(1500000 * (20 / 45)),
+        confidence: "high",
+        capacity_ratio: 20.0,
+      }
+    ];
+
+    const providerLots7d = [
+      {
+        upstream_id: "us-bear-max",
+        upstream_name: "bear-max",
+        window: "7d",
+        source: "header",
+        state: "fresh",
+        provider_start_unix_secs: now - 7 * 24 * 3600,
+        provider_reset_unix_secs: now + 1.6 * 24 * 3600,
+        observed_at_unix_millis: (now - 30) * 1000,
+        utilization: 0.78,
+        capacity_estimate_tokens: Math.floor(14000000 * (20 / 45)),
+        used_before_cc_window_tokens: 0,
+        capacity_to_now_tokens_estimate: Math.floor(14000000 * (20 / 45)),
+        projected_capacity_tokens_estimate: Math.floor(14000000 * (20 / 45)),
+        confidence: "high",
+        capacity_ratio: 20.0,
+      },
+      {
+        upstream_id: "us-bh322yoo-max",
+        upstream_name: "bh322yoo-max",
+        window: "7d",
+        source: "header",
+        state: "fresh",
+        provider_start_unix_secs: now - 7 * 24 * 3600,
+        provider_reset_unix_secs: now + 4 * 24 * 3600,
+        observed_at_unix_millis: (now - 25) * 1000,
+        utilization: 0.05,
+        capacity_estimate_tokens: Math.floor(14000000 * (5 / 45)),
+        used_before_cc_window_tokens: 0,
+        capacity_to_now_tokens_estimate: Math.floor(14000000 * (5 / 45)),
+        projected_capacity_tokens_estimate: Math.floor(14000000 * (5 / 45)),
+        confidence: "high",
+        capacity_ratio: 5.0,
+      },
+      {
+        upstream_id: "us-isac-personal",
+        upstream_name: "isac-personal",
+        window: "7d",
+        source: "header",
+        state: "fresh",
+        provider_start_unix_secs: now - 7 * 24 * 3600,
+        provider_reset_unix_secs: now + 1.5 * 24 * 3600,
+        observed_at_unix_millis: (now - 28) * 1000,
+        utilization: 0.69,
+        capacity_estimate_tokens: Math.floor(14000000 * (20 / 45)),
+        used_before_cc_window_tokens: 0,
+        capacity_to_now_tokens_estimate: Math.floor(14000000 * (20 / 45)),
+        projected_capacity_tokens_estimate: Math.floor(14000000 * (20 / 45)),
+        confidence: "high",
+        capacity_ratio: 20.0,
+      }
+    ];
+
+    const util5h = (0.10 * 20 + 0.16 * 5 + 0.0 * 20) / 45;
+    const util7d = (0.78 * 20 + 0.05 * 5 + 0.69 * 20) / 45;
+
+    const windowSpec = [
+      { window: "5h", utilization: util5h, capacity: 1_500_000, secs: 5 * 3600, lots: providerLots5h },
+      { window: "7d", utilization: util7d, capacity: 14_000_000, secs: 7 * 24 * 3600, lots: providerLots7d },
+    ];
+    return ok({
+      now_unix_secs: now,
+      window_anchor_unix_secs: now,
+      max_staleness_secs: 300,
+      upstream_count: upstreamCount,
+      windows: windowSpec.map((w) => ({
+        window: w.window,
+        cc_window_start_unix_secs: now - w.secs,
+        cc_window_reset_unix_secs: now + w.secs,
+        used_tokens: Math.floor(w.capacity * w.utilization),
+        utilization: w.utilization,
+        utilization_percent: w.utilization * 100,
+        capacity_to_now_tokens_estimate: w.capacity,
+        projected_capacity_tokens_estimate: w.capacity,
+        remaining_to_now_tokens_estimate: Math.floor(w.capacity * (1 - w.utilization)),
+        confidence: "high",
+        contributing_upstreams: upstreamCount,
+        stale_upstreams: 0,
+        missing_capacity_upstreams: 0,
+        provider_lots: w.lots,
+        caveats: [],
+      })),
+      caveats: [],
+    });
+  }
+  if (path === "/admin/v1/subscription-quotas/pool-history" && m === "GET") {
+    const now = NOW();
+    const windowsParam = url.searchParams.get("windows") || "5h,7d";
+    const windows = windowsParam.split(",");
+    const since = parseInt(url.searchParams.get("since_unix_secs") || String(now - 3600), 10);
+    const until = parseInt(url.searchParams.get("until_unix_secs") || String(now), 10);
+    
+    const seriesData = windows.map(win => {
+      const is7d = win === "7d";
+      const baseUtil = is7d ? 0.60 : 0.15;
+      const points = [];
+      for (let t = since; t <= until; t += 60) {
+        // Random walk around baseUtil
+        const noise = (Math.sin(t / 300) + Math.cos(t / 700)) * 0.05;
+        const util = Math.max(0, Math.min(1, baseUtil + noise));
+        points.push({
+          snapshot_at_unix_secs: t,
+          utilization: util,
+          utilization_percent: util * 100,
+          contributing_upstreams: 3,
+          eligible_upstreams: 3,
+          stale_upstreams: 0,
+          max_observed_at_unix_millis: (t - 30) * 1000,
+        });
+      }
+      return {
+        window: win,
+        latest: points[points.length - 1] || null,
+        series: points,
+      };
+    });
+
+    return ok({
+      now_unix_secs: now,
+      windows: seriesData,
+    });
+  }
   if (path === "/admin/v1/subscription-quotas/analysis" && m === "GET") {
     const now = NOW();
     const range = url.searchParams.get("range") || "7d";
@@ -1141,7 +1323,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
 
 // ──────────────────────────────────────────────────────────────────────────────
 const server = serve({
-  port: 8001,
+  port: 8002,
   hostname: "0.0.0.0",
   idleTimeout: 0,
   async fetch(req) {

@@ -29,6 +29,8 @@ mod error_format;
 #[cfg(not(loom))]
 mod error_normalizer;
 #[cfg(not(loom))]
+pub mod event_bus;
+#[cfg(not(loom))]
 mod hop_by_hop;
 #[cfg(not(loom))]
 pub mod instrumented_connector;
@@ -96,6 +98,8 @@ pub use dynamic_view::{
 pub use error_format::{anthropic_error_body, anthropic_error_response};
 #[cfg(not(loom))]
 pub use error_normalizer::{ErrorNormalizer, NormalizerError, UpstreamKind};
+#[cfg(not(loom))]
+pub use event_bus::{BusError, BusReceiver, InMemoryBus, RequestEventBus, new_in_memory_bus};
 #[cfg(not(loom))]
 pub use hop_by_hop::{HopByHopStripLayer, HopByHopStripService, strip_hop_by_hop};
 #[cfg(not(loom))]

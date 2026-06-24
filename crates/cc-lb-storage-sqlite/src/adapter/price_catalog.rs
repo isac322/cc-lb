@@ -2,6 +2,7 @@ use async_trait::async_trait;
 use cc_lb_storage_api::{
     PriceCatalogCache, PriceCatalogSnapshotRecord, StorageError, StorageResult,
 };
+use sha2::{Digest, Sha256};
 use sqlx::Row;
 
 use crate::{SqliteStorage, map_sqlx_error};
@@ -15,12 +16,17 @@ impl PriceCatalogCache for SqliteStorage {
                 field: "json_bytes".to_owned(),
                 reason: error.to_string(),
             })?;
+        let payload_hash = sha256_hex(json_bytes);
+        let fetched_at_ms = u64_to_i64(fetched_at_ms, "price catalog fetched_at_ms")?;
 
         sqlx::query(
-            "INSERT INTO price_catalog_snapshots_v1 (payload, fetched_at_ms, created_at) VALUES (?, ?, unixepoch())",
+            "INSERT INTO price_catalog_snapshots_v1 (payload, payload_hash, fetched_at_ms, created_at) \
+             VALUES (?, ?, ?, unixepoch()) \
+             ON CONFLICT(payload_hash) DO UPDATE SET fetched_at_ms = excluded.fetched_at_ms",
         )
         .bind(payload)
-        .bind(u64_to_i64(fetched_at_ms, "price catalog fetched_at_ms")?)
+        .bind(&payload_hash)
+        .bind(fetched_at_ms)
         .execute(self.pool())
         .await
         .map_err(map_sqlx_error)?;
@@ -51,6 +57,16 @@ impl PriceCatalogCache for SqliteStorage {
         })
         .transpose()
     }
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(64);
+    for byte in digest {
+        use std::fmt::Write as _;
+        let _ = write!(out, "{byte:02x}");
+    }
+    out
 }
 
 fn u64_to_i64(value: u64, field: &str) -> StorageResult<i64> {

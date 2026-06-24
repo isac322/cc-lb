@@ -31,6 +31,7 @@ fn test_state() -> AdminState {
         warmup_dialect_dispatcher: None,
         subscription_metadata_hook: None,
         start_time: std::time::Instant::now(),
+        event_bus: None,
     }
 }
 

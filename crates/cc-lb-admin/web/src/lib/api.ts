@@ -769,6 +769,7 @@ export interface AggregateProviderLotResponse {
   capacity_to_now_tokens_estimate: number | null;
   projected_capacity_tokens_estimate: number | null;
   confidence: string;
+  capacity_ratio: number;
 }
 
 export interface AggregateWindowResponse {
@@ -796,6 +797,27 @@ export interface AggregateResponse {
   upstream_count: number;
   windows: AggregateWindowResponse[];
   caveats: string[];
+}
+
+export interface PoolHistoryPoint {
+  snapshot_at_unix_secs: number;
+  utilization: number | null;
+  utilization_percent: number | null;
+  contributing_upstreams: number;
+  eligible_upstreams: number;
+  stale_upstreams: number;
+  max_observed_at_unix_millis: number | null;
+}
+
+export interface PoolHistoryWindowResponse {
+  window: string;
+  latest: PoolHistoryPoint | null;
+  series: PoolHistoryPoint[];
+}
+
+export interface PoolHistoryResponse {
+  now_unix_secs: number;
+  windows: PoolHistoryWindowResponse[];
 }
 export interface DraftCompleteResponse {
   state_token: string;

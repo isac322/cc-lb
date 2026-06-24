@@ -1627,6 +1627,7 @@ mod tests {
             scheduler: None,
             admin_token: None,
             start_time: std::time::Instant::now(),
+            event_bus: None,
         };
         TestContext {
             _dir: dir,

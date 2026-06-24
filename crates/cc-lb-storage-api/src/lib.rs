@@ -4,6 +4,7 @@ pub mod anthropic_compatibility_kv;
 pub mod error;
 pub mod organization_metadata;
 pub mod plugin_registry;
+pub mod pool_quota_history;
 pub mod principal;
 pub mod prompt_cache_observation;
 pub mod runtime_change_notifier;
@@ -24,6 +25,7 @@ pub use cc_lb_plugin_wire::augmented_metadata::AugmentedMetadata;
 pub use error::{PluginChainConflictReason, StorageError, StorageResult};
 pub use organization_metadata::*;
 pub use plugin_registry::*;
+pub use pool_quota_history::*;
 pub use principal::*;
 pub use prompt_cache_observation::{
     PromptCacheObservationRecord, PromptCacheObservationStore, TtlClass,

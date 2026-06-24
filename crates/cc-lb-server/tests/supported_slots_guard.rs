@@ -587,6 +587,7 @@ fn admin_state(storage: Arc<Storage>) -> AdminState {
         config: Arc::new(Config::default()),
         scheduler: None,
         admin_token: Some(ADMIN_TOKEN.to_owned()),
+        event_bus: None,
         start_time: std::time::Instant::now(),
     }
 }

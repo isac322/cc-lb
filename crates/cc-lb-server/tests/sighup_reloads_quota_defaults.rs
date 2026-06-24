@@ -44,6 +44,7 @@ async fn sighup_reloads_body_defaults() {
         data_dir: None,
         warmup_dialect_dispatcher: None,
         subscription_metadata_hook: None,
+        event_bus: None,
         start_time: std::time::Instant::now(),
     });
     let before_admin = admin_config(app.clone()).await;
