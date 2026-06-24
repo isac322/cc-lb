@@ -47,7 +47,17 @@ const upstreams: any[] = [
     spec_revision: 4,
     base_url: "https://api.anthropic.com",
     warmup_enabled: true,
-    warmup_dialect_plugin: null,
+    warmup_dialect_plugin: {
+      wasm_registry_id: "pl-shape-llama",
+      wire_version: 3,
+      config: {
+        mode: "compact",
+        max_tokens: 1,
+        model: "claude-haiku-4-5-20251015",
+        anthropic_beta: ["oauth-2025-04-20"],
+        retry_on_429: true,
+      },
+    },
     status: { last_apply_error: null, last_apply_at_unix_secs: null, last_warmup_at_unix_secs: 1718380800 },
   },
   {
@@ -517,6 +527,185 @@ function generateEvent(seq: number, forceUpstreamId?: string) {
 const RECENT_EVENTS = Array.from({ length: 220 }).map((_, i) => generateEvent(i + 1)).filter((e): e is NonNullable<typeof e> => e !== null).sort((a, b) => b.ts - a.ts);
 
 // ──────────────────────────────────────────────────────────────────────────────
+// Warmup attempts fixture
+
+const WARMUP_PLUGIN_SNAPSHOT_FIXTURE = {
+  wasm_registry_id: "pl-shape-llama",
+  wire_version: 3,
+  config: {
+    mode: "compact",
+    max_tokens: 1,
+    model: "claude-haiku-4-5-20251015",
+    anthropic_beta: ["oauth-2025-04-20"],
+    retry_on_429: true,
+  },
+};
+
+const WARMUP_FIVE_HOUR = 5 * 3600;
+
+function pluginSnapshotFor(u: any) {
+  if (!u.warmup_dialect_plugin) return null;
+  return {
+    ...WARMUP_PLUGIN_SNAPSHOT_FIXTURE,
+    wasm_registry_id: u.warmup_dialect_plugin.wasm_registry_id,
+    config: u.warmup_dialect_plugin.config && Object.keys(u.warmup_dialect_plugin.config).length
+      ? u.warmup_dialect_plugin.config
+      : WARMUP_PLUGIN_SNAPSHOT_FIXTURE.config,
+  };
+}
+
+function generateWarmupAttempts(upstreamId: string): any[] {
+  const upstream = upstreams.find((u) => u.id === upstreamId);
+  const seedBase = [...upstreamId].reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
+  const rng = randomSeed(seedBase + 7);
+  const out: any[] = [];
+  let prevFreshAt = NOW() - 30 * 86400 - WARMUP_FIVE_HOUR;
+
+  for (let day = 29; day >= 0; day--) {
+    const attemptsToday = 3 + Math.floor(rng() * 4);
+    for (let i = 0; i < attemptsToday; i++) {
+      const dayBase = NOW() - day * 86400;
+      const ts = dayBase - Math.floor(rng() * 86400);
+      const trigger = rng() < 0.15 ? "manual" : "scheduled";
+      const completedDelta = 0.2 + rng() * 1.2;
+
+      let outcome: string;
+      let reason: string | null = null;
+      let httpStatus: number | null = null;
+      let cycleKey: number | null = null;
+      let expectedCycleKey: number | null = null;
+      let idleSecs: number | null = null;
+      let errorDetail: string | null = null;
+      let leaseHolder: string | null = null;
+
+      const roll = rng();
+      if (roll < 0.62) {
+        outcome = "success_fresh";
+        httpStatus = 200;
+        cycleKey = Math.floor(ts / WARMUP_FIVE_HOUR);
+        const idleRaw = ts - prevFreshAt - WARMUP_FIVE_HOUR;
+        idleSecs = idleRaw > 0 ? idleRaw : 0;
+        prevFreshAt = ts;
+      } else if (roll < 0.78) {
+        outcome = "success_redundant";
+        reason = "window_already_active";
+        httpStatus = 200;
+        cycleKey = Math.floor(prevFreshAt / WARMUP_FIVE_HOUR);
+        expectedCycleKey = cycleKey + 1;
+      } else if (roll < 0.88) {
+        outcome = "transient_failure";
+        const opts = ["upstream_5xx", "network_error", "request_timeout", "http_429_missing_cycle_key", "dialect_plugin_transient"];
+        reason = opts[Math.floor(rng() * opts.length)]!;
+        httpStatus = reason === "upstream_5xx" ? (rng() < 0.5 ? 502 : 503) : reason === "http_429_missing_cycle_key" ? 429 : null;
+        errorDetail = reason === "network_error"
+          ? "tcp connect: connection refused (3 retries exhausted)"
+          : reason === "request_timeout"
+            ? "upstream did not respond within 12000ms"
+            : reason === "http_429_missing_cycle_key"
+              ? "429 returned without anthropic-ratelimit-* headers — cannot tell which cycle"
+              : reason === "dialect_plugin_transient"
+                ? "shape plugin transient error: deadline_exceeded after 250ms"
+                : "upstream returned 5xx";
+      } else if (roll < 0.95) {
+        outcome = "permanent_failure";
+        const opts = ["auth_failed", "forbidden", "bad_request", "not_found", "dialect_plugin_failed", "oauth_refresh_failed", "request_build_failed", "credential_decrypt_failed"];
+        reason = opts[Math.floor(rng() * opts.length)]!;
+        httpStatus = reason === "auth_failed" ? 401 : reason === "forbidden" ? 403 : reason === "not_found" ? 404 : reason === "bad_request" ? 400 : null;
+        errorDetail = reason === "dialect_plugin_failed"
+          ? "shape plugin returned error: schema_mismatch (field 'model' expected string, got null)"
+          : reason === "auth_failed"
+            ? "OAuth token rejected: invalid_token"
+            : reason === "forbidden"
+              ? "403: scope 'user:inference' missing on credential"
+              : reason === "oauth_refresh_failed"
+                ? "refresh_token revoked by upstream"
+                : reason === "request_build_failed"
+                  ? "could not build /v1/messages request body (serde_json::Error)"
+                  : reason === "credential_decrypt_failed"
+                    ? "AEAD decrypt failed: wrong nonce"
+                    : `Upstream rejected: ${reason}`;
+      } else {
+        outcome = "skipped";
+        const opts = ["lease_held", "upstream_disabled", "oauth_credentials_missing", "upstream_deleted"];
+        reason = opts[Math.floor(rng() * opts.length)]!;
+        if (reason === "lease_held") {
+          leaseHolder = `replica-${1 + Math.floor(rng() * 3)}`;
+        }
+      }
+
+      out.push({
+        id: `wa-${upstreamId}-${day}-${i}`,
+        upstream_id: upstreamId,
+        attempted_at_unix_secs: ts,
+        completed_at_unix_secs: outcome === "skipped" ? ts : ts + completedDelta,
+        scheduled_for_unix_secs: trigger === "manual" ? ts : Math.floor(ts / 3600) * 3600,
+        trigger,
+        outcome,
+        reason,
+        http_status: httpStatus,
+        cycle_key: cycleKey,
+        expected_cycle_key: expectedCycleKey,
+        idle_secs_since_prev_window: idleSecs,
+        replica_id: `replica-${1 + Math.floor(rng() * 3)}`,
+        lease_holder: leaseHolder,
+        upstream_spec_revision: upstream?.spec_revision ?? 1,
+        dialect_plugin_snapshot: pluginSnapshotFor(upstream ?? {}),
+        error_detail: errorDetail,
+      });
+    }
+  }
+
+  out.sort((a, b) => b.attempted_at_unix_secs - a.attempted_at_unix_secs);
+
+  if (upstreamId === "us-oauth-healthy") {
+    for (let i = 0; i < 3; i++) {
+      if (out[i]) {
+        out[i].outcome = "permanent_failure";
+        out[i].reason = "oauth_refresh_failed";
+        out[i].http_status = null;
+        out[i].error_detail = "refresh_token revoked by upstream";
+      }
+    }
+  }
+
+  return out;
+}
+
+const warmupAttemptsByUpstream: Record<string, any[]> = {};
+function getWarmupAttempts(upstreamId: string): any[] {
+  if (!warmupAttemptsByUpstream[upstreamId]) {
+    warmupAttemptsByUpstream[upstreamId] = generateWarmupAttempts(upstreamId);
+  }
+  return warmupAttemptsByUpstream[upstreamId]!;
+}
+function prependWarmupAttempt(upstreamId: string, attempt: any) {
+  getWarmupAttempts(upstreamId).unshift(attempt);
+}
+
+function summarizeWarmupAttempts(attempts: any[], windowSecs: number) {
+  const cutoff = NOW() - windowSecs;
+  const summary = { success_fresh: 0, success_redundant: 0, transient_failure: 0, permanent_failure: 0, skipped: 0 };
+  for (const a of attempts) {
+    if (a.attempted_at_unix_secs < cutoff) break;
+    if (a.outcome in summary) summary[a.outcome as keyof typeof summary]++;
+  }
+  return summary;
+}
+
+function encodeWarmupCursor(attempt: any): string {
+  return Buffer.from(`${attempt.attempted_at_unix_secs}|${attempt.id}`).toString("base64");
+}
+function decodeWarmupCursor(cursor: string): { ts: number; id: string } | null {
+  try {
+    const raw = Buffer.from(cursor, "base64").toString("utf-8");
+    const [ts, id] = raw.split("|");
+    return { ts: Number(ts), id: id ?? "" };
+  } catch {
+    return null;
+  }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
 // Route handlers (path-based)
 
 async function handle(req: Request, url: URL): Promise<Response> {
@@ -655,19 +844,93 @@ async function handle(req: Request, url: URL): Promise<Response> {
       const u = upstreams.find((x) => x.id === mm[1]);
       if (!u) return notFound("upstream_not_found");
       const outcome = url.searchParams.get("mock_outcome") ?? "success";
+      const ts = NOW();
+      const cycleKeyNow = Math.floor(ts / WARMUP_FIVE_HOUR);
+      const makeAttempt = (overrides: Record<string, unknown>) => ({
+        id: `wa-${u.id}-fire-${ts}-${Math.floor(Math.random() * 1000)}`,
+        upstream_id: u.id,
+        attempted_at_unix_secs: ts,
+        completed_at_unix_secs: ts + 0.4,
+        scheduled_for_unix_secs: ts,
+        trigger: "manual",
+        outcome: "success_fresh",
+        reason: null,
+        http_status: null,
+        cycle_key: null,
+        expected_cycle_key: null,
+        idle_secs_since_prev_window: null,
+        replica_id: "replica-1",
+        lease_holder: null,
+        upstream_spec_revision: u.spec_revision,
+        dialect_plugin_snapshot: pluginSnapshotFor(u),
+        error_detail: null,
+        ...overrides,
+      });
       if (outcome === "success") {
-        return ok({ fired: true, cycle_key: 1718380800 });
+        prependWarmupAttempt(u.id, makeAttempt({ outcome: "success_fresh", http_status: 200, cycle_key: cycleKeyNow, idle_secs_since_prev_window: 600 }));
+        return ok({ fired: true, cycle_key: cycleKeyNow });
       }
       if (outcome === "lease_held") {
+        prependWarmupAttempt(u.id, makeAttempt({ outcome: "skipped", reason: "lease_held", lease_holder: "replica-2" }));
         return new Response(JSON.stringify({ fired: false, reason: "lease_held", held_by: "replica-2" }), { status: 202, headers: { "Content-Type": "application/json", ...CORS } });
       }
       if (["auth_failed", "forbidden", "bad_request", "not_found", "dialect_plugin_failed"].includes(outcome)) {
+        const httpStatus = outcome === "auth_failed" ? 401 : outcome === "forbidden" ? 403 : outcome === "not_found" ? 404 : outcome === "bad_request" ? 400 : null;
+        prependWarmupAttempt(u.id, makeAttempt({ outcome: "permanent_failure", reason: outcome, http_status: httpStatus, error_detail: `Permanent failure: ${outcome}` }));
         return new Response(JSON.stringify({ fired: false, reason: outcome }), { status: 502, headers: { "Content-Type": "application/json", ...CORS } });
       }
       if (outcome === "transient") {
+        prependWarmupAttempt(u.id, makeAttempt({ outcome: "transient_failure", reason: "upstream_5xx", http_status: 503, error_detail: "Transient: upstream 5xx" }));
         return new Response(JSON.stringify({ fired: false, reason: "transient" }), { status: 503, headers: { "Content-Type": "application/json", ...CORS } });
       }
-      return ok({ fired: true, cycle_key: 1718380800 });
+      prependWarmupAttempt(u.id, makeAttempt({ outcome: "success_fresh", http_status: 200, cycle_key: cycleKeyNow }));
+      return ok({ fired: true, cycle_key: cycleKeyNow });
+    }
+  }
+  {
+    const mm = path.match(/^\/admin\/v1\/upstreams\/([^/]+)\/warmup$/);
+    if (mm && m === "GET") {
+      const u = upstreams.find((x) => x.id === mm[1]);
+      if (!u) return notFound("upstream_not_found");
+      const attempts = getWarmupAttempts(u.id);
+      const last = attempts[0] ?? null;
+      const nextScheduled = u.enabled && u.warmup_enabled
+        ? NOW() + 60 * 12 + ((u.id.length * 47) % 600)
+        : null;
+      return ok({
+        upstream_id: u.id,
+        last_attempt: last,
+        recent_attempts: attempts.slice(0, 10),
+        next_scheduled_at_unix_secs: nextScheduled,
+        recent_summary_7d: summarizeWarmupAttempts(attempts, 7 * 86400),
+        dialect_plugin: pluginSnapshotFor(u),
+      });
+    }
+  }
+  {
+    const mm = path.match(/^\/admin\/v1\/upstreams\/([^/]+)\/warmup\/attempts$/);
+    if (mm && m === "GET") {
+      const u = upstreams.find((x) => x.id === mm[1]);
+      if (!u) return notFound("upstream_not_found");
+      const all = getWarmupAttempts(u.id);
+      const limit = Math.min(parseInt(url.searchParams.get("limit") ?? "50", 10) || 50, 200);
+      const outcomeFilter = url.searchParams.get("outcome");
+      const before = url.searchParams.get("before");
+      let startIdx = 0;
+      if (before) {
+        const decoded = decodeWarmupCursor(before);
+        if (decoded) {
+          const ix = all.findIndex((a) => a.id === decoded.id);
+          if (ix >= 0) startIdx = ix + 1;
+        }
+      }
+      const filtered = (outcomeFilter ? all.filter((a) => a.outcome === outcomeFilter) : all).slice(startIdx);
+      const slice = filtered.slice(0, limit);
+      const next = slice.length === limit ? slice[slice.length - 1] : null;
+      return ok({
+        attempts: slice,
+        next_cursor: next ? encodeWarmupCursor(next) : null,
+      });
     }
   }
   {
@@ -1323,7 +1586,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
 
 // ──────────────────────────────────────────────────────────────────────────────
 const server = serve({
-  port: 8002,
+  port: 8001,
   hostname: "0.0.0.0",
   idleTimeout: 0,
   async fetch(req) {

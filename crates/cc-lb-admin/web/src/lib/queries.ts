@@ -1180,3 +1180,124 @@ export function useCreateFromOauthDraft() {
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.upstreams }),
   });
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Warmup attempts history + summary
+
+export type WarmupOutcome =
+  | 'success_fresh'
+  | 'success_redundant'
+  | 'transient_failure'
+  | 'permanent_failure'
+  | 'skipped';
+
+export type WarmupReason =
+  | 'window_already_active'
+  | 'http_429_missing_cycle_key'
+  | 'upstream_5xx'
+  | 'network_error'
+  | 'request_timeout'
+  | 'request_build_failed'
+  | 'oauth_refresh_failed'
+  | 'credential_decrypt_failed'
+  | 'auth_failed'
+  | 'forbidden'
+  | 'bad_request'
+  | 'not_found'
+  | 'dialect_plugin_failed'
+  | 'dialect_plugin_transient'
+  | 'oauth_credentials_missing'
+  | 'lease_held'
+  | 'upstream_disabled'
+  | 'upstream_deleted';
+
+export type WarmupTrigger = 'scheduled' | 'manual';
+
+export interface WarmupDialectPluginSnapshot {
+  wasm_registry_id: string;
+  wire_version?: number;
+  config: Record<string, unknown>;
+}
+
+export interface WarmupAttempt {
+  id: string;
+  upstream_id: string;
+  attempted_at_unix_secs: number;
+  completed_at_unix_secs: number | null;
+  scheduled_for_unix_secs: number;
+  trigger: WarmupTrigger;
+  outcome: WarmupOutcome;
+  reason: WarmupReason | null;
+  http_status: number | null;
+  cycle_key: number | null;
+  expected_cycle_key: number | null;
+  idle_secs_since_prev_window: number | null;
+  replica_id: string | null;
+  lease_holder: string | null;
+  upstream_spec_revision: number;
+  dialect_plugin_snapshot: WarmupDialectPluginSnapshot | null;
+  error_detail: string | null;
+}
+
+export interface WarmupRecentSummary {
+  success_fresh: number;
+  success_redundant: number;
+  transient_failure: number;
+  permanent_failure: number;
+  skipped: number;
+}
+
+export interface WarmupSummary {
+  upstream_id: string;
+  last_attempt: WarmupAttempt | null;
+  recent_attempts: WarmupAttempt[];
+  next_scheduled_at_unix_secs: number | null;
+  recent_summary_7d: WarmupRecentSummary;
+  dialect_plugin: WarmupDialectPluginSnapshot | null;
+}
+
+export interface WarmupHistoryPage {
+  attempts: WarmupAttempt[];
+  next_cursor: string | null;
+}
+
+export const warmupKeys = {
+  summary: (upstreamId: string) => ['warmup', 'summary', upstreamId] as const,
+  attempts: (
+    upstreamId: string,
+    filters: { outcome?: WarmupOutcome | null; limit?: number },
+  ) => ['warmup', 'attempts', upstreamId, filters] as const,
+};
+
+export function useWarmupSummary(upstreamId: string) {
+  return useQuery({
+    queryKey: warmupKeys.summary(upstreamId),
+    queryFn: () =>
+      getJson<WarmupSummary>(`/admin/v1/upstreams/${upstreamId}/warmup`),
+    enabled: Boolean(upstreamId),
+    refetchInterval: 30_000,
+    staleTime: 15_000,
+  });
+}
+
+export function useWarmupAttempts(
+  upstreamId: string,
+  filters: { outcome?: WarmupOutcome | null; limit?: number } = {},
+) {
+  return useInfiniteQuery({
+    queryKey: warmupKeys.attempts(upstreamId, filters),
+    enabled: Boolean(upstreamId),
+    initialPageParam: undefined as string | undefined,
+    queryFn: async ({ pageParam }) => {
+      const params = new URLSearchParams();
+      if (filters.outcome) params.set('outcome', filters.outcome);
+      if (filters.limit) params.set('limit', String(filters.limit));
+      if (pageParam) params.set('before', pageParam);
+      const qs = params.toString();
+      return getJson<WarmupHistoryPage>(
+        `/admin/v1/upstreams/${upstreamId}/warmup/attempts${qs ? `?${qs}` : ''}`,
+      );
+    },
+    getNextPageParam: (last) => last.next_cursor ?? undefined,
+  });
+}

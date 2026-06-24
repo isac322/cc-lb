@@ -51,7 +51,7 @@ import { ApiUsageCard } from '../components/upstreams/ApiUsageCard';
 import { InlineNameEditor } from '../components/upstreams/InlineNameEditor';
 import { QuotaObservedAt } from '../components/upstreams/QuotaObservedAt';
 import { SettingsCard } from '../components/upstreams/SettingsCard';
-import { WarmupCard } from '../components/upstreams/WarmupCard';
+import { WarmupCardMinimal } from '../components/upstreams/warmup/WarmupCardMinimal';
 import { ApiError } from '../lib/api';
 import { getWindowColor, WINDOW_DURATION_SECS } from '../lib/colors';
 import { DEFAULT_ANTHROPIC_BASE_URL } from '../lib/constants';
@@ -80,7 +80,9 @@ import {
   useUsage,
 } from '../lib/queries';
 
-const upstreamSearchSchema = z.object({ selectedId: z.string().optional() });
+const upstreamSearchSchema = z.object({
+  selectedId: z.string().optional(),
+});
 
 export const Route = createFileRoute('/upstreams')({
   validateSearch: upstreamSearchSchema,
@@ -1625,7 +1627,7 @@ function DetailView({
           </Section>
         )}
 
-        <WarmupCard upstream={upstream} />
+        <WarmupCardMinimal upstream={upstream} />
 
         {!isOauth && <SettingsCard upstream={upstream} />}
 
