@@ -769,6 +769,7 @@ export interface AggregateProviderLotResponse {
   capacity_to_now_tokens_estimate: number | null;
   projected_capacity_tokens_estimate: number | null;
   confidence: string;
+  capacity_ratio: number;
 }
 
 export interface AggregateWindowResponse {

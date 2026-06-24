@@ -1169,9 +1169,36 @@ fn build_aggregate_window_response(
         contributing_upstreams,
         stale_upstreams,
         missing_capacity_upstreams,
-        provider_lots: lots.to_vec(),
+        provider_lots: latest_lot_per_upstream(lots),
         caveats,
     }
+}
+
+/// Collapse a series of provider lots (one per observation) to the latest lot per upstream
+/// (max observed_at_unix_millis). The aggregate response should expose pool-current state,
+/// not raw history; series queries live on a separate endpoint.
+fn latest_lot_per_upstream(
+    lots: &[AggregateProviderLotResponse],
+) -> Vec<AggregateProviderLotResponse> {
+    let mut latest_idx: HashMap<&str, (u64, usize)> = HashMap::new();
+    for (idx, lot) in lots.iter().enumerate() {
+        let observed = lot.observed_at_unix_millis.unwrap_or(0);
+        latest_idx
+            .entry(lot.upstream_id.as_str())
+            .and_modify(|(prev_ts, prev_idx)| {
+                if observed >= *prev_ts {
+                    *prev_ts = observed;
+                    *prev_idx = idx;
+                }
+            })
+            .or_insert((observed, idx));
+    }
+    let mut result: Vec<AggregateProviderLotResponse> = latest_idx
+        .into_values()
+        .map(|(_, idx)| lots[idx].clone())
+        .collect();
+    result.sort_by(|a, b| a.upstream_name.cmp(&b.upstream_name));
+    result
 }
 
 #[derive(Clone)]

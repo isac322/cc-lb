@@ -4,7 +4,6 @@ import {
   ArrowUpRight,
   Database,
   Gauge,
-  LineChart as LineIcon,
   ShieldCheck,
   Timer,
   TrendingUp,
@@ -24,20 +23,17 @@ import {
   CartesianGrid,
   ReferenceArea,
   ReferenceLine,
-  ResponsiveContainer,
   Tooltip as RTooltip,
   XAxis,
   YAxis,
 } from 'recharts';
 import {
   Card,
-  CardBody,
   CardHeader,
   cx,
   PageContainer,
   Section,
   Sparkline,
-  StatusBadge,
 } from '../components/ui/primitives';
 import { RequestEventsTable } from '../components/ui/RequestEventsTable';
 import { eventTime, type RequestEvent, streamEventsFetch } from '../lib/api';
@@ -51,7 +47,6 @@ import {
   useUpstreamNameMap,
   useUsage,
 } from '../lib/queries';
-
 export const Route = createFileRoute('/')({
   component: OverviewPage,
 });
@@ -76,28 +71,6 @@ function fmtMs(n: number | undefined | null): string {
   if (n == null) return '—';
   if (n >= 1000) return `${(n / 1000).toFixed(2)}s`;
   return `${Math.round(n)}ms`;
-}
-function fmtMin(min: number | null): string {
-  if (min == null || !Number.isFinite(min)) return '—';
-  if (min < 60) return `${Math.floor(min)}m`;
-  if (min < 60 * 24) {
-    const h = Math.floor(min / 60);
-    const m = Math.floor(min - h * 60);
-    return m === 0 ? `${h}h` : `${h}h ${m}m`;
-  }
-  const d = Math.floor(min / (60 * 24));
-  const h = Math.floor((min - d * 60 * 24) / 60);
-  return h === 0 ? `${d}d` : `${d}d ${h}h`;
-}
-function utilTone(pct: number): 'ok' | 'warn' | 'danger' {
-  if (pct >= 85) return 'danger';
-  if (pct >= 60) return 'warn';
-  return 'ok';
-}
-function utilColor(pct: number): string {
-  if (pct >= 85) return 'var(--color-danger)';
-  if (pct >= 60) return 'var(--color-warn)';
-  return 'var(--color-ok)';
 }
 function fmtChartTick(unix: number): string {
   const d = new Date(unix * 1000);
@@ -200,93 +173,263 @@ type AggregateWindow = NonNullable<
   ReturnType<typeof useSubscriptionQuotaAggregate>['data']
 >['windows'][number];
 
-function PoolQuotaInlineRow({
+const POOL_PALETTES: Record<'5h' | '7d', readonly string[]> = {
+  '5h': [
+    'rgb(37, 99, 235)',
+    'rgb(59, 130, 246)',
+    'rgb(96, 165, 250)',
+    'rgb(147, 197, 253)',
+    'rgb(191, 219, 254)',
+  ],
+  '7d': [
+    'rgb(124, 58, 237)',
+    'rgb(139, 92, 246)',
+    'rgb(167, 139, 250)',
+    'rgb(196, 181, 253)',
+    'rgb(221, 214, 254)',
+  ],
+};
+
+function poolSegmentColor(window: '5h' | '7d', index: number): string {
+  const palette = POOL_PALETTES[window];
+  return palette[index % palette.length];
+}
+
+function PoolQuotaPopoverContent({
+  window,
+  w,
+  activeIdx,
+}: {
+  window: '5h' | '7d';
+  w: AggregateWindow;
+  activeIdx: number | null;
+}) {
+  const totalRatio = w.provider_lots.reduce(
+    (sum, lot) => sum + lot.capacity_ratio,
+    0,
+  );
+  return (
+    <div className="flex flex-col gap-2 text-sm text-text">
+      <div className="flex items-center gap-3 px-3 pb-2 border-b border-subtle text-xs font-medium text-text-muted uppercase tracking-wider">
+        <span className="flex-1">Upstream</span>
+        <span className="w-16 text-right">Util</span>
+        <span className="w-16 text-right">Weight</span>
+        <span className="w-16 text-right">Impact</span>
+      </div>
+      {w.provider_lots.map((lot, i) => {
+        const util = lot.utilization ?? 0;
+        const weightedContribution =
+          totalRatio > 0 ? ((util * lot.capacity_ratio) / totalRatio) * 100 : 0;
+        const idColor = poolSegmentColor(window, i);
+        const utilTextColor =
+          lot.utilization != null
+            ? 'var(--color-text)'
+            : 'var(--color-text-muted)';
+        const isHovered = activeIdx === i;
+        return (
+          <div
+            key={i}
+            className={cx(
+              'flex items-center gap-3 px-3 py-2 rounded-md transition-colors',
+              isHovered ? 'bg-surface-raised shadow-sm' : 'hover:bg-overlay-2',
+            )}
+          >
+            <div className="flex items-center gap-2.5 flex-1 min-w-0">
+              <span
+                className="inline-block w-2.5 h-2.5 rounded-sm shrink-0"
+                style={{ backgroundColor: idColor }}
+              />
+              <span
+                className={cx(
+                  'truncate',
+                  isHovered ? 'font-medium text-text' : 'text-text-muted',
+                )}
+              >
+                {lot.upstream_name}
+              </span>
+            </div>
+            <span
+              className="tabular-nums w-16 text-right font-medium"
+              style={{ color: utilTextColor }}
+            >
+              {lot.utilization != null ? `${(util * 100).toFixed(1)}%` : '—'}
+            </span>
+            <span className="tabular-nums w-16 text-right text-text-muted">
+              {lot.capacity_ratio.toFixed(1)}x
+            </span>
+            <span
+              className={cx(
+                'tabular-nums w-16 text-right',
+                isHovered ? 'font-medium text-text' : 'text-text-muted',
+              )}
+            >
+              {weightedContribution > 0
+                ? `${weightedContribution.toFixed(1)}%`
+                : '0.0%'}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+export function PoolQuotaStackedBar({
   window,
   w,
 }: {
   window: '5h' | '7d';
   w: AggregateWindow | undefined;
 }) {
+  const [activeIdx, setActiveIdx] = useState<number | null>(null);
+  const [openPopover, setOpenPopover] = useState(false);
+
   if (!w) {
     return (
-      <div className="flex items-center gap-2 text-xs text-text-faint min-h-[56px]">
-        <span className="uppercase tracking-wider">{window} pool</span>
-        <span>· no data</span>
+      <div className="flex flex-col gap-2 min-h-[56px]">
+        <div className="flex items-center justify-between mb-1.5">
+          <span className="text-xs font-medium text-text-muted">
+            {window} pool
+          </span>
+          <span className="text-xs text-text-faint">no data</span>
+        </div>
+        <div className="h-5 w-full rounded-full border border-subtle bg-surface-raised" />
       </div>
     );
   }
 
-  const pctRaw = w.utilization_percent;
-  const has_pct = pctRaw != null;
-  const used_pct = pctRaw ?? 0;
-  const used_tokens = w.used_tokens ?? 0;
-  const capacity_tokens =
-    w.projected_capacity_tokens_estimate ??
-    w.capacity_to_now_tokens_estimate ??
-    0;
-  const has_capacity = capacity_tokens > 0;
-  const nowUnixSecs = Math.floor(Date.now() / 1000);
-  const elapsedMin = Math.max(
-    1,
-    (nowUnixSecs - w.cc_window_start_unix_secs) / 60,
-  );
-  const burn_per_min = used_tokens / elapsedMin;
-  const reset_min = Math.max(
+  const totalRatio = w.provider_lots.reduce(
+    (sum, lot) => sum + lot.capacity_ratio,
     0,
-    (w.cc_window_reset_unix_secs - nowUnixSecs) / 60,
   );
-  const remainingTokens = Math.max(0, capacity_tokens - used_tokens);
-  const eta_min_raw =
-    has_capacity && burn_per_min > 0 ? remainingTokens / burn_per_min : null;
-  const eta_min =
-    eta_min_raw != null && eta_min_raw <= reset_min ? eta_min_raw : null;
-  const c = has_pct ? utilColor(used_pct) : 'var(--color-text-faint)';
-  const tone = has_pct ? utilTone(used_pct) : 'neutral';
+  const usedPct = w.utilization_percent ?? 0;
 
+  const handleInteraction = (i: number | null, isClick = false) => {
+    const isMobile = 'ontouchstart' in globalThis.window;
+    if (isMobile && !isClick) return;
+    if (isClick && isMobile) {
+      if (openPopover && activeIdx === i) {
+        setOpenPopover(false);
+        setActiveIdx(null);
+      } else {
+        setOpenPopover(true);
+        setActiveIdx(i);
+      }
+    } else if (!isMobile) {
+      setActiveIdx(i);
+      setOpenPopover(i !== null);
+    }
+  };
+
+  const renderSegments = () =>
+    w.provider_lots.map((lot, i) => {
+      const util = lot.utilization ?? 0;
+      const weightedContribution =
+        totalRatio > 0
+          ? ((util * lot.capacity_ratio) / totalRatio) * 100
+          : 0;
+      if (weightedContribution <= 0) return null;
+
+      const idColor = poolSegmentColor(window, i);
+      const isHovered = activeIdx === i;
+      const isOtherHovered = activeIdx !== null && activeIdx !== i;
+      return (
+        <div
+          key={i}
+          className={cx(
+            'h-full border-r border-bg last:border-r-0 transition-all cursor-pointer',
+            isHovered &&
+              'outline outline-1 outline-white/60 outline-offset-[-1px] z-10',
+            isOtherHovered && 'opacity-60',
+          )}
+          style={{
+            width: `${weightedContribution}%`,
+            backgroundColor: idColor,
+          }}
+          title={`${lot.upstream_name} · ${lot.capacity_ratio.toFixed(1)}x · ${lot.utilization != null ? (util * 100).toFixed(1) : '—'}%`}
+          onMouseEnter={() => handleInteraction(i)}
+          onClick={() => handleInteraction(i, true)}
+          onTouchStart={() => handleInteraction(i, true)}
+        />
+      );
+    });
+
+  const pctText =
+    w.utilization_percent != null ? `${usedPct.toFixed(1)}%` : '—';
   return (
-    <div className="flex flex-col gap-1.5 min-w-0">
-      <div className="flex items-baseline gap-2 min-w-0">
-        <span className="text-[11px] uppercase tracking-wider text-text-faint shrink-0">
-          {window} pool
-        </span>
-        <span
-          className="tabular-nums font-medium text-xl leading-none"
-          style={{ color: c }}
-        >
-          {has_pct ? `${used_pct.toFixed(1)}%` : '—'}
-        </span>
-        <span className="text-[11px] text-text-faint tabular-nums truncate ml-auto">
-          {fmtCount(used_tokens)} /{' '}
-          {has_capacity ? fmtCount(capacity_tokens) : '—'} tok
-        </span>
-        <StatusBadge tone={tone} label={w.confidence ?? 'missing'} />
+    <div
+      className={cx('relative', openPopover && 'z-50')}
+      onMouseLeave={() => handleInteraction(null)}
+    >
+      <div className="2xl:hidden flex flex-col gap-1.5">
+        <div className="flex items-center justify-between">
+          <span className="text-xs font-medium text-text-muted">
+            {window} pool
+          </span>
+          <span className="tabular-nums font-medium text-sm leading-none text-text">
+            {pctText}
+          </span>
+        </div>
+        <div className="h-5 w-full flex rounded-full overflow-hidden border border-subtle bg-surface-raised">
+          {renderSegments()}
+        </div>
       </div>
-      <ProgressBar pct={used_pct} color={c} height="h-1.5" />
-      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-text-faint tabular-nums">
-        <span>
-          eta <span className="text-text">{fmtMin(eta_min)}</span>
+
+      <div className="hidden 2xl:flex items-center gap-2">
+        <span className="text-xs font-medium text-text-muted shrink-0">
+          {window}
         </span>
-        <span>
-          burn <span className="text-text">{fmtCount(burn_per_min)}/min</span>
-        </span>
-        <span>
-          resets <span className="text-text">{fmtMin(reset_min)}</span>
+        <div className="flex-1 h-5 flex rounded-full overflow-hidden border border-subtle bg-surface-raised min-w-0">
+          {renderSegments()}
+        </div>
+        <span className="tabular-nums font-medium text-sm leading-none text-text shrink-0">
+          {pctText}
         </span>
       </div>
+
+      {openPopover && (
+        <>
+          <div
+            className="fixed inset-0 z-40 sm:hidden"
+            onClick={() => handleInteraction(null, true)}
+            onTouchStart={() => handleInteraction(null, true)}
+          />
+          <div className="absolute top-full left-0 mt-2 w-full z-50 bg-bg-sub border border-subtle-strong rounded-md shadow-xl p-2">
+            <PoolQuotaPopoverContent
+              window={window}
+              w={w}
+              activeIdx={activeIdx}
+            />
+          </div>
+        </>
+      )}
     </div>
   );
 }
 
-function PoolQuotaCompactStrip({
+function PoolQuotaCard({
   aggregate,
+  chart,
 }: {
   aggregate: ReturnType<typeof useSubscriptionQuotaAggregate>;
+  chart: {
+    data: { unix: number; '5h': number | null; '7d': number | null }[];
+    maxValue: number;
+    rangeStartUnix: number;
+    rangeEndUnix: number;
+    range: Range;
+    latest: { '5h': number | null; '7d': number | null };
+  };
 }) {
   const w5h = aggregate.data?.windows.find((x) => x.window === '5h');
   const w7d = aggregate.data?.windows.find((x) => x.window === '7d');
   const upstreamCount = aggregate.data?.upstream_count ?? 0;
+  const contributingCount = Math.max(
+    w5h?.contributing_upstreams ?? 0,
+    w7d?.contributing_upstreams ?? 0,
+  );
   return (
-    <Card>
+    <Card className="min-w-0 flex flex-col h-full">
       <CardHeader
         title={
           <span className="inline-flex items-center gap-2">
@@ -296,19 +439,43 @@ function PoolQuotaCompactStrip({
         }
         subtitle={
           upstreamCount > 0
-            ? `capacity-weighted · ${upstreamCount} upstream${upstreamCount === 1 ? '' : 's'}`
-            : 'capacity-weighted'
+            ? `plan-weighted · ${contributingCount} of ${upstreamCount} upstreams`
+            : 'plan-weighted'
         }
       />
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-x-6 gap-y-4 p-3">
-        <PoolQuotaInlineRow window="5h" w={w5h} />
-        <PoolQuotaInlineRow window="7d" w={w7d} />
+      <div className="flex-1 flex flex-col gap-4 p-4 pt-2 min-h-0">
+        <div className="flex flex-col gap-2">
+          <div className="text-xs uppercase tracking-wider font-medium text-text-faint">
+            Snapshot
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-x-10 gap-y-4">
+            <PoolQuotaStackedBar window="5h" w={w5h} />
+            <PoolQuotaStackedBar window="7d" w={w7d} />
+          </div>
+        </div>
+        <div className="h-px bg-border" />
+        <div className="flex-1 flex flex-col gap-2 min-h-0">
+          <div className="flex items-center justify-between">
+            <div className="text-xs uppercase tracking-wider font-medium text-text-faint">
+              Trend · {chart.range}
+            </div>
+            <PoolQuotaLegend latest={chart.latest} />
+          </div>
+          <div className="flex-1 min-h-64 min-w-0 w-full relative">
+            <PoolQuotaThemedChart
+              seriesData={chart.data}
+              rangeStartUnix={chart.rangeStartUnix}
+              rangeEndUnix={chart.rangeEndUnix}
+              maxValue={chart.maxValue}
+            />
+          </div>
+        </div>
       </div>
     </Card>
   );
 }
 
-function PoolQuotaThemedChart({
+export function PoolQuotaThemedChart({
   seriesData,
   maxValue,
   rangeStartUnix,
@@ -324,20 +491,18 @@ function PoolQuotaThemedChart({
   const c7d = getWindowColor('7d');
 
   return (
-    <div
-      className="w-full flex-1 min-h-[240px] relative"
-      style={{ minWidth: 0 }}
-    >
+    <div className="relative size-full min-h-0 min-w-0">
       {!seriesData.length ? (
         <div className="absolute inset-0 flex items-center justify-center text-xs text-text-faint pointer-events-none z-10">
           No timeline data yet for this range
         </div>
       ) : null}
-      <ResponsiveContainer width="100%" height="100%">
-        <AreaChart
-          data={seriesData}
-          margin={{ top: 8, right: 8, bottom: 4, left: 0 }}
-        >
+      <AreaChart
+        responsive
+        className="size-full"
+        data={seriesData}
+        margin={{ top: 0, right: 0, bottom: 0, left: 0 }}
+      >
           <defs>
             <linearGradient
               id={`${chartId}-grad-5h`}
@@ -367,25 +532,25 @@ function PoolQuotaThemedChart({
             domain={[rangeStartUnix, rangeEndUnix]}
             allowDataOverflow
             tick={{
-              fill: 'var(--color-text-faint)',
+              fill: 'var(--color-text-muted)',
               fontSize: 10,
-              fontFamily: 'Geist Mono',
             }}
             tickFormatter={fmtChartTick}
             axisLine={false}
             tickLine={false}
             minTickGap={40}
+            tickMargin={8}
           />
           <YAxis
             tick={{
-              fill: 'var(--color-text-faint)',
+              fill: 'var(--color-text-muted)',
               fontSize: 10,
-              fontFamily: 'Geist Mono',
             }}
             tickFormatter={(v) => `${v}%`}
             axisLine={false}
             tickLine={false}
-            width={44}
+            width={48}
+            tickMargin={8}
             domain={[0, maxValue]}
             ticks={
               maxValue <= 100
@@ -408,12 +573,26 @@ function PoolQuotaThemedChart({
             stroke="var(--color-warn)"
             strokeOpacity={0.5}
             strokeDasharray="4 4"
+            label={{
+              position: 'insideBottomLeft',
+              value: '80% Warn',
+              fill: 'var(--color-text-muted)',
+              fontSize: 11,
+              opacity: 0.9,
+            }}
           />
           <ReferenceLine
             y={95}
             stroke="var(--color-danger)"
             strokeOpacity={0.6}
             strokeDasharray="4 4"
+            label={{
+              position: 'insideBottomLeft',
+              value: '95% Critical',
+              fill: 'var(--color-text-muted)',
+              fontSize: 11,
+              opacity: 0.9,
+            }}
           />
           <RTooltip
             cursor={{
@@ -427,20 +606,20 @@ function PoolQuotaThemedChart({
                 <div
                   style={{
                     background: 'var(--color-bg-sub)',
-                    border: '1px solid var(--color-border)',
-                    borderRadius: 2,
+                    border: '1px solid var(--color-subtle-strong)',
+                    borderRadius: 6,
                     color: 'var(--color-text)',
                     fontSize: 11,
-                    fontFamily: 'Geist Mono Variable, monospace',
-                    padding: '6px 10px',
-                    boxShadow: '0 4px 12px rgba(0,0,0,0.18)',
-                    minWidth: 120,
+                    padding: '8px 12px',
+                    boxShadow: '0 8px 24px rgba(0,0,0,0.32)',
+                    minWidth: 140,
                   }}
                 >
                   <div
                     style={{
-                      color: 'var(--color-text-faint)',
-                      marginBottom: 4,
+                      color: 'var(--color-text-muted)',
+                      marginBottom: 6,
+                      fontWeight: 500,
                     }}
                   >
                     {fmtChartTooltip(Number(label))}
@@ -453,10 +632,10 @@ function PoolQuotaThemedChart({
                       <div
                         key={i}
                         style={{
-                          padding: '1px 0',
+                          padding: '2px 0',
                           display: 'flex',
                           justifyContent: 'space-between',
-                          gap: 8,
+                          gap: 12,
                         }}
                       >
                         <span
@@ -465,11 +644,17 @@ function PoolQuotaThemedChart({
                               typeof p.color === 'string'
                                 ? p.color
                                 : 'var(--color-text)',
+                            fontWeight: 500,
                           }}
                         >
                           {wLabel}
                         </span>
-                        <span style={{ fontVariantNumeric: 'tabular-nums' }}>
+                        <span
+                          style={{
+                            fontVariantNumeric: 'tabular-nums',
+                            fontWeight: 500,
+                          }}
+                        >
                           {typeof p.value === 'number'
                             ? `${p.value.toFixed(1)}%`
                             : '—'}
@@ -501,13 +686,12 @@ function PoolQuotaThemedChart({
             isAnimationActive={false}
             connectNulls={false}
           />
-        </AreaChart>
-      </ResponsiveContainer>
+      </AreaChart>
     </div>
   );
 }
 
-function PoolQuotaLegend({
+export function PoolQuotaLegend({
   latest,
 }: {
   latest?: { '5h': number | null; '7d': number | null };
@@ -660,9 +844,6 @@ function OverviewPage() {
     (totals as any)?.p95_latency_ms ?? totals?.avg_latency_ms ?? 0;
   const latencyLabel =
     (totals as any)?.p95_latency_ms !== undefined ? 'p95' : 'Avg latency';
-  const util7d =
-    quotaAggregate.data?.windows.find((w) => w.window === '7d')
-      ?.utilization_percent ?? 0;
 
   const sparkRate =
     summary.data?.sparkline.buckets.map(
@@ -731,18 +912,6 @@ function OverviewPage() {
     return Math.ceil(m / 10) * 10;
   }, [chartData]);
 
-  const upstreamCount = quotaAggregate.data?.upstream_count ?? 0;
-  const seriesUpstreamCount = useMemo(() => {
-    let max = 0;
-    for (const window of quotaPoolHistory.data?.windows ?? []) {
-      for (const point of window.series) {
-        if (point.contributing_upstreams > max) {
-          max = point.contributing_upstreams;
-        }
-      }
-    }
-    return max;
-  }, [quotaPoolHistory.data]);
   const chartLatest = useMemo(() => {
     let latest5h: number | null = null;
     let latest7d: number | null = null;
@@ -818,8 +987,8 @@ function OverviewPage() {
         </div>
       </div>
 
-      {/* 6 KPI Strip */}
-      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-6 gap-2">
+      {/* KPI Strip */}
+      <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-5 gap-2">
         <ValueTile
           size="sm"
           icon={<Activity className="w-3.5 h-3.5" />}
@@ -848,14 +1017,6 @@ function OverviewPage() {
         />
         <ValueTile
           size="sm"
-          icon={<Gauge className="w-3.5 h-3.5" />}
-          label="sub util"
-          value={`${util7d.toFixed(0)}%`}
-          sub="7d pool aggregate"
-          sparkColor="#8b5cf6"
-        />
-        <ValueTile
-          size="sm"
           icon={<Timer className="w-3.5 h-3.5" />}
           label={latencyLabel}
           value={fmtMs(latency)}
@@ -872,31 +1033,20 @@ function OverviewPage() {
         />
       </div>
 
-      <PoolQuotaCompactStrip aggregate={quotaAggregate} />
+      <div className="grid grid-cols-1 xl:grid-cols-[2fr_1fr] gap-4 min-w-0">
+        <PoolQuotaCard
+          aggregate={quotaAggregate}
+          chart={{
+            data: chartData,
+            maxValue: chartMaxValue,
+            rangeStartUnix: nowUnixSecs - seriesRangeSecs,
+            rangeEndUnix: nowUnixSecs,
+            range,
+            latest: chartLatest,
+          }}
+        />
 
-      <div className="grid grid-cols-1 xl:grid-cols-[2fr_1fr] gap-3 min-w-0 xl:items-stretch">
-        <Card className="min-w-0 flex flex-col xl:h-96">
-          <CardHeader
-            title={
-              <span className="inline-flex items-center gap-2">
-                <LineIcon className="w-3.5 h-3.5 text-text-faint" />
-                Pool quota timeline
-              </span>
-            }
-            subtitle={`Plan-weighted pool utilization · ${seriesUpstreamCount || upstreamCount} upstream${(seriesUpstreamCount || upstreamCount) === 1 ? '' : 's'} · ${range}`}
-            action={<PoolQuotaLegend latest={chartLatest} />}
-          />
-          <CardBody className="flex-1 flex flex-col min-h-0 p-2 pt-1">
-            <PoolQuotaThemedChart
-              seriesData={chartData}
-              rangeStartUnix={nowUnixSecs - seriesRangeSecs}
-              rangeEndUnix={nowUnixSecs}
-              maxValue={chartMaxValue}
-            />
-          </CardBody>
-        </Card>
-
-        <Card className="min-w-0 flex flex-col xl:h-96">
+    <Card className="min-w-0 flex flex-col h-full">
           <CardHeader
             title={
               <span className="inline-flex items-center gap-2">
