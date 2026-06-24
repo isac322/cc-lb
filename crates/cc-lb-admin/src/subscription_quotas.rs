@@ -6,7 +6,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::{
     Json, Router,
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -16,8 +16,8 @@ use cc_lb_storage_api::{
     OrganizationMetadataRecord, POOL_QUOTA_POLICY_VERSION, PoolQuotaHistoryStore,
     PoolQuotaSnapshotRecord, Storage, StorageError, SubscriptionQuotaBucket,
     SubscriptionQuotaSeriesQuery, SubscriptionQuotaSource, SubscriptionQuotaSourceMerge,
-    SubscriptionQuotaStatus, SubscriptionQuotaWindow, UpstreamRecord, UpstreamStore,
-    UpstreamSubscriptionMetadataRecord, UsageRollup, UsageRollupResolution, upstream::UpstreamKind,
+    SubscriptionQuotaWindow, UpstreamRecord, UpstreamStore, UpstreamSubscriptionMetadataRecord,
+    UsageRollup, UsageRollupResolution, upstream::UpstreamKind,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -153,19 +153,12 @@ struct SeriesResponseItem {
     markers: Vec<SeriesMarkerResponse>,
 }
 
+// Slim wire shape: dashboard plots only these two; internal analysis paths
+// read SubscriptionQuotaBucket directly from cc-lb-storage-api, not this.
 #[derive(Debug, Serialize, Deserialize)]
 struct SeriesBucketResponse {
     bucket_start_unix_secs: u64,
-    observed: bool,
-    sample_count: u32,
-    utilization_min: Option<f64>,
-    utilization_avg: Option<f64>,
-    utilization_max: Option<f64>,
     utilization_last: Option<f64>,
-    status_last: Option<String>,
-    resets_at_unix_secs_last: Option<u64>,
-    observed_at_unix_millis_last: Option<u64>,
-    sources_seen: Vec<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -356,40 +349,68 @@ struct UtilizationInterval {
 
 async fn handle_latest(
     State(state): State<AdminState>,
+    headers: HeaderMap,
     Query(query): Query<LatestQuery>,
 ) -> Response {
+    let etag = etag_header_for(&state, query.upstream_ids.as_deref()).await;
+    if let Some(ref e) = etag
+        && matches_if_none_match(&headers, e)
+    {
+        return not_modified_response(e);
+    }
     match build_latest_response(&state, query).await {
-        Ok(response) => Json(response).into_response(),
+        Ok(response) => apply_etag(Json(response).into_response(), etag.as_deref()),
         Err(response) => response,
     }
 }
 
 async fn handle_series(
     State(state): State<AdminState>,
+    headers: HeaderMap,
     Query(query): Query<SeriesQuery>,
 ) -> Response {
+    let etag = etag_header_for(&state, query.upstream_ids.as_deref()).await;
+    if let Some(ref e) = etag
+        && matches_if_none_match(&headers, e)
+    {
+        return not_modified_response(e);
+    }
     match build_series_response(&state, query).await {
-        Ok(response) => Json(response).into_response(),
+        Ok(response) => apply_etag(Json(response).into_response(), etag.as_deref()),
         Err(response) => response,
     }
 }
 
 async fn handle_analysis(
     State(state): State<AdminState>,
+    headers: HeaderMap,
     Query(query): Query<AnalysisQuery>,
 ) -> Response {
+    let etag = etag_header_for(&state, query.upstream_ids.as_deref()).await;
+    if let Some(ref e) = etag
+        && matches_if_none_match(&headers, e)
+    {
+        return not_modified_response(e);
+    }
     match build_analysis_response(&state, query).await {
-        Ok(response) => Json(response).into_response(),
+        Ok(response) => apply_etag(Json(response).into_response(), etag.as_deref()),
         Err(response) => response,
     }
 }
 
 async fn handle_aggregate(
     State(state): State<AdminState>,
+    headers: HeaderMap,
     Query(query): Query<AggregateQuery>,
 ) -> Response {
+    let etag = etag_header_for(&state, query.upstream_ids.as_deref()).await;
+    if let Some(ref e) = etag
+        && matches_if_none_match(&headers, e)
+    {
+        return not_modified_response(e);
+    }
     match build_aggregate_response(&state, query).await {
-        Ok(response) => Json(response).into_response(),
+        Ok(response) => apply_etag(Json(response).into_response(), etag.as_deref()),
         Err(response) => response,
     }
 }
@@ -538,6 +559,66 @@ fn pool_history_point_from_record(record: &PoolQuotaSnapshotRecord) -> PoolHisto
         stale_upstreams: record.stale_upstreams,
         max_observed_at_unix_millis: record.max_observed_at_unix_millis,
     }
+}
+
+// Weak ETag from the latest_v1 sidecar's max observed_at_unix_millis for the
+// requested upstreams. None when upstream_ids missing (overview/all path)
+// to skip a "list all OAuth upstreams" SQL on every poll.
+async fn etag_header_for(state: &AdminState, upstream_ids: Option<&str>) -> Option<String> {
+    let trimmed = upstream_ids.map(str::trim).filter(|s| !s.is_empty())?;
+    let uuids: Vec<Uuid> = trimmed
+        .split(',')
+        .filter_map(|id| Uuid::parse_str(id.trim()).ok())
+        .collect();
+    if uuids.is_empty() {
+        return None;
+    }
+    let storage = state.storage.as_ref()?;
+    let latest = storage
+        .list_latest_subscription_quota_for_upstreams(&uuids)
+        .await
+        .ok()?;
+    let max = latest
+        .into_iter()
+        .map(|record| record.observed_at_unix_millis)
+        .max()
+        .unwrap_or(0);
+    Some(format!("W/\"v1:{max}\""))
+}
+
+fn matches_if_none_match(headers: &HeaderMap, expected: &str) -> bool {
+    headers
+        .get(header::IF_NONE_MATCH)
+        .and_then(|value| value.to_str().ok())
+        .map(|raw| raw.split(',').any(|tag| tag.trim() == expected))
+        .unwrap_or(false)
+}
+
+fn not_modified_response(etag: &str) -> Response {
+    let mut resp = StatusCode::NOT_MODIFIED.into_response();
+    let headers = resp.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(etag) {
+        headers.insert(header::ETAG, value);
+    }
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-cache"),
+    );
+    resp
+}
+
+fn apply_etag(mut resp: Response, etag: Option<&str>) -> Response {
+    let headers = resp.headers_mut();
+    if let Some(etag) = etag
+        && let Ok(value) = HeaderValue::from_str(etag)
+    {
+        headers.insert(header::ETAG, value);
+    }
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-cache"),
+    );
+    resp
 }
 
 pub async fn build_cc_lb_oauth_usage_response(
@@ -2109,20 +2190,7 @@ fn latest_window_response(
 fn series_bucket_response(bucket: &SubscriptionQuotaBucket) -> SeriesBucketResponse {
     SeriesBucketResponse {
         bucket_start_unix_secs: bucket.bucket_start_unix_secs,
-        observed: bucket.observed,
-        sample_count: bucket.sample_count,
-        utilization_min: bucket.utilization_min,
-        utilization_avg: bucket.utilization_avg,
-        utilization_max: bucket.utilization_max,
         utilization_last: bucket.utilization_last,
-        status_last: bucket.status_last.map(status_str).map(str::to_owned),
-        resets_at_unix_secs_last: bucket.resets_at_unix_secs_last,
-        observed_at_unix_millis_last: bucket.observed_at_unix_millis_last,
-        sources_seen: bucket
-            .sources_seen
-            .iter()
-            .map(|source| source.as_str().to_owned())
-            .collect(),
     }
 }
 
@@ -2331,14 +2399,6 @@ fn data_state_str(state: SubscriptionQuotaDataState) -> &'static str {
         SubscriptionQuotaDataState::Fresh => "fresh",
         SubscriptionQuotaDataState::Stale => "stale",
         SubscriptionQuotaDataState::Missing => "missing",
-    }
-}
-
-fn status_str(status: SubscriptionQuotaStatus) -> &'static str {
-    match status {
-        SubscriptionQuotaStatus::Allowed => "allowed",
-        SubscriptionQuotaStatus::AllowedWarning => "allowed_warning",
-        SubscriptionQuotaStatus::Rejected => "rejected",
     }
 }
 

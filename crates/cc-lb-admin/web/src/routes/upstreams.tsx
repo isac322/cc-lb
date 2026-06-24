@@ -96,9 +96,12 @@ function UpstreamsPage() {
     return upstreams.data?.upstreams.map((u) => u.id).join(',') ?? '';
   }, [upstreams.data]);
 
+  // Single source of truth for /latest polling. The DetailView calls the same
+  // hook with identical params so TanStack dedups them into one request; the
+  // parent sidebar reads the 3 windows it needs, the detail reads the full 5.
   const quotaLatest = useSubscriptionQuotaLatest({
     upstreamIds,
-    windows: '5h,7d,overage',
+    windows: '5h,7d,overage,7d_sonnet,7d_opus',
     source: 'merged',
     refetchInterval: 5_000,
   });
@@ -563,7 +566,19 @@ function DetailView({
   const [range, setRange] = useState<'1h' | '6h' | '24h' | '7d'>('7d');
   const [showMoreMeta, setShowMoreMeta] = useState(false);
 
-  const nowUnixSecs = Math.floor(Date.now() / 1000);
+  // Stable across re-renders so quotaSeries/quotaAnalysis queryKeys do not
+  // churn each time another hook here refetches; mirrors routes/index.tsx.
+  // Inlining Math.floor(Date.now()/1000) here fires a fresh
+  // /subscription-quotas/series on every re-render.
+  const [nowUnixSecs, setNowUnixSecs] = useState(() =>
+    Math.floor(Date.now() / 1000),
+  );
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setNowUnixSecs(Math.floor(Date.now() / 1000));
+    }, 60_000);
+    return () => clearInterval(interval);
+  }, []);
   const sinceUnixSecs = useMemo(() => {
     switch (range) {
       case '1h':
@@ -592,12 +607,25 @@ function DetailView({
     }
   }, [range]);
 
+  // Use the same upstreamIds + windows as UpstreamsPage so TanStack dedups
+  // the /latest poll into a single request. selectedLatest extracts our row.
+  const allUpstreams = useUpstreams();
+  const allUpstreamIds = useMemo(
+    () => allUpstreams.data?.upstreams.map((u) => u.id).join(',') ?? '',
+    [allUpstreams.data],
+  );
   const quotaLatest = useSubscriptionQuotaLatest({
-    upstreamIds: upstream.id,
+    upstreamIds: allUpstreamIds,
     windows: '5h,7d,overage,7d_sonnet,7d_opus',
     source: 'merged',
     refetchInterval: 5_000,
   });
+  const selectedLatest = useMemo(
+    () =>
+      quotaLatest.data?.upstreams.find((u) => u.upstream_id === upstream.id) ??
+      null,
+    [quotaLatest.data, upstream.id],
+  );
   const quotaSeries = useSubscriptionQuotaSeries({
     upstreamIds: upstream.id,
     windows: '5h,7d,7d_sonnet,7d_opus,overage',
@@ -662,7 +690,7 @@ function DetailView({
       }
     }
 
-    const latestWindows = quotaLatest.data?.upstreams[0]?.windows;
+    const latestWindows = selectedLatest?.windows;
     if (latestWindows) {
       for (const snap of latestWindows) {
         const duration = WINDOW_DURATION_SECS[snap.window];
@@ -680,7 +708,7 @@ function DetailView({
       rows: Array.from(bucketsByTime.values()).sort((a, b) => a.unix - b.unix),
       markers,
     };
-  }, [quotaSeries.data, quotaLatest.data, range]);
+  }, [quotaSeries.data, selectedLatest, range]);
 
   const recent = useRecentEvents({
     upstream_id: upstream.id,
@@ -1100,8 +1128,7 @@ function DetailView({
                           }}
                           content={({ active, payload, label }) => {
                             if (!active || !payload?.length) return null;
-                            const first =
-                              quotaLatest.data?.upstreams[0]?.windows[0];
+                            const first = selectedLatest?.windows[0];
                             return (
                               <div
                                 style={{
@@ -1193,7 +1220,7 @@ function DetailView({
                             color: 'var(--color-text-muted)',
                           }}
                           content={() => {
-                            const latest = quotaLatest.data?.upstreams[0];
+                            const latest = selectedLatest;
                             if (!latest) return null;
                             const windows = ['5h', '7d', '7d_sonnet'];
                             const opus = latest.windows.find(
@@ -1296,7 +1323,7 @@ function DetailView({
                           });
                         })()}
                         {(() => {
-                          const latest = quotaLatest.data?.upstreams[0];
+                          const latest = selectedLatest;
                           if (!latest) return null;
                           const windows = ['5h', '7d', '7d_sonnet'];
                           const opus = latest.windows.find(
@@ -1335,7 +1362,7 @@ function DetailView({
             </Card>
 
             {(() => {
-              const latest = quotaLatest.data?.upstreams[0];
+              const latest = selectedLatest;
               if (!latest) {
                 return (
                   <Card>

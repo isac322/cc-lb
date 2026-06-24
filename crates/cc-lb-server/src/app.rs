@@ -1826,6 +1826,14 @@ fn admin_router(
     cc_lb_admin::router(admin_state)
         .merge(crate::admin_plugins::router(admin_token, plugin_registry))
         .merge(server_state_router(server_state))
+        // Admin surface only — proxy_router stays uncompressed to keep SSE
+        // bodies streaming and skip CPU on the hot data plane. Defaults
+        // (gzip 6, brotli 4) are deliberate; avoid Best/level 11.
+        .layer(
+            tower_http::compression::CompressionLayer::new()
+                .gzip(true)
+                .br(true),
+        )
 }
 
 fn server_state_router(server_state: Arc<ServerStateHandle>) -> Router {

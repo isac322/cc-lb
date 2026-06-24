@@ -56,16 +56,8 @@ impl UpstreamSubscriptionQuotaStore for SqliteStorage {
         if requested_sources.is_empty() {
             return Ok(Vec::new());
         }
-        let records = list_records_for_upstreams(self, &query.upstream_ids)
-            .await?
-            .into_iter()
-            .filter(|record| {
-                requested_windows.contains(&record.window)
-                    && requested_sources.contains(&record.source)
-                    && record.observed_at_unix_millis >= query.since_unix_millis
-                    && record.observed_at_unix_millis <= query.until_unix_millis
-            })
-            .collect::<Vec<_>>();
+        let records =
+            list_records_for_query(self, &query, &requested_windows, &requested_sources).await?;
         Ok(build_series(records, &query))
     }
 
@@ -125,29 +117,57 @@ async fn list_latest_records_for_upstreams(
     rows.into_iter().map(row_to_record).collect()
 }
 
-async fn list_records_for_upstreams(
+// Filter (window, source, observed_at_unix_millis) at SQL level so the composite
+// `upstream_subscription_quota_obs_series_idx` is used. Mirrors the Postgres
+// adapter; the prior `SELECT * WHERE upstream_id IN (?)` shape over-fetched by
+// ~130× on a 1h view and filtered in Rust.
+async fn list_records_for_query(
     storage: &SqliteStorage,
-    upstream_ids: &[Uuid],
+    query: &SubscriptionQuotaSeriesQuery,
+    requested_windows: &BTreeSet<SubscriptionQuotaWindow>,
+    requested_sources: &BTreeSet<SubscriptionQuotaSource>,
 ) -> StorageResult<Vec<SubscriptionQuotaObservationRecord>> {
-    if upstream_ids.is_empty() {
+    if query.upstream_ids.is_empty() || requested_windows.is_empty() || requested_sources.is_empty()
+    {
         return Ok(Vec::new());
     }
-    let placeholders = std::iter::repeat_n("?", upstream_ids.len())
+    let upstream_placeholders = std::iter::repeat_n("?", query.upstream_ids.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let window_placeholders = std::iter::repeat_n("?", requested_windows.len())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let source_placeholders = std::iter::repeat_n("?", requested_sources.len())
         .collect::<Vec<_>>()
         .join(", ");
     let sql = format!(
         "SELECT * FROM upstream_subscription_quota_observations_v1 \
-         WHERE upstream_id IN ({placeholders}) \
+         WHERE upstream_id IN ({upstream_placeholders}) \
+         AND window IN ({window_placeholders}) \
+         AND source IN ({source_placeholders}) \
+         AND observed_at_unix_millis >= ? \
+         AND observed_at_unix_millis <= ? \
          ORDER BY upstream_id ASC, window ASC, source ASC, observed_at_unix_millis ASC, sample_id ASC"
     );
-    let mut query = sqlx::query(AssertSqlSafe(sql));
-    for upstream_id in upstream_ids {
-        query = query.bind(upstream_id.to_string());
+    let mut q = sqlx::query(AssertSqlSafe(sql));
+    for upstream_id in &query.upstream_ids {
+        q = q.bind(upstream_id.to_string());
     }
-    let rows = query
-        .fetch_all(storage.pool())
-        .await
-        .map_err(map_sqlx_error)?;
+    for window in requested_windows {
+        q = q.bind(window.as_str().to_owned());
+    }
+    for source in requested_sources {
+        q = q.bind(source.as_str().to_owned());
+    }
+    q = q.bind(u64_to_i64(
+        query.since_unix_millis,
+        "subscription quota since_unix_millis",
+    )?);
+    q = q.bind(u64_to_i64(
+        query.until_unix_millis,
+        "subscription quota until_unix_millis",
+    )?);
+    let rows = q.fetch_all(storage.pool()).await.map_err(map_sqlx_error)?;
 
     rows.into_iter().map(row_to_record).collect()
 }
