@@ -12,7 +12,7 @@ use cc_lb_storage_conformance::{
         plugin_registry_store, price_catalog, principal_store, prompt_cache_observation_store,
         storage_roundtrips, storage_roundtrips_cache_split, storage_roundtrips_latency_stages,
         upstream_rate_limit_store, upstream_subscription_metadata_store,
-        upstream_subscription_quota_store,
+        upstream_subscription_quota_store, warmup_attempts_store,
     },
 };
 use cc_lb_storage_sqlite::{SqliteStorage, open_sqlite};
@@ -232,6 +232,11 @@ upstream_subscription_quota_sqlite_test!(
     upstream_subscription_quota_series_filters_observed_at_window_sqlite,
     series_filters_observed_at_window
 );
+
+#[test]
+fn warmup_attempts_store_sqlite() {
+    run_sqlite_scenario("warmup_attempts_store", warmup_attempts_store::run_all);
+}
 
 macro_rules! prompt_cache_observation_sqlite_test {
     ($test_name:ident, $scenario:ident) => {

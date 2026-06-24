@@ -19,3 +19,4 @@ pub mod upstream_subscription_metadata;
 pub mod upstream_subscription_quota;
 pub mod upstreams;
 pub mod usage_rollups;
+pub mod warmup_attempts;

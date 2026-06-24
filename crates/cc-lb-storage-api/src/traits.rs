@@ -8,6 +8,7 @@ use crate::{
     upstream_rate_limit::UpstreamRateLimitStateStore,
     upstream_subscription_metadata::UpstreamSubscriptionMetadataStore,
     upstream_subscription_quota::UpstreamSubscriptionQuotaStore,
+    warmup_attempts::UpstreamWarmupAttemptStore,
 };
 
 pub const CURRENT_CONTRACT_VERSION: u32 = 1;
@@ -267,6 +268,7 @@ pub trait Storage:
     + UpstreamRateLimitStateStore
     + UpstreamSubscriptionQuotaStore
     + UpstreamSubscriptionMetadataStore
+    + UpstreamWarmupAttemptStore
     + PromptCacheObservationStore
     + OrganizationMetadataStore
     + AnthropicCompatibilityKvStore
@@ -295,6 +297,7 @@ impl<T> Storage for T where
         + UpstreamRateLimitStateStore
         + UpstreamSubscriptionQuotaStore
         + UpstreamSubscriptionMetadataStore
+        + UpstreamWarmupAttemptStore
         + PromptCacheObservationStore
         + OrganizationMetadataStore
         + AnthropicCompatibilityKvStore

@@ -17,3 +17,5 @@ pub mod upstream_rate_limit_store;
 pub mod upstream_store;
 pub mod upstream_subscription_metadata_store;
 pub mod upstream_subscription_quota_store;
+mod warmup_attempts_fixture;
+pub mod warmup_attempts_store;

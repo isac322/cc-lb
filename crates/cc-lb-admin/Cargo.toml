@@ -8,6 +8,7 @@ publish = false
 build = "build.rs"
 
 [features]
+default = ["sqlite"]
 sqlite = ["cc-lb-scheduler/sqlite"]
 postgres = ["cc-lb-scheduler/postgres"]
 
