@@ -199,6 +199,29 @@ async fn update_with_correct_if_match_returns_200_and_bumps_revision() {
 }
 
 #[tokio::test]
+async fn patch_flips_enabled_and_warmup_enabled_atomically() {
+    let (_dir, storage) = new_store().await;
+    let app = router(test_state(storage, None));
+    let created = create(app.clone(), "primary").await;
+    let id = body(&created)["id"].as_str().unwrap();
+    assert_eq!(body(&created)["enabled"], true);
+
+    let response = request(
+        app,
+        "PATCH",
+        &format!("/admin/v1/upstreams/{id}"),
+        Some(json!({ "enabled": false, "warmup_enabled": false })),
+        Some("W/\"1\""),
+    )
+    .await;
+
+    assert_eq!(response.status, StatusCode::OK);
+    assert_eq!(body(&response)["enabled"], false);
+    assert_eq!(body(&response)["warmup_enabled"], false);
+    assert_eq!(body(&response)["spec_revision"], 2);
+}
+
+#[tokio::test]
 async fn update_with_stale_if_match_returns_409_with_current_revision() {
     let (_dir, storage) = new_store().await;
     let app = router(test_state(storage, None));
