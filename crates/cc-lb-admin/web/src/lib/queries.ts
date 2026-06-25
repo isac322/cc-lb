@@ -645,29 +645,6 @@ export function useDeleteUpstream() {
     onSuccess: () => qc.invalidateQueries({ queryKey: qk.upstreams }),
   });
 }
-export function useToggleUpstream() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({
-      id,
-      enabled,
-      spec_revision,
-    }: {
-      id: string;
-      enabled: boolean;
-      spec_revision: number;
-    }) =>
-      postJson<Upstream, Record<string, never>>(
-        `/admin/v1/upstreams/${id}/${enabled ? 'enable' : 'disable'}`,
-        {},
-        { ifMatch: spec_revision },
-      ),
-    onSuccess: (_d, vars) => {
-      qc.invalidateQueries({ queryKey: qk.upstreams });
-      qc.invalidateQueries({ queryKey: qk.upstream(vars.id) });
-    },
-  });
-}
 export interface UpdateUpstreamRequest {
   name?: string | null;
   base_url?: string | null;
@@ -676,6 +653,7 @@ export interface UpdateUpstreamRequest {
 }
 
 export interface UpdateUpstreamWarmupSettingsRequest {
+  enabled?: boolean;
   warmup_enabled?: boolean;
   warmup_dialect_plugin?: UpstreamWarmupDialectPlugin | null;
 }
