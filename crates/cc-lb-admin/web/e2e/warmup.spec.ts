@@ -411,8 +411,8 @@ test.describe('WarmupCard', () => {
     await page.screenshot({ path: evidencePath('scenario-8-stale-revision.png'), fullPage: true });
   });
 
-  test('Scenario 9: Disabled upstream pauses warmup controls', async ({ page }) => {
-    const stalePaused = oauthHealthy({
+  test('Scenario 9: Disabled upstream still exposes warmup controls when warmup is enabled', async ({ page }) => {
+    const warmupOnlyUpstream = oauthHealthy({
       id: 'oauth-paused-stale',
       name: 'oauth-paused-stale',
       enabled: false,
@@ -424,15 +424,15 @@ test.describe('WarmupCard', () => {
       },
     });
     await installAppFixtures(page, {
-      upstreams: [oauthHealthy(), stalePaused, apiKeyUpstream()],
+      upstreams: [oauthHealthy(), warmupOnlyUpstream, apiKeyUpstream()],
     });
     await openUpstreams(page, 'oauth-paused-stale');
 
     await expect(page.getByTestId('warmup-card')).toBeVisible();
-    await expect(page.getByText(COPY.upstreamPausedEmpty)).toBeVisible();
-    await expect(page.getByTestId('warmup-fire-now')).toHaveCount(0);
+    await expect(page.getByTestId('warmup-switch')).toHaveAttribute('aria-checked', 'true');
+    await expect(page.getByTestId('warmup-fire-now')).toBeVisible();
     await expect(page.getByTestId('warmup-enable-btn')).toHaveCount(0);
-    await page.screenshot({ path: evidencePath('scenario-9-disabled-state-before.png'), fullPage: true });
+    await page.screenshot({ path: evidencePath('scenario-9-warmup-only-while-disabled.png'), fullPage: true });
   });
 
   test('Scenario 10: api_key upstream renders nothing', async ({ page }) => {

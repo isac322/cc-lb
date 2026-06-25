@@ -136,6 +136,7 @@ describe('useFireNowUpstreamWarmup', () => {
   test.each([
     [400, makeFireNowError('oauth_credentials_missing')],
     [502, makeFireNowError('auth_failed')],
+    [503, makeFireNowError('seven_day_quota_exhausted')],
     [503, makeFireNowError('transient')],
   ])('returns %i error body and still invalidates queries after fire-now attempt', async (status, response) => {
     stubFetchOnce(response, { status });
@@ -242,6 +243,32 @@ describe('useUpdateUpstreamWarmupSettings', () => {
     expect(url).toBe(`/admin/v1/upstreams/${UPSTREAM_ID}`);
     expect(init?.method).toBe('PATCH');
     expect(headersFrom(init).get('If-Match')).toBe(`W/"${SPEC_REVISION}"`);
+    expect(init?.body).toBe(JSON.stringify(patch));
+  });
+
+  test('PATCH body can carry enabled and warmup_enabled atomically', async () => {
+    const patch = { enabled: true, warmup_enabled: true };
+    const updatedUpstream = makeOauthUpstream({
+      id: UPSTREAM_ID,
+      spec_revision: SPEC_REVISION + 1,
+      ...patch,
+    });
+    const fetchMock = stubFetchOnce(updatedUpstream);
+    const client = makeClient();
+    const { result } = renderHook(() => useUpdateUpstreamWarmupSettings(), {
+      wrapper: makeWrapper(client),
+    });
+
+    await result.current.mutateAsync({
+      id: UPSTREAM_ID,
+      spec_revision: SPEC_REVISION,
+      body: patch,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const { url, init } = requestFrom(fetchMock);
+    expect(url).toBe(`/admin/v1/upstreams/${UPSTREAM_ID}`);
+    expect(init?.method).toBe('PATCH');
     expect(init?.body).toBe(JSON.stringify(patch));
   });
 

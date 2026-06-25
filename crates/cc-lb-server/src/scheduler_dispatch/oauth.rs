@@ -109,7 +109,7 @@ impl SchedulerDispatch {
             return Ok(OAuthUsagePollObservation::Skip);
         };
         if upstream.kind != UpstreamKind::AnthropicOauth
-            || !upstream.enabled
+            || (!upstream.enabled && !upstream.warmup_enabled)
             || upstream.deleted_at_unix_secs.is_some()
         {
             return Ok(OAuthUsagePollObservation::Skip);

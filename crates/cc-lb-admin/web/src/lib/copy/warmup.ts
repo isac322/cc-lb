@@ -21,8 +21,6 @@ export const COPY = {
   dialectPluginClearSuccess: 'Shape plugin cleared',
   disabledEmpty:
     'Warmup is off for this upstream. Enable to keep the 5h OAuth window primed.',
-  upstreamPausedEmpty:
-    'Upstream is disabled, so warmup is paused. Re-enable the upstream to resume scheduled warmups.',
   lastNull: 'Never warmed',
   confirmFireBody:
     'This sends a real /messages request to {upstreamName} and consumes a small token. The schedule for the current 5h window will be skipped.',
@@ -45,6 +43,8 @@ export const COPY = {
       'Warmup failed: the dialect plugin raised an error. Check plugin logs.',
     oauth_credentials_missing:
       'Warmup cannot fire: this upstream has no OAuth credentials yet. Complete the OAuth flow first.',
+    seven_day_quota_exhausted:
+      'Warmup skipped: the 7-day subscription quota is exhausted. The scheduler will retry after the reset window.',
     transient:
       'Warmup failed transiently. The background loop will retry automatically.',
   },

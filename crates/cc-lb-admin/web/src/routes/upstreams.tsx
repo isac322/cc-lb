@@ -57,6 +57,7 @@ import { getWindowColor, WINDOW_DURATION_SECS } from '../lib/colors';
 import { DEFAULT_ANTHROPIC_BASE_URL } from '../lib/constants';
 import { fmtChartTooltipTs } from '../lib/format';
 import {
+  type UpdateUpstreamWarmupSettingsRequest,
   type Upstream,
   useCompleteOauthDraft,
   useCreateFromOauthDraft,
@@ -71,8 +72,8 @@ import {
   useSubscriptionQuotaAnalysis,
   useSubscriptionQuotaLatest,
   useSubscriptionQuotaSeries,
-  useToggleUpstream,
   useTriggerSubscriptionMetadataRefresh,
+  useUpdateUpstreamWarmupSettings,
   useUpstreamNameMap,
   useUpstreamOAuthStatus,
   useUpstreamSubscriptionMetadata,
@@ -541,7 +542,7 @@ function DetailView({
   upstream: Upstream;
   onBack: () => void;
 }) {
-  const toggle = useToggleUpstream();
+  const toggle = useUpdateUpstreamWarmupSettings();
   const del = useDeleteUpstream();
   const oauthStart = useOAuthStart();
   const oauthComplete = useOAuthComplete();
@@ -884,11 +885,18 @@ function DetailView({
                   role="switch"
                   aria-checked={upstream.enabled}
                   disabled={toggle.isPending}
-                  onClick={() =>
+                  onClick={() => {
+                    const nextEnabled = !upstream.enabled;
+                    const body: UpdateUpstreamWarmupSettingsRequest = {
+                      enabled: nextEnabled,
+                    };
+                    if (upstream.warmup_enabled !== nextEnabled) {
+                      body.warmup_enabled = nextEnabled;
+                    }
                     toggle.mutate(
                       {
                         id: upstream.id,
-                        enabled: !upstream.enabled,
+                        body,
                         spec_revision: upstream.spec_revision,
                       },
                       {
@@ -899,8 +907,8 @@ function DetailView({
                               : 'Upstream enabled',
                           ),
                       },
-                    )
-                  }
+                    );
+                  }}
                   className="group inline-flex items-center gap-2 h-7 px-2 rounded-sm transition-colors focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-overlay-3"
                 >
                   <div

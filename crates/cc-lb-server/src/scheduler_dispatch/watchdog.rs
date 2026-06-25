@@ -56,7 +56,6 @@ enum WatchdogUpstreamFilter {
 impl WatchdogUpstreamFilter {
     fn matches(self, upstream: &UpstreamRecord) -> bool {
         if upstream.kind != UpstreamKind::AnthropicOauth
-            || !upstream.enabled
             || upstream.deleted_at_unix_secs.is_some()
             || upstream.oauth_credentials.is_none()
         {
@@ -64,7 +63,7 @@ impl WatchdogUpstreamFilter {
         }
         match self {
             Self::Warmup => upstream.warmup_enabled,
-            Self::OAuth => true,
+            Self::OAuth => upstream.enabled || upstream.warmup_enabled,
         }
     }
 }

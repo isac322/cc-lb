@@ -397,7 +397,7 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
         data-testid="warmup-switch"
         aria-label="Toggle warmup"
         aria-checked={upstream.warmup_enabled}
-        disabled={settingsPending || !upstream.enabled}
+        disabled={settingsPending}
         onClick={handleToggle}
         className={cx(
           'relative inline-flex h-5 w-9 shrink-0 items-center self-center rounded-full border transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed',
@@ -444,18 +444,7 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
             </div>
           )}
 
-          {!upstream.enabled && (
-            <div className="flex flex-col gap-1 bg-overlay-2 border border-subtle rounded p-3">
-              <span className="text-sm font-medium text-text">
-                {COPY.upstreamPausedEmpty}
-              </span>
-              <span className="text-sm text-text-muted">
-                Upstream is paused — warm-up does not apply
-              </span>
-            </div>
-          )}
-
-          {upstream.enabled && !upstream.warmup_enabled && (
+          {!upstream.warmup_enabled && (
             <div className="flex items-center justify-between bg-overlay-2 border border-subtle rounded p-3">
               <span className="text-sm text-text-muted">
                 Warmup disabled — re-enable to schedule new attempts
@@ -472,12 +461,7 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
             </div>
           )}
 
-          <div
-            className={cx(
-              'flex-1 flex flex-col gap-4',
-              !upstream.enabled && 'opacity-60 pointer-events-none',
-            )}
-          >
+          <div className="flex-1 flex flex-col gap-4">
             <div className="grid grid-cols-1 gap-4 border-b border-subtle pb-3 sm:grid-cols-2">
               <div className="flex flex-col gap-1">
                 <span className="text-[11px] uppercase tracking-wider text-text-faint">
@@ -552,7 +536,7 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
                     className="max-w-[220px] bg-transparent font-mono text-text outline-none"
                     value={selectedPluginValue}
                     onChange={handlePluginChange}
-                    disabled={settingsPending || !upstream.enabled}
+                    disabled={settingsPending}
                     aria-label={COPY.dialectPluginLabel}
                     title={selectedPluginValue || COPY.defaultPluginOption}
                   >
@@ -629,10 +613,7 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
               data-testid="warmup-fire-now"
               onClick={() => setConfirmFireOpen(true)}
               disabled={
-                fireWarmup.isPending ||
-                fireCooldown ||
-                !upstream.enabled ||
-                !upstream.warmup_enabled
+                fireWarmup.isPending || fireCooldown || !upstream.warmup_enabled
               }
               iconLeft={<Zap className="h-3 w-3" />}
             >

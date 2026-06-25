@@ -816,6 +816,7 @@ async function handle(req: Request, url: URL): Promise<Response> {
         const expectedEtag = `W/"${u.spec_revision}"`;
         if (ifMatch !== expectedEtag && ifMatch !== `"${u.spec_revision}"`) return err(412, "precondition_failed");
         const body = await readJson<any>(req);
+        if (body.enabled !== undefined) u.enabled = body.enabled;
         if (body.warmup_enabled !== undefined) u.warmup_enabled = body.warmup_enabled;
         if (body.warmup_dialect_plugin !== undefined) u.warmup_dialect_plugin = body.warmup_dialect_plugin;
         u.spec_revision++;
