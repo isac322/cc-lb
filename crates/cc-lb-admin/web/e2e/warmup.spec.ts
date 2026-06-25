@@ -473,7 +473,7 @@ test.describe('WarmupCard', () => {
     await openUpstreams(page);
 
     await page.getByTestId('warmup-card').focus();
-    const expectedOrder = ['warmup-switch', 'warmup-plugin-select', 'warmup-plugin-clear', 'warmup-fire-now'];
+    const expectedOrder = ['warmup-history-button', 'warmup-fire-now', 'warmup-switch', 'warmup-plugin-select', 'warmup-plugin-clear'];
     const focusOrder: string[] = [];
     for (let index = 0; index < expectedOrder.length; index += 1) {
       await page.keyboard.press('Tab');
