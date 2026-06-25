@@ -1,3 +1,5 @@
+#![cfg(all(feature = "sqlite", not(feature = "postgres")))]
+
 use std::str::FromStr as _;
 
 use cc_lb_scheduler::jobs::watchdog::{WatchdogEntityKind, run_entity_watchdog};
