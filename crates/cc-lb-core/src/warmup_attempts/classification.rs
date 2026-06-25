@@ -1,4 +1,6 @@
-use cc_lb_storage_api::{SubscriptionQuotaWindow, WarmupAttemptOutcome, WarmupAttemptReason};
+use cc_lb_storage_api::{
+    SubscriptionQuotaStatus, SubscriptionQuotaWindow, WarmupAttemptOutcome, WarmupAttemptReason,
+};
 use http::StatusCode;
 
 use super::{WarmupAttemptExecution, WarmupAttemptExecutionResult};
@@ -14,10 +16,22 @@ pub(super) struct AttemptFields {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ResponseClassification {
-    Success { cycle_key: i64 },
-    WindowAlreadyActive { cycle_key: i64 },
-    Transient { reason: WarmupAttemptReason },
-    Permanent { reason: WarmupAttemptReason },
+    Success {
+        cycle_key: i64,
+    },
+    WindowAlreadyActive {
+        cycle_key: i64,
+    },
+    Skipped {
+        reason: WarmupAttemptReason,
+        cycle_key: i64,
+    },
+    Transient {
+        reason: WarmupAttemptReason,
+    },
+    Permanent {
+        reason: WarmupAttemptReason,
+    },
 }
 
 pub(super) fn attempt_fields(execution: &WarmupAttemptExecution<'_>) -> AttemptFields {
@@ -57,12 +71,13 @@ pub(super) fn attempt_fields(execution: &WarmupAttemptExecution<'_>) -> AttemptF
         },
         WarmupAttemptExecutionResult::Skipped {
             reason,
+            cycle_key,
             error_detail,
         } => AttemptFields {
             outcome: WarmupAttemptOutcome::Skipped,
             reason: Some(reason),
             http_status: None,
-            cycle_key: None,
+            cycle_key,
             error_detail: error_detail.map(ToOwned::to_owned),
         },
     }
@@ -87,6 +102,13 @@ fn response_attempt_fields(
             Some(WarmupAttemptReason::WindowAlreadyActive),
             error_detail,
         ),
+        ResponseClassification::Skipped { reason, cycle_key } => AttemptFields {
+            outcome: WarmupAttemptOutcome::Skipped,
+            reason: Some(reason),
+            http_status: Some(status_to_i32(status)),
+            cycle_key: Some(cycle_key),
+            error_detail: error_detail.map(ToOwned::to_owned),
+        },
         ResponseClassification::Transient { reason } => AttemptFields {
             outcome: WarmupAttemptOutcome::TransientFailure,
             reason: Some(reason),
@@ -143,14 +165,25 @@ fn classify_response(
         };
     }
     match status {
-        StatusCode::TOO_MANY_REQUESTS => match five_hour_cycle_key(observations) {
-            Some(cycle_key) if cycle_key > candidate_cycle_key => {
-                ResponseClassification::WindowAlreadyActive { cycle_key }
+        StatusCode::TOO_MANY_REQUESTS => {
+            if let Some(cycle_key) = seven_day_exhausted_cycle_key(observations)
+                && cycle_key > candidate_cycle_key
+            {
+                return ResponseClassification::Skipped {
+                    reason: WarmupAttemptReason::SevenDayQuotaExhausted,
+                    cycle_key,
+                };
             }
-            Some(_) | None => ResponseClassification::Transient {
-                reason: WarmupAttemptReason::Http429MissingCycleKey,
-            },
-        },
+
+            match five_hour_cycle_key(observations) {
+                Some(cycle_key) if cycle_key > candidate_cycle_key => {
+                    ResponseClassification::WindowAlreadyActive { cycle_key }
+                }
+                Some(_) | None => ResponseClassification::Transient {
+                    reason: WarmupAttemptReason::Http429MissingCycleKey,
+                },
+            }
+        }
         StatusCode::UNAUTHORIZED => ResponseClassification::Permanent {
             reason: WarmupAttemptReason::AuthFailed,
         },
@@ -173,9 +206,48 @@ fn classify_response(
 }
 
 fn five_hour_cycle_key(observations: &[crate::UnifiedQuotaObservation]) -> Option<i64> {
+    cycle_key_for_window(observations, SubscriptionQuotaWindow::FiveHour)
+}
+
+fn seven_day_exhausted_cycle_key(observations: &[crate::UnifiedQuotaObservation]) -> Option<i64> {
+    const SEVEN_DAY_WINDOWS: [SubscriptionQuotaWindow; 3] = [
+        SubscriptionQuotaWindow::SevenDay,
+        SubscriptionQuotaWindow::SevenDaySonnet,
+        SubscriptionQuotaWindow::SevenDayOpus,
+    ];
+
+    SEVEN_DAY_WINDOWS
+        .into_iter()
+        .find_map(|window| exhausted_cycle_key_for_window(observations, window))
+}
+
+fn exhausted_cycle_key_for_window(
+    observations: &[crate::UnifiedQuotaObservation],
+    window: SubscriptionQuotaWindow,
+) -> Option<i64> {
     observations
         .iter()
-        .find(|observation| observation.window == SubscriptionQuotaWindow::FiveHour)
+        .find(|observation| {
+            observation.window == window && quota_observation_is_exhausted(observation)
+        })
+        .and_then(|observation| observation.resets_at_unix_secs)
+        .and_then(|resets_at| i64::try_from(resets_at).ok())
+}
+
+fn quota_observation_is_exhausted(observation: &crate::UnifiedQuotaObservation) -> bool {
+    observation.status == Some(SubscriptionQuotaStatus::Rejected)
+        || observation
+            .utilization
+            .is_some_and(|utilization| utilization >= 1.0)
+}
+
+fn cycle_key_for_window(
+    observations: &[crate::UnifiedQuotaObservation],
+    window: SubscriptionQuotaWindow,
+) -> Option<i64> {
+    observations
+        .iter()
+        .find(|observation| observation.window == window)
         .and_then(|observation| observation.resets_at_unix_secs)
         .and_then(|resets_at| i64::try_from(resets_at).ok())
 }
@@ -183,3 +255,6 @@ fn five_hour_cycle_key(observations: &[crate::UnifiedQuotaObservation]) -> Optio
 fn status_to_i32(status: StatusCode) -> i32 {
     i32::from(status.as_u16())
 }
+
+#[cfg(test)]
+mod tests;
