@@ -43,6 +43,7 @@ pub enum WarmupAttemptExecutionResult<'a> {
     },
     Skipped {
         reason: WarmupAttemptReason,
+        cycle_key: Option<i64>,
         error_detail: Option<&'a str>,
     },
 }

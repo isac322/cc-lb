@@ -867,6 +867,7 @@ async fn record_fire_now_skip(
         completed_at_unix_secs: Some(now_unix_secs),
         result: WarmupAttemptExecutionResult::Skipped {
             reason,
+            cycle_key: None,
             error_detail,
         },
     })
@@ -906,6 +907,7 @@ async fn record_fire_now_failure(
 const fn warmup_attempt_reason_str(reason: WarmupAttemptReason) -> &'static str {
     match reason {
         WarmupAttemptReason::WindowAlreadyActive => "window_already_active",
+        WarmupAttemptReason::SevenDayQuotaExhausted => "seven_day_quota_exhausted",
         WarmupAttemptReason::Http429MissingCycleKey => "http_429_missing_cycle_key",
         WarmupAttemptReason::Upstream5xx => "upstream_5xx",
         WarmupAttemptReason::NetworkError => "network_error",

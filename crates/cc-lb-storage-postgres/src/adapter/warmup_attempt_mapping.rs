@@ -77,6 +77,7 @@ pub(crate) fn outcome_from_str(value: &str) -> StorageResult<WarmupAttemptOutcom
 pub(crate) fn reason_to_str(reason: WarmupAttemptReason) -> &'static str {
     match reason {
         WarmupAttemptReason::WindowAlreadyActive => "window_already_active",
+        WarmupAttemptReason::SevenDayQuotaExhausted => "seven_day_quota_exhausted",
         WarmupAttemptReason::Http429MissingCycleKey => "http_429_missing_cycle_key",
         WarmupAttemptReason::Upstream5xx => "upstream_5xx",
         WarmupAttemptReason::NetworkError => "network_error",
@@ -100,6 +101,7 @@ pub(crate) fn reason_to_str(reason: WarmupAttemptReason) -> &'static str {
 fn reason_from_str(value: &str) -> StorageResult<WarmupAttemptReason> {
     match value {
         "window_already_active" => Ok(WarmupAttemptReason::WindowAlreadyActive),
+        "seven_day_quota_exhausted" => Ok(WarmupAttemptReason::SevenDayQuotaExhausted),
         "http_429_missing_cycle_key" => Ok(WarmupAttemptReason::Http429MissingCycleKey),
         "upstream_5xx" => Ok(WarmupAttemptReason::Upstream5xx),
         "network_error" => Ok(WarmupAttemptReason::NetworkError),
