@@ -24,10 +24,7 @@ pub(super) fn warmup_preflight_skip_reason(
     if upstream.deleted_at_unix_secs.is_some() {
         return Some(WarmupAttemptReason::UpstreamDeleted);
     }
-    if upstream.kind != UpstreamKind::AnthropicOauth
-        || !upstream.enabled
-        || !upstream.warmup_enabled
-    {
+    if upstream.kind != UpstreamKind::AnthropicOauth || !upstream.warmup_enabled {
         return Some(WarmupAttemptReason::UpstreamDisabled);
     }
     if upstream.oauth_credentials.is_none() {
