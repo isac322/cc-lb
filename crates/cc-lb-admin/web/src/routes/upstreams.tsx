@@ -51,7 +51,7 @@ import { ApiUsageCard } from '../components/upstreams/ApiUsageCard';
 import { InlineNameEditor } from '../components/upstreams/InlineNameEditor';
 import { QuotaObservedAt } from '../components/upstreams/QuotaObservedAt';
 import { SettingsCard } from '../components/upstreams/SettingsCard';
-import { WarmupCard } from '../components/upstreams/WarmupCard';
+import { WarmupCardMinimal } from '../components/upstreams/warmup/WarmupCardMinimal';
 import { ApiError } from '../lib/api';
 import { getWindowColor, WINDOW_DURATION_SECS } from '../lib/colors';
 import { DEFAULT_ANTHROPIC_BASE_URL } from '../lib/constants';
@@ -80,7 +80,9 @@ import {
   useUsage,
 } from '../lib/queries';
 
-const upstreamSearchSchema = z.object({ selectedId: z.string().optional() });
+const upstreamSearchSchema = z.object({
+  selectedId: z.string().optional(),
+});
 
 export const Route = createFileRoute('/upstreams')({
   validateSearch: upstreamSearchSchema,
@@ -407,7 +409,7 @@ function oauthBadge(entry: {
   if (exp <= now) return { tone: 'danger', label: 'Expired' };
   if (exp - now < OAUTH_EXPIRING_SOON_SECS)
     return { tone: 'warn', label: 'Expiring soon' };
-  return { tone: 'ok', label: 'Active' };
+  return { tone: 'ok', label: 'Connected' };
 }
 
 type ChartRow = { ts: string; unix: number } & Record<
@@ -719,6 +721,15 @@ function DetailView({
   const isOauth = upstream.kind === 'anthropic_oauth';
   const subMeta = subscriptionMetadataQ.data?.subscription_metadata;
   const orgMeta = subscriptionMetadataQ.data?.organization_metadata;
+  const principalEntry = upstreamOAuthQ.data?.has_credentials
+    ? upstreamOAuthQ.data
+    : null;
+  const hasBoundToken = Boolean(principalEntry);
+  const oauthStatusBadge: OAuthBadge = upstreamOAuthQ.isLoading
+    ? { tone: 'neutral', label: 'Loading' }
+    : principalEntry
+      ? oauthBadge(principalEntry)
+      : { tone: 'neutral', label: 'Not connected' };
 
   const renderHeader = () => {
     const fields: {
@@ -1625,7 +1636,117 @@ function DetailView({
           </Section>
         )}
 
-        <WarmupCard upstream={upstream} />
+        {isOauth ? (
+          <div className="grid gap-4 2xl:grid-cols-[3fr_2fr]">
+            <WarmupCardMinimal upstream={upstream} />
+            <Card className="w-full h-full flex flex-col">
+              <CardHeader
+                title={
+                  <div className="flex items-center gap-2">
+                    <StatusBadge
+                      tone={oauthStatusBadge.tone}
+                      label={oauthStatusBadge.label}
+                    />
+                    <span>OAuth Status</span>
+                  </div>
+                }
+                subtitle={
+                  hasBoundToken ? 'Bound on this upstream' : 'Not connected'
+                }
+                action={
+                  <Button
+                    size="sm"
+                    className="self-center"
+                    iconLeft={<KeyRound className="h-3 w-3" />}
+                    onClick={() => {
+                      oauthStart.mutate(upstream.id, {
+                        onSuccess: (res) => {
+                          setOauthState({
+                            authorize_url: res.authorize_url,
+                            state_token: res.state_token,
+                            code: '',
+                          });
+                          setOauthOpen(true);
+                        },
+                      });
+                    }}
+                  >
+                    {hasBoundToken ? 'Reconnect' : 'Connect'}
+                  </Button>
+                }
+                align="center"
+              />
+              <CardBody className="text-sm flex-1">
+                {statusQ.isLoading ? (
+                  <Skeleton className="h-12" />
+                ) : !hasBoundToken ? (
+                  <div className="flex flex-wrap items-center gap-3">
+                    <StatusBadge
+                      tone={oauthStatusBadge.tone}
+                      label={oauthStatusBadge.label}
+                    />
+                    <p className="text-xs text-text-faint">
+                      Run "Connect via OAuth" to authorize this upstream.
+                    </p>
+                  </div>
+                ) : principalEntry ? (
+                  <div className="space-y-3">
+                    <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                      <div>
+                        <div className="text-[11px] uppercase tracking-wider text-text-faint">
+                          Expires
+                        </div>
+                        <div className="mt-0.5 font-mono">
+                          <Badge tone={oauthBadge(principalEntry).tone}>
+                            <RelativeTime
+                              ts={
+                                principalEntry.expires_at_unix_secs
+                                  ? new Date(
+                                      principalEntry.expires_at_unix_secs *
+                                        1000,
+                                    )
+                                  : null
+                              }
+                            />
+                          </Badge>
+                        </div>
+                      </div>
+                      <div>
+                        <div className="text-[11px] uppercase tracking-wider text-text-faint">
+                          Refresh token
+                        </div>
+                        <div className="mt-0.5">
+                          {principalEntry.refresh_token_present ? (
+                            'present'
+                          ) : (
+                            <span className="text-amber-400">missing</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                    {principalEntry.scopes.length ? (
+                      <div>
+                        <div className="text-[11px] uppercase tracking-wider text-text-faint">
+                          Scopes
+                        </div>
+                        <div className="mt-0.5 break-all font-mono text-xs">
+                          {principalEntry.scopes.join(', ')}
+                        </div>
+                      </div>
+                    ) : null}
+                  </div>
+                ) : (
+                  <p className="text-xs text-text-faint">
+                    Token is bound on the upstream but no credential details are
+                    available right now.
+                  </p>
+                )}
+              </CardBody>
+            </Card>
+          </div>
+        ) : (
+          <WarmupCardMinimal upstream={upstream} />
+        )}
 
         {!isOauth && <SettingsCard upstream={upstream} />}
 
@@ -1654,128 +1775,6 @@ function DetailView({
             />
           </div>
         </Card>
-
-        {upstream.kind === 'anthropic_oauth'
-          ? (() => {
-              const principalEntry = upstreamOAuthQ.data?.has_credentials
-                ? upstreamOAuthQ.data
-                : null;
-              const runtimeStatus = upstreamRuntimeStatus?.status;
-              const hasBoundToken = Boolean(principalEntry);
-              const badge: OAuthBadge = upstreamOAuthQ.isLoading
-                ? { tone: 'neutral', label: 'Loading' }
-                : principalEntry
-                  ? oauthBadge(principalEntry)
-                  : { tone: 'neutral', label: 'Not connected' };
-              return (
-                <Card>
-                  <CardHeader
-                    title="OAuth Status"
-                    subtitle={
-                      hasBoundToken ? 'Bound on this upstream' : 'Not connected'
-                    }
-                    action={
-                      <Button
-                        size="sm"
-                        iconLeft={<KeyRound className="w-3 h-3" />}
-                        onClick={() => {
-                          oauthStart.mutate(upstream.id, {
-                            onSuccess: (res) => {
-                              setOauthState({
-                                authorize_url: res.authorize_url,
-                                state_token: res.state_token,
-                                code: '',
-                              });
-                              setOauthOpen(true);
-                            },
-                          });
-                        }}
-                      >
-                        {hasBoundToken
-                          ? 'Reconnect via OAuth'
-                          : 'Connect via OAuth'}
-                      </Button>
-                    }
-                  />
-                  <CardBody className="text-sm">
-                    {statusQ.isLoading ? (
-                      <Skeleton className="h-12" />
-                    ) : !hasBoundToken ? (
-                      <div className="flex flex-wrap items-center gap-3">
-                        <StatusBadge tone={badge.tone} label={badge.label} />
-                        <p className="text-xs text-text-faint">
-                          Run "Connect via OAuth" to authorize this upstream.
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="space-y-3">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <StatusBadge tone={badge.tone} label={badge.label} />
-                          <span className="text-[11px] text-text-faint font-mono">
-                            runtime: {runtimeStatus}
-                          </span>
-                        </div>
-                        {principalEntry ? (
-                          <>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                              <div>
-                                <div className="text-[11px] text-text-faint uppercase tracking-wider">
-                                  Expires
-                                </div>
-                                <div className="font-mono mt-0.5">
-                                  <Badge tone={oauthBadge(principalEntry).tone}>
-                                    <RelativeTime
-                                      ts={
-                                        principalEntry.expires_at_unix_secs
-                                          ? new Date(
-                                              principalEntry.expires_at_unix_secs *
-                                                1000,
-                                            )
-                                          : null
-                                      }
-                                    />
-                                  </Badge>
-                                </div>
-                              </div>
-                              <div>
-                                <div className="text-[11px] text-text-faint uppercase tracking-wider">
-                                  Refresh token
-                                </div>
-                                <div className="mt-0.5">
-                                  {principalEntry.refresh_token_present ? (
-                                    'present'
-                                  ) : (
-                                    <span className="text-amber-400">
-                                      missing
-                                    </span>
-                                  )}
-                                </div>
-                              </div>
-                            </div>
-                            {principalEntry.scopes.length ? (
-                              <div>
-                                <div className="text-[11px] text-text-faint uppercase tracking-wider">
-                                  Scopes
-                                </div>
-                                <div className="font-mono mt-0.5 break-all text-xs">
-                                  {principalEntry.scopes.join(', ')}
-                                </div>
-                              </div>
-                            ) : null}
-                          </>
-                        ) : (
-                          <p className="text-xs text-text-faint">
-                            Token is bound on the upstream but no credential
-                            details are available right now.
-                          </p>
-                        )}
-                      </div>
-                    )}
-                  </CardBody>
-                </Card>
-              );
-            })()
-          : null}
       </div>
 
       <Modal
