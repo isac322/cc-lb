@@ -3,7 +3,7 @@ use std::sync::Arc;
 use anyhow::{Result, ensure};
 use cc_lb_storage_api::{
     UpstreamStore, UpstreamWarmupAttemptStore, WarmupAttemptListFilters, WarmupAttemptOutcome,
-    WarmupAttemptSummary,
+    WarmupAttemptReason, WarmupAttemptSummary,
 };
 
 use crate::{
@@ -43,12 +43,9 @@ macro_rules! scenario {
 
 scenario!(insert_and_read_back, |storage| async move {
     let upstream = create_upstream(storage.as_ref(), "warmup-insert-read").await?;
-    let record = attempt(
-        upstream.id,
-        1,
-        1_800_000_000,
-        WarmupAttemptOutcome::SuccessFresh,
-    );
+    let record = attempt(upstream.id, 1, 1_800_000_000, WarmupAttemptOutcome::Skipped);
+    let mut record = record;
+    record.reason = Some(WarmupAttemptReason::SevenDayQuotaExhausted);
     storage.insert_warmup_attempt(&record).await?;
 
     ensure!(
