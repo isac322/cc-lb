@@ -1,3 +1,5 @@
+#![cfg(all(feature = "sqlite", not(feature = "postgres")))]
+
 use std::error::Error;
 use std::str::FromStr as _;
 use std::time::Duration;

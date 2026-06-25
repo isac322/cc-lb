@@ -1,3 +1,5 @@
+#![cfg(all(feature = "sqlite", not(feature = "postgres")))]
+
 //! Spike: apalis-sqlite idempotency-key uniqueness divergence (SQLite half).
 //!
 //! Confirms three behavioral facts at the raw-SQL level:

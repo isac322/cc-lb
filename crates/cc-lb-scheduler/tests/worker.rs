@@ -1,3 +1,5 @@
+#![cfg(all(feature = "sqlite", not(feature = "postgres")))]
+
 use std::str::FromStr as _;
 use std::sync::Arc;
 use std::time::Duration;
