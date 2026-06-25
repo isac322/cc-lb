@@ -45,6 +45,8 @@ export const COPY = {
       'Warmup failed: the dialect plugin raised an error. Check plugin logs.',
     oauth_credentials_missing:
       'Warmup cannot fire: this upstream has no OAuth credentials yet. Complete the OAuth flow first.',
+    seven_day_quota_exhausted:
+      'Warmup skipped: the 7-day subscription quota is exhausted. The scheduler will retry after the reset window.',
     transient:
       'Warmup failed transiently. The background loop will retry automatically.',
   },

@@ -136,6 +136,7 @@ describe('useFireNowUpstreamWarmup', () => {
   test.each([
     [400, makeFireNowError('oauth_credentials_missing')],
     [502, makeFireNowError('auth_failed')],
+    [503, makeFireNowError('seven_day_quota_exhausted')],
     [503, makeFireNowError('transient')],
   ])('returns %i error body and still invalidates queries after fire-now attempt', async (status, response) => {
     stubFetchOnce(response, { status });

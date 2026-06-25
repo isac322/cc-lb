@@ -687,6 +687,7 @@ export type FireNowErrorReason =
   | 'not_found'
   | 'dialect_plugin_failed'
   | 'oauth_credentials_missing'
+  | 'seven_day_quota_exhausted'
   | 'transient';
 
 export type FireNowResponse =
