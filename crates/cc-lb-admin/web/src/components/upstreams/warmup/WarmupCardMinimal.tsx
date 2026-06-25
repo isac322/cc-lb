@@ -1,3 +1,4 @@
+import { HelpCircle, History, Zap } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
 import {
@@ -18,22 +19,37 @@ import {
   useWarmupSummary,
 } from '../../../lib/queries';
 import {
+  Badge,
   Button,
   Card,
   CardBody,
   CardHeader,
   ConfirmDialog,
   cx,
-  INPUT_CLASS,
+  Hint,
   StatusBadge,
 } from '../../ui/primitives';
-import { RelativeTime, ResetCountdown } from '../../ui/RelativeTime';
+import { RelativeTime } from '../../ui/RelativeTime';
 import { REASON_LABEL } from './parts/copy';
 import { WarmupConfigModal } from './parts/WarmupConfigModal';
-import { WarmupOutcomeBadge } from './parts/WarmupOutcomeBadge';
-import { WarmupRecentStrip } from './parts/WarmupRecentStrip';
-import { detectActiveIncident, formatDuration } from './parts/warmupViewModel';
+import { detectActiveIncident } from './parts/warmupViewModel';
 import { WarmupHistoryDrawer } from './WarmupHistoryDrawer';
+
+const LAST_OUTCOME_LABEL = {
+  success_fresh: 'Success',
+  success_redundant: 'Success',
+  transient_failure: 'Retrying',
+  permanent_failure: 'Failed',
+  skipped: 'Skipped',
+} as const;
+
+const LAST_OUTCOME_TONE = {
+  success_fresh: 'ok',
+  success_redundant: 'ok',
+  transient_failure: 'warn',
+  permanent_failure: 'danger',
+  skipped: 'neutral',
+} as const;
 
 function pluginSupportsSlot(
   p: { supported_slots?: string[]; slot?: string },
@@ -78,6 +94,50 @@ function currentRevisionFromError(err: unknown): number | null {
     (body as { current_revision?: unknown }).current_revision,
   );
   return Number.isFinite(current) ? current : null;
+}
+
+function HelpIcon({
+  label,
+  text,
+}: {
+  readonly label: string;
+  readonly text: string;
+}) {
+  return (
+    <Hint
+      label={
+        <span className="block max-w-72 whitespace-normal leading-5">
+          {text}
+        </span>
+      }
+      side="top"
+    >
+      <span
+        aria-label={label}
+        className="inline-flex h-4 w-4 cursor-help items-center justify-center text-text-faint transition-colors hover:text-text"
+      >
+        <HelpCircle className="h-3.5 w-3.5" />
+      </span>
+    </Hint>
+  );
+}
+
+function WarmupHelpHover() {
+  return (
+    <HelpIcon
+      label="Warm-up help"
+      text="Warm-up sends a tiny background Anthropic request when idle time would otherwise stall the next 5h window. Returning users land in an active window instead of starting one late."
+    />
+  );
+}
+
+function ShapePluginHelpHover() {
+  return (
+    <HelpIcon
+      label="Shape plugin help"
+      text="Warm-up is also an Anthropic request. Shape plugin applies the same request transform used for proxied traffic to that small warm-up prompt."
+    />
+  );
 }
 
 export function WarmupCardMinimal({ upstream }: { upstream: Upstream }) {
@@ -272,6 +332,10 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
     }
   };
 
+  const openHistory = () => {
+    setDrawerOpen(true);
+  };
+
   const shapePlugins =
     registry.data?.entries.filter((p: PluginEntry) =>
       pluginSupportsSlot(p, 'shape'),
@@ -321,31 +385,12 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
     <div className="flex items-center gap-2">
       <StatusBadge tone={statusTone} label={statusLabel} />
       <span>Warm-up</span>
+      <WarmupHelpHover />
     </div>
   );
 
   const headerActions = (
-    <div className="flex items-center gap-2">
-      <Button
-        variant="ghost"
-        size="sm"
-        className="bg-overlay-2"
-        data-testid="warmup-history-button"
-        onClick={() => setDrawerOpen(true)}
-      >
-        History →
-      </Button>
-      {upstream.enabled && upstream.warmup_enabled && (
-        <Button
-          variant="secondary"
-          size="sm"
-          data-testid="warmup-fire-now"
-          onClick={() => setConfirmFireOpen(true)}
-          disabled={fireWarmup.isPending || fireCooldown}
-        >
-          ⚡ {COPY.fireNowButtonLabel}
-        </Button>
-      )}
+    <div className="flex items-center">
       <button
         type="button"
         role="switch"
@@ -355,15 +400,15 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
         disabled={settingsPending || !upstream.enabled}
         onClick={handleToggle}
         className={cx(
-          'relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors duration-200 ease-in-out border focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed',
+          'relative inline-flex h-5 w-9 shrink-0 items-center self-center rounded-full border transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed',
           upstream.warmup_enabled
-            ? 'bg-emerald-500 border-emerald-500'
+            ? 'bg-[color:var(--color-ok)] border-[color:var(--color-ok)]'
             : 'bg-overlay-5 border-subtle-strong hover:border-text-muted',
         )}
       >
         <span
           className={cx(
-            'pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
+            'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
             upstream.warmup_enabled ? 'translate-x-4' : 'translate-x-0.5',
           )}
         />
@@ -372,100 +417,22 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
   );
 
   const lastAttempt = summary?.last_attempt;
-  let supplementaryLine = '';
-
-  const renderPrimaryLine = () => {
-    if (!lastAttempt) return 'No warm-up attempts recorded yet.';
-    const reasonLabel = lastAttempt.reason
-      ? REASON_LABEL[lastAttempt.reason]
-      : 'unknown reason';
-    const timeNode = (
-      <RelativeTime ts={lastAttempt.attempted_at_unix_secs * 1000} />
-    );
-    const httpStatus = lastAttempt.http_status
-      ? `HTTP ${lastAttempt.http_status}`
-      : '';
-    const errorDetail = lastAttempt.error_detail
-      ? lastAttempt.error_detail.substring(0, 80) +
-        (lastAttempt.error_detail.length > 80 ? '...' : '')
-      : '';
-    const errorSuffix = [httpStatus, errorDetail].filter(Boolean).join(' · ');
-
-    switch (lastAttempt.outcome) {
-      case 'success_fresh':
-        if (
-          lastAttempt.idle_secs_since_prev_window != null &&
-          lastAttempt.idle_secs_since_prev_window > 0
-        ) {
-          supplementaryLine = `Upstream had been idle for ${formatDuration(lastAttempt.idle_secs_since_prev_window)} before this warm-up.`;
-        } else {
-          supplementaryLine =
-            'Triggered immediately after the previous 5h window ended.';
-        }
-        return <>Last attempt succeeded {timeNode}: opened a new 5h window.</>;
-      case 'success_redundant':
-        supplementaryLine =
-          'No new cycle was started — the upstream was already primed.';
-        return (
-          <>Last attempt succeeded {timeNode}: 5h window was already active.</>
-        );
-      case 'transient_failure':
-        supplementaryLine = `Scheduler will retry.${errorSuffix ? ` ${errorSuffix}` : ''}`;
-        return (
-          <>
-            Last attempt failed transiently {timeNode}: {reasonLabel}.
-          </>
-        );
-      case 'permanent_failure':
-        supplementaryLine = `Operator action required.${errorSuffix ? ` ${errorSuffix}` : ''}`;
-        return (
-          <>
-            Last attempt failed {timeNode}: {reasonLabel}.
-          </>
-        );
-      case 'skipped':
-        if (lastAttempt.reason === 'lease_held') {
-          supplementaryLine = `Another replica (${lastAttempt.lease_holder ?? 'unknown'}) held the lease for this cycle.`;
-        }
-        return (
-          <>
-            Last attempt skipped {timeNode}: {reasonLabel}.
-          </>
-        );
-    }
-  };
-
-  const primaryLineContent = renderPrimaryLine();
-
-  const recent7d = summary?.recent_summary_7d;
-  const successCount =
-    (recent7d?.success_fresh ?? 0) + (recent7d?.success_redundant ?? 0);
-  const failedCount =
-    (recent7d?.transient_failure ?? 0) + (recent7d?.permanent_failure ?? 0);
-  const skippedCount = recent7d?.skipped ?? 0;
-
-  const configObj =
-    pluginSnapshot?.config &&
-    typeof pluginSnapshot.config === 'object' &&
-    !Array.isArray(pluginSnapshot.config)
-      ? (pluginSnapshot.config as Record<string, unknown>)
-      : {};
-  const configKeys = Object.keys(configObj);
-  const configSummary =
-    configKeys.length === 0
-      ? '(no config)'
-      : configKeys.map((k) => `${k}=${String(configObj[k])}`).join(' · ');
 
   return (
     <>
-      <Card data-testid="warmup-card" data-variant="minimal" tabIndex={-1}>
+      <Card
+        data-testid="warmup-card"
+        data-variant="minimal"
+        tabIndex={-1}
+        className="w-full h-full flex flex-col"
+      >
         <CardHeader
           title={headerTitle}
-          subtitle="Keeps this upstream's 5h window primed before traffic arrives"
+          subtitle="Starts the next 5h window during idle gaps."
           action={headerActions}
-          className="flex-row items-start justify-between"
+          align="center"
         />
-        <CardBody className="flex flex-col gap-4">
+        <CardBody className="space-y-4 flex-1 flex flex-col">
           {staleRevisionVisible && (
             <div
               role="status"
@@ -507,214 +474,180 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
 
           <div
             className={cx(
-              'flex flex-col gap-4',
+              'flex-1 flex flex-col gap-4',
               !upstream.enabled && 'opacity-60 pointer-events-none',
             )}
           >
-            {/* Narrative Row */}
-            <div className="flex items-start gap-2">
-              {lastAttempt && (
-                <div className="mt-0.5 shrink-0">
-                  <WarmupOutcomeBadge outcome={lastAttempt.outcome} />
-                </div>
-              )}
-              <div className="flex flex-col">
-                <div className="text-sm text-text leading-tight">
-                  {primaryLineContent}
-                </div>
-                {supplementaryLine && (
-                  <div className="text-xs text-text-muted mt-1">
-                    {supplementaryLine}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Recent Activity Strip */}
-            <div className="flex flex-col gap-1.5">
-              <div className="flex items-center justify-between">
-                <span className="text-[11px] uppercase tracking-wider text-text-faint">
-                  Recent attempts
-                </span>
-                <span className="text-[11px] text-text-faint">
-                  Last 7d: {successCount} success · {failedCount} failed ·{' '}
-                  {skippedCount} skipped
-                </span>
-              </div>
-              <div className="flex items-center gap-2">
-                <WarmupRecentStrip
-                  attempts={summary?.recent_attempts}
-                  onClick={() => setDrawerOpen(true)}
-                />
-                <span className="text-[11px] text-text-muted ml-1">
-                  (click to view all)
-                </span>
-              </div>
-            </div>
-
-            {/* 3-Column Grid */}
-            <div className="grid grid-cols-1 sm:grid-cols-[1fr_1fr_1.5fr] gap-4 border-t border-subtle pt-3 w-full">
-              {/* Cell 1: Next Run */}
+            <div className="grid grid-cols-1 gap-4 border-b border-subtle pb-3 sm:grid-cols-2">
               <div className="flex flex-col gap-1">
                 <span className="text-[11px] uppercase tracking-wider text-text-faint">
-                  Next Run
+                  Next run
                 </span>
-                <div className="text-sm text-text">
+                <div className="text-sm font-medium text-text">
                   {summary?.next_scheduled_at_unix_secs ? (
-                    <ResetCountdown
+                    <RelativeTime
+                      compact
                       ts={summary.next_scheduled_at_unix_secs * 1000}
                     />
                   ) : (
                     <span className="text-text-muted">Not scheduled</span>
                   )}
                 </div>
-                <div className="text-[11px] text-text-faint">
-                  Scheduled by cc-lb
-                </div>
               </div>
 
-              {/* Cell 2: Last Attempt */}
               <div className="flex flex-col gap-1">
-                <span className="text-[11px] uppercase tracking-wider text-text-faint">
-                  Last Attempt
+                <span className="inline-flex items-center gap-1 text-[11px] uppercase tracking-wider text-text-faint">
+                  Last run
                 </span>
-                <div className="text-sm text-text" data-testid="warmup-last">
+                <div
+                  className="text-sm font-medium text-text"
+                  data-testid="warmup-last"
+                >
                   {lastAttempt ? (
-                    <RelativeTime
-                      ts={lastAttempt.attempted_at_unix_secs * 1000}
-                    />
+                    <button
+                      type="button"
+                      onClick={openHistory}
+                      className="rounded-sm text-left transition-colors hover:bg-overlay-2 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+                      aria-label="Open last warm-up attempt detail"
+                    >
+                      <div className="flex flex-wrap items-center gap-2 text-sm font-medium text-text">
+                        <Badge tone={LAST_OUTCOME_TONE[lastAttempt.outcome]}>
+                          {LAST_OUTCOME_LABEL[lastAttempt.outcome]}
+                        </Badge>
+                        <RelativeTime
+                          compact
+                          ts={lastAttempt.attempted_at_unix_secs * 1000}
+                        />
+                      </div>
+                    </button>
                   ) : upstream.status.last_warmup_at_unix_secs ? (
                     <RelativeTime
+                      compact
                       ts={upstream.status.last_warmup_at_unix_secs * 1000}
                     />
                   ) : (
                     <span className="text-text-muted">Never</span>
                   )}
                 </div>
-                {lastAttempt && (
-                  <div className="text-[11px] text-text-faint">
-                    {lastAttempt.outcome === 'success_fresh'
-                      ? 'Fresh window'
-                      : lastAttempt.outcome === 'success_redundant'
-                        ? 'Redundant window'
-                        : lastAttempt.outcome === 'skipped'
-                          ? 'Skipped'
-                          : 'Failed'}{' '}
-                    · {lastAttempt.trigger}
-                  </div>
-                )}
               </div>
+            </div>
 
-              {/* Cell 3: Shape plugin */}
-              <div className="flex flex-col gap-1">
-                <span className="text-[11px] uppercase tracking-wider text-text-faint">
-                  Shape plugin
-                </span>
-                {shapePlugins.length === 0 &&
-                !upstream.warmup_dialect_plugin ? (
-                  <div className="text-xs text-text-muted mt-1">
-                    <span>{COPY.noShapePluginsAvailable}</span>{' '}
-                    <a href="/plugins" className="text-accent hover:underline">
-                      Plugins
-                    </a>
-                  </div>
-                ) : (
-                  <div className="flex items-center gap-2 min-w-0 w-full">
-                    <select
-                      id="dialect-plugin-select"
-                      data-testid="warmup-plugin-select"
-                      className={cx(
-                        INPUT_CLASS,
-                        'flex-1 min-w-0 text-ellipsis',
-                      )}
-                      value={selectedPluginValue}
-                      onChange={handlePluginChange}
-                      disabled={settingsPending || !upstream.enabled}
-                      aria-label={COPY.dialectPluginLabel}
-                      title={selectedPluginValue || COPY.defaultPluginOption}
-                    >
-                      <option value="">{COPY.defaultPluginOption}</option>
-                      {selectedPluginValue && !selectedPluginKnown && (
-                        <option value={selectedPluginValue}>
-                          {COPY.unknownPluginTemplate.replace(
-                            '{id}',
-                            selectedPluginValue,
-                          )}
-                        </option>
-                      )}
-                      {shapePlugins.map((p: PluginEntry) => (
-                        <option key={p.id} value={p.id}>
-                          {p.name}
-                        </option>
-                      ))}
-                    </select>
-                    {upstream.warmup_dialect_plugin && (
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        data-testid="warmup-plugin-clear"
-                        onClick={() => setConfirmClearPluginOpen(true)}
-                        disabled={settingsPending || !upstream.enabled}
-                      >
-                        {COPY.clearPluginButtonLabel}
-                      </Button>
+            <div className="flex items-center justify-between gap-3">
+              <span className="inline-flex items-center gap-1.5 text-sm text-text-muted">
+                Shape plugin
+                <ShapePluginHelpHover />
+              </span>
+              {shapePlugins.length === 0 && !upstream.warmup_dialect_plugin ? (
+                <div className="text-xs text-text-muted">
+                  <span>{COPY.noShapePluginsAvailable}</span>{' '}
+                  <a href="/plugins" className="text-accent hover:underline">
+                    Plugins
+                  </a>
+                </div>
+              ) : (
+                <label className="inline-flex items-center gap-2 rounded-sm border border-subtle bg-overlay-2 px-2 py-1 text-xs text-text-muted">
+                  <select
+                    id="dialect-plugin-select"
+                    data-testid="warmup-plugin-select"
+                    className="max-w-[220px] bg-transparent font-mono text-text outline-none"
+                    value={selectedPluginValue}
+                    onChange={handlePluginChange}
+                    disabled={settingsPending || !upstream.enabled}
+                    aria-label={COPY.dialectPluginLabel}
+                    title={selectedPluginValue || COPY.defaultPluginOption}
+                  >
+                    <option value="">{COPY.defaultPluginOption}</option>
+                    {selectedPluginValue && !selectedPluginKnown && (
+                      <option value={selectedPluginValue}>
+                        {COPY.unknownPluginTemplate.replace(
+                          '{id}',
+                          selectedPluginValue,
+                        )}
+                      </option>
+                    )}
+                    {shapePlugins.map((p: PluginEntry) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+              )}
+            </div>
+
+            {lastAttempt?.error_detail && (
+              <div
+                className={cx(
+                  'rounded-sm border p-2 text-xs leading-relaxed',
+                  lastAttempt.outcome === 'permanent_failure'
+                    ? 'border-[color:var(--color-danger)]/30 bg-red-500/10 text-[color:var(--color-danger)]'
+                    : 'border-[color:var(--color-warn)]/30 bg-amber-500/10 text-[color:var(--color-warn)]',
+                )}
+              >
+                {lastAttempt.reason
+                  ? REASON_LABEL[lastAttempt.reason]
+                  : 'Warm-up failed'}
+                : {lastAttempt.error_detail}
+              </div>
+            )}
+
+            {(leasePanel || errorPanel) && (
+              <div className="flex flex-col gap-2 mt-2">
+                {leasePanel && (
+                  <div
+                    data-testid="warmup-lease-panel"
+                    role="status"
+                    aria-live="polite"
+                    className="text-xs text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded p-2"
+                  >
+                    {COPY.leaseHeldTemplate.replace(
+                      '{heldBy}',
+                      leasePanel.heldBy,
                     )}
                   </div>
                 )}
-                {upstream.warmup_dialect_plugin && pluginSnapshot && (
-                  <div className="flex flex-col gap-1 mt-1">
-                    <div
-                      className="text-[11px] font-mono text-text-faint truncate"
-                      title={configSummary}
-                    >
-                      {configSummary}
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <span className="text-[11px] text-text-faint">
-                        wire v{pluginSnapshot.wire_version}
-                      </span>
-                      <button
-                        type="button"
-                        className="text-[11px] text-text hover:underline shrink-0"
-                        onClick={() => setConfigOpen(true)}
-                      >
-                        View full config
-                      </button>
-                    </div>
+                {errorPanel && (
+                  <div
+                    data-testid="warmup-error-panel"
+                    data-reason={errorPanel.reason}
+                    role="alert"
+                    aria-live="polite"
+                    className="text-xs text-red-200 bg-red-500/10 border border-red-500/30 rounded p-2"
+                  >
+                    {COPY.fireErrorReasons[errorPanel.reason]}
                   </div>
                 )}
               </div>
-            </div>
+            )}
           </div>
 
-          {(leasePanel || errorPanel) && (
-            <div className="flex flex-col gap-2 mt-2">
-              {leasePanel && (
-                <div
-                  data-testid="warmup-lease-panel"
-                  role="status"
-                  aria-live="polite"
-                  className="text-xs text-amber-200 bg-amber-500/10 border border-amber-500/30 rounded p-2"
-                >
-                  {COPY.leaseHeldTemplate.replace(
-                    '{heldBy}',
-                    leasePanel.heldBy,
-                  )}
-                </div>
-              )}
-              {errorPanel && (
-                <div
-                  data-testid="warmup-error-panel"
-                  data-reason={errorPanel.reason}
-                  role="alert"
-                  aria-live="polite"
-                  className="text-xs text-red-200 bg-red-500/10 border border-red-500/30 rounded p-2"
-                >
-                  {COPY.fireErrorReasons[errorPanel.reason]}
-                </div>
-              )}
-            </div>
-          )}
+          <div className="grid grid-cols-2 gap-2 border-t border-subtle pt-3 mt-auto">
+            <Button
+              variant="secondary"
+              size="sm"
+              fullWidth
+              data-testid="warmup-fire-now"
+              onClick={() => setConfirmFireOpen(true)}
+              disabled={
+                fireWarmup.isPending ||
+                fireCooldown ||
+                !upstream.enabled ||
+                !upstream.warmup_enabled
+              }
+              iconLeft={<Zap className="h-3 w-3" />}
+            >
+              {COPY.fireNowButtonLabel}
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              data-testid="warmup-history-button"
+              onClick={() => openHistory()}
+              iconLeft={<History className="h-3 w-3" />}
+            >
+              History
+            </Button>
+          </div>
         </CardBody>
 
         <ConfirmDialog

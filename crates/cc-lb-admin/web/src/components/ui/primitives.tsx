@@ -21,16 +21,19 @@ export function CardHeader({
   action,
   subtitle,
   className,
+  align = 'start',
 }: {
-  title: ReactNode;
-  subtitle?: ReactNode;
-  action?: ReactNode;
-  className?: string;
+  readonly title: ReactNode;
+  readonly subtitle?: ReactNode;
+  readonly action?: ReactNode;
+  readonly className?: string;
+  readonly align?: 'start' | 'center';
 }) {
   return (
     <div
       className={cx(
-        'flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3 sm:gap-4 px-4 py-3 border-b border-subtle',
+        'flex flex-col sm:flex-row sm:justify-between gap-3 sm:gap-4 px-4 py-3 border-b border-subtle',
+        align === 'center' ? 'sm:items-center' : 'sm:items-start',
         className,
       )}
     >

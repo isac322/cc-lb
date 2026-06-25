@@ -6,7 +6,7 @@ export const COPY = {
   dialectPluginLabel: 'Shape plugin',
   defaultPluginOption: 'None (default request shape)',
   enableButtonLabel: 'Enable warmup',
-  fireNowButtonLabel: 'Fire warmup now',
+  fireNowButtonLabel: 'Fire now',
   clearPluginButtonLabel: 'Clear plugin',
   confirmFireTitle: 'Fire warmup now?',
   confirmFireConfirmLabel: 'Fire now',
