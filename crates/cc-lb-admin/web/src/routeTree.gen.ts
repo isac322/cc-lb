@@ -18,7 +18,6 @@ import { Route as LogsRouteImport } from './routes/logs'
 import { Route as CredentialsRouteImport } from './routes/credentials'
 import { Route as AuditRouteImport } from './routes/audit'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as MockupsWarmupRouteImport } from './routes/mockups.warmup'
 
 const UpstreamsRoute = UpstreamsRouteImport.update({
   id: '/upstreams',
@@ -65,11 +64,6 @@ const IndexRoute = IndexRouteImport.update({
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
-const MockupsWarmupRoute = MockupsWarmupRouteImport.update({
-  id: '/mockups/warmup',
-  path: '/mockups/warmup',
-  getParentRoute: () => rootRouteImport,
-} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -81,7 +75,6 @@ export interface FileRoutesByFullPath {
   '/settings': typeof SettingsRoute
   '/status': typeof StatusRoute
   '/upstreams': typeof UpstreamsRoute
-  '/mockups/warmup': typeof MockupsWarmupRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -93,7 +86,6 @@ export interface FileRoutesByTo {
   '/settings': typeof SettingsRoute
   '/status': typeof StatusRoute
   '/upstreams': typeof UpstreamsRoute
-  '/mockups/warmup': typeof MockupsWarmupRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -106,7 +98,6 @@ export interface FileRoutesById {
   '/settings': typeof SettingsRoute
   '/status': typeof StatusRoute
   '/upstreams': typeof UpstreamsRoute
-  '/mockups/warmup': typeof MockupsWarmupRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -120,7 +111,6 @@ export interface FileRouteTypes {
     | '/settings'
     | '/status'
     | '/upstreams'
-    | '/mockups/warmup'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -132,7 +122,6 @@ export interface FileRouteTypes {
     | '/settings'
     | '/status'
     | '/upstreams'
-    | '/mockups/warmup'
   id:
     | '__root__'
     | '/'
@@ -144,7 +133,6 @@ export interface FileRouteTypes {
     | '/settings'
     | '/status'
     | '/upstreams'
-    | '/mockups/warmup'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -157,7 +145,6 @@ export interface RootRouteChildren {
   SettingsRoute: typeof SettingsRoute
   StatusRoute: typeof StatusRoute
   UpstreamsRoute: typeof UpstreamsRoute
-  MockupsWarmupRoute: typeof MockupsWarmupRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -225,13 +212,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/mockups/warmup': {
-      id: '/mockups/warmup'
-      path: '/mockups/warmup'
-      fullPath: '/mockups/warmup'
-      preLoaderRoute: typeof MockupsWarmupRouteImport
-      parentRoute: typeof rootRouteImport
-    }
   }
 }
 
@@ -245,7 +225,6 @@ const rootRouteChildren: RootRouteChildren = {
   SettingsRoute: SettingsRoute,
   StatusRoute: StatusRoute,
   UpstreamsRoute: UpstreamsRoute,
-  MockupsWarmupRoute: MockupsWarmupRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
