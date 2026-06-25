@@ -1,8 +1,12 @@
 use super::*;
+use crate::scheduler_dispatch::warmup::quota::WarmupPreflightSkip;
 use cc_lb_plugin_api::{SubscriptionQuotaCandidateSnapshot, SubscriptionQuotaDataState};
 use cc_lb_storage_api::{SubscriptionQuotaStatus, SubscriptionQuotaWindow};
 
 use super::scheduling::POST_RESET_GUARD_SECS;
+
+const NOW_UNIX_SECS: i64 = 1_782_000_000;
+const NOW_UNIX_MILLIS: u64 = 1_782_000_000_000;
 
 #[test]
 fn next_warmup_task_schedules_after_reset_guard_and_jitter() {
@@ -33,8 +37,8 @@ fn quota_preflight_skips_fresh_seven_day_exhausted_snapshot() {
     )];
 
     assert_eq!(
-        quota_preflight_skip_from_snapshots(&snapshots, 1_782_000_000),
-        Some(WarmupPreflightSkip {
+        quota_preflight_decision_from_snapshots(&snapshots, NOW_UNIX_SECS),
+        WarmupQuotaPreflightDecision::Skip(WarmupPreflightSkip {
             reason: WarmupAttemptReason::SevenDayQuotaExhausted,
             cycle_key: Some(1_782_414_000),
         })
@@ -61,8 +65,8 @@ fn quota_preflight_prefers_seven_day_over_five_hour_snapshot() {
     ];
 
     assert_eq!(
-        quota_preflight_skip_from_snapshots(&snapshots, 1_782_000_000),
-        Some(WarmupPreflightSkip {
+        quota_preflight_decision_from_snapshots(&snapshots, NOW_UNIX_SECS),
+        WarmupQuotaPreflightDecision::Skip(WarmupPreflightSkip {
             reason: WarmupAttemptReason::SevenDayQuotaExhausted,
             cycle_key: Some(1_782_414_000),
         })
@@ -80,8 +84,8 @@ fn quota_preflight_skips_fresh_five_hour_active_snapshot() {
     )];
 
     assert_eq!(
-        quota_preflight_skip_from_snapshots(&snapshots, 1_782_000_000),
-        Some(WarmupPreflightSkip {
+        quota_preflight_decision_from_snapshots(&snapshots, NOW_UNIX_SECS),
+        WarmupQuotaPreflightDecision::Skip(WarmupPreflightSkip {
             reason: WarmupAttemptReason::WindowAlreadyActive,
             cycle_key: Some(1_782_018_000),
         })
@@ -108,8 +112,41 @@ fn quota_preflight_falls_through_for_stale_or_missing_snapshots() {
     ];
 
     assert_eq!(
-        quota_preflight_skip_from_snapshots(&snapshots, 1_782_000_000),
-        None
+        quota_preflight_decision_from_snapshots(&snapshots, NOW_UNIX_SECS),
+        WarmupQuotaPreflightDecision::Unknown
+    );
+}
+
+#[test]
+fn quota_preflight_sends_warmup_for_fresh_five_hour_inactive_snapshot() {
+    let snapshots = [quota_snapshot(
+        SubscriptionQuotaWindow::FiveHour,
+        SubscriptionQuotaDataState::Fresh,
+        Some(0.0),
+        Some(SubscriptionQuotaStatus::Allowed),
+        Some(1_781_982_000),
+    )];
+
+    assert_eq!(
+        quota_preflight_decision_from_snapshots(&snapshots, NOW_UNIX_SECS),
+        WarmupQuotaPreflightDecision::SendWarmup
+    );
+}
+
+#[test]
+fn quota_preflight_ignores_five_hour_snapshot_older_than_three_minutes() {
+    let snapshots = [quota_snapshot_with_observed_at(
+        SubscriptionQuotaWindow::FiveHour,
+        SubscriptionQuotaDataState::Fresh,
+        Some(0.2),
+        Some(SubscriptionQuotaStatus::Allowed),
+        Some(1_782_018_000),
+        NOW_UNIX_MILLIS - 181_000,
+    )];
+
+    assert_eq!(
+        quota_preflight_decision_from_snapshots(&snapshots, NOW_UNIX_SECS),
+        WarmupQuotaPreflightDecision::Unknown
     );
 }
 
@@ -119,6 +156,24 @@ fn quota_snapshot(
     utilization: Option<f64>,
     status: Option<SubscriptionQuotaStatus>,
     resets_at_unix_secs: Option<u64>,
+) -> SubscriptionQuotaCandidateSnapshot {
+    quota_snapshot_with_observed_at(
+        window,
+        state,
+        utilization,
+        status,
+        resets_at_unix_secs,
+        NOW_UNIX_MILLIS,
+    )
+}
+
+fn quota_snapshot_with_observed_at(
+    window: SubscriptionQuotaWindow,
+    state: SubscriptionQuotaDataState,
+    utilization: Option<f64>,
+    status: Option<SubscriptionQuotaStatus>,
+    resets_at_unix_secs: Option<u64>,
+    observed_at_unix_millis: u64,
 ) -> SubscriptionQuotaCandidateSnapshot {
     SubscriptionQuotaCandidateSnapshot {
         window: window.as_str().to_owned(),
@@ -133,7 +188,7 @@ fn quota_snapshot(
         extra_usage_enabled: None,
         extra_usage_monthly_limit: None,
         extra_usage_used_credits: None,
-        observed_at_unix_millis: Some(1_782_000_000_000),
+        observed_at_unix_millis: Some(observed_at_unix_millis),
         max_staleness_secs: 1_800,
         fallback_available: None,
         overage_in_use: None,

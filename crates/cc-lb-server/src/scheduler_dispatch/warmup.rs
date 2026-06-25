@@ -15,7 +15,8 @@ mod scheduling;
 mod support;
 
 use quota::{
-    WarmupPreflightSkip, quota_preflight_skip_from_snapshots, warmup_preflight_skip_reason,
+    WarmupQuotaPreflightDecision, quota_preflight_decision_from_snapshots,
+    warmup_preflight_skip_reason,
 };
 use request::WarmupDispatchAttempt;
 use scheduling::next_warmup_task;
@@ -44,27 +45,30 @@ impl SchedulerDispatch {
                 .await;
             return Ok(JobOutcome::Skip);
         }
-        if let Some(skip) = self.quota_preflight_skip(upstream.id) {
-            self.record_warmup_skip(
-                &upstream,
-                job,
-                expected_cycle_key,
-                skip.reason,
-                skip.cycle_key,
-                None,
-            )
-            .await;
-            if let Some(cycle_key) = skip.cycle_key {
-                self.write_next_warmup_after_quota_skip(upstream.id, cycle_key)
-                    .await?;
+        match self.quota_preflight_decision(upstream.id) {
+            WarmupQuotaPreflightDecision::Skip(skip) => {
+                self.record_warmup_skip(
+                    &upstream,
+                    job,
+                    expected_cycle_key,
+                    skip.reason,
+                    skip.cycle_key,
+                    None,
+                )
+                .await;
+                if let Some(cycle_key) = skip.cycle_key {
+                    self.write_next_warmup_after_quota_skip(upstream.id, cycle_key)
+                        .await?;
+                }
+                return Ok(JobOutcome::Skip);
             }
-            return Ok(JobOutcome::Skip);
+            WarmupQuotaPreflightDecision::SendWarmup | WarmupQuotaPreflightDecision::Unknown => {}
         }
         self.fire_warmup(&mut upstream, job, expected_cycle_key)
             .await
     }
 
-    fn quota_preflight_skip(&self, upstream_id: uuid::Uuid) -> Option<WarmupPreflightSkip> {
+    fn quota_preflight_decision(&self, upstream_id: uuid::Uuid) -> WarmupQuotaPreflightDecision {
         let view = self.dynamic_view.load();
         let max_staleness_secs = view.subscription_quota_routing_max_staleness_secs;
         drop(view);
@@ -73,7 +77,10 @@ impl SchedulerDispatch {
             now_unix_millis(),
             max_staleness_secs,
         );
-        quota_preflight_skip_from_snapshots(&snapshots, now_unix_secs_i64().ok()?)
+        let Ok(now_unix_secs) = now_unix_secs_i64() else {
+            return WarmupQuotaPreflightDecision::Unknown;
+        };
+        quota_preflight_decision_from_snapshots(&snapshots, now_unix_secs)
     }
 
     async fn fire_warmup(

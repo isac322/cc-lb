@@ -3,10 +3,19 @@ use cc_lb_storage_api::UpstreamRecord;
 use cc_lb_storage_api::upstream::UpstreamKind;
 use cc_lb_storage_api::{SubscriptionQuotaStatus, SubscriptionQuotaWindow, WarmupAttemptReason};
 
+const QUOTA_PREFLIGHT_MAX_AGE_SECS: i64 = 180;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(super) struct WarmupPreflightSkip {
     pub(super) reason: WarmupAttemptReason,
     pub(super) cycle_key: Option<i64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(super) enum WarmupQuotaPreflightDecision {
+    Skip(WarmupPreflightSkip),
+    SendWarmup,
+    Unknown,
 }
 
 pub(super) fn warmup_preflight_skip_reason(
@@ -27,10 +36,10 @@ pub(super) fn warmup_preflight_skip_reason(
     None
 }
 
-pub(super) fn quota_preflight_skip_from_snapshots(
+pub(super) fn quota_preflight_decision_from_snapshots(
     snapshots: &[SubscriptionQuotaCandidateSnapshot],
     now_unix_secs: i64,
-) -> Option<WarmupPreflightSkip> {
+) -> WarmupQuotaPreflightDecision {
     const SEVEN_DAY_WINDOWS: [SubscriptionQuotaWindow; 3] = [
         SubscriptionQuotaWindow::SevenDay,
         SubscriptionQuotaWindow::SevenDaySonnet,
@@ -41,26 +50,31 @@ pub(super) fn quota_preflight_skip_from_snapshots(
         if let Some(cycle_key) = snapshots
             .iter()
             .find(|snapshot| quota_snapshot_matches_window(snapshot, window))
-            .filter(|snapshot| quota_snapshot_is_fresh(snapshot))
+            .filter(|snapshot| quota_snapshot_is_usable(snapshot, now_unix_secs))
             .filter(|snapshot| quota_snapshot_is_exhausted(snapshot))
             .and_then(|snapshot| quota_snapshot_future_reset(snapshot, now_unix_secs))
         {
-            return Some(WarmupPreflightSkip {
+            return WarmupQuotaPreflightDecision::Skip(WarmupPreflightSkip {
                 reason: WarmupAttemptReason::SevenDayQuotaExhausted,
                 cycle_key: Some(cycle_key),
             });
         }
     }
 
-    snapshots
+    match snapshots
         .iter()
         .find(|snapshot| quota_snapshot_matches_window(snapshot, SubscriptionQuotaWindow::FiveHour))
-        .filter(|snapshot| quota_snapshot_is_fresh(snapshot))
-        .and_then(|snapshot| quota_snapshot_future_reset(snapshot, now_unix_secs))
-        .map(|cycle_key| WarmupPreflightSkip {
-            reason: WarmupAttemptReason::WindowAlreadyActive,
-            cycle_key: Some(cycle_key),
-        })
+        .filter(|snapshot| quota_snapshot_is_usable(snapshot, now_unix_secs))
+    {
+        Some(snapshot) => match quota_snapshot_future_reset(snapshot, now_unix_secs) {
+            Some(cycle_key) => WarmupQuotaPreflightDecision::Skip(WarmupPreflightSkip {
+                reason: WarmupAttemptReason::WindowAlreadyActive,
+                cycle_key: Some(cycle_key),
+            }),
+            None => WarmupQuotaPreflightDecision::SendWarmup,
+        },
+        None => WarmupQuotaPreflightDecision::Unknown,
+    }
 }
 
 fn quota_snapshot_matches_window(
@@ -70,8 +84,18 @@ fn quota_snapshot_matches_window(
     SubscriptionQuotaWindow::from_str(&snapshot.window) == Some(window)
 }
 
-fn quota_snapshot_is_fresh(snapshot: &SubscriptionQuotaCandidateSnapshot) -> bool {
+fn quota_snapshot_is_usable(
+    snapshot: &SubscriptionQuotaCandidateSnapshot,
+    now_unix_secs: i64,
+) -> bool {
     snapshot.state == SubscriptionQuotaDataState::Fresh
+        && snapshot
+            .observed_at_unix_millis
+            .and_then(|observed_at| i64::try_from(observed_at / 1_000).ok())
+            .is_some_and(|observed_at| {
+                let age_secs = now_unix_secs - observed_at;
+                (0..=QUOTA_PREFLIGHT_MAX_AGE_SECS).contains(&age_secs)
+            })
 }
 
 fn quota_snapshot_is_exhausted(snapshot: &SubscriptionQuotaCandidateSnapshot) -> bool {
