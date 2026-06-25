@@ -21,6 +21,7 @@ pub enum WarmupAttemptOutcome {
 #[serde(rename_all = "snake_case")]
 pub enum WarmupAttemptReason {
     WindowAlreadyActive,
+    SevenDayQuotaExhausted,
     #[serde(rename = "http_429_missing_cycle_key")]
     Http429MissingCycleKey,
     #[serde(rename = "upstream_5xx")]
@@ -281,11 +282,18 @@ mod tests {
             .map_err(|error| error.to_string());
         let upstream_5xx_reason = serde_json::to_string(&WarmupAttemptReason::Upstream5xx)
             .map_err(|error| error.to_string());
+        let seven_day_quota_exhausted_reason =
+            serde_json::to_string(&WarmupAttemptReason::SevenDayQuotaExhausted)
+                .map_err(|error| error.to_string());
 
         assert_eq!(
             http_429_reason.as_deref(),
             Ok("\"http_429_missing_cycle_key\"")
         );
         assert_eq!(upstream_5xx_reason.as_deref(), Ok("\"upstream_5xx\""));
+        assert_eq!(
+            seven_day_quota_exhausted_reason.as_deref(),
+            Ok("\"seven_day_quota_exhausted\"")
+        );
     }
 }

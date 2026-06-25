@@ -569,7 +569,7 @@ async fn create_upstream_from_oauth_draft(
             .await;
         }
     };
-    if let Err(error) = seed_oauth_bootstrap_tasks(&state, updated.id).await {
+    if let Err(error) = seed_oauth_bootstrap_tasks(&state, &updated).await {
         return rollback_oauth_draft_creation(
             storage.as_ref(),
             &payload.state_token,
@@ -747,7 +747,7 @@ async fn complete_oauth(
         Err(error) => return storage_error_response(&error),
     };
 
-    if let Err(error) = seed_oauth_bootstrap_tasks(&state, upstream_id).await {
+    if let Err(error) = seed_oauth_bootstrap_tasks(&state, &updated).await {
         return scheduler_error_response(&error);
     }
 
@@ -954,13 +954,24 @@ fn scheduler_error_response(error: &SchedulerError) -> Response {
 
 async fn seed_oauth_bootstrap_tasks(
     state: &AdminState,
-    upstream_id: Uuid,
+    upstream: &UpstreamRecord,
 ) -> Result<(), SchedulerError> {
     let Some(scheduler) = state.scheduler.as_ref() else {
         return Ok(());
     };
     let seed_secs = now_unix_secs();
-    for task in oauth_bootstrap_tasks(upstream_id, seed_secs) {
+    for task in oauth_bootstrap_tasks(upstream.id, seed_secs) {
+        match scheduler.push_adaptive_task(task).await {
+            Ok(()) | Err(SchedulerError::Conflict(_)) => {}
+            Err(error) => return Err(error),
+        }
+    }
+    if upstream.kind == UpstreamKind::AnthropicOauth
+        && upstream.warmup_enabled
+        && upstream.oauth_credentials.is_some()
+        && upstream.deleted_at_unix_secs.is_none()
+    {
+        let task = super::upstreams::warmup_bootstrap_task(upstream.id, seed_secs);
         match scheduler.push_adaptive_task(task).await {
             Ok(()) | Err(SchedulerError::Conflict(_)) => {}
             Err(error) => return Err(error),

@@ -137,6 +137,8 @@ struct UpstreamUpdateBody {
     #[serde(default)]
     api_key_value: Option<String>,
     #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(default)]
     warmup_enabled: Option<bool>,
     #[serde(default)]
     warmup_dialect_plugin: Option<UpstreamWarmupDialectPlugin>,
@@ -867,6 +869,7 @@ async fn record_fire_now_skip(
         completed_at_unix_secs: Some(now_unix_secs),
         result: WarmupAttemptExecutionResult::Skipped {
             reason,
+            cycle_key: None,
             error_detail,
         },
     })
@@ -906,6 +909,7 @@ async fn record_fire_now_failure(
 const fn warmup_attempt_reason_str(reason: WarmupAttemptReason) -> &'static str {
     match reason {
         WarmupAttemptReason::WindowAlreadyActive => "window_already_active",
+        WarmupAttemptReason::SevenDayQuotaExhausted => "seven_day_quota_exhausted",
         WarmupAttemptReason::Http429MissingCycleKey => "http_429_missing_cycle_key",
         WarmupAttemptReason::Upstream5xx => "upstream_5xx",
         WarmupAttemptReason::NetworkError => "network_error",
@@ -987,7 +991,7 @@ async fn update_upstream(
             base_url: body.base_url,
             api_key_ciphertext,
             oauth_token_generation: None,
-            enabled: None,
+            enabled: body.enabled,
             warmup_enabled: body.warmup_enabled,
             warmup_dialect_plugin: body.warmup_dialect_plugin,
         },
@@ -1040,7 +1044,10 @@ async fn seed_warmup_if_toggled(
     }
 }
 
-fn warmup_bootstrap_task(upstream_id: Uuid, seed_secs: u64) -> SchedulerPushTask<AdaptiveJob> {
+pub(super) fn warmup_bootstrap_task(
+    upstream_id: Uuid,
+    seed_secs: u64,
+) -> SchedulerPushTask<AdaptiveJob> {
     let job = UpstreamWarmupJob::new(upstream_id, seed_secs);
     SchedulerPushTask {
         args: AdaptiveJob::Warmup(job),
@@ -1464,6 +1471,9 @@ fn changed_fields(body: &UpstreamUpdateBody) -> Vec<&'static str> {
     }
     if body.api_key_env.is_some() || body.api_key_value.is_some() {
         fields.push("api_key_ciphertext");
+    }
+    if body.enabled.is_some() {
+        fields.push("enabled");
     }
     if body.warmup_enabled.is_some() {
         fields.push("warmup_enabled");

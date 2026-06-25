@@ -51,7 +51,7 @@ The table below lists every job type registered in the scheduler. This list is d
 
 | Name | Kind | Idempotency Key Shape | Retry Class | Cadence / Trigger | Idempotency / Effect Table | Max Latency Budget |
 |---|---|---|---|---|---|---|
-| **UpstreamWarmupJob** | Entity | `entity:warmup:<upstream_id>:<cycle_key>` | Entity | Enqueued by watchdog when warmup is due (every 5 hours) | `apalis.jobs` full unique idempotency key | 10s |
+| **UpstreamWarmupJob** | Entity | `adaptive:warmup:<upstream_id>:<cycle_key>` | Entity | Enqueued by watchdog when warmup is due (every 5 hours) | `apalis.jobs` full unique idempotency key | 10s |
 | **OAuthRefreshJob** | Entity | `entity:oauth_refresh:<upstream_id>:<expires_at_unix_secs>` | Entity | Enqueued by watchdog, proactively, or lazily when token is near expiry | `apalis.jobs` full unique idempotency key | 10s |
 | **AnthropicCompatRefreshJob** | Entity | `entity:anthropic_compat_refresh:<key>` | Entity | Enqueued via Reconcile for each compatibility key | `anthropic_compat_refresh_claims` | 10s |
 | **MetadataRefreshJob** | Entity | `entity:metadata_refresh:<upstream_id>:<generation>` | Entity | Enqueued after OAuth refresh completes | `metadata_refresh_claims` | 10s |

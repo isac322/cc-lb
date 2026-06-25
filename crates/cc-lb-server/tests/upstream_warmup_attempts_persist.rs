@@ -82,6 +82,7 @@ async fn warmup_attempt_executor_persists_one_row_for_each_outcome() {
             expected_idle_secs: None,
             result: WarmupAttemptExecutionResult::Skipped {
                 reason: WarmupAttemptReason::UpstreamDisabled,
+                cycle_key: None,
                 error_detail: None,
             },
         },

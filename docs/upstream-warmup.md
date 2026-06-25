@@ -83,6 +83,16 @@ The warm-up system logs its activity using tracing events. All events use the `w
 - **cycle_abandoned**: The warm-up cycle was abandoned, either because of missing observations or a permanent failure.
   - Fields: `upstream_id`, `reason`, `error` (optional)
 
+## Quota-aware scheduling
+
+Warm-up distinguishes the five-hour active window from seven-day quota exhaustion.
+
+If the local usage cache already shows a fresh active five-hour window, the warm-up attempt is skipped as `WindowAlreadyActive`; no provider request is sent. If a warm-up request or fresh usage cache shows the seven-day window is exhausted, the attempt is skipped as `SevenDayQuotaExhausted` instead. That skip records the reset cycle key so operators can tell the account is quota-blocked rather than merely already warm.
+
+Seven-day exhaustion does not stamp the upstream as successfully warmed. Instead, the scheduler enqueues the next warm-up after the seven-day reset at `reset + 30..59s`, using the idempotency key `adaptive:warmup:{upstream_id}:{reset}`. The 30-second guard lets Anthropic roll the window before cc-lb retries; the stable jitter avoids a thundering herd across upstreams.
+
+The watchdog treats any pending, queued, running, or retryable failed warm-up task with that cycle-key family as active, even when its `run_at` is in the future. It will not pull a future reset task forward. If the only remaining warm-up task is dead-lettered (`Failed` at max attempts or `Killed`), the watchdog may bootstrap a new immediate warm-up on its next tick.
+
 ## Multi-replica notes
 
 Warm-up is implemented as an Apalis entity job (`UpstreamWarmupJob`). Cross-replica coordination no longer depends on per-upstream scheduling columns.
