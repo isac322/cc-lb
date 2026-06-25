@@ -246,6 +246,32 @@ describe('useUpdateUpstreamWarmupSettings', () => {
     expect(init?.body).toBe(JSON.stringify(patch));
   });
 
+  test('PATCH body can carry enabled and warmup_enabled atomically', async () => {
+    const patch = { enabled: true, warmup_enabled: true };
+    const updatedUpstream = makeOauthUpstream({
+      id: UPSTREAM_ID,
+      spec_revision: SPEC_REVISION + 1,
+      ...patch,
+    });
+    const fetchMock = stubFetchOnce(updatedUpstream);
+    const client = makeClient();
+    const { result } = renderHook(() => useUpdateUpstreamWarmupSettings(), {
+      wrapper: makeWrapper(client),
+    });
+
+    await result.current.mutateAsync({
+      id: UPSTREAM_ID,
+      spec_revision: SPEC_REVISION,
+      body: patch,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const { url, init } = requestFrom(fetchMock);
+    expect(url).toBe(`/admin/v1/upstreams/${UPSTREAM_ID}`);
+    expect(init?.method).toBe('PATCH');
+    expect(init?.body).toBe(JSON.stringify(patch));
+  });
+
   test('returns updated upstream and invalidates upstream detail before list', async () => {
     const patch = { warmup_enabled: false };
     const updatedUpstream = makeOauthUpstream({
