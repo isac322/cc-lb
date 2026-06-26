@@ -31,7 +31,7 @@ impl ConfigStore for SqliteStorage {
         mut new: ConfigDraftState,
         expected_revision: u64,
     ) -> StorageResult<u64> {
-        let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
+        let mut tx = self.begin_immediate().await?;
         let current = read_config_draft_in_tx(&mut tx).await?;
         if current.revision != expected_revision {
             return Err(conflict("stale config draft revision"));
@@ -66,7 +66,7 @@ impl ConfigStore for SqliteStorage {
         revision: u64,
         error: Option<String>,
     ) -> StorageResult<()> {
-        let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
+        let mut tx = self.begin_immediate().await?;
         let mut state = read_config_draft_in_tx(&mut tx).await?;
         if state.revision != revision {
             return Err(conflict("stale config draft revision"));
@@ -109,7 +109,7 @@ impl ConfigStore for SqliteStorage {
             summary,
         };
         let payload = serde_json::to_string(&entry)?;
-        let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
+        let mut tx = self.begin_immediate().await?;
 
         sqlx::query(
             "INSERT INTO config_history_v1 (id, payload, created_at, updated_at) VALUES (?, ?, unixepoch(), unixepoch()) ON CONFLICT(id) DO UPDATE SET payload = excluded.payload, updated_at = excluded.updated_at",

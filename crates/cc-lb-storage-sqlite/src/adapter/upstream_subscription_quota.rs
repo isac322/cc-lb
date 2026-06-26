@@ -18,7 +18,7 @@ impl UpstreamSubscriptionQuotaStore for SqliteStorage {
         &self,
         records: &[SubscriptionQuotaObservationRecord],
     ) -> StorageResult<()> {
-        let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
+        let mut tx = self.begin_immediate().await?;
         for record in records {
             insert_observation(&mut tx, record).await?;
             upsert_latest(&mut tx, record).await?;
