@@ -226,6 +226,11 @@ pub enum DispatchMode {
     StreamingOk,
     Statuses(Arc<Mutex<VecDeque<StatusCode>>>),
     HeadersOk(HeaderMap),
+    Raw {
+        status: StatusCode,
+        headers: HeaderMap,
+        body: Bytes,
+    },
 }
 
 #[derive(Clone)]
@@ -254,6 +259,16 @@ impl UpstreamDispatch for MockDispatch {
                     StatusCode::OK,
                     json!({"type":"message","usage":{"input_tokens":1,"output_tokens":1}}),
                 );
+                *response.headers_mut() = headers.clone();
+                Ok(response)
+            }
+            DispatchMode::Raw {
+                status,
+                headers,
+                body,
+            } => {
+                let mut response = Response::new(Body::from(body.clone()));
+                *response.status_mut() = *status;
                 *response.headers_mut() = headers.clone();
                 Ok(response)
             }
