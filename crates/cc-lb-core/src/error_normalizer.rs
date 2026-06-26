@@ -87,18 +87,6 @@ impl ErrorNormalizer {
         make_error_frame_from_json(&error_json)
     }
 
-    pub(crate) fn build_http_error_response_with_dialect(
-        &self,
-        kind: UpstreamKind,
-        status: StatusCode,
-        body: &Bytes,
-        original_headers: &HeaderMap,
-        fallback_dialect: Option<&dyn UpstreamDialect>,
-    ) -> Response<Body> {
-        let body = self.normalize_http_error_with_dialect(kind, status, body, fallback_dialect);
-        response_from_error_body(status, body, original_headers)
-    }
-
     fn normalize_http_error_with_dialect(
         &self,
         kind: UpstreamKind,
