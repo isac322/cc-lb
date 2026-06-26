@@ -30,7 +30,7 @@ impl PluginRegistryStore for SqliteStorage {
         validate_identifier("plugin.name", &input.name)?;
         validate_blob(&blob)?;
 
-        let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
+        let mut tx = self.begin_immediate().await?;
         let now = unix_secs_to_i64(blob.parse_validated_at_unix_secs, "wasm_blob.created_at")?;
         let blob_insert = sqlx::query(
             "INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, refcount, created_at) VALUES (?, ?, ?, ?, 0, ?) ON CONFLICT(sha256) DO NOTHING",
@@ -178,7 +178,7 @@ impl PluginRegistryStore for SqliteStorage {
         expected_revision: u64,
         label: Option<String>,
     ) -> StorageResult<WasmRegistryEntry> {
-        let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
+        let mut tx = self.begin_immediate().await?;
         let current = registry_revision_in_tx(&mut tx, id).await?;
         if current != expected_revision {
             return Err(StorageError::StalePluginRegistryRevision { current });
@@ -225,7 +225,7 @@ impl PluginRegistryStore for SqliteStorage {
         id: Uuid,
         expected_revision: u64,
     ) -> StorageResult<Option<WasmRegistryEntry>> {
-        let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
+        let mut tx = self.begin_immediate().await?;
         let Some(entry) = registry_by_id_in_tx(&mut tx, id).await? else {
             tx.commit().await.map_err(map_sqlx_error)?;
             return Ok(None);
@@ -265,7 +265,7 @@ impl PluginRegistryStore for SqliteStorage {
     }
 
     async fn decrement_blob_refcount_or_delete(&self, sha256: [u8; 32]) -> StorageResult<bool> {
-        let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
+        let mut tx = self.begin_immediate().await?;
         let referenced: Option<Vec<u8>> =
             sqlx::query_scalar("SELECT sha256 FROM wasm_registry_v2 WHERE sha256 = ? LIMIT 1")
                 .bind(sha256.as_slice())
@@ -291,7 +291,7 @@ impl PluginRegistryStore for SqliteStorage {
         &self,
         input: PluginChainEntryInput,
     ) -> StorageResult<PluginChainEntry> {
-        let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
+        let mut tx = self.begin_immediate().await?;
         let sha256 = sha_for_registry_id_in_tx(&mut tx, input.wasm_registry_id)
             .await?
             .ok_or_else(|| StorageError::PluginRegistryConflict {
@@ -425,7 +425,7 @@ impl PluginRegistryStore for SqliteStorage {
         slot: PluginSlot,
         new_orders: Vec<(Uuid, i64, u64)>,
     ) -> StorageResult<Vec<PluginChainEntry>> {
-        let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
+        let mut tx = self.begin_immediate().await?;
         let mut staged_orders = HashMap::with_capacity(new_orders.len());
         let mut seen_ids = HashSet::with_capacity(new_orders.len());
         for (id, order, expected_revision) in &new_orders {
@@ -518,7 +518,7 @@ impl PluginRegistryStore for SqliteStorage {
                 current: entry.revision,
             });
         }
-        let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
+        let mut tx = self.begin_immediate().await?;
         let result = sqlx::query("DELETE FROM plugin_chains_v2 WHERE id = ? AND revision = ?")
             .bind(id.to_string())
             .bind(u64_to_i64(expected_revision, "plugin_chain.revision")?)

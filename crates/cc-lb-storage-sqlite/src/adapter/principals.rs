@@ -4,7 +4,7 @@ use cc_lb_storage_api::{
     StorageResult, validate_identifier,
 };
 use serde_json::Value;
-use sqlx::{Row, Sqlite, SqlitePool, Transaction, sqlite::SqliteRow};
+use sqlx::{Row, Sqlite, Transaction, sqlite::SqliteRow};
 use uuid::Uuid;
 
 use crate::{SqliteStorage, map_sqlx_error};
@@ -159,7 +159,7 @@ impl PrincipalStore for SqliteStorage {
         now_unix_secs: u64,
     ) -> StorageResult<Option<PrincipalRecord>> {
         let now = u64_to_i64(now_unix_secs, "principal.deleted_at")?;
-        let mut tx = begin_immediate(self.pool()).await?;
+        let mut tx = self.begin_immediate().await?;
         let row = sqlx::query(
             "UPDATE principals_v1 SET deleted_at = ?, updated_at = ?, revision = revision + 1 WHERE id = ? AND revision = ? AND deleted_at IS NULL RETURNING id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, revision, created_at, updated_at, last_apply_error, last_apply_at, deleted_at",
         )
@@ -179,7 +179,7 @@ impl PrincipalStore for SqliteStorage {
     }
 
     async fn hard_delete(&self, id: Uuid) -> StorageResult<bool> {
-        let mut tx = begin_immediate(self.pool()).await?;
+        let mut tx = self.begin_immediate().await?;
         let audit_refs = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(1) FROM audit_log_v1 WHERE principal_id = ?",
         )
@@ -350,12 +350,6 @@ async fn cascade_plugin_chains_in_tx(
         .map_err(map_sqlx_error)?;
     }
     Ok(())
-}
-
-async fn begin_immediate(pool: &SqlitePool) -> StorageResult<Transaction<'static, Sqlite>> {
-    pool.begin_with("BEGIN IMMEDIATE")
-        .await
-        .map_err(map_sqlx_error)
 }
 
 fn principal_from_row(row: SqliteRow) -> StorageResult<PrincipalRecord> {

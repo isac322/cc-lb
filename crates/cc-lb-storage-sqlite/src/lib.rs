@@ -2,7 +2,7 @@ use std::{str::FromStr, time::Duration};
 
 use cc_lb_storage_api::{StorageError, StorageResult};
 use sqlx::{
-    SqlitePool,
+    Sqlite, SqlitePool, Transaction,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 
@@ -21,6 +21,16 @@ impl SqliteStorage {
     pub fn pool(&self) -> &SqlitePool {
         &self.pool
     }
+
+    pub async fn begin_immediate(&self) -> StorageResult<Transaction<'static, Sqlite>> {
+        begin_immediate(&self.pool).await
+    }
+}
+
+pub async fn begin_immediate(pool: &SqlitePool) -> StorageResult<Transaction<'static, Sqlite>> {
+    pool.begin_with("BEGIN IMMEDIATE")
+        .await
+        .map_err(map_sqlx_error)
 }
 
 pub async fn open_sqlite(database_url: &str) -> StorageResult<SqliteStorage> {

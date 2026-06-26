@@ -102,7 +102,7 @@ impl UpstreamStore for SqliteStorage {
     }
 
     async fn set_status(&self, id: Uuid, status: UpstreamStatusUpdate) -> StorageResult<()> {
-        let mut tx = begin_immediate(self.pool()).await?;
+        let mut tx = self.begin_immediate().await?;
         ensure_split_spec_active_in_tx(&mut tx, id).await?;
         set_split_status_in_tx(&mut tx, id, status).await?;
         tx.commit().await.map_err(map_sqlx_error)
@@ -146,7 +146,7 @@ impl UpstreamStore for SqliteStorage {
     }
 
     async fn soft_delete(&self, id: Uuid, expected_revision: u64) -> StorageResult<()> {
-        let mut tx = begin_immediate(self.pool()).await?;
+        let mut tx = self.begin_immediate().await?;
         let row = sqlx::query(
             "UPDATE upstream_spec_v1 SET deleted_at = unixepoch(), spec_revision = spec_revision + 1, updated_at = unixepoch() WHERE id = ? AND spec_revision = ? AND deleted_at IS NULL RETURNING id",
         )
@@ -162,7 +162,7 @@ impl UpstreamStore for SqliteStorage {
     }
 
     async fn hard_delete(&self, id: Uuid) -> StorageResult<()> {
-        let mut tx = begin_immediate(self.pool()).await?;
+        let mut tx = self.begin_immediate().await?;
         sqlx::query("DELETE FROM upstream_spec_v1 WHERE id = ?")
             .bind(id.to_string())
             .execute(&mut *tx)
@@ -176,7 +176,7 @@ impl UpstreamStore for SqliteStorage {
         id: Uuid,
         expected_revision: u64,
     ) -> StorageResult<Option<UpstreamRecord>> {
-        let mut tx = begin_immediate(self.pool()).await?;
+        let mut tx = self.begin_immediate().await?;
         let row = sqlx::query(
             "UPDATE upstream_spec_v1 SET warmup_dialect_plugin = NULL, spec_revision = spec_revision + 1, updated_at = unixepoch() WHERE id = ? AND spec_revision = ? AND deleted_at IS NULL RETURNING id",
         )
@@ -197,7 +197,7 @@ async fn create_split(
     storage: &SqliteStorage,
     create: UpstreamCreate,
 ) -> StorageResult<UpstreamRecord> {
-    let mut tx = begin_immediate(storage.pool()).await?;
+    let mut tx = storage.begin_immediate().await?;
     let id = Uuid::new_v4();
     sqlx::query(
         "INSERT INTO upstream_spec_v1 (id, name, kind, base_url, enabled, warmup_enabled, warmup_dialect_plugin, spec_revision, created_at, updated_at) VALUES (?, ?, ?, ?, 1, ?, ?, 1, unixepoch(), unixepoch())",
@@ -337,7 +337,7 @@ async fn update_split_spec(
     if let Some(name) = update.name.as_deref() {
         validate_identifier("upstream.name", name)?;
     }
-    let mut tx = begin_immediate(storage.pool()).await?;
+    let mut tx = storage.begin_immediate().await?;
     let warmup_dialect_plugin = json_string(update.warmup_dialect_plugin.as_ref())?;
     let row = sqlx::query(
         "UPDATE upstream_spec_v1
@@ -375,7 +375,7 @@ async fn update_split_api_key_secret(
     id: Uuid,
     api_key_ciphertext: Option<Vec<u8>>,
 ) -> StorageResult<UpstreamRecord> {
-    let mut tx = begin_immediate(storage.pool()).await?;
+    let mut tx = storage.begin_immediate().await?;
     ensure_split_spec_active_in_tx(&mut tx, id).await?;
     sqlx::query(
         "INSERT INTO upstream_api_key_secret_v1 (upstream_id, api_key_ciphertext, secret_revision, created_at, updated_at)
@@ -402,7 +402,7 @@ async fn update_split_oauth_token(
     tokens: EncryptedOAuthTokens,
     expected_revision: Option<u64>,
 ) -> StorageResult<UpstreamRecord> {
-    let mut tx = begin_immediate(storage.pool()).await?;
+    let mut tx = storage.begin_immediate().await?;
     if let Some(expected_revision) = expected_revision {
         ensure_split_spec_revision_in_tx(&mut tx, id, expected_revision).await?;
     } else {
@@ -433,7 +433,7 @@ async fn update_split_oauth_token_generation(
     id: Uuid,
     generation: u64,
 ) -> StorageResult<()> {
-    let mut tx = begin_immediate(storage.pool()).await?;
+    let mut tx = storage.begin_immediate().await?;
     ensure_split_spec_active_in_tx(&mut tx, id).await?;
     sqlx::query(
         "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, token_revision, oauth_token_generation, refreshed_at, created_at, updated_at)
@@ -456,7 +456,7 @@ async fn complete_split_refresh(
     _holder: Uuid,
     tokens: EncryptedOAuthTokens,
 ) -> StorageResult<()> {
-    let mut tx = begin_immediate(storage.pool()).await?;
+    let mut tx = storage.begin_immediate().await?;
     ensure_split_spec_active_in_tx(&mut tx, id).await?;
     sqlx::query(
         "INSERT INTO upstream_oauth_token_v1 (upstream_id, oauth_credentials_ciphertext, token_revision, oauth_token_generation, refreshed_at, created_at, updated_at)
@@ -509,9 +509,20 @@ async fn ensure_split_spec_revision(
     id: Uuid,
     expected_revision: u64,
 ) -> StorageResult<()> {
-    let mut tx = begin_immediate(pool).await?;
-    ensure_split_spec_revision_in_tx(&mut tx, id, expected_revision).await?;
-    tx.commit().await.map_err(map_sqlx_error)
+    let current: Option<i64> = sqlx::query_scalar(
+        "SELECT spec_revision FROM upstream_spec_v1 WHERE id = ? AND deleted_at IS NULL",
+    )
+    .bind(id.to_string())
+    .fetch_optional(pool)
+    .await
+    .map_err(map_sqlx_error)?;
+    match current {
+        Some(current) if i64_to_u64(current, "upstream spec revision")? == expected_revision => {
+            Ok(())
+        }
+        Some(_) => Err(conflict("stale upstream revision")),
+        None => Err(conflict("upstream not found")),
+    }
 }
 
 async fn ensure_split_spec_revision_in_tx(
@@ -618,12 +629,6 @@ async fn set_split_status_in_tx(
     .await
     .map_err(map_sqlx_error)?;
     Ok(())
-}
-
-async fn begin_immediate(pool: &SqlitePool) -> StorageResult<Transaction<'static, Sqlite>> {
-    pool.begin_with("BEGIN IMMEDIATE")
-        .await
-        .map_err(map_sqlx_error)
 }
 
 fn split_row_to_record(row: SqliteRow) -> StorageResult<UpstreamRecord> {

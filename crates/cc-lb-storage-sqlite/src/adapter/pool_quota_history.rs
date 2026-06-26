@@ -16,7 +16,7 @@ impl PoolQuotaHistoryStore for SqliteStorage {
         if records.is_empty() {
             return Ok(());
         }
-        let mut tx = self.pool().begin().await.map_err(map_sqlx_error)?;
+        let mut tx = self.begin_immediate().await?;
         for record in records {
             sqlx::query(
                 r#"INSERT INTO pool_subscription_quota_history_v1 (
