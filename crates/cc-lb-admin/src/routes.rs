@@ -10,7 +10,6 @@ use axum::{
 use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_storage_api::{Storage, StorageError};
 use http_body_util::BodyExt;
-use rust_embed::RustEmbed;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
@@ -18,11 +17,8 @@ use crate::{
     AdminState,
     auth::require_admin_auth,
     principals::{principal_key_usage, principal_limits, principal_usage},
+    static_assets::{serve_asset, serve_index},
 };
-
-#[derive(RustEmbed)]
-#[folder = "web/dist/"]
-struct Assets;
 
 pub fn build_router(state: AdminState) -> Router {
     let protected_routes = Router::new()
@@ -250,28 +246,6 @@ async fn mutate_api_key(
     };
     result.map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(json!({ "status": "ok" })))
-}
-
-async fn serve_index() -> impl IntoResponse {
-    serve_asset(Path("index.html".to_string())).await
-}
-
-async fn serve_asset(Path(file): Path<String>) -> impl IntoResponse {
-    if let Some(content) = Assets::get(&file) {
-        let mime = mime_guess::from_path(&file).first_or_octet_stream();
-        return ([(header::CONTENT_TYPE, mime.as_ref())], content.data).into_response();
-    }
-    if file.starts_with("admin/") {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    match Assets::get("index.html") {
-        Some(content) => (
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-            content.data,
-        )
-            .into_response(),
-        None => StatusCode::NOT_FOUND.into_response(),
-    }
 }
 
 async fn health(State(state): State<AdminState>) -> Json<Value> {
