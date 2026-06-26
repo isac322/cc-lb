@@ -94,7 +94,7 @@ tokio = { workspace = true, features = ["fs", "io-util", "net", "process", "rt",
 tokio-util.workspace = true
 tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12"] }
 tower = { workspace = true, features = ["timeout", "util"] }
-tower-http = { workspace = true, features = ["compression-br", "compression-gzip"] }
+tower-http = { workspace = true, features = ["compression-br", "compression-gzip", "set-header"] }
 tracing.workspace = true
 url.workspace = true
 uuid = { workspace = true, features = ["v4", "serde"] }

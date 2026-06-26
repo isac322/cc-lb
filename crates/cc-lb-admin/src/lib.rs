@@ -11,6 +11,7 @@ pub mod principals;
 pub mod routes;
 pub mod scheduler;
 pub mod settings;
+mod static_assets;
 pub mod status;
 pub mod subscription_quotas;
 pub mod v1;
