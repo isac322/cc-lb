@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use async_trait::async_trait;
 use cc_lb_storage_api::{
     AugmentedMetadata, BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_SHA256,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256,
     MAX_WASM_BLOB_BYTES, PluginBlobRepo, PluginChainConflictReason, PluginChainEntry,
     PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryRecord, PluginRegistryRepo,
     PluginRegistryStatus, PluginRegistryStore, PluginSlot, RepoError, StorageError, StorageResult,
@@ -771,6 +772,10 @@ fn registry_from_row(row: SqliteRow) -> StorageResult<WasmRegistryEntry> {
     if id == BUILTIN_CACHE_AFFINITY_ID || sha256 == BUILTIN_CACHE_AFFINITY_SHA256 {
         return Ok(WasmRegistryEntry::builtin_cache_affinity(refcount));
     }
+    if id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID || sha256 == BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256
+    {
+        return Ok(WasmRegistryEntry::builtin_subscription_preference(refcount));
+    }
     let uploaded_by = parse_uuid(
         &row.try_get::<String, _>("uploaded_by_admin_id")
             .map_err(map_sqlx_error)?,
@@ -905,6 +910,9 @@ async fn sha_for_registry_id_in_tx(
 ) -> StorageResult<Option<[u8; 32]>> {
     if id == BUILTIN_CACHE_AFFINITY_ID {
         return Ok(Some(BUILTIN_CACHE_AFFINITY_SHA256));
+    }
+    if id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
+        return Ok(Some(BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256));
     }
     let value: Option<Vec<u8>> =
         sqlx::query_scalar("SELECT sha256 FROM wasm_registry_v2 WHERE id = ?")
