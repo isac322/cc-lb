@@ -9,9 +9,9 @@ use axum::{
 };
 use cc_lb_core::{AuditEntry, AuditPayload};
 use cc_lb_storage_api::{
-    BUILTIN_CACHE_AFFINITY_ID, PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput,
-    PluginChainEntryUpdate, PluginMetadata, PluginSlot, PrincipalStore, Storage, StorageError,
-    WasmRegistryEntry, sparse_order,
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginChainConflictReason,
+    PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate, PluginMetadata, PluginSlot,
+    PrincipalStore, Storage, StorageError, WasmRegistryEntry, sparse_order,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -182,6 +182,12 @@ async fn list_registry(
     {
         all.push(WasmRegistryEntry::builtin_cache_affinity(0));
     }
+    if !all
+        .iter()
+        .any(|entry| entry.id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID)
+    {
+        all.push(WasmRegistryEntry::builtin_subscription_preference(0));
+    }
     all.sort_by_key(|entry| entry.id);
     let total = all.len();
     let start = query
@@ -232,7 +238,7 @@ async fn patch_registry(
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
-    if id == BUILTIN_CACHE_AFFINITY_ID {
+    if id == BUILTIN_CACHE_AFFINITY_ID || id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
         return builtin_plugin_immutable();
     }
     match storage
@@ -259,7 +265,7 @@ async fn delete_registry(
     let Some(storage) = state.storage.as_deref() else {
         return storage_unavailable();
     };
-    if id == BUILTIN_CACHE_AFFINITY_ID {
+    if id == BUILTIN_CACHE_AFFINITY_ID || id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
         return builtin_plugin_immutable();
     }
     match storage.delete_registry_entry(id, expected_revision).await {

@@ -1237,7 +1237,9 @@ pub async fn backfill_supported_slots(storage: &dyn Storage) {
     use cc_lb_runtime_extism::handshake::{
         build_offer, execute_handshake, slot_set_from_handshake,
     };
-    use cc_lb_storage_api::{BUILTIN_CACHE_AFFINITY_ID, PluginSlot};
+    use cc_lb_storage_api::{
+        BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginSlot,
+    };
 
     let entries = match storage.list_registry(None, usize::MAX).await {
         Ok(entries) => entries,
@@ -1254,7 +1256,7 @@ pub async fn backfill_supported_slots(storage: &dyn Storage) {
         if !entry.supported_slots.is_empty() {
             continue;
         }
-        if entry.id == BUILTIN_CACHE_AFFINITY_ID {
+        if entry.id == BUILTIN_CACHE_AFFINITY_ID || entry.id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
             if let Err(error) = storage
                 .update_supported_slots(entry.id, vec![PluginSlot::Router])
                 .await
@@ -1321,7 +1323,9 @@ pub async fn backfill_supported_slots(storage: &dyn Storage) {
 
 pub async fn backfill_wire_version(storage: &dyn Storage) {
     use cc_lb_runtime_extism::handshake::{build_offer, execute_handshake};
-    use cc_lb_storage_api::{BUILTIN_CACHE_AFFINITY_ID, default_wire_version};
+    use cc_lb_storage_api::{
+        BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, default_wire_version,
+    };
 
     let entries = match storage.list_registry(None, usize::MAX).await {
         Ok(entries) => entries,
@@ -1337,7 +1341,7 @@ pub async fn backfill_wire_version(storage: &dyn Storage) {
     let mut updated = 0_usize;
     let mut failed = 0_usize;
     for entry in entries {
-        if entry.id == BUILTIN_CACHE_AFFINITY_ID {
+        if entry.id == BUILTIN_CACHE_AFFINITY_ID || entry.id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
             continue;
         }
         if entry.is_builtin {
