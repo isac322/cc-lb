@@ -1,3 +1,4 @@
+import { Input as BaseInput } from '@base-ui/react/input';
 import { type KeyboardEvent, useEffect, useRef, useState } from 'react';
 import { toast } from 'sonner';
 import { type Upstream, useUpdateUpstream } from '../../lib/queries';
@@ -68,19 +69,19 @@ export function InlineNameEditor({ upstream, className }: Props) {
   if (isEditing) {
     return (
       <div className={cx('relative inline-block', className)}>
-        <input
-          ref={inputRef}
-          type="text"
+        <BaseInput
           className={cx(
             INPUT_CLASS,
             'text-xl font-mono w-fit',
             updateUpstream.isPending && 'opacity-50 cursor-not-allowed',
           )}
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          onBlur={handleSave}
-          onKeyDown={handleKeyDown}
           disabled={updateUpstream.isPending}
+          onBlur={handleSave}
+          onChange={(e) => setName(e.target.value)}
+          onKeyDown={handleKeyDown}
+          ref={inputRef}
+          type="text"
+          value={name}
         />
         {updateUpstream.isPending && (
           <div className="absolute right-2 top-1/2 -translate-y-1/2">

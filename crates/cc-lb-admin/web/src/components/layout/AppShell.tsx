@@ -1,4 +1,4 @@
-import * as Dialog from '@radix-ui/react-dialog';
+import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import { Link } from '@tanstack/react-router';
 import {
   Activity,
@@ -83,27 +83,22 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
         <SidebarFooter collapsed={collapsed} />
       </aside>
 
-      {/* Mobile drawer — Radix Dialog with left-side slide-in */}
-      <Dialog.Root open={mobileOpen} onOpenChange={setMobileOpen}>
-        <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 z-40 bg-modal-backdrop backdrop-blur-sm lg:hidden" />
-          <Dialog.Content
-            aria-describedby={undefined}
+      <BaseDialog.Root onOpenChange={setMobileOpen} open={mobileOpen}>
+        <BaseDialog.Portal>
+          <BaseDialog.Backdrop className="fixed inset-0 z-40 bg-modal-backdrop backdrop-blur-sm transition-opacity duration-150 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0 lg:hidden" />
+          <BaseDialog.Popup
+            className="fixed left-0 top-0 z-50 w-64 bg-bg-sub border-r border-subtle grid grid-rows-[3rem_1fr_auto] outline-none transition-transform duration-150 ease-out data-[ending-style]:-translate-x-full data-[starting-style]:-translate-x-full lg:hidden"
             style={{ height: '100vh' }}
-            className="fixed left-0 top-0 z-50 w-64 bg-bg-sub border-r border-subtle grid grid-rows-[3rem_1fr_auto] outline-none lg:hidden"
           >
-            <Dialog.Title className="sr-only">Navigation</Dialog.Title>
+            <BaseDialog.Title className="sr-only">Navigation</BaseDialog.Title>
             <div className="flex items-center justify-between px-4 border-b border-subtle">
               <SidebarBrand collapsed={false} />
-              <Dialog.Close asChild>
-                <button
-                  type="button"
-                  aria-label="Close menu"
-                  className="text-text-muted hover:text-text"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </Dialog.Close>
+              <BaseDialog.Close
+                aria-label="Close menu"
+                className="text-text-muted hover:text-text"
+              >
+                <X className="w-4 h-4" />
+              </BaseDialog.Close>
             </div>
             <div className="overflow-y-auto min-h-0 pb-8">
               <SidebarNav
@@ -112,9 +107,9 @@ export function AppShell({ children, onCommandPalette }: AppShellProps) {
               />
             </div>
             <SidebarFooter collapsed={false} />
-          </Dialog.Content>
-        </Dialog.Portal>
-      </Dialog.Root>
+          </BaseDialog.Popup>
+        </BaseDialog.Portal>
+      </BaseDialog.Root>
 
       <main className="flex-1 flex flex-col min-w-0 bg-bg min-h-screen">
         <Topbar

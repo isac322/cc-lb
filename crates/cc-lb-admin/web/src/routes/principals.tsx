@@ -1,3 +1,10 @@
+import { Dialog as BaseDialog } from '@base-ui/react/dialog';
+import { NumberField as BaseNumberField } from '@base-ui/react/number-field';
+import { Popover as BasePopover } from '@base-ui/react/popover';
+import { Radio as BaseRadio } from '@base-ui/react/radio';
+import { RadioGroup as BaseRadioGroup } from '@base-ui/react/radio-group';
+import { Switch as BaseSwitch } from '@base-ui/react/switch';
+import { Tabs as BaseTabs } from '@base-ui/react/tabs';
 import {
   closestCenter,
   DndContext,
@@ -31,9 +38,7 @@ import {
   XCircle,
 } from 'lucide-react';
 import React, { useEffect, useMemo, useState } from 'react';
-import { createPortal } from 'react-dom';
 import { toast } from 'sonner';
-import { Drawer } from 'vaul';
 import { z } from 'zod';
 import {
   Badge,
@@ -541,9 +546,7 @@ function LimitsEditor({
       ) : null}
       {value.map((row, idx) => {
         const isCost = row.kind === 'cost_usd';
-        const capDisplay = isCost
-          ? (row.cap_micros / 1_000_000).toString()
-          : row.cap_micros.toString();
+        const capValue = isCost ? row.cap_micros / 1_000_000 : row.cap_micros;
         return (
           <div
             key={idx}
@@ -568,33 +571,28 @@ function LimitsEditor({
             </div>
             <div className="w-32">
               <Field label="Window (sec)">
-                <input
-                  type="number"
+                <BaseNumberField.Root
                   min={1}
                   step={1}
-                  className={INPUT_CLASS}
                   value={row.window_secs}
-                  onChange={(e) =>
+                  onValueChange={(nextValue) =>
                     updateRow(idx, {
-                      window_secs: Math.max(
-                        1,
-                        Math.floor(Number(e.target.value) || 0),
-                      ),
+                      window_secs: Math.max(1, Math.floor(nextValue ?? 0)),
                     })
                   }
-                />
+                >
+                  <BaseNumberField.Input className={INPUT_CLASS} />
+                </BaseNumberField.Root>
               </Field>
             </div>
             <div className="w-40">
               <Field label={isCost ? 'Cap (USD)' : 'Cap'}>
-                <input
-                  type="number"
+                <BaseNumberField.Root
                   min={0}
-                  step={isCost ? '0.01' : '1'}
-                  className={INPUT_CLASS}
-                  value={capDisplay}
-                  onChange={(e) => {
-                    const raw = Number(e.target.value);
+                  step={isCost ? 0.01 : 1}
+                  value={capValue}
+                  onValueChange={(nextValue) => {
+                    const raw = nextValue ?? 0;
                     if (!Number.isFinite(raw) || raw < 0) {
                       updateRow(idx, { cap_micros: 0 });
                       return;
@@ -605,7 +603,9 @@ function LimitsEditor({
                         : Math.floor(raw),
                     });
                   }}
-                />
+                >
+                  <BaseNumberField.Input className={INPUT_CLASS} />
+                </BaseNumberField.Root>
               </Field>
             </div>
             <Button
@@ -732,6 +732,7 @@ function DefaultLimitsCard({ principal }: { principal: Principal }) {
 }
 
 function SlotRadioCard({
+  value,
   name,
   desc,
   isActive,
@@ -740,8 +741,8 @@ function SlotRadioCard({
   isDefault,
   isNone,
   badge,
-  onClick,
 }: {
+  value: string;
   name: string;
   desc: string;
   isActive: boolean;
@@ -750,7 +751,6 @@ function SlotRadioCard({
   isDefault?: boolean;
   isNone?: boolean;
   badge?: string;
-  onClick: () => void;
 }) {
   return (
     <li role="radio" aria-checked={isActive}>
@@ -766,23 +766,32 @@ function SlotRadioCard({
           isMutatingOther ? 'pointer-events-none opacity-50' : '',
         )}
       >
-        <input
-          type="radio"
-          className="hidden"
-          checked={isActive}
-          onChange={onClick}
-        />
-        <div className="mt-1 flex items-center justify-center w-4 h-4 shrink-0">
+        <BaseRadio.Root
+          className="mt-1 flex items-center justify-center w-4 h-4 shrink-0"
+          disabled={isMutatingOther}
+          value={value}
+        >
           {isMutating ? (
             <Spinner className="w-3 h-3 text-accent" />
           ) : isNone ? (
-            <span className="text-text-faint text-xs leading-none">⊘</span>
+            <>
+              <BaseRadio.Indicator className="sr-only" />
+              <span className="text-text-faint text-xs leading-none">⊘</span>
+            </>
           ) : isDefault ? (
-            <span className="w-1.5 h-1.5 rounded-full border border-text-faint" />
+            <>
+              <BaseRadio.Indicator className="sr-only" />
+              <span className="w-1.5 h-1.5 rounded-full border border-text-faint" />
+            </>
           ) : (
-            <span className={cx('status-dot', isActive ? 'ok' : 'neutral')} />
+            <>
+              <BaseRadio.Indicator className="status-dot ok" />
+              <span
+                className={cx('status-dot neutral', isActive && 'hidden!')}
+              />
+            </>
           )}
-        </div>
+        </BaseRadio.Root>
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2">
             <span className="font-medium text-sm truncate">{name}</span>
@@ -807,14 +816,14 @@ function PluginDetailDrawer({
   if (!plugin) return null;
 
   return (
-    <Drawer.Root open={open} onOpenChange={onOpenChange} direction="right">
-      <Drawer.Portal>
-        <Drawer.Overlay className="fixed inset-0 z-40 bg-drawer-backdrop" />
-        <Drawer.Content className="fixed right-0 top-0 bottom-0 w-full max-w-lg bg-bg-sub border-l border-subtle z-50 flex flex-col">
-          <Drawer.Title className="sr-only">Plugin detail</Drawer.Title>
-          <Drawer.Description className="sr-only">
+    <BaseDialog.Root open={open} onOpenChange={onOpenChange}>
+      <BaseDialog.Portal>
+        <BaseDialog.Backdrop className="fixed inset-0 z-40 bg-drawer-backdrop" />
+        <BaseDialog.Popup className="fixed right-0 top-0 bottom-0 w-full max-w-lg bg-bg-sub border-l border-subtle z-50 flex flex-col outline-none transition-transform duration-200 ease-out data-[ending-style]:translate-x-full data-[starting-style]:translate-x-full">
+          <BaseDialog.Title className="sr-only">Plugin detail</BaseDialog.Title>
+          <BaseDialog.Description className="sr-only">
             Detail view of a plugin
-          </Drawer.Description>
+          </BaseDialog.Description>
 
           <div className="p-4 border-b border-subtle flex items-start justify-between gap-3">
             <div className="min-w-0">
@@ -834,14 +843,12 @@ function PluginDetailDrawer({
                 )}
               </div>
             </div>
-            <button
-              type="button"
+            <BaseDialog.Close
               aria-label="Close"
-              onClick={() => onOpenChange(false)}
               className="text-text-muted hover:text-text shrink-0"
             >
               <X className="w-4 h-4" />
-            </button>
+            </BaseDialog.Close>
           </div>
 
           <div className="flex-1 overflow-y-auto p-4 pb-8 space-y-6 text-sm">
@@ -924,9 +931,9 @@ function PluginDetailDrawer({
               </div>
             </section>
           </div>
-        </Drawer.Content>
-      </Drawer.Portal>
-    </Drawer.Root>
+        </BaseDialog.Popup>
+      </BaseDialog.Portal>
+    </BaseDialog.Root>
   );
 }
 
@@ -1079,28 +1086,6 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
   useFlipReorder(listRef, entries);
 
   const [pickerOpen, setPickerOpen] = useState(false);
-  const [pickerAnchor, setPickerAnchor] = useState<DOMRect | null>(null);
-  const placeholderRef = React.useRef<HTMLLIElement>(null);
-
-  const togglePicker = (e: React.MouseEvent) => {
-    e.stopPropagation();
-    if (pickerOpen) {
-      setPickerOpen(false);
-    } else {
-      if (placeholderRef.current) {
-        setPickerAnchor(placeholderRef.current.getBoundingClientRect());
-      }
-      setPickerOpen(true);
-    }
-  };
-
-  useEffect(() => {
-    const handleClickOutside = () => setPickerOpen(false);
-    if (pickerOpen) {
-      document.addEventListener('click', handleClickOutside);
-    }
-    return () => document.removeEventListener('click', handleClickOutside);
-  }, [pickerOpen]);
 
   const moveUp = (index: number) => {
     if (index === 0) return;
@@ -1162,44 +1147,43 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
         className="border-b-0 pb-0"
       />
       <div className="flex flex-col px-4 border-b border-subtle relative">
-        <div className="flex items-center gap-1 w-fit mt-3" role="tablist">
-          <Hint
-            label={
-              isComplex
-                ? "Basic can't show this chain without losing the extra filters. Open Advanced to edit the full chain."
-                : ''
+        <BaseTabs.Root
+          value={activeTab}
+          onValueChange={(value) => {
+            if (value === 'basic' || value === 'advanced') {
+              handleTabClick(value);
             }
-          >
-            <button
-              role="tab"
-              aria-selected={activeTab === 'basic'}
-              aria-disabled={isComplex}
-              className={cx(
-                'px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors',
-                activeTab === 'basic'
-                  ? 'border-accent text-text'
-                  : 'border-transparent text-text-faint hover:text-text',
-                isComplex && 'opacity-50 cursor-not-allowed',
-              )}
-              onClick={() => handleTabClick('basic')}
+          }}
+        >
+          <BaseTabs.List className="flex items-center gap-1 w-fit mt-3">
+            <Hint
+              label={
+                isComplex
+                  ? "Basic can't show this chain without losing the extra filters. Open Advanced to edit the full chain."
+                  : ''
+              }
             >
-              Basic
-            </button>
-          </Hint>
-          <button
-            role="tab"
-            aria-selected={activeTab === 'advanced'}
-            className={cx(
-              'px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors',
-              activeTab === 'advanced'
-                ? 'border-accent text-text'
-                : 'border-transparent text-text-faint hover:text-text',
-            )}
-            onClick={() => handleTabClick('advanced')}
-          >
-            Advanced
-          </button>
-        </div>
+              <BaseTabs.Tab
+                aria-disabled={isComplex}
+                className={cx(
+                  'px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors border-transparent text-text-faint hover:text-text data-[active]:border-[color:var(--color-accent)] data-[active]:text-[color:var(--color-text)]',
+                  isComplex && 'opacity-50 cursor-not-allowed',
+                )}
+                value="basic"
+              >
+                Basic
+              </BaseTabs.Tab>
+            </Hint>
+            <BaseTabs.Tab
+              className={cx(
+                'px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors border-transparent text-text-faint hover:text-text data-[active]:border-[color:var(--color-accent)] data-[active]:text-[color:var(--color-text)]',
+              )}
+              value="advanced"
+            >
+              Advanced
+            </BaseTabs.Tab>
+          </BaseTabs.List>
+        </BaseTabs.Root>
         {showMobileNotice && (
           <div className="absolute left-4 top-full mt-2 z-10 text-amber-300 bg-amber-500/10 border border-amber-500/30 rounded-sm px-3 py-2 text-xs shadow-lg flex items-start gap-2 max-w-xs">
             <span>
@@ -1228,12 +1212,12 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                   already served them, so the prompt cache hits stay high.
                 </div>
               </div>
-              <button
-                type="button"
-                role="switch"
-                aria-checked={isSticky}
+              <BaseSwitch.Root
+                checked={isSticky}
                 className="group inline-flex items-center gap-2 h-7 px-2 rounded-sm transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-overlay-3"
-                onClick={toggleSticky}
+                nativeButton
+                onCheckedChange={() => toggleSticky()}
+                render={<button type="button" />}
                 disabled={
                   !cacheAffinityPlugin || insert.isPending || del.isPending
                 }
@@ -1246,23 +1230,26 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                       : 'bg-overlay-5 border-subtle-strong group-hover:border-text-muted',
                   )}
                 >
-                  <span
+                  <BaseSwitch.Thumb
                     className={cx(
                       'pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
                       isSticky ? 'translate-x-4' : 'translate-x-0.5',
                     )}
                   />
                 </div>
-              </button>
+              </BaseSwitch.Root>
             </div>
 
             <div>
               <div className="text-sm font-medium text-text mb-3">
                 When multiple upstreams qualify, pick
               </div>
-              <ul
+              <BaseRadioGroup
                 className="grid grid-cols-1 sm:grid-cols-2 gap-3"
-                role="radiogroup"
+                name="strategy"
+                onValueChange={setStrategy}
+                render={<ul />}
+                value={strategy}
               >
                 <li
                   role="radio"
@@ -1277,22 +1264,18 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                         : 'border-subtle hover:bg-overlay-3',
                     )}
                   >
-                    <input
-                      type="radio"
-                      name="strategy"
+                    <BaseRadio.Root
+                      className="mt-1 flex items-center justify-center w-4 h-4 shrink-0"
                       value="first-pick"
-                      className="hidden"
-                      checked={strategy === 'first-pick'}
-                      onChange={() => setStrategy('first-pick')}
-                    />
-                    <div className="mt-1 flex items-center justify-center w-4 h-4 shrink-0">
+                    >
+                      <BaseRadio.Indicator className="status-dot ok" />
                       <span
                         className={cx(
-                          'status-dot',
-                          strategy === 'first-pick' ? 'ok' : 'neutral',
+                          'status-dot neutral',
+                          strategy === 'first-pick' && 'hidden!',
                         )}
                       />
-                    </div>
+                    </BaseRadio.Root>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="font-medium text-sm truncate">
@@ -1319,22 +1302,18 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                         : 'border-subtle hover:bg-overlay-3',
                     )}
                   >
-                    <input
-                      type="radio"
-                      name="strategy"
+                    <BaseRadio.Root
+                      className="mt-1 flex items-center justify-center w-4 h-4 shrink-0"
                       value="random"
-                      className="hidden"
-                      checked={strategy === 'random'}
-                      onChange={() => setStrategy('random')}
-                    />
-                    <div className="mt-1 flex items-center justify-center w-4 h-4 shrink-0">
+                    >
+                      <BaseRadio.Indicator className="status-dot ok" />
                       <span
                         className={cx(
-                          'status-dot',
-                          strategy === 'random' ? 'ok' : 'neutral',
+                          'status-dot neutral',
+                          strategy === 'random' && 'hidden!',
                         )}
                       />
-                    </div>
+                    </BaseRadio.Root>
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2">
                         <span className="font-medium text-sm truncate">
@@ -1348,7 +1327,7 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
                     </div>
                   </label>
                 </li>
-              </ul>
+              </BaseRadioGroup>
             </div>
           </div>
         )}
@@ -1366,273 +1345,274 @@ export function RouterSlotEditor({ principalId }: { principalId: string }) {
               </div>
             )}
 
-            <ul ref={listRef} className="space-y-0">
-              {entries.map((e, idx) => {
-                const reg = registry.data?.entries.find(
-                  (r) => r.id === e.wasm_registry_id,
-                );
-                const isPinnedCache =
-                  !isComplex && isSticky && reg?.name === 'cache-affinity';
+            <BasePopover.Root open={pickerOpen} onOpenChange={setPickerOpen}>
+              <ul ref={listRef} className="space-y-0">
+                {entries.map((e, idx) => {
+                  const reg = registry.data?.entries.find(
+                    (r) => r.id === e.wasm_registry_id,
+                  );
+                  const isPinnedCache =
+                    !isComplex && isSticky && reg?.name === 'cache-affinity';
 
-                return (
-                  <React.Fragment key={e.id}>
-                    {idx > 0 && (
+                  return (
+                    <React.Fragment key={e.id}>
+                      {idx > 0 && (
+                        <li
+                          className="flex flex-col items-center"
+                          data-key={`connector-${idx}`}
+                        >
+                          <div className="w-px h-4 bg-subtle"></div>
+                          <ChevronDown className="w-3 h-3 text-text-faint -mt-1 mb-1" />
+                        </li>
+                      )}
                       <li
-                        className="flex flex-col items-center"
-                        data-key={`connector-${idx}`}
+                        className="flex items-center gap-3 p-3 border border-subtle rounded-sm bg-overlay-1"
+                        data-key={e.id}
                       >
-                        <div className="w-px h-4 bg-subtle"></div>
-                        <ChevronDown className="w-3 h-3 text-text-faint -mt-1 mb-1" />
-                      </li>
-                    )}
-                    <li
-                      className="flex items-center gap-3 p-3 border border-subtle rounded-sm bg-overlay-1"
-                      data-key={e.id}
-                    >
-                      <div className="text-[10px] tabular-nums text-text-faint w-8 shrink-0">
-                        Step {idx + 1}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <button
-                            type="button"
-                            className="text-sm font-medium text-text truncate hover:underline"
-                            onClick={() => setDetailPlugin(reg ?? null)}
-                          >
-                            {reg?.name ?? e.wasm_registry_id}
-                          </button>
+                        <div className="text-[10px] tabular-nums text-text-faint w-8 shrink-0">
+                          Step {idx + 1}
                         </div>
-                        <div className="text-xs text-text-faint truncate mt-0.5">
-                          {reg?.metadata?.purpose ??
-                            'User-uploaded filter (no description supplied).'}
-                        </div>
-                      </div>
-                      <div className="flex items-center gap-1 shrink-0">
-                        {isPinnedCache ? (
-                          <div
-                            className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint"
-                            title="Pinned by Basic settings"
-                          >
-                            <Lock className="w-4 h-4" />
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              className="text-sm font-medium text-text truncate hover:underline"
+                              onClick={() => setDetailPlugin(reg ?? null)}
+                            >
+                              {reg?.name ?? e.wasm_registry_id}
+                            </button>
                           </div>
-                        ) : (
-                          <>
-                            <button
-                              onClick={() => moveUp(idx)}
-                              className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
-                              disabled={idx === 0}
+                          <div className="text-xs text-text-faint truncate mt-0.5">
+                            {reg?.metadata?.purpose ??
+                              'User-uploaded filter (no description supplied).'}
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-1 shrink-0">
+                          {isPinnedCache ? (
+                            <div
+                              className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint"
+                              title="Pinned by Basic settings"
                             >
-                              <ArrowUp className="w-4 h-4" />
-                            </button>
-                            <button
-                              onClick={() => moveDown(idx)}
-                              className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
-                              disabled={idx === entries.length - 1}
-                            >
-                              <ArrowDown className="w-4 h-4" />
-                            </button>
-                            <button
-                              onClick={() => removeFilter(e.id, e.revision)}
-                              className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-red-400 hover:bg-overlay-3"
-                            >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
-                          </>
+                              <Lock className="w-4 h-4" />
+                            </div>
+                          ) : (
+                            <>
+                              <button
+                                onClick={() => moveUp(idx)}
+                                className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
+                                disabled={idx === 0}
+                              >
+                                <ArrowUp className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => moveDown(idx)}
+                                className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-text hover:bg-overlay-3 disabled:opacity-30 disabled:cursor-not-allowed"
+                                disabled={idx === entries.length - 1}
+                              >
+                                <ArrowDown className="w-4 h-4" />
+                              </button>
+                              <button
+                                onClick={() => removeFilter(e.id, e.revision)}
+                                className="h-7 w-7 inline-flex items-center justify-center rounded-sm text-text-faint hover:text-red-400 hover:bg-overlay-3"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </>
+                          )}
+                        </div>
+                      </li>
+                    </React.Fragment>
+                  );
+                })}
+
+                {entries.length > 0 && (
+                  <li
+                    className="flex flex-col items-center"
+                    data-key="connector-end"
+                  >
+                    <div className="w-px h-4 bg-subtle"></div>
+                    <ChevronDown className="w-3 h-3 text-text-faint -mt-1 mb-1" />
+                  </li>
+                )}
+
+                <BasePopover.Trigger
+                  nativeButton={false}
+                  render={
+                    <li
+                      className="flex items-center justify-center p-3 border border-dashed border-subtle-strong rounded-sm bg-overlay-1/50 hover:bg-overlay-2 cursor-pointer transition-colors"
+                      data-key="add-filter-placeholder"
+                      onClick={(e) => e.stopPropagation()}
+                    />
+                  }
+                >
+                  <div className="flex items-center gap-2 text-text-muted hover:text-text">
+                    <Plus className="w-4 h-4" />
+                    <span className="text-sm font-medium">Add filter</span>
+                  </div>
+                </BasePopover.Trigger>
+              </ul>
+
+              <div className="flex flex-col gap-3 p-3 border border-subtle border-l-2 border-l-accent rounded-sm bg-overlay-1 mt-4">
+                <div className="flex items-center gap-3">
+                  <div className="text-[10px] tabular-nums text-text-faint w-8 shrink-0 flex items-center gap-1">
+                    <ChevronDown className="w-3 h-3" />
+                    Final
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="text-sm font-medium text-text truncate">
+                        Terminal step
+                      </span>
+                    </div>
+                    <div className="text-xs text-text-faint truncate mt-0.5">
+                      Picks the upstream that will serve the request.
+                    </div>
+                  </div>
+                </div>
+                <div className="pl-11">
+                  <BaseRadioGroup
+                    className="grid grid-cols-1 sm:grid-cols-2 gap-3"
+                    name="term-strategy"
+                    onValueChange={setStrategy}
+                    render={<ul />}
+                    value={strategy}
+                  >
+                    <li
+                      role="radio"
+                      aria-checked={strategy === 'first-pick'}
+                      className="h-full"
+                    >
+                      <label
+                        className={cx(
+                          'flex items-start gap-3 p-3 border rounded-md cursor-pointer transition-colors h-full',
+                          strategy === 'first-pick'
+                            ? 'border-accent bg-[color-mix(in_srgb,var(--color-accent)_8%,transparent)]'
+                            : 'border-subtle hover:bg-overlay-3',
                         )}
-                      </div>
+                      >
+                        <BaseRadio.Root
+                          className="mt-1 flex items-center justify-center w-4 h-4 shrink-0"
+                          value="first-pick"
+                        >
+                          <BaseRadio.Indicator className="status-dot ok" />
+                          <span
+                            className={cx(
+                              'status-dot neutral',
+                              strategy === 'first-pick' && 'hidden!',
+                            )}
+                          />
+                        </BaseRadio.Root>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-sm truncate">
+                              First eligible
+                            </span>
+                          </div>
+                          <div className="text-xs text-text-faint mt-0.5">
+                            Always pick the first upstream in the candidate
+                            list. Predictable, easy to reason about.
+                          </div>
+                        </div>
+                      </label>
                     </li>
-                  </React.Fragment>
-                );
-              })}
-
-              {entries.length > 0 && (
-                <li
-                  className="flex flex-col items-center"
-                  data-key="connector-end"
-                >
-                  <div className="w-px h-4 bg-subtle"></div>
-                  <ChevronDown className="w-3 h-3 text-text-faint -mt-1 mb-1" />
-                </li>
-              )}
-
-              <li
-                ref={placeholderRef}
-                className="flex items-center justify-center p-3 border border-dashed border-subtle-strong rounded-sm bg-overlay-1/50 hover:bg-overlay-2 cursor-pointer transition-colors"
-                onClick={togglePicker}
-                data-key="add-filter-placeholder"
-              >
-                <div className="flex items-center gap-2 text-text-muted hover:text-text">
-                  <Plus className="w-4 h-4" />
-                  <span className="text-sm font-medium">Add filter</span>
-                </div>
-              </li>
-            </ul>
-
-            <div className="flex flex-col gap-3 p-3 border border-subtle border-l-2 border-l-accent rounded-sm bg-overlay-1 mt-4">
-              <div className="flex items-center gap-3">
-                <div className="text-[10px] tabular-nums text-text-faint w-8 shrink-0 flex items-center gap-1">
-                  <ChevronDown className="w-3 h-3" />
-                  Final
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="flex items-center gap-2">
-                    <span className="text-sm font-medium text-text truncate">
-                      Terminal step
-                    </span>
-                  </div>
-                  <div className="text-xs text-text-faint truncate mt-0.5">
-                    Picks the upstream that will serve the request.
-                  </div>
+                    <li
+                      role="radio"
+                      aria-checked={strategy === 'random'}
+                      className="h-full"
+                    >
+                      <label
+                        className={cx(
+                          'flex items-start gap-3 p-3 border rounded-md cursor-pointer transition-colors h-full',
+                          strategy === 'random'
+                            ? 'border-accent bg-[color-mix(in_srgb,var(--color-accent)_8%,transparent)]'
+                            : 'border-subtle hover:bg-overlay-3',
+                        )}
+                      >
+                        <BaseRadio.Root
+                          className="mt-1 flex items-center justify-center w-4 h-4 shrink-0"
+                          value="random"
+                        >
+                          <BaseRadio.Indicator className="status-dot ok" />
+                          <span
+                            className={cx(
+                              'status-dot neutral',
+                              strategy === 'random' && 'hidden!',
+                            )}
+                          />
+                        </BaseRadio.Root>
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2">
+                            <span className="font-medium text-sm truncate">
+                              Random
+                            </span>
+                          </div>
+                          <div className="text-xs text-text-faint mt-0.5">
+                            Pick a random upstream from the candidate list.
+                            Helps spread load when many are equivalent.
+                          </div>
+                        </div>
+                      </label>
+                    </li>
+                  </BaseRadioGroup>
                 </div>
               </div>
-              <div className="pl-11">
-                <ul
-                  className="grid grid-cols-1 sm:grid-cols-2 gap-3"
-                  role="radiogroup"
+              <BasePopover.Portal>
+                <BasePopover.Positioner
+                  align="start"
+                  className="z-50"
+                  sideOffset={4}
                 >
-                  <li
-                    role="radio"
-                    aria-checked={strategy === 'first-pick'}
-                    className="h-full"
+                  <BasePopover.Popup
+                    className="w-64 bg-bg-sub border border-subtle rounded-sm shadow-lg z-50 py-1"
+                    onClick={(e) => e.stopPropagation()}
                   >
-                    <label
-                      className={cx(
-                        'flex items-start gap-3 p-3 border rounded-md cursor-pointer transition-colors h-full',
-                        strategy === 'first-pick'
-                          ? 'border-accent bg-[color-mix(in_srgb,var(--color-accent)_8%,transparent)]'
-                          : 'border-subtle hover:bg-overlay-3',
-                      )}
-                    >
-                      <input
-                        type="radio"
-                        name="term-strategy"
-                        value="first-pick"
-                        className="hidden"
-                        checked={strategy === 'first-pick'}
-                        onChange={() => setStrategy('first-pick')}
-                      />
-                      <div className="mt-1 flex items-center justify-center w-4 h-4 shrink-0">
-                        <span
-                          className={cx(
-                            'status-dot',
-                            strategy === 'first-pick' ? 'ok' : 'neutral',
-                          )}
-                        />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium text-sm truncate">
-                            First eligible
-                          </span>
-                        </div>
-                        <div className="text-xs text-text-faint mt-0.5">
-                          Always pick the first upstream in the candidate list.
-                          Predictable, easy to reason about.
-                        </div>
-                      </div>
-                    </label>
-                  </li>
-                  <li
-                    role="radio"
-                    aria-checked={strategy === 'random'}
-                    className="h-full"
-                  >
-                    <label
-                      className={cx(
-                        'flex items-start gap-3 p-3 border rounded-md cursor-pointer transition-colors h-full',
-                        strategy === 'random'
-                          ? 'border-accent bg-[color-mix(in_srgb,var(--color-accent)_8%,transparent)]'
-                          : 'border-subtle hover:bg-overlay-3',
-                      )}
-                    >
-                      <input
-                        type="radio"
-                        name="term-strategy"
-                        value="random"
-                        className="hidden"
-                        checked={strategy === 'random'}
-                        onChange={() => setStrategy('random')}
-                      />
-                      <div className="mt-1 flex items-center justify-center w-4 h-4 shrink-0">
-                        <span
-                          className={cx(
-                            'status-dot',
-                            strategy === 'random' ? 'ok' : 'neutral',
-                          )}
-                        />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="font-medium text-sm truncate">
-                            Random
-                          </span>
-                        </div>
-                        <div className="text-xs text-text-faint mt-0.5">
-                          Pick a random upstream from the candidate list. Helps
-                          spread load when many are equivalent.
-                        </div>
-                      </div>
-                    </label>
-                  </li>
-                </ul>
-              </div>
-            </div>
+                    {registry.data?.entries
+                      .filter((p) => pluginSupportsSlot(p, 'router'))
+                      .map((p) => {
+                        const inChain = entries.some(
+                          (e) => e.wasm_registry_id === p.id,
+                        );
+                        const isPinnedCache =
+                          !isComplex && isSticky && p.name === 'cache-affinity';
+                        const disabled = inChain || isPinnedCache;
+
+                        return (
+                          <button
+                            key={p.id}
+                            className={cx(
+                              'w-full text-left px-3 py-2 text-sm flex flex-col gap-0.5',
+                              disabled
+                                ? 'opacity-50 cursor-not-allowed'
+                                : 'hover:bg-overlay-3',
+                            )}
+                            disabled={disabled}
+                            onClick={() => addFilter(p.id)}
+                          >
+                            <div className="flex items-center justify-between">
+                              <span className="font-medium text-text">
+                                {p.name}
+                              </span>
+                              {disabled ? (
+                                <span className="text-[10px] text-text-faint">
+                                  {isPinnedCache
+                                    ? 'Pinned by Sticky'
+                                    : 'Already in chain'}
+                                </span>
+                              ) : null}
+                            </div>
+                            <span className="text-xs text-text-faint truncate">
+                              {p.metadata?.purpose ?? 'Custom filter'}
+                            </span>
+                          </button>
+                        );
+                      })}
+                  </BasePopover.Popup>
+                </BasePopover.Positioner>
+              </BasePopover.Portal>
+            </BasePopover.Root>
           </div>
         )}
       </CardBody>
-
-      {pickerOpen &&
-        pickerAnchor &&
-        createPortal(
-          <div
-            className="absolute w-64 bg-bg-sub border border-subtle rounded-sm shadow-lg z-50 py-1"
-            style={{
-              top: pickerAnchor.bottom + window.scrollY + 4,
-              left: pickerAnchor.left + window.scrollX,
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            {registry.data?.entries
-              .filter((p) => pluginSupportsSlot(p, 'router'))
-              .map((p) => {
-                const inChain = entries.some(
-                  (e) => e.wasm_registry_id === p.id,
-                );
-                const isPinnedCache =
-                  !isComplex && isSticky && p.name === 'cache-affinity';
-                const disabled = inChain || isPinnedCache;
-
-                return (
-                  <button
-                    key={p.id}
-                    className={cx(
-                      'w-full text-left px-3 py-2 text-sm flex flex-col gap-0.5',
-                      disabled
-                        ? 'opacity-50 cursor-not-allowed'
-                        : 'hover:bg-overlay-3',
-                    )}
-                    disabled={disabled}
-                    onClick={() => addFilter(p.id)}
-                  >
-                    <div className="flex items-center justify-between">
-                      <span className="font-medium text-text">{p.name}</span>
-                      {disabled ? (
-                        <span className="text-[10px] text-text-faint">
-                          {isPinnedCache
-                            ? 'Pinned by Sticky'
-                            : 'Already in chain'}
-                        </span>
-                      ) : null}
-                    </div>
-                    <span className="text-xs text-text-faint truncate">
-                      {p.metadata?.purpose ?? 'Custom filter'}
-                    </span>
-                  </button>
-                );
-              })}
-          </div>,
-          document.body,
-        )}
 
       <PluginDetailDrawer
         plugin={detailPlugin}
@@ -1743,12 +1723,18 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
         subtitle="Request / response transform. Inherits the dialect returned by the router when unset."
       />
       <CardBody>
-        <ul
+        <BaseRadioGroup
           className="space-y-2"
-          role="radiogroup"
           aria-busy={mutatingId !== null}
+          name="shape-slot"
+          onValueChange={(nextValue) => {
+            void handleSelect(nextValue === 'none' ? null : nextValue);
+          }}
+          render={<ul />}
+          value={activeEntry?.wasm_registry_id ?? 'none'}
         >
           <SlotRadioCard
+            value="none"
             name="None"
             desc="Inherits the dialect returned by the router (typically anthropic-direct)."
             isActive={!activeEntry}
@@ -1756,22 +1742,21 @@ function ShapeSlotEditor({ principalId }: { principalId: string }) {
             isMutatingOther={mutatingId !== null && mutatingId !== 'none'}
             isNone
             badge="Off"
-            onClick={() => handleSelect(null)}
           />
           {candidates
             .filter((p) => pluginSupportsSlot(p, 'shape'))
             .map((p) => (
               <SlotRadioCard
                 key={p.id}
+                value={p.id}
                 name={p.name}
                 desc={p.label || 'Custom shape plugin'}
                 isActive={activeEntry?.wasm_registry_id === p.id}
                 isMutating={mutatingId === p.id}
                 isMutatingOther={mutatingId !== null && mutatingId !== p.id}
-                onClick={() => handleSelect(p.id)}
               />
             ))}
-        </ul>
+        </BaseRadioGroup>
       </CardBody>
     </Card>
   );

@@ -43,10 +43,6 @@ import {
   type UpstreamOAuthStatusResponse,
 } from './api';
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Entity shapes the new UI uses. (These mirror what mock-server.ts returns
-// and what the old hooks/* declared piecemeal.)
-
 export interface UpstreamStatus {
   last_apply_error: string | null;
   last_apply_at_unix_secs: number | null;

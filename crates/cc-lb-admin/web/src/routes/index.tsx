@@ -1,3 +1,7 @@
+import { Meter as BaseMeter } from '@base-ui/react/meter';
+import { Popover as BasePopover } from '@base-ui/react/popover';
+import { Toggle as BaseToggle } from '@base-ui/react/toggle';
+import { ToggleGroup as BaseToggleGroup } from '@base-ui/react/toggle-group';
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import {
   Activity,
@@ -144,31 +148,6 @@ function ValueTile({
   );
 }
 
-function ProgressBar({
-  pct,
-  color,
-  height = 'h-1.5',
-}: {
-  pct: number;
-  color: string;
-  height?: string;
-}) {
-  const clamped = Math.min(100, Math.max(0, pct || 0));
-  return (
-    <div
-      className={cx(
-        'relative w-full bg-overlay-3 rounded-full overflow-hidden',
-        height,
-      )}
-    >
-      <div
-        className="absolute top-0 left-0 h-full rounded-full transition-all"
-        style={{ width: `${clamped}%`, background: color }}
-      />
-    </div>
-  );
-}
-
 type AggregateWindow = NonNullable<
   ReturnType<typeof useSubscriptionQuotaAggregate>['data']
 >['windows'][number];
@@ -303,6 +282,24 @@ export function PoolQuotaStackedBar({
     0,
   );
   const usedPct = w.utilization_percent ?? 0;
+  const weightedSegments = w.provider_lots
+    .map((lot, index) => {
+      const util = lot.utilization ?? 0;
+      const weightedContribution =
+        totalRatio > 0 ? ((util * lot.capacity_ratio) / totalRatio) * 100 : 0;
+
+      return {
+        idColor: poolSegmentColor(window, index),
+        index,
+        lot,
+        weightedContribution,
+      };
+    })
+    .filter((segment) => segment.weightedContribution > 0);
+  const totalWeightedContribution = weightedSegments.reduce(
+    (sum, segment) => sum + segment.weightedContribution,
+    0,
+  );
 
   const handleInteraction = (i: number | null, isClick = false) => {
     const isMobile = 'ontouchstart' in globalThis.window;
@@ -322,32 +319,27 @@ export function PoolQuotaStackedBar({
   };
 
   const renderSegments = () =>
-    w.provider_lots.map((lot, i) => {
+    weightedSegments.map(({ idColor, index, lot, weightedContribution }) => {
       const util = lot.utilization ?? 0;
-      const weightedContribution =
-        totalRatio > 0 ? ((util * lot.capacity_ratio) / totalRatio) * 100 : 0;
-      if (weightedContribution <= 0) return null;
-
-      const idColor = poolSegmentColor(window, i);
-      const isHovered = activeIdx === i;
-      const isOtherHovered = activeIdx !== null && activeIdx !== i;
+      const isHovered = activeIdx === index;
+      const isOtherHovered = activeIdx !== null && activeIdx !== index;
       return (
         <div
-          key={i}
+          key={index}
           className={cx(
-            'h-full border-r border-bg last:border-r-0 transition-all cursor-pointer',
+            'h-full basis-0 border-r border-bg last:border-r-0 transition-all cursor-pointer',
             isHovered &&
               'outline outline-1 outline-white/60 outline-offset-[-1px] z-10',
             isOtherHovered && 'opacity-60',
           )}
           style={{
-            width: `${weightedContribution}%`,
             backgroundColor: idColor,
+            flexGrow: weightedContribution,
           }}
           title={`${lot.upstream_name} · ${lot.capacity_ratio.toFixed(1)}x · ${lot.utilization != null ? (util * 100).toFixed(1) : '—'}%`}
-          onMouseEnter={() => handleInteraction(i)}
-          onClick={() => handleInteraction(i, true)}
-          onTouchStart={() => handleInteraction(i, true)}
+          onMouseEnter={() => handleInteraction(index)}
+          onClick={() => handleInteraction(index, true)}
+          onTouchStart={() => handleInteraction(index, true)}
         />
       );
     });
@@ -355,53 +347,79 @@ export function PoolQuotaStackedBar({
   const pctText =
     w.utilization_percent != null ? `${usedPct.toFixed(1)}%` : '—';
   return (
-    <div
-      className={cx('relative', openPopover && 'z-50')}
-      onMouseLeave={() => handleInteraction(null)}
+    <BasePopover.Root
+      open={openPopover}
+      onOpenChange={(nextOpen) => {
+        setOpenPopover(nextOpen);
+        if (!nextOpen) setActiveIdx(null);
+      }}
     >
-      <div className="2xl:hidden flex flex-col gap-1.5">
-        <div className="flex items-center justify-between">
-          <span className="text-xs font-medium text-text-muted">
-            {window} pool
+      <BasePopover.Trigger
+        className={cx('relative block w-full text-left', openPopover && 'z-50')}
+        closeDelay={0}
+        delay={0}
+        nativeButton={false}
+        openOnHover
+        render={<div />}
+      >
+        <div className="2xl:hidden flex flex-col gap-1.5">
+          <div className="flex items-center justify-between">
+            <span className="text-xs font-medium text-text-muted">
+              {window} pool
+            </span>
+            <span className="tabular-nums font-medium text-sm leading-none text-text">
+              {pctText}
+            </span>
+          </div>
+          <BaseMeter.Root
+            className="h-5 w-full"
+            max={100}
+            value={totalWeightedContribution}
+          >
+            <BaseMeter.Track className="h-5 w-full flex rounded-full overflow-hidden border border-subtle bg-surface-raised">
+              <BaseMeter.Indicator className="h-full flex transition-all">
+                {renderSegments()}
+              </BaseMeter.Indicator>
+            </BaseMeter.Track>
+          </BaseMeter.Root>
+        </div>
+
+        <div className="hidden 2xl:flex items-center gap-2">
+          <span className="text-xs font-medium text-text-muted shrink-0">
+            {window}
           </span>
-          <span className="tabular-nums font-medium text-sm leading-none text-text">
+          <BaseMeter.Root
+            className="flex-1 h-5 min-w-0"
+            max={100}
+            value={totalWeightedContribution}
+          >
+            <BaseMeter.Track className="h-5 w-full flex rounded-full overflow-hidden border border-subtle bg-surface-raised">
+              <BaseMeter.Indicator className="h-full flex transition-all">
+                {renderSegments()}
+              </BaseMeter.Indicator>
+            </BaseMeter.Track>
+          </BaseMeter.Root>
+          <span className="tabular-nums font-medium text-sm leading-none text-text shrink-0">
             {pctText}
           </span>
         </div>
-        <div className="h-5 w-full flex rounded-full overflow-hidden border border-subtle bg-surface-raised">
-          {renderSegments()}
-        </div>
-      </div>
+      </BasePopover.Trigger>
 
-      <div className="hidden 2xl:flex items-center gap-2">
-        <span className="text-xs font-medium text-text-muted shrink-0">
-          {window}
-        </span>
-        <div className="flex-1 h-5 flex rounded-full overflow-hidden border border-subtle bg-surface-raised min-w-0">
-          {renderSegments()}
-        </div>
-        <span className="tabular-nums font-medium text-sm leading-none text-text shrink-0">
-          {pctText}
-        </span>
-      </div>
-
-      {openPopover && (
-        <>
-          <div
-            className="fixed inset-0 z-40 sm:hidden"
-            onClick={() => handleInteraction(null, true)}
-            onTouchStart={() => handleInteraction(null, true)}
-          />
-          <div className="absolute top-full left-0 mt-2 w-full z-50 bg-bg-sub border border-subtle-strong rounded-md shadow-xl p-2">
+      <BasePopover.Portal>
+        <BasePopover.Positioner align="start" side="bottom" sideOffset={8}>
+          <BasePopover.Popup
+            className="z-50 w-[var(--anchor-width)] max-w-[calc(100vw-1rem)] bg-bg-sub border border-subtle-strong rounded-md shadow-xl p-2"
+            initialFocus={false}
+          >
             <PoolQuotaPopoverContent
               window={window}
               w={w}
               activeIdx={activeIdx}
             />
-          </div>
-        </>
-      )}
-    </div>
+          </BasePopover.Popup>
+        </BasePopover.Positioner>
+      </BasePopover.Portal>
+    </BasePopover.Root>
   );
 }
 
@@ -960,23 +978,25 @@ function OverviewPage() {
     <PageContainer>
       <div className="flex items-center justify-between mb-2">
         <h1 className="text-lg font-medium">Overview</h1>
-        <div className="flex flex-wrap bg-overlay-2 border border-subtle rounded-sm p-0.5">
+        <BaseToggleGroup
+          aria-label="Time range"
+          className="flex flex-wrap bg-overlay-2 border border-subtle rounded-sm p-0.5"
+          onValueChange={(values) => {
+            const first = values[0];
+            if (first) setRange(first);
+          }}
+          value={[range]}
+        >
           {RANGES.map((r) => (
-            <button
+            <BaseToggle
               key={r}
-              type="button"
-              onClick={() => setRange(r)}
-              className={cx(
-                'px-2.5 h-7 text-xs rounded-sm transition-colors',
-                r === range
-                  ? 'bg-overlay-6 text-text'
-                  : 'text-text-faint hover:text-text',
-              )}
+              className="px-2.5 h-7 text-xs rounded-sm transition-colors text-text-faint hover:text-text data-[pressed]:bg-[color:var(--color-overlay-6)] data-[pressed]:text-[color:var(--color-text)]"
+              value={r}
             >
               {r}
-            </button>
+            </BaseToggle>
           ))}
-        </div>
+        </BaseToggleGroup>
       </div>
 
       {/* KPI Strip */}
@@ -1066,12 +1086,21 @@ function OverviewPage() {
                         {p.primary_model} · {p.requests.toLocaleString()} req ·{' '}
                         {fmtCount(p.tokens)} tok
                       </div>
-                      <div className="mt-1.5">
-                        <ProgressBar
-                          pct={(p.cost_usd / Math.max(1, p.max_cost)) * 100}
-                          color="var(--color-accent)"
-                        />
-                      </div>
+                      <BaseMeter.Root
+                        className="mt-1.5"
+                        max={100}
+                        value={Math.min(
+                          100,
+                          Math.max(
+                            0,
+                            (p.cost_usd / Math.max(1, p.max_cost)) * 100 || 0,
+                          ),
+                        )}
+                      >
+                        <BaseMeter.Track className="relative w-full bg-overlay-3 rounded-full overflow-hidden h-1.5">
+                          <BaseMeter.Indicator className="h-full rounded-full transition-all bg-[color:var(--color-accent)]" />
+                        </BaseMeter.Track>
+                      </BaseMeter.Root>
                     </div>
                     <div className="text-right shrink-0">
                       <div className="text-sm font-mono tabular-nums">
