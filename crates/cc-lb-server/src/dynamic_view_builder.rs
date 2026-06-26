@@ -15,6 +15,7 @@ use cc_lb_core::api_keys::principal_view::{
     RouterPipelineCache,
 };
 use cc_lb_core::builtin_filters::cache_affinity::CacheAffinityFilter;
+use cc_lb_core::builtin_filters::subscription_preference::SubscriptionPreferenceFilter;
 use cc_lb_core::clock::SystemClock;
 use cc_lb_core::{
     ApplyStatus, DynamicView, DynamicViewBuilder, ErrorNormalizer, UpstreamRateLimitCache,
@@ -22,8 +23,9 @@ use cc_lb_core::{
 };
 use cc_lb_dialect_anthropic::AnthropicDirectDialect;
 use cc_lb_plugin_api::{
-    FilterPlugin, PluginManifest, Principal, RateLimitObservation, RequestContext, RouteDecision,
-    RouteError, RouterPlugin, Signer, SignerError, SignerFactory, Upstream, UpstreamCandidate,
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, FilterPlugin, PluginManifest,
+    Principal, RateLimitObservation, RequestContext, RouteDecision, RouteError, RouterPlugin,
+    Signer, SignerError, SignerFactory, Upstream, UpstreamCandidate,
 };
 use cc_lb_runtime_extism::{ExtismRuntime, StagedSlot};
 use cc_lb_storage_api::upstream::UpstreamKind;
@@ -618,7 +620,13 @@ async fn build_router_pipeline(
             })));
         };
         if registry_entry.is_builtin {
-            filters.push(Arc::new(CacheAffinityFilter::new()));
+            match registry_entry.id {
+                BUILTIN_CACHE_AFFINITY_ID => filters.push(Arc::new(CacheAffinityFilter::new())),
+                BUILTIN_SUBSCRIPTION_PREFERENCE_ID => {
+                    filters.push(Arc::new(SubscriptionPreferenceFilter::new()));
+                }
+                _ => {}
+            }
             continue;
         }
         let manifest = match manifest_for_chain_entry(stores, data_dir, registry, &entry).await {
