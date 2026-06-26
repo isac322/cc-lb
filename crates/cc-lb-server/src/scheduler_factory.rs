@@ -271,9 +271,6 @@ async fn open_postgres(
     // before sqlx's `Migrator::run` starts its own transactions, so we
     // hold a dedicated connection for the full setup window.
     run_postgres_scheduler_setup(&connect_options, &pool).await?;
-    cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool)
-        .await
-        .map_err(migration_error)?;
     let leader = scheduler_sqlx::PgConnection::connect_with(&connect_options)
         .await
         .map_err(|error| SchedulerFactoryError::LeaderConnectionFailed {
@@ -302,9 +299,10 @@ async fn open_postgres(
 #[cfg(feature = "postgres")]
 async fn run_postgres_scheduler_setup(
     connect_options: &scheduler_sqlx::postgres::PgConnectOptions,
-    _pool: &scheduler_sqlx::PgPool,
+    pool: &scheduler_sqlx::PgPool,
 ) -> Result<(), SchedulerFactoryError> {
     let connect_options = connect_options.clone();
+    let pool = pool.clone();
     tokio::spawn(async move {
         use scheduler_sqlx::Connection as _;
 
@@ -325,12 +323,18 @@ async fn run_postgres_scheduler_setup(
             .await
             .map_err(migration_error)?;
         let migrator = apalis_postgres::PostgresStorage::<(), (), ()>::migrations();
-        let result = migrator.run_direct(&mut conn).await;
+        let apalis_result = migrator.run_direct(&mut conn).await;
+        let post_setup_result = if apalis_result.is_ok() {
+            cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await
+        } else {
+            Ok(())
+        };
         let _ = scheduler_sqlx::query("SELECT pg_advisory_unlock($1)")
             .bind(SCHEDULER_SETUP_LOCK_KEY)
             .execute(&mut conn)
             .await;
-        result.map_err(migration_error)
+        apalis_result.map_err(migration_error)?;
+        post_setup_result.map_err(migration_error)
     })
     .await
     .map_err(migration_error)?
