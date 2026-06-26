@@ -1823,7 +1823,7 @@ fn admin_router(
     plugin_registry: PluginRegistry,
 ) -> Router {
     let admin_token = admin_state.admin_token.clone();
-    cc_lb_admin::router(admin_state)
+    let admin_router = cc_lb_admin::router(admin_state)
         .merge(crate::admin_plugins::router(admin_token, plugin_registry))
         .merge(server_state_router(server_state))
         // Admin surface only — proxy_router stays uncompressed to keep SSE
@@ -1833,7 +1833,9 @@ fn admin_router(
             tower_http::compression::CompressionLayer::new()
                 .gzip(true)
                 .br(true),
-        )
+        );
+
+    crate::admin_security::with_browser_security_headers(admin_router)
 }
 
 fn server_state_router(server_state: Arc<ServerStateHandle>) -> Router {
