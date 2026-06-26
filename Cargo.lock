@@ -863,6 +863,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "cc-lb-oauth-protocol"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "url",
+]
+
+[[package]]
 name = "cc-lb-observability"
 version = "0.1.0"
 dependencies = [
@@ -1065,6 +1075,7 @@ dependencies = [
  "cc-lb-config",
  "cc-lb-core",
  "cc-lb-dialect-anthropic",
+ "cc-lb-oauth-protocol",
  "cc-lb-observability",
  "cc-lb-plugin-api",
  "cc-lb-pricing",
@@ -1144,6 +1155,7 @@ dependencies = [
  "bytes",
  "cc-lb-aead",
  "cc-lb-core",
+ "cc-lb-oauth-protocol",
  "cc-lb-plugin-api",
  "cc-lb-storage-api",
  "chrono",
