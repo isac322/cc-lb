@@ -2,11 +2,13 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 
 use bytes::Bytes;
+use cc_lb_oauth_protocol::{
+    ExistingTokenParts, parse_token_endpoint_response, refreshed_token_parts,
+};
 use cc_lb_storage_api::{OAuthCredentials, StorageError};
 use dashmap::DashMap;
 use http::StatusCode;
 use secrecy::{ExposeSecret, SecretString};
-use serde::Deserialize;
 use thiserror::Error;
 use url::Url;
 
@@ -58,14 +60,6 @@ pub enum RefreshError {
         #[from]
         source: StorageError,
     },
-}
-
-#[derive(Debug, Deserialize)]
-struct TokenEndpointJson {
-    access_token: String,
-    refresh_token: Option<String>,
-    expires_in: u64,
-    scope: Option<String>,
 }
 
 pub fn new_breaker_map() -> BreakerMap {
@@ -171,22 +165,23 @@ fn parse_token_response(
     existing: &OAuthCredentials,
     now_epoch_secs: u64,
 ) -> Result<OAuthCredentials, RefreshError> {
-    let parsed: TokenEndpointJson =
-        serde_json::from_slice(&body).map_err(|source| RefreshError::Json {
-            reason: source.to_string(),
-        })?;
-    let scopes = parsed
-        .scope
-        .map(|scope| scope.split_whitespace().map(str::to_owned).collect())
-        .unwrap_or_else(|| existing.scopes.clone());
+    let parsed = parse_token_endpoint_response(&body).map_err(|source| RefreshError::Json {
+        reason: source.to_string(),
+    })?;
+    let refreshed = refreshed_token_parts(
+        ExistingTokenParts {
+            refresh_token: existing.refresh_token.clone(),
+            scopes: existing.scopes.clone(),
+        },
+        parsed,
+        now_epoch_secs,
+    );
 
     Ok(OAuthCredentials {
-        access_token: parsed.access_token,
-        refresh_token: parsed
-            .refresh_token
-            .unwrap_or_else(|| existing.refresh_token.clone()),
-        expires_at: now_epoch_secs.saturating_add(parsed.expires_in),
-        scopes,
+        access_token: refreshed.access_token,
+        refresh_token: refreshed.refresh_token,
+        expires_at: refreshed.expires_at_unix_secs,
+        scopes: refreshed.scopes,
     })
 }
 
