@@ -1,8 +1,10 @@
+import { Field as BaseField } from '@base-ui/react/field';
+import { Form as BaseForm } from '@base-ui/react/form';
+import { Input as BaseInput } from '@base-ui/react/input';
 import { Lock } from 'lucide-react';
-import { type FormEvent, type ReactNode, useEffect, useState } from 'react';
-import { toast } from 'sonner';
+import { type ReactNode, useEffect, useState } from 'react';
 import { AUTH_TOKEN_KEY, getAdminToken, setAdminToken } from '../lib/auth';
-import { Button, Card, cx, Field, INPUT_CLASS } from './ui/primitives';
+import { Button, Card, cx, INPUT_CLASS } from './ui/primitives';
 
 const AUTH_REQUIRED_EVENT = 'cclb:auth-required';
 
@@ -10,6 +12,7 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
   const [hasToken, setHasToken] = useState<boolean>(() => !!getAdminToken());
   const [value, setValue] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [errors, setErrors] = useState<Record<string, string>>({});
 
   useEffect(() => {
     const onStorage = (e: StorageEvent) => {
@@ -32,17 +35,18 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
     return <>{children}</>;
   }
 
-  function handleSubmit(e: FormEvent<HTMLFormElement>) {
-    e.preventDefault();
+  function handleSubmit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
     const trimmed = value.trim();
     if (!trimmed) {
-      toast.error('Token cannot be empty');
+      setErrors({ token: 'Token cannot be empty' });
       return;
     }
     setSubmitting(true);
     try {
       setAdminToken(trimmed);
       setValue('');
+      setErrors({});
       setHasToken(true);
     } finally {
       setSubmitting(false);
@@ -67,28 +71,37 @@ export function AuthRequiredGate({ children }: { children: ReactNode }) {
               Paste the admin Bearer token to continue.
             </p>
           </div>
-          <form onSubmit={handleSubmit} className="flex flex-col gap-4">
-            <Field label="Bearer token">
-              <input
-                type="password"
+          <BaseForm
+            className="flex flex-col gap-4"
+            errors={errors}
+            onSubmit={handleSubmit}
+          >
+            <BaseField.Root className="flex flex-col gap-1.5" name="token">
+              <BaseField.Label className="text-[11px] uppercase tracking-wider text-text-faint">
+                Bearer token
+              </BaseField.Label>
+              <BaseField.Control
                 autoComplete="current-password"
                 autoFocus
-                spellCheck={false}
-                value={value}
-                onChange={(e) => setValue(e.target.value)}
-                placeholder="paste token"
                 className={cx(INPUT_CLASS, 'font-mono')}
+                onChange={(event) => setValue(event.target.value)}
+                placeholder="paste token"
+                render={<BaseInput />}
+                spellCheck={false}
+                type="password"
+                value={value}
               />
-            </Field>
+              <BaseField.Error className="text-[11px] text-red-400" />
+            </BaseField.Root>
             <Button
+              disabled={submitting || !value.trim()}
+              fullWidth
               type="submit"
               variant="primary"
-              fullWidth
-              disabled={submitting || !value.trim()}
             >
               Sign in
             </Button>
-          </form>
+          </BaseForm>
         </Card>
       </div>
     </div>

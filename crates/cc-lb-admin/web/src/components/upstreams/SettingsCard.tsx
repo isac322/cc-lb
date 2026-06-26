@@ -1,3 +1,5 @@
+import { Radio as BaseRadio } from '@base-ui/react/radio';
+import { RadioGroup as BaseRadioGroup } from '@base-ui/react/radio-group';
 import { useState } from 'react';
 import { toast } from 'sonner';
 import { DEFAULT_ANTHROPIC_BASE_URL } from '../../lib/constants';
@@ -96,24 +98,32 @@ export function SettingsCard({ upstream }: Props) {
             {upstream.kind === 'anthropic_api_key' && (
               <Field label="API Key">
                 <div className="flex flex-col gap-2">
-                  <div className="flex items-center gap-4">
+                  <BaseRadioGroup
+                    className="flex items-center gap-4"
+                    onValueChange={(value) =>
+                      setUseLiteral(value === 'literal')
+                    }
+                    value={useLiteral ? 'literal' : 'env'}
+                  >
                     <label className="flex items-center gap-1.5 text-sm text-text">
-                      <input
-                        type="radio"
-                        checked={!useLiteral}
-                        onChange={() => setUseLiteral(false)}
-                      />
+                      <BaseRadio.Root
+                        className="flex h-4 w-4 items-center justify-center rounded-full border border-subtle bg-bg data-[checked]:border-[color:var(--color-accent)]"
+                        value="env"
+                      >
+                        <BaseRadio.Indicator className="h-2 w-2 rounded-full bg-[color:var(--color-accent)]" />
+                      </BaseRadio.Root>
                       Environment Variable
                     </label>
                     <label className="flex items-center gap-1.5 text-sm text-text">
-                      <input
-                        type="radio"
-                        checked={useLiteral}
-                        onChange={() => setUseLiteral(true)}
-                      />
+                      <BaseRadio.Root
+                        className="flex h-4 w-4 items-center justify-center rounded-full border border-subtle bg-bg data-[checked]:border-[color:var(--color-accent)]"
+                        value="literal"
+                      >
+                        <BaseRadio.Indicator className="h-2 w-2 rounded-full bg-[color:var(--color-accent)]" />
+                      </BaseRadio.Root>
                       Literal Value
                     </label>
-                  </div>
+                  </BaseRadioGroup>
                   {!useLiteral ? (
                     <input
                       type="text"

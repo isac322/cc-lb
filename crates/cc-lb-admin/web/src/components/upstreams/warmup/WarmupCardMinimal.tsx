@@ -1,3 +1,4 @@
+import { Switch as BaseSwitch } from '@base-ui/react/switch';
 import { HelpCircle, History, Zap } from 'lucide-react';
 import { useEffect, useState } from 'react';
 import { toast } from 'sonner';
@@ -391,28 +392,28 @@ function WarmupCardMinimalInner({ upstream }: { upstream: Upstream }) {
 
   const headerActions = (
     <div className="flex items-center">
-      <button
-        type="button"
-        role="switch"
-        data-testid="warmup-switch"
+      <BaseSwitch.Root
         aria-label="Toggle warmup"
-        aria-checked={upstream.warmup_enabled}
-        disabled={settingsPending}
-        onClick={handleToggle}
+        checked={upstream.warmup_enabled}
         className={cx(
           'relative inline-flex h-5 w-9 shrink-0 items-center self-center rounded-full border transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed',
           upstream.warmup_enabled
             ? 'bg-[color:var(--color-ok)] border-[color:var(--color-ok)]'
             : 'bg-overlay-5 border-subtle-strong hover:border-text-muted',
         )}
+        data-testid="warmup-switch"
+        disabled={settingsPending}
+        nativeButton
+        onCheckedChange={handleToggle}
+        render={<button type="button" />}
       >
-        <span
+        <BaseSwitch.Thumb
           className={cx(
             'pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
             upstream.warmup_enabled ? 'translate-x-4' : 'translate-x-0.5',
           )}
         />
-      </button>
+      </BaseSwitch.Root>
     </div>
   );
 

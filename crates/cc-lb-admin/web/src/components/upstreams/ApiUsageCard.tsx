@@ -1,3 +1,5 @@
+import { Toggle as BaseToggle } from '@base-ui/react/toggle';
+import { ToggleGroup as BaseToggleGroup } from '@base-ui/react/toggle-group';
 import { useId, useMemo } from 'react';
 import {
   Area,
@@ -11,7 +13,7 @@ import {
 import type { DashboardUsageResponse } from '../../lib/api';
 import { getWindowColor } from '../../lib/colors';
 import { fmtUsd } from '../../lib/format';
-import { Card, CardBody, CardHeader, cx, Skeleton } from '../ui/primitives';
+import { Card, CardBody, CardHeader, Skeleton } from '../ui/primitives';
 
 type Props = {
   data: DashboardUsageResponse | undefined;
@@ -85,60 +87,43 @@ export function ApiUsageCard({
     return val.toLocaleString();
   };
 
+  const toggleClass =
+    'rounded px-2 py-1 text-xs font-medium transition-colors text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100 data-[pressed]:bg-white data-[pressed]:text-zinc-900 data-[pressed]:shadow-sm dark:data-[pressed]:bg-zinc-700 dark:data-[pressed]:text-zinc-100';
+
   const action = (
     <div className="flex items-center gap-2">
-      <div className="flex items-center rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800">
-        <button
-          type="button"
-          onClick={() => onRangeChange('24h')}
-          className={cx(
-            'rounded px-2 py-1 text-xs font-medium transition-colors',
-            range === '24h'
-              ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100'
-              : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100',
-          )}
-        >
+      <BaseToggleGroup
+        aria-label="Time range"
+        className="flex items-center rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800"
+        onValueChange={(values) => {
+          const first = values[0];
+          if (first === '24h' || first === '7d') onRangeChange(first);
+        }}
+        value={[range]}
+      >
+        <BaseToggle className={toggleClass} value="24h">
           24h
-        </button>
-        <button
-          type="button"
-          onClick={() => onRangeChange('7d')}
-          className={cx(
-            'rounded px-2 py-1 text-xs font-medium transition-colors',
-            range === '7d'
-              ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100'
-              : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100',
-          )}
-        >
+        </BaseToggle>
+        <BaseToggle className={toggleClass} value="7d">
           7d
-        </button>
-      </div>
-      <div className="flex items-center rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800">
-        <button
-          type="button"
-          onClick={() => onMetricChange('tokens')}
-          className={cx(
-            'rounded px-2 py-1 text-xs font-medium transition-colors',
-            metric === 'tokens'
-              ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100'
-              : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100',
-          )}
-        >
+        </BaseToggle>
+      </BaseToggleGroup>
+      <BaseToggleGroup
+        aria-label="Metric"
+        className="flex items-center rounded-md bg-zinc-100 p-0.5 dark:bg-zinc-800"
+        onValueChange={(values) => {
+          const first = values[0];
+          if (first === 'tokens' || first === 'cost') onMetricChange(first);
+        }}
+        value={[metric]}
+      >
+        <BaseToggle className={toggleClass} value="tokens">
           Tokens
-        </button>
-        <button
-          type="button"
-          onClick={() => onMetricChange('cost')}
-          className={cx(
-            'rounded px-2 py-1 text-xs font-medium transition-colors',
-            metric === 'cost'
-              ? 'bg-white text-zinc-900 shadow-sm dark:bg-zinc-700 dark:text-zinc-100'
-              : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100',
-          )}
-        >
+        </BaseToggle>
+        <BaseToggle className={toggleClass} value="cost">
           Cost
-        </button>
-      </div>
+        </BaseToggle>
+      </BaseToggleGroup>
     </div>
   );
 

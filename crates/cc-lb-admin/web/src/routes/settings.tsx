@@ -1,3 +1,4 @@
+import { Collapsible as BaseCollapsible } from '@base-ui/react/collapsible';
 import { createFileRoute } from '@tanstack/react-router';
 import {
   AlertTriangle,
@@ -539,17 +540,19 @@ function ConfigDraftSection() {
             }
           />
           {schema.data ? (
-            <details className="text-xs">
-              <summary className="cursor-pointer text-text-faint">
+            <BaseCollapsible.Root className="text-xs">
+              <BaseCollapsible.Trigger className="cursor-pointer text-text-faint">
                 Coverage checklist ({schema.data.coverage_checklist.length}{' '}
                 fields)
-              </summary>
-              <ul className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-1 font-mono">
-                {schema.data.coverage_checklist.map((f) => (
-                  <li key={f}>· {f}</li>
-                ))}
-              </ul>
-            </details>
+              </BaseCollapsible.Trigger>
+              <BaseCollapsible.Panel className="overflow-hidden h-[var(--collapsible-panel-height)] transition-[height] duration-150 ease-out data-[ending-style]:h-0 data-[starting-style]:h-0">
+                <ul className="mt-2 grid grid-cols-1 md:grid-cols-2 gap-1 font-mono">
+                  {schema.data.coverage_checklist.map((f) => (
+                    <li key={f}>· {f}</li>
+                  ))}
+                </ul>
+              </BaseCollapsible.Panel>
+            </BaseCollapsible.Root>
           ) : null}
         </CardBody>
       </Card>

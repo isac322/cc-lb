@@ -1,4 +1,4 @@
-import * as Dialog from '@radix-ui/react-dialog';
+import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import { useNavigate } from '@tanstack/react-router';
 import { Command } from 'cmdk';
 import {
@@ -44,18 +44,19 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
   };
 
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-modal-backdrop backdrop-blur-sm" />
-        <Dialog.Content
-          aria-describedby={undefined}
-          style={{ maxHeight: 'min(700px, 80vh)' }}
+    <BaseDialog.Root onOpenChange={onOpenChange} open={open}>
+      <BaseDialog.Portal>
+        <BaseDialog.Backdrop className="fixed inset-0 z-50 bg-modal-backdrop backdrop-blur-sm" />
+        <BaseDialog.Popup
           className="fixed top-[5vh] left-1/2 -translate-x-1/2 z-50 w-[calc(100%-2rem)] max-w-xl outline-none"
+          style={{ maxHeight: 'min(700px, 80vh)' }}
         >
-          <Dialog.Title className="sr-only">Command palette</Dialog.Title>
-          <Dialog.Description className="sr-only">
+          <BaseDialog.Title className="sr-only">
+            Command palette
+          </BaseDialog.Title>
+          <BaseDialog.Description className="sr-only">
             Search resources or run commands
-          </Dialog.Description>
+          </BaseDialog.Description>
           <Command
             label="Command palette"
             className="bg-bg-sub border border-subtle-strong rounded-sm shadow-2xl grid grid-rows-[auto_minmax(0,1fr)_auto] max-h-full overflow-hidden"
@@ -69,15 +70,12 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
               <kbd className="font-mono text-[10px] text-text-faint bg-overlay-3 px-1.5 py-0.5 rounded-sm border border-subtle">
                 ESC
               </kbd>
-              <Dialog.Close asChild>
-                <button
-                  type="button"
-                  aria-label="Close"
-                  className="text-text-muted hover:text-text"
-                >
-                  <X className="w-4 h-4" />
-                </button>
-              </Dialog.Close>
+              <BaseDialog.Close
+                aria-label="Close"
+                className="text-text-muted hover:text-text"
+              >
+                <X className="w-4 h-4" />
+              </BaseDialog.Close>
             </div>
             <Command.List
               className="overflow-y-auto"
@@ -218,8 +216,8 @@ export function CommandPalette({ open, onOpenChange }: CommandPaletteProps) {
               <span className="inline-flex items-center gap-1">ESC Close</span>
             </div>
           </Command>
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+        </BaseDialog.Popup>
+      </BaseDialog.Portal>
+    </BaseDialog.Root>
   );
 }

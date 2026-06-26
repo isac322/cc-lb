@@ -1,3 +1,4 @@
+import { Tabs as BaseTabs } from '@base-ui/react/tabs';
 import { createFileRoute } from '@tanstack/react-router';
 import { Copy, Trash2, UploadCloud } from 'lucide-react';
 import { useRef, useState } from 'react';
@@ -48,23 +49,22 @@ function PluginsPage() {
   const [tab, setTab] = useState<PluginsTab>('registry');
   return (
     <PageContainer>
-      <div className="flex items-center gap-1 border-b border-subtle">
-        {TABS.map(({ id, label }) => (
-          <button
-            key={id}
-            type="button"
-            onClick={() => setTab(id)}
-            className={cx(
-              'px-3 py-2 text-sm border-b-2 -mb-px transition-colors',
-              tab === id
-                ? 'border-accent text-text'
-                : 'border-transparent text-text-faint hover:text-text',
-            )}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
+      <BaseTabs.Root
+        onValueChange={(value) => setTab(value as PluginsTab)}
+        value={tab}
+      >
+        <BaseTabs.List className="flex items-center gap-1 border-b border-subtle">
+          {TABS.map(({ id, label }) => (
+            <BaseTabs.Tab
+              className="px-3 py-2 text-sm border-b-2 -mb-px transition-colors border-transparent text-text-faint hover:text-text data-[active]:border-[color:var(--color-accent)] data-[active]:text-[color:var(--color-text)]"
+              key={id}
+              value={id}
+            >
+              {label}
+            </BaseTabs.Tab>
+          ))}
+        </BaseTabs.List>
+      </BaseTabs.Root>
 
       {tab === 'registry' ? (
         <RegistryTab />
