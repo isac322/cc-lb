@@ -24,6 +24,7 @@ import {
   usePrincipals,
   useUploadWasm,
 } from '../lib/queries';
+import { useCopyButton } from '../lib/useCopyButton';
 
 export const Route = createFileRoute('/plugins')({
   component: PluginsPage,
@@ -210,6 +211,7 @@ function RegistryTab() {
   const upload = useUploadWasm();
   const del = useDeletePlugin();
   const gc = useGcPlugins();
+  const { copy } = useCopyButton();
   const fileRef = useRef<HTMLInputElement>(null);
   const [pendingDelete, setPendingDelete] = useState<{
     id: string;
@@ -369,10 +371,7 @@ function RegistryTab() {
                           type="button"
                           aria-label="Copy SHA256"
                           className="text-text-faint hover:text-text"
-                          onClick={() => {
-                            navigator.clipboard.writeText(p.sha256_hex);
-                            toast.success('SHA256 copied');
-                          }}
+                          onClick={() => copy(p.sha256_hex, 'SHA256')}
                         >
                           <Copy className="w-3 h-3" />
                         </button>

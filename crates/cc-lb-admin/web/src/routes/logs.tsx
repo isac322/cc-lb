@@ -3,7 +3,6 @@ import { Toggle as BaseToggle } from '@base-ui/react/toggle';
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { Copy, Download, RefreshCw, X, Zap } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { toast } from 'sonner';
 import { z } from 'zod';
 import {
   Badge,
@@ -31,6 +30,7 @@ import {
   useUpstreamNameMap,
   useUpstreams,
 } from '../lib/queries';
+import { useCopyButton } from '../lib/useCopyButton';
 
 import { computeLatencySections } from './computeLatencySections';
 
@@ -49,13 +49,6 @@ export const Route = createFileRoute('/logs')({
 });
 
 const DASH = '—';
-
-function copyText(value: string, label: string) {
-  navigator.clipboard.writeText(value).then(
-    () => toast.success(`${label} copied`),
-    () => toast.error(`Failed to copy ${label}`),
-  );
-}
 
 function LogsPage() {
   const filters = Route.useSearch();
@@ -361,6 +354,8 @@ function RequestDetail({
   principalName: string | null;
   onClose: () => void;
 }) {
+  const { copy } = useCopyButton();
+
   const hasAnyToken =
     event.input_tokens != null ||
     event.output_tokens != null ||
@@ -405,7 +400,7 @@ function RequestDetail({
               type="button"
               aria-label="Copy request id"
               className="text-text-faint hover:text-text"
-              onClick={() => copyText(event.request_id, 'Request ID')}
+              onClick={() => copy(event.request_id, 'Request ID')}
             >
               <Copy className="w-3 h-3" />
             </button>
@@ -459,7 +454,7 @@ function RequestDetail({
                     type="button"
                     aria-label="Copy key id"
                     className="text-text-faint hover:text-text"
-                    onClick={() => copyText(event.key_id!, 'Key ID')}
+                    onClick={() => copy(event.key_id!, 'Key ID')}
                   >
                     <Copy className="w-3 h-3" />
                   </button>

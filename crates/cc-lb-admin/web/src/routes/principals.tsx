@@ -85,6 +85,7 @@ import {
   useUpdateRouterTerminalStrategy,
   useUpstreamNameMap,
 } from '../lib/queries';
+import { useCopyButton } from '../lib/useCopyButton';
 
 const principalSearchSchema = z.object({ selectedId: z.string().optional() });
 
@@ -813,6 +814,7 @@ function PluginDetailDrawer({
   open: boolean;
   onOpenChange: (open: boolean) => void;
 }) {
+  const { copy } = useCopyButton();
   if (!plugin) return null;
 
   return (
@@ -920,10 +922,7 @@ function PluginDetailDrawer({
                     type="button"
                     aria-label="Copy plugin id"
                     className="hover:text-text"
-                    onClick={() => {
-                      navigator.clipboard.writeText(plugin.id);
-                      toast.success('Plugin ID copied');
-                    }}
+                    onClick={() => copy(plugin.id, 'Plugin ID')}
                   >
                     <Copy className="w-3 h-3" />
                   </button>
@@ -2008,6 +2007,7 @@ function ApiKeysCard({ principal }: { principal: Principal }) {
   const keys = usePrincipalKeys(principal.id);
   const issue = useIssueKey();
   const revoke = useRevokeKey();
+  const { copy } = useCopyButton();
   const [issueOpen, setIssueOpen] = useState(false);
   const [label, setLabel] = useState('');
   const [issued, setIssued] = useState<{
@@ -2163,10 +2163,7 @@ function ApiKeysCard({ principal }: { principal: Principal }) {
               <Button
                 size="sm"
                 iconLeft={<Copy className="w-3 h-3" />}
-                onClick={() => {
-                  navigator.clipboard.writeText(issued.plaintext_key);
-                  toast.success('Copied');
-                }}
+                onClick={() => copy(issued.plaintext_key)}
               >
                 Copy
               </Button>
