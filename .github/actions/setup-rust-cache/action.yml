@@ -57,14 +57,19 @@ runs:
       run: |
         echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
         echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
-        echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
         if [ "${{ steps.cachemode.outputs.shared }}" = "true" ]; then
           # SCCACHE_DIR / SCCACHE_CACHE_SIZE come from the runner pod env (shared hostPath).
           # Force the local disk backend so sccache never talks to the GHA cache service.
           echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
+          # Intentionally NO SCCACHE_BASEDIRS here: every ephemeral runner on the single
+          # node checks out to the identical workspace path, so absolute paths already
+          # match and yield cache hits. Setting BASEDIRS rewrites dep-info (.d) paths to
+          # relative form, which cargo then fails to parse on a cache hit
+          # ("could not parse/generate dep info at ...target/debug/deps/*.d").
         else
           echo "SCCACHE_DIR=$GITHUB_WORKSPACE/.sccache" >> "$GITHUB_ENV"
           echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
+          echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
         fi
         if [ "${{ inputs.stable-build-metadata }}" = "true" ]; then
           echo "GIT_SHA=0000000" >> "$GITHUB_ENV"
