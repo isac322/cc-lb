@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.1.3](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-conformance-v0.1.2...cc-lb-plugin-conformance-v0.1.3) - 2026-06-26
+
+### Other
+
+- updated the following local packages: cc-lb-plugin-api, cc-lb-runtime-protocol
+
 ## [0.1.2](https://github.com/isac322/cc-lb/compare/cc-lb-plugin-conformance-v0.1.1...cc-lb-plugin-conformance-v0.1.2) - 2026-06-18
 
 ### Other
