@@ -1,6 +1,6 @@
+import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import { ChevronRight, X } from 'lucide-react';
 import { useMemo, useState } from 'react';
-import { Drawer } from 'vaul';
 import { formatRelativeUnixSeconds } from '../../../lib/format';
 import {
   type Upstream,
@@ -153,17 +153,19 @@ export function WarmupHistoryDrawer({ open, onOpenChange, upstream }: Props) {
   };
 
   return (
-    <Drawer.Root direction="right" open={open} onOpenChange={handleOpenChange}>
-      <Drawer.Portal>
-        <Drawer.Overlay className="fixed inset-0 z-40 bg-drawer-backdrop" />
-        <Drawer.Content
+    <BaseDialog.Root onOpenChange={handleOpenChange} open={open}>
+      <BaseDialog.Portal>
+        <BaseDialog.Backdrop className="fixed inset-0 z-40 bg-drawer-backdrop transition-opacity duration-200 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
+        <BaseDialog.Popup
+          className="fixed right-0 top-0 bottom-0 w-full max-w-3xl bg-bg-sub border-l border-subtle z-50 flex flex-col outline-none transition-transform duration-200 ease-out data-[ending-style]:translate-x-full data-[starting-style]:translate-x-full"
           data-testid="warmup-history-drawer"
-          className="fixed right-0 top-0 bottom-0 w-full max-w-3xl bg-bg-sub border-l border-subtle z-50 flex flex-col"
         >
-          <Drawer.Title className="sr-only">Warm-up history</Drawer.Title>
-          <Drawer.Description className="sr-only">
+          <BaseDialog.Title className="sr-only">
+            Warm-up history
+          </BaseDialog.Title>
+          <BaseDialog.Description className="sr-only">
             Full list of warm-up attempts for {upstream.name}.
-          </Drawer.Description>
+          </BaseDialog.Description>
 
           <header className="flex items-center justify-between gap-3 px-3 py-2.5 border-b border-subtle shrink-0">
             <div className="min-w-0 flex items-center gap-3">
@@ -270,9 +272,9 @@ export function WarmupHistoryDrawer({ open, onOpenChange, upstream }: Props) {
               </div>
             )}
           </div>
-        </Drawer.Content>
-      </Drawer.Portal>
-    </Drawer.Root>
+        </BaseDialog.Popup>
+      </BaseDialog.Portal>
+    </BaseDialog.Root>
   );
 }
 

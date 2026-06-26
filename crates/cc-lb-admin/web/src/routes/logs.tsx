@@ -1,8 +1,9 @@
+import { Dialog as BaseDialog } from '@base-ui/react/dialog';
+import { Toggle as BaseToggle } from '@base-ui/react/toggle';
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import { Copy, Download, RefreshCw, X, Zap } from 'lucide-react';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { Drawer } from 'vaul';
 import { z } from 'zod';
 import {
   Badge,
@@ -186,14 +187,15 @@ function LogsPage() {
         }
         action={
           <div className="flex items-center gap-2 flex-wrap justify-end">
-            <Button
-              size="sm"
-              variant={tailing ? 'accent' : 'secondary'}
-              iconLeft={<Zap className="w-3 h-3" />}
-              onClick={() => setTailing((t) => !t)}
+            <BaseToggle
+              aria-label="Live tail logs"
+              className="inline-flex items-center justify-center rounded-sm font-medium transition-colors select-none disabled:cursor-not-allowed disabled:opacity-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2 h-7 px-2.5 text-xs gap-1.5 bg-[color:var(--color-panel-strong)] border border-[color:var(--color-border)] text-[color:var(--color-text)] hover:bg-[color:var(--color-hover-bg)] data-[pressed]:bg-[color:var(--color-accent-dim)] data-[pressed]:text-[color:var(--color-accent)] data-[pressed]:border-[color:var(--color-accent)]"
+              onPressedChange={setTailing}
+              pressed={tailing}
             >
+              <Zap className="w-3 h-3" />
               {tailing ? 'Stop tail' : 'Live tail'}
-            </Button>
+            </BaseToggle>
             <Button
               size="sm"
               iconLeft={<RefreshCw className="w-3 h-3" />}
@@ -317,34 +319,35 @@ function LogsPage() {
         </Card>
       </Section>
 
-      <Drawer.Root
-        open={!!selected}
-        onOpenChange={(o) => {
-          if (!o) setSelected(null);
+      <BaseDialog.Root
+        onOpenChange={(open) => {
+          if (!open) setSelected(null);
         }}
-        direction="right"
+        open={!!selected}
       >
-        <Drawer.Portal>
-          <Drawer.Overlay className="fixed inset-0 z-40 bg-drawer-backdrop" />
-          <Drawer.Content className="fixed right-0 top-0 bottom-0 w-full max-w-lg bg-bg-sub border-l border-subtle z-50 flex flex-col">
-            <Drawer.Title className="sr-only">Request detail</Drawer.Title>
-            <Drawer.Description className="sr-only">
+        <BaseDialog.Portal>
+          <BaseDialog.Backdrop className="fixed inset-0 z-40 bg-drawer-backdrop transition-opacity duration-200 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
+          <BaseDialog.Popup className="fixed right-0 top-0 bottom-0 w-full max-w-lg bg-bg-sub border-l border-subtle z-50 flex flex-col outline-none transition-transform duration-200 ease-out data-[ending-style]:translate-x-full data-[starting-style]:translate-x-full">
+            <BaseDialog.Title className="sr-only">
+              Request detail
+            </BaseDialog.Title>
+            <BaseDialog.Description className="sr-only">
               Detail view of a single request event
-            </Drawer.Description>
+            </BaseDialog.Description>
             {selected ? (
               <RequestDetail
                 event={selected}
+                onClose={() => setSelected(null)}
                 principalName={
                   selected.principal_id
                     ? (principalNameMap.get(selected.principal_id) ?? null)
                     : null
                 }
-                onClose={() => setSelected(null)}
               />
             ) : null}
-          </Drawer.Content>
-        </Drawer.Portal>
-      </Drawer.Root>
+          </BaseDialog.Popup>
+        </BaseDialog.Portal>
+      </BaseDialog.Root>
     </FullPage>
   );
 }

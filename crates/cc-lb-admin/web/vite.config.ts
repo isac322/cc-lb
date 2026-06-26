@@ -16,7 +16,6 @@ export default defineConfig({
     port: 5173,
     strictPort: true,
     proxy: {
-      // The dev fallback if api.ts ever drops its hardcoded mock-server URL.
       '/admin/v1': { target: 'http://127.0.0.1:8001', changeOrigin: true },
       '/admin/events': { target: 'http://127.0.0.1:8001', changeOrigin: true },
       '/admin/health': { target: 'http://127.0.0.1:8001', changeOrigin: true },

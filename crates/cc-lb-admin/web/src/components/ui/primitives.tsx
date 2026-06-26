@@ -1,8 +1,9 @@
-import * as Dialog from '@radix-ui/react-dialog';
-import * as Tooltip from '@radix-ui/react-tooltip';
+import { AlertDialog as BaseAlertDialog } from '@base-ui/react/alert-dialog';
+import { Button as BaseButton } from '@base-ui/react/button';
+import { Dialog as BaseDialog } from '@base-ui/react/dialog';
+import { Popover as BasePopover } from '@base-ui/react/popover';
 import { X } from 'lucide-react';
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from 'react';
-import { forwardRef, useState } from 'react';
 import { Area, AreaChart, ResponsiveContainer } from 'recharts';
 
 import { getWindowColor } from '../../lib/colors';
@@ -84,53 +85,48 @@ const BTN_SIZES: Record<ButtonSize, string> = {
   sm: 'h-7 px-2.5 text-xs gap-1.5',
   md: 'h-9 px-3 text-sm gap-2',
 };
-export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
-  function Button(
-    {
-      variant = 'secondary',
-      size = 'md',
-      fullWidth,
-      iconLeft,
-      iconRight,
-      className,
-      children,
-      ...rest
-    },
-    ref,
-  ) {
-    return (
-      <button
-        ref={ref}
-        type="button"
-        className={cx(
-          'inline-flex items-center justify-center rounded-sm font-medium transition-colors select-none',
-          'disabled:cursor-not-allowed disabled:opacity-50',
-          'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
-          BTN_VARIANTS[variant],
-          BTN_SIZES[size],
-          fullWidth ? 'w-full' : '',
-          className,
-        )}
-        {...rest}
-      >
-        {iconLeft}
-        {children}
-        {iconRight}
-      </button>
-    );
-  },
-);
+export function Button({
+  variant = 'secondary',
+  size = 'md',
+  fullWidth,
+  iconLeft,
+  iconRight,
+  className,
+  children,
+  type,
+  ...rest
+}: ButtonProps) {
+  return (
+    <BaseButton
+      type={type ?? 'button'}
+      className={cx(
+        'inline-flex items-center justify-center rounded-sm font-medium transition-colors select-none',
+        'disabled:cursor-not-allowed disabled:opacity-50',
+        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
+        BTN_VARIANTS[variant],
+        BTN_SIZES[size],
+        fullWidth ? 'w-full' : '',
+        className,
+      )}
+      {...rest}
+    >
+      {iconLeft}
+      {children}
+      {iconRight}
+    </BaseButton>
+  );
+}
 
-// ─── IconButton (44px touch target on mobile) ────────────────────────────────
 export function IconButton({
   className,
   children,
   label,
+  type,
   ...rest
 }: ButtonProps & { label: string }) {
   return (
-    <button
-      type="button"
+    <BaseButton
+      type={type ?? 'button'}
       aria-label={label}
       className={cx(
         'inline-flex items-center justify-center text-text-muted hover:text-text rounded-sm',
@@ -141,7 +137,7 @@ export function IconButton({
       {...rest}
     >
       {children}
-    </button>
+    </BaseButton>
   );
 }
 
@@ -261,32 +257,38 @@ export function Modal({
   const sizeClass =
     size === 'sm' ? 'max-w-sm' : size === 'lg' ? 'max-w-2xl' : 'max-w-md';
   return (
-    <Dialog.Root open={open} onOpenChange={onOpenChange}>
-      <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-modal-backdrop backdrop-blur-sm data-[state=open]:animate-in data-[state=open]:fade-in" />
-        <Dialog.Content
+    <BaseDialog.Root open={open} onOpenChange={onOpenChange}>
+      <BaseDialog.Portal>
+        <BaseDialog.Backdrop className="fixed inset-0 z-50 bg-modal-backdrop backdrop-blur-sm transition-opacity duration-150 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
+        <BaseDialog.Popup
           className={cx(
             'fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[calc(100%-2rem)] outline-none',
             'bg-bg-sub border border-subtle-strong rounded-sm shadow-2xl flex flex-col max-h-[85vh]',
+            'transition-[opacity,scale] duration-150 ease-out data-[ending-style]:opacity-0 data-[ending-style]:scale-95 data-[starting-style]:opacity-0 data-[starting-style]:scale-95',
             sizeClass,
           )}
         >
           <div className="flex items-start justify-between px-4 py-3 border-b border-subtle">
             <div className="min-w-0">
-              <Dialog.Title className="text-sm font-medium text-text">
+              <BaseDialog.Title className="text-sm font-medium text-text">
                 {title}
-              </Dialog.Title>
+              </BaseDialog.Title>
               {description ? (
-                <Dialog.Description className="mt-0.5 text-xs text-text-faint">
+                <BaseDialog.Description className="mt-0.5 text-xs text-text-faint">
                   {description}
-                </Dialog.Description>
+                </BaseDialog.Description>
               ) : null}
             </div>
-            <Dialog.Close asChild>
-              <IconButton label="Close dialog">
-                <X className="w-4 h-4" />
-              </IconButton>
-            </Dialog.Close>
+            <BaseDialog.Close
+              aria-label="Close dialog"
+              className={cx(
+                'inline-flex items-center justify-center text-text-muted hover:text-text rounded-sm',
+                'h-9 w-9 md:h-8 md:w-8 hover:bg-overlay-5',
+                'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-1',
+              )}
+            >
+              <X className="w-4 h-4" />
+            </BaseDialog.Close>
           </div>
           <div className="flex-1 p-4 overflow-y-auto">{children}</div>
           {footer ? (
@@ -294,9 +296,9 @@ export function Modal({
               {footer}
             </div>
           ) : null}
-        </Dialog.Content>
-      </Dialog.Portal>
-    </Dialog.Root>
+        </BaseDialog.Popup>
+      </BaseDialog.Portal>
+    </BaseDialog.Root>
   );
 }
 
@@ -322,40 +324,52 @@ export function ConfirmDialog({
   confirmDisabled?: boolean;
 }) {
   return (
-    <Modal
-      open={open}
-      onOpenChange={onOpenChange}
-      title={title}
-      size="sm"
-      footer={
-        <>
-          <Button variant="ghost" onClick={() => onOpenChange(false)}>
-            {cancelLabel}
-          </Button>
-          <Button
-            variant={destructive ? 'danger' : 'primary'}
-            disabled={confirmDisabled}
-            autoFocus
-            onClick={() => {
-              onConfirm();
-              onOpenChange(false);
-            }}
-          >
-            {confirmLabel}
-          </Button>
-        </>
-      }
-    >
-      {description ? (
-        <div className="text-sm leading-relaxed text-text-muted">
-          {description}
-        </div>
-      ) : null}
-    </Modal>
+    <BaseAlertDialog.Root open={open} onOpenChange={onOpenChange}>
+      <BaseAlertDialog.Portal>
+        <BaseAlertDialog.Backdrop className="fixed inset-0 z-50 bg-modal-backdrop backdrop-blur-sm transition-opacity duration-150 ease-out data-[ending-style]:opacity-0 data-[starting-style]:opacity-0" />
+        <BaseAlertDialog.Popup
+          className={cx(
+            'fixed top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 w-[calc(100%-2rem)] outline-none',
+            'bg-bg-sub border border-subtle-strong rounded-sm shadow-2xl flex flex-col max-h-[85vh] max-w-sm',
+            'transition-[opacity,scale] duration-150 ease-out data-[ending-style]:opacity-0 data-[ending-style]:scale-95 data-[starting-style]:opacity-0 data-[starting-style]:scale-95',
+          )}
+        >
+          <div className="flex items-start justify-between px-4 py-3 border-b border-subtle">
+            <div className="min-w-0">
+              <BaseAlertDialog.Title className="text-sm font-medium text-text">
+                {title}
+              </BaseAlertDialog.Title>
+            </div>
+          </div>
+          <div className="flex-1 p-4 overflow-y-auto">
+            {description ? (
+              <BaseAlertDialog.Description className="text-sm leading-relaxed text-text-muted">
+                {description}
+              </BaseAlertDialog.Description>
+            ) : null}
+          </div>
+          <div className="px-4 py-3 border-t border-subtle flex items-center justify-end gap-2">
+            <Button variant="ghost" onClick={() => onOpenChange(false)}>
+              {cancelLabel}
+            </Button>
+            <Button
+              autoFocus
+              disabled={confirmDisabled}
+              onClick={() => {
+                onConfirm();
+                onOpenChange(false);
+              }}
+              variant={destructive ? 'danger' : 'primary'}
+            >
+              {confirmLabel}
+            </Button>
+          </div>
+        </BaseAlertDialog.Popup>
+      </BaseAlertDialog.Portal>
+    </BaseAlertDialog.Root>
   );
 }
 
-// ─── Tooltip wrapper ─────────────────────────────────────────────────────────
 export function Hint({
   label,
   children,
@@ -365,33 +379,24 @@ export function Hint({
   children: ReactNode;
   side?: 'top' | 'right' | 'bottom' | 'left';
 }) {
-  const [open, setOpen] = useState(false);
   return (
-    <Tooltip.Provider delayDuration={200}>
-      <Tooltip.Root open={open} onOpenChange={setOpen}>
-        <Tooltip.Trigger asChild>
-          <span
-            onClick={(e) => {
-              e.stopPropagation();
-              setOpen((o) => !o);
-            }}
-          >
-            {children}
-          </span>
-        </Tooltip.Trigger>
-        <Tooltip.Portal>
-          <Tooltip.Content
-            side={side}
-            sideOffset={4}
-            onPointerDownOutside={() => setOpen(false)}
-            className="z-50 px-2 py-1 text-[11px] rounded-sm bg-bg-sub border border-subtle-strong text-text shadow-lg"
-          >
+    <BasePopover.Root>
+      <BasePopover.Trigger
+        delay={200}
+        onClick={(event) => event.stopPropagation()}
+        openOnHover
+        render={<span />}
+      >
+        {children}
+      </BasePopover.Trigger>
+      <BasePopover.Portal>
+        <BasePopover.Positioner side={side} sideOffset={4}>
+          <BasePopover.Popup className="z-50 px-2 py-1 text-[11px] rounded-sm bg-bg-sub border border-subtle-strong text-text shadow-lg">
             {label}
-            <Tooltip.Arrow className="fill-[color:var(--color-bg-sub)]" />
-          </Tooltip.Content>
-        </Tooltip.Portal>
-      </Tooltip.Root>
-    </Tooltip.Provider>
+          </BasePopover.Popup>
+        </BasePopover.Positioner>
+      </BasePopover.Portal>
+    </BasePopover.Root>
   );
 }
 

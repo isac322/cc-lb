@@ -1,4 +1,10 @@
 // biome-ignore-all lint/suspicious/noExplicitAny: legitimate any for loose chart/metadata shapes
+import { Meter as BaseMeter } from '@base-ui/react/meter';
+import { Radio as BaseRadio } from '@base-ui/react/radio';
+import { RadioGroup as BaseRadioGroup } from '@base-ui/react/radio-group';
+import { Switch as BaseSwitch } from '@base-ui/react/switch';
+import { Toggle as BaseToggle } from '@base-ui/react/toggle';
+import { ToggleGroup as BaseToggleGroup } from '@base-ui/react/toggle-group';
 import { createFileRoute, useNavigate } from '@tanstack/react-router';
 import {
   ChevronLeft,
@@ -283,17 +289,25 @@ function UpstreamsPage() {
                             <div className="w-8 shrink-0 text-text-faint truncate">
                               {windowName === 'overage' ? 'Extra' : label}
                             </div>
-                            <div className="flex-1 h-[5px] bg-progress-track rounded-full overflow-hidden">
-                              {utilization != null && (
-                                <div
+                            <BaseMeter.Root
+                              value={
+                                utilization == null
+                                  ? 0
+                                  : Math.min(
+                                      100,
+                                      Math.max(0, utilization * 100),
+                                    )
+                              }
+                              max={100}
+                              className="flex-1 h-[5px] bg-progress-track rounded-full overflow-hidden"
+                            >
+                              <BaseMeter.Track className="h-full">
+                                <BaseMeter.Indicator
                                   className="h-full rounded-full"
-                                  style={{
-                                    width: `${Math.min(100, Math.max(0, utilization * 100))}%`,
-                                    backgroundColor: color.stroke,
-                                  }}
+                                  style={{ backgroundColor: color.stroke }}
                                 />
-                              )}
-                            </div>
+                              </BaseMeter.Track>
+                            </BaseMeter.Root>
                             <div className="w-8 shrink-0 text-right tabular-nums">
                               {pct}
                             </div>
@@ -880,13 +894,13 @@ function DetailView({
                   upstream.enabled ? 'Click to disable' : 'Click to enable'
                 }
               >
-                <button
-                  type="button"
-                  role="switch"
+                <BaseSwitch.Root
                   aria-checked={upstream.enabled}
+                  checked={upstream.enabled}
+                  className="group inline-flex items-center gap-2 h-7 px-2 rounded-sm transition-colors focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-overlay-3"
                   disabled={toggle.isPending}
-                  onClick={() => {
-                    const nextEnabled = !upstream.enabled;
+                  nativeButton
+                  onCheckedChange={(nextEnabled) => {
                     const body: UpdateUpstreamWarmupSettingsRequest = {
                       enabled: nextEnabled,
                     };
@@ -909,7 +923,7 @@ function DetailView({
                       },
                     );
                   }}
-                  className="group inline-flex items-center gap-2 h-7 px-2 rounded-sm transition-colors focus:outline-none focus:ring-2 focus:ring-accent/40 disabled:opacity-50 disabled:cursor-not-allowed hover:bg-overlay-3"
+                  render={<button role="switch" type="button" />}
                 >
                   <div
                     className={cx(
@@ -919,7 +933,7 @@ function DetailView({
                         : 'bg-overlay-5 border-subtle-strong group-hover:border-text-muted',
                     )}
                   >
-                    <span
+                    <BaseSwitch.Thumb
                       className={cx(
                         'pointer-events-none inline-block h-3 w-3 transform rounded-full bg-white shadow-sm transition-transform duration-200 ease-in-out',
                         upstream.enabled ? 'translate-x-4' : 'translate-x-0.5',
@@ -936,7 +950,7 @@ function DetailView({
                   >
                     {upstream.enabled ? 'Enabled' : 'Disabled'}
                   </span>
-                </button>
+                </BaseSwitch.Root>
               </Hint>
               <Badge tone="mono">{upstream.kind}</Badge>
             </div>
@@ -1047,23 +1061,25 @@ function DetailView({
               <CardHeader
                 title="Quota History"
                 action={
-                  <div className="flex flex-wrap bg-overlay-2 border border-subtle rounded-sm p-0.5 max-w-full">
+                  <BaseToggleGroup
+                    value={[range]}
+                    onValueChange={(values) => {
+                      const first = values[0];
+                      if (first) setRange(first);
+                    }}
+                    className="flex flex-wrap bg-overlay-2 border border-subtle rounded-sm p-0.5 max-w-full"
+                  >
                     {(['1h', '6h', '24h', '7d'] as const).map((r) => (
-                      <button
+                      <BaseToggle
                         key={r}
                         type="button"
-                        onClick={() => setRange(r)}
-                        className={cx(
-                          'px-2.5 h-7 text-xs rounded-sm transition-colors',
-                          r === range
-                            ? 'bg-overlay-6 text-text'
-                            : 'text-text-faint hover:text-text',
-                        )}
+                        value={r}
+                        className="px-2.5 h-7 text-xs rounded-sm transition-colors text-text-faint hover:text-text data-[pressed]:bg-[color:var(--color-overlay-6)] data-[pressed]:text-[color:var(--color-text)]"
                       >
                         {r}
-                      </button>
+                      </BaseToggle>
                     ))}
-                  </div>
+                  </BaseToggleGroup>
                 }
               />
               <CardBody className="p-3 pt-1">
@@ -1476,15 +1492,28 @@ function DetailView({
                                       ).toFixed(1)}
                                       %
                                     </div>
-                                    <div className="w-full h-1 bg-progress-track rounded-full overflow-hidden mt-1">
-                                      <div
-                                        className="h-full rounded-full"
-                                        style={{
-                                          width: `${Math.min(100, Math.max(0, (snap.extra_usage_used_credits / snap.extra_usage_monthly_limit) * 100))}%`,
-                                          backgroundColor: color.fill,
-                                        }}
-                                      />
-                                    </div>
+                                    <BaseMeter.Root
+                                      value={Math.min(
+                                        100,
+                                        Math.max(
+                                          0,
+                                          (snap.extra_usage_used_credits /
+                                            snap.extra_usage_monthly_limit) *
+                                            100,
+                                        ),
+                                      )}
+                                      max={100}
+                                      className="w-full h-1 bg-progress-track rounded-full overflow-hidden mt-1"
+                                    >
+                                      <BaseMeter.Track className="h-full">
+                                        <BaseMeter.Indicator
+                                          className="h-full rounded-full"
+                                          style={{
+                                            backgroundColor: color.fill,
+                                          }}
+                                        />
+                                      </BaseMeter.Track>
+                                    </BaseMeter.Root>
                                     <div className="text-sm font-medium tabular-nums mt-1">
                                       $
                                       {(
@@ -1513,15 +1542,21 @@ function DetailView({
                                 </div>
                               )}
                               {!isOverage && snap.utilization != null && (
-                                <div className="w-full h-1 bg-progress-track rounded-full overflow-hidden mt-1">
-                                  <div
-                                    className="h-full rounded-full"
-                                    style={{
-                                      width: `${Math.min(100, Math.max(0, snap.utilization * 100))}%`,
-                                      backgroundColor: color.fill,
-                                    }}
-                                  />
-                                </div>
+                                <BaseMeter.Root
+                                  value={Math.min(
+                                    100,
+                                    Math.max(0, snap.utilization * 100),
+                                  )}
+                                  max={100}
+                                  className="w-full h-1 bg-progress-track rounded-full overflow-hidden mt-1"
+                                >
+                                  <BaseMeter.Track className="h-full">
+                                    <BaseMeter.Indicator
+                                      className="h-full rounded-full"
+                                      style={{ backgroundColor: color.fill }}
+                                    />
+                                  </BaseMeter.Track>
+                                </BaseMeter.Root>
                               )}
                               {windowNotStarted ? (
                                 <div className="text-[10px] text-text-faint font-mono mt-1">
@@ -2032,16 +2067,19 @@ function CreateUpstreamModal({
     if (step === 'type') {
       return (
         <div className="space-y-4">
-          <div className="space-y-2">
+          <BaseRadioGroup
+            name="kind"
+            value={kind}
+            onValueChange={(value) => setKind(value)}
+            className="space-y-2"
+          >
             <label className="flex items-start gap-3 p-3 border border-subtle rounded-md cursor-pointer hover:bg-overlay-1 transition-colors">
-              <input
-                type="radio"
-                name="kind"
+              <BaseRadio.Root
                 value="anthropic_oauth"
-                checked={kind === 'anthropic_oauth'}
-                onChange={() => setKind('anthropic_oauth')}
-                className="mt-1"
-              />
+                className="mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-subtle bg-bg transition-colors data-[checked]:border-[color:var(--color-accent)]"
+              >
+                <BaseRadio.Indicator className="h-2 w-2 rounded-full bg-[color:var(--color-accent)]" />
+              </BaseRadio.Root>
               <div>
                 <div className="font-medium text-text">
                   Anthropic OAuth (Recommended)
@@ -2054,14 +2092,12 @@ function CreateUpstreamModal({
               </div>
             </label>
             <label className="flex items-start gap-3 p-3 border border-subtle rounded-md cursor-pointer hover:bg-overlay-1 transition-colors">
-              <input
-                type="radio"
-                name="kind"
+              <BaseRadio.Root
                 value="anthropic_api_key"
-                checked={kind === 'anthropic_api_key'}
-                onChange={() => setKind('anthropic_api_key')}
-                className="mt-1"
-              />
+                className="mt-1 flex h-4 w-4 shrink-0 items-center justify-center rounded-full border border-subtle bg-bg transition-colors data-[checked]:border-[color:var(--color-accent)]"
+              >
+                <BaseRadio.Indicator className="h-2 w-2 rounded-full bg-[color:var(--color-accent)]" />
+              </BaseRadio.Root>
               <div>
                 <div className="font-medium text-text">Anthropic API Key</div>
                 <div className="text-xs text-text-faint mt-1">
@@ -2070,7 +2106,7 @@ function CreateUpstreamModal({
                 </div>
               </div>
             </label>
-          </div>
+          </BaseRadioGroup>
         </div>
       );
     }

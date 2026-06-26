@@ -13,6 +13,7 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
 
 function RootLayout() {
   const [paletteOpen, setPaletteOpen] = useState(false);
+
   return (
     <AuthRequiredGate>
       <AppShell onCommandPalette={() => setPaletteOpen(true)}>
