@@ -30,6 +30,7 @@ cc-lb-observability = { path = "../cc-lb-observability" }
 cc-lb-pricing = { path = "../cc-lb-pricing" }
 dashmap.workspace = true
 eventsource-stream.workspace = true
+flate2.workspace = true
 futures-core = "0.3"
 hickory-resolver = { workspace = true, features = ["tokio", "system-config"] }
 http.workspace = true

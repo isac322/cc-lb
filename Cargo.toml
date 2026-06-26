@@ -62,6 +62,7 @@ dashmap = "6"
 eventsource-stream = "0.2"
 extism = { version = "1", default-features = false, features = ["wasmtime-default-features"] }
 figment = "0.10"
+flate2 = "1"
 globset = "0.4"
 hickory-resolver = "0.26"
 hex = "0.4"

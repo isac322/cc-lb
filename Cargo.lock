@@ -873,6 +873,7 @@ dependencies = [
  "chrono",
  "dashmap",
  "eventsource-stream",
+ "flate2",
  "futures-core",
  "globset",
  "hickory-resolver",
