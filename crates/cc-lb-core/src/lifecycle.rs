@@ -56,7 +56,7 @@ use crate::dynamic_view::{
     DynamicView, DynamicViewBuilder, DynamicViewHolder, UpstreamStatusSnapshot,
 };
 use crate::error_format::{anthropic_error_response, anthropic_error_response_with_retry_after};
-use crate::error_normalizer::{ErrorNormalizer, UpstreamKind};
+use crate::error_normalizer::ErrorNormalizer;
 use crate::event_bus::RequestEventBus;
 use crate::hop_by_hop::strip_hop_by_hop;
 use crate::model_resolution::{cache_threshold_tokens, canonical_model_id};
@@ -1373,12 +1373,7 @@ impl Lifecycle {
                     }
                 };
             } else {
-                let mut response = rebuild_error_response(
-                    unauthorized,
-                    &route.upstream,
-                    route.dialect.as_ref(),
-                    view.error_normalizer.as_ref(),
-                );
+                let mut response = response_from_collected(unauthorized);
                 self.attach_limit_headers(&mut response, active_limit.as_ref());
                 record_api_key_request_metric(&metric_context, response.status());
                 observe_finished_for_principal(
@@ -1416,13 +1411,7 @@ impl Lifecycle {
                     cc_lb_observability::cache_observation_dropped_reason::STATUS_4XX,
                 );
             }
-            let collected = collect_error_response(response).await;
-            let mut response = rebuild_error_response(
-                collected,
-                &route.upstream,
-                route.dialect.as_ref(),
-                view.error_normalizer.as_ref(),
-            );
+            strip_hop_by_hop(response.headers_mut());
             self.attach_limit_headers(&mut response, active_limit.as_ref());
             record_api_key_request_metric(&metric_context, response.status());
             observe_finished_for_principal(
@@ -2673,19 +2662,11 @@ async fn collect_error_response(response: Response<Body>) -> CollectedResponse {
     }
 }
 
-fn rebuild_error_response(
-    collected: CollectedResponse,
-    upstream: &Upstream,
-    dialect: &dyn cc_lb_plugin_api::UpstreamDialect,
-    normalizer: &ErrorNormalizer,
-) -> Response<Body> {
-    normalizer.build_http_error_response_with_dialect(
-        UpstreamKind::from(upstream),
-        collected.status,
-        &collected.body,
-        &collected.headers,
-        Some(dialect),
-    )
+fn response_from_collected(collected: CollectedResponse) -> Response<Body> {
+    let mut response = Response::new(Body::from(collected.body));
+    *response.status_mut() = collected.status;
+    *response.headers_mut() = collected.headers;
+    response
 }
 
 fn copy_headers(source: HeaderMap, target: Option<&mut HeaderMap>) {
