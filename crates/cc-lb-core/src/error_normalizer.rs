@@ -1,15 +1,19 @@
 use std::collections::HashMap;
+use std::io::Read;
 use std::sync::Arc;
 
 use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_plugin_api::{Upstream, UpstreamDialect};
+use flate2::read::GzDecoder;
 use http::header::CONTENT_TYPE;
 use http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode};
 use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::sse_error_frame::make_error_frame_from_json;
+
+const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum UpstreamKind {
@@ -106,20 +110,37 @@ impl ErrorNormalizer {
         body: &Bytes,
         fallback_dialect: Option<&dyn UpstreamDialect>,
     ) -> Bytes {
+        let body = decoded_gzip_error_body(body);
         if let Some(dialect) = self.dialects.get(&kind) {
-            if let Some(normalized) = dialect.normalize_error(status, body) {
+            if let Some(normalized) = dialect.normalize_error(status, &body) {
                 return normalized;
             }
-            return body.clone();
+            return body;
         }
 
         if let Some(dialect) = fallback_dialect
-            && let Some(normalized) = dialect.normalize_error(status, body)
+            && let Some(normalized) = dialect.normalize_error(status, &body)
         {
             return normalized;
         }
 
-        body.clone()
+        body
+    }
+}
+
+fn decoded_gzip_error_body(body: &Bytes) -> Bytes {
+    if !body.starts_with(&GZIP_MAGIC) {
+        return body.clone();
+    }
+
+    let mut decoder = GzDecoder::new(body.as_ref());
+    let mut decoded = Vec::new();
+    match decoder.read_to_end(&mut decoded) {
+        Ok(_) => Bytes::from(decoded),
+        Err(source) => {
+            tracing::warn!(%source, "failed to decode gzip upstream error body");
+            body.clone()
+        }
     }
 }
 
