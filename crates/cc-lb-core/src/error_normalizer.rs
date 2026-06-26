@@ -6,14 +6,12 @@ use axum::body::Body;
 use bytes::Bytes;
 use cc_lb_plugin_api::{Upstream, UpstreamDialect};
 use flate2::read::GzDecoder;
-use http::header::CONTENT_TYPE;
+use http::header::{CONTENT_ENCODING, CONTENT_TYPE};
 use http::{HeaderMap, HeaderName, HeaderValue, Response, StatusCode};
 use serde_json::{Value, json};
 use thiserror::Error;
 
 use crate::sse_error_frame::make_error_frame_from_json;
-
-const GZIP_MAGIC: [u8; 2] = [0x1f, 0x8b];
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum UpstreamKind {
@@ -66,7 +64,7 @@ impl ErrorNormalizer {
         status: StatusCode,
         body: &Bytes,
     ) -> Bytes {
-        self.normalize_http_error_with_dialect(kind, status, body, None)
+        self.normalize_http_error_with_dialect(kind, status, body, &HeaderMap::new(), None)
     }
 
     pub fn build_http_error_response(
@@ -76,7 +74,8 @@ impl ErrorNormalizer {
         body: &Bytes,
         original_headers: &HeaderMap,
     ) -> Response<Body> {
-        let body = self.normalize_http_error(kind, status, body);
+        let body =
+            self.normalize_http_error_with_dialect(kind, status, body, original_headers, None);
         response_from_error_body(status, body, original_headers)
     }
 
@@ -99,7 +98,13 @@ impl ErrorNormalizer {
         original_headers: &HeaderMap,
         fallback_dialect: Option<&dyn UpstreamDialect>,
     ) -> Response<Body> {
-        let body = self.normalize_http_error_with_dialect(kind, status, body, fallback_dialect);
+        let body = self.normalize_http_error_with_dialect(
+            kind,
+            status,
+            body,
+            original_headers,
+            fallback_dialect,
+        );
         response_from_error_body(status, body, original_headers)
     }
 
@@ -108,9 +113,10 @@ impl ErrorNormalizer {
         kind: UpstreamKind,
         status: StatusCode,
         body: &Bytes,
+        original_headers: &HeaderMap,
         fallback_dialect: Option<&dyn UpstreamDialect>,
     ) -> Bytes {
-        let body = decoded_gzip_error_body(body);
+        let body = decoded_error_body(body, original_headers);
         if let Some(dialect) = self.dialects.get(&kind) {
             if let Some(normalized) = dialect.normalize_error(status, &body) {
                 return normalized;
@@ -128,8 +134,8 @@ impl ErrorNormalizer {
     }
 }
 
-fn decoded_gzip_error_body(body: &Bytes) -> Bytes {
-    if !body.starts_with(&GZIP_MAGIC) {
+fn decoded_error_body(body: &Bytes, original_headers: &HeaderMap) -> Bytes {
+    if !is_gzip_encoded(original_headers) {
         return body.clone();
     }
 
@@ -142,6 +148,17 @@ fn decoded_gzip_error_body(body: &Bytes) -> Bytes {
             body.clone()
         }
     }
+}
+
+fn is_gzip_encoded(headers: &HeaderMap) -> bool {
+    headers
+        .get(CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| {
+            value
+                .split(',')
+                .any(|encoding| encoding.trim().eq_ignore_ascii_case("gzip"))
+        })
 }
 
 fn response_from_error_body(
