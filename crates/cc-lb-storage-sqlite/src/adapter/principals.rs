@@ -206,26 +206,20 @@ impl PrincipalStore for SqliteStorage {
     async fn set_last_apply_error(
         &self,
         id: Uuid,
-        expected_revision: u64,
         error: Option<String>,
         applied_at_unix_secs: u64,
     ) -> StorageResult<Option<PrincipalRecord>> {
-        update_principal(
-            self,
-            id,
-            expected_revision,
-            u64_to_i64(applied_at_unix_secs, "principal.last_apply_at")?,
-            None,
-            None,
-            None,
-            None,
-            None,
-            None,
-            true,
-            error,
-            Some(u64_to_i64(applied_at_unix_secs, "principal.last_apply_at")?),
+        let applied_at = u64_to_i64(applied_at_unix_secs, "principal.last_apply_at")?;
+        let row = sqlx::query(
+            "UPDATE principals_v1 SET last_apply_error = ?, last_apply_at = ? WHERE id = ? RETURNING id, name, kind, enabled, allowed_models, allowed_upstreams, default_limits, router_terminal_strategy, revision, created_at, updated_at, last_apply_error, last_apply_at, deleted_at",
         )
+        .bind(error)
+        .bind(applied_at)
+        .bind(id.to_string())
+        .fetch_optional(self.pool())
         .await
+        .map_err(map_sqlite_error)?;
+        row.map(principal_from_row).transpose()
     }
 }
 

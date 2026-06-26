@@ -250,30 +250,22 @@ impl PrincipalStore for PostgresStorage {
     async fn set_last_apply_error(
         &self,
         id: Uuid,
-        expected_revision: u64,
         error: Option<String>,
         applied_at_unix_secs: u64,
     ) -> StorageResult<Option<PrincipalRecord>> {
         let applied_at = unix_secs_to_datetime(applied_at_unix_secs, "principal.last_apply_at")?;
-        let Some(current) = self.get_by_id(id).await? else {
-            return Ok(None);
-        };
-        if current.revision != expected_revision {
-            return Err(conflict(format!(
-                "stale postgres principal revision; current revision is {}",
-                current.revision
-            )));
-        }
         let row = sqlx::query(
-            "UPDATE principals_v1 SET last_apply_error = $3, last_apply_at = $4, updated_at = $4, revision = revision + 1 WHERE id = $1 AND revision = $2 RETURNING *",
+            "UPDATE principals_v1 SET last_apply_error = $2, last_apply_at = $3 WHERE id = $1 RETURNING *",
         )
         .bind(id)
-        .bind(u64_to_i64(expected_revision, "principal.revision")?)
         .bind(error)
         .bind(applied_at)
-        .fetch_one(&self.pool)
+        .fetch_optional(&self.pool)
         .await
         .map_err(map_sqlx_error)?;
+        let Some(row) = row else {
+            return Ok(None);
+        };
         let record = principal_from_row(row)?;
         self.notify_principal_changed(record.id).await?;
         Ok(Some(record))

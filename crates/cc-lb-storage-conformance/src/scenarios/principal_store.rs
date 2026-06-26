@@ -435,7 +435,6 @@ where
         let errored = PrincipalStore::set_last_apply_error(
             &*storage,
             record.id,
-            0,
             Some("router compile failed".to_owned()),
             BASE_TS + 3,
         )
@@ -443,12 +442,13 @@ where
         .unwrap();
         ensure!(errored.last_apply_error == Some("router compile failed".to_owned()));
         ensure!(errored.last_apply_at_unix_secs == Some(BASE_TS + 3));
-        let cleared =
-            PrincipalStore::set_last_apply_error(&*storage, record.id, 1, None, BASE_TS + 4)
-                .await?
-                .unwrap();
+        ensure!(errored.revision == record.revision);
+        let cleared = PrincipalStore::set_last_apply_error(&*storage, record.id, None, BASE_TS + 4)
+            .await?
+            .unwrap();
         ensure!(cleared.last_apply_error.is_none());
         ensure!(cleared.last_apply_at_unix_secs == Some(BASE_TS + 4));
+        ensure!(cleared.revision == record.revision);
         Ok(())
     })
     .await

@@ -117,7 +117,6 @@ pub trait PrincipalStore: Send + Sync {
     async fn set_last_apply_error(
         &self,
         id: Uuid,
-        expected_revision: u64,
         error: Option<String>,
         applied_at_unix_secs: u64,
     ) -> StorageResult<Option<PrincipalRecord>>;
