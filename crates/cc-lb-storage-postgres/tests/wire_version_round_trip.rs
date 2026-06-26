@@ -34,7 +34,7 @@ async fn run_test(url: &str) -> Result<()> {
         storage.initialize(BackendKind::Postgres).await?;
 
         let blob = WasmBlob {
-            sha256: [2; 32],
+            sha256: [42; 32],
             bytes: b"wire-version-plugin".to_vec(),
             size_bytes: b"wire-version-plugin".len() as u64,
             parse_validated_at_unix_secs: 1_800_000_000,
