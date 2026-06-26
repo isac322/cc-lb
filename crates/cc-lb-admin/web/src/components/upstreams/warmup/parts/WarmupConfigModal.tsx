@@ -1,7 +1,7 @@
 import { Copy } from 'lucide-react';
-import { useMemo, useState } from 'react';
-import { toast } from 'sonner';
+import { useMemo } from 'react';
 import type { WarmupDialectPluginSnapshot } from '../../../../lib/queries';
+import { useCopyButton } from '../../../../lib/useCopyButton';
 import { Button, Modal } from '../../../ui/primitives';
 
 interface Props {
@@ -11,7 +11,7 @@ interface Props {
 }
 
 export function WarmupConfigModal({ open, onOpenChange, plugin }: Props) {
-  const [copied, setCopied] = useState(false);
+  const { copied, copy } = useCopyButton();
 
   const pretty = useMemo(() => {
     try {
@@ -21,16 +21,7 @@ export function WarmupConfigModal({ open, onOpenChange, plugin }: Props) {
     }
   }, [plugin.config]);
 
-  const handleCopy = async () => {
-    try {
-      await navigator.clipboard.writeText(pretty);
-      setCopied(true);
-      toast.success('Plugin config copied to clipboard');
-      setTimeout(() => setCopied(false), 1500);
-    } catch {
-      toast.error('Clipboard write failed');
-    }
-  };
+  const handleCopy = () => copy(pretty, 'Plugin config');
 
   return (
     <Modal
