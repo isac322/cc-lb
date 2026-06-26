@@ -11,9 +11,9 @@ use cc_lb_runtime_extism::{
     registry::{PluginRegistry, RegistryError},
 };
 use cc_lb_storage_api::{
-    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_SHA256, PluginRegistryRecord,
-    PluginRegistryRepo, PluginRegistryStatus, PluginRegistryStore, RepoError, Storage,
-    WasmRegistryEntry,
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_SHA256, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256, PluginRegistryRecord, PluginRegistryRepo,
+    PluginRegistryStatus, PluginRegistryStore, RepoError, Storage, WasmRegistryEntry,
 };
 use thiserror::Error;
 use tokio::sync::{Semaphore, watch};
@@ -196,7 +196,9 @@ async fn process_record(
     force_rehandshake: bool,
     now: i64,
 ) -> RecordOutcome {
-    if record.sha256 == BUILTIN_CACHE_AFFINITY_SHA256 {
+    if record.sha256 == BUILTIN_CACHE_AFFINITY_SHA256
+        || record.sha256 == BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256
+    {
         registry.load_record_into_cache(&record);
         return RecordOutcome::SkippedFresh {
             sha256: record.sha256,
@@ -235,7 +237,7 @@ async fn reconcile_supported_slots_drift(storage: &dyn Storage, record: &PluginR
             return;
         }
     };
-    if entry.id == BUILTIN_CACHE_AFFINITY_ID {
+    if entry.id == BUILTIN_CACHE_AFFINITY_ID || entry.id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
         return;
     }
 
@@ -438,7 +440,10 @@ pub async fn bridge_legacy_wasm_registry(
         let last_id = page.last().map(|entry| entry.id);
 
         for entry in page {
-            if entry.is_builtin || entry.id == BUILTIN_CACHE_AFFINITY_ID {
+            if entry.is_builtin
+                || entry.id == BUILTIN_CACHE_AFFINITY_ID
+                || entry.id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID
+            {
                 continue;
             }
             report.scanned += 1;

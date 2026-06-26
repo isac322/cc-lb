@@ -2,10 +2,11 @@ use std::collections::{HashMap, HashSet};
 
 use async_trait::async_trait;
 use cc_lb_storage_api::{
-    BUILTIN_CACHE_AFFINITY_ID, MAX_WASM_BLOB_BYTES, PluginChainConflictReason, PluginChainEntry,
-    PluginChainEntryInput, PluginChainEntryUpdate, PluginRegistryStore, PluginSlot, StorageError,
-    StorageResult, WasmBlob, WasmBlobRecord, WasmRegistryEntry, WasmRegistryEntryInput,
-    default_wire_version, sparse_order, validate_identifier,
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, MAX_WASM_BLOB_BYTES,
+    PluginChainConflictReason, PluginChainEntry, PluginChainEntryInput, PluginChainEntryUpdate,
+    PluginRegistryStore, PluginSlot, StorageError, StorageResult, WasmBlob, WasmBlobRecord,
+    WasmRegistryEntry, WasmRegistryEntryInput, default_wire_version, sparse_order,
+    validate_identifier,
 };
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -672,6 +673,9 @@ fn registry_from_row(row: sqlx::postgres::PgRow) -> StorageResult<WasmRegistryEn
     let refcount = row.try_get("refcount").map_err(map_sqlx_error)?;
     if id == BUILTIN_CACHE_AFFINITY_ID {
         return Ok(WasmRegistryEntry::builtin_cache_affinity(refcount));
+    }
+    if id == BUILTIN_SUBSCRIPTION_PREFERENCE_ID {
+        return Ok(WasmRegistryEntry::builtin_subscription_preference(refcount));
     }
 
     let uploaded_at: DateTime<Utc> = row.try_get("uploaded_at").map_err(map_sqlx_error)?;

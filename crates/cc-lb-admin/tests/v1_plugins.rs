@@ -7,8 +7,9 @@ use axum::http::{HeaderMap, Request, StatusCode};
 use cc_lb_config::Config;
 use cc_lb_core::spawn_audit_writer;
 use cc_lb_storage_api::{
-    AuditStore, BUILTIN_CACHE_AFFINITY_ID, PluginChainEntryInput, PluginRegistryStore, PluginSlot,
-    PrincipalCreate, PrincipalKind, PrincipalStore, WasmBlob, WasmRegistryEntryInput, sparse_order,
+    AuditStore, BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
+    PluginChainEntryInput, PluginRegistryStore, PluginSlot, PrincipalCreate, PrincipalKind,
+    PrincipalStore, WasmBlob, WasmRegistryEntryInput, sparse_order,
 };
 use config_admin_common::{TOKEN, app, authed_json, temp_storage, test_state};
 use http_body_util::BodyExt;
@@ -20,14 +21,14 @@ use uuid::Uuid;
 async fn registry_list_paginates() {
     let (_dir, storage) = temp_storage().await;
     seed_registry(&storage, 1, "plugin-page-a").await;
-    let _second = seed_registry(&storage, 2, "plugin-page-b").await;
+    let _second = seed_registry(&storage, 3, "plugin-page-b").await;
     let app = app(test_state(Config::default(), Some(storage)));
 
     let (status, headers, body) =
         request_json(app, "GET", "/admin/v1/plugins/registry?limit=1", None, None).await;
 
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(headers.get("x-total-count").unwrap(), "3");
+    assert_eq!(headers.get("x-total-count").unwrap(), "4");
     assert_eq!(body["entries"].as_array().unwrap().len(), 1);
 }
 
@@ -75,6 +76,16 @@ async fn registry_list_exposes_builtin_cache_affinity() {
             "Exactly 1 candidate → no change."
         ])
     );
+    let subscription_preference = body["entries"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|entry| entry["id"] == BUILTIN_SUBSCRIPTION_PREFERENCE_ID.to_string())
+        .expect("builtin subscription-preference entry is listed");
+    assert_eq!(subscription_preference["name"], "subscription-preference");
+    assert_eq!(subscription_preference["kind"], "filter");
+    assert_eq!(subscription_preference["wire_version"], 3);
+    assert_eq!(subscription_preference["is_builtin"], true);
     let uploaded_entry = body["entries"]
         .as_array()
         .unwrap()
@@ -394,6 +405,49 @@ async fn chain_insert_accepts_builtin_cache_affinity_registry_id() {
     assert_eq!(
         entries[0]["wasm_registry_id"],
         BUILTIN_CACHE_AFFINITY_ID.to_string()
+    );
+}
+
+#[tokio::test]
+async fn chain_insert_accepts_builtin_subscription_preference_registry_id() {
+    let (_dir, storage) = temp_storage().await;
+    let principal_id = seed_principal(&storage, "principal-builtin-subscription-preference").await;
+    let app = app(test_state(Config::default(), Some(storage)));
+
+    let (status, _, body, _) = authed_json(
+        app.clone(),
+        "POST",
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain"),
+        Some(json!({
+            "slot": "Router",
+            "wasm_registry_id": BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
+            "wire_version": 3
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["slot"], "router");
+    assert_eq!(
+        body["wasm_registry_id"],
+        BUILTIN_SUBSCRIPTION_PREFERENCE_ID.to_string()
+    );
+    assert_eq!(body["wire_version"], 3);
+
+    let (status, _, chain, _) = authed_json(
+        app,
+        "GET",
+        &format!("/admin/v1/principals/{principal_id}/plugin-chain?slot=Router"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let entries = chain["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0]["id"], body["id"]);
+    assert_eq!(
+        entries[0]["wasm_registry_id"],
+        BUILTIN_SUBSCRIPTION_PREFERENCE_ID.to_string()
     );
 }
 

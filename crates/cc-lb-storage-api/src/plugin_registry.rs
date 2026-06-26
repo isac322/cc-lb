@@ -7,11 +7,21 @@ use crate::StorageResult;
 
 pub use cc_lb_plugin_api::{
     BUILTIN_CACHE_AFFINITY_ID, BUILTIN_CACHE_AFFINITY_NAME, BUILTIN_CACHE_AFFINITY_WIRE_VERSION,
-    PluginSlot,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_NAME,
+    BUILTIN_SUBSCRIPTION_PREFERENCE_WIRE_VERSION, PluginSlot,
 };
 
 pub const BUILTIN_PLUGIN_KIND_FILTER: &str = "filter";
 pub const BUILTIN_CACHE_AFFINITY_SHA256: [u8; 32] = [0; 32];
+/// Pseudo-SHA for the built-in `subscription-preference` filter.
+///
+/// Encoded as ASCII `b"subscription-preference"` followed by NUL padding so it
+/// never collides with the `[seed; 32]` uniform patterns that conformance and
+/// fixture tests use (cache-affinity already reserves `[0; 32]`).
+pub const BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256: [u8; 32] = [
+    0x73, 0x75, 0x62, 0x73, 0x63, 0x72, 0x69, 0x70, 0x74, 0x69, 0x6F, 0x6E, 0x2D, 0x70, 0x72, 0x65,
+    0x66, 0x65, 0x72, 0x65, 0x6E, 0x63, 0x65, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
 
 pub const MAX_WASM_BLOB_BYTES: u64 = 32 * 1024 * 1024;
 
@@ -102,6 +112,25 @@ impl WasmRegistryEntry {
     pub fn is_cache_affinity_builtin(&self) -> bool {
         self.id == BUILTIN_CACHE_AFFINITY_ID
     }
+
+    pub fn builtin_subscription_preference(refcount: i64) -> Self {
+        Self {
+            id: BUILTIN_SUBSCRIPTION_PREFERENCE_ID,
+            sha256: BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256,
+            name: BUILTIN_SUBSCRIPTION_PREFERENCE_NAME.to_owned(),
+            original_filename: "builtin://subscription-preference".to_owned(),
+            label: Some("Built-in subscription preference filter".to_owned()),
+            uploaded_at_unix_secs: 0,
+            uploaded_by_admin_id: Uuid::nil(),
+            refcount,
+            revision: 0,
+            kind: BUILTIN_PLUGIN_KIND_FILTER.to_owned(),
+            wire_version: BUILTIN_SUBSCRIPTION_PREFERENCE_WIRE_VERSION,
+            is_builtin: true,
+            metadata: Some(builtin_metadata_for_subscription_preference()),
+            supported_slots: vec![PluginSlot::Router],
+        }
+    }
 }
 
 fn default_plugin_kind() -> String {
@@ -122,6 +151,20 @@ fn builtin_metadata_for_cache_affinity() -> PluginMetadata {
             "5 candidates, 2 with positive cache score → keep the 2 hits.".to_owned(),
             "5 candidates, all with zero cache score → pass all 5 through.".to_owned(),
             "Exactly 1 candidate → no change.".to_owned(),
+        ],
+    }
+}
+
+fn builtin_metadata_for_subscription_preference() -> PluginMetadata {
+    PluginMetadata {
+        purpose: "Prefer subscription/OAuth upstreams while quota appears alive; use API-key upstreams only when subscription candidates are exhausted.".to_owned(),
+        keeps: "OAuth candidates whose subscription quota is not clearly exhausted, or API-key candidates when every OAuth candidate is exhausted.".to_owned(),
+        drops: "API-key candidates while at least one OAuth candidate appears alive; exhausted OAuth candidates when API-key fallback is available.".to_owned(),
+        empty_behavior: "Never drops everything. If no API-key fallback exists, exhausted OAuth candidates pass through so the upstream/provider returns the authoritative result.".to_owned(),
+        examples: vec![
+            "OAuth and API-key candidates, OAuth quota alive → keep OAuth candidates only.".to_owned(),
+            "OAuth and API-key candidates, every OAuth quota exhausted → keep API-key candidates only.".to_owned(),
+            "Only API-key candidates → keep API-key candidates.".to_owned(),
         ],
     }
 }
