@@ -7,6 +7,10 @@ use cc_lb_aead::{AeadService, EncryptedOAuthTokens, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
 use cc_lb_core::clock::{Clock, ClockHandle, unix_secs};
 use cc_lb_core::{AuditPayload, MetadataHookHandle, MetadataHookRequest};
+use cc_lb_oauth_protocol::{
+    ExistingTokenParts, TokenEndpointResponse, parse_token_endpoint_response,
+    refresh_token_form_body, refreshed_token_parts,
+};
 use cc_lb_scheduler::jobs::metadata_refresh::MetadataRefreshJob;
 use cc_lb_scheduler::jobs::oauth_refresh::OAuthRefreshJob;
 use cc_lb_scheduler::worker::{
@@ -21,7 +25,6 @@ use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
-use serde::Deserialize;
 use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
@@ -633,17 +636,9 @@ pub enum RefreshError {
     #[error("oauth token endpoint request failed: {0}")]
     Http(String),
     #[error("oauth token response parse failed: {0}")]
-    Parse(serde_json::Error),
+    Parse(cc_lb_oauth_protocol::TokenEndpointParseError),
     #[error("oauth refresh cancelled")]
     Cancelled,
-}
-
-#[derive(Deserialize)]
-struct TokenResponse {
-    access_token: String,
-    refresh_token: Option<String>,
-    expires_in: u64,
-    scope: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -667,17 +662,19 @@ async fn refresh_flow(
     let token = request_refresh(http, oauth_cfg, cancel, &previous.refresh_token).await;
     match token {
         Ok(response) => {
-            let now = unix_secs(clock.now());
-            let scopes = response
-                .scope
-                .as_deref()
-                .map(|scope| scope.split_whitespace().map(ToOwned::to_owned).collect())
-                .unwrap_or(previous.scopes);
+            let refreshed = refreshed_token_parts(
+                ExistingTokenParts {
+                    refresh_token: previous.refresh_token,
+                    scopes: previous.scopes,
+                },
+                response,
+                unix_secs(clock.now()),
+            );
             let bundle = OAuthTokenBundle {
-                access_token: response.access_token,
-                refresh_token: response.refresh_token.unwrap_or(previous.refresh_token),
-                expires_at_unix_secs: now.saturating_add(response.expires_in),
-                scopes,
+                access_token: refreshed.access_token,
+                refresh_token: refreshed.refresh_token,
+                expires_at_unix_secs: refreshed.expires_at_unix_secs,
+                scopes: refreshed.scopes,
             };
             let fingerprint = access_token_fingerprint(&bundle.access_token);
             let expires_at = bundle.expires_at_unix_secs;
@@ -735,8 +732,8 @@ async fn request_refresh(
     oauth_cfg: &AnthropicOAuthConfig,
     cancel: &CancellationToken,
     refresh_token: &str,
-) -> Result<TokenResponse, RefreshError> {
-    let body = refresh_form_body(oauth_cfg.client_id.as_str(), refresh_token);
+) -> Result<TokenEndpointResponse, RefreshError> {
+    let body = refresh_token_form_body(oauth_cfg.client_id.as_str(), refresh_token);
     let content_length = HeaderValue::from_str(&body.len().to_string())
         .map_err(|error| RefreshError::Http(error.to_string()))?;
     let request = Request::post(oauth_cfg.token_url.as_str())
@@ -766,15 +763,7 @@ async fn request_refresh(
                 .to_bytes()
         }
     };
-    serde_json::from_slice(&bytes).map_err(RefreshError::Parse)
-}
-
-fn refresh_form_body(client_id: &str, refresh_token: &str) -> String {
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    serializer.append_pair("grant_type", "refresh_token");
-    serializer.append_pair("client_id", client_id);
-    serializer.append_pair("refresh_token", refresh_token);
-    serializer.finish()
+    parse_token_endpoint_response(&bytes).map_err(RefreshError::Parse)
 }
 
 fn access_token_fingerprint(access_token: &str) -> String {

@@ -1,6 +1,9 @@
 use bytes::Bytes;
 use cc_lb_aead::{AeadService, OAuthTokenBundle};
 use cc_lb_config::AnthropicOAuthConfig;
+use cc_lb_oauth_protocol::{
+    TokenEndpointResponse, parse_token_endpoint_response, refresh_token_form_body,
+};
 use cc_lb_scheduler::error::{Result as SchedulerResult, SchedulerError};
 use cc_lb_storage_api::UpstreamRecord;
 use http::{Request, StatusCode};
@@ -9,7 +12,6 @@ use hyper_rustls::HttpsConnectorBuilder;
 use hyper_util::client::legacy::Client;
 use hyper_util::client::legacy::connect::HttpConnector;
 use hyper_util::rt::TokioExecutor;
-use serde::Deserialize;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 use url::Url;
@@ -18,14 +20,6 @@ const DEFAULT_ANTHROPIC_BASE_URL: &str = "https://api.anthropic.com/";
 const USAGE_URL: &str = "https://api.anthropic.com/api/oauth/usage";
 
 pub(super) type JsonHttpClient = Client<hyper_rustls::HttpsConnector<HttpConnector>, Full<Bytes>>;
-
-#[derive(Debug, Deserialize)]
-pub(super) struct TokenResponse {
-    pub access_token: String,
-    pub refresh_token: Option<String>,
-    pub expires_in: u64,
-    pub scope: Option<String>,
-}
 
 pub(super) struct UsageFetchResponse {
     pub status: StatusCode,
@@ -37,8 +31,8 @@ pub(super) async fn request_refresh(
     oauth_cfg: &AnthropicOAuthConfig,
     cancel: &CancellationToken,
     refresh_token: &str,
-) -> SchedulerResult<TokenResponse> {
-    let body = refresh_form_body(oauth_cfg.client_id.as_str(), refresh_token);
+) -> SchedulerResult<TokenEndpointResponse> {
+    let body = refresh_token_form_body(oauth_cfg.client_id.as_str(), refresh_token);
     let request = Request::post(oauth_cfg.token_url.as_str())
         .header(
             http::header::CONTENT_TYPE,
@@ -65,7 +59,7 @@ pub(super) async fn request_refresh(
         .await
         .map_err(|error| SchedulerError::Job(error.to_string()))?
         .to_bytes();
-    serde_json::from_slice(&bytes).map_err(|error| SchedulerError::Job(error.to_string()))
+    parse_token_endpoint_response(&bytes).map_err(|error| SchedulerError::Job(error.to_string()))
 }
 
 pub(super) async fn fetch_usage(
@@ -125,12 +119,4 @@ pub(super) fn json_http_client() -> JsonHttpClient {
         .enable_http2()
         .build();
     Client::builder(TokioExecutor::new()).build(connector)
-}
-
-fn refresh_form_body(client_id: &str, refresh_token: &str) -> String {
-    let mut serializer = url::form_urlencoded::Serializer::new(String::new());
-    serializer.append_pair("grant_type", "refresh_token");
-    serializer.append_pair("client_id", client_id);
-    serializer.append_pair("refresh_token", refresh_token);
-    serializer.finish()
 }
