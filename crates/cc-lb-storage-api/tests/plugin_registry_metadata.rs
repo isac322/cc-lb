@@ -1,4 +1,7 @@
-use cc_lb_storage_api::{BUILTIN_CACHE_AFFINITY_ID, PluginMetadata, PluginSlot, WasmRegistryEntry};
+use cc_lb_storage_api::{
+    BUILTIN_CACHE_AFFINITY_ID, BUILTIN_SUBSCRIPTION_PREFERENCE_ID, PluginMetadata, PluginSlot,
+    WasmRegistryEntry,
+};
 use serde_json::json;
 use uuid::Uuid;
 
@@ -115,6 +118,21 @@ fn wasm_registry_entry_round_trips_with_supported_slots() {
 fn builtin_cache_affinity_entry_advertises_router_slot() {
     let entry = WasmRegistryEntry::builtin_cache_affinity(0);
     assert_eq!(entry.supported_slots, vec![PluginSlot::Router]);
+}
+
+#[test]
+fn builtin_subscription_preference_entry_synthesizes_metadata() {
+    let entry = WasmRegistryEntry::builtin_subscription_preference(2);
+    let metadata = entry.metadata.expect("builtin metadata is present");
+
+    assert_eq!(entry.id, BUILTIN_SUBSCRIPTION_PREFERENCE_ID);
+    assert_eq!(entry.supported_slots, vec![PluginSlot::Router]);
+    assert_eq!(
+        metadata.purpose,
+        "Prefer subscription/OAuth upstreams while quota appears alive; use API-key upstreams only when subscription candidates are exhausted."
+    );
+    assert!(metadata.keeps.contains("OAuth candidates"));
+    assert!(metadata.drops.contains("API-key candidates"));
 }
 
 fn uploaded_entry(metadata: Option<PluginMetadata>) -> WasmRegistryEntry {
