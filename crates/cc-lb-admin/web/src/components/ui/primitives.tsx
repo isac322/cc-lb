@@ -4,7 +4,6 @@ import { Dialog as BaseDialog } from '@base-ui/react/dialog';
 import { Popover as BasePopover } from '@base-ui/react/popover';
 import { X } from 'lucide-react';
 import type { ButtonHTMLAttributes, HTMLAttributes, ReactNode } from 'react';
-import { forwardRef } from 'react';
 import { Area, AreaChart, ResponsiveContainer } from 'recharts';
 
 import { getWindowColor } from '../../lib/colors';
@@ -86,43 +85,37 @@ const BTN_SIZES: Record<ButtonSize, string> = {
   sm: 'h-7 px-2.5 text-xs gap-1.5',
   md: 'h-9 px-3 text-sm gap-2',
 };
-export const Button = forwardRef<HTMLButtonElement, ButtonProps>(
-  function Button(
-    {
-      variant = 'secondary',
-      size = 'md',
-      fullWidth,
-      iconLeft,
-      iconRight,
-      className,
-      children,
-      type,
-      ...rest
-    },
-    ref,
-  ) {
-    return (
-      <BaseButton
-        ref={ref}
-        type={type ?? 'button'}
-        className={cx(
-          'inline-flex items-center justify-center rounded-sm font-medium transition-colors select-none',
-          'disabled:cursor-not-allowed disabled:opacity-50',
-          'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
-          BTN_VARIANTS[variant],
-          BTN_SIZES[size],
-          fullWidth ? 'w-full' : '',
-          className,
-        )}
-        {...rest}
-      >
-        {iconLeft}
-        {children}
-        {iconRight}
-      </BaseButton>
-    );
-  },
-);
+export function Button({
+  variant = 'secondary',
+  size = 'md',
+  fullWidth,
+  iconLeft,
+  iconRight,
+  className,
+  children,
+  type,
+  ...rest
+}: ButtonProps) {
+  return (
+    <BaseButton
+      type={type ?? 'button'}
+      className={cx(
+        'inline-flex items-center justify-center rounded-sm font-medium transition-colors select-none',
+        'disabled:cursor-not-allowed disabled:opacity-50',
+        'focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent focus-visible:outline-offset-2',
+        BTN_VARIANTS[variant],
+        BTN_SIZES[size],
+        fullWidth ? 'w-full' : '',
+        className,
+      )}
+      {...rest}
+    >
+      {iconLeft}
+      {children}
+      {iconRight}
+    </BaseButton>
+  );
+}
 
 export function IconButton({
   className,

@@ -13,14 +13,7 @@ import {
   TrendingUp,
   Users,
 } from 'lucide-react';
-import {
-  useCallback,
-  useEffect,
-  useId,
-  useMemo,
-  useRef,
-  useState,
-} from 'react';
+import { useEffect, useId, useMemo, useRef, useState } from 'react';
 import {
   Area,
   AreaChart,
@@ -57,6 +50,9 @@ export const Route = createFileRoute('/')({
 
 const RANGES = ['1h', '6h', '24h', '7d'] as const;
 type Range = (typeof RANGES)[number];
+
+const stepFor = (r: Range): 'hour' | 'minute' =>
+  r === '7d' || r === '24h' ? 'hour' : 'minute';
 
 function fmtCount(n: number | undefined | null): string {
   if (n == null) return '0';
@@ -727,10 +723,6 @@ export function PoolQuotaLegend({
 function OverviewPage() {
   const navigate = useNavigate({ from: Route.fullPath });
   const [range, setRange] = useState<Range>('24h');
-  const stepFor = useCallback(
-    (r: Range) => (r === '7d' || r === '24h' ? 'hour' : 'minute'),
-    [],
-  );
 
   const summary = useSummary(range);
   const principalUsage = useUsage(range, stepFor(range), 'principal');
