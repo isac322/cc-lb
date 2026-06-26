@@ -47,6 +47,17 @@ expression: body
         "sha256_hex": "0909090909090909090909090909090909090909090909090909090909090909",
         "size_bytes": 9,
         "supported_slots": []
+      },
+      {
+        "label": "Built-in subscription preference filter",
+        "name": "subscription-preference",
+        "original_filename": "builtin://subscription-preference",
+        "refcount": 0,
+        "sha256_hex": "737562736372697074696f6e2d707265666572656e6365000000000000000000",
+        "size_bytes": 0,
+        "supported_slots": [
+          "router"
+        ]
       }
     ]
   },

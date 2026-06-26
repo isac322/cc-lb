@@ -13,7 +13,15 @@ pub use cc_lb_plugin_api::{
 
 pub const BUILTIN_PLUGIN_KIND_FILTER: &str = "filter";
 pub const BUILTIN_CACHE_AFFINITY_SHA256: [u8; 32] = [0; 32];
-pub const BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256: [u8; 32] = [2; 32];
+/// Pseudo-SHA for the built-in `subscription-preference` filter.
+///
+/// Encoded as ASCII `b"subscription-preference"` followed by NUL padding so it
+/// never collides with the `[seed; 32]` uniform patterns that conformance and
+/// fixture tests use (cache-affinity already reserves `[0; 32]`).
+pub const BUILTIN_SUBSCRIPTION_PREFERENCE_SHA256: [u8; 32] = [
+    0x73, 0x75, 0x62, 0x73, 0x63, 0x72, 0x69, 0x70, 0x74, 0x69, 0x6F, 0x6E, 0x2D, 0x70, 0x72, 0x65,
+    0x66, 0x65, 0x72, 0x65, 0x6E, 0x63, 0x65, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+];
 
 pub const MAX_WASM_BLOB_BYTES: u64 = 32 * 1024 * 1024;
 

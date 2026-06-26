@@ -1,6 +1,6 @@
 WITH builtin AS (
     SELECT
-        decode(repeat('02', 32), 'hex') AS sha256,
+        decode('737562736372697074696f6e2d707265666572656e6365000000000000000000', 'hex') AS sha256,
         '00000000-0000-0000-0000-000000000002'::uuid AS id
 )
 INSERT INTO wasm_blobs_v2 (sha256, bytes, size_bytes, parse_validated_at, refcount, created_at)
@@ -10,7 +10,7 @@ ON CONFLICT (sha256) DO NOTHING;
 
 WITH builtin AS (
     SELECT
-        decode(repeat('02', 32), 'hex') AS sha256,
+        decode('737562736372697074696f6e2d707265666572656e6365000000000000000000', 'hex') AS sha256,
         '00000000-0000-0000-0000-000000000002'::uuid AS id
 )
 INSERT INTO wasm_registry_v2 (
