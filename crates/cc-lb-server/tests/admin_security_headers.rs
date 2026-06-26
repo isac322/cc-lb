@@ -52,6 +52,20 @@ async fn get_with_if_none_match(router: axum::Router, uri: &str, etag: &str) -> 
         .unwrap()
 }
 
+async fn get_with_accept_encoding(router: axum::Router, uri: &str, encoding: &str) -> Response {
+    router
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(uri)
+                .header(header::ACCEPT_ENCODING, encoding)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
 async fn post_messages(router: axum::Router) -> Response {
     router
         .oneshot(
@@ -120,6 +134,16 @@ async fn admin_responses_include_browser_security_headers() {
         .unwrap()
         .to_owned();
 
+    let encoded_asset = get_with_accept_encoding(app.admin_router.clone(), &asset_path, "br").await;
+    assert_eq!(encoded_asset.status(), StatusCode::OK);
+    assert!(encoded_asset.headers().contains_key(header::ETAG));
+    assert!(
+        !encoded_asset
+            .headers()
+            .contains_key(header::CONTENT_ENCODING),
+        "ETagged static assets must not be dynamically compressed"
+    );
+
     let cached = get_with_if_none_match(app.admin_router.clone(), &asset_path, &etag).await;
     assert_eq!(cached.status(), StatusCode::NOT_MODIFIED);
     assert_security_headers(&cached);
@@ -139,3 +163,4 @@ async fn proxy_responses_omit_admin_browser_security_headers() {
 
     let messages = post_messages(app.router).await;
     assert_security_headers_absent(&messages);
+}

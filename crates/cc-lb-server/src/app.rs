@@ -1827,13 +1827,10 @@ fn admin_router(
         .merge(crate::admin_plugins::router(admin_token, plugin_registry))
         .merge(server_state_router(server_state))
         // Admin surface only — proxy_router stays uncompressed to keep SSE
-        // bodies streaming and skip CPU on the hot data plane. Defaults
-        // (gzip 6, brotli 4) are deliberate; avoid Best/level 11.
-        .layer(
-            tower_http::compression::CompressionLayer::new()
-                .gzip(true)
-                .br(true),
-        );
+        // bodies streaming and skip CPU on the hot data plane. ETagged
+        // static assets skip dynamic compression to keep strong ETags valid.
+        // Defaults (gzip 6, brotli 4) are deliberate; avoid Best/level 11.
+        .layer(crate::admin_compression::layer());
 
     crate::admin_security::with_browser_security_headers(admin_router)
 }

@@ -5,6 +5,7 @@
 // 1: generic fatal / unhandled error
 // 2: startup validation/preflight/storage kind fatal errors
 
+pub(crate) mod admin_compression;
 pub(crate) mod admin_plugins;
 pub(crate) mod admin_security;
 pub mod app;
