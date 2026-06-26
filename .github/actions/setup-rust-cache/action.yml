@@ -18,32 +18,13 @@ inputs:
 runs:
   using: composite
   steps:
-    # Single-node self-hosted runners pre-provision shared, node-local cache dirs
-    # via the runner pod (CARGO_HOME + SCCACHE_DIR on hostPath). When present we use
-    # them directly and skip ALL GitHub-Actions-cache round-trips: every build on the
-    # node shares one sccache + one cargo registry, so duplicate compilation and the
-    # per-build target/ upload/download disappear. On GitHub-hosted runners SCCACHE_DIR
-    # is unset, so we fall back to the portable per-workspace + actions/cache behavior.
-    - name: Detect shared node-local cache
-      id: cachemode
-      shell: bash
-      run: |
-        if [ -n "${SCCACHE_DIR:-}" ]; then
-          echo "shared=true" >> "$GITHUB_OUTPUT"
-          echo "Shared node-local cache: SCCACHE_DIR=$SCCACHE_DIR CARGO_HOME=${CARGO_HOME:-<default>}"
-        else
-          echo "shared=false" >> "$GITHUB_OUTPUT"
-          echo "No shared cache dir; using per-workspace + actions/cache (portable mode)"
-        fi
-
     - name: Run sccache-cache
       id: sccache-setup
       uses: mozilla-actions/sccache-action@v0.0.10
       continue-on-error: true
 
-    # Portable mode only: round-trip the per-workspace sccache dir through GHA cache.
     - name: Restore sccache directory
-      if: steps.sccache-setup.outcome == 'success' && steps.cachemode.outputs.shared == 'false'
+      if: steps.sccache-setup.outcome == 'success'
       uses: actions/cache@v5
       with:
         path: .sccache
@@ -55,22 +36,11 @@ runs:
       if: steps.sccache-setup.outcome == 'success'
       shell: bash
       run: |
-        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
         echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
-        if [ "${{ steps.cachemode.outputs.shared }}" = "true" ]; then
-          # SCCACHE_DIR / SCCACHE_CACHE_SIZE come from the runner pod env (shared hostPath).
-          # Force the local disk backend so sccache never talks to the GHA cache service.
-          echo "SCCACHE_GHA_ENABLED=false" >> "$GITHUB_ENV"
-          # Intentionally NO SCCACHE_BASEDIRS here: every ephemeral runner on the single
-          # node checks out to the identical workspace path, so absolute paths already
-          # match and yield cache hits. Setting BASEDIRS rewrites dep-info (.d) paths to
-          # relative form, which cargo then fails to parse on a cache hit
-          # ("could not parse/generate dep info at ...target/debug/deps/*.d").
-        else
-          echo "SCCACHE_DIR=$GITHUB_WORKSPACE/.sccache" >> "$GITHUB_ENV"
-          echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
-          echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
-        fi
+        echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_DIR=$GITHUB_WORKSPACE/.sccache" >> "$GITHUB_ENV"
+        echo "SCCACHE_CACHE_SIZE=2G" >> "$GITHUB_ENV"
+        echo "SCCACHE_BASEDIRS=$GITHUB_WORKSPACE" >> "$GITHUB_ENV"
         if [ "${{ inputs.stable-build-metadata }}" = "true" ]; then
           echo "GIT_SHA=0000000" >> "$GITHUB_ENV"
           echo "SOURCE_DATE_EPOCH=0" >> "$GITHUB_ENV"
@@ -88,11 +58,7 @@ runs:
         EOF
         echo "EXTISM_CACHE_CONFIG=$GITHUB_WORKSPACE/.extism-cache.toml" >> "$GITHUB_ENV"
 
-    # Portable mode only: cargo registry + target via GHA cache. In shared mode the
-    # node-local CARGO_HOME + sccache already provide this, so we skip it entirely
-    # (no redundant registry upload, no huge target/ round-trip that fills the node disk).
     - uses: Swatinem/rust-cache@v2
-      if: steps.cachemode.outputs.shared == 'false'
       with:
         cache-on-failure: true
         cache-targets: ${{ inputs.cache-targets }}
