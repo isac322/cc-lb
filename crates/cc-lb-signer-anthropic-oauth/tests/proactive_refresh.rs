@@ -42,6 +42,16 @@ async fn proactive_refreshes_before_signing() {
         Some("Bearer sk-ant-oat01-refreshed")
     );
     assert_eq!(http.call_count(), 1);
+    let body = http.bodies().pop().expect("refresh request body recorded");
+    let fields = url::form_urlencoded::parse(body.as_bytes()).collect::<Vec<_>>();
+    assert_eq!(
+        fields,
+        vec![
+            ("grant_type".into(), "refresh_token".into()),
+            ("client_id".into(), "client-test".into()),
+            ("refresh_token".into(), "refresh-old".into()),
+        ]
+    );
     let stored = test_storage
         .get_oauth("alice", "anthropic_oauth")
         .await
