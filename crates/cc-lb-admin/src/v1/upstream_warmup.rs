@@ -126,12 +126,11 @@ pub(crate) async fn get_upstream_warmup(
             detail: "clock now overflowed i64 unix seconds".to_owned(),
         }
     })?;
-    let cutoff_unix_secs =
-        now_unix_secs
-            .checked_sub(RECENT_SUMMARY_WINDOW_SECS)
-            .ok_or_else(|| WarmupReadError::Internal {
-                detail: "recent summary cutoff overflow".to_owned(),
-            })?;
+    let cutoff_unix_secs = now_unix_secs
+        .checked_sub(RECENT_SUMMARY_WINDOW_SECS)
+        .ok_or_else(|| WarmupReadError::Internal {
+            detail: "recent summary cutoff overflow".to_owned(),
+        })?;
     let recent_summary_7d = storage
         .summarize_recent_warmup_attempts(upstream_id, cutoff_unix_secs)
         .await?;

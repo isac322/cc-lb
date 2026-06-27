@@ -753,8 +753,7 @@ async fn sqlite_storage(
     path: &std::path::Path,
 ) -> Result<Arc<SqliteStorage>, Box<dyn std::error::Error>> {
     let database_url = format!("sqlite://{}", path.display());
-    let storage =
-        open_sqlite(&database_url, std::sync::Arc::new(cc_lb_core::SystemClock)).await?;
+    let storage = open_sqlite(&database_url, std::sync::Arc::new(cc_lb_core::SystemClock)).await?;
     storage.initialize(BackendKind::Sqlite).await?;
     Ok(Arc::new(storage))
 }

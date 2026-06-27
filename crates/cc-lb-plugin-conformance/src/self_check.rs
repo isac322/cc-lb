@@ -11,8 +11,8 @@ pub fn run(
     supported_slots: &[PluginSlot],
     clock: &dyn Clock,
 ) -> Result<SelfCheckReport, SelfCheckError> {
-    let response = execute_self_check(wasm, supported_slots, clock)
-        .map_err(SelfCheckError::from_protocol)?;
+    let response =
+        execute_self_check(wasm, supported_slots, clock).map_err(SelfCheckError::from_protocol)?;
 
     Ok(SelfCheckReport {
         status: response.status.into(),

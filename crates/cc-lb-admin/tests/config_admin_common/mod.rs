@@ -51,8 +51,8 @@ async fn open_storage(dir: &Path, filename: &str) -> Arc<SqliteStorage> {
     let database_url = format!("sqlite://{}", dir.join(filename).display());
     let storage =
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
-        .await
-        .unwrap();
+            .await
+            .unwrap();
     storage.initialize(BackendKind::Sqlite).await.unwrap();
     Arc::new(storage)
 }

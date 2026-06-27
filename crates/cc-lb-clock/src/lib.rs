@@ -142,8 +142,14 @@ mod tests {
         let before = SystemTime::now();
         let mid = clock.now();
         let after = SystemTime::now();
-        assert!(mid >= before, "SystemClock.now() should be monotonic vs before");
-        assert!(mid <= after, "SystemClock.now() should be monotonic vs after");
+        assert!(
+            mid >= before,
+            "SystemClock.now() should be monotonic vs before"
+        );
+        assert!(
+            mid <= after,
+            "SystemClock.now() should be monotonic vs after"
+        );
     }
 
     #[test]

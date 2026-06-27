@@ -48,6 +48,7 @@ async fn run_postgres_race(url: String) -> TestResult<()> {
     cc_lb_scheduler::migrations::apply_post_setup_migrations(&pool).await?;
     let storage = Arc::new(cc_lb_storage_postgres::PostgresStorage::new(
         storage_pool.clone(),
+        Arc::new(cc_lb_core::SystemClock),
     ));
     storage.initialize(BackendKind::Postgres).await?;
 

@@ -90,8 +90,8 @@ async fn open_storage(path: &std::path::Path) -> Arc<Storage> {
     let database_url = format!("sqlite://{}", path.display());
     let storage =
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
-        .await
-        .unwrap();
+            .await
+            .unwrap();
     storage.initialize(BackendKind::Sqlite).await.unwrap();
     Arc::new(storage)
 }

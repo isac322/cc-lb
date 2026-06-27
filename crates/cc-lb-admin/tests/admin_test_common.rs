@@ -156,8 +156,8 @@ pub async fn sqlite_storage(dir: &std::path::Path, filename: &str) -> Arc<Sqlite
     let database_url = format!("sqlite://{}", dir.join(filename).display());
     let storage =
         cc_lb_storage_sqlite::open_sqlite(&database_url, Arc::new(cc_lb_core::SystemClock))
-        .await
-        .expect("admin sqlite opens");
+            .await
+            .expect("admin sqlite opens");
     storage
         .initialize(BackendKind::Sqlite)
         .await
